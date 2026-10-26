@@ -31,7 +31,7 @@
 //!
 //! # The ratchet did not move, and could not have
 //!
-//! Seventeen of the 345 corpus flows declare a flow trigger and they carry
+//! Seventeen of the 351 corpus flows declare a flow trigger and they carry
 //! **twenty-one** declarations between them. **Zero baselined golden entries are
 //! reachable through any of them**, and six of the 26 `not-standalone` corpus
 //! flows exist only to be reached through one and have **no golden entry at
@@ -1702,7 +1702,7 @@ mod tests {
         files.sort();
         assert!(
             files.len() > 300,
-            "expected the 345-flow corpus, found {}",
+            "expected the 351-flow corpus, found {}",
             files.len()
         );
 

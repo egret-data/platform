@@ -263,7 +263,7 @@
 //! after `end`, so the schedule returns to the live clock);
 //! `currentDate = 06-05T02:00Z` → `06-16T02:00Z`.
 //!
-//! **The corpus contains zero live backfill declarations** — 345 flows, two
+//! **The corpus contains zero live backfill declarations** — 351 flows, two
 //! commented-out lines — so nothing in this section is or can be judged by the
 //! execution ratchet. The tests in this file are the whole instrument.
 
@@ -1273,13 +1273,13 @@ pub enum ScheduleError {
     /// `2026-06-11T02:00Z` without the delay and `2026-06-16T02:00Z` with
     /// `PT1H`. So a `Schedule` that declares it is refused rather than
     /// silently scheduled without it.
-    UnsupportedLateMaximumDelay(String),
+    UnsupportedLateMaximumDelay,
     /// `Schedule` supports a `when` expression that filters candidate ticks
     /// (`Schedule.findNextDateMatchingConditions`). Rendering it needs a
     /// `RunContext` this seam does not have, and a schedule that ignored it
     /// would **fire where Kestra would not** — the one failure the oracle
     /// cannot catch. So it is refused, loudly.
-    UnsupportedWhenCondition(String),
+    UnsupportedWhenCondition,
 }
 
 impl fmt::Display for ScheduleError {
@@ -1289,15 +1289,16 @@ impl fmt::Display for ScheduleError {
             Self::MissingCron => write!(f, "core.schedule requires a `cron`"),
             Self::Cron(e) => write!(f, "invalid cron: {e}"),
             Self::UnknownTimezone(tz) => write!(f, "unknown timezone {tz:?}"),
-            Self::UnsupportedLateMaximumDelay(d) => {
-                write!(f, "core.schedule `lateMaximumDelay` is not supported: {d}")
-            }
-            Self::UnsupportedWhenCondition(w) => {
-                write!(
-                    f,
-                    "core.schedule `when` conditions are not supported: {w:?}"
-                )
-            }
+            // Key names only (spec D10): the author's `lateMaximumDelay` and
+            // `when` values are never echoed.
+            Self::UnsupportedLateMaximumDelay => write!(
+                f,
+                "core.schedule `lateMaximumDelay` is not supported; roadmap package #11 lifts it"
+            ),
+            Self::UnsupportedWhenCondition => write!(
+                f,
+                "core.schedule `when` conditions are not supported; roadmap package #11 lifts it"
+            ),
         }
     }
 }
@@ -1351,9 +1352,7 @@ impl ScheduleTrigger {
         // "no condition".
         if let Some(when) = &trigger.when {
             if when.source() != "true" {
-                return Err(ScheduleError::UnsupportedWhenCondition(
-                    when.source().to_string(),
-                ));
+                return Err(ScheduleError::UnsupportedWhenCondition);
             }
         }
 
@@ -1365,10 +1364,8 @@ impl ScheduleTrigger {
         schedule: &Schedule,
         disabled: bool,
     ) -> Result<Self, ScheduleError> {
-        if let Some(delay) = &schedule.late_maximum_delay {
-            return Err(ScheduleError::UnsupportedLateMaximumDelay(
-                delay.to_string(),
-            ));
+        if schedule.late_maximum_delay.is_some() {
+            return Err(ScheduleError::UnsupportedLateMaximumDelay);
         }
 
         let cron = schedule.cron.as_deref().ok_or(ScheduleError::MissingCron)?;
@@ -2902,6 +2899,32 @@ mod tests {
     /// The two-sided half: `when` absent, and the literal default `"true"`,
     /// must both resolve — `hasWhenCondition()` is
     /// `getWhen() != null && !"true".equals(getWhen())`, so a refusal on
+    /// Spec §5 + D10: the two refusals name the package that lifts them and
+    /// carry no value of the author's (`when` and `lateMaximumDelay` are
+    /// expressions and durations the author wrote; a message names keys only).
+    #[test]
+    fn the_when_and_late_maximum_delay_refusals_name_the_package_and_no_value() {
+        let secret = "SENTINEL-value-1d2f";
+        let when: Trigger = serde_norway::from_str(&format!(
+            "id: t\ntype: core.schedule\ncron: \"0 2 * * *\"\nwhen: \"{{{{ '{secret}' }}}}\"\n"
+        ))
+        .unwrap();
+        let e = ScheduleTrigger::resolve(&when).expect_err("a when condition");
+        assert_eq!(
+            e.to_string(),
+            "core.schedule `when` conditions are not supported; roadmap package #11 lifts it"
+        );
+        let late: Trigger = serde_norway::from_str(&format!(
+            "id: t\ntype: core.schedule\ncron: \"0 2 * * *\"\nlateMaximumDelay: {secret}\n"
+        ))
+        .unwrap();
+        let e = ScheduleTrigger::resolve(&late).expect_err("a lateMaximumDelay");
+        assert_eq!(
+            e.to_string(),
+            "core.schedule `lateMaximumDelay` is not supported; roadmap package #11 lifts it"
+        );
+    }
+
     /// `"true"` would refuse every trigger the model gives a default to.
     #[test]
     fn a_when_condition_is_refused_but_the_default_true_is_not() {
@@ -2911,7 +2934,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             ScheduleTrigger::resolve(&with_when),
-            Err(ScheduleError::UnsupportedWhenCondition(_))
+            Err(ScheduleError::UnsupportedWhenCondition)
         ));
 
         let explicit_true: Trigger = serde_norway::from_str(
@@ -3452,7 +3475,7 @@ mod tests {
         assert!(
             matches!(
                 ScheduleTrigger::resolve(&trigger),
-                Err(ScheduleError::UnsupportedLateMaximumDelay(_))
+                Err(ScheduleError::UnsupportedLateMaximumDelay)
             ),
             "a declared lateMaximumDelay must refuse, never schedule without it"
         );

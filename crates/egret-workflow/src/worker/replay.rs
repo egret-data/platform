@@ -145,7 +145,7 @@ use crate::executor::{ExecutionState, RunIx, RunState, Tick};
 /// `FAILED` child. What this module must not do is add the execution the
 /// artifact does not create: that is over-acceptance, it would be invisible to
 /// the oracle (no corpus flow puts a `CREATE_NEW_EXECUTION` retry inside a
-/// `Loop` — measured over all 345), and the child would be an orphan anyway,
+/// `Loop` — measured over all 351), and the child would be an orphan anyway,
 /// since [`spawn::on_execution_terminal`](super::spawn) reports a terminal only
 /// through a `parent_run_ix` that a replay does not have.
 ///

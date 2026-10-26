@@ -1185,7 +1185,7 @@ mod tests {
             }
         }
         files.sort();
-        assert!(files.len() > 300, "expected the 345-flow corpus");
+        assert!(files.len() > 300, "expected the 351-flow corpus");
 
         let mut resolved = Vec::new();
         let mut refused_at_save = Vec::new();

@@ -405,7 +405,7 @@ pub enum TaskKind {
     /// It is `Option<u32>` and not `Property<i32>` because [`build_plan`] is
     /// pure: Kestra renders `concurrent` through a `RunContext`, and a builder
     /// that cannot render can only read a literal. Every `concurrent:` in the
-    /// 345-flow corpus **is** a literal — measured, and re-measured on every
+    /// 351-flow corpus **is** a literal — measured, and re-measured on every
     /// run by `every_corpus_concurrent_is_a_literal_integer` — so nothing this
     /// oracle compares depends on the fallback.
     Parallel {
@@ -764,7 +764,7 @@ impl std::error::Error for PlanError {}
 ///
 /// The arithmetic is in the constant, over a measured cost.
 /// `the_depth_bound_is_derived_from_the_deepest_corpus_flow` in
-/// `executor/mod.rs` re-measures `MEASURED_MAX_CORPUS_DEPTH` from the 345
+/// `executor/mod.rs` re-measures `MEASURED_MAX_CORPUS_DEPTH` from the 351
 /// committed corpus flows on every run and fails if it moves, so this is a
 /// bound over a measurement rather than over a memory of one.
 ///
@@ -834,9 +834,11 @@ const WAIT_FOR_TYPE: &str = "waitfor";
 /// Each of the four is a real construct with a measured trace this executor
 /// does not produce, and the order is declaration order in `Pause.java`:
 ///
-/// * `tasks:` — the list a pause runs **after** it is resumed. No baselined
-///   corpus entry writes one, so a rule here would be a rule nothing can
-///   exercise.
+/// * `tasks:` — **not a Kestra property** (`Pause.java:158`: `extends Task
+///   implements FlowableTask`, no `tasks` field; corrected 2026-10-26, spec
+///   D14). It is an unknown property, refused permanently and by name, and no
+///   roadmap package lifts it. It stays here rather than in the save-time key
+///   census because a stored version carrying one would otherwise stall.
 /// * `errors:` — `valids/pause-errors-finally-after-execution` writes one, and
 ///   its golden run history is `CREATED RUNNING PAUSED RUNNING FAILED`: the
 ///   pause re-enters `RUNNING` to drive the handler. Nothing else in this
@@ -1224,7 +1226,7 @@ pub(crate) fn flatten_flow(flow: &crate::models::Flow) -> Result<Plan, PlanError
 /// would be inventing a semantics Kestra does not have; dropping the node alone
 /// would make `flatten_dag` refuse the flow for a dangling `dependsOn`, which
 /// is an over-refusal. No corpus flow reaches the question —
-/// `no_corpus_dag_node_is_disabled` re-derives that from all 345 flows on every
+/// `no_corpus_dag_node_is_disabled` re-derives that from all 351 flows on every
 /// run — so the position is left as a named gap rather than guessed at.
 fn flatten_list(
     out: &mut Vec<PlanTask>,
@@ -1431,7 +1433,7 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
         // the crate**, and it is a literal parse rather than a render for the
         // reason [`PlanTask::retry`] gives about durations: `build_plan` is
         // pure. `every_corpus_pause_timeout_is_a_literal` re-derives from all
-        // 345 flows that no corpus `timeout:` on a `Pause` is an expression, so
+        // 351 flows that no corpus `timeout:` on a `Pause` is an expression, so
         // the fallback is measured unreachable rather than assumed.
         (ModelKind::Pause(pause), Some(PAUSE_TYPE)) => {
             if pause_gap(pause).is_none() {
@@ -1564,7 +1566,7 @@ pub fn loop_until_gap(l: &crate::models::LoopUntil) -> Option<&'static str> {
 ///
 /// Only the third is a gap, and it is measured to be unreachable from this
 /// corpus: `every_corpus_concurrent_is_a_literal_integer` re-derives, from all
-/// 345 flows on every run, that every `concurrent:` written anywhere in it is a
+/// 351 flows on every run, that every `concurrent:` written anywhere in it is a
 /// literal. Kestra's own cap is guarded by `concurrent > 0`, so "cannot read
 /// it" and "not capped" land in the same place there too.
 fn literal_concurrency(source: Option<&crate::models::Property<i32>>) -> Option<u32> {

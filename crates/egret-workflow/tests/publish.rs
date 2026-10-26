@@ -357,10 +357,12 @@ async fn a_subflow_absent_from_the_callers_workspace_publishes_with_the_warning_
 }
 
 /// A `flowRef` the AUTHOR wrote into the draft is not a frozen id: the field
-/// deserialises (it is how a snapshot reads back), so an absent target must
-/// clear it rather than leave the author's uuid in the published plan.
+/// deserialises (it is how a snapshot reads back), and no Kestra `Subflow` has
+/// it. Since package #1 (spec D1, D17) the save-time key census refuses it as
+/// an `unknown_property` error, so the author's uuid never reaches a published
+/// plan, and nothing is published.
 #[tokio::test]
-async fn an_authored_flow_ref_does_not_survive_an_absent_target() {
+async fn an_authored_flow_ref_is_refused_at_publish() {
     let Some(db) = db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let (other_ws, other_user) = common::seed_workspace(&db).await;
@@ -383,17 +385,17 @@ async fn an_authored_flow_ref_does_not_survive_an_absent_target() {
     // Control: the draft really carries the forged id.
     assert!(f.source.contains(&theirs.id.to_string()));
 
-    let v = egret_workflow::publish(&repo, &common::workflow_refs(), ws, user, f.id, "")
+    let err = egret_workflow::publish(&repo, &common::workflow_refs(), ws, user, f.id, "")
         .await
-        .expect("publishes");
-    assert_eq!(first_task(&v)["flowId"], "nightly_rollup", "{}", v.snapshot);
-    assert!(
-        !v.snapshot["plan"]
-            .to_string()
-            .contains(&theirs.id.to_string()),
-        "another workspace's id must not reach the plan: {}",
-        v.snapshot
-    );
+        .expect_err("an authored flowRef must not publish");
+    match err {
+        egret_core::Error::InvalidInput(m) => assert!(
+            m.contains("`flowRef` is not a property of io.kestra.plugin.core.flow.Subflow")
+                && m.contains("tasks.t.flowRef"),
+            "{m}"
+        ),
+        other => panic!("{other:?}"),
+    }
 }
 
 /// Found in the caller's workspace: the id is frozen, and no warning. The
@@ -767,7 +769,10 @@ tasks:
     match err {
         egret_core::Error::InvalidInput(m) => {
             assert!(m.contains("(tasks.wd.outputFiles)"), "{m}");
-            assert!(m.contains("not implemented by egret"), "{m}");
+            assert!(
+                m.contains("not implemented by egret (roadmap package #17)"),
+                "{m}"
+            );
         }
         other => panic!("{other:?}"),
     }
@@ -936,25 +941,16 @@ fn with_nested_errors_handler(id: &str, handler: &str) -> String {
 }
 
 /// An absent `Subflow` target inside a nested `errors:` gets what a top-level
-/// one gets: Kestra's warning at its path, and no `flowRef` -- even one the
-/// author wrote naming another workspace's flow.
+/// one gets: Kestra's warning at its path, and no `flowRef`. (An authored
+/// `flowRef`, even one naming another workspace's flow, is refused before this
+/// point: `an_authored_flow_ref_is_refused_at_publish`.)
 #[tokio::test]
-async fn a_subflow_inside_a_nested_errors_list_is_resolved_warned_and_its_authored_flow_ref_cleared(
-) {
+async fn a_subflow_inside_a_nested_errors_list_is_resolved_and_warned() {
     let Some(db) = db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
-    let (other_ws, other_user) = common::seed_workspace(&db).await;
     let repo = egret_workflow::FlowRepo::new(db.clone());
-    let theirs = common::draft(
-        &repo, other_ws, other_user,
-        "id: nightly_rollup\nnamespace: company.analytics\ntasks:\n  - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: x\n",
-    )
-    .await;
-    let handler = format!(
-        "      - id: h\n        type: core.subflow\n        namespace: company.analytics\n        flowId: nightly_rollup\n        flowRef: {}\n",
-        theirs.id
-    );
-    let f = common::draft(&repo, ws, user, &with_nested_errors_handler("f", &handler)).await;
+    let handler = "      - id: h\n        type: core.subflow\n        namespace: company.analytics\n        flowId: nightly_rollup\n";
+    let f = common::draft(&repo, ws, user, &with_nested_errors_handler("f", handler)).await;
 
     let v = egret_workflow::publish(&repo, &common::workflow_refs(), ws, user, f.id, "")
         .await
@@ -963,23 +959,9 @@ async fn a_subflow_inside_a_nested_errors_list_is_resolved_warned_and_its_author
     // The path is real, so `flowRef` being absent is not vacuous.
     assert_eq!(h["flowId"], "nightly_rollup", "{}", v.snapshot);
     assert!(h["flowRef"].is_null(), "{}", v.snapshot);
-    assert!(
-        !v.snapshot["plan"]
-            .to_string()
-            .contains(&theirs.id.to_string()),
-        "another workspace's id must not reach the plan: {}",
-        v.snapshot
-    );
-    // KI-121: the authored `flowRef` is no property of Kestra's Subflow, and
-    // publish clears it, so the author is told it is ignored.
     assert_eq!(
         v.snapshot["warnings"],
         serde_json::json!([
-            {
-                "code": "unknown_property",
-                "message": "task 'h': `flowRef` is not a property of io.kestra.plugin.core.flow.Subflow; egret ignores it",
-                "path": "tasks.seq.h.flowRef",
-            },
             {
                 "code": "subflow_not_found",
                 "message": subflow_warning("company.analytics", "nightly_rollup"),
@@ -1085,26 +1067,16 @@ async fn an_unknown_task_type_inside_a_nested_errors_list_cannot_be_published() 
 /// **PR-2 final review M1: an `AllowFailure`'s `finally:` is walked too.**
 /// `Task::children()` walks `tasks` then `finally`, and publish's walk now
 /// goes through the same list (`Task::children_mut`). Before, the
-/// `AllowFailure` arm walked `tasks` only: a `Subflow` inside `finally:` kept
-/// the `flowRef` its author wrote -- here another workspace's flow id -- and
-/// got no warning. Now it gets what a top-level one gets.
+/// `AllowFailure` arm walked `tasks` only: a `Subflow` inside `finally:` was
+/// never resolved and got no warning. Now it gets what a top-level one gets.
+/// (An authored `flowRef` there is refused as an unknown property.)
 #[tokio::test]
-async fn a_subflow_inside_an_allow_failure_finally_is_resolved_warned_and_its_authored_flow_ref_cleared(
-) {
+async fn a_subflow_inside_an_allow_failure_finally_is_resolved_and_warned() {
     let Some(db) = db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
-    let (other_ws, other_user) = common::seed_workspace(&db).await;
     let repo = egret_workflow::FlowRepo::new(db.clone());
-    let theirs = common::draft(
-        &repo, other_ws, other_user,
-        "id: nightly_rollup\nnamespace: company.analytics\ntasks:\n  - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: x\n",
-    )
-    .await;
-    let source = format!(
-        "id: f\nnamespace: a.b\ntasks:\n  - id: af\n    type: io.kestra.plugin.core.flow.AllowFailure\n    tasks:\n      - id: body\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n    finally:\n      - id: h\n        type: core.subflow\n        namespace: company.analytics\n        flowId: nightly_rollup\n        flowRef: {}\n",
-        theirs.id
-    );
-    let f = common::draft(&repo, ws, user, &source).await;
+    let source = "id: f\nnamespace: a.b\ntasks:\n  - id: af\n    type: io.kestra.plugin.core.flow.AllowFailure\n    tasks:\n      - id: body\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n    finally:\n      - id: h\n        type: core.subflow\n        namespace: company.analytics\n        flowId: nightly_rollup\n";
+    let f = common::draft(&repo, ws, user, source).await;
 
     let v = egret_workflow::publish(&repo, &common::workflow_refs(), ws, user, f.id, "")
         .await
@@ -1113,28 +1085,59 @@ async fn a_subflow_inside_an_allow_failure_finally_is_resolved_warned_and_its_au
     // The path is real, so `flowRef` being absent is not vacuous.
     assert_eq!(h["flowId"], "nightly_rollup", "{}", v.snapshot);
     assert!(h["flowRef"].is_null(), "{}", v.snapshot);
-    assert!(
-        !v.snapshot["plan"]
-            .to_string()
-            .contains(&theirs.id.to_string()),
-        "another workspace's id must not reach the plan: {}",
-        v.snapshot
-    );
-    // KI-121: the authored `flowRef` is no property of Kestra's Subflow, and
-    // publish clears it, so the author is told it is ignored.
     assert_eq!(
         v.snapshot["warnings"],
         serde_json::json!([
-            {
-                "code": "unknown_property",
-                "message": "task 'h': `flowRef` is not a property of io.kestra.plugin.core.flow.Subflow; egret ignores it",
-                "path": "tasks.af.h.flowRef",
-            },
             {
                 "code": "subflow_not_found",
                 "message": subflow_warning("company.analytics", "nightly_rollup"),
                 "path": "tasks.af.h",
             },
         ]),
+    );
+}
+
+/// **No silent drops, Task 3.** `invalids/invalid-property`: Kestra refuses
+/// `Unrecognized field "invalid"`, so does publish, by name and path.
+#[tokio::test]
+async fn an_unknown_property_on_a_core_task_is_refused_by_publish() {
+    let Some(db) = db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let source = "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: io.kestra.plugin.core.debug.Return\n    format: x\n    invalid: x\n";
+    let f = common::draft(&repo, ws, user, source).await;
+
+    let err = egret_workflow::publish(&repo, &common::workflow_refs(), ws, user, f.id, "")
+        .await
+        .expect_err("an unknown property is refused");
+    match err {
+        egret_core::Error::InvalidInput(m) => assert!(
+            m.contains("task 't': unknown property 'invalid' on io.kestra.plugin.core.debug.Return: neither Kestra nor egret accepts it"),
+            "{m}"
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A `Task.java` key Kestra accepts and egret does not act on publishes, with
+/// the warning naming the package in the snapshot.
+#[tokio::test]
+async fn a_task_java_key_on_a_core_task_publishes_with_the_warning() {
+    let Some(db) = db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let source = "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n    logLevel: INFO\n";
+    let f = common::draft(&repo, ws, user, source).await;
+
+    let v = egret_workflow::publish(&repo, &common::workflow_refs(), ws, user, f.id, "")
+        .await
+        .expect("publishes");
+    assert_eq!(
+        v.snapshot["warnings"],
+        serde_json::json!([{
+            "code": "not_honoured",
+            "message": "task 't': property 'logLevel' is accepted by Kestra on io.kestra.plugin.core.log.Log but egret does not act on it yet; roadmap package #13 lifts it",
+            "path": "tasks.t.logLevel",
+        }]),
     );
 }
