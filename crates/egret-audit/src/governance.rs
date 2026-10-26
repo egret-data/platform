@@ -44,6 +44,10 @@ pub mod action {
     // Username takeover (spec 2026-10-23 §4.4): who was deleted, with the
     // username retired for good.
     pub const USER_DELETE: &str = "user:delete";
+    // Classifications follow a rename (spec 2026-10-26 §5.7): a table or
+    // column's rows moved to its new name, or a dropped namespace's removed.
+    pub const CATALOG_TAG_MOVE: &str = "tag:move";
+    pub const CATALOG_TAG_PURGE: &str = "tag:purge";
 }
 
 /// The `resource_type` each governance action is recorded under.
@@ -55,6 +59,9 @@ pub mod resource {
     pub const POLICY_PROFILE: &str = "policy_profile";
     pub const ENGINE_GRANT: &str = "engine_grant";
     pub const USER: &str = "user";
+    /// A catalog table or column (`<warehouse_id>:<schema>.<table>`), as the
+    /// legacy `tag:assign` sink events record it.
+    pub const CATALOG: &str = "catalog";
 }
 
 /// Which permission reads an event in the feed: `Policy` needs `policy:read`,
@@ -136,6 +143,8 @@ pub const FAMILIES: &[(&str, &str, Family)] = &[
         Family::Policy,
     ),
     (action::USER_DELETE, resource::USER, Family::User),
+    (action::CATALOG_TAG_MOVE, resource::CATALOG, Family::Tag),
+    (action::CATALOG_TAG_PURGE, resource::CATALOG, Family::Tag),
     ("role:assign", "grant", Family::Policy),
     ("role:unassign", "grant", Family::Policy),
     ("tag:assign", "catalog", Family::Tag),
@@ -164,6 +173,8 @@ pub const GOVERNANCE_ACTIONS: &[&str] = &[
     action::ENGINE_GRANT_UPDATE,
     action::ENGINE_GRANT_DELETE,
     action::USER_DELETE,
+    action::CATALOG_TAG_MOVE,
+    action::CATALOG_TAG_PURGE,
 ];
 
 /// The family of a stored event, or `None` when it is not governance.
@@ -210,27 +221,90 @@ pub fn configure(audit_enabled: bool) {
     RECORDING.store(records_governance_changes(audit_enabled), Ordering::Relaxed);
 }
 
+/// Who made a governance change.
+pub enum Actor<'a> {
+    /// A signed-in user (or an administrator acting as one).
+    User(&'a egret_core::Principal),
+    /// A catalog client (`catalog.catalog_clients`) whose token reached the
+    /// Iceberg catalog: it is no user, so it is recorded in `detail.actor`
+    /// with `actor_user_id` NULL (rename spec C6a). A client deleted since
+    /// keeps its `client_id`, with `id`, `name` and `consumer_type` unknown.
+    CatalogClient {
+        id: Option<Uuid>,
+        client_id: String,
+        name: Option<String>,
+        consumer_type: Option<String>,
+    },
+    /// egret itself (no caller is known: a request with no catalog guard).
+    Egret,
+}
+
 /// INSERT one `kind = 'mutation'` row on the caller's connection (its
 /// transaction). Stamps `actor_user_id` and `impersonator` exactly as
 /// [`crate::mutation_for`] does. A summary over [`MAX_SUMMARY_BYTES`] is
 /// stored as `{"truncated": true, "bytes": n}`.
 pub async fn record_change(conn: &mut PgConnection, c: Change<'_>) -> Result<(), sqlx::Error> {
-    debug_assert!(
-        family_of(c.action, c.resource_type).is_some(),
-        "{} on {} is not a governance pair; add it to FAMILIES",
+    record_change_by(
+        conn,
+        Actor::User(c.principal),
         c.action,
-        c.resource_type
+        c.resource_type,
+        c.resource_id,
+        c.summary,
+    )
+    .await
+}
+
+/// [`record_change`] by any [`Actor`]: a user is stamped as `record_change`
+/// does; a catalog client leaves `actor_user_id` NULL and is added to the
+/// stored detail as `actor: {kind: "catalog_client", id, client_id, name,
+/// consumer_type}`; egret sets neither.
+pub async fn record_change_by(
+    conn: &mut PgConnection,
+    actor: Actor<'_>,
+    action: &'static str,
+    resource_type: &'static str,
+    resource_id: String,
+    summary: serde_json::Value,
+) -> Result<(), sqlx::Error> {
+    debug_assert!(
+        family_of(action, resource_type).is_some(),
+        "{action} on {resource_type} is not a governance pair; add it to FAMILIES"
     );
     if !RECORDING.load(Ordering::Relaxed) {
         return Ok(());
     }
-    let bytes = serde_json::to_vec(&c.summary)
+    let bytes = serde_json::to_vec(&summary)
         .map(|v| v.len())
         .unwrap_or(usize::MAX);
-    let detail = if bytes > MAX_SUMMARY_BYTES {
+    let mut detail = if bytes > MAX_SUMMARY_BYTES {
         serde_json::json!({ "truncated": true, "bytes": bytes })
     } else {
-        c.summary
+        summary
+    };
+    let (user, impersonator) = match &actor {
+        Actor::User(p) => (
+            Some(p.user_id.0),
+            p.impersonator.as_ref().map(|i| i.user_id.0),
+        ),
+        Actor::CatalogClient {
+            id,
+            client_id,
+            name,
+            consumer_type,
+        } => {
+            if let Some(obj) = detail.as_object_mut() {
+                obj.insert(
+                    "actor".to_string(),
+                    serde_json::json!({
+                        "kind": "catalog_client", "id": id, "client_id": client_id,
+                        "name": name, "consumer_type": consumer_type,
+                    }),
+                );
+            }
+            (None, None)
+        }
+        Actor::Egret => (None, None),
     };
     sqlx::query(
         "INSERT INTO audit.audit_log \
@@ -238,11 +312,11 @@ pub async fn record_change(conn: &mut PgConnection, c: Change<'_>) -> Result<(),
               resource_id, detail) \
          VALUES ('mutation', $1, $2, NULL, $3, $4, $5, $6)",
     )
-    .bind(c.principal.user_id.0)
-    .bind(c.principal.impersonator.as_ref().map(|i| i.user_id.0))
-    .bind(c.action)
-    .bind(c.resource_type)
-    .bind(c.resource_id)
+    .bind(user)
+    .bind(impersonator)
+    .bind(action)
+    .bind(resource_type)
+    .bind(resource_id)
     .bind(detail)
     .execute(conn)
     .await?;

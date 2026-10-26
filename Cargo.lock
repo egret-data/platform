@@ -3204,6 +3204,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "chrono",
+ "egret-audit",
  "egret-auth",
  "egret-bi",
  "egret-catalog-api",

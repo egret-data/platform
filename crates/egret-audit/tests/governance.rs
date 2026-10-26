@@ -6,7 +6,8 @@
 //! `resource_id` it generated, because the binary's tests share one database.
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use egret_audit::governance::{
-    action, family_of, governance_changes_via, record_change, Change, Family, GOVERNANCE_ACTIONS,
+    action, family_of, governance_changes_via, record_change, record_change_by, Actor, Change,
+    Family, GOVERNANCE_ACTIONS,
 };
 use egret_metastore::Db;
 use serde_json::{json, Value};
@@ -231,6 +232,8 @@ const EXPECTED: &[(&str, &str, Family)] = &[
     (action::ENGINE_GRANT_UPDATE, "engine_grant", Family::Policy),
     (action::ENGINE_GRANT_DELETE, "engine_grant", Family::Policy),
     (action::USER_DELETE, "user", Family::User),
+    (action::CATALOG_TAG_MOVE, "catalog", Family::Tag),
+    (action::CATALOG_TAG_PURGE, "catalog", Family::Tag),
 ];
 
 #[test]
@@ -469,4 +472,52 @@ async fn the_mutation_feed_index_is_partial_on_mutations() {
     let def = def.expect("audit_log_mutation_ts_idx exists");
     assert!(def.contains("WHERE (kind = 'mutation'::text)"), "{def}");
     assert!(def.contains("ts DESC, id DESC"), "{def}");
+}
+
+/// Rename spec C6a: a catalog client is no user. Its event leaves
+/// `actor_user_id` NULL and names the client in `detail.actor`; an event by
+/// egret itself names nobody.
+#[tokio::test]
+async fn a_catalog_client_is_recorded_in_the_detail_and_egret_as_nobody() {
+    let db = db().await;
+    let client = Uuid::new_v4();
+    let rid = format!("{}:sales.orders", Uuid::new_v4());
+    let mut conn = db.pool.acquire().await.unwrap();
+    record_change_by(
+        &mut conn,
+        Actor::CatalogClient {
+            id: Some(client),
+            client_id: "trino-main-7f3a".into(),
+            name: Some("trino-main".into()),
+            consumer_type: Some("engine".into()),
+        },
+        action::CATALOG_TAG_MOVE,
+        "catalog",
+        rid.clone(),
+        json!({"rows": 2}),
+    )
+    .await
+    .expect("record");
+    record_change_by(
+        &mut conn,
+        Actor::Egret,
+        action::CATALOG_TAG_PURGE,
+        "catalog",
+        rid.clone(),
+        json!({"rows": 1}),
+    )
+    .await
+    .expect("record");
+
+    let rows = rows_for(&db, &rid).await;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].actor_user_id, None);
+    assert_eq!(
+        rows[0].detail,
+        json!({"rows": 2, "actor": {
+            "kind": "catalog_client", "id": client, "client_id": "trino-main-7f3a",
+            "name": "trino-main", "consumer_type": "engine"}})
+    );
+    assert_eq!(rows[1].actor_user_id, None);
+    assert_eq!(rows[1].detail, json!({"rows": 1}));
 }

@@ -119,6 +119,7 @@ use egret_perm_compile::table_columns::{
 };
 use uuid::Uuid;
 
+use crate::mount::CatalogCaller;
 use crate::view_hold::{
     compile_is_lock_timeout, decode_segment, default_hold_limit, delete_inserted_rows, delete_rows,
     is_lock_timeout, is_multi_level, lock_key, rename_of, request_metadata, resolve, seconds,
@@ -1180,6 +1181,7 @@ impl TableHook {
         deadline: Instant,
         prefix: &str,
         plan: MovePlan,
+        caller: Option<CatalogCaller>,
         req: Request,
         next: Next,
     ) -> Response {
@@ -1216,7 +1218,9 @@ impl TableHook {
         };
         let this = self.clone();
         uncancellable(async move {
-            let response = this.run_move(deadline, &plan, &profiles, req, next).await;
+            let response = this
+                .run_move(deadline, &plan, &profiles, caller.as_ref(), req, next)
+                .await;
             locks.release().await;
             names.release().await;
             drop(permit);
@@ -1272,6 +1276,7 @@ impl TableHook {
         deadline: Instant,
         plan: &MovePlan,
         profiles: &[i64],
+        caller: Option<&CatalogCaller>,
         req: Request,
         next: Next,
     ) -> Response {
@@ -1288,7 +1293,7 @@ impl TableHook {
             self.compensate(plan, &copied).await;
             return response;
         }
-        self.finish(plan, &copied, profiles).await;
+        self.finish(plan, &copied, profiles, caller).await;
         response
     }
 
@@ -1458,10 +1463,17 @@ impl TableHook {
 
     /// After the 2xx (rename spec §5.3 step 8): delete `Before \ Target` (the
     /// sources' rows), re-tag the views that read the old names, recompile
-    /// with no overlay. A failure is logged and recorded as each profile's
-    /// failed compile: the old rows stay, which over-tags and never
+    /// with no overlay, and record one `tag:move` event per moved coordinate
+    /// by `caller` (C6, R7). A failure is logged and recorded as each
+    /// profile's failed compile: the old rows stay, which over-tags and never
     /// under-tags.
-    async fn finish(&self, plan: &MovePlan, copied: &Copied, profiles: &[i64]) {
+    async fn finish(
+        &self,
+        plan: &MovePlan,
+        copied: &Copied,
+        profiles: &[i64],
+        caller: Option<&CatalogCaller>,
+    ) {
         let result: Result<(), String> = async {
             let mut tx = self.db.pool.begin().await.map_err(|e| e.to_string())?;
             sqlx::query("SELECT set_config('lock_timeout', $1, true)")
@@ -1483,6 +1495,9 @@ impl TableHook {
                 .retag_bump_and_recompile(&mut tx)
                 .await
                 .map_err(|e| e.to_string())?;
+            record_moves(&mut tx, plan, copied, caller)
+                .await
+                .map_err(|e| e.to_string())?;
             tx.commit().await.map_err(|e| e.to_string())
         }
         .await;
@@ -1494,6 +1509,155 @@ impl TableHook {
                 .await;
         }
     }
+}
+
+/// Who made a change, resolved from the Iceberg caller (rename spec §5.7, R7,
+/// C6a): a catalog client by its `client_id` (one deleted since keeps it), a
+/// user by id (no catalog token names one today), or egret when no guard ran.
+enum Caller {
+    User(egret_core::Principal),
+    Client {
+        id: Option<Uuid>,
+        client_id: String,
+        name: Option<String>,
+        consumer_type: Option<String>,
+    },
+    Egret,
+}
+
+impl Caller {
+    async fn resolve(
+        conn: &mut sqlx::PgConnection,
+        caller: Option<&CatalogCaller>,
+    ) -> Result<Self, sqlx::Error> {
+        let Some(c) = caller else {
+            return Ok(Self::Egret);
+        };
+        if c.audience == "catalog" {
+            let client: Option<(Uuid, String, String, String)> = sqlx::query_as(
+                "SELECT id, client_id, name, consumer_type FROM catalog.catalog_clients \
+                  WHERE client_id = $1",
+            )
+            .bind(&c.subject)
+            .fetch_optional(&mut *conn)
+            .await?;
+            if let Some((id, client_id, name, consumer_type)) = client {
+                return Ok(Self::Client {
+                    id: Some(id),
+                    client_id,
+                    name: Some(name),
+                    consumer_type: Some(consumer_type),
+                });
+            }
+        }
+        if let Ok(user_id) = c.subject.parse::<Uuid>() {
+            let email: Option<String> = sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
+                .bind(user_id)
+                .fetch_optional(&mut *conn)
+                .await?;
+            if let Some(email) = email {
+                return Ok(Self::User(egret_core::Principal {
+                    user_id: egret_core::UserId(user_id),
+                    email,
+                    platform_roles: Vec::new(),
+                    permissions: Vec::new(),
+                    group_ids: Vec::new(),
+                    impersonator: None,
+                }));
+            }
+        }
+        Ok(Self::Client {
+            id: None,
+            client_id: c.subject.clone(),
+            name: None,
+            consumer_type: None,
+        })
+    }
+
+    fn actor(&self) -> egret_audit::governance::Actor<'_> {
+        use egret_audit::governance::Actor;
+        match self {
+            Self::User(p) => Actor::User(p),
+            Self::Client {
+                id,
+                client_id,
+                name,
+                consumer_type,
+            } => Actor::CatalogClient {
+                id: *id,
+                client_id: client_id.clone(),
+                name: name.clone(),
+                consumer_type: consumer_type.clone(),
+            },
+            Self::Egret => Actor::Egret,
+        }
+    }
+}
+
+/// One `tag:move` event per coordinate whose rows moved (rename spec §5.7),
+/// on the after-commit transaction: an event exists exactly when the move
+/// completed.
+async fn record_moves(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    plan: &MovePlan,
+    copied: &Copied,
+    caller: Option<&CatalogCaller>,
+) -> Result<(), sqlx::Error> {
+    use egret_audit::governance::{action, record_change_by, resource};
+    let caller = Caller::resolve(tx, caller).await?;
+    let ids: Vec<Uuid> = copied.before.iter().map(|r| r.0).collect();
+    let names: Vec<(Uuid, String)> = sqlx::query_as("SELECT id, name FROM tags WHERE id = ANY($1)")
+        .bind(&ids)
+        .fetch_all(&mut **tx)
+        .await?;
+    let tag = |id: Uuid| {
+        let name = names
+            .iter()
+            .find(|(i, _)| *i == id)
+            .map(|(_, n)| n.as_str());
+        serde_json::json!({"id": id, "name": name})
+    };
+    let coordinate = |c: &Coordinate| serde_json::json!({"schema": c.schema, "table": c.table, "column": c.column});
+    for (from, to) in &plan.moves {
+        let moved: Vec<&Assignment> = copied.before.iter().filter(|r| from.holds(r)).collect();
+        if moved.is_empty() {
+            continue;
+        }
+        let mut tags: Vec<Uuid> = moved.iter().map(|r| r.0).collect();
+        tags.sort();
+        tags.dedup();
+        let kept: Vec<serde_json::Value> = copied
+            .before
+            .iter()
+            .filter(|r| to.holds(r))
+            .map(|r| {
+                let column = (!r.3.is_empty()).then_some(r.3.as_str());
+                serde_json::json!({"tag": tag(r.0), "column": column})
+            })
+            .collect();
+        let trigger = if from.column.is_some() {
+            "iceberg_column_rename"
+        } else {
+            "iceberg_rename"
+        };
+        record_change_by(
+            tx,
+            caller.actor(),
+            action::CATALOG_TAG_MOVE,
+            resource::CATALOG,
+            format!("{}:{}.{}", plan.warehouse_id, from.schema, from.table),
+            serde_json::json!({
+                "before": coordinate(from),
+                "after": coordinate(to),
+                "tags": tags.into_iter().map(tag).collect::<Vec<_>>(),
+                "rows": moved.len(),
+                "kept": kept,
+                "trigger": trigger,
+            }),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// The axum middleware (module doc). Every request it does not handle passes
@@ -1536,10 +1700,11 @@ pub async fn hook_table_commits(
     };
     match plan {
         Ok(Some(plan)) => {
+            let caller = req.extensions().get::<CatalogCaller>().cloned();
             return hook
                 .clone()
-                .hold_move(deadline, &prefix, plan, req, next)
-                .await
+                .hold_move(deadline, &prefix, plan, caller, req, next)
+                .await;
         }
         Ok(None) => {}
         Err(refusal) => return refusal.into_response(),

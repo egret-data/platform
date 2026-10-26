@@ -637,3 +637,19 @@ Deviations the code forces are recorded here, per task, as they happen.
   fields, the table's rows, and (only when a whole-table row exists) whether a StarRocks engine is bound.
 - The guards (dropped column, append, column add without a rename) pin behaviour that existed before this task; they
   hold a test-owned name lock during the commit, so a hook that took one would refuse.
+
+### Task 7: governance events by the real caller
+
+- The feed's sentences are plain text, like every other sentence in the feed (the frontend renders `sentence` as
+  text): "Catalog client trino-main moved classification PII from sales.orders to sales.orders_v2 (table renamed)",
+  with no `*`/backtick markup.
+- `Actor::User` needs a `Principal`; for a user subject the hook builds one from the `users` row (id and email,
+  no roles): `record_change_by` stores only the user id and the impersonator. No catalog token names a user today,
+  so that branch is unexercised.
+- A move whose source carried no row (a column rename kept only because a whole-table row and StarRocks need its
+  masks, C12) records no `tag:move`: nothing moved. `kept` entries are `{"tag": {"id", "name"}, "column": …|null}`.
+- `egret-catalog-engine` gains `egret-audit` as a dependency. The controlplane feed test inserts the events as the
+  hook stores them (the controlplane does not depend on the catalog engine).
+- `a_rename_with_nothing_bound_moves_at_once` bounds the move at half the test deadline (2.5 s), not 1 s: with the
+  whole binary running in parallel the copy and the after-commit step took 1.1-1.3 s. A wait on a silent engine
+  would run to the 5 s deadline.

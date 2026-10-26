@@ -65,8 +65,13 @@ struct Env {
     state: ApiContext<EngineState>,
     /// Lakekeeper with no hook in front.
     raw: axum::Router,
-    /// Lakekeeper behind the table hook, with [`observe`] between them.
+    /// Lakekeeper behind the table hook, with [`observe`] between them, behind
+    /// a [`StubGuard`] that names [`Env::caller`] as the request's caller.
     app: axum::Router,
+    /// The same, with no guard at all.
+    unguarded: axum::Router,
+    /// The token subject the stub guard reports.
+    caller: Arc<Mutex<String>>,
     prefix: String,
     warehouse_id: Uuid,
     /// The registry catalog over the warehouse.
@@ -348,12 +353,18 @@ async fn env_with_limit(limit: Duration) -> Option<Env> {
         observe,
     ));
     let hook = Arc::new(TableHook::new(db.clone()).with_limit(limit));
-    let app = front_catalog_router(table_hook::layer(inner, hook.clone()), None, None);
+    let hooked = table_hook::layer(inner, hook.clone());
+    let caller: Arc<Mutex<String>> = Arc::new(Mutex::new(unique("no-such-client")));
+    let guard: Arc<dyn egret_catalog_engine::CatalogGuard> = Arc::new(StubGuard(caller.clone()));
+    let app = front_catalog_router(hooked.clone(), Some(guard), None);
+    let unguarded = front_catalog_router(hooked, None, None);
     let env = Env {
         db,
         state,
         raw,
         app,
+        unguarded,
+        caller,
         prefix,
         warehouse_id,
         catalog,
@@ -375,6 +386,26 @@ async fn env_with_limit(limit: Duration) -> Option<Env> {
         .await;
     assert_eq!(status, StatusCode::OK, "create namespace: {body}");
     Some(env)
+}
+
+/// A guard that lets every request through, by the subject in its slot, as
+/// the production guard does with a verified catalog token.
+struct StubGuard(Arc<Mutex<String>>);
+
+#[async_trait::async_trait]
+impl egret_catalog_engine::CatalogGuard for StubGuard {
+    async fn check(
+        &self,
+        _method: &str,
+        _path: &str,
+        _query: Option<&str>,
+        _bearer: Option<&str>,
+    ) -> Result<egret_catalog_engine::CatalogCaller, (StatusCode, String)> {
+        Ok(egret_catalog_engine::CatalogCaller {
+            subject: self.0.lock().unwrap().clone(),
+            audience: "catalog".into(),
+        })
+    }
 }
 
 impl Env {
@@ -1939,11 +1970,10 @@ async fn a_rename_with_nothing_bound_moves_at_once() {
     let started = Instant::now();
     let (status, body) = env.rename("orders", "orders_v2").await;
     assert!(status.is_success(), "rename: {status} {body}");
-    assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "{:?}",
-        started.elapsed()
-    );
+    // No wait: well inside the deadline a wait on a silent engine would
+    // reach (the copy and the after-commit step alone take over a second
+    // while the rest of the suite runs).
+    assert!(started.elapsed() < LIMIT / 2, "{:?}", started.elapsed());
     assert_eq!(
         env.rows().await,
         sorted(vec![row(a, "orders_v2", ""), row(b, "orders_v2", "email")])
@@ -2465,4 +2495,175 @@ async fn a_column_add_without_a_rename_takes_the_755_path() {
         env.masked_columns(a, "orders").await,
         vec!["email", "id", "phone"]
     );
+}
+
+// ── Task 7: governance events by the real caller (C6, C6a, R7) ──
+
+impl Env {
+    /// A catalog client of the warehouse named `name`, returning
+    /// `(id, client_id)`.
+    async fn catalog_client(&self, name: &str) -> (Uuid, String) {
+        let pool = &self.db.pool;
+        let workspace: Uuid =
+            sqlx::query_scalar("SELECT workspace_id FROM catalog.warehouses WHERE id = $1")
+                .bind(self.warehouse_id)
+                .fetch_one(pool)
+                .await
+                .expect("workspace");
+        let role: Uuid = sqlx::query_scalar(
+            "INSERT INTO catalog.catalog_roles (warehouse_id, name, consumer_type) \
+             VALUES ($1, $2, 'engine') RETURNING id",
+        )
+        .bind(self.warehouse_id)
+        .bind(unique("th-role"))
+        .fetch_one(pool)
+        .await
+        .expect("catalog role");
+        let client_id = unique(name);
+        let id: Uuid = sqlx::query_scalar(
+            "INSERT INTO catalog.catalog_clients (name, consumer_type, workspace_id, \
+             warehouse_id, catalog_role_id, client_id, client_secret_hash) \
+             VALUES ($1, 'engine', $2, $3, $4, $5, 'x') RETURNING id",
+        )
+        .bind(name)
+        .bind(workspace)
+        .bind(self.warehouse_id)
+        .bind(role)
+        .bind(&client_id)
+        .fetch_one(pool)
+        .await
+        .expect("catalog client");
+        (id, client_id)
+    }
+
+    /// `(actor_user_id, detail)` of every `tag:move` event on `sales.{table}`.
+    async fn move_events(&self, table: &str) -> Vec<(Option<Uuid>, Value)> {
+        sqlx::query_as(
+            "SELECT actor_user_id, detail FROM audit.audit_log \
+              WHERE action = 'tag:move' AND resource_type = 'catalog' AND resource_id = $1 \
+              ORDER BY id",
+        )
+        .bind(format!("{}:sales.{table}", self.warehouse_id))
+        .fetch_all(&self.db.pool)
+        .await
+        .expect("events")
+    }
+}
+
+/// C6, R7: a completed move records one `tag:move` event, by the catalog
+/// client whose token sent the rename; `kept` lists what the new name carried
+/// already (C1).
+#[tokio::test]
+async fn a_completed_move_records_one_tag_move_event_by_its_caller() {
+    let Some(env) = env().await else { return };
+    let (a, b) = env.classified_orders().await;
+    let c = env.new_gated_tag().await;
+    env.assign(c, "orders_v2", "").await;
+    env.recompile_all().await;
+    let (client, client_id) = env.catalog_client("trino-main").await;
+    *env.caller.lock().unwrap() = client_id.clone();
+    let _plugins = env.start_plugins().await;
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    let events = env.move_events("orders").await;
+    assert_eq!(events.len(), 1, "{events:?}");
+    let (actor, detail) = &events[0];
+    assert_eq!(*actor, None);
+    assert_eq!(
+        detail["actor"],
+        json!({"kind": "catalog_client", "id": client, "client_id": client_id,
+               "name": "trino-main", "consumer_type": "engine"})
+    );
+    assert_eq!(
+        detail["before"],
+        json!({"schema": "sales", "table": "orders", "column": null})
+    );
+    assert_eq!(
+        detail["after"],
+        json!({"schema": "sales", "table": "orders_v2", "column": null})
+    );
+    assert_eq!(detail["rows"], json!(2));
+    assert_eq!(detail["trigger"], json!("iceberg_rename"));
+    let mut tags: Vec<String> = detail["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["id"].as_str().unwrap().to_string())
+        .collect();
+    tags.sort();
+    let mut want = vec![a.to_string(), b.to_string()];
+    want.sort();
+    assert_eq!(tags, want);
+    let kept = detail["kept"].as_array().unwrap();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(kept[0]["tag"]["id"], json!(c));
+}
+
+/// C6a: a client deleted since keeps its `client_id`; its id and name are
+/// unknown.
+#[tokio::test]
+async fn a_move_by_a_deleted_client_keeps_its_client_id() {
+    let Some(env) = env().await else { return };
+    env.classified_orders().await;
+    let (client, client_id) = env.catalog_client("trino-main").await;
+    sqlx::query("DELETE FROM catalog.catalog_clients WHERE id = $1")
+        .bind(client)
+        .execute(&env.db.pool)
+        .await
+        .expect("delete client");
+    *env.caller.lock().unwrap() = client_id.clone();
+    let _plugins = env.start_plugins().await;
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    let events = env.move_events("orders").await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].1["actor"],
+        json!({"kind": "catalog_client", "id": null, "client_id": client_id,
+               "name": null, "consumer_type": null})
+    );
+}
+
+/// C6a: with no guard (no caller known) the move is egret's: no actor.
+#[tokio::test]
+async fn a_move_with_no_guard_is_by_egret() {
+    let Some(env) = env().await else { return };
+    env.classified_orders().await;
+    let _plugins = env.start_plugins().await;
+
+    let (status, body) = send(
+        &env.unguarded,
+        &env.prefix,
+        "POST",
+        "tables/rename",
+        Some(json!({
+            "source": {"namespace": ["sales"], "name": "orders"},
+            "destination": {"namespace": ["sales"], "name": "orders_v2"},
+        })),
+    )
+    .await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    let events = env.move_events("orders").await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].0, None);
+    assert!(events[0].1.get("actor").is_none(), "{:?}", events[0].1);
+}
+
+/// C6: a refused or undone move records nothing.
+#[tokio::test]
+async fn a_refused_or_undone_move_records_nothing() {
+    let Some(env) = env().await else { return };
+    env.classified_orders().await;
+    let _plugins = env.start_plugins().await;
+
+    let (status, body) = env
+        .rename_across((&["sales"], "orders"), (&["sales", "eu"], "orders"))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    env.create_table("orders_v2", &[(1, "id")]).await;
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(!status.is_success(), "{status} {body}");
+    assert!(env.move_events("orders").await.is_empty());
 }
