@@ -82,7 +82,10 @@
 //!    refusal is a 409 and nothing is renamed. This transaction is the
 //!    pre-commit compile; no dry run runs;
 //! 3. wait, within one deadline ([`crate::view_hold::default_hold_limit`]), for
-//!    the Trino plugins bound to the warehouse to report the new tag version;
+//!    the Trino plugins bound to the warehouse to report the new tag version
+//!    and the StarRocks plugins the new policy version. An engine type with
+//!    nothing bound is not waited for; a bound one whose plugins stay silent
+//!    refuses the move at the deadline and undoes the copy;
 //! 4. forward. A non-2xx undoes exactly the rows the copy inserted; a 2xx
 //!    deletes the source's rows, re-tags the views that read the old name, and
 //!    recompiles with no overlay.
@@ -911,6 +914,29 @@ struct Copied {
     target: Vec<Assignment>,
     /// `(Trino profile, its tag version)` to wait for.
     tags: Vec<(i64, i64)>,
+    /// `(StarRocks profile, its policy version)` to wait for (C5).
+    policies: Vec<(i64, i64)>,
+}
+
+/// `(profile id, policy version)` of every StarRocks engine bound to the
+/// warehouse: the StarRocks plugin reports its `lastKnownVersion` against
+/// the profile's `policy_version` on each policy poll (rename spec C5).
+async fn starrocks_policy_versions(
+    conn: &mut sqlx::PgConnection,
+    warehouse_id: Uuid,
+) -> Result<Vec<(i64, i64)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT DISTINCT s.id, s.policy_version \
+           FROM registry.catalogs c \
+           JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id \
+           JOIN engine_mgmt.engines e ON e.id = ea.engine_id \
+           JOIN policy.authz_services s ON s.id = e.authz_service_id \
+          WHERE c.warehouse_id = $1 AND e.type = 'starrocks' \
+          ORDER BY s.id",
+    )
+    .bind(warehouse_id)
+    .fetch_all(&mut *conn)
+    .await
 }
 
 /// The name locks of one move, on a connection detached from the pool;
@@ -1194,7 +1220,10 @@ impl TableHook {
             .await
             .map_err(|e| refused(&e))?;
         // Read after the bump, in the same transaction: the versions the
-        // plugins must report are the ones the copy is served under.
+        // plugins must report are the ones the copy is served under. Trino's
+        // tags change only when rows were inserted; StarRocks' policies may
+        // change through the overlay alone. A list with no engine bound is
+        // empty, and is skipped by the wait (C4).
         let tags = if inserted.is_empty() {
             Vec::new()
         } else {
@@ -1202,19 +1231,23 @@ impl TableHook {
                 .await
                 .map_err(db)?
         };
+        let policies = starrocks_policy_versions(&mut tx, plan.warehouse_id)
+            .await
+            .map_err(db)?;
         tx.commit().await.map_err(db)?;
         Ok(Copied {
             before,
             inserted,
             target,
             tags,
+            policies,
         })
     }
 
     /// Wait until the plugins serve the copy (rename spec §5.3 step 6).
     async fn wait(&self, deadline: Instant, copied: &Copied) -> Result<(), Refusal> {
         let left = deadline.saturating_duration_since(Instant::now());
-        match wait_for_versions(&self.policy, &copied.tags, &[], left).await {
+        match wait_for_versions(&self.policy, &copied.tags, &copied.policies, left).await {
             Ok(()) => Ok(()),
             Err(WaitError::Timeout { waiting_on }) => Err(Refusal(format!(
                 "engines did not confirm the moved classifications within {} s: {}; check that \

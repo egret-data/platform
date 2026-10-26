@@ -606,3 +606,12 @@ Deviations the code forces are recorded here, per task, as they happen.
   catalog"), not 409; `a_failed_rename_undoes_the_copy` asserts a non-2xx carrying Lakekeeper's own body.
 - Found, not fixed: `view_hold::lock_key` (shared by the view hold and now the move, C17) does not fold case, so a
   hold on `Orders` and one on `orders` do not exclude each other, although Lakekeeper's names are case-insensitive.
+
+### Task 4: StarRocks wait, no Trino, silent engines
+
+- As designed: the copy reads the StarRocks `(profile, policy_version)` pairs after its recompile, always (the
+  overlay alone can change StarRocks policies); Trino pairs only when rows were inserted; an empty list is skipped.
+- Test harness: `the_rename_waits_for_the_starrocks_policy_version` runs the fake StarRocks plugin five times slower
+  than the Trino one. At equal cadence it passed on the Task 3 code too (StarRocks happened to report within the
+  Trino wait), so it could not tell the wait apart from its absence. The Task 3 tests now start both fake plugins: a
+  bound StarRocks profile whose plugin never polls refuses the move (R5).

@@ -77,6 +77,10 @@ struct Env {
     /// The Trino profile bound to the catalog (with its tag service).
     trino_id: i64,
     trino_name: String,
+    /// The Trino engine bound through it.
+    trino_engine: Uuid,
+    /// The StarRocks engine bound through the StarRocks profile.
+    starrocks_engine: Uuid,
     policy: PolicyStore,
     on_commit: OnCommit,
     on_reach: OnReach,
@@ -87,15 +91,16 @@ struct Env {
 
 /// What the catalog held when a request reached lakekeeper: armed with
 /// `(METHOD /path, warehouse, None)`, [`observe`] fills in the moment, the
-/// tables the warehouse's classification rows name, and the Trino profile's
-/// tag version.
-type RowsAtReach = Arc<Mutex<Option<(String, Uuid, i64, Option<AtReach>)>>>;
+/// tables the warehouse's classification rows name, the Trino profile's tag
+/// version and the StarRocks profile's policy version.
+type RowsAtReach = Arc<Mutex<Option<(String, Uuid, (i64, i64), Option<AtReach>)>>>;
 
 #[derive(Debug, Clone)]
 struct AtReach {
     at: Instant,
     tables: Vec<String>,
     tag_version: i64,
+    policy_version: i64,
 }
 
 /// Armed with `(METHOD /path, signal)`: [`observe`] signals when that request
@@ -133,8 +138,8 @@ async fn observe(
         .unwrap()
         .as_ref()
         .filter(|(w, _, _, seen)| *w == what && seen.is_none())
-        .map(|(_, warehouse, trino, _)| (*warehouse, *trino));
-    if let Some((warehouse, trino)) = armed {
+        .map(|(_, warehouse, profiles, _)| (*warehouse, *profiles));
+    if let Some((warehouse, (trino, starrocks))) = armed {
         let tables: Vec<String> = sqlx::query_scalar(
             "SELECT DISTINCT table_name FROM catalog_tag_assignments WHERE warehouse_id = $1 \
              ORDER BY 1",
@@ -149,11 +154,18 @@ async fn observe(
                 .fetch_one(&db.pool)
                 .await
                 .expect("tag version at reach");
+        let policy_version: i64 =
+            sqlx::query_scalar("SELECT policy_version FROM policy.authz_services WHERE id = $1")
+                .bind(starrocks)
+                .fetch_one(&db.pool)
+                .await
+                .expect("policy version at reach");
         if let Some(slot) = rows_at_reach.lock().unwrap().as_mut() {
             slot.3 = Some(AtReach {
                 at,
                 tables,
                 tag_version,
+                policy_version,
             });
         }
     }
@@ -216,8 +228,12 @@ async fn observe(
 }
 
 /// A lakekeeper warehouse with namespace `sales`, and the egret warehouse over
-/// it.
+/// it; the hook holds a move at most [`LIMIT`].
 async fn env() -> Option<Env> {
+    env_with_limit(LIMIT).await
+}
+
+async fn env_with_limit(limit: Duration) -> Option<Env> {
     let dsn = egret_test_db::url().await?;
     let db = Db::connect(&dsn, 10).await.expect("connect");
     db.migrate().await.expect("migrate");
@@ -331,7 +347,7 @@ async fn env() -> Option<Env> {
         ),
         observe,
     ));
-    let hook = Arc::new(TableHook::new(db.clone()).with_limit(LIMIT));
+    let hook = Arc::new(TableHook::new(db.clone()).with_limit(limit));
     let app = front_catalog_router(table_hook::layer(inner, hook.clone()), None, None);
     let env = Env {
         db,
@@ -345,6 +361,8 @@ async fn env() -> Option<Env> {
         profile_name: profile.name,
         trino_id: trino.id,
         trino_name,
+        trino_engine,
+        starrocks_engine: engine,
         policy,
         on_commit,
         on_reach,
@@ -1561,13 +1579,23 @@ impl Env {
         plugins::start_trino(self.policy.clone(), self.trino_name.clone(), POLL)
     }
 
+    /// The fake Trino and StarRocks plugins, each polled once.
+    async fn start_plugins(&self) -> (plugins::Plugin, plugins::Plugin) {
+        let trino = self.start_trino_plugin();
+        let starrocks =
+            plugins::start_starrocks(self.policy.clone(), self.profile_name.clone(), POLL);
+        trino.polled().await;
+        starrocks.polled().await;
+        (trino, starrocks)
+    }
+
     /// Arm [`observe`] to record what the catalog held when `what` reached
     /// lakekeeper.
     fn probe_reach(&self, what: &str) {
         *self.rows_at_reach.lock().unwrap() = Some((
             format!("{} /{}/{}", "POST", self.prefix, what),
             self.warehouse_id,
-            self.trino_id,
+            (self.trino_id, self.profile_id),
             None,
         ));
     }
@@ -1618,8 +1646,7 @@ fn sorted(mut rows: Vec<Row>) -> Vec<Row> {
 async fn a_renamed_table_keeps_its_classifications() {
     let Some(env) = env().await else { return };
     let (a, b) = env.classified_orders().await;
-    let plugin = env.start_trino_plugin();
-    plugin.polled().await;
+    let _plugins = env.start_plugins().await;
 
     let (status, body) = env.rename("orders", "orders_v2").await;
     assert!(status.is_success(), "rename: {status} {body}");
@@ -1657,8 +1684,7 @@ async fn a_renamed_table_keeps_its_classifications() {
 async fn the_rename_reaches_lakekeeper_only_after_trino_serves_the_moved_tags() {
     let Some(env) = env().await else { return };
     env.classified_orders().await;
-    let plugin = env.start_trino_plugin();
-    plugin.polled().await;
+    let (plugin, _starrocks) = env.start_plugins().await;
     env.probe_reach("tables/rename");
 
     let (status, body) = env.rename("orders", "orders_v2").await;
@@ -1721,8 +1747,7 @@ async fn a_rename_whose_move_is_refused_answers_409_and_does_not_rename() {
     .await
     .expect("path rule");
     env.recompile_all().await;
-    let plugin = env.start_trino_plugin();
-    plugin.polled().await;
+    let _plugins = env.start_plugins().await;
     let (rows, versions) = (env.rows().await, env.versions().await);
 
     let (status, body) = env.rename("orders", "orders_v2").await;
@@ -1748,8 +1773,7 @@ async fn a_failed_rename_undoes_the_copy() {
     let Some(env) = env().await else { return };
     let (a, b) = env.classified_orders().await;
     env.create_table("orders_v2", &[(1, "id")]).await;
-    let plugin = env.start_trino_plugin();
-    plugin.polled().await;
+    let _plugins = env.start_plugins().await;
     let before = env.tag_version().await;
 
     let (status, body) = env.rename("orders", "orders_v2").await;
@@ -1789,8 +1813,7 @@ async fn a_rename_moves_classifications_only() {
     .fetch_one(&env.db.pool)
     .await
     .expect("deny grant");
-    let plugin = env.start_trino_plugin();
-    plugin.polled().await;
+    let _plugins = env.start_plugins().await;
 
     let (status, body) = env.rename("orders", "orders_v2").await;
     assert!(status.is_success(), "rename: {status} {body}");
@@ -1800,4 +1823,129 @@ async fn a_rename_moves_classifications_only() {
         .await
         .expect("grant");
     assert_eq!(table, "orders");
+}
+
+// ── Task 4: wait for StarRocks too; no Trino, silent engines (C4, C5, R5) ──
+
+impl Env {
+    fn start_starrocks_plugin(&self, poll: Duration) -> plugins::Plugin {
+        plugins::start_starrocks(self.policy.clone(), self.profile_name.clone(), poll)
+    }
+
+    /// Unbind an engine from the catalog.
+    async fn detach(&self, engine: Uuid) {
+        sqlx::query("DELETE FROM registry.engine_catalog_attachments WHERE engine_id = $1")
+            .bind(engine)
+            .execute(&self.db.pool)
+            .await
+            .expect("detach");
+    }
+}
+
+/// C5: the rename reaches lakekeeper only once the StarRocks plugin has
+/// reported the policy version the copy left, and its download then masks
+/// the new name.
+#[tokio::test]
+async fn the_rename_waits_for_the_starrocks_policy_version() {
+    let Some(env) = env().await else { return };
+    let (a, _) = env.classified_orders().await;
+    let trino = env.start_trino_plugin();
+    // Five times slower than Trino's: a rename that waited for Trino alone
+    // reaches lakekeeper before StarRocks reports.
+    let starrocks = env.start_starrocks_plugin(POLL * 5);
+    trino.polled().await;
+    starrocks.polled().await;
+    env.probe_reach("tables/rename");
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    let reached = env.reached();
+    let reported = starrocks.report_of(reached.policy_version).await;
+    assert!(
+        reported < reached.at,
+        "StarRocks reported the copy's policy version {} only after the rename reached \
+         lakekeeper",
+        reached.policy_version
+    );
+    let policies = env.served_starrocks_policies().await;
+    let mask = format!(
+        "{}{a}-mask-{}.sales.orders_v2.id",
+        egret_policy::COMPILER_CLEARANCE_PREFIX,
+        env.catalog
+    );
+    assert!(policies.contains(&mask), "{policies:?}");
+}
+
+/// C4: with no Trino engine bound, a classified rename is not refused and
+/// waits on StarRocks alone.
+#[tokio::test]
+async fn a_rename_with_no_trino_bound_moves_without_a_trino_wait() {
+    let Some(env) = env().await else { return };
+    let (a, b) = env.classified_orders().await;
+    env.detach(env.trino_engine).await;
+    let starrocks = env.start_starrocks_plugin(POLL);
+    starrocks.polled().await;
+    env.probe_reach("tables/rename");
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(
+        env.rows().await,
+        sorted(vec![row(a, "orders_v2", ""), row(b, "orders_v2", "email")])
+    );
+    let reached = env.reached();
+    assert!(starrocks.report_of(reached.policy_version).await < reached.at);
+}
+
+/// R5: a bound engine whose plugins never confirm refuses the rename at the
+/// deadline and undoes the copy.
+#[tokio::test]
+async fn a_rename_no_plugin_confirms_is_refused_and_undone() {
+    let Some(env) = env_with_limit(Duration::from_secs(2)).await else {
+        return;
+    };
+    let (a, b) = env.classified_orders().await;
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let message = body["error"]["message"].as_str().expect("message");
+    assert!(
+        message.starts_with(
+            "egret refused the table change: engines did not confirm the moved \
+             classifications within 2 s: "
+        ),
+        "{message}"
+    );
+    assert!(
+        message.contains(egret_policy::NO_PLUGIN_POLLED),
+        "{message}"
+    );
+    assert_eq!(
+        env.rows().await,
+        sorted(vec![row(a, "orders", ""), row(b, "orders", "email")])
+    );
+    assert!(env.source("orders").await.is_some(), "not renamed");
+}
+
+/// C4, C5: with no engine bound at all, nothing can be waited for and the
+/// move goes through at once.
+#[tokio::test]
+async fn a_rename_with_nothing_bound_moves_at_once() {
+    let Some(env) = env().await else { return };
+    let (a, b) = env.classified_orders().await;
+    env.detach(env.trino_engine).await;
+    env.detach(env.starrocks_engine).await;
+
+    let started = Instant::now();
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        env.rows().await,
+        sorted(vec![row(a, "orders_v2", ""), row(b, "orders_v2", "email")])
+    );
 }
