@@ -733,3 +733,10 @@ Deviations the code forces are recorded here, per task, as they happen.
   rename's wait, its forward and `finish`), the write is refused at once: 409 `{"code": "table_change_held"}`. A write
   holding the lock also makes a rename that starts meanwhile refuse ("being held"), so neither side can interleave.
   The `egret-table-hook` profile lock is not needed: the name lock already covers the whole hold.
+
+### Review fix 3: a held multi-table commit dry-runs its other tables (review finding 3)
+
+- `move_plan_for_columns` adds to the plan's overlay every other table of the request whose current schema changes
+  (its new columns, nothing leaving). A held commit's copy compile is therefore also #755's dry run for those
+  tables: a ceiling they would cross is refused 409 before the commit, instead of the commit landing and `finish`
+  failing (which left the source rows behind and wedged the profile).

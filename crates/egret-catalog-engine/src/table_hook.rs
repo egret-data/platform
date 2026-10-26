@@ -1116,6 +1116,11 @@ impl TableHook {
         let mut starrocks_bound: Option<bool> = None;
         let mut moves = Vec::new();
         let mut overlay = Vec::new();
+        // The request's other schema changes: when the commit is held, the
+        // copy's compile is their dry run too (review finding 3), so a
+        // ceiling they cross is a 409 before the commit, as #755's dry run
+        // would answer.
+        let mut others = Vec::new();
         for (ns, table, updates) in changes {
             let Some(new) = new_current_fields(&mut conn, warehouse_id, &ns, &table, updates)
                 .await
@@ -1137,7 +1142,16 @@ impl TableHook {
                     (fold(old_name) != fold(new_name)).then(|| (old_name.clone(), new_name.clone()))
                 })
                 .collect();
+            let unmoved = PendingColumns {
+                warehouse_id,
+                schema: ns.clone(),
+                table: table.clone(),
+                columns: Some(column_names(&new)),
+                leaving: Vec::new(),
+                leaving_table: false,
+            };
             if renames.is_empty() {
+                others.push(unmoved);
                 continue;
             }
             let rows = rows_of(&mut conn, warehouse_id, &[(ns.clone(), table.clone())])
@@ -1162,6 +1176,7 @@ impl TableHook {
                 })
                 .collect();
             if classified.is_empty() {
+                others.push(unmoved);
                 continue;
             }
             for (old_name, new_name) in classified {
@@ -1197,6 +1212,7 @@ impl TableHook {
         if moves.is_empty() {
             return Ok(None);
         }
+        overlay.extend(others);
         Ok(Some(MovePlan {
             warehouse_id,
             moves,

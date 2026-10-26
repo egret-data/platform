@@ -3187,3 +3187,54 @@ async fn a_catalog_tag_write_during_a_held_rename_is_refused() {
         .await
         .expect("free once the rename has finished");
 }
+
+// ── Review fix 3: a held multi-table commit dry-runs its other tables ──
+
+/// Review finding 3: one table of a multi-table commit renames a classified
+/// column (so the commit is held) and another grows a whole-table
+/// classification past its ceiling. The hold's compile is the dry run for
+/// both: the commit is refused 409 before it lands, and neither table
+/// changes.
+#[tokio::test]
+async fn a_held_multi_table_commit_refuses_another_tables_ceiling() {
+    let Some(env) = env().await else { return };
+    let (_, b) = env.classified_orders().await;
+    // 1 deny + 498 masks = 499; growing to 500 columns makes it 501.
+    let wide = fields(498);
+    env.create_table("wide", &refs(&wide)).await;
+    env.classify_table("wide").await;
+    env.recompile_all().await;
+    let _plugins = env.start_plugins().await;
+
+    let grown = fields(500);
+    let change = |table: &str, fields: &[(i64, &str)]| {
+        json!({
+            "identifier": {"namespace": ["sales"], "name": table},
+            "requirements": [],
+            "updates": [
+                {"action": "add-schema", "schema": schema(1, fields)},
+                {"action": "set-current-schema", "schema-id": -1}
+            ]
+        })
+    };
+    let (status, body) = env
+        .call(
+            "POST",
+            "transactions/commit",
+            Some(json!({"table-changes": [
+                change("orders", &[(1, "id"), (2, "mail")]),
+                change("wide", &refs(&grown)),
+            ]})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or("");
+    assert!(message.contains("ceiling"), "{message}");
+    assert_eq!(env.loaded("wide").await.len(), 498, "nothing committed");
+    assert_eq!(
+        env.loaded("orders").await,
+        vec!["id".to_string(), "email".to_string()]
+    );
+    assert!(env.rows().await.contains(&row(b, "orders", "email")));
+    assert!(!env.rows().await.iter().any(|r| r.3 == "mail"));
+}
