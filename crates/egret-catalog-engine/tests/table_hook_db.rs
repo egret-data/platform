@@ -1806,6 +1806,10 @@ async fn a_rename_whose_move_is_refused_answers_409_and_does_not_rename() {
         ),
         "{message}"
     );
+    // Live check F4: the compile's own advice is not followed by a second
+    // "resolve it".
+    assert!(message.ends_with(". Nothing was renamed."), "{message}");
+    assert!(!message.contains("resolve it, then retry"), "{message}");
     assert!(env.source("orders").await.is_some(), "not renamed");
     assert!(env.source("orders_v2").await.is_none());
     assert_eq!(env.rows().await, rows);

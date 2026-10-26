@@ -793,3 +793,10 @@ Deviations the code forces are recorded here, per task, as they happen.
   checks the destination's state first (`table_states_via` = `dropped`) and answers 409 at once: "the new name
   sales.x belongs to a dropped table in the recycle bin, and the catalog does not rename onto it; undrop that table,
   purge it, or choose another name". An unclassified rename is not held and still gets Lakekeeper's own answer.
+
+### Live fix F4: the move's refusal does not repeat itself
+
+- A refused copy compile now reads "egret refused the table change: the table's classifications cannot move to
+  sales.x: <compile message>. Nothing was renamed." The compile message carries its own advice ("resolve the rule
+  masks on that column"), so the hold's "; resolve it, then retry" repeated it. §8's example message ends the old
+  way; this note supersedes it.

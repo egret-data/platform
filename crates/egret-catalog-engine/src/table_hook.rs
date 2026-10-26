@@ -1476,7 +1476,7 @@ impl TableHook {
         };
         let refused = |e: &dyn std::fmt::Display| {
             Refusal(format!(
-                "the table's classifications cannot move to {}: {e}; resolve it, then retry",
+                "the table's classifications cannot move to {}: {e}. Nothing was renamed.",
                 plan.destination_labels()
             ))
         };
