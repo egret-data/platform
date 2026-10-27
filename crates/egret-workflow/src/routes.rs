@@ -3155,12 +3155,22 @@ pub struct KillQuery {
 /// `ErrorBody.code` of the kill route's 409 (spec D3).
 pub const EXECUTION_TERMINATED_CODE: &str = "execution_terminated";
 
+/// `ErrorBody.code` of the kill route's RETRYABLE 409 (end hooks #2b, B3 fix
+/// round 1, I1): the execution has ended and its `afterExecution:` is still
+/// running, but its only live task is a block being prepared or finished,
+/// which cannot be killed until that step has landed. Nothing is written.
+pub const KILL_NOT_APPLIED_CODE: &str = "kill_not_applied";
+
 /// The kill route's error: every [`egret_core::Error`], plus the coded 409.
 #[derive(Debug)]
 pub enum KillError {
     Core(Error),
     /// The execution is terminal, in this state.
     Terminated(Uuid, String),
+    /// The execution is terminal and its `afterExecution:` runs, but the kill
+    /// could not be applied now ([`crate::worker::KillOutcome::NotApplied`]):
+    /// a retryable 409 with [`KILL_NOT_APPLIED_CODE`].
+    NotApplied(Uuid),
 }
 
 impl From<Error> for KillError {
@@ -3181,6 +3191,18 @@ impl axum::response::IntoResponse for KillError {
                     ))
                     .to_string(),
                     code: Some(EXECUTION_TERMINATED_CODE.to_string()),
+                }),
+            )
+                .into_response(),
+            KillError::NotApplied(id) => (
+                StatusCode::CONFLICT,
+                Json(egret_core::http::ErrorBody {
+                    error: Error::Conflict(format!(
+                        "execution {id}: the kill did not apply: an afterExecution block is \
+                         being prepared or finished; retry"
+                    ))
+                    .to_string(),
+                    code: Some(KILL_NOT_APPLIED_CODE.to_string()),
                 }),
             )
                 .into_response(),
@@ -3247,6 +3269,7 @@ async fn kill_execution(
         crate::worker::KillOutcome::Terminated(s) => {
             return Err(KillError::Terminated(id, s.wire().to_string()));
         }
+        crate::worker::KillOutcome::NotApplied(_) => return Err(KillError::NotApplied(id)),
     };
     let mut audited = serde_json::json!({
         "from_state": before.execution.state,

@@ -592,3 +592,274 @@ async fn a_phase_kill_cascades_into_the_phases_children_only(pool: sqlx::PgPool)
     assert_eq!(exec_row(&pool, bgchild).await.0, "SUCCESS");
     assert_eq!(exec_row(&pool, ex).await, ended);
 }
+
+// ── Fix round 1 (B3 review) ─────────────────────────────────────────────────
+
+/// **A phase kill that cannot apply now is a retryable 409, not an accepted
+/// kill** (fix round 1, I1): the only live run of the phase is a root
+/// `WorkingDirectory` block whose prepare claim is out, which must stay
+/// `RUNNING` for its claim. The route answers 409 `kill_not_applied`,
+/// distinct from `execution_terminated`, writes nothing and audits nothing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_phase_kill_of_a_preparing_block_is_a_retryable_409(pool: sqlx::PgPool) {
+    let (_db, ws, user, app) = setup(&pool).await;
+    let ex = start(
+        &pool,
+        ws,
+        "id: wdafter\nnamespace: t\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    \
+         message: hi\nafterExecution:\n  - id: wd\n    \
+         type: io.kestra.plugin.core.flow.WorkingDirectory\n    tasks:\n      - id: w\n        \
+         type: io.kestra.plugin.core.log.Log\n        message: in\n",
+    )
+    .await;
+    finish(&pool, "a").await;
+    let block: (String, Option<String>) = sqlx::query_as(
+        "SELECT state, working_dir FROM workflow.task_runs \
+          WHERE execution_id = $1 AND task_id = 'wd'",
+    )
+    .bind(ex)
+    .fetch_one(&pool)
+    .await
+    .expect("the block");
+    assert_eq!(
+        (block.0.as_str(), block.1.as_deref()),
+        ("RUNNING", Some("PREPARING")),
+        "the fixture: the block waits on its prepare claim"
+    );
+    let row = exec_row(&pool, ex).await;
+    common::audit_mutations(&app);
+
+    let res = kill(&app, ws, ex, user).await;
+    assert_eq!(res.status(), 409);
+    let body = common::json(res).await;
+    assert_eq!(body["code"], "kill_not_applied", "{body}");
+    assert!(
+        body["error"].as_str().is_some_and(|e| e.contains("retry")),
+        "{body}"
+    );
+    assert_eq!(exec_row(&pool, ex).await, row);
+    let after: (String, Option<String>) = sqlx::query_as(
+        "SELECT state, working_dir FROM workflow.task_runs \
+          WHERE execution_id = $1 AND task_id = 'wd'",
+    )
+    .bind(ex)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(after, block, "the refusal wrote the block");
+    assert!(
+        common::audit_mutations(&app).is_empty(),
+        "a refusal audits nothing"
+    );
+}
+
+/// **An ancestor's kill reaches a terminal child's running after-task**
+/// (fix round 1, I2; a recorded divergence from Kestra, whose cascade skips a
+/// terminal child): the child is `SUCCESS` with its after-run live, so its
+/// parent's `Subflow` run still waits (D10). Killing the parent kills the
+/// child's after-run, and the child's state, history and `ended_at` stay
+/// byte-identical.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_parent_kill_stops_a_terminal_childs_running_after_task(pool: sqlx::PgPool) {
+    let (db, ws, user, app) = setup(&pool).await;
+    file_flow(
+        &db,
+        ws,
+        user,
+        "id: child\nnamespace: t\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    \
+         message: hi\nafterExecution:\n  - id: nap\n    type: io.kestra.plugin.core.flow.Sleep\n    \
+         duration: PT1H\n",
+    )
+    .await;
+    let parent = start(
+        &pool,
+        ws,
+        "id: parent\nnamespace: t\ntasks:\n  - id: sub\n    type: io.kestra.plugin.core.flow.Subflow\n    \
+         namespace: t\n    flowId: child\n",
+    )
+    .await;
+    let child: Uuid =
+        sqlx::query_scalar("SELECT id FROM workflow.executions WHERE trigger_execution_id = $1")
+            .bind(parent)
+            .fetch_one(&pool)
+            .await
+            .expect("the subflow child");
+    finish(&pool, "a").await;
+    let ended = exec_row(&pool, child).await;
+    assert_eq!(ended.0, "SUCCESS");
+    assert_eq!(
+        run_state(&pool, child, "nap").await.as_deref(),
+        Some("RUNNING")
+    );
+
+    assert_eq!(kill(&app, ws, parent, user).await.status(), 202);
+    assert_eq!(
+        run_state(&pool, child, "nap").await.as_deref(),
+        Some("KILLING")
+    );
+    assert_eq!(exec_row(&pool, child).await, ended);
+    assert_eq!(
+        run_state(&pool, parent, "sub").await.as_deref(),
+        Some("KILLED")
+    );
+
+    one_tick(&pool).await;
+    assert_eq!(
+        run_state(&pool, child, "nap").await.as_deref(),
+        Some("KILLED")
+    );
+    assert_eq!(exec_row(&pool, child).await, ended);
+    assert_eq!(exec_row(&pool, parent).await.0, "KILLED");
+}
+
+/// **An ancestor's kill leaves a terminal child with no live phase alone**
+/// (fix round 1, I2): the child ended `SUCCESS` through an `Exit` while its
+/// `Parallel` sibling `long` still runs -- a live run that is not of an
+/// `afterExecution:`. Killing the parent (kept live by its own `p`) does not
+/// touch the child: `long` keeps running and the child's row is unchanged.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_parent_kill_leaves_a_terminal_child_without_a_live_phase_alone(pool: sqlx::PgPool) {
+    let (db, ws, user, app) = setup(&pool).await;
+    file_flow(
+        &db,
+        ws,
+        user,
+        "id: child\nnamespace: t\ntasks:\n  - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    \
+         tasks:\n      - id: exit\n        type: io.kestra.plugin.core.execution.Exit\n        \
+         state: SUCCESS\n      - id: long\n        type: io.kestra.plugin.core.log.Log\n        \
+         message: hi\n",
+    )
+    .await;
+    let parent = start(
+        &pool,
+        ws,
+        "id: parent\nnamespace: t\ntasks:\n  - id: ppar\n    type: io.kestra.plugin.core.flow.Parallel\n    \
+         tasks:\n      - id: sub\n        type: io.kestra.plugin.core.flow.Subflow\n        \
+         namespace: t\n        flowId: child\n      - id: p\n        \
+         type: io.kestra.plugin.core.log.Log\n        message: hi\n",
+    )
+    .await;
+    let child: Uuid =
+        sqlx::query_scalar("SELECT id FROM workflow.executions WHERE trigger_execution_id = $1")
+            .bind(parent)
+            .fetch_one(&pool)
+            .await
+            .expect("the subflow child");
+    let ended = exec_row(&pool, child).await;
+    assert_eq!(ended.0, "SUCCESS", "the fixture: the Exit ended the child");
+    assert_eq!(
+        run_state(&pool, child, "long").await.as_deref(),
+        Some("RUNNING"),
+        "the fixture: a live sibling of the Exit"
+    );
+    assert_eq!(exec_row(&pool, parent).await.0, "RUNNING");
+
+    assert_eq!(kill(&app, ws, parent, user).await.status(), 202);
+    assert_eq!(
+        run_state(&pool, child, "long").await.as_deref(),
+        Some("RUNNING")
+    );
+    assert_eq!(exec_row(&pool, child).await, ended);
+}
+
+/// **Pin: a phase `Subflow` with `transmitFailed: true` whose child was
+/// killed by someone else stops the rest of the phase** (fix round 1, minor
+/// 2). The child's `KILLED` reaches the `Subflow` run as `KILLED`
+/// (`guess_state`), which reads as a killed phase (`phase_killed`): `end` is
+/// never created, and the parent's row is unchanged.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_phase_subflow_whose_child_is_killed_elsewhere_stops_the_phase(pool: sqlx::PgPool) {
+    let (db, ws, user, app) = setup(&pool).await;
+    file_flow(
+        &db,
+        ws,
+        user,
+        "id: child\nnamespace: t\ntasks:\n  - id: c\n    type: io.kestra.plugin.core.log.Log\n    \
+         message: hi\n",
+    )
+    .await;
+    let parent = start(
+        &pool,
+        ws,
+        "id: parent\nnamespace: t\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    \
+         message: hi\nafterExecution:\n  - id: sub\n    type: io.kestra.plugin.core.flow.Subflow\n    \
+         namespace: t\n    flowId: child\n    transmitFailed: true\n  - id: end\n    \
+         type: io.kestra.plugin.core.log.Log\n    message: after\n",
+    )
+    .await;
+    finish(&pool, "a").await;
+    let ended = exec_row(&pool, parent).await;
+    assert_eq!(ended.0, "SUCCESS");
+    let child: Uuid =
+        sqlx::query_scalar("SELECT id FROM workflow.executions WHERE trigger_execution_id = $1")
+            .bind(parent)
+            .fetch_one(&pool)
+            .await
+            .expect("the subflow child");
+
+    assert_eq!(kill(&app, ws, child, user).await.status(), 202);
+    one_tick(&pool).await;
+    assert_eq!(exec_row(&pool, child).await.0, "KILLED");
+    assert_eq!(
+        run_state(&pool, parent, "sub").await.as_deref(),
+        Some("KILLED")
+    );
+    let reg = one_tick(&pool).await;
+    assert!(reg.ran.lock().unwrap().is_empty(), "{:?}", reg.ran);
+    assert_eq!(run_state(&pool, parent, "end").await, None);
+    assert_eq!(exec_row(&pool, parent).await, ended);
+}
+
+/// **A phase kill is scoped and needs `workflow:manage`** (fix round 1, minor
+/// 5), now that the route's terminal pre-check is gone: another workspace's
+/// terminal execution with a live after-run is a 404, `workflow:read` alone a
+/// 403, and neither writes anything.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_phase_kill_is_scoped_and_needs_manage(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage", "workflow:read"]).await;
+    let (theirs, _other) = common::seed_workspace(&db).await;
+    let (_, reader) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, reader, &["workflow:read"]).await;
+    let app = common::app(&db).await;
+
+    let foreign = start(&pool, theirs, &one_after("foreign")).await;
+    let mine = start(&pool, ws, &one_after("mine")).await;
+    let claimed = egret_workflow::worker::claim(&pool, 10).await.unwrap();
+    for c in &claimed {
+        egret_workflow::worker::commit_outcome(
+            &pool,
+            c,
+            &egret_workflow::worker::Outcome::success(),
+        )
+        .await
+        .unwrap();
+    }
+    for ex in [foreign, mine] {
+        assert_eq!(exec_row(&pool, ex).await.0, "SUCCESS");
+        assert_eq!(
+            run_state(&pool, ex, "end").await.as_deref(),
+            Some("RUNNING")
+        );
+    }
+    let rows = (exec_row(&pool, foreign).await, exec_row(&pool, mine).await);
+
+    assert_eq!(kill(&app, ws, foreign, user).await.status(), 404);
+    assert_eq!(kill(&app, ws, mine, reader).await.status(), 403);
+    assert_eq!(
+        run_state(&pool, foreign, "end").await.as_deref(),
+        Some("RUNNING")
+    );
+    assert_eq!(
+        run_state(&pool, mine, "end").await.as_deref(),
+        Some("RUNNING")
+    );
+    assert_eq!(
+        (exec_row(&pool, foreign).await, exec_row(&pool, mine).await),
+        rows
+    );
+    // Control: the manager's own kill is accepted.
+    assert_eq!(kill(&app, ws, mine, user).await.status(), 202);
+}

@@ -144,6 +144,15 @@ pub enum KillOutcome {
     /// no run of the phase is live once the kill has committed; otherwise a
     /// running task is still to be stopped by a worker.
     AfterExecution { state: RunState, stopped: bool },
+    /// The execution had ended, in this state, and its `afterExecution:` was
+    /// still running, but the kill could not be applied **now** (B3 fix
+    /// round 1, I1): the only live run of the phase is a `WorkingDirectory`
+    /// block whose prepare or finish claim is out, which must stay `RUNNING`
+    /// for its claim to commit (`executor::kill::advance_killing`'s rule), and
+    /// nothing of the phase is being killed already. Nothing is written; the
+    /// caller may retry once the claim has landed. Without this refusal the
+    /// kill would answer as accepted and the phase would run on.
+    NotApplied(RunState),
 }
 
 /// How many times a kill that Postgres chose as a deadlock's victim is run
@@ -217,6 +226,9 @@ async fn kill_in(
                 // phase live, the refusal is as before.
                 if !crate::executor::after_execution_live(&ctx.plan, &state) {
                     return Ok((KillOutcome::Terminated(last), false));
+                }
+                if !phase_kill_applies(&ctx.plan, &state) {
+                    return Ok((KillOutcome::NotApplied(last), false));
                 }
                 let runs = (0..state.runs.len())
                     .filter(|&ix| crate::executor::after_execution::in_phase(&ctx.plan, &state, ix))
@@ -384,6 +396,18 @@ async fn descendants(
             let (ctx, state, now) = match claim::load(conn, id, stack()).await {
                 Ok(loaded) => loaded,
                 Err(e) if claim::row_content_fault(&e) => {
+                    // A TERMINAL descendant is here only for a live phase
+                    // (I2), and without a plan nothing can tell its phase
+                    // from an `Exit` sibling: it is left, as before I2.
+                    let st: String =
+                        sqlx::query_scalar("SELECT state FROM workflow.executions WHERE id = $1")
+                            .bind(id)
+                            .fetch_one(&mut *conn)
+                            .await
+                            .map_err(db_err)?;
+                    if from_wire(&st).is_some_and(|s| s.is_terminal()) {
+                        continue;
+                    }
                     let why = force_close::reason(&e);
                     let closed = force_close::close(conn, id, &why, None, stack().caller()).await?;
                     tracing::warn!(
@@ -399,12 +423,26 @@ async fn descendants(
                 }
                 Err(e) => return Err(e),
             };
-            // It ended between the read and the lock.
-            if state.history.last().is_some_and(|s| s.is_terminal()) {
-                continue;
-            }
-            let (before, state) =
-                kill_loaded(conn, &ctx, state, crate::executor::kill::kill_leaves).await?;
+            // **A terminal descendant whose `afterExecution:` is still
+            // running has its phase killed** (B3 fix round 1, I2, decided by
+            // the controller 2026-10-27 under the user's Q3 answer; a
+            // divergence from Kestra, whose cascade skips a terminal child,
+            // `ExS:998-1000`): its state, history and `ended_at` are not
+            // written. Any other terminal descendant -- one that ended
+            // between the read and the lock, or whose only live run is an
+            // `Exit` sibling, or whose phase cannot take the kill now (I1) --
+            // is left.
+            let kill = if state.history.last().is_some_and(|s| s.is_terminal()) {
+                if !crate::executor::after_execution_live(&ctx.plan, &state)
+                    || !phase_kill_applies(&ctx.plan, &state)
+                {
+                    continue;
+                }
+                crate::executor::kill::kill_phase
+            } else {
+                crate::executor::kill::kill_leaves
+            };
+            let (before, state) = kill_loaded(conn, &ctx, state, kill).await?;
             jobs.push(Job::Settle(Box::new(Frame::loaded(
                 ctx, before, state, now,
             ))));
@@ -423,8 +461,13 @@ async fn descendants(
 /// which is part of the tree being killed; the root's own replay is not
 /// (module doc, "Which executions are children").
 ///
+/// **And a terminal descendant that still has a live run** (B3 fix round 1,
+/// I2): its `afterExecution:` may be running, which the cascade kills.
+/// Whether the live run is of the phase needs the plan, so the caller
+/// decides (`descendants`).
+///
 /// `$2` (a phase kill, Q3): when not NULL, a child of the root is followed
-/// only when its link names one of these runs of the root.
+/// only when the link that joins it to the root names one of these runs.
 const DESCENDANTS: &str = "WITH RECURSIVE tree (id, depth) AS ( \
        SELECT $1::uuid, 0 \
      UNION ALL \
@@ -435,11 +478,26 @@ const DESCENDANTS: &str = "WITH RECURSIVE tree (id, depth) AS ( \
            OR (e.trigger_execution_id = t.id AND e.trigger_run_ix IS NOT NULL) \
            OR (t.depth > 0 AND e.parent_execution_id = t.id AND e.parent_run_ix IS NULL) \
         WHERE t.depth > 0 OR $2::int[] IS NULL \
-           OR e.parent_run_ix = ANY($2) OR e.trigger_run_ix = ANY($2) \
+           OR (e.parent_execution_id = t.id AND e.parent_run_ix = ANY($2)) \
+           OR (e.trigger_execution_id = t.id AND e.trigger_run_ix = ANY($2)) \
      ) \
      SELECT t.id FROM tree t JOIN workflow.executions e ON e.id = t.id \
-      WHERE t.depth > 0 AND NOT workflow.state_is_terminal(e.state) \
+      WHERE t.depth > 0 \
+        AND (NOT workflow.state_is_terminal(e.state) \
+             OR EXISTS (SELECT 1 FROM workflow.task_runs r \
+                         WHERE r.execution_id = e.id \
+                           AND NOT workflow.state_is_terminal(r.state))) \
       ORDER BY t.depth, t.id";
+
+/// **Whether a phase kill of `state` does anything** (fix round 1, I1): it
+/// writes a command, or the phase is already being killed (a second kill of a
+/// phase whose leaf is still `KILLING` is accepted again, as a second kill of
+/// a `KILLING` execution is). Neither holds only when every live run of the
+/// phase is a `WorkingDirectory` block waiting on its claim.
+fn phase_kill_applies(plan: &crate::executor::Plan, state: &ExecutionState) -> bool {
+    crate::executor::phase_killed(plan, state)
+        || !crate::executor::kill::kill_phase(plan, state).is_empty()
+}
 
 /// The loaded `state` of `ctx`'s execution, and the same with `kill`'s
 /// commands applied -- `executor::kill::kill_leaves`, or for a phase kill
