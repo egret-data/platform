@@ -88,13 +88,15 @@ export default function ExecutionGanttTab({ execution, slots }: { execution: Exe
   const [params, setParams] = useSearchParams();
   const view = useRef<GanttViewHandle>(null);
   const reducedMotion = usePrefersReducedMotion();
-  const live = !isTerminalState(execution.state);
+  // The clock runs while a run could still be open: not terminal, or an afterExecution run live.
+  // `buildGantt` decides at the clock's time whether it still is (the follow window, `AFTER_RUN_FOLLOW_MS`).
+  const clockOn = !isTerminalState(execution.state) || execution.runs.some((r) => !isTerminalState(r.state));
   const minMs = reducedMotion
     ? LIVE_REDRAW_MS.reducedMotion
     : execution.runs.length < LIVE_REDRAW_MS.threshold
       ? LIVE_REDRAW_MS.few
       : LIVE_REDRAW_MS.many;
-  const now = useGanttClock(live, minMs);
+  const now = useGanttClock(clockOn, minMs);
   const model = useMemo(() => buildGantt(execution, now), [execution, now]);
   const raw = params.get("run");
   const selected = parseRun(raw);

@@ -1,6 +1,6 @@
 import type { ExecutionDto } from "@/api/generated/model";
 import type { Enablement } from "@/components/workflows/draftState";
-import { isTerminalState } from "@/components/workflows/executionState";
+import { executionLive, isTerminalState, type LiveExecution } from "@/components/workflows/executionState";
 
 /**
  * WHEN RESUME, REPLAY AND KILL ARE OFFERED (W7b spec §5.2; Kill: workflow kill
@@ -66,27 +66,42 @@ export function canReplay(execution: Pick<ExecutionDto, "flow_id">): Enablement 
 }
 
 /**
- * Kill (workflow kill spec §7, D6): shown while the execution has not ended.
- * `KILLING` is live, not terminal, so the button stays, disabled, until the
- * worker has stopped the running task and the execution is `KILLED`.
+ * Kill (workflow kill spec §7, D6): shown while the execution has not ended,
+ * and while an ended one still has a live `afterExecution:` run (end hooks
+ * D15, Q3), within `AFTER_RUN_FOLLOW_MS`. `KILLING` is live, not terminal, so
+ * the button stays, disabled, until the worker has stopped the running task
+ * and the execution is `KILLED`.
  */
-export function showsKill(execution: Pick<ExecutionDto, "state">): boolean {
-  return !isTerminalState(execution.state);
+export function showsKill(execution: LiveExecution, now: number): boolean {
+  return executionLive(execution, now);
 }
 
 /** Why Kill is disabled while `KILLING`. */
 export const KILL_IN_PROGRESS_REASON = "The kill was sent; a worker is stopping the running task";
 
-/** Kill, for an execution that `showsKill`: every live state, `PAUSED` included, except one already being killed. */
-export function canKill(execution: Pick<ExecutionDto, "state">): Enablement {
-  return execution.state === "KILLING" ? { ok: false, reason: KILL_IN_PROGRESS_REASON } : { ok: true };
+/**
+ * Kill, for an execution that `showsKill`: every live state, `PAUSED`
+ * included, except one already being killed. A kill of an ended execution's
+ * `afterExecution:` run leaves the execution's own state alone, so that one is
+ * read from the runs.
+ */
+export function canKill(execution: Pick<LiveExecution, "state" | "runs">): Enablement {
+  const killing = execution.state === "KILLING" || (isTerminalState(execution.state) && execution.runs.some((r) => r.state === "KILLING"));
+  return killing ? { ok: false, reason: KILL_IN_PROGRESS_REASON } : { ok: true };
 }
+
+/** What the page says after killing the `afterExecution:` run of an ended execution. */
+export const AFTER_RUN_KILL_FEEDBACK = "Stopping the afterExecution tasks";
 
 /**
  * What the page says after a kill, from the state the route answered: `KILLED`
- * when nothing was running, `KILLING` while a worker still stops a task.
+ * when nothing was running, `KILLING` while a worker still stops a task. The
+ * route answers a phase kill (`afterRunKill`: the execution had already ended)
+ * with the execution's own, unchanged state, so that state says nothing about
+ * the kill.
  */
-export function killFeedback(answeredState: string): string {
+export function killFeedback(answeredState: string, afterRunKill = false): string {
+  if (afterRunKill) return AFTER_RUN_KILL_FEEDBACK;
   return answeredState === "KILLED" ? "Killed the execution" : "Killing the execution: the running task is being stopped";
 }
 

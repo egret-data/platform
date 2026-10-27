@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { workflowGetExecutionResponse } from "@/api/generated/workflow/workflow";
-import { isTerminalState } from "@/components/workflows/executionState";
+import { executionLive } from "@/components/workflows/executionState";
 import { fullTimestamp } from "@/lib/relativeTime";
 
 /**
@@ -39,14 +39,18 @@ export function nextPollMs<T>(state: PollState<T>, now: number, finished: (data:
   return Math.min(Math.max(POLL_MS, now - state.dataUpdatedAt), POLL_MAX_MS);
 }
 
-/** An execution read is final once the execution is terminal. */
-export function executionFinished(data: workflowGetExecutionResponse): boolean {
-  return data.status === 200 && isTerminalState(data.data.state);
+/**
+ * An execution read is final once the execution is terminal and no run is
+ * live (an `afterExecution:` run), or the execution has been terminal past
+ * `AFTER_RUN_FOLLOW_MS`.
+ */
+export function executionFinished(data: workflowGetExecutionResponse, now: number = Date.now()): boolean {
+  return data.status === 200 && !executionLive(data.data, now);
 }
 
 /** `nextPollMs` for `GET …/executions/{id}`. */
 export function nextExecutionPollMs(state: PollState<workflowGetExecutionResponse>, now: number): number | false {
-  return nextPollMs(state, now, executionFinished);
+  return nextPollMs(state, now, (d) => executionFinished(d, now));
 }
 
 /**

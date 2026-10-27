@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { AFTER_RUN_FOLLOW_MS } from "@/components/workflows/executionState";
 import { executionFinished, nextExecutionPollMs, nextPollMs } from "@/components/workflows/executions/polling";
 
-function answer(state: string) {
-  return { status: 200, data: { state }, headers: new Headers() } as never;
+function answer(state: string, runs: string[] = [], ended_at: string | null = "2026-10-10T10:00:00Z") {
+  return { status: 200, data: { state, ended_at, updated_at: ended_at ?? "2026-10-10T10:00:00Z", runs: runs.map((r) => ({ state: r })) }, headers: new Headers() } as never;
 }
+const ENDED = Date.parse("2026-10-10T10:00:00Z");
 
 describe("nextPollMs", () => {
   // W7a's case (ExecutionMinimal.test.tsx), moved with the function.
@@ -34,5 +36,19 @@ describe("nextPollMs", () => {
     expect(executionFinished(answer("SUCCESS"))).toBe(true);
     expect(executionFinished(answer("PAUSED"))).toBe(false);
     expect(executionFinished({ status: 404, data: { error: "x" }, headers: new Headers() } as never)).toBe(false);
+  });
+
+  it("is not final while a terminal execution still has a live run (an afterExecution run), and is once every run is terminal", () => {
+    const now = ENDED + 60_000;
+    expect(executionFinished(answer("FAILED", ["RUNNING"]), now)).toBe(false);
+    expect(executionFinished(answer("FAILED", ["SUCCESS", "KILLING"]), now)).toBe(false);
+    expect(executionFinished(answer("FAILED", ["SUCCESS"]), now)).toBe(true);
+    expect(executionFinished(answer("RUNNING", ["SUCCESS"]), now)).toBe(false);
+  });
+
+  it("keeps polling a terminal execution with a live run, then gives up once it has been terminal longer than the window", () => {
+    const state = (now: number) => nextExecutionPollMs({ data: answer("SUCCESS", ["RUNNING"]), status: "success", dataUpdatedAt: now }, now);
+    expect(state(ENDED + AFTER_RUN_FOLLOW_MS - 1)).toBe(2000);
+    expect(state(ENDED + AFTER_RUN_FOLLOW_MS)).toBe(false);
   });
 });

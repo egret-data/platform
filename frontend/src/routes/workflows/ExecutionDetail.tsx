@@ -345,6 +345,8 @@ type Pending = "resume" | "replay" | "kill" | null;
 
 /** The kill route's 409 code: the execution ended before the kill reached it (workflow kill spec D3). */
 const EXECUTION_TERMINATED = "execution_terminated";
+/** The kill route's other 409: it was not applied to the run (end hooks B3); asking again can work. */
+const KILL_NOT_APPLIED = "kill_not_applied";
 
 /**
  * Resume, Replay (spec §5.2) and Kill (workflow kill spec §7), each confirmed
@@ -367,7 +369,8 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
   const resumeState = canResume(execution);
   const replayShown = showsReplay(execution);
   const replayState = canReplay(execution);
-  const killShown = showsKill(execution);
+  const now = useNow();
+  const killShown = showsKill(execution, now);
   const killState = canKill(execution);
 
   const runResume = async () => {
@@ -395,13 +398,15 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
       void queryClient.invalidateQueries({ queryKey: workflowsKeys.execution(execution.id) });
       void queryClient.invalidateQueries({ queryKey: workflowsKeys.executions(ws) });
     };
+    // Kill of an execution that has ended: it can only reach its afterExecution run.
+    const afterRunKill = isTerminalState(execution.state);
     try {
       const res = await kill.mutateAsync({ workspace: ws, id: execution.id, params: { cascade } });
       if (res.status !== 202) throw new Error("The execution could not be killed. Try again.");
       refresh();
       // The page stays, so a toast confirms it (FE-ACTION-2), in terms of the state the route
       // answered. `KILLING` is not terminal: the page keeps polling until it is `KILLED`.
-      toast.success(killFeedback(res.data.state));
+      toast.success(killFeedback(res.data.state, afterRunKill));
     } catch (e) {
       if (e instanceof ApiError && e.code === EXECUTION_TERMINATED) {
         // It ended first: read it again so the page shows how, and say so in the dialog.
@@ -410,6 +415,9 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
         throw new Error("The execution has already ended, so there is nothing to kill. The page now shows its final state.", {
           cause: e,
         });
+      }
+      if (e instanceof ApiError && e.code === KILL_NOT_APPLIED) {
+        throw new Error("The kill did not take effect. Try again.", { cause: e });
       }
       throw e;
     }

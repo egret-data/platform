@@ -282,6 +282,18 @@ describe("buildGantt: the estimated fallback (spec §6.3)", () => {
     expect(g.axis.end).toBe(T("2026-10-11T10:01:40.000001Z"));
   });
 
+  it("keeps a live afterExecution run of an ended execution open and growing with the clock, within the follow window", () => {
+    const after = run(0, "after", { state: "RUNNING", history: ["CREATED", "RUNNING"], ended_seq: null, started_at: "2026-10-11T10:01:10Z" });
+    const ended = { state: "SUCCESS", ended_at: "2026-10-11T10:01:05.000001Z" };
+    const soon = T("2026-10-11T10:05:00Z");
+    const g = buildGantt(execution([after], ended), soon);
+    expect(rowOf(g, 0).bar).toEqual({ start: T("2026-10-11T10:01:10Z"), end: soon, open: true });
+    expect(g.live).toBe(true);
+    expect(g.axis.end).toBe(soon);
+    const later = buildGantt(execution([after], ended), soon + 60_000);
+    expect(rowOf(later, 0).bar?.end).toBe(soon + 60_000);
+  });
+
   it("is not estimated when both times are recorded, and the chart says so", () => {
     const g = buildGantt(
       execution([run(0, "a", { started_at: "2026-10-11T10:00:02Z", ended_at: "2026-10-11T10:00:03Z" })]),

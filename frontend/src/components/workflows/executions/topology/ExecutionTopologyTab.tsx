@@ -6,7 +6,7 @@ import { useWorkflowGetExecutionGraph } from "@/api/generated/workflow/workflow"
 import type { ExecutionDto, FlowGraph, NodeState } from "@/api/generated/model";
 import { Button } from "@/components/ui/button";
 import { IconButton } from "@/components/ui/icon-button";
-import { isTerminalState } from "@/components/workflows/executionState";
+import { executionLive } from "@/components/workflows/executionState";
 import { buildGantt } from "@/components/workflows/executions/gantt/ganttModel";
 import { GanttRunPanel, type GanttRunSlots } from "@/components/workflows/executions/gantt/GanttView";
 import { nextPollMs } from "@/components/workflows/executions/polling";
@@ -64,7 +64,8 @@ export default function ExecutionTopologyTab({
   const expandedRaw = params.getAll("expand");
   const expandKey = expandedRaw.join("\n");
   const expanded = useMemo(() => (expandKey ? expandKey.split("\n") : []), [expandKey]);
-  const terminal = isTerminalState(execution.state);
+  // Terminal and no live afterExecution run (end hooks D15): nothing more will change.
+  const terminal = !executionLive(execution, now);
   const container = useRef<HTMLDivElement>(null);
 
   const query = useWorkflowGetExecutionGraph(
