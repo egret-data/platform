@@ -32,6 +32,11 @@ pub struct Plan {
     /// The flow's `finally:` (package #2a). Appended after every list the
     /// plan held before #2 (D3).
     pub finally: Vec<TaskIx>,
+    /// The flow's `afterExecution:` (package #2b). Flattened LAST, after the
+    /// flow's `finally:` and its drain, and then drained in turn (D3), so no
+    /// index the plan held before #2b moves. Driven only once the execution
+    /// is terminal, by [`after_execution::drive`](super::after_execution).
+    pub after_execution: Vec<TaskIx>,
     /// The flow's own `retry:`, `Flow.java`'s `AbstractRetry retry`.
     ///
     /// It is the **last** of Kestra's three sources, consulted only for a run
@@ -1214,11 +1219,16 @@ pub(crate) fn flatten_flow(flow: &crate::models::Flow) -> Result<Plan, PlanError
     drain_deferred(&mut tasks, &mut deferred)?;
     let finally = flatten_list(&mut tasks, &flow.finally_, 1, &mut deferred)?;
     drain_deferred(&mut tasks, &mut deferred)?;
+    // #2b: the flow's `afterExecution:` comes after everything above, so the
+    // #2a layout (and the A1 fixture's pre-#2 prefix) is unchanged.
+    let after_execution = flatten_list(&mut tasks, &flow.after_execution, 1, &mut deferred)?;
+    drain_deferred(&mut tasks, &mut deferred)?;
     Ok(Plan {
         tasks,
         roots,
         errors,
         finally,
+        after_execution,
         retry: super::retry::policy_of(flow.retry.as_ref()),
     })
 }

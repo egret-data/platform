@@ -23,6 +23,8 @@
 # is registered and planned `TaskKind::Exit` (`executor::exit`). 104 -> 100.
 # Nothing else moved and nothing was added.
 #
+# end hooks #2b Task B1 (2026-10-27): banked `valids/after-execution-error`, `after-execution-finally`, `after-execution-flowable`, `flow-concurrency-queue-after-execution`, `flow-concurrency-queue-killed-after-execution`, `restart-with-after-execution`, `sleep-long`, `sleep-long-after-execution-flowable` -- `advance` runs `afterExecution:` once the execution is terminal (spec D8). 60 -> 52.
+#
 # Group C1 Task 2 (2026-10-18): banked `valids/flow-with-array-outputs`,
 # `valids/output-values`, `valids/replay`, `valids/task-runif`, `valids/waitfor`,
 # `valids/waitfor-max-iterations`, `valids/waitfor-multiple-tasks`,
@@ -574,21 +576,12 @@ invalids/dag-invalid-subtask
 invalids/inputs-bad-validator-syntax
 invalids/inputs-with-multiple-constraint-violations
 # `invalids/invalid-property` banked 2026-10-26 (no-silent-drops Task 8b): Kestra refuses it (`Unrecognized field "invalid"`) and egret refuses it at save (`spec::validate_source`, `unknown_property`); the oracle counts a save-time refusal of an id in a `Seam::Save` refusal group.
-# group C1 Task 2 (2026-10-18): `OutputValues` runs now; held by `afterExecution:`, which egret does not run (its `end` run is missing; measured).
+# end hooks #2b Task B1 (2026-10-27): `afterExecution:` runs now; held by flow `outputs:`, which egret never evaluates: `end` renders `{{ execution.outputs.final }}` (worker/render.rs; package #6, plan Task B7).
 valids/after-execution
-# group C1 Task 2 (2026-10-18): `OutputValues` runs now; held by `afterExecution:`, which egret does not run (its `end` run is missing; measured).
-valids/after-execution-error
-# group C1 Task 2 (2026-10-18): `OutputValues` runs now; held by `afterExecution:`, which egret does not run (its `end` run is missing; measured).
-valids/after-execution-finally
-valids/after-execution-flowable
 valids/all-flowable
 valids/dag
 valids/disable-flowable
 valids/errors
-# group C1 Task 2 (2026-10-18): `OutputValues` runs now; held by `afterExecution:`, which egret does not run (its `afterExecution` run is missing; measured).
-valids/flow-concurrency-queue-after-execution
-# group C1 Task 2 (2026-10-18): `OutputValues` runs now; held by `afterExecution:`, which egret does not run (its `afterExecution` run is missing; measured).
-valids/flow-concurrency-queue-killed-after-execution
 valids/flow-concurrency-sla-fail-child
 valids/flow-concurrency-sla-fail-parent
 valids/flow-with-outputs-failed
@@ -617,7 +610,6 @@ valids/restart-child
 valids/restart-loop
 valids/restart-parent
 valids/restart-parent-loop
-valids/restart-with-after-execution
 valids/retry-failed-flow-duration
 # Egret retries without scheduler latency; Kestra adds about 0.6 s per retry, so its
 # fourth attempt falls outside maxDuration and egret's does not. Same class as
@@ -633,9 +625,6 @@ valids/retry-with-flowable-errors
 valids/sla-max-duration-fail
 valids/sla-parent-flow
 valids/sla-subflow
-# group C1 Task 2 (2026-10-18): `OutputValues` runs now; held by `afterExecution:`, which egret does not run (its `output` run is missing; measured).
-valids/sleep-long
-valids/sleep-long-after-execution-flowable
 valids/subflow-parent-retry
 valids/subflow-secret-output-child
 valids/subflow-secret-output-parent

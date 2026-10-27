@@ -3218,6 +3218,8 @@ owner is how a suppression list starts.
 
 > **Correction, 2026-10-27 (end hooks A7).** Two rows of the table above (a `Loop`'s own `errors:` and `finally:`, both "unclaimed", and "`models::Loop` has no `errors` field") are history. `models::Loop` carries `errors` and `finally` since end hooks A2, the flow's and every flowable's `finally:` are run by A4, and a `Loop` iteration runs the `Loop`'s own lists since A6; see the sections "End hooks A4" and "End hooks A6" below.
 
+> **Correction, 2026-10-27 (end hooks #2b Task B1).** The `afterExecution:` row above is history too: the plan flattens it (`Plan::after_execution`) and `advance` runs it once the execution is terminal; 8 of its 10 entries banked. See the section "End hooks #2b Task B1" below.
+
 **The `sla:` row is the first this table has lowered for a reason the reader
 must not read as progress-pending.** Every other lowering marks work somebody
 can still do. Here the remaining three, plus the two in `UNATTRIBUTED` held by
@@ -13628,3 +13630,47 @@ named bank, measured: `invalids/loop-switch-failed`, `valids/finally-loop` and
 - Baselined: run terminals 254 -> 210, sub-executions 39 -> 31, executions
   99 -> 88, `finally:` construct row 5 -> 3, `Loop` row 17 -> 14, handler
   ceiling 271 -> 273 (`handler-surface.txt` regenerated).
+
+## End hooks #2b Task B1 (2026-10-27): `afterExecution:` runs once the execution is terminal, eight entries bank
+
+`executor::advance` gained the post-terminal phase (spec D8, Kestra's
+`ExecutorService.handleAfterExecution`): once the execution's last state is
+terminal, `executor::after_execution::drive` walks the flow's
+`afterExecution:` one task at a time, as runs with no parent, and never emits
+a command that writes the execution (`SetExecutionState`, `ScheduleRetry`,
+`PauseRun`). The execution's history and `ended_at` do not move. `KILLING`
+still goes to `kill::advance_killing`, so the phase starts once the execution
+is `KILLED`. The plan flattens `afterExecution:` last (`Plan::after_execution`,
+D3), so no earlier index moves. Nothing in the phase is retried (D11:
+`retry::policy_for` answers `None` for a run under `afterExecution:`). The
+oracle's worker already drives `advance` after a terminal state, so the eight
+entries the spec expected for all of #2b bank here. Ratchet 301/60/60/0 ->
+301/52/52/0; census unchanged (295 live, 25 validate-refused, 21 unknown type).
+
+**Banked (8):** `valids/after-execution-error`, `after-execution-finally`,
+`after-execution-flowable`, `flow-concurrency-queue-after-execution`,
+`flow-concurrency-queue-killed-after-execution`,
+`restart-with-after-execution`, `sleep-long` and
+`sleep-long-after-execution-flowable`.
+
+**Still baselined:** `valids/after-execution` (its `end` renders
+`{{ execution.outputs.final }}`, and egret never evaluates flow `outputs:`;
+#6) and `valids/pause-errors-finally-after-execution` (refused for its
+`Pause` `errors:`; #9).
+
+Figures that moved, each pinned with a dated note:
+- the bank split: (301, 241, 60) -> (301, 249, 52);
+- the field breakdown: runs 46 -> 38, order 17 -> 8, total 57 -> 49;
+- pairs: `EGRET_TOP_LEVEL_PAIRS` 852 -> 874, `EGRET_PAIRS_BEFORE_RESTRICTION`
+  1160 -> 1182; kept pairs on matching entries 586 + 197 -> 610 + 197, on
+  baselined entries 303 + 30 -> 279 + 30;
+- the timeout split: (2, 58, 60) -> (2, 50, 52);
+- baselined: run terminals 210 -> 187, executions 88 -> 80, run-history
+  tokens 842 -> 752, execution-history tokens 329 -> 305;
+- residual rows: `finally:` 3 -> 2, `afterExecution:` 10 -> 2;
+- concurrency declarers that match: 10 -> 12; baselined ids named `kill`:
+  one -> none;
+- the plan reconstruction: 456/109/293/106 -> 467/111/280/106 (the 13 golden
+  `afterExecution:` runs are planned now);
+- handler ceiling 273 -> 281 (`afterExecution:` is no longer a blocker;
+  `handler-surface.txt` regenerated).
