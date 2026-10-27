@@ -1955,6 +1955,7 @@ impl TableHook {
             record_moves(&mut tx, plan, copied, &kept, caller)
                 .await
                 .map_err(|e| e.to_string())?;
+            record_perm_events(&mut tx, copied, &moved_allows, caller).await?;
             tx.commit().await.map_err(|e| e.to_string())
         }
         .await;
@@ -2222,6 +2223,105 @@ async fn record_moves(
             }),
         )
         .await?;
+    }
+    Ok(())
+}
+
+/// The permission-model events of a completed move (grants-follow spec D9),
+/// on the after-commit transaction: `perm_grant:move` per allow re-pointed,
+/// `perm_grant:copy` / `perm_rule:copy` per restriction copied. A refused or
+/// undone move never reaches here, so it records none.
+async fn record_perm_events(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    copied: &Copied,
+    moved_allows: &[Vec<(egret_perm::Grant, egret_perm::Grant)>],
+    caller: Option<&CatalogCaller>,
+) -> Result<(), String> {
+    use egret_audit::governance::{action, record_change_by, resource};
+    let nothing = moved_allows.iter().all(Vec::is_empty)
+        && copied.copies.iter().all(follow::Copies::is_empty);
+    if nothing {
+        return Ok(());
+    }
+    let err = |e: &dyn std::fmt::Display| e.to_string();
+    let caller = Caller::resolve(tx, caller).await.map_err(|e| err(&e))?;
+    for (i, m) in copied.perm.moves.iter().enumerate() {
+        let trigger = if m.mv.from.column.is_some() {
+            "iceberg_column_rename"
+        } else {
+            "iceberg_rename"
+        };
+        let rename = serde_json::json!({"from": m.mv.from.label(), "to": m.mv.to.label()});
+        let summary = |before: serde_json::Value, after: serde_json::Value| {
+            serde_json::json!({
+                "before": before, "after": after, "rename": rename, "trigger": trigger,
+            })
+        };
+        for (before, after) in moved_allows.get(i).into_iter().flatten() {
+            let b = follow::grant_summary_via(tx, before).await?;
+            let a = follow::grant_summary_via(tx, after).await?;
+            record_change_by(
+                tx,
+                caller.actor(),
+                action::GRANT_MOVE,
+                resource::PERM_GRANT,
+                before.id.to_string(),
+                summary(b, a),
+            )
+            .await
+            .map_err(|e| err(&e))?;
+        }
+        let Some(copies) = copied.copies.get(i) else {
+            continue;
+        };
+        for (source, copy) in &copies.grants {
+            let (Some(src), Some(new)) = (
+                egret_perm::get_grant_via(tx, *source)
+                    .await
+                    .map_err(|e| err(&e))?,
+                egret_perm::get_grant_via(tx, *copy)
+                    .await
+                    .map_err(|e| err(&e))?,
+            ) else {
+                continue;
+            };
+            let b = follow::grant_summary_via(tx, &src).await?;
+            let a = follow::grant_summary_via(tx, &new).await?;
+            record_change_by(
+                tx,
+                caller.actor(),
+                action::GRANT_COPY,
+                resource::PERM_GRANT,
+                copy.to_string(),
+                summary(b, a),
+            )
+            .await
+            .map_err(|e| err(&e))?;
+        }
+        for (source, copy) in &copies.rules {
+            let (Some(src), Some(new)) = (
+                egret_perm::get_rule_via(tx, *source)
+                    .await
+                    .map_err(|e| err(&e))?,
+                egret_perm::get_rule_via(tx, *copy)
+                    .await
+                    .map_err(|e| err(&e))?,
+            ) else {
+                continue;
+            };
+            let b = follow::rule_summary_via(tx, &src).await?;
+            let a = follow::rule_summary_via(tx, &new).await?;
+            record_change_by(
+                tx,
+                caller.actor(),
+                action::RULE_COPY,
+                resource::PERM_RULE,
+                copy.to_string(),
+                summary(b, a),
+            )
+            .await
+            .map_err(|e| err(&e))?;
+        }
     }
     Ok(())
 }

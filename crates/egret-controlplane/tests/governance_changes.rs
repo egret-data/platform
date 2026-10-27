@@ -1067,3 +1067,89 @@ async fn classification_moves_read_with_their_catalog_client() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(actions(&body).is_empty(), "family Tag: {body}");
 }
+
+/// Grants-follow spec §5.7: an allow moved and the restrictions copied by a
+/// rename read with the catalog client that made it, to a `policy:read`
+/// reader only.
+#[tokio::test]
+async fn grant_moves_and_copies_read_with_their_catalog_client() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    let actor = json!({"kind": "catalog_client", "id": Uuid::new_v4(), "client_id": "trino-main-7f3a",
+                       "name": "trino-main", "consumer_type": "engine"});
+    let grant = |effect: &str, actions: &[&str], table: &str| {
+        json!({"id": Uuid::new_v4(), "catalog": "lake", "schema": "sales", "table": table,
+               "column": null, "effect": effect, "actions": actions,
+               "include": ["group:contractors"], "exclude": []})
+    };
+    let rule = |name: &str, table: &str| {
+        json!({"id": Uuid::new_v4(), "name": name, "kind": "mask",
+               "selector": format!("lake.sales.{table}.email"), "function": "MASK_HASH",
+               "exempt": [], "exempt_exclude": []})
+    };
+    let rename = json!({"from": "sales.orders", "to": "sales.orders_v2"});
+    let events = [
+        (
+            action::GRANT_MOVE,
+            "perm_grant",
+            json!({"before": grant("allow", &["read"], "orders"),
+                   "after": grant("allow", &["read"], "orders_v2"),
+                   "rename": rename, "trigger": "iceberg_rename", "actor": actor}),
+        ),
+        (
+            action::GRANT_COPY,
+            "perm_grant",
+            json!({"before": grant("deny", &["read", "write"], "orders"),
+                   "after": grant("deny", &["read", "write"], "orders_v2"),
+                   "rename": rename, "trigger": "iceberg_rename", "actor": actor}),
+        ),
+        (
+            action::RULE_COPY,
+            "perm_rule",
+            json!({"before": rule("pii-email", "orders"),
+                   "after": rule("pii-email (sales.orders_v2)", "orders_v2"),
+                   "rename": rename, "trigger": "iceberg_rename", "actor": actor}),
+        ),
+    ];
+    let mut conn = f.db.pool.acquire().await.unwrap();
+    for (a, rt, detail) in events {
+        sqlx::query(
+            "INSERT INTO audit.audit_log (kind, action, resource_type, resource_id, detail) \
+             VALUES ('mutation', $1, $2, $3, $4)",
+        )
+        .bind(a)
+        .bind(rt)
+        .bind(Uuid::new_v4().to_string())
+        .bind(detail)
+        .execute(&mut *conn)
+        .await
+        .expect("event");
+    }
+
+    let policy_reader = session(&f, &["policy:read"]).await;
+    let tag_reader = session(&f, &["tag:read"]).await;
+    let st = state(&f, None).await;
+    let (status, body) = changes(&st, &policy_reader, "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sentences: Vec<&str> = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["sentence"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        sentences,
+        vec![
+            "Catalog client trino-main copied mask rule pii-email from sales.orders.email to \
+             sales.orders_v2.email as pii-email (sales.orders_v2); the original stays on \
+             sales.orders.email (table renamed)",
+            "Catalog client trino-main copied deny grant (read, write) from sales.orders to \
+             sales.orders_v2; the original stays on sales.orders (table renamed)",
+            "Catalog client trino-main moved allow grant (read) from sales.orders to \
+             sales.orders_v2 (table renamed)",
+        ]
+    );
+    let (status, body) = changes(&st, &tag_reader, "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(actions(&body).is_empty(), "family Policy: {body}");
+}

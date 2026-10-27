@@ -48,6 +48,11 @@ pub mod action {
     // column's rows moved to its new name, or a dropped namespace's removed.
     pub const CATALOG_TAG_MOVE: &str = "tag:move";
     pub const CATALOG_TAG_PURGE: &str = "tag:purge";
+    // Grants follow a rename (spec 2026-10-27 §5.7, D9): an allow re-pointed
+    // to the renamed table, a restriction copied to it (the original stays).
+    pub const GRANT_MOVE: &str = "perm_grant:move";
+    pub const GRANT_COPY: &str = "perm_grant:copy";
+    pub const RULE_COPY: &str = "perm_rule:copy";
 }
 
 /// The `resource_type` each governance action is recorded under.
@@ -145,6 +150,9 @@ pub const FAMILIES: &[(&str, &str, Family)] = &[
     (action::USER_DELETE, resource::USER, Family::User),
     (action::CATALOG_TAG_MOVE, resource::CATALOG, Family::Tag),
     (action::CATALOG_TAG_PURGE, resource::CATALOG, Family::Tag),
+    (action::GRANT_MOVE, resource::PERM_GRANT, Family::Policy),
+    (action::GRANT_COPY, resource::PERM_GRANT, Family::Policy),
+    (action::RULE_COPY, resource::PERM_RULE, Family::Policy),
     ("role:assign", "grant", Family::Policy),
     ("role:unassign", "grant", Family::Policy),
     ("tag:assign", "catalog", Family::Tag),
@@ -175,6 +183,9 @@ pub const GOVERNANCE_ACTIONS: &[&str] = &[
     action::USER_DELETE,
     action::CATALOG_TAG_MOVE,
     action::CATALOG_TAG_PURGE,
+    action::GRANT_MOVE,
+    action::GRANT_COPY,
+    action::RULE_COPY,
 ];
 
 /// The family of a stored event, or `None` when it is not governance.

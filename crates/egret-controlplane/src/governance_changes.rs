@@ -311,7 +311,36 @@ fn truncated_phrase(action: &str) -> &'static str {
         action::USER_DELETE => "deleted a user",
         action::CATALOG_TAG_MOVE => "moved classifications with a renamed table",
         action::CATALOG_TAG_PURGE => "removed classifications with a dropped namespace",
+        action::GRANT_MOVE => "moved a grant with a renamed table",
+        action::GRANT_COPY => "copied a grant to a renamed table",
+        action::RULE_COPY => "copied a rule to a renamed table",
         _ => "made a change",
+    }
+}
+
+/// `schema.table[.column]` of a grant summary, the catalog left out.
+fn rename_path(g: &Value) -> String {
+    ["schema", "table", "column"]
+        .iter()
+        .map_while(|k| g.get(*k).and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// A rule summary's path selector, the catalog left out.
+fn selector_path(r: &Value) -> String {
+    let sel = s(r, "selector");
+    sel.split_once('.')
+        .map_or(sel, |(_, rest)| rest)
+        .to_string()
+}
+
+/// `table renamed` or `column renamed`, from a rename event's trigger.
+fn renamed(d: &Value) -> &'static str {
+    if s(d, "trigger") == "iceberg_column_rename" {
+        "column renamed"
+    } else {
+        "table renamed"
     }
 }
 
@@ -652,6 +681,61 @@ async fn entry(c: &mut PgConnection, row: ChangeRow) -> Result<ChangeEntry, sqlx
                     at(after)
                 ),
                 target,
+                live,
+            )
+        }
+        action::GRANT_MOVE | action::GRANT_COPY => {
+            let (before, after) = (
+                d.get("before").unwrap_or(&Value::Null),
+                d.get("after").unwrap_or(&Value::Null),
+            );
+            let live = exists(
+                c,
+                "SELECT EXISTS (SELECT 1 FROM perm.grants WHERE id::text = $1)",
+                &id,
+            )
+            .await?;
+            let what = format!(
+                "{} grant ({})",
+                s(after, "effect"),
+                strings(after, "actions").join(", ")
+            );
+            let (from, to) = (rename_path(before), rename_path(after));
+            let sentence = if row.action == action::GRANT_MOVE {
+                format!("{a} moved {what} from {from} to {to} ({})", renamed(d))
+            } else {
+                format!(
+                    "{a} copied {what} from {from} to {to}; the original stays on {from} ({})",
+                    renamed(d)
+                )
+            };
+            (sentence, uuid.map(|id| Ref::Grant { id }), live)
+        }
+        action::RULE_COPY => {
+            let (before, after) = (
+                d.get("before").unwrap_or(&Value::Null),
+                d.get("after").unwrap_or(&Value::Null),
+            );
+            let live = exists(
+                c,
+                "SELECT EXISTS (SELECT 1 FROM perm.rules WHERE id::text = $1)",
+                &id,
+            )
+            .await?;
+            let kind = match s(after, "kind") {
+                "row_filter" => "row-filter",
+                _ => "mask",
+            };
+            let (from, to) = (selector_path(before), selector_path(after));
+            (
+                format!(
+                    "{a} copied {kind} rule {} from {from} to {to} as {}; the original stays on \
+                     {from} ({})",
+                    s(before, "name"),
+                    s(after, "name"),
+                    renamed(d)
+                ),
+                uuid.map(|id| Ref::Rule { id }),
                 live,
             )
         }

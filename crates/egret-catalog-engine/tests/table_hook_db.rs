@@ -3813,3 +3813,158 @@ async fn a_classified_rename_still_moves_its_classifications() {
         ]
     );
 }
+
+// ── Grants follow a rename, Task 7: allows move after the commit; events ──
+
+impl Env {
+    /// `(table, column)` grant `id` names now.
+    async fn grant_at(&self, id: Uuid) -> (String, Option<String>) {
+        sqlx::query_as("SELECT table_name, column_name FROM perm.grants WHERE id = $1")
+            .bind(id)
+            .fetch_one(&self.db.pool)
+            .await
+            .expect("grant")
+    }
+
+    /// The grant and rule events of the warehouse's catalog, oldest first:
+    /// `(action, resource id, detail)`.
+    async fn perm_events(&self) -> Vec<(String, String, Value)> {
+        sqlx::query_as(
+            "SELECT action, resource_id, detail FROM audit.audit_log \
+              WHERE kind = 'mutation' AND action IN ('perm_grant:move', 'perm_grant:copy', \
+                    'perm_rule:copy', 'perm_grant:left', 'ranger_policy:left') \
+                AND (detail -> 'after' ->> 'catalog' = $1 OR detail ->> 'catalog' = $1 \
+                     OR starts_with(detail -> 'after' ->> 'selector', $1 || '.')) \
+              ORDER BY id",
+        )
+        .bind(&self.catalog)
+        .fetch_all(&self.db.pool)
+        .await
+        .expect("events")
+    }
+}
+
+/// G2, D2: the allows follow the renamed table in place, ids kept, after the
+/// commit; a rename that carries only allows waits for no plugin.
+#[tokio::test]
+async fn a_renamed_tables_allows_move_and_keep_their_ids() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "email")]).await;
+    let allow = env
+        .perm_grant(egret_perm::Effect::Allow, &["sales", "orders"], &["u"])
+        .await;
+    let column = env
+        .perm_grant(
+            egret_perm::Effect::Allow,
+            &["sales", "orders", "email"],
+            &["v"],
+        )
+        .await;
+    env.recompile_all().await;
+    // No plugin runs: a hold that waited would time out.
+    let started = Instant::now();
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert!(started.elapsed() < LIMIT, "{:?}", started.elapsed());
+    assert_eq!(env.grant_at(allow).await, ("orders_v2".into(), None));
+    assert_eq!(
+        env.grant_at(column).await,
+        ("orders_v2".into(), Some("email".into()))
+    );
+    assert!(env.trino_reads("u", "orders_v2").await);
+    assert!(!env.trino_reads("u", "orders").await);
+}
+
+/// G6: before the commit no allow names the new name.
+#[tokio::test]
+async fn an_allow_is_not_on_the_new_name_before_the_commit() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    env.perm_grant(egret_perm::Effect::Allow, &["sales", "orders"], &["u"])
+        .await;
+    env.probe_reach("tables/rename");
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(
+        env.reached().perm,
+        vec![perm_row("grant", "allow", "orders", "")]
+    );
+    assert_eq!(
+        env.perm().await,
+        vec![perm_row("grant", "allow", "orders_v2", "")]
+    );
+}
+
+/// D9: a completed rename records one `perm_grant:move` per allow and one
+/// `perm_grant:copy` / `perm_rule:copy` per restriction, by its caller.
+#[tokio::test]
+async fn a_completed_rename_records_move_and_copy_events_by_its_caller() {
+    let Some(env) = env().await else { return };
+    let (deny, mask, filter) = env.restricted_orders().await;
+    let allow = env
+        .perm_grant(egret_perm::Effect::Allow, &["sales", "orders"], &["w"])
+        .await;
+    let (_, client) = env.catalog_client("trino-main").await;
+    *env.caller.lock().unwrap() = client.clone();
+    let _plugins = env.start_plugins().await;
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    let events = env.perm_events().await;
+    let of = |a: &str| -> Vec<&(String, String, Value)> {
+        events.iter().filter(|(x, _, _)| x == a).collect()
+    };
+    let moves = of("perm_grant:move");
+    assert_eq!(moves.len(), 1, "{events:?}");
+    assert_eq!(moves[0].1, allow.to_string());
+    let copies = of("perm_grant:copy");
+    assert_eq!(copies.len(), 1, "{events:?}");
+    assert_eq!(copies[0].2["before"]["id"], json!(deny));
+    assert_ne!(copies[0].1, deny.to_string());
+    let rules = of("perm_rule:copy");
+    let mut sources: Vec<Value> = rules.iter().map(|e| e.2["before"]["id"].clone()).collect();
+    sources.sort_by_key(Value::to_string);
+    let mut want = vec![json!(mask), json!(filter)];
+    want.sort_by_key(Value::to_string);
+    assert_eq!(sources, want);
+    for (_, _, d) in &events {
+        assert_eq!(d["actor"]["client_id"], json!(client), "{d}");
+        assert_eq!(d["actor"]["name"], json!("trino-main"), "{d}");
+        assert_eq!(d["trigger"], "iceberg_rename", "{d}");
+        assert_eq!(
+            d["rename"],
+            json!({"from": "sales.orders", "to": "sales.orders_v2"}),
+            "{d}"
+        );
+        if d["after"]["selector"].is_string() {
+            let at = |side: &str| d[side]["selector"].as_str().unwrap().to_string();
+            assert!(at("after").contains(".sales.orders_v2"), "{d}");
+            assert!(!at("before").contains(".sales.orders_v2"), "{d}");
+        } else {
+            assert_eq!(d["after"]["table"], "orders_v2", "{d}");
+            assert_eq!(d["before"]["table"], "orders", "{d}");
+        }
+    }
+}
+
+/// D9: a refused or undone rename records no grant event.
+#[tokio::test]
+async fn a_refused_or_undone_rename_records_no_grant_event() {
+    let Some(env) = env_with_limit(Duration::from_secs(2)).await else {
+        return;
+    };
+    env.restricted_orders().await;
+    env.perm_grant(egret_perm::Effect::Allow, &["sales", "orders"], &["w"])
+        .await;
+    // No plugin: the wait times out and the copy is undone.
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    // Lakekeeper refuses: the copy is undone.
+    env.create_table("orders_v2", &[(1, "id")]).await;
+    let _plugins = env.start_plugins().await;
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(!status.is_success(), "{status} {body}");
+    assert!(env.perm_events().await.is_empty());
+}

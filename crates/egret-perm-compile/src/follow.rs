@@ -721,3 +721,37 @@ pub fn refusal_message(
     }
     Some(format!("{}. Nothing was renamed.", parts.join(". ")))
 }
+
+// ── event summaries (D9) ───────────────────────────────────────────────────
+
+/// A grant's governance summary (`{catalog, schema, table, column, effect,
+/// actions, include, exclude}`) with its `id`, as the feed records grants.
+///
+/// # Errors
+/// The database's error, as text.
+pub async fn grant_summary_via(
+    conn: &mut sqlx::PgConnection,
+    g: &Grant,
+) -> Result<serde_json::Value, String> {
+    let mut v = crate::governance_events::grant_summary(conn, g)
+        .await
+        .map_err(|e| e.to_string())?;
+    v["id"] = serde_json::json!(g.id);
+    Ok(v)
+}
+
+/// A rule's governance summary (`{name, kind, selector, function, …}`) with
+/// its `id`.
+///
+/// # Errors
+/// The database's error, as text.
+pub async fn rule_summary_via(
+    conn: &mut sqlx::PgConnection,
+    r: &Rule,
+) -> Result<serde_json::Value, String> {
+    let mut v = crate::governance_events::rule_summary(conn, r)
+        .await
+        .map_err(|e| e.to_string())?;
+    v["id"] = serde_json::json!(r.id);
+    Ok(v)
+}
