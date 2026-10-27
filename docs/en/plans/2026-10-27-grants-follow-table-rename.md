@@ -21,7 +21,7 @@ recursively dropped namespace; reports stale references.
 
 **Tech stack:** Rust (axum 0.8, sqlx 0.9), embedded Lakekeeper, Ranger plugin ledger, React 18, Vitest.
 
-**Spec:** `docs/en/specs/2026-10-27-grants-follow-table-rename-design.md` (G1-G4 user decisions, D1-D20 defaults).
+**Spec:** `docs/en/specs/2026-10-27-grants-follow-table-rename-design.md` (G1-G6 user decisions, D1-D21 defaults).
 Read it and #757's spec §3-§5 first. Every `file:line` there was checked on `4807c3e3`; re-check with
 `/usr/bin/grep -n` before editing (Step 0).
 
@@ -71,18 +71,18 @@ Read it and #757's spec §3-§5 first. Every `file:line` there was checked on `4
 | file | change | task |
 |---|---|---|
 | `crates/egret-policy/src/plugin_downloads.rs` | latch in `wait_for_versions` | 1 |
-| `crates/egret-perm-compile/src/follow.rs` (new), `src/lib.rs` | selection, hand-written check, copy/move/delete helpers | 2, 3 |
-| `crates/egret-perm-compile/tests/follow_db.rs` (new) | follow selection tests | 2, 3 |
-| `crates/egret-perm-compile/src/trigger.rs`, `src/table_columns.rs` | D12; `table_states_ns_via` | 4, 14 |
+| `crates/egret-perm-compile/src/follow.rs` (new), `src/lib.rs` | selection, hand-written check, copy/move/delete helpers, cover | 2, 3, 9 |
+| `crates/egret-perm-compile/tests/follow_db.rs` (new) | follow selection and cover tests | 2, 3, 9 |
+| `crates/egret-perm-compile/src/trigger.rs`, `src/table_columns.rs` | D12; `table_states_ns_via` | 4, 15 |
 | `crates/egret-perm-compile/src/routes.rs` | D10 name lock | 5 |
 | `crates/egret-perm-compile/src/governance_events.rs` | summaries reachable from `follow` | 7 |
-| `crates/egret-catalog-engine/src/table_hook.rs` | plan parts, copy, wait, finish, catalog follow, purge | 6-13 |
-| `crates/egret-catalog-engine/src/store/embedded.rs` | catalog-grant follow and purge queries | 12, 13 |
-| `crates/egret-catalog-engine/tests/table_hook_db.rs`, `tests/common/plugins.rs` | hook tests | 6-13 |
-| `crates/egret-audit/src/governance.rs` | D9 actions, `CATALOG_GRANT`, `Family::Catalog` | 7, 12 |
-| `crates/egret-controlplane/src/governance_changes.rs` | sentences, `Catalog` family | 7, 8, 9, 12 |
-| `crates/egret-controlplane/src/governance_overview.rs`, `tests/governance_attention.rs` | five sources | 14, 15 |
-| `frontend/src/routes/governance/overview/AttentionSection.tsx`, its `__tests__` | `CHECKS` | 16 |
+| `crates/egret-catalog-engine/src/table_hook.rs` | plan parts, copy, wait, finish, cover, catalog follow, purge | 6-14 |
+| `crates/egret-catalog-engine/src/store/embedded.rs` | catalog-grant follow and purge queries | 13, 14 |
+| `crates/egret-catalog-engine/tests/table_hook_db.rs`, `tests/common/plugins.rs` | hook tests | 6-14 |
+| `crates/egret-audit/src/governance.rs` | D9 actions, `CATALOG_GRANT`, `Family::Catalog` | 7, 8, 10, 13 |
+| `crates/egret-controlplane/src/governance_changes.rs` | sentences, `Catalog` family | 7, 8, 10, 13 |
+| `crates/egret-controlplane/src/governance_overview.rs`, `tests/governance_attention.rs` | five sources | 15, 16 |
+| `frontend/src/routes/governance/overview/AttentionSection.tsx`, its `__tests__` | `CHECKS` | 17 |
 
 ## Step 0: Re-verify the evidence on the then-current main
 
@@ -284,7 +284,45 @@ Read it and #757's spec §3-§5 first. Every `file:line` there was checked on `4
 - [ ] **Checks:** as Task 7.
 - [ ] Commit `feat(catalog): refuse a rename a restrictive pattern would let escape`.
 
-## Task 9: Hand-written restrictive policies refuse the rename (G3, D5)
+## Task 9: A covered destination does not refuse (G5, spec §5.9, D21)
+
+**Files:** `crates/egret-perm-compile/src/follow.rs` (`cover_via`, `refusal_message`); `table_hook.rs`; tests
+`follow_db.rs`, `table_hook_db.rs`.
+
+- [ ] **Red (DB, `follow_db.rs`)**, each for the move `sales.orders → sales.archive` with a restrictive pattern row on
+  `sales.orders*` that D4 refuses today:
+  - `a_deny_pattern_is_covered_by_an_equal_deny_on_the_new_name` — pattern deny `read` to `group:contractors`;
+    an exact-name deny `read, write` to `group:contractors` and `user:bob` on `sales.archive` → `Full` (more actions
+    and subjects still cover). Also covered by another pattern `sales.arch*` with the same body, and by two
+    candidates (`read` to the group, `write` to the group) for a pattern deny of `read, write`.
+  - `a_mask_pattern_is_covered_by_an_equal_mask_on_the_new_name` — pattern mask `sales.orders*.email`, Hash,
+    exemptions `{include: [role:pii-cleared]}`; a mask on `sales.archive.EMAIL` (folded), Hash, same expression, no
+    exemptions → `Full`. A candidate with type `Nullify`, or `value_expr` differing by one space, → `Partial` whose
+    `missing` names the column, type and expression.
+  - `a_row_filter_pattern_is_covered_by_an_equal_filter_on_the_new_name` — pattern filter `region = 'eu'`; an
+    exact-name filter with the same text and the same exemptions → `Full`; `region='eu'` (no spaces) → `Partial`.
+  - `a_partial_cover_refuses_and_names_what_is_missing` — pattern deny `read` to `group:contractors` and
+    `group:vendors`; the new name denies `read` to `group:contractors` only → `Partial { missing: ["read for
+    group:vendors"] }`; a deny to a user who is a member of `vendors` does not cover the group (no expansion).
+  - `a_copy_this_rename_makes_counts_as_a_cover` (D21) — pattern deny `sales.orders*` and a literal deny with the
+    same body on `sales.orders`, which D1 copies → `Full`.
+  - guards: a tag-selected mask and a hand-written policy on the new name are never candidates (`Partial`); egret
+    inserts no row to create a cover (row counts unchanged after `cover_via`).
+  Expected on the base: compile error; with a stub returning `Partial` for everything, the `Full` cases red.
+- [ ] **Red (router, `table_hook_db.rs`):**
+  - `a_covered_destination_lets_the_rename_through` — pattern deny `sales.orders*` and an equal exact-name deny on
+    `sales.archive`; rename `orders → archive` → 2xx; the pattern row unchanged, no copy of it, the served policies
+    restrict `archive` through the exact-name row. Today (Task 8 code): 409 (red).
+  - `a_partially_covered_destination_is_refused_with_what_is_missing` — the exact-name deny names one group of two →
+    409 whose message contains "lacks a deny of read for group:vendors" and ends "Nothing was renamed."
+  - `a_cover_deleted_before_the_copy_refuses` — the cover is deleted between plan and copy (the Task 8 test hook) →
+    409 from the copy transaction.
+- [ ] **Fix:** spec §5.9 (`cover_via`, the union rule for denies, `missing`), D21; the plan and the copy re-check
+  call it before refusing; `refusal_message` prints `missing` (spec §8).
+- [ ] **Checks:** as Task 7, plus `cargo test -p egret-perm-compile --test follow_db`.
+- [ ] Commit `feat(catalog): let a rename through when the new name is already as restricted`.
+
+## Task 10: Hand-written restrictive policies refuse the rename (G3, D5)
 
 **Files:** `table_hook.rs`; `governance.rs` (`ranger_policy:left`); `governance_changes.rs`; tests `table_hook_db.rs`.
 
@@ -299,9 +337,9 @@ Read it and #757's spec §3-§5 first. Every `file:line` there was checked on `4
 - [ ] **Checks:** as Task 7, plus `cargo test -p egret-policy --lib`.
 - [ ] Commit `feat(catalog): refuse a rename a hand-written restriction names`.
 
-## Task 10: The rename defaults (D11, D13, swap, #757 interplay)
+## Task 11: The rename defaults (D11, D13, swap, #757 interplay)
 
-**Files:** `table_hook.rs`; tests `table_hook_db.rs`. Each red fails on the Task 9 code; guards stay green and are
+**Files:** `table_hook.rs`; tests `table_hook_db.rs`. Each red fails on the Task 10 code; guards stay green and are
 mutation-checked.
 
 - [ ] **Red / guards:**
@@ -325,7 +363,7 @@ mutation-checked.
 - [ ] **Checks:** as Task 6.
 - [ ] Commit `fix(catalog): keep the swap pattern restricted and skip what a rename does not carry`.
 
-## Task 11: A column rename carries its column grants and rules (G1, spec §5.4)
+## Task 12: A column rename carries its column grants and rules (G1, spec §5.4)
 
 **Files:** `table_hook.rs`; tests `table_hook_db.rs` (Trino's `RENAME COLUMN` body: `add-schema` with the same field
 ids and `set-current-schema -1`).
@@ -343,7 +381,7 @@ ids and `set-current-schema -1`).
 - [ ] **Checks:** as Task 6.
 - [ ] Commit `fix(catalog): carry a column's grants and rules with it on rename`.
 
-## Task 12: Catalog grants follow (KI-309, D8)
+## Task 13: Catalog grants follow (KI-309, D8)
 
 **Files:** `crates/egret-catalog-engine/src/store/embedded.rs`; `table_hook.rs`; `governance.rs`
 (`catalog_grant:move`, `catalog_grant:delete`, `CATALOG_GRANT`, `Family::Catalog`); `governance_changes.rs`; tests
@@ -370,7 +408,7 @@ ids and `set-current-schema -1`).
   the feed test binary.
 - [ ] Commit `fix(catalog): catalog grants follow a renamed table`.
 
-## Task 13: Recursive namespace drop (D15)
+## Task 14: Recursive namespace drop (D15)
 
 **Files:** `table_hook.rs` (`purge_namespace`); `embedded.rs`; tests `table_hook_db.rs`.
 
@@ -384,10 +422,10 @@ ids and `set-current-schema -1`).
   everything stays (red).
   Guard: a plain namespace drop deletes nothing (#757).
 - [ ] **Fix:** spec §5.6.
-- [ ] **Checks:** as Task 12.
+- [ ] **Checks:** as Task 13.
 - [ ] Commit `fix(catalog): purge allows and catalog grants with a recursively dropped namespace`.
 
-## Task 14: Stale-reference report (D16)
+## Task 15: Stale-reference report (D16)
 
 **Files:** `crates/egret-perm-compile/src/table_columns.rs` (`table_states_ns_via`); `governance_overview.rs`; tests
 `table_hook_db.rs` (drift), `crates/egret-controlplane/tests/governance_attention.rs` (its `lakekeeper` stub).
@@ -408,7 +446,7 @@ ids and `set-current-schema -1`).
   egret-controlplane --test governance_attention`; `cargo test -p egret-catalog-engine --test table_hook_db`.
 - [ ] Commit `feat(governance): report grants, rules and catalog grants on tables that do not exist`.
 
-## Task 15: Names a rename left without their allows (D17)
+## Task 16: Names a rename left without their allows (D17)
 
 **Files:** `governance_overview.rs`; tests `governance_attention.rs`.
 
@@ -418,10 +456,10 @@ ids and `set-current-schema -1`).
   reported. The same for `catalog_grant:move` → `renamed_names_lost_catalog_grants` for a `catalog_registry:read`
   reader. Today: no such kinds (red). Guard: #757's `renamed_names_reused` unchanged.
 - [ ] **Fix:** spec D17.
-- [ ] **Checks:** as Task 14.
+- [ ] **Checks:** as Task 15.
 - [ ] Commit `feat(governance): report names a rename left without their allow grants`.
 
-## Task 16: Frontend
+## Task 17: Frontend
 
 **Files:** `frontend/src/routes/governance/overview/AttentionSection.tsx`, its `__tests__`; the feed's family filter
 if it lists families (check with `/usr/bin/grep -rn "tag:read\|policy:read" frontend/src/routes/governance`).
@@ -435,7 +473,7 @@ if it lists families (check with `/usr/bin/grep -rn "tag:read\|policy:read" fron
   Tasks 7-15, `npm run gen:api` and commit the client.
 - [ ] Commit `feat(governance): name the new stale-permission checks`.
 
-## Task 17: Final gate
+## Task 18: Final gate
 
 - [ ] **Backend** (one command at a time; `pgrep -x cargo` empty first):
 
@@ -459,7 +497,7 @@ Expected: every command exits 0; the skip grep prints `0`. Known environment-onl
 --test sql_starrocks_live` without a live StarRocks) are named, not ignored. Read the full log before calling it
 green.
 
-## Task 18: Live check (own compose project `egret-grmove`, port 18780; never 18080)
+## Task 19: Live check (own compose project `egret-grmove`, port 18780; never 18080)
 
 Compose override in the scratchpad (`-p egret-grmove`, `DEMO_PORT=18780`; confirm free with `lsof -i :18780`), with a
 real Trino (Ranger plugin 2.5.0) and a real StarRocks (Ranger plugin 2.8/2.9) on one egret Iceberg catalog, the
@@ -477,7 +515,8 @@ mismatch between egret's state and what an engine returns is a defect, not a not
    `analyst-u`: `SELECT * FROM sales.orders_v2` (and `sales.orders` until it is gone). From Trino: `ALTER TABLE
    sales.orders RENAME TO orders_v2`; record its duration. Expect for the whole window: `contractor-u` never reads a
    row; `analyst-u` never sees a non-`eu` row; `email` never in clear for anyone uncleared. `reader-u` may be refused
-   on `orders_v2` for up to two polls after the commit (D2's gap; record it), then reads it hashed. The ledger shows
+   on `orders_v2` for up to two polls after the commit (G6's accepted gap; record its length for the docs'
+   Limitation), then reads it hashed. The ledger shows
    Trino's `policies` row and StarRocks' row reporting the copy's versions before the commit time in egret's log.
    Then: the deny, mask and filter exist on both names; the allows name `orders_v2` with their old ids; the events
    in Governance > Changes name Trino's catalog client.
@@ -490,6 +529,10 @@ mismatch between egret's state and what an engine returns is a defect, not a not
 5. **G4 409:** add a deny on `sales.orders_*` to `contractors`; rename `orders_old` to `archive` from Trino → Trino
    prints the 409 naming the grant; `SHOW TABLES` still lists `orders_old`. Add an allow on `sales.tmp_*`, create
    `tmp_a`, rename `tmp_a → a` → 2xx; Changes shows the `perm_grant:left` sentence.
+   **G5:** add an exact-name deny on `sales.archive` to `contractors` with the same action → the same rename of
+   `orders_old` to `archive` now succeeds and `contractor-u` is refused on `archive` on both engines from the first
+   read; remove `contractors` from a second pattern-deny group first to see a partial cover refused with the missing
+   subject named.
 6. **G3 409:** on a manual Trino profile bound to the catalog (or the StarRocks one if only it is manual), write an
    operator mask policy naming `sales.orders_old.email`; rename `orders_old → orders_x` → 409 naming the policy; the
    policy's JSON is unchanged. Delete the policy; the rename succeeds.
@@ -507,23 +550,25 @@ mismatch between egret's state and what an engine returns is a defect, not a not
 11. **UI:** the five Overview findings, the Changes sentences for every new action (and the Who column), 1440 and
     390 px, light and dark.
 
-## Task 19: Pull request
+## Task 20: Pull request
 
 - [ ] Push only after the user says so. Title `fix(catalog): grants, rules and catalog grants follow a table
-  rename`. Body: spec link; G1-G4; D1-D20 marked as defaults the user may revisit; the prerequisite F-A PR; gate
+  rename`. Body: spec link; G1-G6; D1-D21 marked as defaults the user may revisit; the prerequisite F-A PR; gate
   output; live results with the read-loop timings and the step 8 durations; the release note of spec §9; the Docs box
-  naming the follow-up docs PR (KI-308, KI-309 and spec §11's rows, D20); non-goals; related defects; open questions
-  (spec §13). Append a dated note to #757's spec §14 saying its §11 items 1-3 are fixed by this package
+  naming the follow-up docs PR (KI-308, KI-309, spec §11's rows and the G6 Limitation of spec §9, D20); non-goals;
+  related defects. Append a dated note to #757's spec §14 saying its §11 items 1-3 are fixed by this package
   (append-only). End with the attribution line from the session reminder.
 
 ## Self-review
 
-- **Spec coverage:** D7 → T1; §5.2 → T2, T3; D12 → T4; D10 → T5; §5.3 → T6, T7, T10; D4/D14 → T8; D5 → T9; §5.4 →
-  T11; §5.5/D8 → T12; §5.6/D15 → T13; §5.8/D16 → T14; D17 → T15; frontend → T16; §10 risks → T18 (steps 2, 8, 9).
+- **Spec coverage:** D7 → T1; §5.2 → T2, T3; D12 → T4; D10 → T5; §5.3 → T6, T7, T11; D4/D14 → T8; G5/§5.9/D21 →
+  T9; D5 → T10; §5.4 → T12; §5.5/D8 → T13; §5.6/D15 → T14; §5.8/D16 → T15; D17 → T16; frontend → T17; §10 risks →
+  T19 (steps 2, 8, 9).
 - **Ordering:** each task ends green. T2-T3 before T6 (the hook uses `follow`); T4 before T6 (the copy's compile);
-  T5 independent (after T3 only for shared fixtures); T7 needs T6; T8-T11 need T7 (events); T12 needs T7's actor
-  plumbing and Family work; T13 needs T12; T14 needs T7 (copy events for sample details); T15 needs T7 and T12; T16
-  after T15; T17 after T16; T18 after T17.
-- **User decisions:** G1 → T2-T15 (F-A is Step 0's prerequisite; views are spec §11 item 1); G2 → T6 (copies stay),
-  T7 (allows move after), T10 (swap); G3 → T3, T9; G4 → T2, T8, T11.
-- **Open questions:** spec §13 (two).
+  T5 independent (after T3 only for shared fixtures); T7 needs T6; T8-T12 need T7 (events); T9 needs T8 (the
+  refusal path); T13 needs T7's actor plumbing and Family work; T14 needs T13; T15 needs T7 (copy events for sample
+  details); T16 needs T7 and T13; T17 after T16; T18 after T17; T19 after T18.
+- **User decisions:** G1 → T2-T16 (F-A is Step 0's prerequisite; views are spec §11 item 1); G2 → T6 (copies stay),
+  T7 (allows move after), T11 (swap); G3 → T3, T10; G4 → T2, T8, T12; G5 → T9, T19 step 5; G6 → T7 (allows move
+  only in `finish`), T19 step 2 (the gap measured), spec §9 (the Limitation).
+- **Open questions:** none (spec §13).
