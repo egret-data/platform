@@ -568,6 +568,11 @@ impl Env {
 
     /// A token for a fresh role holding exactly `grants`.
     async fn token_for(&self, consumer: &str, grants: &[Grant<'_>]) -> String {
+        self.token_and_subject(consumer, grants).await.0
+    }
+
+    /// The same, and the token's `sub`.
+    async fn token_and_subject(&self, consumer: &str, grants: &[Grant<'_>]) -> (String, String) {
         let role_name = unique("vc-role");
         let role = self
             .catalog
@@ -589,15 +594,17 @@ impl Env {
                 .expect("grant");
         }
         let km = self.keys.active().await.expect("active key");
-        egret_machine_idp::sign_claims(
+        let subject = unique("vc-client");
+        let token = egret_machine_idp::sign_claims(
             &km,
             &json!({
-                "sub": unique("vc-client"), "aud": CATALOG_AUDIENCE,
+                "sub": subject, "aud": CATALOG_AUDIENCE,
                 "warehouse": self.warehouse, "roles": [role_name],
                 "exp": chrono::Utc::now().timestamp() + 600,
             }),
         )
-        .expect("sign")
+        .expect("sign");
+        (token, subject)
     }
 
     /// Create `{ns}.{name}` through lakekeeper with no guard. Returns the
@@ -1139,21 +1146,21 @@ async fn egret_s_own_principal_still_loads_read_write_delete() {
 #[tokio::test]
 async fn a_config_call_registers_no_lakekeeper_user() {
     let env = env_or_skip!();
-    let token = env
-        .token_for(
+    let (token, subject) = env
+        .token_and_subject(
             "external",
             &[("table", Some("sales"), Some("orders"), "read")],
         )
         .await;
+    // This token's own principal only: other tests share the database.
     let users = || async {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM lakekeeper.users WHERE id LIKE 'egret-catalog~%'",
-        )
-        .fetch_one(env.catalog.pool())
-        .await
-        .expect("count lakekeeper users")
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM lakekeeper.users WHERE id = $1")
+            .bind(format!("egret-catalog~{subject}"))
+            .fetch_one(env.catalog.pool())
+            .await
+            .expect("count lakekeeper users")
     };
-    let before = users().await;
+    assert_eq!(users().await, 0);
 
     let req = axum::http::Request::builder()
         .method("GET")
@@ -1170,7 +1177,75 @@ async fn a_config_call_registers_no_lakekeeper_user() {
 
     assert_eq!(
         users().await,
-        before,
-        "a config call registered a lakekeeper user"
+        0,
+        "a config call registered this client as a lakekeeper user"
     );
+}
+
+// ── Mixed grants and views (review finding 4) ──────────────────────────────
+
+/// A role holding namespace `read` and `write` on one table in it gets RWD on
+/// that table and read-only on its sibling: each table is decided on its own.
+#[tokio::test]
+async fn a_mixed_role_writes_only_the_table_it_may_write() {
+    let env = env_or_skip!();
+    env.create_table("sales", "orders").await;
+    env.create_table("sales", "peer").await;
+    let role = env
+        .token_for(
+            "external",
+            &[
+                ("namespace", Some("sales"), None, "read"),
+                ("table", Some("sales"), Some("orders"), "write"),
+            ],
+        )
+        .await;
+
+    let (_, orders) = env.vended_in_config(&env.load(&role, "sales", "orders", &[VENDED]).await);
+    let (_, peer) = env.vended_in_config(&env.load(&role, "sales", "peer", &[VENDED]).await);
+
+    assert!(orders.can_write(), "the written table: {orders:?}");
+    assert!(!peer.can_write(), "its sibling: {peer:?}");
+}
+
+/// C9: a view load vends read-only credentials on the view's location,
+/// whatever the caller's grant (lakekeeper hard-codes `Read` there).
+#[tokio::test]
+async fn a_view_load_vends_read_only_credentials() {
+    let env = env_or_skip!();
+    let view = json!({
+        "name": "v_orders",
+        "schema": schema(),
+        "view-version": {
+            "version-id": 1,
+            "schema-id": 0,
+            "timestamp-ms": chrono::Utc::now().timestamp_millis(),
+            "summary": {"engine-name": "trino", "engine-version": "483"},
+            "default-namespace": ["sales"],
+            "representations": [{"type": "sql", "sql": "SELECT 'a' AS id", "dialect": "trino"}]
+        },
+        "properties": {}
+    });
+    let (status, body) = env
+        .send(&env.raw, None, "POST", "namespaces/sales/views", &[], view)
+        .await;
+    assert_eq!(status, StatusCode::OK, "create view: {body}");
+    let writer = env
+        .token_for("external", &[("namespace", Some("sales"), None, "write")])
+        .await;
+
+    let (status, load) = env
+        .send(
+            &env.app,
+            Some(&writer),
+            "GET",
+            "namespaces/sales/views/v_orders",
+            &[VENDED],
+            Value::Null,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{load}");
+    let (_, policy) = env.vended_in_config(&load);
+
+    assert!(!policy.can_write(), "a view load is read only: {policy:?}");
 }
