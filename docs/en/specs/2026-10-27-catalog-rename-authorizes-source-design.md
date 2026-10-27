@@ -163,6 +163,13 @@ the view hold's rename run on the body the mount re-injected.
   /catalog/v1/config` advertises `overrides.uri` without the port (`http://egret.localtest.me/catalog`), and pyiceberg
   then fails against port 80. Likely cause: `deploy/demo/edge.conf.template` sends `X-Forwarded-Host $host` (no port)
   and `rewrite_config_host` uses the host it is given. Not in this package.
+- **LOW. O3 (second live check): no read timeout on a guarded body.** An authenticated client that declares a body
+  (`Content-Length: 500` on `POST …/tables/rename`) and sends nothing keeps the connection open for 130 s or more,
+  with no answer: the mount waits for the body it is allowed to read. It needs a valid token, memory stays capped
+  (1 MiB / 16 MiB, §10.2), and an unauthenticated caller gets 401 at once. Behind the demo edge, nginx buffers request
+  bodies, so the hold moves there. An obvious fix exists: a body-read timeout in the mount on the buffered routes
+  (wrap the read in `tokio::time::timeout` and answer 408), or a server-wide header and body read timeout on the
+  listener, which would cover every route that reads a body, not only these. Not in this package.
 - F-B: catalog grants were compared byte for byte while lakekeeper's names are not. *Corrected after review:* this
   did not fail closed (the caller chooses the spelling, §3.4). Fixed in §10.4.
 
@@ -449,16 +456,34 @@ mount, seen failing on the code before the fix), what was decided, and how it is
 
 - The live check on `ed1e1db5` showed Trino 483 writes **only** through single-table commits (`POST
   …/namespaces/{ns}/tables/{t}`), never `transactions/commit`, so §10.3's buffering sits on Trino's main write path.
-  No commit body was captured, so the test uses Iceberg Java's `UpdateTableRequest` shape (what Trino's REST catalog
-  sends): an `identifier` equal to the path, `assert-table-uuid` and `assert-current-schema-id`, then
-  `set-properties`, `add-schema` and `set-current-schema`.
+- The second live check captured Trino's eight commit bodies: none carries an `identifier` (creates with
+  `assert-create`, appends with `add-snapshot` and `set-snapshot-ref`, column adds with `add-schema`). So Trino's
+  commits are authorized as the path's table. `a_captured_trino_commit_passes_the_guard` replays one of them (an `ADD
+  COLUMN`, verbatim except the table uuid): a write grant commits it, a read grant gets 403.
+- Other Iceberg clients send an `identifier` equal to the path; `a_trino_shaped_table_commit_passes_the_guard` covers
+  that shape (`assert-table-uuid`, `assert-current-schema-id`, `set-properties`, `add-schema`).
 - An identifier equal to the path is authorized as that table (§10.3), with names compared as lakekeeper compares them
   (§10.4) and path segments decoded as lakekeeper decodes them; an absent identifier is authorized as the path's table.
   lakekeeper itself compares the identifier with the decoded path byte for byte (`determine_table_ident`), so a
   case-only difference between them is lakekeeper's 400, not the guard's.
-- **Test:** `a_trino_shaped_table_commit_passes_the_guard`: single-level, multi-level (`corp%1Ffin`), a name with a
+- **Tests:** `a_trino_shaped_table_commit_passes_the_guard`: single-level, multi-level (`corp%1Ffin`), a name with a
   space reached as `%20` and as `+`, and a grant spelled `Orders` for the table `orders`; each commits (200) and the
-  property lands.
+  property lands. `a_captured_trino_commit_passes_the_guard`, above.
 - **Cost on that path:** the guard copies the body once (bounded by 16 MiB) and parses it once; the table hook behind
   it already buffered and parsed the same body before this package. §10.4 adds at most one Postgres query when a name
   differs in bytes from a grant name. Not benchmarked; the test's commits answered in tens of milliseconds.
+
+## 11. Live check
+
+Two runs against a demo stack built from this branch, with real Trino 483 and pyiceberg 0.12 behind the guard, and a
+restricted catalog client beside Trino's own. The full record (steps, request sniffs, captured bodies) is in the live
+check report kept with this package's working notes, outside the repository.
+
+- **Run 1, on `ed1e1db5`** (§1–§9): every step passed. Trino created, renamed and committed tables and views; the
+  restricted client's unauthorized renames and multi-table commits were refused with 403 and its authorized ones went
+  through; #757's classification move followed a rename on both the database row and Trino's downloaded tag cache.
+  Trino sent only single-table commits. Observations: O1 (§7, the `/config` uri behind a non-default edge port) and O2
+  (plain-text refusals, fixed in §10.8).
+- **Run 2, on `9bf06328`** (§10): every step passed again, including Trino's writes through the single-table commit
+  guard (§10.9), Iceberg JSON refusals that pyiceberg parses cleanly (§10.8), the signer refusal (§10.6) and the
+  recursive-drop refusal (§10.5). Observation: O3 (§7, no body-read timeout).

@@ -1698,12 +1698,13 @@ async fn refusals_use_the_iceberg_error_model() {
     }
 }
 
-/// Trino 483 writes only through single-table commits (live check), with an
-/// Iceberg Java `UpdateTableRequest` body: an `identifier` equal to the path,
-/// `assert-table-uuid` and `assert-current-schema-id`, then the updates. Such
-/// a commit passes the guard for a role with write on the table: single- and
-/// multi-level namespaces, a name with a space (path `%20` or `+`), and a
-/// grant spelled in another case.
+/// Trino 483 writes only through single-table commits (live check). This is
+/// the Iceberg REST shape with an `identifier` equal to the path (clients other
+/// than Trino send one; Trino sends none, see the captured body below), with
+/// `assert-table-uuid` and `assert-current-schema-id`, then the updates. Such a
+/// commit passes the guard for a role with write on the table: single- and
+/// multi-level namespaces, a name with a space (path `%20` or `+`), and a grant
+/// spelled in another case.
 #[tokio::test]
 async fn a_trino_shaped_table_commit_passes_the_guard() {
     let env = env_or_skip!();
@@ -1769,4 +1770,65 @@ async fn a_trino_shaped_table_commit_passes_the_guard() {
             "{path_ns}/{path_name}"
         );
     }
+}
+
+/// A commit body captured from Trino 483 in the second live check (an `ALTER
+/// TABLE … ADD COLUMN phone`), verbatim except the table uuid. Trino sends no
+/// `identifier`, so the guard authorizes the path's table.
+#[tokio::test]
+async fn a_captured_trino_commit_passes_the_guard() {
+    let env = env_or_skip!();
+    let schema = json!({"type": "struct", "schema-id": 0, "fields": [
+        {"id": 1, "name": "id", "required": false, "type": "int"},
+        {"id": 2, "name": "email", "required": false, "type": "string"},
+        {"id": 3, "name": "region", "required": false, "type": "string"},
+    ]});
+    let (status, created) = env
+        .send(
+            &env.raw,
+            None,
+            "POST",
+            "namespaces/sales/tables",
+            json!({"name": "orders", "schema": schema}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let uuid = created["metadata"]["table-uuid"].clone();
+    let body = json!({
+        "requirements": [
+            {"type": "assert-table-uuid", "uuid": uuid},
+            {"type": "assert-last-assigned-field-id", "last-assigned-field-id": 3},
+            {"type": "assert-current-schema-id", "current-schema-id": 0},
+        ],
+        "updates": [
+            {"action": "add-schema", "schema": {"type": "struct", "schema-id": 1, "fields": [
+                {"id": 1, "name": "id", "required": false, "type": "int"},
+                {"id": 2, "name": "email", "required": false, "type": "string"},
+                {"id": 3, "name": "region", "required": false, "type": "string"},
+                {"id": 4, "name": "phone", "required": false, "type": "string"},
+            ]}, "last-column-id": 4},
+            {"action": "set-current-schema", "schema-id": -1},
+        ],
+    });
+    let writer = env
+        .token_for(
+            "external",
+            &[grant("table", Some(&["sales"]), Some("orders"), "write")],
+        )
+        .await;
+    let reader = env
+        .token_for(
+            "external",
+            &[grant("table", Some(&["sales"]), Some("orders"), "read")],
+        )
+        .await;
+    let (status, resp) = env
+        .commit_one(&reader, "tables", "sales", "orders", body.clone())
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "a read grant: {resp}");
+    let (status, resp) = env
+        .commit_one(&writer, "tables", "sales", "orders", body)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert_eq!(resp["metadata"]["current-schema-id"], 1, "{resp}");
 }
