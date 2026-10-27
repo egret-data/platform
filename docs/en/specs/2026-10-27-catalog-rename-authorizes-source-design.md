@@ -333,6 +333,10 @@ mount, seen failing on the code before the fix), what was decided, and how it is
   `a_spark_branch_commit_is_authorized_by_the_table_it_commits_to` (was 403 before: the guard checked the pseudo path
   table; a grant on `corp.fin` now commits through the branch path, and plain commits with and without an identifier
   still commit); `a_malformed_single_table_commit_is_a_400_from_the_guard` (red, green now).
+- A commit with `assert-create` to a name the caller holds a `table` `write` grant on passes the guard (it is a
+  commit to that table). It only completes a create that was *staged* first (`POST …/namespaces/{ns}/tables` with
+  `stage-create`), and staging is a create in the namespace, which needs a namespace-level grant (§3.2). The second
+  live check sent one with nothing staged: lakekeeper answered 404 and created nothing.
 - Not changed: #757's table hook classifies an update by its path, so a Spark branch commit's schema change is seen as
   a change to `db.t`/`branch_x`, not to `db.t`. Recorded, not fixed here.
 
@@ -487,3 +491,24 @@ check report kept with this package's working notes, outside the repository.
 - **Run 2, on `9bf06328`** (§10): every step passed again, including Trino's writes through the single-table commit
   guard (§10.9), Iceberg JSON refusals that pyiceberg parses cleanly (§10.8), the signer refusal (§10.6) and the
   recursive-drop refusal (§10.5). Observation: O3 (§7, no body-read timeout).
+
+## 12. Local gate (2026-10-27, on `167cf529`)
+
+Run with `EGRET_ALLOW_DB_SKIP` unset, `DATABASE_URL` on the test Postgres and `EGRET_TEST_SHARED_STORE_URL` on the
+test Valkey. The machine was shared with other sessions' builds (load average 20 to 36), which is what the timing
+failures below track. Failures were rerun alone to tell flakes from defects.
+
+| check | result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass |
+| `just test-shipping-resolution` | pass |
+| `cargo test --workspace --no-fail-fast` | pass, except two targets, both known; **0 DB skips** |
+| — `egret-workflow --test sql_starrocks_live` | 7 fail: `EGRET_TEST_STARROCKS_URL` is not set (no StarRocks here); known |
+| — `egret-catalog-engine --test table_hook_db` | 1 timing failure in the run (`an_error_after_a_committed_rename_finishes_the_move`: the 5 s plugin wait ran out, 409 instead of 500); passed 3/3 alone. A whole-suite rerun hit the other known timing test (`a_rename_with_nothing_bound_moves_at_once`, 4.8 s against 2.5 s), which passed alone earlier |
+| `just test-ranger-gates` | pass |
+| frontend `npm ci`, `npm run gen:api` | pass; **no diff** in `src/api` or `openapi.json` |
+| frontend `npm run lint`, `npx tsc -b` | pass |
+| frontend `npm test` (vitest) | 8496 of 8500 pass; 4 failed under load (`ScheduleDetail`, `fieldNamesEverywhere`, `OutputsTree`, `NamespaceKvTab`); all four files pass when rerun alone. This branch changes no frontend file |
+| frontend `npm run build` | pass |
+| frontend `test:bundle*` (10 scripts) | pass |
