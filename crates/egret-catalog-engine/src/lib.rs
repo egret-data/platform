@@ -16,6 +16,9 @@ pub mod browse;
 /// Crate-level engine domain error ([`CatalogEngineError`]) for the per-request
 /// warehouse/browse operations — distinct from the store's [`CatalogError`].
 pub mod error;
+/// How a catalog grant covers a namespace or a table: the rule the catalog
+/// guard and lakekeeper's authorizer share.
+pub mod grant_match;
 /// The view-governance lineage sweep (spec B3): recompute every view's
 /// lineage and re-tag it, on a schedule and on demand.
 pub mod lineage_sweep;
