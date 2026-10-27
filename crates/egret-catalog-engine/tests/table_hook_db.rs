@@ -412,20 +412,19 @@ struct StubGuard(Arc<Mutex<String>>);
 impl egret_catalog_engine::CatalogGuard for StubGuard {
     async fn check(
         &self,
-        _method: &str,
+        method: &str,
         path: &str,
         _query: Option<&str>,
         _bearer: Option<&str>,
         body: Option<&[u8]>,
     ) -> Result<egret_catalog_engine::CatalogCaller, (StatusCode, String)> {
-        // The mount hands the guard a rename's or a multi-table commit's body
-        // and puts it back, so the hook behind it acts on the same bytes.
+        // The mount hands the guard the body of exactly the requests
+        // `GuardedBody` names and puts it back, so the hook behind it acts on
+        // the same bytes.
         assert_eq!(
             body.is_some(),
-            path.ends_with("/tables/rename")
-                || path.ends_with("/views/rename")
-                || path.ends_with("/transactions/commit"),
-            "the guard reads the body of a rename or a multi-table commit only: {path}"
+            egret_catalog_engine::GuardedBody::of(method, path).is_some(),
+            "the guard reads the body of a guarded request only: {method} {path}"
         );
         Ok(egret_catalog_engine::CatalogCaller {
             subject: self.0.lock().unwrap().clone(),

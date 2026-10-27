@@ -1063,3 +1063,39 @@ impl Env {
         )
     }
 }
+
+// ── The review's findings (spec §10) ────────────────────────────────────────
+
+/// F8: a body with a duplicate key is never decided on one copy and run on
+/// the other: whichever copy is unauthorized, nothing is renamed.
+#[tokio::test]
+async fn a_duplicate_key_body_renames_nothing() {
+    let env = env_or_skip!();
+    env.create_table("sales", "secret").await;
+    env.create_table("stage", "mine").await;
+    let token = env
+        .token_for(
+            "external",
+            &[grant("namespace", Some(&["stage"]), None, "write")],
+        )
+        .await;
+    let secret = r#"{"namespace":["sales"],"name":"secret"}"#;
+    let mine = r#"{"namespace":["stage"],"name":"mine"}"#;
+    let dst = r#"{"namespace":["stage"],"name":"loot"}"#;
+    for (first, last) in [(secret, mine), (mine, secret)] {
+        let body = format!(r#"{{"source":{first},"source":{last},"destination":{dst}}}"#);
+        let (status, resp) = env
+            .send_bytes(
+                &env.app,
+                Some(&token),
+                "POST",
+                "tables/rename",
+                body.into_bytes(),
+            )
+            .await;
+        assert!(!status.is_success(), "{status} {resp}");
+        assert!(env.exists("tables", "sales", "secret").await);
+        assert!(env.exists("tables", "stage", "mine").await);
+        assert!(!env.exists("tables", "stage", "loot").await);
+    }
+}

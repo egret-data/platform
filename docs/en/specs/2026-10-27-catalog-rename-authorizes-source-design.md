@@ -255,3 +255,22 @@ built now, because no egret warehouse can reach it.
 
 Both tests passed before this change too: they pin the present behaviour. Mutation: turning signing on in
 `s3_storage_profile` fails both.
+
+## 10. Review findings (2026-10-27)
+
+An independent review of this branch found the guard holes below, mostly on routes next to the ones §1–§9 fixed. The
+user's decision: close the whole class here. Each subsection says what was measured first (a red test through the real
+mount, seen failing on the code before the fix), what was decided, and how it is tested. F4 is recorded only (§10.7).
+
+### 10.1 F8: test stubs, duplicate keys, `+` and `%` in names
+
+- The stub guards in `table_hook_db` and `view_hold_db` decided which requests carry a body with
+  `path.ends_with("/tables/rename")`, which drifts from the mount (a single-table commit to a table named `rename` ends
+  with that suffix). They now ask `GuardedBody::of`, the function the mount uses.
+- A duplicate key cannot make the guard decide on one copy while lakekeeper runs the other: lakekeeper deserializes
+  rename, commit and identifier bodies with plain `serde` derives, which refuse a duplicate field.
+  `a_duplicate_key_body_renames_nothing` pins it both ways round (the unauthorized copy first, then last): nothing is
+  renamed. It passed before this change too.
+- Names containing `+` or `%`: lakekeeper URL-decodes path segments and maps `+` to a space; the guard compared raw
+  segments. That fails closed (a grant on `a b` is not reached by `a+b`), except for a grant whose own name contains
+  `+` or `%xx`. §10.4 makes the guard decode path segments as lakekeeper does, so this note is closed there.
