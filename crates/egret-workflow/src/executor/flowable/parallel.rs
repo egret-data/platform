@@ -82,8 +82,10 @@ pub(crate) fn drive_lists(
         Current::RetryPending => return Step::Waiting,
         // `errors:` and `finally:` alike: one child at a time, after the
         // still-live siblings of a failure are failed (spec §4.1). On the way
-        // into `finally` after a success every sibling is already terminal, so
-        // `fail_the_rest` has nothing to do.
+        // into `finally` after a success every LIVE run under the siblings is
+        // already terminal; a run a `LoopUntil` restart emptied and never
+        // rebuilt is not live, and `fail_the_rest` skips it (review M3), so
+        // it has nothing to do there.
         Current::Errors(list) | Current::Finally(list) => {
             let cmds = fail_the_rest(
                 state,
@@ -437,7 +439,10 @@ fn fail_the_rest(state: &ExecutionState, runs: &[Option<RunIx>]) -> Vec<Command>
     doomed.sort_unstable();
     doomed
         .into_iter()
-        .filter(|&ix| !is_terminal(state, ix))
+        // An empty history is `Command::RestartLoop`'s "this run does not
+        // exist at the moment" (a loop iteration that never rebuilt it), not
+        // a live run: failing it would persist a ghost `FAILED` (review M3).
+        .filter(|&ix| !state.runs[ix].history.is_empty() && !is_terminal(state, ix))
         .map(|run| Command::SetRunState {
             run,
             state: RunState::Failed,
