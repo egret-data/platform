@@ -1471,8 +1471,9 @@ impl RenderSide {
 /// `runIf:` (if any) has rendered truthy -- a falsy one is `advance()`'s
 /// `SkipRun`, and a pending one is [`render_run_if`]'s to decide first -- and
 /// **only while `advance()` itself still drives the execution**
-/// ([`crate::executor::drives_forward`], group C2 ruling D9): not once it is
-/// terminal, and not while it is `KILLING`, which creates and starts nothing
+/// ([`crate::executor::drives_forward`], group C2 ruling D9), or runs its
+/// post-terminal phase ([`crate::executor::drives_after`], end hooks #2b):
+/// not once it is terminated, and not while it is `KILLING`, which creates and starts nothing
 /// (an update computed then would still be written by `settle`). A `PAUSED`
 /// or `RETRYING` execution DOES compute: `advance()` keeps driving a paused
 /// run's siblings and a retrying run's siblings, and an update there must not
@@ -1501,7 +1502,9 @@ pub(super) fn render_updates(
     now: Tick,
     side: &mut RenderSide,
 ) -> Pass {
-    if !crate::executor::drives_forward(state) {
+    // End hooks #2b (spec §5): and while the post-terminal phase runs, so an
+    // update inside `afterExecution:` is computed rather than left `CREATED`.
+    if !crate::executor::drives_forward(state) && !crate::executor::drives_after(plan, state) {
         return Pass::Nothing;
     }
     let pending: Vec<RunIx> = (0..state.runs.len())

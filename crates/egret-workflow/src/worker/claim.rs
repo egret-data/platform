@@ -3486,11 +3486,24 @@ async fn advance_frame(conn: &mut PgConnection, frame: &mut Frame<'_>) -> Result
             // not update -- so a nested settle that terminated the execution
             // has ALREADY told its parent, and this one does not report the
             // terminal twice.
+            //
+            // **The parent hears at "terminated", not at "terminal"** (end
+            // hooks #2b, spec D10, Kestra `DE:752-759`): an execution whose
+            // `afterExecution:` is still running is terminal but not
+            // terminated, and its parent waits. So the report is made by the
+            // settle in which `terminated` first becomes true -- the one that
+            // made the execution terminal for a flow with no after-list, the
+            // one that ended its last after-run otherwise -- with the state
+            // the execution ended with. `was != is` keeps today's report of
+            // a terminal that changes into another one. A forced report
+            // ([`Job::report`]) has no plan and keeps the old rule.
             let was = before.history.last().copied();
             let is = state.history.last().copied();
+            let now_terminated = crate::executor::terminated(&ctx.plan, state)
+                && (!crate::executor::terminated(&ctx.plan, before) || was != is);
             return Ok(Some(Settled {
                 id: ctx.id,
-                terminal: is.filter(|s| was != Some(*s) && notifies_parent(*s)),
+                terminal: is.filter(|s| now_terminated && notifies_parent(*s)),
                 caller: ctx.caller(),
                 outage: surface.files_outage(),
                 forced: false,
