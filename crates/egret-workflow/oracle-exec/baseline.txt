@@ -639,7 +639,7 @@ valids/sleep-long-after-execution-flowable
 valids/subflow-parent-retry
 valids/subflow-secret-output-child
 valids/subflow-secret-output-parent
-# group C2 Task 5 (2026-10-18): `SetVariables` runs now; held by the flow-level `finally:`, which egret does not run (its `write_execution_context` and `skipped_when_failures_exist` runs are missing; `hello` and `will_fail` match; measured).
+# end hooks A8 (2026-10-27): the flow-level `finally:` runs now (A4), but this entry did not bank: `write_execution_context` and `skipped_when_failures_exist` are created and end `CREATED FAILED` with no message, because their `runIf` (`tasksWithState(state='FAILED') is [not] empty`) fails to render -- Pebble's `empty` test, a renderer cause owned by package #5 (measured at A4; the 2026-10-18 cause, "egret does not run `finally:`", is history).
 valids/task-runif-taskswithstate
 valids/task-runif-workingdirectory
 valids/variables

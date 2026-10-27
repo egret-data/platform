@@ -2,6 +2,8 @@
 
 **Status:** designed 2026-10-26. Not built. Roadmap row #2 of `docs/en/plans/2026-10-18-workflow-kestra-parity-roadmap.md`, with the additions of package #1's spec §9 item 3. Plan: `docs/en/plans/2026-10-26-workflow-end-hooks.md`. Branch `feat/workflow-end-hooks`, stacked on `feat/workflow-no-silent-drops` (draft PR #756). This spec proposes two PRs, #2a and #2b (D1, Q1).
 
+**Status, 2026-10-27: #2a built** (Part A of the plan, Tasks A1 to A8, branch `feat/workflow-end-hooks`; PR #2a, in review). `finally:` runs on every flowable except `Pause`, the flow's own `finally:` runs, and `Loop`, `LoopUntil` and `WorkingDirectory` run their `errors:`. Measured ratchet **301 / 60 / 60 / 0** (from 301 / 72 / 72 / 0): 12 entries banked, not the 13 §7.1 expected (see the as-built note under §7.1). `LIVE` 295, `VALIDATE_REFUSED` 25 and `UNKNOWN_TYPE_REFUSED` 21 are unchanged. #2b (flow `afterExecution:`, the post-terminal phase, D8 to D15 and the kill divergence) is not built.
+
 **Where the claims come from.** Every claim about egret was checked in the worktree `egret-endhooks` at `68c9f4de`. egret paths are relative to `crates/egret-workflow/src/` unless another root is given. Kestra is the checkout at `data-portal/kestra`, pinned at `96893b589`. Kestra paths use these short forms:
 - `ES` is `executor/src/main/java/io/kestra/executor/ExecutorService.java`.
 - `DE` is `…/executor/DefaultExecutor.java`.
@@ -154,6 +156,11 @@ All decisions are this spec's defaults, dated 2026-10-26, under the rule "follow
 3. **Roadmap row #2 sizes it "M", "~20 upper, 14–15 strict".** Measured, it is two Ms (D1), with 23 upper and 21 expected (§7.1).
 4. **Roadmap Appendix A** groups `restart-with-finally` and `restart-with-after-execution` as restart flows. The harness cannot restart (`oracle-exec/driver.rs:1160-1241` starts once and ticks). Kestra's golden for both is the first execution only, with no restart recorded. Both are ordinary `finally`/`afterExecution` entries (§7.1).
 
+**As built, 2026-10-27 (false premises).** Confirmed while building #2a:
+- Premise 1: no run reads the snapshot. The plan is re-derived from the execution's own copy of the source, so a version published before #2 needed no special handling. The real hazard was the positional `task_ix`: the plan is index-stable (Task A3) and the A1 fixture pins it.
+- Premise 2: the sweep premise is the doc comment on `sweep_decision`, not debt D15, and it was already false before #2 because of `Exit`. It matters for #2b (a live `afterExecution:` block older than 24 hours is reachable by the `_wd` sweep; carried to Task B5).
+- Premise 3 (sizing): #2a banks 12 of the 13 expected, see §7.1.
+
 ## 1. What #2 covers
 
 | construct | today | #2 | PR |
@@ -208,6 +215,21 @@ All decisions are this spec's defaults, dated 2026-10-26, under the rule "follow
 - `working_directory::drive` (`working_directory.rs:27-49`): Begin → Prepared drives `tasks` (with `&[]` errors, as today) → Finish. Then, after the block's own claim is finished, `current_list` over (`tasks`, `errors`, `finally`) runs `errors`/`finally` as ordinary child runs (D7). The block's run stays `RUNNING` until then. **To measure in Task A5:** whether the block's run can stay `RUNNING` after `FinishWorkingDirectory` without the worker seeing a finished block as live (`worker/working_dir.rs`). If it cannot, the task stops and reports, and D7 moves to a follow-up with a refusal naming #17.
 - `loop_until::drive`: the body step uses `sequential::drive(tasks, errors, finally)` (D6).
 - The flow's root call (`executor/mod.rs:225`) passes `&plan.finally`.
+
+**As built, 2026-10-27 (§4.1, #2a).**
+- `current_list` follows `Execution.java:579-624` arm by arm; each arm cites its Java lines. The `terminalState` arm is not ported (#9).
+- **Shared rule change.** `current_list`'s "started" test ignores a run that `RestartLoop` discarded (an empty history): such a run is not "started". This is shared by every caller.
+- **A `Dag` with `errors:`** used to be handed to `parallel::drive`, whose predicate is `true`, so it ignored `dependsOn`. It now keeps its gate (`drive_lists` with the `dependsOn` predicate). No corpus `Dag` had `errors:` before `finally-dag`.
+- **Worker lookup.** The shared `spec::path::find_task` (the worker's leaf lookup, used by claim and spawn) now walks `finally` and the loops' `errors`. It closed three gaps that existed before #2: a `Loop` in an `errors:` list aborted the tick; a `WorkingDirectory` in an `errors:` list failed; and (found by the A4 fix round) flow-level `finally:` tasks first failed with "not a leaf" until the worker walk read `flow.finally_`.
+- **`WorkingDirectory` (Q4: default).** `errors:` and `finally:` run as child runs after the block's own finish claim, so `finally:` runs after success (Kestra's code appears never to start it; treated as a Kestra bug). The hook children are **outside the directory**: no `block_id`, no snapshot, no directory-scoped claim. The block's run stays `RUNNING` until the hooks end.
+- **Loops (A6).** A `Loop` iteration runs the `Loop`'s own `errors:` and `finally:` (D5) instead of clearing them; a `LoopUntil` body passes `errors`/`finally` to `sequential::drive` (D6).
+- `Pause` `finally:` stays refused and moves to #9 (Q5).
+- **Divergences and unmeasured items, recorded as such:**
+  1. A block whose children are all disabled: egret skips its `finally` (`FU:163-170`); Kestra's code may create the first `finally` child in the same pass. **Unmeasured**; no corpus flow has this shape.
+  2. A `Parallel`/`Dag` failing without `errors:` fails its live siblings before `finally`; Kestra keeps them running until the parent ends. **Unmeasured**; not in the corpus.
+  3. A `WorkingDirectory` block whose prepare or finish claim fails ends `FAILED` without running `errors`/`finally` (the V3 rule). Pinned by `a_blocks_failed_finish_claim_runs_neither_errors_nor_finally` in `tests/working_dir_claims.rs`; a failing prepare or finish is #17's to revisit.
+  4. `run_of` takes the first run of a task. Latent for an execution-level restart: #7 must discard the end-hook runs on restart (§9).
+  5. The `_wd` sweep premise bites a live `afterExecution:` block older than 24 hours. Carried to #2b Task B5.
 
 ### 4.2 #2b: the post-terminal phase
 
@@ -319,6 +341,14 @@ Not banked by #2, with their package:
 
 The upper bound is 23 (21 + `after-execution` + `pause-errors-…`), against the roadmap's "~20 upper, 14–15 strict".
 
+**As built, 2026-10-27 (§7.1, #2a).** Measured from a fresh `cargo test -p egret-workflow --test executor -- --nocapture`: **301 / 60 / 60 / 0**, `(301, 241, 60)` in `the_sixteen_banked_entries…`. 12 of the 13 expected banked, not 13 (so 60, not 59):
+- A4: `valids/finally-dag`, `finally-parallel`, `finally-sequential`, `finally-sequential-error` (72 to 68).
+- A4 fix round (the worker finds a flow-level `finally:` leaf): `valids/finally-flow`, `finally-flow-error`, `finally-flow-error-first`, `finally-sequential-error-first`, `restart-with-finally` (68 to 63).
+- A6: `valids/finally-loop`, `finally-loop-parallel`, `invalids/loop-switch-failed` (63 to 60).
+- **Did not bank: `valids/task-runif-taskswithstate`.** Its flow-level `finally:` runs now and its two tasks are created, but both end `CREATED FAILED`: their `runIf` (`tasksWithState(...) is [not] empty`) fails to render, Pebble's `empty` test. A renderer cause, owned by package #5. Its baseline comment was rewritten.
+- The risky entries all banked except that one: `finally-parallel` (one dropped pair) and `restart-with-finally` (the `runIf` on `taskrun.attemptsCount` rendered).
+- The census (`LIVE` 295, `VALIDATE_REFUSED` 25, `UNKNOWN_TYPE_REFUSED` 21) did not move. The derived constants moved in the tasks that moved them, each with a dated comment in `tests/executor.rs`. At A8 every constant was re-read against the printout; none had drifted (61 of 61 tests pass).
+
 ### 7.2 Census and pinned constants
 
 - `LIVE` 295, `VALIDATE_REFUSED` 25 and `UNKNOWN_TYPE_REFUSED` 21 are expected unchanged. No corpus flow has a `Pause`/`Exit` in `afterExecution:` (scan of all 351 files, 2026-10-26). The one corpus `Pause` with `finally:` is already refused for `errors:`. Measured in Tasks A2 and B5. Any move is a finding to report.
@@ -344,6 +374,8 @@ The upper bound is 23 (21 + `after-execution` + `pause-errors-…`), against the
 - No `lift_of` row exists for these keys (`keys.rs:1280-1286` asserts `None`), so none is deleted. The cross-check's `TWO` exemption (`keys.rs:1351`) is deleted. `finally_and_the_errors_two_takes_draw_nothing` (`keys.rs:1636-1650`) is replaced by `a_typo_inside_a_flowable_finally_is_refused_at_its_path` and `a_typo_inside_a_loop_errors_is_refused_at_its_path`.
 - #2b adds the D11 warning (`not_honoured`, #13) and D12's `unsupported_after_execution_task` (in `validate_for_run`, so `build_plan` sees it).
 - Spec #1 §10 is closed by a dated note: the `snapshot.source` instruction was a false premise (above), and the walker change is this section.
+
+**As built, 2026-10-27 (§8, A2 and A7).** `child_lists` descent and the `property-treatment.json` regeneration were folded into Task A2 (controller decision: A2 would otherwise break the corpus pairing test); A7 removed `finally`/`errors` from `silent()` and deleted the `TWO` exemption. `property-treatment.json` shows no diff after A7. `Pause` `finally` is reported by `pause_gap` alone: adding it to `silent()` was dead code (mutation kept every test green), so it was not added.
 
 ## 9. Replay, restart, `Exit`, kill, SLA
 
@@ -384,3 +416,5 @@ Each question is the user's to answer: a change of scope, a behaviour change for
 - **Q4: default** (egret runs `WorkingDirectory` `finally:`; Kestra's behaviour is treated as a bug).
 - **Q5: yes.** `Pause` `finally:` moves to #9 and is refused naming #9 until then.
 
+
+**As built, 2026-10-27 (answers).** Q1 is built as the split: #2a is Part A (this note's PR), #2b is Part B. Q5: `Pause` `finally:` is refused naming #9 (A2). Q4: `WorkingDirectory` `finally:` runs after success (A5). Q2: default. Q3 is **not built in #2a**: the kill that stops `afterExecution:` runs is Part B Task B3; the roadmap §3.1 lists it as "planned in #2b".
