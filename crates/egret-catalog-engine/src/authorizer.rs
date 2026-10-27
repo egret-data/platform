@@ -110,6 +110,36 @@ fn catalog_client_of(metadata: &RequestMetadata) -> Option<CatalogClientIdentity
     })
 }
 
+/// What a table action asks of the data decision.
+#[derive(Debug, PartialEq, Eq)]
+enum DataAsk {
+    /// Not a data-plane action: the guard has decided it.
+    NotData,
+    /// May the caller read (`write: false`) or write the table's data?
+    Ask { write: bool },
+    /// A data question on behalf of another user: refused (fail closed).
+    Refuse,
+}
+
+/// Classify one table action lakekeeper asks about.
+///
+/// `user` is set (lakekeeper has already folded "the caller itself" into
+/// `None`) only when lakekeeper asks on behalf of another principal: a
+/// DEFINER view chain (trusted engines, which egret does not configure) or a
+/// for-user permission check (the management API, which egret does not
+/// mount). egret's grants belong to the caller, so a data question about
+/// another user is refused rather than answered with the caller's grants.
+fn data_ask(action: &CatalogTableAction, user: Option<&UserOrRole>) -> DataAsk {
+    match action {
+        CatalogTableAction::ReadData | CatalogTableAction::WriteData if user.is_some() => {
+            DataAsk::Refuse
+        }
+        CatalogTableAction::ReadData => DataAsk::Ask { write: false },
+        CatalogTableAction::WriteData => DataAsk::Ask { write: true },
+        _ => DataAsk::NotData,
+    }
+}
+
 /// egret's lakekeeper authorizer. See the module docs.
 #[derive(Clone)]
 pub struct EgretAuthorizer {
@@ -145,7 +175,7 @@ impl EgretAuthorizer {
     async fn client_may(
         &self,
         client: &CatalogClientIdentity,
-        warehouse: &ResolvedWarehouse,
+        lakekeeper_warehouse_id: &str,
         asks: &[(Vec<String>, String, bool)],
     ) -> Result<Vec<bool>, IsAllowedActionError> {
         let unavailable = |e: crate::store::CatalogError| {
@@ -157,7 +187,7 @@ impl EgretAuthorizer {
             .await
             .map_err(unavailable)?
             .and_then(|w| w.lakekeeper_warehouse_id)
-            .is_some_and(|id| id == warehouse.warehouse_id.to_string());
+            .is_some_and(|id| id == lakekeeper_warehouse_id);
         if !scoped {
             return Ok(vec![false; asks.len()]);
         }
@@ -363,37 +393,44 @@ impl Authorizer for EgretAuthorizer {
         // For each action: `Some(write)` for a data-plane action, `None` for
         // any other. Owned, so nothing borrowed from `actions` is held across
         // the store's awaits.
-        let mut data_plane: Vec<Option<bool>> = Vec::with_capacity(actions.len());
+        // Per action: `None` for a control-plane action (allowed), `Some(None)`
+        // for a refused data question, `Some(Some(write))` for one the grants
+        // decide.
+        let mut data_plane: Vec<Option<Option<bool>>> = Vec::with_capacity(actions.len());
         let mut asks: Vec<(Vec<String>, String, bool)> = Vec::new();
         for (_, a) in actions {
-            let write = match a.action.clone().into() {
-                CatalogTableAction::ReadData => Some(false),
-                CatalogTableAction::WriteData => Some(true),
-                _ => None,
+            let ask = match data_ask(&a.action.clone().into(), a.user) {
+                DataAsk::NotData => None,
+                DataAsk::Refuse => Some(None),
+                DataAsk::Ask { write } => {
+                    asks.push((
+                        a.info.namespace_ident().clone().inner(),
+                        a.info.table_ident().name().to_string(),
+                        write,
+                    ));
+                    Some(Some(write))
+                }
             };
-            if let Some(write) = write {
-                asks.push((
-                    a.info.namespace_ident().clone().inner(),
-                    a.info.table_ident().name().to_string(),
-                    write,
-                ));
-            }
-            data_plane.push(write);
+            data_plane.push(ask);
         }
         if asks.is_empty() {
-            return Ok(vec![true; actions.len()]);
+            return Ok(data_plane.iter().map(|d| d.is_none()).collect());
         }
         let caller = Caller::of(&self.system, metadata);
         let decided = match (caller.fixed_answer(), caller) {
             (Some(answer), _) => vec![answer; asks.len()],
-            (None, Caller::Client(client)) => self.client_may(&client, warehouse, &asks).await?,
+            (None, Caller::Client(client)) => {
+                self.client_may(&client, &warehouse.warehouse_id.to_string(), &asks)
+                    .await?
+            }
             (None, _) => vec![false; asks.len()],
         };
         let mut decided = decided.into_iter();
         let mut out = Vec::with_capacity(data_plane.len());
         for d in data_plane {
             out.push(match d {
-                Some(_) => decided.next().unwrap_or(false),
+                Some(Some(_)) => decided.next().unwrap_or(false),
+                Some(None) => false,
                 None => true,
             });
         }
@@ -601,6 +638,71 @@ mod tests {
         let caller = Caller::of(&system(), &principal("oidc~stranger"));
         assert_eq!(caller, Caller::Other);
         assert_eq!(caller.fixed_answer(), Some(false));
+    }
+
+    /// Finding 3 of the review: lakekeeper asks "may user X read this table"
+    /// for a DEFINER view chain or a for-user check. egret's grants are the
+    /// caller's, so such a question is refused, never answered with the
+    /// caller's grants.
+    #[test]
+    fn a_data_question_on_behalf_of_another_user_is_refused() {
+        let other = UserOrRole::User(UserId::try_from("oidc~someone-else").expect("a user id"));
+        for action in [CatalogTableAction::ReadData, CatalogTableAction::WriteData] {
+            assert_eq!(
+                data_ask(&action, Some(&other)),
+                DataAsk::Refuse,
+                "{action:?}"
+            );
+        }
+        assert_eq!(
+            data_ask(&CatalogTableAction::ReadData, None),
+            DataAsk::Ask { write: false }
+        );
+        assert_eq!(
+            data_ask(&CatalogTableAction::WriteData, None),
+            DataAsk::Ask { write: true }
+        );
+        assert_eq!(
+            data_ask(&CatalogTableAction::GetMetadata, Some(&other)),
+            DataAsk::NotData,
+            "a control-plane question stays the guard's"
+        );
+    }
+
+    /// C12: a grant store that cannot answer fails the decision; it never
+    /// picks a scope.
+    #[tokio::test]
+    async fn a_grant_store_error_fails_the_decision() {
+        let unreachable = egret_metastore::Db {
+            pool: sqlx::postgres::PgPoolOptions::new()
+                .acquire_timeout(std::time::Duration::from_millis(500))
+                .connect_lazy("postgres://egret:egret@127.0.0.1:1/none")
+                .expect("a lazy pool"),
+        };
+        let authorizer = EgretAuthorizer::new(
+            ServerId::new_random(),
+            system(),
+            CatalogStore::new(unreachable),
+        );
+        let client = CatalogClientIdentity {
+            warehouse: "wh".into(),
+            role: "reader".into(),
+            subject: "client-1".into(),
+        };
+        let asked = authorizer
+            .client_may(
+                &client,
+                "lk-wh",
+                &[(vec!["sales".into()], "orders".into(), false)],
+            )
+            .await;
+        assert!(
+            matches!(
+                asked,
+                Err(IsAllowedActionError::AuthorizationBackendUnavailable(_))
+            ),
+            "{asked:?}"
+        );
     }
 
     /// A subject lakekeeper would refuse as a user id still names the client;
