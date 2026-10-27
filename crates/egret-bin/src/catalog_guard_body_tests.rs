@@ -1697,3 +1697,76 @@ async fn refusals_use_the_iceberg_error_model() {
         assert!(!message(&body).is_empty(), "{what}: {body}");
     }
 }
+
+/// Trino 483 writes only through single-table commits (live check), with an
+/// Iceberg Java `UpdateTableRequest` body: an `identifier` equal to the path,
+/// `assert-table-uuid` and `assert-current-schema-id`, then the updates. Such
+/// a commit passes the guard for a role with write on the table: single- and
+/// multi-level namespaces, a name with a space (path `%20` or `+`), and a
+/// grant spelled in another case.
+#[tokio::test]
+async fn a_trino_shaped_table_commit_passes_the_guard() {
+    let env = env_or_skip!();
+    env.create_table("sales", "orders").await;
+    env.create_table("corp%1Ffin", "ledger").await;
+    env.create_table("sales", "my table").await;
+    let token = env
+        .token_for(
+            "external",
+            &[
+                grant("table", Some(&["sales"]), Some("Orders"), "write"),
+                grant("table", Some(&["corp", "fin"]), Some("ledger"), "write"),
+                grant("table", Some(&["sales"]), Some("my table"), "write"),
+            ],
+        )
+        .await;
+    let cases: [(&str, &str, &[&str], &str); 4] = [
+        ("sales", "orders", &["sales"], "orders"),
+        ("corp%1Ffin", "ledger", &["corp", "fin"], "ledger"),
+        ("sales", "my%20table", &["sales"], "my table"),
+        ("sales", "my+table", &["sales"], "my table"),
+    ];
+    for (i, (path_ns, path_name, ns, name)) in cases.into_iter().enumerate() {
+        let (_, loaded) = env
+            .send(
+                &env.raw,
+                None,
+                "GET",
+                &format!("namespaces/{path_ns}/tables/{path_name}"),
+                Value::Null,
+            )
+            .await;
+        let uuid = loaded["metadata"]["table-uuid"].clone();
+        let schema_id = loaded["metadata"]["current-schema-id"].clone();
+        let body = json!({
+            "identifier": {"namespace": ns, "name": name},
+            "requirements": [
+                {"type": "assert-table-uuid", "uuid": uuid},
+                {"type": "assert-current-schema-id", "current-schema-id": schema_id},
+            ],
+            "updates": [
+                {"action": "set-properties", "updates": {"egret.probe": format!("trino{i}")}},
+                {"action": "add-schema", "schema": {"type": "struct", "schema-id": 1, "fields": [
+                    {"id": 1, "name": "id", "type": "string", "required": false},
+                    {"id": 2, "name": format!("c{i}"), "type": "long", "required": false},
+                ]}, "last-column-id": 2},
+                {"action": "set-current-schema", "schema-id": -1},
+            ],
+        });
+        let started = std::time::Instant::now();
+        let (status, resp) = env
+            .commit_one(&token, "tables", path_ns, path_name, body)
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{path_ns}/{path_name}: {resp} (after {:?})",
+            started.elapsed()
+        );
+        assert_eq!(
+            env.probe(path_ns, path_name).await.as_deref(),
+            Some(format!("trino{i}").as_str()),
+            "{path_ns}/{path_name}"
+        );
+    }
+}

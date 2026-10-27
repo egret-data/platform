@@ -159,6 +159,10 @@ the view hold's rename run on the body the mount re-injected.
 - **LOW.** `GET /{prefix}/namespaces` (and `?parent=`) is a catalog-root read: any role with any grant lists every
   namespace name in the warehouse. Names only, no tables or data. A narrow fix would filter the listing by grants
   (lakekeeper's response would have to be rewritten), not obvious enough to do here.
+- **O1 (live check on `ed1e1db5`, not confirmed in code).** Behind the demo edge on a non-default port, `GET
+  /catalog/v1/config` advertises `overrides.uri` without the port (`http://egret.localtest.me/catalog`), and pyiceberg
+  then fails against port 80. Likely cause: `deploy/demo/edge.conf.template` sends `X-Forwarded-Host $host` (no port)
+  and `rewrite_config_host` uses the host it is given. Not in this package.
 - F-B: catalog grants were compared byte for byte while lakekeeper's names are not. *Corrected after review:* this
   did not fail closed (the caller chooses the spelling, §3.4). Fixed in §10.4.
 
@@ -440,3 +444,21 @@ mount, seen failing on the code before the fix), what was decided, and how it is
 - **Test:** `refusals_use_the_iceberg_error_model` (401 with no token, 403 on a rename and on a load, 400 on a
   malformed commit, 413 on an oversized rename). Before this change each of those bodies was plain text. The other
   tests now read refusal messages from `error.message`.
+
+### 10.9 Trino's write path through the single-table commit guard
+
+- The live check on `ed1e1db5` showed Trino 483 writes **only** through single-table commits (`POST
+  …/namespaces/{ns}/tables/{t}`), never `transactions/commit`, so §10.3's buffering sits on Trino's main write path.
+  No commit body was captured, so the test uses Iceberg Java's `UpdateTableRequest` shape (what Trino's REST catalog
+  sends): an `identifier` equal to the path, `assert-table-uuid` and `assert-current-schema-id`, then
+  `set-properties`, `add-schema` and `set-current-schema`.
+- An identifier equal to the path is authorized as that table (§10.3), with names compared as lakekeeper compares them
+  (§10.4) and path segments decoded as lakekeeper decodes them; an absent identifier is authorized as the path's table.
+  lakekeeper itself compares the identifier with the decoded path byte for byte (`determine_table_ident`), so a
+  case-only difference between them is lakekeeper's 400, not the guard's.
+- **Test:** `a_trino_shaped_table_commit_passes_the_guard`: single-level, multi-level (`corp%1Ffin`), a name with a
+  space reached as `%20` and as `+`, and a grant spelled `Orders` for the table `orders`; each commits (200) and the
+  property lands.
+- **Cost on that path:** the guard copies the body once (bounded by 16 MiB) and parses it once; the table hook behind
+  it already buffered and parsed the same body before this package. §10.4 adds at most one Postgres query when a name
+  differs in bytes from a grant name. Not benchmarked; the test's commits answered in tens of milliseconds.
