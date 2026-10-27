@@ -4,6 +4,7 @@ import type { ExecutionDto, LogLevel } from "@/api/generated/model";
 import { LogLevel as LOG_LEVELS } from "@/api/generated/model";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { LogView } from "@/components/workflows/executions/logs/LogView";
+import { logEndedAt } from "@/components/workflows/executions/logs/useLogFollow";
 import type { LogFilters } from "@/components/workflows/executions/logs/useLogFollow";
 
 /**
@@ -107,6 +108,7 @@ export default function ExecutionLogsTab({ ws, execution }: { ws: string; execut
         executionId={execution.id}
         filters={filters}
         runs={execution.runs}
+        endedAt={logEndedAt(execution)}
         filtersActive={active}
         onClearFilters={clear}
         // The tab's height, whatever the header above it wraps to: a fixed `100vh - 22rem`

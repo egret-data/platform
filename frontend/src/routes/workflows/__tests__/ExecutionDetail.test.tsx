@@ -652,12 +652,21 @@ describe("ExecutionDetail: Kill (workflow kill spec §7)", () => {
     const afterRun = (runState: string) =>
       execution("SUCCESS", { ended_at: new Date().toISOString(), runs: [run("extract", "SUCCESS", 0), run("after", runState, 1)] });
 
+    it("words the dialog for stopping the afterExecution tasks, not for killing the execution", async () => {
+      new Server(ok(afterRun("RUNNING")));
+      renderPage();
+      await userEvent.click(await screen.findByRole("button", { name: "Kill" }));
+      const dialog = await screen.findByRole("alertdialog", { name: "Stop the afterExecution tasks?" });
+      expect(within(dialog).getByText(/keeps its state/)).toBeInTheDocument();
+      expect(within(dialog).queryByText(/cannot be resumed/)).toBeNull();
+    });
+
     it("shows Kill, enabled, and says the afterExecution tasks are being stopped after the 202 (not that the execution is killed)", async () => {
       const server = new Server(ok(afterRun("RUNNING")));
       server.kill = { status: 202, body: afterRun("RUNNING") };
       renderPage();
       await userEvent.click(await screen.findByRole("button", { name: "Kill" }));
-      const dialog = await screen.findByRole("alertdialog", { name: "Kill this execution?" });
+      const dialog = await screen.findByRole("alertdialog", { name: "Stop the afterExecution tasks?" });
       await userEvent.click(within(dialog).getByRole("button", { name: "Kill" }));
       await waitFor(() => expect(killCalls(server)).toHaveLength(1));
       await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Stopping the afterExecution tasks"));
@@ -681,7 +690,7 @@ describe("ExecutionDetail: Kill (workflow kill spec §7)", () => {
       server.kill = { status: 409, body: { error: "conflict: the kill did not reach the afterExecution tasks", code: "kill_not_applied" } };
       renderPage();
       await userEvent.click(await screen.findByRole("button", { name: "Kill" }));
-      const dialog = await screen.findByRole("alertdialog", { name: "Kill this execution?" });
+      const dialog = await screen.findByRole("alertdialog", { name: "Stop the afterExecution tasks?" });
       await userEvent.click(within(dialog).getByRole("button", { name: "Kill" }));
       expect(await within(dialog).findByText("The kill did not take effect. Try again.")).toBeInTheDocument();
       expect(within(dialog).queryByText(/already ended/)).toBeNull();

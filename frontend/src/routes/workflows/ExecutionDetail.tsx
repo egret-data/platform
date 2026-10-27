@@ -36,6 +36,7 @@ import { WorkerOffNotice } from "@/components/workflows/WorkerOffNotice";
 import ExecutionGanttTab from "@/components/workflows/executions/gantt/ExecutionGanttTab";
 import type { GanttRunSlots } from "@/components/workflows/executions/gantt/GanttView";
 import ExecutionLogsTab from "@/components/workflows/executions/logs/ExecutionLogsTab";
+import { logEndedAt } from "@/components/workflows/executions/logs/useLogFollow";
 import { LogView } from "@/components/workflows/executions/logs/LogView";
 import ExecutionOutputsTab from "@/components/workflows/executions/outputs/ExecutionOutputsTab";
 import { OutputsTree } from "@/components/workflows/executions/outputs/OutputsTree";
@@ -180,13 +181,14 @@ function ExecutionFrame({ ws, tab, execution }: { ws: string; tab: ExecutionTab;
   const href = `${base}/executions/${encodeURIComponent(execution.id)}`;
   const now = useNow();
   // Stable across polls: the Gantt renders a slot once per selected run (Task 4).
+  const endedAt = logEndedAt(execution);
   const ganttSlots = useMemo<GanttRunSlots>(
     () => ({
-      logs: (run: TaskRunDto) => <RunLogs ws={ws} executionId={execution.id} run={run} />,
+      logs: (run: TaskRunDto) => <RunLogs ws={ws} executionId={execution.id} run={run} endedAt={endedAt} />,
       // The panel is keyed by run, so the tree's open items start afresh for each run.
       outputs: (run: TaskRunDto) => <OutputsTree ws={ws} executionId={execution.id} run={run} loopValue={execution.loop_value} />,
     }),
-    [ws, execution.id, execution.loop_value],
+    [ws, execution.id, execution.loop_value, endedAt],
   );
 
   return (
@@ -223,7 +225,7 @@ function ExecutionFrame({ ws, tab, execution }: { ws: string; tab: ExecutionTab;
 }
 
 /** A run's lines in the Gantt's run panel: the Logs tab's view, filtered to the run, ungrouped. */
-function RunLogs({ ws, executionId, run }: { ws: string; executionId: string; run: TaskRunDto }) {
+function RunLogs({ ws, executionId, run, endedAt }: { ws: string; executionId: string; run: TaskRunDto; endedAt: string | null }) {
   const filters = useMemo(() => ({ taskRunId: run.id }), [run.id]);
   const runs = useMemo(() => [run], [run]);
   return (
@@ -232,6 +234,7 @@ function RunLogs({ ws, executionId, run }: { ws: string; executionId: string; ru
       executionId={executionId}
       filters={filters}
       runs={runs}
+      endedAt={endedAt}
       grouped={false}
       heightClass="h-72"
       label={`Logs of ${run.task_id} #${run.run_ix}`}
@@ -369,6 +372,8 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
   const resumeState = canResume(execution);
   const replayShown = showsReplay(execution);
   const replayState = canReplay(execution);
+  // An ended execution can only be killed in its afterExecution run.
+  const afterRunKill = isTerminalState(execution.state);
   const killShown = showsKill(execution, now);
   const killState = canKill(execution);
 
@@ -398,7 +403,6 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
       void queryClient.invalidateQueries({ queryKey: workflowsKeys.executions(ws) });
     };
     // Kill of an execution that has ended: it can only reach its afterExecution run.
-    const afterRunKill = isTerminalState(execution.state);
     try {
       const res = await kill.mutateAsync({ workspace: ws, id: execution.id, params: { cascade } });
       if (res.status !== 202) throw new Error("The execution could not be killed. Try again.");
@@ -487,8 +491,12 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
       <ConfirmAction
         open={open === "kill"}
         onOpenChange={(o) => setOpen(o ? "kill" : null)}
-        title="Kill this execution?"
-        description="Every running task is stopped, and every task that has not finished ends Killed. A killed execution cannot be resumed; replay it to run it again."
+        title={afterRunKill ? "Stop the afterExecution tasks?" : "Kill this execution?"}
+        description={
+          afterRunKill
+            ? "The afterExecution tasks that are still running are stopped. The execution has ended and keeps its state."
+            : "Every running task is stopped, and every task that has not finished ends Killed. A killed execution cannot be resumed; replay it to run it again."
+        }
         confirmLabel="Kill"
         confirmVariant="destructive"
         confirmDisabled={killEnded || !killShown}
