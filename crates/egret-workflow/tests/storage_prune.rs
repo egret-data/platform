@@ -281,9 +281,17 @@ impl World {
         .expect("insert execution")
     }
 
+    /// The execution's state and age. Its runs are aged with it: since
+    /// package #2b the pruner's clock is the later of the execution's
+    /// `updated_at` and its runs' ends, and these fixtures mean "everything of
+    /// this execution happened then".
     async fn set(&self, execution: Uuid, state: &str, days_ago: i32) {
         sqlx::query(
-            "UPDATE workflow.executions SET state = $2, \
+            "WITH runs AS ( \
+               UPDATE workflow.task_runs SET updated_at = now() - make_interval(days => $3) \
+                WHERE execution_id = $1 \
+             ) \
+             UPDATE workflow.executions SET state = $2, \
                updated_at = now() - make_interval(days => $3) WHERE id = $1",
         )
         .bind(execution)
@@ -296,7 +304,11 @@ impl World {
 
     async fn age_hours(&self, execution: Uuid, hours: i32) {
         sqlx::query(
-            "UPDATE workflow.executions SET updated_at = now() - make_interval(hours => $2) \
+            "WITH runs AS ( \
+               UPDATE workflow.task_runs SET updated_at = now() - make_interval(hours => $2) \
+                WHERE execution_id = $1 \
+             ) \
+             UPDATE workflow.executions SET updated_at = now() - make_interval(hours => $2) \
               WHERE id = $1",
         )
         .bind(execution)
@@ -367,14 +379,16 @@ impl World {
         uri
     }
 
-    /// A stored object with no index row (an upload never committed).
+    /// A stored object with no index row (an upload never committed). The
+    /// run that wrote it is as old as its execution (see [`Self::set`]).
     async fn unindexed(&self, execution: Uuid, name: &str) -> String {
         let run: Uuid = sqlx::query_scalar(
             "INSERT INTO workflow.task_runs \
-               (execution_id, run_ix, task_ix, task_id, type_id, state, history) \
+               (execution_id, run_ix, task_ix, task_id, type_id, state, history, updated_at) \
              VALUES ($1, (SELECT count(*) FROM workflow.task_runs WHERE execution_id = $1), 0, \
                      'Write_It', 'io.kestra.plugin.core.storage.Write', 'SUCCESS', \
-                     '[\"SUCCESS\"]'::jsonb) RETURNING id",
+                     '[\"SUCCESS\"]'::jsonb, \
+                     (SELECT updated_at FROM workflow.executions WHERE id = $1)) RETURNING id",
         )
         .bind(execution)
         .fetch_one(&self.db.pool)
@@ -555,6 +569,40 @@ async fn the_pruners_retention_runs_from_the_last_runs_end() {
     w.prefixes_are_own(&[old]);
 }
 
+/// Package #2b, B5 fix round 1: a terminal run written with no `ended_at`
+/// (before migration 0183, or by a writer that left it NULL) ends no
+/// earlier than its `updated_at`, and the pruner's clock reads that.
+#[tokio::test]
+async fn the_pruner_reads_a_legacy_runs_updated_at_as_its_end() {
+    let _g = SERIAL.lock().await;
+    let Some(w) = World::new().await else { return };
+    let ended = w.exec("SUCCESS", 400, None).await;
+    let kept = w.file(ended, "a.txt").await;
+    sqlx::query(
+        "INSERT INTO workflow.task_runs \
+           (execution_id, run_ix, task_ix, task_id, type_id, state, history, updated_at) \
+         VALUES ($1, (SELECT count(*) FROM workflow.task_runs WHERE execution_id = $1), 0, \
+                 'After_It', 'io.kestra.plugin.core.log.Log', 'SUCCESS', '[\"SUCCESS\"]'::jsonb, \
+                 now() - interval '1 day')",
+    )
+    .bind(ended)
+    .execute(&w.db.pool)
+    .await
+    .expect("a legacy run: terminal, ended_at NULL");
+    // The control: the same execution shape, every run as old as it.
+    let old = w.exec("SUCCESS", 400, None).await;
+    let pruned = w.file(old, "a.txt").await;
+
+    let report = w.pass().await;
+
+    assert!(
+        w.kept(&kept).await,
+        "pruned 1 day after a legacy run's last write: {report:?}"
+    );
+    assert!(w.gone(&pruned).await, "the control was not pruned");
+    w.prefixes_are_own(&[old]);
+}
+
 #[tokio::test]
 async fn an_ended_execution_older_than_the_window_loses_objects_then_rows() {
     let _g = SERIAL.lock().await;
@@ -676,9 +724,9 @@ async fn index_rows_outside_the_executions_prefix_keep_the_family() {
     let own = w.file(e, "a.txt").await;
     let run: Uuid = sqlx::query_scalar(
         "INSERT INTO workflow.task_runs \
-           (execution_id, run_ix, task_ix, task_id, type_id, state, history) \
+           (execution_id, run_ix, task_ix, task_id, type_id, state, history, updated_at) \
          VALUES ($1, 99, 0, 'Write_It', 'io.kestra.plugin.core.storage.Write', 'SUCCESS', \
-                 '[\"SUCCESS\"]'::jsonb) RETURNING id",
+                 '[\"SUCCESS\"]'::jsonb, now() - interval '400 days') RETURNING id",
     )
     .bind(e)
     .fetch_one(&w.db.pool)

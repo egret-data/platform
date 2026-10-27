@@ -1516,8 +1516,8 @@ impl ExecutionRepo {
     /// `complete` is computed from this row and its runs' ends: the
     /// execution is idle (`workflow.execution_is_idle`, migration 0210:
     /// terminal AND no task run live) AND its last work ended -- the later of
-    /// `updated_at` and the runs' latest `ended_at` -- longer ago than
-    /// [`SETTLE_LAG`](crate::logs::SETTLE_LAG). A run's last lines were
+    /// `updated_at` and the runs' latest `COALESCE(ended_at, updated_at)` --
+    /// longer ago than [`SETTLE_LAG`](crate::logs::SETTLE_LAG). A run's last lines were
     /// inserted before its outcome committed (`RunLog::finish`'s flush
     /// barrier), so once the settle lag has also passed since the last
     /// commit, the page has nothing more to reveal (spec §6). Idle, not
@@ -1529,7 +1529,8 @@ impl ExecutionRepo {
             "SELECT e.state, \
                     COALESCE(workflow.execution_is_idle(e.id), false) \
                       AND GREATEST(e.updated_at, \
-                                   (SELECT max(r.ended_at) FROM workflow.task_runs r \
+                                   (SELECT max(COALESCE(r.ended_at, r.updated_at)) \
+                                      FROM workflow.task_runs r \
                                      WHERE r.execution_id = e.id)) \
                           < now() - make_interval(secs => $3) \
                FROM workflow.executions e WHERE e.id = $1 AND e.workspace_id = $2",

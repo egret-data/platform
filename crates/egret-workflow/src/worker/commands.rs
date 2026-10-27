@@ -2527,7 +2527,8 @@ pub trait OrphanSweep: Send + Sync {
 /// not a UUID): of the runs with no row, those whose execution has a row here
 /// and is idle are [`RunLiveness::superseded`] (debt D15), with the end of
 /// the execution's last work (package #2b, spec §6): the later of its own
-/// `COALESCE(ended_at, updated_at)` and its runs' latest `ended_at`.
+/// `COALESCE(ended_at, updated_at)` and its runs' latest
+/// `COALESCE(ended_at, updated_at)`.
 ///
 /// Idle is `workflow.execution_is_idle` (migration 0210): terminal AND no
 /// task run of it live. A terminal execution can still run work -- an
@@ -2601,7 +2602,8 @@ pub(crate) async fn run_liveness(
     )> = sqlx::query_as(
         "SELECT e.id, \
                 GREATEST(COALESCE(e.ended_at, e.updated_at), \
-                         COALESCE((SELECT max(r.ended_at) FROM workflow.task_runs r \
+                         COALESCE((SELECT max(COALESCE(r.ended_at, r.updated_at)) \
+                                     FROM workflow.task_runs r \
                                     WHERE r.execution_id = e.id), \
                                   COALESCE(e.ended_at, e.updated_at))), \
                 now() \
@@ -2651,7 +2653,8 @@ pub(crate) struct RunLiveness {
     /// execution (the work's `egret.io/execution-id` label) has a row here and
     /// is idle (`workflow.execution_is_idle`: terminal, no run live), with the
     /// end of its last work, `GREATEST(COALESCE(ended_at, updated_at),
-    /// max(task_runs.ended_at))` (package #2b). Such a run was
+    /// max(COALESCE(task_runs.ended_at, task_runs.updated_at)))` (package
+    /// #2b). Such a run was
     /// **superseded**: a `LoopUntil` iteration renamed its row (debt D12), so
     /// no row holds its id any more, but the execution it belonged to is this
     /// database's and is over.
@@ -2686,11 +2689,13 @@ pub(crate) struct RunLiveness {
 /// means no live work", which was false before package #2: an `Exit` with
 /// `SUCCESS`, `WARNING`, `FAILED` or `CANCELLED` leaves its siblings running
 /// in a terminal execution (`executor/exit.rs`), and `afterExecution:`
-/// (package #2b) runs whole lists after the end. A `LoopUntil` beside an
-/// `Exit` or inside `afterExecution:` is superseded while its execution is
-/// terminal, so [`run_liveness`] answers it only once the execution is idle,
-/// and measures the retention from its last run's end (spec §6, D13). The
-/// terminal rules read the run's own row and need no premise.
+/// (package #2b) runs whole lists after the end (a `LoopUntil` is refused
+/// there). The live case is a `LoopUntil` beside an `Exit`: its superseded
+/// iteration's container belongs to an execution that is terminal while a
+/// sibling still runs, so [`run_liveness`] answers it only once the
+/// execution is idle, and measures the retention from its last run's end
+/// (spec §6, D13). The terminal rules read the run's own row and need no
+/// premise.
 pub(crate) fn sweep_decision(
     live: &RunLiveness,
     id: uuid::Uuid,

@@ -135,10 +135,10 @@ async fn execution_is_idle_is_false_while_running(pool: sqlx::PgPool) {
 }
 
 /// Spec §6: a container whose run has no row (a `LoopUntil` iteration D12
-/// renamed) is superseded only when its execution is IDLE. While an
-/// `afterExecution:` run is live the execution is terminal but not idle, so
-/// the container is not judged at all: a superseded iteration inside
-/// `afterExecution:` keeps its container while the phase runs.
+/// renamed) is superseded only when its execution is IDLE. While any run is
+/// live -- an `afterExecution:` run, or the `Exit` sibling the `LoopUntil`
+/// stood beside (a `LoopUntil` inside `afterExecution:` is refused) -- the
+/// execution is terminal but not idle, so the container is not judged.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_superseded_kept_container_is_not_judged_while_after_execution_runs(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
@@ -165,8 +165,9 @@ async fn a_superseded_kept_container_is_not_judged_while_after_execution_runs(po
 }
 
 /// Spec §6: a superseded kept container's retention runs from the LAST end
-/// of the execution's work, `GREATEST(e.ended_at, max(task_runs.ended_at))`,
-/// not from the execution's `ended_at`, which an after-run outlives.
+/// of the execution's work, `GREATEST(e.ended_at, max(COALESCE(r.ended_at,
+/// r.updated_at)))`, not from the execution's `ended_at`, which an after-run
+/// or an `Exit` sibling outlives.
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_superseded_retention_runs_from_the_last_runs_end(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
@@ -195,5 +196,43 @@ async fn the_superseded_retention_runs_from_the_last_runs_end(pool: sqlx::PgPool
         superseded,
         vec![(gone, last_end, false)],
         "judged from the after-run's end (inside the hour), not the execution's (10 h ago)"
+    );
+}
+
+/// B5 fix round 1: a terminal run with no `ended_at` (written before
+/// migration 0183, or by a writer that left it NULL) ended no earlier than
+/// its `updated_at`, and the superseded clock reads that, as `run_liveness`'s
+/// own terminal rule does.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_superseded_retention_reads_a_legacy_runs_updated_at(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    // Arrange: ended 10 h ago; a terminal run with `ended_at` NULL whose row
+    // was last written just now.
+    let ws = seed_workspace(&pool).await;
+    let ex = seed_execution(&pool, ws, "SUCCESS", 10).await;
+    seed_run(&pool, ex, 0, "SUCCESS", 10).await;
+    let legacy = seed_run(&pool, ex, 1, "SUCCESS", 0).await;
+    let written: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "UPDATE workflow.task_runs SET ended_at = NULL, updated_at = now() \
+          WHERE id = $1 RETURNING updated_at",
+    )
+    .bind(legacy)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let gone = Uuid::new_v4();
+    // Act
+    let superseded = egret_workflow::worker::commands::superseded_for_tests(
+        &pool,
+        &[(gone, Some(ex))],
+        Some(Duration::from_secs(3600)),
+    )
+    .await
+    .expect("run_liveness");
+    // Assert
+    assert_eq!(
+        superseded,
+        vec![(gone, written, false)],
+        "judged from the legacy run's last write, not the execution's end"
     );
 }

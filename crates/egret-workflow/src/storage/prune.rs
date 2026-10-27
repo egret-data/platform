@@ -16,8 +16,9 @@
 //! still has index rows or `workflow.loop_file_values` rows, whose state is
 //! terminal (`RunState::is_terminal`, the one list) and whose last work ended
 //! more than `retention_days` ago: the later of its `updated_at` and its task
-//! runs' latest `ended_at` (package #2b: an `afterExecution:` run ends after
-//! its execution, whose row it does not move).
+//! runs' latest end, `COALESCE(ended_at, updated_at)` (package #2b: an
+//! `afterExecution:` run ends after its execution, whose row it does not
+//! move).
 //!
 //! **Keep a source while a dependent runs** (the user's ruling of
 //! 2026-10-04): a family is skipped while any member is in the readable set
@@ -412,8 +413,9 @@ async fn protected_set(conn: &mut PgConnection) -> Result<BTreeSet<Uuid>> {
 }
 
 /// Loop roots whose last work ended more than `retention_days` ago -- the
-/// later of the root's `updated_at` and its task runs' latest `ended_at`,
-/// which an `afterExecution:` run puts after the execution's end -- and whose family
+/// later of the root's `updated_at` and its task runs' latest
+/// `COALESCE(ended_at, updated_at)`, which an `afterExecution:` run puts
+/// after the execution's end -- and whose family
 /// still has index rows or `Loop` values (`workflow.loop_file_values`: a
 /// `Loop` over a trigger's or a replay source's file writes values and no
 /// file), oldest first. The walk starts from those rows (both tables hold
@@ -442,7 +444,8 @@ async fn prune_candidates(
           WHERE r.id IN (SELECT id FROM up WHERE loop_index IS NULL) \
             AND r.state = ANY($1) \
             AND GREATEST(r.updated_at, \
-                         (SELECT max(t.ended_at) FROM workflow.task_runs t \
+                         (SELECT max(COALESCE(t.ended_at, t.updated_at)) \
+                            FROM workflow.task_runs t \
                            WHERE t.execution_id = r.id)) \
                 < now() - make_interval(days => $2) \
             AND NOT (r.id = ANY($3)) \
