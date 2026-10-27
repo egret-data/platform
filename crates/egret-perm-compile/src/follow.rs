@@ -132,6 +132,10 @@ pub struct PermFollow {
     /// Allow grants that matched the source and do not reach the destination
     /// (D4, D14): left as they are, reported.
     pub left: Vec<Grant>,
+    /// Restrictive pattern rows that would refuse, but whose restriction the
+    /// new name already carries (G5). They change nothing; the hold still
+    /// runs, so the cover cannot be deleted while it does (D10).
+    pub covered: Vec<PermRow>,
 }
 
 impl PermFollow {
@@ -142,6 +146,7 @@ impl PermFollow {
             && self.move_grants.is_empty()
             && self.refused.is_empty()
             && self.left.is_empty()
+            && self.covered.is_empty()
     }
 
     /// Something is copied before the commit (the hold must wait).
@@ -269,7 +274,237 @@ pub fn plan(grants: &[Grant], rules: &[Rule], mv: &Move) -> PermFollow {
         let f = follows(scope, mv);
         restrictive(&mut out, PermRow::Rule(r.clone()), f);
     }
+    // G5: a pattern row whose restriction the new name already carries, or
+    // will carry through this move's own copies (D21), does not refuse.
+    let pending = out.clone();
+    for mut r in std::mem::take(&mut out.refused) {
+        if r.multi_level {
+            out.refused.push(r);
+            continue;
+        }
+        match cover(&r.row, grants, rules, mv, &pending) {
+            Cover::Full => out.covered.push(r.row),
+            Cover::Partial { missing } => {
+                r.missing = missing;
+                out.refused.push(r);
+            }
+        }
+    }
     out
+}
+
+// ── a covered destination (G5, spec §5.9, D21) ─────────────────────────────
+
+/// Whether the destination already carries a refused pattern row's
+/// restriction (spec §5.9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cover {
+    Full,
+    /// What the new name lacks, one sentence per gap.
+    Partial {
+        missing: Vec<String>,
+    },
+}
+
+fn principal_label(p: &egret_perm::Principal) -> String {
+    format!("{}:{}", p.kind.as_str(), p.r#ref)
+}
+
+fn same_principal(a: &egret_perm::Principal, b: &egret_perm::Principal) -> bool {
+    a.kind == b.kind && a.r#ref == b.r#ref
+}
+
+/// `a ⊆ b`, principals compared as stored.
+fn subset(a: &[egret_perm::Principal], b: &[egret_perm::Principal]) -> bool {
+    a.iter().all(|x| b.iter().any(|y| same_principal(x, y)))
+}
+
+/// Does a candidate's column level reach what the refused row restricts?
+/// For a column move the destination coordinate carries the new column and
+/// [`reaches`] decides; for a table move a table-level refused row needs a
+/// table-level candidate (no column, or `*`), and a column-level one a
+/// candidate naming the same column (folded) or none.
+fn column_covers(candidate: &Scope, refused: &Scope, mv: &Move) -> bool {
+    if mv.is_column() {
+        return true;
+    }
+    match candidate.column.as_deref() {
+        None | Some("*") => true,
+        Some(c) => refused
+            .column
+            .as_deref()
+            .is_some_and(|r| r != "*" && fold(r) == fold(c)),
+    }
+}
+
+/// G5 for one refused row: the candidates are the catalog's deny grants and
+/// path rules that reach the destination, plus the copies `pending` is about
+/// to insert (D21). Tag rules and hand-written policies never count.
+pub fn cover(
+    refused: &PermRow,
+    grants: &[Grant],
+    rules: &[Rule],
+    mv: &Move,
+    pending: &PermFollow,
+) -> Cover {
+    let to = mv.to.label();
+    let copies_g: Vec<Grant> = pending
+        .copy_grants
+        .iter()
+        .map(|g| Grant {
+            scope: moved_scope(&g.scope, mv),
+            ..g.clone()
+        })
+        .collect();
+    let copies_r: Vec<Rule> = pending
+        .copy_rules
+        .iter()
+        .filter_map(|r| match &r.selector {
+            Selector::Path(s) => Some(Rule {
+                selector: Selector::Path(moved_scope(s, mv)),
+                ..r.clone()
+            }),
+            Selector::Tag { .. } => None,
+        })
+        .collect();
+    let reaches_to = |s: &Scope| s.catalog_id == mv.catalog_id && reaches(s, &mv.to);
+    match refused {
+        PermRow::Grant(r) => {
+            let candidates: Vec<&Grant> = grants
+                .iter()
+                .chain(&copies_g)
+                .filter(|c| {
+                    c.effect == Effect::Deny
+                        && c.origin == GrantOrigin::Explicit
+                        && reaches_to(&c.scope)
+                        && column_covers(&c.scope, &r.scope, mv)
+                        && subset(&c.principals.exclude, &r.principals.exclude)
+                })
+                .collect();
+            let mut missing = Vec::new();
+            for a in &r.actions {
+                let lacking: Vec<String> = r
+                    .principals
+                    .include
+                    .iter()
+                    .filter(|p| {
+                        !candidates.iter().any(|c| {
+                            c.actions.contains(a)
+                                && c.principals.include.iter().any(|q| same_principal(p, q))
+                        })
+                    })
+                    .map(principal_label)
+                    .collect();
+                if !lacking.is_empty() {
+                    missing.push(format!(
+                        "{to} lacks a deny of {} for {}",
+                        a.as_str(),
+                        lacking.join(", ")
+                    ));
+                }
+            }
+            if missing.is_empty() {
+                Cover::Full
+            } else {
+                Cover::Partial { missing }
+            }
+        }
+        PermRow::Rule(r) => {
+            let Selector::Path(rs) = &r.selector else {
+                return Cover::Partial {
+                    missing: vec![format!("{to} is not covered")],
+                };
+            };
+            let candidates: Vec<&Rule> = rules
+                .iter()
+                .chain(&copies_r)
+                .filter(|c| match &c.selector {
+                    Selector::Path(cs) => reaches_to(cs),
+                    Selector::Tag { .. } => false,
+                })
+                .collect();
+            let exemptions_fit = |c: &Rule| {
+                subset(&c.exempt.include, &r.exempt.include)
+                    && subset(&r.exempt.exclude, &c.exempt.exclude)
+            };
+            match &r.kind {
+                egret_perm::RuleKind::Mask {
+                    mask_type,
+                    value_expr,
+                } => {
+                    let column = rs.column.clone().unwrap_or_default();
+                    let same_mask: Vec<&&Rule> = candidates
+                        .iter()
+                        .filter(|c| {
+                            let Selector::Path(cs) = &c.selector else {
+                                return false;
+                            };
+                            let same_column = mv.is_column()
+                                || cs
+                                    .column
+                                    .as_deref()
+                                    .is_some_and(|cc| fold(cc) == fold(&column));
+                            same_column
+                                && matches!(&c.kind, egret_perm::RuleKind::Mask {
+                                    mask_type: t, value_expr: e
+                                } if t == mask_type && e == value_expr)
+                        })
+                        .collect();
+                    if same_mask.iter().any(|c| exemptions_fit(c)) {
+                        return Cover::Full;
+                    }
+                    let column = mv.to.column.clone().unwrap_or(column);
+                    let expr = value_expr.as_deref().map_or_else(
+                        || "no expression".to_string(),
+                        |e| format!("expression {e}"),
+                    );
+                    let missing = if same_mask.is_empty() {
+                        format!("{to} has no mask on {column} with type {mask_type} and {expr}")
+                    } else {
+                        format!("the mask on {column} of {to} exempts more principals")
+                    };
+                    Cover::Partial {
+                        missing: vec![missing],
+                    }
+                }
+                egret_perm::RuleKind::RowFilter { filter_expr } => {
+                    let same_filter: Vec<&&Rule> = candidates
+                        .iter()
+                        .filter(|c| {
+                            matches!(&c.kind, egret_perm::RuleKind::RowFilter { filter_expr: e }
+                                if e == filter_expr)
+                        })
+                        .collect();
+                    if same_filter.iter().any(|c| exemptions_fit(c)) {
+                        return Cover::Full;
+                    }
+                    let missing = if same_filter.is_empty() {
+                        format!("{to} has no row filter \"{filter_expr}\"")
+                    } else {
+                        format!("the row filter \"{filter_expr}\" on {to} exempts more principals")
+                    };
+                    Cover::Partial {
+                        missing: vec![missing],
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// [`cover`] over the catalog's rows as stored, on `conn`.
+///
+/// # Errors
+/// The store's error.
+pub async fn cover_via(
+    conn: &mut sqlx::PgConnection,
+    refused: &PermRow,
+    mv: &Move,
+    pending: &PermFollow,
+) -> Result<Cover, egret_perm::PermError> {
+    let grants = grants_of_catalog_via(conn, mv.catalog_id).await?;
+    let rules = path_rules_of_catalog_via(conn, mv.catalog_id).await?;
+    Ok(cover(refused, &grants, &rules, mv, pending))
 }
 
 /// [`plan`] over the catalog's rows as stored, on `conn`.

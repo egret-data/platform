@@ -4139,8 +4139,9 @@ async fn a_pattern_written_during_the_plan_is_caught_under_the_locks() {
     });
     // The rename has planned and waits for the profile lock.
     tokio::time::sleep(Duration::from_millis(1500)).await;
+    // Another subject than the copied deny's, which would cover it (G5, D21).
     let pattern = env
-        .perm_grant(egret_perm::Effect::Deny, &["sales", "ord*"], &["u"])
+        .perm_grant(egret_perm::Effect::Deny, &["sales", "ord*"], &["w"])
         .await;
     {
         use sqlx::Connection as _;
@@ -4167,4 +4168,100 @@ async fn a_pattern_that_covers_both_names_changes_nothing() {
     assert!(status.is_success(), "rename: {status} {body}");
     assert_eq!(env.perm().await, perm);
     assert!(env.perm_events().await.is_empty());
+}
+
+// ── Grants follow a rename, Task 9: a covered destination (G5, §5.9) ──
+
+/// G5: a pattern deny that would stop covering the table does not refuse
+/// when the new name already carries an equal deny; nothing is copied for it
+/// and the exact-name row restricts the renamed table.
+#[tokio::test]
+async fn a_covered_destination_lets_the_rename_through() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    env.perm_grant(egret_perm::Effect::Allow, &[], &["u", "v"])
+        .await;
+    let pattern = env
+        .perm_grant(egret_perm::Effect::Deny, &["sales", "orders*"], &["u"])
+        .await;
+    env.perm_grant(egret_perm::Effect::Deny, &["sales", "archive"], &["u"])
+        .await;
+    env.recompile_all().await;
+    let perm = env.perm().await;
+    let _plugins = env.start_plugins().await;
+
+    let (status, body) = env.rename("orders", "archive").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(env.grant_at(pattern).await, ("orders*".into(), None));
+    assert_eq!(env.perm().await, perm, "nothing copied, nothing moved");
+    assert!(!env.trino_reads("u", "archive").await);
+    assert!(!env.starrocks_reads("u", "archive").await);
+    assert!(env.trino_reads("v", "archive").await);
+}
+
+/// G5: a partial cover refuses, naming what the new name lacks.
+#[tokio::test]
+async fn a_partially_covered_destination_is_refused_with_what_is_missing() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    env.perm_grant(egret_perm::Effect::Deny, &["sales", "orders*"], &["u", "w"])
+        .await;
+    env.perm_grant(egret_perm::Effect::Deny, &["sales", "archive"], &["u"])
+        .await;
+    let (status, body) = env.rename("orders", "archive").await;
+    env.assert_refused_and_unrenamed(
+        status,
+        &body,
+        &["lacks a deny of read for user:w".to_string()],
+    )
+    .await;
+}
+
+/// G5 under the locks: a cover deleted after the plan read refuses in the
+/// copy transaction.
+#[tokio::test]
+async fn a_cover_deleted_before_the_copy_refuses() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    env.perm_grant(egret_perm::Effect::Deny, &["sales", "orders*"], &["u"])
+        .await;
+    let cover = env
+        .perm_grant(egret_perm::Effect::Deny, &["sales", "archive"], &["u"])
+        .await;
+    let _plugins = env.start_plugins().await;
+    let lock = env.hold_profile_lock().await;
+    let app = env.app.clone();
+    let prefix = env.prefix.clone();
+    let rename = tokio::spawn(async move {
+        send(
+            &app,
+            &prefix,
+            "POST",
+            "tables/rename",
+            Some(json!({
+                "source": {"namespace": ["sales"], "name": "orders"},
+                "destination": {"namespace": ["sales"], "name": "archive"},
+            })),
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // Straight to the store: the hold already holds the name lock a route
+    // write would take (D10).
+    sqlx::query("DELETE FROM perm.grants WHERE id = $1")
+        .bind(cover)
+        .execute(&env.db.pool)
+        .await
+        .expect("delete the cover");
+    {
+        use sqlx::Connection as _;
+        lock.close().await.expect("release");
+    }
+    let (status, body) = rename.await.expect("rename task");
+    env.assert_refused_and_unrenamed(
+        status,
+        &body,
+        &["lacks a deny of read for user:u".to_string()],
+    )
+    .await;
 }

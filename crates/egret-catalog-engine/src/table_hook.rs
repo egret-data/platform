@@ -876,6 +876,7 @@ impl PermMove {
             || !self.follow.copy_rules.is_empty()
             || !self.follow.move_grants.is_empty()
             || !self.follow.left.is_empty()
+            || !self.follow.covered.is_empty()
             || !self.handwritten.report.is_empty()
     }
 

@@ -249,7 +249,15 @@ async fn literal_rows_follow_by_effect() {
 #[tokio::test]
 async fn restrictive_patterns_that_stop_matching_refuse() {
     let Some(f) = fx().await else { return };
-    let both = f.grant(Effect::Deny, &["sales", "ord*"]).await;
+    // Another subject than `prefix`'s, so neither covers the other (G5).
+    let both = f
+        .grant_to(
+            Effect::Deny,
+            &["sales", "ord*"],
+            &[Action::Read],
+            &[group("other")],
+        )
+        .await;
     let prefix = f.grant(Effect::Deny, &["sales", "orders*"]).await;
     let p = f.plan(("sales", "orders"), ("sales", "archive")).await;
     assert_eq!(refused_ids(&p), sorted(vec![both, prefix]));
@@ -317,7 +325,16 @@ async fn a_column_move_selects_column_rows() {
     let deny = f.grant(Effect::Deny, &["sales", "orders", "email"]).await;
     let m = f.rule(mask(), &["sales", "orders", "EMAIL"]).await;
     let allow = f.grant(Effect::Allow, &["sales", "orders", "email"]).await;
-    let pattern = f.rule(mask(), &["sales", "orders", "e*"]).await;
+    // Another mask type than the copied one, which would cover it (G5, D21).
+    let pattern = f
+        .rule(
+            RuleKind::Mask {
+                mask_type: "MASK_NULL".into(),
+                value_expr: None,
+            },
+            &["sales", "orders", "e*"],
+        )
+        .await;
     f.grant(Effect::Deny, &["sales", "orders"]).await;
     f.rule(filter("region = 'eu'"), &["sales", "orders"]).await;
     // Another column's rows stay.
@@ -739,4 +756,301 @@ async fn move_allows_keeps_the_id() {
             .as_deref(),
         Some("orders")
     );
+}
+
+// ── Task 9: a covered destination does not refuse (G5, spec §5.9, D21) ──
+
+use egret_perm_compile::follow::{cover_via, Cover};
+
+impl Fx {
+    /// The refusal `plan` gives one row for `orders → archive`, or `None`.
+    async fn refusal_of(&self, id: Uuid) -> Option<Vec<String>> {
+        let p = self.plan(("sales", "orders"), ("sales", "archive")).await;
+        p.refused
+            .iter()
+            .find(|r| match &r.row {
+                PermRow::Grant(g) => g.id == id,
+                PermRow::Rule(r) => r.id == id,
+            })
+            .map(|r| r.missing.clone())
+    }
+
+    async fn rule_count(&self) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM perm.rules WHERE catalog_id = $1")
+            .bind(self.catalog_id)
+            .fetch_one(&self.db.pool)
+            .await
+            .expect("count")
+    }
+}
+
+fn user(name: &str) -> Principal {
+    Principal {
+        kind: PrincipalKind::User,
+        r#ref: name.into(),
+    }
+}
+
+/// G5: an exact-name deny on the new name with at least the actions and the
+/// subjects covers a pattern deny; so does another pattern, and so do two
+/// denies sharing the work.
+#[tokio::test]
+async fn a_deny_pattern_is_covered_by_an_equal_deny_on_the_new_name() {
+    let Some(f) = fx().await else { return };
+    let pattern = f
+        .grant_to(
+            Effect::Deny,
+            &["sales", "orders*"],
+            &[Action::Read],
+            &[group("contractors")],
+        )
+        .await;
+    assert!(f.refusal_of(pattern).await.is_some(), "uncovered: refused");
+    f.grant_to(
+        Effect::Deny,
+        &["sales", "archive"],
+        &[Action::Read, Action::Write],
+        &[group("contractors"), user("bob")],
+    )
+    .await;
+    assert_eq!(f.refusal_of(pattern).await, None, "covered");
+
+    let Some(f) = fx().await else { return };
+    let pattern = f
+        .grant_to(
+            Effect::Deny,
+            &["sales", "orders*"],
+            &[Action::Read],
+            &[group("contractors")],
+        )
+        .await;
+    f.grant_to(
+        Effect::Deny,
+        &["sales", "arch*"],
+        &[Action::Read],
+        &[group("contractors")],
+    )
+    .await;
+    assert_eq!(
+        f.refusal_of(pattern).await,
+        None,
+        "covered by another pattern"
+    );
+
+    let Some(f) = fx().await else { return };
+    let pattern = f
+        .grant_to(
+            Effect::Deny,
+            &["sales", "orders*"],
+            &[Action::Read, Action::Write],
+            &[group("contractors")],
+        )
+        .await;
+    f.grant_to(
+        Effect::Deny,
+        &["sales", "archive"],
+        &[Action::Read],
+        &[group("contractors")],
+    )
+    .await;
+    assert_eq!(
+        f.refusal_of(pattern).await,
+        Some(vec![
+            "sales.archive lacks a deny of write for group:contractors".into()
+        ])
+    );
+    f.grant_to(
+        Effect::Deny,
+        &["sales", "archive"],
+        &[Action::Write],
+        &[group("contractors")],
+    )
+    .await;
+    assert_eq!(
+        f.refusal_of(pattern).await,
+        None,
+        "two denies share the work"
+    );
+}
+
+/// G5: a mask of the same type and expression, exempting no more, covers.
+#[tokio::test]
+async fn a_mask_pattern_is_covered_by_an_equal_mask_on_the_new_name() {
+    let Some(f) = fx().await else { return };
+    let pattern = f
+        .rule_named(
+            &unique("pm"),
+            mask(),
+            &["sales", "orders*", "email"],
+            PrincipalSet {
+                include: vec![Principal {
+                    kind: PrincipalKind::Role,
+                    r#ref: "pii-cleared".into(),
+                }],
+                exclude: Vec::new(),
+            },
+        )
+        .await;
+    // Another type, then the same type with another expression: partial.
+    let nullify = f
+        .rule(
+            RuleKind::Mask {
+                mask_type: "MASK_NULL".into(),
+                value_expr: None,
+            },
+            &["sales", "archive", "email"],
+        )
+        .await;
+    assert_eq!(
+        f.refusal_of(pattern).await,
+        Some(vec![
+            "sales.archive has no mask on email with type MASK_HASH and no expression".into()
+        ])
+    );
+    let _ = nullify;
+    let spaced = f
+        .rule(
+            RuleKind::Mask {
+                mask_type: "MASK_HASH".into(),
+                value_expr: Some(" ".into()),
+            },
+            &["sales", "archive", "email"],
+        )
+        .await;
+    assert!(
+        f.refusal_of(pattern).await.is_some(),
+        "{spaced}: another expression"
+    );
+    f.rule(mask(), &["sales", "archive", "EMAIL"]).await;
+    assert_eq!(f.refusal_of(pattern).await, None, "covered, column folded");
+}
+
+/// G5: a row filter of the same text and exemptions covers; another text
+/// does not.
+#[tokio::test]
+async fn a_row_filter_pattern_is_covered_by_an_equal_filter_on_the_new_name() {
+    let Some(f) = fx().await else { return };
+    let pattern = f.rule(filter("region = 'eu'"), &["sales", "orders*"]).await;
+    f.rule(filter("region='eu'"), &["sales", "archive"]).await;
+    assert_eq!(
+        f.refusal_of(pattern).await,
+        Some(vec![
+            "sales.archive has no row filter \"region = 'eu'\"".into()
+        ])
+    );
+    f.rule(filter("region = 'eu'"), &["sales", "archive"]).await;
+    assert_eq!(f.refusal_of(pattern).await, None);
+}
+
+/// G5: a partial cover refuses and names what is missing; a deny on a member
+/// does not cover a deny on the group.
+#[tokio::test]
+async fn a_partial_cover_refuses_and_names_what_is_missing() {
+    let Some(f) = fx().await else { return };
+    let pattern = f
+        .grant_to(
+            Effect::Deny,
+            &["sales", "orders*"],
+            &[Action::Read],
+            &[group("contractors"), group("vendors")],
+        )
+        .await;
+    f.grant_to(
+        Effect::Deny,
+        &["sales", "archive"],
+        &[Action::Read],
+        &[group("contractors")],
+    )
+    .await;
+    f.grant_to(
+        Effect::Deny,
+        &["sales", "archive"],
+        &[Action::Read],
+        &[user("vera")],
+    )
+    .await;
+    assert_eq!(
+        f.refusal_of(pattern).await,
+        Some(vec![
+            "sales.archive lacks a deny of read for group:vendors".into()
+        ])
+    );
+    let p = f.plan(("sales", "orders"), ("sales", "archive")).await;
+    let mv = f.table_move("orders", "archive");
+    let message = refusal_message(&p.refused, &[], &mv).expect("refused");
+    assert!(
+        message.contains("sales.archive lacks a deny of read for group:vendors"),
+        "{message}"
+    );
+}
+
+/// D21: a copy this rename makes counts as a cover.
+#[tokio::test]
+async fn a_copy_this_rename_makes_counts_as_a_cover() {
+    let Some(f) = fx().await else { return };
+    let pattern = f
+        .grant_to(
+            Effect::Deny,
+            &["sales", "orders*"],
+            &[Action::Read],
+            &[group("contractors")],
+        )
+        .await;
+    f.grant_to(
+        Effect::Deny,
+        &["sales", "orders"],
+        &[Action::Read],
+        &[group("contractors")],
+    )
+    .await;
+    assert_eq!(f.refusal_of(pattern).await, None);
+}
+
+/// G5 guards: a tag-selected mask and a hand-written policy on the new name
+/// are never candidates, and deciding a cover writes nothing.
+#[tokio::test]
+async fn tag_rules_and_handwritten_policies_never_cover_and_nothing_is_written() {
+    let Some(f) = fx().await else { return };
+    let pattern = f.rule(mask(), &["sales", "orders*", "email"]).await;
+    let key = unique("pii");
+    sqlx::query("INSERT INTO tags (key, name) VALUES ($1, $1)")
+        .bind(&key)
+        .execute(&f.db.pool)
+        .await
+        .expect("tag");
+    let mut tx = f.db.pool.begin().await.expect("begin");
+    egret_perm::create_rule_in_tx(
+        &mut tx,
+        &Rule {
+            id: Uuid::nil(),
+            name: unique("tag-mask"),
+            kind: mask(),
+            selector: Selector::Tag { key },
+            exempt: PrincipalSet::default(),
+        },
+    )
+    .await
+    .expect("tag rule");
+    tx.commit().await.expect("commit");
+    let cat = f.catalog_name().await;
+    let profile = f.profile().await;
+    f.policy(
+        profile,
+        json!({"policyType": 1, "resources": {
+            "catalog": {"values": [cat]}, "schema": {"values": ["sales"]},
+            "table": {"values": ["archive"]}, "column": {"values": ["email"]}},
+            "dataMaskPolicyItems": [{"users": ["u"], "dataMaskInfo": {"dataMaskType": "MASK_HASH"}}]}),
+        true,
+        "operator",
+    )
+    .await;
+    let before = f.rule_count().await;
+    let p = f.plan(("sales", "orders"), ("sales", "archive")).await;
+    let row = p.refused.first().expect("refused").row.clone();
+    let mut conn = f.db.pool.acquire().await.expect("acquire");
+    let c = cover_via(&mut conn, &row, &f.table_move("orders", "archive"), &p)
+        .await
+        .expect("cover");
+    assert!(matches!(c, Cover::Partial { .. }), "{c:?} {pattern}");
+    assert_eq!(f.rule_count().await, before, "egret inserts no cover");
 }

@@ -495,3 +495,24 @@ Deviations the code forces are recorded here, per task, as they happen.
   tag expansions and clearance masks, which move with the classifications and stay correctly uncounted; path rules
   and grants never reach them.
 - **Migrations.** `main`'s newest is `0210`. None is planned (D18).
+
+### Tasks 1-9 (2026-10-28)
+
+- **Task 6, D11 widened by two cases.** A move whose only work is an allow pattern that stops covering the table
+  (`left`), a plain hand-written allow to report (D5), or a covered pattern row (G5) also takes the hold, without a
+  wait: the `*:left` events are recorded in `finish`, which only the hold has, and a covered pattern needs its cover
+  to stay put until the commit. The hold's name locks give that: a route write deleting the cover on the destination
+  name answers 409 `table_change_held` (D10). Cost: milliseconds, as for allows.
+- **Task 6, waits.** A plan with no classification rows and no restrictive copy waits for nothing (StarRocks
+  included): the overlay of such a plan changes no StarRocks body that #755's after-commit recompile would not.
+- **Task 6, test plugin.** The fake Trino plugin (`tests/common/plugins.rs`) polls `/plugins/policies/download` too,
+  under the same plugin id, as E26 measured.
+- **Task 7.** The allow move in `finish` landed with Task 6's commit (the code path was the same edit); Task 7's reds
+  were shown on the pre-Task-6 hook and by deleting the move (`take(0)`).
+- **Task 8, the plan-time read.** The plan's refusals were already in Task 6's commit; Task 8's reds were run on the
+  pre-Task-6 hook. The "pattern written during the plan" test holds the hook's own profile advisory lock from the
+  test's connection, so the hook plans, waits, and re-reads under the lock after the test writes the pattern: no test
+  hook in production code.
+- **Task 9, covers.** `follow::plan` applies G5 itself: a covered pattern row goes to `PermFollow::covered` with no
+  refusal. Two follow tests of Task 2 met G5: `ord*` covered `orders*` (same body), and a column move's own mask copy
+  (D21) covered a mask pattern `e*`; the tests now give those rows another subject or mask type.
