@@ -93,6 +93,48 @@ pub struct Input {
     /// `Input` for [`Self::item_type`]'s reason; `None` on every other type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_file_extensions: Option<Vec<String>>,
+    /// `StringInput.validator` / `SecretInput.validator` -- a regular
+    /// expression the value must match. Modelled only; enforced by a later
+    /// package-#3 task. Flat on `Input` for [`Self::item_type`]'s reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validator: Option<String>,
+    /// `IntInput` / `FloatInput` / `DurationInput` `min`: a JSON number
+    /// (`INT`, `FLOAT`) or an ISO-8601 duration string (`DURATION`). Kept as
+    /// written so a Kestra flow round-trips verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<serde_json::Value>,
+    /// Upper bound; see [`Self::min`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<serde_json::Value>,
+    /// `DateInput` / `DateTimeInput` / `TimeInput` `after`: the value must be
+    /// later than this (an ISO date, datetime or time string, kept as written).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    /// The value must be earlier than this; see [`Self::after`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+    /// `SelectInput` / `MultiselectInput` `values`: scalars or
+    /// `{label, value}` objects, kept as written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub values: Option<Vec<serde_json::Value>>,
+    /// `SelectInput` / `MultiselectInput` `expression`: a Pebble expression
+    /// producing the option list instead of `values`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<String>,
+    /// `SelectInput` / `MultiselectInput` `allowCustomValue` (Kestra default
+    /// `false`): a value outside the options is accepted.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_custom_value: bool,
+    /// `SelectInput.isRadio`: render as radio buttons. `None` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_radio: Option<bool>,
+    /// `SelectInput` / `MultiselectInput` `autoSelectFirst`. `None` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_select_first: Option<bool>,
+    /// `JsonInput.jsonSchema`: a JSON Schema the value must satisfy, kept as
+    /// written (an object, or a string Kestra would parse).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json_schema: Option<serde_json::Value>,
 }
 
 const fn default_true() -> bool {
@@ -215,5 +257,52 @@ prefill: world
             .unwrap()
             .get("allowedFileExtensions")
             .is_none());
+    }
+
+    /// Package #3 A1: the validation keys parse in Kestra's spelling and
+    /// re-serialise as written (numbers stay numbers, durations strings).
+    #[test]
+    fn validation_keys_round_trip_verbatim() {
+        let cases = [
+            "id: s\ntype: STRING\nvalidator: ^a+$\n",
+            "id: n\ntype: INT\nmin: 1\nmax: 10\n",
+            "id: f\ntype: FLOAT\nmin: 0.5\nmax: 2.5\n",
+            "id: d\ntype: DURATION\nmin: PT1S\nmax: PT1H\n",
+            "id: t\ntype: DATE\nafter: '2024-01-01'\nbefore: '2025-01-01'\n",
+            "id: s\ntype: SELECT\nvalues:\n- a\n- 2\n- label: L\n  value: v\nexpression: '{{ x }}'\nallowCustomValue: true\nisRadio: true\nautoSelectFirst: false\n",
+            "id: j\ntype: JSON\njsonSchema:\n  type: object\n",
+        ];
+        for yaml in cases {
+            let i: Input = serde_norway::from_str(yaml).unwrap_or_else(|e| panic!("{yaml}: {e}"));
+            let want: serde_json::Value = serde_norway::from_str(yaml).unwrap();
+            let mut got = serde_json::to_value(&i).unwrap();
+            got.as_object_mut().unwrap().remove("required");
+            assert_eq!(got, want, "{yaml}");
+        }
+        let i: Input = serde_norway::from_str("id: n\ntype: INT\nmin: 1\n").unwrap();
+        assert_eq!(i.min, Some(serde_json::json!(1)));
+        assert!(i.max.is_none() && !i.allow_custom_value);
+    }
+
+    #[test]
+    fn absent_validation_keys_are_not_serialised() {
+        let i: Input = serde_norway::from_str("id: x\ntype: STRING\n").unwrap();
+        let json = serde_json::to_value(&i).unwrap();
+        for k in [
+            "validator",
+            "min",
+            "max",
+            "after",
+            "before",
+            "values",
+            "expression",
+            "allowCustomValue",
+            "isRadio",
+            "autoSelectFirst",
+            "jsonSchema",
+        ] {
+            assert!(json.get(k).is_none(), "{k}");
+        }
+        assert!(!i.allow_custom_value);
     }
 }

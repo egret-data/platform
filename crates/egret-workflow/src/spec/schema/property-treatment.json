@@ -74,8 +74,8 @@
       "type": "honoured"
     },
     "io.kestra.core.models.flows.input.DateInput-2": {
-      "after": "ignored",
-      "before": "ignored",
+      "after": "honoured",
+      "before": "honoured",
       "defaults": "honoured",
       "dependsOn": "honoured",
       "description": "honoured",
@@ -86,8 +86,8 @@
       "type": "honoured"
     },
     "io.kestra.core.models.flows.input.DateTimeInput-2": {
-      "after": "ignored",
-      "before": "ignored",
+      "after": "honoured",
+      "before": "honoured",
       "defaults": "honoured",
       "dependsOn": "honoured",
       "description": "honoured",
@@ -103,8 +103,8 @@
       "description": "honoured",
       "displayName": "honoured",
       "id": "honoured",
-      "max": "ignored",
-      "min": "ignored",
+      "max": "honoured",
+      "min": "honoured",
       "prefill": "honoured",
       "required": "honoured",
       "type": "honoured"
@@ -136,8 +136,8 @@
       "description": "honoured",
       "displayName": "honoured",
       "id": "honoured",
-      "max": "ignored",
-      "min": "ignored",
+      "max": "honoured",
+      "min": "honoured",
       "prefill": "honoured",
       "required": "honoured",
       "type": "honoured"
@@ -159,8 +159,8 @@
       "description": "honoured",
       "displayName": "honoured",
       "id": "honoured",
-      "max": "ignored",
-      "min": "ignored",
+      "max": "honoured",
+      "min": "honoured",
       "prefill": "honoured",
       "required": "honoured",
       "type": "honoured"
@@ -181,25 +181,25 @@
       "description": "honoured",
       "displayName": "honoured",
       "id": "honoured",
-      "jsonSchema": "ignored",
+      "jsonSchema": "honoured",
       "prefill": "honoured",
       "required": "honoured",
       "type": "honoured"
     },
     "io.kestra.core.models.flows.input.MultiselectInput-2": {
-      "allowCustomValue": "ignored",
-      "autoSelectFirst": "ignored",
+      "allowCustomValue": "honoured",
+      "autoSelectFirst": "honoured",
       "defaults": "honoured",
       "dependsOn": "honoured",
       "description": "honoured",
       "displayName": "honoured",
-      "expression": "ignored",
+      "expression": "honoured",
       "id": "honoured",
       "itemType": "honoured",
       "prefill": "honoured",
       "required": "honoured",
       "type": "honoured",
-      "values": "ignored"
+      "values": "honoured"
     },
     "io.kestra.core.models.flows.input.ReusableInputsInput-1": {
       "defaults": "honoured",
@@ -223,22 +223,22 @@
       "prefill": "honoured",
       "required": "honoured",
       "type": "honoured",
-      "validator": "ignored"
+      "validator": "honoured"
     },
     "io.kestra.core.models.flows.input.SelectInput-2": {
-      "allowCustomValue": "ignored",
-      "autoSelectFirst": "ignored",
+      "allowCustomValue": "honoured",
+      "autoSelectFirst": "honoured",
       "defaults": "honoured",
       "dependsOn": "honoured",
       "description": "honoured",
       "displayName": "honoured",
-      "expression": "ignored",
+      "expression": "honoured",
       "id": "honoured",
-      "isRadio": "ignored",
+      "isRadio": "honoured",
       "prefill": "honoured",
       "required": "honoured",
       "type": "honoured",
-      "values": "ignored"
+      "values": "honoured"
     },
     "io.kestra.core.models.flows.input.StringInput-2": {
       "defaults": "honoured",
@@ -249,11 +249,11 @@
       "prefill": "honoured",
       "required": "honoured",
       "type": "honoured",
-      "validator": "ignored"
+      "validator": "honoured"
     },
     "io.kestra.core.models.flows.input.TimeInput-2": {
-      "after": "ignored",
-      "before": "ignored",
+      "after": "honoured",
+      "before": "honoured",
       "defaults": "honoured",
       "dependsOn": "honoured",
       "description": "honoured",
