@@ -56,6 +56,9 @@ pub mod action {
     /// An allow pattern that covered a renamed table and no longer does:
     /// nothing written, the event is the record (spec D4, D9).
     pub const GRANT_LEFT: &str = "perm_grant:left";
+    /// A plain hand-written allow that names a renamed table literally and
+    /// still names the old name (spec D5, D9).
+    pub const RANGER_POLICY_LEFT: &str = "ranger_policy:left";
 }
 
 /// The `resource_type` each governance action is recorded under.
@@ -157,6 +160,11 @@ pub const FAMILIES: &[(&str, &str, Family)] = &[
     (action::GRANT_COPY, resource::PERM_GRANT, Family::Policy),
     (action::RULE_COPY, resource::PERM_RULE, Family::Policy),
     (action::GRANT_LEFT, resource::PERM_GRANT, Family::Policy),
+    (
+        action::RANGER_POLICY_LEFT,
+        resource::RANGER_POLICY,
+        Family::Policy,
+    ),
     ("role:assign", "grant", Family::Policy),
     ("role:unassign", "grant", Family::Policy),
     ("tag:assign", "catalog", Family::Tag),
@@ -191,6 +199,7 @@ pub const GOVERNANCE_ACTIONS: &[&str] = &[
     action::GRANT_COPY,
     action::RULE_COPY,
     action::GRANT_LEFT,
+    action::RANGER_POLICY_LEFT,
 ];
 
 /// The family of a stored event, or `None` when it is not governance.

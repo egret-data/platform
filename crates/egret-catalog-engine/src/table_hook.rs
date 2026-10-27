@@ -2241,7 +2241,11 @@ async fn record_perm_events(
     use egret_audit::governance::{action, record_change_by, resource};
     let nothing = moved_allows.iter().all(Vec::is_empty)
         && copied.copies.iter().all(follow::Copies::is_empty)
-        && copied.perm.moves.iter().all(|m| m.follow.left.is_empty());
+        && copied
+            .perm
+            .moves
+            .iter()
+            .all(|m| m.follow.left.is_empty() && m.handwritten.report.is_empty());
     if nothing {
         return Ok(());
     }
@@ -2292,6 +2296,25 @@ async fn record_perm_events(
             .map_err(|e| err(&e))?;
             tracing::warn!(grant = %g.id, from = %m.mv.from.label(), to = %m.mv.to.label(),
                 "a renamed table left an allow grant behind: it no longer covers the table");
+        }
+        // A plain hand-written allow still names the old name: egret never
+        // rewrites a hand-written policy (G3), so the event is the record.
+        for h in &m.handwritten.report {
+            record_change_by(
+                tx,
+                caller.actor(),
+                action::RANGER_POLICY_LEFT,
+                resource::RANGER_POLICY,
+                h.id.to_string(),
+                serde_json::json!({
+                    "before": {"id": h.id, "service": h.profile, "name": h.name},
+                    "after": null, "rename": rename, "trigger": trigger,
+                }),
+            )
+            .await
+            .map_err(|e| err(&e))?;
+            tracing::warn!(policy = %h.label(), from = %m.mv.from.label(), to = %m.mv.to.label(),
+                "a renamed table is still named by a hand-written allow policy");
         }
         let Some(copies) = copied.copies.get(i) else {
             continue;

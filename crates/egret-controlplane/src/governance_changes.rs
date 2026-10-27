@@ -315,6 +315,7 @@ fn truncated_phrase(action: &str) -> &'static str {
         action::GRANT_COPY => "copied a grant to a renamed table",
         action::RULE_COPY => "copied a rule to a renamed table",
         action::GRANT_LEFT => "renamed a table an allow grant no longer covers",
+        action::RANGER_POLICY_LEFT => "renamed a table a hand-written policy still names",
         _ => "made a change",
     }
 }
@@ -735,6 +736,30 @@ async fn entry(c: &mut PgConnection, row: ChangeRow) -> Result<ChangeEntry, sqlx
                     s(g, "effect")
                 ),
                 uuid.map(|id| Ref::Grant { id }),
+                live,
+            )
+        }
+        action::RANGER_POLICY_LEFT => {
+            let p = d.get("before").unwrap_or(&Value::Null);
+            let rename = d.get("rename").unwrap_or(&Value::Null);
+            let live = exists(
+                c,
+                "SELECT EXISTS (SELECT 1 FROM policy.authz_policies WHERE id::text = $1)",
+                &id,
+            )
+            .await?;
+            (
+                format!(
+                    "{a} renamed {} to {}; hand-written policy {}/{} still names {}",
+                    s(rename, "from"),
+                    s(rename, "to"),
+                    s(p, "service"),
+                    s(p, "name"),
+                    s(rename, "from")
+                ),
+                Some(Ref::Profile {
+                    name: s(p, "service").to_string(),
+                }),
                 live,
             )
         }

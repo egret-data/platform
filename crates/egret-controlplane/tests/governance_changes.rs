@@ -1188,3 +1188,36 @@ async fn a_left_allow_reads_with_its_catalog_client() {
          no longer covers it"
     );
 }
+
+/// Grants-follow spec §5.7: a hand-written allow a rename left naming the old
+/// name.
+#[tokio::test]
+async fn a_left_handwritten_policy_reads_with_its_catalog_client() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    let actor = json!({"kind": "catalog_client", "id": Uuid::new_v4(), "client_id": "trino-main-7f3a",
+                       "name": "trino-main", "consumer_type": "engine"});
+    let detail = json!({
+        "before": {"id": 412, "service": "lake-trino", "name": "orders-read"},
+        "after": null, "rename": {"from": "sales.orders", "to": "sales.orders_v2"},
+        "trigger": "iceberg_rename", "actor": actor,
+    });
+    sqlx::query(
+        "INSERT INTO audit.audit_log (kind, action, resource_type, resource_id, detail) \
+         VALUES ('mutation', $1, 'ranger_policy', '412', $2)",
+    )
+    .bind(action::RANGER_POLICY_LEFT)
+    .bind(detail)
+    .execute(&f.db.pool)
+    .await
+    .expect("event");
+    let policy_reader = session(&f, &["policy:read"]).await;
+    let st = state(&f, None).await;
+    let (status, body) = changes(&st, &policy_reader, "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["entries"][0]["sentence"],
+        "Catalog client trino-main renamed sales.orders to sales.orders_v2; hand-written policy \
+         lake-trino/orders-read still names sales.orders"
+    );
+}

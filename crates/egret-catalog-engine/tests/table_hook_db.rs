@@ -4265,3 +4265,152 @@ async fn a_cover_deleted_before_the_copy_refuses() {
     )
     .await;
 }
+
+// ── Grants follow a rename, Task 10: hand-written policies (G3, D5) ──
+
+impl Env {
+    /// An operator policy on the Trino profile, returning its id.
+    async fn handwritten(&self, body: Value, enabled: bool) -> i64 {
+        sqlx::query_scalar(
+            "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, enabled, managed_by) \
+             VALUES ($1, $2, $3, $4, 'operator') RETURNING id",
+        )
+        .bind(self.trino_id)
+        .bind(unique("th-hand"))
+        .bind(body)
+        .bind(enabled)
+        .fetch_one(&self.db.pool)
+        .await
+        .expect("hand-written policy")
+    }
+
+    async fn policy_row(&self, id: i64) -> (Value, i64) {
+        sqlx::query_as("SELECT policy_jsonb, version FROM policy.authz_policies WHERE id = $1")
+            .bind(id)
+            .fetch_one(&self.db.pool)
+            .await
+            .expect("policy")
+    }
+
+    fn access_policy(&self, table: &[&str], excludes: bool, deny: bool) -> Value {
+        let item = json!([{"users": ["u"], "accesses": [{"type": "select", "isAllowed": true}]}]);
+        json!({
+            "policyType": 0,
+            "resources": {
+                "catalog": {"values": [self.catalog], "isExcludes": false},
+                "schema": {"values": ["sales"], "isExcludes": false},
+                "table": {"values": table, "isExcludes": excludes},
+                "column": {"values": ["*"], "isExcludes": false},
+            },
+            "policyItems": if deny { json!([]) } else { item.clone() },
+            "denyPolicyItems": if deny { item } else { json!([]) },
+        })
+    }
+}
+
+/// G3, D5: an enabled operator mask, an exclusion-list allow or a deny naming
+/// the table refuses the rename, naming the policy; the policy is untouched.
+#[tokio::test]
+async fn a_handwritten_mask_naming_the_table_refuses_the_rename() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "email")]).await;
+    let mask = env
+        .handwritten(
+            json!({
+                "policyType": 1,
+                "resources": {
+                    "catalog": {"values": [env.catalog]}, "schema": {"values": ["sales"]},
+                    "table": {"values": ["orders"]}, "column": {"values": ["email"]},
+                },
+                "dataMaskPolicyItems": [{"users": ["u"],
+                                         "dataMaskInfo": {"dataMaskType": "MASK_HASH"}}],
+            }),
+            true,
+        )
+        .await;
+    let before = env.policy_row(mask).await;
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    let label = format!("{}/", env.trino_name);
+    env.assert_refused_and_unrenamed(status, &body, &[label.clone(), format!("({mask})")])
+        .await;
+    assert_eq!(
+        env.policy_row(mask).await,
+        before,
+        "byte-identical, same version"
+    );
+
+    for (excludes, deny) in [(true, false), (false, true)] {
+        sqlx::query(
+            "DELETE FROM policy.authz_policies WHERE service_id = $1 AND managed_by = 'operator'",
+        )
+        .bind(env.trino_id)
+        .execute(&env.db.pool)
+        .await
+        .expect("clear");
+        let id = env
+            .handwritten(env.access_policy(&["orders"], excludes, deny), true)
+            .await;
+        let (status, body) = env.rename("orders", "orders_v2").await;
+        env.assert_refused_and_unrenamed(status, &body, &[format!("({id})")])
+            .await;
+    }
+}
+
+/// D5: a plain hand-written allow naming the table is reported
+/// (`ranger_policy:left`), not refused, and stays as it was.
+#[tokio::test]
+async fn a_plain_handwritten_allow_is_reported() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    let allow = env
+        .handwritten(
+            env.access_policy(&["orders", "customers"], false, false),
+            true,
+        )
+        .await;
+    let before = env.policy_row(allow).await;
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(env.policy_row(allow).await, before);
+    let left: Vec<(String, Value)> = sqlx::query_as(
+        "SELECT resource_id, detail FROM audit.audit_log \
+          WHERE action = 'ranger_policy:left' AND resource_id = $1",
+    )
+    .bind(allow.to_string())
+    .fetch_all(&env.db.pool)
+    .await
+    .expect("events");
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert_eq!(left[0].1["before"]["service"], json!(env.trino_name));
+    assert_eq!(
+        left[0].1["rename"],
+        json!({"from": "sales.orders", "to": "sales.orders_v2"})
+    );
+}
+
+/// D5 guards: a disabled policy, or one on a profile not bound to the
+/// catalog, does not refuse.
+#[tokio::test]
+async fn a_disabled_or_unbound_policy_does_not_refuse() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    env.handwritten(env.access_policy(&["orders"], false, true), false)
+        .await;
+    let unbound = env
+        .policy
+        .create_service(&unique("th_unbound"), "trino", &json!({}))
+        .await
+        .expect("unbound profile");
+    sqlx::query(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, enabled, managed_by) \
+         VALUES ($1, $2, $3, true, 'operator')",
+    )
+    .bind(unbound.id)
+    .bind(unique("th-unbound"))
+    .bind(env.access_policy(&["orders"], false, true))
+    .execute(&env.db.pool)
+    .await
+    .expect("unbound policy");
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+}
