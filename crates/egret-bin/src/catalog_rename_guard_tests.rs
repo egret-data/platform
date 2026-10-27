@@ -1,0 +1,727 @@
+//! The catalog guard authorizes a rename by its source and its destination
+//! (spec `docs/en/specs/2026-10-27-catalog-rename-authorizes-source-design.md`).
+//!
+//! Every test drives the REAL [`EgretCatalogGuard`] in front of lakekeeper's
+//! real Iceberg router, wired as `serve` wires it (`mount_catalog_engine`: the
+//! guard, the view hold, the table hook), on an in-memory warehouse. Tables
+//! and views are made through lakekeeper with no guard in front.
+//!
+//! DB-gated; self-skips only under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS.
+
+use super::{EgretCatalogGuard, CATALOG_AUDIENCE};
+use axum::body::Body;
+use axum::http::StatusCode;
+use egret_catalog_engine::{
+    build_state, catalog_engine_router, create_memory_warehouse, ensure_bootstrapped,
+    front_catalog_router, mount_catalog_engine, run_lakekeeper_migrations, GrantInput, TableHook,
+    ViewHold,
+};
+use egret_machine_idp::SigningKeyStore as _;
+use serde_json::{json, Value};
+use std::sync::Arc;
+use tower::ServiceExt as _;
+
+const SYSTEM_USER: &str = "egret-system";
+
+fn unique(prefix: &str) -> String {
+    format!(
+        "{prefix}_{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..12]
+    )
+}
+
+static LAKEKEEPER: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+/// The view hold's EXPLAIN never runs here: no view in these tests carries
+/// lineage or a classification.
+struct NoExplain;
+
+#[async_trait::async_trait]
+impl egret_perm_compile::lineage::ExplainRunner for NoExplain {
+    async fn explain_io(&self, _: &str, _: &str, _: &str) -> Result<Value, String> {
+        Err("no EXPLAIN in the rename guard tests".into())
+    }
+}
+
+struct Env {
+    /// The guard, the view hold and the table hook in front of lakekeeper.
+    app: axum::Router,
+    /// Lakekeeper with nothing in front.
+    raw: axum::Router,
+    keys: egret_machine_idp::PgSigningKeyStore,
+    catalog: egret_catalog_engine::CatalogStore,
+    prefix: String,
+    warehouse: String,
+    warehouse_id: uuid::Uuid,
+}
+
+/// A warehouse with namespaces `sales`, `stage`, `corp` and `corp.fin`.
+async fn env() -> Option<Env> {
+    let dsn = egret_test_db::url().await?;
+    let db = egret_metastore::Db::connect(&dsn, 10)
+        .await
+        .expect("connect");
+    db.migrate().await.expect("migrate");
+    LAKEKEEPER
+        .get_or_init(|| async {
+            run_lakekeeper_migrations(&dsn)
+                .await
+                .expect("lakekeeper migrations");
+            let (state, _) = build_state(&dsn, SYSTEM_USER).await.expect("state");
+            ensure_bootstrapped(state, SYSTEM_USER)
+                .await
+                .expect("bootstrap");
+        })
+        .await;
+    let (state, _) = build_state(&dsn, SYSTEM_USER).await.expect("state");
+    let prefix = create_memory_warehouse(state.clone(), SYSTEM_USER, &unique("rnwh"))
+        .await
+        .expect("lakekeeper warehouse");
+    let pool = &db.pool;
+    let ws: uuid::Uuid =
+        sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,'RN') RETURNING id")
+            .bind(unique("rn-ws"))
+            .fetch_one(pool)
+            .await
+            .expect("workspace");
+    let sc: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
+         VALUES ($1,'us-east-1','b','AK') RETURNING id",
+    )
+    .bind(unique("rn-sc"))
+    .fetch_one(pool)
+    .await
+    .expect("storage connection");
+    let warehouse = unique("rn_wh");
+    let warehouse_id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id, \
+         lakekeeper_warehouse_id) VALUES ($1,$2,$3,$4) RETURNING id",
+    )
+    .bind(&warehouse)
+    .bind(ws)
+    .bind(sc)
+    .bind(&prefix)
+    .fetch_one(pool)
+    .await
+    .expect("warehouse");
+
+    let guard: Arc<dyn egret_catalog_engine::CatalogGuard> = Arc::new(EgretCatalogGuard {
+        keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
+        catalog: egret_catalog_engine::CatalogStore::new(db.clone()),
+    });
+    let hold = Arc::new(ViewHold::new(db.clone(), Arc::new(NoExplain)));
+    let hook = Arc::new(TableHook::new(db.clone()));
+    let env = Env {
+        app: mount_catalog_engine(state.clone(), Some(guard), Some(hold), Some(hook)),
+        raw: front_catalog_router(catalog_engine_router(state), None, None),
+        keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
+        catalog: egret_catalog_engine::CatalogStore::new(db),
+        prefix,
+        warehouse,
+        warehouse_id,
+    };
+    for ns in [
+        json!(["sales"]),
+        json!(["stage"]),
+        json!(["corp"]),
+        json!(["corp", "fin"]),
+    ] {
+        let (status, body) = env
+            .send(
+                &env.raw,
+                None,
+                "POST",
+                "namespaces",
+                json!({ "namespace": ns }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "create namespace {ns}: {body}");
+    }
+    Some(env)
+}
+
+/// One grant of a role.
+struct Grant<'a> {
+    securable: &'a str,
+    namespace: Option<&'a [&'a str]>,
+    table: Option<&'a str>,
+    privilege: &'a str,
+}
+
+fn grant<'a>(
+    securable: &'a str,
+    namespace: Option<&'a [&'a str]>,
+    table: Option<&'a str>,
+    privilege: &'a str,
+) -> Grant<'a> {
+    Grant {
+        securable,
+        namespace,
+        table,
+        privilege,
+    }
+}
+
+impl Env {
+    async fn send(
+        &self,
+        app: &axum::Router,
+        token: Option<&str>,
+        method: &str,
+        path: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        self.send_bytes(app, token, method, path, body.to_string().into_bytes())
+            .await
+    }
+
+    async fn send_bytes(
+        &self,
+        app: &axum::Router,
+        token: Option<&str>,
+        method: &str,
+        path: &str,
+        body: Vec<u8>,
+    ) -> (StatusCode, Value) {
+        let mut req = axum::http::Request::builder()
+            .method(method)
+            .uri(format!("/{}/{path}", self.prefix))
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            req = req.header("authorization", format!("Bearer {t}"));
+        }
+        let body = if method == "GET" {
+            Body::empty()
+        } else {
+            Body::from(body)
+        };
+        let resp = app.clone().oneshot(req.body(body).unwrap()).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()));
+        (status, value)
+    }
+
+    /// A token for a fresh role holding exactly `grants`.
+    async fn token_for(&self, consumer: &str, grants: &[Grant<'_>]) -> String {
+        let role_name = unique("rn-role");
+        let role = self
+            .catalog
+            .create_role(self.warehouse_id, &role_name, consumer, None)
+            .await
+            .expect("role");
+        for g in grants {
+            self.catalog
+                .add_grant(
+                    role.id,
+                    &GrantInput {
+                        securable_type: g.securable.into(),
+                        namespace: g
+                            .namespace
+                            .map(|n| n.iter().map(|s| s.to_string()).collect()),
+                        table_name: g.table.map(str::to_string),
+                        privilege: g.privilege.into(),
+                    },
+                )
+                .await
+                .expect("grant");
+        }
+        let km = self.keys.active().await.expect("active key");
+        egret_machine_idp::sign_claims(
+            &km,
+            &json!({
+                "sub": unique("rn-client"), "aud": CATALOG_AUDIENCE,
+                "warehouse": self.warehouse, "roles": [role_name],
+                "exp": chrono::Utc::now().timestamp() + 600,
+            }),
+        )
+        .expect("sign")
+    }
+
+    async fn create_table(&self, ns: &str, name: &str) {
+        let schema = json!({"type": "struct", "schema-id": 0, "fields": [
+            {"id": 1, "name": "id", "type": "string", "required": false}
+        ]});
+        let (status, body) = self
+            .send(
+                &self.raw,
+                None,
+                "POST",
+                &format!("namespaces/{ns}/tables"),
+                json!({"name": name, "schema": schema}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "create {ns}.{name}: {body}");
+    }
+
+    async fn create_view(&self, ns: &str, name: &str) {
+        let body = json!({
+            "name": name,
+            "schema": {"type": "struct", "schema-id": 0, "fields": [
+                {"id": 1, "name": "id", "type": "string", "required": false}
+            ]},
+            "view-version": {
+                "version-id": 1,
+                "schema-id": 0,
+                "timestamp-ms": chrono::Utc::now().timestamp_millis(),
+                "summary": {"engine-name": "trino", "engine-version": "483"},
+                "default-namespace": [ns],
+                "representations": [{"type": "sql", "sql": "SELECT 1 AS id", "dialect": "trino"}]
+            },
+            "properties": {}
+        });
+        let (status, body) = self
+            .send(
+                &self.raw,
+                None,
+                "POST",
+                &format!("namespaces/{ns}/views"),
+                body,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "create view {ns}.{name}: {body}");
+    }
+
+    /// Does lakekeeper hold `{ns}/{kind}/{name}` (`kind` is `tables` or `views`)?
+    async fn exists(&self, kind: &str, ns: &str, name: &str) -> bool {
+        let (status, body) = self
+            .send(
+                &self.raw,
+                None,
+                "GET",
+                &format!("namespaces/{ns}/{kind}/{name}"),
+                Value::Null,
+            )
+            .await;
+        match status {
+            StatusCode::OK => true,
+            StatusCode::NOT_FOUND => false,
+            other => panic!("load {ns}/{kind}/{name}: {other} {body}"),
+        }
+    }
+
+    async fn rename(
+        &self,
+        token: &str,
+        kind: &str,
+        source: (&[&str], &str),
+        destination: (&[&str], &str),
+    ) -> (StatusCode, Value) {
+        self.send(
+            &self.app,
+            Some(token),
+            "POST",
+            &format!("{kind}/rename"),
+            json!({
+                "source": {"namespace": source.0, "name": source.1},
+                "destination": {"namespace": destination.0, "name": destination.1},
+            }),
+        )
+        .await
+    }
+
+    async fn load(&self, token: &str, kind: &str, ns: &str, name: &str) -> StatusCode {
+        self.send(
+            &self.app,
+            Some(token),
+            "GET",
+            &format!("namespaces/{ns}/{kind}/{name}"),
+            Value::Null,
+        )
+        .await
+        .0
+    }
+}
+
+macro_rules! env_or_skip {
+    () => {
+        match env().await {
+            Some(e) => e,
+            None => {
+                eprintln!(
+                    "SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set"
+                );
+                return;
+            }
+        }
+    };
+}
+
+/// F-A, the premise: a table grant on a name that does not exist yet is
+/// enough to rename a table the role cannot read onto that name, and then
+/// read it.
+#[tokio::test]
+async fn a_table_grant_on_the_destination_does_not_rename_an_unreadable_table() {
+    let env = env_or_skip!();
+    env.create_table("sales", "secret").await;
+    let token = env
+        .token_for(
+            "external",
+            &[grant("table", Some(&["sales"]), Some("loot"), "write")],
+        )
+        .await;
+    assert_eq!(
+        env.load(&token, "tables", "sales", "secret").await,
+        StatusCode::FORBIDDEN,
+        "the role cannot read the source"
+    );
+
+    let (status, body) = env
+        .rename(
+            &token,
+            "tables",
+            (&["sales"], "secret"),
+            (&["sales"], "loot"),
+        )
+        .await;
+    let read = env.load(&token, "tables", "sales", "loot").await;
+    assert_eq!(
+        (status, read),
+        (StatusCode::FORBIDDEN, StatusCode::NOT_FOUND),
+        "rename answered {status} {body}, then the read under the new name answered {read}"
+    );
+    assert!(
+        body.as_str().unwrap_or("").contains("sales.secret"),
+        "the 403 names the source: {body}"
+    );
+    assert!(env.exists("tables", "sales", "secret").await, "not renamed");
+}
+
+/// F-A: a write grant on another namespace is enough to move an unreadable
+/// table into it, and then read it.
+#[tokio::test]
+async fn a_write_grant_elsewhere_does_not_move_an_unreadable_table_into_it() {
+    let env = env_or_skip!();
+    env.create_table("sales", "secret").await;
+    let token = env
+        .token_for(
+            "external",
+            &[grant("namespace", Some(&["stage"]), None, "write")],
+        )
+        .await;
+
+    let (status, body) = env
+        .rename(
+            &token,
+            "tables",
+            (&["sales"], "secret"),
+            (&["stage"], "secret"),
+        )
+        .await;
+    let read = env.load(&token, "tables", "stage", "secret").await;
+    assert_eq!(
+        (status, read),
+        (StatusCode::FORBIDDEN, StatusCode::NOT_FOUND),
+        "rename answered {status} {body}, then the read under the new name answered {read}"
+    );
+    assert!(env.exists("tables", "sales", "secret").await, "not renamed");
+}
+
+/// A read grant on the source is not a write: a rename removes the source
+/// name, as a drop does.
+#[tokio::test]
+async fn a_read_grant_on_the_source_is_not_enough() {
+    let env = env_or_skip!();
+    env.create_table("sales", "orders").await;
+    let token = env
+        .token_for(
+            "external",
+            &[
+                grant("table", Some(&["sales"]), Some("orders"), "read"),
+                grant("namespace", Some(&["stage"]), None, "write"),
+            ],
+        )
+        .await;
+    let (status, body) = env
+        .rename(
+            &token,
+            "tables",
+            (&["sales"], "orders"),
+            (&["stage"], "orders"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(env.exists("tables", "sales", "orders").await, "not renamed");
+}
+
+/// The destination: write on the source does not create a table in a
+/// namespace the role may not create tables in.
+#[tokio::test]
+async fn an_unauthorized_destination_is_refused() {
+    let env = env_or_skip!();
+    env.create_table("sales", "mine").await;
+    let token = env
+        .token_for(
+            "external",
+            &[grant("namespace", Some(&["sales"]), None, "write")],
+        )
+        .await;
+    let (status, body) = env
+        .rename(&token, "tables", (&["sales"], "mine"), (&["stage"], "mine"))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        body.as_str().unwrap_or("").contains("stage"),
+        "the 403 names the destination namespace: {body}"
+    );
+    assert!(env.exists("tables", "sales", "mine").await, "not renamed");
+    assert!(!env.exists("tables", "stage", "mine").await, "not created");
+}
+
+/// Controller default D2: the destination needs the privilege a create in
+/// its namespace needs. A table grant on the destination name is not one,
+/// even with write on the source.
+#[tokio::test]
+async fn a_table_grant_on_the_destination_name_does_not_create_it() {
+    let env = env_or_skip!();
+    env.create_table("sales", "mine").await;
+    let token = env
+        .token_for(
+            "external",
+            &[
+                grant("table", Some(&["sales"]), Some("mine"), "write"),
+                grant("table", Some(&["sales"]), Some("mine2"), "write"),
+            ],
+        )
+        .await;
+    let (status, body) = env
+        .rename(
+            &token,
+            "tables",
+            (&["sales"], "mine"),
+            (&["sales"], "mine2"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(env.exists("tables", "sales", "mine").await, "not renamed");
+}
+
+/// Write on the source's namespace and on the destination's renames, across
+/// namespaces, and the table hook (#757) still lets the rename through.
+#[tokio::test]
+async fn an_authorized_rename_still_renames() {
+    let env = env_or_skip!();
+    env.create_table("sales", "orders").await;
+    let token = env
+        .token_for(
+            "external",
+            &[
+                grant("table", Some(&["sales"]), Some("orders"), "write"),
+                grant("namespace", Some(&["stage"]), None, "manage"),
+            ],
+        )
+        .await;
+    let (status, body) = env
+        .rename(
+            &token,
+            "tables",
+            (&["sales"], "orders"),
+            (&["stage"], "orders_v2"),
+        )
+        .await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert!(env.exists("tables", "stage", "orders_v2").await);
+    assert!(!env.exists("tables", "sales", "orders").await);
+}
+
+/// An engine's catalog client holds `manage` on the whole warehouse
+/// (`egret_engine_mgmt::engines`); it renames whatever it likes.
+#[tokio::test]
+async fn an_engine_client_with_warehouse_manage_still_renames() {
+    let env = env_or_skip!();
+    env.create_table("sales", "orders").await;
+    env.create_view("sales", "v_orders").await;
+    let token = env
+        .token_for("engine", &[grant("catalog", None, None, "manage")])
+        .await;
+    let (status, body) = env
+        .rename(
+            &token,
+            "tables",
+            (&["sales"], "orders"),
+            (&["stage"], "orders"),
+        )
+        .await;
+    assert!(status.is_success(), "table rename: {status} {body}");
+    assert!(env.exists("tables", "stage", "orders").await);
+    let (status, body) = env
+        .rename(
+            &token,
+            "views",
+            (&["sales"], "v_orders"),
+            (&["stage"], "v_orders"),
+        )
+        .await;
+    assert!(status.is_success(), "view rename: {status} {body}");
+    assert!(env.exists("views", "stage", "v_orders").await);
+}
+
+/// F-C: a view rename is authorized the same way.
+#[tokio::test]
+async fn a_view_rename_is_authorized_by_its_source_and_destination() {
+    let env = env_or_skip!();
+    env.create_view("sales", "v_secret").await;
+    env.create_view("sales", "v_mine").await;
+    let attacker = env
+        .token_for(
+            "external",
+            &[grant("table", Some(&["sales"]), Some("v_loot"), "write")],
+        )
+        .await;
+    let (status, body) = env
+        .rename(
+            &attacker,
+            "views",
+            (&["sales"], "v_secret"),
+            (&["sales"], "v_loot"),
+        )
+        .await;
+    let read = env.load(&attacker, "views", "sales", "v_loot").await;
+    assert_eq!(
+        (status, read),
+        (StatusCode::FORBIDDEN, StatusCode::NOT_FOUND),
+        "view rename answered {status} {body}, then the read under the new name answered {read}"
+    );
+    assert!(
+        env.exists("views", "sales", "v_secret").await,
+        "not renamed"
+    );
+
+    let owner = env
+        .token_for(
+            "external",
+            &[grant("namespace", Some(&["sales"]), None, "write")],
+        )
+        .await;
+    let (status, body) = env
+        .rename(
+            &owner,
+            "views",
+            (&["sales"], "v_mine"),
+            (&["stage"], "v_mine"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "destination: {body}");
+    let (status, body) = env
+        .rename(
+            &owner,
+            "views",
+            (&["sales"], "v_mine"),
+            (&["sales"], "v_mine2"),
+        )
+        .await;
+    assert!(
+        status.is_success(),
+        "authorized view rename: {status} {body}"
+    );
+    assert!(env.exists("views", "sales", "v_mine2").await);
+}
+
+/// A multi-level namespace matches a grant level by level, exactly: a grant
+/// on `corp` does not reach `corp.fin`.
+#[tokio::test]
+async fn a_multi_level_namespace_matches_exactly() {
+    let env = env_or_skip!();
+    env.create_table("corp%1Ffin", "ledger").await;
+    let parent = env
+        .token_for(
+            "external",
+            &[grant("namespace", Some(&["corp"]), None, "write")],
+        )
+        .await;
+    let (status, body) = env
+        .rename(
+            &parent,
+            "tables",
+            (&["corp", "fin"], "ledger"),
+            (&["corp"], "ledger"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(env.exists("tables", "corp%1Ffin", "ledger").await);
+
+    let fin = env
+        .token_for(
+            "external",
+            &[grant("namespace", Some(&["corp", "fin"]), None, "write")],
+        )
+        .await;
+    let (status, body) = env
+        .rename(
+            &fin,
+            "tables",
+            (&["corp", "fin"], "ledger"),
+            (&["corp", "fin"], "ledger_v2"),
+        )
+        .await;
+    assert!(status.is_success(), "{status} {body}");
+    assert!(env.exists("tables", "corp%1Ffin", "ledger_v2").await);
+}
+
+/// The guard answers a body it cannot read as a rename with its own 400,
+/// before lakekeeper sees it.
+#[tokio::test]
+async fn a_malformed_rename_body_is_a_400_from_the_guard() {
+    let env = env_or_skip!();
+    let token = env
+        .token_for("engine", &[grant("catalog", None, None, "manage")])
+        .await;
+    for (what, body) in [
+        ("not JSON", b"{not json".to_vec()),
+        (
+            "no destination",
+            json!({"source": {"namespace": ["sales"], "name": "t"}})
+                .to_string()
+                .into_bytes(),
+        ),
+        (
+            "an empty namespace",
+            json!({
+                "source": {"namespace": [], "name": "t"},
+                "destination": {"namespace": ["sales"], "name": "u"},
+            })
+            .to_string()
+            .into_bytes(),
+        ),
+        (
+            "a namespace that is not a list of strings",
+            json!({
+                "source": {"namespace": "sales", "name": "t"},
+                "destination": {"namespace": ["sales"], "name": "u"},
+            })
+            .to_string()
+            .into_bytes(),
+        ),
+        (
+            "an empty name",
+            json!({
+                "source": {"namespace": ["sales"], "name": ""},
+                "destination": {"namespace": ["sales"], "name": "u"},
+            })
+            .to_string()
+            .into_bytes(),
+        ),
+    ] {
+        for kind in ["tables", "views"] {
+            let (status, resp) = env
+                .send_bytes(
+                    &env.app,
+                    Some(&token),
+                    "POST",
+                    &format!("{kind}/rename"),
+                    body.clone(),
+                )
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{kind}, {what}: {resp}");
+            assert!(
+                resp.as_str()
+                    .unwrap_or("")
+                    .starts_with("malformed rename request"),
+                "{kind}, {what}: the guard's own 400, not lakekeeper's: {resp}"
+            );
+        }
+    }
+}

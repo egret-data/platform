@@ -241,17 +241,38 @@ pub fn catalog_engine_router(state: ApiContext<EngineState>) -> axum::Router {
 ///
 /// `path`/`query` are lakekeeper-relative (the router is mounted under
 /// `/catalog/v1`, so a request to `/catalog/v1/config` arrives here as `/config`).
+///
+/// `body` is the request body for a rename ([`is_rename_request`]), whose
+/// source and destination are named only there, and `None` for every other
+/// request, which streams through unread.
 #[async_trait::async_trait]
 pub trait CatalogGuard: Send + Sync {
     /// `Ok(caller)` → allowed, by the principal the verified token names;
-    /// `Err((status, message))` → rejected (e.g. 401/403).
+    /// `Err((status, message))` → rejected (e.g. 400/401/403).
     async fn check(
         &self,
         method: &str,
         path: &str,
         query: Option<&str>,
         bearer: Option<&str>,
+        body: Option<&[u8]>,
     ) -> Result<CatalogCaller, (axum::http::StatusCode, String)>;
+}
+
+/// The most of a rename body the mount buffers for the guard. A rename body
+/// is a few hundred bytes.
+pub const RENAME_BODY_LIMIT: usize = 1 << 20;
+
+/// Is this `POST /{prefix}/tables/rename` or `POST /{prefix}/views/rename`?
+/// Those two name their source and destination only in the body, so the
+/// mount hands the guard the body for them (rename-authz spec §3.1).
+pub fn is_rename_request(method: &str, path: &str) -> bool {
+    let segs: Vec<&str> = path
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+    method == "POST" && matches!(segs.as_slice(), [_, "tables" | "views", "rename"])
 }
 
 /// Who sent an allowed Iceberg request: the verified token's `sub` and `aud`.
@@ -353,8 +374,34 @@ async fn guard_then_inject_metadata(
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.strip_prefix("Bearer "))
             .map(str::to_string);
+        // A rename names its source and destination only in the body: read
+        // it for the guard and put the same bytes back, so the view hold, the
+        // table hook and lakekeeper see exactly what the guard authorized.
+        let body = if is_rename_request(&method, &path) {
+            let (parts, body) = req.into_parts();
+            let bytes = match axum::body::to_bytes(body, RENAME_BODY_LIMIT).await {
+                Ok(b) => b,
+                Err(e) => {
+                    return (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        format!("malformed rename request: the body could not be read: {e}"),
+                    )
+                        .into_response()
+                }
+            };
+            req = axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes.clone()));
+            Some(bytes)
+        } else {
+            None
+        };
         match g
-            .check(&method, &path, query.as_deref(), bearer.as_deref())
+            .check(
+                &method,
+                &path,
+                query.as_deref(),
+                bearer.as_deref(),
+                body.as_deref(),
+            )
             .await
         {
             Ok(caller) => {

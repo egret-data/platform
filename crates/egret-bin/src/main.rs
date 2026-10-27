@@ -515,6 +515,7 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
         path: &str,
         query: Option<&str>,
         bearer: Option<&str>,
+        body: Option<&[u8]>,
     ) -> Result<egret_catalog_engine::CatalogCaller, (axum::http::StatusCode, String)> {
         use axum::http::StatusCode;
         let forbid = |m: String| Err((StatusCode::FORBIDDEN, m));
@@ -614,6 +615,42 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
             }
             let is_write = matches!(method, "POST" | "PUT" | "DELETE" | "PATCH");
 
+            // A rename (`/tables/rename`, `/views/rename`) names what it touches
+            // only in its body: it needs what a drop of the source needs and
+            // what a create in the destination's namespace needs (rename-authz
+            // spec §3.2).
+            if method == "POST" && matches!(segs.as_slice(), [_, "tables" | "views", "rename"]) {
+                let (src, dst) = parse_rename_body(body).map_err(|m| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("malformed rename request: {m}"),
+                    )
+                })?;
+                if !grants
+                    .iter()
+                    .any(|g| catalog_grant_covers(g, Some(&src.0), Some(&src.1), true))
+                {
+                    return forbid(format!(
+                        "role '{token_role}' may not rename {}.{}: renaming needs write on the \
+                         source, as dropping it would",
+                        src.0.join("."),
+                        src.1
+                    ));
+                }
+                if !grants
+                    .iter()
+                    .any(|g| catalog_grant_covers(g, Some(&dst.0), None, true))
+                {
+                    let ns = dst.0.join(".");
+                    return forbid(format!(
+                        "role '{token_role}' may not rename into {ns}.{}: renaming needs write on \
+                         namespace {ns}, as creating a table there would",
+                        dst.1
+                    ));
+                }
+                return Ok(caller);
+            }
+
             // Resolve the request target: /namespaces/{ns}[/tables|views/{table}].
             let target_ns: Option<Vec<String>> = (segs.get(1) == Some(&"namespaces"))
                 .then(|| segs.get(2))
@@ -646,6 +683,39 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
         }
         Ok(caller)
     }
+}
+
+/// One side of a rename: the namespace's levels and the name.
+type RenameSide = (Vec<String>, String);
+
+/// The `{source, destination}` of a rename body, each `{namespace: [..],
+/// name}`. `Err` says what is wrong, for the 400.
+fn parse_rename_body(body: Option<&[u8]>) -> Result<(RenameSide, RenameSide), String> {
+    let body = body.ok_or("no body")?;
+    let json: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("the body is not JSON: {e}"))?;
+    let side = |k: &str| -> Result<RenameSide, String> {
+        let v = json.get(k).ok_or(format!("no `{k}`"))?;
+        let ns: Vec<String> = v
+            .get("namespace")
+            .and_then(|n| n.as_array())
+            .and_then(|a| {
+                a.iter()
+                    .map(|l| l.as_str().map(str::to_string))
+                    .collect::<Option<Vec<_>>>()
+            })
+            .filter(|ns| !ns.is_empty())
+            .ok_or(format!(
+                "`{k}.namespace` is not a non-empty list of strings"
+            ))?;
+        let name = v
+            .get("name")
+            .and_then(|n| n.as_str())
+            .filter(|n| !n.is_empty())
+            .ok_or(format!("`{k}.name` is not a non-empty string"))?;
+        Ok((ns, name.to_string()))
+    };
+    Ok((side("source")?, side("destination")?))
 }
 
 /// Split a namespace path segment into its parts. lakekeeper encodes multipart
@@ -3138,6 +3208,9 @@ mod catalog_authz_tests {
 /// DB-gated (the guard needs `PgSigningKeyStore`, whose key lives in Postgres);
 /// self-skips without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS, like the other DB-backed suites.
 #[cfg(test)]
+mod catalog_rename_guard_tests;
+
+#[cfg(test)]
 mod catalog_guard_audience_tests {
     use super::{EgretCatalogGuard, CATALOG_AUDIENCE};
     use egret_catalog_engine::CatalogGuard as _;
@@ -3182,7 +3255,7 @@ mod catalog_guard_audience_tests {
 
         let catalog_tok = token_with_aud(&g, CATALOG_AUDIENCE).await;
         assert!(
-            g.check("GET", "/config", None, Some(&catalog_tok))
+            g.check("GET", "/config", None, Some(&catalog_tok), None)
                 .await
                 .is_ok(),
             "a catalog-audience token must still pass /config"
@@ -3190,7 +3263,7 @@ mod catalog_guard_audience_tests {
 
         let data_api_tok = token_with_aud(&g, "data-api").await;
         let err = g
-            .check("GET", "/config", None, Some(&data_api_tok))
+            .check("GET", "/config", None, Some(&data_api_tok), None)
             .await
             .expect_err("a data-api token must not reach the catalog");
         assert_eq!(err.0, axum::http::StatusCode::UNAUTHORIZED, "{}", err.1);
@@ -3214,7 +3287,7 @@ mod catalog_guard_audience_tests {
         )
         .expect("sign");
         let caller = g
-            .check("GET", "/config", None, Some(&token))
+            .check("GET", "/config", None, Some(&token), None)
             .await
             .expect("a catalog token passes /config");
         assert_eq!(
@@ -3285,6 +3358,7 @@ mod catalog_guard_audience_tests {
                 &format!("/{canonical}/namespaces/s/views"),
                 None,
                 Some(&token),
+                None,
             )
             .await
             .expect_err("no grant");
@@ -3305,6 +3379,7 @@ mod catalog_guard_audience_tests {
                     &format!("/{alias}/namespaces/s/views"),
                     None,
                     Some(&token),
+                    None,
                 )
                 .await
                 .expect_err("an alias prefix must be refused");

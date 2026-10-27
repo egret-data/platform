@@ -395,7 +395,10 @@ async fn env_with(o: Opts) -> Option<Env> {
     let hold = ViewHold::new(db.clone(), runner.clone())
         .with_limit(limit)
         .with_max_holds(max_holds);
-    let app = front_catalog_router(inner, None, Some(Arc::new(hold)));
+    // A pass-through guard in front, as in production: it reads a rename's
+    // body, so the hold's rename runs on the bytes the mount put back.
+    let guard: Arc<dyn egret_catalog_engine::CatalogGuard> = Arc::new(BodyReadingGuard);
+    let app = front_catalog_router(inner, Some(guard), Some(Arc::new(hold)));
 
     let env = Env {
         db,
@@ -575,6 +578,33 @@ impl Env {
     /// the version its last 200 carried.
     fn start_plugin(&self) -> Plugin {
         plugins::start_trino(self.policy.clone(), self.profile_name.clone(), POLL)
+    }
+}
+
+/// Lets every request through. The mount hands it a rename's body (and only
+/// a rename's), which it checks is the rename it expects.
+struct BodyReadingGuard;
+
+#[async_trait::async_trait]
+impl egret_catalog_engine::CatalogGuard for BodyReadingGuard {
+    async fn check(
+        &self,
+        _method: &str,
+        path: &str,
+        _query: Option<&str>,
+        _bearer: Option<&str>,
+        body: Option<&[u8]>,
+    ) -> Result<egret_catalog_engine::CatalogCaller, (StatusCode, String)> {
+        let rename = path.ends_with("/views/rename") || path.ends_with("/tables/rename");
+        assert_eq!(body.is_some(), rename, "the body of a rename only: {path}");
+        if let Some(b) = body {
+            let json: Value = serde_json::from_slice(b).expect("a rename body is JSON");
+            assert!(json.get("source").is_some(), "the rename body: {json}");
+        }
+        Ok(egret_catalog_engine::CatalogCaller {
+            subject: "view-hold-test".into(),
+            audience: "catalog".into(),
+        })
     }
 }
 
