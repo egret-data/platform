@@ -52,7 +52,7 @@ mod retry;
 mod state;
 pub(crate) mod update;
 
-pub use after_execution::{drives_after, terminated};
+pub use after_execution::{after_execution_live, drives_after, phase_killed, terminated};
 pub use command::Command;
 pub use plan::{
     build_plan, loop_until_gap, pause_gap, plan_stored, DagNode, Plan, PlanError, PlanTask,
@@ -195,9 +195,10 @@ pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
         // `RETRYING` last (`retry::scan` writes it beside the `FAILED`), so a
         // retried execution never starts the phase early.
         //
-        // B3 HOOK (Q3, user answer 2026-10-27): a kill of the PHASE (a
-        // terminal execution with live after-runs) stops it without
-        // touching the execution's state; see `after_execution::drive`.
+        // Q3 (user answer 2026-10-27): a kill of the PHASE (a terminal
+        // execution with live after-runs, `worker::kill`) stops it without
+        // touching the execution's state; `after_execution::drive` then
+        // closes the phase and creates nothing more.
         return match state.history.last() {
             Some(RunState::Killing) => kill::advance_killing(plan, state),
             Some(s) if s.is_terminal() => after_execution::drive(plan, state, now),
@@ -11624,5 +11625,83 @@ mod end_hooks_drive_tests {
             }
         }
         assert!(flows >= 9, "corpus flows with afterExecution: {flows}");
+    }
+
+    /// **A kill of the phase (Q3, user answer 2026-10-27) closes it and
+    /// creates nothing more, without touching the execution.** The route's
+    /// `kill::kill_phase` on a `SUCCESS` execution whose after-list is
+    /// `[seq: Sequential [x, y], end]`, while `x` runs: `x` and `seq` are
+    /// `KILLING`; once the worker has written `x` `KILLED`, `seq` is closed
+    /// `KILLED` and neither `y` nor `end` is ever created. The history stays
+    /// `CREATED RUNNING SUCCESS`, no command writes the execution, and the
+    /// execution is `terminated` at the end.
+    #[test]
+    fn a_killed_phase_closes_its_flowables_and_creates_nothing_more() {
+        let src = format!(
+            "{HEAD}tasks:\n{}afterExecution:\n  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n{}{}{}",
+            leaf(2, "a", LOG),
+            leaf(6, "x", LOG),
+            leaf(6, "y", LOG),
+            leaf(2, "end", LOG)
+        );
+        let flow = crate::spec::parse(&src).expect("parses");
+        let plan = plan::flatten_flow(&flow).expect("plans");
+        let mut state = ExecutionState::new(&plan);
+        for _ in 0..100 {
+            if last_of(&plan, &state, "x") == Some(RunState::Running) {
+                break;
+            }
+            let cmds = advance(&plan, &state, Tick(0));
+            if cmds.is_empty() {
+                assert!(finish_one_runnable(&plan, &mut state), "stalled: {state:?}");
+            }
+            for c in &cmds {
+                apply(&mut state, c);
+            }
+        }
+        assert_eq!(last_of(&plan, &state, "x"), Some(RunState::Running));
+        let ended = state.history.clone();
+        assert_eq!(ended.last(), Some(&RunState::Success));
+        assert!(super::after_execution_live(&plan, &state));
+        assert!(!super::phase_killed(&plan, &state));
+
+        let cmds = super::kill::kill_phase(&plan, &state);
+        assert!(
+            !cmds
+                .iter()
+                .any(super::after_execution::writes_the_execution),
+            "{cmds:?}"
+        );
+        for c in &cmds {
+            apply(&mut state, c);
+        }
+        assert_eq!(last_of(&plan, &state, "x"), Some(RunState::Killing));
+        assert_eq!(last_of(&plan, &state, "seq"), Some(RunState::Killing));
+        assert!(super::phase_killed(&plan, &state));
+        assert!(drives_after(&plan, &state), "x is still to be stopped");
+
+        for _ in 0..100 {
+            let cmds = advance(&plan, &state, Tick(0));
+            assert!(
+                !cmds.iter().any(|c| matches!(
+                    c,
+                    Command::CreateRun { .. } | Command::SetExecutionState { .. }
+                )),
+                "a killed phase created a run or wrote the execution: {cmds:?}"
+            );
+            if cmds.is_empty() && !finish_one_runnable(&plan, &mut state) {
+                break;
+            }
+            for c in &cmds {
+                apply(&mut state, c);
+            }
+        }
+        assert_eq!(last_of(&plan, &state, "x"), Some(RunState::Killed));
+        assert_eq!(last_of(&plan, &state, "seq"), Some(RunState::Killed));
+        assert_eq!(last_of(&plan, &state, "y"), None);
+        assert_eq!(last_of(&plan, &state, "end"), None);
+        assert_eq!(state.history, ended);
+        assert!(terminated(&plan, &state));
+        assert!(!super::after_execution_live(&plan, &state));
     }
 }

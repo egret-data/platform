@@ -30,6 +30,19 @@
 //! `stamps::stamp_attempt_ends` the attempt's, and nothing here writes a
 //! state column by hand.
 //!
+//! # A terminal execution whose `afterExecution:` still runs (Q3)
+//!
+//! End hooks #2b, the user's answer to Q3 (2026-10-27), a security
+//! divergence from Kestra, which answers 409 and force-executes the list: a
+//! kill of a terminal execution with a live run of its `afterExecution:` is
+//! accepted ([`KillOutcome::AfterExecution`]). The phase's live runs are
+//! killed by `executor::kill::kill_phase` (leaves as above, its flowables
+//! `KILLING` at once), the cascade reaches only the children of the phase's
+//! own runs, and the execution's state, history and `ended_at` are not
+//! written: `advance` then closes the phase (`executor::kill::close_phase`)
+//! and creates no further after-task. With nothing of the phase live, the
+//! 409 stands.
+//!
 //! # The run rows are locked before they are written
 //!
 //! The claim takes a row with `FOR UPDATE SKIP LOCKED` and no execution lock,
@@ -120,9 +133,17 @@ pub enum KillOutcome {
     Killing,
     /// Nothing was running: the execution is `KILLED`.
     Killed,
-    /// The execution was already terminal under its lock, in this state
-    /// (spec D3: refused, nothing written).
+    /// The execution was already terminal under its lock, in this state, and
+    /// no run of its `afterExecution:` was live (spec D3: refused, nothing
+    /// written).
     Terminated(RunState),
+    /// The execution had ended, in `state`, and its `afterExecution:` was
+    /// still running (end hooks #2b, the user's answer to Q3, 2026-10-27):
+    /// the phase's live runs are killed and the execution's own state,
+    /// history and `ended_at` are left as they were. `stopped` is true when
+    /// no run of the phase is live once the kill has committed; otherwise a
+    /// running task is still to be stopped by a worker.
+    AfterExecution { state: RunState, stopped: bool },
 }
 
 /// How many times a kill that Postgres chose as a deadlock's victim is run
@@ -178,16 +199,38 @@ async fn kill_in(
     let (conn, gate) = at.parts();
     let mut forced = false;
     let mut reported = Vec::new();
+    // The phase kill (Q3): the execution's terminal state, and the runs of
+    // its `afterExecution:`, which bound the cascade and the outcome.
+    let mut phase: Option<(RunState, Vec<i32>)> = None;
     match claim::load(conn, execution, Stack::Fresh(gate.clone())).await {
         Ok((ctx, state, now)) => {
             if ctx.workspace_id != workspace {
                 return Err(Error::NotFound("execution".into()));
             }
             if let Some(&last) = state.history.last().filter(|s| s.is_terminal()) {
-                return Ok((KillOutcome::Terminated(last), false));
+                // **A kill stops `afterExecution:`** (end hooks #2b, the user's
+                // answer to Q3, 2026-10-27; a security divergence from Kestra,
+                // which answers 409 and force-executes the list): a tenant must
+                // not be able to write a task that no one can kill. Only the
+                // phase's runs are killed; the execution keeps the state,
+                // history and `ended_at` it ended with. With nothing of the
+                // phase live, the refusal is as before.
+                if !crate::executor::after_execution_live(&ctx.plan, &state) {
+                    return Ok((KillOutcome::Terminated(last), false));
+                }
+                let runs = (0..state.runs.len())
+                    .filter(|&ix| crate::executor::after_execution::in_phase(&ctx.plan, &state, ix))
+                    .map(|ix| i32::try_from(ix).expect("a run index fits the column"))
+                    .collect();
+                phase = Some((last, runs));
+                let (before, state) =
+                    kill_loaded(conn, &ctx, state, crate::executor::kill::kill_phase).await?;
+                claim::settle(conn, &ctx, &before, state, now, None).await?;
+            } else {
+                let (before, state) =
+                    kill_loaded(conn, &ctx, state, crate::executor::kill::kill_leaves).await?;
+                claim::settle(conn, &ctx, &before, state, now, None).await?;
             }
-            let (before, state) = kill_loaded(conn, &ctx, state).await?;
-            claim::settle(conn, &ctx, &before, state, now, None).await?;
         }
         Err(e) if claim::row_content_fault(&e) => {
             // Debt D4. The row exists (the fault is in its content), and the
@@ -229,7 +272,15 @@ async fn kill_in(
         // Each one settled on its own, in lock order, after its parent's
         // settle: a child that ends `KILLED` reports to a parent whose run is
         // already terminal, which is a no-op.
-        let found = descendants(conn, execution, || Stack::Fresh(gate.clone())).await?;
+        // A phase kill reaches only the children of the phase's own runs: a
+        // `wait: false` child of the flow's `tasks:` is not the phase's work.
+        let found = descendants(
+            conn,
+            execution,
+            phase.as_ref().map(|(_, runs)| runs.as_slice()),
+            || Stack::Fresh(gate.clone()),
+        )
+        .await?;
         forced |= found.forced;
         for job in found.jobs {
             claim::run_job(conn, job).await?;
@@ -238,6 +289,25 @@ async fn kill_in(
     // The root's own report last: its parent is outside the tree.
     for job in reported {
         claim::run_job(conn, job).await?;
+    }
+    if let Some((state, runs)) = phase {
+        let live: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM workflow.task_runs \
+              WHERE execution_id = $1 AND run_ix = ANY($2) \
+                AND NOT workflow.state_is_terminal(state)",
+        )
+        .bind(execution)
+        .bind(&runs)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        return Ok((
+            KillOutcome::AfterExecution {
+                state,
+                stopped: live == 0,
+            },
+            forced,
+        ));
     }
     let after: String = sqlx::query_scalar("SELECT state FROM workflow.executions WHERE id = $1")
         .bind(execution)
@@ -261,9 +331,11 @@ async fn kill_in(
 /// its own execution's runs (`executor::exit`), so a `Subflow` child it
 /// `KILLED` the run of would otherwise run on.
 pub(super) async fn cascade(conn: &mut PgConnection, ctx: &ExecutionCtx) -> Result<Vec<Job>> {
-    Ok(descendants(conn, ctx.id, || Stack::Nested(ctx.caller()))
-        .await?
-        .jobs)
+    Ok(
+        descendants(conn, ctx.id, None, || Stack::Nested(ctx.caller()))
+            .await?
+            .jobs,
+    )
 }
 
 /// What [`descendants`] found.
@@ -283,9 +355,13 @@ struct Descendants {
 /// parent may be a descendant whose kill is one of those settles, and the
 /// report must read the parent as that settle leaves it
 /// (`worker::force_close`'s module doc).
+///
+/// `only` (a phase kill, Q3) restricts depth 1 to the children of those runs
+/// of `root`; `None` takes every child.
 async fn descendants(
     conn: &mut PgConnection,
     root: Uuid,
+    only: Option<&[i32]>,
     stack: impl Fn() -> Stack,
 ) -> Result<Descendants> {
     let mut seen = HashSet::new();
@@ -295,6 +371,7 @@ async fn descendants(
     loop {
         let found: Vec<Uuid> = sqlx::query_scalar(DESCENDANTS)
             .bind(root)
+            .bind(only)
             .fetch_all(&mut *conn)
             .await
             .map_err(db_err)?;
@@ -326,7 +403,8 @@ async fn descendants(
             if state.history.last().is_some_and(|s| s.is_terminal()) {
                 continue;
             }
-            let (before, state) = kill_loaded(conn, &ctx, state).await?;
+            let (before, state) =
+                kill_loaded(conn, &ctx, state, crate::executor::kill::kill_leaves).await?;
             jobs.push(Job::Settle(Box::new(Frame::loaded(
                 ctx, before, state, now,
             ))));
@@ -344,6 +422,9 @@ async fn descendants(
 /// only. A subflow child that ended `RETRIED` continues in its replacement,
 /// which is part of the tree being killed; the root's own replay is not
 /// (module doc, "Which executions are children").
+///
+/// `$2` (a phase kill, Q3): when not NULL, a child of the root is followed
+/// only when its link names one of these runs of the root.
 const DESCENDANTS: &str = "WITH RECURSIVE tree (id, depth) AS ( \
        SELECT $1::uuid, 0 \
      UNION ALL \
@@ -353,18 +434,21 @@ const DESCENDANTS: &str = "WITH RECURSIVE tree (id, depth) AS ( \
            ON (e.parent_execution_id = t.id AND e.parent_run_ix IS NOT NULL) \
            OR (e.trigger_execution_id = t.id AND e.trigger_run_ix IS NOT NULL) \
            OR (t.depth > 0 AND e.parent_execution_id = t.id AND e.parent_run_ix IS NULL) \
+        WHERE t.depth > 0 OR $2::int[] IS NULL \
+           OR e.parent_run_ix = ANY($2) OR e.trigger_run_ix = ANY($2) \
      ) \
      SELECT t.id FROM tree t JOIN workflow.executions e ON e.id = t.id \
       WHERE t.depth > 0 AND NOT workflow.state_is_terminal(e.state) \
       ORDER BY t.depth, t.id";
 
-/// The loaded `state` of `ctx`'s execution, and the same with
-/// `executor::kill::kill_leaves` applied, under the run rows' locks (module
-/// doc).
+/// The loaded `state` of `ctx`'s execution, and the same with `kill`'s
+/// commands applied -- `executor::kill::kill_leaves`, or for a phase kill
+/// `executor::kill::kill_phase` -- under the run rows' locks (module doc).
 async fn kill_loaded(
     conn: &mut PgConnection,
     ctx: &ExecutionCtx,
     state: ExecutionState,
+    kill: fn(&crate::executor::Plan, &ExecutionState) -> Vec<crate::executor::Command>,
 ) -> Result<(ExecutionState, ExecutionState)> {
     sqlx::query(
         "SELECT 1 FROM workflow.task_runs WHERE execution_id = $1 ORDER BY run_ix FOR UPDATE",
@@ -375,7 +459,7 @@ async fn kill_loaded(
     .map_err(db_err)?;
     let before = state.clone();
     let mut state = state;
-    let cmds = crate::executor::kill::kill_leaves(&ctx.plan, &state);
+    let cmds = kill(&ctx.plan, &state);
     for cmd in &cmds {
         apply(&mut state, cmd);
     }

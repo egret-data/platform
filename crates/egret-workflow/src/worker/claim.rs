@@ -827,7 +827,8 @@ pub async fn due_retries(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<
     // a wake would settle into nothing every tick, for ever -- the endless case
     // the term above closes for a terminal execution. The `RETRIED` arm is
     // unaffected in practice: its execution is `RETRIED`, and the kill route
-    // refuses a terminal execution. `a_killing_execution_hides_its_waiting_
+    // never moves a terminal execution (it refuses one, or since end hooks
+    // #2b kills only its `afterExecution:` runs). `a_killing_execution_hides_its_waiting_
     // runs_from_the_waker`.
     .bind(RunState::Killing.wire())
     .fetch_all(exec)

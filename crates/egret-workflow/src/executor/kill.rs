@@ -77,8 +77,76 @@ use super::state::{ExecutionState, RunIx, RunState, WorkingDirPhase};
 /// One level per round: a flowable is `KILLED` only when every child run is
 /// already terminal, so nested flowables close innermost first, one per round.
 pub(crate) fn advance_killing(plan: &Plan, state: &ExecutionState) -> Vec<Command> {
+    let cmds = close_runs(plan, state, |_| true);
+    if cmds.is_empty() && state.runs.iter().all(is_settled) {
+        return vec![Command::SetExecutionState {
+            state: RunState::Killed,
+        }];
+    }
+    cmds
+}
+
+/// One round of closing a **killed post-terminal phase** (end hooks #2b, the
+/// user's answer to Q3, 2026-10-27): [`advance_killing`]'s rules, applied to
+/// the runs of the flow's `afterExecution:` only
+/// ([`in_phase`](super::after_execution::in_phase)), and never a command that
+/// writes the execution, whose state, history and `ended_at` are those it
+/// ended with. Nothing is created, started or retried; a flowable of the
+/// phase becomes `KILLING`, then `KILLED` once its children are terminal.
+pub(crate) fn close_phase(plan: &Plan, state: &ExecutionState) -> Vec<Command> {
+    close_runs(plan, state, |ix| {
+        super::after_execution::in_phase(plan, state, ix)
+    })
+}
+
+/// **The kill route's commands for a terminal execution whose
+/// `afterExecution:` is still running** (Q3, a security divergence from
+/// Kestra, which answers 409 and force-executes the list): every live run
+/// of the phase is killed as [`kill_leaves`] kills a leaf -- a running
+/// `Runnable` becomes `KILLING` for its holder or the kill-only claim, every
+/// other live leaf `KILLED` -- and every live flowable of the phase becomes
+/// `KILLING` at once, so the phase reads as killed
+/// ([`phase_killed`](super::after_execution::phase_killed)) even when no
+/// leaf of it is live. A `WorkingDirectory` block whose prepare or finish
+/// claim is out is left `RUNNING`, as [`advance_killing`] leaves it, so the
+/// claim can still commit.
+///
+/// No `SetExecutionState`: the execution is not moved.
+pub(crate) fn kill_phase(plan: &Plan, state: &ExecutionState) -> Vec<Command> {
     let mut cmds = Vec::new();
     for (ix, run) in state.runs.iter().enumerate() {
+        let Some(&last) = run.history.last() else {
+            continue;
+        };
+        if last.is_terminal()
+            || last == RunState::Killing
+            || !super::after_execution::in_phase(plan, state, ix)
+        {
+            continue;
+        }
+        let kind = &plan.tasks[run.task].kind;
+        let to = if is_leaf(kind) {
+            leaf_kill(kind, last)
+        } else if matches!(
+            run.working_dir,
+            Some(WorkingDirPhase::Preparing | WorkingDirPhase::Finishing)
+        ) {
+            continue;
+        } else {
+            RunState::Killing
+        };
+        cmds.push(Command::SetRunState { run: ix, state: to });
+    }
+    cmds
+}
+
+/// [`advance_killing`]'s per-run rules over the runs `only` admits.
+fn close_runs(plan: &Plan, state: &ExecutionState, only: impl Fn(RunIx) -> bool) -> Vec<Command> {
+    let mut cmds = Vec::new();
+    for (ix, run) in state.runs.iter().enumerate() {
+        if !only(ix) {
+            continue;
+        }
         // An empty history is `Command::RestartLoop`'s "this run does not exist
         // right now"; nothing is owed to it.
         let Some(&last) = run.history.last() else {
@@ -131,11 +199,6 @@ pub(crate) fn advance_killing(plan: &Plan, state: &ExecutionState) -> Vec<Comman
                 });
             }
         }
-    }
-    if cmds.is_empty() && state.runs.iter().all(is_settled) {
-        cmds.push(Command::SetExecutionState {
-            state: RunState::Killed,
-        });
     }
     cmds
 }
@@ -210,7 +273,7 @@ fn is_leaf(kind: &TaskKind) -> bool {
 }
 
 /// Terminal, or emptied by `RestartLoop` and so not a run at the moment.
-fn is_settled(run: &super::state::TaskRun) -> bool {
+pub(crate) fn is_settled(run: &super::state::TaskRun) -> bool {
     run.history.last().is_none_or(|s| s.is_terminal())
 }
 

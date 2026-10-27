@@ -3219,25 +3219,31 @@ async fn kill_execution(
     Path((_ws, id)): Path<(String, Uuid)>,
     Query(q): Query<KillQuery>,
 ) -> std::result::Result<(StatusCode, Json<ExecutionDto>), KillError> {
-    // Workflow kill spec §3. The terminal check is made twice, as resume's
-    // is: here off the scoped read (so a foreign id never reaches the worker,
-    // and the common refusal is cheap), and again by
-    // `worker::kill_execution` under the execution's lock, which decides the
-    // race with a worker ending it.
+    // Workflow kill spec §3. The scoped read keeps a foreign id from ever
+    // reaching the worker. The terminal check is `worker::kill_execution`'s
+    // alone, under the execution's lock: since end hooks #2b (the user's
+    // answer to Q3, 2026-10-27) a terminal execution whose `afterExecution:`
+    // is still running is killable, and only its plan can tell.
     egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
     let before = st.executions.get(ctx.workspace_id.0, id).await?;
-    // An unknown spelling is not called terminal: the worker's `load` refuses
-    // it, which is a 500 rather than a guess.
-    if crate::worker::from_wire(&before.execution.state).is_some_and(RunState::is_terminal) {
-        return Err(KillError::Terminated(id, before.execution.state));
-    }
     let cascade = q.cascade.unwrap_or(true);
     let (outcome, forced) =
         crate::worker::kill_execution_reporting(&st.db.pool, ctx.workspace_id.0, id, cascade)
             .await?;
-    let outcome = match outcome {
-        crate::worker::KillOutcome::Killing => RunState::Killing,
-        crate::worker::KillOutcome::Killed => RunState::Killed,
+    // `after_execution`: a kill of the post-terminal phase (Q3) leaves the
+    // execution's state alone, so the outcome is the execution's own state
+    // and the record says what happened to the phase.
+    let (outcome, after_execution) = match outcome {
+        crate::worker::KillOutcome::Killing => (RunState::Killing, None),
+        crate::worker::KillOutcome::Killed => (RunState::Killed, None),
+        crate::worker::KillOutcome::AfterExecution { state, stopped } => (
+            state,
+            Some(if stopped {
+                RunState::Killed
+            } else {
+                RunState::Killing
+            }),
+        ),
         crate::worker::KillOutcome::Terminated(s) => {
             return Err(KillError::Terminated(id, s.wire().to_string()));
         }
@@ -3247,6 +3253,9 @@ async fn kill_execution(
         "cascade": cascade,
         "outcome": outcome.wire(),
     });
+    if let Some(phase) = after_execution {
+        audited["after_execution"] = serde_json::Value::String(phase.wire().to_string());
+    }
     // Debt D4: only when the kill closed an execution it could not load by
     // force, so every other record keeps its shape.
     if forced {

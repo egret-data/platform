@@ -31,8 +31,9 @@
 
 use super::command::Command;
 use super::flowable::{run_of, sequential, Step};
+use super::kill;
 use super::plan::Plan;
-use super::state::{ExecutionState, RunIx, Tick};
+use super::state::{ExecutionState, RunIx, RunState, Tick};
 
 /// Kestra `ExecutorService.handleAfterExecution` (`ES:1005-1023`): once the
 /// execution is terminal, run `afterExecution:` one task at a time. The
@@ -46,12 +47,20 @@ use super::state::{ExecutionState, RunIx, Tick};
 /// `errors:`/`finally:` are passed empty because the flow's own lists are
 /// over.
 pub(crate) fn drive(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
-    // B3 HOOK (Q3, user answer 2026-10-27): a kill STOPS `afterExecution:`
-    // (a security divergence from Kestra, which force-executes the list
-    // after a kill and answers 409 to a kill of a terminal execution). Plan
-    // Task B3 builds it: once the kill route has stopped this phase's live
-    // runs, this walk must create no further after-task. Until B3 nothing
-    // records such a kill, so there is nothing to ask here yet.
+    // Q3 (user answer 2026-10-27): a kill STOPS `afterExecution:` (a
+    // security divergence from Kestra, which force-executes the list after a
+    // kill and answers 409 to a kill of a terminal execution). Once the kill
+    // route has killed this phase's live runs ([`kill::kill_phase`]), the
+    // phase is over: the walk creates no further after-task, and what is
+    // left is closing the phase's flowables ([`kill::close_phase`]).
+    if phase_killed(plan, state) {
+        let cmds = kill::close_phase(plan, state);
+        debug_assert!(
+            !cmds.iter().any(writes_the_execution),
+            "a killed post-terminal phase emitted a command that writes the execution: {cmds:?}"
+        );
+        return cmds;
+    }
     let cmds = match sequential::drive_list(plan, state, &plan.after_execution, None, now) {
         Some(Step::Commands(cmds)) => cmds,
         Some(Step::Waiting | Step::Done(_)) | None => Vec::new(),
@@ -80,12 +89,56 @@ pub(crate) fn writes_the_execution(cmd: &Command) -> bool {
 /// A `Loop` iteration's plan has no `afterExecution:` (D5, `ExS:1331`
 /// excludes `LOOP`), so for it "terminated" is "terminal". So is it for any
 /// flow without the list.
+///
+/// **A killed phase** (Q3, user answer 2026-10-27) is terminated once every
+/// run of it is terminal: [`drive`] then creates nothing more, so the
+/// after-tasks it never reached are not waited for.
 pub fn terminated(plan: &Plan, state: &ExecutionState) -> bool {
+    if !state.history.last().is_some_and(|s| s.is_terminal()) {
+        return false;
+    }
+    let all_ran = plan.after_execution.iter().all(|&task| {
+        run_of(state, None, task)
+            .and_then(|ix| state.runs[ix].history.last())
+            .is_some_and(|s| s.is_terminal())
+    });
+    all_ran
+        || (phase_killed(plan, state)
+            && (0..state.runs.len())
+                .filter(|&ix| in_phase(plan, state, ix))
+                .all(|ix| kill::is_settled(&state.runs[ix])))
+}
+
+/// **The phase has been killed** (Q3): a run of it is `KILLING` or `KILLED`.
+///
+/// Read off the runs, because the execution's own state must not move and
+/// so cannot carry the kill. Before Q3 no run of the phase could end
+/// `KILLED`: the phase starts only once a kill of the execution is over
+/// (D8), `Exit` is refused in it (D12), and a worker writes `KILLED` only
+/// through a kill. One reach is wider than the route: a `Subflow` of the
+/// phase with `transmitFailed: true` whose child execution was killed by
+/// someone else ends `KILLED` too (`subflow::guess_state`), and that stops
+/// the rest of the phase -- the same reading a `KILLED` child gets in the
+/// flow's `tasks:`, where it makes its parent `KILLED`
+/// (`flowable::aggregate`).
+pub fn phase_killed(plan: &Plan, state: &ExecutionState) -> bool {
+    !plan.after_execution.is_empty()
+        && state.runs.iter().enumerate().any(|(ix, run)| {
+            matches!(
+                run.history.last(),
+                Some(RunState::Killing | RunState::Killed)
+            ) && in_phase(plan, state, ix)
+        })
+}
+
+/// **A kill of this terminal execution has something to stop** (Q3): the
+/// execution is terminal and a run of its `afterExecution:` is live. The kill
+/// route accepts a kill of a terminal execution only then
+/// (`worker::kill`); otherwise it stays 409.
+pub fn after_execution_live(plan: &Plan, state: &ExecutionState) -> bool {
     state.history.last().is_some_and(|s| s.is_terminal())
-        && plan.after_execution.iter().all(|&task| {
-            run_of(state, None, task)
-                .and_then(|ix| state.runs[ix].history.last())
-                .is_some_and(|s| s.is_terminal())
+        && state.runs.iter().enumerate().any(|(ix, run)| {
+            run.history.last().is_some_and(|s| !s.is_terminal()) && in_phase(plan, state, ix)
         })
 }
 
