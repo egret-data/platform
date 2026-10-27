@@ -5629,8 +5629,8 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
          (0, +1, -1, -1). **2026-10-27, end hooks A3 moves it to 456/109/293/106**: \
          the plan now holds every `finally:` list (the flow's own and each \
          flowable's), so the 18 corpus runs written in one leave `unplanned` \
-         for `fed` (+18, 0, -18), and 2 of them carry no `SUBMITTED` in the \
-         golden, which is what the over-feed counts (+2; not traced per run). \
+         for `fed` (+18, 0, -18), and the +2 over-feed is one opaque run plus the \
+         `SetVariables` run, which `is_an_update` adds to the over-feed. \
          Nothing else moved: the ratchet is unchanged."
     );
     assert_eq!(

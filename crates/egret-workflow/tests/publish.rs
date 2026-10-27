@@ -436,50 +436,73 @@ async fn a_subflow_naming_a_flow_in_the_callers_own_workspace_publishes_and_free
     );
 }
 
-/// **A `Subflow` in a flowable's `finally:` is resolved at publish exactly like
-/// one in `tasks:`** (package #2a): the reference is frozen into the snapshot
-/// and the snapshot carries no warning. Publish walks `Task::children_mut`,
-/// so this fails if that walk misses the new list.
+/// **A `Subflow` in any flowable's `finally:` or in a loop's `errors:` is
+/// resolved at publish exactly like one in `tasks:`** (package #2a): the
+/// reference is frozen into the snapshot and the snapshot carries no warning.
+/// Publish walks `Task::children_mut` / `error_children_mut`, so a case fails
+/// (named) if that walk misses a kind's list. `Pause` is not here: publish
+/// refuses its `finally:` (#9).
 #[tokio::test]
-async fn a_subflow_in_a_flowables_finally_is_resolved_like_one_in_tasks() {
+async fn a_subflow_in_any_new_list_is_resolved_like_one_in_tasks() {
     let Some(db) = db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let repo = egret_workflow::FlowRepo::new(db.clone());
     let target_src = "id: nightly_rollup\nnamespace: company.analytics\ntasks:\n  - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: x\n";
     let target = common::draft(&repo, ws, user, target_src).await;
-    let sub = |id: &str| {
-        format!(
-            "{{id: {id}, type: core.subflow, namespace: company.analytics, flowId: nightly_rollup}}"
-        )
-    };
-    let f = common::draft(
-        &repo, ws, user,
-        &format!(
-            "id: f\nnamespace: a.b\ntasks:\n  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks: [{}]\n    finally: [{}]\n  - id: lp\n    type: io.kestra.plugin.core.flow.Loop\n    values: [1]\n    tasks: [{}]\n    errors: [{}]\n",
-            sub("in_tasks"),
-            sub("in_finally"),
-            sub("in_loop"),
-            sub("in_loop_errors"),
-        ),
-    )
-    .await;
-
-    let v = egret_workflow::publish(&repo, &common::workflow_refs(), ws, user, f.id, "")
-        .await
-        .expect("publish");
-
-    let seq = &v.snapshot["plan"]["tasks"][0];
     let want = serde_json::json!(target.id);
-    assert_eq!(seq["tasks"][0]["flowRef"], want, "{}", v.snapshot);
-    assert_eq!(seq["finally"][0]["flowRef"], want, "{}", v.snapshot);
-    let lp = &v.snapshot["plan"]["tasks"][1];
-    assert_eq!(lp["errors"][0]["flowRef"], want, "{}", v.snapshot);
-    assert_eq!(
-        v.snapshot["warnings"],
-        serde_json::json!([]),
-        "{}",
-        v.snapshot
-    );
+    let sub = "{id: sf, type: core.subflow, namespace: company.analytics, flowId: nightly_rollup}";
+    let log = "{id: a, type: core.log, message: m}";
+    // (type, the body the kind needs, the list under test)
+    let cases = [
+        ("Sequential", format!("tasks: [{log}]"), "finally"),
+        ("Parallel", format!("tasks: [{log}]"), "finally"),
+        ("If", format!("condition: x\n    then: [{log}]"), "finally"),
+        (
+            "Switch",
+            format!("value: x\n    cases: {{k: [{log}]}}"),
+            "finally",
+        ),
+        ("Dag", format!("tasks: [{{task: {log}}}]"), "finally"),
+        (
+            "LoopUntil",
+            format!("condition: x\n    tasks: [{log}]"),
+            "finally",
+        ),
+        ("WorkingDirectory", format!("tasks: [{log}]"), "finally"),
+        (
+            "Loop",
+            format!("values: [1]\n    tasks: [{log}]"),
+            "finally",
+        ),
+        ("Loop", format!("values: [1]\n    tasks: [{log}]"), "errors"),
+        (
+            "LoopUntil",
+            format!("condition: x\n    tasks: [{log}]"),
+            "errors",
+        ),
+        ("WorkingDirectory", format!("tasks: [{log}]"), "errors"),
+    ];
+    for (ty, body, list) in cases {
+        let f = common::draft(
+            &repo, ws, user,
+            &format!(
+                "id: f_{}_{list}\nnamespace: a.b\ntasks:\n  - id: blk\n    type: io.kestra.plugin.core.flow.{ty}\n    {body}\n    {list}: [{sub}]\n",
+                ty.to_lowercase()
+            ),
+        )
+        .await;
+        let v = egret_workflow::publish(&repo, &common::workflow_refs(), ws, user, f.id, "")
+            .await
+            .unwrap_or_else(|e| panic!("{ty}.{list}: {e:?}"));
+        let blk = &v.snapshot["plan"]["tasks"][0];
+        assert_eq!(blk[list][0]["flowRef"], want, "{ty}.{list}: {}", v.snapshot);
+        assert_eq!(
+            v.snapshot["warnings"],
+            serde_json::json!([]),
+            "{ty}.{list}: {}",
+            v.snapshot
+        );
+    }
 }
 
 // -- Fix round 2, Finding 1: `namespace: "a/b"`, `flowId: "c"` used to encode

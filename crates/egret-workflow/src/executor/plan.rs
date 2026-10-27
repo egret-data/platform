@@ -18,9 +18,12 @@ pub type TaskIx = usize;
 // only -- which is all any caller uses.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Plan {
-    /// Flattened; children are addressed by index. Pre-order, so a parent
-    /// always precedes its children — an ordering convenience for a reader,
-    /// not something any rule depends on.
+    /// Flattened; children are addressed by index. A parent always precedes
+    /// its children — an ordering convenience for a reader, not something any
+    /// rule depends on. A subtree is **not** contiguous: since package #2 a
+    /// block's `finally:` (and a `LoopUntil`/`WorkingDirectory`'s `errors:`) is
+    /// appended after the flow's `tasks:` and `errors:` (D3), so it sits far
+    /// from its parent.
     pub tasks: Vec<PlanTask>,
     /// The flow's top-level `tasks:`.
     pub roots: Vec<TaskIx>,
@@ -1316,8 +1319,9 @@ fn flatten_one<'a>(
         });
     }
 
-    // Reserved before the children are flattened, so `tasks` reads in
-    // pre-order and a child's index is always greater than its parent's.
+    // Reserved before the children are flattened, so a child's index is always
+    // greater than its parent's. (Not contiguous: a block's deferred lists are
+    // appended later, see `drain_deferred`.)
     let ix = out.len();
     out.push(PlanTask {
         id: task.id.clone(),
@@ -1344,9 +1348,8 @@ fn flatten_one<'a>(
         &task.kind,
         crate::models::canonical_flow_type(&task.r#type).as_deref(),
     ) {
-        // `errors` is flattened AFTER `tasks` for both, so `out` stays
-        // pre-order and the error subtree sits behind the task subtree it
-        // handles -- which is also the order Kestra creates their runs in.
+        // `errors` is flattened AFTER `tasks` for both, so the error subtree
+        // sits behind the task subtree it handles -- which is also the order Kestra creates their runs in.
         (ModelKind::Sequential(seq), Some(SEQUENTIAL_TYPE)) => {
             let children = flatten_list(out, &seq.tasks, depth + 1, deferred)?;
             out[ix].errors = flatten_list(out, &seq.errors, depth + 1, deferred)?;
@@ -1538,11 +1541,8 @@ fn flatten_one<'a>(
                     message: format!("loopUntil '{}' has no condition to loop until", task.id),
                 })?;
             let cf = lu.check_frequency.as_ref();
-            // No `errors:` is flattened, because W1's `models::LoopUntil`
-            // has no such field -- Kestra's `AbstractBranch` does, and the
-            // omission is W1's rather than this task's. Nothing in the
-            // corpus writes one on a `LoopUntil`, so `plan.tasks[ix].errors`
-            // stays the empty slice every caller already handles.
+            // Its `errors:` and `finally:` are flattened later, from the
+            // deferred queue (D3), so no index planned before package #2 moves.
             let children = flatten_list(out, &lu.tasks, depth + 1, deferred)?;
             deferred.push_back((ix, task, depth + 1));
             out[ix].kind = TaskKind::LoopUntil {
@@ -1726,8 +1726,7 @@ fn flatten_dag<'a>(
         });
     }
 
-    // Flattened in declaration order, so `out` stays pre-order and a node's own
-    // subtree sits between it and the next node.
+    // Flattened in declaration order; a node precedes its own children.
     let mut plan_ix = Vec::with_capacity(nodes.len());
     for (task, _) in nodes {
         plan_ix.push(flatten_one(out, task, depth, deferred)?);
@@ -1908,5 +1907,57 @@ mod end_hooks_plan_tests {
         assert_eq!(plan.tasks[0].errors, vec![3]);
         assert_eq!(plan.tasks[0].finally, vec![4]);
         assert_eq!(plan.tasks[4].finally, vec![6]);
+    }
+
+    /// D3 for every kind that defers: a block's `finally:` is planned AFTER the
+    /// later sibling and the flow's `errors:`, never inline behind its own
+    /// children. The corpus has no later sibling for most of these kinds, so
+    /// the A1 fixture cannot catch an inlined `finally`; this table does, and
+    /// each failure names the kind.
+    #[test]
+    fn every_kind_plans_its_finally_after_a_later_sibling_and_the_flows_errors() {
+        let log = |id: &str| format!("{{id: {id}, type: core.log, message: m}}");
+        let kinds = [
+            ("Sequential", format!("tasks: [{}]", log("a"))),
+            ("Parallel", format!("tasks: [{}]", log("a"))),
+            ("If", format!("condition: x\n    then: [{}]", log("a"))),
+            (
+                "Switch",
+                format!("value: x\n    cases: {{k: [{}]}}", log("a")),
+            ),
+            ("Dag", format!("tasks: [{{task: {}}}]", log("a"))),
+            (
+                "LoopUntil",
+                format!("condition: x\n    tasks: [{}]", log("a")),
+            ),
+            ("WorkingDirectory", format!("tasks: [{}]", log("a"))),
+        ];
+        for (ty, body) in kinds {
+            let src = format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: b\n    type: io.kestra.plugin.core.flow.{ty}\n    {body}\n    finally: [{z}]\n  - id: after\n    type: core.log\n    message: m\nerrors: [{fe}]\nfinally: [{ff}]\n",
+                z = log("z"),
+                fe = log("fe"),
+                ff = log("ff"),
+            );
+            let plan = plan_stored(&src).unwrap_or_else(|e| panic!("{ty}: {e:?}"));
+            assert_eq!(
+                ids(&plan),
+                ["b", "a", "after", "fe", "z", "ff"],
+                "{ty}: today's layout first, then the new lists"
+            );
+            assert_eq!(plan.tasks[0].finally, vec![4], "{ty}");
+            assert_eq!(plan.finally, vec![5], "{ty}");
+        }
+    }
+
+    /// The same rule one level down: a flowable nested in a `Sequential`'s
+    /// `tasks:` that has its own `finally:` does not put it before the
+    /// sibling that follows the nested block.
+    #[test]
+    fn a_nested_flowables_finally_is_planned_after_the_sibling_that_follows_it() {
+        let src = "id: f\nnamespace: a.b\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.flow.Parallel\n        tasks: [{id: a, type: core.log, message: m}]\n        finally: [{id: z, type: core.log, message: m}]\n      - id: sib\n        type: core.log\n        message: m\n";
+        let plan = plan_stored(src).unwrap();
+        assert_eq!(ids(&plan), ["outer", "inner", "a", "sib", "z"]);
+        assert_eq!(plan.tasks[1].finally, vec![4]);
     }
 }

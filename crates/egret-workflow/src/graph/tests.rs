@@ -1194,6 +1194,7 @@ fn every_kind_with_a_finally_draws_it() {
         ("If", "condition: \"{{ true }}\","),
         ("Switch", "value: x,"),
         ("WorkingDirectory", ""),
+        ("Dag", "tasks: [],"),
         ("LoopUntil", "condition: \"{{ true }}\","),
         ("Loop", "values: [1],"),
     ] {

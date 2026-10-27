@@ -240,6 +240,8 @@ pub(crate) fn drive(
         // Unreachable: `descend` matches on this kind before it gets here.
         return Step::Waiting;
     };
+    // Since end hooks A3 this list can be non-empty (the plan reads a
+    // `LoopUntil`'s `errors:`), so it is live here; A5 owns its tests.
     let errors = plan.tasks[task].errors.as_slice();
     match sequential::drive(plan, state, tasks, errors, Some(run), now) {
         Step::Commands(cmds) => return Step::Commands(cmds),

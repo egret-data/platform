@@ -283,7 +283,11 @@ impl Task {
 // no owner in W3a and adding a field nothing reads would be a second dead
 // field rather than a smaller version of the same fix.
 //
-// `children()` is NOT widened with it, and that is a decision rather than an
+// **2026-10-27 (end hooks A2): `children()` IS widened now** -- it lists
+// `finally` last for every flowable. The paragraph below is the record of why
+// it was not, until package #2 decided the refusal movement was worth it.
+//
+// `children()` was NOT widened with it, and that was a decision rather than an
 // oversight. Java's `AbstractBranch.allChildTasks()` *is* `tasks + errors +
 // _finally`, so `children()` is narrower than Kestra's walk -- but
 // `children()` is `spec::validate`'s walk (duplicate ids, `has_cycle`) and
@@ -1262,14 +1266,16 @@ sql: SELECT 1
         fn leaf(id: &str) -> String {
             format!("{{id: {id}, type: io.kestra.plugin.core.log.Log, message: x}}")
         }
+        // `finally` is on every kind that has one except `Pause`, whose
+        // `finally` publish refuses (`unsupported_pause_property`, #9).
         let (a, b, e, f) = (leaf("a"), leaf("b"), leaf("e"), leaf("f"));
         let yaml = format!(
             "id: root\ntype: core.sequential\ntasks:\n\
              \x20 - {{id: seq, type: core.sequential, tasks: [{a}], errors: [{e}], finally: [{f}]}}\n\
-             \x20 - {{id: par, type: core.parallel, tasks: [{a}, {b}], errors: [{e}]}}\n\
-             \x20 - {{id: if, type: core.if, condition: x, then: [{a}], else: [{b}], errors: [{e}]}}\n\
-             \x20 - {{id: sw, type: core.switch, value: x, cases: {{k1: [{a}], k2: [{b}]}}, defaults: [{leaf_d}], errors: [{e}]}}\n\
-             \x20 - {{id: dag, type: core.dag, tasks: [{{task: {a}}}, {{task: {b}, dependsOn: [a]}}], errors: [{e}]}}\n\
+             \x20 - {{id: par, type: core.parallel, tasks: [{a}, {b}], errors: [{e}], finally: [{f}]}}\n\
+             \x20 - {{id: if, type: core.if, condition: x, then: [{a}], else: [{b}], errors: [{e}], finally: [{f}]}}\n\
+             \x20 - {{id: sw, type: core.switch, value: x, cases: {{k1: [{a}], k2: [{b}]}}, defaults: [{leaf_d}], errors: [{e}], finally: [{f}]}}\n\
+             \x20 - {{id: dag, type: core.dag, tasks: [{{task: {a}}}, {{task: {b}, dependsOn: [a]}}], errors: [{e}], finally: [{f}]}}\n\
              \x20 - {{id: lp, type: core.loop, values: [1], tasks: [{a}], errors: [{e}], finally: [{f}]}}\n\
              \x20 - {{id: lu, type: core.loopuntil, condition: x, tasks: [{a}], errors: [{e}], finally: [{f}]}}\n\
              \x20 - {{id: af, type: core.allowfailure, tasks: [{a}], finally: [{b}], errors: [{e}]}}\n\
@@ -1337,12 +1343,15 @@ sql: SELECT 1
     #[test]
     fn a_finally_that_is_not_a_list_of_tasks_is_a_parse_error_naming_the_key() {
         for bad in ["not-a-list", "[1]"] {
-            for flow in [
-                format!("id: f\nnamespace: a.b\ntasks: [{{id: a, type: core.log, message: m}}]\nfinally: {bad}\n"),
-                format!("id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: core.sequential\n    tasks: [{{id: a, type: core.log, message: m}}]\n    finally: {bad}\n"),
+            for (flow, task_level) in [
+                (format!("id: f\nnamespace: a.b\ntasks: [{{id: a, type: core.log, message: m}}]\nfinally: {bad}\n"), false),
+                (format!("id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: core.sequential\n    tasks: [{{id: a, type: core.log, message: m}}]\n    finally: {bad}\n"), true),
             ] {
                 let err = crate::spec::parse(&flow).expect_err(&flow);
                 assert!(err.message.contains("finally"), "{bad}: {err:?}");
+                if task_level {
+                    assert!(err.message.contains("task 's'"), "{bad}: {err:?}");
+                }
             }
         }
     }
