@@ -112,6 +112,8 @@ pub fn rule_kind_word(r: &Rule) -> &'static str {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refused {
     pub row: PermRow,
+    /// The row follows, but into a namespace of several levels (D14).
+    pub multi_level: bool,
     pub missing: Vec<String>,
 }
 
@@ -229,6 +231,7 @@ pub fn plan(grants: &[Grant], rules: &[Rule], mv: &Move) -> PermFollow {
         } else if follows || escapes {
             out.refused.push(Refused {
                 row,
+                multi_level: follows,
                 missing: Vec::new(),
             });
         }
@@ -320,4 +323,401 @@ async fn path_rules_of_catalog_via(
         }
     }
     Ok(out)
+}
+
+// ── hand-written policies (D5, G3) ─────────────────────────────────────────
+
+/// One hand-written policy, as a refusal or a report names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Handwritten {
+    pub id: i64,
+    pub profile: String,
+    pub name: String,
+}
+
+impl Handwritten {
+    /// `profile/name (id)`.
+    pub fn label(&self) -> String {
+        format!("{}/{} ({})", self.profile, self.name, self.id)
+    }
+}
+
+/// What D5 found for one move.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HandwrittenCheck {
+    /// Restrictive (a mask, a row filter, a deny, or an exclusion list on the
+    /// renamed level): the rename is refused.
+    pub refuse: Vec<Handwritten>,
+    /// A plain literal allow: reported.
+    pub report: Vec<Handwritten>,
+}
+
+/// One resource level of a Ranger policy: `(values, isExcludes)`.
+fn resource<'a>(body: &'a serde_json::Value, level: &str) -> Option<(Vec<&'a str>, bool)> {
+    let r = body.get("resources")?.get(level)?;
+    let values = r
+        .get("values")?
+        .as_array()?
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    let excludes = r
+        .get("isExcludes")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    Some((values, excludes))
+}
+
+/// Does a level (glob values, honouring `isExcludes`) reach `value`?
+fn level_reaches((values, excludes): &(Vec<&str>, bool), value: &str) -> bool {
+    values.iter().any(|v| resource_level_matches(v, value)) != *excludes
+}
+
+/// Does a level name `value` literally, in either polarity?
+fn names_literally((values, _): &(Vec<&str>, bool), value: &str) -> bool {
+    values
+        .iter()
+        .any(|v| is_literal(v) && fold(v) == fold(value))
+}
+
+fn non_empty_list(body: &serde_json::Value, key: &str) -> bool {
+    body.get(key)
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|a| !a.is_empty())
+}
+
+/// Classify one hand-written policy body for `mv` (D5): `None` when it does
+/// not name the source literally, else `Some(true)` when it is restrictive.
+pub fn handwritten_names(body: &serde_json::Value, catalog_name: &str, mv: &Move) -> Option<bool> {
+    let catalog = resource(body, "catalog")?;
+    let schema = resource(body, "schema").or_else(|| resource(body, "database"))?;
+    let table = resource(body, "table")?;
+    if !level_reaches(&catalog, catalog_name) || !level_reaches(&schema, &mv.from.schema) {
+        return None;
+    }
+    // The renamed level and its own `isExcludes`.
+    let renamed = match &mv.from.column {
+        None => {
+            if !names_literally(&table, &mv.from.table) {
+                return None;
+            }
+            table
+        }
+        Some(c) => {
+            if !level_reaches(&table, &mv.from.table) {
+                return None;
+            }
+            let column = resource(body, "column")?;
+            if !names_literally(&column, c) {
+                return None;
+            }
+            column
+        }
+    };
+    let policy_type = body
+        .get("policyType")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+    Some(
+        policy_type == 1
+            || policy_type == 2
+            || non_empty_list(body, "denyPolicyItems")
+            || non_empty_list(body, "denyExceptions")
+            || renamed.1,
+    )
+}
+
+/// D5 over the enabled operator policies of `services` (the profiles bound to
+/// the warehouse), `catalog_name` the registry catalog's name.
+///
+/// # Errors
+/// The database's error.
+pub async fn handwritten_via(
+    conn: &mut sqlx::PgConnection,
+    services: &[i64],
+    catalog_name: &str,
+    mv: &Move,
+) -> Result<HandwrittenCheck, sqlx::Error> {
+    let rows: Vec<(i64, String, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT p.id, s.name, p.name, p.policy_jsonb FROM policy.authz_policies p \
+           JOIN policy.authz_services s ON s.id = p.service_id \
+          WHERE p.service_id = ANY($1) AND p.enabled AND p.managed_by = 'operator' \
+          ORDER BY s.name, p.name, p.id",
+    )
+    .bind(services)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut out = HandwrittenCheck::default();
+    for (id, profile, name, body) in rows {
+        let Some(restrictive) = handwritten_names(&body, catalog_name, mv) else {
+            continue;
+        };
+        let h = Handwritten { id, profile, name };
+        if restrictive {
+            out.refuse.push(h);
+        } else {
+            out.report.push(h);
+        }
+    }
+    Ok(out)
+}
+
+// ── the writes (D1, D2, D13) ───────────────────────────────────────────────
+
+/// The rows one move's copy inserted: `(source id, copy id)`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Copies {
+    pub grants: Vec<(Uuid, Uuid)>,
+    pub rules: Vec<(Uuid, Uuid)>,
+}
+
+impl Copies {
+    pub fn is_empty(&self) -> bool {
+        self.grants.is_empty() && self.rules.is_empty()
+    }
+}
+
+fn folded_scope(s: &Scope) -> Scope {
+    let f = |l: &Option<String>| l.as_deref().map(fold);
+    Scope {
+        catalog_id: s.catalog_id,
+        schema: f(&s.schema),
+        table: f(&s.table),
+        column: f(&s.column),
+    }
+}
+
+/// D13's equivalence key of a grant: its canonical body (as a migration
+/// hashes it) with the id cleared and the scope folded.
+fn grant_key(g: &Grant) -> String {
+    let mut g = g.clone();
+    g.id = Uuid::nil();
+    g.scope = folded_scope(&g.scope);
+    crate::migrate::grant_hash(&g)
+}
+
+/// D13's equivalence key of a path rule: as [`grant_key`], the name cleared.
+fn rule_key(r: &Rule) -> String {
+    let mut r = r.clone();
+    r.id = Uuid::nil();
+    r.name = String::new();
+    if let Selector::Path(s) = &r.selector {
+        r.selector = Selector::Path(folded_scope(s));
+    }
+    crate::migrate::rule_hash(&r)
+}
+
+/// `<name> (<schema>.<table>)`, or `.<column>` for a column move.
+fn copy_name(r: &Rule, mv: &Move) -> String {
+    format!("{} ({})", r.name, mv.to.label())
+}
+
+/// Copy `plan`'s restrictive rows to the destination on `tx` (D1): each a new
+/// row with the source's body and principals or exemptions, the scope
+/// re-pointed ([`moved_scope`]). A copy whose equivalent already sits on the
+/// destination is skipped (D13). A rule copy is named
+/// `"<name> (<destination>)"`, with ` #2`, ` #3` … on a name collision.
+///
+/// # Errors
+/// The store's error; a database CHECK refusing a destination name.
+pub async fn copy_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    plan: &PermFollow,
+    mv: &Move,
+) -> Result<Copies, egret_perm::PermError> {
+    let mut out = Copies::default();
+    if !plan.copies() {
+        return Ok(out);
+    }
+    let existing_grants: Vec<String> = grants_of_catalog_via(tx, mv.catalog_id)
+        .await?
+        .iter()
+        .map(grant_key)
+        .collect();
+    let existing_rules: Vec<String> = path_rules_of_catalog_via(tx, mv.catalog_id)
+        .await?
+        .iter()
+        .map(rule_key)
+        .collect();
+    for g in &plan.copy_grants {
+        let copy = Grant {
+            id: Uuid::nil(),
+            scope: moved_scope(&g.scope, mv),
+            ..g.clone()
+        };
+        if existing_grants.contains(&grant_key(&copy)) {
+            continue;
+        }
+        let id = egret_perm::create_grant_in_tx(tx, &copy).await?;
+        out.grants.push((g.id, id));
+    }
+    for r in &plan.copy_rules {
+        let Selector::Path(scope) = &r.selector else {
+            continue;
+        };
+        let mut copy = Rule {
+            id: Uuid::nil(),
+            name: copy_name(r, mv),
+            selector: Selector::Path(moved_scope(scope, mv)),
+            ..r.clone()
+        };
+        if existing_rules.contains(&rule_key(&copy)) {
+            continue;
+        }
+        let base = copy.name.clone();
+        let mut n = 1;
+        let id = loop {
+            let taken: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM perm.rules WHERE name = $1)")
+                    .bind(&copy.name)
+                    .fetch_one(&mut **tx)
+                    .await?;
+            if !taken {
+                // A savepoint: a concurrent writer taking the name between
+                // the check and the insert retries with the next suffix.
+                let mut sp = sqlx::Connection::begin(&mut **tx).await?;
+                match egret_perm::create_rule_in_tx(&mut sp, &copy).await {
+                    Ok(id) => {
+                        sp.commit().await?;
+                        break id;
+                    }
+                    Err(egret_perm::PermError::Db(e))
+                        if e.as_database_error()
+                            .and_then(|d| d.code())
+                            .is_some_and(|c| c == "23505") =>
+                    {
+                        sp.rollback().await?;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            n += 1;
+            copy.name = format!("{base} #{n}");
+        };
+        out.rules.push((r.id, id));
+    }
+    Ok(out)
+}
+
+/// Undo a copy (compensation): delete exactly the rows it inserted.
+///
+/// # Errors
+/// The store's error.
+pub async fn delete_copies_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    copies: &Copies,
+) -> Result<(), egret_perm::PermError> {
+    for (_, id) in &copies.grants {
+        egret_perm::delete_grant_in_tx(tx, *id).await?;
+    }
+    for (_, id) in &copies.rules {
+        egret_perm::delete_rule_in_tx(tx, *id).await?;
+    }
+    Ok(())
+}
+
+/// Re-point the allow grants `ids` to the destination in place, keeping each
+/// id (D2), after re-reading it under the caller's locks: a row that no
+/// longer follows the move is left alone. Returns `(before, after)` of each
+/// moved grant.
+///
+/// # Errors
+/// The store's error.
+pub async fn move_allows_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ids: &[Uuid],
+    mv: &Move,
+) -> Result<Vec<(Grant, Grant)>, egret_perm::PermError> {
+    let mut out = Vec::new();
+    for &id in ids {
+        let Some(before) = egret_perm::get_grant_via(tx, id).await? else {
+            continue;
+        };
+        if before.effect != Effect::Allow
+            || before.origin != GrantOrigin::Explicit
+            || before.scope.catalog_id != mv.catalog_id
+            || !follows(&before.scope, mv)
+        {
+            continue;
+        }
+        let after = Grant {
+            scope: moved_scope(&before.scope, mv),
+            ..before.clone()
+        };
+        egret_perm::update_grant_in_tx(tx, id, &after).await?;
+        out.push((before, after));
+    }
+    Ok(out)
+}
+
+// ── the refusal (spec §8) ──────────────────────────────────────────────────
+
+/// How many refused rows a message lists.
+const LISTED: usize = 10;
+
+/// The 409's text for one move's refusals (spec §8), without the
+/// "egret refused the table change: " prefix. `None` when nothing refuses.
+pub fn refusal_message(
+    refused: &[Refused],
+    handwritten: &[Handwritten],
+    mv: &Move,
+) -> Option<String> {
+    let (from, to) = (mv.from.label(), mv.to.label());
+    let mut parts = Vec::new();
+    let patterns: Vec<&Refused> = refused.iter().filter(|r| !r.multi_level).collect();
+    if !patterns.is_empty() {
+        let n = patterns.len();
+        let rows: Vec<String> = patterns
+            .iter()
+            .take(LISTED)
+            .map(|r| {
+                if r.missing.is_empty() {
+                    r.row.describe()
+                } else {
+                    format!("{} — {}", r.row.describe(), r.missing.join("; "))
+                }
+            })
+            .collect();
+        let more = if n > LISTED {
+            format!("; and {} more", n - LISTED)
+        } else {
+            String::new()
+        };
+        let (count, verb) = if n == 1 {
+            ("1 restriction covers".to_string(), "it")
+        } else {
+            (format!("{n} restrictions cover"), "these restrictions")
+        };
+        parts.push(format!(
+            "{count} {from} through a name pattern and would not cover {to}: {}{more}. egret does \
+             not rewrite patterns: add {verb} for the new name, change the patterns, or choose a \
+             name they cover",
+            rows.join("; ")
+        ));
+    }
+    let multi: Vec<&Refused> = refused.iter().filter(|r| r.multi_level).collect();
+    if !multi.is_empty() {
+        let rows: Vec<String> = multi
+            .iter()
+            .take(LISTED)
+            .map(|r| r.row.describe())
+            .collect();
+        parts.push(format!(
+            "{from} carries restrictions that cannot follow it into {to}, whose namespace has more \
+             than one level, which no grant or rule can name: {}; use a single-level schema",
+            rows.join("; ")
+        ));
+    }
+    if !handwritten.is_empty() {
+        let names: Vec<String> = handwritten.iter().map(Handwritten::label).collect();
+        parts.push(format!(
+            "hand-written Ranger policies name {from} with a deny, mask, row filter or exclusion \
+             list: {}; egret does not rewrite hand-written policies: edit or migrate them first",
+            names.join(", ")
+        ));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!("{}. Nothing was renamed.", parts.join(". ")))
 }
