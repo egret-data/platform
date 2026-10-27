@@ -30,19 +30,14 @@ pub(crate) fn drive(
     now: Tick,
 ) -> Step {
     let errors = plan.tasks[task].errors.as_slice();
-    let children = match sequential::drive(plan, state, tasks, errors, Some(run), now) {
+    // End hooks A4: `finally:` is `current_list`'s third list, as for every
+    // other flowable (D2), rather than a private second walk. `Done` is still
+    // the aggregate of `tasks:` alone, so a failing `finally:` child does not
+    // change the block's state.
+    let children = match sequential::drive(plan, state, tasks, errors, finally, Some(run), now) {
         Step::Done(children) => children,
         other => return other,
     };
-    if !finally.is_empty() {
-        // The block's state is already decided, so `finally` only decides when
-        // the block is done. A failing `finally:` child does not change it.
-        if let step @ (Step::Commands(_) | Step::Waiting) =
-            sequential::drive(plan, state, finally, &[], Some(run), now)
-        {
-            return step;
-        }
-    }
     let state = block_state(children, plan.tasks[task].allow_warning);
     Step::Commands(vec![Command::SetRunState { run, state }])
 }

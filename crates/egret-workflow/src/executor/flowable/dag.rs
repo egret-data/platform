@@ -17,8 +17,7 @@
 use crate::executor::plan::{DagNode, Plan, TaskIx};
 use crate::executor::state::{ExecutionState, RunIx, RunState, Tick};
 
-use super::parallel::drive_concurrent;
-use super::{current_list, latest, Current, Step};
+use super::{latest, Step};
 
 /// Drive one `Dag`.
 ///
@@ -37,7 +36,7 @@ use super::{current_list, latest, Current, Step};
 ///
 /// It said the predicate was `SUCCESS` (later `SUCCESS` **or** `SKIPPED`), that
 /// *"the two spellings cannot be told apart"*, and that *"`FAILED` and `KILLED`
-/// remain unreachable here"*. The argument was: rule 1 of [`drive_concurrent`]
+/// remain unreachable here"*. The argument was: rule 1 of [`drive_concurrent`](super::parallel::drive_concurrent)
 /// closes the branch on any terminal that is not `SUCCESS`, so no
 /// terminated-but-not-successful dependency ever reaches this line.
 ///
@@ -78,19 +77,22 @@ pub(crate) fn drive(
     state: &ExecutionState,
     nodes: &[DagNode],
     errors: &[TaskIx],
+    finally: &[TaskIx],
     parent: Option<RunIx>,
     now: Tick,
 ) -> Step {
     let children: Vec<TaskIx> = nodes.iter().map(|n| n.task).collect();
     // `Dag.java:106` carries `errors` like every other flowable, and
-    // `Dag.resolveNexts` passes it to `resolveDagNexts`. No corpus `Dag` writes
-    // one -- `every_corpus_errors_list_is_on_a_flowable_egret_plans` derives
-    // that -- so this arm is here for the shape rather than for a measurement,
-    // and it defers to `parallel::drive`, which is what `resolveDagNexts` does
-    // too.
-    if !errors.is_empty() {
-        return super::parallel::drive(plan, state, &children, errors, parent, None, now);
-    }
+    // `Dag.resolveNexts` passes it (and `finally`) to `resolveDagNexts`, which
+    // is `resolveParallelNexts` with the `dependsOn` filter below.
+    //
+    // **End hooks A4 (2026-10-27): this used to defer to `parallel::drive`
+    // whenever `errors:` was non-empty, and so dropped the `dependsOn` gate
+    // while `tasks:` ran** -- every node started at once. No corpus `Dag` had
+    // an `errors:` then; `valids/finally-dag` has one. Both lists now go
+    // through `parallel::drive_lists`, which asks `current_list` and walks
+    // `errors:`/`finally:` sequentially, with this predicate for `tasks:`.
+    //
     // **Kestra's SECOND gate, applied to the one path that did not go through
     // it** -- W8 Task 5 fix round 4.
     //
@@ -116,18 +118,14 @@ pub(crate) fn drive(
     // It is one call because it is one Java method: `Dag.resolveNexts` ->
     // `resolveDagNexts` -> `resolveParallelNexts` ->
     // `findTaskDependingFlowState`, the same function a `Parallel` reaches.
-    // The `errors.is_empty()` branch above already routes through
-    // `parallel::drive`, which asks this for itself.
-    if matches!(
-        current_list(plan, state, &children, errors, parent, now),
-        Current::RetryPending
-    ) {
-        return Step::Waiting;
-    }
-    drive_concurrent(
+    // Since end hooks A4 it is asked inside `parallel::drive_lists`, for the
+    // `Dag` with and without lists alike.
+    super::parallel::drive_lists(
         plan,
         state,
         &children,
+        errors,
+        finally,
         parent,
         // Kestra's `Dag` carries `concurrent` exactly as `Parallel` does; no
         // corpus flow sets it on a `Dag`, so `TaskKind::Dag` does not carry it

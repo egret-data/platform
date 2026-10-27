@@ -243,7 +243,8 @@ pub(crate) fn drive(
     // Since end hooks A3 this list can be non-empty (the plan reads a
     // `LoopUntil`'s `errors:`), so it is live here; A5 owns its tests.
     let errors = plan.tasks[task].errors.as_slice();
-    match sequential::drive(plan, state, tasks, errors, Some(run), now) {
+    // `finally:` is A5's (D6); not driven yet.
+    match sequential::drive(plan, state, tasks, errors, &[], Some(run), now) {
         Step::Commands(cmds) => return Step::Commands(cmds),
         Step::Waiting => return Step::Waiting,
         Step::Done(_) => {}

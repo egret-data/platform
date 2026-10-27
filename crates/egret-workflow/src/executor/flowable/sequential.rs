@@ -12,11 +12,14 @@ use crate::executor::state::{ExecutionState, RunIx, RunState, Tick};
 
 use super::{aggregate, current_list, descend, open, run_of, Current, Step};
 
-/// Drive one sequential task list and its `errors:`.
+/// Drive one sequential task list, its `errors:` and its `finally:`.
 ///
-/// `children` is the `tasks:` list, `errors` its `errors:`, and `parent` the
-/// run that owns both (`None` for the root list). Returns the first thing that
-/// needs doing, or the list's terminal state.
+/// `children` is the `tasks:` list, `errors` its `errors:`, `finally` its
+/// `finally:`, and `parent` the run that owns all three (`None` for the root
+/// list). Returns the first thing that needs doing, or the list's terminal
+/// state -- which is [`aggregate`] over `children` alone, even after `errors`
+/// and `finally` have run (spec §0.2: a failing `finally` child changes
+/// nothing).
 ///
 /// Returning at the **first** thing is what makes this sequential, and it is
 /// the one line of difference from
@@ -46,12 +49,13 @@ pub(crate) fn drive(
     state: &ExecutionState,
     children: &[TaskIx],
     errors: &[TaskIx],
+    finally: &[TaskIx],
     parent: Option<RunIx>,
     now: Tick,
 ) -> Step {
     let is_flow = parent.is_none();
-    let list = match current_list(plan, state, children, errors, parent, now) {
-        Current::Tasks(list) | Current::Errors(list) => list,
+    let list = match current_list(plan, state, children, errors, finally, parent, now) {
+        Current::Tasks(list) | Current::Errors(list) | Current::Finally(list) => list,
         Current::RetryPending if is_flow => return Step::Done(aggregate(state, children, parent)),
         Current::RetryPending => return Step::Waiting,
         Current::Ended => return Step::Done(aggregate(state, children, parent)),
@@ -156,10 +160,10 @@ fn walk(
     None
 }
 
-/// [`walk`], for [`parallel`](super::parallel), whose `errors:` list is driven
-/// sequentially even though its `tasks:` list is not — Kestra says so in as
-/// many words: "errors & finally must be run as sequential tasks"
-/// (`FlowableUtils.resolveParallelNexts`).
+/// [`walk`], for [`parallel`](super::parallel) (and so `Dag`), whose `errors:`
+/// and `finally:` lists are driven sequentially even though its `tasks:` list
+/// is not — Kestra says so in as many words: "errors & finally must be run as
+/// sequential tasks" (`FlowableUtils.resolveParallelNexts`).
 pub(crate) fn walk_errors(
     plan: &Plan,
     state: &ExecutionState,

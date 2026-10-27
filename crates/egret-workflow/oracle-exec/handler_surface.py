@@ -202,20 +202,30 @@ def collect_tasks(node, path, out):
             collect_tasks(v, path, out)
 
 
-def unported_finally(node):
-    """True if some `finally:` is NOT the block-level `finally:` of an AllowFailure.
+# End hooks A4 (2026-10-27): the executor runs a `finally:` on these kinds by
+# Kestra's list rule (`flowable::current_list`). Still unported: the flow's own
+# `finally:` (the executor runs it, but the worker's leaf lookup,
+# `worker::claim::leaf`, does not walk `flow.finally_`, so its leaves fail),
+# and `finally:` on `Loop`, `LoopUntil`, `WorkingDirectory` (A5, A6) and
+# `Pause` (refused, #9).
+PORTED_FINALLY = {"allowfailure", "sequential", "parallel", "if", "switch", "dag"}
+
+
+def unported_finally(node, root=True):
+    """True if some `finally:` is one egret does not run yet.
 
     The AllowFailure flowable runs its own `finally:` (spec §5.2 of its design),
-    so that one is ported; a `finally:` on any other task is not.
+    and since end hooks A4 so do the kinds in PORTED_FINALLY. `root` is the
+    flow document itself, whose `finally:` is not ported (see above).
     """
     if isinstance(node, dict):
         ty = node.get("type")
-        is_allow_failure = isinstance(ty, str) and ty.rsplit(".", 1)[-1].lower() == "allowfailure"
-        if "finally" in node and not is_allow_failure:
+        short = ty.rsplit(".", 1)[-1].lower() if isinstance(ty, str) else None
+        if "finally" in node and (root or short not in PORTED_FINALLY):
             return True
-        return any(unported_finally(v) for v in node.values())
+        return any(unported_finally(v, False) for v in node.values())
     if isinstance(node, list):
-        return any(unported_finally(v) for v in node)
+        return any(unported_finally(v, False) for v in node)
     return False
 
 
@@ -1004,8 +1014,11 @@ def check_inputs(flows, kinds, golden, baseline):
     # `task-runif-taskswithstate` stays, on the flow-level `finally:`).
     # 72 since no-silent-drops Task 8b (2026-10-26) banked
     # `invalids/invalid-property` (refused at save, `Seam::Save`).
-    if len(baseline) != 72:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 72; the split "
+    # 68 since end hooks A4 (2026-10-27) banked `valids/finally-dag`,
+    # `valids/finally-parallel`, `valids/finally-sequential` and
+    # `valids/finally-sequential-error` (flowable `finally:` runs).
+    if len(baseline) != 68:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 68; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1655,8 +1668,8 @@ def self_test():
          "not 273",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 72",
-         "not 72",
+    case("baseline.txt is no longer 68",
+         "not 68",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

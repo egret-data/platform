@@ -35,7 +35,8 @@ pub(crate) fn drive(
         None => Step::Commands(vec![Command::BeginWorkingDirectory { run }]),
         Some(WorkingDirPhase::Preparing | WorkingDirPhase::Finishing) => Step::Waiting,
         Some(WorkingDirPhase::Prepared) => {
-            match sequential::drive(plan, state, tasks, &[], Some(run), now) {
+            // `errors:`/`finally:` are A5's (D7); not driven yet.
+            match sequential::drive(plan, state, tasks, &[], &[], Some(run), now) {
                 // The children are over, whatever state they reached. The
                 // finish claim runs before the block takes its terminal state.
                 Step::Done(_) => Step::Commands(vec![Command::FinishWorkingDirectory { run }]),

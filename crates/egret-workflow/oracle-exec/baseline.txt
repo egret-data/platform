@@ -579,15 +579,11 @@ valids/all-flowable
 valids/dag
 valids/disable-flowable
 valids/errors
-valids/finally-dag
 valids/finally-flow
 valids/finally-flow-error
 valids/finally-flow-error-first
 valids/finally-loop
 valids/finally-loop-parallel
-valids/finally-parallel
-valids/finally-sequential
-valids/finally-sequential-error
 valids/finally-sequential-error-first
 # group C1 Task 2 (2026-10-18): `OutputValues` runs now; held by `afterExecution:`, which egret does not run (its `afterExecution` run is missing; measured).
 valids/flow-concurrency-queue-after-execution

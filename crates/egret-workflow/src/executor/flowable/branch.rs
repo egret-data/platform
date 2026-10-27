@@ -127,6 +127,7 @@ pub fn is_truthy(rendered: &str) -> bool {
 /// **A `Switch` in the same position FAILS** — see [`drive_switch`]. The two
 /// are not one rule, and writing them as one is the mistake this pair of doc
 /// comments exists to prevent.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn drive_if(
     plan: &Plan,
     state: &ExecutionState,
@@ -134,13 +135,16 @@ pub(crate) fn drive_if(
     then_: &[TaskIx],
     else_: &[TaskIx],
     errors: &[TaskIx],
+    finally: &[TaskIx],
     now: Tick,
 ) -> Step {
     let Some(rendered) = state.runs[run].rendered.as_deref() else {
         return Step::Waiting;
     };
     let chosen = if is_truthy(rendered) { then_ } else { else_ };
-    sequential::drive(plan, state, chosen, errors, Some(run), now)
+    // An empty `chosen` ends the `If` without its `finally:`
+    // (`If.java:188-198`): `current_list`'s first arm.
+    sequential::drive(plan, state, chosen, errors, finally, Some(run), now)
 }
 
 /// Drive one `Switch`.
@@ -188,6 +192,7 @@ pub(crate) fn drive_if(
 /// hold that apart from the other two. **Nothing in the corpus writes
 /// `defaults: []`** (measured over all 351 flows), so nothing reaches it.
 /// Closing it needs an `Option<Vec<Task>>` in W1's model and a third arm here.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn drive_switch(
     plan: &Plan,
     state: &ExecutionState,
@@ -195,6 +200,7 @@ pub(crate) fn drive_switch(
     cases: &[(String, Vec<TaskIx>)],
     default: &[TaskIx],
     errors: &[TaskIx],
+    finally: &[TaskIx],
     now: Tick,
 ) -> Step {
     let Some(rendered) = state.runs[run].rendered.as_deref() else {
@@ -202,8 +208,10 @@ pub(crate) fn drive_switch(
     };
     match cases.iter().find(|(key, _)| key == rendered) {
         Some((_, chosen)) if chosen.is_empty() => Step::Waiting,
-        Some((_, chosen)) => sequential::drive(plan, state, chosen, errors, Some(run), now),
+        Some((_, chosen)) => {
+            sequential::drive(plan, state, chosen, errors, finally, Some(run), now)
+        }
         None if default.is_empty() => Step::Done(RunState::Failed),
-        None => sequential::drive(plan, state, default, errors, Some(run), now),
+        None => sequential::drive(plan, state, default, errors, finally, Some(run), now),
     }
 }

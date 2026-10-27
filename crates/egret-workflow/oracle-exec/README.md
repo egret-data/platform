@@ -13537,3 +13537,42 @@ breakdown (runs 54 → 55, order 26 → 27, total 80 → 69), the ordered pairs
 (2, 82, 84) → (2, 71, 73), baselined terminals 325 → 303, executions
 119 → 108, run-history tokens 1257 → 1192 and execution-history tokens
 422 → 389. The residual `ExecutionUpdatableTask` row went 12 → 1.
+
+## End hooks A4 (2026-10-27): `finally:` by Kestra's list rule, four entries bank
+
+**What changed.** `flowable::current_list` is Kestra's
+`findTaskDependingFlowState` with its third list: `tasks`, then `errors` (on a
+failure for good), then `finally`, which runs on success too, one child at a
+time under a `Parallel` or a `Dag` as well. Every flowable that calls it
+(`Sequential`, `Parallel`, `Dag`, `If`, `Switch`, `AllowFailure`) and the flow's
+own root call pass their `finally:`; a block's (and the execution's) state is
+still the aggregate of `tasks` alone. A `Dag` with an `errors:` used to be
+handed to `parallel::drive` and lose its `dependsOn` gate; it now keeps it.
+The ratchet went from 72 mismatching / 72 baselined to 68 / 68, 0 broken.
+
+**Banked (4):** `valids/finally-dag`, `valids/finally-parallel`,
+`valids/finally-sequential` and `valids/finally-sequential-error`.
+
+**Expected and still baselined (6), first differing field from the printout:**
+`valids/finally-flow`, `finally-flow-error`, `finally-flow-error-first`,
+`finally-sequential-error-first` and `restart-with-finally` differ on `runs`
+only: the flow-level `finally:` runs are created in the right order, but each
+leaf ends `FAILED` where the golden has `SUCCESS`. The worker refuses them with
+`NotALeaf` ("egret cannot run task `a1`: it is a control-flow task"), because
+`worker::claim::leaf` walks `flow.tasks` and `flow.errors` and not
+`flow.finally_`. `valids/task-runif-taskswithstate` also differs on `runs`:
+`write_execution_context` and `skipped_when_failures_exist` are created and
+end `CREATED FAILED` -- their `runIf:` (`tasksWithState(state='FAILED') is
+[not] empty`) fails to render.
+
+The handler-surface ceiling went 262 → 266 (`unported_finally` now treats a
+`finally:` on `AllowFailure`, `Sequential`, `Parallel`, `If`, `Switch` and
+`Dag` as ported; the flow's own `finally:` stays unported for the reason
+above). The derived figures that moved, each with a dated note where it is
+pinned: the bank split (301, 229, 72) → (301, 233, 68), the field breakdown
+(runs 55 → 51, order 27 → 17, total 69 → 65), the ordered pairs
+(`EGRET_TOP_LEVEL_PAIRS` 777 → 852, `EGRET_PAIRS_BEFORE_RESTRICTION`
+999 → 1074, asserted 550 → 661, baselined 566 → 455), the timeout split
+(2, 70, 72) → (2, 66, 68), baselined terminals 303 → 272, executions
+108 → 104, run-history tokens 1192 → 1076 and execution-history tokens
+389 → 377. The residual `finally:` row went 14 → 10.
