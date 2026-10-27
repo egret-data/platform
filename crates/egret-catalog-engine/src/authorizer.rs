@@ -140,6 +140,20 @@ fn data_ask(action: &CatalogTableAction, user: Option<&UserOrRole>) -> DataAsk {
     }
 }
 
+/// The answer for each action: a control-plane action (`None`) is allowed, a
+/// refused data question (`Some(None)`) is not, and a data question the
+/// grants decided (`Some(Some(_))`) takes the next of `decided`, in order.
+fn merge(plan: &[Option<Option<bool>>], decided: Vec<bool>) -> Vec<bool> {
+    let mut decided = decided.into_iter();
+    plan.iter()
+        .map(|d| match d {
+            Some(Some(_)) => decided.next().unwrap_or(false),
+            Some(None) => false,
+            None => true,
+        })
+        .collect()
+}
+
 /// egret's lakekeeper authorizer. See the module docs.
 #[derive(Clone)]
 pub struct EgretAuthorizer {
@@ -414,7 +428,7 @@ impl Authorizer for EgretAuthorizer {
             data_plane.push(ask);
         }
         if asks.is_empty() {
-            return Ok(data_plane.iter().map(|d| d.is_none()).collect());
+            return Ok(merge(&data_plane, Vec::new()));
         }
         let caller = Caller::of(&self.system, metadata);
         let decided = match (caller.fixed_answer(), caller) {
@@ -425,16 +439,7 @@ impl Authorizer for EgretAuthorizer {
             }
             (None, _) => vec![false; asks.len()],
         };
-        let mut decided = decided.into_iter();
-        let mut out = Vec::with_capacity(data_plane.len());
-        for d in data_plane {
-            out.push(match d {
-                Some(Some(_)) => decided.next().unwrap_or(false),
-                Some(None) => false,
-                None => true,
-            });
-        }
-        Ok(out)
+        Ok(merge(&data_plane, decided))
     }
 
     // Views: a view load vends read credentials on the view's metadata
@@ -666,6 +671,21 @@ mod tests {
             data_ask(&CatalogTableAction::GetMetadata, Some(&other)),
             DataAsk::NotData,
             "a control-plane question stays the guard's"
+        );
+    }
+
+    #[test]
+    fn answers_merge_in_the_order_lakekeeper_asked() {
+        let plan = [None, Some(None), Some(Some(false)), Some(Some(true))];
+        assert_eq!(
+            merge(&plan, vec![true, false]),
+            vec![true, false, true, false]
+        );
+        assert_eq!(merge(&[None, Some(None)], Vec::new()), vec![true, false]);
+        assert_eq!(
+            merge(&[Some(Some(true))], Vec::new()),
+            vec![false],
+            "a missing answer is a refusal"
         );
     }
 
