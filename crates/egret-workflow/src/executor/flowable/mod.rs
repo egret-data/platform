@@ -221,7 +221,14 @@ pub(crate) fn current_list<'a>(
     parent: Option<RunIx>,
     now: Tick,
 ) -> Current<'a> {
-    let started = |list: &[TaskIx]| list.iter().any(|&t| run_of(state, parent, t).is_some());
+    // A run with no history is one `Command::RestartLoop` threw away (Kestra
+    // deletes those task runs): it has not started in this iteration. End
+    // hooks A5: without this, a `LoopUntil`'s second iteration found its
+    // first iteration's `finally` run "started" and skipped its body.
+    let started = |list: &[TaskIx]| {
+        list.iter()
+            .any(|&t| run_of(state, parent, t).is_some_and(|ix| !state.runs[ix].history.is_empty()))
+    };
     // Kestra's `isTerminated(list, parent)`: every task of the list has a run
     // and that run is terminal.
     let exhausted = |list: &[TaskIx]| {
@@ -391,12 +398,16 @@ pub(crate) fn start(
     // `working-directory-real-child-fails` has no `SUBMITTED` on its `fails`
     // run. So the discriminator is the parent run's kind as well as the child's:
     // a plain `Runnable` at the top level, or under any other flowable, is
-    // submitted as before. A block's children are the only runnables with a
-    // `WorkingDirectory` parent (`spec::validate` refuses anything else there).
+    // submitted as before.
+    //
+    // End hooks D7: "inside the block" is "in the block's `tasks:`", not "has
+    // a `WorkingDirectory` parent". A block's `errors:`/`finally:` children
+    // also have the block as parent, and they run after the directory is
+    // closed, as ordinary leaves that ARE submitted.
     let in_block = state.runs[run].parent.is_some_and(|p| {
         matches!(
-            plan.tasks[state.runs[p].task].kind,
-            TaskKind::WorkingDirectory { .. }
+            &plan.tasks[state.runs[p].task].kind,
+            TaskKind::WorkingDirectory { tasks } if tasks.contains(&task)
         )
     });
     if matches!(plan.tasks[task].kind, TaskKind::Runnable { .. }) && !in_block {

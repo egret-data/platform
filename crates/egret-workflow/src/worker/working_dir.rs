@@ -104,7 +104,19 @@ pub(crate) fn carry_of(
     flow: &Flow,
     render: &RenderContext,
 ) -> Result<Option<WorkingDirCarry>, String> {
+    // End hooks D7: "inside the directory" is "in a block's `tasks:`". The
+    // claim joins the block only while it is `PREPARED`, which is when its
+    // `tasks` run; its `errors:`/`finally:` children run after the finish
+    // claim (`FINISHED`), get no `block_id`, and so no snapshot. Both
+    // directions fail closed: a `tasks` child with no block is refused here,
+    // and a child with a block that is not in its `tasks` is refused below.
     let Some(block) = c.block_id else {
+        if parent_block_of(flow, &c.task_id).is_some() {
+            return Err(format!(
+                "corrupt: {} is a child of a WorkingDirectory whose directory is not open                  (the block is not prepared)",
+                c.task_id
+            ));
+        }
         return Ok(None);
     };
     let Some(start_from) = c.block_snapshot.clone() else {

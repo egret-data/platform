@@ -1101,3 +1101,173 @@ async fn a_block_in_the_flows_finally_or_errors_is_prepared_and_finished(pool: P
         assert_eq!(child_row(&pool, ex, "a").await.0, "SUCCESS", "`{list}:`");
     }
 }
+
+/// End hooks D7: a block with `inputFiles` (so its prepare claim writes a real
+/// snapshot), whose child `a` fails, and whose `errors: [e]` and
+/// `finally: [z]` run after it finished.
+const HOOKED_BLOCK: &str = "id: wd-hooks\nnamespace: w6.claims\ntasks:\n  - id: block\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n    inputFiles:\n      a.txt: one\n    tasks:\n      - id: a\n        type: io.kestra.plugin.core.execution.Fail\n    errors:\n      - id: e\n        type: io.kestra.plugin.core.debug.Return\n        format: e\n    finally:\n      - id: z\n        type: io.kestra.plugin.core.debug.Return\n        format: z\n";
+
+/// Tick until the run of `task` is claimable (`RUNNING`, no lease), then take
+/// it with the worker's own `claim` and hand it back unleased, so the caller
+/// sees exactly what the worker would claim it as. `None` if the execution
+/// settled first.
+async fn peek_claim(
+    pool: &PgPool,
+    reg: &Handlers,
+    ex: uuid::Uuid,
+    task: &str,
+) -> Option<egret_workflow::worker::Claimed> {
+    for _ in 0..40 {
+        let claimable: Option<uuid::Uuid> = sqlx::query_scalar(
+            "SELECT id FROM workflow.task_runs WHERE execution_id = $1 AND task_id = $2 \
+               AND state = 'RUNNING' AND claimed_at IS NULL",
+        )
+        .bind(ex)
+        .bind(task)
+        .fetch_optional(pool)
+        .await
+        .expect("read the run");
+        if let Some(id) = claimable {
+            let claimed = egret_workflow::worker::claim(pool, 64)
+                .await
+                .expect("claim");
+            sqlx::query("UPDATE workflow.task_runs SET claimed_at = NULL WHERE execution_id = $1")
+                .bind(ex)
+                .execute(pool)
+                .await
+                .expect("hand the claims back");
+            return claimed.into_iter().find(|c| c.id == id);
+        }
+        tick_with(pool, 8, reg, WorkerTiming::default())
+            .await
+            .expect("a tick");
+    }
+    None
+}
+
+/// D7, and the security half of it: a child in the block's `tasks:` is
+/// claimed inside the directory (its block and snapshot), while the block's
+/// `errors:`/`finally:` children are claimed as ordinary leaves AFTER the
+/// block finished: no `block_id`, no snapshot, so no carried directory and
+/// no access to the block's files. They run (a hook child used to be refused
+/// as corrupt), they leave the block's pointer alone, and the block keeps its
+/// children's state.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_blocks_errors_and_finally_run_after_it_finished_outside_the_directory(pool: PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    egret_workflow::storage::install_mem_for_tests();
+    let db = egret_metastore::Db { pool: pool.clone() };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    let reg = registry();
+
+    let ex = egret_workflow::worker::start_execution(
+        &pool,
+        ws,
+        None,
+        HOOKED_BLOCK,
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+
+    let a = peek_claim(&pool, &reg, ex, "a")
+        .await
+        .expect("a is claimed");
+    assert!(a.block_id.is_some(), "a child in tasks is inside the block");
+    assert!(
+        a.block_snapshot.is_some(),
+        "a child in tasks starts from the block's snapshot"
+    );
+
+    for hook in ["e", "z"] {
+        let c = peek_claim(&pool, &reg, ex, hook)
+            .await
+            .unwrap_or_else(|| panic!("{hook} is claimed"));
+        let (state, phase, _) = block_row(&pool, ex).await;
+        assert_eq!(
+            (state.as_str(), phase.as_deref()),
+            ("RUNNING", Some("FINISHED")),
+            "{hook} runs after the finish claim, while the block is still running"
+        );
+        assert_eq!(c.block_id, None, "hook {hook} never gets the block");
+        assert_eq!(c.block_snapshot, None, "hook {hook} never sees a snapshot");
+    }
+    let (_, _, pointer_before) = block_row(&pool, ex).await;
+
+    settle(&pool, &reg, ex, 40).await;
+
+    let (state, phase, pointer) = block_row(&pool, ex).await;
+    assert_eq!(state, "FAILED", "the block keeps its tasks' state");
+    assert_eq!(phase.as_deref(), Some("FINISHED"));
+    assert_eq!(pointer, pointer_before, "a hook child moves no pointer");
+    assert_eq!(child_row(&pool, ex, "a").await.0, "FAILED");
+    for hook in ["e", "z"] {
+        let (state, message) = child_row(&pool, ex, hook).await;
+        assert_eq!(state, "SUCCESS", "hook {hook}: {message:?}");
+    }
+}
+
+/// D7 / Q4: `finally:` runs after a block that succeeded, as an ordinary leaf.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_blocks_finally_runs_after_it_succeeded(pool: PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    egret_workflow::storage::install_mem_for_tests();
+    let db = egret_metastore::Db { pool: pool.clone() };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    let reg = registry();
+    let src = HOOKED_BLOCK.replace(
+        "        type: io.kestra.plugin.core.execution.Fail\n",
+        "        type: io.kestra.plugin.core.debug.Return\n        format: a\n",
+    );
+
+    let ex = egret_workflow::worker::start_execution(&pool, ws, None, &src, serde_json::json!({}))
+        .await
+        .expect("start");
+    settle(&pool, &reg, ex, 40).await;
+
+    assert_eq!(block_row(&pool, ex).await.0, "SUCCESS");
+    assert_eq!(child_row(&pool, ex, "z").await.0, "SUCCESS");
+    let errors: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'e'",
+    )
+    .bind(ex)
+    .fetch_one(&pool)
+    .await
+    .expect("count");
+    assert_eq!(errors, 0, "errors run only on a failure");
+}
+
+/// D7, fail closed the other way: a child in the block's `tasks:` that is
+/// claimed while its block is not `PREPARED` gets no block from the claim,
+/// and is refused as corrupt rather than run outside the directory.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_tasks_child_of_a_block_that_is_not_prepared_fails_as_corrupt(pool: PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    egret_workflow::storage::install_mem_for_tests();
+    let db = egret_metastore::Db { pool: pool.clone() };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    let reg = registry();
+
+    let ex = egret_workflow::worker::start_execution(&pool, ws, None, BLOCK, serde_json::json!({}))
+        .await
+        .expect("start");
+    tick_with(&pool, 8, &reg, WorkerTiming::default())
+        .await
+        .expect("the prepare claim");
+    assert_eq!(block_row(&pool, ex).await.1.as_deref(), Some("PREPARED"));
+    sqlx::query(
+        "UPDATE workflow.task_runs SET working_dir = 'FINISHED' \
+          WHERE execution_id = $1 AND task_id = 'block'",
+    )
+    .bind(ex)
+    .execute(&pool)
+    .await
+    .expect("close the directory under the child");
+
+    settle(&pool, &reg, ex, 40).await;
+
+    let (state, message) = child_row(&pool, ex, "a").await;
+    assert_eq!(state, "FAILED", "the child is refused, not run");
+    let message = message.expect("the reason");
+    assert!(message.contains("corrupt"), "{message}");
+}

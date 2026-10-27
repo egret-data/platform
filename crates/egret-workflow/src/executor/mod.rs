@@ -10300,7 +10300,7 @@ mod allow_failure_drive_tests {
 /// happened.
 #[cfg(test)]
 mod end_hooks_drive_tests {
-    use super::state::{apply, ExecutionState, RunState, Tick};
+    use super::state::{apply, ExecutionState, RunState, Tick, WorkingDirPhase};
     use super::{advance, plan, Command, Plan, TaskKind};
 
     struct Trace {
@@ -10345,12 +10345,35 @@ mod end_hooks_drive_tests {
     }
 
     fn drive(src: &str, fail: &[&str], kill_when_running: Option<&str>) -> Trace {
+        drive_answering(src, fail, kill_when_running, &[])
+    }
+
+    /// [`drive`], also playing the worker's two other parts A5 needs:
+    ///
+    /// - a `WorkingDirectory` claim (prepare or finish) is completed the round
+    ///   after it is begun, and logged `claim:prepare:<block>` /
+    ///   `claim:finish:<block>`;
+    /// - a `LoopUntil` condition is rendered behind the executor's own gate
+    ///   ([`super::loop_condition_is_asked`], the call `worker::render` makes),
+    ///   from `answers` in order (the last repeats), and logged
+    ///   `condition:<loop>`.
+    ///
+    /// A `fail` entry `id#n` fails only the `n`-th time (1-based) a run of
+    /// `id` ends; a bare `id` fails every time.
+    fn drive_answering(
+        src: &str,
+        fail: &[&str],
+        kill_when_running: Option<&str>,
+        answers: &[&str],
+    ) -> Trace {
         let flow = crate::spec::parse(src).expect("parses");
         let plan = plan::flatten_flow(&flow).expect("plans");
         let mut state = ExecutionState::new(&plan);
         let mut events = Vec::new();
         let mut final_state = None;
         let mut now = Tick(0);
+        let mut asked = 0usize;
+        let mut ended: std::collections::HashMap<String, usize> = Default::default();
         for _ in 0..1000 {
             let cmds = advance(&plan, &state, now);
             if !cmds.is_empty() {
@@ -10360,6 +10383,38 @@ mod end_hooks_drive_tests {
                     }
                     step(&plan, &mut state, cmd, &mut events);
                 }
+                continue;
+            }
+            let claim = (0..state.runs.len()).find(|&ix| {
+                matches!(
+                    state.runs[ix].working_dir,
+                    Some(WorkingDirPhase::Preparing | WorkingDirPhase::Finishing)
+                ) && !state.runs[ix]
+                    .history
+                    .last()
+                    .is_some_and(|s| s.is_terminal())
+            });
+            if let Some(ix) = claim {
+                let which = if state.runs[ix].working_dir == Some(WorkingDirPhase::Preparing) {
+                    "prepare"
+                } else {
+                    "finish"
+                };
+                events.push(format!("claim:{which}:{}", id_of(&plan, &state, ix)));
+                let cmd = Command::CompleteWorkingDirectoryClaim { run: ix };
+                step(&plan, &mut state, &cmd, &mut events);
+                continue;
+            }
+            let condition = (0..state.runs.len()).find(|&ix| {
+                state.runs[ix].history.last() == Some(&RunState::Running)
+                    && state.runs[ix].rendered.is_none()
+                    && super::loop_condition_is_asked(&plan, &state, ix, state.runs[ix].task, now)
+            });
+            if let Some(ix) = condition {
+                events.push(format!("condition:{}", id_of(&plan, &state, ix)));
+                let answer = answers.get(asked).or(answers.last()).expect("an answer");
+                asked += 1;
+                state.runs[ix].rendered = Some((*answer).to_string());
                 continue;
             }
             // The caller's render of a literal `runIf:` and `If` condition.
@@ -10419,7 +10474,12 @@ mod end_hooks_drive_tests {
                 let outcome = if killing {
                     RunState::Killed
                 } else {
-                    let raw = if fail.contains(&id_of(&plan, &state, ix)) {
+                    let id = id_of(&plan, &state, ix).to_string();
+                    let n = ended.entry(id.clone()).or_default();
+                    *n += 1;
+                    let raw = if fail.contains(&id.as_str())
+                        || fail.contains(&format!("{id}#{n}").as_str())
+                    {
                         RunState::Failed
                     } else {
                         RunState::Success
@@ -10925,5 +10985,184 @@ mod end_hooks_drive_tests {
         assert_eq!(last_of(&plan, &state, "outer"), Some(RunState::Failed));
         assert_eq!(last_of(&plan, &state, "fs"), Some(RunState::Success));
         assert_eq!(flow, RunState::Failed);
+    }
+
+    // ----------------------------------------------------------------------
+    // A5: `LoopUntil` (D6) and `WorkingDirectory` (D7) run errors and finally
+    // ----------------------------------------------------------------------
+
+    /// A `LoopUntil` `loop` whose body is `body`, with `errors: [e]` and
+    /// `finally: [z]`, asked `condition:` every `PT1S`.
+    fn loop_until_hooks() -> String {
+        format!(
+            "{HEAD}tasks:\n  - id: loop\n    type: io.kestra.plugin.core.flow.LoopUntil\n    condition: \"{{{{ done }}}}\"\n    checkFrequency:\n      interval: PT1S\n    tasks:\n{}    errors:\n{}    finally:\n{}",
+            leaf(6, "body", LOG),
+            leaf(6, "e", LOG),
+            leaf(6, "z", LOG)
+        )
+    }
+
+    /// The events of `t` that A5's ordering is about, in order: each end of
+    /// `body`/`e`/`z` and each time the loop's condition was asked.
+    fn loop_story(t: &Trace) -> Vec<String> {
+        t.events
+            .iter()
+            .filter(|e| {
+                e.starts_with("end:body")
+                    || e.starts_with("end:e:")
+                    || e.starts_with("end:z")
+                    || e.starts_with("condition:")
+                    || e.starts_with("end:loop")
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// D6: each iteration walks `tasks`, then `errors` on a failure, then
+    /// `finally`, and only then is the condition asked. Iteration 1 succeeds
+    /// (`body`, `z`, the condition says go round again); iteration 2's body
+    /// fails (`body`, `e`, `z`), and a failed body ends the loop without asking
+    /// the condition (`children_executed`, unchanged). A failed body ends a
+    /// `LoopUntil` at once, so `errors` can only run in its last iteration.
+    #[test]
+    fn a_loop_until_runs_errors_then_finally_in_each_iteration_before_the_condition() {
+        let t = drive_answering(&loop_until_hooks(), &["body#2"], None, &["false", "true"]);
+        assert_eq!(
+            loop_story(&t),
+            [
+                "end:body:Success",
+                "end:z:Success",
+                "condition:loop",
+                "end:body:Failed",
+                "end:e:Success",
+                "end:z:Success",
+                "end:loop:Failed",
+            ],
+            "full log: {:?}",
+            t.events
+        );
+        assert_eq!(t.flow, RunState::Failed);
+    }
+
+    /// D6, the success path: `finally` runs every iteration, `errors` never,
+    /// and each condition is asked only after that iteration's `z` ended.
+    #[test]
+    fn a_loop_until_runs_finally_before_each_condition_on_success() {
+        let t = drive_answering(&loop_until_hooks(), &[], None, &["false", "true"]);
+        assert_eq!(
+            loop_story(&t),
+            [
+                "end:body:Success",
+                "end:z:Success",
+                "condition:loop",
+                "end:body:Success",
+                "end:z:Success",
+                "condition:loop",
+                "end:loop:Success",
+            ],
+            "full log: {:?}",
+            t.events
+        );
+        assert_eq!(last_of(&t.plan, &t.state, "e"), None, "errors never ran");
+    }
+
+    /// D6: `Command::RestartLoop` reaches the iteration's `finally` run (it is
+    /// a descendant of the loop run), so iteration 2 builds `z` back from
+    /// nothing: one run of `z`, whose history is iteration 2's alone.
+    #[test]
+    fn a_restarted_loop_until_discards_its_finally_runs() {
+        let t = drive_answering(&loop_until_hooks(), &[], None, &["false", "true"]);
+        let z = t
+            .plan
+            .tasks
+            .iter()
+            .position(|p| p.id == "z")
+            .expect("z is planned");
+        let runs: Vec<_> = t.state.runs.iter().filter(|r| r.task == z).collect();
+        assert_eq!(runs.len(), 1, "the restart reuses z's run");
+        assert_eq!(
+            runs[0].history,
+            [
+                RunState::Created,
+                RunState::Submitted,
+                RunState::Running,
+                RunState::Success
+            ],
+            "iteration 1's z history was discarded"
+        );
+        assert_eq!(
+            t.events.iter().filter(|e| *e == "end:z:Success").count(),
+            2,
+            "z ran once per iteration"
+        );
+    }
+
+    /// A `WorkingDirectory` `wd` holding `a`, with `errors: [e]` and
+    /// `finally: [z]`.
+    fn working_directory_hooks() -> String {
+        format!(
+            "{HEAD}tasks:\n  - id: wd\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n    tasks:\n{}    errors:\n{}    finally:\n{}",
+            leaf(6, "a", LOG),
+            leaf(6, "e", LOG),
+            leaf(6, "z", LOG)
+        )
+    }
+
+    /// D7: the block's children run in the directory, the finish claim
+    /// closes it, and only then do `errors` and `finally` run, as ordinary
+    /// runs outside it: a hook leaf is `SUBMITTED` like any leaf, where the
+    /// child in `tasks` is not. The block keeps its children's state.
+    #[test]
+    fn a_working_directory_runs_errors_and_finally_after_it_finishes() {
+        let t = drive(&working_directory_hooks(), &["a"], None);
+        assert_eq!(order(&t.plan, &t.state), ["wd", "a", "e", "z"]);
+        assert!(at(&t, "claim:prepare:wd") < at(&t, "create:a"));
+        assert!(
+            at(&t, "claim:finish:wd") < at(&t, "create:e"),
+            "errors run after the finish claim: {:?}",
+            t.events
+        );
+        assert!(at(&t, "end:e:Success") < at(&t, "create:z"));
+        assert!(at(&t, "end:z:Success") < at(&t, "end:wd:Failed"));
+        assert_eq!(t.state.runs[0].working_dir, Some(WorkingDirPhase::Finished));
+        let history = |id: &str| {
+            t.state
+                .runs
+                .iter()
+                .find(|r| t.plan.tasks[r.task].id == id)
+                .expect("a run")
+                .history
+                .clone()
+        };
+        assert_eq!(
+            history("a"),
+            [RunState::Created, RunState::Running, RunState::Failed],
+            "a child in tasks is inside the directory, not submitted"
+        );
+        for hook in ["e", "z"] {
+            assert_eq!(
+                history(hook),
+                [
+                    RunState::Created,
+                    RunState::Submitted,
+                    RunState::Running,
+                    RunState::Success
+                ],
+                "hook {hook} is an ordinary leaf, outside the directory"
+            );
+        }
+        assert_eq!(t.flow, RunState::Failed);
+    }
+
+    /// D7 / Q4: egret runs `finally` after a `WorkingDirectory` that
+    /// succeeded (Kestra's code never starts it, which the spec reads as a
+    /// Kestra bug); `errors` does not run.
+    #[test]
+    fn a_working_directory_runs_finally_after_success() {
+        let t = drive(&working_directory_hooks(), &[], None);
+        assert_eq!(order(&t.plan, &t.state), ["wd", "a", "z"]);
+        assert!(at(&t, "claim:finish:wd") < at(&t, "create:z"));
+        assert!(at(&t, "end:z:Success") < at(&t, "end:wd:Success"));
+        assert_eq!(t.flow, RunState::Success);
     }
 }

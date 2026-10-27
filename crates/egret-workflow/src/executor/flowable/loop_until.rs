@@ -240,11 +240,9 @@ pub(crate) fn drive(
         // Unreachable: `descend` matches on this kind before it gets here.
         return Step::Waiting;
     };
-    // Since end hooks A3 this list can be non-empty (the plan reads a
-    // `LoopUntil`'s `errors:`), so it is live here; A5 owns its tests.
-    let errors = plan.tasks[task].errors.as_slice();
-    // `finally:` is A5's (D6); not driven yet.
-    match sequential::drive(plan, state, tasks, errors, &[], Some(run), now) {
+    // End hooks D6: one iteration is `tasks`, then `errors:` on a failure,
+    // then `finally:`, all walked before the loop's own question.
+    match iteration_body(plan, state, run, task, tasks, now) {
         Step::Commands(cmds) => return Step::Commands(cmds),
         Step::Waiting => return Step::Waiting,
         Step::Done(_) => {}
@@ -280,6 +278,23 @@ pub(crate) fn drive(
         return Step::Done(RunState::Failed);
     }
     Step::Done(aggregate(state, tasks, Some(run)))
+}
+
+/// One iteration's walk (end hooks D6): `tasks`, then the loop's `errors:`
+/// when the body failed, then its `finally:`, by the shared `current_list`
+/// rule. `Done` only when all three are over, which is the one moment the
+/// condition may be asked -- [`drive`] and [`condition_is_asked`] both read it.
+fn iteration_body(
+    plan: &Plan,
+    state: &ExecutionState,
+    run: RunIx,
+    task: TaskIx,
+    tasks: &[TaskIx],
+    now: Tick,
+) -> Step {
+    let errors = plan.tasks[task].errors.as_slice();
+    let finally = plan.tasks[task].finally.as_slice();
+    sequential::drive(plan, state, tasks, errors, finally, Some(run), now)
 }
 
 // **`resume` used to live here too**, reading `TaskRun::not_before` where
@@ -382,6 +397,13 @@ pub fn condition_is_asked(
     else {
         return false;
     };
+    // End hooks D6: and the iteration's `errors:`/`finally:` are over. Without
+    // this, the render would ask while `finally` still runs, and a condition
+    // over `outputs.<finally child>` would read the previous iteration.
     children_executed(state, run, tasks)
+        && matches!(
+            iteration_body(plan, state, run, task, tasks, now),
+            Step::Done(_)
+        )
         && !reached_maximums(state, run, *max_iterations, *max_duration, now)
 }

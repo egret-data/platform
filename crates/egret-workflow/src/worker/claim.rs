@@ -212,7 +212,10 @@ pub struct Claimed {
     pub block_phase: Option<String>,
     /// **For a child of a `WorkingDirectory` block:** the block run's
     /// surrogate key, which names the objects of its snapshots (spec §4.3).
-    /// `None` for every run that is not such a child.
+    /// `None` for every run that is not such a child. The claim joins the
+    /// block only while it is `PREPARED` (end hooks D7): the block's
+    /// `errors:`/`finally:` children run after it is `FINISHED`, outside the
+    /// directory, and never get it.
     pub block_id: Option<Uuid>,
     /// **For a child:** the block's snapshot pointer as this claim read it
     /// (spec §5.2). A child whose block has run no prepare claim has none,
@@ -540,7 +543,7 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
            LEFT JOIN workflow.flows f ON f.id = e.flow_id \
            LEFT JOIN workflow.task_runs b \
              ON b.execution_id = t.execution_id AND b.run_ix = t.parent_ix \
-            AND b.working_dir IS NOT NULL \
+            AND b.working_dir = 'PREPARED' \
           ORDER BY t.created_at, t.execution_id, t.run_ix",
     )
     .bind(limit)

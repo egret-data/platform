@@ -21,7 +21,7 @@ use crate::executor::command::Command;
 use crate::executor::plan::{Plan, TaskIx};
 use crate::executor::state::{ExecutionState, RunIx, Tick, WorkingDirPhase};
 
-use super::{aggregate, sequential, Step};
+use super::{sequential, Step};
 
 /// Drive one `WorkingDirectory` block whose run is `RUNNING`.
 pub(crate) fn drive(
@@ -34,8 +34,9 @@ pub(crate) fn drive(
     match state.runs[run].working_dir {
         None => Step::Commands(vec![Command::BeginWorkingDirectory { run }]),
         Some(WorkingDirPhase::Preparing | WorkingDirPhase::Finishing) => Step::Waiting,
+        // Inside the directory: `tasks` alone. Their `errors:`/`finally:` are
+        // not run here (D7): they run after the finish claim, outside it.
         Some(WorkingDirPhase::Prepared) => {
-            // `errors:`/`finally:` are A5's (D7); not driven yet.
             match sequential::drive(plan, state, tasks, &[], &[], Some(run), now) {
                 // The children are over, whatever state they reached. The
                 // finish claim runs before the block takes its terminal state.
@@ -43,9 +44,26 @@ pub(crate) fn drive(
                 other => other,
             }
         }
-        // The block's terminal is the aggregate of its children, which the
-        // finish claim did not change. `descend` applies `allowFailure:` to it.
-        Some(WorkingDirPhase::Finished) => Step::Done(aggregate(state, tasks, Some(run))),
+        // End hooks D7: the directory is closed; `errors:` (when a child
+        // failed) and `finally:` (always, after success too: Q4) run now as
+        // ordinary children of the block, by the shared `current_list` rule.
+        // They are not in the directory: `flowable::start` submits a hook
+        // leaf like any leaf, and the worker gives it no snapshot
+        // (`worker::claim::claim` joins the block only while `PREPARED`). The
+        // block stays `RUNNING` meanwhile; its terminal is still the aggregate
+        // of `tasks` alone (spec §0.2), and `descend` applies `allowFailure:`.
+        Some(WorkingDirPhase::Finished) => {
+            let def = &plan.tasks[state.runs[run].task];
+            sequential::drive(
+                plan,
+                state,
+                tasks,
+                &def.errors,
+                &def.finally,
+                Some(run),
+                now,
+            )
+        }
     }
 }
 
