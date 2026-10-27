@@ -760,31 +760,10 @@ pub fn validate_for_run(flow: &Flow) -> ValidationReport {
 /// Key and id names only (package #1, D10).
 fn validate_after_execution(flow: &Flow, report: &mut ValidationReport) {
     fn walk(task: &Task, path: String, report: &mut ValidationReport) {
-        let refused = match &task.kind {
-            TaskKind::Pause(_) => Some((
-                "a Pause",
-                "the execution has already ended, and a Pause would pause it again",
-                9,
-            )),
-            TaskKind::Leaf { .. } if task.r#type == crate::executor::exit::TYPE_ID => Some((
-                "an Exit",
-                "the execution has already ended, and an Exit would set its state",
-                20,
-            )),
-            TaskKind::LoopUntil(_) => Some((
-                "a LoopUntil",
-                "it waits between iterations by pausing the run, and the execution has already ended",
-                9,
-            )),
-            _ => None,
-        };
-        if let Some((kind, why, package)) = refused {
+        if let Some(message) = after_execution_refusal(task) {
             report.errors.push(Finding {
-                code: "unsupported_after_execution_task",
-                message: format!(
-                    "task '{}' is {kind} inside afterExecution, which egret does not run: {why}. Roadmap package #{package} lifts it",
-                    task.id
-                ),
+                code: AFTER_EXECUTION_REFUSAL_CODE,
+                message,
                 path: path.clone(),
             });
         }
@@ -799,6 +778,46 @@ fn validate_after_execution(flow: &Flow, report: &mut ValidationReport) {
             report,
         );
     }
+}
+
+/// The code of [`after_execution_refusal`]'s finding.
+pub(crate) const AFTER_EXECUTION_REFUSAL_CODE: &str = "unsupported_after_execution_task";
+
+/// **The one D12 predicate** (end hooks #2b): why `task`, found anywhere
+/// inside `afterExecution:`, is refused -- `Pause`, `Exit`, or `LoopUntil`
+/// (`WaitFor` is its alias) -- or `None`. It looks at `task` alone; the
+/// caller walks the subtree.
+///
+/// Two readers, one text: [`validate_after_execution`] refuses such a flow at
+/// save and at start, and the planner (`executor::plan::flatten_flow`)
+/// records it in `Plan::after_execution_refused` so that a flow STORED before
+/// the refusal existed -- an execution running at deploy (D4), or a
+/// `CREATE_NEW_EXECUTION` replacement planned with `plan_stored` -- fails
+/// that after-run with this message instead of running it
+/// (`executor::after_execution::drive`, final-review fix 2026-10-28).
+pub(crate) fn after_execution_refusal(task: &Task) -> Option<String> {
+    let (kind, why, package) = match &task.kind {
+        TaskKind::Pause(_) => (
+            "a Pause",
+            "the execution has already ended, and a Pause would pause it again",
+            9,
+        ),
+        TaskKind::Leaf { .. } if task.r#type == crate::executor::exit::TYPE_ID => (
+            "an Exit",
+            "the execution has already ended, and an Exit would set its state",
+            20,
+        ),
+        TaskKind::LoopUntil(_) => (
+            "a LoopUntil",
+            "it waits between iterations by pausing the run, and the execution has already ended",
+            9,
+        ),
+        _ => return None,
+    };
+    Some(format!(
+        "task '{}' is {kind} inside afterExecution, which egret does not run: {why}. Roadmap package #{package} lifts it",
+        task.id
+    ))
 }
 
 /// W5a: every script task (`crate::scripts`) is parsed, and each property,

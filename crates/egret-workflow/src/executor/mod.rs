@@ -52,7 +52,9 @@ mod retry;
 mod state;
 pub(crate) mod update;
 
-pub use after_execution::{after_execution_live, drives_after, phase_killed, terminated};
+pub use after_execution::{
+    after_execution_live, drives_after, phase_killed, refusal_of, terminated,
+};
 pub use command::Command;
 pub use plan::{
     build_plan, loop_until_gap, pause_gap, plan_stored, DagNode, Plan, PlanError, PlanTask,
@@ -11703,5 +11705,171 @@ mod end_hooks_drive_tests {
         assert_eq!(state.history, ended);
         assert!(terminated(&plan, &state));
         assert!(!super::after_execution_live(&plan, &state));
+    }
+
+    // ---- Final-review fix (2026-10-28): a STORED source cannot make the
+    // phase write the ended execution ----
+
+    /// A source whose `afterExecution:` holds `bad` (a D12-refused kind) and
+    /// then a `Log` `after2`.
+    fn stored_with(bad: &str) -> String {
+        format!(
+            "{HEAD}tasks:\n{}afterExecution:\n{bad}{}",
+            leaf(2, "ok", LOG),
+            leaf(2, "after2", LOG)
+        )
+    }
+
+    const STORED_PAUSE: &str =
+        "  - id: bad\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n";
+    const STORED_EXIT_FAILED: &str =
+        "  - id: bad\n    type: io.kestra.plugin.core.execution.Exit\n    state: FAILED\n";
+    const STORED_EXIT_KILLED: &str =
+        "  - id: bad\n    type: io.kestra.plugin.core.execution.Exit\n    state: KILLED\n";
+    const STORED_LOOP_UNTIL: &str = "  - id: bad\n    type: io.kestra.plugin.core.flow.LoopUntil\n    condition: \"{{ true }}\"\n    checkFrequency:\n      interval: PT0S\n    tasks:\n      - id: c\n        type: io.kestra.plugin.core.log.Log\n        message: m\n";
+    const STORED_EXIT_IN_IF: &str = "  - id: gate\n    type: io.kestra.plugin.core.flow.If\n    condition: \"true\"\n    then:\n      - id: bad\n        type: io.kestra.plugin.core.execution.Exit\n        state: FAILED\n";
+
+    /// Drive a stored source (`plan_stored`, so no start-time refusal) to
+    /// its end through `advance`, the main tasks succeeding, an `If`
+    /// rendering its literal condition. Returns the plan, the state, and
+    /// every command `advance` returned once the execution was terminal.
+    fn drive_stored(src: &str) -> (Plan, ExecutionState, Vec<Command>) {
+        assert!(
+            super::build_plan(src).is_err(),
+            "the fixture must be one `build_plan` refuses at start"
+        );
+        let plan = super::plan_stored(src).expect("a stored source plans");
+        let mut state = ExecutionState::new(&plan);
+        let mut phase = Vec::new();
+        for _ in 0..300 {
+            let terminal = state.history.last().is_some_and(|s| s.is_terminal());
+            let cmds = advance(&plan, &state, Tick(0));
+            if terminal {
+                phase.extend(cmds.iter().cloned());
+            }
+            for c in &cmds {
+                apply(&mut state, c);
+            }
+            if !cmds.is_empty() {
+                continue;
+            }
+            let mut rendered = false;
+            for ix in 0..state.runs.len() {
+                let task = &plan.tasks[state.runs[ix].task];
+                if state.runs[ix].history.last() == Some(&RunState::Running)
+                    && state.runs[ix].rendered.is_none()
+                    && matches!(task.kind, TaskKind::If { .. })
+                {
+                    state.runs[ix].rendered = Some("true".into());
+                    rendered = true;
+                }
+            }
+            if !rendered && !finish_one_runnable(&plan, &mut state) {
+                break;
+            }
+        }
+        (plan, state, phase)
+    }
+
+    /// The four refused kinds, each STORED, each driven from a terminal
+    /// `SUCCESS`: the after-run of the refused kind is FAILED without ever
+    /// starting (one attempt `[FAILED]`), it carries the D12 refusal text,
+    /// nothing writes the execution, and the next after-task still runs.
+    #[test]
+    fn a_stored_refused_kind_in_after_execution_fails_without_running() {
+        for (name, bad) in [
+            ("Pause", STORED_PAUSE),
+            ("Exit FAILED", STORED_EXIT_FAILED),
+            ("Exit KILLED", STORED_EXIT_KILLED),
+            ("LoopUntil", STORED_LOOP_UNTIL),
+        ] {
+            let (plan, state, phase) = drive_stored(&stored_with(bad));
+            assert_eq!(
+                state.history,
+                [RunState::Created, RunState::Running, RunState::Success],
+                "{name}: the ended execution moved"
+            );
+            assert!(
+                !phase
+                    .iter()
+                    .any(super::after_execution::writes_the_execution),
+                "{name}: the phase emitted {phase:?}"
+            );
+            let bad_run = run_for(&plan, &state, "bad");
+            assert_eq!(
+                bad_run.history,
+                [RunState::Created, RunState::Failed],
+                "{name}: the refused run must fail before it starts"
+            );
+            assert_eq!(bad_run.attempts.len(), 1, "{name}");
+            let ix = state
+                .runs
+                .iter()
+                .position(|r| std::ptr::eq(r, bad_run))
+                .unwrap();
+            let why = super::refusal_of(&plan, &state, ix).expect("the refusal text");
+            assert!(
+                why.starts_with("task 'bad' is a") && why.contains("inside afterExecution"),
+                "{name}: {why}"
+            );
+            assert_eq!(last_of(&plan, &state, "c"), None, "{name}: a child ran");
+            assert_eq!(
+                last_of(&plan, &state, "after2"),
+                Some(RunState::Success),
+                "{name}: the next after-task"
+            );
+            assert!(terminated(&plan, &state), "{name}");
+        }
+    }
+
+    /// The same text as the start-time refusal (one predicate, two readers).
+    #[test]
+    fn the_stored_refusal_text_is_the_start_refusal_text() {
+        let src = stored_with(STORED_EXIT_FAILED);
+        let start = super::build_plan(&src)
+            .expect_err("refused at start")
+            .message;
+        let plan = super::plan_stored(&src).unwrap();
+        let (_, stored) = plan
+            .after_execution_refused
+            .iter()
+            .next()
+            .expect("one refused");
+        assert!(start.contains(stored.as_str()), "{start} / {stored}");
+    }
+
+    /// Nested: an `Exit` inside an `If` in `afterExecution:` fails, the `If`
+    /// ends `FAILED`, and the execution does not move.
+    #[test]
+    fn a_stored_exit_nested_in_an_if_fails_the_if_and_not_the_execution() {
+        let (plan, state, phase) = drive_stored(&stored_with(STORED_EXIT_IN_IF));
+        assert!(!phase
+            .iter()
+            .any(super::after_execution::writes_the_execution));
+        assert_eq!(
+            state.history,
+            [RunState::Created, RunState::Running, RunState::Success]
+        );
+        assert_eq!(
+            run_for(&plan, &state, "bad").history,
+            [RunState::Created, RunState::Failed]
+        );
+        assert_eq!(last_of(&plan, &state, "gate"), Some(RunState::Failed));
+        assert_eq!(last_of(&plan, &state, "after2"), Some(RunState::Success));
+        assert!(terminated(&plan, &state));
+    }
+
+    /// No refusal for a flow `build_plan` accepts: the map is empty.
+    #[test]
+    fn a_plan_that_starts_has_no_refused_after_task() {
+        let src = format!(
+            "{HEAD}tasks:\n{}afterExecution:\n{}",
+            leaf(2, "ok", LOG),
+            leaf(2, "end", LOG)
+        );
+        assert!(super::build_plan(&src)
+            .unwrap()
+            .after_execution_refused
+            .is_empty());
     }
 }

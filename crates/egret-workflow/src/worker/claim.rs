@@ -4813,6 +4813,20 @@ fn drive(
                 if let Some(alive) = alive {
                     renew_restarted_ids(surface, state, &alive, side);
                 }
+                // End hooks final-review fix (2026-10-28): an after-run of a
+                // kind D12 refuses, in a STORED source, is failed by
+                // `after_execution::drive` without running; its message is
+                // the refusal's text.
+                if let Command::FailUnstarted { run, .. }
+                | Command::SetRunState {
+                    run,
+                    state: RunState::Failed,
+                } = cmd
+                {
+                    if let Some(why) = crate::executor::refusal_of(plan, state, *run) {
+                        side.failures.push((*run, why.to_string()));
+                    }
+                }
             }
             marks.observe(&snapshot, state, *seq);
             continue;

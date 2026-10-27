@@ -1065,3 +1065,113 @@ async fn a_working_directory_inside_after_execution_runs_to_the_end(pool: sqlx::
     .await;
     assert_eq!(runs_of(&pool, ex, "it").await, 1, "the child ran");
 }
+
+// ── Final-review fix (2026-10-28): a STORED source with a refused kind ─────
+
+/// **A flow stored before D12 cannot make `afterExecution:` write the ended
+/// execution** (final review, Important 1). On main a `Pause`, `Exit` or
+/// `LoopUntil` inside `afterExecution:` was accepted at publish and never
+/// run; an execution of it that is running at deploy (D4) re-plans its own
+/// stored source with `plan_stored`, which skips the start-time refusal.
+///
+/// Built here as exactly that: the execution starts from a source
+/// `build_plan` accepts, and its stored source is then replaced -- index for
+/// index -- by one whose first after-task is an `Exit` with `state: FAILED`.
+/// The after-run is FAILED with the refusal's text without running; the
+/// execution's state, history and `ended_at`, and its flow-trigger events,
+/// do not move; the next after-task runs.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_stored_exit_in_after_execution_fails_and_leaves_the_execution_alone(pool: sqlx::PgPool) {
+    let (db, ws, user, _app) = setup(&pool).await;
+    common::seed_flow(
+        &db,
+        ws,
+        user,
+        "id: listener\nnamespace: t\ntriggers:\n  - id: on_done\n    \
+         type: io.kestra.plugin.core.trigger.Flow\n    states: [SUCCESS, FAILED, KILLED, KILLING]\n\
+         tasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n",
+        "draft",
+    )
+    .await;
+    let ex = start(&pool, ws, &two_after("stored")).await;
+    let stored = format!(
+        "id: stored\nnamespace: t\ntasks:\n  - id: a\n    type: {LOG}\n    message: hi\n\
+         afterExecution:\n  - id: end1\n    type: io.kestra.plugin.core.execution.Exit\n    state: FAILED\n\
+         \x20 - id: end2\n    type: {LOG}\n    message: two\n"
+    );
+    assert!(
+        egret_workflow::executor::build_plan(&stored).is_err(),
+        "the stored source must be one a new start refuses"
+    );
+    sqlx::query("UPDATE workflow.executions SET source = $2 WHERE id = $1")
+        .bind(ex)
+        .bind(&stored)
+        .execute(&pool)
+        .await
+        .expect("store the pre-D12 source");
+
+    finish(&pool, "a").await;
+    let ended = exec_row(&pool, ex).await;
+    assert_eq!(ended.0, "SUCCESS");
+    assert_eq!(ended.1, json!(["CREATED", "RUNNING", "SUCCESS"]));
+    assert!(ended.2.is_some());
+    let events_at_end: Vec<(Uuid, String)> = common::events(&db)
+        .await
+        .into_iter()
+        .filter(|(id, _)| *id == ex)
+        .collect();
+
+    let (state, history, message): (String, Value, Option<String>) = sqlx::query_as(
+        "SELECT state, history, message FROM workflow.task_runs \
+          WHERE execution_id = $1 AND task_id = 'end1'",
+    )
+    .bind(ex)
+    .fetch_one(&pool)
+    .await
+    .expect("the Exit's after-run");
+    assert_eq!(state, "FAILED");
+    assert_eq!(history, json!(["CREATED", "FAILED"]), "it never started");
+    let message = message.expect("the refusal is the run's message");
+    assert!(
+        message.starts_with("task 'end1' is an Exit inside afterExecution"),
+        "{message}"
+    );
+
+    finish(&pool, "end2").await;
+    assert_eq!(
+        run_state(&pool, ex, "end2").await.as_deref(),
+        Some("SUCCESS")
+    );
+    assert_eq!(
+        exec_row(&pool, ex).await,
+        ended,
+        "the phase moved the execution"
+    );
+    let events_after: Vec<(Uuid, String)> = common::events(&db)
+        .await
+        .into_iter()
+        .filter(|(id, _)| *id == ex)
+        .collect();
+    assert_eq!(
+        events_after, events_at_end,
+        "the phase wrote a flow-trigger event"
+    );
+    assert_eq!(
+        events_after.iter().filter(|(_, s)| s == "SUCCESS").count(),
+        1,
+        "{events_after:?}"
+    );
+    assert!(
+        events_after
+            .iter()
+            .all(|(_, s)| s != "FAILED" && s != "KILLING"),
+        "{events_after:?}"
+    );
+    assert!(
+        egret_workflow::worker::claim(&pool, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing is left for a worker"
+    );
+}

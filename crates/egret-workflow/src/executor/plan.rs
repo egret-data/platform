@@ -37,6 +37,18 @@ pub struct Plan {
     /// index the plan held before #2b moves. Driven only once the execution
     /// is terminal, by [`after_execution::drive`](super::after_execution).
     pub after_execution: Vec<TaskIx>,
+    /// Every task inside `afterExecution:` of a kind D12 refuses there
+    /// (`Pause`, `Exit`, `LoopUntil`/`WaitFor`), with the refusal's text
+    /// (`spec::validate::after_execution_refusal`, the one predicate).
+    ///
+    /// `build_plan` refuses such a flow at start, so this is non-empty only
+    /// for a plan of a STORED source (`plan_stored`): an execution running
+    /// at deploy (D4) or a `CREATE_NEW_EXECUTION` replacement of a flow
+    /// published before the refusal existed. The post-terminal phase fails
+    /// such a run with this text instead of running it
+    /// (`after_execution::drive`, final-review fix 2026-10-28). Not part of
+    /// the layout: no index moves.
+    pub after_execution_refused: std::collections::BTreeMap<TaskIx, String>,
     /// The flow's own `retry:`, `Flow.java`'s `AbstractRetry retry`.
     ///
     /// It is the **last** of Kestra's three sources, consulted only for a run
@@ -1221,16 +1233,52 @@ pub(crate) fn flatten_flow(flow: &crate::models::Flow) -> Result<Plan, PlanError
     drain_deferred(&mut tasks, &mut deferred)?;
     // #2b: the flow's `afterExecution:` comes after everything above, so the
     // #2a layout (and the A1 fixture's pre-#2 prefix) is unchanged.
+    let after_start = tasks.len();
     let after_execution = flatten_list(&mut tasks, &flow.after_execution, 1, &mut deferred)?;
     drain_deferred(&mut tasks, &mut deferred)?;
+    let after_execution_refused = refused_after_execution(flow, &tasks, after_start);
     Ok(Plan {
         tasks,
         roots,
         errors,
         finally,
         after_execution,
+        after_execution_refused,
         retry: super::retry::policy_of(flow.retry.as_ref()),
     })
+}
+
+/// [`Plan::after_execution_refused`]: each task inside `afterExecution:` that
+/// `spec::validate::after_execution_refusal` refuses, by its plan index.
+///
+/// Every index from `after_start` on was flattened from `afterExecution:`
+/// (the queue was drained before it), so a task is looked up by id in that
+/// range alone. A disabled task is not planned and is skipped.
+fn refused_after_execution(
+    flow: &crate::models::Flow,
+    tasks: &[PlanTask],
+    after_start: TaskIx,
+) -> std::collections::BTreeMap<TaskIx, String> {
+    fn walk(
+        task: &Task,
+        tasks: &[PlanTask],
+        after_start: TaskIx,
+        out: &mut std::collections::BTreeMap<TaskIx, String>,
+    ) {
+        if let Some(message) = crate::spec::validate::after_execution_refusal(task) {
+            if let Some(ix) = (after_start..tasks.len()).find(|&ix| tasks[ix].id == task.id) {
+                out.insert(ix, message);
+            }
+        }
+        for child in task.children().into_iter().chain(task.error_children()) {
+            walk(child, tasks, after_start, out);
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    for task in &flow.after_execution {
+        walk(task, tasks, after_start, &mut out);
+    }
+    out
 }
 
 /// Flatten a list of children, **dropping the ones the author disabled**.
