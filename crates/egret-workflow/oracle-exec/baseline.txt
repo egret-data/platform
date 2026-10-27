@@ -222,6 +222,9 @@
 # entries whose loop body is an `If` on `{{ inputs.failed == false }}` with
 # `true` posted and `false` declared, i.e. the two that named the defect. They
 # stay baselined for `finally:`, which has no owner.
+# 2026-10-27 correction: `finally:` has an owner now -- see the README sections
+# "End hooks A4" and "End hooks A6" (a Loop's own errors/finally run in its
+# iteration). The sentence above is history, not the current state.
 #
 # W3b Task 7 re-derived the whole coverage statement and swept this file with
 # the rest. Three sentences in the W3a blocks above are FALSE now and are left

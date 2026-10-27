@@ -552,7 +552,8 @@ fn is_non_runnable(canonical: &str) -> bool {
 }
 
 /// A flowable's own keys that #1 says nothing about. `finally` and `errors`
-/// are #2's (spec Rule 1); a `Pause` `tasks:` is `executor::pause_gap`'s
+/// are model keys now (the walker descends into them, and a `Pause` `finally`
+/// is `executor::pause_gap`'s alone); a `Pause` `tasks:` is `pause_gap`'s
 /// (D14), so it is not reported a second time; `revision`, `updated` and
 /// `tenantId` are server-managed and Kestra ignores what an author writes
 /// (D15). `pluginDefaults` keeps its own `removed_plugin_defaults`
@@ -561,7 +562,7 @@ fn silent(site: Option<Site<'_>>, key: &str) -> bool {
     match site {
         Some(Site::Flow) => matches!(key, "revision" | "updated" | "tenantId" | "pluginDefaults"),
         Some(Site::Task(t)) if FLOWABLE_TYPES.iter().any(|(c, _)| *c == t) => {
-            matches!(key, "finally" | "errors" | "taskCache" | "workerSelector")
+            matches!(key, "taskCache" | "workerSelector")
                 || (t == "io.kestra.plugin.core.flow.Pause" && key == "tasks")
         }
         _ => false,
@@ -1273,7 +1274,7 @@ mod tests {
         );
         assert_eq!(lift_of(Site::Input("SELECT"), "values"), Some(Package(3)));
         assert_eq!(lift_of(Site::Flow, "policyRefs"), Some(Enterprise));
-        // Not lifted by #1's table: honoured, #2's, or unknown to Kestra.
+        // Not lifted by #1's table: honoured or unknown to Kestra.
         assert_eq!(lift_of(Site::Task(log), "message"), None);
         assert_eq!(
             lift_of(
@@ -1346,8 +1347,6 @@ mod tests {
                 "not at the pin; unknown_property",
             ),
         ];
-        /// #2's keys (Rule 1): neither read, lifted nor refused by #1.
-        const TWO: &[&str] = &["finally", "errors"];
         use crate::spec::schema::{kestra_definition, FLOWABLE_TYPES, TRIGGER_TYPES};
         let rows =
             FLOWABLE_TYPES
@@ -1373,9 +1372,6 @@ mod tests {
             for k in props.keys().map(String::as_str) {
                 if egret.contains(&k) || TASK_MODEL_KEYS.contains(&k) || lift_of(site, k).is_some()
                 {
-                    continue;
-                }
-                if matches!(site, Site::Task(_)) && TWO.contains(&k) {
                     continue;
                 }
                 if DIFFERENCES.iter().any(|(r, p, _)| *r == row && *p == k) {
@@ -1632,19 +1628,27 @@ mod tests {
         assert_eq!(w[0].path, "deleted");
     }
 
-    /// Rule 1: `finally:` on a flowable and `errors:` on `Loop` go to #2, which
-    /// is next, so #1 says nothing about them -- not a refusal, not a warning.
     #[test]
-    fn finally_and_the_errors_two_takes_draw_nothing() {
-        let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      - id: a\n        type: core.log\n        message: a\n    finally:\n      - id: b\n        type: core.log\n        message: b\n  - id: l\n    type: io.kestra.plugin.core.flow.Loop\n    values: [1]\n    tasks:\n      - id: c\n        type: core.log\n        message: c\n    errors:\n      - id: d\n        type: core.log\n        message: d\n");
-        assert!(
-            r.errors.is_empty()
-                && !r
-                    .warnings
-                    .iter()
-                    .any(|w| w.code == "not_honoured" || w.code == "unknown_property"),
-            "{r:?}"
+    fn a_typo_inside_a_flowable_finally_is_refused_at_its_path() {
+        only(
+            &format!("{HEAD}tasks:\n  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks: [{{id: a, type: core.log, message: m}}]\n    finally:\n      - id: z\n        type: core.log\n        message: m\n        mesage: typo\n"),
+            "tasks.seq.z.mesage",
+            "unknown_property",
         );
+    }
+
+    #[test]
+    fn a_typo_inside_a_loop_errors_is_refused_at_its_path() {
+        only(
+            &format!("{HEAD}tasks:\n  - id: each\n    type: io.kestra.plugin.core.flow.Loop\n    values: [1]\n    tasks: [{{id: a, type: core.log, message: m}}]\n    errors:\n      - id: e\n        type: core.log\n        message: m\n        mesage: typo\n"),
+            "tasks.each.e.mesage",
+            "unknown_property",
+        );
+    }
+
+    #[test]
+    fn finally_and_the_loops_errors_are_model_keys_now() {
+        silent_census(&format!("{HEAD}tasks:\n  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks: [{{id: a, type: core.log, message: m}}]\n    finally: [{{id: z, type: core.log, message: m}}]\n"));
     }
 
     #[test]

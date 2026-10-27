@@ -821,11 +821,12 @@ fn as_the_loop_reads_it(child: RunState) -> RunState {
 /// against them: `valids/finally-loop`'s body reads `{{ inputs.failed }}`) and
 /// replaces only the task lists.
 ///
-/// The parent's flow-level `errors:`, `finally:` and `afterExecution:` are
-/// **cleared**, and that is measured rather than tidy: `valids/all-flowable`
-/// ran its flow-level `errors:` in the PARENT when the loop failed, and its
-/// sub-execution ran the `Loop`'s own `errors:` instead. Egret can do the first
-/// and not the second — see this module's header for the W1 gap that costs.
+/// The `Loop`'s own `errors:` and `finally:` **replace** the parent flow's
+/// (end hooks A6, D5), and that is measured rather than tidy:
+/// `valids/all-flowable` ran its flow-level `errors:` in the PARENT when the
+/// loop failed, and its sub-execution ran the `Loop`'s own `errors:` instead.
+/// Only `afterExecution:` is **cleared** (a LOOP iteration has none), together
+/// with `triggers:` and `sla:` below.
 fn sub_flow_source(source: &str, loop_task_id: &str, owner: Uuid) -> Result<String> {
     let mut flow = crate::spec::parse(source)
         .map_err(|e| worker_err(WorkerError::Unplannable(owner, e.message)))?;
@@ -989,6 +990,46 @@ fn worker_err(e: WorkerError) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// End hooks A7 (carry c): a `Loop` nested in the body, in `errors:` and
+    /// in `finally:` of the Loop stays where it is, and the iteration source
+    /// takes the lists of the Loop it was asked for.
+    #[test]
+    fn a_nested_loop_keeps_its_own_lists_in_the_iteration_source() {
+        let inner = |id: &str| {
+            format!("type: io.kestra.plugin.core.flow.Loop\n        values: [1]\n        tasks: [{{id: {id}t, type: core.log, message: m}}]\n        errors: [{{id: {id}e, type: core.log, message: m}}]\n        finally: [{{id: {id}f, type: core.log, message: m}}]\n")
+        };
+        let src = format!(
+            "id: f\nnamespace: a.b\nerrors: [{{id: fe, type: core.log, message: m}}]\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Loop\n    values: [1]\n    tasks:\n      - id: inb\n        {}    errors:\n      - id: ine\n        {}    finally:\n      - id: inf\n        {}",
+            inner("b"),
+            inner("e"),
+            inner("g"),
+        );
+        let ids = |l: &[crate::models::Task]| l.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        let outer = crate::spec::parse(&sub_flow_source(&src, "outer", uuid::Uuid::nil()).unwrap())
+            .unwrap();
+        assert_eq!(ids(&outer.tasks), ["inb"]);
+        assert_eq!(ids(&outer.errors), ["ine"]);
+        assert_eq!(ids(&outer.finally_), ["inf"]);
+        let inb =
+            crate::spec::parse(&sub_flow_source(&src, "inb", uuid::Uuid::nil()).unwrap()).unwrap();
+        assert_eq!(
+            (ids(&inb.tasks), ids(&inb.errors), ids(&inb.finally_)),
+            (vec!["bt".into()], vec!["be".into()], vec!["bf".into()])
+        );
+        let ine =
+            crate::spec::parse(&sub_flow_source(&src, "ine", uuid::Uuid::nil()).unwrap()).unwrap();
+        assert_eq!(
+            (ids(&ine.tasks), ids(&ine.errors), ids(&ine.finally_)),
+            (vec!["et".into()], vec!["ee".into()], vec!["ef".into()])
+        );
+        let inf =
+            crate::spec::parse(&sub_flow_source(&src, "inf", uuid::Uuid::nil()).unwrap()).unwrap();
+        assert_eq!(
+            (ids(&inf.tasks), ids(&inf.errors), ids(&inf.finally_)),
+            (vec!["gt".into()], vec!["ge".into()], vec!["gf".into()])
+        );
+    }
 
     /// End hooks A6 (D5): an iteration runs the `Loop`'s own `errors:` and
     /// `finally:`, never the parent flow's, and has no `afterExecution`.

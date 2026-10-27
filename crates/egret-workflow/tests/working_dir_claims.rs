@@ -1306,6 +1306,12 @@ async fn a_blocks_failed_finish_claim_runs_neither_errors_nor_finally(pool: PgPo
     settle(&pool, &reg, ex, 40).await;
 
     assert_eq!(block_row(&pool, ex).await.0, "FAILED", "the finish failed");
+    let (_, message) = child_row(&pool, ex, "block").await;
+    let message = message.unwrap_or_default();
+    assert!(
+        message.contains("DIRECTORY") && message.contains("outputFiles"),
+        "V3 must fail for the directory copy-out, not for another reason: {message:?}"
+    );
     let hooks: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM workflow.task_runs WHERE execution_id = $1 \
            AND task_id IN ('e', 'z')",

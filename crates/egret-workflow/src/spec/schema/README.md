@@ -181,7 +181,7 @@ class needs `plugins::gate::check` (both features, a runner, its FQCN in
 
 ### Result
 
-1625 properties over 97 rows: 1119 honoured, 4 warned, 378 ignored, 124 refused (counted from `property-treatment.json`, 2026-10-26, after package #1 moved the two `onChildFailure` rows from `ignored` to `refused`; before that, 380 ignored and 122 refused, counted from `property-treatment.json`, 2026-10-25, after KI-121 measured the three retry rows' `warningOnRetry` `ignored`; the line said 1512 / 1051 / 335 before, counted 2026-10-17, while the committed file already held 1625 / 1122 / 377).
+1625 properties over 97 rows: 1130 honoured, 4 warned, 366 ignored, 125 refused (counted from `property-treatment.json`, 2026-10-27, after end hooks A2 moved `finally` on the flowables and `errors` on the three loop-like ones from `ignored` to `honoured` and `Pause.finally` to `refused`; before that, 1119 honoured, 4 warned, 378 ignored, 124 refused, 2026-10-26, after package #1 moved the two `onChildFailure` rows from `ignored` to `refused`; before that, 380 ignored and 122 refused, counted from `property-treatment.json`, 2026-10-25, after KI-121 measured the three retry rows' `warningOnRetry` `ignored`; the line said 1512 / 1051 / 335 before, counted 2026-10-17, while the committed file already held 1625 / 1122 / 377).
 
 *base 7* = `assets`, `logLevel`, `logToFile`, `policyRefs`, `taskCache`, `version`, `workerSelector`: `ignored` on core tasks and flowables, `refused` on script and plugin tasks.
 
