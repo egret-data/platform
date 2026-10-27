@@ -912,6 +912,22 @@ impl<'de> Deserialize<'de> for Task {
         let allow_failure: bool = with_default(&mut map, "allowFailure", false)?;
         let allow_warning: bool = with_default(&mut map, "allowWarning", false)?;
 
+        // `serde_json::from_value` cannot say WHICH key it choked on, so a
+        // flowable's `finally:` that is not a list of mappings would surface
+        // as a bare "expected a sequence". Name the key (never the value).
+        if canonical_flow_type(&r#type).is_some() {
+            match map.get("finally") {
+                None | Some(serde_json::Value::Null) => {}
+                Some(serde_json::Value::Array(items))
+                    if items.iter().all(serde_json::Value::is_object) => {}
+                Some(_) => {
+                    return Err(D::Error::custom(format!(
+                        "task '{id}': `finally` must be a list of tasks"
+                    )))
+                }
+            }
+        }
+
         let rest = serde_json::Value::Object(map);
         let kind = kind_for(&r#type, rest).map_err(D::Error::custom)?;
 
@@ -1246,18 +1262,18 @@ sql: SELECT 1
         fn leaf(id: &str) -> String {
             format!("{{id: {id}, type: io.kestra.plugin.core.log.Log, message: x}}")
         }
-        let (a, b, e) = (leaf("a"), leaf("b"), leaf("e"));
+        let (a, b, e, f) = (leaf("a"), leaf("b"), leaf("e"), leaf("f"));
         let yaml = format!(
             "id: root\ntype: core.sequential\ntasks:\n\
-             \x20 - {{id: seq, type: core.sequential, tasks: [{a}], errors: [{e}]}}\n\
+             \x20 - {{id: seq, type: core.sequential, tasks: [{a}], errors: [{e}], finally: [{f}]}}\n\
              \x20 - {{id: par, type: core.parallel, tasks: [{a}, {b}], errors: [{e}]}}\n\
              \x20 - {{id: if, type: core.if, condition: x, then: [{a}], else: [{b}], errors: [{e}]}}\n\
              \x20 - {{id: sw, type: core.switch, value: x, cases: {{k1: [{a}], k2: [{b}]}}, defaults: [{leaf_d}], errors: [{e}]}}\n\
              \x20 - {{id: dag, type: core.dag, tasks: [{{task: {a}}}, {{task: {b}, dependsOn: [a]}}], errors: [{e}]}}\n\
-             \x20 - {{id: lp, type: core.loop, values: [1], tasks: [{a}]}}\n\
-             \x20 - {{id: lu, type: core.loopuntil, condition: x, tasks: [{a}]}}\n\
+             \x20 - {{id: lp, type: core.loop, values: [1], tasks: [{a}], errors: [{e}], finally: [{f}]}}\n\
+             \x20 - {{id: lu, type: core.loopuntil, condition: x, tasks: [{a}], errors: [{e}], finally: [{f}]}}\n\
              \x20 - {{id: af, type: core.allowfailure, tasks: [{a}], finally: [{b}], errors: [{e}]}}\n\
-             \x20 - {{id: wd, type: core.workingdirectory, tasks: [{a}]}}\n\
+             \x20 - {{id: wd, type: core.workingdirectory, tasks: [{a}], errors: [{e}], finally: [{f}]}}\n\
              \x20 - {{id: pz, type: core.pause, tasks: [{a}], errors: [{e}]}}\n\
              \x20 - {{id: sf, type: core.subflow, namespace: n, flowId: f}}\n\
              errors: [{e}]\n",
@@ -1313,6 +1329,22 @@ sql: SELECT 1
             ["a", "b"],
             "AllowFailure walks `tasks` then `finally`"
         );
+    }
+
+    /// A `finally:` that is not a list of tasks is a parse error, never a
+    /// panic and never a silently empty list. Through `spec::parse`, which is
+    /// what carries the key's path in the message.
+    #[test]
+    fn a_finally_that_is_not_a_list_of_tasks_is_a_parse_error_naming_the_key() {
+        for bad in ["not-a-list", "[1]"] {
+            for flow in [
+                format!("id: f\nnamespace: a.b\ntasks: [{{id: a, type: core.log, message: m}}]\nfinally: {bad}\n"),
+                format!("id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: core.sequential\n    tasks: [{{id: a, type: core.log, message: m}}]\n    finally: {bad}\n"),
+            ] {
+                let err = crate::spec::parse(&flow).expect_err(&flow);
+                assert!(err.message.contains("finally"), "{bad}: {err:?}");
+            }
+        }
     }
 
     #[test]

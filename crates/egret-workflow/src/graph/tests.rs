@@ -1155,3 +1155,52 @@ fn a_task_type_this_deployment_does_not_serve_is_its_refusal() {
     let alone = flow_graph(&flow, None).unwrap();
     assert_eq!(task(&alone, "tasks.q").refusal, None);
 }
+
+#[test]
+fn a_sequential_finally_is_drawn_like_an_allow_failures() {
+    for ty in ["Sequential", "AllowFailure"] {
+        let g = graph(&format!(
+            "tasks:\n  - {{id: s, type: {FLOW}.{ty}, tasks: [{a}], finally: [{z}]}}\n",
+            a = leaf("a"),
+            z = leaf("z"),
+        ));
+        let z = task(&g, "tasks.s.z");
+        assert_eq!(z.task_id, "z", "{ty}");
+        assert_eq!(z.branch, Branch::Finally, "{ty}");
+        assert_eq!(
+            g.nodes
+                .iter()
+                .filter(|n| matches!(&n.kind, NodeKind::Task { task_id, .. } if task_id == "z"))
+                .count(),
+            1,
+            "{ty}: one node, not one per walk"
+        );
+        let edges = edges(&g);
+        assert!(
+            edges.contains(&e("start:tasks.s", "tasks.s.z", Finally, None)),
+            "{ty}"
+        );
+        assert!(
+            edges.contains(&e("tasks.s.z", "end:tasks.s", Finally, None)),
+            "{ty}"
+        );
+    }
+}
+
+#[test]
+fn every_kind_with_a_finally_draws_it() {
+    for (ty, extra) in [
+        ("Parallel", ""),
+        ("If", "condition: \"{{ true }}\","),
+        ("Switch", "value: x,"),
+        ("WorkingDirectory", ""),
+        ("LoopUntil", "condition: \"{{ true }}\","),
+        ("Loop", "values: [1],"),
+    ] {
+        let g = graph(&format!(
+            "tasks:\n  - {{id: s, type: {FLOW}.{ty}, {extra} finally: [{z}]}}\n",
+            z = leaf("z"),
+        ));
+        assert_eq!(task(&g, "tasks.s.z").branch, Branch::Finally, "{ty}");
+    }
+}

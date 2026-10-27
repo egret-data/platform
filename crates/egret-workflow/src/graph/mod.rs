@@ -828,16 +828,30 @@ impl Builder {
             None,
             &end,
         );
-        // `finally:` of an `AllowFailure` is a nested list of its own, drawn
-        // beside its `errors:` (both leave `start` and reach `end`).
-        if let TaskKind::AllowFailure(a) = &task.kind {
-            let finally = Ctx {
+        // A block's `finally:` is a nested list of its own, drawn beside its
+        // `errors:` (both leave `start` and reach `end`). Every kind with the
+        // field has one since package #2; the match names them all.
+        let finally: &[Task] = match &task.kind {
+            TaskKind::Sequential(b) => &b.finally,
+            TaskKind::Parallel(b) => &b.finally,
+            TaskKind::If(b) => &b.finally,
+            TaskKind::Switch(b) => &b.finally,
+            TaskKind::Dag(b) => &b.finally,
+            TaskKind::Loop(b) => &b.finally,
+            TaskKind::LoopUntil(b) => &b.finally,
+            TaskKind::AllowFailure(b) => &b.finally,
+            TaskKind::WorkingDirectory(b) => &b.finally,
+            TaskKind::Pause(b) => &b.finally,
+            TaskKind::Subflow(_) | TaskKind::Leaf { .. } => &[],
+        };
+        if !finally.is_empty() {
+            let ctx = Ctx {
                 path: inner.path.clone(),
                 uid: inner.uid.clone(),
                 branch: Branch::Finally,
                 cluster: inner.cluster,
             };
-            self.chain(&start, &a.finally, &finally, Finally, Finally, None, &end);
+            self.chain(&start, finally, &ctx, Finally, Finally, None, &end);
         }
         self.add_node(end.clone(), NodeKind::End, Some(ix));
         Span {

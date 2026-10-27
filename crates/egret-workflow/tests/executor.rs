@@ -5572,7 +5572,7 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
             ),
             (
                 "io.kestra.plugin.core.execution.SetVariables".to_string(),
-                5
+                6
             ),
             (
                 "io.kestra.plugin.core.execution.UnsetVariables".to_string(),
@@ -5582,7 +5582,10 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
         "every update run in the comparable golden: 19 in all, each of them `fed` \
          and over-fed while `plan_stored` planned the type an opaque `Runnable`, \
          and exactly the (fed, flowable, over-feed) = (-19, +19, -19) movement \
-         group C2 Task 3 measured on the sum below"
+         group C2 Task 3 measured on the sum below \
+         (2026-10-27, end hooks A3: 19 became 20 -- the flow-level `finally:` \
+         of `valids/task-runif-taskswithstate` is planned now, so its \
+         `SetVariables` run was `unplanned` and is an update run)"
     );
     let update_types: Vec<String> = is_an_update.keys().cloned().collect();
     let is_an_update: usize = is_an_update.values().sum();
@@ -5597,7 +5600,7 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
                 + is_an_exit
                 + is_an_update
         ),
-        (438, 109, 311, 104),
+        (456, 109, 293, 106),
         "the reconstruction must reproduce Task 5's four committed figures -- up \
          to the 10 runs Task 7's `errors:` support moved out of `unplanned` and \
          into `fed`, which is derived above rather than folded into these \
@@ -5623,7 +5626,12 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
          (fed - in_errors, flowable, unplanned + in_errors, over-feed). \
          `valids/retry-with-flowable-errors` is refused by its block-level retry \
          and stays on the `plan_stored` path, now with its block planned: \
-         (0, +1, -1, -1)."
+         (0, +1, -1, -1). **2026-10-27, end hooks A3 moves it to 456/109/293/106**: \
+         the plan now holds every `finally:` list (the flow's own and each \
+         flowable's), so the 18 corpus runs written in one leave `unplanned` \
+         for `fed` (+18, 0, -18), and 2 of them carry no `SUBMITTED` in the \
+         golden, which is what the over-feed counts (+2; not traced per run). \
+         Nothing else moved: the ratchet is unchanged."
     );
     assert_eq!(
         over_fed.get("io.kestra.plugin.core.flow.Loop").copied(),

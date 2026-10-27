@@ -26,6 +26,9 @@ pub struct Plan {
     pub roots: Vec<TaskIx>,
     /// The flow's top-level `errors:`.
     pub errors: Vec<TaskIx>,
+    /// The flow's `finally:` (package #2a). Appended after every list the
+    /// plan held before #2 (D3).
+    pub finally: Vec<TaskIx>,
     /// The flow's own `retry:`, `Flow.java`'s `AbstractRetry retry`.
     ///
     /// It is the **last** of Kestra's three sources, consulted only for a run
@@ -109,6 +112,9 @@ impl Plan {
         let own_errors = self.tasks[ix].errors.iter().copied();
         let mut out: Vec<TaskIx> = own_errors.collect();
         out.extend(self.direct_task_children(ix));
+        // Last, as `AbstractBranch.allChildTasks()` has it (`tasks`, `errors`,
+        // `_finally`) and as D3 appends it.
+        out.extend(self.tasks[ix].finally.iter().copied());
         out
     }
 
@@ -128,9 +134,7 @@ impl Plan {
             // then run in a different execution, and unlike a `Pause`'s, which
             // a planned `Pause` never has.
             | TaskKind::LoopUntil { tasks, .. } => tasks.clone(),
-            TaskKind::AllowFailure { tasks, finally } => {
-                tasks.iter().chain(finally).copied().collect()
-            }
+            TaskKind::AllowFailure { tasks } => tasks.clone(),
             TaskKind::WorkingDirectory { tasks } => tasks.clone(),
             TaskKind::If { then_, else_, .. } => then_.iter().chain(else_).copied().collect(),
             TaskKind::Switch { cases, default, .. } => cases
@@ -319,6 +323,10 @@ pub struct PlanTask {
     /// so there is no third state to carry.
     pub allow_failure: bool,
     pub allow_warning: bool,
+    /// The block's `finally:` (Kestra `AbstractBranch._finally`). Inline for
+    /// `AllowFailure` (where it always was), appended for every other kind (D3).
+    /// Empty for a `Loop`, whose `finally:` is not planned in the parent (D5).
+    pub finally: Vec<TaskIx>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -380,10 +388,9 @@ pub enum TaskKind {
     /// `io.kestra.plugin.core.flow.AllowFailure`: a `Sequential` whose failure
     /// is a warning (spec §5.1). Its `errors:` are on [`PlanTask::errors`], as
     /// for every flowable; `finally` runs after the block ends, whatever its
-    /// state, and is carried here because no other kind has one.
+    /// state, and is on [`PlanTask::finally`], like every other kind's.
     AllowFailure {
         tasks: Vec<TaskIx>,
-        finally: Vec<TaskIx>,
     },
     /// `io.kestra.plugin.core.flow.WorkingDirectory`: its children run one
     /// after another in one working directory, which the executor carries from
@@ -1175,12 +1182,22 @@ fn parse_for_plan(source: &str) -> Result<crate::models::Flow, PlanError> {
 /// would answer `Err` for exactly the flows the guard is about.
 pub(crate) fn flatten_flow(flow: &crate::models::Flow) -> Result<Plan, PlanError> {
     let mut tasks = Vec::new();
-    let roots = flatten_list(&mut tasks, &flow.tasks, 1)?;
-    let errors = flatten_list(&mut tasks, &flow.errors, 1)?;
+    let mut deferred = Deferred::new();
+    // Today's layout first (D3): the flow's `tasks:` and `errors:`, each
+    // subtree in pre-order, exactly as before package #2.
+    let roots = flatten_list(&mut tasks, &flow.tasks, 1, &mut deferred)?;
+    let errors = flatten_list(&mut tasks, &flow.errors, 1, &mut deferred)?;
+    // Then every list package #2 added, appended: the blocks' own, in the
+    // order they were met, then the flow's `finally:`, then whatever those
+    // deferred in turn.
+    drain_deferred(&mut tasks, &mut deferred)?;
+    let finally = flatten_list(&mut tasks, &flow.finally_, 1, &mut deferred)?;
+    drain_deferred(&mut tasks, &mut deferred)?;
     Ok(Plan {
         tasks,
         roots,
         errors,
+        finally,
         retry: super::retry::policy_of(flow.retry.as_ref()),
     })
 }
@@ -1231,19 +1248,63 @@ pub(crate) fn flatten_flow(flow: &crate::models::Flow) -> Result<Plan, PlanError
 /// is an over-refusal. No corpus flow reaches the question —
 /// `no_corpus_dag_node_is_disabled` re-derives that from all 351 flows on every
 /// run — so the position is left as a named gap rather than guessed at.
-fn flatten_list(
+fn flatten_list<'a>(
     out: &mut Vec<PlanTask>,
-    tasks: &[Task],
+    tasks: &'a [Task],
     depth: usize,
+    deferred: &mut Deferred<'a>,
 ) -> Result<Vec<TaskIx>, PlanError> {
     tasks
         .iter()
         .filter(|t| !t.disabled)
-        .map(|t| flatten_one(out, t, depth))
+        .map(|t| flatten_one(out, t, depth, deferred))
         .collect::<Result<Vec<_>, _>>()
 }
 
-fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<TaskIx, PlanError> {
+/// Blocks whose `finally:` (and, for `LoopUntil`/`WorkingDirectory`, `errors:`)
+/// are flattened after the rest of the plan, so no index package #2 did not
+/// add moves (D3). Entries are `(plan index, model task, the children's depth)`.
+type Deferred<'a> = std::collections::VecDeque<(TaskIx, &'a Task, usize)>;
+
+/// Flatten every deferred block's new lists, FIFO; a list that holds another
+/// such block defers it in turn, and the loop runs until nothing is left.
+fn drain_deferred<'a>(
+    out: &mut Vec<PlanTask>,
+    deferred: &mut Deferred<'a>,
+) -> Result<(), PlanError> {
+    while let Some((ix, task, depth)) = deferred.pop_front() {
+        let (errors, finally) = deferred_lists(task);
+        if let Some(errors) = errors {
+            out[ix].errors = flatten_list(out, errors, depth, deferred)?;
+        }
+        out[ix].finally = flatten_list(out, finally, depth, deferred)?;
+    }
+    Ok(())
+}
+
+/// The lists [`drain_deferred`] flattens for a block: its `errors:` when the
+/// kind's `errors:` is new in package #2 (`LoopUntil`, `WorkingDirectory`),
+/// and its `finally:`. Every kind a `flatten_one` arm defers is named; any
+/// other kind has no such lists.
+fn deferred_lists(task: &Task) -> (Option<&[Task]>, &[Task]) {
+    match &task.kind {
+        ModelKind::Sequential(b) => (None, &b.finally),
+        ModelKind::Parallel(b) => (None, &b.finally),
+        ModelKind::If(b) => (None, &b.finally),
+        ModelKind::Switch(b) => (None, &b.finally),
+        ModelKind::Dag(b) => (None, &b.finally),
+        ModelKind::LoopUntil(b) => (Some(&b.errors), &b.finally),
+        ModelKind::WorkingDirectory(b) => (Some(&b.errors), &b.finally),
+        _ => (None, &[]),
+    }
+}
+
+fn flatten_one<'a>(
+    out: &mut Vec<PlanTask>,
+    task: &'a Task,
+    depth: usize,
+    deferred: &mut Deferred<'a>,
+) -> Result<TaskIx, PlanError> {
     if depth > MAX_TASK_DEPTH {
         return Err(PlanError {
             message: format!(
@@ -1269,6 +1330,7 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
         errors: Vec::new(),
         allow_failure: task.allow_failure,
         allow_warning: task.allow_warning,
+        finally: Vec::new(),
     });
 
     // Kestra dispatches on the wire `type`, and so does this -- through the
@@ -1286,28 +1348,29 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
         // pre-order and the error subtree sits behind the task subtree it
         // handles -- which is also the order Kestra creates their runs in.
         (ModelKind::Sequential(seq), Some(SEQUENTIAL_TYPE)) => {
-            let children = flatten_list(out, &seq.tasks, depth + 1)?;
-            out[ix].errors = flatten_list(out, &seq.errors, depth + 1)?;
+            let children = flatten_list(out, &seq.tasks, depth + 1, deferred)?;
+            out[ix].errors = flatten_list(out, &seq.errors, depth + 1, deferred)?;
+            deferred.push_back((ix, task, depth + 1));
             out[ix].kind = TaskKind::Sequential { tasks: children };
         }
         // `errors` after `tasks`, and `finally` after both, which is Kestra's
         // order (`AbstractBranch.allChildTasks()` is `tasks + errors + _finally`).
         (ModelKind::AllowFailure(af), Some(ALLOW_FAILURE_TYPE)) => {
-            let children = flatten_list(out, &af.tasks, depth + 1)?;
-            out[ix].errors = flatten_list(out, &af.errors, depth + 1)?;
-            let finally = flatten_list(out, &af.finally, depth + 1)?;
-            out[ix].kind = TaskKind::AllowFailure {
-                tasks: children,
-                finally,
-            };
+            let children = flatten_list(out, &af.tasks, depth + 1, deferred)?;
+            out[ix].errors = flatten_list(out, &af.errors, depth + 1, deferred)?;
+            // Inline: an `AllowFailure`'s `finally` always sat here.
+            out[ix].finally = flatten_list(out, &af.finally, depth + 1, deferred)?;
+            out[ix].kind = TaskKind::AllowFailure { tasks: children };
         }
         (ModelKind::WorkingDirectory(wd), Some(WORKING_DIRECTORY_TYPE)) => {
-            let children = flatten_list(out, &wd.tasks, depth + 1)?;
+            let children = flatten_list(out, &wd.tasks, depth + 1, deferred)?;
+            deferred.push_back((ix, task, depth + 1));
             out[ix].kind = TaskKind::WorkingDirectory { tasks: children };
         }
         (ModelKind::Parallel(par), Some(PARALLEL_TYPE)) => {
-            let children = flatten_list(out, &par.tasks, depth + 1)?;
-            out[ix].errors = flatten_list(out, &par.errors, depth + 1)?;
+            let children = flatten_list(out, &par.tasks, depth + 1, deferred)?;
+            out[ix].errors = flatten_list(out, &par.errors, depth + 1, deferred)?;
+            deferred.push_back((ix, task, depth + 1));
             out[ix].kind = TaskKind::Parallel {
                 tasks: children,
                 concurrency: literal_concurrency(par.concurrent.as_ref()),
@@ -1324,9 +1387,10 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
             let condition = cond.condition.clone().ok_or_else(|| PlanError {
                 message: format!("if '{}' has no condition to branch on", task.id),
             })?;
-            let then_ = flatten_list(out, &cond.then, depth + 1)?;
-            let else_ = flatten_list(out, &cond.r#else, depth + 1)?;
-            out[ix].errors = flatten_list(out, &cond.errors, depth + 1)?;
+            let then_ = flatten_list(out, &cond.then, depth + 1, deferred)?;
+            let else_ = flatten_list(out, &cond.r#else, depth + 1, deferred)?;
+            out[ix].errors = flatten_list(out, &cond.errors, depth + 1, deferred)?;
+            deferred.push_back((ix, task, depth + 1));
             out[ix].kind = TaskKind::If {
                 condition,
                 then_,
@@ -1345,10 +1409,11 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
                 })?;
             let mut cases = Vec::with_capacity(sw.cases.len());
             for (key, tasks) in &sw.cases {
-                cases.push((key.clone(), flatten_list(out, tasks, depth + 1)?));
+                cases.push((key.clone(), flatten_list(out, tasks, depth + 1, deferred)?));
             }
-            let default = flatten_list(out, &sw.defaults, depth + 1)?;
-            out[ix].errors = flatten_list(out, &sw.errors, depth + 1)?;
+            let default = flatten_list(out, &sw.defaults, depth + 1, deferred)?;
+            out[ix].errors = flatten_list(out, &sw.errors, depth + 1, deferred)?;
+            deferred.push_back((ix, task, depth + 1));
             out[ix].kind = TaskKind::Switch {
                 value,
                 cases,
@@ -1400,7 +1465,9 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
                 .ok_or_else(|| PlanError {
                     message: format!("loop '{}' has no values to iterate", task.id),
                 })?;
-            let children = flatten_list(out, &lp.tasks, depth + 1)?;
+            // D5: a `Loop`'s `errors:` and `finally:` run in each iteration's
+            // sub-execution, so nothing of them is planned in the parent.
+            let children = flatten_list(out, &lp.tasks, depth + 1, deferred)?;
             out[ix].kind = TaskKind::Loop {
                 values,
                 tasks: children,
@@ -1421,9 +1488,10 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
                 nodes.push((child, node.depends_on.as_slice()));
             }
             out[ix].kind = TaskKind::Dag {
-                nodes: flatten_dag(out, &task.id, &nodes, depth + 1)?,
+                nodes: flatten_dag(out, &task.id, &nodes, depth + 1, deferred)?,
             };
-            out[ix].errors = flatten_list(out, &dag.errors, depth + 1)?;
+            out[ix].errors = flatten_list(out, &dag.errors, depth + 1, deferred)?;
+            deferred.push_back((ix, task, depth + 1));
         }
         // W8 Task 3. A `Pause` this executor reproduces carries its
         // `pauseDuration:` unrendered and its `timeout:` parsed; one that
@@ -1475,7 +1543,8 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
             // omission is W1's rather than this task's. Nothing in the
             // corpus writes one on a `LoopUntil`, so `plan.tasks[ix].errors`
             // stays the empty slice every caller already handles.
-            let children = flatten_list(out, &lu.tasks, depth + 1)?;
+            let children = flatten_list(out, &lu.tasks, depth + 1, deferred)?;
+            deferred.push_back((ix, task, depth + 1));
             out[ix].kind = TaskKind::LoopUntil {
                 tasks: children,
                 condition,
@@ -1616,11 +1685,12 @@ fn literal_concurrency_limit(source: Option<i32>) -> u32 {
 /// `invalids/dag-cyclicdependency` and `invalids/dag-notexist-task` are
 /// `refused` in the golden at all. Resolving `dependsOn` to indices here makes
 /// the run-time copy unrepresentable.
-fn flatten_dag(
+fn flatten_dag<'a>(
     out: &mut Vec<PlanTask>,
     dag_id: &str,
-    nodes: &[(&Task, &[String])],
+    nodes: &[(&'a Task, &[String])],
     depth: usize,
+    deferred: &mut Deferred<'a>,
 ) -> Result<Vec<DagNode>, PlanError> {
     let ids: Vec<&str> = nodes.iter().map(|(t, _)| t.id.as_str()).collect();
 
@@ -1660,7 +1730,7 @@ fn flatten_dag(
     // subtree sits between it and the next node.
     let mut plan_ix = Vec::with_capacity(nodes.len());
     for (task, _) in nodes {
-        plan_ix.push(flatten_one(out, task, depth)?);
+        plan_ix.push(flatten_one(out, task, depth, deferred)?);
     }
 
     Ok(nodes
@@ -1728,7 +1798,7 @@ mod allow_failure_plan_tests {
         .expect("parses");
         let plan = flatten_flow(&flow).expect("plans");
         let block = plan.roots[0];
-        let TaskKind::AllowFailure { tasks, finally } = &plan.tasks[block].kind else {
+        let TaskKind::AllowFailure { tasks } = &plan.tasks[block].kind else {
             panic!("expected AllowFailure, got {:?}", plan.tasks[block].kind);
         };
         let id = |ix: &TaskIx| plan.tasks[*ix].id.as_str();
@@ -1737,6 +1807,7 @@ mod allow_failure_plan_tests {
             plan.tasks[block].errors.iter().map(id).collect::<Vec<_>>(),
             ["e"]
         );
+        let finally = &plan.tasks[block].finally;
         assert_eq!(finally.iter().map(id).collect::<Vec<_>>(), ["f"]);
         assert!(
             tasks.iter().chain(finally).all(|ix| *ix > block),
@@ -1788,5 +1859,54 @@ mod pause_finally_tests {
             e.contains("'finally'") && e.contains("Roadmap package #9 lifts it"),
             "{e}"
         );
+    }
+}
+
+#[cfg(test)]
+mod end_hooks_plan_tests {
+    use super::*;
+
+    fn ids(plan: &Plan) -> Vec<&str> {
+        plan.tasks.iter().map(|t| t.id.as_str()).collect()
+    }
+
+    #[test]
+    fn a_sequential_finally_is_planned_after_everything_that_was_planned_before() {
+        let src = "id: f\nnamespace: a.b\ntasks:\n  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks: [{id: a, type: core.log, message: m}]\n    finally: [{id: z, type: core.log, message: m}]\n  - id: after\n    type: core.log\n    message: m\nfinally:\n  - id: ff\n    type: core.log\n    message: m\n";
+        let plan = plan_stored(src).unwrap();
+        assert_eq!(
+            ids(&plan),
+            ["seq", "a", "after", "z", "ff"],
+            "today's layout first, then the new lists"
+        );
+        let seq = 0;
+        assert_eq!(plan.tasks[seq].finally, vec![3]);
+        assert_eq!(plan.finally, vec![4]);
+        assert_eq!(plan.children_of(seq), vec![1, 3]);
+    }
+
+    #[test]
+    fn an_allow_failure_finally_stays_inline() {
+        let src = "id: f\nnamespace: a.b\ntasks:\n  - id: af\n    type: io.kestra.plugin.core.flow.AllowFailure\n    tasks: [{id: a, type: core.log, message: m}]\n    finally: [{id: z, type: core.log, message: m}]\n  - id: after\n    type: core.log\n    message: m\n";
+        let plan = plan_stored(src).unwrap();
+        assert_eq!(ids(&plan), ["af", "a", "z", "after"]);
+        assert_eq!(plan.tasks[0].finally, vec![2]);
+    }
+
+    #[test]
+    fn a_loops_errors_and_finally_are_not_planned_in_the_parent() {
+        let src = "id: f\nnamespace: a.b\ntasks:\n  - id: each\n    type: io.kestra.plugin.core.flow.Loop\n    values: [1]\n    tasks: [{id: a, type: core.log, message: m}]\n    errors: [{id: e, type: core.log, message: m}]\n    finally: [{id: z, type: core.log, message: m}]\n";
+        let plan = plan_stored(src).unwrap();
+        assert!(plan.tasks.iter().all(|t| t.id != "e" && t.id != "z"));
+    }
+
+    #[test]
+    fn working_directory_and_loop_until_errors_and_finally_are_appended_and_nest() {
+        let src = "id: f\nnamespace: a.b\ntasks:\n  - id: wd\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n    tasks: [{id: a, type: core.log, message: m}]\n    errors: [{id: e, type: core.log, message: m}]\n    finally:\n      - id: inner\n        type: io.kestra.plugin.core.flow.Sequential\n        tasks: [{id: i1, type: core.log, message: m}]\n        finally: [{id: i2, type: core.log, message: m}]\n  - id: after\n    type: core.log\n    message: m\n";
+        let plan = plan_stored(src).unwrap();
+        assert_eq!(ids(&plan), ["wd", "a", "after", "e", "inner", "i1", "i2"]);
+        assert_eq!(plan.tasks[0].errors, vec![3]);
+        assert_eq!(plan.tasks[0].finally, vec![4]);
+        assert_eq!(plan.tasks[4].finally, vec![6]);
     }
 }

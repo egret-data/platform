@@ -436,6 +436,52 @@ async fn a_subflow_naming_a_flow_in_the_callers_own_workspace_publishes_and_free
     );
 }
 
+/// **A `Subflow` in a flowable's `finally:` is resolved at publish exactly like
+/// one in `tasks:`** (package #2a): the reference is frozen into the snapshot
+/// and the snapshot carries no warning. Publish walks `Task::children_mut`,
+/// so this fails if that walk misses the new list.
+#[tokio::test]
+async fn a_subflow_in_a_flowables_finally_is_resolved_like_one_in_tasks() {
+    let Some(db) = db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let target_src = "id: nightly_rollup\nnamespace: company.analytics\ntasks:\n  - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: x\n";
+    let target = common::draft(&repo, ws, user, target_src).await;
+    let sub = |id: &str| {
+        format!(
+            "{{id: {id}, type: core.subflow, namespace: company.analytics, flowId: nightly_rollup}}"
+        )
+    };
+    let f = common::draft(
+        &repo, ws, user,
+        &format!(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks: [{}]\n    finally: [{}]\n  - id: lp\n    type: io.kestra.plugin.core.flow.Loop\n    values: [1]\n    tasks: [{}]\n    errors: [{}]\n",
+            sub("in_tasks"),
+            sub("in_finally"),
+            sub("in_loop"),
+            sub("in_loop_errors"),
+        ),
+    )
+    .await;
+
+    let v = egret_workflow::publish(&repo, &common::workflow_refs(), ws, user, f.id, "")
+        .await
+        .expect("publish");
+
+    let seq = &v.snapshot["plan"]["tasks"][0];
+    let want = serde_json::json!(target.id);
+    assert_eq!(seq["tasks"][0]["flowRef"], want, "{}", v.snapshot);
+    assert_eq!(seq["finally"][0]["flowRef"], want, "{}", v.snapshot);
+    let lp = &v.snapshot["plan"]["tasks"][1];
+    assert_eq!(lp["errors"][0]["flowRef"], want, "{}", v.snapshot);
+    assert_eq!(
+        v.snapshot["warnings"],
+        serde_json::json!([]),
+        "{}",
+        v.snapshot
+    );
+}
+
 // -- Fix round 2, Finding 1: `namespace: "a/b"`, `flowId: "c"` used to encode
 // to "a/b/c" and decode, via split_once('/'), as ("a", "b/c") -- a different
 // pair than declared. `spec::validate` now refuses this at publish's step 3,
