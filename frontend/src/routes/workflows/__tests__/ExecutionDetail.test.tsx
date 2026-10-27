@@ -8,6 +8,7 @@ import { fullTimestamp } from "@/lib/relativeTime";
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn() }));
 vi.mock("sonner", () => ({ toast }));
 
+import { AFTER_RUN_FOLLOW_MS } from "@/components/workflows/executionState";
 import ExecutionDetail from "@/routes/workflows/ExecutionDetail";
 
 const WS = "eng";
@@ -782,6 +783,35 @@ describe("ExecutionDetail: Overview", () => {
     renderPage();
     const children = await screen.findByRole("region", { name: "Child executions" });
     expect(await within(children).findByText("No child executions")).toBeInTheDocument();
+  });
+
+  describe("child executions of an ended execution with a live afterExecution run", () => {
+    const CHILD = "33333333-0000-4000-8000-000000000004";
+    const listReads = (server: Server) => server.calls.filter((c) => c.method === "GET" && c.path === `${BASE}/executions`).length;
+    const ended = (msAgo: number) =>
+      execution("SUCCESS", { ended_at: new Date(Date.now() - msAgo).toISOString(), runs: [run("after", "RUNNING", 0)] });
+
+    it("keeps reading the list, so a child the after-run starts appears", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const server = new Server(ok(ended(1000)));
+      renderPage();
+      const children = await screen.findByRole("region", { name: "Child executions" });
+      expect(await within(children).findByText("No child executions")).toBeInTheDocument();
+      server.children = [{ ...execution("RUNNING"), id: CHILD, parent_execution_id: EXEC, loop_index: null, loop_value: null }];
+      await act(() => vi.advanceTimersByTimeAsync(2500));
+      expect(await within(children).findByRole("link", { name: CHILD.slice(0, 8) })).toBeInTheDocument();
+    });
+
+    it("stops reading once the execution has been terminal past the follow window", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const server = new Server(ok(ended(AFTER_RUN_FOLLOW_MS + 60_000)));
+      renderPage();
+      const children = await screen.findByRole("region", { name: "Child executions" });
+      await within(children).findByText("No child executions");
+      const before = listReads(server);
+      await act(() => vi.advanceTimersByTimeAsync(10_000));
+      expect(listReads(server)).toBe(before);
+    });
   });
 
   it("lists the task runs in run order, each opening the Gantt with that run selected", async () => {

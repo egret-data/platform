@@ -335,7 +335,7 @@ function ExecutionHeader({ ws, execution, now }: { ws: string; execution: Execut
       }
       actions={
         /* Every action needs `workflow:manage`; a user without it does not see them (spec §5.2). */
-        execution.can_manage ? <ExecutionActions ws={ws} execution={execution} /> : null
+        execution.can_manage ? <ExecutionActions ws={ws} execution={execution} now={now} /> : null
       }
     />
   );
@@ -352,7 +352,7 @@ const KILL_NOT_APPLIED = "kill_not_applied";
  * Resume, Replay (spec §5.2) and Kill (workflow kill spec §7), each confirmed
  * first (FE-ACTION-1), each saying why when disabled (FE-ACTION-4).
  */
-function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionDto }) {
+function ExecutionActions({ ws, execution, now }: { ws: string; execution: ExecutionDto; now: number }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const resume = useWorkflowResumeExecution();
@@ -369,7 +369,6 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
   const resumeState = canResume(execution);
   const replayShown = showsReplay(execution);
   const replayState = canReplay(execution);
-  const now = useNow();
   const killShown = showsKill(execution, now);
   const killState = canKill(execution);
 

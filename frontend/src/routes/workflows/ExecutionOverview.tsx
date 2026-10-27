@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StateChip } from "@/components/workflows/StateChip";
-import { formatDuration, isTerminalState } from "@/components/workflows/executionState";
+import { executionLive, formatDuration, isTerminalState } from "@/components/workflows/executionState";
 import { FileRow, FileRowList } from "@/components/workflows/executions/files/FileRow";
 import { findFileUris, isFileUri, pathSteps } from "@/components/workflows/executions/outputs/outputsModel";
 import { nextPollMs } from "@/components/workflows/executions/polling";
@@ -49,7 +49,7 @@ export default function ExecutionOverview({ ws, execution, now }: { ws: string; 
         <LabelChips labels={execution.effective_labels} />
       </Section>
       <Section title="Child executions">
-        <ChildExecutions ws={ws} execution={execution} />
+        <ChildExecutions ws={ws} execution={execution} now={now} />
       </Section>
       <Section title="Task runs">
         <TaskRuns ws={ws} execution={execution} now={now} />
@@ -212,10 +212,11 @@ function TriggerSection({ execution }: { execution: ExecutionDto }) {
 /**
  * The execution's direct children (spec §5.3): loop iterations, subflow and
  * flow-trigger children, and a retry's replacement, read with `parent=`. It
- * follows while the execution or a child is still running.
+ * follows while the execution (an afterExecution run can start a child after it
+ * ended; see `executionLive`) or a child is still running.
  */
-function ChildExecutions({ ws, execution }: { ws: string; execution: ExecutionDto }) {
-  const terminal = isTerminalState(execution.state);
+function ChildExecutions({ ws, execution, now }: { ws: string; execution: ExecutionDto; now: number }) {
+  const ended = !executionLive(execution, now);
   const query = useWorkflowListExecutions(
     ws,
     { parent: execution.id, limit: CHILDREN_LIMIT },
@@ -223,7 +224,7 @@ function ChildExecutions({ ws, execution }: { ws: string; execution: ExecutionDt
       query: {
         queryKey: workflowsKeys.executionChildren(execution.id),
         refetchInterval: (q) =>
-          nextPollMs(q.state, Date.now(), (d) => terminal && d.status === 200 && d.data.rows.every((r) => isTerminalState(r.state))),
+          nextPollMs(q.state, Date.now(), (d) => ended && d.status === 200 && d.data.rows.every((r) => isTerminalState(r.state))),
       },
     },
   );

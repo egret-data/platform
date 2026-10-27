@@ -4,6 +4,7 @@ import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import type { ExecutionDto, TaskRunDto } from "@/api/generated/model";
+import { AFTER_RUN_FOLLOW_MS } from "@/components/workflows/executionState";
 import ExecutionGanttTab from "@/components/workflows/executions/gantt/ExecutionGanttTab";
 
 /** 10:00:00 to 10:01:40: a hundred seconds, so a second is one percent of the axis. */
@@ -444,6 +445,38 @@ describe("ExecutionGanttTab: live redraws", () => {
     setVisibility("visible");
     frames(100);
     expect(duration()).toBe("16 s so far");
+  });
+
+  describe("a terminal execution with a run that never ends", () => {
+    const stuck = (endedAt: string) =>
+      execution({
+        state: "SUCCESS",
+        ended_at: endedAt,
+        runs: [run(0, "stuck", { state: "RUNNING", history: ["CREATED", "RUNNING"], ended_seq: null, started_at: at(0) })],
+      });
+    const rendersOver = (ms: number, endedAt: string, nowAt: number) => {
+      vi.useFakeTimers({ toFake: ["requestAnimationFrame", "cancelAnimationFrame", "Date", "setTimeout", "clearTimeout"], now: nowAt });
+      let renders = 0;
+      render(
+        <MemoryRouter initialEntries={["/gantt"]}>
+          <Profiler id="gantt" onRender={() => renders++}>
+            <ExecutionGanttTab execution={stuck(endedAt)} slots={NO_SLOTS} />
+          </Profiler>
+        </MemoryRouter>,
+      );
+      for (let t = 0; t < 200; t += 16) act(() => vi.advanceTimersByTime(16));
+      renders = 0;
+      for (let t = 0; t < ms; t += 16) act(() => vi.advanceTimersByTime(16));
+      return renders;
+    };
+
+    it("keeps the clock running inside the follow window (an afterExecution run may be live)", () => {
+      expect(rendersOver(1000, at(10), Date.parse(at(60)))).toBeGreaterThanOrEqual(15);
+    });
+
+    it("sets no new now once the follow window has passed", () => {
+      expect(rendersOver(1000, at(10), Date.parse(at(10)) + AFTER_RUN_FOLLOW_MS + 1000)).toBe(0);
+    });
   });
 
   it("does not re-render the slots on clock ticks", () => {
