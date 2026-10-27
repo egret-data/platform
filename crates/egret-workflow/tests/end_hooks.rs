@@ -983,32 +983,32 @@ async fn a_loop_inside_after_execution_runs_to_the_end(pool: sqlx::PgPool) {
     );
 }
 
-/// **A `LoopUntil` of two iterations inside `afterExecution:` runs to the
-/// end.** Measured 2026-10-27: it does not. `LoopUntil` waits between
-/// iterations by pausing its run (`Command::PauseRun` with a `Resume::Iterate`
-/// at a tick, even for `interval: PT0S`), and the post-terminal phase refuses
-/// any command that writes the execution: the worker panics in
-/// `after_execution.rs:68` ("the post-terminal phase emitted a command that
-/// writes the execution: [PauseRun { run: 1, resume: Iterate .. }]").
-#[ignore = "refused since package #2b: a LoopUntil waits between iterations with PauseRun, which the after-execution phase cannot apply (panic at after_execution.rs:68); follow-up package number to be set by the controller"]
+/// **A `LoopUntil` inside `afterExecution:` is refused at start** (package
+/// #9 lifts it). Measured 2026-10-27: it waits between iterations with
+/// `Command::PauseRun` (even for `interval: PT0S`), which the post-terminal
+/// phase cannot apply; unrefused, the worker panicked in
+/// `after_execution.rs` ("the post-terminal phase emitted a command that
+/// writes the execution").
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_loop_until_inside_after_execution_runs_to_the_end(pool: sqlx::PgPool) {
+async fn a_loop_until_inside_after_execution_is_refused_at_start(pool: sqlx::PgPool) {
     let (_db, ws, _user, _app) = setup(&pool).await;
-    let ex = run_phase(
-        &pool,
-        ws,
-        &with_after(
-            "after-loopuntil",
-            &format!(
-                "  - id: after\n    type: io.kestra.plugin.core.flow.LoopUntil\n    \
-                 condition: \"{{{{ outputs.after.iterationCount >= 2 }}}}\"\n    \
-                 checkFrequency:\n      interval: PT0S\n    \
-                 tasks:\n      - id: it\n        type: {LOG}\n        message: x\n"
-            ),
+    let source = with_after(
+        "after-loopuntil",
+        &format!(
+            "  - id: after\n    type: io.kestra.plugin.core.flow.LoopUntil\n    \
+             condition: \"{{{{ outputs.after.iterationCount >= 2 }}}}\"\n    \
+             checkFrequency:\n      interval: PT0S\n    \
+             tasks:\n      - id: it\n        type: {LOG}\n        message: x\n"
         ),
-    )
-    .await;
-    assert_eq!(runs_of(&pool, ex, "it").await, 2, "two iterations");
+    );
+    let err = egret_workflow::worker::start_execution(&pool, ws, None, &source, json!({}))
+        .await
+        .expect_err("the start is refused");
+    let text = format!("{err:?}");
+    assert!(
+        text.contains("unsupported_after_execution_task") && text.contains("LoopUntil"),
+        "{text}"
+    );
 }
 
 /// **A `Subflow` inside `afterExecution:` runs its child execution to a

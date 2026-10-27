@@ -749,28 +749,40 @@ pub fn validate_for_run(flow: &Flow) -> ValidationReport {
     report
 }
 
-/// End hooks #2b (spec D12): `Pause` and `Exit` are refused anywhere inside
-/// `afterExecution:`. That list runs once the execution is terminal, so a
-/// `Pause` would mark an ended execution `PAUSED` and an `Exit` would set its
-/// state; `after_execution::drive` asserts neither happens. Walks
+/// End hooks #2b (spec D12): `Pause`, `Exit` and `LoopUntil` (`WaitFor` is its
+/// alias) are refused anywhere inside `afterExecution:`. That list runs once
+/// the execution is terminal, so a `Pause` would mark an ended execution
+/// `PAUSED`, an `Exit` would set its state, and a `LoopUntil` waits between
+/// iterations with `PauseRun` (the pause machinery, package #9);
+/// `after_execution::drive` asserts none of them happens. Walks
 /// `children()` and `error_children()` (finally lists included) from the
 /// list's roots. Lives in the run-time gate so `build_plan` refuses at start.
 /// Key and id names only (package #1, D10).
 fn validate_after_execution(flow: &Flow, report: &mut ValidationReport) {
     fn walk(task: &Task, path: String, report: &mut ValidationReport) {
         let refused = match &task.kind {
-            TaskKind::Pause(_) => Some(("Pause", "a Pause would pause it again", 9)),
-            TaskKind::Leaf { .. } if task.r#type == crate::executor::exit::TYPE_ID => {
-                Some(("Exit", "an Exit would set its state", 20))
-            }
+            TaskKind::Pause(_) => Some((
+                "a Pause",
+                "the execution has already ended, and a Pause would pause it again",
+                9,
+            )),
+            TaskKind::Leaf { .. } if task.r#type == crate::executor::exit::TYPE_ID => Some((
+                "an Exit",
+                "the execution has already ended, and an Exit would set its state",
+                20,
+            )),
+            TaskKind::LoopUntil(_) => Some((
+                "a LoopUntil",
+                "it waits between iterations by pausing the run, and the execution has already ended",
+                9,
+            )),
             _ => None,
         };
         if let Some((kind, why, package)) = refused {
-            let article = if kind == "Exit" { "an" } else { "a" };
             report.errors.push(Finding {
                 code: "unsupported_after_execution_task",
                 message: format!(
-                    "task '{}' is {article} {kind} inside afterExecution, which egret does not run: the execution has already ended, and {why}. Roadmap package #{package} lifts it",
+                    "task '{}' is {kind} inside afterExecution, which egret does not run: {why}. Roadmap package #{package} lifts it",
                     task.id
                 ),
                 path: path.clone(),
@@ -5547,6 +5559,53 @@ mod tests {
             "{}",
             err.message
         );
+    }
+
+    const LOOP_UNTIL: &str = "io.kestra.plugin.core.flow.LoopUntil";
+
+    fn loop_until_body(id: &str, ty: &str) -> String {
+        format!(
+            "  - id: {id}\n    type: {ty}\n    condition: \"{{{{ true }}}}\"\n    checkFrequency:\n      interval: PT0S\n    tasks:\n      - id: c\n        type: io.kestra.plugin.core.log.Log\n        message: m\n"
+        )
+    }
+
+    #[test]
+    fn a_loop_until_inside_after_execution_is_refused_at_start() {
+        let src = after_exec("afterExecution", &loop_until_body("lu", LOOP_UNTIL));
+        let got = refusals(&src);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].0, "afterExecution.lu");
+        assert_eq!(
+            got[0].1,
+            "task 'lu' is a LoopUntil inside afterExecution, which egret does not run: it waits between iterations by pausing the run, and the execution has already ended. Roadmap package #9 lifts it"
+        );
+        let err = crate::executor::build_plan(&src).expect_err("build_plan refuses it");
+        assert!(
+            err.message.starts_with("unsupported_after_execution_task:"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn a_wait_for_nested_in_an_if_inside_after_execution_is_refused() {
+        let body = format!(
+            "  - id: gate\n    type: io.kestra.plugin.core.flow.If\n    condition: \"{{{{ true }}}}\"\n    then:\n{}",
+            loop_until_body("w", "io.kestra.plugin.core.flow.WaitFor")
+                .lines()
+                .map(|l| format!("    {l}\n"))
+                .collect::<String>()
+        );
+        let got = refusals(&after_exec("afterExecution", &body));
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].0, "afterExecution.gate.w");
+    }
+
+    #[test]
+    fn a_loop_until_in_tasks_is_not_refused_by_the_after_execution_gate() {
+        let src = after_exec("tasks", &loop_until_body("lu", LOOP_UNTIL));
+        assert!(refusals(&src).is_empty());
+        crate::executor::build_plan(&src).expect("a LoopUntil in tasks still plans");
     }
 
     #[test]
