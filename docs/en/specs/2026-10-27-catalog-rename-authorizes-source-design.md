@@ -428,3 +428,15 @@ mount, seen failing on the code before the fix), what was decided, and how it is
   `Authorizer` that answers `WriteData` (and `ReadData`) from the same catalog grants the guard uses, or have the guard
   strip or downgrade the data-access request for a caller without a write grant on the table. Either needs its own
   spec: the authorizer is consulted on many paths besides `loadTable`.
+
+### 10.8 O2: refusals in the Iceberg error model
+
+- **Problem** (live check on `ed1e1db5`, Trino 483 and pyiceberg 0.12): the guard and the mount answered 401, 403, 400
+  and 413 as plain text. pyiceberg still raised `ForbiddenError`, but reported "Received unexpected JSON Payload …
+  Invalid JSON".
+- **Decision.** Every refusal by the guard or the mount is now `{"error": {"message", "type", "code"}}`, as lakekeeper
+  answers its own errors, with the same messages: `type` is `BadRequestException` (400), `NotAuthorizedException`
+  (401), `ForbiddenException` (403), `RequestTooLargeException` (413), `ServerErrorException` (5xx).
+- **Test:** `refusals_use_the_iceberg_error_model` (401 with no token, 403 on a rename and on a load, 400 on a
+  malformed commit, 413 on an oversized rename). Before this change each of those bodies was plain text. The other
+  tests now read refusal messages from `error.message`.

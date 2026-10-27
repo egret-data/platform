@@ -32,6 +32,12 @@ fn unique(prefix: &str) -> String {
     )
 }
 
+/// The message of a refusal: the guard answers in the Iceberg error model
+/// (`{"error": {"message": ..}}`).
+fn message(body: &Value) -> &str {
+    body["error"]["message"].as_str().unwrap_or("")
+}
+
 static LAKEKEEPER: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
 /// Held across a warehouse's create and its profile write ([`env_with_profile`]).
@@ -416,7 +422,7 @@ async fn a_table_grant_on_the_destination_does_not_rename_an_unreadable_table() 
         "rename answered {status} {body}, then the read under the new name answered {read}"
     );
     assert!(
-        body.as_str().unwrap_or("").contains("sales.secret"),
+        message(&body).contains("sales.secret"),
         "the 403 names the source: {body}"
     );
     assert!(env.exists("tables", "sales", "secret").await, "not renamed");
@@ -496,7 +502,7 @@ async fn an_unauthorized_destination_is_refused() {
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert!(
-        body.as_str().unwrap_or("").contains("stage"),
+        message(&body).contains("stage"),
         "the 403 names the destination namespace: {body}"
     );
     assert!(env.exists("tables", "sales", "mine").await, "not renamed");
@@ -749,9 +755,7 @@ async fn a_malformed_rename_body_is_a_400_from_the_guard() {
                 .await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{kind}, {what}: {resp}");
             assert!(
-                resp.as_str()
-                    .unwrap_or("")
-                    .starts_with("malformed rename request"),
+                message(&resp).starts_with("malformed rename request"),
                 "{kind}, {what}: the guard's own 400, not lakekeeper's: {resp}"
             );
         }
@@ -823,7 +827,7 @@ async fn a_multi_table_commit_to_an_unwritable_table_is_refused() {
         "the commit answered {status} {body}, and left theirs' property {theirs:?}"
     );
     assert!(
-        body.as_str().unwrap_or("").contains("sales.theirs"),
+        message(&body).contains("sales.theirs"),
         "the 403 names the table: {body}"
     );
 }
@@ -855,7 +859,7 @@ async fn one_unwritable_table_refuses_the_whole_commit() {
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert!(
-        body.as_str().unwrap_or("").contains("sales.theirs"),
+        message(&body).contains("sales.theirs"),
         "the 403 names the refused table: {body}"
     );
     assert_eq!(env.probe("sales", "mine").await, None, "nothing forwarded");
@@ -965,9 +969,7 @@ async fn a_malformed_multi_table_commit_is_a_400_from_the_guard() {
             .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{what}: {resp}");
         assert!(
-            resp.as_str()
-                .unwrap_or("")
-                .starts_with("malformed multi-table commit"),
+            message(&resp).starts_with("malformed multi-table commit"),
             "{what}: the guard's own 400, not lakekeeper's: {resp}"
         );
     }
@@ -1059,9 +1061,7 @@ async fn the_guard_refuses_remote_signing_outright() {
                 .await;
             assert_eq!(status, StatusCode::FORBIDDEN, "{path} {method}: {body}");
             assert!(
-                body.as_str()
-                    .unwrap_or("")
-                    .contains("remote signing is not used by egret"),
+                message(&body).contains("remote signing is not used by egret"),
                 "{path} {method}: the guard's own refusal: {body}"
             );
         }
@@ -1429,9 +1429,7 @@ async fn a_malformed_single_table_commit_is_a_400_from_the_guard() {
             .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{what}: {resp}");
         assert!(
-            resp.as_str()
-                .unwrap_or("")
-                .starts_with("malformed table commit"),
+            message(&resp).starts_with("malformed table commit"),
             "{what}: the guard's own 400: {resp}"
         );
     }
@@ -1616,4 +1614,86 @@ async fn a_recursive_namespace_drop_needs_a_catalog_grant() {
         status.is_success(),
         "catalog manage drops recursively: {status} {body}"
     );
+}
+
+/// O2: every refusal by the guard or the mount is in the Iceberg REST error
+/// model, `{"error": {"message", "type", "code"}}`, so Iceberg clients parse
+/// it: 401, 403, 400 and 413, on guarded and unguarded routes.
+#[tokio::test]
+async fn refusals_use_the_iceberg_error_model() {
+    let env = env_or_skip!();
+    env.create_table("sales", "secret").await;
+    let nobody = env
+        .token_for(
+            "external",
+            &[grant("namespace", Some(&["stage"]), None, "read")],
+        )
+        .await;
+    let engine = env
+        .token_for("engine", &[grant("catalog", None, None, "manage")])
+        .await;
+    let rename = json!({
+        "source": {"namespace": ["sales"], "name": "secret"},
+        "destination": {"namespace": ["sales"], "name": "loot"},
+    });
+    let cases: Vec<(&str, StatusCode, &str, (StatusCode, Value))> = vec![
+        (
+            "no token",
+            StatusCode::UNAUTHORIZED,
+            "NotAuthorizedException",
+            env.send(&env.app, None, "POST", "tables/rename", rename.clone())
+                .await,
+        ),
+        (
+            "rename refused",
+            StatusCode::FORBIDDEN,
+            "ForbiddenException",
+            env.send(&env.app, Some(&nobody), "POST", "tables/rename", rename)
+                .await,
+        ),
+        (
+            "load refused",
+            StatusCode::FORBIDDEN,
+            "ForbiddenException",
+            env.send(
+                &env.app,
+                Some(&nobody),
+                "GET",
+                "namespaces/sales/tables/secret",
+                Value::Null,
+            )
+            .await,
+        ),
+        (
+            "malformed",
+            StatusCode::BAD_REQUEST,
+            "BadRequestException",
+            env.send_bytes(
+                &env.app,
+                Some(&engine),
+                "POST",
+                "transactions/commit",
+                b"[1,2".to_vec(),
+            )
+            .await,
+        ),
+        (
+            "too large",
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "RequestTooLargeException",
+            env.send_abs(
+                Some(&engine),
+                &format!("/{}/tables/rename", env.prefix),
+                streamed_body(2),
+                &[],
+            )
+            .await,
+        ),
+    ];
+    for (what, status, kind, (got, body)) in cases {
+        assert_eq!(got, status, "{what}: {body}");
+        assert_eq!(body["error"]["type"], kind, "{what}: {body}");
+        assert_eq!(body["error"]["code"], status.as_u16(), "{what}: {body}");
+        assert!(!message(&body).is_empty(), "{what}: {body}");
+    }
 }

@@ -396,7 +396,6 @@ async fn guard_then_inject_metadata(
     mut req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    use axum::response::IntoResponse as _;
     let path = req.uri().path().to_string();
     // Capture how the client reached egret, to rewrite the catalog config `uri`
     // lakekeeper otherwise advertises as its hardcoded `http://localhost:8181`.
@@ -429,18 +428,17 @@ async fn guard_then_inject_metadata(
             // Authenticate before reading a byte, refuse a declared length
             // over the cap unread, and a streamed body that crosses it.
             if let Err((status, msg)) = g.authenticate(bearer.as_deref()).await {
-                return (status, msg).into_response();
+                return iceberg_error(status, &msg);
             }
             let too_large = || {
-                (
+                iceberg_error(
                     axum::http::StatusCode::PAYLOAD_TOO_LARGE,
-                    format!(
+                    &format!(
                         "the body of a {} is larger than {} bytes",
                         kind.what(),
                         kind.limit()
                     ),
                 )
-                    .into_response()
             };
             let declared = req
                 .headers()
@@ -461,11 +459,10 @@ async fn guard_then_inject_metadata(
                     if over_cap {
                         return too_large();
                     }
-                    return (
+                    return iceberg_error(
                         axum::http::StatusCode::BAD_REQUEST,
-                        format!("malformed {}: the body could not be read", kind.what()),
-                    )
-                        .into_response();
+                        &format!("malformed {}: the body could not be read", kind.what()),
+                    );
                 }
             };
             req = axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes.clone()));
@@ -486,7 +483,7 @@ async fn guard_then_inject_metadata(
             Ok(caller) => {
                 req.extensions_mut().insert(caller);
             }
-            Err((status, msg)) => return (status, msg).into_response(),
+            Err((status, msg)) => return iceberg_error(status, &msg),
         }
     }
     req.extensions_mut()
@@ -505,6 +502,29 @@ async fn guard_then_inject_metadata(
         }
     }
     response
+}
+
+/// A refusal by the guard or the mount, in the Iceberg REST error model
+/// (`{"error": {"message", "type", "code"}}`), as lakekeeper answers its own
+/// errors, so Iceberg clients parse it (rename-authz spec §10.8).
+fn iceberg_error(status: axum::http::StatusCode, message: &str) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    let kind = match status.as_u16() {
+        400 => "BadRequestException",
+        401 => "NotAuthorizedException",
+        403 => "ForbiddenException",
+        404 => "NoSuchEntityException",
+        413 => "RequestTooLargeException",
+        s if s >= 500 => "ServerErrorException",
+        _ => "RESTException",
+    };
+    (
+        status,
+        axum::Json(serde_json::json!({
+            "error": {"message": message, "type": kind, "code": status.as_u16()}
+        })),
+    )
+        .into_response()
 }
 
 /// Replace lakekeeper's hardcoded `http://localhost:8181` in the `/config` body
