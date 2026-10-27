@@ -10315,3 +10315,205 @@ async fn rule_enforcement_is_capped_at_one_hundred_ids() {
     assert_eq!(status, StatusCode::OK, "{got}");
     assert_eq!(got, json!([]));
 }
+
+// ---------------------------------------------------------------------------
+// grants-follow spec D10: writes wait their turn behind a held rename
+// ---------------------------------------------------------------------------
+
+/// Give the fixture's warehouse a Lakekeeper id, and hold the rename hold's
+/// name lock on `sales.{table}` from a connection of the test's own, as a
+/// held rename would. Dropping the connection releases it.
+async fn hold_name(f: &Fixture, table: &str) -> sqlx::PgConnection {
+    use sqlx::Connection as _;
+    let warehouse: Uuid =
+        sqlx::query_scalar("SELECT warehouse_id FROM registry.catalogs WHERE id = $1")
+            .bind(f.catalog_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("warehouse");
+    let prefix: Option<String> =
+        sqlx::query_scalar("SELECT lakekeeper_warehouse_id FROM catalog.warehouses WHERE id = $1")
+            .bind(warehouse)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("prefix");
+    let prefix = match prefix {
+        Some(p) => p,
+        None => lakekeeper_stub::link_warehouse(&f.db, warehouse)
+            .await
+            .to_string(),
+    };
+    let mut conn = sqlx::PgConnection::connect(&f.dsn).await.expect("connect");
+    let key = egret_perm_compile::view_tags::name_lock_key(&prefix, "sales", table);
+    let got: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(hashtextextended($1, 0))")
+        .bind(key)
+        .fetch_one(&mut conn)
+        .await
+        .expect("lock");
+    assert!(got, "the test's own lock");
+    conn
+}
+
+fn deny_body(catalog_id: Uuid, table: &str) -> Value {
+    json!({
+        "effect": "deny",
+        "actions": ["read"],
+        "scope": { "catalog_id": catalog_id, "schema": "sales", "table": table, "column": null },
+        "principals": { "include": [{ "kind": "user", "ref": "contractor" }], "exclude": [] }
+    })
+}
+
+async fn send_json(
+    f: &Fixture,
+    method: &str,
+    uri: &str,
+    token: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    into_json(
+        f.app()
+            .oneshot(req(method, uri, token, body))
+            .await
+            .unwrap(),
+    )
+    .await
+}
+
+fn assert_held(status: StatusCode, body: &Value) {
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "table_change_held", "{body}");
+}
+
+#[tokio::test]
+async fn a_grant_write_on_a_held_name_is_refused() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let _held = hold_name(&f, "orders").await;
+    let (count, version) = (f.grant_count().await, f.policy_version().await);
+
+    let (status, body) = send_json(
+        &f,
+        "POST",
+        "/perm/grants",
+        &token,
+        Some(deny_body(f.catalog_id, "Orders")),
+    )
+    .await;
+    assert_held(status, &body);
+    assert_eq!(f.grant_count().await, count, "nothing written");
+    assert_eq!(f.policy_version().await, version, "no recompile");
+}
+
+#[tokio::test]
+async fn a_patch_moving_a_grant_off_a_held_name_is_refused() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (status, body) = send_json(
+        &f,
+        "POST",
+        "/perm/grants",
+        &token,
+        Some(deny_body(f.catalog_id, "orders")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["id"].as_str().expect("id").to_string();
+    let _held = hold_name(&f, "orders").await;
+
+    let (status, body) = send_json(
+        &f,
+        "PATCH",
+        &format!("/perm/grants/{id}"),
+        &token,
+        Some(deny_body(f.catalog_id, "other")),
+    )
+    .await;
+    assert_held(status, &body);
+    let table: String =
+        sqlx::query_scalar("SELECT table_name FROM perm.grants WHERE id = $1::uuid")
+            .bind(&id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("grant");
+    assert_eq!(table, "orders");
+}
+
+#[tokio::test]
+async fn a_rule_write_and_deletes_on_a_held_name_are_refused() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (status, body) = send_json(
+        &f,
+        "POST",
+        "/perm/grants",
+        &token,
+        Some(deny_body(f.catalog_id, "orders")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let grant = body["id"].as_str().expect("id").to_string();
+    let mask = |name: String| {
+        json!({
+            "name": name,
+            "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+            "selector": { "type": "path", "catalog_id": f.catalog_id,
+                          "schema": "sales", "table": "orders", "column": "phone" },
+            "exempt": { "include": [], "exclude": [] }
+        })
+    };
+    let (status, body) =
+        send_json(&f, "POST", "/perm/rules", &token, Some(mask(unique("m")))).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let rule = body["id"].as_str().expect("id").to_string();
+    let _held = hold_name(&f, "orders").await;
+
+    let (status, body) =
+        send_json(&f, "POST", "/perm/rules", &token, Some(mask(unique("m2")))).await;
+    assert_held(status, &body);
+    let (status, body) =
+        send_json(&f, "DELETE", &format!("/perm/grants/{grant}"), &token, None).await;
+    assert_held(status, &body);
+    let (status, body) =
+        send_json(&f, "DELETE", &format!("/perm/rules/{rule}"), &token, None).await;
+    assert_held(status, &body);
+}
+
+#[tokio::test]
+async fn a_pattern_write_takes_no_name_lock() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let _held = hold_name(&f, "orders").await;
+    let (status, body) = send_json(
+        &f,
+        "POST",
+        "/perm/grants",
+        &token,
+        Some(deny_body(f.catalog_id, "ord*")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+}
+
+#[tokio::test]
+async fn a_grant_on_a_catalog_without_an_embedded_warehouse_is_not_locked() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let _held = hold_name(&f, "orders").await;
+    let other: Uuid = sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config) VALUES ($1, 'iceberg', '{}'::jsonb) \
+         RETURNING id",
+    )
+    .bind(unique("perm_routes_hive"))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("catalog");
+    let (status, body) = send_json(
+        &f,
+        "POST",
+        "/perm/grants",
+        &token,
+        Some(deny_body(other, "orders")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+}
