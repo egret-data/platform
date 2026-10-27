@@ -122,8 +122,10 @@ async function readPage(
  * A page is final when the execution is complete and nothing more came back,
  * or when the execution has been terminal past the follow window (`endedAt`).
  */
-function pageFinished(page: LogPageDto, endedAt: string | null | undefined, now: number): boolean {
+function pageFinished(page: LogPageDto, pageSize: number, endedAt: string | null | undefined, now: number): boolean {
   if (page.complete && page.items.length === 0) return true;
+  // A full page means more lines are settled: the bound never cuts it off from the next read.
+  if (page.items.length >= pageSize) return false;
   if (!endedAt || !isTerminalState(page.execution_state)) return false;
   const ended = Date.parse(endedAt);
   return Number.isFinite(ended) && now - ended >= AFTER_RUN_FOLLOW_MS;
@@ -223,7 +225,7 @@ export function useLogFollow(ws: string, executionId: string, filters: LogFilter
           : nextPollMs(
               { data: lastPage, status: error === null ? "success" : "error", dataUpdatedAt: lastGoodAt },
               Date.now(),
-              (p) => pageFinished(p, endedAtRef.current, Date.now()),
+              (p) => pageFinished(p, pageSize, endedAtRef.current, Date.now()),
             );
       if (wait === false) return;
       timer = setTimeout(poll, wait);
@@ -250,7 +252,7 @@ export function useLogFollow(ws: string, executionId: string, filters: LogFilter
         lastPage = page;
         lastGoodAt = Date.now();
         error = null;
-        done = pageFinished(page, endedAtRef.current, Date.now());
+        done = pageFinished(page, pageSize, endedAtRef.current, Date.now());
       } catch (e) {
         if (abort.signal.aborted) return;
         error = e;

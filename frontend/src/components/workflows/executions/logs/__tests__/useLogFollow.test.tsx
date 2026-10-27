@@ -147,6 +147,24 @@ describe("useLogFollow: when it reads", () => {
       expect(server.queries).toHaveLength(1);
     });
 
+    it("never cuts off a full page: it reads the next one at once, and stops after one that is not full", async () => {
+      const server = new LogServer().install();
+      server.replies = [
+        page([line(1), line(2)], { execution_state: "SUCCESS", complete: false }),
+        page([line(3), line(4)], { execution_state: "SUCCESS", complete: false }),
+        page([line(5)], { execution_state: "SUCCESS", complete: false }),
+      ];
+      const { result } = follow({}, { pageSize: 2, endedAt: endedAgo(AFTER_RUN_FOLLOW_MS + 1000) });
+      await settle();
+      await settle();
+      await settle();
+      expect(server.queries).toHaveLength(3);
+      expect(ids(result)).toEqual([1, 2, 3, 4, 5]);
+      expect(result.current.done).toBe(true);
+      await advance(30_000);
+      expect(server.queries).toHaveLength(3);
+    });
+
     it("does not stop while the page still says the execution is running", async () => {
       const server = new LogServer().install();
       server.replies = [page([], { execution_state: "RUNNING", complete: false })];
