@@ -3834,6 +3834,7 @@ impl Env {
               WHERE kind = 'mutation' AND action IN ('perm_grant:move', 'perm_grant:copy', \
                     'perm_rule:copy', 'perm_grant:left', 'ranger_policy:left') \
                 AND (detail -> 'after' ->> 'catalog' = $1 OR detail ->> 'catalog' = $1 \
+                     OR detail -> 'before' ->> 'catalog' = $1 \
                      OR starts_with(detail -> 'after' ->> 'selector', $1 || '.')) \
               ORDER BY id",
         )
@@ -3861,12 +3862,10 @@ async fn a_renamed_tables_allows_move_and_keep_their_ids() {
         )
         .await;
     env.recompile_all().await;
-    // No plugin runs: a hold that waited would time out.
-    let started = Instant::now();
-
+    // No plugin runs: a hold that waited would time out with a 409 naming
+    // `<no plugin has polled>`, so the 2xx itself proves it did not wait.
     let (status, body) = env.rename("orders", "orders_v2").await;
     assert!(status.is_success(), "rename: {status} {body}");
-    assert!(started.elapsed() < LIMIT, "{:?}", started.elapsed());
     assert_eq!(env.grant_at(allow).await, ("orders_v2".into(), None));
     assert_eq!(
         env.grant_at(column).await,
@@ -3966,5 +3965,206 @@ async fn a_refused_or_undone_rename_records_no_grant_event() {
     let _plugins = env.start_plugins().await;
     let (status, body) = env.rename("orders", "orders_v2").await;
     assert!(!status.is_success(), "{status} {body}");
+    assert!(env.perm_events().await.is_empty());
+}
+
+// ── Grants follow a rename, Task 8: patterns refuse or are reported (G4) ──
+
+impl Env {
+    async fn create_namespace(&self, levels: &[&str]) {
+        let (status, body) = self
+            .call_raw("POST", "namespaces", Some(json!({"namespace": levels})))
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "create namespace {levels:?}: {body}"
+        );
+    }
+
+    /// Hold the table hook's profile lock on the lowest bound profile from a
+    /// connection of the test's own: a held rename plans, then waits for it.
+    async fn hold_profile_lock(&self) -> sqlx::PgConnection {
+        use sqlx::Connection as _;
+        let mut conn = sqlx::PgConnection::connect(&egret_test_db::url().await.expect("url"))
+            .await
+            .expect("connect");
+        sqlx::query("SELECT pg_advisory_lock(hashtextextended('egret-table-hook\u{1e}' || $1, 0))")
+            .bind(self.trino_id.min(self.profile_id).to_string())
+            .execute(&mut conn)
+            .await
+            .expect("profile lock");
+        conn
+    }
+
+    async fn assert_refused_and_unrenamed(
+        &self,
+        status: StatusCode,
+        body: &Value,
+        names: &[String],
+    ) {
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        let message = body["error"]["message"].as_str().expect("message");
+        assert!(
+            message.starts_with("egret refused the table change: "),
+            "{message}"
+        );
+        assert!(message.ends_with(". Nothing was renamed."), "{message}");
+        for n in names {
+            assert!(message.contains(n.as_str()), "{n} not in {message}");
+        }
+        assert!(self.source("orders").await.is_some(), "not renamed");
+    }
+}
+
+/// G4, D4: a restrictive pattern that would stop covering the table refuses
+/// the rename at plan time; nothing is locked, written or recompiled.
+#[tokio::test]
+async fn a_restrictive_pattern_that_would_stop_covering_the_table_refuses_the_rename() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    let pattern = env
+        .perm_grant(egret_perm::Effect::Deny, &["sales", "orders*"], &["u"])
+        .await;
+    env.recompile_all().await;
+    let (perm, versions) = (env.perm().await, env.versions().await);
+
+    let (status, body) = env.rename("orders", "archive").await;
+    env.assert_refused_and_unrenamed(
+        status,
+        &body,
+        &[format!("deny grant {pattern} (sales.orders*)")],
+    )
+    .await;
+    assert_eq!(env.perm().await, perm);
+    assert_eq!(env.versions().await, versions);
+    // No lock was left: the same refusal again, not "being held".
+    let (status, body) = env.rename("orders", "archive").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        !body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("being held"),
+        "{body}"
+    );
+
+    // A schema-level row filter and a rename into another namespace.
+    drop(env);
+    let Some(env) = self::env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    env.create_namespace(&["finance"]).await;
+    env.perm_rule(
+        egret_perm::RuleKind::RowFilter {
+            filter_expr: "region = 'eu'".into(),
+        },
+        &["sales"],
+    )
+    .await;
+    let (status, body) = env
+        .rename_across((&["sales"], "orders"), (&["finance"], "orders"))
+        .await;
+    env.assert_refused_and_unrenamed(status, &body, &["(sales)".to_string()])
+        .await;
+}
+
+/// G4, D4: an allow pattern that stops covering the table is left as it is
+/// and reported (`perm_grant:left`).
+#[tokio::test]
+async fn an_allow_pattern_is_left_and_reported() {
+    let Some(env) = env().await else { return };
+    env.create_table("tmp_a", &[(1, "id")]).await;
+    let pattern = env
+        .perm_grant(egret_perm::Effect::Allow, &["sales", "tmp_*"], &["u"])
+        .await;
+
+    let (status, body) = env.rename("tmp_a", "a").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(env.grant_at(pattern).await, ("tmp_*".into(), None));
+    let events = env.perm_events().await;
+    let left: Vec<_> = events
+        .iter()
+        .filter(|(a, _, _)| a == "perm_grant:left")
+        .collect();
+    assert_eq!(left.len(), 1, "{events:?}");
+    assert_eq!(left[0].1, pattern.to_string());
+    assert_eq!(
+        left[0].2["rename"],
+        json!({"from": "sales.tmp_a", "to": "sales.a"})
+    );
+}
+
+/// D14: a restriction cannot follow into a namespace of several levels.
+#[tokio::test]
+async fn a_restriction_into_a_multi_level_namespace_refuses() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    env.create_namespace(&["sales", "eu"]).await;
+    let deny = env
+        .perm_grant(egret_perm::Effect::Deny, &["sales", "orders"], &["u"])
+        .await;
+    let (status, body) = env
+        .rename_across((&["sales"], "orders"), (&["sales", "eu"], "orders"))
+        .await;
+    env.assert_refused_and_unrenamed(status, &body, &[deny.to_string()])
+        .await;
+}
+
+/// D4 under the locks: a pattern written after the plan read is caught by the
+/// copy transaction's re-read, which rolls the copy back.
+#[tokio::test]
+async fn a_pattern_written_during_the_plan_is_caught_under_the_locks() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    env.perm_grant(egret_perm::Effect::Deny, &["sales", "orders"], &["u"])
+        .await;
+    let _plugins = env.start_plugins().await;
+    let lock = env.hold_profile_lock().await;
+    let perm = env.perm().await;
+
+    let app = env.app.clone();
+    let prefix = env.prefix.clone();
+    let rename = tokio::spawn(async move {
+        send(
+            &app,
+            &prefix,
+            "POST",
+            "tables/rename",
+            Some(json!({
+                "source": {"namespace": ["sales"], "name": "orders"},
+                "destination": {"namespace": ["sales"], "name": "archive"},
+            })),
+        )
+        .await
+    });
+    // The rename has planned and waits for the profile lock.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let pattern = env
+        .perm_grant(egret_perm::Effect::Deny, &["sales", "ord*"], &["u"])
+        .await;
+    {
+        use sqlx::Connection as _;
+        lock.close().await.expect("release");
+    }
+    let (status, body) = rename.await.expect("rename task");
+    env.assert_refused_and_unrenamed(status, &body, &[pattern.to_string()])
+        .await;
+    let mut want = perm;
+    want.push(perm_row("grant", "deny", "ord*", ""));
+    want.sort();
+    assert_eq!(env.perm().await, want, "the copy was rolled back");
+}
+
+/// D4: a pattern that covers both names changes nothing.
+#[tokio::test]
+async fn a_pattern_that_covers_both_names_changes_nothing() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    env.perm_grant(egret_perm::Effect::Deny, &["sales", "ord*"], &["u"])
+        .await;
+    let perm = env.perm().await;
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(env.perm().await, perm);
     assert!(env.perm_events().await.is_empty());
 }

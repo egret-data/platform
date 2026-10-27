@@ -237,6 +237,7 @@ const EXPECTED: &[(&str, &str, Family)] = &[
     (action::GRANT_MOVE, "perm_grant", Family::Policy),
     (action::GRANT_COPY, "perm_grant", Family::Policy),
     (action::RULE_COPY, "perm_rule", Family::Policy),
+    (action::GRANT_LEFT, "perm_grant", Family::Policy),
 ];
 
 #[test]

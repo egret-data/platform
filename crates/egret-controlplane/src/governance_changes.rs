@@ -314,6 +314,7 @@ fn truncated_phrase(action: &str) -> &'static str {
         action::GRANT_MOVE => "moved a grant with a renamed table",
         action::GRANT_COPY => "copied a grant to a renamed table",
         action::RULE_COPY => "copied a rule to a renamed table",
+        action::GRANT_LEFT => "renamed a table an allow grant no longer covers",
         _ => "made a change",
     }
 }
@@ -710,6 +711,32 @@ async fn entry(c: &mut PgConnection, row: ChangeRow) -> Result<ChangeEntry, sqlx
                 )
             };
             (sentence, uuid.map(|id| Ref::Grant { id }), live)
+        }
+        action::GRANT_LEFT => {
+            let g = d.get("before").unwrap_or(&Value::Null);
+            let rename = d.get("rename").unwrap_or(&Value::Null);
+            let live = exists(
+                c,
+                "SELECT EXISTS (SELECT 1 FROM perm.grants WHERE id::text = $1)",
+                &id,
+            )
+            .await?;
+            let on = rename_path(g);
+            let on = if on.is_empty() {
+                "the whole catalog".to_string()
+            } else {
+                on
+            };
+            (
+                format!(
+                    "{a} renamed {} to {}; {} grant on {on} no longer covers it",
+                    s(rename, "from"),
+                    s(rename, "to"),
+                    s(g, "effect")
+                ),
+                uuid.map(|id| Ref::Grant { id }),
+                live,
+            )
         }
         action::RULE_COPY => {
             let (before, after) = (

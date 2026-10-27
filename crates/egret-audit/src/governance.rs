@@ -53,6 +53,9 @@ pub mod action {
     pub const GRANT_MOVE: &str = "perm_grant:move";
     pub const GRANT_COPY: &str = "perm_grant:copy";
     pub const RULE_COPY: &str = "perm_rule:copy";
+    /// An allow pattern that covered a renamed table and no longer does:
+    /// nothing written, the event is the record (spec D4, D9).
+    pub const GRANT_LEFT: &str = "perm_grant:left";
 }
 
 /// The `resource_type` each governance action is recorded under.
@@ -153,6 +156,7 @@ pub const FAMILIES: &[(&str, &str, Family)] = &[
     (action::GRANT_MOVE, resource::PERM_GRANT, Family::Policy),
     (action::GRANT_COPY, resource::PERM_GRANT, Family::Policy),
     (action::RULE_COPY, resource::PERM_RULE, Family::Policy),
+    (action::GRANT_LEFT, resource::PERM_GRANT, Family::Policy),
     ("role:assign", "grant", Family::Policy),
     ("role:unassign", "grant", Family::Policy),
     ("tag:assign", "catalog", Family::Tag),
@@ -186,6 +190,7 @@ pub const GOVERNANCE_ACTIONS: &[&str] = &[
     action::GRANT_MOVE,
     action::GRANT_COPY,
     action::RULE_COPY,
+    action::GRANT_LEFT,
 ];
 
 /// The family of a stored event, or `None` when it is not governance.

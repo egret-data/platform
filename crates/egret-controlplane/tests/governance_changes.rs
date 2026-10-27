@@ -1153,3 +1153,38 @@ async fn grant_moves_and_copies_read_with_their_catalog_client() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(actions(&body).is_empty(), "family Policy: {body}");
 }
+
+/// Grants-follow spec §5.7: an allow pattern a rename left behind.
+#[tokio::test]
+async fn a_left_allow_reads_with_its_catalog_client() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    let actor = json!({"kind": "catalog_client", "id": Uuid::new_v4(), "client_id": "trino-main-7f3a",
+                       "name": "trino-main", "consumer_type": "engine"});
+    let detail = json!({
+        "before": {"id": Uuid::new_v4(), "catalog": "lake", "schema": "sales", "table": "tmp_*",
+                   "column": null, "effect": "allow", "actions": ["read"],
+                   "include": ["group:analysts"], "exclude": []},
+        "after": null, "rename": {"from": "sales.tmp_a", "to": "sales.a"},
+        "trigger": "iceberg_rename", "actor": actor,
+    });
+    sqlx::query(
+        "INSERT INTO audit.audit_log (kind, action, resource_type, resource_id, detail) \
+         VALUES ('mutation', $1, 'perm_grant', $2, $3)",
+    )
+    .bind(action::GRANT_LEFT)
+    .bind(Uuid::new_v4().to_string())
+    .bind(detail)
+    .execute(&f.db.pool)
+    .await
+    .expect("event");
+    let policy_reader = session(&f, &["policy:read"]).await;
+    let st = state(&f, None).await;
+    let (status, body) = changes(&st, &policy_reader, "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["entries"][0]["sentence"],
+        "Catalog client trino-main renamed sales.tmp_a to sales.a; allow grant on sales.tmp_* \
+         no longer covers it"
+    );
+}

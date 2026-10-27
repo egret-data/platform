@@ -2239,7 +2239,8 @@ async fn record_perm_events(
 ) -> Result<(), String> {
     use egret_audit::governance::{action, record_change_by, resource};
     let nothing = moved_allows.iter().all(Vec::is_empty)
-        && copied.copies.iter().all(follow::Copies::is_empty);
+        && copied.copies.iter().all(follow::Copies::is_empty)
+        && copied.perm.moves.iter().all(|m| m.follow.left.is_empty());
     if nothing {
         return Ok(());
     }
@@ -2270,6 +2271,26 @@ async fn record_perm_events(
             )
             .await
             .map_err(|e| err(&e))?;
+        }
+        // An allow pattern that stops covering the table, or a following
+        // allow into a namespace no grant can name, is left as it is; the
+        // event is the only record that it no longer reaches the table.
+        for g in &m.follow.left {
+            let b = follow::grant_summary_via(tx, g).await?;
+            record_change_by(
+                tx,
+                caller.actor(),
+                action::GRANT_LEFT,
+                resource::PERM_GRANT,
+                g.id.to_string(),
+                serde_json::json!({
+                    "before": b, "after": null, "rename": rename, "trigger": trigger,
+                }),
+            )
+            .await
+            .map_err(|e| err(&e))?;
+            tracing::warn!(grant = %g.id, from = %m.mv.from.label(), to = %m.mv.to.label(),
+                "a renamed table left an allow grant behind: it no longer covers the table");
         }
         let Some(copies) = copied.copies.get(i) else {
             continue;
