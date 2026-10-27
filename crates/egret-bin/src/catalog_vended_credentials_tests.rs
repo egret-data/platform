@@ -844,6 +844,30 @@ async fn an_engine_client_with_a_catalog_read_role_is_read_only() {
     assert!(!policy.can_write(), "{policy:?}");
 }
 
+/// The authorizer compares names as the guard does, by lakekeeper's
+/// collation (F-A §D12): a grant spelled in another case covers the table,
+/// so its holder still gets credentials of its grant's scope.
+#[tokio::test]
+async fn a_grant_in_another_case_vends_by_the_catalogs_collation() {
+    let env = env_or_skip!();
+    env.create_table("sales", "orders").await;
+    let writer = env
+        .token_for("external", &[("namespace", Some("SALES"), None, "write")])
+        .await;
+    let reader = env
+        .token_for(
+            "external",
+            &[("table", Some("Sales"), Some("ORDERS"), "read")],
+        )
+        .await;
+
+    let (_, written) = env.vended_in_config(&env.load(&writer, "sales", "orders", &[VENDED]).await);
+    let (_, read) = env.vended_in_config(&env.load(&reader, "sales", "orders", &[VENDED]).await);
+
+    assert!(written.can_write(), "{written:?}");
+    assert!(!read.can_write(), "{read:?}");
+}
+
 // ── /credentials ────────────────────────────────────────────────────────────
 
 /// `GET …/tables/{t}/credentials` asks the same question as a load, and
@@ -1105,4 +1129,48 @@ async fn egret_s_own_principal_still_loads_read_write_delete() {
         "the browse load minted one key: {minted:?}"
     );
     assert!(minted[0].can_write(), "{:?}", minted[0]);
+}
+
+// ── GET /config ─────────────────────────────────────────────────────────────
+
+/// `GET /config` keeps lakekeeper's internal actor: it vends nothing, and
+/// lakekeeper registers the principal of a config call as a lakekeeper user,
+/// so naming the client there would add a user row per catalog client.
+#[tokio::test]
+async fn a_config_call_registers_no_lakekeeper_user() {
+    let env = env_or_skip!();
+    let token = env
+        .token_for(
+            "external",
+            &[("table", Some("sales"), Some("orders"), "read")],
+        )
+        .await;
+    let users = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM lakekeeper.users WHERE id LIKE 'egret-catalog~%'",
+        )
+        .fetch_one(env.catalog.pool())
+        .await
+        .expect("count lakekeeper users")
+    };
+    let before = users().await;
+
+    let req = axum::http::Request::builder()
+        .method("GET")
+        .uri("/config")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = env.app.clone().oneshot(req).await.unwrap();
+    assert_ne!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "the guard lets it through"
+    );
+
+    assert_eq!(
+        users().await,
+        before,
+        "a config call registered a lakekeeper user"
+    );
 }
