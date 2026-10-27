@@ -1269,5 +1269,50 @@ async fn a_tasks_child_of_a_block_that_is_not_prepared_fails_as_corrupt(pool: Pg
     let (state, message) = child_row(&pool, ex, "a").await;
     assert_eq!(state, "FAILED", "the child is refused, not run");
     let message = message.expect("the reason");
-    assert!(message.contains("corrupt"), "{message}");
+    assert!(
+        message.contains(
+            "corrupt: a is a child of a WorkingDirectory whose directory is not open \
+             (the block is not prepared)"
+        ),
+        "{message}"
+    );
+}
+
+/// V3, pinned (end hooks A6): when the block's FINISH claim fails (`outputFiles`
+/// names a directory, which the finish claim refuses), the block ends `FAILED` and its `errors:` and
+/// `finally:` never run, because they start only after a finished block. Kestra
+/// would run them; this test documents the divergence so a later change to it
+/// is deliberate.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_blocks_failed_finish_claim_runs_neither_errors_nor_finally(pool: PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    egret_workflow::storage::install_mem_for_tests();
+    let db = egret_metastore::Db { pool: pool.clone() };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    let reg = registry();
+    let src = HOOKED_BLOCK
+        .replace(
+            "        type: io.kestra.plugin.core.execution.Fail\n",
+            "        type: io.kestra.plugin.core.debug.Return\n        format: a\n",
+        )
+        .replace(
+            "      a.txt: one\n",
+            "      a.txt: one\n      sub/x.txt: x\n    outputFiles:\n      - sub\n",
+        );
+
+    let ex = egret_workflow::worker::start_execution(&pool, ws, None, &src, serde_json::json!({}))
+        .await
+        .expect("start");
+    settle(&pool, &reg, ex, 40).await;
+
+    assert_eq!(block_row(&pool, ex).await.0, "FAILED", "the finish failed");
+    let hooks: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.task_runs WHERE execution_id = $1 \
+           AND task_id IN ('e', 'z')",
+    )
+    .bind(ex)
+    .fetch_one(&pool)
+    .await
+    .expect("count");
+    assert_eq!(hooks, 0, "V3: no `e`/`z` run after a failed finish claim");
 }

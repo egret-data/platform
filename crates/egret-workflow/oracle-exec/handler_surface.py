@@ -206,8 +206,9 @@ def collect_tasks(node, path, out):
 # Kestra's list rule (`flowable::current_list`), and since its fix round the
 # flow's own `finally:` too (the worker finds its leaves through
 # `spec::path::find_task`). Still unported: `finally:` on `Loop`, `LoopUntil`,
-# `WorkingDirectory` (A5, A6) and `Pause` (refused, #9).
-PORTED_FINALLY = {"allowfailure", "sequential", "parallel", "if", "switch", "dag"}
+# `WorkingDirectory` (A5) and `Pause` (refused, #9). `Loop` since A6
+# (2026-10-27): its iterations run the Loop's own `errors:`/`finally:`.
+PORTED_FINALLY = {"allowfailure", "sequential", "parallel", "if", "switch", "dag", "loop"}
 
 
 def unported_finally(node):
@@ -1029,9 +1030,12 @@ def check_inputs(flows, kinds, golden, baseline):
     # its fix round (the same day) banked `valids/finally-flow`,
     # `-flow-error`, `-flow-error-first`, `-sequential-error-first` and
     # `valids/restart-with-finally` (the worker finds a flow-level `finally:`
-    # leaf).
-    if len(baseline) != 63:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 63; the split "
+    # leaf). 60 since end hooks A6 (2026-10-27) banked
+    # `invalids/loop-switch-failed`, `valids/finally-loop` and
+    # `valids/finally-loop-parallel` (a `Loop` iteration runs the Loop's own
+    # `errors:`/`finally:`).
+    if len(baseline) != 60:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 60; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1681,8 +1685,8 @@ def self_test():
          "not 273",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 63",
-         "not 63",
+    case("baseline.txt is no longer 60",
+         "not 60",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

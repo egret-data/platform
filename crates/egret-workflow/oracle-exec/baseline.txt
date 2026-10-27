@@ -9,6 +9,10 @@
 #
 # One id per line. `#` starts a comment. golden.json order.
 #
+# End hooks A6 (2026-10-27): banked `invalids/loop-switch-failed`,
+# `valids/finally-loop` and `valids/finally-loop-parallel` -- a `Loop` iteration
+# runs the `Loop`'s own `errors:`/`finally:` (D5). 63 -> 60.
+#
 # WorkingDirectory Task 8: banked `valids/working-directory-taskrun` (egret's trace
 # matches Kestra's now, and it is the one of the four WorkingDirectory valids that
 # needs no script runner). 104 -> 103. Its three siblings stay here, with the causes
@@ -567,7 +571,6 @@ invalids/dag-invalid-subtask
 invalids/inputs-bad-validator-syntax
 invalids/inputs-with-multiple-constraint-violations
 # `invalids/invalid-property` banked 2026-10-26 (no-silent-drops Task 8b): Kestra refuses it (`Unrecognized field "invalid"`) and egret refuses it at save (`spec::validate_source`, `unknown_property`); the oracle counts a save-time refusal of an id in a `Seam::Save` refusal group.
-invalids/loop-switch-failed
 # group C1 Task 2 (2026-10-18): `OutputValues` runs now; held by `afterExecution:`, which egret does not run (its `end` run is missing; measured).
 valids/after-execution
 # group C1 Task 2 (2026-10-18): `OutputValues` runs now; held by `afterExecution:`, which egret does not run (its `end` run is missing; measured).
@@ -579,8 +582,6 @@ valids/all-flowable
 valids/dag
 valids/disable-flowable
 valids/errors
-valids/finally-loop
-valids/finally-loop-parallel
 # group C1 Task 2 (2026-10-18): `OutputValues` runs now; held by `afterExecution:`, which egret does not run (its `afterExecution` run is missing; measured).
 valids/flow-concurrency-queue-after-execution
 # group C1 Task 2 (2026-10-18): `OutputValues` runs now; held by `afterExecution:`, which egret does not run (its `afterExecution` run is missing; measured).

@@ -113,7 +113,8 @@ pub(crate) fn carry_of(
     let Some(block) = c.block_id else {
         if parent_block_of(flow, &c.task_id).is_some() {
             return Err(format!(
-                "corrupt: {} is a child of a WorkingDirectory whose directory is not open                  (the block is not prepared)",
+                "corrupt: {} is a child of a WorkingDirectory whose directory is not open \
+                 (the block is not prepared)",
                 c.task_id
             ));
         }

@@ -13609,3 +13609,20 @@ Figures that moved, each pinned with a dated note:
 - run-history tokens: 1076 → 1007;
 - execution-history tokens: 377 → 362;
 - the residual `finally:` row: 10 → 5.
+
+## End hooks A6 (2026-10-27): a `Loop` iteration runs the `Loop`'s `errors:` and `finally:`, three entries bank
+
+`worker::spawn::sub_flow_source` now makes the `Loop`'s own `errors:` and
+`finally:` the iteration's `errors`/`finally` (the parent flow's are not
+inherited; an iteration has no `afterExecution`). The three entries the spec
+named bank, measured: `invalids/loop-switch-failed`, `valids/finally-loop` and
+`valids/finally-loop-parallel`. Ratchet 301/63/63/0 -> 301/60/60/0.
+
+- `SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED` 4 -> 1 (only
+  `valids/retry-flowable-parallel` is left); entries with a `spawned` that
+  match 24 -> 27; `MISMATCH_ON_SPAWNED` 12 -> 9.
+- Pairs: egret produces 852 + 216 (nested 130 -> 216); kept pairs on matching
+  entries 586 + 103 -> 586 + 197, on baselined entries 303 + 124 -> 303 + 30.
+- Baselined: run terminals 254 -> 210, sub-executions 39 -> 31, executions
+  99 -> 88, `finally:` construct row 5 -> 3, `Loop` row 17 -> 14, handler
+  ceiling 271 -> 273 (`handler-surface.txt` regenerated).

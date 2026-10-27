@@ -50,6 +50,12 @@
 //!
 //! # Where this is knowingly narrower than Kestra
 //!
+//! **Corrected 2026-10-27 (end hooks A6, D5): no longer true.** `models::Loop`
+//! now carries `errors:` and `finally:`, and [`sub_flow_source`] makes them the
+//! iteration's own `errors`/`finally` (the parent flow's are still not
+//! inherited, and an iteration has no `afterExecution`). The paragraph below is
+//! kept as history.
+//!
 //! A `Loop`'s own `errors:` and `finally:` run **in the sub-execution**, not in
 //! the parent: `valids/all-flowable`'s sub-execution runs `1-each-1` (FAILED)
 //! then `1-each-seq-error`, which is the `Loop` task's `errors:` list, while
@@ -823,8 +829,8 @@ fn as_the_loop_reads_it(child: RunState) -> RunState {
 fn sub_flow_source(source: &str, loop_task_id: &str, owner: Uuid) -> Result<String> {
     let mut flow = crate::spec::parse(source)
         .map_err(|e| worker_err(WorkerError::Unplannable(owner, e.message)))?;
-    let body = match find_task(&flow, loop_task_id).map(|t| &t.kind) {
-        Some(ModelTaskKind::Loop(l)) => l.tasks.clone(),
+    let (body, errors, finally) = match find_task(&flow, loop_task_id).map(|t| &t.kind) {
+        Some(ModelTaskKind::Loop(l)) => (l.tasks.clone(), l.errors.clone(), l.finally.clone()),
         _ => {
             return Err(worker_err(WorkerError::Corrupt(
                 owner,
@@ -833,8 +839,11 @@ fn sub_flow_source(source: &str, loop_task_id: &str, owner: Uuid) -> Result<Stri
         }
     };
     flow.tasks = body;
-    flow.errors = Vec::new();
-    flow.finally_ = Vec::new();
+    // End hooks A6 (D5): the iteration's `errors:`/`finally:` are the `Loop`'s
+    // own, not the parent flow's (Kestra `ES:1037-1043`). `afterExecution`
+    // stays cleared below: a LOOP iteration has none (`ExS:1331`).
+    flow.errors = errors;
+    flow.finally_ = finally;
     flow.after_execution = Vec::new();
     // A sub-execution is spawned, never triggered. Carrying the parent's
     // `triggers:` into it would put a schedule on a row that is one iteration
@@ -980,6 +989,27 @@ fn worker_err(e: WorkerError) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// End hooks A6 (D5): an iteration runs the `Loop`'s own `errors:` and
+    /// `finally:`, never the parent flow's, and has no `afterExecution`.
+    #[test]
+    fn an_iteration_runs_the_loops_errors_and_finally_as_its_own() {
+        let src = "id: f\nnamespace: a.b\nerrors: [{id: fe, type: core.log, message: m}]\nfinally: [{id: ff, type: core.log, message: m}]\nafterExecution: [{id: fa, type: core.log, message: m}]\ntasks:\n  - id: each\n    type: io.kestra.plugin.core.flow.Loop\n    values: [1]\n    tasks: [{id: a, type: core.log, message: m}]\n    errors: [{id: e, type: core.log, message: m}]\n    finally: [{id: z, type: core.log, message: m}]\n";
+        let sub =
+            crate::spec::parse(&sub_flow_source(src, "each", uuid::Uuid::nil()).unwrap()).unwrap();
+        let ids = |l: &[crate::models::Task]| l.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&sub.tasks), ["a"]);
+        assert_eq!(
+            ids(&sub.errors),
+            ["e"],
+            "the Loop's errors, not the flow's (ES:1037-1043)"
+        );
+        assert_eq!(ids(&sub.finally_), ["z"]);
+        assert!(
+            sub.after_execution.is_empty(),
+            "a LOOP iteration has no afterExecution (ExS:1331)"
+        );
+    }
 
     /// **The guard [`terminated_in_error`]'s doc claimed and did not have.**
     ///

@@ -818,7 +818,10 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
         // day): `valids/finally-flow`, `-flow-error`, `-flow-error-first`,
         // `-sequential-error-first` and `valids/restart-with-finally` bank (the
         // worker finds a flow-level `finally:` leaf); 63 + 238 = 301.
-        (301, 238, 63),
+        // 63 -> 60 baselined, 238 -> 241 matching at end hooks A6 (2026-10-27):
+        // `invalids/loop-switch-failed`, `valids/finally-loop` and
+        // `valids/finally-loop-parallel` bank; 60 + 241 = 301.
+        (301, 241, 60),
         "301 = matching + baselined, the total beside its parts. It read \
          167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries, W8 \
          Task 4 banked `valids/waitfor-nested`, W8 Task 5 banked seven \
@@ -2417,7 +2420,9 @@ const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 41;
 /// produces 852 + 130`). The nested figure does not move: a `Loop`'s
 /// `finally:` is A6's.
 const EGRET_TOP_LEVEL_PAIRS: usize = 852;
-const EGRET_NESTED_PAIRS: usize = 130;
+// 130 -> 216 at end hooks A6 (2026-10-27, measured): the iterations now run the
+// `Loop`'s own `errors:`/`finally:`, which adds 86 pairs inside `spawned`.
+const EGRET_NESTED_PAIRS: usize = 216;
 
 /// **KEPT is not ASSERTED, and the line between them is the baseline rather
 /// than the nesting** — W3b Task 7.
@@ -2517,7 +2522,10 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         // `-sequential-error`); measured.
         // + the 28 top-level pairs of the five entries the A4 fix round banked
         // (the flow-level `finally:` ones and `restart-with-finally`); measured.
-        (586, 103, 689),
+        // + the 94 nested pairs of the three entries end hooks A6 banked
+        // (2026-10-27: `invalids/loop-switch-failed`, `valids/finally-loop`,
+        // `valids/finally-loop-parallel`); measured.
+        (586, 197, 783),
         "the pairs a change to which the ratchet REPORTS: they live on entries \
          that match, so any change to one makes its entry a REGRESSION. W6 Task \
          3 moved 3 of them across the line, all top-level: the 12 `Subflow` \
@@ -2544,7 +2552,9 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         // `-sequential-error` moved to the matching side.
         // 455 -> 427 at the A4 fix round: the 28 top-level pairs of the five
         // flow-level `finally:` entries it banked.
-        (303, 124, 427),
+        // 427 -> 333 at end hooks A6 (2026-10-27): the 94 nested pairs of the
+        // three `Loop` entries it banked moved to the matching side.
+        (303, 30, 333),
         "and the pairs a change to which it does not: they live on baselined \
          entries, which mismatch whatever the pair says. Flipping all 704 leaves \
          the ratchet green and unmoved -- at 131 when W6 Task 3 flipped them, at \
@@ -2973,12 +2983,16 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
 // banked `valids/finally-dag`, `-parallel`, `-sequential`, `-sequential-error`.
 // 272 -> 254 at the A4 fix round (measured): the 18 runs of the five
 // flow-level `finally:` entries it banked.
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 254;
+// 254 -> 210 at end hooks A6 (2026-10-27): the 44 run terminals of the three
+// `Loop` entries it banked.
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 210;
 /// 43 from W6 Task 4 to W9a Task 10; **40 since W9a Task 11** -- the three
 /// iterations of `valids/loop-values-from-uri`.
 // 40 -> 39 at WorkingDirectory Task 8: `working-directory-taskrun` has one
 // sub-execution, and it is banked.
-const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 39;
+// 39 -> 31 at end hooks A6 (2026-10-27): the eight sub-executions of the three
+// `Loop` entries it banked.
+const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 31;
 /// **165 through W8 Task 2, 157 after W8 Task 3, 156 after W8 Task 4, 149 after
 /// W8 Task 5, 147 now** -- the eight `Pause` entries W8 Task 3 banked, the one
 /// `LoopUntil` entry W8 Task 4 banked, W8 Task 5's seven and W8 Task 6's two.
@@ -3007,7 +3021,9 @@ const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 39;
 // 108 -> 104 at end hooks A4 (2026-10-27): the four `finally-*` entries it
 // banked (one top-level execution each, no sub-execution).
 // 104 -> 99 at the A4 fix round: the five flow-level `finally:` entries.
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 99;
+// 99 -> 88 at end hooks A6 (2026-10-27): the three parents and eight
+// sub-executions of the `Loop` entries it banked.
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 88;
 /// **1703 through W8 Task 2, 1647 after W8 Task 3, 1610 after W8 Task 4, 1528
 /// now** -- 56 run-history tokens on Task 3's eight, 37 on
 /// `valids/waitfor-nested` (whose seven runs include three loops reading
@@ -3036,7 +3052,9 @@ const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 99;
 /// `finally-*` entries it banked (measured).
 /// **1007 since the A4 fix round**: 69 on the 18 runs of the five flow-level
 /// `finally:` entries it banked (measured).
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1007;
+// 1007 -> 842 at end hooks A6 (2026-10-27): the run-history tokens of the three
+// `Loop` entries it banked.
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 842;
 /// **665 through W8 Task 2, 617 after W8 Task 3, 562 after W8 Task 4, 526 after
 /// W8 Task 5, 522 now** -- 48 execution-history tokens on Task 3's eight, i.e.
 /// six apiece (every one of them reads `CREATED RUNNING PAUSED RESTARTED
@@ -3065,7 +3083,9 @@ const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1007;
 /// **377 since end hooks A4 (2026-10-27)**: three on each of the four
 /// `finally-*` executions it banked (`CREATED RUNNING <terminal>`).
 /// **362 since the A4 fix round**: three on each of the five it banked.
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 362;
+// 362 -> 329 at end hooks A6 (2026-10-27): the execution-history tokens of the
+// three `Loop` entries it banked.
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 329;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -3212,7 +3232,9 @@ const RESTRICTION_REMOVES_ENTRIES: usize = 11;
 // 999 -> 1074 at end hooks A4 (2026-10-27, measured): the 75 pairs
 // `EGRET_TOP_LEVEL_PAIRS` gained from the `finally:` runs the executor now
 // creates; `RESTRICTION_REMOVES` is unchanged (92 over the same 11 entries).
-const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 1074;
+// 1074 -> 1160 at end hooks A6 (2026-10-27, measured): the 86 nested pairs
+// `EGRET_NESTED_PAIRS` gained; the restriction removes none of them.
+const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 1160;
 
 /// Test names `oracle-exec/README.md` cites that **no longer exist**, each with
 /// its successor or an empty string where there is none — W3b Task 7.
@@ -4516,7 +4538,9 @@ const RUNS_REFUSED: [&str; 4] = [
 /// **11 since no-silent-stall Task 1**: two of the 49 entries it added to
 /// [`RUNS_REFUSED`] carried a sub-execution.
 // 11 -> 12 at WorkingDirectory Task 8 (measured).
-const MISMATCH_ON_SPAWNED: usize = 12;
+// 12 -> 9 at end hooks A6 (2026-10-27, measured): `valids/finally-loop`,
+// `valids/finally-loop-parallel` and `invalids/loop-switch-failed` banked.
+const MISMATCH_ON_SPAWNED: usize = 9;
 /// **122 through W8 Task 2, 114 after W8 Task 3, 113 now** -- the eight `Pause`
 /// entries Task 3 banked and the one `LoopUntil` entry Task 4 did. The
 /// `refused` half of the golden is untouched by either: no `Pause` or
@@ -4541,7 +4565,8 @@ const MISMATCH_ON_SPAWNED: usize = 12;
 // 69 -> 65 at end hooks A4 (2026-10-27, measured): `valids/finally-dag`,
 // `-parallel`, `-sequential` and `-sequential-error` banked.
 // 65 -> 60 at the A4 fix round: the five flow-level `finally:` entries banked.
-const MISMATCHING_RUNS_ENTRIES: usize = 60;
+// 60 -> 57 at end hooks A6 (2026-10-27, measured): the three `Loop` entries above.
+const MISMATCHING_RUNS_ENTRIES: usize = 57;
 /// **84 through W5; 63 after W6 Task 3, and 59 since W6 Task 4 corrected the
 /// classifier.**
 ///
@@ -4815,7 +4840,9 @@ async fn the_sub_executions_are_compared_and_this_is_what_they_cost() {
 /// The count above, as a named constant so the report and the test cannot
 /// disagree about it.
 // 23 -> 24 at WorkingDirectory Task 8: `valids/working-directory-taskrun` banked.
-const SPAWNED_ENTRIES_THAT_MATCH: usize = 24;
+// 24 -> 27 at end hooks A6 (2026-10-27): `invalids/loop-switch-failed`,
+// `valids/finally-loop` and `valids/finally-loop-parallel` banked.
+const SPAWNED_ENTRIES_THAT_MATCH: usize = 27;
 
 /// And the names, which is what `baseline.txt`'s header attributes one by one.
 /// Sixteen banked at W3b Task 5, `valids/replay-loop` at the whole-branch
@@ -4823,6 +4850,11 @@ const SPAWNED_ENTRIES_THAT_MATCH: usize = 24;
 /// `inputs`, and `valids/loop-with-subflow` at W6 Task 3 -- its loop body is a
 /// `Subflow`, so the body ran and the `Subflow` inside it stalled.
 const SPAWNED_ENTRIES_THAT_MATCH_BY_NAME: &[&str] = &[
+    // End hooks A6 (2026-10-27): a `Loop` iteration runs the `Loop`'s own
+    // `errors:` and `finally:`.
+    "invalids/loop-switch-failed",
+    "valids/finally-loop",
+    "valids/finally-loop-parallel",
     "valids/flowable-with-parent-fail",
     "valids/loop-expression-context",
     "valids/loop-failed",
@@ -4879,7 +4911,9 @@ const SPAWNED_ENTRIES_THAT_MATCH_BY_NAME: &[&str] = &[
 /// `invalids/loop-switch-failed`, `valids/finally-loop`,
 /// `valids/finally-loop-parallel` and `valids/retry-flowable-parallel` -- all
 /// `Loop`s, none a replay -- and the test prints the list on every run.
-const SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED: usize = 4;
+// 4 -> 1 at end hooks A6 (2026-10-27): the three `Loop` entries banked; only
+// `valids/retry-flowable-parallel` is left.
+const SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED: usize = 1;
 
 /// **No run is ever created for a task inside a `Loop`, over the whole
 /// corpus.**
@@ -7039,7 +7073,9 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
             // W9a Task 11 (a `Loop` over an ION file); 17 since WorkingDirectory
             // Task 8 banked `valids/working-directory-taskrun` (a `Loop` whose
             // sub-execution egret now gets right).
-            17,
+            // 17 -> 14 at end hooks A6 (2026-10-27): `invalids/loop-switch-failed`,
+            // `valids/finally-loop` and `valids/finally-loop-parallel` banked.
+            14,
             &["io.kestra.plugin.core.flow.Loop\n", "core.loop\n"],
         ),
         // **`Subflow` was a row here with 22 through W5, and W6 Task 3 removed
@@ -7069,7 +7105,8 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         // renderer cause), the two `finally-loop*` (A6),
         // `pause-errors-finally-after-execution` (#9) and
         // `after-execution-finally` (#2b).
-        ("finally:", 5, &["finally:"]),
+        // 5 -> 3 at end hooks A6 (2026-10-27): the two `finally-loop*` entries banked.
+        ("finally:", 3, &["finally:"]),
         (
             "ExecutionUpdatableTask",
             // 16 until kill-and-exit Task 3 banked the four `valids/exit*`
@@ -7799,7 +7836,9 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
     // flow-level `finally:` entries it banked.
     assert_eq!(
         (declaring.len(), without, baseline.len()),
-        (2, 61, 63),
+        // (2, 61, 63) -> (2, 58, 60) at end hooks A6 (2026-10-27): nor do the
+        // three `Loop` entries it banked.
+        (2, 58, 60),
         "the baselined population that declares a `timeout:`, and the rest \
          ((2, 106, 108) until no-silent-stall Task 1 banked \
          `invalids/invalid-task`, which declares none). It \

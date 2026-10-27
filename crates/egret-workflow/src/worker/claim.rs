@@ -218,8 +218,11 @@ pub struct Claimed {
     /// directory, and never get it.
     pub block_id: Option<Uuid>,
     /// **For a child:** the block's snapshot pointer as this claim read it
-    /// (spec §5.2). A child whose block has run no prepare claim has none,
-    /// and is refused as corrupt rather than started on an empty directory.
+    /// (spec §5.2). The claim joins the block only while it is `PREPARED`, so a
+    /// child whose block has run no prepare claim gets no `block_id` at all
+    /// (and so no snapshot); `working_dir::carry_of` refuses that child as
+    /// corrupt rather than starting it on an empty directory. A block that is
+    /// `PREPARED` but has no snapshot is refused there too.
     pub block_snapshot: Option<String>,
     /// **A claim taken only to finish a kill** (workflow kill spec §4.3): a
     /// leaf run that is `KILLING` with no lease -- its worker died or gave
