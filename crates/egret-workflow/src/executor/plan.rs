@@ -869,15 +869,33 @@ const WAIT_FOR_TYPE: &str = "waitfor";
 /// The order decides only which name the `unsupported_pause_property` error
 /// prints (`spec::validate`, which refuses any non-`None` since 2026-10-11);
 /// the decision is the same for any non-`None`.
+///
+/// # `finally:` is refused here and NOT in [`pause_plan_gap`] (2026-10-27)
+///
+/// `finally:` became a model key in package #2a. Before it a `Pause` carrying
+/// one published and ran: serde dropped the list and the task paused. So this
+/// predicate -- the one `spec::validate` asks -- refuses it (publish and every
+/// NEW start, naming #9), while the planner asks [`pause_plan_gap`], which
+/// ignores it: an execution stored before #2a and re-planned by
+/// [`plan_stored`] keeps its `Pause` a [`TaskKind::Pause`] at the same index
+/// and its `finally:` unrun, by the rules it started under (D4). Routing the
+/// planner through this function would turn that `Pause` into an opaque
+/// `Runnable` the worker fails as not-a-leaf.
 pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
+    if p.tasks.is_empty() && p.errors.is_empty() && !p.finally.is_empty() {
+        return Some("finally");
+    }
+    pause_plan_gap(p)
+}
+
+/// The planner's half of [`pause_gap`]: every property it names except
+/// `finally:`, in the same order. See [`pause_gap`] for why the two differ.
+pub(crate) fn pause_plan_gap(p: &crate::models::Pause) -> Option<&'static str> {
     if !p.tasks.is_empty() {
         return Some("tasks");
     }
     if !p.errors.is_empty() {
         return Some("errors");
-    }
-    if !p.finally.is_empty() {
-        return Some("finally");
     }
     // **Any `behavior:`, literal or expression, and rounds 2-3 MEASURED why.**
     // Fix round 1 narrowed this to literals on the theory that an expression
@@ -1509,8 +1527,10 @@ fn flatten_one<'a>(
         // pure. `every_corpus_pause_timeout_is_a_literal` re-derives from all
         // 351 flows that no corpus `timeout:` on a `Pause` is an expression, so
         // the fallback is measured unreachable rather than assumed.
+        // `pause_plan_gap`, not `pause_gap`: a stored `Pause` with `finally:`
+        // still plans as a `Pause` (see `pause_gap`).
         (ModelKind::Pause(pause), Some(PAUSE_TYPE)) => {
-            if pause_gap(pause).is_none() {
+            if pause_plan_gap(pause).is_none() {
                 out[ix].timeout = task
                     .timeout
                     .as_ref()
@@ -1858,6 +1878,36 @@ mod pause_finally_tests {
             e.contains("'finally'") && e.contains("Roadmap package #9 lifts it"),
             "{e}"
         );
+    }
+
+    /// I1 of the #2a whole-branch review: a flow published BEFORE #2a with a
+    /// `Pause` carrying `finally:` was valid then (serde ignored the list),
+    /// and an execution of it still running at deploy is re-planned through
+    /// `plan_stored`. It must keep planning the `Pause` as a `Pause` -- the
+    /// rules it started under -- with its `finally:` unplanned, exactly as
+    /// before; only publish and a NEW start refuse it.
+    #[test]
+    fn a_stored_pause_with_finally_still_plans_as_a_pause_and_still_validates_as_refused() {
+        let src = "id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n    finally: [{id: z, type: core.log, message: m}]\n";
+        let plan = plan_stored(src).unwrap();
+        assert_eq!(
+            plan.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            ["p"],
+            "the Pause's finally: stays unplanned, as before #2a"
+        );
+        assert!(
+            matches!(plan.tasks[0].kind, TaskKind::Pause { .. }),
+            "a stored Pause with finally: plans as a Pause: {:?}",
+            plan.tasks[0].kind
+        );
+        let flow = crate::spec::parse(src).unwrap();
+        let report = crate::spec::validate(&flow);
+        let refusal = report
+            .errors
+            .iter()
+            .find(|f| f.code == "unsupported_pause_property")
+            .expect("publish still refuses a Pause finally:");
+        assert!(refusal.message.contains("#9"), "{}", refusal.message);
     }
 }
 

@@ -3701,7 +3701,7 @@ mod tests {
         // `Pause` is planned [`TaskKind::Pause`] only when it declares none of
         // the four properties `build_plan` does not reproduce, and an opaque
         // `Runnable` otherwise -- so this arm has to ask the same question
-        // `build_plan` asks, through the same `pause_gap`, or the two would be
+        // `build_plan` asks, through the same `pause_plan_gap`, or the two would be
         // two opinions about which pauses are reproduced.
         //
         // **That makes this ONE arm weaker than the others and it is said out
@@ -3720,7 +3720,9 @@ mod tests {
                 | K::Dag(_)
                 | K::Loop(_) => PlannedAs::Descends,
                 K::Subflow(_) => PlannedAs::Executable,
-                K::Pause(p) if pause_gap(p).is_none() => PlannedAs::Waits,
+                K::Pause(p) if crate::executor::plan::pause_plan_gap(p).is_none() => {
+                    PlannedAs::Waits
+                }
                 K::Pause(_) => PlannedAs::Opaque,
                 // Kill-and-exit Task 3: an `Exit` is a `Leaf` to the model and
                 // a kind the executor drives itself in the plan.
