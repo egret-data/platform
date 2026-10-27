@@ -10,7 +10,7 @@
 //! `ApiServer<C, A, S>`) does three things relevant here:
 //!
 //! 1. **Authz**: `authorizer.can_bootstrap(&request_metadata)`. Under
-//!    lakekeeper's `AllowAllAuthorizer` (EB-1) this always passes.
+//!    egret's [`crate::EgretAuthorizer`] this always passes.
 //! 2. **Seeds the default project**: when `DEFAULT_PROJECT_ID` is set (the OSS
 //!    default → nil UUID), `bootstrap` creates the "Default Project" if absent.
 //!    This is the outcome egret needs.
@@ -65,6 +65,7 @@
 //!   `<idp_id>~<subject>` form and keeps the synthetic principal in a sane
 //!   identity space.
 
+use crate::mount::EngineAuthorizer;
 use anyhow::Context as _;
 use lakekeeper::api::management::v1::server::{BootstrapRequest, Service as ServerService};
 use lakekeeper::api::management::v1::user::UserType;
@@ -72,7 +73,6 @@ use lakekeeper::api::management::v1::ApiServer;
 use lakekeeper::api::ApiContext;
 use lakekeeper::api::RequestMetadata;
 use lakekeeper::limes::Authentication;
-use lakekeeper::service::authz::AllowAllAuthorizer;
 use lakekeeper::service::{Actor, UserId};
 use lakekeeper_storage_postgres::{PostgresBackend, SecretsState};
 use uuid::Uuid;
@@ -81,7 +81,7 @@ use crate::mount::EngineState;
 
 /// `ApiServer` specialized to egret's concrete backends — the type whose
 /// `Service` trait impls carry `bootstrap`.
-type EngineApiServer = ApiServer<PostgresBackend, AllowAllAuthorizer, SecretsState>;
+type EngineApiServer = ApiServer<PostgresBackend, EngineAuthorizer, SecretsState>;
 
 /// IdP id used for the synthetic egret-system principal. lakekeeper `UserId`s
 /// are `<idp_id>~<subject_in_idp>`; `oidc` is lakekeeper's canonical OIDC IdP id.

@@ -433,6 +433,8 @@ impl egret_catalog_engine::CatalogGuard for StubGuard {
         Ok(egret_catalog_engine::CatalogCaller {
             subject: self.0.lock().unwrap().clone(),
             audience: "catalog".into(),
+            warehouse: String::new(),
+            role: String::new(),
         })
     }
 }

@@ -1,21 +1,24 @@
 //! egret-catalog-engine — embeds lakekeeper's core crates as the in-process
 //! catalog engine with a single shared `iceberg` version.
 //!
-//! EB-1 reduces this crate to a **bare embedded-lakekeeper mount** fronted by
-//! lakekeeper's own permissive [`AllowAllAuthorizer`]. The legacy egret auth /
-//! browse / token / warehouse-mapping glue (which depended on egret-catalog's
-//! now-deleted warehouse + token store) has been stripped; the real egret
-//! [`Authorizer`](lakekeeper::service::authz::Authorizer) and warehouse mapping
-//! are re-introduced in EB-3.
+//! The engine is lakekeeper's Iceberg REST router, fronted by egret's catalog
+//! guard ([`CatalogGuard`]), which decides every request, and backed by
+//! [`EgretAuthorizer`], which scopes the S3 credentials lakekeeper vends to
+//! the caller's grants (vended-credentials spec).
 
 /// Prod bootstrap of lakekeeper's default project using a stable admin principal
 /// derived from `catalog.system_user`.
 pub mod admin;
+/// egret's lakekeeper authorizer: vended credentials follow catalog grants.
+pub mod authorizer;
 pub mod bootstrap;
 pub mod browse;
 /// Crate-level engine domain error ([`CatalogEngineError`]) for the per-request
 /// warehouse/browse operations — distinct from the store's [`CatalogError`].
 pub mod error;
+/// How a catalog grant covers a namespace or a table: the rule the catalog
+/// guard and [`authorizer::EgretAuthorizer`] share.
+pub mod grant_match;
 /// The view-governance lineage sweep (spec B3): recompute every view's
 /// lineage and re-tag it, on a schedule and on demand.
 pub mod lineage_sweep;
@@ -51,6 +54,7 @@ pub use admin::{
     set_delete_profile, set_format_versions, set_warehouse_active, SearchResult, TaskInfo,
     WarehouseConfig,
 };
+pub use authorizer::{catalog_client_metadata, CatalogClientIdentity, EgretAuthorizer};
 pub use bootstrap::ensure_bootstrapped;
 pub use browse::{
     list_namespaces, list_tabulars, load_table_detail, load_view_detail, ColumnInfo,
@@ -59,9 +63,6 @@ pub use browse::{
 };
 pub use error::CatalogEngineError;
 pub use lakekeeper::api::ApiContext;
-/// lakekeeper's built-in open authorizer. EB-1 mounts the engine with this
-/// permissive authorizer; EB-3 replaces it with the real egret authorizer.
-pub use lakekeeper::service::authz::AllowAllAuthorizer;
 pub use lakekeeper::CancellationToken;
 pub use lineage_sweep::{
     spawn_classification_sweeps, LineageSweep, LineageSweeper, NoCatalogSweeper, SweepError,
@@ -74,7 +75,8 @@ pub use lineage_sweep::{
 pub use mount::build_state_with_gc_poll;
 pub use mount::{
     build_state, catalog_engine_router, front_catalog_router, mount_catalog_engine,
-    spawn_gc_workers, CatalogCaller, CatalogGuard, EngineServer, EngineState, GuardedBody,
+    spawn_gc_workers, CatalogCaller, CatalogGuard, EngineAuthorizer, EngineServer, EngineState,
+    GuardedBody,
 };
 pub use pool::{build_isolated_pool, LAKEKEEPER_SCHEMA};
 pub use recovery::{

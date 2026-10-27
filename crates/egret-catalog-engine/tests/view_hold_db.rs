@@ -613,6 +613,8 @@ impl egret_catalog_engine::CatalogGuard for BodyReadingGuard {
         Ok(egret_catalog_engine::CatalogCaller {
             subject: "view-hold-test".into(),
             audience: "catalog".into(),
+            warehouse: String::new(),
+            role: String::new(),
         })
     }
 }

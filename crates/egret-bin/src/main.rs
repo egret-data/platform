@@ -14,6 +14,7 @@ use egret_auth::routes::AuthState;
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
 use egret_bin::bootstrap::{admin_report, AdminPassword};
+use egret_catalog_engine::grant_match::{catalog_grant_covers_by, grants_write, CatalogNameEq};
 use egret_config::Config;
 use egret_core::ratelimit::RateLimiter;
 use egret_metastore::Db;
@@ -566,16 +567,6 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
         use axum::http::StatusCode;
         let forbid = |m: String| Err((StatusCode::FORBIDDEN, m));
         let claims = self.verify(bearer).await?;
-        // Who sent it (rename spec R7): a layer behind the guard names the
-        // caller from this, not from a claim it would have to verify again.
-        let caller = egret_catalog_engine::CatalogCaller {
-            subject: claims
-                .get("sub")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            audience: CATALOG_AUDIENCE.to_string(),
-        };
         let token_warehouse = claims
             .get("warehouse")
             .and_then(|v| v.as_str())
@@ -586,6 +577,20 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
             .and_then(|a| a.first())
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        // Who sent it (rename spec R7): a layer behind the guard names the
+        // caller from this, not from a claim it would have to verify again,
+        // and lakekeeper's authorizer scopes vended credentials to its role's
+        // grants (vended-credentials spec §4.4).
+        let caller = egret_catalog_engine::CatalogCaller {
+            subject: claims
+                .get("sub")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            audience: CATALOG_AUDIENCE.to_string(),
+            warehouse: token_warehouse.to_string(),
+            role: token_role.to_string(),
+        };
 
         // Remote S3 request signing (`/aws/s3/sign`, `/{prefix}/v1/aws/s3/sign`,
         // `/signer/{prefix}/tabular-id/{id}/v1/aws/s3/sign`): egret's warehouses
@@ -788,7 +793,11 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
             }
 
             // Names compare as lakekeeper compares them (§10.4).
-            let eq = CatalogNameEq::load(&self.catalog, &grants, &needs)
+            let requested: Vec<&str> = needs
+                .iter()
+                .flat_map(|n| n.ns.iter().map(String::as_str).chain(n.table.as_deref()))
+                .collect();
+            let eq = CatalogNameEq::load(&self.catalog, &grants, &requested)
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("names: {e}")))?;
             for need in needs {
@@ -892,49 +901,6 @@ struct Need {
     refusal: String,
 }
 
-/// Name equality as lakekeeper's collation has it, for the names in one
-/// request: byte-equal names are equal, and every other (grant name, request
-/// name) pair is asked of Postgres once ([`CatalogStore::names_equal_in_catalog`]).
-struct CatalogNameEq(std::collections::HashSet<(String, String)>);
-
-impl CatalogNameEq {
-    async fn load(
-        store: &egret_catalog_engine::CatalogStore,
-        grants: &[egret_catalog_engine::CatalogGrant],
-        needs: &[Need],
-    ) -> Result<Self, egret_catalog_engine::CatalogError> {
-        let requested: std::collections::BTreeSet<&str> = needs
-            .iter()
-            .flat_map(|n| n.ns.iter().map(String::as_str).chain(n.table.as_deref()))
-            .collect();
-        let granted: std::collections::BTreeSet<&str> = grants
-            .iter()
-            .flat_map(|g| {
-                g.namespace
-                    .iter()
-                    .flatten()
-                    .map(String::as_str)
-                    .chain(g.table_name.as_deref())
-            })
-            .collect();
-        let pairs: Vec<(String, String)> = granted
-            .iter()
-            .flat_map(|g| requested.iter().map(move |r| (*g, *r)))
-            .filter(|(g, r)| g != r)
-            .map(|(g, r)| (g.to_string(), r.to_string()))
-            .collect();
-        Ok(Self(store.names_equal_in_catalog(&pairs).await?))
-    }
-
-    /// `granted` (a grant's name) and `requested` name the same thing.
-    fn eq(&self, granted: &str, requested: &str) -> bool {
-        granted == requested
-            || self
-                .0
-                .contains(&(granted.to_string(), requested.to_string()))
-    }
-}
-
 /// Percent-decode one path segment, as axum's `Path` does for lakekeeper.
 /// `None` for bad percent-encoding or bytes that are not UTF-8.
 fn percent_decode(seg: &str) -> Option<String> {
@@ -993,11 +959,6 @@ fn is_signer_route(path: &str) -> bool {
     segs.first() == Some(&"signer") || segs.ends_with(&["aws", "s3", "sign"])
 }
 
-/// Does this grant carry `write` or `manage`?
-fn grants_write(g: &egret_catalog_engine::CatalogGrant) -> bool {
-    g.privilege.eq_ignore_ascii_case("write") || g.privilege.eq_ignore_ascii_case("manage")
-}
-
 /// [`catalog_grant_covers_by`] with names compared byte for byte (the
 /// structural unit tests).
 #[cfg(test)]
@@ -1008,45 +969,6 @@ fn catalog_grant_covers(
     is_write: bool,
 ) -> bool {
     catalog_grant_covers_by(g, target_ns, target_table, is_write, &|a, b| a == b)
-}
-
-/// Does one grant authorize the requested `(namespace, table)` at the required
-/// privilege? `catalog` covers everything; `namespace` covers its own namespace
-/// and everything in it; `table` covers only its exact table (plus, for reads,
-/// listing the namespace that holds it). Writes require `write`/`manage`.
-/// `eq(granted, requested)` says whether two names are the same; the guard
-/// passes lakekeeper's collation ([`CatalogNameEq`]).
-fn catalog_grant_covers_by(
-    g: &egret_catalog_engine::CatalogGrant,
-    target_ns: Option<&[String]>,
-    target_table: Option<&str>,
-    is_write: bool,
-    eq: &dyn Fn(&str, &str) -> bool,
-) -> bool {
-    if is_write && !grants_write(g) {
-        return false;
-    }
-    let ns_match = || match (target_ns, g.namespace.as_deref()) {
-        (Some(t), Some(gn)) => t.len() == gn.len() && gn.iter().zip(t).all(|(a, b)| eq(a, b)),
-        _ => false,
-    };
-    match g.securable_type.as_str() {
-        "catalog" => true,
-        "namespace" => ns_match(),
-        "table" => {
-            if !ns_match() {
-                return false;
-            }
-            match target_table {
-                // A specific table request must hit this grant's exact table.
-                Some(t) => g.table_name.as_deref().is_some_and(|gt| eq(gt, t)),
-                // Listing/loading the enclosing namespace is a read affordance for
-                // a table-grant holder, never a write (e.g. creating a table).
-                None => !is_write,
-            }
-        }
-        _ => false,
-    }
 }
 
 /// Provisions the embedded lakekeeper warehouse for an egret `warehouses` row.
@@ -3536,6 +3458,12 @@ mod catalog_authz_tests {
 #[cfg(test)]
 mod catalog_guard_body_tests;
 
+/// Vended S3 credentials follow the caller's grants (F4), through the real
+/// guard and lakekeeper's router on egret's S3 profile over an in-process
+/// object store and STS.
+#[cfg(test)]
+mod catalog_vended_credentials_tests;
+
 #[cfg(test)]
 mod catalog_guard_audience_tests {
     use super::{EgretCatalogGuard, CATALOG_AUDIENCE};
@@ -3596,7 +3524,8 @@ mod catalog_guard_audience_tests {
     }
 
     /// Rename spec R7: the guard returns who the verified token names, so the
-    /// table hook can record the caller of a classification move.
+    /// table hook can record the caller of a classification move, and the
+    /// mount can name its warehouse and role to lakekeeper's authorizer.
     #[tokio::test]
     async fn the_catalog_guard_returns_the_token_subject() {
         let Some(g) = guard().await else {
@@ -3608,6 +3537,7 @@ mod catalog_guard_audience_tests {
             &km,
             &serde_json::json!({
                 "sub": "cat1", "aud": CATALOG_AUDIENCE,
+                "warehouse": "wh1", "roles": ["r1"],
                 "exp": chrono::Utc::now().timestamp() + 600,
             }),
         )
@@ -3621,6 +3551,8 @@ mod catalog_guard_audience_tests {
             egret_catalog_engine::CatalogCaller {
                 subject: "cat1".into(),
                 audience: CATALOG_AUDIENCE.into(),
+                warehouse: "wh1".into(),
+                role: "r1".into(),
             }
         );
     }
