@@ -1648,7 +1648,14 @@ mod tests {
 
     #[test]
     fn finally_and_the_loops_errors_are_model_keys_now() {
-        silent_census(&format!("{HEAD}tasks:\n  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks: [{{id: a, type: core.log, message: m}}]\n    finally: [{{id: z, type: core.log, message: m}}]\n"));
+        silent_census(&format!("{HEAD}tasks:\n  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks: [{{id: a, type: core.log, message: m}}]\n    finally: [{{id: z, type: core.log, message: m}}]\n  - id: each\n    type: io.kestra.plugin.core.flow.Loop\n    values: [1]\n    tasks: [{{id: b, type: core.log, message: m}}]\n    errors: [{{id: e, type: core.log, message: m}}]\n"));
+    }
+
+    /// A `Pause` `finally:` is a model key to the walker; `pause_gap` alone
+    /// refuses it, so the walker adds no finding of its own.
+    #[test]
+    fn a_pause_finally_draws_no_finding_from_the_walker() {
+        silent_census(&format!("{HEAD}tasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Pause\n    finally: [{{id: z, type: core.log, message: m}}]\n"));
     }
 
     #[test]
