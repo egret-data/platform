@@ -2163,10 +2163,12 @@ pub struct LogPageDto {
     /// ...), read on this call. For display: **do not stop polling on a
     /// terminal state alone** -- see `complete`.
     pub execution_state: String,
-    /// The execution is terminal AND became so more than the 2 s settle lag
-    /// ago. **Stop polling when `complete` is true and `items` is empty**:
-    /// then every stored line has been served. A terminal `execution_state`
-    /// alone is not enough -- the run's last lines may be younger than the
+    /// The execution is idle -- terminal AND every one of its task runs
+    /// terminal, `afterExecution:` runs included -- AND its last run ended
+    /// more than the 2 s settle lag ago. **Stop polling when `complete` is
+    /// true and `items` is empty**: then every stored line has been served. A
+    /// terminal `execution_state` alone is not enough -- an `afterExecution:`
+    /// run may still be logging, and the last lines may be younger than the
     /// settle lag and not served yet.
     pub complete: bool,
 }
@@ -2186,9 +2188,10 @@ pub struct LogPageDto {
 /// **When to stop polling: on `complete && items.is_empty()`, never on a
 /// terminal `execution_state` alone.** A run's lines are inserted before its
 /// outcome commits (`RunLog::finish` waits on the log writer's flush barrier),
-/// so once the execution has been terminal for longer than the settle lag,
-/// every line it will ever have is visible; `complete` says exactly that,
-/// computed from the execution row itself. A terminal state seen earlier can
+/// so once the execution has been idle (terminal AND every task run terminal,
+/// `afterExecution:` runs included; `workflow.execution_is_idle`) for longer
+/// than the settle lag, measured from its last run's end, every line it will
+/// ever have is visible; `complete` says exactly that. A terminal state seen earlier can
 /// still have its last lines inside the lag. `complete` does NOT mean every
 /// line the run printed was stored: see spec §11 for the cases (the process
 /// dying, a dropped batch, a log-write fault during which the barrier does not
@@ -2210,7 +2213,7 @@ pub struct LogPageDto {
         ExecutionLogsQuery,
     ),
     responses(
-        (status = 200, description = "Up to `limit` settled lines after `after`, in id order, with the next cursor, the execution's current state, and `complete`. Lines appear about 2 s after they are written (the settle lag guards against out-of-order commits). Stop polling on `complete` with no `items`, not on a terminal state alone.", body = LogPageDto),
+        (status = 200, description = "Up to `limit` settled lines after `after`, in id order, with the next cursor, the execution's current state, and `complete`. Lines appear about 2 s after they are written (the settle lag guards against out-of-order commits). Stop polling on `complete` with no `items`, not on a terminal state alone: an ended execution's `afterExecution:` runs can still be logging.", body = LogPageDto),
         (status = 400, description = "`limit` outside 1..=2000, a `min_level` that is not one of TRACE/DEBUG/INFO/WARN/ERROR, or a malformed `{id}`/`after`/`task_run_id`", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
@@ -3220,21 +3223,24 @@ impl axum::response::IntoResponse for KillError {
         KillQuery,
     ),
     responses(
-        (status = 202, description = "The kill is recorded. The body is the execution afterwards: `KILLING` while a running task still has to be stopped by a worker (it then becomes `KILLED` on its own), or `KILLED` if nothing was running. Every run that was retrying, paused or not yet started is `KILLED` already.", body = ExecutionDto),
+        (status = 202, description = "The kill is recorded. The body is the execution afterwards: `KILLING` while a running task still has to be stopped by a worker (it then becomes `KILLED` on its own), or `KILLED` if nothing was running. Every run that was retrying, paused or not yet started is `KILLED` already. On an execution that has already ended but whose `afterExecution:` tasks still run, only those tasks are killed: the body keeps the execution's own final state (e.g. `SUCCESS`).", body = ExecutionDto),
         (status = 400, description = "`cascade` is not `true` or `false`", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed", body = egret_core::http::ErrorBody),
-        (status = 409, description = "The execution has already ended (code `execution_terminated`). Nothing is written.", body = egret_core::http::ErrorBody),
+        (status = 409, description = "The execution has already ended and none of its `afterExecution:` tasks is running (code `execution_terminated`), or its `afterExecution:` kill cannot apply yet because a block is being prepared or finished (code `kill_not_applied`; retry). Nothing is written.", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
-/// Kill an execution that has not ended.
+/// Kill an execution, or the `afterExecution:` tasks of one that has ended.
 ///
 /// Tasks retrying, paused or not yet started end `KILLED` at once; a running
 /// task is stopped by a worker -- the one running it, or the next one to claim
 /// it -- and the execution is `KILLING` until it has. With `cascade` (the default) its `Loop` iterations
-/// and `Subflow` child executions are killed the same way.
+/// and `Subflow` child executions are killed the same way. On an ended
+/// execution whose `afterExecution:` tasks still run, only those are killed
+/// and the execution's state is not changed; the audit `outcome` is then that
+/// state, with `after_execution` saying what happened to the tasks.
 async fn kill_execution(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,

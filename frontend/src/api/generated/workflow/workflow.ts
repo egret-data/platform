@@ -1097,8 +1097,11 @@ export const getWorkflowKillExecutionUrl = (workspace: string,
  * Tasks retrying, paused or not yet started end `KILLED` at once; a running
  * task is stopped by a worker -- the one running it, or the next one to claim
  * it -- and the execution is `KILLING` until it has. With `cascade` (the default) its `Loop` iterations
- * and `Subflow` child executions are killed the same way.
- * @summary Kill an execution that has not ended.
+ * and `Subflow` child executions are killed the same way. On an ended
+ * execution whose `afterExecution:` tasks still run, only those are killed
+ * and the execution's state is not changed; the audit `outcome` is then that
+ * state, with `after_execution` saying what happened to the tasks.
+ * @summary Kill an execution, or the `afterExecution:` tasks of one that has ended.
  */
 export const workflowKillExecution = async (workspace: string,
     id: string,
@@ -1149,7 +1152,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type WorkflowKillExecutionMutationError = ErrorBody
 
     /**
- * @summary Kill an execution that has not ended.
+ * @summary Kill an execution, or the `afterExecution:` tasks of one that has ended.
  */
 export const useWorkflowKillExecution = <TError = ErrorBody,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowKillExecution>>, TError,{workspace: string;id: string;params?: WorkflowKillExecutionParams}, TContext>, request?: SecondParameter<typeof customInstance>}
@@ -1231,9 +1234,10 @@ export const getWorkflowGetExecutionLogsUrl = (workspace: string,
  * **When to stop polling: on `complete && items.is_empty()`, never on a
  * terminal `execution_state` alone.** A run's lines are inserted before its
  * outcome commits (`RunLog::finish` waits on the log writer's flush barrier),
- * so once the execution has been terminal for longer than the settle lag,
- * every line it will ever have is visible; `complete` says exactly that,
- * computed from the execution row itself. A terminal state seen earlier can
+ * so once the execution has been idle (terminal AND every task run terminal,
+ * `afterExecution:` runs included; `workflow.execution_is_idle`) for longer
+ * than the settle lag, measured from its last run's end, every line it will
+ * ever have is visible; `complete` says exactly that. A terminal state seen earlier can
  * still have its last lines inside the lag. `complete` does NOT mean every
  * line the run printed was stored: see spec §11 for the cases (the process
  * dying, a dropped batch, a log-write fault during which the barrier does not
