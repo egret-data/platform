@@ -13674,3 +13674,43 @@ Figures that moved, each pinned with a dated note:
   `afterExecution:` runs are planned now);
 - handler ceiling 273 -> 281 (`afterExecution:` is no longer a blocker;
   `handler-surface.txt` regenerated).
+
+## End hooks #2b as built (Task B7, 2026-10-28): what banked, what did not, and what the oracle cannot see
+
+Measured at HEAD `cf7e7c5c` (`cargo test -p egret-workflow --test executor --
+--nocapture`): ratchet **301 / 52 / 52 / 0**, `(301, 249, 52)`; census 295
+live, 25 validate-refused, 21 unknown type. The printout is identical to Task
+B1's apart from test order. Tasks B2 to B6 moved no constant; every constant
+B1 moved was re-read against this printout and none drifted.
+
+**Banked by #2b: 8 of the 8 the spec expected, all in Task B1** (section
+above). The spec's `(301, 250, 51)` was computed from #2a's expected 59;
+#2a ended at 60, so 52 is the full expectation.
+
+**Did not bank, and why:**
+- `valids/after-execution`: its `afterExecution:` run `end` now exists, but
+  it renders `{{ execution.outputs.final }}` and egret never evaluates flow
+  `outputs:` (`worker/render.rs`). Package #6 (roadmap note 6). It differs on
+  `runs` only now: B7 printed the eight entries that differ on `order`
+  (`valids/dag`, `full`, `if`, `loop-object`, `loop-object-in-list`,
+  `parallel-disabled-tasks`, `task-runif-workingdirectory`, `variables`), and
+  it is not among them. It is the ninth entry of B1's `MISMATCH_ON_ORDER`
+  drop 17 -> 8, which B1 could not itemise.
+- `valids/pause-errors-finally-after-execution`: refused at start for its
+  `Pause` `errors:` (and its `Pause` `finally:`), package #9.
+
+**What the golden cannot pin** (each is covered by DB tests in
+`tests/end_hooks.rs`, `tests/migration_0210_execution_is_idle.rs`,
+`tests/storage_prune.rs`, `tests/task_logs.rs` and `tests/exit_sibling_idle.rs`
+instead):
+- a kill during `afterExecution:`. Kestra answers 409 and force-executes the
+  list, so no golden can show egret's divergence (a kill stops the after-runs,
+  the user's Q3); `flow-concurrency-queue-killed-after-execution` killed
+  nothing;
+- the refusals of `Pause`, `Exit` and `LoopUntil`/`WaitFor` inside
+  `afterExecution:` and the `retry:` warning there: no corpus flow has one, so
+  `LIVE`, `VALIDATE_REFUSED` and `UNKNOWN_TYPE_REFUSED` did not move;
+- the parent's report at "terminated": no corpus `Subflow` child has an
+  `afterExecution:`;
+- the sweeps, the pruner and the logs route: the harness has no storage or
+  container clock.

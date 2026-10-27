@@ -4528,6 +4528,10 @@ const MISMATCH_ON_RUNS: usize = 38;
 // `order` -- the four it banked and six still held on `runs` alone.
 // 17 -> 8 at end hooks #2b Task B1 (2026-10-27, measured): the eight `afterExecution:` entries it banked, and one entry that stays baselined (the printout
 // does not itemise it; the candidate is `valids/after-execution`, whose `end` run now exists).
+// Verified at #2b Task B7 (2026-10-28) with a temporary per-entry print: the eight are
+// `valids/dag`, `full`, `if`, `loop-object`, `loop-object-in-list`, `parallel-disabled-tasks`,
+// `task-runif-workingdirectory` and `variables`; `valids/after-execution` is not among them,
+// so it is the ninth.
 const MISMATCH_ON_ORDER: usize = 8;
 /// The `runs` entries egret refuses on purpose, in golden order: each is a
 /// flow Kestra ran holding a task egret cannot run, which before its refusal

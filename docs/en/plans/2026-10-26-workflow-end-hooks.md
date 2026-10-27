@@ -766,6 +766,8 @@ Read `docs/en/frontend-rules.md` first. This task changes data rules only: no ne
   - `afterExecution:` runs after the execution has ended, cannot be killed, is not retried, and refuses `Pause`/`Exit`;
   - the execution page keeps updating until the after-tasks finish.
 
+  *Correction, 2026-10-28 (Task B7, Q3 as built):* "cannot be killed" above is superseded. The Platform docs must say instead: the Kill button stays on an ended execution while its `afterExecution:` tasks run, and a kill stops them without changing the execution's own state; a kill that cannot apply yet answers `kill_not_applied` (retry); a parent's kill also stops a child's running `afterExecution:`. `Pause`, `Exit` and `LoopUntil`/`WaitFor` are refused inside `afterExecution:`, and a `retry:` there is warned. The page follows the after-tasks for at most 30 minutes after the end.
+
   This change goes to that repo's docs PR; the controller opens it.
 - [ ] **Step 3: commit** `docs(workflow): package #2 in Vietnamese`.
 

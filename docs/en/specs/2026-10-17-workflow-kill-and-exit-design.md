@@ -17,6 +17,7 @@
 - D1. `cascade` defaults to `true` and kills child executions (subflow and loop children), as Kestra's `isOnKillCascade` does.
 - D2. A paused execution is killed without a worker: nothing is running, so its waiting runs go straight to `KILLED` (Kestra resumes it into `KILLING`, `core/…/services/ExecutionService.java:1007-1013`; the outcome is the same).
 - D3. Killing a terminal execution is `409 execution_terminated`. Kestra answers 409 only when `isOnKillCascade` is false (`webserver/…/ExecutionController.java:1757`); egret has nothing to emit for a terminal execution, so it refuses in both cases.
+  - *Note, 2026-10-28 (end hooks #2b, the user's answer to Q3; spec `2026-10-26-workflow-end-hooks-design.md` D9 as built).* A terminal execution can now have something to kill: its `afterExecution:` runs. A kill of a terminal execution with a live after-run is **accepted** (202): it stops those runs and never writes the execution's own state, history or `ended_at`; the audit `outcome` is the execution's own state plus `"after_execution": "KILLING"|"KILLED"`. Without a live after-run it is still `409 execution_terminated` (an `Exit` sibling still running does not count). A phase kill that cannot apply yet (a root after-task `WorkingDirectory` being prepared or finished) is a retryable `409 kill_not_applied`. A parent's cascade (D1) also stops a terminal child's live after-phase, where Kestra skips terminal descendants. This is a security divergence (roadmap §3.1): a tenant cannot write a task that no one can kill.
 - D4. The kill route needs `WF_MANAGE`, the same permission as resume and replay (`routes.rs:2833`, `:2939`), and writes an audit record.
 - D5. `Exit` with `SUCCESS`, `WARNING`, `FAILED` or `CANCELLED` leaves running sibling branches running, as Kestra documents (`core/…/plugin/core/execution/Exit.java`, *"only `KILLED` stops sibling tasks"*).
 - D6. The UI gets a Kill button on the execution detail page (W7b), a confirmation dialog with the cascade option, and a `KILLING` badge. No per-task-run kill, no bulk kill.
@@ -51,6 +52,7 @@
 *Note, 2026-10-18:* the route as built is `POST /api/ws/{workspace}/workflows/executions/{id}/kill`, the prefix every workflow route has (`routes.rs`), as the plan's Global Constraints say.
 - `202` with the execution DTO: it is now `KILLING`, or `KILLED` if nothing was running.
 - `404` if the execution is not in the workspace; `409 execution_terminated` if it is terminal (D3).
+  - *Note, 2026-10-28 (end hooks #2b):* unless its `afterExecution:` still runs: then `202` with the execution unchanged (e.g. `SUCCESS`), or `409 kill_not_applied` (retry) when the phase kill cannot apply yet. See D3's note.
 - `WF_MANAGE` (D4). utoipa-documented, regenerated into the frontend client with `npm run gen:api`.
 
 ### 3.2 One transaction
