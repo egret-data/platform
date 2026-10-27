@@ -456,3 +456,42 @@ None. The first draft's two were answered on 2026-10-27 (G5, G6).
 ## 14. Implementation notes (append-only)
 
 Deviations the code forces are recorded here, per task, as they happen.
+
+### Step 0 (2026-10-28): rebased onto `ff25210b`
+
+- **Base.** The branch is rebased onto `main` `ff25210b` (#761). Two security PRs landed after the plan's base
+  `4807c3e3`: #758 (F-A, `1e0a3cf8`, spec `2026-10-27-catalog-rename-authorizes-source-design.md`) and #760 (F4,
+  `2d2c3f35`, spec `2026-10-27-vended-credentials-follow-grants-design.md`). The prerequisite is met.
+- **F-A changes nothing this design depends on.** The guard now reads the body of `POST …/tables/rename` and of
+  multi-table and single-table commits (`GuardedBody`), requires drop-equivalent write on the source and
+  namespace-level write on the destination, and puts the same bytes back, so the table hook still reads the body it
+  read before. The guard runs before the hook and still inserts `CatalogCaller` (now with `warehouse` and `role`) into
+  the request extensions; `Caller::resolve` reads only `subject` and `audience`, so the hook's actor is unchanged.
+  Task 13 adds a test through the real guard that the events name the verified client.
+- **E12/E13 are stale.** `catalog_grant_covers` in `egret-bin` is now a `#[cfg(test)]` wrapper; the rule is
+  `egret_catalog_engine::grant_match::catalog_grant_covers_by`, which compares names with lakekeeper's ICU
+  `case_insensitive` collation (`CatalogNameEq`, asked of Postgres through `CatalogStore::names_equal_in_catalog`).
+  So a grant on `Orders` now covers `orders`. Consequences for D8: the grants a rename selects are those whose
+  namespace elements and table name equal the source **under `lakekeeper.case_insensitive`** (in SQL, the same
+  collation), not under `lower()`; the union check (D8's delete-instead-of-update) uses the same collation; a
+  rename whose source and destination are equal under the collation moves nothing (the grant already covers both
+  spellings), which replaces D8's "case-only" test. F-B (§11 item 2) is fixed on main by #758; it stays listed for
+  history.
+- **F4: catalog grants now also decide vended credentials** (`EgretAuthorizer`, ReadData/WriteData from
+  `catalog.catalog_grants` through `grant_match`). A grant left on the old name therefore also loses the renamed
+  table's read/write credentials and gives them to a new table at the old name. Task 13 adds a test that the
+  authorizer's decision for the renamed table follows the moved grant.
+- **Rows re-checked.** E1/E2 (0154; only 0178/0179 ALTER `perm`), E3 (`eval.rs:350`), E5 (`trigger.rs:1730`,
+  `:1775`), E7 (`store.rs:300-340`, no `origin` in the SET list; `create_rule_in_tx` exported), E9
+  (`migrate.rs:718`, `:727`), E10 (no index on `catalog.catalog_grants`), E15 (`table_hook.rs:1048`, `:1225`),
+  E17 (`table_hook.rs:1554-1563`), E18 (`plugin_downloads.rs:211-238`), E20 (`view_tags.rs:94`; the 409 lives in
+  `egret-bi/src/catalog_tags.rs:317-345`), E21 (`trigger.rs:682-685`; `DesiredPolicy` carries `source_kind` and
+  `rule_id`, so D12 can tell a classification body from a grant or path-rule body without a name prefix), E22
+  (`table_columns.rs:365`), E23 (`governance_overview.rs:183`), E26/E27 (both passages present). Line numbers
+  otherwise as cited.
+- **D5.** The compiler emits `registry.catalogs.name` at the catalog level (`grants.rs::scope_to_resources`). No
+  migration seeds an `operator` policy; a fresh stack's hand-written policies are the infra defaults (all `*`).
+- **D12 sites.** Only `trigger.rs:682-685` (the profile total). `rules.rs:536`/`:562` and `clearance.rs:459` count
+  tag expansions and clearance masks, which move with the classifications and stay correctly uncounted; path rules
+  and grants never reach them.
+- **Migrations.** `main`'s newest is `0210`. None is planned (D18).
