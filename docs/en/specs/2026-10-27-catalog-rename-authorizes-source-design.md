@@ -367,3 +367,22 @@ mount, seen failing on the code before the fix), what was decided, and how it is
 - **Tests:** the three above (red at `c24c2c23`, green now). The second one is an agreement test: for spellings that
   differ in case, width, composition, ignorables, accents and length, the guard allows exactly when lakekeeper's own
   router finds the table, and refuses exactly when it answers 404.
+
+### 10.5 F5: a recursive namespace drop reached child namespaces (D13)
+
+- **Problem.** `DELETE /{prefix}/namespaces/{ns}?recursive=true` deletes every child namespace and every table in them
+  (`lakekeeper-storage-postgres/src/namespace.rs:667-698`; `LK/server/namespace.rs:536`, `:709-760`). The guard
+  required write on `{ns}` only, though a grant on `corp` covers nothing in `corp.fin` (§3.5).
+- **Measured** at `bdf77d92`: a role with `namespace` `manage` on `corp` dropped `corp` recursively with **204**,
+  deleting the table `corp.fin.ledger` (`a_recursive_namespace_drop_needs_a_catalog_grant`).
+- **Decision (D13): a recursive drop needs a `catalog`-level `write`/`manage` grant.** Checking a grant per descendant
+  would need a lakekeeper read of the subtree, and a child created between that read and the drop would escape the
+  check. A recursive drop of a subtree is an administrator's action; an engine's client holds `catalog` `manage`. A
+  role with a namespace grant still drops an empty namespace, or a namespace's tables one by one.
+- The query is read as lakekeeper reads it: form-decoded keys and values, so `recursiv%65=true` counts; any `recursive`
+  value other than `false` counts (lakekeeper refuses values other than `true`/`false`, so this only refuses more).
+- 403: `role '<r>' may not drop namespace <ns> recursively: a recursive drop deletes every child namespace and table,
+  so it needs a catalog-level write or manage grant`.
+- **Tests:** `a_recursive_namespace_drop_needs_a_catalog_grant` (red, green now: three query spellings refused with the
+  child's table intact; `catalog` `manage` still drops recursively); unit test
+  `a_recursive_drop_is_read_as_lakekeeper_reads_the_query`.

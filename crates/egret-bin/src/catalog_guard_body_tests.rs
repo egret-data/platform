@@ -1562,3 +1562,54 @@ async fn a_rename_source_in_another_case_is_decided_on_the_table() {
     assert!(status.is_success(), "{status} {body}");
     assert!(env.exists("tables", "sales", "mine2").await);
 }
+
+/// F5: a recursive namespace drop deletes every child namespace and table, so
+/// it needs a catalog-level write; a grant on the parent alone is refused.
+#[tokio::test]
+async fn a_recursive_namespace_drop_needs_a_catalog_grant() {
+    let env = env_or_skip!();
+    env.create_table("corp%1Ffin", "ledger").await;
+    let parent = env
+        .token_for(
+            "external",
+            &[grant("namespace", Some(&["corp"]), None, "manage")],
+        )
+        .await;
+    for query in [
+        "recursive=true",
+        "recursiv%65=true",
+        "recursive=true&purge=true",
+    ] {
+        let (status, body) = env
+            .send(
+                &env.app,
+                Some(&parent),
+                "DELETE",
+                &format!("namespaces/corp?{query}"),
+                Value::Null,
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{query}: {body}");
+        assert!(
+            env.exists("tables", "corp%1Ffin", "ledger").await,
+            "{query}: the child's table survives"
+        );
+    }
+
+    let engine = env
+        .token_for("engine", &[grant("catalog", None, None, "manage")])
+        .await;
+    let (status, body) = env
+        .send(
+            &env.app,
+            Some(&engine),
+            "DELETE",
+            "namespaces/corp?recursive=true",
+            Value::Null,
+        )
+        .await;
+    assert!(
+        status.is_success(),
+        "catalog manage drops recursively: {status} {body}"
+    );
+}

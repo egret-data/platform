@@ -738,6 +738,25 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
                         ),
                         _ => None,
                     };
+                    // A recursive namespace drop deletes every child namespace
+                    // and every table in them (§10.5): only a catalog-level
+                    // write/manage grant covers all of that.
+                    if method == "DELETE"
+                        && target_ns.is_some()
+                        && target_table.is_none()
+                        && segs.len() == 3
+                        && is_recursive(query)
+                        && !grants
+                            .iter()
+                            .any(|g| g.securable_type == "catalog" && grants_write(g))
+                    {
+                        return forbid(format!(
+                            "role '{token_role}' may not drop namespace {} recursively: a \
+                             recursive drop deletes every child namespace and table, so it needs a \
+                             catalog-level write or manage grant",
+                            target_ns.as_deref().unwrap_or_default().join(".")
+                        ));
+                    }
                     match target_ns {
                         // catalog-root op (list namespaces, …): any grant for
                         // reads, a write/manage grant for writes.
@@ -939,6 +958,16 @@ fn path_namespace(seg: &str) -> Option<Vec<String>> {
 /// (`normalize_tabular_name`): percent-decoded, `+` read as a space.
 fn path_tabular(seg: &str) -> Option<String> {
     Some(percent_decode(seg)?.replace('+', " "))
+}
+
+/// Does the query ask for a recursive drop? Keys and values are
+/// form-decoded as lakekeeper's query parser decodes them; any `recursive`
+/// whose value is not `false` counts (lakekeeper refuses values other than
+/// `true`/`false`, so this only ever refuses more).
+fn is_recursive(query: Option<&str>) -> bool {
+    query.is_some_and(|q| {
+        url::form_urlencoded::parse(q.as_bytes()).any(|(k, v)| k == "recursive" && v != "false")
+    })
 }
 
 /// Does this grant carry `write` or `manage`?
@@ -3363,7 +3392,7 @@ const WORKFLOW_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(1
 
 #[cfg(test)]
 mod catalog_authz_tests {
-    use super::{catalog_grant_covers, path_namespace, path_tabular};
+    use super::{catalog_grant_covers, is_recursive, path_namespace, path_tabular};
     use egret_catalog_engine::CatalogGrant;
     use uuid::Uuid;
 
@@ -3419,6 +3448,22 @@ mod catalog_authz_tests {
         let g = grant("catalog", None, None, "write");
         let ns = vec!["demo_ns".to_string()];
         assert!(catalog_grant_covers(&g, Some(&ns), Some("events"), true));
+    }
+
+    #[test]
+    fn a_recursive_drop_is_read_as_lakekeeper_reads_the_query() {
+        assert!(is_recursive(Some("recursive=true")));
+        assert!(is_recursive(Some("purge=true&recursiv%65=true")));
+        assert!(
+            is_recursive(Some("recursive=TRUE")),
+            "refused by lakekeeper; counted"
+        );
+        assert!(!is_recursive(Some("recursive=false")));
+        assert!(
+            !is_recursive(Some("Recursive=true")),
+            "an unknown key to lakekeeper"
+        );
+        assert!(!is_recursive(None));
     }
 
     #[test]
