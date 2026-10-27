@@ -1,4 +1,6 @@
-//! The catalog guard authorizes a rename by its source and its destination
+//! The catalog guard authorizes the requests that name their targets only in
+//! the body: a rename, by its source and its destination, and a multi-table
+//! commit, by every table it changes
 //! (spec `docs/en/specs/2026-10-27-catalog-rename-authorizes-source-design.md`).
 //!
 //! Every test drives the REAL [`EgretCatalogGuard`] in front of lakekeeper's
@@ -74,10 +76,10 @@ async fn env() -> Option<Env> {
         })
         .await;
     let (state, _) = build_state(&dsn, SYSTEM_USER).await.expect("state");
+    let pool = &db.pool;
     let prefix = create_memory_warehouse(state.clone(), SYSTEM_USER, &unique("rnwh"))
         .await
         .expect("lakekeeper warehouse");
-    let pool = &db.pool;
     let ws: uuid::Uuid =
         sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,'RN') RETURNING id")
             .bind(unique("rn-ws"))
@@ -723,5 +725,220 @@ async fn a_malformed_rename_body_is_a_400_from_the_guard() {
                 "{kind}, {what}: the guard's own 400, not lakekeeper's: {resp}"
             );
         }
+    }
+}
+
+// ── Multi-table commit (spec §8) ────────────────────────────────────────────
+
+/// One `table-changes` entry that sets a property on `ns.name`.
+fn set_property(ns: &[&str], name: &str, value: &str) -> Value {
+    json!({
+        "identifier": {"namespace": ns, "name": name},
+        "requirements": [],
+        "updates": [{"action": "set-properties", "updates": {"egret.probe": value}}],
+    })
+}
+
+impl Env {
+    async fn commit(&self, token: &str, changes: Vec<Value>) -> (StatusCode, Value) {
+        self.send(
+            &self.app,
+            Some(token),
+            "POST",
+            "transactions/commit",
+            json!({ "table-changes": changes }),
+        )
+        .await
+    }
+
+    /// The `egret.probe` property of `ns.name`, read through lakekeeper.
+    async fn probe(&self, ns: &str, name: &str) -> Option<String> {
+        let (status, body) = self
+            .send(
+                &self.raw,
+                None,
+                "GET",
+                &format!("namespaces/{ns}/tables/{name}"),
+                Value::Null,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "load {ns}.{name}: {body}");
+        body["metadata"]["properties"]["egret.probe"]
+            .as_str()
+            .map(str::to_string)
+    }
+}
+
+/// The premise: a write grant on one table commits to another table through
+/// the multi-table commit.
+#[tokio::test]
+async fn a_multi_table_commit_to_an_unwritable_table_is_refused() {
+    let env = env_or_skip!();
+    env.create_table("sales", "mine").await;
+    env.create_table("sales", "theirs").await;
+    let token = env
+        .token_for(
+            "external",
+            &[grant("table", Some(&["sales"]), Some("mine"), "write")],
+        )
+        .await;
+
+    let (status, body) = env
+        .commit(&token, vec![set_property(&["sales"], "theirs", "pwned")])
+        .await;
+    let theirs = env.probe("sales", "theirs").await;
+    assert_eq!(
+        (status, theirs.as_deref()),
+        (StatusCode::FORBIDDEN, None),
+        "the commit answered {status} {body}, and left theirs' property {theirs:?}"
+    );
+    assert!(
+        body.as_str().unwrap_or("").contains("sales.theirs"),
+        "the 403 names the table: {body}"
+    );
+}
+
+/// One unwritable table refuses the whole commit: nothing is forwarded, so
+/// the writable table in the same commit is unchanged too.
+#[tokio::test]
+async fn one_unwritable_table_refuses_the_whole_commit() {
+    let env = env_or_skip!();
+    env.create_table("sales", "mine").await;
+    env.create_table("sales", "theirs").await;
+    let token = env
+        .token_for(
+            "external",
+            &[
+                grant("table", Some(&["sales"]), Some("mine"), "write"),
+                grant("table", Some(&["sales"]), Some("theirs"), "read"),
+            ],
+        )
+        .await;
+    let (status, body) = env
+        .commit(
+            &token,
+            vec![
+                set_property(&["sales"], "mine", "1"),
+                set_property(&["sales"], "theirs", "1"),
+            ],
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        body.as_str().unwrap_or("").contains("sales.theirs"),
+        "the 403 names the refused table: {body}"
+    );
+    assert_eq!(env.probe("sales", "mine").await, None, "nothing forwarded");
+    assert_eq!(env.probe("sales", "theirs").await, None);
+}
+
+/// Write on every table commits; an engine with warehouse manage commits
+/// anywhere, multi-level namespaces included.
+#[tokio::test]
+async fn an_authorized_multi_table_commit_still_commits() {
+    let env = env_or_skip!();
+    env.create_table("sales", "mine").await;
+    env.create_table("stage", "other").await;
+    env.create_table("corp%1Ffin", "ledger").await;
+    let token = env
+        .token_for(
+            "external",
+            &[
+                grant("table", Some(&["sales"]), Some("mine"), "write"),
+                grant("namespace", Some(&["stage"]), None, "manage"),
+            ],
+        )
+        .await;
+    let (status, body) = env
+        .commit(
+            &token,
+            vec![
+                set_property(&["sales"], "mine", "a"),
+                set_property(&["stage"], "other", "a"),
+            ],
+        )
+        .await;
+    assert!(status.is_success(), "commit: {status} {body}");
+    assert_eq!(env.probe("sales", "mine").await.as_deref(), Some("a"));
+    assert_eq!(env.probe("stage", "other").await.as_deref(), Some("a"));
+
+    let engine = env
+        .token_for("engine", &[grant("catalog", None, None, "manage")])
+        .await;
+    let (status, body) = env
+        .commit(
+            &engine,
+            vec![
+                set_property(&["sales"], "mine", "b"),
+                set_property(&["corp", "fin"], "ledger", "b"),
+            ],
+        )
+        .await;
+    assert!(status.is_success(), "engine commit: {status} {body}");
+    assert_eq!(
+        env.probe("corp%1Ffin", "ledger").await.as_deref(),
+        Some("b")
+    );
+}
+
+/// A grant on `corp` does not reach a table in `corp.fin`.
+#[tokio::test]
+async fn a_multi_table_commit_matches_namespaces_exactly() {
+    let env = env_or_skip!();
+    env.create_table("corp%1Ffin", "ledger").await;
+    let token = env
+        .token_for(
+            "external",
+            &[grant("namespace", Some(&["corp"]), None, "write")],
+        )
+        .await;
+    let (status, body) = env
+        .commit(&token, vec![set_property(&["corp", "fin"], "ledger", "x")])
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(env.probe("corp%1Ffin", "ledger").await, None);
+}
+
+/// A body the guard cannot read as a multi-table commit is its own 400.
+#[tokio::test]
+async fn a_malformed_multi_table_commit_is_a_400_from_the_guard() {
+    let env = env_or_skip!();
+    let token = env
+        .token_for("engine", &[grant("catalog", None, None, "manage")])
+        .await;
+    for (what, body) in [
+        ("not JSON", b"{not json".to_vec()),
+        ("no table-changes", b"{}".to_vec()),
+        (
+            "table-changes not a list",
+            json!({"table-changes": {}}).to_string().into_bytes(),
+        ),
+        (
+            "an empty list",
+            json!({"table-changes": []}).to_string().into_bytes(),
+        ),
+        (
+            "a change with no identifier",
+            json!({"table-changes": [{"requirements": [], "updates": []}]})
+                .to_string()
+                .into_bytes(),
+        ),
+        (
+            "an empty namespace",
+            json!({"table-changes": [set_property(&[], "t", "x")]})
+                .to_string()
+                .into_bytes(),
+        ),
+    ] {
+        let (status, resp) = env
+            .send_bytes(&env.app, Some(&token), "POST", "transactions/commit", body)
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{what}: {resp}");
+        assert!(
+            resp.as_str()
+                .unwrap_or("")
+                .starts_with("malformed multi-table commit"),
+            "{what}: the guard's own 400, not lakekeeper's: {resp}"
+        );
     }
 }

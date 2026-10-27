@@ -618,37 +618,64 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
             // A rename (`/tables/rename`, `/views/rename`) names what it touches
             // only in its body: it needs what a drop of the source needs and
             // what a create in the destination's namespace needs (rename-authz
-            // spec §3.2).
-            if method == "POST" && matches!(segs.as_slice(), [_, "tables" | "views", "rename"]) {
-                let (src, dst) = parse_rename_body(body).map_err(|m| {
-                    (
-                        StatusCode::BAD_REQUEST,
-                        format!("malformed rename request: {m}"),
-                    )
-                })?;
-                if !grants
-                    .iter()
-                    .any(|g| catalog_grant_covers(g, Some(&src.0), Some(&src.1), true))
-                {
-                    return forbid(format!(
-                        "role '{token_role}' may not rename {}.{}: renaming needs write on the \
-                         source, as dropping it would",
-                        src.0.join("."),
-                        src.1
-                    ));
+            // spec §3.2). A multi-table commit (`/transactions/commit`) needs,
+            // for every table it changes, what an update of that table alone
+            // needs (§8.2).
+            match egret_catalog_engine::GuardedBody::of(method, path) {
+                Some(egret_catalog_engine::GuardedBody::Rename) => {
+                    let (src, dst) = parse_rename_body(body).map_err(|m| {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            format!("malformed rename request: {m}"),
+                        )
+                    })?;
+                    if !grants
+                        .iter()
+                        .any(|g| catalog_grant_covers(g, Some(&src.0), Some(&src.1), true))
+                    {
+                        return forbid(format!(
+                            "role '{token_role}' may not rename {}.{}: renaming needs write on the \
+                             source, as dropping it would",
+                            src.0.join("."),
+                            src.1
+                        ));
+                    }
+                    if !grants
+                        .iter()
+                        .any(|g| catalog_grant_covers(g, Some(&dst.0), None, true))
+                    {
+                        let ns = dst.0.join(".");
+                        return forbid(format!(
+                            "role '{token_role}' may not rename into {ns}.{}: renaming needs write on \
+                             namespace {ns}, as creating a table there would",
+                            dst.1
+                        ));
+                    }
+                    return Ok(caller);
                 }
-                if !grants
-                    .iter()
-                    .any(|g| catalog_grant_covers(g, Some(&dst.0), None, true))
-                {
-                    let ns = dst.0.join(".");
-                    return forbid(format!(
-                        "role '{token_role}' may not rename into {ns}.{}: renaming needs write on \
-                         namespace {ns}, as creating a table there would",
-                        dst.1
-                    ));
+                Some(egret_catalog_engine::GuardedBody::MultiTableCommit) => {
+                    let tables = parse_commit_body(body).map_err(|m| {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            format!("malformed multi-table commit: {m}"),
+                        )
+                    })?;
+                    for (ns, name) in &tables {
+                        if !grants
+                            .iter()
+                            .any(|g| catalog_grant_covers(g, Some(ns), Some(name), true))
+                        {
+                            return forbid(format!(
+                                "role '{token_role}' may not commit to {}.{name}: a multi-table \
+                                 commit needs write on every table it changes, as updating it \
+                                 alone would; nothing was committed",
+                                ns.join(".")
+                            ));
+                        }
+                    }
+                    return Ok(caller);
                 }
-                return Ok(caller);
+                None => {}
             }
 
             // Resolve the request target: /namespaces/{ns}[/tables|views/{table}].
@@ -685,37 +712,67 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
     }
 }
 
-/// One side of a rename: the namespace's levels and the name.
-type RenameSide = (Vec<String>, String);
+/// A table or view named in a request body: the namespace's levels and the
+/// name.
+type TableIdent = (Vec<String>, String);
 
 /// The `{source, destination}` of a rename body, each `{namespace: [..],
 /// name}`. `Err` says what is wrong, for the 400.
-fn parse_rename_body(body: Option<&[u8]>) -> Result<(RenameSide, RenameSide), String> {
+fn parse_rename_body(body: Option<&[u8]>) -> Result<(TableIdent, TableIdent), String> {
     let body = body.ok_or("no body")?;
     let json: serde_json::Value =
         serde_json::from_slice(body).map_err(|e| format!("the body is not JSON: {e}"))?;
-    let side = |k: &str| -> Result<RenameSide, String> {
-        let v = json.get(k).ok_or(format!("no `{k}`"))?;
-        let ns: Vec<String> = v
-            .get("namespace")
-            .and_then(|n| n.as_array())
-            .and_then(|a| {
-                a.iter()
-                    .map(|l| l.as_str().map(str::to_string))
-                    .collect::<Option<Vec<_>>>()
-            })
-            .filter(|ns| !ns.is_empty())
-            .ok_or(format!(
-                "`{k}.namespace` is not a non-empty list of strings"
-            ))?;
-        let name = v
-            .get("name")
-            .and_then(|n| n.as_str())
-            .filter(|n| !n.is_empty())
-            .ok_or(format!("`{k}.name` is not a non-empty string"))?;
-        Ok((ns, name.to_string()))
+    let side = |k: &str| -> Result<TableIdent, String> {
+        identifier(json.get(k).ok_or(format!("no `{k}`"))?, k)
     };
     Ok((side("source")?, side("destination")?))
+}
+
+/// The tables a multi-table commit changes: each `table-changes[].identifier`
+/// (`{namespace: [..], name}`). `Err` says what is wrong, for the 400.
+fn parse_commit_body(body: Option<&[u8]>) -> Result<Vec<TableIdent>, String> {
+    let body = body.ok_or("no body")?;
+    let json: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("the body is not JSON: {e}"))?;
+    let changes = json
+        .get("table-changes")
+        .and_then(|c| c.as_array())
+        .ok_or("`table-changes` is not a list")?;
+    if changes.is_empty() {
+        return Err("`table-changes` is empty".into());
+    }
+    changes
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            c.get("identifier")
+                .ok_or(format!("`table-changes[{i}]` has no `identifier`"))
+                .and_then(|id| identifier(id, &format!("table-changes[{i}].identifier")))
+        })
+        .collect()
+}
+
+/// `{namespace: [..], name}`: the namespace a non-empty list of strings, the
+/// name a non-empty string. `at` names it in the error.
+fn identifier(v: &serde_json::Value, at: &str) -> Result<TableIdent, String> {
+    let ns: Vec<String> = v
+        .get("namespace")
+        .and_then(|n| n.as_array())
+        .and_then(|a| {
+            a.iter()
+                .map(|l| l.as_str().map(str::to_string))
+                .collect::<Option<Vec<_>>>()
+        })
+        .filter(|ns| !ns.is_empty())
+        .ok_or(format!(
+            "`{at}.namespace` is not a non-empty list of strings"
+        ))?;
+    let name = v
+        .get("name")
+        .and_then(|n| n.as_str())
+        .filter(|n| !n.is_empty())
+        .ok_or(format!("`{at}.name` is not a non-empty string"))?;
+    Ok((ns, name.to_string()))
 }
 
 /// Split a namespace path segment into its parts. lakekeeper encodes multipart
@@ -3208,7 +3265,7 @@ mod catalog_authz_tests {
 /// DB-gated (the guard needs `PgSigningKeyStore`, whose key lives in Postgres);
 /// self-skips without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS, like the other DB-backed suites.
 #[cfg(test)]
-mod catalog_rename_guard_tests;
+mod catalog_guard_body_tests;
 
 #[cfg(test)]
 mod catalog_guard_audience_tests {

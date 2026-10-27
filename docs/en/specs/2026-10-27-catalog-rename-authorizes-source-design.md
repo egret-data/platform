@@ -5,7 +5,8 @@ Programme: Control Plane & DG, security defects. Origin: the grants-after-rename
 (and F-C, the same defect on views). Precedent: the guard's own per-request privilege mapping
 (`crates/egret-bin/src/main.rs`, `EgretCatalogGuard::check` and `catalog_grant_covers`).
 
-The controller set every choice here (§4, D1–D6); the user may revisit them.
+The controller set every choice here (§4, D1–D6; §8.4, D7–D9); the user may revisit them. §8 extends the package,
+at the user's request (2026-10-27), to the multi-table commit, the sibling hole of §7.
 
 ## 1. Problem
 
@@ -119,11 +120,11 @@ runs before lakekeeper, on names only.
 ## 5. Not in scope
 
 - Moving catalog grants, `perm.grants` and rules with a rename (KI-309; the grants-after-rename package).
-- The other root-level writes the guard also authorizes by "any write grant" (§7).
+- The other root-level writes the guard authorizes by "any write grant" (§7), except the multi-table commit (§8).
 
 ## 6. Tests
 
-`crates/egret-bin/src/catalog_rename_guard_tests.rs`, through `mount_catalog_engine` (the real guard, view hold and
+`crates/egret-bin/src/catalog_guard_body_tests.rs`, through `mount_catalog_engine` (the real guard, view hold and
 table hook in front of lakekeeper's router, on an in-memory warehouse):
 
 - premise: `a_table_grant_on_the_destination_does_not_rename_an_unreadable_table`,
@@ -145,9 +146,58 @@ the view hold's rename run on the body the mount re-injected.
 
 ## 7. Related defects found, not fixed
 
-- `POST /{prefix}/transactions/commit` (multi-table commit) is also a catalog-root write: any `write` grant commits to
-  any table named in its body. By reading only; not measured.
+- `POST /{prefix}/transactions/commit` (multi-table commit) was also a catalog-root write. Fixed in §8.
 - `POST /{prefix}/v1/aws/s3/sign` (the S3 request signer) is also a catalog-root write by path. By reading only; whether
   lakekeeper's signer scopes the signature to a tabular the caller could load is not checked.
 - `POST /{prefix}/namespaces` (create namespace) is allowed for any role with any write grant.
 - F-B: case-sensitive grants against a case-insensitive catalog (§3.4).
+
+## 8. The multi-table commit
+
+### 8.1 Problem and evidence
+
+`POST /{prefix}/transactions/commit` names the tables it changes only in its body (`table-changes[].identifier`,
+`LK/tables.rs:581`). Its path has no `namespaces` segment, so the guard authorized it as a catalog-root write, exactly
+like the rename (E2): any role with any `write`/`manage` grant could commit any change to any table.
+
+Measured at `7b965597` through the real mount: a role whose only grant is `table` `write` on `sales.mine` committed
+`set-properties` to `sales.theirs`. The commit answered **200**, and lakekeeper then held the new property on
+`sales.theirs` (`a_multi_table_commit_to_an_unwritable_table_is_refused`). A set-properties update is the harmless
+probe; the same request carries `add-snapshot`, `set-location`, `remove-snapshots` and schema changes.
+
+### 8.2 Privilege model
+
+For **every** table in `table-changes`, the guard requires what a single-table update (`POST
+…/namespaces/{ns}/tables/{t}`) of that table requires: a `write`/`manage` grant covering `(ns, t)`, so `catalog`,
+`namespace` on `ns`, or `table` on `(ns, t)` (E5). The same `catalog_grant_covers` call decides both routes, so they
+cannot drift. Namespaces match exactly and level by level (§3.4, §3.5).
+
+### 8.3 Body, answers, hooks
+
+- The mount hands the guard the body (`GuardedBody::MultiTableCommit`) and puts the same bytes back, as for a rename
+  (§3.1). #757's table hook reads this body too; its multi-table tests run behind a stub guard that reads it.
+- The first table not covered → 403, before anything is forwarded: `role '<r>' may not commit to <ns>.<name>: a
+  multi-table commit needs write on every table it changes, as updating it alone would; nothing was committed`.
+  The commit is atomic in lakekeeper, and the guard refuses it whole, so a covered table in the same commit is not
+  changed either.
+- 400, `malformed multi-table commit: <what>`: not JSON; `table-changes` missing, not a list, or empty; an entry
+  with no `identifier`; an identifier whose `namespace` is not a non-empty list of strings or whose `name` is not a
+  non-empty string.
+
+### 8.4 Controller defaults
+
+| id | choice | reason |
+|---|---|---|
+| D7 | Every table needs single-table update's privilege; one miss refuses the whole commit | the commit is all-or-nothing in lakekeeper; forwarding a part would change its meaning |
+| D8 | Body cap 16 MiB | a commit carries whole schemas and snapshot lists; the table hook behind the guard already buffers the same body to 16 MiB, so this adds no new memory bound and refuses nothing the hook accepts |
+| D9 | An empty `table-changes`, or an entry with no `identifier`, is a 400 | an entry with no identifier names no table the guard can authorize; an empty commit authorizes nothing |
+
+### 8.5 Tests
+
+In `crates/egret-bin/src/catalog_guard_body_tests.rs`:
+
+- red at `7b965597`, green now: `a_multi_table_commit_to_an_unwritable_table_is_refused` (the premise),
+  `one_unwritable_table_refuses_the_whole_commit`, `a_multi_table_commit_matches_namespaces_exactly`,
+  `a_malformed_multi_table_commit_is_a_400_from_the_guard`;
+- green before and after: `an_authorized_multi_table_commit_still_commits` (table and namespace grants, an engine with
+  warehouse manage, a multi-level namespace).

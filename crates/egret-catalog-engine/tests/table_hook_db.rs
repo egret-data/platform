@@ -405,7 +405,7 @@ async fn env_with_limit(limit: Duration) -> Option<Env> {
 
 /// A guard that lets every request through, by the subject in its slot, as
 /// the production guard does with a verified catalog token. It reads a
-/// rename's body, as the production guard does.
+/// rename's or a multi-table commit's body, as the production guard does.
 struct StubGuard(Arc<Mutex<String>>);
 
 #[async_trait::async_trait]
@@ -418,12 +418,14 @@ impl egret_catalog_engine::CatalogGuard for StubGuard {
         _bearer: Option<&str>,
         body: Option<&[u8]>,
     ) -> Result<egret_catalog_engine::CatalogCaller, (StatusCode, String)> {
-        // The mount hands the guard a rename's body and puts it back, so the
-        // hook behind it moves classifications on the same bytes.
+        // The mount hands the guard a rename's or a multi-table commit's body
+        // and puts it back, so the hook behind it acts on the same bytes.
         assert_eq!(
             body.is_some(),
-            path.ends_with("/tables/rename") || path.ends_with("/views/rename"),
-            "the guard reads the body of a rename only: {path}"
+            path.ends_with("/tables/rename")
+                || path.ends_with("/views/rename")
+                || path.ends_with("/transactions/commit"),
+            "the guard reads the body of a rename or a multi-table commit only: {path}"
         );
         Ok(egret_catalog_engine::CatalogCaller {
             subject: self.0.lock().unwrap().clone(),

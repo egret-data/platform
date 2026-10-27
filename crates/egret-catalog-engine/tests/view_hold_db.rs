@@ -581,8 +581,8 @@ impl Env {
     }
 }
 
-/// Lets every request through. The mount hands it a rename's body (and only
-/// a rename's), which it checks is the rename it expects.
+/// Lets every request through. The mount hands it a rename's body, which it
+/// checks is the rename it expects, or a multi-table commit's, and no other.
 struct BodyReadingGuard;
 
 #[async_trait::async_trait]
@@ -596,8 +596,13 @@ impl egret_catalog_engine::CatalogGuard for BodyReadingGuard {
         body: Option<&[u8]>,
     ) -> Result<egret_catalog_engine::CatalogCaller, (StatusCode, String)> {
         let rename = path.ends_with("/views/rename") || path.ends_with("/tables/rename");
-        assert_eq!(body.is_some(), rename, "the body of a rename only: {path}");
-        if let Some(b) = body {
+        let commit = path.ends_with("/transactions/commit");
+        assert_eq!(
+            body.is_some(),
+            rename || commit,
+            "the body of a rename or a multi-table commit only: {path}"
+        );
+        if let (true, Some(b)) = (rename, body) {
             let json: Value = serde_json::from_slice(b).expect("a rename body is JSON");
             assert!(json.get("source").is_some(), "the rename body: {json}");
         }

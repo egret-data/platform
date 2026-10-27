@@ -242,9 +242,9 @@ pub fn catalog_engine_router(state: ApiContext<EngineState>) -> axum::Router {
 /// `path`/`query` are lakekeeper-relative (the router is mounted under
 /// `/catalog/v1`, so a request to `/catalog/v1/config` arrives here as `/config`).
 ///
-/// `body` is the request body for a rename ([`is_rename_request`]), whose
-/// source and destination are named only there, and `None` for every other
-/// request, which streams through unread.
+/// `body` is the request body for a rename or a multi-table commit
+/// ([`GuardedBody`]), whose targets are named only there, and `None` for every
+/// other request, which streams through unread.
 #[async_trait::async_trait]
 pub trait CatalogGuard: Send + Sync {
     /// `Ok(caller)` → allowed, by the principal the verified token names;
@@ -259,20 +259,52 @@ pub trait CatalogGuard: Send + Sync {
     ) -> Result<CatalogCaller, (axum::http::StatusCode, String)>;
 }
 
-/// The most of a rename body the mount buffers for the guard. A rename body
-/// is a few hundred bytes.
-pub const RENAME_BODY_LIMIT: usize = 1 << 20;
+/// The requests that name their targets only in the body, whose body the
+/// mount hands the guard (rename-authz spec §3.1, §8.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardedBody {
+    /// `POST /{prefix}/tables/rename` or `POST /{prefix}/views/rename`.
+    Rename,
+    /// `POST /{prefix}/transactions/commit`.
+    MultiTableCommit,
+}
 
-/// Is this `POST /{prefix}/tables/rename` or `POST /{prefix}/views/rename`?
-/// Those two name their source and destination only in the body, so the
-/// mount hands the guard the body for them (rename-authz spec §3.1).
-pub fn is_rename_request(method: &str, path: &str) -> bool {
-    let segs: Vec<&str> = path
-        .trim_start_matches('/')
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .collect();
-    method == "POST" && matches!(segs.as_slice(), [_, "tables" | "views", "rename"])
+impl GuardedBody {
+    /// Which of them this request is, if any.
+    pub fn of(method: &str, path: &str) -> Option<Self> {
+        if method != "POST" {
+            return None;
+        }
+        let segs: Vec<&str> = path
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+        match segs.as_slice() {
+            [_, "tables" | "views", "rename"] => Some(Self::Rename),
+            [_, "transactions", "commit"] => Some(Self::MultiTableCommit),
+            _ => None,
+        }
+    }
+
+    /// The most of the body the mount buffers. A rename body is a few hundred
+    /// bytes. A multi-table commit carries whole schemas and snapshots; the
+    /// table hook behind the guard already buffers it up to 16 MiB, so the
+    /// guard takes the same cap and adds no new limit.
+    pub fn limit(self) -> usize {
+        match self {
+            Self::Rename => 1 << 20,
+            Self::MultiTableCommit => 16 << 20,
+        }
+    }
+
+    /// How the guard's 400 names the request.
+    pub fn what(self) -> &'static str {
+        match self {
+            Self::Rename => "rename request",
+            Self::MultiTableCommit => "multi-table commit",
+        }
+    }
 }
 
 /// Who sent an allowed Iceberg request: the verified token's `sub` and `aud`.
@@ -374,17 +406,18 @@ async fn guard_then_inject_metadata(
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.strip_prefix("Bearer "))
             .map(str::to_string);
-        // A rename names its source and destination only in the body: read
-        // it for the guard and put the same bytes back, so the view hold, the
-        // table hook and lakekeeper see exactly what the guard authorized.
-        let body = if is_rename_request(&method, &path) {
+        // A rename and a multi-table commit name what they touch only in the
+        // body: read it for the guard and put the same bytes back, so the view
+        // hold, the table hook and lakekeeper see exactly what the guard
+        // authorized.
+        let body = if let Some(kind) = GuardedBody::of(&method, &path) {
             let (parts, body) = req.into_parts();
-            let bytes = match axum::body::to_bytes(body, RENAME_BODY_LIMIT).await {
+            let bytes = match axum::body::to_bytes(body, kind.limit()).await {
                 Ok(b) => b,
                 Err(e) => {
                     return (
                         axum::http::StatusCode::BAD_REQUEST,
-                        format!("malformed rename request: the body could not be read: {e}"),
+                        format!("malformed {}: the body could not be read: {e}", kind.what()),
                     )
                         .into_response()
                 }

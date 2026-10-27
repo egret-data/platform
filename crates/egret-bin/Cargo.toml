@@ -84,7 +84,7 @@ egret-test-db.workspace = true
 # discovery document and the minted token come from the same wiring the binary
 # builds rather than from a hand-made copy of it.
 tower.workspace = true
-# The catalog guard's rename tests (`src/catalog_rename_guard_tests.rs`) drive
+# The catalog guard's body tests (`src/catalog_guard_body_tests.rs`) drive
 # the real guard in front of lakekeeper's real router on an in-memory
 # warehouse, which only `test-utils` exposes (`create_memory_warehouse`).
 egret-catalog-engine = { workspace = true, features = ["test-utils"] }
