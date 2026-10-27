@@ -138,8 +138,13 @@ fn guard(plan: &Plan, state: &ExecutionState, cmds: Vec<Command>, now: Tick) -> 
             other => runs.extend(named_run(other)),
         }
     }
-    runs.retain(|&ix| ix < state.runs.len() && in_phase(plan, state, ix));
+    // Only runs this round can still fail: a named run that is already
+    // terminal (or not of the phase) cannot stand in for the batch.
+    runs.retain(|&ix| {
+        ix < state.runs.len() && in_phase(plan, state, ix) && fail(state, ix, now).is_some()
+    });
     if runs.is_empty() {
+        // Fallback: every live run of the phase with no live child.
         runs = (0..state.runs.len())
             .filter(|&ix| in_phase(plan, state, ix))
             .filter(|&ix| fail(state, ix, now).is_some())
@@ -154,8 +159,23 @@ fn guard(plan: &Plan, state: &ExecutionState, cmds: Vec<Command>, now: Tick) -> 
     }
     runs.sort_unstable();
     runs.dedup();
-    runs.into_iter()
+    let failed: Vec<Command> = runs
+        .into_iter()
         .filter_map(|ix| fail(state, ix, now))
+        .collect();
+    if !failed.is_empty() {
+        return failed;
+    }
+    // **No live run of the phase at all** (re-review Minor, 2026-10-28):
+    // nothing can stand in for the batch, and dropping it whole would stall
+    // the phase (the next round would emit it again). Its execution writes
+    // are stripped and the rest is kept. With no live run, what the walk can
+    // still emit is the creation of the next after-task (`CreateRun`, which
+    // writes nothing of the execution), so the phase moves on, every
+    // after-task ends with a terminal run, and [`terminated`] becomes true.
+    // If the stripped batch is empty, this round returns no commands.
+    cmds.into_iter()
+        .filter(|c| !writes_the_execution(c))
         .collect()
 }
 
@@ -375,5 +395,128 @@ mod tests {
             state: RunState::Success,
         }];
         assert_eq!(guard(&plan, &state, ok.clone(), Tick(0)), ok);
+    }
+
+    /// A terminal `SUCCESS` execution with after-tasks `e1`, `e2`, `e3`:
+    /// `e1`'s run is `SUCCESS`, `e2`'s is `RUNNING`.
+    fn one_done_one_running() -> (Plan, ExecutionState) {
+        let plan = crate::executor::plan_stored(
+            "id: f\nnamespace: t\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: a\nafterExecution:\n  - id: e1\n    type: io.kestra.plugin.core.log.Log\n    message: e\n  - id: e2\n    type: io.kestra.plugin.core.log.Log\n    message: e\n  - id: e3\n    type: io.kestra.plugin.core.log.Log\n    message: e\n",
+        )
+        .unwrap();
+        let mut state = ExecutionState::new(&plan);
+        for s in [RunState::Running, RunState::Success] {
+            apply(&mut state, &Command::SetExecutionState { state: s });
+        }
+        for (run, task) in plan.after_execution[..2].iter().enumerate() {
+            apply(
+                &mut state,
+                &Command::CreateRun {
+                    task: *task,
+                    parent: None,
+                    value: None,
+                },
+            );
+            apply(&mut state, &Command::StartRun { run, at: Tick(0) });
+        }
+        apply(
+            &mut state,
+            &Command::SetRunState {
+                run: 0,
+                state: RunState::Success,
+            },
+        );
+        (plan, state)
+    }
+
+    /// Re-review Minor (2026-10-28): a batch whose named runs are all
+    /// already terminal is still replaced -- by the live leaf of the phase.
+    #[test]
+    fn the_guard_fails_a_live_run_when_every_named_run_is_terminal() {
+        let (plan, state) = one_done_one_running();
+        assert_eq!(
+            guard(
+                &plan,
+                &state,
+                vec![
+                    Command::SetRunState {
+                        run: 0,
+                        state: RunState::Failed
+                    },
+                    Command::SetExecutionState {
+                        state: RunState::Failed
+                    },
+                ],
+                Tick(0)
+            ),
+            vec![Command::SetRunState {
+                run: 1,
+                state: RunState::Failed
+            }]
+        );
+    }
+
+    /// With no live run of the phase at all, the batch keeps its commands
+    /// that do not write the execution: the phase moves on (here, `e3` is
+    /// created), and once every after-task has ended, `terminated` holds.
+    /// An all-writing batch then yields no commands.
+    #[test]
+    fn the_guard_strips_the_writes_when_no_run_of_the_phase_is_live() {
+        let (plan, mut state) = one_done_one_running();
+        apply(
+            &mut state,
+            &Command::SetRunState {
+                run: 1,
+                state: RunState::Success,
+            },
+        );
+        let e3 = plan.after_execution[2];
+        let create = Command::CreateRun {
+            task: e3,
+            parent: None,
+            value: None,
+        };
+        let out = guard(
+            &plan,
+            &state,
+            vec![
+                create.clone(),
+                Command::SetExecutionState {
+                    state: RunState::Failed,
+                },
+            ],
+            Tick(0),
+        );
+        assert_eq!(out, vec![create.clone()]);
+        assert!(!terminated(&plan, &state));
+        apply(&mut state, &create);
+        apply(
+            &mut state,
+            &Command::StartRun {
+                run: 2,
+                at: Tick(0),
+            },
+        );
+        apply(
+            &mut state,
+            &Command::SetRunState {
+                run: 2,
+                state: RunState::Success,
+            },
+        );
+        assert!(terminated(&plan, &state));
+        assert_eq!(drive(&plan, &state, Tick(0)), Vec::new());
+        assert_eq!(
+            guard(
+                &plan,
+                &state,
+                vec![Command::SetExecutionState {
+                    state: RunState::Failed
+                }],
+                Tick(0)
+            ),
+            Vec::new()
+        );
+        assert_eq!(state.history.last(), Some(&RunState::Success));
     }
 }
