@@ -863,3 +863,205 @@ async fn a_phase_kill_is_scoped_and_needs_manage(pool: sqlx::PgPool) {
     // Control: the manager's own kill is accepted.
     assert_eq!(kill(&app, ws, mine, user).await.status(), 202);
 }
+
+// ── Part 3: the other flowables inside the phase (D12's measurement) ────────
+
+/// One `Log` task `a`, then `afterExecution:` holding `after` (the YAML of
+/// the list, already indented under `afterExecution:`).
+fn with_after(id: &str, after: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: a\n    type: {LOG}\n    message: hi\n\
+         afterExecution:\n{after}"
+    )
+}
+
+/// Run `source` to the end of its phase and check what every kind must keep:
+/// the top after-task `after` and every other run of the execution is
+/// `SUCCESS`, and the execution's state, history and `ended_at` are what the
+/// main run ended with. Returns the execution id.
+async fn run_phase(pool: &sqlx::PgPool, ws: Uuid, source: &str) -> Uuid {
+    run_phase_with(pool, ws, source, false).await
+}
+
+/// `run_phase`; with `real_tasks` the worker runs the real core-task handlers
+/// over an in-memory object store (a `WorkingDirectory` block needs both).
+async fn run_phase_with(pool: &sqlx::PgPool, ws: Uuid, source: &str, real_tasks: bool) -> Uuid {
+    let ex = start(pool, ws, source).await;
+    finish(pool, "a").await;
+    let ended = exec_row(pool, ex).await;
+    assert_eq!(ended.0, "SUCCESS");
+    assert_eq!(ended.1, json!(["CREATED", "RUNNING", "SUCCESS"]));
+    assert!(ended.2.is_some());
+
+    if real_tasks {
+        egret_workflow::storage::install_mem_for_tests();
+        let reg =
+            egret_workflow::worker::Handlers::with_core_tasks(egret_workflow::storage::current());
+        let mut ended_phase = false;
+        for _ in 0..50 {
+            if run_state(pool, ex, "after").await.as_deref() == Some("SUCCESS") {
+                ended_phase = true;
+                break;
+            }
+            egret_workflow::worker::tick_with(
+                pool,
+                64,
+                &reg,
+                egret_workflow::worker::WorkerTiming::default(),
+            )
+            .await
+            .expect("a worker tick");
+        }
+        assert!(
+            ended_phase,
+            "the after-task `after` did not end in 50 ticks"
+        );
+    } else {
+        tick_until(pool, "the after-task `after` ending", || async {
+            run_state(pool, ex, "after").await.as_deref() == Some("SUCCESS")
+        })
+        .await;
+    }
+    let states: Vec<(String, String)> =
+        sqlx::query_as("SELECT task_id, state FROM workflow.task_runs WHERE execution_id = $1")
+            .bind(ex)
+            .fetch_all(pool)
+            .await
+            .unwrap();
+    assert!(
+        states.iter().all(|(_, s)| s == "SUCCESS"),
+        "every run of the execution is SUCCESS: {states:?}"
+    );
+    assert_eq!(
+        exec_row(pool, ex).await,
+        ended,
+        "the phase moved the execution"
+    );
+    ex
+}
+
+async fn runs_of(pool: &sqlx::PgPool, ex: Uuid, task_id: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.task_runs WHERE execution_id = $1 AND task_id = $2 AND state = 'SUCCESS'",
+    )
+    .bind(ex)
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// **A `Loop` over `[1, 2]` inside `afterExecution:` runs both iterations.**
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_loop_inside_after_execution_runs_to_the_end(pool: sqlx::PgPool) {
+    let (_db, ws, _user, _app) = setup(&pool).await;
+    let ex = run_phase(
+        &pool,
+        ws,
+        &with_after(
+            "after-loop",
+            &format!(
+                "  - id: after\n    type: io.kestra.plugin.core.flow.Loop\n    values: [1, 2]\n    \
+                 tasks:\n      - id: it\n        type: {LOG}\n        message: \"{{{{ taskrun.value }}}}\"\n"
+            ),
+        ),
+    )
+    .await;
+    // A `Loop` iterates in sub-executions, not in runs of its own execution.
+    let iterations: Vec<(i32, String)> = sqlx::query_as(
+        "SELECT loop_index, state FROM workflow.executions \
+          WHERE parent_execution_id = $1 ORDER BY loop_index",
+    )
+    .bind(ex)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        iterations,
+        vec![(0, "SUCCESS".to_string()), (1, "SUCCESS".to_string())],
+        "one terminal sub-execution per value"
+    );
+}
+
+/// **A `LoopUntil` of two iterations inside `afterExecution:` runs to the
+/// end.** Measured 2026-10-27: it does not. `LoopUntil` waits between
+/// iterations by pausing its run (`Command::PauseRun` with a `Resume::Iterate`
+/// at a tick, even for `interval: PT0S`), and the post-terminal phase refuses
+/// any command that writes the execution: the worker panics in
+/// `after_execution.rs:68` ("the post-terminal phase emitted a command that
+/// writes the execution: [PauseRun { run: 1, resume: Iterate .. }]").
+#[ignore = "refused since package #2b: a LoopUntil waits between iterations with PauseRun, which the after-execution phase cannot apply (panic at after_execution.rs:68); follow-up package number to be set by the controller"]
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_loop_until_inside_after_execution_runs_to_the_end(pool: sqlx::PgPool) {
+    let (_db, ws, _user, _app) = setup(&pool).await;
+    let ex = run_phase(
+        &pool,
+        ws,
+        &with_after(
+            "after-loopuntil",
+            &format!(
+                "  - id: after\n    type: io.kestra.plugin.core.flow.LoopUntil\n    \
+                 condition: \"{{{{ outputs.after.iterationCount >= 2 }}}}\"\n    \
+                 checkFrequency:\n      interval: PT0S\n    \
+                 tasks:\n      - id: it\n        type: {LOG}\n        message: x\n"
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(runs_of(&pool, ex, "it").await, 2, "two iterations");
+}
+
+/// **A `Subflow` inside `afterExecution:` runs its child execution to a
+/// terminal state, and the phase ends.**
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_inside_after_execution_runs_to_the_end(pool: sqlx::PgPool) {
+    let (db, ws, user, _app) = setup(&pool).await;
+    file_flow(
+        &db,
+        ws,
+        user,
+        &format!("id: kid\nnamespace: t\ntasks:\n  - id: k\n    type: {LOG}\n    message: kid\n"),
+    )
+    .await;
+    let ex = run_phase(
+        &pool,
+        ws,
+        &with_after(
+            "after-subflow",
+            "  - id: after\n    type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    flowId: kid\n",
+        ),
+    )
+    .await;
+    let kid: (Uuid, String) =
+        sqlx::query_as("SELECT id, state FROM workflow.executions WHERE trigger_execution_id = $1")
+            .bind(ex)
+            .fetch_one(&pool)
+            .await
+            .expect("the subflow child");
+    assert_eq!(kid.1, "SUCCESS");
+    assert_eq!(
+        run_state(&pool, kid.0, "k").await.as_deref(),
+        Some("SUCCESS")
+    );
+}
+
+/// **A `WorkingDirectory` inside `afterExecution:` runs its `core.log` child
+/// and ends.**
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_working_directory_inside_after_execution_runs_to_the_end(pool: sqlx::PgPool) {
+    let (_db, ws, _user, _app) = setup(&pool).await;
+    let ex = run_phase_with(
+        &pool,
+        ws,
+        &with_after(
+            "after-wd",
+            &format!(
+                "  - id: after\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n    \
+                 tasks:\n      - id: it\n        type: {LOG}\n        message: x\n"
+            ),
+        ),
+        true,
+    )
+    .await;
+    assert_eq!(runs_of(&pool, ex, "it").await, 1, "the child ran");
+}
