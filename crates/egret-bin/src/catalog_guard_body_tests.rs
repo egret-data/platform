@@ -1234,3 +1234,202 @@ async fn a_streamed_body_over_the_cap_is_a_413() {
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{route}: {resp}");
     }
 }
+
+/// A single-table commit with `body`, through the guard.
+impl Env {
+    async fn commit_one(
+        &self,
+        token: &str,
+        kind: &str,
+        path_ns: &str,
+        path_name: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        self.send(
+            &self.app,
+            Some(token),
+            "POST",
+            &format!("namespaces/{path_ns}/{kind}/{path_name}"),
+            body,
+        )
+        .await
+    }
+
+    /// The `egret.probe` property of view `ns.name`, read through lakekeeper.
+    async fn view_probe(&self, ns: &str, name: &str) -> Option<String> {
+        let (status, body) = self
+            .send(
+                &self.raw,
+                None,
+                "GET",
+                &format!("namespaces/{ns}/views/{name}"),
+                Value::Null,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "load view {ns}.{name}: {body}");
+        body["metadata"]["properties"]["egret.probe"]
+            .as_str()
+            .map(str::to_string)
+    }
+}
+
+/// A commit body that sets `egret.probe`, naming `identifier` when given.
+fn commit_body(identifier: Option<(&[&str], &str)>, value: &str) -> Value {
+    let mut body = json!({
+        "requirements": [],
+        "updates": [{"action": "set-properties", "updates": {"egret.probe": value}}],
+    });
+    if let Some((ns, name)) = identifier {
+        body["identifier"] = json!({"namespace": ns, "name": name});
+    }
+    body
+}
+
+/// F1, the review's scenario: a grant on namespace `corp.fin` must not commit
+/// to the TABLE `corp.fin` by naming it in a single-table commit's body
+/// (lakekeeper's "Spark branch" fallback commits to the body's table).
+#[tokio::test]
+async fn a_single_table_commit_cannot_reach_the_table_its_body_names() {
+    let env = env_or_skip!();
+    env.create_table("corp", "fin").await;
+    let team = env
+        .token_for(
+            "external",
+            &[grant("namespace", Some(&["corp", "fin"]), None, "write")],
+        )
+        .await;
+    let (status, body) = env
+        .commit_one(
+            &team,
+            "tables",
+            "corp%1Ffin",
+            "anything",
+            commit_body(Some((&["corp"], "fin")), "pwned"),
+        )
+        .await;
+    let probe = env.probe("corp", "fin").await;
+    assert_eq!(
+        (status, probe.as_deref()),
+        (StatusCode::FORBIDDEN, None),
+        "the commit answered {status} {body}, and left corp.fin's property {probe:?}"
+    );
+}
+
+/// F1 on views: lakekeeper commits a view to the view in the PATH and only
+/// validates the body's `identifier` (`views/commit.rs`: `determine_table_ident`
+/// at :61, then `load_and_authorize_view_operation` on `parameters.view`), so
+/// the review's scenario does not reach the view the body names. Pinned: a
+/// namespace grant on `corp.vfin` changes nothing on the view `corp.vfin`.
+#[tokio::test]
+async fn a_view_commit_reaches_only_the_view_in_its_path() {
+    let env = env_or_skip!();
+    env.create_view("corp", "vfin").await;
+    // The path's namespace must exist for lakekeeper to get past loading it.
+    let (status, body) = env
+        .send(
+            &env.raw,
+            None,
+            "POST",
+            "namespaces",
+            json!({"namespace": ["corp", "vfin"]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "namespace corp.vfin: {body}");
+    let team = env
+        .token_for(
+            "external",
+            &[grant("namespace", Some(&["corp", "vfin"]), None, "write")],
+        )
+        .await;
+    let (status, body) = env
+        .commit_one(
+            &team,
+            "views",
+            "corp%1Fvfin",
+            "anything",
+            commit_body(Some((&["corp"], "vfin")), "pwned"),
+        )
+        .await;
+    assert!(!status.is_success(), "{status} {body}");
+    assert_eq!(env.view_probe("corp", "vfin").await, None);
+}
+
+/// F1: a real Spark branch commit (path `corp.fin/branch_x`, body `corp.fin`)
+/// is authorized by the table it commits to, so a grant on that table
+/// commits; a commit whose body names its own path still commits.
+#[tokio::test]
+async fn a_spark_branch_commit_is_authorized_by_the_table_it_commits_to() {
+    let env = env_or_skip!();
+    env.create_table("corp", "fin").await;
+    let owner = env
+        .token_for(
+            "external",
+            &[grant("table", Some(&["corp"]), Some("fin"), "write")],
+        )
+        .await;
+    let (status, body) = env
+        .commit_one(
+            &owner,
+            "tables",
+            "corp%1Ffin",
+            "branch_x",
+            commit_body(Some((&["corp"], "fin")), "branch"),
+        )
+        .await;
+    assert!(status.is_success(), "spark branch commit: {status} {body}");
+    assert_eq!(env.probe("corp", "fin").await.as_deref(), Some("branch"));
+
+    let (status, body) = env
+        .commit_one(
+            &owner,
+            "tables",
+            "corp",
+            "fin",
+            commit_body(Some((&["corp"], "fin")), "plain"),
+        )
+        .await;
+    assert!(status.is_success(), "plain commit: {status} {body}");
+    let (status, body) = env
+        .commit_one(&owner, "tables", "corp", "fin", commit_body(None, "bare"))
+        .await;
+    assert!(
+        status.is_success(),
+        "commit with no identifier: {status} {body}"
+    );
+    assert_eq!(env.probe("corp", "fin").await.as_deref(), Some("bare"));
+}
+
+/// F1: a single-table commit body the guard cannot read is its own 400.
+#[tokio::test]
+async fn a_malformed_single_table_commit_is_a_400_from_the_guard() {
+    let env = env_or_skip!();
+    env.create_table("sales", "t").await;
+    let token = env
+        .token_for("engine", &[grant("catalog", None, None, "manage")])
+        .await;
+    for (what, body) in [
+        ("not JSON", b"{not json".to_vec()),
+        (
+            "an identifier with an empty namespace",
+            commit_body(Some((&[], "t")), "x").to_string().into_bytes(),
+        ),
+    ] {
+        let (status, resp) = env
+            .send_bytes(
+                &env.app,
+                Some(&token),
+                "POST",
+                "namespaces/sales/tables/t",
+                body,
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{what}: {resp}");
+        assert!(
+            resp.as_str()
+                .unwrap_or("")
+                .starts_with("malformed table commit"),
+            "{what}: the guard's own 400: {resp}"
+        );
+    }
+}
+

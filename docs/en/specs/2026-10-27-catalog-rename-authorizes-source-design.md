@@ -293,3 +293,31 @@ mount, seen failing on the code before the fix), what was decided, and how it is
   - `authenticate` is a required trait method, so a new guard cannot forget it.
 - **Tests:** the three above, red before, green now. The unauthenticated test asserts that the server pulled **0
   bytes** from the body stream (a counting stream), which is how "refused without being buffered" is observed.
+
+### 10.3 F1: a single-table commit could change the table its body names
+
+- **Problem.** The guard authorized `POST /{prefix}/namespaces/{ns}/tables/{t}` by the path. lakekeeper commits to the
+  body's `identifier` when it has one: `determine_table_ident` (`LK/server/tables.rs:1997-2032`, called at `:652`)
+  returns the body identifier when it equals the path, **and** when the path's namespace is `[..n-1] + [name]` of it
+  (the "Spark branch" fallback: Spark sends a branch commit as path `db.t` / `branch_x` with body `db.t`).
+- **Measured** at `9e375205`: a role holding only `namespace` `write` on `corp.fin` sent `POST
+  …/namespaces/corp%1Ffin/tables/anything` with body identifier `corp.fin`; lakekeeper answered **200** and the TABLE
+  `corp.fin` carried the new property (`a_single_table_commit_cannot_reach_the_table_its_body_names`).
+- **Views are not affected.** `commit_view` also calls `determine_table_ident` (`LK/server/views/commit.rs:61`), but
+  only to validate; it then loads and commits the view named by the PATH (`load_and_authorize_view_operation` on
+  `parameters.view`, `:103-118`). Measured: the same scenario on views changes nothing on the body's view (lakekeeper
+  answers 404 for the path's view). Pinned by `a_view_commit_reaches_only_the_view_in_its_path`; the guard does not
+  buffer view commits.
+- **Decision (D11): authorize the table lakekeeper commits to.** The mount buffers the body
+  (`GuardedBody::TableCommit`, 16 MiB, the table hook's own cap, after authN). When the body has an `identifier`, the
+  guard requires write on **that** table; otherwise on the path's table. It does not refuse a mismatch with a 400:
+  real Spark branch commits rely on the fallback, and their path table (`branch_x` in namespace `db.t`) is a name no
+  grant would cover, so "authorize both" would break them. A mismatch lakekeeper does not accept is its own 400.
+- 403: `role '<r>' may not commit to <ns>.<name>: it is not granted write on that table`. 400: `malformed table
+  commit: <what>` (not JSON; an `identifier` that is not `{namespace: [non-empty strings], name: non-empty string}`).
+- **Tests:** `a_single_table_commit_cannot_reach_the_table_its_body_names` (red, green now);
+  `a_spark_branch_commit_is_authorized_by_the_table_it_commits_to` (was 403 before: the guard checked the pseudo path
+  table; a grant on `corp.fin` now commits through the branch path, and plain commits with and without an identifier
+  still commit); `a_malformed_single_table_commit_is_a_400_from_the_guard` (red, green now).
+- Not changed: #757's table hook classifies an update by its path, so a Spark branch commit's schema change is seen as
+  a change to `db.t`/`branch_x`, not to `db.t`. Recorded, not fixed here.

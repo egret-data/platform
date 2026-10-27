@@ -242,9 +242,10 @@ pub fn catalog_engine_router(state: ApiContext<EngineState>) -> axum::Router {
 /// `path`/`query` are lakekeeper-relative (the router is mounted under
 /// `/catalog/v1`, so a request to `/catalog/v1/config` arrives here as `/config`).
 ///
-/// `body` is the request body for a rename or a multi-table commit
-/// ([`GuardedBody`]), whose targets are named only there, and `None` for every
-/// other request, which streams through unread.
+/// `body` is the request body for a rename, a multi-table commit or a
+/// single-table commit ([`GuardedBody`]), whose targets are named (or
+/// re-named) there, and `None` for every other request, which streams through
+/// unread.
 #[async_trait::async_trait]
 pub trait CatalogGuard: Send + Sync {
     /// Verify the bearer token only (authN). The mount calls it before it
@@ -276,6 +277,9 @@ pub enum GuardedBody {
     Rename,
     /// `POST /{prefix}/transactions/commit`.
     MultiTableCommit,
+    /// `POST /{prefix}/namespaces/{ns}/tables/{t}`: its body may name another
+    /// table in `identifier`, and lakekeeper commits to that one (§10.3).
+    TableCommit,
 }
 
 impl GuardedBody {
@@ -292,18 +296,19 @@ impl GuardedBody {
         match segs.as_slice() {
             [_, "tables" | "views", "rename"] => Some(Self::Rename),
             [_, "transactions", "commit"] => Some(Self::MultiTableCommit),
+            [_, "namespaces", _, "tables", _] => Some(Self::TableCommit),
             _ => None,
         }
     }
 
     /// The most of the body the mount buffers. A rename body is a few hundred
-    /// bytes. A multi-table commit carries whole schemas and snapshots; the
-    /// table hook behind the guard already buffers it up to 16 MiB, so the
-    /// guard takes the same cap and adds no new limit.
+    /// bytes. A commit carries whole schemas and snapshots; the table hook
+    /// behind the guard already buffers it up to 16 MiB, so the guard takes
+    /// the same cap and adds no new limit.
     pub fn limit(self) -> usize {
         match self {
             Self::Rename => 1 << 20,
-            Self::MultiTableCommit => 16 << 20,
+            Self::MultiTableCommit | Self::TableCommit => 16 << 20,
         }
     }
 
@@ -312,6 +317,7 @@ impl GuardedBody {
         match self {
             Self::Rename => "rename request",
             Self::MultiTableCommit => "multi-table commit",
+            Self::TableCommit => "table commit",
         }
     }
 }

@@ -640,7 +640,8 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
             // what a create in the destination's namespace needs (rename-authz
             // spec §3.2). A multi-table commit (`/transactions/commit`) needs,
             // for every table it changes, what an update of that table alone
-            // needs (§8.2).
+            // needs (§8.2). A single-table commit needs write on the table its
+            // body names, when it names one (§10.3).
             match egret_catalog_engine::GuardedBody::of(method, path) {
                 Some(egret_catalog_engine::GuardedBody::Rename) => {
                     let (src, dst) = parse_rename_body(body).map_err(|m| {
@@ -692,6 +693,30 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
                                 ns.join(".")
                             ));
                         }
+                    }
+                    return Ok(caller);
+                }
+                Some(egret_catalog_engine::GuardedBody::TableCommit) => {
+                    // lakekeeper commits to the body's `identifier` whenever
+                    // it accepts one (its "Spark branch" fallback included),
+                    // and to the path's table otherwise: authorize that table.
+                    let named = parse_table_commit_body(body).map_err(|m| {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            format!("malformed table commit: {m}"),
+                        )
+                    })?;
+                    let (ns, name) =
+                        named.unwrap_or_else(|| (catalog_ns_parts(segs[2]), segs[4].to_string()));
+                    if !grants
+                        .iter()
+                        .any(|g| catalog_grant_covers(g, Some(&ns), Some(&name), true))
+                    {
+                        return forbid(format!(
+                            "role '{token_role}' may not commit to {}.{name}: it is not granted \
+                             write on that table",
+                            ns.join(".")
+                        ));
                     }
                     return Ok(caller);
                 }
@@ -770,6 +795,18 @@ fn parse_commit_body(body: Option<&[u8]>) -> Result<Vec<TableIdent>, String> {
                 .and_then(|id| identifier(id, &format!("table-changes[{i}].identifier")))
         })
         .collect()
+}
+
+/// The table a single-table commit's body names in `identifier`, if any.
+/// `Err` says what is wrong, for the 400.
+fn parse_table_commit_body(body: Option<&[u8]>) -> Result<Option<TableIdent>, String> {
+    let body = body.ok_or("no body")?;
+    let json: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("the body is not JSON: {e}"))?;
+    match json.get("identifier") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(id) => identifier(id, "identifier").map(Some),
+    }
 }
 
 /// `{namespace: [..], name}`: the namespace a non-empty list of strings, the
