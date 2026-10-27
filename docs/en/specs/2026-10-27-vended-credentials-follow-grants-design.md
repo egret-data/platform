@@ -1,11 +1,16 @@
 # Vended S3 credentials follow catalog grants: design
 
-Date 2026-10-27. Branch `fix/vended-credentials-follow-grants`, on the F-A branch
-(`fix/catalog-rename-authorizes-source`, spec
+Date 2026-10-27. Branch `fix/vended-credentials-follow-grants`, rebased onto main `827da4bb` after
+F-A merged (#758, `1e0a3cf8`; branch `fix/catalog-rename-authorizes-source`, spec
 [`2026-10-27-catalog-rename-authorizes-source-design.md`](2026-10-27-catalog-rename-authorizes-source-design.md),
 §10.7 recorded this defect). Plan: [`docs/en/plans/2026-10-27-vended-credentials-follow-grants.md`](../plans/2026-10-27-vended-credentials-follow-grants.md).
 
 `LK/` below is `crates/lakekeeper/src/` of the pinned lakekeeper checkout (rev `791650571d`, 0.12.3).
+
+**Commit ids.** The measurements in §6–§9 were taken before the rebase. `a381fc1b` is the F-A head
+the branch was built on (its code is on main as `1e0a3cf8`). `12ba90c1` is the pre-rebase id of
+`4599c6c5`; `git diff 12ba90c1 4599c6c5 -- crates/` is empty, so the gate and the live check apply
+to the rebased code. §11 records the review and what changed after it.
 
 ## 1. Problem
 
@@ -123,6 +128,10 @@ The authorizer classifies the caller (`Caller::of`):
 
 For each `ReadData`/`WriteData` lakekeeper asks about a table, as `(namespace, table, write)`:
 
+0. If lakekeeper asks on behalf of another user (`ActionOnTable.user` is set: a DEFINER view chain
+   or a for-user permission check, neither reachable in egret today), the answer is no: egret's grants
+   belong to the caller (review finding 3).
+
 1. The token's warehouse (by name) must map to the warehouse lakekeeper resolved
    (`lakekeeper_warehouse_id`). Otherwise every data action is refused.
 2. The role's grants (`grants_for_role`), and lakekeeper's collation for every (grant name, table
@@ -159,27 +168,41 @@ original request's metadata, so they run as the catalog client; both ask only co
   unchanged behaviour for egret's own paths; fail closed for anything unforeseen.
 - **C5 The warehouse is re-checked in the authorizer** (§4.5 step 1). Reason: defence in depth if
   the guard's prefix check ever changes. Through the guard it is unobservable (the guard refuses a
-  prefix that is not the token's warehouse), so its mutant survives (§7).
+  prefix that is not the token's warehouse); `tests/authorizer_db.rs` pins it through lakekeeper's
+  router with the metadata set directly.
 - **C6 Grants are read on every data decision, not cached.** Reason: a revoked or narrowed grant takes
-  effect on the next load. Cost: three small queries per table load or `/credentials` call.
+  effect on the next load. Cost (corrected after review finding 2): the guard already runs
+  `get_warehouse_by_name`, `grants_for_role` and, when some grant name and requested name are not
+  byte-equal, `names_equal_in_catalog`; the authorizer runs the same two or three again. So a table
+  load or `/credentials` call costs 4–6 egret queries, on every load, including `client-managed` and
+  `If-None-Match` loads, since lakekeeper asks `ReadData`/`WriteData` on every load. The authorizer's
+  queries use lakekeeper's read pool. Reading the grants once per request (carrying the guard's in the
+  claim or a request extension) is a possible follow-up (§10).
 - **C7 The credential cache.** lakekeeper caches a vended key by (location, permission, profile)
   (`STCCacheKey`). The permission is part of the key, so a reader can never be handed a cached RWD key:
   measured by `a_reader_after_a_writer_is_not_handed_the_cached_writer_key` (writer first gets an RWD
   key, the reader then gets a different, read-only key, the writer's next load the cached RWD key).
   Callers with the same permission on the same table still share a key (§9, O2).
 - **C8 Create, stage-create, register.** A creator still gets RWD on the location of the table it
-  creates (lakekeeper hard-codes it, and the guard requires namespace write). A client-chosen location
-  cannot be another table's: lakekeeper refuses, measured and pinned for create and stage-create on
-  another table's location and on its parent (409 `LocationAlreadyTaken`), register of another
-  table's metadata file (409, same table uuid) and register of a forged metadata file whose location
-  is another table's (409 `LocationAlreadyTaken`); no key minted in the attempt reaches that table. No
-  guard change.
-- **C9 Views unchanged.** A view load vends read-only credentials on the view's metadata location; a
-  view commit needs write in the guard.
+  creates (lakekeeper hard-codes it, and the guard requires namespace write). **Within one
+  warehouse**, a client-chosen location cannot be another table's: lakekeeper refuses, measured and
+  pinned for create and stage-create on another table's location and on its parent
+  (409 `LocationAlreadyTaken`), register of another table's metadata file (409, same table uuid) and
+  register of a forged metadata file whose location is another table's (409 `LocationAlreadyTaken`);
+  no key minted in the attempt reaches that table. No guard change. Across warehouses the claim does
+  not hold (review finding 1): lakekeeper's location check is per warehouse, register does not check
+  that the location is empty, and its warehouse-overlap check compares endpoint strings, so two
+  warehouses on one bucket whose storage connections write the endpoint differently are not seen as
+  overlapping. That needs an admin to have set up overlapping storage, and predates this branch
+  (before it, every caller got RWD anyway). Recorded in §10.
+- **C9 Views unchanged.** A view load vends read-only credentials on the view's metadata location
+  (pinned: `a_view_load_vends_read_only_credentials`, even for a namespace writer); a view commit
+  needs write in the guard.
 - **C10 The grant store** is built in `build_state` on lakekeeper's read pool (same database; egret's
   queries are schema-qualified), so `build_state`'s signature is unchanged.
 - **C11 `CatalogCaller` gains `warehouse` and `role`**, filled by the guard from the verified token.
-- **C12 Store errors** fail the request (`AuthorizationBackendUnavailable`), never default to a scope.
+- **C12 Store errors** fail the request (`AuthorizationBackendUnavailable`), never default to a scope
+  (pinned: `a_grant_store_error_fails_the_decision`, on an unreachable store).
 - **C13 The test object store** is an in-process S3 + STS (`MockS3`) that records every session
   policy lakekeeper sends and enforces it, as RustFS does (M1). It lets the tests observe the scope
   without S3, and lakekeeper's own storage validation of the warehouse runs against it.
@@ -209,6 +232,11 @@ classification (`authorizer.rs`).
 | `a_config_call_registers_no_lakekeeper_user` | ok (pin, C2) | ok |
 | `a_grant_in_another_case_vends_by_the_catalogs_collation` | fails (reader RWD), by construction | ok |
 | unit: `a_catalog_client_is_named_by_its_claim`, `egret_s_own_principal_reads_and_writes`, `any_other_principal_gets_no_data_access`, `an_overlong_subject_still_names_the_client` | n/a (new code) | ok |
+| after review: `a_mixed_role_writes_only_the_table_it_may_write` (namespace read + table write: RWD on that table, read-only on its sibling) | fails (sibling RWD), by construction | ok |
+| after review: `a_view_load_vends_read_only_credentials` (C9) | ok (pin) | ok |
+| after review, unit: `a_data_question_on_behalf_of_another_user_is_refused` | **FAILED** on the code before the fix (answered `Ask`) | ok |
+| after review, unit: `a_grant_store_error_fails_the_decision` (C12), `answers_merge_in_the_order_lakekeeper_asked` | n/a | ok |
+| after review, `tests/authorizer_db.rs` through lakekeeper's router: `a_client_of_the_warehouse_may_read`, `a_client_of_another_warehouse_gets_no_data_access` (C5), `an_unknown_principal_gets_no_data_access` (C4) | n/a | ok |
 
 The red run (on `a381fc1b`, with only the test file added) is the first 11 rows: 6 failed exactly on
 the defect (the session policy lakekeeper asked for was RWD, or the reader got the writer's key), 5
@@ -234,6 +262,28 @@ Each mutant was applied to the source, the authorizer's unit tests and every egr
 | M10 the `/config` carve-out removed | killed (`a_config_call_registers_no_lakekeeper_user`) after that test was added; it survived the first run |
 | M11 the mount keeps the internal actor | killed (6) |
 | M12 the collation dropped (byte equality) | killed (`a_grant_in_another_case_vends_by_the_catalogs_collation`) after that test was added; it survived the first run |
+
+**After the review** (on `bd80dbe5`; the unit tests, every egret-bin `catalog_` test and
+`tests/authorizer_db.rs` per mutant): all 15 killed. M9 no longer exists (the early return now goes
+through `merge`).
+
+| Mutant | Result |
+|---|---|
+| M1 `ReadData` asked as a write | killed (10) |
+| M2 `WriteData` asked as a read | killed (9) |
+| M3 system principal denied | killed (2) |
+| M4 unknown principal allowed | killed (2, incl. `an_unknown_principal_gets_no_data_access` through the router) |
+| M5 a catalog client skips its grants | killed (10) |
+| M6 the warehouse re-check ignored (C5) | **killed** (`a_client_of_another_warehouse_gets_no_data_access`) |
+| M7 the write flag not passed to the grant rule | killed (8, incl. `a_mixed_role_writes_only_the_table_it_may_write`) |
+| M8 non-data table actions denied | killed (26) |
+| M10 the `/config` carve-out removed | killed (the subject-scoped config test) |
+| M11 the mount keeps the internal actor | killed (8) |
+| M12 the collation dropped | killed (1) |
+| M13 a question on behalf of another user answered with the caller's grants | killed (`a_data_question_on_behalf_of_another_user_is_refused`) |
+| M14 a refused question allowed in the merge | killed (`answers_merge_in_the_order_lakekeeper_asked`) |
+| M15 a missing answer allowed in the merge | killed (same) |
+| M16 a store error read as "no warehouse" (refusal instead of an error) | killed (`a_grant_store_error_fails_the_decision`) |
 
 ## 8. Local gate
 
@@ -299,5 +349,50 @@ removed, BuildKit cache kept, port 18780 free.
   policy.
 - **O6** lakekeeper's `parse_data_access` calls `.to_str().unwrap()` on the delegation header; a
   non-visible-ASCII value panics the handler.
+- **Cross-warehouse register (review finding 1).** With two warehouses on one bucket whose storage
+  connections write the endpoint differently, a namespace writer in one could register a forged
+  metadata file whose location is a table of the other and get RWD on it (C8). Precondition: an admin
+  set up overlapping storage. Fix options: refuse overlapping storage connections on egret's side
+  (normalising the endpoint), or have the guard refuse a register whose metadata location is not
+  under the warehouse's own tables.
+- **Grants read twice per load (review finding 2).** The guard and the authorizer each read the
+  role's grants (C6); carrying the guard's in the request would halve it.
 - **Docs.** The user docs (egret-data/docs, Platform) must say that a `read` grant vends read-only
-  storage credentials and that an engine attached with a read-only role can no longer write.
+  storage credentials and that an engine attached with a read-only role can no longer write
+  (docs KI-311).
+
+## 11. Review (2026-10-27) and how each finding was handled
+
+An independent read-only review of the four branch commits found no HIGH: no path where a caller
+with only a read grant gets write- or delete-capable credentials, or a signed request, through egret's
+mount.
+
+1. **LOW/MED: C8 holds only within one warehouse.** Narrowed C8 to what was measured (one
+   warehouse, pinned by `a_create_or_register_cannot_take_another_tables_location`) and recorded the
+   cross-warehouse register, with its precondition (an admin set up two warehouses on one bucket with
+   differently written endpoints; it predates this branch), as a follow-up in §10. No code change.
+2. **LOW: the per-load query count.** C6 corrected: 4–6 egret queries per load or `/credentials`
+   call (guard and authorizer each), on every load including `client-managed` ones. Reading the
+   grants once per request is a follow-up in §10. No optimisation here.
+3. **LOW: `ActionOnTable.user` was ignored.** The authorizer now refuses a `ReadData`/`WriteData`
+   question asked on behalf of another user (`DataAsk::Refuse`, §4.5 step 0). Not reachable in-process
+   (it needs trusted engines or the management API), so a unit test pins it; it failed on the code
+   before the fix (red first). Commit `91ac264c`.
+4. **LOW: test gaps.** Added: a grant-store error fails the decision (C12, unit); namespace read plus
+   write on one table gives RWD on that table and read-only on its sibling; a view load is read-only
+   for a namespace writer (C9); through lakekeeper's router with the metadata set directly, an unknown
+   principal and a client of another warehouse get no data access (C4, C5; this also kills M6); the
+   config test now checks only its own token's principal. Commits `e729ae9f`, `bd80dbe5`.
+5. **LOW: commit ids rebased away.** The ids are explained at the top of this spec; the evidence
+   applies to the rebased code (`git diff 12ba90c1 4599c6c5 -- crates/` is empty).
+6. **INFO: behaviour to document.** A narrowed writer keeps its cached RWD key up to 3600 s, and the
+   other writers of the table are served the same key (§10); an engine attached with a read-only role
+   can no longer write (D3). The docs update (egret-data/docs, Platform; docs KI-311) is required
+   before or with the merge.
+
+**Checks after the review, on `bd80dbe5`:** `cargo fmt --all --check` pass;
+`cargo clippy --workspace --all-targets -- -D warnings` pass; `cargo test -p egret-bin --bin egret
+catalog_` 58 passed; `cargo test -p egret-catalog-engine --no-fail-fast` 155 passed, 0 failed; no DB
+skips (against `egret_test`, `EGRET_ALLOW_DB_SKIP` unset). The full workspace gate (§8) and the live
+check (§9) were not repeated: the only change to the vending decision is the refusal of on-behalf
+questions, which egret cannot reach today.
