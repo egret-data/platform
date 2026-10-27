@@ -274,3 +274,22 @@ mount, seen failing on the code before the fix), what was decided, and how it is
 - Names containing `+` or `%`: lakekeeper URL-decodes path segments and maps `+` to a space; the guard compared raw
   segments. That fails closed (a grant on `a b` is not reached by `a+b`), except for a grant whose own name contains
   `+` or `%xx`. §10.4 makes the guard decode path segments as lakekeeper does, so this note is closed there.
+
+### 10.2 F2: a guarded body was read before the token was verified (introduced by §3.1 and §8.3)
+
+- **Problem.** The mount read the body of a rename (1 MiB) or a multi-table commit (16 MiB) before `check` ran, so
+  before the token was verified. Anyone who could reach `/catalog/v1` could make it buffer 16 MiB per request, with no
+  token and any prefix, and hold the connection while trickling the body.
+- **Measured** at `b1d85fee`: an unauthenticated `POST /{prefix}/transactions/commit` whose body yields 64 KiB and
+  then never ends got no answer within 5 s (`an_unauthenticated_body_is_not_read`); the same with a valid token and a
+  declared `Content-Length` over the cap also hung (`a_declared_length_over_the_cap_is_a_413_unread`); a streamed body
+  over the cap got 400, not 413 (`a_streamed_body_over_the_cap_is_a_413`).
+- **Decision.**
+  - `CatalogGuard` gains `authenticate(bearer)` (token, expiry, audience). The mount calls it before it reads a
+    guarded body; `check` still decides the request in full afterwards (the token is verified twice on these routes:
+    one key read and one signature check).
+  - A declared `Content-Length` over the cap is a **413** before the body is read. A streamed body that crosses the
+    cap is a **413** as soon as it does (`http_body_util::LengthLimitError`). Any other read failure is a 400.
+  - `authenticate` is a required trait method, so a new guard cannot forget it.
+- **Tests:** the three above, red before, green now. The unauthenticated test asserts that the server pulled **0
+  bytes** from the body stream (a counting stream), which is how "refused without being buffered" is observed.

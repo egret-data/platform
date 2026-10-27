@@ -247,6 +247,15 @@ pub fn catalog_engine_router(state: ApiContext<EngineState>) -> axum::Router {
 /// other request, which streams through unread.
 #[async_trait::async_trait]
 pub trait CatalogGuard: Send + Sync {
+    /// Verify the bearer token only (authN). The mount calls it before it
+    /// reads a guarded body, so an unauthenticated caller cannot make it
+    /// buffer anything (rename-authz spec §10.2). [`Self::check`] still
+    /// decides the request in full.
+    async fn authenticate(
+        &self,
+        bearer: Option<&str>,
+    ) -> Result<(), (axum::http::StatusCode, String)>;
+
     /// `Ok(caller)` → allowed, by the principal the verified token names;
     /// `Err((status, message))` → rejected (e.g. 400/401/403).
     async fn check(
@@ -411,15 +420,46 @@ async fn guard_then_inject_metadata(
         // hold, the table hook and lakekeeper see exactly what the guard
         // authorized.
         let body = if let Some(kind) = GuardedBody::of(&method, &path) {
+            // Authenticate before reading a byte, refuse a declared length
+            // over the cap unread, and a streamed body that crosses it.
+            if let Err((status, msg)) = g.authenticate(bearer.as_deref()).await {
+                return (status, msg).into_response();
+            }
+            let too_large = || {
+                (
+                    axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                    format!(
+                        "the body of a {} is larger than {} bytes",
+                        kind.what(),
+                        kind.limit()
+                    ),
+                )
+                    .into_response()
+            };
+            let declared = req
+                .headers()
+                .get(axum::http::header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok());
+            if declared.is_some_and(|n| n > kind.limit() as u64) {
+                return too_large();
+            }
             let (parts, body) = req.into_parts();
             let bytes = match axum::body::to_bytes(body, kind.limit()).await {
                 Ok(b) => b,
                 Err(e) => {
+                    let over_cap = e
+                        .into_inner()
+                        .downcast_ref::<http_body_util::LengthLimitError>()
+                        .is_some();
+                    if over_cap {
+                        return too_large();
+                    }
                     return (
                         axum::http::StatusCode::BAD_REQUEST,
-                        format!("malformed {}: the body could not be read: {e}", kind.what()),
+                        format!("malformed {}: the body could not be read", kind.what()),
                     )
-                        .into_response()
+                        .into_response();
                 }
             };
             req = axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes.clone()));

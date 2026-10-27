@@ -587,6 +587,10 @@ struct BodyReadingGuard;
 
 #[async_trait::async_trait]
 impl egret_catalog_engine::CatalogGuard for BodyReadingGuard {
+    async fn authenticate(&self, _bearer: Option<&str>) -> Result<(), (StatusCode, String)> {
+        Ok(())
+    }
+
     async fn check(
         &self,
         method: &str,

@@ -1066,6 +1066,44 @@ impl Env {
 
 // ── The review's findings (spec §10) ────────────────────────────────────────
 
+impl Env {
+    /// Send to an absolute, lakekeeper-relative `path`, with `headers`; the
+    /// answer must come within 5 s (a hang is a panic, not a timeout of the
+    /// test run).
+    async fn send_abs(
+        &self,
+        token: Option<&str>,
+        path: &str,
+        body: Body,
+        headers: &[(&str, String)],
+    ) -> (StatusCode, Value) {
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            req = req.header("authorization", format!("Bearer {t}"));
+        }
+        for (k, v) in headers {
+            req = req.header(*k, v);
+        }
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.app.clone().oneshot(req.body(body).unwrap()),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{path}: no answer within 5 s"))
+        .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()));
+        (status, value)
+    }
+}
+
 /// F8: a body with a duplicate key is never decided on one copy and run on
 /// the other: whichever copy is unauthorized, nothing is renamed.
 #[tokio::test]
@@ -1097,5 +1135,102 @@ async fn a_duplicate_key_body_renames_nothing() {
         assert!(env.exists("tables", "sales", "secret").await);
         assert!(env.exists("tables", "stage", "mine").await);
         assert!(!env.exists("tables", "stage", "loot").await);
+    }
+}
+/// A request body that yields `first` and then never ends, counting the bytes
+/// the server pulled from it.
+fn endless_body(first: usize) -> (Body, Arc<std::sync::atomic::AtomicUsize>) {
+    use futures_util::StreamExt as _;
+    let pulled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = pulled.clone();
+    let stream = futures_util::stream::once(async move {
+        Ok::<_, std::io::Error>(bytes::Bytes::from(vec![b' '; first]))
+    })
+    .chain(futures_util::stream::pending())
+    .inspect(move |chunk| {
+        if let Ok(c) = chunk {
+            counter.fetch_add(c.len(), std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    (Body::from_stream(stream), pulled)
+}
+
+/// A body of `chunks` chunks of 1 MiB of spaces, with no length declared.
+fn streamed_body(chunks: usize) -> Body {
+    let stream = futures_util::stream::iter(
+        (0..chunks).map(|_| Ok::<_, std::io::Error>(bytes::Bytes::from(vec![b' '; 1 << 20]))),
+    );
+    Body::from_stream(stream)
+}
+
+/// F2: an unauthenticated request is answered 401 before its body is read,
+/// so it cannot make the mount buffer anything.
+#[tokio::test]
+async fn an_unauthenticated_body_is_not_read() {
+    let env = env_or_skip!();
+    for route in [
+        "transactions/commit",
+        "tables/rename",
+        "namespaces/sales/tables/t",
+    ] {
+        let (body, pulled) = endless_body(64 << 10);
+        let (status, resp) = env
+            .send_abs(None, &format!("/{}/{route}", env.prefix), body, &[])
+            .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{route}: {resp}");
+        assert_eq!(
+            pulled.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "{route}: nothing of the body was read"
+        );
+    }
+}
+
+/// F2: a declared length over the cap is a 413 before the body is read.
+#[tokio::test]
+async fn a_declared_length_over_the_cap_is_a_413_unread() {
+    let env = env_or_skip!();
+    let token = env
+        .token_for("engine", &[grant("catalog", None, None, "manage")])
+        .await;
+    for (route, cap) in [
+        ("transactions/commit", 16usize << 20),
+        ("tables/rename", 1 << 20),
+    ] {
+        let (body, pulled) = endless_body(1024);
+        let (status, resp) = env
+            .send_abs(
+                Some(&token),
+                &format!("/{}/{route}", env.prefix),
+                body,
+                &[("content-length", (cap + 1).to_string())],
+            )
+            .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{route}: {resp}");
+        assert_eq!(
+            pulled.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "{route}: nothing of the body was read"
+        );
+    }
+}
+
+/// F2: a streamed body that crosses the cap is a 413.
+#[tokio::test]
+async fn a_streamed_body_over_the_cap_is_a_413() {
+    let env = env_or_skip!();
+    let token = env
+        .token_for("engine", &[grant("catalog", None, None, "manage")])
+        .await;
+    for (route, chunks) in [("transactions/commit", 17), ("tables/rename", 2)] {
+        let (status, resp) = env
+            .send_abs(
+                Some(&token),
+                &format!("/{}/{route}", env.prefix),
+                streamed_body(chunks),
+                &[],
+            )
+            .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{route}: {resp}");
     }
 }

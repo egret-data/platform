@@ -507,18 +507,14 @@ struct EgretCatalogGuard {
     catalog: egret_catalog_engine::CatalogStore,
 }
 
-#[async_trait::async_trait]
-impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
-    async fn check(
+impl EgretCatalogGuard {
+    /// authN: a valid, unexpired egret JWT minted for the catalog audience.
+    /// Returns its claims.
+    async fn verify(
         &self,
-        method: &str,
-        path: &str,
-        query: Option<&str>,
         bearer: Option<&str>,
-        body: Option<&[u8]>,
-    ) -> Result<egret_catalog_engine::CatalogCaller, (axum::http::StatusCode, String)> {
+    ) -> Result<serde_json::Value, (axum::http::StatusCode, String)> {
         use axum::http::StatusCode;
-        let forbid = |m: String| Err((StatusCode::FORBIDDEN, m));
         // authN: a valid, unexpired egret JWT is required on every catalog request.
         let token = bearer.ok_or((StatusCode::UNAUTHORIZED, "missing bearer token".into()))?;
         use egret_machine_idp::SigningKeyStore as _;
@@ -546,6 +542,30 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
         if claims.get("aud").and_then(|v| v.as_str()) != Some(CATALOG_AUDIENCE) {
             return Err((StatusCode::UNAUTHORIZED, "wrong audience".to_string()));
         }
+        Ok(claims)
+    }
+}
+
+#[async_trait::async_trait]
+impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
+    async fn authenticate(
+        &self,
+        bearer: Option<&str>,
+    ) -> Result<(), (axum::http::StatusCode, String)> {
+        self.verify(bearer).await.map(|_| ())
+    }
+
+    async fn check(
+        &self,
+        method: &str,
+        path: &str,
+        query: Option<&str>,
+        bearer: Option<&str>,
+        body: Option<&[u8]>,
+    ) -> Result<egret_catalog_engine::CatalogCaller, (axum::http::StatusCode, String)> {
+        use axum::http::StatusCode;
+        let forbid = |m: String| Err((StatusCode::FORBIDDEN, m));
+        let claims = self.verify(bearer).await?;
         // Who sent it (rename spec R7): a layer behind the guard names the
         // caller from this, not from a claim it would have to verify again.
         let caller = egret_catalog_engine::CatalogCaller {
