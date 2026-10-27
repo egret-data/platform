@@ -132,6 +132,7 @@ use crate::view_hold::{
     is_lock_timeout, is_multi_level, lock_key, rename_of, request_metadata, resolve, seconds,
     trino_tag_versions, uncancellable, Assignment, DEFAULT_MAX_HOLDS, MIN_LOCK_WAIT,
 };
+use egret_perm_compile::follow;
 use egret_perm_compile::view_tags::{ViewReach, ViewReachError};
 use egret_policy::{wait_for_versions, PolicyStore, WaitError};
 use sqlx::Connection as _;
@@ -842,6 +843,139 @@ struct MovePlan {
     /// lakekeeper answers non-2xx, before the copy is undone (review
     /// finding 4).
     committed_if: Vec<Committed>,
+    /// The sources carry classification rows (#757's part of the plan).
+    classified: bool,
+    /// What the moves carry of the permission model, per move (grants-follow
+    /// spec §5.2): read at plan time, read again under the locks.
+    perm: PermPart,
+}
+
+/// The permission-model part of a move plan (grants-follow spec §5.3).
+#[derive(Default)]
+struct PermPart {
+    /// The registry catalog over the warehouse, `(id, name)`.
+    catalog: Option<(Uuid, String)>,
+    /// The profiles bound to the warehouse (D5 reads their hand-written
+    /// policies).
+    services: Vec<i64>,
+    /// One entry per move.
+    moves: Vec<PermMove>,
+}
+
+/// What one coordinate move carries.
+struct PermMove {
+    mv: follow::Move,
+    follow: follow::PermFollow,
+    handwritten: follow::HandwrittenCheck,
+}
+
+impl PermMove {
+    /// Something to copy, move or report: the move needs the hold.
+    fn has_work(&self) -> bool {
+        !self.follow.copy_grants.is_empty()
+            || !self.follow.copy_rules.is_empty()
+            || !self.follow.move_grants.is_empty()
+            || !self.follow.left.is_empty()
+            || !self.handwritten.report.is_empty()
+    }
+
+    /// The 409's text when something refuses the move (D4, D5, D14).
+    fn refusal(&self) -> Option<String> {
+        follow::refusal_message(&self.follow.refused, &self.handwritten.refuse, &self.mv)
+    }
+}
+
+impl PermPart {
+    /// Read, on `conn`, what each of `moves` carries; `warehouse_id`'s
+    /// registry catalog names the rows. No catalog: nothing (a warehouse no
+    /// catalog is registered over has no grants).
+    async fn read(
+        conn: &mut sqlx::PgConnection,
+        warehouse_id: Uuid,
+        moves: &[(Coordinate, Coordinate)],
+    ) -> Result<Self, String> {
+        let catalog: Option<(Uuid, String)> =
+            sqlx::query_as("SELECT id, name FROM registry.catalogs WHERE warehouse_id = $1")
+                .bind(warehouse_id)
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(|e| e.to_string())?;
+        let Some((catalog_id, catalog_name)) = catalog.clone() else {
+            return Ok(Self::default());
+        };
+        let services =
+            egret_catalog_registry::services_bound_to_warehouse(&mut *conn, warehouse_id)
+                .await
+                .map_err(|e| e.to_string())?;
+        let mut out = Self {
+            catalog,
+            services,
+            moves: Vec::new(),
+        };
+        for (from, to) in moves {
+            let mv = follow::Move {
+                catalog_id,
+                from: follow::Coord {
+                    schema: from.schema.clone(),
+                    table: from.table.clone(),
+                    column: from.column.clone(),
+                },
+                to: follow::Coord {
+                    schema: to.schema.clone(),
+                    table: to.table.clone(),
+                    column: to.column.clone(),
+                },
+            };
+            out.moves
+                .push(Self::read_move(conn, &out.services, &catalog_name, mv).await?);
+        }
+        Ok(out)
+    }
+
+    async fn read_move(
+        conn: &mut sqlx::PgConnection,
+        services: &[i64],
+        catalog_name: &str,
+        mv: follow::Move,
+    ) -> Result<PermMove, String> {
+        let follow = follow::plan_via(conn, &mv)
+            .await
+            .map_err(|e| e.to_string())?;
+        let handwritten = follow::handwritten_via(conn, services, catalog_name, &mv)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(PermMove {
+            mv,
+            follow,
+            handwritten,
+        })
+    }
+
+    /// The same moves read again on `conn` (under the hold's locks).
+    async fn reread(&self, conn: &mut sqlx::PgConnection) -> Result<Self, String> {
+        let Some((_, catalog_name)) = &self.catalog else {
+            return Ok(Self::default());
+        };
+        let mut moves = Vec::new();
+        for m in &self.moves {
+            moves.push(Self::read_move(conn, &self.services, catalog_name, m.mv.clone()).await?);
+        }
+        Ok(Self {
+            catalog: self.catalog.clone(),
+            services: self.services.clone(),
+            moves,
+        })
+    }
+
+    /// Every move's refusal, joined; `None` when nothing refuses.
+    fn refusal(&self) -> Option<String> {
+        let parts: Vec<String> = self.moves.iter().filter_map(PermMove::refusal).collect();
+        (!parts.is_empty()).then(|| parts.join(" "))
+    }
+
+    fn has_work(&self) -> bool {
+        self.moves.iter().any(PermMove::has_work)
+    }
 }
 
 /// One sign that a held change committed.
@@ -884,6 +1018,15 @@ impl MovePlan {
             push_table(&mut out, to.schema.clone(), to.table.clone());
         }
         out
+    }
+
+    /// What the move carries, as its refusals name it.
+    fn what(&self) -> &'static str {
+        if self.classified {
+            "classifications"
+        } else {
+            "permissions"
+        }
     }
 
     fn destination_labels(&self) -> String {
@@ -974,8 +1117,13 @@ struct Copied {
     target: Vec<Assignment>,
     /// `(Trino profile, its tag version)` to wait for.
     tags: Vec<(i64, i64)>,
-    /// `(StarRocks profile, its policy version)` to wait for (C5).
+    /// `(profile, its policy version)` to wait for: StarRocks (C5), and Trino
+    /// when a grant or rule copy was inserted (grants-follow D6).
     policies: Vec<(i64, i64)>,
+    /// The permission-model part as read under the locks, and the rows each
+    /// move's copy inserted (grants-follow §5.3).
+    perm: PermPart,
+    copies: Vec<follow::Copies>,
 }
 
 /// `(profile id, policy version)` of every StarRocks engine bound to the
@@ -992,6 +1140,27 @@ async fn starrocks_policy_versions(
            JOIN engine_mgmt.engines e ON e.id = ea.engine_id \
            JOIN policy.authz_services s ON s.id = e.authz_service_id \
           WHERE c.warehouse_id = $1 AND e.type = 'starrocks' \
+          ORDER BY s.id",
+    )
+    .bind(warehouse_id)
+    .fetch_all(&mut *conn)
+    .await
+}
+
+/// `(profile id, policy version)` of every Trino engine bound to the
+/// warehouse: Trino's plugin reports its `lastKnownVersion` on each policy
+/// poll as well (grants-follow spec D6, E26).
+async fn trino_policy_versions(
+    conn: &mut sqlx::PgConnection,
+    warehouse_id: Uuid,
+) -> Result<Vec<(i64, i64)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT DISTINCT s.id, s.policy_version \
+           FROM registry.catalogs c \
+           JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id \
+           JOIN engine_mgmt.engines e ON e.id = ea.engine_id \
+           JOIN policy.authz_services s ON s.id = e.authz_service_id \
+          WHERE c.warehouse_id = $1 AND e.type = 'trino' \
           ORDER BY s.id",
     )
     .bind(warehouse_id)
@@ -1045,15 +1214,30 @@ impl TableHook {
         let rows = rows_of(&mut conn, warehouse_id, &source)
             .await
             .map_err(|e| check(&e))?;
-        if rows.is_empty() {
-            return Ok(None);
-        }
         let Some(current) = current_columns_via(&mut conn, warehouse_id, &src_ns, &src)
             .await
             .map_err(|e| check(&e))?
         else {
             return Ok(None);
         };
+        let moves = vec![(
+            Coordinate {
+                schema: src_ns.clone(),
+                table: src.clone(),
+                column: None,
+            },
+            Coordinate {
+                schema: dst_ns.clone(),
+                table: dst.clone(),
+                column: None,
+            },
+        )];
+        let perm = PermPart::read(&mut conn, warehouse_id, &moves)
+            .await
+            .map_err(|e| check(&e))?;
+        if rows.is_empty() && !perm.has_work() && perm.refusal().is_none() {
+            return Ok(None);
+        }
         let tabular_id = live_tabular_id_via(&mut conn, warehouse_id, &src_ns, &src)
             .await
             .map_err(|e| check(&e))?;
@@ -1078,12 +1262,15 @@ impl TableHook {
                 dst_ns.replace('\u{1f}', ".")
             )));
         }
-        if is_multi_level(&dst_ns) {
+        if !rows.is_empty() && is_multi_level(&dst_ns) {
             return Err(Refusal(
                 "the table carries classifications and its new namespace has more than one \
                  level, where egret cannot keep them; use a single-level schema"
                     .to_string(),
             ));
+        }
+        if let Some(why) = perm.refusal() {
+            return Err(Refusal(why));
         }
         let pending = |schema: &str, table: &str, leaving_table: bool| PendingColumns {
             warehouse_id,
@@ -1093,9 +1280,11 @@ impl TableHook {
             leaving: Vec::new(),
             leaving_table,
         };
+        let mut overlay = vec![pending(&dst_ns, &dst, false), pending(&src_ns, &src, true)];
+        overlay.retain(|p| !is_multi_level(&p.schema));
         Ok(Some(MovePlan {
             warehouse_id,
-            overlay: vec![pending(&dst_ns, &dst, false), pending(&src_ns, &src, true)],
+            overlay,
             committed_if: tabular_id
                 .map(|tabular_id| Committed::Renamed {
                     schema: dst_ns.clone(),
@@ -1104,18 +1293,9 @@ impl TableHook {
                 })
                 .into_iter()
                 .collect(),
-            moves: vec![(
-                Coordinate {
-                    schema: src_ns,
-                    table: src,
-                    column: None,
-                },
-                Coordinate {
-                    schema: dst_ns,
-                    table: dst,
-                    column: None,
-                },
-            )],
+            moves,
+            classified: !rows.is_empty(),
+            perm,
         }))
     }
 
@@ -1166,6 +1346,8 @@ impl TableHook {
             return Ok(None);
         };
         let mut starrocks_bound: Option<bool> = None;
+        let mut classified_any = false;
+        let mut perm = PermPart::default();
         let mut moves = Vec::new();
         let mut overlay = Vec::new();
         // The request's other schema changes: when the commit is held, the
@@ -1222,12 +1404,35 @@ impl TableHook {
                 }
                 starrocks_bound == Some(true)
             };
-            let classified: Vec<&(String, String)> = renames
-                .iter()
-                .filter(|(old_name, _)| {
-                    masks_per_column || rows.iter().any(|r| fold(&r.3) == fold(old_name))
-                })
-                .collect();
+            let at = |column: &str| Coordinate {
+                schema: ns.clone(),
+                table: table.clone(),
+                column: Some(column.to_string()),
+            };
+            // A renamed column moves when it is classified (#757 C12) or when a
+            // grant or path rule names it (grants-follow §5.4).
+            let pairs: Vec<(Coordinate, Coordinate)> =
+                renames.iter().map(|(o, n)| (at(o), at(n))).collect();
+            let carried = PermPart::read(&mut conn, warehouse_id, &pairs)
+                .await
+                .map_err(|e| check(&e))?;
+            let mut classified: Vec<&(String, String)> = Vec::new();
+            for (pair, rename) in carried.moves.into_iter().zip(&renames) {
+                let is_classified =
+                    masks_per_column || rows.iter().any(|r| fold(&r.3) == fold(&rename.0));
+                let carries = pair.has_work() || pair.refusal().is_some();
+                if is_classified {
+                    classified_any = true;
+                }
+                if is_classified || carries {
+                    classified.push(rename);
+                    perm.moves.push(pair);
+                }
+            }
+            if perm.catalog.is_none() {
+                perm.catalog = carried.catalog;
+                perm.services = carried.services;
+            }
             if classified.is_empty() {
                 others.push(unmoved);
                 continue;
@@ -1238,11 +1443,6 @@ impl TableHook {
                 fields: new.clone(),
             });
             for (old_name, new_name) in classified {
-                let at = |column: &str| Coordinate {
-                    schema: ns.clone(),
-                    table: table.clone(),
-                    column: Some(column.to_string()),
-                };
                 moves.push((at(old_name), at(new_name)));
             }
             // During the hold the table still has its old columns: both
@@ -1270,12 +1470,17 @@ impl TableHook {
         if moves.is_empty() {
             return Ok(None);
         }
+        if let Some(why) = perm.refusal() {
+            return Err(Refusal(why));
+        }
         overlay.extend(others);
         Ok(Some(MovePlan {
             warehouse_id,
             moves,
             overlay,
             committed_if,
+            classified: classified_any,
+            perm,
         }))
     }
 
@@ -1458,25 +1663,25 @@ impl TableHook {
 
     /// The copy transaction (rename spec §5.3 step 5): the pre-commit compile.
     async fn copy(&self, deadline: Instant, plan: &MovePlan) -> Result<Copied, Refusal> {
+        let what = plan.what();
         let busy = || {
-            Refusal(
-                "egret could not move the table's classifications in time, because other \
-                 permission changes were being written; retry"
-                    .to_string(),
-            )
+            Refusal(format!(
+                "egret could not move the table's {what} in time, because other permission \
+                 changes were being written; retry"
+            ))
         };
         let db = |e: sqlx::Error| {
             if is_lock_timeout(&e) {
                 busy()
             } else {
                 Refusal(format!(
-                    "egret could not move the table's classifications ({e}); retry"
+                    "egret could not move the table's {what} ({e}); retry"
                 ))
             }
         };
         let refused = |e: &dyn std::fmt::Display| {
             Refusal(format!(
-                "the table's classifications cannot move to {}: {e}. Nothing was renamed.",
+                "the table's {what} cannot move to {}: {e}. Nothing was renamed.",
                 plan.destination_labels()
             ))
         };
@@ -1532,6 +1737,34 @@ impl TableHook {
                 inserted.push(row);
             }
         }
+        // The permission-model part, read again under the locks: a pattern
+        // or a hand-written policy written since the plan refuses here, and
+        // nothing is renamed (grants-follow §5.3 step 5, D4).
+        let perm = plan.perm.reread(&mut tx).await.map_err(|e| {
+            Refusal(format!(
+                "egret could not move the table's {what} ({e}); retry"
+            ))
+        })?;
+        if let Some(why) = perm.refusal() {
+            return Err(Refusal(why));
+        }
+        let mut copies = Vec::with_capacity(perm.moves.len());
+        for m in &perm.moves {
+            copies.push(
+                follow::copy_in_tx(&mut tx, &m.follow, &m.mv)
+                    .await
+                    .map_err(|e| match e {
+                        egret_perm::PermError::Db(e) => {
+                            match e.as_database_error().and_then(|d| d.code()) {
+                                Some(c) if c == "23514" => refused(&e),
+                                _ => db(e),
+                            }
+                        }
+                        other => refused(&other),
+                    })?,
+            );
+        }
+        let copied_restrictions = copies.iter().any(|c| !c.is_empty());
         let overlay = serde_json::to_string(&plan.overlay).map_err(|e| refused(&e))?;
         sqlx::query("SELECT set_config($1, $2, true)")
             .bind(PENDING_COLUMNS_SETTING)
@@ -1551,6 +1784,11 @@ impl TableHook {
         // tags change only when rows were inserted; StarRocks' policies may
         // change through the overlay alone. A list with no engine bound is
         // empty, and is skipped by the wait (C4).
+        //
+        // A plan that copied nothing restrictive and moves no classification
+        // (allows only, grants-follow D11) waits for nothing: the allows move
+        // after the commit. A restriction copied changes the Trino profile's
+        // policy version too (D6).
         let tags = if inserted.is_empty() {
             Vec::new()
         } else {
@@ -1558,9 +1796,20 @@ impl TableHook {
                 .await
                 .map_err(db)?
         };
-        let policies = starrocks_policy_versions(&mut tx, plan.warehouse_id)
-            .await
-            .map_err(db)?;
+        let mut policies = if plan.classified || copied_restrictions {
+            starrocks_policy_versions(&mut tx, plan.warehouse_id)
+                .await
+                .map_err(db)?
+        } else {
+            Vec::new()
+        };
+        if copied_restrictions {
+            policies.extend(
+                trino_policy_versions(&mut tx, plan.warehouse_id)
+                    .await
+                    .map_err(db)?,
+            );
+        }
         tx.commit().await.map_err(db)?;
         Ok(Copied {
             before,
@@ -1568,6 +1817,8 @@ impl TableHook {
             target,
             tags,
             policies,
+            perm,
+            copies,
         })
     }
 
@@ -1577,9 +1828,14 @@ impl TableHook {
         match wait_for_versions(&self.policy, &copied.tags, &copied.policies, left).await {
             Ok(()) => Ok(()),
             Err(WaitError::Timeout { waiting_on }) => Err(Refusal(format!(
-                "engines did not confirm the moved classifications within {} s: {}; check that \
-                 the engines are running and polling egret's Ranger endpoint, then retry. Nothing \
-                 was renamed.",
+                "engines did not confirm the {} within {} s: {}; check that the engines are \
+                 running and polling egret's Ranger endpoint, then retry. Nothing was renamed.",
+                if copied.inserted.is_empty() && !copied.copies.iter().all(follow::Copies::is_empty)
+                {
+                    "copied restrictions"
+                } else {
+                    "moved classifications"
+                },
                 seconds(self.limit),
                 waiting_on.join(", ")
             ))),
@@ -1607,6 +1863,11 @@ impl TableHook {
             delete_inserted_rows(&mut tx, plan.warehouse_id, &copied.inserted)
                 .await
                 .map_err(|e| e.to_string())?;
+            for copies in &copied.copies {
+                follow::delete_copies_in_tx(&mut tx, copies)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
             reach
                 .retag_bump_and_recompile(&mut tx)
                 .await
@@ -1616,8 +1877,8 @@ impl TableHook {
         .await;
         if let Err(e) = result {
             tracing::error!(error = %e, destinations = %plan.destination_labels(),
-                "table hook could not undo a classification move; the copied rows remain on a \
-                 name that did not get the table");
+                "table hook could not undo a move; the copied classifications and restrictions \
+                 remain on a name that did not get the table");
         }
     }
 
@@ -1676,6 +1937,17 @@ impl TableHook {
             delete_rows(&mut tx, plan.warehouse_id, &leaving)
                 .await
                 .map_err(|e| e.to_string())?;
+            // The allows follow the table now that it has its new name
+            // (grants-follow G2, D2): in place, ids kept.
+            let mut moved_allows = Vec::with_capacity(copied.perm.moves.len());
+            for m in &copied.perm.moves {
+                let ids: Vec<Uuid> = m.follow.move_grants.iter().map(|g| g.id).collect();
+                moved_allows.push(
+                    follow::move_allows_in_tx(&mut tx, &ids, &m.mv)
+                        .await
+                        .map_err(|e| e.to_string())?,
+                );
+            }
             reach
                 .retag_bump_and_recompile(&mut tx)
                 .await
