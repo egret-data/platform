@@ -1236,9 +1236,10 @@ export const getWorkflowGetExecutionLogsUrl = (workspace: string,
  * outcome commits (`RunLog::finish` waits on the log writer's flush barrier),
  * so once the execution has been idle (terminal AND every task run terminal,
  * `afterExecution:` runs included; `workflow.execution_is_idle`) for longer
- * than the settle lag, measured from its last run's end, every line it will
- * ever have is visible; `complete` says exactly that. A terminal state seen earlier can
- * still have its last lines inside the lag. `complete` does NOT mean every
+ * than the settle lag (counted from the later of the execution's last update
+ * and its last run's end), every line it will ever have is visible;
+ * `complete` says exactly that. A terminal state seen earlier can still have
+ * its last lines inside the lag. `complete` does NOT mean every
  * line the run printed was stored: see spec §11 for the cases (the process
  * dying, a dropped batch, a log-write fault during which the barrier does not
  * wait, a run executed twice).

@@ -2164,12 +2164,12 @@ pub struct LogPageDto {
     /// terminal state alone** -- see `complete`.
     pub execution_state: String,
     /// The execution is idle -- terminal AND every one of its task runs
-    /// terminal, `afterExecution:` runs included -- AND its last run ended
-    /// more than the 2 s settle lag ago. **Stop polling when `complete` is
-    /// true and `items` is empty**: then every stored line has been served. A
-    /// terminal `execution_state` alone is not enough -- an `afterExecution:`
-    /// run may still be logging, and the last lines may be younger than the
-    /// settle lag and not served yet.
+    /// terminal, `afterExecution:` runs included -- AND the later of its last
+    /// update and its last run's end is more than the 2 s settle lag ago.
+    /// **Stop polling when `complete` is true and `items` is empty**: then
+    /// every stored line has been served. A terminal `execution_state` alone
+    /// is not enough -- an `afterExecution:` run may still be logging, and the
+    /// last lines may be younger than the settle lag and not served yet.
     pub complete: bool,
 }
 
@@ -2190,9 +2190,10 @@ pub struct LogPageDto {
 /// outcome commits (`RunLog::finish` waits on the log writer's flush barrier),
 /// so once the execution has been idle (terminal AND every task run terminal,
 /// `afterExecution:` runs included; `workflow.execution_is_idle`) for longer
-/// than the settle lag, measured from its last run's end, every line it will
-/// ever have is visible; `complete` says exactly that. A terminal state seen earlier can
-/// still have its last lines inside the lag. `complete` does NOT mean every
+/// than the settle lag (counted from the later of the execution's last update
+/// and its last run's end), every line it will ever have is visible;
+/// `complete` says exactly that. A terminal state seen earlier can still have
+/// its last lines inside the lag. `complete` does NOT mean every
 /// line the run printed was stored: see spec §11 for the cases (the process
 /// dying, a dropped batch, a log-write fault during which the barrier does not
 /// wait, a run executed twice).
