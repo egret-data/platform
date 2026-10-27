@@ -101,7 +101,7 @@ use super::{claim, WorkerError};
 use crate::executor::{
     apply, build_plan, Command, ExecutionState, RunIx, RunState, TaskIx, TaskKind,
 };
-use crate::models::{Flow, Subflow, Task, TaskKind as ModelTaskKind};
+use crate::models::{Flow, Subflow, TaskKind as ModelTaskKind};
 use crate::runners::{render_str, RenderContext};
 use crate::trigger::flow::DEFAULT_MAX_EXECUTION_DEPTH;
 
@@ -1323,29 +1323,25 @@ async fn trigger_of(conn: &mut PgConnection, execution_id: Uuid) -> Result<Optio
 /// answer `None` and report a corruption for a flow that is merely unusual.
 /// `claim::leaf` had exactly this bug and exactly this fix.
 ///
-/// **What this does NOT close is the publish-time half**, which is not this
-/// module's seam: `publish::resolve_task` still cannot see such a `Subflow`, so
-/// its `flow_ref` is never filled and a cross-workspace target inside an
-/// `errors:` is never refused. Named here so the next reader finds it beside
-/// the walk that goes wider, rather than in a report.
+/// **End hooks A4 fix round (2026-10-27):** all five worker walks, this one
+/// included, now go through `spec::path::find_task`, so `spawn::find_task`
+/// reaches `error_children()` too and the heading above is history.
+///
+/// **The publish-time half is closed too (corrected 2026-10-27).** This
+/// paragraph used to say `publish::resolve_task` could not see such a
+/// `Subflow`; that stopped being true at debt PR-2 (#698), whose resolve walk
+/// visits `children_mut()` and then `error_children_mut()`, so a `Subflow` in
+/// any `errors:` (and, since #2a, any `finally:`) is resolved by the same
+/// `resolve_task` as one in `tasks:` -- its `flow_ref` filled, its target
+/// checked the same way. `tests/publish.rs::
+/// a_subflow_in_any_new_list_is_resolved_like_one_in_tasks` pins the walk.
 fn subflow_of<'a>(flow: &'a Flow, want: &str) -> Option<&'a Subflow> {
-    fn walk<'a>(task: &'a Task, want: &str) -> Option<&'a Subflow> {
-        if task.id == want {
-            return match &task.kind {
-                ModelTaskKind::Subflow(s) => Some(s),
-                _ => None,
-            };
-        }
-        task.children()
-            .into_iter()
-            .chain(task.error_children())
-            .find_map(|c| walk(c, want))
+    // End hooks A4 fix round (2026-10-27): the shared walk, which also reaches
+    // `afterExecution:` (#2b).
+    match &crate::spec::path::find_task(flow, want)?.kind {
+        ModelTaskKind::Subflow(s) => Some(s),
+        _ => None,
     }
-    flow.tasks
-        .iter()
-        .chain(flow.errors.iter())
-        .chain(flow.finally_.iter())
-        .find_map(|t| walk(t, want))
 }
 
 /// One of `namespace`/`flowId`, rendered.

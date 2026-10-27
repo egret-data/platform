@@ -9,6 +9,10 @@
 #
 # One id per line. `#` starts a comment. golden.json order.
 #
+# End hooks A6 (2026-10-27): banked `invalids/loop-switch-failed`,
+# `valids/finally-loop` and `valids/finally-loop-parallel` -- a `Loop` iteration
+# runs the `Loop`'s own `errors:`/`finally:` (D5). 63 -> 60.
+#
 # WorkingDirectory Task 8: banked `valids/working-directory-taskrun` (egret's trace
 # matches Kestra's now, and it is the one of the four WorkingDirectory valids that
 # needs no script runner). 104 -> 103. Its three siblings stay here, with the causes
@@ -218,6 +222,9 @@
 # entries whose loop body is an `If` on `{{ inputs.failed == false }}` with
 # `true` posted and `false` declared, i.e. the two that named the defect. They
 # stay baselined for `finally:`, which has no owner.
+# 2026-10-27 correction: `finally:` has an owner now -- see the README sections
+# "End hooks A4" and "End hooks A6" (a Loop's own errors/finally run in its
+# iteration). The sentence above is history, not the current state.
 #
 # W3b Task 7 re-derived the whole coverage statement and swept this file with
 # the rest. Three sentences in the W3a blocks above are FALSE now and are left
@@ -567,7 +574,6 @@ invalids/dag-invalid-subtask
 invalids/inputs-bad-validator-syntax
 invalids/inputs-with-multiple-constraint-violations
 # `invalids/invalid-property` banked 2026-10-26 (no-silent-drops Task 8b): Kestra refuses it (`Unrecognized field "invalid"`) and egret refuses it at save (`spec::validate_source`, `unknown_property`); the oracle counts a save-time refusal of an id in a `Seam::Save` refusal group.
-invalids/loop-switch-failed
 # group C1 Task 2 (2026-10-18): `OutputValues` runs now; held by `afterExecution:`, which egret does not run (its `end` run is missing; measured).
 valids/after-execution
 # group C1 Task 2 (2026-10-18): `OutputValues` runs now; held by `afterExecution:`, which egret does not run (its `end` run is missing; measured).
@@ -579,16 +585,6 @@ valids/all-flowable
 valids/dag
 valids/disable-flowable
 valids/errors
-valids/finally-dag
-valids/finally-flow
-valids/finally-flow-error
-valids/finally-flow-error-first
-valids/finally-loop
-valids/finally-loop-parallel
-valids/finally-parallel
-valids/finally-sequential
-valids/finally-sequential-error
-valids/finally-sequential-error-first
 # group C1 Task 2 (2026-10-18): `OutputValues` runs now; held by `afterExecution:`, which egret does not run (its `afterExecution` run is missing; measured).
 valids/flow-concurrency-queue-after-execution
 # group C1 Task 2 (2026-10-18): `OutputValues` runs now; held by `afterExecution:`, which egret does not run (its `afterExecution` run is missing; measured).
@@ -622,7 +618,6 @@ valids/restart-loop
 valids/restart-parent
 valids/restart-parent-loop
 valids/restart-with-after-execution
-valids/restart-with-finally
 valids/retry-failed-flow-duration
 # Egret retries without scheduler latency; Kestra adds about 0.6 s per retry, so its
 # fourth attempt falls outside maxDuration and egret's does not. Same class as
@@ -644,7 +639,7 @@ valids/sleep-long-after-execution-flowable
 valids/subflow-parent-retry
 valids/subflow-secret-output-child
 valids/subflow-secret-output-parent
-# group C2 Task 5 (2026-10-18): `SetVariables` runs now; held by the flow-level `finally:`, which egret does not run (its `write_execution_context` and `skipped_when_failures_exist` runs are missing; `hello` and `will_fail` match; measured).
+# end hooks A8 (2026-10-27): the flow-level `finally:` runs now (A4), but this entry did not bank: `write_execution_context` and `skipped_when_failures_exist` are created and end `CREATED FAILED` with no message, because their `runIf` (`tasksWithState(state='FAILED') is [not] empty`) fails to render -- Pebble's `empty` test, a renderer cause owned by package #5 (measured at A4; the 2026-10-18 cause, "egret does not run `finally:`", is history).
 valids/task-runif-taskswithstate
 valids/task-runif-workingdirectory
 valids/variables

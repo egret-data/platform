@@ -24,7 +24,7 @@ use super::commands::{
 };
 use super::handlers::script::{STORAGE_SCHEME, WORKING_DIR_VAR};
 use super::WorkingDirCarry;
-use crate::models::{Flow, Task, TaskKind, WorkingDirectory};
+use crate::models::{Flow, TaskKind, WorkingDirectory};
 use crate::runners::files::is_namespace_file_uri;
 use crate::runners::{render_str, RenderContext};
 use crate::storage::collect::collect_one;
@@ -104,7 +104,20 @@ pub(crate) fn carry_of(
     flow: &Flow,
     render: &RenderContext,
 ) -> Result<Option<WorkingDirCarry>, String> {
+    // End hooks D7: "inside the directory" is "in a block's `tasks:`". The
+    // claim joins the block only while it is `PREPARED`, which is when its
+    // `tasks` run; its `errors:`/`finally:` children run after the finish
+    // claim (`FINISHED`), get no `block_id`, and so no snapshot. Both
+    // directions fail closed: a `tasks` child with no block is refused here,
+    // and a child with a block that is not in its `tasks` is refused below.
     let Some(block) = c.block_id else {
+        if parent_block_of(flow, &c.task_id).is_some() {
+            return Err(format!(
+                "corrupt: {} is a child of a WorkingDirectory whose directory is not open \
+                 (the block is not prepared)",
+                c.task_id
+            ));
+        }
         return Ok(None);
     };
     let Some(start_from) = c.block_snapshot.clone() else {
@@ -183,19 +196,13 @@ pub(crate) async fn run_claim(pool: &PgPool, c: &Claimed, render: &RenderContext
 /// The block's definition, found by its task id in the frozen flow source.
 /// `None` when the flow has no such block, which is corruption.
 fn block_of<'a>(flow: &'a Flow, id: &str) -> Option<&'a WorkingDirectory> {
-    fn walk<'a>(task: &'a Task, id: &str) -> Option<&'a WorkingDirectory> {
-        if task.id == id {
-            return match &task.kind {
-                TaskKind::WorkingDirectory(w) => Some(w),
-                _ => None,
-            };
-        }
-        task.children()
-            .into_iter()
-            .chain(task.error_children())
-            .find_map(|c| walk(c, id))
+    // End hooks A4 fix round (2026-10-27): the shared walk. This walked
+    // `flow.tasks` alone, so a block in the flow's `errors:` or `finally:`
+    // was refused as corrupt.
+    match &crate::spec::path::find_task(flow, id)?.kind {
+        TaskKind::WorkingDirectory(w) => Some(w),
+        _ => None,
     }
-    flow.tasks.iter().find_map(|t| walk(t, id))
 }
 
 /// Renders one string of the block with the block's render context, as a
@@ -662,18 +669,14 @@ async fn save_archive(
 /// The `WorkingDirectory` whose `tasks` hold the child `child`, found in the
 /// frozen flow. `None` when no block of the flow holds it.
 fn parent_block_of<'a>(flow: &'a Flow, child: &str) -> Option<&'a WorkingDirectory> {
-    fn walk<'a>(task: &'a Task, child: &str) -> Option<&'a WorkingDirectory> {
-        if let TaskKind::WorkingDirectory(w) = &task.kind {
-            if w.tasks.iter().any(|t| t.id == child) {
-                return Some(w);
-            }
-        }
-        task.children()
-            .into_iter()
-            .chain(task.error_children())
-            .find_map(|c| walk(c, child))
-    }
-    flow.tasks.iter().find_map(|t| walk(t, child))
+    // End hooks A4 fix round (2026-10-27): over the shared tree, which reaches
+    // every root list (this walked `flow.tasks` alone).
+    crate::spec::path::every_task(flow)
+        .into_iter()
+        .find_map(|(_, task)| match &task.kind {
+            TaskKind::WorkingDirectory(w) if w.tasks.iter().any(|t| t.id == child) => Some(w),
+            _ => None,
+        })
 }
 
 /// The block's `outputFiles`, rendered and checked (spec §2.2): a list of names

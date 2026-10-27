@@ -222,7 +222,18 @@ pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
     // PARTIALLY** — W3b's message-driven driver is the candidate, exactly as it
     // is for the `Parallel` guard. Whoever gives `advance` one has to bring both
     // guards back, and bring the test that makes them fire with them.
-    let mut work = match sequential::drive(plan, state, &plan.roots, &plan.errors, None, now) {
+    // End hooks A4: the flow's own `finally:` is the third list of the same
+    // rule (`ES:504-512`, `ES:1025-1050` call `findTaskDependingFlowState` for
+    // the flow too); the execution's state is still `aggregate(roots)`.
+    let mut work = match sequential::drive(
+        plan,
+        state,
+        &plan.roots,
+        &plan.errors,
+        &plan.finally,
+        None,
+        now,
+    ) {
         Step::Commands(cmds) => cmds,
         Step::Waiting => Vec::new(),
         Step::Done(state) => vec![Command::SetExecutionState { state }],
@@ -450,6 +461,124 @@ mod tests {
         }
         out.sort();
         out
+    }
+
+    /// End hooks A4 fix round (2026-10-27): `spec::path::find_task`, the one
+    /// lookup the worker turns a stored run's task id back into its model task
+    /// with, finds EVERY task the plan holds, for every corpus flow that plans,
+    /// and finds the same task `spec::path::every_task` lists under that id.
+    /// The kinds agree where the worker relies on them: a planned `Runnable`
+    /// is a model `Leaf` (`claim::leaf`), a planned `Loop` a model `Loop`
+    /// (`spawn::find_task`), a planned `WorkingDirectory` a model one
+    /// (`working_dir::block_of`). The `finally:` count is the population the
+    /// old `claim::leaf` walk could not reach.
+    #[test]
+    fn find_task_resolves_every_planned_task_of_every_corpus_flow() {
+        use crate::models::TaskKind as M;
+        let (mut flows, mut tasks, mut under_finally) = (0usize, 0usize, 0usize);
+        for (id, source) in every_corpus_flow() {
+            let Ok(flow) = crate::spec::parse(&source) else {
+                continue;
+            };
+            // `build_plan`, the start gate: a flow it refuses never has a run.
+            let Ok(plan) = build_plan(&source) else {
+                continue;
+            };
+            flows += 1;
+            let every = crate::spec::path::every_task(&flow);
+            for (ix, t) in plan.tasks.iter().enumerate() {
+                let found = crate::spec::path::find_task(&flow, &t.id)
+                    .unwrap_or_else(|| panic!("{id}: plan task {ix} `{}` not found", t.id));
+                let listed = every
+                    .iter()
+                    .find(|(_, m)| m.id == t.id)
+                    .map(|(_, m)| *m)
+                    .expect("every_task lists it");
+                assert!(std::ptr::eq(found, listed), "{id}: `{}`", t.id);
+                let agrees = match (&t.kind, &found.kind) {
+                    (TaskKind::Runnable { .. }, k) => matches!(k, M::Leaf { .. }),
+                    (TaskKind::Loop { .. }, k) => matches!(k, M::Loop(_)),
+                    (TaskKind::WorkingDirectory { .. }, k) => matches!(k, M::WorkingDirectory(_)),
+                    _ => true,
+                };
+                assert!(agrees, "{id}: plan task {ix} `{}` kind", t.id);
+                tasks += 1;
+            }
+            under_finally += every
+                .iter()
+                .filter(|(path, _)| path.starts_with("finally."))
+                .filter(|(_, m)| plan.tasks.iter().any(|t| t.id == m.id))
+                .count();
+        }
+        println!("{flows} flows, {tasks} planned tasks, {under_finally} under `finally:`");
+        assert!(flows > 250 && tasks > 700, "{flows} flows, {tasks} tasks");
+        assert!(
+            under_finally > 0,
+            "the corpus plans tasks under the flow's `finally:`"
+        );
+    }
+
+    /// One flow's layout as D3 freezes it: index, id, kind, and the children
+    /// `Plan::children_of` returned before package #2.
+    fn layout(plan: &Plan) -> Vec<(usize, String, String, Vec<usize>)> {
+        (0..plan.tasks.len())
+            .map(|ix| {
+                let kind = format!("{:?}", plan.tasks[ix].kind);
+                let tag = kind.split([' ', '{', '(']).next().unwrap_or("").to_string();
+                (ix, plan.tasks[ix].id.clone(), tag, plan.children_of(ix))
+            })
+            .collect()
+    }
+
+    /// **D3: a plan built after package #2 starts with the layout every stored
+    /// `task_runs.task_ix` was written against** (`worker/claim.rs:538`, read
+    /// back at `:4393`). A list #2 adds may only be APPENDED: an execution that
+    /// was running at deploy time is re-planned from its own source at its next
+    /// claim, and a shifted index would hand its runs another task's spec.
+    /// `EGRET_WRITE_PLAN_LAYOUT=1` rewrites the fixture; that is allowed only in
+    /// Task A1, at `68c9f4de`, before any planner change.
+    #[test]
+    fn the_plan_before_end_hooks_is_a_prefix_of_every_plan_after() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/executor/plan_layout_pre_end_hooks.json"
+        );
+        let mut now = serde_json::Map::new();
+        for (id, source) in every_corpus_flow() {
+            if let Ok(plan) = plan::plan_stored(&source) {
+                now.insert(id, serde_json::to_value(layout(&plan)).unwrap());
+            }
+        }
+        if std::env::var("EGRET_WRITE_PLAN_LAYOUT").as_deref() == Ok("1") {
+            std::fs::write(path, serde_json::to_string_pretty(&now).unwrap()).unwrap();
+        }
+        let frozen: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert!(
+            frozen.len() >= 300,
+            "the fixture covers the corpus ({})",
+            frozen.len()
+        );
+        let mut moved = Vec::new();
+        for (id, old) in &frozen {
+            let old: Vec<(usize, String, String, Vec<usize>)> =
+                serde_json::from_value(old.clone()).unwrap();
+            let Some(new) = now.get(id) else {
+                moved.push(format!("{id}: planned before #2, not now"));
+                continue;
+            };
+            let new: Vec<(usize, String, String, Vec<usize>)> =
+                serde_json::from_value(new.clone()).unwrap();
+            for o in &old {
+                // A node keeps its index, id and kind, and every old child is still
+                // its child (a new `finally` or a loop's new `errors` only adds some).
+                match new.get(o.0) {
+                    Some(n) if n.1 == o.1 && n.2 == o.2 && o.3.iter().all(|c| n.3.contains(c)) => {}
+                    other => moved.push(format!("{id}: ix {} was {o:?}, is {other:?}", o.0)),
+                }
+            }
+        }
+        assert!(moved.is_empty(), "{moved:#?}");
     }
 
     /// W7c Task 1: the topology graph over the whole corpus. For every flow
@@ -3572,7 +3701,7 @@ mod tests {
         // `Pause` is planned [`TaskKind::Pause`] only when it declares none of
         // the four properties `build_plan` does not reproduce, and an opaque
         // `Runnable` otherwise -- so this arm has to ask the same question
-        // `build_plan` asks, through the same `pause_gap`, or the two would be
+        // `build_plan` asks, through the same `pause_plan_gap`, or the two would be
         // two opinions about which pauses are reproduced.
         //
         // **That makes this ONE arm weaker than the others and it is said out
@@ -3591,7 +3720,9 @@ mod tests {
                 | K::Dag(_)
                 | K::Loop(_) => PlannedAs::Descends,
                 K::Subflow(_) => PlannedAs::Executable,
-                K::Pause(p) if pause_gap(p).is_none() => PlannedAs::Waits,
+                K::Pause(p) if crate::executor::plan::pause_plan_gap(p).is_none() => {
+                    PlannedAs::Waits
+                }
                 K::Pause(_) => PlannedAs::Opaque,
                 // Kill-and-exit Task 3: an `Exit` is a `Leaf` to the model and
                 // a kind the executor drives itself in the plan.
@@ -10155,5 +10286,928 @@ mod allow_failure_drive_tests {
         assert_eq!(last_of(&plan, &state, "fin"), Some(RunState::Success));
         assert_eq!(last_of(&plan, &state, "handler"), None);
         assert_eq!(flow, RunState::Success);
+    }
+}
+
+/// End hooks A4 (spec §4.1, D2): every flowable and the flow itself choose
+/// their list by Kestra's `findTaskDependingFlowState` -- `tasks`, then
+/// `errors` (on failure only), then `finally`, one at a time -- and take their
+/// state from `tasks` alone.
+///
+/// The harness is `allow_failure_drive_tests`'s `run`, plus what these shapes
+/// need: a literal `If` condition and `runIf:` are rendered as the caller
+/// would, time jumps to the earliest `not_before` when nothing else moves (a
+/// `retry:`), an optional kill once a named run is `RUNNING`, and an event log
+/// (`create:<id>`, `end:<id>:<state>`, `exec:<state>`) in the order things
+/// happened.
+#[cfg(test)]
+mod end_hooks_drive_tests {
+    use super::state::{apply, ExecutionState, RunState, Tick, WorkingDirPhase};
+    use super::{advance, plan, Command, Plan, TaskKind};
+
+    struct Trace {
+        plan: Plan,
+        state: ExecutionState,
+        flow: RunState,
+        events: Vec<String>,
+    }
+
+    fn id_of<'a>(plan: &'a Plan, state: &ExecutionState, ix: usize) -> &'a str {
+        plan.tasks[state.runs[ix].task].id.as_str()
+    }
+
+    /// `apply`, recording every run created and every run or execution that
+    /// enters a terminal state.
+    fn step(plan: &Plan, state: &mut ExecutionState, cmd: &Command, events: &mut Vec<String>) {
+        let runs_before = state.runs.len();
+        let lasts: Vec<Option<RunState>> = state
+            .runs
+            .iter()
+            .map(|r| r.history.last().copied())
+            .collect();
+        let exec_before = state.history.last().copied();
+        apply(state, cmd);
+        for ix in runs_before..state.runs.len() {
+            events.push(format!("create:{}", id_of(plan, state, ix)));
+        }
+        for (ix, before) in lasts.iter().enumerate() {
+            let now = state.runs[ix].history.last().copied();
+            if now != *before {
+                if let Some(s) = now.filter(|s| s.is_terminal()) {
+                    events.push(format!("end:{}:{s:?}", id_of(plan, state, ix)));
+                }
+            }
+        }
+        let exec_now = state.history.last().copied();
+        if exec_now != exec_before {
+            if let Some(s) = exec_now.filter(|s| s.is_terminal()) {
+                events.push(format!("exec:{s:?}"));
+            }
+        }
+    }
+
+    fn drive(src: &str, fail: &[&str], kill_when_running: Option<&str>) -> Trace {
+        drive_answering(src, fail, kill_when_running, &[])
+    }
+
+    /// [`drive`], also playing the worker's two other parts A5 needs:
+    ///
+    /// - a `WorkingDirectory` claim (prepare or finish) is completed the round
+    ///   after it is begun, and logged `claim:prepare:<block>` /
+    ///   `claim:finish:<block>`;
+    /// - a `LoopUntil` condition is rendered behind the executor's own gate
+    ///   ([`super::loop_condition_is_asked`], the call `worker::render` makes),
+    ///   from `answers` in order (the last repeats), and logged
+    ///   `condition:<loop>`.
+    ///
+    /// A `fail` entry `id#n` fails only the `n`-th time (1-based) a run of
+    /// `id` ends; a bare `id` fails every time.
+    fn drive_answering(
+        src: &str,
+        fail: &[&str],
+        kill_when_running: Option<&str>,
+        answers: &[&str],
+    ) -> Trace {
+        let flow = crate::spec::parse(src).expect("parses");
+        let plan = plan::flatten_flow(&flow).expect("plans");
+        let mut state = ExecutionState::new(&plan);
+        let mut events = Vec::new();
+        let mut final_state = None;
+        let mut now = Tick(0);
+        let mut asked = 0usize;
+        let mut ended: std::collections::HashMap<String, usize> = Default::default();
+        for _ in 0..1000 {
+            let cmds = advance(&plan, &state, now);
+            if !cmds.is_empty() {
+                for cmd in &cmds {
+                    // Terminal states only: a `RUNNING` here would let a
+                    // drive that hangs read as one that ended (review M4).
+                    if let Command::SetExecutionState { state } = cmd {
+                        if state.is_terminal() {
+                            final_state = Some(*state);
+                        }
+                    }
+                    step(&plan, &mut state, cmd, &mut events);
+                }
+                continue;
+            }
+            let claim = (0..state.runs.len()).find(|&ix| {
+                matches!(
+                    state.runs[ix].working_dir,
+                    Some(WorkingDirPhase::Preparing | WorkingDirPhase::Finishing)
+                ) && !state.runs[ix]
+                    .history
+                    .last()
+                    .is_some_and(|s| s.is_terminal())
+            });
+            if let Some(ix) = claim {
+                let which = if state.runs[ix].working_dir == Some(WorkingDirPhase::Preparing) {
+                    "prepare"
+                } else {
+                    "finish"
+                };
+                events.push(format!("claim:{which}:{}", id_of(&plan, &state, ix)));
+                let cmd = Command::CompleteWorkingDirectoryClaim { run: ix };
+                step(&plan, &mut state, &cmd, &mut events);
+                continue;
+            }
+            let condition = (0..state.runs.len()).find(|&ix| {
+                state.runs[ix].history.last() == Some(&RunState::Running)
+                    && state.runs[ix].rendered.is_none()
+                    && super::loop_condition_is_asked(&plan, &state, ix, state.runs[ix].task, now)
+            });
+            if let Some(ix) = condition {
+                events.push(format!("condition:{}", id_of(&plan, &state, ix)));
+                let answer = answers.get(asked).or(answers.last()).expect("an answer");
+                asked += 1;
+                state.runs[ix].rendered = Some((*answer).to_string());
+                continue;
+            }
+            // The caller's render of a literal `runIf:` and `If` condition.
+            let mut rendered = false;
+            for ix in 0..state.runs.len() {
+                let task = &plan.tasks[state.runs[ix].task];
+                let last = state.runs[ix].history.last().copied();
+                if last == Some(RunState::Created) && state.runs[ix].rendered_run_if.is_none() {
+                    if let Some(source) = &task.run_if {
+                        state.runs[ix].rendered_run_if = Some(source.clone());
+                        rendered = true;
+                    }
+                }
+                if last == Some(RunState::Running) && state.runs[ix].rendered.is_none() {
+                    match &task.kind {
+                        TaskKind::If { condition, .. } => {
+                            state.runs[ix].rendered = Some(condition.clone());
+                            rendered = true;
+                        }
+                        TaskKind::Switch { value, .. } => {
+                            state.runs[ix].rendered = Some(value.clone());
+                            rendered = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if rendered {
+                continue;
+            }
+            let killing = state.history.last() == Some(&RunState::Killing);
+            if let Some(id) = kill_when_running {
+                let target_running = (0..state.runs.len()).any(|ix| {
+                    id_of(&plan, &state, ix) == id
+                        && state.runs[ix].history.last() == Some(&RunState::Running)
+                });
+                if target_running && !killing && !state.history.contains(&RunState::Killing) {
+                    let cmd = Command::SetExecutionState {
+                        state: RunState::Killing,
+                    };
+                    step(&plan, &mut state, &cmd, &mut events);
+                    continue;
+                }
+            }
+            // The worker: a runnable it holds ends, and under a kill it ends
+            // `KILLED` (whether or not `advance_killing` marked it `KILLING`).
+            let in_flight = (0..state.runs.len()).find(|&ix| {
+                matches!(
+                    plan.tasks[state.runs[ix].task].kind,
+                    TaskKind::Runnable { .. }
+                ) && matches!(
+                    state.runs[ix].history.last(),
+                    Some(RunState::Running | RunState::Killing)
+                )
+            });
+            if let Some(ix) = in_flight {
+                let outcome = if killing {
+                    RunState::Killed
+                } else {
+                    let id = id_of(&plan, &state, ix).to_string();
+                    let n = ended.entry(id.clone()).or_default();
+                    *n += 1;
+                    let raw = if fail.contains(&id.as_str())
+                        || fail.contains(&format!("{id}#{n}").as_str())
+                    {
+                        RunState::Failed
+                    } else {
+                        RunState::Success
+                    };
+                    super::allow_failure::for_runnable(&plan, &state, ix, raw, now)
+                };
+                let cmd = Command::SetRunState {
+                    run: ix,
+                    state: outcome,
+                };
+                step(&plan, &mut state, &cmd, &mut events);
+                continue;
+            }
+            match state
+                .runs
+                .iter()
+                .filter_map(|r| r.not_before)
+                .filter(|t| *t > now)
+                .min()
+            {
+                Some(t) => now = t,
+                None => break,
+            }
+        }
+        let flow = final_state.expect("the execution reached a terminal state");
+        Trace {
+            plan,
+            state,
+            flow,
+            events,
+        }
+    }
+
+    fn run(src: &str, fail: &[&str]) -> (Plan, ExecutionState, RunState) {
+        let t = drive(src, fail, None);
+        (t.plan, t.state, t.flow)
+    }
+
+    /// The last state of the run for `id`, or `None` if no run was created.
+    fn last_of(plan: &Plan, state: &ExecutionState, id: &str) -> Option<RunState> {
+        let task = plan.tasks.iter().position(|t| t.id == id)?;
+        state
+            .runs
+            .iter()
+            .find(|r| r.task == task)
+            .and_then(|r| r.history.last().copied())
+    }
+
+    /// The task id of every run, in creation order.
+    fn order(plan: &Plan, state: &ExecutionState) -> Vec<String> {
+        state
+            .runs
+            .iter()
+            .map(|r| plan.tasks[r.task].id.clone())
+            .collect()
+    }
+
+    /// The position of `event` in the log; panics with the log if absent.
+    fn at(t: &Trace, event: &str) -> usize {
+        t.events
+            .iter()
+            .position(|e| e == event)
+            .unwrap_or_else(|| panic!("no `{event}` in {:?}", t.events))
+    }
+
+    const HEAD: &str = "id: f\nnamespace: io.kestra.tests\n";
+    const FAIL: &str = "io.kestra.plugin.core.execution.Fail";
+    const LOG: &str = "io.kestra.plugin.core.log.Log";
+
+    /// A leaf at `indent` spaces: `- id: <id>` of type `ty`.
+    fn leaf(indent: usize, id: &str, ty: &str) -> String {
+        let pad = " ".repeat(indent);
+        if ty == LOG {
+            format!("{pad}- id: {id}\n{pad}  type: {ty}\n{pad}  message: {id}\n")
+        } else {
+            format!("{pad}- id: {id}\n{pad}  type: {ty}\n")
+        }
+    }
+
+    /// A `Sequential` `seq` holding `ko` (`Fail`), with `finally: [a1, a2]`.
+    const SEQ_FINALLY: &str = "id: f\nnamespace: io.kestra.tests\ntasks:\n  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      - id: ko\n        type: io.kestra.plugin.core.execution.Fail\n    finally:\n      - id: a1\n        type: io.kestra.plugin.core.log.Log\n        message: a1\n      - id: a2\n        type: io.kestra.plugin.core.log.Log\n        message: a2\n";
+
+    /// [`SEQ_FINALLY`] with `errors: [e1, e2]`.
+    const SEQ_ERRORS_FINALLY: &str = "id: f\nnamespace: io.kestra.tests\ntasks:\n  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      - id: ko\n        type: io.kestra.plugin.core.execution.Fail\n    errors:\n      - id: e1\n        type: io.kestra.plugin.core.log.Log\n        message: e1\n      - id: e2\n        type: io.kestra.plugin.core.log.Log\n        message: e2\n    finally:\n      - id: a1\n        type: io.kestra.plugin.core.log.Log\n        message: a1\n      - id: a2\n        type: io.kestra.plugin.core.log.Log\n        message: a2\n";
+
+    /// spec §0.1, golden `finally-sequential`: tasks, then finally; the block ends
+    /// after its finally and keeps its tasks' state.
+    #[test]
+    fn a_sequential_runs_finally_after_a_failure_and_stays_failed() {
+        let t = drive(SEQ_FINALLY, &["ko"], None);
+        assert_eq!(order(&t.plan, &t.state), ["seq", "ko", "a1", "a2"]);
+        assert_eq!(last_of(&t.plan, &t.state, "seq"), Some(RunState::Failed));
+        assert_eq!(last_of(&t.plan, &t.state, "a1"), Some(RunState::Success));
+        assert_eq!(last_of(&t.plan, &t.state, "a2"), Some(RunState::Success));
+        assert_eq!(t.flow, RunState::Failed);
+        assert!(
+            at(&t, "end:a2:Success") < at(&t, "end:seq:Failed"),
+            "the block ends after its finally: {:?}",
+            t.events
+        );
+    }
+
+    /// `finally` runs on success too.
+    #[test]
+    fn a_sequential_runs_finally_after_success() {
+        let (plan, state, flow) = run(SEQ_FINALLY, &[]);
+        assert_eq!(order(&plan, &state), ["seq", "ko", "a1", "a2"]);
+        assert_eq!(last_of(&plan, &state, "seq"), Some(RunState::Success));
+        assert_eq!(last_of(&plan, &state, "a1"), Some(RunState::Success));
+        assert_eq!(last_of(&plan, &state, "a2"), Some(RunState::Success));
+        assert_eq!(flow, RunState::Success);
+    }
+
+    /// spec §0.2: a failing finally child changes nothing and does not stop the next one.
+    #[test]
+    fn a_failing_finally_child_neither_fails_the_block_nor_stops_the_next() {
+        let (plan, state, flow) = run(SEQ_FINALLY, &["a1"]);
+        assert_eq!(last_of(&plan, &state, "a1"), Some(RunState::Failed));
+        assert_eq!(last_of(&plan, &state, "a2"), Some(RunState::Success));
+        assert_eq!(last_of(&plan, &state, "seq"), Some(RunState::Success));
+        assert_eq!(flow, RunState::Success);
+    }
+
+    /// A failing finally under a failed block: the block stays FAILED (from
+    /// its tasks), and the next finally child still runs.
+    #[test]
+    fn a_failing_finally_child_under_a_failed_block_leaves_it_failed() {
+        let (plan, state, flow) = run(SEQ_FINALLY, &["ko", "a1"]);
+        assert_eq!(last_of(&plan, &state, "a1"), Some(RunState::Failed));
+        assert_eq!(last_of(&plan, &state, "a2"), Some(RunState::Success));
+        assert_eq!(last_of(&plan, &state, "seq"), Some(RunState::Failed));
+        assert_eq!(flow, RunState::Failed);
+    }
+
+    /// golden `finally-sequential-error`: errors strictly before finally.
+    #[test]
+    fn errors_run_before_finally() {
+        let t = drive(SEQ_ERRORS_FINALLY, &["ko"], None);
+        assert_eq!(
+            order(&t.plan, &t.state),
+            ["seq", "ko", "e1", "e2", "a1", "a2"]
+        );
+        assert!(at(&t, "end:e2:Success") < at(&t, "create:a1"));
+        assert_eq!(last_of(&t.plan, &t.state, "seq"), Some(RunState::Failed));
+        assert_eq!(t.flow, RunState::Failed);
+    }
+
+    /// On success the `errors:` list is skipped and `finally:` still runs.
+    #[test]
+    fn errors_are_skipped_on_success_and_finally_runs() {
+        let (plan, state, flow) = run(SEQ_ERRORS_FINALLY, &[]);
+        assert_eq!(order(&plan, &state), ["seq", "ko", "a1", "a2"]);
+        assert_eq!(flow, RunState::Success);
+    }
+
+    /// golden `finally-flow-error`: the flow's own lists in the same order, and
+    /// the execution takes its terminal only after its finally.
+    #[test]
+    fn the_flows_errors_then_finally() {
+        let src = format!(
+            "{HEAD}tasks:\n{}errors:\n{}{}finally:\n{}{}",
+            leaf(2, "ko", FAIL),
+            leaf(2, "e1", LOG),
+            leaf(2, "e2", LOG),
+            leaf(2, "a1", LOG),
+            leaf(2, "a2", LOG)
+        );
+        let t = drive(&src, &["ko"], None);
+        assert_eq!(order(&t.plan, &t.state), ["ko", "e1", "e2", "a1", "a2"]);
+        assert_eq!(t.flow, RunState::Failed);
+        assert!(at(&t, "end:a2:Success") < at(&t, "exec:Failed"));
+        assert_eq!(
+            t.state
+                .history
+                .iter()
+                .filter(|s| **s == RunState::Failed)
+                .count(),
+            1,
+            "the execution enters FAILED once, after its finally: {:?}",
+            t.state.history
+        );
+    }
+
+    /// golden `finally-flow-error-first`: the sibling after the failure is never created.
+    #[test]
+    fn the_flows_finally_skips_the_rest_of_tasks() {
+        let src = format!(
+            "{HEAD}tasks:\n{}{}finally:\n{}",
+            leaf(2, "ko", FAIL),
+            leaf(2, "ok", LOG),
+            leaf(2, "a1", LOG)
+        );
+        let (plan, state, flow) = run(&src, &["ko"]);
+        assert_eq!(order(&plan, &state), ["ko", "a1"]);
+        assert_eq!(last_of(&plan, &state, "ok"), None);
+        assert_eq!(flow, RunState::Failed);
+    }
+
+    /// The flow's finally runs after success, and its state is its tasks'.
+    #[test]
+    fn the_flows_finally_runs_after_success_and_a_failure_in_it_changes_nothing() {
+        let src = format!(
+            "{HEAD}tasks:\n{}finally:\n{}{}",
+            leaf(2, "ok", LOG),
+            leaf(2, "a1", LOG),
+            leaf(2, "a2", LOG)
+        );
+        let t = drive(&src, &["a1"], None);
+        assert_eq!(order(&t.plan, &t.state), ["ok", "a1", "a2"]);
+        assert_eq!(t.flow, RunState::Success);
+        assert!(at(&t, "end:a2:Success") < at(&t, "exec:Success"));
+    }
+
+    /// golden `finally-parallel`: finally is sequential under a Parallel.
+    #[test]
+    fn a_parallels_finally_runs_one_at_a_time() {
+        let src = format!(
+            "{HEAD}tasks:\n  - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n{}{}    finally:\n{}{}",
+            leaf(6, "p1", LOG),
+            leaf(6, "p2", LOG),
+            leaf(6, "a1", LOG),
+            leaf(6, "a2", LOG)
+        );
+        let t = drive(&src, &[], None);
+        assert_eq!(order(&t.plan, &t.state), ["par", "p1", "p2", "a1", "a2"]);
+        assert!(at(&t, "end:p2:Success") < at(&t, "create:a1"));
+        assert!(
+            at(&t, "end:a1:Success") < at(&t, "create:a2"),
+            "a2 is created only after a1 ended: {:?}",
+            t.events
+        );
+        assert_eq!(last_of(&t.plan, &t.state, "par"), Some(RunState::Success));
+        assert_eq!(t.flow, RunState::Success);
+    }
+
+    /// golden `finally-parallel` (failed run): the Parallel's errors run, then
+    /// its finally, all sequentially; the successful sibling stays SUCCESS.
+    #[test]
+    fn a_parallels_errors_then_finally_after_a_failure() {
+        let src = format!(
+            "{HEAD}tasks:\n  - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n{}{}    errors:\n{}{}    finally:\n{}{}",
+            leaf(6, "p1", LOG),
+            leaf(6, "ko", FAIL),
+            leaf(6, "e1", LOG),
+            leaf(6, "e2", LOG),
+            leaf(6, "a1", LOG),
+            leaf(6, "a2", LOG)
+        );
+        let t = drive(&src, &["ko"], None);
+        assert_eq!(
+            order(&t.plan, &t.state),
+            ["par", "p1", "ko", "e1", "e2", "a1", "a2"]
+        );
+        assert!(at(&t, "end:e1:Success") < at(&t, "create:e2"));
+        assert!(at(&t, "end:e2:Success") < at(&t, "create:a1"));
+        assert!(at(&t, "end:a1:Success") < at(&t, "create:a2"));
+        assert_eq!(last_of(&t.plan, &t.state, "p1"), Some(RunState::Success));
+        assert_eq!(last_of(&t.plan, &t.state, "par"), Some(RunState::Failed));
+        assert_eq!(t.flow, RunState::Failed);
+    }
+
+    /// spec §4.1: with no `errors:`, a failure fails the still-live siblings
+    /// (egret's `fail_the_rest`) before the finally starts.
+    #[test]
+    fn a_parallel_with_no_errors_fails_its_live_siblings_before_its_finally() {
+        let src = format!(
+            "{HEAD}tasks:\n  - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n{}{}    finally:\n{}",
+            leaf(6, "ko", FAIL),
+            leaf(6, "p1", LOG),
+            leaf(6, "a1", LOG)
+        );
+        let t = drive(&src, &["ko"], None);
+        assert_eq!(order(&t.plan, &t.state), ["par", "ko", "p1", "a1"]);
+        assert_eq!(last_of(&t.plan, &t.state, "p1"), Some(RunState::Failed));
+        assert!(at(&t, "end:p1:Failed") < at(&t, "create:a1"));
+        assert_eq!(last_of(&t.plan, &t.state, "a1"), Some(RunState::Success));
+        assert_eq!(last_of(&t.plan, &t.state, "par"), Some(RunState::Failed));
+        assert_eq!(t.flow, RunState::Failed);
+    }
+
+    /// golden `finally-dag`: the Dag's dependencies still order its tasks when
+    /// it has `errors:`/`finally:`, and the lists follow one at a time.
+    #[test]
+    fn a_dag_keeps_its_dependencies_and_runs_errors_then_finally() {
+        let src = format!(
+            "{HEAD}tasks:\n  - id: dag\n    type: io.kestra.plugin.core.flow.Dag\n    tasks:\n      - task:\n          id: t1\n          type: {LOG}\n          message: t1\n      - task:\n          id: t2\n          type: {FAIL}\n        dependsOn: [t1]\n    errors:\n{}    finally:\n{}{}",
+            leaf(6, "e1", LOG),
+            leaf(6, "a1", LOG),
+            leaf(6, "a2", LOG)
+        );
+        let t = drive(&src, &["t2"], None);
+        assert_eq!(
+            order(&t.plan, &t.state),
+            ["dag", "t1", "t2", "e1", "a1", "a2"]
+        );
+        assert!(
+            at(&t, "end:t1:Success") < at(&t, "create:t2"),
+            "t2 depends on t1: {:?}",
+            t.events
+        );
+        assert!(at(&t, "end:a1:Success") < at(&t, "create:a2"));
+        assert_eq!(last_of(&t.plan, &t.state, "dag"), Some(RunState::Failed));
+        assert_eq!(t.flow, RunState::Failed);
+    }
+
+    const IF_FINALLY: &str = "id: f\nnamespace: io.kestra.tests\ntasks:\n  - id: if\n    type: io.kestra.plugin.core.flow.If\n    condition: \"{COND}\"\n    then:\n      - id: x\n        type: io.kestra.plugin.core.log.Log\n        message: x\n    finally:\n      - id: z\n        type: io.kestra.plugin.core.log.Log\n        message: z\n";
+
+    /// `If.java:188-198`: an If whose branch is empty ends without its finally.
+    #[test]
+    fn an_if_with_nothing_to_run_skips_its_finally() {
+        let (plan, state, flow) = run(&IF_FINALLY.replace("{COND}", "false"), &[]);
+        assert_eq!(order(&plan, &state), ["if"]);
+        assert_eq!(last_of(&plan, &state, "z"), None);
+        assert_eq!(last_of(&plan, &state, "if"), Some(RunState::Success));
+        assert_eq!(flow, RunState::Success);
+    }
+
+    /// An If that has a branch to run runs its finally after it.
+    #[test]
+    fn an_if_runs_its_finally_after_its_branch() {
+        let (plan, state, flow) = run(&IF_FINALLY.replace("{COND}", "true"), &[]);
+        assert_eq!(order(&plan, &state), ["if", "x", "z"]);
+        assert_eq!(last_of(&plan, &state, "if"), Some(RunState::Success));
+        assert_eq!(flow, RunState::Success);
+    }
+
+    /// A Switch runs its finally after the chosen case.
+    #[test]
+    fn a_switch_runs_its_finally_after_its_case() {
+        let src = format!(
+            "{HEAD}tasks:\n  - id: sw\n    type: io.kestra.plugin.core.flow.Switch\n    value: a\n    cases:\n      a:\n{}    finally:\n{}",
+            leaf(8, "x", FAIL),
+            leaf(6, "z", LOG)
+        );
+        let (plan, state, flow) = run(&src, &["x"]);
+        assert_eq!(order(&plan, &state), ["sw", "x", "z"]);
+        assert_eq!(last_of(&plan, &state, "sw"), Some(RunState::Failed));
+        assert_eq!(last_of(&plan, &state, "z"), Some(RunState::Success));
+        assert_eq!(flow, RunState::Failed);
+    }
+
+    /// `FU:163-170`: a block whose children are all disabled is SUCCESS without finally.
+    #[test]
+    fn a_block_of_disabled_children_skips_its_finally() {
+        let src = format!(
+            "{HEAD}tasks:\n  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      - id: x\n        type: {LOG}\n        message: x\n        disabled: true\n    finally:\n{}",
+            leaf(6, "z", LOG)
+        );
+        let (plan, state, flow) = run(&src, &[]);
+        assert_eq!(order(&plan, &state), ["seq"]);
+        assert_eq!(last_of(&plan, &state, "z"), None);
+        assert_eq!(last_of(&plan, &state, "seq"), Some(RunState::Success));
+        assert_eq!(flow, RunState::Success);
+    }
+
+    /// A child skipped by `runIf:` is terminal: the block's tasks are
+    /// exhausted and its finally runs.
+    #[test]
+    fn a_skipped_child_is_done_and_the_finally_runs() {
+        let src = format!(
+            "{HEAD}tasks:\n  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      - id: x\n        type: {LOG}\n        message: x\n        runIf: \"false\"\n    finally:\n{}",
+            leaf(6, "z", LOG)
+        );
+        let (plan, state, flow) = run(&src, &[]);
+        assert_eq!(order(&plan, &state), ["seq", "x", "z"]);
+        assert_eq!(last_of(&plan, &state, "x"), Some(RunState::Skipped));
+        assert_eq!(last_of(&plan, &state, "z"), Some(RunState::Success));
+        assert_eq!(last_of(&plan, &state, "seq"), Some(RunState::Success));
+        assert_eq!(flow, RunState::Success);
+    }
+
+    /// A child whose failure is allowed is a WARNING, not a failure: the
+    /// block goes on to its next child and its finally, and ends WARNING.
+    #[test]
+    fn an_allowed_failure_runs_the_rest_and_the_finally() {
+        let src = format!(
+            "{HEAD}tasks:\n  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      - id: ko\n        type: {FAIL}\n        allowFailure: true\n{}    errors:\n{}    finally:\n{}",
+            leaf(6, "ok", LOG),
+            leaf(6, "e1", LOG),
+            leaf(6, "z", LOG)
+        );
+        let (plan, state, flow) = run(&src, &["ko"]);
+        assert_eq!(order(&plan, &state), ["seq", "ko", "ok", "z"]);
+        assert_eq!(last_of(&plan, &state, "ko"), Some(RunState::Warning));
+        assert_eq!(last_of(&plan, &state, "seq"), Some(RunState::Warning));
+        assert_eq!(flow, RunState::Warning);
+    }
+
+    /// `Execution.java:602-606`: a failure that will be retried starts neither list.
+    #[test]
+    fn a_retry_pending_failure_starts_no_finally() {
+        let src = format!(
+            "{HEAD}tasks:\n  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      - id: ko\n        type: {FAIL}\n        retry:\n          type: constant\n          interval: PT1S\n          maxAttempts: 2\n    errors:\n{}    finally:\n{}",
+            leaf(6, "e1", LOG),
+            leaf(6, "z", LOG)
+        );
+        let t = drive(&src, &["ko"], None);
+        let ko_failed: Vec<usize> = t
+            .events
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| *e == "end:ko:Failed")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(ko_failed.len(), 2, "two attempts: {:?}", t.events);
+        assert!(
+            ko_failed[1] < at(&t, "create:e1"),
+            "errors start only after the last attempt: {:?}",
+            t.events
+        );
+        assert!(at(&t, "end:e1:Success") < at(&t, "create:z"));
+        assert_eq!(last_of(&t.plan, &t.state, "seq"), Some(RunState::Failed));
+        assert_eq!(t.flow, RunState::Failed);
+    }
+
+    /// spec §0.4: nothing new is created while the execution is KILLING, so a
+    /// kill during a finally stops the finally list.
+    #[test]
+    fn a_kill_during_finally_creates_no_further_finally_child() {
+        let t = drive(SEQ_FINALLY, &["ko"], Some("a1"));
+        assert_eq!(order(&t.plan, &t.state), ["seq", "ko", "a1"]);
+        assert_eq!(last_of(&t.plan, &t.state, "a1"), Some(RunState::Killed));
+        assert_eq!(last_of(&t.plan, &t.state, "a2"), None);
+        assert_eq!(t.flow, RunState::Killed);
+    }
+
+    /// `Execution.java:589-593` comes FIRST: once a `finally` run exists the
+    /// list is `finally`, even if `errors:` has not run. No rule of this
+    /// executor writes that state (a failure starts `errors` before
+    /// `finally`), so it is built by hand; the arm pins Kestra's precedence,
+    /// which mutation (a) of the A4 brief reorders.
+    #[test]
+    fn once_finally_has_started_errors_are_not_re_entered() {
+        let flow = crate::spec::parse(SEQ_ERRORS_FINALLY).expect("parses");
+        let plan = plan::flatten_flow(&flow).expect("plans");
+        let ix = |id: &str| plan.tasks.iter().position(|t| t.id == id).unwrap();
+        let mut state = ExecutionState::new(&plan);
+        let t0 = Tick(0);
+        for cmd in [
+            Command::SetExecutionState {
+                state: RunState::Running,
+            },
+            Command::CreateRun {
+                task: ix("seq"),
+                parent: None,
+                value: None,
+            },
+            Command::StartRun { run: 0, at: t0 },
+            Command::CreateRun {
+                task: ix("ko"),
+                parent: Some(0),
+                value: None,
+            },
+            Command::StartRun { run: 1, at: t0 },
+            Command::SetRunState {
+                run: 1,
+                state: RunState::Failed,
+            },
+            Command::CreateRun {
+                task: ix("a1"),
+                parent: Some(0),
+                value: None,
+            },
+        ] {
+            apply(&mut state, &cmd);
+        }
+        let seq = &plan.tasks[ix("seq")];
+        let TaskKind::Sequential { tasks } = &seq.kind else {
+            panic!("seq is a Sequential");
+        };
+        assert_eq!(
+            super::flowable::current_list(
+                &plan,
+                &state,
+                tasks,
+                &seq.errors,
+                &seq.finally,
+                Some(0),
+                t0
+            ),
+            super::flowable::Current::Finally(&seq.finally)
+        );
+        let cmds = advance(&plan, &state, t0);
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Command::CreateRun { task, .. } if *task == ix("e1"))),
+            "errors are not started once finally has: {cmds:?}"
+        );
+    }
+
+    /// A nested block's finally runs when that block ends, before the outer
+    /// block's; and a flowable inside the flow's finally runs its own.
+    #[test]
+    fn finally_lists_nest() {
+        let src = format!(
+            "{HEAD}tasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.flow.Sequential\n        tasks:\n{}        finally:\n{}{}    finally:\n{}finally:\n  - id: fs\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n{}    finally:\n{}",
+            leaf(10, "x", FAIL),
+            leaf(10, "zi", LOG),
+            leaf(6, "after", LOG),
+            leaf(6, "zo", LOG),
+            leaf(6, "y", LOG),
+            leaf(6, "zf", LOG)
+        );
+        let (plan, state, flow) = run(&src, &["x"]);
+        assert_eq!(
+            order(&plan, &state),
+            ["outer", "inner", "x", "zi", "zo", "fs", "y", "zf"]
+        );
+        assert_eq!(last_of(&plan, &state, "inner"), Some(RunState::Failed));
+        assert_eq!(last_of(&plan, &state, "outer"), Some(RunState::Failed));
+        assert_eq!(last_of(&plan, &state, "fs"), Some(RunState::Success));
+        assert_eq!(flow, RunState::Failed);
+    }
+
+    // ----------------------------------------------------------------------
+    // A5: `LoopUntil` (D6) and `WorkingDirectory` (D7) run errors and finally
+    // ----------------------------------------------------------------------
+
+    /// A `LoopUntil` `loop` whose body is `body`, with `errors: [e]` and
+    /// `finally: [z]`, asked `condition:` every `PT1S`.
+    fn loop_until_hooks() -> String {
+        format!(
+            "{HEAD}tasks:\n  - id: loop\n    type: io.kestra.plugin.core.flow.LoopUntil\n    condition: \"{{{{ done }}}}\"\n    checkFrequency:\n      interval: PT1S\n    tasks:\n{}    errors:\n{}    finally:\n{}",
+            leaf(6, "body", LOG),
+            leaf(6, "e", LOG),
+            leaf(6, "z", LOG)
+        )
+    }
+
+    /// The events of `t` that A5's ordering is about, in order: each end of
+    /// `body`/`e`/`z` and each time the loop's condition was asked.
+    fn loop_story(t: &Trace) -> Vec<String> {
+        t.events
+            .iter()
+            .filter(|e| {
+                e.starts_with("end:body")
+                    || e.starts_with("end:e:")
+                    || e.starts_with("end:z")
+                    || e.starts_with("condition:")
+                    || e.starts_with("end:loop")
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// D6: each iteration walks `tasks`, then `errors` on a failure, then
+    /// `finally`, and only then is the condition asked. Iteration 1 succeeds
+    /// (`body`, `z`, the condition says go round again); iteration 2's body
+    /// fails (`body`, `e`, `z`), and a failed body ends the loop without asking
+    /// the condition (`children_executed`, unchanged). A failed body ends a
+    /// `LoopUntil` at once, so `errors` can only run in its last iteration.
+    #[test]
+    fn a_loop_until_runs_errors_then_finally_in_each_iteration_before_the_condition() {
+        let t = drive_answering(&loop_until_hooks(), &["body#2"], None, &["false", "true"]);
+        assert_eq!(
+            loop_story(&t),
+            [
+                "end:body:Success",
+                "end:z:Success",
+                "condition:loop",
+                "end:body:Failed",
+                "end:e:Success",
+                "end:z:Success",
+                "end:loop:Failed",
+            ],
+            "full log: {:?}",
+            t.events
+        );
+        assert_eq!(t.flow, RunState::Failed);
+    }
+
+    /// D6, the success path: `finally` runs every iteration, `errors` never,
+    /// and each condition is asked only after that iteration's `z` ended.
+    #[test]
+    fn a_loop_until_runs_finally_before_each_condition_on_success() {
+        let t = drive_answering(&loop_until_hooks(), &[], None, &["false", "true"]);
+        assert_eq!(
+            loop_story(&t),
+            [
+                "end:body:Success",
+                "end:z:Success",
+                "condition:loop",
+                "end:body:Success",
+                "end:z:Success",
+                "condition:loop",
+                "end:loop:Success",
+            ],
+            "full log: {:?}",
+            t.events
+        );
+        assert_eq!(last_of(&t.plan, &t.state, "e"), None, "errors never ran");
+        assert_eq!(t.flow, RunState::Success);
+    }
+
+    /// D6: `Command::RestartLoop` reaches the iteration's `finally` run (it is
+    /// a descendant of the loop run), so iteration 2 builds `z` back from
+    /// nothing: one run of `z`, whose history is iteration 2's alone.
+    #[test]
+    fn a_restarted_loop_until_discards_its_finally_runs() {
+        let t = drive_answering(&loop_until_hooks(), &[], None, &["false", "true"]);
+        let z = t
+            .plan
+            .tasks
+            .iter()
+            .position(|p| p.id == "z")
+            .expect("z is planned");
+        let runs: Vec<_> = t.state.runs.iter().filter(|r| r.task == z).collect();
+        assert_eq!(runs.len(), 1, "the restart reuses z's run");
+        assert_eq!(
+            runs[0].history,
+            [
+                RunState::Created,
+                RunState::Submitted,
+                RunState::Running,
+                RunState::Success
+            ],
+            "iteration 1's z history was discarded"
+        );
+        assert_eq!(
+            t.events.iter().filter(|e| *e == "end:z:Success").count(),
+            2,
+            "z ran once per iteration"
+        );
+        assert_eq!(t.flow, RunState::Success);
+    }
+
+    /// Review M3: a run `RestartLoop` emptied and the next iteration never
+    /// rebuilt is not a run at the moment (`kill.rs` reads it the same way),
+    /// so a `Parallel` entering its `finally:` after SUCCESS must not mark it
+    /// `FAILED`. Iteration 1's `ko` fails (allowed), so the `AllowFailure`'s
+    /// `e` runs; iteration 2's `ko` succeeds and `e` is never rebuilt, so its
+    /// run keeps the empty history the restart left it.
+    #[test]
+    fn a_parallels_finally_after_success_leaves_a_discarded_loop_run_alone() {
+        let src = format!(
+            "{HEAD}tasks:\n  - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      - id: loop\n        type: io.kestra.plugin.core.flow.LoopUntil\n        condition: \"{{{{ done }}}}\"\n        checkFrequency:\n          interval: PT1S\n        tasks:\n          - id: af\n            type: io.kestra.plugin.core.flow.AllowFailure\n            tasks:\n{}            errors:\n{}    finally:\n{}",
+            leaf(14, "ko", LOG),
+            leaf(14, "e", LOG),
+            leaf(6, "z", LOG)
+        );
+        let t = drive_answering(&src, &["ko#1"], None, &["false", "true"]);
+        let e = t.plan.tasks.iter().position(|p| p.id == "e").unwrap();
+        let e_runs: Vec<_> = t.state.runs.iter().filter(|r| r.task == e).collect();
+        assert_eq!(e_runs.len(), 1, "e ran in iteration 1: {:?}", t.events);
+        assert_eq!(
+            e_runs[0].history,
+            [],
+            "the discarded run of e stays discarded, not FAILED: {:?}",
+            t.events
+        );
+        assert_eq!(last_of(&t.plan, &t.state, "z"), Some(RunState::Success));
+        assert_eq!(last_of(&t.plan, &t.state, "par"), Some(RunState::Success));
+        assert_eq!(t.flow, RunState::Success);
+    }
+
+    /// A `WorkingDirectory` `wd` holding `a`, with `errors: [e]` and
+    /// `finally: [z]`.
+    fn working_directory_hooks() -> String {
+        format!(
+            "{HEAD}tasks:\n  - id: wd\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n    tasks:\n{}    errors:\n{}    finally:\n{}",
+            leaf(6, "a", LOG),
+            leaf(6, "e", LOG),
+            leaf(6, "z", LOG)
+        )
+    }
+
+    /// D7: the block's children run in the directory, the finish claim
+    /// closes it, and only then do `errors` and `finally` run, as ordinary
+    /// runs outside it: a hook leaf is `SUBMITTED` like any leaf, where the
+    /// child in `tasks` is not. The block keeps its children's state.
+    #[test]
+    fn a_working_directory_runs_errors_and_finally_after_it_finishes() {
+        let t = drive(&working_directory_hooks(), &["a"], None);
+        assert_eq!(order(&t.plan, &t.state), ["wd", "a", "e", "z"]);
+        assert!(at(&t, "claim:prepare:wd") < at(&t, "create:a"));
+        assert!(
+            at(&t, "claim:finish:wd") < at(&t, "create:e"),
+            "errors run after the finish claim: {:?}",
+            t.events
+        );
+        assert!(at(&t, "end:e:Success") < at(&t, "create:z"));
+        assert!(at(&t, "end:z:Success") < at(&t, "end:wd:Failed"));
+        assert_eq!(t.state.runs[0].working_dir, Some(WorkingDirPhase::Finished));
+        let history = |id: &str| {
+            t.state
+                .runs
+                .iter()
+                .find(|r| t.plan.tasks[r.task].id == id)
+                .expect("a run")
+                .history
+                .clone()
+        };
+        assert_eq!(
+            history("a"),
+            [RunState::Created, RunState::Running, RunState::Failed],
+            "a child in tasks is inside the directory, not submitted"
+        );
+        for hook in ["e", "z"] {
+            assert_eq!(
+                history(hook),
+                [
+                    RunState::Created,
+                    RunState::Submitted,
+                    RunState::Running,
+                    RunState::Success
+                ],
+                "hook {hook} is an ordinary leaf, outside the directory"
+            );
+        }
+        assert_eq!(t.flow, RunState::Failed);
+    }
+
+    /// D7 / Q4: egret runs `finally` after a `WorkingDirectory` that
+    /// succeeded (Kestra's code never starts it, which the spec reads as a
+    /// Kestra bug); `errors` does not run.
+    #[test]
+    fn a_working_directory_runs_finally_after_success() {
+        let t = drive(&working_directory_hooks(), &[], None);
+        assert_eq!(order(&t.plan, &t.state), ["wd", "a", "z"]);
+        assert!(at(&t, "claim:finish:wd") < at(&t, "create:z"));
+        assert!(at(&t, "end:z:Success") < at(&t, "end:wd:Success"));
+        assert_eq!(t.flow, RunState::Success);
     }
 }

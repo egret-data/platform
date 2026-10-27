@@ -142,9 +142,8 @@ pub(crate) enum Step {
     Done(RunState),
 }
 
-/// Which of a flowable's two lists is driven right now — Kestra's
-/// [`Execution.findTaskDependingFlowState`], with `finally` left out because
-/// no W3a task implements it.
+/// Which of a flowable's three lists is driven right now — Kestra's
+/// [`Execution.findTaskDependingFlowState`] (`Execution.java:579-624`).
 ///
 /// Java returns a `List<ResolvedTask>` and overloads the empty one with two
 /// different meanings, which is what this enum separates:
@@ -153,8 +152,9 @@ pub(crate) enum Step {
 /// |---|---|---|
 /// | `resolvedTasks` | [`Current::Tasks`] | nothing has failed yet |
 /// | `resolvedErrors` | [`Current::Errors`] | something failed for good and there is an `errors:` |
+/// | `resolvedFinally` | [`Current::Finally`] | the tasks (and `errors:`) are over and there is a `finally:` |
 /// | `emptyList()` from the retry branch | [`Current::RetryPending`] | a failure that will be retried |
-/// | `emptyList()` from the no-errors branch | [`Current::Ended`] | a failure for good with no `errors:` |
+/// | `emptyList()` from the no-errors branch | [`Current::Ended`] | a failure for good with no `errors:` and no `finally:` |
 ///
 /// The two empties are not interchangeable and the artifact proves it twice
 /// over. `FlowableUtils.resolveState`'s empty arm returns a state **only** if
@@ -170,11 +170,27 @@ pub(crate) enum Step {
 pub(crate) enum Current<'a> {
     Tasks(&'a [TaskIx]),
     Errors(&'a [TaskIx]),
+    /// Kestra `findTaskDependingFlowState`'s `finally` answer
+    /// (`Execution.java:589-593,615-620`). End hooks A4 (spec §4.1, D2).
+    ///
+    /// Whatever the block's own scheduling, this list is walked one child at
+    /// a time ("errors & finally must be run as sequential tasks",
+    /// `FlowableUtils.resolveParallelNexts`), and the block's state is still
+    /// [`aggregate`] over its `tasks` alone (`FU.resolveState` ->
+    /// `guessFinalState(tasks, …)`): a `finally` child that fails changes
+    /// nothing.
+    Finally(&'a [TaskIx]),
     RetryPending,
     Ended,
 }
 
-/// [`Current`], for one list and its `errors:`.
+/// [`Current`], for one list, its `errors:` and its `finally:`.
+///
+/// The arms follow `Execution.findTaskDependingFlowState`
+/// (`Execution.java:579-624`) in its order, one comment per Java line range.
+/// An empty `errors`/`finally` slice is Java's `null` list: egret's plan cannot
+/// tell `finally: []` from an absent `finally:`, and `removeDisabled` has
+/// already run (a disabled task is never planned).
 ///
 /// # "will be retried" is asked with the FULL precedence, and Kestra asks it
 /// two different ways
@@ -201,35 +217,86 @@ pub(crate) fn current_list<'a>(
     state: &ExecutionState,
     tasks: &'a [TaskIx],
     errors: &'a [TaskIx],
+    finally: &'a [TaskIx],
     parent: Option<RunIx>,
     now: Tick,
 ) -> Current<'a> {
-    let errors_started = errors
-        .iter()
-        .any(|&task| run_of(state, parent, task).is_some());
+    // A run with no history is one `Command::RestartLoop` threw away (Kestra
+    // deletes those task runs): it has not started in this iteration. End
+    // hooks A5: without this, a `LoopUntil`'s second iteration found its
+    // first iteration's `finally` run "started" and skipped its body.
+    let started = |list: &[TaskIx]| {
+        list.iter()
+            .any(|&t| run_of(state, parent, t).is_some_and(|ix| !state.runs[ix].history.is_empty()))
+    };
+    // Kestra's `isTerminated(list, parent)`: every task of the list has a run
+    // and that run is terminal.
+    let exhausted = |list: &[TaskIx]| {
+        list.iter()
+            .all(|&t| run_of(state, parent, t).is_some_and(|ix| is_terminal(state, ix)))
+    };
+
+    // A flowable with nothing to run ends at once, from its own state, and its
+    // `finally` never starts: `FU.resolveSequentialState` (`FU:163-170`, every
+    // child disabled, which egret plans as an empty list) and `If.resolveState`
+    // (`If.java:188-198`, an empty branch) both answer before
+    // `findTaskDependingFlowState` is asked. Only a flowable: the flow's own
+    // list has no such guard (`ExecutorService.handleEnd`).
+    if parent.is_some() && tasks.is_empty() {
+        return Current::Ended;
+    }
+
+    // `Execution.java:589-593`: "finally is already started, just continue it".
+    if started(finally) {
+        return Current::Finally(finally);
+    }
+
+    // `Execution.java:595-599` (`terminalState == FAILED`) is not here: only
+    // Kestra's `Pause` passes a `terminalState`, and egret's `Pause` runs no
+    // sub-list until #9 (D14).
+
+    let errors_started = started(errors);
     let failed: Vec<RunIx> = tasks
         .iter()
         .filter_map(|&task| run_of(state, parent, task))
         .filter(|&ix| latest(state, ix) == Some(RunState::Failed))
         .collect();
-
-    if !errors_started && failed.is_empty() {
-        return Current::Tasks(tasks);
-    }
-    // `hasFailedNoRetry`: is there a failure that will NOT be retried?
     let will_retry = |&ix: &RunIx| {
         crate::executor::retry::policy_for(plan, state, ix)
             .and_then(|p| crate::executor::retry::next_retry_at(p, state, ix, now))
             .is_some()
     };
-    if !errors_started && failed.iter().all(will_retry) {
-        return Current::RetryPending;
+
+    // `Execution.java:601-613`: `errors` has started, or a task failed.
+    if errors_started || !failed.is_empty() {
+        // `:602-606`: every failure will be retried -- start neither list.
+        // (`!errors_started` keeps egret's pre-A4 reading: once `errors` is
+        // running it is not abandoned for a retry.)
+        if !errors_started && failed.iter().all(will_retry) {
+            return Current::RetryPending;
+        }
+        // `:608-609`: both lists exist and `errors` has not terminated.
+        if !finally.is_empty() && !errors.is_empty() && !exhausted(errors) {
+            return Current::Errors(errors);
+        }
+        // `:610-612`: no `finally` -- `errors`, or nothing at all.
+        if finally.is_empty() {
+            return if errors.is_empty() {
+                Current::Ended
+            } else {
+                Current::Errors(errors)
+            };
+        }
     }
-    if errors.is_empty() {
-        Current::Ended
-    } else {
-        Current::Errors(errors)
+
+    // `Execution.java:615-620`: `finally` once the tasks are all terminated,
+    // or one has failed with no retry left.
+    if !finally.is_empty() && (exhausted(tasks) || !failed.iter().all(will_retry)) {
+        return Current::Finally(finally);
     }
+
+    // `Execution.java:622`.
+    Current::Tasks(tasks)
 }
 
 /// Kestra's `Execution.guessFinalState` over the runs of `tasks` under
@@ -331,12 +398,16 @@ pub(crate) fn start(
     // `working-directory-real-child-fails` has no `SUBMITTED` on its `fails`
     // run. So the discriminator is the parent run's kind as well as the child's:
     // a plain `Runnable` at the top level, or under any other flowable, is
-    // submitted as before. A block's children are the only runnables with a
-    // `WorkingDirectory` parent (`spec::validate` refuses anything else there).
+    // submitted as before.
+    //
+    // End hooks D7: "inside the block" is "in the block's `tasks:`", not "has
+    // a `WorkingDirectory` parent". A block's `errors:`/`finally:` children
+    // also have the block as parent, and they run after the directory is
+    // closed, as ordinary leaves that ARE submitted.
     let in_block = state.runs[run].parent.is_some_and(|p| {
         matches!(
-            plan.tasks[state.runs[p].task].kind,
-            TaskKind::WorkingDirectory { .. }
+            &plan.tasks[state.runs[p].task].kind,
+            TaskKind::WorkingDirectory { tasks } if tasks.contains(&task)
         )
     });
     if matches!(plan.tasks[task].kind, TaskKind::Runnable { .. }) && !in_block {
@@ -493,6 +564,9 @@ pub(crate) fn descend(
     now: Tick,
 ) -> Step {
     let errors = plan.tasks[task].errors.as_slice();
+    // End hooks A4 (D2): every flowable that `current_list` drives gets its
+    // `finally:`. `WorkingDirectory` and `LoopUntil` do not yet (A5).
+    let finally = plan.tasks[task].finally.as_slice();
     let step = match &plan.tasks[task].kind {
         TaskKind::Runnable { .. } => return Step::Waiting,
         // Waiting for the same reason a `Runnable` is, on a different thing:
@@ -503,22 +577,29 @@ pub(crate) fn descend(
         // division of labour `TaskKind::Loop` already has.
         TaskKind::Executable { .. } => return Step::Waiting,
         TaskKind::Sequential { tasks } => {
-            sequential::drive(plan, state, tasks, errors, Some(run), now)
+            sequential::drive(plan, state, tasks, errors, finally, Some(run), now)
         }
         // Returned without the `Done` mapping below, for the reason
         // `allow_failure::drive` gives: its terminal is already the block's.
-        TaskKind::AllowFailure { tasks, finally } => {
-            return allow_failure::drive(plan, state, run, task, tasks, finally, now)
+        TaskKind::AllowFailure { tasks } => {
+            return allow_failure::drive(plan, state, run, task, tasks, finally, now);
         }
-        TaskKind::Parallel { tasks, concurrency } => {
-            parallel::drive(plan, state, tasks, errors, Some(run), *concurrency, now)
-        }
-        TaskKind::Dag { nodes } => dag::drive(plan, state, nodes, errors, Some(run), now),
+        TaskKind::Parallel { tasks, concurrency } => parallel::drive(
+            plan,
+            state,
+            tasks,
+            errors,
+            finally,
+            Some(run),
+            *concurrency,
+            now,
+        ),
+        TaskKind::Dag { nodes } => dag::drive(plan, state, nodes, errors, finally, Some(run), now),
         TaskKind::If { then_, else_, .. } => {
-            branch::drive_if(plan, state, run, then_, else_, errors, now)
+            branch::drive_if(plan, state, run, then_, else_, errors, finally, now)
         }
         TaskKind::Switch { cases, default, .. } => {
-            branch::drive_switch(plan, state, run, cases, default, errors, now)
+            branch::drive_switch(plan, state, run, cases, default, errors, finally, now)
         }
         TaskKind::Loop { .. } => return Step::Waiting,
         // Not returned: its `Done` is the block's, and it takes the same

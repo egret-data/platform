@@ -3216,6 +3216,8 @@ owner is how a suppression list starts.
 | `{{ task.type }}` on a flowable | **0 baselined entries, and that is the finding** — a divergence this corpus cannot show | `worker::render`'s `task` context: `TaskKind::Runnable { type_id } => Some(..), _ => None`, where Kestra's `task.type` is always the FQCN. The divergence set is exactly `{Sequential, Parallel, If, Switch, Loop, Dag, Subflow}` — `Subflow` is IN it (`Executable` since W6) and the four opaque flowables are OUT (planned `Runnable`, so populated) | **unclaimed, and deliberately not fixed at W8 Task 1.** Only `valids/logs` and `valids/disable-simple` write `{{task.type}}` and both write it on a `core.log.Log` leaf, so no golden entry and no assertion can fail on it. The element of the class this corpus does not contain is **a `{{ task.type }}` on a flowable**. Found by the predicate sweep; recorded here and beside `render.rs`'s match rather than only in a task report |
 | ~~`sla:`~~ — **half taken by W8 Task 6** | ~~**5** baselined entries~~ — **3**, and all three are `MAX_DURATION`s | `Flow.sla`, `SLA.Type.{MAX_DURATION,EXECUTION_ASSERTION}` | **W8 Task 6 took `EXECUTION_ASSERTION` and refused `MAX_DURATION` by name.** The cell read *"W1 ports it as a data shape and says so; nothing evaluates one"*, and that is now half false: `src/sla.rs` evaluates an `ExecutionChangedSLA` and `worker::claim::settle` acts on it, which banks `valids/flow-concurrency-sla-assert-cancel` and `valids/sla-execution-condition`. The other subtype is an `ExecutionMonitoringSLA` — a **separate scheduled loop** in the artifact, not the executor's message path — and **the three that remain cannot be banked by any implementation whatsoever**; see the fifth blindness mechanism. The row is LOWERED rather than deleted, because the construct really does still hold them |
 
+> **Correction, 2026-10-27 (end hooks A7).** Two rows of the table above (a `Loop`'s own `errors:` and `finally:`, both "unclaimed", and "`models::Loop` has no `errors` field") are history. `models::Loop` carries `errors` and `finally` since end hooks A2, the flow's and every flowable's `finally:` are run by A4, and a `Loop` iteration runs the `Loop`'s own lists since A6; see the sections "End hooks A4" and "End hooks A6" below.
+
 **The `sla:` row is the first this table has lowered for a reason the reader
 must not read as progress-pending.** Every other lowering marks work somebody
 can still do. Here the remaining three, plus the two in `UNATTRIBUTED` held by
@@ -13537,3 +13539,92 @@ breakdown (runs 54 → 55, order 26 → 27, total 80 → 69), the ordered pairs
 (2, 82, 84) → (2, 71, 73), baselined terminals 325 → 303, executions
 119 → 108, run-history tokens 1257 → 1192 and execution-history tokens
 422 → 389. The residual `ExecutionUpdatableTask` row went 12 → 1.
+
+## End hooks A4 (2026-10-27): `finally:` by Kestra's list rule, four entries bank
+
+**What changed.** `flowable::current_list` is Kestra's
+`findTaskDependingFlowState` with its third list: `tasks`, then `errors` (on a
+failure for good), then `finally`, which runs on success too, one child at a
+time under a `Parallel` or a `Dag` as well. Every flowable that calls it
+(`Sequential`, `Parallel`, `Dag`, `If`, `Switch`, `AllowFailure`) and the flow's
+own root call pass their `finally:`; a block's (and the execution's) state is
+still the aggregate of `tasks` alone. A `Dag` with an `errors:` used to be
+handed to `parallel::drive` and lose its `dependsOn` gate; it now keeps it.
+The ratchet went from 72 mismatching / 72 baselined to 68 / 68, 0 broken.
+
+**Banked (4):** `valids/finally-dag`, `valids/finally-parallel`,
+`valids/finally-sequential` and `valids/finally-sequential-error`.
+
+**Expected and still baselined (6), first differing field from the printout:**
+`valids/finally-flow`, `finally-flow-error`, `finally-flow-error-first`,
+`finally-sequential-error-first` and `restart-with-finally` differ on `runs`
+only: the flow-level `finally:` runs are created in the right order, but each
+leaf ends `FAILED` where the golden has `SUCCESS`. The worker refuses them with
+`NotALeaf` ("egret cannot run task `a1`: it is a control-flow task"), because
+`worker::claim::leaf` walks `flow.tasks` and `flow.errors` and not
+`flow.finally_`. `valids/task-runif-taskswithstate` also differs on `runs`:
+`write_execution_context` and `skipped_when_failures_exist` are created and
+end `CREATED FAILED` -- their `runIf:` (`tasksWithState(state='FAILED') is
+[not] empty`) fails to render.
+
+The handler-surface ceiling went 262 → 266 (`unported_finally` now treats a
+`finally:` on `AllowFailure`, `Sequential`, `Parallel`, `If`, `Switch` and
+`Dag` as ported; the flow's own `finally:` stays unported for the reason
+above). The derived figures that moved, each with a dated note where it is
+pinned: the bank split (301, 229, 72) → (301, 233, 68), the field breakdown
+(runs 55 → 51, order 27 → 17, total 69 → 65), the ordered pairs
+(`EGRET_TOP_LEVEL_PAIRS` 777 → 852, `EGRET_PAIRS_BEFORE_RESTRICTION`
+999 → 1074, asserted 550 → 661, baselined 566 → 455), the timeout split
+(2, 70, 72) → (2, 66, 68), baselined terminals 303 → 272, executions
+108 → 104, run-history tokens 1192 → 1076 and execution-history tokens
+389 → 377. The residual `finally:` row went 14 → 10.
+
+**A4 fix round (2026-10-27): the flow's own `finally:` banks (5).** The worker
+turned a stored run's task id back into its model task through five private
+walks, each over a different subset of the tree. `claim::leaf` missed the
+flow's `finally:` (the cause above), `spawn::find_task` missed every `errors:`
+below the root, and `working_dir::block_of`/`parent_block_of` saw `flow.tasks`
+alone. All five now call `spec::path::find_task`, which walks what
+`spec::path::every_task` walks (all four root lists, `children()` and
+`error_children()`). `find_task_resolves_every_planned_task_of_every_corpus_flow`
+pins that it finds every planned task of every corpus flow `build_plan`
+accepts (299 flows, 793 tasks). Banked: `valids/finally-flow`,
+`finally-flow-error`, `finally-flow-error-first`,
+`finally-sequential-error-first` and `restart-with-finally`; 68 / 68 became
+63 / 63.
+
+`valids/task-runif-taskswithstate` stays baselined on a renderer cause: its two
+`runIf:`s are `{{ tasksWithState(state='FAILED') is [not] empty }}`, and
+Pebble's `empty` test is one egret's renderer leaves unknown on purpose (the
+fence test in `runners::env`), so both runs end `CREATED FAILED`.
+`handler_surface.py` gained a `render` blocker for it, and the flow's own
+`finally:` is ported there now: the ceiling went 266 → 271.
+
+Figures that moved, each pinned with a dated note:
+- the bank split: (301, 233, 68) → (301, 238, 63);
+- the field breakdown: runs 51 → 46, total 65 → 60;
+- asserted pairs: 661 → 689;
+- baselined pairs: 455 → 427;
+- the timeout split: (2, 66, 68) → (2, 61, 63);
+- baselined terminals: 272 → 254;
+- baselined executions: 104 → 99;
+- run-history tokens: 1076 → 1007;
+- execution-history tokens: 377 → 362;
+- the residual `finally:` row: 10 → 5.
+
+## End hooks A6 (2026-10-27): a `Loop` iteration runs the `Loop`'s `errors:` and `finally:`, three entries bank
+
+`worker::spawn::sub_flow_source` now makes the `Loop`'s own `errors:` and
+`finally:` the iteration's `errors`/`finally` (the parent flow's are not
+inherited; an iteration has no `afterExecution`). The three entries the spec
+named bank, measured: `invalids/loop-switch-failed`, `valids/finally-loop` and
+`valids/finally-loop-parallel`. Ratchet 301/63/63/0 -> 301/60/60/0.
+
+- `SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED` 4 -> 1 (only
+  `valids/retry-flowable-parallel` is left); entries with a `spawned` that
+  match 24 -> 27; `MISMATCH_ON_SPAWNED` 12 -> 9.
+- Pairs: egret produces 852 + 216 (nested 130 -> 216); kept pairs on matching
+  entries 586 + 103 -> 586 + 197, on baselined entries 303 + 124 -> 303 + 30.
+- Baselined: run terminals 254 -> 210, sub-executions 39 -> 31, executions
+  99 -> 88, `finally:` construct row 5 -> 3, `Loop` row 17 -> 14, handler
+  ceiling 271 -> 273 (`handler-surface.txt` regenerated).

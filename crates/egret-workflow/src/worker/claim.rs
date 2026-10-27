@@ -212,11 +212,17 @@ pub struct Claimed {
     pub block_phase: Option<String>,
     /// **For a child of a `WorkingDirectory` block:** the block run's
     /// surrogate key, which names the objects of its snapshots (spec §4.3).
-    /// `None` for every run that is not such a child.
+    /// `None` for every run that is not such a child. The claim joins the
+    /// block only while it is `PREPARED` (end hooks D7): the block's
+    /// `errors:`/`finally:` children run after it is `FINISHED`, outside the
+    /// directory, and never get it.
     pub block_id: Option<Uuid>,
     /// **For a child:** the block's snapshot pointer as this claim read it
-    /// (spec §5.2). A child whose block has run no prepare claim has none,
-    /// and is refused as corrupt rather than started on an empty directory.
+    /// (spec §5.2). The claim joins the block only while it is `PREPARED`, so a
+    /// child whose block has run no prepare claim gets no `block_id` at all
+    /// (and so no snapshot); `working_dir::carry_of` refuses that child as
+    /// corrupt rather than starting it on an empty directory. A block that is
+    /// `PREPARED` but has no snapshot is refused there too.
     pub block_snapshot: Option<String>,
     /// **A claim taken only to finish a kill** (workflow kill spec §4.3): a
     /// leaf run that is `KILLING` with no lease -- its worker died or gave
@@ -418,35 +424,25 @@ struct Leaf<'a> {
 /// this arm; `load` plans its stored source without validation
 /// (`executor::plan_stored`), so it does reach it. See `NotALeaf`'s doc.
 fn leaf<'a>(flow: &'a crate::models::Flow, task_id: &str) -> Option<Leaf<'a>> {
-    fn walk<'a>(task: &'a crate::models::Task, want: &str) -> Option<Leaf<'a>> {
-        if task.id == want {
-            return match &task.kind {
-                crate::models::TaskKind::Leaf { spec } => Some(Leaf {
-                    spec,
-                    // **Read from the `Task`, not from `spec`.** `timeout` is
-                    // one of the seven keys `models::Task`'s deserializer takes
-                    // OUT of a leaf's `spec`, which is exactly why a handler
-                    // could not see it and `handlers::sql` used a constant.
-                    timeout: task.timeout.as_ref(),
-                }),
-                _ => None,
-            };
-        }
-        // `children()` AND `error_children()`: an error handler nested inside a
-        // flowable's own `errors:` is a leaf a worker claims like any other,
-        // and a walk that could not reach it aborted the tick with
-        // `WorkerError::Corrupt` and left the run `RUNNING` for ever. See
-        // `models::Task::error_children` for the three corpus entries that
-        // showed it.
-        task.children()
-            .into_iter()
-            .chain(task.error_children())
-            .find_map(|c| walk(c, want))
+    // `spec::path::find_task` walks every list the plan reaches: `children()`
+    // AND `error_children()` (an error handler nested inside a flowable's own
+    // `errors:` is a leaf a worker claims like any other -- a walk that could
+    // not reach it aborted the tick with `WorkerError::Corrupt`; see
+    // `models::Task::error_children`), and all four root lists. End hooks A4
+    // fix round (2026-10-27): this walked `flow.tasks` and `flow.errors` only,
+    // so a leaf in the flow's `finally:` failed with the not-a-leaf line.
+    let task = crate::spec::path::find_task(flow, task_id)?;
+    match &task.kind {
+        crate::models::TaskKind::Leaf { spec } => Some(Leaf {
+            spec,
+            // **Read from the `Task`, not from `spec`.** `timeout` is one of
+            // the seven keys `models::Task`'s deserializer takes OUT of a
+            // leaf's `spec`, which is exactly why a handler could not see it
+            // and `handlers::sql` used a constant.
+            timeout: task.timeout.as_ref(),
+        }),
+        _ => None,
     }
-    flow.tasks
-        .iter()
-        .chain(flow.errors.iter())
-        .find_map(|t| walk(t, task_id))
 }
 
 /// Take up to `limit` runnable task runs, marking each leased.
@@ -550,7 +546,7 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
            LEFT JOIN workflow.flows f ON f.id = e.flow_id \
            LEFT JOIN workflow.task_runs b \
              ON b.execution_id = t.execution_id AND b.run_ix = t.parent_ix \
-            AND b.working_dir IS NOT NULL \
+            AND b.working_dir = 'PREPARED' \
           ORDER BY t.created_at, t.execution_id, t.run_ix",
     )
     .bind(limit)

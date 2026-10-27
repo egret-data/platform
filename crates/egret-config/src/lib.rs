@@ -2127,6 +2127,8 @@ pub const ENV_OUTSIDE_CONFIG: &[&str] = &[
     "EGRET_ENGINE_TLS_INSECURE",
     // Test-corpus generator switch (egret-workflow).
     "EGRET_WRITE_PROPERTY_TREATMENT",
+    // Frozen plan-layout fixture regenerator (egret-workflow).
+    "EGRET_WRITE_PLAN_LAYOUT",
 ];
 
 /// Prefixes of the test-harness variables (`EGRET_TEST_*`, `EGRET_E2E_*`,

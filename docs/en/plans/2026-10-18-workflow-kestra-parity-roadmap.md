@@ -26,6 +26,8 @@
 
 **Note, 2026-10-26 (package #1 "No silent drops", in review: PR #756, row #1 is marked done only after merge).** Measured on the package's branch, rebased onto main `28fb8693`. Source: the ratchet printout of `cargo test -p egret-workflow --test executor -- --nocapture` and the constants in `oracle-exec/driver.rs`. Mismatch, baselined with a cause: **72** (the 2026-10-19 column says 73; `invalids/invalid-property` is now counted as refused, through a save-time group, spec Q1 (b)). Ratchet: **301 / 72 / 72 / 0** (golden / mismatching / baselined / broken), so 229 match the golden (`sixteen_banked` asserts (301, 229, 72)). `LIVE` stays **295** (`driver.rs:853`) and `VALIDATE_REFUSED` stays **25** (`driver.rs:979`): the package's spec predicted 294 and 26, but `invalids/invalid-property` is a name-contest loser (it shares `id: duplicate` with `invalids/duplicate`) and `publish_corpus` never files it. `UNKNOWN_TYPE_REFUSED` 21 (`driver.rs:931`) and `PUBLISHED_BUT_REFUSED` 6 are unchanged. The rows above stay as the 2026-10-18 and 2026-10-19 record.
 
+**Note, 2026-10-27 (package #2a "End hooks, part A", built on `feat/workflow-end-hooks`, PR #2a in review).** Ratchet measured with the same command: **301 / 60 / 60 / 0**, so 241 match (`sixteen_banked` asserts (301, 241, 60)). `LIVE` 295, `VALIDATE_REFUSED` 25, `UNKNOWN_TYPE_REFUSED` 21 unchanged. Twelve entries banked: nine `finally:` entries, `valids/finally-loop` and `-loop-parallel`, and `invalids/loop-switch-failed` (the list is in the end-hooks spec §7.1 as-built note). `valids/task-runif-taskswithstate` stays baselined: its `runIf` uses Pebble's `empty` test (renderer, package #5). The by-cause split above was not re-derived.
+
 In the 2026-10-18 count of 84, C2 accounted for 12 entries. The other 72, by cause: `finally:` 11, `afterExecution:` 9, renderer divergences 8, `sla: MAX_DURATION` 5, `Loop` own `outputs:` 5, timing/poller latency 4, order pairs a clockless driver cannot reach 4, invalid flows over-accepted 4, unattributed `Loop` divergences 4, `Pause` 3, flow `outputs:`/SECRET 3, `WorkingDirectory`+`runIf` 3, Subflow retry 2, missing Pebble functions 2, single causes 4, deliberate 1.
 
 **Feature surface** (Kestra 2.0 OSS, beyond the corpus; Appendix B has the evidence):
@@ -63,6 +65,8 @@ Each package goes through the usual flow: spec (or a spec section) → plan → 
 
 **Rule 2: re-check after #2.** The sweep's premise, "a terminal execution has no live work", holds only while egret runs no `afterExecution:` (debt spec D15). #2 must re-check it.
 
+*Correction, 2026-10-27 (spec `2026-10-26-workflow-end-hooks-design.md`, false premise 2).* The premise is written in the doc comment of `sweep_decision` (`worker/commands.rs`), not in debt spec D15 (the `LoopUntil` superseded-container rule). It was already false before #2: an `Exit` with `SUCCESS`, `WARNING`, `FAILED` or `CANCELLED` leaves siblings running in a terminal execution. #2a runs no post-terminal work, so it did not change the answer; #2b Task B5 re-checks the `_wd` sweep and the pruner for `afterExecution:`.
+
 | # | Package | Scope (what it lifts) | Banks | Size |
 |---|---|---|---|---|
 | 0 | **Group C2** — done, #693 (`78c182ab`) | `SetVariables`, `UnsetVariables`, `Labels` | 11 of 12 | M |
@@ -90,12 +94,25 @@ Each package goes through the usual flow: spec (or a spec section) → plan → 
 
 **Expected after #2:** the baseline falls from 73 to about 52.
 
+**Split, 2026-10-27 (spec `2026-10-26-workflow-end-hooks-design.md`, D1 and Q1: yes).** Row #2 is two PRs and the row above is not edited.
+- **#2a (built, PR in review):** `finally:` on every flowable except `Pause`, the flow's own `finally:`, and `errors:`/`finally:` on `Loop`, `LoopUntil` and `WorkingDirectory`. Measured: 12 banks, baseline 72 to **60** (the table above expected 13 and about 14 to 15 strict; `task-runif-taskswithstate` did not bank, renderer cause, #5).
+- **#2b (not built):** flow `afterExecution:`, the post-terminal phase and the kill divergence (§3.1). Expected 8 banks, to 52 (spec §7.1 expected 51 from 59; from 60 it is 52).
+- **`Pause` `finally:` moved to #9** (spec D14, Q5: yes). It is refused naming #9 until then.
+
 **Notes, 2026-10-26 (package #1's spec §9, `docs/en/specs/2026-10-19-workflow-no-silent-drops-design.md`; the rows above are not edited).** Corrections 6 and 8 are under Appendix B §4 and §8, and 7 is in §4 below.
 1. **#9:** `Pause` `tasks:` is not a Kestra property (`Pause.java:158`: its fields are `pauseDuration`, `behavior`, `onPause`, `onResume`, `errors`, `finally`). It is removed from #9's scope and stays refused permanently, as an unknown property (code `unsupported_pause_property`, kept). #9 also gains `LoopUntil` non-literal `checkFrequency`/`failOnMaxReached` (`unsupported_loop_until_property`; spec Q3).
 2. **#11:** gains Schedule `allowConcurrent` (Kestra's default is `false` and locks the trigger until its execution ends, `TriggerScheduler.java:345-349`; egret never locks; package #1 warns only on an explicit `false`), `failOnTriggerError`, and Webhook `when`.
 3. **#2:** gains `LoopUntil` `errors:`, `WorkingDirectory` `errors:` and `WorkingDirectory` `finally:` (all `AbstractBranch`). A version published before #2 holds them only in `snapshot.source`, so #2 must re-derive the plan from the source (spec §10).
+   - *Correction, 2026-10-27: the `snapshot.source` premise is false* (end-hooks spec, false premise 1). No run reads the snapshot: a start runs the draft row's `flows.source`, copies it into `executions.source`, and every claim re-plans from that copy. Nothing needed re-deriving. The real hazard was the positional `task_ix`, handled by the index-stable plan (A3) and the A1 fixture. #2a also built `WorkingDirectory` `errors:`/`finally:` (Q4: default; Kestra's code appears never to start the WD `finally:`, treated as a bug).
 4. **#3:** gains SELECT/MULTISELECT `isRadio` and `autoSelectFirst` as start-form hints, and SELECT/MULTISELECT `expression`.
 5. **#17:** gains the script `outputFiles` `**` and `[...]` patterns (`worker/commands.rs:3108-3124`).
+
+**Notes, 2026-10-27 (package #2, end-hooks spec §7.1, §9 and §4.1 as-built).**
+6. **#6:** gains flow-level `outputs:` evaluation. `valids/after-execution` stays baselined because its `afterExecution:` renders `{{ execution.outputs.final }}` and egret never evaluates flow `outputs:` (`worker/render.rs:279-284`).
+7. **#7:** when it builds restart in place it must remove the `errors`, `finally` and `afterExecution` runs, as Kestra's `ExecutionService` does (`ExS:339-351`). Latent today: `run_of` takes a task's first run, so an execution-level restart would read a stale end-hook run.
+8. **#9:** owns `Pause` `finally:` (refused naming #9 until then).
+9. **#17:** a `WorkingDirectory` block whose prepare or finish claim fails ends `FAILED` without running its `errors`/`finally` (the V3 rule, pinned by a test in `tests/working_dir_claims.rs`); revisit with the Kubernetes runner.
+10. **#5:** owns `valids/task-runif-taskswithstate` (Pebble `empty` test in `runIf`).
 
 ## 3. What stays different, and why
 
@@ -109,6 +126,7 @@ These stay because matching Kestra would open a cross-workspace hole, an SSRF, o
 - **`allowedFileExtensions`:** a FILE input's allowlist is enforced (§8 item 5).
 - **Namespace confinement:** KV, namespace-file writes, `PurgeKV`, `PurgeFiles` and `PurgeLogs` are confined to the flow's own namespace and its children (§8 item 6).
 - **Caps:** KV value size and density, number digits (§8 item 7), and `executions.variables`/`Labels` (debt D8, D9).
+- **A kill stops `afterExecution:` runs (planned in #2b, user ruling Q3, 2026-10-27).** Kestra answers 409 to a kill of a terminal execution and force-executes the `afterExecution:` list after a kill. egret will accept the kill of a terminal execution that still has live after-tasks, move those runs to KILLING/KILLED through the existing kill path, and never change the execution's own final state, so a tenant cannot create a task that no one can kill. Not built in #2a: Part B Task B3.
 - **Workspace-scoped references:** publish resolves Subflow/`dependsOn` targets only in the caller's workspace (debt §5.1).
 
 ### 3.2 egret design kept, with no loss of Kestra behaviour

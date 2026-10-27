@@ -1410,7 +1410,7 @@ mod tests {
         for (set, expect_waiting) in [(RunState::Paused, true), (RunState::Success, false)] {
             let mut s = state.clone();
             apply(&mut s, &Command::SetRunState { run: 0, state: set });
-            let step = sequential::drive(&plan, &s, &roots, &[], None, Tick(1));
+            let step = sequential::drive(&plan, &s, &roots, &[], &[], None, Tick(1));
             assert_eq!(
                 matches!(step, Step::Waiting),
                 expect_waiting,

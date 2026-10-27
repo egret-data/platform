@@ -16,7 +16,8 @@ use super::{
 };
 
 /// Drive one `Parallel` task list: every child is startable, always — until one
-/// fails for good, after which its `errors:` list is driven **sequentially**.
+/// fails for good, after which its `errors:` list is driven **sequentially**,
+/// and then (on success too) its `finally:`, also sequentially.
 ///
 /// "Sequentially" is Kestra's own word, not an inference:
 /// `FlowableUtils.resolveParallelNexts` compares the chosen list against the
@@ -30,21 +31,62 @@ use super::{
 /// exercised by any corpus flow — no `Parallel` in the corpus has both an
 /// `errors:` and a sibling still running when one branch fails — so it is
 /// stated here rather than claimed to be measured.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn drive(
     plan: &Plan,
     state: &ExecutionState,
     children: &[TaskIx],
     errors: &[TaskIx],
+    finally: &[TaskIx],
     parent: Option<RunIx>,
     concurrency: Option<u32>,
     now: Tick,
 ) -> Step {
-    match current_list(plan, state, children, errors, parent, now) {
+    drive_lists(
+        plan,
+        state,
+        children,
+        errors,
+        finally,
+        parent,
+        concurrency,
+        now,
+        |_, _| true,
+    )
+}
+
+/// [`drive`] with the `tasks:` list's `startable` predicate as an argument:
+/// `Parallel` passes `true`, `Dag` its `dependsOn` gate. Kestra's
+/// `resolveDagNexts` is `resolveParallelNexts` with that filter, and both ask
+/// `findTaskDependingFlowState` first -- which is [`current_list`] here.
+///
+/// End hooks A4: before A4 a `Dag` with an `errors:` was handed to [`drive`],
+/// whose predicate is `true`, so its `dependsOn` was ignored while `tasks:`
+/// ran (no corpus `Dag` had an `errors:`; `valids/finally-dag` has one).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn drive_lists(
+    plan: &Plan,
+    state: &ExecutionState,
+    children: &[TaskIx],
+    errors: &[TaskIx],
+    finally: &[TaskIx],
+    parent: Option<RunIx>,
+    concurrency: Option<u32>,
+    now: Tick,
+    startable: impl Fn(TaskIx, &dyn Fn(TaskIx) -> Option<RunIx>) -> bool,
+) -> Step {
+    match current_list(plan, state, children, errors, finally, parent, now) {
         // A branch that will be retried holds the whole `Parallel` open, for the
         // reason `sequential::drive` records: `resolveState`'s empty arm
         // returns a state only when `hasFailedNoRetry`.
         Current::RetryPending => return Step::Waiting,
-        Current::Errors(list) => {
+        // `errors:` and `finally:` alike: one child at a time, after the
+        // still-live siblings of a failure are failed (spec §4.1). On the way
+        // into `finally` after a success every LIVE run under the siblings is
+        // already terminal; a run a `LoopUntil` restart emptied and never
+        // rebuilt is not live, and `fail_the_rest` skips it (review M3), so
+        // it has nothing to do there.
+        Current::Errors(list) | Current::Finally(list) => {
             let cmds = fail_the_rest(
                 state,
                 &children
@@ -65,7 +107,7 @@ pub(crate) fn drive(
         // be a second copy of `fail_the_rest`'s three measurements.
         Current::Tasks(_) | Current::Ended => {}
     }
-    drive_concurrent(plan, state, children, parent, concurrency, now, |_, _| true)
+    drive_concurrent(plan, state, children, parent, concurrency, now, startable)
 }
 
 /// Drive one concurrently-scheduled task list.
@@ -397,7 +439,10 @@ fn fail_the_rest(state: &ExecutionState, runs: &[Option<RunIx>]) -> Vec<Command>
     doomed.sort_unstable();
     doomed
         .into_iter()
-        .filter(|&ix| !is_terminal(state, ix))
+        // An empty history is `Command::RestartLoop`'s "this run does not
+        // exist at the moment" (a loop iteration that never rebuilt it), not
+        // a live run: failing it would persist a ghost `FAILED` (review M3).
+        .filter(|&ix| !state.runs[ix].history.is_empty() && !is_terminal(state, ix))
         .map(|run| Command::SetRunState {
             run,
             state: RunState::Failed,

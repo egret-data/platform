@@ -28,6 +28,8 @@
 
 **Ghi chú, 2026-10-26 (gói #1 "Không bỏ qua im lặng", đang review: PR #756, dòng #1 chỉ đánh dấu xong sau khi merge).** Đo trên nhánh của gói, đã rebase lên main `28fb8693`. Nguồn: kết quả in ra của ratchet từ `cargo test -p egret-workflow --test executor -- --nocapture` và các hằng số trong `oracle-exec/driver.rs`. Lệch, đã đưa vào baseline kèm nguyên nhân: **72** (cột 2026-10-19 ghi 73; `invalids/invalid-property` nay được tính là bị từ chối, qua một nhóm lúc lưu, spec Q1 (b)). Ratchet: **301 / 72 / 72 / 0** (golden / lệch / baselined / hỏng), nên 229 khớp golden (`sixteen_banked` assert (301, 229, 72)). `LIVE` vẫn **295** (`driver.rs:853`) và `VALIDATE_REFUSED` vẫn **25** (`driver.rs:979`): spec của gói dự đoán 294 và 26, nhưng `invalids/invalid-property` là bên thua trong cuộc tranh tên (dùng chung `id: duplicate` với `invalids/duplicate`) và `publish_corpus` không bao giờ lưu nó. `UNKNOWN_TYPE_REFUSED` 21 (`driver.rs:931`) và `PUBLISHED_BUT_REFUSED` 6 không đổi. Các cột ở trên vẫn là bản ghi của 2026-10-18 và 2026-10-19.
 
+**Ghi chú, 2026-10-27 (gói #2a "Hook kết thúc, phần A", xây trên `feat/workflow-end-hooks`, PR #2a đang review).** Ratchet đo bằng cùng lệnh: **301 / 60 / 60 / 0**, nên 241 khớp (`sixteen_banked` assert (301, 241, 60)). `LIVE` 295, `VALIDATE_REFUSED` 25, `UNKNOWN_TYPE_REFUSED` 21 không đổi. Mười hai mục được bank: chín mục `finally:`, `valids/finally-loop` và `-loop-parallel`, và `invalids/loop-switch-failed` (danh sách nằm trong ghi chú như-đã-xây §7.1 của spec end-hooks). `valids/task-runif-taskswithstate` vẫn ở baseline: `runIf` của nó dùng test `empty` của Pebble (renderer, gói #5). Phần chia theo nguyên nhân ở trên không được suy lại.
+
 Trong 84 trường hợp lệch đo ngày 2026-10-18, C2 chiếm 12. 72 trường hợp còn lại theo nguyên nhân: `finally:` 11, `afterExecution:` 9, renderer lệch 8, `sla: MAX_DURATION` 5, `outputs:` riêng của `Loop` 5, độ trễ timing/poller 4, các cặp thứ tự mà driver không có đồng hồ không thể đạt tới 4, flow invalid bị chấp nhận thừa 4, các lệch `Loop` chưa quy được nguyên nhân 4, `Pause` 3, flow `outputs:`/SECRET 3, `WorkingDirectory`+`runIf` 3, retry của Subflow 2, thiếu hàm Pebble 2, nguyên nhân đơn lẻ 4, cố ý 1.
 
 **Bề mặt tính năng** (Kestra 2.0 OSS, ngoài corpus; bằng chứng ở Phụ lục B):
@@ -65,6 +67,8 @@ Mỗi gói đi qua quy trình thường lệ: spec (hoặc một mục spec) →
 
 **Quy tắc 2: kiểm lại sau #2.** Tiền đề của việc dọn container, "execution đã terminal thì không còn việc nào đang chạy", chỉ đúng khi egret chưa chạy `afterExecution:` (D15 của spec nợ). #2 phải kiểm lại nó.
 
+*Đính chính, 2026-10-27 (spec `2026-10-26-workflow-end-hooks-design.md`, tiền đề sai 2).* Tiền đề này nằm trong doc comment của `sweep_decision` (`worker/commands.rs`), không phải D15 của spec nợ (quy tắc container bị thay thế của `LoopUntil`). Nó đã sai trước #2: một `Exit` với `SUCCESS`, `WARNING`, `FAILED` hoặc `CANCELLED` để các task anh em tiếp tục chạy trong một execution đã terminal. #2a không chạy việc gì sau terminal, nên không đổi câu trả lời; Task B5 của #2b kiểm lại việc dọn `_wd` và pruner cho `afterExecution:`.
+
 | # | Gói | Phạm vi (những gì nó gỡ) | Banks | Cỡ |
 |---|---|---|---|---|
 | 0 | **Nhóm C2** — xong, #693 (`78c182ab`) | `SetVariables`, `UnsetVariables`, `Labels` | 11 trên 12 | M |
@@ -92,12 +96,25 @@ Mỗi gói đi qua quy trình thường lệ: spec (hoặc một mục spec) →
 
 **Kỳ vọng sau #2:** baseline giảm từ 73 xuống khoảng 52.
 
+**Tách đôi, 2026-10-27 (spec `2026-10-26-workflow-end-hooks-design.md`, D1 và Q1: có).** Dòng #2 thành hai PR và dòng ở trên không bị sửa.
+- **#2a (đã xây, PR đang review):** `finally:` trên mọi flowable trừ `Pause`, `finally:` của chính flow, và `errors:`/`finally:` trên `Loop`, `LoopUntil` và `WorkingDirectory`. Đo được: 12 mục bank, baseline từ 72 xuống **60** (bảng trên kỳ vọng 13 và khoảng 14 đến 15 chặt; `task-runif-taskswithstate` không bank, nguyên nhân renderer, #5).
+- **#2b (chưa xây):** `afterExecution:` của flow, pha sau terminal và khác biệt về kill (§3.1). Kỳ vọng 8 mục bank, xuống 52 (§7.1 của spec kỳ vọng 51 từ 59; tính từ 60 là 52).
+- **`finally:` của `Pause` chuyển sang #9** (spec D14, Q5: có). Đến lúc đó nó bị từ chối và nêu #9.
+
 **Ghi chú, 2026-10-26 (§9 của spec gói #1, `docs/en/specs/2026-10-19-workflow-no-silent-drops-design.md`; các dòng ở trên không bị sửa).** Đính chính 6 và 8 nằm dưới Phụ lục B §4 và §8 (bản EN), và 7 ở §4 bên dưới.
 1. **#9:** `tasks:` của `Pause` không phải property của Kestra (`Pause.java:158`: field của nó là `pauseDuration`, `behavior`, `onPause`, `onResume`, `errors`, `finally`). Nó bị bỏ khỏi phạm vi của #9 và vẫn bị từ chối vĩnh viễn, như một property không xác định (mã `unsupported_pause_property` được giữ). #9 còn thêm `checkFrequency`/`failOnMaxReached` không phải literal của `LoopUntil` (`unsupported_loop_until_property`; spec Q3).
 2. **#11:** thêm `allowConcurrent` của Schedule (mặc định của Kestra là `false` và khoá trigger đến khi execution của nó xong, `TriggerScheduler.java:345-349`; egret không bao giờ khoá; gói #1 chỉ cảnh báo khi viết `false` tường minh), `failOnTriggerError`, và `when` của Webhook.
 3. **#2:** thêm `errors:` của `LoopUntil`, `errors:` của `WorkingDirectory` và `finally:` của `WorkingDirectory` (đều là `AbstractBranch`). Một version publish trước #2 giữ chúng chỉ trong `snapshot.source`, nên #2 phải suy lại plan từ source (spec §10).
+   - *Đính chính, 2026-10-27: tiền đề `snapshot.source` là sai* (spec end-hooks, tiền đề sai 1). Không run nào đọc snapshot: một lần start chạy `flows.source` của dòng draft, chép nó vào `executions.source`, và mỗi claim lập lại plan từ bản chép đó. Không có gì cần suy lại. Rủi ro thật là `task_ix` theo vị trí, được xử lý bằng plan ổn định chỉ số (A3) và fixture A1. #2a cũng xây `errors:`/`finally:` của `WorkingDirectory` (Q4: mặc định; code của Kestra có vẻ không bao giờ khởi chạy `finally:` của WD, coi là lỗi).
 4. **#3:** thêm `isRadio` và `autoSelectFirst` của SELECT/MULTISELECT như gợi ý cho form start, và `expression` của SELECT/MULTISELECT.
 5. **#17:** thêm các pattern `**` và `[...]` của `outputFiles` trong script (`worker/commands.rs:3108-3124`).
+
+**Ghi chú, 2026-10-27 (gói #2, như-đã-xây §7.1, §9 và §4.1 của spec end-hooks).**
+6. **#6:** thêm việc tính `outputs:` cấp flow. `valids/after-execution` vẫn ở baseline vì `afterExecution:` của nó render `{{ execution.outputs.final }}` mà egret không bao giờ tính `outputs:` của flow (`worker/render.rs:279-284`).
+7. **#7:** khi xây restart tại chỗ, nó phải xoá các run `errors`, `finally` và `afterExecution`, như `ExecutionService` của Kestra làm (`ExS:339-351`). Hiện đang tiềm ẩn: `run_of` lấy run đầu tiên của một task, nên một restart cấp execution sẽ đọc một run end-hook cũ.
+8. **#9:** sở hữu `finally:` của `Pause` (bị từ chối và nêu #9 cho đến lúc đó).
+9. **#17:** một block `WorkingDirectory` có claim prepare hoặc finish thất bại kết thúc `FAILED` mà không chạy `errors`/`finally` của nó (quy tắc V3, ghim bằng một test trong `tests/working_dir_claims.rs`); xem lại khi có runner Kubernetes.
+10. **#5:** sở hữu `valids/task-runif-taskswithstate` (test `empty` của Pebble trong `runIf`).
 
 ## 3. Những gì vẫn khác, và vì sao
 
@@ -111,6 +128,7 @@ Những điểm này được giữ vì làm giống Kestra sẽ mở lỗ hổn
 - **`allowedFileExtensions`:** allowlist của input FILE được thực thi (mục 5 của §8).
 - **Giới hạn trong namespace:** KV, ghi namespace file, `PurgeKV`, `PurgeFiles` và `PurgeLogs` chỉ tác động lên namespace của chính flow và các namespace con (mục 6 của §8).
 - **Giới hạn kích thước:** kích thước và mật độ giá trị KV, số chữ số (mục 7 của §8), và `executions.variables`/`Labels` (D8, D9 của gói nợ).
+- **Kill dừng các run `afterExecution:` (dự kiến trong #2b, quyết định Q3 của người dùng, 2026-10-27).** Kestra trả 409 cho lệnh kill một execution đã terminal và vẫn ép chạy danh sách `afterExecution:` sau một lần kill. egret sẽ chấp nhận kill một execution đã terminal mà còn after-task đang chạy, chuyển các run đó sang KILLING/KILLED qua đường kill hiện có, và không bao giờ đổi trạng thái cuối của chính execution, để một tenant không thể tạo ra task mà không ai kill được. Chưa xây trong #2a: Task B3 của Phần B.
 - **Tham chiếu theo workspace:** publish chỉ phân giải đích của Subflow/`dependsOn` trong workspace của người publish (§5.1 của spec nợ).
 
 ### 3.2 Thiết kế riêng của egret được giữ, không mất hành vi nào của Kestra
