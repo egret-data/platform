@@ -973,94 +973,98 @@ async fn a_malformed_multi_table_commit_is_a_400_from_the_guard() {
     }
 }
 
-// ── S3 signer (spec §9) ─────────────────────────────────────────────────────
+// ── S3 signer (spec §9, §10.6) ──────────────────────────────────────────────
 
-/// The S3 signer gives no signature: egret's S3 warehouses have remote
-/// signing off, and lakekeeper refuses before it maps the location to a
-/// table. That refusal is the only thing between a role with a write grant
-/// anywhere and a signature for any table's files (lakekeeper's own table
-/// check runs on `AllowAllAuthorizer`), so it is pinned here, for a GET and a
-/// PUT, for a role with write elsewhere and for an engine with manage.
+/// A sign request for `method` on a file under `egret-sign/kp`.
+fn sign_request(method: &str) -> Value {
+    json!({
+        "region": "us-east-1",
+        "uri": "http://127.0.0.1:1/egret-sign/kp/some-table/data/x.parquet",
+        "method": method,
+        "headers": {},
+    })
+}
+
+/// egret's S3 warehouse profile, on a bucket nothing reaches.
+fn egret_s3_profile() -> Value {
+    egret_catalog_engine::s3_storage_profile(&egret_catalog_engine::S3StorageConfig {
+        bucket: "egret-sign".into(),
+        region: "us-east-1".into(),
+        endpoint: Some("http://127.0.0.1:1/".into()),
+        path_style: true,
+        access_key: "AK".into(),
+        secret_key: "SK".into(),
+        key_prefix: Some("kp".into()),
+    })
+}
+
+/// Behind the guard's own refusal (below), lakekeeper still refuses to sign on
+/// a warehouse with egret's S3 profile: remote signing is off, and it refuses
+/// before it maps the location to a table. Lakekeeper's own table check runs
+/// on `AllowAllAuthorizer`, so this refusal is pinned, straight against
+/// lakekeeper's router, for a GET and a PUT.
 #[tokio::test]
-async fn the_s3_signer_gives_no_signature_on_an_egret_warehouse() {
-    let profile =
-        egret_catalog_engine::s3_storage_profile(&egret_catalog_engine::S3StorageConfig {
-            bucket: "egret-sign".into(),
-            region: "us-east-1".into(),
-            endpoint: Some("http://127.0.0.1:1/".into()),
-            path_style: true,
-            access_key: "AK".into(),
-            secret_key: "SK".into(),
-            key_prefix: Some("kp".into()),
-        });
-    let Some(env) = env_with_profile(Some(profile)).await else {
+async fn lakekeeper_refuses_to_sign_on_an_egret_warehouse() {
+    let Some(env) = env_with_profile(Some(egret_s3_profile())).await else {
         eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
-    let elsewhere = env
-        .token_for(
-            "external",
-            &[grant("namespace", Some(&["stage"]), None, "write")],
-        )
-        .await;
+    for method in ["GET", "PUT"] {
+        let (status, body) = env
+            .send(
+                &env.raw,
+                None,
+                "POST",
+                "v1/aws/s3/sign",
+                sign_request(method),
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method}: {body}");
+        assert_eq!(
+            body["error"]["type"], "RemoteSigningDisabled",
+            "{method}: lakekeeper's refusal, before any table lookup: {body}"
+        );
+    }
+}
+
+/// F6: the guard refuses every signer route itself, whatever the caller's
+/// grants, so the signer is closed even if a profile ever turns signing on.
+#[tokio::test]
+async fn the_guard_refuses_remote_signing_outright() {
+    let Some(env) = env_with_profile(Some(egret_s3_profile())).await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
     let engine = env
         .token_for("engine", &[grant("catalog", None, None, "manage")])
         .await;
-    for (who, token) in [("write elsewhere", &elsewhere), ("engine", &engine)] {
+    let paths = [
+        format!("/{}/v1/aws/s3/sign", env.prefix),
+        format!(
+            "/signer/{}/tabular-id/{}/v1/aws/s3/sign",
+            env.prefix,
+            uuid::Uuid::new_v4()
+        ),
+        "/aws/s3/sign".to_string(),
+    ];
+    for path in &paths {
         for method in ["GET", "PUT"] {
             let (status, body) = env
-                .send(
-                    &env.app,
-                    Some(token),
-                    "POST",
-                    "v1/aws/s3/sign",
-                    json!({
-                        "region": "us-east-1",
-                        "uri": "http://127.0.0.1:1/egret-sign/kp/some-table/data/x.parquet",
-                        "method": method,
-                        "headers": {},
-                    }),
+                .send_abs(
+                    Some(&engine),
+                    path,
+                    Body::from(sign_request(method).to_string()),
+                    &[],
                 )
                 .await;
-            assert_eq!(status, StatusCode::FORBIDDEN, "{who} {method}: {body}");
-            assert_eq!(
-                body["error"]["type"], "RemoteSigningDisabled",
-                "{who} {method}: lakekeeper's refusal, before any table lookup: {body}"
+            assert_eq!(status, StatusCode::FORBIDDEN, "{path} {method}: {body}");
+            assert!(
+                body.as_str()
+                    .unwrap_or("")
+                    .contains("remote signing is not used by egret"),
+                "{path} {method}: the guard's own refusal: {body}"
             );
         }
-    }
-
-    // The table-specific signer route lakekeeper would advertise does not
-    // even pass the guard: its first segment is not the warehouse prefix.
-    let (status, body) = env.send_signer_route(&elsewhere).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-}
-
-impl Env {
-    async fn send_signer_route(&self, token: &str) -> (StatusCode, Value) {
-        let req = axum::http::Request::builder()
-            .method("POST")
-            .uri(format!(
-                "/signer/{}/tabular-id/{}/v1/aws/s3/sign",
-                self.prefix,
-                uuid::Uuid::new_v4()
-            ))
-            .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {token}"))
-            .body(Body::from(
-                json!({"region": "us-east-1", "uri": "http://127.0.0.1:1/egret-sign/kp/x", "method": "GET", "headers": {}})
-                    .to_string(),
-            ))
-            .unwrap();
-        let resp = self.app.clone().oneshot(req).await.unwrap();
-        let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
-            .await
-            .unwrap();
-        (
-            status,
-            Value::String(String::from_utf8_lossy(&bytes).into_owned()),
-        )
     }
 }
 

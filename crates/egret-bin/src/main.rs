@@ -587,6 +587,18 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
+        // Remote S3 request signing (`/aws/s3/sign`, `/{prefix}/v1/aws/s3/sign`,
+        // `/signer/{prefix}/tabular-id/{id}/v1/aws/s3/sign`): egret's warehouses
+        // have it off and no egret client uses it, and lakekeeper's own table
+        // check behind it allows everyone, so refuse every signer route here,
+        // whatever the grants (rename-authz spec §10.6).
+        if is_signer_route(path) {
+            return forbid(
+                "remote signing is not used by egret: S3 access goes through vended credentials"
+                    .to_string(),
+            );
+        }
+
         // authZ, discovery (`GET /config?warehouse=`): a client may only discover
         // the warehouse named in its token.
         if path == "/config" {
@@ -968,6 +980,17 @@ fn is_recursive(query: Option<&str>) -> bool {
     query.is_some_and(|q| {
         url::form_urlencoded::parse(q.as_bytes()).any(|(k, v)| k == "recursive" && v != "false")
     })
+}
+
+/// Is this one of lakekeeper's S3 signer routes? Any path ending in
+/// `aws/s3/sign`, or under `/signer/`.
+fn is_signer_route(path: &str) -> bool {
+    let segs: Vec<&str> = path
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+    segs.first() == Some(&"signer") || segs.ends_with(&["aws", "s3", "sign"])
 }
 
 /// Does this grant carry `write` or `manage`?
@@ -3392,7 +3415,9 @@ const WORKFLOW_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(1
 
 #[cfg(test)]
 mod catalog_authz_tests {
-    use super::{catalog_grant_covers, is_recursive, path_namespace, path_tabular};
+    use super::{
+        catalog_grant_covers, is_recursive, is_signer_route, path_namespace, path_tabular,
+    };
     use egret_catalog_engine::CatalogGrant;
     use uuid::Uuid;
 
@@ -3464,6 +3489,26 @@ mod catalog_authz_tests {
             "an unknown key to lakekeeper"
         );
         assert!(!is_recursive(None));
+    }
+
+    #[test]
+    fn every_signer_route_is_recognised() {
+        for p in [
+            "/aws/s3/sign",
+            "/wh/v1/aws/s3/sign",
+            "/signer/wh/tabular-id/x/v1/aws/s3/sign",
+            "/signer/anything",
+            "//wh//v1/aws/s3/sign/",
+        ] {
+            assert!(is_signer_route(p), "{p}");
+        }
+        for p in [
+            "/config",
+            "/wh/namespaces/aws/tables/sign",
+            "/wh/tables/rename",
+        ] {
+            assert!(!is_signer_route(p), "{p}");
+        }
     }
 
     #[test]

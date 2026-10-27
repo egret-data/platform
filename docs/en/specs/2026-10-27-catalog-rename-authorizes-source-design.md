@@ -147,15 +147,18 @@ the view hold's rename run on the body the mount re-injected.
 ## 7. Related defects found, not fixed
 
 - `POST /{prefix}/transactions/commit` (multi-table commit) was also a catalog-root write. Fixed in §8.
-- `POST /{prefix}/v1/aws/s3/sign` (the S3 request signer) is also a catalog-root write by path. Not exploitable on an
-  egret warehouse, because remote signing is off; pinned, not changed (§9).
-- `POST /{prefix}/namespaces` (create namespace) is allowed for any role with any write grant, because its path has no
+- `POST /{prefix}/v1/aws/s3/sign` (the S3 request signer) was a catalog-root write by path. Not exploitable on an
+  egret warehouse (remote signing is off, §9); since §10.6 the guard refuses every signer route outright.
+- **LOW.** `POST /{prefix}/namespaces` (create namespace) is allowed for any role with any write grant, because its path has no
   namespace segment and the namespace is named only in the body. Creating one grants the creator nothing: grants are
   exact, so a new namespace is reachable only through a `catalog` grant or a grant an admin adds on it. The harm is
   squatting a name and clutter. A narrow fix is obvious and small: hand the guard the body (`{"namespace": [..]}`) as
   for a rename and require a `write`/`manage` `catalog` grant for a top-level namespace, or a `namespace` grant on the
   parent for a nested one. One choice is open: whether a grant on the parent may create children (the parent grant
   already "covers everything in it" for tables).
+- **LOW.** `GET /{prefix}/namespaces` (and `?parent=`) is a catalog-root read: any role with any grant lists every
+  namespace name in the warehouse. Names only, no tables or data. A narrow fix would filter the listing by grants
+  (lakekeeper's response would have to be rewritten), not obvious enough to do here.
 - F-B: catalog grants were compared byte for byte while lakekeeper's names are not. *Corrected after review:* this
   did not fail closed (the caller chooses the spelling, §3.4). Fixed in §10.4.
 
@@ -236,6 +239,8 @@ Through the real mount, with a role whose only grant is `namespace` `write` on `
   caller may read (E12, E13).
 
 ### 9.3 Decision (controller default D10)
+
+*Superseded after review by D14 (§10.6): the guard now refuses every signer route itself; the pins below stay.*
 
 **No guard change.** The signer is limited on every egret warehouse: signing is off (E14), and lakekeeper refuses
 before any table lookup (E11). What is fixed is that the limit is now explicit and pinned:
@@ -386,3 +391,20 @@ mount, seen failing on the code before the fix), what was decided, and how it is
 - **Tests:** `a_recursive_namespace_drop_needs_a_catalog_grant` (red, green now: three query spellings refused with the
   child's table intact; `catalog` `manage` still drops recursively); unit test
   `a_recursive_drop_is_read_as_lakekeeper_reads_the_query`.
+
+### 10.6 F6: the guard refuses remote signing outright (D14)
+
+- **Problem.** The pins of §9 hold only for the profile egret *creates*. A later "edit storage profile" feature would
+  turn signing on silently, and lakekeeper's own table check behind the signer allows everyone (E13).
+- **Measured** at `3a803474`: a request with a `catalog` `manage` token to `/{prefix}/v1/aws/s3/sign` reached
+  lakekeeper (its `RemoteSigningDisabled` 403 came back), and the other two signer routes got the guard's generic
+  prefix refusal (`the_guard_refuses_remote_signing_outright`).
+- **Decision (D14):** after authN and before anything else, the guard refuses every signer route (any path ending in
+  `aws/s3/sign`, or under `/signer/`) with 403 `remote signing is not used by egret: S3 access goes through vended
+  credentials`, whatever the grants. egret's clients use vended credentials (`sts-enabled: true`).
+- The profile pins stay: `egret_s3_warehouses_have_remote_signing_off` (unit), and
+  `lakekeeper_refuses_to_sign_on_an_egret_warehouse`, which now drives lakekeeper's router directly (the guard no
+  longer lets the request reach it) and still sees `RemoteSigningDisabled` for a GET and a PUT.
+- **Tests:** `the_guard_refuses_remote_signing_outright` (red, green now: all three routes, GET and PUT, even for
+  `catalog` `manage`); unit test `every_signer_route_is_recognised`.
+- "List namespaces" and "create namespace" stay LOW and open (§7).
