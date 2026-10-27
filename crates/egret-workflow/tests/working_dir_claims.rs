@@ -691,8 +691,9 @@ async fn a_failed_delete_leaves_swept_at_null_for_the_sweep(pool: PgPool) {
 
 /// **Debt D6 with D4: a block a kill closed by force keeps its `_wd`
 /// snapshots (no discard ran), and the crash sweep removes them.** The
-/// selection reads the execution's terminal state and the block's
-/// `working_dir`, never the run's state, so a `KILLED` block is listed.
+/// selection reads the execution's terminal state, the block's
+/// `working_dir` and (since package #2b) that the block itself has ended;
+/// `KILLED` is terminal, so a `KILLED` block is listed.
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_wd_sweep_removes_a_force_closed_blocks_snapshots(pool: PgPool) {
     egret_test_db::assert_database_url_is_exported();
@@ -750,6 +751,68 @@ async fn the_wd_sweep_removes_a_force_closed_blocks_snapshots(pool: PgPool) {
     assert_eq!(swept, 1);
     assert_eq!(objects_under(&fs, &key).await, 0);
     assert!(swept_at(&pool, block).await.is_some());
+}
+
+/// **Package #2b, spec §6: the `_wd` sweep leaves a LIVE block of a terminal
+/// execution, however old its row.** A `WorkingDirectory` in
+/// `afterExecution:` (or an `Exit` sibling) runs while its execution is
+/// terminal; its snapshots are what its children read. The selection reads
+/// the block's own state too: only a block that has ended is swept.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_wd_sweep_leaves_a_live_block_of_a_terminal_execution(pool: PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    // Arrange: a prepared block, still RUNNING, whose execution is terminal;
+    // the block's row last moved 25 h ago.
+    let fs = egret_workflow::storage::install_mem_for_tests();
+    let db = egret_metastore::Db { pool: pool.clone() };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    let ex = egret_workflow::worker::start_execution(
+        &pool,
+        ws,
+        None,
+        KILLED_BLOCK,
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+    tick_with(&pool, 8, &registry(), WorkerTiming::default())
+        .await
+        .expect("the prepare claim");
+    let block = block_id(&pool, ex).await;
+    let key = wd_key(&fs, ws, ex, block);
+    assert!(
+        objects_under(&fs, &key).await > 0,
+        "the fixture: a snapshot exists"
+    );
+    let (state, _, _) = block_row(&pool, ex).await;
+    assert_eq!(state, "RUNNING", "the fixture: the block is live");
+    sqlx::query(
+        "UPDATE workflow.executions SET state = 'SUCCESS', \
+                history = history || '[\"SUCCESS\"]'::jsonb, ended_at = now() WHERE id = $1",
+    )
+    .bind(ex)
+    .execute(&pool)
+    .await
+    .expect("the execution -> SUCCESS");
+    sqlx::query(
+        "UPDATE workflow.task_runs SET updated_at = now() - interval '25 hours' WHERE id = $1",
+    )
+    .bind(block)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let cfg = egret_workflow::storage::wd_sweep::WdSweepConfig::default();
+    // Act
+    let swept = egret_workflow::storage::wd_sweep::sweep(&pool, &fs, &cfg)
+        .await
+        .unwrap();
+    // Assert
+    assert_eq!(swept, 0, "a live block is not swept");
+    assert!(
+        objects_under(&fs, &key).await > 0,
+        "a live block of a terminal execution keeps its snapshots"
+    );
+    assert_eq!(swept_at(&pool, block).await, None);
 }
 
 // ── Task 2.3b: a block inside a `LoopUntil` ─────────────────────────────────

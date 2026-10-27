@@ -14,9 +14,10 @@
 //! runs keeps its files and a task after the loop can still read them. A
 //! candidate is a **loop root** (a row with no `loop_index`) whose family
 //! still has index rows or `workflow.loop_file_values` rows, whose state is
-//! terminal (`RunState::is_terminal`, the one list, as
-//! `ExecutionRepo::log_status`) and whose `updated_at` is more than
-//! `retention_days` old.
+//! terminal (`RunState::is_terminal`, the one list) and whose last work ended
+//! more than `retention_days` ago: the later of its `updated_at` and its task
+//! runs' latest `ended_at` (package #2b: an `afterExecution:` run ends after
+//! its execution, whose row it does not move).
 //!
 //! **Keep a source while a dependent runs** (the user's ruling of
 //! 2026-10-04): a family is skipped while any member is in the readable set
@@ -25,10 +26,13 @@
 //! `Subflow` child or Flow-trigger execution it triggered. It is pruned by the
 //! first pass after the last such dependent ended. Since every execution is in
 //! its own readable set, this also keeps every execution that has not ended:
-//! **an execution that has not ended is never pruned.** The set is taken once
+//! **an execution that has not ended is never pruned.** "Has not ended" is
+//! "not idle" (package #2b, spec §6): `NOT workflow.execution_is_idle(id)`
+//! (migration 0210), so a terminal execution whose `afterExecution:` run or
+//! `Exit` sibling is still live has not ended here. The set is taken once
 //! per pass, when its first candidate appears, set-based (one
 //! [`readable_from_any`] query per workspace); a dependent started after that
-//! is caught by a direct check just before each family's delete (a not-ended
+//! is caught by a direct check just before each family's delete (a not-idle
 //! execution whose `replayed_from_execution_id`, `trigger_execution_id` or
 //! `parent_execution_id` names a member).
 //!
@@ -383,7 +387,8 @@ fn terminal() -> Vec<&'static str> {
 
 /// **The user's ruling of 2026-10-04: keep a source while a dependent runs.**
 /// Every execution in the readable set ([`readable_executions`], the one
-/// relation storage reads by) of an execution that has NOT ended: its loop
+/// relation storage reads by) of an execution that has NOT ended -- is not
+/// idle, `workflow.execution_is_idle` (package #2b): its loop
 /// family, its replay and retry chain, its trigger execution and that
 /// trigger's loop family. A family with a member here is neither pruned nor
 /// swept; it is taken by the first pass after its last dependent ended.
@@ -394,9 +399,8 @@ fn terminal() -> Vec<&'static str> {
 async fn protected_set(conn: &mut PgConnection) -> Result<BTreeSet<Uuid>> {
     let live: Vec<(Uuid, Vec<Uuid>)> = sqlx::query_as(
         "SELECT workspace_id, array_agg(id) FROM workflow.executions \
-          WHERE NOT (state = ANY($1)) GROUP BY workspace_id",
+          WHERE NOT workflow.execution_is_idle(id) GROUP BY workspace_id",
     )
-    .bind(terminal())
     .fetch_all(&mut *conn)
     .await
     .map_err(db_err)?;
@@ -407,7 +411,9 @@ async fn protected_set(conn: &mut PgConnection) -> Result<BTreeSet<Uuid>> {
     Ok(out)
 }
 
-/// Loop roots that ended more than `retention_days` ago and whose family
+/// Loop roots whose last work ended more than `retention_days` ago -- the
+/// later of the root's `updated_at` and its task runs' latest `ended_at`,
+/// which an `afterExecution:` run puts after the execution's end -- and whose family
 /// still has index rows or `Loop` values (`workflow.loop_file_values`: a
 /// `Loop` over a trigger's or a replay source's file writes values and no
 /// file), oldest first. The walk starts from those rows (both tables hold
@@ -435,7 +441,10 @@ async fn prune_candidates(
          SELECT r.workspace_id, r.id FROM workflow.executions r \
           WHERE r.id IN (SELECT id FROM up WHERE loop_index IS NULL) \
             AND r.state = ANY($1) \
-            AND r.updated_at < now() - make_interval(days => $2) \
+            AND GREATEST(r.updated_at, \
+                         (SELECT max(t.ended_at) FROM workflow.task_runs t \
+                           WHERE t.execution_id = r.id)) \
+                < now() - make_interval(days => $2) \
             AND NOT (r.id = ANY($3)) \
           ORDER BY r.updated_at, r.id \
           LIMIT $4",
@@ -604,12 +613,11 @@ async fn prune_family(
     // just before the delete (fix round 2, m2).
     let late: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM workflow.executions \
-          WHERE workspace_id = $1 AND NOT (state = ANY($2)) \
-            AND (replayed_from_execution_id = ANY($3) OR trigger_execution_id = ANY($3) \
-                 OR parent_execution_id = ANY($3)))",
+          WHERE workspace_id = $1 AND NOT workflow.execution_is_idle(id) \
+            AND (replayed_from_execution_id = ANY($2) OR trigger_execution_id = ANY($2) \
+                 OR parent_execution_id = ANY($2)))",
     )
     .bind(workspace)
-    .bind(terminal())
     .bind(&ids)
     .fetch_one(&mut *conn)
     .await

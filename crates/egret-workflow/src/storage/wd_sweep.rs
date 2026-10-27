@@ -12,12 +12,16 @@
 //! - a discard whose `delete_prefix` failed.
 //!
 //! [`sweep`] -- run hourly by [`spawn_wd_sweeper`] -- removes the snapshots
-//! of every unstamped block run whose execution is terminal and whose run
-//! ended more than [`WdSweepConfig::older_than`] (24 hours) ago, then stamps
-//! it, so each block is listed once rather than on every pass. The age is
-//! the database's clock. The selection reads the block's `working_dir` and
-//! its execution's state, never the run's own state: a `KILLED` block closed
-//! by force is swept like a `FAILED` one.
+//! of every unstamped block run that has ended, whose execution is terminal
+//! and whose run ended more than [`WdSweepConfig::older_than`] (24 hours)
+//! ago, then stamps it, so each block is listed once rather than on every
+//! pass. The age is the database's clock. The selection reads the block's
+//! `working_dir`, its execution's state, and (package #2b, spec §6) the
+//! block's own state: a terminal execution can still run a block -- one in
+//! `afterExecution:`, or an `Exit` sibling -- whose children read its
+//! snapshots, so only a block whose own state is terminal is swept. Any
+//! terminal state counts: a `KILLED` block closed by force is swept like a
+//! `FAILED` one.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -135,8 +139,8 @@ pub(crate) async fn delete_superseded(
     Ok(removed)
 }
 
-/// One pass: every unstamped block run of a terminal execution that ended
-/// more than `cfg.older_than` ago -- its `_wd/{block}/` deleted, then
+/// One pass: every unstamped block run, itself terminal, of a terminal
+/// execution, that ended more than `cfg.older_than` ago -- its `_wd/{block}/` deleted, then
 /// stamped. Answers how many blocks it swept. A store failure ends the pass
 /// (logged; the row stays unstamped for the next one); `Err` is the
 /// database's.
@@ -165,6 +169,7 @@ async fn sweep_locked(pool: &PgPool, fs: &FileStore, cfg: &WdSweepConfig) -> Res
                FROM workflow.task_runs t JOIN workflow.executions e ON e.id = t.execution_id \
               WHERE t.working_dir IS NOT NULL AND t.working_dir_swept_at IS NULL \
                 AND workflow.state_is_terminal(e.state) \
+                AND workflow.state_is_terminal(t.state) \
                 AND COALESCE(t.ended_at, t.updated_at) < now() - make_interval(secs => $1) \
                 AND NOT (t.id = ANY($2)) \
               ORDER BY COALESCE(t.ended_at, t.updated_at), t.id LIMIT $3",
