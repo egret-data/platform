@@ -71,8 +71,11 @@ use crate::worker::handlers as h;
 /// - a retry's `warningOnRetry` (KI-121): `models::RetryCommon` keeps it and
 ///   `executor::retry` copies it into the plan's policy, but nothing reads it
 ///   there -- a task that succeeds after a retry ends `SUCCESS`, never the
-///   `WARNING` Kestra gives it.
-const NO_EFFECT: &[&str] = &["warningOnStdErr", "warningOnRetry"];
+///   `WARNING` Kestra gives it;
+/// - a JSON input's `jsonSchema` (inputs package A3, spec D12): `models::Input`
+///   keeps it so a flow round-trips, but no JSON Schema validator is in the
+///   dependency tree, so `inputs_check` never checks a value against it.
+const NO_EFFECT: &[&str] = &["warningOnStdErr", "warningOnRetry", "jsonSchema"];
 
 /// Validation error codes that refuse a property by NAME, whatever its value,
 /// so a read property drawing one at its own path is `refused` rather than a

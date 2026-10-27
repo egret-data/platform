@@ -1,38 +1,65 @@
-// kestra: core/src/main/java/io/kestra/core/runners/FlowInputOutput.java (resolveInputs, parseType)
-// kestra: core/src/main/java/io/kestra/core/models/flows/input/*.java (validate)
+// kestra: core/src/main/java/io/kestra/core/runners/FlowInputOutput.java (resolveInputs, resolveInputValue, parseType)
+// kestra: core/src/main/java/io/kestra/core/models/flows/input/*.java (validate, render, getDefaults)
 // kestra: core/src/main/java/io/kestra/core/utils/TypeConverter.java
 // kestra: core/src/main/java/io/kestra/core/exceptions/InputOutputValidationException.java
 // jdk: java.time.{Duration,Instant,LocalDate,LocalTime}#parse/#toString, java.lang.Float#toString
-//! The start-time input check (package #3, spec D1-D5, D9, D10): the flow's
-//! declared `inputs:` against the posted object, giving the **coerced** object
-//! that is stored (D2) or the **first** error in declared order (D1).
+//! The start-time input check (package #3, spec D1-D6, D9, D10, D12, D13):
+//! the flow's declared `inputs:` against the posted object, giving the
+//! **coerced** object that is stored (D2) or the **first** error in declared
+//! order (D1).
 //!
-//! Pure: no database, no renderer, no clock. It reads nothing but its two
-//! arguments, so the start path, the subflow child and (B1) the validate
-//! endpoint can share it and can never disagree.
+//! Pure: no database and no clock. The one thing it cannot do alone is
+//! render a template, so the caller hands it an [`InputRenderer`] for
+//! `dependsOn.condition` and a SELECT / MULTISELECT `expression` (Kestra's
+//! `runContext.renderTyped`). The start path, the subflow child and (B1) the
+//! validate endpoint share it and can never disagree.
 //!
-//! # Per input, in declared order (`FlowInputOutput.resolveInputs`)
+//! # Per input (`FlowInputOutput.resolveInputValue`)
 //!
-//! 1. An explicit `null`, or `""` for any type but STRING, SELECT, EMAIL and
+//! Inputs are visited in declared order; an input's `dependsOn.inputs` are
+//! resolved first, recursively.
+//!
+//! 1. **Enabled?** Every known dependency (an unknown id is ignored, the
+//!    input's own id too) must be enabled and non-null. Then a
+//!    `dependsOn.condition` is rendered with `inputs` bound to the
+//!    dependencies' values; only a boolean `true` enables. A render failure
+//!    disables the input and records ``Invalid condition: <msg>`` on it.
+//!    A disabled input is dropped, skips `required`, and its errors are not
+//!    reported at start (Kestra filters disabled inputs before it throws);
+//!    [`resolve_all`] still lists them. A dependency cycle (refused at save,
+//!    Task A5) disables the inputs on it rather than recursing forever.
+//! 2. **Options.** A SELECT / MULTISELECT `expression` is rendered with the
+//!    same bindings; its non-null items replace `values`.
+//! 3. An explicit `null`, or `""` for any type but STRING, SELECT, EMAIL and
 //!    SECRET (D5, `isTextType`), is **absent**.
-//! 2. Absent with a `defaults`: a literal default (no `{{`/`{%`) is parsed and
+//! 4. Absent with a `defaults`: a literal default (no `{{`/`{%`) is parsed and
 //!    validated like a posted value, and stays absent in the result -- the
 //!    render still fills it (D2). A templated default is not checked here.
-//! 3. Absent with no default: `Missing required input:<id>` when `required`
+//!    `autoSelectFirst` with no `defaults` picks the first option, and that
+//!    value **is** stored: the render knows nothing of `autoSelectFirst`.
+//! 5. Absent with no default: `Missing required input:<id>` when `required`
 //!    (default true), otherwise absent (Kestra keeps a `null`; egret leaves the
 //!    key out, which renders the same).
-//! 4. Parse, then validate. A failure is
-//!    ``Invalid value for input `<id>`. Cause: <cause>`` (D3).
+//! 6. Parse, then validate. A failure is
+//!    ``Invalid value for input `<id>`. Cause: <cause>`` (D3); a MULTISELECT
+//!    gives one such line per bad element, joined by `\n`.
 //!
 //! Undeclared keys are dropped (Kestra drops them with a WARN).
 //!
-//! # Not here yet
+//! # What is stored
 //!
-//! ARRAY, MULTISELECT, JSON, YAML and ION, `dependsOn`, SELECT `expression` and
-//! `autoSelectFirst` are Task A3: until then their posted value passes through
-//! unchanged (after the required / empty-string steps). FILE is checked by
-//! `storage::inputs::check_file_inputs`, FORM and REUSABLE_INPUTS are not
-//! supported: all three pass through unchanged.
+//! INT, FLOAT and BOOL are stored as typed JSON. DATETIME, DATE, TIME and
+//! DURATION are validated and bound-checked but stored **as posted**
+//! (`P1D` stays `P1D`, `10:00:00` stays `10:00:00`). JSON, YAML and ION are
+//! stored as the parsed value. ARRAY and MULTISELECT are stored as the list
+//! of parsed elements.
+//!
+//! # Not here
+//!
+//! FILE is checked by `storage::inputs::check_file_inputs`; FORM and
+//! REUSABLE_INPUTS are not supported. All three pass through unchanged.
+//! `jsonSchema` is **not checked** (D12): no JSON Schema validator is in the
+//! dependency tree, so the key stays a `not_honoured` warning (`spec::keys`).
 //!
 //! # Recorded divergences
 //!
@@ -51,9 +78,23 @@
 //! - **URI** syntax errors follow `java.net.URI`'s message shapes
 //!   (`Illegal character in <part> at index <n>: <uri>`) for the common
 //!   cases only; a missing scheme is Kestra's `Invalid URI format.` exactly.
+//! - **JSON / YAML / ION / ARRAY parse errors** are the prefixed form with the
+//!   parser's own message (`serde_json`, `serde_norway`, `ion-rs`), not
+//!   Kestra's code-block wrapper around Jackson's (D3). An ARRAY / MULTISELECT
+//!   value that is neither a list nor a string holding a JSON list gives
+//!   ``Cannot convert value '<v>' to List`` (Kestra: a `ClassCastException`
+//!   text with no prefix).
+//! - **ION** is read with egret's Ion reader (`storage::ion`, the preview's
+//!   JSON table: a timestamp is its Ion text, a decimal a double); Kestra's
+//!   `IonObjectMapper` gives Java objects. Only the first value is read.
+//! - **MULTISELECT membership** compares each parsed element's text, so an
+//!   `itemType: INT` element `1` matches the option `"1"`; Kestra compares an
+//!   `Integer` to a `String` and refuses every element.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
+use serde::Deserialize as _;
 use serde_json::{Map, Value};
 
 use crate::models::{Input, InputType};
@@ -63,7 +104,8 @@ use crate::models::{Input, InputType};
 pub struct InputError {
     pub input_id: String,
     /// The whole text, e.g. ``Invalid value for input `n`. Cause: it must be
-    /// more than `1` `` or `Missing required input:n`.
+    /// more than `1` `` or `Missing required input:n`. Several lines (a
+    /// MULTISELECT with several bad elements) are joined by `\n`.
     pub message: String,
 }
 
@@ -80,59 +122,315 @@ impl std::error::Error for InputError {}
 /// rather than an accident: one million steps is well under a second.
 pub const VALIDATOR_BACKTRACK_LIMIT: usize = 1_000_000;
 
+/// Kestra's `runContext.renderTyped(expression)` for an input: `inputs` is
+/// what the template sees as `inputs` -- the input's dependencies and their
+/// values (an unset one is `null`). The caller adds the rest of the context
+/// (flow, execution, ...). `Err` is the renderer's message.
+///
+/// Used for `dependsOn.condition` (only `Value::Bool(true)` enables), a
+/// SELECT / MULTISELECT `expression` (must give a list), and a templated
+/// `defaults` that another input depends on (its value, never validated).
+pub trait InputRenderer {
+    fn render_typed(&self, template: &str, inputs: &Map<String, Value>) -> Result<Value, String>;
+}
+
+impl<F> InputRenderer for F
+where
+    F: Fn(&str, &Map<String, Value>) -> Result<Value, String>,
+{
+    fn render_typed(&self, template: &str, inputs: &Map<String, Value>) -> Result<Value, String> {
+        self(template, inputs)
+    }
+}
+
+/// One input's outcome -- Kestra's `InputAndValue`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InputOutcome {
+    pub id: String,
+    /// What is stored; `None` leaves the key out.
+    pub value: Option<Value>,
+    /// What a dependent sees as this input's value: the stored value, a
+    /// literal default's parsed value, or -- on an error -- the value as
+    /// posted (Kestra keeps the raw value on an errored input).
+    pub seen: Option<Value>,
+    pub enabled: bool,
+    /// The value came from `defaults` or `autoSelectFirst`.
+    pub is_default: bool,
+    /// Full messages, in Kestra's form.
+    pub errors: Vec<String>,
+}
+
 /// Check `posted` against `inputs` and return the coerced object, or the
-/// first error in declared order (spec D1).
+/// first error in declared order among the **enabled** inputs (spec D1).
 ///
 /// `posted` that is not an object is treated as `{}`.
-pub fn resolve(inputs: &[Input], posted: &Value) -> Result<Map<String, Value>, InputError> {
-    let posted = posted.as_object();
+pub fn resolve(
+    inputs: &[Input],
+    posted: &Value,
+    renderer: &dyn InputRenderer,
+) -> Result<Map<String, Value>, InputError> {
     let mut out = Map::new();
-    for input in inputs {
-        match check_input(input, posted.and_then(|m| m.get(&input.id))) {
-            Ok(Some(v)) => {
-                out.insert(input.id.clone(), v);
-            }
-            Ok(None) => {}
-            Err(message) => {
-                return Err(InputError {
-                    input_id: input.id.clone(),
-                    message,
-                })
-            }
+    for outcome in resolve_all(inputs, posted, renderer) {
+        if !outcome.enabled {
+            continue;
+        }
+        if !outcome.errors.is_empty() {
+            return Err(InputError {
+                input_id: outcome.id,
+                message: outcome.errors.join("\n"),
+            });
+        }
+        if let Some(v) = outcome.value {
+            out.insert(outcome.id, v);
         }
     }
     Ok(out)
 }
 
-/// One input's whole decision: `Ok(Some(v))` stores `v`, `Ok(None)` leaves
-/// the key out, `Err` is the full message. The unit `resolve` folds over, and
-/// the one a collect-every-error variant (Task B1) will fold over too.
-pub(crate) fn check_input(input: &Input, posted: Option<&Value>) -> Result<Option<Value>, String> {
-    if matches!(input.r#type, InputType::Form | InputType::ReusableInputs) {
-        return Ok(posted.filter(|v| !v.is_null()).cloned());
+/// Every declared input's outcome, in declared order (a repeated id keeps its
+/// first declaration, as Kestra's `toMap` merge does). The validate endpoint
+/// (Task B1) lists these; [`resolve`] folds over them.
+pub fn resolve_all(
+    inputs: &[Input],
+    posted: &Value,
+    renderer: &dyn InputRenderer,
+) -> Vec<InputOutcome> {
+    let mut index = HashMap::new();
+    let mut unique = Vec::new();
+    for input in inputs {
+        if !index.contains_key(input.id.as_str()) {
+            index.insert(input.id.as_str(), unique.len());
+            unique.push(input);
+        }
     }
-    let value = posted.filter(|v| match v {
-        Value::Null => false,
-        Value::String(s) if s.is_empty() => is_text_type(input.r#type),
-        _ => true,
-    });
-    let Some(value) = value else {
-        if let Some(default) = &input.defaults {
-            let source = default.source();
-            if !is_templated(source) {
-                parse_and_validate(input, &Value::String(source.to_string()))
-                    .map_err(|cause| invalid(input, &cause))?;
-            }
-            return Ok(None);
-        }
-        if input.required {
-            return Err(format!("Missing required input:{}", input.id));
-        }
-        return Ok(None);
+    let depended = inputs
+        .iter()
+        .filter_map(|i| i.depends_on.as_ref())
+        .flat_map(|d| d.inputs.iter().map(String::as_str))
+        .collect();
+    let mut resolver = Resolver {
+        states: unique.iter().map(|_| State::Pending).collect(),
+        inputs: unique,
+        index,
+        depended,
+        posted: posted.as_object(),
+        renderer,
     };
-    parse_and_validate(input, value)
-        .map(Some)
-        .map_err(|cause| invalid(input, &cause))
+    for k in 0..resolver.inputs.len() {
+        resolver.visit(k);
+    }
+    resolver
+        .states
+        .into_iter()
+        .filter_map(|s| match s {
+            State::Done(o) => Some(o),
+            State::Pending | State::Visiting => None,
+        })
+        .collect()
+}
+
+enum State {
+    Pending,
+    /// On the current dependency path: reaching it again is a cycle.
+    Visiting,
+    Done(InputOutcome),
+}
+
+struct Resolver<'a> {
+    inputs: Vec<&'a Input>,
+    index: HashMap<&'a str, usize>,
+    /// Ids some input names in `dependsOn.inputs`: only their templated
+    /// default is worth rendering.
+    depended: HashSet<&'a str>,
+    posted: Option<&'a Map<String, Value>>,
+    renderer: &'a dyn InputRenderer,
+    states: Vec<State>,
+}
+
+impl Resolver<'_> {
+    /// `(enabled, seen)` of input `k`, resolving it first if need be; `None`
+    /// when `k` is already on the path (a cycle).
+    fn visit(&mut self, k: usize) -> Option<(bool, Option<Value>)> {
+        match &self.states[k] {
+            State::Done(o) => return Some((o.enabled, o.seen.clone())),
+            State::Visiting => return None,
+            State::Pending => {}
+        }
+        self.states[k] = State::Visiting;
+        let outcome = self.decide(k);
+        let summary = (outcome.enabled, outcome.seen.clone());
+        self.states[k] = State::Done(outcome);
+        Some(summary)
+    }
+
+    fn decide(&mut self, k: usize) -> InputOutcome {
+        let input = self.inputs[k];
+        let raw = self
+            .posted
+            .and_then(|m| m.get(&input.id))
+            .filter(|v| !v.is_null());
+        let mut out = InputOutcome {
+            id: input.id.clone(),
+            value: None,
+            seen: raw.cloned(),
+            enabled: true,
+            is_default: false,
+            errors: Vec::new(),
+        };
+        if matches!(input.r#type, InputType::Form | InputType::ReusableInputs) {
+            out.value = raw.cloned();
+            return out;
+        }
+
+        // 1. Enabled? (`resolveAllDependentInputs`, then the condition.)
+        let mut deps = Map::new();
+        if let Some(depends_on) = &input.depends_on {
+            let mut enabled = true;
+            for id in &depends_on.inputs {
+                if *id == input.id {
+                    continue;
+                }
+                let Some(&j) = self.index.get(id.as_str()) else {
+                    continue; // unknown: ignored at run time (refused at save)
+                };
+                let (dep_enabled, seen) = self.visit(j).unwrap_or((false, None));
+                enabled &= dep_enabled && seen.is_some();
+                deps.insert(id.clone(), seen.unwrap_or(Value::Null));
+            }
+            if enabled {
+                if let Some(condition) = &depends_on.condition {
+                    match self.renderer.render_typed(condition, &deps) {
+                        Ok(Value::Bool(true)) => {}
+                        Ok(_) => enabled = false,
+                        Err(msg) => {
+                            out.errors.push(format!("Invalid condition: {msg}"));
+                            enabled = false;
+                        }
+                    }
+                }
+            }
+            if !enabled {
+                out.enabled = false;
+                return out;
+            }
+        }
+
+        // 2. Options from `expression` (`RenderableInput.mayRenderInput`).
+        let rendered;
+        let input = match (input.r#type, &input.expression) {
+            (InputType::Select | InputType::Multiselect, Some(expression)) => {
+                match self.render_options(input, expression, &deps) {
+                    Ok(values) => {
+                        rendered = Input {
+                            values: Some(values),
+                            ..input.clone()
+                        };
+                        &rendered
+                    }
+                    Err(message) => {
+                        out.errors.push(message);
+                        return out;
+                    }
+                }
+            }
+            _ => input,
+        };
+
+        // 3. Absent?
+        let value = raw.filter(|v| match v {
+            Value::String(s) if s.is_empty() => is_text_type(input.r#type),
+            _ => true,
+        });
+        let fail = |causes: Vec<String>| causes.iter().map(|c| invalid(input, c)).collect();
+
+        if let Some(value) = value {
+            match check_value(input, value) {
+                Ok(v) => {
+                    out.seen = Some(v.clone());
+                    out.value = Some(v);
+                }
+                Err(causes) => out.errors = fail(causes),
+            }
+            return out;
+        }
+
+        // 4. Defaults.
+        if let Some(default) = &input.defaults {
+            out.is_default = true;
+            let source = default.source();
+            if is_templated(source) {
+                // Not validated (D2); rendered only for a dependent to see.
+                out.seen = if self.depended.contains(input.id.as_str()) {
+                    self.renderer
+                        .render_typed(source, &deps)
+                        .ok()
+                        .filter(|v| !v.is_null())
+                } else {
+                    None
+                };
+            } else {
+                match check_value(input, &Value::String(source.to_string())) {
+                    Ok(v) => out.seen = Some(v),
+                    Err(causes) => out.errors = fail(causes),
+                }
+            }
+            return out;
+        }
+        match auto_select_first(input) {
+            Ok(Some(first)) => {
+                out.is_default = true;
+                match check_value(input, &first) {
+                    Ok(v) => {
+                        out.seen = Some(v.clone());
+                        out.value = Some(v);
+                    }
+                    Err(causes) => out.errors = fail(causes),
+                }
+                return out;
+            }
+            Ok(None) => {}
+            Err(cause) => {
+                out.errors = fail(vec![cause]);
+                return out;
+            }
+        }
+
+        // 5. Required.
+        if input.required {
+            out.errors
+                .push(format!("Missing required input:{}", input.id));
+        } else {
+            out.seen = None;
+        }
+        out
+    }
+
+    /// `SelectInput.renderExpressionValues` / `MultiselectInput`'s: the
+    /// rendered list's non-null items, or the full (render-error) message.
+    fn render_options(
+        &self,
+        input: &Input,
+        expression: &str,
+        deps: &Map<String, Value>,
+    ) -> Result<Vec<Value>, String> {
+        // A ConstraintViolationException's message is `<path>: <message>`.
+        let violation = |msg: String| invalid(input, &format!("{}: {msg}", input.id));
+        let result = self
+            .renderer
+            .render_typed(expression.trim(), deps)
+            .map_err(|e| violation(format!("Cannot render 'expression'. Cause: {e}")))?;
+        let Value::Array(items) = result else {
+            return Err(violation(
+                "Invalid expression result. Expected a list of values".into(),
+            ));
+        };
+        let items: Vec<Value> = items.into_iter().filter(|v| !v.is_null()).collect();
+        // `ValueOption.from` throws on an object with no `value`, inside the render.
+        for item in &items {
+            option_value(item).map_err(|cause| invalid(input, &cause))?;
+        }
+        Ok(items)
+    }
 }
 
 /// ``Invalid value for input `<id>`. Cause: <cause>`` --
@@ -154,74 +452,185 @@ fn is_templated(source: &str) -> bool {
     source.contains("{{") || source.contains("{%")
 }
 
-/// `parseType` then `Input.validate`, giving the typed value or the cause.
-fn parse_and_validate(input: &Input, value: &Value) -> Result<Value, String> {
+/// `SelectInput.getDefaults` / `MultiselectInput.getDefaults` with no
+/// `defaults`: the first option when `autoSelectFirst`.
+fn auto_select_first(input: &Input) -> Result<Option<Value>, String> {
+    if input.auto_select_first != Some(true) {
+        return Ok(None);
+    }
+    let Some(first) = input.values.as_ref().and_then(|v| v.first()) else {
+        return Ok(None);
+    };
+    let first = Value::String(option_value(first)?);
+    Ok(match input.r#type {
+        InputType::Select => Some(first),
+        InputType::Multiselect => Some(Value::Array(vec![first])),
+        _ => None,
+    })
+}
+
+/// The element type an input's list is parsed with: MULTISELECT defaults to
+/// STRING (`@Builder.Default`), ARRAY has none (its list passes through).
+fn item_type_of(input: &Input) -> Option<InputType> {
     match input.r#type {
-        InputType::String => {
-            let s = java_to_string(value);
-            check_validator(input.validator.as_deref(), &s)?;
-            Ok(Value::String(s))
+        InputType::Multiselect => Some(input.item_type.unwrap_or(InputType::String)),
+        InputType::Array => input.item_type,
+        _ => None,
+    }
+}
+
+/// `parseType` then `Input.validate`: the value to store, or the causes.
+fn check_value(input: &Input, value: &Value) -> Result<Value, Vec<String>> {
+    let parsed = parse_type(input.r#type, item_type_of(input), value, Some(input))
+        .map_err(|cause| vec![cause])?;
+    validate(input, &parsed)?;
+    Ok(parsed)
+}
+
+/// `FlowInputOutput.parseType`. `top` is the declared input when `value` is
+/// its whole value (a SECRET checks its `validator` here, as Kestra does);
+/// `None` for an ARRAY / MULTISELECT element.
+fn parse_type(
+    t: InputType,
+    item_type: Option<InputType>,
+    value: &Value,
+    top: Option<&Input>,
+) -> Result<Value, String> {
+    match t {
+        InputType::String | InputType::Select | InputType::Email => {
+            Ok(Value::String(java_to_string(value)))
         }
         InputType::Secret => {
             let s = java_to_string(value);
-            // Thrown from inside `parseType` as a ConstraintViolationException,
-            // whose message is `<path>: <msg>` (survey §1.2 (b)).
-            check_validator(input.validator.as_deref(), &s)
-                .map_err(|cause| format!("{}: {cause}", input.id))?;
-            Ok(Value::String(s))
-        }
-        InputType::Email => {
-            let s = java_to_string(value);
-            if !EMAIL.is_match(&s) {
-                return Err("The input must be a valid email".into());
+            if let Some(input) = top {
+                // Thrown from inside `parseType` as a ConstraintViolationException,
+                // whose message is `<path>: <msg>` (survey §1.2 (b)).
+                check_validator(input.validator.as_deref(), &s)
+                    .map_err(|cause| format!("{}: {cause}", input.id))?;
             }
             Ok(Value::String(s))
         }
-        InputType::Select => {
-            let s = java_to_string(value);
-            check_select(input, &s)?;
-            Ok(Value::String(s))
-        }
-        InputType::Int => {
-            let n = to_int(value)?;
-            if let Some(min) = &input.min {
-                let min = to_int(min)?;
-                if n < min {
-                    return Err(format!("it must be more than `{min}`"));
-                }
-            }
-            if let Some(max) = &input.max {
-                let max = to_int(max)?;
-                if n > max {
-                    return Err(format!("it must be less than `{max}`"));
-                }
-            }
-            Ok(Value::from(n))
-        }
-        InputType::Float => {
-            let x = to_float(value)?;
-            if let Some(min) = &input.min {
-                let min = to_float(min)?;
-                if x < min {
-                    return Err(format!("it must be more than `{}`", java_float(min)));
-                }
-            }
-            if let Some(max) = &input.max {
-                let max = to_float(max)?;
-                if x > max {
-                    return Err(format!("it must be less than `{}`", java_float(max)));
-                }
-            }
-            Ok(float_value(x))
-        }
+        InputType::Int => to_int(value).map(Value::from),
+        InputType::Float => to_float(value).map(float_value),
         InputType::Boolean => match value {
             Value::Bool(b) => Ok(Value::Bool(*b)),
             Value::String(s) if s.eq_ignore_ascii_case("true") => Ok(Value::Bool(true)),
             Value::String(s) if s.eq_ignore_ascii_case("false") => Ok(Value::Bool(false)),
             other => Err(cannot_convert(other, "Boolean")),
         },
+        // Parsed to check, stored as posted.
         InputType::Datetime => {
-            let t = to_bounded(value, "Instant", parse_instant)?;
+            to_bounded(value, "Instant", parse_instant).map(|_| as_posted(value))
+        }
+        InputType::Date => to_bounded(value, "LocalDate", parse_date).map(|_| as_posted(value)),
+        InputType::Time => to_bounded(value, "LocalTime", parse_time).map(|_| as_posted(value)),
+        InputType::Duration => {
+            to_bounded(value, "Duration", JavaDuration::parse).map(|_| as_posted(value))
+        }
+        InputType::Uri => {
+            let s = java_to_string(value);
+            check_uri(&s)?;
+            Ok(Value::String(s))
+        }
+        InputType::Json => structured(value, parse_json),
+        InputType::Yaml => structured(value, |s| {
+            serde_norway::from_str::<Value>(s).map_err(|e| e.to_string())
+        }),
+        InputType::Ion => structured(value, parse_ion),
+        InputType::Array | InputType::Multiselect => {
+            let list = match value {
+                Value::Array(items) => items.clone(),
+                Value::String(s) => match parse_json(s)? {
+                    Value::Array(items) => items,
+                    _ => return Err(cannot_convert(value, "List")),
+                },
+                other => return Err(cannot_convert(other, "List")),
+            };
+            let Some(item) = item_type else {
+                return Ok(Value::Array(list));
+            };
+            list.iter()
+                .map(|element| {
+                    let parsed = if element.is_null() {
+                        Err(String::new())
+                    } else {
+                        parse_type(item, None, element, None)
+                    };
+                    parsed.map_err(|_| {
+                        format!(
+                            "Unable to parse array element as `{}` on `{}`",
+                            type_name(item),
+                            java_to_string(element)
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::Array)
+        }
+        InputType::File | InputType::Form | InputType::ReusableInputs => Ok(value.clone()),
+    }
+}
+
+/// The text the user posted, kept for storage (DATETIME, DATE, TIME,
+/// DURATION).
+fn as_posted(value: &Value) -> Value {
+    Value::String(java_to_string(value))
+}
+
+/// JSON / YAML / ION: a map or a list passes through, anything else is read
+/// from its text.
+fn structured(
+    value: &Value,
+    parse: impl Fn(&str) -> Result<Value, String>,
+) -> Result<Value, String> {
+    match value {
+        Value::Object(_) | Value::Array(_) => Ok(value.clone()),
+        other => parse(&java_to_string(other)),
+    }
+}
+
+/// `JacksonMapper.toObject` / `toList`: one value, the rest of the text not
+/// looked at (Jackson's default `FAIL_ON_TRAILING_TOKENS = false`).
+fn parse_json(s: &str) -> Result<Value, String> {
+    let mut de = serde_json::Deserializer::from_str(s);
+    Value::deserialize(&mut de).map_err(|e| e.to_string())
+}
+
+/// `ION_MAPPER.readValue`: the first Ion value, through egret's guarded Ion
+/// reader and its JSON table (`storage::ion`).
+fn parse_ion(s: &str) -> Result<Value, String> {
+    let (rows, _) = crate::storage::ion::values_to_json(s.as_bytes(), 1)?;
+    rows.into_iter()
+        .next()
+        .ok_or_else(|| "No content to map due to end-of-input".to_string())
+}
+
+/// The type as Kestra prints it (`INT`, `BOOL`, `DATETIME`).
+fn type_name(t: InputType) -> String {
+    serde_json::to_value(t)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// `Input.validate` on the parsed value.
+fn validate(input: &Input, parsed: &Value) -> Result<(), Vec<String>> {
+    let one = |r: Result<(), String>| r.map_err(|cause| vec![cause]);
+    let text = || java_to_string(parsed);
+    match input.r#type {
+        InputType::String => one(check_validator(input.validator.as_deref(), &text())),
+        InputType::Email => {
+            if EMAIL.is_match(&text()) {
+                Ok(())
+            } else {
+                one(Err("The input must be a valid email".into()))
+            }
+        }
+        InputType::Select => one(check_select(input, &text())),
+        InputType::Multiselect => check_multiselect(input, parsed),
+        InputType::Int => one(check_int_bounds(input, parsed)),
+        InputType::Float => one(check_float_bounds(input, parsed)),
+        InputType::Datetime => one(to_bounded(parsed, "Instant", parse_instant).and_then(|t| {
             check_after_before(
                 &t,
                 input.after.as_deref(),
@@ -229,24 +638,19 @@ fn parse_and_validate(input: &Input, value: &Value) -> Result<Value, String> {
                 "Instant",
                 parse_instant,
                 format_instant,
-            )?;
-            Ok(Value::String(format_instant(&t)))
-        }
-        InputType::Date => {
-            let d = to_bounded(value, "LocalDate", parse_date)?;
-            let fmt = |d: &chrono::NaiveDate| d.format("%Y-%m-%d").to_string();
+            )
+        })),
+        InputType::Date => one(to_bounded(parsed, "LocalDate", parse_date).and_then(|d| {
             check_after_before(
                 &d,
                 input.after.as_deref(),
                 input.before.as_deref(),
                 "LocalDate",
                 parse_date,
-                fmt,
-            )?;
-            Ok(Value::String(fmt(&d)))
-        }
-        InputType::Time => {
-            let t = to_bounded(value, "LocalTime", parse_time)?;
+                |d: &chrono::NaiveDate| d.format("%Y-%m-%d").to_string(),
+            )
+        })),
+        InputType::Time => one(to_bounded(parsed, "LocalTime", parse_time).and_then(|t| {
             check_after_before(
                 &t,
                 input.after.as_deref(),
@@ -254,40 +658,100 @@ fn parse_and_validate(input: &Input, value: &Value) -> Result<Value, String> {
                 "LocalTime",
                 parse_time,
                 format_time,
-            )?;
-            Ok(Value::String(format_time(&t)))
+            )
+        })),
+        InputType::Duration => one(check_duration_bounds(input, parsed)),
+        // JSON's `jsonSchema` is not checked (D12, module doc).
+        _ => Ok(()),
+    }
+}
+
+fn check_int_bounds(input: &Input, parsed: &Value) -> Result<(), String> {
+    let n = to_int(parsed)?;
+    if let Some(min) = &input.min {
+        let min = to_int(min)?;
+        if n < min {
+            return Err(format!("it must be more than `{min}`"));
         }
-        InputType::Duration => {
-            let d = to_bounded(value, "Duration", JavaDuration::parse)?;
-            if let Some(min) = &input.min {
-                let min = to_bounded(min, "Duration", JavaDuration::parse)?;
-                if d < min {
-                    return Err(format!("It must be more than `{min}`"));
-                }
+    }
+    if let Some(max) = &input.max {
+        let max = to_int(max)?;
+        if n > max {
+            return Err(format!("it must be less than `{max}`"));
+        }
+    }
+    Ok(())
+}
+
+fn check_float_bounds(input: &Input, parsed: &Value) -> Result<(), String> {
+    let x = to_float(parsed)?;
+    if let Some(min) = &input.min {
+        let min = to_float(min)?;
+        if x < min {
+            return Err(format!("it must be more than `{}`", java_float(min)));
+        }
+    }
+    if let Some(max) = &input.max {
+        let max = to_float(max)?;
+        if x > max {
+            return Err(format!("it must be less than `{}`", java_float(max)));
+        }
+    }
+    Ok(())
+}
+
+/// `DurationInput.validate`: the cause starts with a capital I (Kestra's).
+fn check_duration_bounds(input: &Input, parsed: &Value) -> Result<(), String> {
+    let d = to_bounded(parsed, "Duration", JavaDuration::parse)?;
+    if let Some(min) = &input.min {
+        let min = to_bounded(min, "Duration", JavaDuration::parse)?;
+        if d < min {
+            return Err(format!("It must be more than `{min}`"));
+        }
+    }
+    if let Some(max) = &input.max {
+        let max = to_bounded(max, "Duration", JavaDuration::parse)?;
+        if d > max {
+            return Err(format!("It must be less than `{max}`"));
+        }
+    }
+    Ok(())
+}
+
+/// `MultiselectInput.validate`: every element against the options unless
+/// `allowCustomValue`, whether or not the input is required; one violation
+/// per distinct bad element (Kestra collects them in a `HashSet`), in
+/// element order. With no `values` (and no `expression`) nothing is checked.
+fn check_multiselect(input: &Input, parsed: &Value) -> Result<(), Vec<String>> {
+    if input.allow_custom_value {
+        return Ok(());
+    }
+    let Some(values) = &input.values else {
+        return Ok(());
+    };
+    let options = values
+        .iter()
+        .map(option_value)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|cause| vec![cause])?;
+    let Value::Array(items) = parsed else {
+        return Ok(());
+    };
+    let listed = options.join(", ");
+    let mut causes = Vec::new();
+    for item in items {
+        let s = java_to_string(item);
+        if !options.contains(&s) {
+            let cause = format!("value `{s}` doesn't match the values `[{listed}]`");
+            if !causes.contains(&cause) {
+                causes.push(cause);
             }
-            if let Some(max) = &input.max {
-                let max = to_bounded(max, "Duration", JavaDuration::parse)?;
-                if d > max {
-                    return Err(format!("It must be less than `{max}`"));
-                }
-            }
-            Ok(Value::String(d.to_string()))
         }
-        InputType::Uri => {
-            let s = java_to_string(value);
-            check_uri(&s)?;
-            Ok(Value::String(s))
-        }
-        // Task A3 (collections, structured text) and the types checked
-        // elsewhere or not supported: unchanged.
-        InputType::Array
-        | InputType::Multiselect
-        | InputType::Json
-        | InputType::Yaml
-        | InputType::Ion
-        | InputType::File
-        | InputType::Form
-        | InputType::ReusableInputs => Ok(value.clone()),
+    }
+    if causes.is_empty() {
+        Ok(())
+    } else {
+        Err(causes)
     }
 }
 
@@ -330,8 +794,8 @@ static EMAIL: LazyLock<regex::Regex> = LazyLock::new(|| {
 });
 
 /// `SelectInput.validate`: membership only when `required` (Kestra's quirk,
-/// D4), unless `allowCustomValue`. With no `values` (an `expression`, Task
-/// A3) nothing is checked here.
+/// D4), unless `allowCustomValue`. With no `values` (and no `expression`, whose
+/// options have replaced `values` by now) nothing is checked.
 fn check_select(input: &Input, s: &str) -> Result<(), String> {
     if !input.required || input.allow_custom_value {
         return Ok(());
@@ -860,6 +1324,11 @@ mod tests {
 
     use super::*;
 
+    /// The renderer of a test with no template in it.
+    fn no_render(t: &str, _: &Map<String, Value>) -> Result<Value, String> {
+        Err(format!("no renderer in this test: {t}"))
+    }
+
     /// An input from YAML, the way a flow declares it.
     fn input(yaml: &str) -> Input {
         serde_norway::from_str(yaml).unwrap_or_else(|e| panic!("{yaml}: {e}"))
@@ -869,12 +1338,16 @@ mod tests {
     fn one(yaml: &str, posted: Value) -> Result<Option<Value>, String> {
         let i = input(yaml);
         let id = i.id.clone();
-        resolve(std::slice::from_ref(&i), &json!({ id.clone(): posted }))
-            .map(|m| m.get(&id).cloned())
-            .map_err(|e| {
-                assert_eq!(e.input_id, id);
-                e.message
-            })
+        resolve(
+            std::slice::from_ref(&i),
+            &json!({ id.clone(): posted }),
+            &no_render,
+        )
+        .map(|m| m.get(&id).cloned())
+        .map_err(|e| {
+            assert_eq!(e.input_id, id);
+            e.message
+        })
     }
 
     /// Table runner: `(posted, expected)` where `expected` is `Ok(stored)` or
@@ -913,7 +1386,7 @@ mod tests {
         let y = "id: n\ntype: INT\n";
         missing(y, Value::Null);
         let i = input(y);
-        let err = resolve(&[i], &json!({})).unwrap_err();
+        let err = resolve(&[i], &json!({}), &no_render).unwrap_err();
         assert_eq!(err.message, "Missing required input:n");
         assert_eq!(err.input_id, "n");
     }
@@ -944,11 +1417,16 @@ mod tests {
             input("id: b\ntype: INT\nmin: 5\n"),
             input("id: c\ntype: INT\n"),
         ];
-        let ok = resolve(&inputs, &json!({"a": "1", "b": 7, "c": 3, "zz": 1})).unwrap();
+        let ok = resolve(
+            &inputs,
+            &json!({"a": "1", "b": 7, "c": 3, "zz": 1}),
+            &no_render,
+        )
+        .unwrap();
         assert_eq!(Value::Object(ok), json!({"a": 1, "b": 7, "c": 3}));
 
         // b and c are both bad: b is reported, it is declared first.
-        let err = resolve(&inputs, &json!({"a": 1, "b": 1})).unwrap_err();
+        let err = resolve(&inputs, &json!({"a": 1, "b": 1}), &no_render).unwrap_err();
         assert_eq!(err.input_id, "b");
         assert_eq!(
             err.message,
@@ -959,7 +1437,10 @@ mod tests {
     #[test]
     fn a_posted_value_that_is_not_an_object_is_empty() {
         let i = input("id: n\ntype: INT\nrequired: false\n");
-        assert_eq!(resolve(&[i], &json!([1, 2])).unwrap(), Map::new());
+        assert_eq!(
+            resolve(&[i], &json!([1, 2]), &no_render).unwrap(),
+            Map::new()
+        );
     }
 
     #[test]
@@ -1194,7 +1675,7 @@ mod tests {
                 (json!("2023-01-01T00:00:00Z"), Ok(json!("2023-01-01T00:00:00Z"))),
                 (
                     json!("2023-06-01T12:00:00.5+02:00"),
-                    Ok(json!("2023-06-01T10:00:00.500Z")),
+                    Ok(json!("2023-06-01T12:00:00.5+02:00")),
                 ),
                 (
                     json!("2022-12-31T23:59:59Z"),
@@ -1261,8 +1742,8 @@ mod tests {
             "id: t\ntype: TIME\nafter: \"01:00:00\"\nbefore: \"11:59:59\"\n",
             &[
                 (json!("10:00"), Ok(json!("10:00"))),
-                (json!("10:00:00"), Ok(json!("10:00"))),
-                (json!("10:00:01.5"), Ok(json!("10:00:01.500"))),
+                (json!("10:00:00"), Ok(json!("10:00:00"))),
+                (json!("10:00:01.5"), Ok(json!("10:00:01.5"))),
                 (json!("00:59:59"), Err("it must be after `01:00`")),
                 (json!("12:00"), Err("it must be before `11:59:59`")),
                 (
@@ -1284,7 +1765,7 @@ mod tests {
             &[
                 (json!("PT15S"), Ok(json!("PT15S"))),
                 (json!("PT10S"), Ok(json!("PT10S"))),
-                (json!("pt15s"), Ok(json!("PT15S"))),
+                (json!("pt15s"), Ok(json!("pt15s"))),
                 (json!("PT1S"), Err("It must be more than `PT10S`")),
                 (json!("PT30S"), Err("It must be less than `PT20S`")),
             ],
@@ -1292,10 +1773,10 @@ mod tests {
         table(
             "id: d\ntype: DURATION\n",
             &[
-                (json!("P1D"), Ok(json!("PT24H"))),
-                (json!("PT90M"), Ok(json!("PT1H30M"))),
+                (json!("P1D"), Ok(json!("P1D"))),
+                (json!("PT90M"), Ok(json!("PT90M"))),
                 (json!("PT0.5S"), Ok(json!("PT0.5S"))),
-                (json!("-PT0.5S"), Ok(json!("PT-0.5S"))),
+                (json!("-PT0.5S"), Ok(json!("-PT0.5S"))),
                 (json!("PT-1.5S"), Ok(json!("PT-1.5S"))),
                 (json!("PT0S"), Ok(json!("PT0S"))),
                 (json!("P1M"), Err("Cannot convert value 'P1M' to Duration")),
@@ -1415,24 +1896,641 @@ mod tests {
         );
     }
 
-    // --- pass-through types (A3 / elsewhere) ---------------------------------
+    // --- FILE / FORM (checked elsewhere / not supported) ---------------------
 
     #[test]
-    fn types_left_to_later_tasks_pass_through() {
-        for (t, v) in [
-            ("ARRAY\nitemType: INT", json!([1, 2])),
-            ("MULTISELECT\nvalues: [A]", json!(["Z"])),
-            ("JSON", json!("{\"a\":1}")),
-            ("YAML", json!("a: 1")),
-            ("ION", json!("{a:1}")),
-            ("FILE", json!("kestra:///x/y.txt")),
-        ] {
-            let y = format!("id: x\ntype: {t}\n");
-            assert_eq!(one(&y, v.clone()), Ok(Some(v)), "{t}");
-        }
+    fn file_and_form_pass_through() {
+        let v = json!("kestra:///x/y.txt");
+        assert_eq!(one("id: x\ntype: FILE\n", v.clone()), Ok(Some(v)));
         // FILE is still required (Kestra checks `required` for every type).
         missing("id: x\ntype: FILE\n", Value::Null);
         // FORM / REUSABLE_INPUTS: never required here.
         absent("id: x\ntype: FORM\n", Value::Null);
+    }
+
+    // --- ARRAY / MULTISELECT -------------------------------------------------
+
+    /// `serde_json`'s message for `s`, the cause a bad JSON text gives.
+    fn json_error(s: &str) -> String {
+        parse_json(s).unwrap_err()
+    }
+
+    #[test]
+    fn array_parses_each_element_with_item_type() {
+        let y = "id: a\ntype: ARRAY\nitemType: INT\n";
+        let bad_json = json_error("abc");
+        table(
+            y,
+            &[
+                (json!([1, "2"]), Ok(json!([1, 2]))),
+                (json!("[1, 2]"), Ok(json!([1, 2]))),
+                (json!([]), Ok(json!([]))),
+                (
+                    json!([1, "x"]),
+                    Err("Unable to parse array element as `INT` on `x`"),
+                ),
+                (
+                    json!("[1, \"x\"]"),
+                    Err("Unable to parse array element as `INT` on `x`"),
+                ),
+                (
+                    json!([null]),
+                    Err("Unable to parse array element as `INT` on `null`"),
+                ),
+                (
+                    json!([1.5]),
+                    Err("Unable to parse array element as `INT` on `1.5`"),
+                ),
+                (json!("abc"), Err(bad_json.as_str())),
+                (json!(5), Err("Cannot convert value '5' to List")),
+                (json!({"a": 1}), Err("Cannot convert value '{a=1}' to List")),
+                (
+                    json!("{\"a\":1}"),
+                    Err("Cannot convert value '{\"a\":1}' to List"),
+                ),
+            ],
+        );
+        missing(y, json!(""));
+        missing(y, Value::Null);
+    }
+
+    #[test]
+    fn array_item_types_store_what_their_scalar_stores() {
+        table(
+            "id: a\ntype: ARRAY\nitemType: BOOL\n",
+            &[
+                (json!(["TRUE", false]), Ok(json!([true, false]))),
+                (
+                    json!(["yes"]),
+                    Err("Unable to parse array element as `BOOL` on `yes`"),
+                ),
+            ],
+        );
+        // A date element is checked and kept as posted.
+        table(
+            "id: a\ntype: ARRAY\nitemType: DATETIME\n",
+            &[
+                (
+                    json!(["2023-01-01T00:00:00+01:00"]),
+                    Ok(json!(["2023-01-01T00:00:00+01:00"])),
+                ),
+                (
+                    json!(["2023-01-01"]),
+                    Err("Unable to parse array element as `DATETIME` on `2023-01-01`"),
+                ),
+            ],
+        );
+        // STRING elements: a number's text, a map's Java text.
+        table(
+            "id: a\ntype: ARRAY\nitemType: STRING\n",
+            &[(json!([1, {"k": 2}]), Ok(json!(["1", "{k=2}"])))],
+        );
+        // An element is parsed, not validated: an EMAIL element is not
+        // matched against the email pattern (Kestra's parseType).
+        table(
+            "id: a\ntype: ARRAY\nitemType: EMAIL\n",
+            &[(json!(["nope"]), Ok(json!(["nope"])))],
+        );
+        // No itemType: the list passes through.
+        table(
+            "id: a\ntype: ARRAY\n",
+            &[(json!([1, "a", null]), Ok(json!([1, "a", null])))],
+        );
+    }
+
+    #[test]
+    fn multiselect_checks_every_element_against_the_values() {
+        let y = "id: multi\ntype: MULTISELECT\nvalues: [A, B, C]\n";
+        table(
+            y,
+            &[
+                (json!(["A", "C"]), Ok(json!(["A", "C"]))),
+                (json!("[\"B\"]"), Ok(json!(["B"]))),
+                (json!([]), Ok(json!([]))),
+            ],
+        );
+        // One line per distinct bad element, in element order.
+        assert_eq!(
+            one(y, json!(["D", "A", "E", "D"])),
+            Err(
+                "Invalid value for input `multi`. Cause: value `D` doesn't match the values \
+                 `[A, B, C]`\n\
+                 Invalid value for input `multi`. Cause: value `E` doesn't match the values \
+                 `[A, B, C]`"
+                    .into()
+            )
+        );
+        // Checked even when not required (unlike SELECT).
+        table(
+            "id: m\ntype: MULTISELECT\nrequired: false\nvalues: [A]\n",
+            &[(
+                json!(["Z"]),
+                Err("value `Z` doesn't match the values `[A]`"),
+            )],
+        );
+        // allowCustomValue.
+        table(
+            "id: m\ntype: MULTISELECT\nallowCustomValue: true\nvalues: [A]\n",
+            &[(json!(["Z"]), Ok(json!(["Z"])))],
+        );
+        // Default itemType STRING: a number element becomes its text.
+        table(
+            "id: m\ntype: MULTISELECT\nvalues: [\"1\", A]\n",
+            &[(json!([1]), Ok(json!(["1"])))],
+        );
+        // itemType INT: parsed, then compared by text (divergence, module doc).
+        table(
+            "id: m\ntype: MULTISELECT\nitemType: INT\nvalues: [\"1\", \"2\"]\n",
+            &[
+                (json!(["2"]), Ok(json!([2]))),
+                (
+                    json!(["x"]),
+                    Err("Unable to parse array element as `INT` on `x`"),
+                ),
+            ],
+        );
+        // {label, value} options.
+        table(
+            "id: m\ntype: MULTISELECT\nvalues:\n  - {label: Prod, value: p}\n",
+            &[
+                (json!(["p"]), Ok(json!(["p"]))),
+                (
+                    json!(["Prod"]),
+                    Err("value `Prod` doesn't match the values `[p]`"),
+                ),
+            ],
+        );
+        missing(y, json!(""));
+    }
+
+    #[test]
+    fn a_literal_list_default_is_validated() {
+        // A YAML list default is held as its JSON text and parsed back.
+        absent(
+            "id: m\ntype: MULTISELECT\nvalues: [A, B]\ndefaults: [A]\n",
+            Value::Null,
+        );
+        assert_eq!(
+            one(
+                "id: m\ntype: MULTISELECT\nvalues: [A, B]\ndefaults: [Z]\n",
+                Value::Null
+            ),
+            Err(
+                "Invalid value for input `m`. Cause: value `Z` doesn't match the values `[A, B]`"
+                    .into()
+            )
+        );
+        absent(
+            "id: a\ntype: ARRAY\nitemType: INT\ndefaults: [1, 2]\n",
+            Value::Null,
+        );
+    }
+
+    // --- JSON / YAML / ION ---------------------------------------------------
+
+    #[test]
+    fn json_parses_a_string_and_passes_structures_through() {
+        let bad = json_error("{a");
+        table(
+            "id: j\ntype: JSON\n",
+            &[
+                (json!("{\"a\": 1}"), Ok(json!({"a": 1}))),
+                (json!("[1, 2]"), Ok(json!([1, 2]))),
+                (json!("\"s\""), Ok(json!("s"))),
+                (json!({"a": [1]}), Ok(json!({"a": [1]}))),
+                (json!([1]), Ok(json!([1]))),
+                (json!(5), Ok(json!(5))),
+                (json!(true), Ok(json!(true))),
+                // Jackson reads one value and leaves the rest.
+                (json!("1 2"), Ok(json!(1))),
+                (json!("{a"), Err(bad.as_str())),
+            ],
+        );
+        missing("id: j\ntype: JSON\n", json!(""));
+    }
+
+    #[test]
+    fn yaml_parses_a_string_and_a_scalar_stays_a_scalar() {
+        let bad = serde_norway::from_str::<Value>("a: [")
+            .unwrap_err()
+            .to_string();
+        table(
+            "id: y\ntype: YAML\n",
+            &[
+                (
+                    json!("a: 1\nb: [x, y]\n"),
+                    Ok(json!({"a": 1, "b": ["x", "y"]})),
+                ),
+                (json!("hello"), Ok(json!("hello"))),
+                (json!("- 1\n- 2\n"), Ok(json!([1, 2]))),
+                (json!({"a": 1}), Ok(json!({"a": 1}))),
+                (json!("a: ["), Err(bad.as_str())),
+            ],
+        );
+    }
+
+    #[test]
+    fn ion_reads_the_first_value() {
+        table(
+            "id: i\ntype: ION\n",
+            &[
+                (json!("{a: 1, b: \"x\"}"), Ok(json!({"a": 1, "b": "x"}))),
+                (json!("[1, 2]"), Ok(json!([1, 2]))),
+                (json!("1 2"), Ok(json!(1))),
+                (json!({"a": 1}), Ok(json!({"a": 1}))),
+                (json!("   "), Err("No content to map due to end-of-input")),
+            ],
+        );
+        // A syntax error is the reader's message, prefixed.
+        let err = one("id: i\ntype: ION\n", json!("{a:")).unwrap_err();
+        assert!(
+            err.starts_with("Invalid value for input `i`. Cause: ") && err.len() > 40,
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn json_schema_is_not_checked() {
+        table(
+            "id: j\ntype: JSON\njsonSchema: '{\"type\": \"object\"}'\n",
+            &[(json!("[1]"), Ok(json!([1])))],
+        );
+    }
+
+    // --- dependsOn -----------------------------------------------------------
+
+    fn inputs(yaml: &str) -> Vec<Input> {
+        serde_norway::from_str(yaml).unwrap_or_else(|e| panic!("{yaml}: {e}"))
+    }
+
+    const A_THEN_B: &str = "
+- id: a
+  type: STRING
+  required: false
+- id: b
+  type: INT
+  dependsOn:
+    inputs: [a]
+";
+
+    #[test]
+    fn a_disabled_input_is_dropped_and_skips_required() {
+        let i = inputs(A_THEN_B);
+        // a is null: b is disabled, its required is skipped, its value dropped.
+        assert_eq!(resolve(&i, &json!({}), &no_render), Ok(Map::new()));
+        assert_eq!(
+            Value::Object(resolve(&i, &json!({"b": 5}), &no_render).unwrap()),
+            json!({})
+        );
+        // a is set: b is enabled and required.
+        assert_eq!(
+            resolve(&i, &json!({"a": "x"}), &no_render)
+                .unwrap_err()
+                .message,
+            "Missing required input:b"
+        );
+        assert_eq!(
+            Value::Object(resolve(&i, &json!({"a": "x", "b": "5"}), &no_render).unwrap()),
+            json!({"a": "x", "b": 5})
+        );
+        let all = resolve_all(&i, &json!({}), &no_render);
+        assert!(all[0].enabled && !all[1].enabled, "{all:?}");
+        assert!(all[1].errors.is_empty(), "{all:?}");
+    }
+
+    #[test]
+    fn dependencies_resolve_first_whatever_the_declared_order() {
+        // b is declared before a, the input it depends on.
+        let i = inputs(
+            "
+- id: b
+  type: INT
+  dependsOn:
+    inputs: [a]
+- id: a
+  type: STRING
+  required: false
+",
+        );
+        assert_eq!(resolve(&i, &json!({}), &no_render), Ok(Map::new()));
+        assert_eq!(
+            resolve(&i, &json!({"a": "x"}), &no_render)
+                .unwrap_err()
+                .message,
+            "Missing required input:b"
+        );
+        // The outcomes stay in declared order.
+        let ids: Vec<_> = resolve_all(&i, &json!({}), &no_render)
+            .into_iter()
+            .map(|o| o.id)
+            .collect();
+        assert_eq!(ids, ["b", "a"]);
+    }
+
+    #[test]
+    fn a_dependency_must_itself_be_enabled_and_non_null() {
+        let i = inputs(
+            "
+- id: a
+  type: STRING
+  required: false
+- id: b
+  type: STRING
+  required: false
+  dependsOn:
+    inputs: [a]
+- id: c
+  type: INT
+  dependsOn:
+    inputs: [b]
+",
+        );
+        // b is posted but disabled (a is null): c is disabled too.
+        assert_eq!(
+            Value::Object(resolve(&i, &json!({"b": "y"}), &no_render).unwrap()),
+            json!({})
+        );
+        assert_eq!(
+            resolve(&i, &json!({"a": "x", "b": "y"}), &no_render)
+                .unwrap_err()
+                .message,
+            "Missing required input:c"
+        );
+    }
+
+    #[test]
+    fn a_dependency_with_a_default_or_an_error_counts_as_set() {
+        let i = inputs(
+            "
+- id: a
+  type: INT
+  defaults: 5
+- id: b
+  type: INT
+  dependsOn:
+    inputs: [a]
+",
+        );
+        // a's literal default makes it non-null: b is enabled.
+        assert_eq!(
+            resolve(&i, &json!({}), &no_render).unwrap_err().message,
+            "Missing required input:b"
+        );
+        // An errored dependency keeps its raw value (Kestra): b is enabled,
+        // and a's error is the one reported, being declared first.
+        let all = resolve_all(&i, &json!({"a": "x"}), &no_render);
+        assert!(all[1].enabled, "{all:?}");
+        assert_eq!(
+            resolve(&i, &json!({"a": "x"}), &no_render)
+                .unwrap_err()
+                .message,
+            "Invalid value for input `a`. Cause: Cannot convert value 'x' to Integer"
+        );
+    }
+
+    #[test]
+    fn an_unknown_dependency_and_the_input_itself_are_ignored() {
+        let i = inputs("- id: c\n  type: INT\n  dependsOn:\n    inputs: [nope, c]\n");
+        assert_eq!(
+            resolve(&i, &json!({}), &no_render).unwrap_err().message,
+            "Missing required input:c"
+        );
+    }
+
+    #[test]
+    fn a_dependency_cycle_disables_and_terminates() {
+        let i = inputs(
+            "
+- id: x
+  type: INT
+  dependsOn:
+    inputs: [y]
+- id: y
+  type: INT
+  dependsOn:
+    inputs: [x]
+",
+        );
+        assert_eq!(
+            resolve(&i, &json!({"x": 1, "y": 2}), &no_render),
+            Ok(Map::new())
+        );
+        assert!(resolve_all(&i, &json!({}), &no_render)
+            .iter()
+            .all(|o| !o.enabled));
+    }
+
+    const CONDITION: &str = "
+- id: a
+  type: STRING
+- id: b
+  type: INT
+  dependsOn:
+    inputs: [a]
+    condition: \"{{ inputs.a == 'yes' }}\"
+";
+
+    #[test]
+    fn a_condition_sees_the_dependencies_and_only_true_enables() {
+        let i = inputs(CONDITION);
+        let seen = std::cell::RefCell::new(Vec::new());
+        let render = |t: &str, deps: &Map<String, Value>| -> Result<Value, String> {
+            seen.borrow_mut()
+                .push((t.to_string(), Value::Object(deps.clone())));
+            Ok(Value::Bool(deps.get("a") == Some(&json!("yes"))))
+        };
+        assert_eq!(
+            Value::Object(resolve(&i, &json!({"a": "no", "b": 1}), &render).unwrap()),
+            json!({"a": "no"})
+        );
+        assert_eq!(
+            seen.borrow()[0],
+            ("{{ inputs.a == 'yes' }}".to_string(), json!({"a": "no"}))
+        );
+        assert_eq!(
+            resolve(&i, &json!({"a": "yes"}), &render)
+                .unwrap_err()
+                .message,
+            "Missing required input:b"
+        );
+        // A truthy non-boolean does not enable (`Boolean.TRUE.equals`).
+        let truthy =
+            |_: &str, _: &Map<String, Value>| -> Result<Value, String> { Ok(json!("true")) };
+        assert_eq!(
+            Value::Object(resolve(&i, &json!({"a": "yes"}), &truthy).unwrap()),
+            json!({"a": "yes"})
+        );
+        // The condition is not rendered when a dependency is already null.
+        seen.borrow_mut().clear();
+        let _ = resolve(&i, &json!({}), &render);
+        assert!(seen.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_failing_condition_disables_with_an_error_not_reported_at_start() {
+        let i = inputs(CONDITION);
+        let boom =
+            |_: &str, _: &Map<String, Value>| -> Result<Value, String> { Err("boom".to_string()) };
+        assert_eq!(
+            Value::Object(resolve(&i, &json!({"a": "yes", "b": 1}), &boom).unwrap()),
+            json!({"a": "yes"})
+        );
+        let all = resolve_all(&i, &json!({"a": "yes"}), &boom);
+        assert!(!all[1].enabled);
+        assert_eq!(all[1].errors, ["Invalid condition: boom"]);
+    }
+
+    #[test]
+    fn a_templated_default_is_rendered_only_for_a_dependent() {
+        let i = inputs(
+            "
+- id: a
+  type: STRING
+  defaults: \"{{ x }}\"
+- id: b
+  type: INT
+  dependsOn:
+    inputs: [a]
+",
+        );
+        let value = |_: &str, _: &Map<String, Value>| -> Result<Value, String> { Ok(json!("v")) };
+        assert_eq!(
+            resolve(&i, &json!({}), &value).unwrap_err().message,
+            "Missing required input:b"
+        );
+        // A default that does not render leaves the dependency null.
+        assert_eq!(resolve(&i, &json!({}), &no_render), Ok(Map::new()));
+        // Never stored (D2).
+        assert_eq!(
+            Value::Object(resolve(&i, &json!({"b": 1}), &value).unwrap()),
+            json!({"b": 1})
+        );
+    }
+
+    // --- SELECT / MULTISELECT expression and autoSelectFirst -----------------
+
+    fn options(_: &str, _: &Map<String, Value>) -> Result<Value, String> {
+        Ok(json!(["x", null, {"label": "Why", "value": "y"}]))
+    }
+
+    #[test]
+    fn an_expression_gives_the_options() {
+        let s = input("id: s\ntype: SELECT\nexpression: \" {{ opts }} \"\n");
+        let check = |posted: Value, r: &dyn InputRenderer| {
+            resolve(std::slice::from_ref(&s), &json!({"s": posted}), r)
+                .map(Value::Object)
+                .map_err(|e| e.message)
+        };
+        assert_eq!(check(json!("y"), &options), Ok(json!({"s": "y"})));
+        assert_eq!(
+            check(json!("z"), &options),
+            Err("Invalid value for input `s`. Cause: it must match the values `[x, y]`".into())
+        );
+        // The expression is trimmed before it is rendered.
+        let trimmed = |t: &str, _: &Map<String, Value>| -> Result<Value, String> {
+            assert_eq!(t, "{{ opts }}");
+            Ok(json!(["x"]))
+        };
+        assert_eq!(check(json!("x"), &trimmed), Ok(json!({"s": "x"})));
+        let scalar = |_: &str, _: &Map<String, Value>| -> Result<Value, String> { Ok(json!("x")) };
+        assert_eq!(
+            check(json!("x"), &scalar),
+            Err(
+                "Invalid value for input `s`. Cause: s: Invalid expression result. Expected a \
+                 list of values"
+                    .into()
+            )
+        );
+        let boom =
+            |_: &str, _: &Map<String, Value>| -> Result<Value, String> { Err("boom".to_string()) };
+        assert_eq!(
+            check(json!("x"), &boom),
+            Err(
+                "Invalid value for input `s`. Cause: s: Cannot render 'expression'. Cause: boom"
+                    .into()
+            )
+        );
+        let no_value = |_: &str, _: &Map<String, Value>| -> Result<Value, String> {
+            Ok(json!([{"label": "L"}]))
+        };
+        assert_eq!(
+            check(json!("x"), &no_value),
+            Err(
+                "Invalid value for input `s`. Cause: Select option object must define a \
+                 `value` field"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn a_multiselect_expression_gives_the_options() {
+        let m = input("id: m\ntype: MULTISELECT\nexpression: \"{{ opts }}\"\n");
+        let r = resolve(
+            std::slice::from_ref(&m),
+            &json!({"m": ["x", "q"]}),
+            &options,
+        );
+        assert_eq!(
+            r.unwrap_err().message,
+            "Invalid value for input `m`. Cause: value `q` doesn't match the values `[x, y]`"
+        );
+    }
+
+    #[test]
+    fn auto_select_first_picks_and_stores_the_first_option() {
+        let check = |yaml: &str, posted: Value, r: &dyn InputRenderer| {
+            let i = input(yaml);
+            resolve(
+                std::slice::from_ref(&i),
+                &json!({ i.id.clone(): posted }),
+                r,
+            )
+            .map(Value::Object)
+            .map_err(|e| e.message)
+        };
+        let select = "id: s\ntype: SELECT\nautoSelectFirst: true\nvalues: [a, b]\n";
+        assert_eq!(
+            check(select, Value::Null, &no_render),
+            Ok(json!({"s": "a"}))
+        );
+        assert_eq!(check(select, json!("b"), &no_render), Ok(json!({"s": "b"})));
+        assert_eq!(
+            check(
+                "id: m\ntype: MULTISELECT\nautoSelectFirst: true\nvalues: [{label: A, value: a}, b]\n",
+                Value::Null,
+                &no_render
+            ),
+            Ok(json!({"m": ["a"]}))
+        );
+        // After an expression: the first rendered option.
+        assert_eq!(
+            check(
+                "id: s\ntype: SELECT\nautoSelectFirst: true\nexpression: \"{{ o }}\"\n",
+                Value::Null,
+                &options
+            ),
+            Ok(json!({"s": "x"}))
+        );
+        // A declared default wins, and is not stored (D2).
+        assert_eq!(
+            check(
+                "id: s\ntype: SELECT\nautoSelectFirst: true\ndefaults: b\nvalues: [a, b]\n",
+                Value::Null,
+                &no_render
+            ),
+            Ok(json!({}))
+        );
+        // Without it, a required SELECT is missing.
+        assert_eq!(
+            check(
+                "id: s\ntype: SELECT\nvalues: [a, b]\n",
+                Value::Null,
+                &no_render
+            ),
+            Err("Missing required input:s".into())
+        );
+        let all = resolve_all(&[input(select)], &json!({}), &no_render);
+        assert!(all[0].is_default);
     }
 }

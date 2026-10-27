@@ -190,6 +190,9 @@ pub(crate) fn lift_of(site: Site<'_>, key: &str) -> Option<Lift> {
             }
         }
         Site::Input(ty) => match (ty, key) {
+            // No JSON Schema validator is in the dependency tree (spec D12):
+            // the value is parsed but not checked against the schema.
+            ("JSON", "jsonSchema") => Some(Package(3)),
             ("FORM", "inputs") => Some(Enterprise),
             ("REUSABLE_INPUTS", "ref" | "namespace" | "revision") => Some(Enterprise),
             _ => None,
@@ -314,7 +317,6 @@ pub(crate) fn input_keys(ty: &str) -> Vec<&'static str> {
             "allowCustomValue",
             "autoSelectFirst",
         ]),
-        "JSON" => keys.push("jsonSchema"),
         _ => {}
     }
     keys
@@ -2126,6 +2128,7 @@ mod tests {
     fn the_input_rows_name_the_package_the_roadmap_gives() {
         use Lift::{Enterprise, Package};
         let rows = [
+            ("JSON", "jsonSchema", Package(3)),
             ("FORM", "inputs", Enterprise),
             ("REUSABLE_INPUTS", "ref", Enterprise),
             ("REUSABLE_INPUTS", "namespace", Enterprise),

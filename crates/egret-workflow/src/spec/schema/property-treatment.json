@@ -181,7 +181,7 @@
       "description": "honoured",
       "displayName": "honoured",
       "id": "honoured",
-      "jsonSchema": "honoured",
+      "jsonSchema": "ignored",
       "prefill": "honoured",
       "required": "honoured",
       "type": "honoured"
