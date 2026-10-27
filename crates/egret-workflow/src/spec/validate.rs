@@ -734,6 +734,7 @@ pub fn validate_for_run(flow: &Flow) -> ValidationReport {
 
     validate_script_tasks(flow, &mut report);
     validate_plugin_tasks(flow, &mut report);
+    validate_after_execution(flow, &mut report);
 
     validate_inputs(&flow.inputs, &mut report);
 
@@ -746,6 +747,46 @@ pub fn validate_for_run(flow: &Flow) -> ValidationReport {
     emit_not_yet_enforced(&features, &mut report);
 
     report
+}
+
+/// End hooks #2b (spec D12): `Pause` and `Exit` are refused anywhere inside
+/// `afterExecution:`. That list runs once the execution is terminal, so a
+/// `Pause` would mark an ended execution `PAUSED` and an `Exit` would set its
+/// state; `after_execution::drive` asserts neither happens. Walks
+/// `children()` and `error_children()` (finally lists included) from the
+/// list's roots. Lives in the run-time gate so `build_plan` refuses at start.
+/// Key and id names only (package #1, D10).
+fn validate_after_execution(flow: &Flow, report: &mut ValidationReport) {
+    fn walk(task: &Task, path: String, report: &mut ValidationReport) {
+        let refused = match &task.kind {
+            TaskKind::Pause(_) => Some(("Pause", "a Pause would pause it again", 9)),
+            TaskKind::Leaf { .. } if task.r#type == crate::executor::exit::TYPE_ID => {
+                Some(("Exit", "an Exit would set its state", 20))
+            }
+            _ => None,
+        };
+        if let Some((kind, why, package)) = refused {
+            let article = if kind == "Exit" { "an" } else { "a" };
+            report.errors.push(Finding {
+                code: "unsupported_after_execution_task",
+                message: format!(
+                    "task '{}' is {article} {kind} inside afterExecution, which egret does not run: the execution has already ended, and {why}. Roadmap package #{package} lifts it",
+                    task.id
+                ),
+                path: path.clone(),
+            });
+        }
+        for child in task.children().into_iter().chain(task.error_children()) {
+            walk(child, super::path::task_path(&path, &child.id), report);
+        }
+    }
+    for task in &flow.after_execution {
+        walk(
+            task,
+            super::path::task_path("afterExecution", &task.id),
+            report,
+        );
+    }
 }
 
 /// W5a: every script task (`crate::scripts`) is parsed, and each property,
@@ -5464,5 +5505,80 @@ mod tests {
 
         let clean = dup.replace("errors:\n      - id: a\n", "errors:\n      - id: c\n");
         assert!(validate(&parse(&clean).unwrap()).errors.is_empty());
+    }
+
+    // ---- end hooks B2 (spec D12): Pause and Exit inside afterExecution ----
+
+    const PAUSE: &str = "io.kestra.plugin.core.flow.Pause";
+    const EXIT: &str = "io.kestra.plugin.core.execution.Exit";
+
+    fn after_exec(list: &str, body: &str) -> String {
+        let base = if list == "tasks" {
+            String::new()
+        } else {
+            "tasks:\n  - id: t\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+                .to_string()
+        };
+        format!("id: f\nnamespace: a.b\n{base}{list}:\n{body}")
+    }
+
+    fn refusals(src: &str) -> Vec<(String, String)> {
+        validate_for_run(&parse(src).unwrap())
+            .errors
+            .into_iter()
+            .filter(|e| e.code == "unsupported_after_execution_task")
+            .map(|e| (e.path, e.message))
+            .collect()
+    }
+
+    #[test]
+    fn a_pause_inside_after_execution_is_refused_at_start() {
+        let src = after_exec("afterExecution", &format!("  - id: p\n    type: {PAUSE}\n"));
+        let got = refusals(&src);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].0, "afterExecution.p");
+        assert_eq!(
+            got[0].1,
+            "task 'p' is a Pause inside afterExecution, which egret does not run: the execution has already ended, and a Pause would pause it again. Roadmap package #9 lifts it"
+        );
+        let err = crate::executor::build_plan(&src).expect_err("build_plan refuses it");
+        assert!(
+            err.message.starts_with("unsupported_after_execution_task:"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn an_exit_nested_in_an_if_inside_after_execution_is_refused() {
+        let body = format!(
+            "  - id: gate\n    type: io.kestra.plugin.core.flow.If\n    condition: \"{{{{ true }}}}\"\n    then:\n      - id: x\n        type: {EXIT}\n"
+        );
+        let got = refusals(&after_exec("afterExecution", &body));
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].0, "afterExecution.gate.x");
+        assert_eq!(
+            got[0].1,
+            "task 'x' is an Exit inside afterExecution, which egret does not run: the execution has already ended, and an Exit would set its state. Roadmap package #20 lifts it"
+        );
+    }
+
+    #[test]
+    fn a_pause_in_a_finally_list_inside_after_execution_is_refused() {
+        let body = format!(
+            "  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      - id: a\n        type: io.kestra.plugin.core.log.Log\n        message: m\n    finally:\n      - id: p\n        type: {PAUSE}\n"
+        );
+        let got = refusals(&after_exec("afterExecution", &body));
+        assert_eq!(
+            got.iter().map(|g| g.0.as_str()).collect::<Vec<_>>(),
+            ["afterExecution.seq.p"]
+        );
+    }
+
+    #[test]
+    fn a_pause_in_tasks_is_not_touched_by_this_rule() {
+        let body = format!("  - id: p\n    type: {PAUSE}\n  - id: x\n    type: {EXIT}\n");
+        assert!(refusals(&after_exec("tasks", &body)).is_empty());
+        assert!(refusals(&after_exec("errors", &body)).is_empty());
     }
 }

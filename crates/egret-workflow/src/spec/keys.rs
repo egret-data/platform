@@ -437,6 +437,7 @@ const ROOT_LISTS: &[&str] = &["tasks", "errors", "finally", "afterExecution"];
 /// parse as a mapping here, the census adds nothing (it fails open, never a
 /// false refusal).
 pub(crate) fn findings(source: &str, model: &Flow, report: &mut ValidationReport) {
+    after_execution_retry(model, report);
     let doc = serde_norway::from_str::<Value>(source);
     debug_assert!(
         doc.is_ok(),
@@ -452,6 +453,42 @@ pub(crate) fn findings(source: &str, model: &Flow, report: &mut ValidationReport
         reached: Vec::new(),
     }
     .flow(&flow);
+}
+
+/// End hooks #2b (spec D11): `afterExecution:` runs once the execution has
+/// ended and is never retried, so a `retry:` that reaches one of its tasks is
+/// accepted and not acted on. A flow-level `retry:` reaches them when the
+/// list is non-empty. Save and publish only, because the run-time gate must
+/// not warn (package #1). Read from the model: `retry:` is typed on every
+/// task, so this needs no source keys.
+fn after_execution_retry(flow: &Flow, report: &mut ValidationReport) {
+    const MESSAGE: &str = "an afterExecution task is not retried on egret: the execution has already ended. Roadmap package #13 lifts it";
+    fn walk(task: &crate::models::Task, path: String, report: &mut ValidationReport) {
+        if task.retry.is_some() {
+            report.warnings.push(Finding {
+                code: "not_honoured",
+                message: MESSAGE.to_string(),
+                path: format!("{path}.retry"),
+            });
+        }
+        for child in task.children().into_iter().chain(task.error_children()) {
+            walk(child, super::path::task_path(&path, &child.id), report);
+        }
+    }
+    if flow.retry.is_some() && !flow.after_execution.is_empty() {
+        report.warnings.push(Finding {
+            code: "not_honoured",
+            message: MESSAGE.to_string(),
+            path: "retry".to_string(),
+        });
+    }
+    for task in &flow.after_execution {
+        walk(
+            task,
+            super::path::task_path("afterExecution", &task.id),
+            report,
+        );
+    }
 }
 
 /// What the walk of `source` examined (the corpus test's floors).
@@ -2640,6 +2677,53 @@ mod tests {
                 .any(|w| w.code == "flow_trigger_without_depends_on"),
             "{r:?}"
         );
+    }
+
+    // ---- end hooks B2 (spec D11): retry reaching an afterExecution task ----
+
+    fn retry_warnings(src: &str) -> Vec<(String, String)> {
+        let flow = crate::spec::parse(src).unwrap();
+        crate::spec::validate_source(src, &flow)
+            .warnings
+            .into_iter()
+            .filter(|w| w.code == "not_honoured" && w.message.contains("not retried"))
+            .map(|w| (w.path, w.message))
+            .collect()
+    }
+
+    const NOT_RETRIED: &str = "an afterExecution task is not retried on egret: the execution has already ended. Roadmap package #13 lifts it";
+    const RETRY: &str =
+        "    retry:\n      type: constant\n      interval: PT1S\n      maxAttempts: 2\n";
+
+    #[test]
+    fn a_retry_inside_after_execution_warns_thirteen() {
+        let src = format!(
+            "{HEAD}tasks:\n  - id: t\n    type: core.log\n    message: m\n{RETRY}afterExecution:\n  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      - id: a\n        type: core.log\n        message: m\n        retry:\n          type: constant\n          interval: PT1S\n          maxAttempts: 2\n"
+        );
+        // `tasks:` carries a retry too and must stay quiet.
+        assert_eq!(
+            retry_warnings(&src),
+            vec![(
+                "afterExecution.seq.a.retry".to_string(),
+                NOT_RETRIED.to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_flow_retry_with_after_execution_warns_thirteen() {
+        let with = format!(
+            "{HEAD}retry:\n  type: constant\n  interval: PT1S\n  maxAttempts: 2\ntasks:\n  - id: t\n    type: core.log\n    message: m\nafterExecution:\n  - id: a\n    type: core.log\n    message: m\n"
+        );
+        assert_eq!(
+            retry_warnings(&with),
+            vec![("retry".to_string(), NOT_RETRIED.to_string())]
+        );
+        let without = with.replace(
+            "afterExecution:\n  - id: a\n    type: core.log\n    message: m\n",
+            "",
+        );
+        assert!(retry_warnings(&without).is_empty());
     }
 }
 
