@@ -158,6 +158,15 @@ pub(super) fn policy_for<'a>(
     state: &ExecutionState,
     run: RunIx,
 ) -> Option<&'a RetryPolicy> {
+    // End hooks #2b, D11: nothing in the post-terminal phase is retried. A
+    // run under `afterExecution:` has no policy at all, so `retry::scan`
+    // (never called in the phase anyway) and, above all,
+    // `flowable::current_list`'s "will be retried" agree: a flowable inside
+    // the list whose child failed is not left waiting for a retry nobody
+    // will schedule (`a_flowable_in_the_phase_does_not_wait_for_a_retry`).
+    if super::after_execution::in_phase(plan, state, run) {
+        return None;
+    }
     if let Some(own) = plan
         .tasks
         .get(state.runs[run].task)

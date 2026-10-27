@@ -109,6 +109,8 @@ export interface LogViewProps {
   /** Lines per read and the window, for tests. */
   pageSize?: number;
   windowLines?: number;
+  /** When the execution ended (`logEndedAt`); the follower stops once it is long past. */
+  endedAt?: string | null;
   /** The downloaded file's name; `<executionId>.log` by default. */
   downloadName?: string;
   /** A download's page and cap, for tests. */
@@ -129,11 +131,12 @@ export function LogView({
   label = "Log lines",
   pageSize,
   windowLines,
+  endedAt,
   downloadPageSize,
   downloadMaxLines = LOG_DOWNLOAD_MAX_LINES,
   downloadName,
 }: LogViewProps) {
-  const follow = useLogFollow(ws, executionId, filters, { pageSize, windowLines });
+  const follow = useLogFollow(ws, executionId, filters, { pageSize, windowLines, endedAt });
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
   const { rows, offsets } = useMemo(
     () => buildRows(follow.lines, { grouped, runs, collapsed }),

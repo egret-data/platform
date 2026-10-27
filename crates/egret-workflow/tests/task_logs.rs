@@ -1876,6 +1876,75 @@ async fn logs_route_reports_complete_only_after_the_settle_lag() {
     assert!(!complete(&body), "a pause is not an end: {body}");
 }
 
+/// Package #2b, spec §6: an `afterExecution:` run logs after its execution
+/// is terminal, so `complete` waits until the execution is IDLE (no run
+/// live) and the settle lag has passed since the LAST run ended.
+#[tokio::test]
+async fn logs_route_is_not_complete_while_an_after_execution_run_is_live() {
+    let Some(fx) = fx().await else { return };
+    common::grant(&fx.db, fx.ws, fx.user, &["workflow:read"]).await;
+    let exec = fx.execution().await;
+    let app = common::app(&fx.db).await;
+    let complete = |body: &serde_json::Value| {
+        body["complete"]
+            .as_bool()
+            .unwrap_or_else(|| panic!("no boolean complete in {body}"))
+    };
+    // Terminal, past the settle lag, with an after-run still RUNNING.
+    sqlx::query(
+        "UPDATE workflow.executions \
+            SET state = 'SUCCESS', updated_at = now() - interval '10 seconds' WHERE id = $1",
+    )
+    .bind(exec)
+    .execute(&fx.db.pool)
+    .await
+    .expect("set state");
+    let run: Uuid = sqlx::query_scalar(
+        "INSERT INTO workflow.task_runs \
+           (execution_id, run_ix, task_ix, task_id, type_id, state, history) \
+         VALUES ($1, (SELECT count(*) FROM workflow.task_runs WHERE execution_id = $1), 0, \
+                 'after', 'io.kestra.plugin.core.log.Log', 'RUNNING', '[\"RUNNING\"]'::jsonb) \
+         RETURNING id",
+    )
+    .bind(exec)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("the after-run");
+    let ended = |secs_ago: i32| {
+        let pool = fx.db.pool.clone();
+        async move {
+            sqlx::query(
+                "UPDATE workflow.task_runs SET state = 'SUCCESS', \
+                        history = '[\"RUNNING\",\"SUCCESS\"]'::jsonb, \
+                        ended_at = now() - make_interval(secs => $2) WHERE id = $1",
+            )
+            .bind(run)
+            .bind(f64::from(secs_ago))
+            .execute(&pool)
+            .await
+            .expect("end the after-run");
+        }
+    };
+
+    let (s, body) = get_logs(&app, fx.ws, exec, fx.user, "").await;
+    assert_eq!(s, 200, "{body}");
+    assert!(
+        !complete(&body),
+        "an after-run is live: more lines will come: {body}"
+    );
+
+    ended(0).await;
+    let (_, body) = get_logs(&app, fx.ws, exec, fx.user, "").await;
+    assert!(
+        !complete(&body),
+        "the after-run ended inside the settle lag: {body}"
+    );
+
+    ended(3).await;
+    let (_, body) = get_logs(&app, fx.ws, exec, fx.user, "").await;
+    assert!(complete(&body), "idle and past the settle lag: {body}");
+}
+
 // ── Final review I1: a line Postgres refuses costs only itself ──────────────
 
 /// A `Log` message holding U+0000 (reachable through a rendered expression

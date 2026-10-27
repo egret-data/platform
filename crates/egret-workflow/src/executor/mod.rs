@@ -41,6 +41,7 @@
 //! counts; `flowable::loop_` derives why it is a consequence of purity rather
 //! than a shortcut.
 
+pub(crate) mod after_execution;
 pub(crate) mod allow_failure;
 mod command;
 pub mod exit;
@@ -51,6 +52,9 @@ mod retry;
 mod state;
 pub(crate) mod update;
 
+pub use after_execution::{
+    after_execution_live, drives_after, phase_killed, refusal_of, terminated,
+};
 pub use command::Command;
 pub use plan::{
     build_plan, loop_until_gap, pause_gap, plan_stored, DagNode, Plan, PlanError, PlanTask,
@@ -179,12 +183,28 @@ pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
     if !drives_forward(state) {
         // A kill in progress (spec §5): nothing is created, started, retried
         // or resumed, and nothing below -- `reopen_due`, the walk,
-        // `retry::scan`, `pause_mark` -- sees this state. See [`kill`]. A
-        // terminal execution gets nothing at all.
-        return if state.history.last() == Some(&RunState::Killing) {
-            kill::advance_killing(plan, state)
-        } else {
-            Vec::new()
+        // `retry::scan`, `pause_mark` -- sees this state. See [`kill`]. In
+        // particular the post-terminal phase does NOT start while `KILLING`
+        // (`ES:185-190`): `afterExecution:` begins once the execution is
+        // `KILLED` (spec D8).
+        //
+        // A terminal execution gets its post-terminal phase (end hooks #2b,
+        // D8, Kestra `ExecutorService.handleAfterExecution`, `ES:1005-1023`):
+        // the flow's `afterExecution:` list, one task at a time, and never a
+        // command that writes the execution. It starts the round AFTER the
+        // one that made the execution terminal: that round returned its
+        // `SetExecutionState` from below, and a `RETRYING` round leaves
+        // `RETRYING` last (`retry::scan` writes it beside the `FAILED`), so a
+        // retried execution never starts the phase early.
+        //
+        // Q3 (user answer 2026-10-27): a kill of the PHASE (a terminal
+        // execution with live after-runs, `worker::kill`) stops it without
+        // touching the execution's state; `after_execution::drive` then
+        // closes the phase and creates nothing more.
+        return match state.history.last() {
+            Some(RunState::Killing) => kill::advance_killing(plan, state),
+            Some(s) if s.is_terminal() => after_execution::drive(plan, state, now),
+            _ => Vec::new(),
         };
     }
 
@@ -11209,5 +11229,647 @@ mod end_hooks_drive_tests {
         assert!(at(&t, "claim:finish:wd") < at(&t, "create:z"));
         assert!(at(&t, "end:z:Success") < at(&t, "end:wd:Success"));
         assert_eq!(t.flow, RunState::Success);
+    }
+
+    // ---- End hooks #2b, Task B1: the post-terminal phase (D8, D10, D11) ----
+
+    use super::{drives_after, terminated};
+
+    /// A corpus flow's source, by id (`valids/<name>`), either extension.
+    fn corpus(id: &str) -> String {
+        ["yaml", "yml"]
+            .iter()
+            .find_map(|ext| {
+                std::fs::read_to_string(format!(
+                    "{}/oracle-exec/corpus/{id}.{ext}",
+                    env!("CARGO_MANIFEST_DIR")
+                ))
+                .ok()
+            })
+            .unwrap_or_else(|| panic!("no corpus file for {id}"))
+    }
+
+    /// Every event index of `event` in the log.
+    fn all_at(t: &Trace, event: &str) -> Vec<usize> {
+        t.events
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| *e == event)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// The run of `id` (the first), panicking if there is none.
+    fn run_for<'a>(plan: &Plan, state: &'a ExecutionState, id: &str) -> &'a super::TaskRun {
+        let task = plan.tasks.iter().position(|t| t.id == id).expect("a task");
+        state
+            .runs
+            .iter()
+            .find(|r| r.task == task)
+            .unwrap_or_else(|| panic!("no run of {id}"))
+    }
+
+    /// golden `after-execution-error`: CREATED RUNNING FAILED, and `end` runs after.
+    #[test]
+    fn after_execution_runs_after_the_execution_is_terminal_and_changes_nothing() {
+        let t = drive(&corpus("valids/after-execution-error"), &["fail"], None);
+        assert_eq!(
+            t.state.history,
+            [RunState::Created, RunState::Running, RunState::Failed]
+        );
+        assert_eq!(order(&t.plan, &t.state), ["fail", "hello", "end"]);
+        assert_eq!(last_of(&t.plan, &t.state, "end"), Some(RunState::Success));
+        assert_eq!(run_for(&t.plan, &t.state, "end").parent, None);
+        assert_eq!(t.flow, RunState::Failed);
+        assert!(
+            at(&t, "exec:Failed") < at(&t, "create:end"),
+            "the after-run is created after the execution's last state: {:?}",
+            t.events
+        );
+        assert!(terminated(&t.plan, &t.state));
+        assert!(!drives_after(&t.plan, &t.state));
+    }
+
+    /// A failing after-task does not change the execution (ES:1026), is not
+    /// retried (D11), and does not stop the next after-task (FU:79-109).
+    #[test]
+    fn a_failing_after_task_changes_nothing_and_is_not_retried() {
+        let src = format!(
+            "{HEAD}tasks:\n{}afterExecution:\n  - id: a1\n    type: {FAIL}\n    retry:\n      type: constant\n      interval: PT1S\n      maxAttempts: 3\n{}",
+            leaf(2, "ok", LOG),
+            leaf(2, "a2", LOG)
+        );
+        let t = drive(&src, &["a1"], None);
+        assert_eq!(order(&t.plan, &t.state), ["ok", "a1", "a2"]);
+        assert_eq!(
+            all_at(&t, "end:a1:Failed").len(),
+            1,
+            "one attempt: {:?}",
+            t.events
+        );
+        let a1 = run_for(&t.plan, &t.state, "a1");
+        assert_eq!(a1.attempts.len(), 1, "a1 is not retried: {:?}", a1.history);
+        assert_eq!(a1.history.last(), Some(&RunState::Failed));
+        assert_eq!(last_of(&t.plan, &t.state, "a2"), Some(RunState::Success));
+        assert_eq!(
+            t.state.history,
+            [RunState::Created, RunState::Running, RunState::Success],
+            "the execution's history does not move"
+        );
+        assert!(terminated(&t.plan, &t.state));
+    }
+
+    /// D11 below the root of the phase: a flowable inside `afterExecution:`
+    /// whose child fails under a retry policy (here the FLOW's `retry:`,
+    /// which `retry::policy_for` would otherwise fall back to) does not wait
+    /// for a retry nobody will schedule. It ends `FAILED`, and the phase ends.
+    #[test]
+    fn a_flowable_in_the_phase_does_not_wait_for_a_retry() {
+        let src = format!(
+            "{HEAD}retry:\n  type: constant\n  interval: PT1S\n  maxAttempts: 3\ntasks:\n{}afterExecution:\n  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n{}{}",
+            leaf(2, "ok", LOG),
+            leaf(6, "ko", FAIL),
+            leaf(2, "a2", LOG)
+        );
+        let t = drive(&src, &["ko"], None);
+        assert_eq!(order(&t.plan, &t.state), ["ok", "seq", "ko", "a2"]);
+        assert_eq!(all_at(&t, "end:ko:Failed").len(), 1, "{:?}", t.events);
+        assert_eq!(last_of(&t.plan, &t.state, "seq"), Some(RunState::Failed));
+        assert_eq!(last_of(&t.plan, &t.state, "a2"), Some(RunState::Success));
+        assert_eq!(
+            t.state.history,
+            [RunState::Created, RunState::Running, RunState::Success]
+        );
+        assert!(terminated(&t.plan, &t.state));
+    }
+
+    /// One round of the worker the harness plays, enough for a leaf-only
+    /// flow: a `Runnable` that is `RUNNING` (or `KILLING`) ends `SUCCESS`
+    /// (or `KILLED`). Returns false when there was nothing to do.
+    fn finish_one_runnable(plan: &Plan, state: &mut ExecutionState) -> bool {
+        let Some(ix) = (0..state.runs.len()).find(|&ix| {
+            matches!(
+                plan.tasks[state.runs[ix].task].kind,
+                TaskKind::Runnable { .. }
+            ) && matches!(
+                state.runs[ix].history.last(),
+                Some(RunState::Running | RunState::Killing)
+            )
+        }) else {
+            return false;
+        };
+        let to = if state.runs[ix].history.last() == Some(&RunState::Killing) {
+            RunState::Killed
+        } else {
+            RunState::Success
+        };
+        apply(state, &Command::SetRunState { run: ix, state: to });
+        true
+    }
+
+    /// D10: terminal is not terminated while the list runs.
+    #[test]
+    fn terminated_waits_for_the_after_list() {
+        let src = format!(
+            "{HEAD}tasks:\n{}afterExecution:\n{}{}",
+            leaf(2, "ok", LOG),
+            leaf(2, "end", LOG),
+            leaf(2, "end2", LOG)
+        );
+        let flow = crate::spec::parse(&src).expect("parses");
+        let plan = plan::flatten_flow(&flow).expect("plans");
+        let mut state = ExecutionState::new(&plan);
+        let end_running = |plan: &Plan, state: &ExecutionState| {
+            last_of(plan, state, "end") == Some(RunState::Running)
+        };
+        for _ in 0..100 {
+            if end_running(&plan, &state) {
+                break;
+            }
+            let cmds = advance(&plan, &state, Tick(0));
+            if cmds.is_empty() {
+                assert!(finish_one_runnable(&plan, &mut state), "stalled: {state:?}");
+                continue;
+            }
+            for c in &cmds {
+                apply(&mut state, c);
+            }
+        }
+        assert!(end_running(&plan, &state), "`end` never ran: {state:?}");
+        assert_eq!(state.history.last(), Some(&RunState::Success));
+        assert!(!terminated(&plan, &state), "terminal is not terminated");
+        assert!(drives_after(&plan, &state));
+        // `end` ends; `end2` is still to come: still not terminated.
+        assert!(finish_one_runnable(&plan, &mut state));
+        assert!(!terminated(&plan, &state));
+        for _ in 0..100 {
+            let cmds = advance(&plan, &state, Tick(0));
+            if cmds.is_empty() && !finish_one_runnable(&plan, &mut state) {
+                break;
+            }
+            for c in &cmds {
+                apply(&mut state, c);
+            }
+        }
+        assert_eq!(last_of(&plan, &state, "end2"), Some(RunState::Success));
+        assert!(terminated(&plan, &state));
+        assert!(!drives_after(&plan, &state));
+        assert_eq!(
+            state.history,
+            [RunState::Created, RunState::Running, RunState::Success]
+        );
+    }
+
+    /// D8: KILLING runs nothing; KILLED runs the list (ES:192-193, ES:1015).
+    /// The kill is the route's: `kill_leaves`, then `advance` closes it.
+    /// (Q3, user answer 2026-10-27: a kill of the PHASE itself stops the
+    /// after-runs; that is plan Task B3's, not this test's.)
+    #[test]
+    fn after_execution_runs_once_killed_and_not_while_killing() {
+        let src = format!(
+            "{HEAD}tasks:\n{}{}afterExecution:\n{}",
+            leaf(2, "long", LOG),
+            leaf(2, "next", LOG),
+            leaf(2, "end", LOG)
+        );
+        let flow = crate::spec::parse(&src).expect("parses");
+        let plan = plan::flatten_flow(&flow).expect("plans");
+        let end_task = plan.tasks.iter().position(|t| t.id == "end").unwrap();
+        let mut state = ExecutionState::new(&plan);
+        for _ in 0..100 {
+            if last_of(&plan, &state, "long") == Some(RunState::Running) {
+                break;
+            }
+            for c in &advance(&plan, &state, Tick(0)) {
+                apply(&mut state, c);
+            }
+        }
+        assert_eq!(last_of(&plan, &state, "long"), Some(RunState::Running));
+        for c in &super::kill::kill_leaves(&plan, &state) {
+            apply(&mut state, c);
+        }
+        assert_eq!(state.history.last(), Some(&RunState::Killing));
+        let mut killing_rounds = 0;
+        for _ in 0..100 {
+            if state.history.last() != Some(&RunState::Killing) {
+                break;
+            }
+            killing_rounds += 1;
+            let cmds = advance(&plan, &state, Tick(0));
+            assert!(
+                !cmds
+                    .iter()
+                    .any(|c| matches!(c, Command::CreateRun { task, .. } if *task == end_task)),
+                "an after-task was created while KILLING: {cmds:?}"
+            );
+            if cmds.is_empty() {
+                assert!(finish_one_runnable(&plan, &mut state), "stalled: {state:?}");
+                continue;
+            }
+            for c in &cmds {
+                apply(&mut state, c);
+            }
+            assert_eq!(
+                last_of(&plan, &state, "end"),
+                None,
+                "no after-run while KILLING"
+            );
+        }
+        assert!(killing_rounds > 0);
+        assert_eq!(state.history.last(), Some(&RunState::Killed));
+        assert_eq!(last_of(&plan, &state, "end"), None);
+        assert!(drives_after(&plan, &state), "KILLED with the list to run");
+        for _ in 0..100 {
+            let cmds = advance(&plan, &state, Tick(0));
+            if cmds.is_empty() && !finish_one_runnable(&plan, &mut state) {
+                break;
+            }
+            for c in &cmds {
+                apply(&mut state, c);
+            }
+        }
+        assert_eq!(last_of(&plan, &state, "next"), None);
+        assert_eq!(last_of(&plan, &state, "long"), Some(RunState::Killed));
+        assert_eq!(last_of(&plan, &state, "end"), Some(RunState::Success));
+        assert_eq!(
+            state.history,
+            [
+                RunState::Created,
+                RunState::Running,
+                RunState::Killing,
+                RunState::Killed
+            ]
+        );
+        assert!(terminated(&plan, &state));
+    }
+
+    /// No round that makes the execution terminal also starts the phase, and
+    /// a RETRYING round never does: a flow `retry:` (RETRY_FAILED_TASK)
+    /// writes FAILED then RETRYING in one round, so `end` runs only after the
+    /// FINAL `FAILED`, once.
+    #[test]
+    fn a_retrying_execution_does_not_start_after_execution() {
+        let src = format!(
+            "{HEAD}retry:\n  behavior: RETRY_FAILED_TASK\n  type: constant\n  maxAttempts: 3\n  interval: PT1S\ntasks:\n{}afterExecution:\n{}",
+            leaf(2, "ko", FAIL),
+            leaf(2, "end", LOG)
+        );
+        let t = drive(&src, &["ko"], None);
+        let failed = all_at(&t, "exec:Failed");
+        assert!(failed.len() >= 2, "the flow retry ran: {:?}", t.events);
+        assert!(t.state.history.contains(&RunState::Retrying));
+        assert_eq!(all_at(&t, "create:end").len(), 1, "{:?}", t.events);
+        assert!(
+            *failed.last().unwrap() < at(&t, "create:end"),
+            "no `end` before the final FAILED: {:?}",
+            t.events
+        );
+        assert_eq!(t.state.history.last(), Some(&RunState::Failed));
+        assert_eq!(last_of(&t.plan, &t.state, "end"), Some(RunState::Success));
+        assert!(terminated(&t.plan, &t.state));
+    }
+
+    /// No command of the phase writes the execution (D8, D11, D12): every
+    /// corpus flow with `afterExecution:`, driven from each terminal state
+    /// the phase can start from, through its whole list.
+    #[test]
+    fn the_phase_emits_no_execution_state_retry_or_pause() {
+        let dir = format!("{}/oracle-exec/corpus/valids", env!("CARGO_MANIFEST_DIR"));
+        let mut flows = 0usize;
+        let mut entries: Vec<_> = std::fs::read_dir(&dir)
+            .expect("corpus dir")
+            .map(|e| e.expect("entry").path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            let src = std::fs::read_to_string(&path).expect("reads");
+            let Ok(flow) = crate::spec::parse(&src) else {
+                continue;
+            };
+            if flow.after_execution.is_empty() {
+                continue;
+            }
+            let plan = plan::flatten_flow(&flow).expect("plans");
+            assert!(!plan.after_execution.is_empty(), "{path:?}");
+            // D3: flattened last, so it follows every other root list.
+            let first_after = *plan.after_execution.iter().min().unwrap();
+            assert!(
+                plan.roots
+                    .iter()
+                    .chain(&plan.errors)
+                    .chain(&plan.finally)
+                    .all(|&o| o < first_after),
+                "{path:?}: afterExecution is not appended last"
+            );
+            flows += 1;
+            for end in [
+                RunState::Success,
+                RunState::Failed,
+                RunState::Killed,
+                RunState::Warning,
+            ] {
+                let mut state = ExecutionState::new(&plan);
+                for s in [RunState::Running, end] {
+                    apply(&mut state, &Command::SetExecutionState { state: s });
+                }
+                let history = state.history.clone();
+                assert!(drives_after(&plan, &state), "{path:?}");
+                for _ in 0..200 {
+                    let cmds = advance(&plan, &state, Tick(0));
+                    for c in &cmds {
+                        assert!(
+                            !super::after_execution::writes_the_execution(c),
+                            "{path:?} from {end:?}: {c:?}"
+                        );
+                        apply(&mut state, c);
+                    }
+                    if !cmds.is_empty() {
+                        continue;
+                    }
+                    // The caller's renders, then the worker.
+                    let mut rendered = false;
+                    for ix in 0..state.runs.len() {
+                        let task = &plan.tasks[state.runs[ix].task];
+                        let last = state.runs[ix].history.last().copied();
+                        if last == Some(RunState::Created)
+                            && state.runs[ix].rendered_run_if.is_none()
+                            && task.run_if.is_some()
+                        {
+                            state.runs[ix].rendered_run_if = Some("true".into());
+                            rendered = true;
+                        }
+                        if last == Some(RunState::Running)
+                            && state.runs[ix].rendered.is_none()
+                            && matches!(task.kind, TaskKind::If { .. } | TaskKind::Switch { .. })
+                        {
+                            state.runs[ix].rendered = Some("true".into());
+                            rendered = true;
+                        }
+                    }
+                    if !rendered && !finish_one_runnable(&plan, &mut state) {
+                        break;
+                    }
+                }
+                assert_eq!(state.history, history, "{path:?}: the history moved");
+                assert!(
+                    terminated(&plan, &state),
+                    "{path:?} from {end:?}: {state:?}"
+                );
+                for &task in &plan.after_execution {
+                    assert!(
+                        state
+                            .runs
+                            .iter()
+                            .any(|r| r.task == task && r.parent.is_none()),
+                        "{path:?}: an after-task never ran"
+                    );
+                }
+            }
+        }
+        assert!(flows >= 9, "corpus flows with afterExecution: {flows}");
+    }
+
+    /// **A kill of the phase (Q3, user answer 2026-10-27) closes it and
+    /// creates nothing more, without touching the execution.** The route's
+    /// `kill::kill_phase` on a `SUCCESS` execution whose after-list is
+    /// `[seq: Sequential [x, y], end]`, while `x` runs: `x` and `seq` are
+    /// `KILLING`; once the worker has written `x` `KILLED`, `seq` is closed
+    /// `KILLED` and neither `y` nor `end` is ever created. The history stays
+    /// `CREATED RUNNING SUCCESS`, no command writes the execution, and the
+    /// execution is `terminated` at the end.
+    #[test]
+    fn a_killed_phase_closes_its_flowables_and_creates_nothing_more() {
+        let src = format!(
+            "{HEAD}tasks:\n{}afterExecution:\n  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n{}{}{}",
+            leaf(2, "a", LOG),
+            leaf(6, "x", LOG),
+            leaf(6, "y", LOG),
+            leaf(2, "end", LOG)
+        );
+        let flow = crate::spec::parse(&src).expect("parses");
+        let plan = plan::flatten_flow(&flow).expect("plans");
+        let mut state = ExecutionState::new(&plan);
+        for _ in 0..100 {
+            if last_of(&plan, &state, "x") == Some(RunState::Running) {
+                break;
+            }
+            let cmds = advance(&plan, &state, Tick(0));
+            if cmds.is_empty() {
+                assert!(finish_one_runnable(&plan, &mut state), "stalled: {state:?}");
+            }
+            for c in &cmds {
+                apply(&mut state, c);
+            }
+        }
+        assert_eq!(last_of(&plan, &state, "x"), Some(RunState::Running));
+        let ended = state.history.clone();
+        assert_eq!(ended.last(), Some(&RunState::Success));
+        assert!(super::after_execution_live(&plan, &state));
+        assert!(!super::phase_killed(&plan, &state));
+
+        let cmds = super::kill::kill_phase(&plan, &state);
+        assert!(
+            !cmds
+                .iter()
+                .any(super::after_execution::writes_the_execution),
+            "{cmds:?}"
+        );
+        for c in &cmds {
+            apply(&mut state, c);
+        }
+        assert_eq!(last_of(&plan, &state, "x"), Some(RunState::Killing));
+        assert_eq!(last_of(&plan, &state, "seq"), Some(RunState::Killing));
+        assert!(super::phase_killed(&plan, &state));
+        assert!(drives_after(&plan, &state), "x is still to be stopped");
+
+        for _ in 0..100 {
+            let cmds = advance(&plan, &state, Tick(0));
+            assert!(
+                !cmds.iter().any(|c| matches!(
+                    c,
+                    Command::CreateRun { .. } | Command::SetExecutionState { .. }
+                )),
+                "a killed phase created a run or wrote the execution: {cmds:?}"
+            );
+            if cmds.is_empty() && !finish_one_runnable(&plan, &mut state) {
+                break;
+            }
+            for c in &cmds {
+                apply(&mut state, c);
+            }
+        }
+        assert_eq!(last_of(&plan, &state, "x"), Some(RunState::Killed));
+        assert_eq!(last_of(&plan, &state, "seq"), Some(RunState::Killed));
+        assert_eq!(last_of(&plan, &state, "y"), None);
+        assert_eq!(last_of(&plan, &state, "end"), None);
+        assert_eq!(state.history, ended);
+        assert!(terminated(&plan, &state));
+        assert!(!super::after_execution_live(&plan, &state));
+    }
+
+    // ---- Final-review fix (2026-10-28): a STORED source cannot make the
+    // phase write the ended execution ----
+
+    /// A source whose `afterExecution:` holds `bad` (a D12-refused kind) and
+    /// then a `Log` `after2`.
+    fn stored_with(bad: &str) -> String {
+        format!(
+            "{HEAD}tasks:\n{}afterExecution:\n{bad}{}",
+            leaf(2, "ok", LOG),
+            leaf(2, "after2", LOG)
+        )
+    }
+
+    const STORED_PAUSE: &str =
+        "  - id: bad\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n";
+    const STORED_EXIT_FAILED: &str =
+        "  - id: bad\n    type: io.kestra.plugin.core.execution.Exit\n    state: FAILED\n";
+    const STORED_EXIT_KILLED: &str =
+        "  - id: bad\n    type: io.kestra.plugin.core.execution.Exit\n    state: KILLED\n";
+    const STORED_LOOP_UNTIL: &str = "  - id: bad\n    type: io.kestra.plugin.core.flow.LoopUntil\n    condition: \"{{ true }}\"\n    checkFrequency:\n      interval: PT0S\n    tasks:\n      - id: c\n        type: io.kestra.plugin.core.log.Log\n        message: m\n";
+    const STORED_EXIT_IN_IF: &str = "  - id: gate\n    type: io.kestra.plugin.core.flow.If\n    condition: \"true\"\n    then:\n      - id: bad\n        type: io.kestra.plugin.core.execution.Exit\n        state: FAILED\n";
+
+    /// Drive a stored source (`plan_stored`, so no start-time refusal) to
+    /// its end through `advance`, the main tasks succeeding, an `If`
+    /// rendering its literal condition. Returns the plan, the state, and
+    /// every command `advance` returned once the execution was terminal.
+    fn drive_stored(src: &str) -> (Plan, ExecutionState, Vec<Command>) {
+        assert!(
+            super::build_plan(src).is_err(),
+            "the fixture must be one `build_plan` refuses at start"
+        );
+        let plan = super::plan_stored(src).expect("a stored source plans");
+        let mut state = ExecutionState::new(&plan);
+        let mut phase = Vec::new();
+        for _ in 0..300 {
+            let terminal = state.history.last().is_some_and(|s| s.is_terminal());
+            let cmds = advance(&plan, &state, Tick(0));
+            if terminal {
+                phase.extend(cmds.iter().cloned());
+            }
+            for c in &cmds {
+                apply(&mut state, c);
+            }
+            if !cmds.is_empty() {
+                continue;
+            }
+            let mut rendered = false;
+            for ix in 0..state.runs.len() {
+                let task = &plan.tasks[state.runs[ix].task];
+                if state.runs[ix].history.last() == Some(&RunState::Running)
+                    && state.runs[ix].rendered.is_none()
+                    && matches!(task.kind, TaskKind::If { .. })
+                {
+                    state.runs[ix].rendered = Some("true".into());
+                    rendered = true;
+                }
+            }
+            if !rendered && !finish_one_runnable(&plan, &mut state) {
+                break;
+            }
+        }
+        (plan, state, phase)
+    }
+
+    /// The four refused kinds, each STORED, each driven from a terminal
+    /// `SUCCESS`: the after-run of the refused kind is FAILED without ever
+    /// starting (one attempt `[FAILED]`), it carries the D12 refusal text,
+    /// nothing writes the execution, and the next after-task still runs.
+    #[test]
+    fn a_stored_refused_kind_in_after_execution_fails_without_running() {
+        for (name, bad) in [
+            ("Pause", STORED_PAUSE),
+            ("Exit FAILED", STORED_EXIT_FAILED),
+            ("Exit KILLED", STORED_EXIT_KILLED),
+            ("LoopUntil", STORED_LOOP_UNTIL),
+        ] {
+            let (plan, state, phase) = drive_stored(&stored_with(bad));
+            assert_eq!(
+                state.history,
+                [RunState::Created, RunState::Running, RunState::Success],
+                "{name}: the ended execution moved"
+            );
+            assert!(
+                !phase
+                    .iter()
+                    .any(super::after_execution::writes_the_execution),
+                "{name}: the phase emitted {phase:?}"
+            );
+            let bad_run = run_for(&plan, &state, "bad");
+            assert_eq!(
+                bad_run.history,
+                [RunState::Created, RunState::Failed],
+                "{name}: the refused run must fail before it starts"
+            );
+            assert_eq!(bad_run.attempts.len(), 1, "{name}");
+            let ix = state
+                .runs
+                .iter()
+                .position(|r| std::ptr::eq(r, bad_run))
+                .unwrap();
+            let why = super::refusal_of(&plan, &state, ix).expect("the refusal text");
+            assert!(
+                why.starts_with("task 'bad' is a") && why.contains("inside afterExecution"),
+                "{name}: {why}"
+            );
+            assert_eq!(last_of(&plan, &state, "c"), None, "{name}: a child ran");
+            assert_eq!(
+                last_of(&plan, &state, "after2"),
+                Some(RunState::Success),
+                "{name}: the next after-task"
+            );
+            assert!(terminated(&plan, &state), "{name}");
+        }
+    }
+
+    /// The same text as the start-time refusal (one predicate, two readers).
+    #[test]
+    fn the_stored_refusal_text_is_the_start_refusal_text() {
+        let src = stored_with(STORED_EXIT_FAILED);
+        let start = super::build_plan(&src)
+            .expect_err("refused at start")
+            .message;
+        let plan = super::plan_stored(&src).unwrap();
+        let (_, stored) = plan
+            .after_execution_refused
+            .iter()
+            .next()
+            .expect("one refused");
+        assert!(start.contains(stored.as_str()), "{start} / {stored}");
+    }
+
+    /// Nested: an `Exit` inside an `If` in `afterExecution:` fails, the `If`
+    /// ends `FAILED`, and the execution does not move.
+    #[test]
+    fn a_stored_exit_nested_in_an_if_fails_the_if_and_not_the_execution() {
+        let (plan, state, phase) = drive_stored(&stored_with(STORED_EXIT_IN_IF));
+        assert!(!phase
+            .iter()
+            .any(super::after_execution::writes_the_execution));
+        assert_eq!(
+            state.history,
+            [RunState::Created, RunState::Running, RunState::Success]
+        );
+        assert_eq!(
+            run_for(&plan, &state, "bad").history,
+            [RunState::Created, RunState::Failed]
+        );
+        assert_eq!(last_of(&plan, &state, "gate"), Some(RunState::Failed));
+        assert_eq!(last_of(&plan, &state, "after2"), Some(RunState::Success));
+        assert!(terminated(&plan, &state));
+    }
+
+    /// No refusal for a flow `build_plan` accepts: the map is empty.
+    #[test]
+    fn a_plan_that_starts_has_no_refused_after_task() {
+        let src = format!(
+            "{HEAD}tasks:\n{}afterExecution:\n{}",
+            leaf(2, "ok", LOG),
+            leaf(2, "end", LOG)
+        );
+        assert!(super::build_plan(&src)
+            .unwrap()
+            .after_execution_refused
+            .is_empty());
     }
 }

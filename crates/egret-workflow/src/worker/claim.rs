@@ -827,7 +827,8 @@ pub async fn due_retries(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<
     // a wake would settle into nothing every tick, for ever -- the endless case
     // the term above closes for a terminal execution. The `RETRIED` arm is
     // unaffected in practice: its execution is `RETRIED`, and the kill route
-    // refuses a terminal execution. `a_killing_execution_hides_its_waiting_
+    // never moves a terminal execution (it refuses one, or since end hooks
+    // #2b kills only its `afterExecution:` runs). `a_killing_execution_hides_its_waiting_
     // runs_from_the_waker`.
     .bind(RunState::Killing.wire())
     .fetch_all(exec)
@@ -3486,11 +3487,24 @@ async fn advance_frame(conn: &mut PgConnection, frame: &mut Frame<'_>) -> Result
             // not update -- so a nested settle that terminated the execution
             // has ALREADY told its parent, and this one does not report the
             // terminal twice.
+            //
+            // **The parent hears at "terminated", not at "terminal"** (end
+            // hooks #2b, spec D10, Kestra `DE:752-759`): an execution whose
+            // `afterExecution:` is still running is terminal but not
+            // terminated, and its parent waits. So the report is made by the
+            // settle in which `terminated` first becomes true -- the one that
+            // made the execution terminal for a flow with no after-list, the
+            // one that ended its last after-run otherwise -- with the state
+            // the execution ended with. `was != is` keeps today's report of
+            // a terminal that changes into another one. A forced report
+            // ([`Job::report`]) has no plan and keeps the old rule.
             let was = before.history.last().copied();
             let is = state.history.last().copied();
+            let now_terminated = crate::executor::terminated(&ctx.plan, state)
+                && (!crate::executor::terminated(&ctx.plan, before) || was != is);
             return Ok(Some(Settled {
                 id: ctx.id,
-                terminal: is.filter(|s| was != Some(*s) && notifies_parent(*s)),
+                terminal: is.filter(|s| now_terminated && notifies_parent(*s)),
                 caller: ctx.caller(),
                 outage: surface.files_outage(),
                 forced: false,
@@ -4798,6 +4812,20 @@ fn drive(
                 apply(state, cmd);
                 if let Some(alive) = alive {
                     renew_restarted_ids(surface, state, &alive, side);
+                }
+                // End hooks final-review fix (2026-10-28): an after-run of a
+                // kind D12 refuses, in a STORED source, is failed by
+                // `after_execution::drive` without running; its message is
+                // the refusal's text.
+                if let Command::FailUnstarted { run, .. }
+                | Command::SetRunState {
+                    run,
+                    state: RunState::Failed,
+                } = cmd
+                {
+                    if let Some(why) = crate::executor::refusal_of(plan, state, *run) {
+                        side.failures.push((*run, why.to_string()));
+                    }
                 }
             }
             marks.observe(&snapshot, state, *seq);

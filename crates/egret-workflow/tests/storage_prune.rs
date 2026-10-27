@@ -70,6 +70,10 @@ struct Fake {
     /// RUNNING manual replay of `.3` in workspace `.2` (a dependent that
     /// appears after the pass took its protected set).
     on_delete_prefix: Mutex<Option<(String, sqlx::PgPool, Uuid, Uuid)>>,
+    /// Package #2b: the late dependent [`on_delete_prefix`](Self::on_delete_prefix)
+    /// inserts is a `SUCCESS` replay whose `afterExecution:` run is still
+    /// `RUNNING` (terminal, not idle), rather than a `RUNNING` one.
+    late_dependent_after_run: AtomicBool,
 }
 
 impl Fake {
@@ -142,18 +146,34 @@ impl ObjectStore for Fake {
             }
         };
         if let Some((_, pool, ws, source)) = hook {
-            sqlx::query(
+            let after_run = self.late_dependent_after_run.load(Ordering::SeqCst);
+            let state = if after_run { "SUCCESS" } else { "RUNNING" };
+            let late: Uuid = sqlx::query_scalar(
                 "INSERT INTO workflow.executions (workspace_id, namespace, flow_key, source, \
                    state, history, replayed_from_execution_id) \
-                 VALUES ($1, $2, $3, 'id: f\ntasks: []\n', 'RUNNING', '[\"RUNNING\"]'::jsonb, $4)",
+                 VALUES ($1, $2, $3, 'id: f\ntasks: []\n', $5, jsonb_build_array($5::text), $4) \
+                 RETURNING id",
             )
             .bind(ws)
             .bind(NS)
             .bind(FLOW)
             .bind(source)
-            .execute(&pool)
+            .bind(state)
+            .fetch_one(&pool)
             .await
             .expect("insert the late dependent");
+            if after_run {
+                sqlx::query(
+                    "INSERT INTO workflow.task_runs \
+                       (execution_id, run_ix, task_ix, task_id, type_id, state, history) \
+                     VALUES ($1, 0, 0, 'After_It', 'io.kestra.plugin.core.log.Log', 'RUNNING', \
+                             '[\"RUNNING\"]'::jsonb)",
+                )
+                .bind(late)
+                .execute(&pool)
+                .await
+                .expect("insert the late dependent's after-run");
+            }
         }
         if self.fail_delete_prefix.load(Ordering::SeqCst) || self.failing(uri) {
             return Err(StorageError::S3(format!("{uri}: the store is down")));
@@ -261,9 +281,17 @@ impl World {
         .expect("insert execution")
     }
 
+    /// The execution's state and age. Its runs are aged with it: since
+    /// package #2b the pruner's clock is the later of the execution's
+    /// `updated_at` and its runs' ends, and these fixtures mean "everything of
+    /// this execution happened then".
     async fn set(&self, execution: Uuid, state: &str, days_ago: i32) {
         sqlx::query(
-            "UPDATE workflow.executions SET state = $2, \
+            "WITH runs AS ( \
+               UPDATE workflow.task_runs SET updated_at = now() - make_interval(days => $3) \
+                WHERE execution_id = $1 \
+             ) \
+             UPDATE workflow.executions SET state = $2, \
                updated_at = now() - make_interval(days => $3) WHERE id = $1",
         )
         .bind(execution)
@@ -276,7 +304,11 @@ impl World {
 
     async fn age_hours(&self, execution: Uuid, hours: i32) {
         sqlx::query(
-            "UPDATE workflow.executions SET updated_at = now() - make_interval(hours => $2) \
+            "WITH runs AS ( \
+               UPDATE workflow.task_runs SET updated_at = now() - make_interval(hours => $2) \
+                WHERE execution_id = $1 \
+             ) \
+             UPDATE workflow.executions SET updated_at = now() - make_interval(hours => $2) \
               WHERE id = $1",
         )
         .bind(execution)
@@ -284,6 +316,26 @@ impl World {
         .execute(&self.db.pool)
         .await
         .unwrap();
+    }
+
+    /// Package #2b: a run of `execution` added after its end -- an
+    /// `afterExecution:` run -- in `state`; a terminal one ended
+    /// `ended_days_ago` days ago.
+    async fn after_run(&self, execution: Uuid, state: &str, ended_days_ago: i32) {
+        sqlx::query(
+            "INSERT INTO workflow.task_runs \
+               (execution_id, run_ix, task_ix, task_id, type_id, state, history, ended_at) \
+             VALUES ($1, (SELECT count(*) FROM workflow.task_runs WHERE execution_id = $1), 0, \
+                     'After_It', 'io.kestra.plugin.core.log.Log', $2, jsonb_build_array($2::text), \
+                     CASE WHEN workflow.state_is_terminal($2) \
+                          THEN now() - make_interval(days => $3) END)",
+        )
+        .bind(execution)
+        .bind(state)
+        .bind(ended_days_ago)
+        .execute(&self.db.pool)
+        .await
+        .expect("insert the after-run");
     }
 
     /// A file a task run of `execution` wrote: indexed and stored.
@@ -327,14 +379,16 @@ impl World {
         uri
     }
 
-    /// A stored object with no index row (an upload never committed).
+    /// A stored object with no index row (an upload never committed). The
+    /// run that wrote it is as old as its execution (see [`Self::set`]).
     async fn unindexed(&self, execution: Uuid, name: &str) -> String {
         let run: Uuid = sqlx::query_scalar(
             "INSERT INTO workflow.task_runs \
-               (execution_id, run_ix, task_ix, task_id, type_id, state, history) \
+               (execution_id, run_ix, task_ix, task_id, type_id, state, history, updated_at) \
              VALUES ($1, (SELECT count(*) FROM workflow.task_runs WHERE execution_id = $1), 0, \
                      'Write_It', 'io.kestra.plugin.core.storage.Write', 'SUCCESS', \
-                     '[\"SUCCESS\"]'::jsonb) RETURNING id",
+                     '[\"SUCCESS\"]'::jsonb, \
+                     (SELECT updated_at FROM workflow.executions WHERE id = $1)) RETURNING id",
         )
         .bind(execution)
         .fetch_one(&self.db.pool)
@@ -464,6 +518,91 @@ async fn an_execution_that_has_not_ended_is_never_pruned() {
     w.prefixes_are_own(&[ended]);
 }
 
+/// Package #2b, spec §6: "an execution that has not ended is never pruned"
+/// reads `workflow.execution_is_idle`. A terminal execution whose
+/// `afterExecution:` run is still live keeps its files: the after-run may
+/// read them.
+#[tokio::test]
+async fn the_pruner_keeps_an_execution_whose_after_execution_runs() {
+    let _g = SERIAL.lock().await;
+    let Some(w) = World::new().await else { return };
+    let ended = w.exec("FAILED", 400, None).await;
+    let kept = w.file(ended, "a.txt").await;
+    w.after_run(ended, "RUNNING", 0).await;
+    // The control: the same age, idle, is pruned by the same pass.
+    let idle = w.exec("FAILED", 400, None).await;
+    let pruned = w.file(idle, "a.txt").await;
+
+    let report = w.pass().await;
+
+    assert!(
+        w.kept(&kept).await,
+        "a terminal execution with a live after-run lost its file: {report:?}"
+    );
+    assert!(!w.pruned_at(ended).await);
+    assert!(w.gone(&pruned).await, "the idle control was not pruned");
+    w.prefixes_are_own(&[idle]);
+}
+
+/// Package #2b, spec §6: the retention runs from the end of the execution's
+/// LAST run, which an `afterExecution:` run can put long after the
+/// execution's own end (`updated_at`).
+#[tokio::test]
+async fn the_pruners_retention_runs_from_the_last_runs_end() {
+    let _g = SERIAL.lock().await;
+    let Some(w) = World::new().await else { return };
+    let ended = w.exec("SUCCESS", 400, None).await;
+    let kept = w.file(ended, "a.txt").await;
+    w.after_run(ended, "SUCCESS", 1).await;
+    // The control: its after-run ended outside the window too.
+    let old = w.exec("SUCCESS", 400, None).await;
+    let pruned = w.file(old, "a.txt").await;
+    w.after_run(old, "SUCCESS", 31).await;
+
+    let report = w.pass().await;
+
+    assert!(
+        w.kept(&kept).await,
+        "pruned 1 day after its after-run ended: {report:?}"
+    );
+    assert!(w.gone(&pruned).await, "the control was not pruned");
+    w.prefixes_are_own(&[old]);
+}
+
+/// Package #2b, B5 fix round 1: a terminal run written with no `ended_at`
+/// (before migration 0183, or by a writer that left it NULL) ends no
+/// earlier than its `updated_at`, and the pruner's clock reads that.
+#[tokio::test]
+async fn the_pruner_reads_a_legacy_runs_updated_at_as_its_end() {
+    let _g = SERIAL.lock().await;
+    let Some(w) = World::new().await else { return };
+    let ended = w.exec("SUCCESS", 400, None).await;
+    let kept = w.file(ended, "a.txt").await;
+    sqlx::query(
+        "INSERT INTO workflow.task_runs \
+           (execution_id, run_ix, task_ix, task_id, type_id, state, history, updated_at) \
+         VALUES ($1, (SELECT count(*) FROM workflow.task_runs WHERE execution_id = $1), 0, \
+                 'After_It', 'io.kestra.plugin.core.log.Log', 'SUCCESS', '[\"SUCCESS\"]'::jsonb, \
+                 now() - interval '1 day')",
+    )
+    .bind(ended)
+    .execute(&w.db.pool)
+    .await
+    .expect("a legacy run: terminal, ended_at NULL");
+    // The control: the same execution shape, every run as old as it.
+    let old = w.exec("SUCCESS", 400, None).await;
+    let pruned = w.file(old, "a.txt").await;
+
+    let report = w.pass().await;
+
+    assert!(
+        w.kept(&kept).await,
+        "pruned 1 day after a legacy run's last write: {report:?}"
+    );
+    assert!(w.gone(&pruned).await, "the control was not pruned");
+    w.prefixes_are_own(&[old]);
+}
+
 #[tokio::test]
 async fn an_ended_execution_older_than_the_window_loses_objects_then_rows() {
     let _g = SERIAL.lock().await;
@@ -585,9 +724,9 @@ async fn index_rows_outside_the_executions_prefix_keep_the_family() {
     let own = w.file(e, "a.txt").await;
     let run: Uuid = sqlx::query_scalar(
         "INSERT INTO workflow.task_runs \
-           (execution_id, run_ix, task_ix, task_id, type_id, state, history) \
+           (execution_id, run_ix, task_ix, task_id, type_id, state, history, updated_at) \
          VALUES ($1, 99, 0, 'Write_It', 'io.kestra.plugin.core.storage.Write', 'SUCCESS', \
-                 '[\"SUCCESS\"]'::jsonb) RETURNING id",
+                 '[\"SUCCESS\"]'::jsonb, now() - interval '400 days') RETURNING id",
     )
     .bind(e)
     .fetch_one(&w.db.pool)
@@ -1230,6 +1369,32 @@ async fn a_dependent_started_during_the_pass_keeps_its_source() {
     w.set(replay, "SUCCESS", 0).await;
     w.pass().await;
     assert!(w.gone(&source_file).await);
+}
+
+/// Package #2b: the direct check before a family's delete reads
+/// `execution_is_idle` too. The late dependent is a replay that is already
+/// terminal while its `afterExecution:` run is live.
+#[tokio::test]
+async fn a_late_dependent_whose_after_execution_runs_keeps_its_source() {
+    let _g = SERIAL.lock().await;
+    let Some(w) = World::new().await else { return };
+    let first = w.exec("SUCCESS", 19_990, None).await;
+    let first_file = w.file(first, "a.txt").await;
+    let source = w.exec("SUCCESS", 19_980, None).await;
+    let source_file = w.input(source, "in.csv").await;
+    w.store
+        .late_dependent_after_run
+        .store(true, Ordering::SeqCst);
+    *w.store.on_delete_prefix.lock().unwrap() =
+        Some((first.to_string(), w.db.pool.clone(), w.ws, source));
+
+    let report = w.pass().await;
+
+    assert!(w.gone(&first_file).await, "{report:?}");
+    assert!(
+        w.kept(&source_file).await,
+        "a late dependent with a live after-run lost its source"
+    );
 }
 
 /// W9b spec §11: the pruner deletes under execution prefixes only. Namespace

@@ -8,6 +8,7 @@ import { fullTimestamp } from "@/lib/relativeTime";
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn() }));
 vi.mock("sonner", () => ({ toast }));
 
+import { AFTER_RUN_FOLLOW_MS } from "@/components/workflows/executionState";
 import ExecutionDetail from "@/routes/workflows/ExecutionDetail";
 
 const WS = "eng";
@@ -646,6 +647,58 @@ describe("ExecutionDetail: Kill (workflow kill spec §7)", () => {
     await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
   });
 
+  describe("while an afterExecution run is live on an ended execution", () => {
+    // Ended a moment ago, so the page is still following it.
+    const afterRun = (runState: string) =>
+      execution("SUCCESS", { ended_at: new Date().toISOString(), runs: [run("extract", "SUCCESS", 0), run("after", runState, 1)] });
+
+    it("words the dialog for stopping the afterExecution tasks, not for killing the execution", async () => {
+      new Server(ok(afterRun("RUNNING")));
+      renderPage();
+      await userEvent.click(await screen.findByRole("button", { name: "Kill" }));
+      const dialog = await screen.findByRole("alertdialog", { name: "Stop the afterExecution tasks?" });
+      expect(within(dialog).getByText(/keeps its state/)).toBeInTheDocument();
+      expect(within(dialog).queryByText(/cannot be resumed/)).toBeNull();
+    });
+
+    it("shows Kill, enabled, and says the afterExecution tasks are being stopped after the 202 (not that the execution is killed)", async () => {
+      const server = new Server(ok(afterRun("RUNNING")));
+      server.kill = { status: 202, body: afterRun("RUNNING") };
+      renderPage();
+      await userEvent.click(await screen.findByRole("button", { name: "Kill" }));
+      const dialog = await screen.findByRole("alertdialog", { name: "Stop the afterExecution tasks?" });
+      await userEvent.click(within(dialog).getByRole("button", { name: "Kill" }));
+      await waitFor(() => expect(killCalls(server)).toHaveLength(1));
+      await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Stopping the afterExecution tasks"));
+    });
+
+    it("reads Killing… and is disabled once the run is being killed", async () => {
+      new Server(ok(afterRun("KILLING")));
+      renderPage();
+      expect(await screen.findByRole("button", { name: "Killing…" })).toBeDisabled();
+    });
+
+    it("hides Kill again once every run has ended", async () => {
+      new Server(ok(afterRun("SUCCESS")));
+      renderPage();
+      expect(await screen.findByRole("button", { name: "Replay" })).toBeEnabled();
+      expect(screen.queryByRole("button", { name: /^Kill/ })).toBeNull();
+    });
+
+    it("on a 409 kill_not_applied, says to try again inline, keeps the confirm on, and is not the execution_terminated message", async () => {
+      const server = new Server(ok(afterRun("RUNNING")));
+      server.kill = { status: 409, body: { error: "conflict: the kill did not reach the afterExecution tasks", code: "kill_not_applied" } };
+      renderPage();
+      await userEvent.click(await screen.findByRole("button", { name: "Kill" }));
+      const dialog = await screen.findByRole("alertdialog", { name: "Stop the afterExecution tasks?" });
+      await userEvent.click(within(dialog).getByRole("button", { name: "Kill" }));
+      expect(await within(dialog).findByText("The kill did not take effect. Try again.")).toBeInTheDocument();
+      expect(within(dialog).queryByText(/already ended/)).toBeNull();
+      expect(within(dialog).getByRole("button", { name: "Kill" })).toBeEnabled();
+      expect(toast.success).not.toHaveBeenCalled();
+    });
+  });
+
   it("shows the cascade help in plain words", async () => {
     new Server(ok(execution("RUNNING")));
     renderPage();
@@ -739,6 +792,35 @@ describe("ExecutionDetail: Overview", () => {
     renderPage();
     const children = await screen.findByRole("region", { name: "Child executions" });
     expect(await within(children).findByText("No child executions")).toBeInTheDocument();
+  });
+
+  describe("child executions of an ended execution with a live afterExecution run", () => {
+    const CHILD = "33333333-0000-4000-8000-000000000004";
+    const listReads = (server: Server) => server.calls.filter((c) => c.method === "GET" && c.path === `${BASE}/executions`).length;
+    const ended = (msAgo: number) =>
+      execution("SUCCESS", { ended_at: new Date(Date.now() - msAgo).toISOString(), runs: [run("after", "RUNNING", 0)] });
+
+    it("keeps reading the list, so a child the after-run starts appears", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const server = new Server(ok(ended(1000)));
+      renderPage();
+      const children = await screen.findByRole("region", { name: "Child executions" });
+      expect(await within(children).findByText("No child executions")).toBeInTheDocument();
+      server.children = [{ ...execution("RUNNING"), id: CHILD, parent_execution_id: EXEC, loop_index: null, loop_value: null }];
+      await act(() => vi.advanceTimersByTimeAsync(2500));
+      expect(await within(children).findByRole("link", { name: CHILD.slice(0, 8) })).toBeInTheDocument();
+    });
+
+    it("stops reading once the execution has been terminal past the follow window", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const server = new Server(ok(ended(AFTER_RUN_FOLLOW_MS + 60_000)));
+      renderPage();
+      const children = await screen.findByRole("region", { name: "Child executions" });
+      await within(children).findByText("No child executions");
+      const before = listReads(server);
+      await act(() => vi.advanceTimersByTimeAsync(10_000));
+      expect(listReads(server)).toBe(before);
+    });
   });
 
   it("lists the task runs in run order, each opening the Gantt with that run selected", async () => {

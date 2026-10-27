@@ -19,6 +19,7 @@
 - D1. `cascade` mặc định là `true` và kill các child execution (child của subflow và của loop), như `isOnKillCascade` của Kestra.
 - D2. Execution đang paused được kill mà không cần worker: không có gì đang chạy, nên các run đang chờ của nó đi thẳng sang `KILLED` (Kestra resume nó vào `KILLING`, `core/…/services/ExecutionService.java:1007-1013`; kết quả như nhau).
 - D3. Kill một execution đã terminal là `409 execution_terminated`. Kestra chỉ trả 409 khi `isOnKillCascade` là false (`webserver/…/ExecutionController.java:1757`); egret không có gì để phát ra cho execution terminal, nên từ chối ở cả hai trường hợp.
+  - *Ghi chú, 2026-10-28 (end hooks #2b, câu trả lời Q3 của người dùng; spec `2026-10-26-workflow-end-hooks-design.md` D9 như đã xây).* Một execution terminal nay có thể có thứ để kill: các run `afterExecution:` của nó. Lệnh kill một execution terminal có after-run còn sống được **chấp nhận** (202): nó dừng các run đó và không bao giờ ghi state, history hay `ended_at` của chính execution; `outcome` của audit là state của chính execution cộng `"after_execution": "KILLING"|"KILLED"`. Không có after-run còn sống thì vẫn là `409 execution_terminated` (một `Exit` anh em còn chạy không tính). Một phase kill chưa áp dụng được (một `WorkingDirectory` after-task gốc đang được prepare hoặc finish) là `409 kill_not_applied` có thể retry. Cascade của cha (D1) cũng dừng pha after còn sống của một con terminal, trong khi Kestra bỏ qua hậu duệ terminal. Đây là một chỗ khác vì bảo mật (roadmap §3.1): một tenant không thể viết một task mà không ai kill được.
 - D4. Route kill cần `WF_MANAGE`, cùng quyền với resume và replay (`routes.rs:2833`, `:2939`), và ghi một audit record.
 - D5. `Exit` với `SUCCESS`, `WARNING`, `FAILED` hoặc `CANCELLED` để các nhánh sibling đang chạy tiếp tục chạy, như Kestra ghi trong tài liệu (`core/…/plugin/core/execution/Exit.java`, *"only `KILLED` stops sibling tasks"*).
 - D6. UI có nút Kill trên trang chi tiết execution (W7b), hộp thoại xác nhận với tuỳ chọn cascade, và badge `KILLING`. Không kill theo từng task run, không kill hàng loạt.
@@ -53,6 +54,7 @@
 *Ghi chú, 2026-10-18:* route như đã xây là `POST /api/ws/{workspace}/workflows/executions/{id}/kill`, tiền tố mà mọi route workflow dùng (`routes.rs`), như Global Constraints của plan ghi.
 - `202` kèm execution DTO: lúc này nó là `KILLING`, hoặc `KILLED` nếu không có gì đang chạy.
 - `404` nếu execution không thuộc workspace; `409 execution_terminated` nếu nó đã terminal (D3).
+  - *Ghi chú, 2026-10-28 (end hooks #2b):* trừ khi `afterExecution:` của nó còn chạy: khi đó `202` với execution không đổi (ví dụ `SUCCESS`), hoặc `409 kill_not_applied` (retry) khi phase kill chưa áp dụng được. Xem ghi chú của D3.
 - `WF_MANAGE` (D4). Có tài liệu utoipa, được sinh lại vào client frontend bằng `npm run gen:api`.
 
 ### 3.2 Một transaction

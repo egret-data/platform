@@ -2163,11 +2163,13 @@ pub struct LogPageDto {
     /// ...), read on this call. For display: **do not stop polling on a
     /// terminal state alone** -- see `complete`.
     pub execution_state: String,
-    /// The execution is terminal AND became so more than the 2 s settle lag
-    /// ago. **Stop polling when `complete` is true and `items` is empty**:
-    /// then every stored line has been served. A terminal `execution_state`
-    /// alone is not enough -- the run's last lines may be younger than the
-    /// settle lag and not served yet.
+    /// The execution is idle -- terminal AND every one of its task runs
+    /// terminal, `afterExecution:` runs included -- AND the later of its last
+    /// update and its last run's end is more than the 2 s settle lag ago.
+    /// **Stop polling when `complete` is true and `items` is empty**: then
+    /// every stored line has been served. A terminal `execution_state` alone
+    /// is not enough -- an `afterExecution:` run may still be logging, and the
+    /// last lines may be younger than the settle lag and not served yet.
     pub complete: bool,
 }
 
@@ -2186,10 +2188,12 @@ pub struct LogPageDto {
 /// **When to stop polling: on `complete && items.is_empty()`, never on a
 /// terminal `execution_state` alone.** A run's lines are inserted before its
 /// outcome commits (`RunLog::finish` waits on the log writer's flush barrier),
-/// so once the execution has been terminal for longer than the settle lag,
-/// every line it will ever have is visible; `complete` says exactly that,
-/// computed from the execution row itself. A terminal state seen earlier can
-/// still have its last lines inside the lag. `complete` does NOT mean every
+/// so once the execution has been idle (terminal AND every task run terminal,
+/// `afterExecution:` runs included; `workflow.execution_is_idle`) for longer
+/// than the settle lag (counted from the later of the execution's last update
+/// and its last run's end), every line it will ever have is visible;
+/// `complete` says exactly that. A terminal state seen earlier can still have
+/// its last lines inside the lag. `complete` does NOT mean every
 /// line the run printed was stored: see spec §11 for the cases (the process
 /// dying, a dropped batch, a log-write fault during which the barrier does not
 /// wait, a run executed twice).
@@ -2210,7 +2214,7 @@ pub struct LogPageDto {
         ExecutionLogsQuery,
     ),
     responses(
-        (status = 200, description = "Up to `limit` settled lines after `after`, in id order, with the next cursor, the execution's current state, and `complete`. Lines appear about 2 s after they are written (the settle lag guards against out-of-order commits). Stop polling on `complete` with no `items`, not on a terminal state alone.", body = LogPageDto),
+        (status = 200, description = "Up to `limit` settled lines after `after`, in id order, with the next cursor, the execution's current state, and `complete`. Lines appear about 2 s after they are written (the settle lag guards against out-of-order commits). Stop polling on `complete` with no `items`, not on a terminal state alone: an ended execution's `afterExecution:` runs can still be logging.", body = LogPageDto),
         (status = 400, description = "`limit` outside 1..=2000, a `min_level` that is not one of TRACE/DEBUG/INFO/WARN/ERROR, or a malformed `{id}`/`after`/`task_run_id`", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
@@ -3155,12 +3159,22 @@ pub struct KillQuery {
 /// `ErrorBody.code` of the kill route's 409 (spec D3).
 pub const EXECUTION_TERMINATED_CODE: &str = "execution_terminated";
 
+/// `ErrorBody.code` of the kill route's RETRYABLE 409 (end hooks #2b, B3 fix
+/// round 1, I1): the execution has ended and its `afterExecution:` is still
+/// running, but its only live task is a block being prepared or finished,
+/// which cannot be killed until that step has landed. Nothing is written.
+pub const KILL_NOT_APPLIED_CODE: &str = "kill_not_applied";
+
 /// The kill route's error: every [`egret_core::Error`], plus the coded 409.
 #[derive(Debug)]
 pub enum KillError {
     Core(Error),
     /// The execution is terminal, in this state.
     Terminated(Uuid, String),
+    /// The execution is terminal and its `afterExecution:` runs, but the kill
+    /// could not be applied now ([`crate::worker::KillOutcome::NotApplied`]):
+    /// a retryable 409 with [`KILL_NOT_APPLIED_CODE`].
+    NotApplied(Uuid),
 }
 
 impl From<Error> for KillError {
@@ -3184,6 +3198,18 @@ impl axum::response::IntoResponse for KillError {
                 }),
             )
                 .into_response(),
+            KillError::NotApplied(id) => (
+                StatusCode::CONFLICT,
+                Json(egret_core::http::ErrorBody {
+                    error: Error::Conflict(format!(
+                        "execution {id}: the kill did not apply: an afterExecution block is \
+                         being prepared or finished; retry"
+                    ))
+                    .to_string(),
+                    code: Some(KILL_NOT_APPLIED_CODE.to_string()),
+                }),
+            )
+                .into_response(),
         }
     }
 }
@@ -3198,55 +3224,68 @@ impl axum::response::IntoResponse for KillError {
         KillQuery,
     ),
     responses(
-        (status = 202, description = "The kill is recorded. The body is the execution afterwards: `KILLING` while a running task still has to be stopped by a worker (it then becomes `KILLED` on its own), or `KILLED` if nothing was running. Every run that was retrying, paused or not yet started is `KILLED` already.", body = ExecutionDto),
+        (status = 202, description = "The kill is recorded. The body is the execution afterwards: `KILLING` while a running task still has to be stopped by a worker (it then becomes `KILLED` on its own), or `KILLED` if nothing was running. Every run that was retrying, paused or not yet started is `KILLED` already. On an execution that has already ended but whose `afterExecution:` tasks still run, only those tasks are killed: the body keeps the execution's own final state (e.g. `SUCCESS`).", body = ExecutionDto),
         (status = 400, description = "`cascade` is not `true` or `false`", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed", body = egret_core::http::ErrorBody),
-        (status = 409, description = "The execution has already ended (code `execution_terminated`). Nothing is written.", body = egret_core::http::ErrorBody),
+        (status = 409, description = "The execution has already ended and none of its `afterExecution:` tasks is running (code `execution_terminated`), or its `afterExecution:` kill cannot apply yet because a block is being prepared or finished (code `kill_not_applied`; retry). Nothing is written.", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
-/// Kill an execution that has not ended.
+/// Kill an execution, or the `afterExecution:` tasks of one that has ended.
 ///
 /// Tasks retrying, paused or not yet started end `KILLED` at once; a running
 /// task is stopped by a worker -- the one running it, or the next one to claim
 /// it -- and the execution is `KILLING` until it has. With `cascade` (the default) its `Loop` iterations
-/// and `Subflow` child executions are killed the same way.
+/// and `Subflow` child executions are killed the same way. On an ended
+/// execution whose `afterExecution:` tasks still run, only those are killed
+/// and the execution's state is not changed; the audit `outcome` is then that
+/// state, with `after_execution` saying what happened to the tasks.
 async fn kill_execution(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
     Query(q): Query<KillQuery>,
 ) -> std::result::Result<(StatusCode, Json<ExecutionDto>), KillError> {
-    // Workflow kill spec §3. The terminal check is made twice, as resume's
-    // is: here off the scoped read (so a foreign id never reaches the worker,
-    // and the common refusal is cheap), and again by
-    // `worker::kill_execution` under the execution's lock, which decides the
-    // race with a worker ending it.
+    // Workflow kill spec §3. The scoped read keeps a foreign id from ever
+    // reaching the worker. The terminal check is `worker::kill_execution`'s
+    // alone, under the execution's lock: since end hooks #2b (the user's
+    // answer to Q3, 2026-10-27) a terminal execution whose `afterExecution:`
+    // is still running is killable, and only its plan can tell.
     egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
     let before = st.executions.get(ctx.workspace_id.0, id).await?;
-    // An unknown spelling is not called terminal: the worker's `load` refuses
-    // it, which is a 500 rather than a guess.
-    if crate::worker::from_wire(&before.execution.state).is_some_and(RunState::is_terminal) {
-        return Err(KillError::Terminated(id, before.execution.state));
-    }
     let cascade = q.cascade.unwrap_or(true);
     let (outcome, forced) =
         crate::worker::kill_execution_reporting(&st.db.pool, ctx.workspace_id.0, id, cascade)
             .await?;
-    let outcome = match outcome {
-        crate::worker::KillOutcome::Killing => RunState::Killing,
-        crate::worker::KillOutcome::Killed => RunState::Killed,
+    // `after_execution`: a kill of the post-terminal phase (Q3) leaves the
+    // execution's state alone, so the outcome is the execution's own state
+    // and the record says what happened to the phase.
+    let (outcome, after_execution) = match outcome {
+        crate::worker::KillOutcome::Killing => (RunState::Killing, None),
+        crate::worker::KillOutcome::Killed => (RunState::Killed, None),
+        crate::worker::KillOutcome::AfterExecution { state, stopped } => (
+            state,
+            Some(if stopped {
+                RunState::Killed
+            } else {
+                RunState::Killing
+            }),
+        ),
         crate::worker::KillOutcome::Terminated(s) => {
             return Err(KillError::Terminated(id, s.wire().to_string()));
         }
+        crate::worker::KillOutcome::NotApplied(_) => return Err(KillError::NotApplied(id)),
     };
     let mut audited = serde_json::json!({
         "from_state": before.execution.state,
         "cascade": cascade,
         "outcome": outcome.wire(),
     });
+    if let Some(phase) = after_execution {
+        audited["after_execution"] = serde_json::Value::String(phase.wire().to_string());
+    }
     // Debt D4: only when the kill closed an execution it could not load by
     // force, so every other record keeps its shape.
     if forced {

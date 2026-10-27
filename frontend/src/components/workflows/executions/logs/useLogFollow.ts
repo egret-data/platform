@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { workflowGetExecutionLogs } from "@/api/generated/workflow/workflow";
 import type { LogLevel, LogLineDto, LogPageDto, WorkflowGetExecutionLogsParams } from "@/api/generated/model";
+import { AFTER_RUN_FOLLOW_MS, isTerminalState, type LiveExecution } from "@/components/workflows/executionState";
 import { nextPollMs } from "@/components/workflows/executions/polling";
 
 /**
@@ -29,6 +30,11 @@ import { nextPollMs } from "@/components/workflows/executions/polling";
  * meant to read (review I1), and the next page would push the history the
  * user asked for out again. `followLatest` (the view calls it when the user
  * is back at the bottom) re-arms the window.
+ *
+ * **The bound.** `complete` means the execution is idle, which an execution with
+ * a run that never ends never is. So once the execution has been terminal for
+ * `AFTER_RUN_FOLLOW_MS` (`endedAt`), the page counts as finished even when
+ * `complete` is false: the follower does not read for ever.
  */
 
 /** Lines per read (spec §7: "Pages are 500 lines"). */
@@ -48,6 +54,17 @@ export interface LogFilters {
 export interface LogFollowOptions {
   pageSize?: number;
   windowLines?: number;
+  /**
+   * When the execution ended (`logEndedAt`), or null/undefined while it has not.
+   * Past `AFTER_RUN_FOLLOW_MS` after it, with the page's state terminal too,
+   * the follower stops.
+   */
+  endedAt?: string | null;
+}
+
+/** The `endedAt` a log view of this execution passes: its end once it is terminal, else null. */
+export function logEndedAt(execution: Pick<LiveExecution, "state" | "ended_at" | "updated_at">): string | null {
+  return isTerminalState(execution.state) ? (execution.ended_at ?? execution.updated_at) : null;
 }
 
 export interface LogFollow {
@@ -101,8 +118,18 @@ async function readPage(
   return res.data;
 }
 
-/** A page is final when the execution is complete and nothing more came back. */
-const pageFinished = (page: LogPageDto) => page.complete && page.items.length === 0;
+/**
+ * A page is final when the execution is complete and nothing more came back,
+ * or when the execution has been terminal past the follow window (`endedAt`).
+ */
+function pageFinished(page: LogPageDto, pageSize: number, endedAt: string | null | undefined, now: number): boolean {
+  if (page.complete && page.items.length === 0) return true;
+  // A full page means more lines are settled: the bound never cuts it off from the next read.
+  if (page.items.length >= pageSize) return false;
+  if (!endedAt || !isTerminalState(page.execution_state)) return false;
+  const ended = Date.parse(endedAt);
+  return Number.isFinite(ended) && now - ended >= AFTER_RUN_FOLLOW_MS;
+}
 
 interface Snapshot {
   /** The read this snapshot belongs to; a snapshot of other filters is not shown. */
@@ -134,6 +161,11 @@ export function useLogFollow(ws: string, executionId: string, filters: LogFilter
   const windowLines = options.windowLines ?? LOG_WINDOW_LINES;
   const { minLevel, taskId, taskRunId } = filters;
   const key = JSON.stringify([ws, executionId, minLevel ?? null, taskId ?? null, taskRunId ?? null, pageSize, windowLines]);
+  // Read at each poll, so a new end time does not restart the follower.
+  const endedAtRef = useRef(options.endedAt);
+  useEffect(() => {
+    endedAtRef.current = options.endedAt;
+  });
   const [snap, setSnap] = useState<Snapshot>(INITIAL);
   const controls = useRef<{ retry: () => void; loadEarlier: () => void; followLatest: () => void }>({
     retry: () => {},
@@ -193,7 +225,7 @@ export function useLogFollow(ws: string, executionId: string, filters: LogFilter
           : nextPollMs(
               { data: lastPage, status: error === null ? "success" : "error", dataUpdatedAt: lastGoodAt },
               Date.now(),
-              pageFinished,
+              (p) => pageFinished(p, pageSize, endedAtRef.current, Date.now()),
             );
       if (wait === false) return;
       timer = setTimeout(poll, wait);
@@ -220,7 +252,7 @@ export function useLogFollow(ws: string, executionId: string, filters: LogFilter
         lastPage = page;
         lastGoodAt = Date.now();
         error = null;
-        done = pageFinished(page);
+        done = pageFinished(page, pageSize, endedAtRef.current, Date.now());
       } catch (e) {
         if (abort.signal.aborted) return;
         error = e;

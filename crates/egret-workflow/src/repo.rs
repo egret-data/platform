@@ -1513,28 +1513,30 @@ impl ExecutionRepo {
     /// in another workspace is [`Error::NotFound`], exactly as one that never
     /// existed.
     ///
-    /// `complete` is computed from this same row: the state is terminal
-    /// ([`RunState::is_terminal`](crate::executor::RunState::is_terminal), the
-    /// one list) AND `updated_at` is older than
-    /// [`SETTLE_LAG`](crate::logs::SETTLE_LAG). The run's last lines were
+    /// `complete` is computed from this row and its runs' ends: the
+    /// execution is idle (`workflow.execution_is_idle`, migration 0210:
+    /// terminal AND no task run live) AND its last work ended -- the later of
+    /// `updated_at` and the runs' latest `COALESCE(ended_at, updated_at)` --
+    /// longer ago than [`SETTLE_LAG`](crate::logs::SETTLE_LAG). A run's last lines were
     /// inserted before its outcome committed (`RunLog::finish`'s flush
-    /// barrier), so once the settle lag has also passed since that commit,
-    /// the page has nothing more to reveal (spec §6).
+    /// barrier), so once the settle lag has also passed since the last
+    /// commit, the page has nothing more to reveal (spec §6). Idle, not
+    /// terminal (package #2b, spec §6 of the end-hooks design): an
+    /// `afterExecution:` run, or an `Exit` sibling, logs after its execution
+    /// is terminal.
     pub async fn log_status(&self, ws: Uuid, id: Uuid) -> Result<ExecutionLogStatus> {
-        let terminal: Vec<&'static str> = crate::executor::RunState::ALL
-            .iter()
-            .filter(|s| s.is_terminal())
-            .map(|s| s.wire())
-            .collect();
         let row: Option<(String, bool)> = sqlx::query_as(
-            "SELECT state, \
-                    state = ANY($3) \
-                      AND updated_at < now() - make_interval(secs => $4) \
-               FROM workflow.executions WHERE id = $1 AND workspace_id = $2",
+            "SELECT e.state, \
+                    COALESCE(workflow.execution_is_idle(e.id), false) \
+                      AND GREATEST(e.updated_at, \
+                                   (SELECT max(COALESCE(r.ended_at, r.updated_at)) \
+                                      FROM workflow.task_runs r \
+                                     WHERE r.execution_id = e.id)) \
+                          < now() - make_interval(secs => $3) \
+               FROM workflow.executions e WHERE e.id = $1 AND e.workspace_id = $2",
         )
         .bind(id)
         .bind(ws)
-        .bind(terminal)
         .bind(crate::logs::SETTLE_LAG.as_secs_f64())
         .fetch_optional(&self.db.pool)
         .await
@@ -1621,6 +1623,7 @@ impl ExecutionRepo {
 pub struct ExecutionLogStatus {
     /// Kestra's wire spelling, as stored.
     pub state: String,
-    /// Terminal, and terminal for longer than the settle lag.
+    /// Idle (terminal, no task run live), and its last work ended longer
+    /// ago than the settle lag.
     pub complete: bool,
 }

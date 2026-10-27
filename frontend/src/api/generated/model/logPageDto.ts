@@ -26,11 +26,13 @@ export interface LogPageDto {
      */
   execution_state: string;
   /**
-     * The execution is terminal AND became so more than the 2 s settle lag
-     * ago. **Stop polling when `complete` is true and `items` is empty**:
-     * then every stored line has been served. A terminal `execution_state`
-     * alone is not enough -- the run's last lines may be younger than the
-     * settle lag and not served yet.
+     * The execution is idle -- terminal AND every one of its task runs
+     * terminal, `afterExecution:` runs included -- AND the later of its last
+     * update and its last run's end is more than the 2 s settle lag ago.
+     * **Stop polling when `complete` is true and `items` is empty**: then
+     * every stored line has been served. A terminal `execution_state` alone
+     * is not enough -- an `afterExecution:` run may still be logging, and the
+     * last lines may be younger than the settle lag and not served yet.
      */
   complete: boolean;
 }

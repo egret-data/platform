@@ -122,7 +122,7 @@ function run(task_id: string, state: string, run_ix: number): TaskRunDto {
   } as unknown as TaskRunDto;
 }
 
-function execution(state: string): ExecutionDto {
+function execution(state: string, afterRun = false): ExecutionDto {
   return {
     id: EXEC,
     flow_id: null,
@@ -140,7 +140,11 @@ function execution(state: string): ExecutionDto {
     ended_at: state === "RUNNING" ? null : T3,
     updated_at: T3,
     source: "",
-    runs: [run("first", "SUCCESS", 0), run("loop", "RUNNING", 1), run("call", "RUNNING", 2)],
+    // A finished execution has only finished runs, unless an afterExecution run is still live.
+    runs:
+      state === "RUNNING" || afterRun
+        ? [run("first", "SUCCESS", 0), run("loop", "RUNNING", 1), run("call", "RUNNING", 2)]
+        : [run("first", "SUCCESS", 0), run("loop", "SUCCESS", 1), run("call", "SUCCESS", 2)],
     can_manage: false,
   } as unknown as ExecutionDto;
 }
@@ -259,6 +263,21 @@ describe("ExecutionTopologyTab: updates (spec §6.3)", () => {
     await waitFor(() => expect(server.graphReads()).toHaveLength(3));
 
     // The execution's own poll saw it end: one read for the final states, then none.
+    update(execution("SUCCESS"));
+    await waitFor(() => expect(server.graphReads()).toHaveLength(4));
+    await act(() => vi.advanceTimersByTimeAsync(20_000));
+    expect(server.graphReads()).toHaveLength(4);
+  });
+
+  it("keeps reading every 2 s while a terminal execution still has a live afterExecution run, and stops when it ends", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const server = new Server(ok(GRAPH));
+    const { update } = renderTab(execution("SUCCESS", true));
+    await findNode("tasks.first");
+    await act(() => vi.advanceTimersByTimeAsync(2000));
+    await waitFor(() => expect(server.graphReads()).toHaveLength(2));
+    await act(() => vi.advanceTimersByTimeAsync(2000));
+    await waitFor(() => expect(server.graphReads()).toHaveLength(3));
     update(execution("SUCCESS"));
     await waitFor(() => expect(server.graphReads()).toHaveLength(4));
     await act(() => vi.advanceTimersByTimeAsync(20_000));

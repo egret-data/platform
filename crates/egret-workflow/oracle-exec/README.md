@@ -3218,6 +3218,8 @@ owner is how a suppression list starts.
 
 > **Correction, 2026-10-27 (end hooks A7).** Two rows of the table above (a `Loop`'s own `errors:` and `finally:`, both "unclaimed", and "`models::Loop` has no `errors` field") are history. `models::Loop` carries `errors` and `finally` since end hooks A2, the flow's and every flowable's `finally:` are run by A4, and a `Loop` iteration runs the `Loop`'s own lists since A6; see the sections "End hooks A4" and "End hooks A6" below.
 
+> **Correction, 2026-10-27 (end hooks #2b Task B1).** The `afterExecution:` row above is history too: the plan flattens it (`Plan::after_execution`) and `advance` runs it once the execution is terminal; 8 of its 10 entries banked. See the section "End hooks #2b Task B1" below.
+
 **The `sla:` row is the first this table has lowered for a reason the reader
 must not read as progress-pending.** Every other lowering marks work somebody
 can still do. Here the remaining three, plus the two in `UNATTRIBUTED` held by
@@ -13628,3 +13630,87 @@ named bank, measured: `invalids/loop-switch-failed`, `valids/finally-loop` and
 - Baselined: run terminals 254 -> 210, sub-executions 39 -> 31, executions
   99 -> 88, `finally:` construct row 5 -> 3, `Loop` row 17 -> 14, handler
   ceiling 271 -> 273 (`handler-surface.txt` regenerated).
+
+## End hooks #2b Task B1 (2026-10-27): `afterExecution:` runs once the execution is terminal, eight entries bank
+
+`executor::advance` gained the post-terminal phase (spec D8, Kestra's
+`ExecutorService.handleAfterExecution`): once the execution's last state is
+terminal, `executor::after_execution::drive` walks the flow's
+`afterExecution:` one task at a time, as runs with no parent, and never emits
+a command that writes the execution (`SetExecutionState`, `ScheduleRetry`,
+`PauseRun`). The execution's history and `ended_at` do not move. `KILLING`
+still goes to `kill::advance_killing`, so the phase starts once the execution
+is `KILLED`. The plan flattens `afterExecution:` last (`Plan::after_execution`,
+D3), so no earlier index moves. Nothing in the phase is retried (D11:
+`retry::policy_for` answers `None` for a run under `afterExecution:`). The
+oracle's worker already drives `advance` after a terminal state, so the eight
+entries the spec expected for all of #2b bank here. Ratchet 301/60/60/0 ->
+301/52/52/0; census unchanged (295 live, 25 validate-refused, 21 unknown type).
+
+**Banked (8):** `valids/after-execution-error`, `after-execution-finally`,
+`after-execution-flowable`, `flow-concurrency-queue-after-execution`,
+`flow-concurrency-queue-killed-after-execution`,
+`restart-with-after-execution`, `sleep-long` and
+`sleep-long-after-execution-flowable`.
+
+**Still baselined:** `valids/after-execution` (its `end` renders
+`{{ execution.outputs.final }}`, and egret never evaluates flow `outputs:`;
+#6) and `valids/pause-errors-finally-after-execution` (refused for its
+`Pause` `errors:`; #9).
+
+Figures that moved, each pinned with a dated note:
+- the bank split: (301, 241, 60) -> (301, 249, 52);
+- the field breakdown: runs 46 -> 38, order 17 -> 8, total 57 -> 49;
+- pairs: `EGRET_TOP_LEVEL_PAIRS` 852 -> 874, `EGRET_PAIRS_BEFORE_RESTRICTION`
+  1160 -> 1182; kept pairs on matching entries 586 + 197 -> 610 + 197, on
+  baselined entries 303 + 30 -> 279 + 30;
+- the timeout split: (2, 58, 60) -> (2, 50, 52);
+- baselined: run terminals 210 -> 187, executions 88 -> 80, run-history
+  tokens 842 -> 752, execution-history tokens 329 -> 305;
+- residual rows: `finally:` 3 -> 2, `afterExecution:` 10 -> 2;
+- concurrency declarers that match: 10 -> 12; baselined ids named `kill`:
+  one -> none;
+- the plan reconstruction: 456/109/293/106 -> 467/111/280/106 (the 13 golden
+  `afterExecution:` runs are planned now);
+- handler ceiling 273 -> 281 (`afterExecution:` is no longer a blocker;
+  `handler-surface.txt` regenerated).
+
+## End hooks #2b as built (Task B7, 2026-10-28): what banked, what did not, and what the oracle cannot see
+
+Measured at HEAD `cf7e7c5c` (`cargo test -p egret-workflow --test executor --
+--nocapture`): ratchet **301 / 52 / 52 / 0**, `(301, 249, 52)`; census 295
+live, 25 validate-refused, 21 unknown type. The printout is identical to Task
+B1's apart from test order. Tasks B2 to B6 moved no constant; every constant
+B1 moved was re-read against this printout and none drifted.
+
+**Banked by #2b: 8 of the 8 the spec expected, all in Task B1** (section
+above). The spec's `(301, 250, 51)` was computed from #2a's expected 59;
+#2a ended at 60, so 52 is the full expectation.
+
+**Did not bank, and why:**
+- `valids/after-execution`: its `afterExecution:` run `end` now exists, but
+  it renders `{{ execution.outputs.final }}` and egret never evaluates flow
+  `outputs:` (`worker/render.rs`). Package #6 (roadmap note 6). It differs on
+  `runs` only now: B7 printed the eight entries that differ on `order`
+  (`valids/dag`, `full`, `if`, `loop-object`, `loop-object-in-list`,
+  `parallel-disabled-tasks`, `task-runif-workingdirectory`, `variables`), and
+  it is not among them. It is the ninth entry of B1's `MISMATCH_ON_ORDER`
+  drop 17 -> 8, which B1 could not itemise.
+- `valids/pause-errors-finally-after-execution`: refused at start for its
+  `Pause` `errors:` (and its `Pause` `finally:`), package #9.
+
+**What the golden cannot pin** (each is covered by DB tests in
+`tests/end_hooks.rs`, `tests/migration_0210_execution_is_idle.rs`,
+`tests/storage_prune.rs`, `tests/task_logs.rs` and `tests/exit_sibling_idle.rs`
+instead):
+- a kill during `afterExecution:`. Kestra answers 409 and force-executes the
+  list, so no golden can show egret's divergence (a kill stops the after-runs,
+  the user's Q3); `flow-concurrency-queue-killed-after-execution` killed
+  nothing;
+- the refusals of `Pause`, `Exit` and `LoopUntil`/`WaitFor` inside
+  `afterExecution:` and the `retry:` warning there: no corpus flow has one, so
+  `LIVE`, `VALIDATE_REFUSED` and `UNKNOWN_TYPE_REFUSED` did not move;
+- the parent's report at "terminated": no corpus `Subflow` child has an
+  `afterExecution:`;
+- the sweeps, the pruner and the logs route: the harness has no storage or
+  container clock.

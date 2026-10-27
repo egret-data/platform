@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
+import { AFTER_RUN_FOLLOW_MS } from "@/components/workflows/executionState";
 import { downloadLogs, formatLogLine, useLogFollow, type LogFilters } from "@/components/workflows/executions/logs/useLogFollow";
 import { EXEC, line, LogServer, page, WS } from "./logServer";
 
@@ -119,6 +120,69 @@ describe("useLogFollow: when it reads", () => {
     expect(result.current.done).toBe(true);
     await advance(30_000);
     expect(server.queries).toHaveLength(2);
+  });
+
+  describe("the bound on an execution that never becomes idle (complete stays false)", () => {
+    const ENDED = "2026-10-10T10:00:00Z";
+    const endedAgo = (ms: number) => new Date(Date.now() - ms).toISOString();
+    const idle = () => page([], { execution_state: "SUCCESS", complete: false });
+
+    it("keeps reading every 2 s inside the follow window after the execution ended", async () => {
+      const server = new LogServer().install();
+      server.replies = [idle()];
+      const { result } = follow({}, { endedAt: endedAgo(60_000) });
+      await settle();
+      await advance(10_000);
+      expect(server.queries.length).toBeGreaterThanOrEqual(5);
+      expect(result.current.done).toBe(false);
+    });
+
+    it("stops once the execution has been terminal for the whole window", async () => {
+      const server = new LogServer().install();
+      server.replies = [idle()];
+      const { result } = follow({}, { endedAt: endedAgo(AFTER_RUN_FOLLOW_MS + 1000) });
+      await settle();
+      expect(result.current.done).toBe(true);
+      await advance(30_000);
+      expect(server.queries).toHaveLength(1);
+    });
+
+    it("never cuts off a full page: it reads the next one at once, and stops after one that is not full", async () => {
+      const server = new LogServer().install();
+      server.replies = [
+        page([line(1), line(2)], { execution_state: "SUCCESS", complete: false }),
+        page([line(3), line(4)], { execution_state: "SUCCESS", complete: false }),
+        page([line(5)], { execution_state: "SUCCESS", complete: false }),
+      ];
+      const { result } = follow({}, { pageSize: 2, endedAt: endedAgo(AFTER_RUN_FOLLOW_MS + 1000) });
+      await settle();
+      await settle();
+      await settle();
+      expect(server.queries).toHaveLength(3);
+      expect(ids(result)).toEqual([1, 2, 3, 4, 5]);
+      expect(result.current.done).toBe(true);
+      await advance(30_000);
+      expect(server.queries).toHaveLength(3);
+    });
+
+    it("does not stop while the page still says the execution is running", async () => {
+      const server = new LogServer().install();
+      server.replies = [page([], { execution_state: "RUNNING", complete: false })];
+      follow({}, { endedAt: ENDED });
+      await settle();
+      await advance(6000);
+      expect(server.queries.length).toBeGreaterThanOrEqual(3);
+    });
+
+    it("still stops on complete with no items, as before", async () => {
+      const server = new LogServer().install();
+      server.replies = [page([], { execution_state: "SUCCESS", complete: true })];
+      const { result } = follow({}, { endedAt: endedAgo(1000) });
+      await settle();
+      expect(result.current.done).toBe(true);
+      await advance(30_000);
+      expect(server.queries).toHaveLength(1);
+    });
   });
 
   it("does not stop on a terminal state alone: the reader lags the writer", async () => {

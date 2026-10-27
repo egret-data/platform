@@ -4,7 +4,7 @@ import { Info, ListTree, X } from "lucide-react";
 import type { ExecutionDto } from "@/api/generated/model";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { Button } from "@/components/ui/button";
-import { isTerminalState } from "@/components/workflows/executionState";
+import { executionLive, isTerminalState } from "@/components/workflows/executionState";
 import { buildGantt } from "@/components/workflows/executions/gantt/ganttModel";
 import {
   GanttRunPanel,
@@ -42,9 +42,10 @@ function usePrefersReducedMotion(): boolean {
  * The clock live bars are drawn to. While `live`, it advances on animation
  * frames, at most once per `minMs`, and only while the document is visible:
  * `visibilitychange` to hidden cancels the frame loop, back to visible
- * restarts it. Not live, it stands still.
+ * restarts it. Not live, it stands still. `stillLive` is asked at each tick: once
+ * it says no (an afterExecution run's follow window passed), the loop ends.
  */
-export function useGanttClock(live: boolean, minMs: number): number {
+export function useGanttClock(live: boolean, minMs: number, stillLive?: (now: number) => boolean): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!live) return;
@@ -55,6 +56,10 @@ export function useGanttClock(live: boolean, minMs: number): number {
       if (t - last >= minMs) {
         last = t;
         setNow(t);
+      }
+      if (stillLive && !stillLive(t)) {
+        frame = 0;
+        return;
       }
       frame = requestAnimationFrame(draw);
     };
@@ -72,7 +77,7 @@ export function useGanttClock(live: boolean, minMs: number): number {
       stop();
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [live, minMs]);
+  }, [live, minMs, stillLive]);
   return now;
 }
 
@@ -88,13 +93,16 @@ export default function ExecutionGanttTab({ execution, slots }: { execution: Exe
   const [params, setParams] = useSearchParams();
   const view = useRef<GanttViewHandle>(null);
   const reducedMotion = usePrefersReducedMotion();
-  const live = !isTerminalState(execution.state);
+  // The clock runs while a run could still be open: not terminal, or an afterExecution run live.
+  // The clock stops itself, and `buildGantt` caps the bars, once the follow window (`AFTER_RUN_FOLLOW_MS`) has passed.
+  const clockOn = !isTerminalState(execution.state) || execution.runs.some((r) => !isTerminalState(r.state));
   const minMs = reducedMotion
     ? LIVE_REDRAW_MS.reducedMotion
     : execution.runs.length < LIVE_REDRAW_MS.threshold
       ? LIVE_REDRAW_MS.few
       : LIVE_REDRAW_MS.many;
-  const now = useGanttClock(live, minMs);
+  const stillLive = useCallback((t: number) => executionLive(execution, t), [execution]);
+  const now = useGanttClock(clockOn, minMs, stillLive);
   const model = useMemo(() => buildGantt(execution, now), [execution, now]);
   const raw = params.get("run");
   const selected = parseRun(raw);

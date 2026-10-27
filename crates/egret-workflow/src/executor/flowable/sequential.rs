@@ -173,3 +173,17 @@ pub(crate) fn walk_errors(
 ) -> Option<Step> {
     walk(plan, state, list, parent, now)
 }
+
+/// [`walk`], for the flow's `afterExecution:` (end hooks #2b, spec D8): the
+/// post-terminal phase walks its list one task at a time under no parent,
+/// with no `errors:`/`finally:` and no list choice -- the execution's own
+/// lists are over. `None` is "the list is exhausted".
+pub(crate) fn drive_list(
+    plan: &Plan,
+    state: &ExecutionState,
+    list: &[TaskIx],
+    parent: Option<RunIx>,
+    now: Tick,
+) -> Option<Step> {
+    walk(plan, state, list, parent, now)
+}

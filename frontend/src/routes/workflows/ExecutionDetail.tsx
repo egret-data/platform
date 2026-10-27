@@ -36,6 +36,7 @@ import { WorkerOffNotice } from "@/components/workflows/WorkerOffNotice";
 import ExecutionGanttTab from "@/components/workflows/executions/gantt/ExecutionGanttTab";
 import type { GanttRunSlots } from "@/components/workflows/executions/gantt/GanttView";
 import ExecutionLogsTab from "@/components/workflows/executions/logs/ExecutionLogsTab";
+import { logEndedAt } from "@/components/workflows/executions/logs/useLogFollow";
 import { LogView } from "@/components/workflows/executions/logs/LogView";
 import ExecutionOutputsTab from "@/components/workflows/executions/outputs/ExecutionOutputsTab";
 import { OutputsTree } from "@/components/workflows/executions/outputs/OutputsTree";
@@ -180,13 +181,14 @@ function ExecutionFrame({ ws, tab, execution }: { ws: string; tab: ExecutionTab;
   const href = `${base}/executions/${encodeURIComponent(execution.id)}`;
   const now = useNow();
   // Stable across polls: the Gantt renders a slot once per selected run (Task 4).
+  const endedAt = logEndedAt(execution);
   const ganttSlots = useMemo<GanttRunSlots>(
     () => ({
-      logs: (run: TaskRunDto) => <RunLogs ws={ws} executionId={execution.id} run={run} />,
+      logs: (run: TaskRunDto) => <RunLogs ws={ws} executionId={execution.id} run={run} endedAt={endedAt} />,
       // The panel is keyed by run, so the tree's open items start afresh for each run.
       outputs: (run: TaskRunDto) => <OutputsTree ws={ws} executionId={execution.id} run={run} loopValue={execution.loop_value} />,
     }),
-    [ws, execution.id, execution.loop_value],
+    [ws, execution.id, execution.loop_value, endedAt],
   );
 
   return (
@@ -223,7 +225,7 @@ function ExecutionFrame({ ws, tab, execution }: { ws: string; tab: ExecutionTab;
 }
 
 /** A run's lines in the Gantt's run panel: the Logs tab's view, filtered to the run, ungrouped. */
-function RunLogs({ ws, executionId, run }: { ws: string; executionId: string; run: TaskRunDto }) {
+function RunLogs({ ws, executionId, run, endedAt }: { ws: string; executionId: string; run: TaskRunDto; endedAt: string | null }) {
   const filters = useMemo(() => ({ taskRunId: run.id }), [run.id]);
   const runs = useMemo(() => [run], [run]);
   return (
@@ -232,6 +234,7 @@ function RunLogs({ ws, executionId, run }: { ws: string; executionId: string; ru
       executionId={executionId}
       filters={filters}
       runs={runs}
+      endedAt={endedAt}
       grouped={false}
       heightClass="h-72"
       label={`Logs of ${run.task_id} #${run.run_ix}`}
@@ -335,7 +338,7 @@ function ExecutionHeader({ ws, execution, now }: { ws: string; execution: Execut
       }
       actions={
         /* Every action needs `workflow:manage`; a user without it does not see them (spec §5.2). */
-        execution.can_manage ? <ExecutionActions ws={ws} execution={execution} /> : null
+        execution.can_manage ? <ExecutionActions ws={ws} execution={execution} now={now} /> : null
       }
     />
   );
@@ -345,12 +348,14 @@ type Pending = "resume" | "replay" | "kill" | null;
 
 /** The kill route's 409 code: the execution ended before the kill reached it (workflow kill spec D3). */
 const EXECUTION_TERMINATED = "execution_terminated";
+/** The kill route's other 409: it was not applied to the run (end hooks B3); asking again can work. */
+const KILL_NOT_APPLIED = "kill_not_applied";
 
 /**
  * Resume, Replay (spec §5.2) and Kill (workflow kill spec §7), each confirmed
  * first (FE-ACTION-1), each saying why when disabled (FE-ACTION-4).
  */
-function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionDto }) {
+function ExecutionActions({ ws, execution, now }: { ws: string; execution: ExecutionDto; now: number }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const resume = useWorkflowResumeExecution();
@@ -367,7 +372,9 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
   const resumeState = canResume(execution);
   const replayShown = showsReplay(execution);
   const replayState = canReplay(execution);
-  const killShown = showsKill(execution);
+  // An ended execution can only be killed in its afterExecution run.
+  const afterRunKill = isTerminalState(execution.state);
+  const killShown = showsKill(execution, now);
   const killState = canKill(execution);
 
   const runResume = async () => {
@@ -395,13 +402,14 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
       void queryClient.invalidateQueries({ queryKey: workflowsKeys.execution(execution.id) });
       void queryClient.invalidateQueries({ queryKey: workflowsKeys.executions(ws) });
     };
+    // Kill of an execution that has ended: it can only reach its afterExecution run.
     try {
       const res = await kill.mutateAsync({ workspace: ws, id: execution.id, params: { cascade } });
       if (res.status !== 202) throw new Error("The execution could not be killed. Try again.");
       refresh();
       // The page stays, so a toast confirms it (FE-ACTION-2), in terms of the state the route
       // answered. `KILLING` is not terminal: the page keeps polling until it is `KILLED`.
-      toast.success(killFeedback(res.data.state));
+      toast.success(killFeedback(res.data.state, afterRunKill));
     } catch (e) {
       if (e instanceof ApiError && e.code === EXECUTION_TERMINATED) {
         // It ended first: read it again so the page shows how, and say so in the dialog.
@@ -410,6 +418,9 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
         throw new Error("The execution has already ended, so there is nothing to kill. The page now shows its final state.", {
           cause: e,
         });
+      }
+      if (e instanceof ApiError && e.code === KILL_NOT_APPLIED) {
+        throw new Error("The kill did not take effect. Try again.", { cause: e });
       }
       throw e;
     }
@@ -480,8 +491,12 @@ function ExecutionActions({ ws, execution }: { ws: string; execution: ExecutionD
       <ConfirmAction
         open={open === "kill"}
         onOpenChange={(o) => setOpen(o ? "kill" : null)}
-        title="Kill this execution?"
-        description="Every running task is stopped, and every task that has not finished ends Killed. A killed execution cannot be resumed; replay it to run it again."
+        title={afterRunKill ? "Stop the afterExecution tasks?" : "Kill this execution?"}
+        description={
+          afterRunKill
+            ? "The afterExecution tasks that are still running are stopped. The execution has ended and keeps its state."
+            : "Every running task is stopped, and every task that has not finished ends Killed. A killed execution cannot be resumed; replay it to run it again."
+        }
         confirmLabel="Kill"
         confirmVariant="destructive"
         confirmDisabled={killEnded || !killShown}

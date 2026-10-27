@@ -31698,8 +31698,8 @@
         "tags": [
           "workflow"
         ],
-        "summary": "Kill an execution that has not ended.",
-        "description": "Tasks retrying, paused or not yet started end `KILLED` at once; a running\ntask is stopped by a worker -- the one running it, or the next one to claim\nit -- and the execution is `KILLING` until it has. With `cascade` (the default) its `Loop` iterations\nand `Subflow` child executions are killed the same way.",
+        "summary": "Kill an execution, or the `afterExecution:` tasks of one that has ended.",
+        "description": "Tasks retrying, paused or not yet started end `KILLED` at once; a running\ntask is stopped by a worker -- the one running it, or the next one to claim\nit -- and the execution is `KILLING` until it has. With `cascade` (the default) its `Loop` iterations\nand `Subflow` child executions are killed the same way. On an ended\nexecution whose `afterExecution:` tasks still run, only those are killed\nand the execution's state is not changed; the audit `outcome` is then that\nstate, with `after_execution` saying what happened to the tasks.",
         "operationId": "kill_execution",
         "parameters": [
           {
@@ -31744,7 +31744,7 @@
         ],
         "responses": {
           "202": {
-            "description": "The kill is recorded. The body is the execution afterwards: `KILLING` while a running task still has to be stopped by a worker (it then becomes `KILLED` on its own), or `KILLED` if nothing was running. Every run that was retrying, paused or not yet started is `KILLED` already.",
+            "description": "The kill is recorded. The body is the execution afterwards: `KILLING` while a running task still has to be stopped by a worker (it then becomes `KILLED` on its own), or `KILLED` if nothing was running. Every run that was retrying, paused or not yet started is `KILLED` already. On an execution that has already ended but whose `afterExecution:` tasks still run, only those tasks are killed: the body keeps the execution's own final state (e.g. `SUCCESS`).",
             "content": {
               "application/json": {
                 "schema": {
@@ -31794,7 +31794,7 @@
             }
           },
           "409": {
-            "description": "The execution has already ended (code `execution_terminated`). Nothing is written.",
+            "description": "The execution has already ended and none of its `afterExecution:` tasks is running (code `execution_terminated`), or its `afterExecution:` kill cannot apply yet because a block is being prepared or finished (code `kill_not_applied`; retry). Nothing is written.",
             "content": {
               "application/json": {
                 "schema": {
@@ -31822,7 +31822,7 @@
           "workflow"
         ],
         "summary": "An execution's log lines after a cursor, in `id` order.",
-        "description": "**Lines appear about 2 seconds after they are written (the settle lag,\n[`crate::logs::SETTLE_LAG`]).** A page stops before the first line whose\n`inserted_at` is less than 2 s old, and serves nothing above it. The reason\nis out-of-order commits: `bigserial` ids are allocated at insert and\ncommitted later, so with two writers (two egret replicas) id 100 can\ncommit after id 101. A client that had read 101 and moved its cursor past\nit would never see 100. Holding lines back until the lowest unserved one\nhas settled lets the lower id commit first, provided a log write lasts less\nthan half the lag (a log batch is one short `INSERT`).\n\n**When to stop polling: on `complete && items.is_empty()`, never on a\nterminal `execution_state` alone.** A run's lines are inserted before its\noutcome commits (`RunLog::finish` waits on the log writer's flush barrier),\nso once the execution has been terminal for longer than the settle lag,\nevery line it will ever have is visible; `complete` says exactly that,\ncomputed from the execution row itself. A terminal state seen earlier can\nstill have its last lines inside the lag. `complete` does NOT mean every\nline the run printed was stored: see spec §11 for the cases (the process\ndying, a dropped batch, a log-write fault during which the barrier does not\nwait, a run executed twice).\n\nAuthorisation is exactly `GET …/executions/{id}`'s: `WsContext` (session,\nmembership, the `workflows` feature gate), then `workflow:read`, then\n[`ExecutionRepo::log_status`] for existence and ownership (the same\ncontract as `ExecutionRepo::get`, one row, no source or task runs) -- **an\nexecution in another workspace is a 404, never a 403** -- and only then the\npage, which filters on the workspace AND the execution again.",
+        "description": "**Lines appear about 2 seconds after they are written (the settle lag,\n[`crate::logs::SETTLE_LAG`]).** A page stops before the first line whose\n`inserted_at` is less than 2 s old, and serves nothing above it. The reason\nis out-of-order commits: `bigserial` ids are allocated at insert and\ncommitted later, so with two writers (two egret replicas) id 100 can\ncommit after id 101. A client that had read 101 and moved its cursor past\nit would never see 100. Holding lines back until the lowest unserved one\nhas settled lets the lower id commit first, provided a log write lasts less\nthan half the lag (a log batch is one short `INSERT`).\n\n**When to stop polling: on `complete && items.is_empty()`, never on a\nterminal `execution_state` alone.** A run's lines are inserted before its\noutcome commits (`RunLog::finish` waits on the log writer's flush barrier),\nso once the execution has been idle (terminal AND every task run terminal,\n`afterExecution:` runs included; `workflow.execution_is_idle`) for longer\nthan the settle lag (counted from the later of the execution's last update\nand its last run's end), every line it will ever have is visible;\n`complete` says exactly that. A terminal state seen earlier can still have\nits last lines inside the lag. `complete` does NOT mean every\nline the run printed was stored: see spec §11 for the cases (the process\ndying, a dropped batch, a log-write fault during which the barrier does not\nwait, a run executed twice).\n\nAuthorisation is exactly `GET …/executions/{id}`'s: `WsContext` (session,\nmembership, the `workflows` feature gate), then `workflow:read`, then\n[`ExecutionRepo::log_status`] for existence and ownership (the same\ncontract as `ExecutionRepo::get`, one row, no source or task runs) -- **an\nexecution in another workspace is a 404, never a 403** -- and only then the\npage, which filters on the workspace AND the execution again.",
         "operationId": "get_execution_logs",
         "parameters": [
           {
@@ -31922,7 +31922,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Up to `limit` settled lines after `after`, in id order, with the next cursor, the execution's current state, and `complete`. Lines appear about 2 s after they are written (the settle lag guards against out-of-order commits). Stop polling on `complete` with no `items`, not on a terminal state alone.",
+            "description": "Up to `limit` settled lines after `after`, in id order, with the next cursor, the execution's current state, and `complete`. Lines appear about 2 s after they are written (the settle lag guards against out-of-order commits). Stop polling on `complete` with no `items`, not on a terminal state alone: an ended execution's `afterExecution:` runs can still be logging.",
             "content": {
               "application/json": {
                 "schema": {
@@ -48231,7 +48231,7 @@
           },
           "complete": {
             "type": "boolean",
-            "description": "The execution is terminal AND became so more than the 2 s settle lag\nago. **Stop polling when `complete` is true and `items` is empty**:\nthen every stored line has been served. A terminal `execution_state`\nalone is not enough -- the run's last lines may be younger than the\nsettle lag and not served yet."
+            "description": "The execution is idle -- terminal AND every one of its task runs\nterminal, `afterExecution:` runs included -- AND the later of its last\nupdate and its last run's end is more than the 2 s settle lag ago.\n**Stop polling when `complete` is true and `items` is empty**: then\nevery stored line has been served. A terminal `execution_state` alone\nis not enough -- an `afterExecution:` run may still be logging, and the\nlast lines may be younger than the settle lag and not served yet."
           }
         }
       },

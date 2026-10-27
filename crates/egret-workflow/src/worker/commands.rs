@@ -2525,8 +2525,15 @@ pub trait OrphanSweep: Send + Sync {
 /// ask the database. Each run comes with the execution its container or pod is
 /// labelled with (`egret.io/execution-id`, `None` when the label is absent or
 /// not a UUID): of the runs with no row, those whose execution has a row here
-/// and is terminal are [`RunLiveness::superseded`] (debt D15), with the
-/// execution's `COALESCE(ended_at, updated_at)`.
+/// and is idle are [`RunLiveness::superseded`] (debt D15), with the end of
+/// the execution's last work (package #2b, spec §6): the later of its own
+/// `COALESCE(ended_at, updated_at)` and its runs' latest
+/// `COALESCE(ended_at, updated_at)`.
+///
+/// Idle is `workflow.execution_is_idle` (migration 0210): terminal AND no
+/// task run of it live. A terminal execution can still run work -- an
+/// `afterExecution:` run, an `Exit` sibling -- and a container of such an
+/// execution is not judged until that work has ended.
 ///
 /// A terminal run's end is `COALESCE(ended_at, updated_at)`: a row written
 /// before migration 0183, or by a writer that left `ended_at` NULL, has only
@@ -2593,8 +2600,15 @@ pub(crate) async fn run_liveness(
         chrono::DateTime<chrono::Utc>,
         chrono::DateTime<chrono::Utc>,
     )> = sqlx::query_as(
-        "SELECT id, COALESCE(ended_at, updated_at), now() FROM workflow.executions \
-              WHERE id = ANY($1) AND workflow.state_is_terminal(state)",
+        "SELECT e.id, \
+                GREATEST(COALESCE(e.ended_at, e.updated_at), \
+                         COALESCE((SELECT max(COALESCE(r.ended_at, r.updated_at)) \
+                                     FROM workflow.task_runs r \
+                                    WHERE r.execution_id = e.id), \
+                                  COALESCE(e.ended_at, e.updated_at))), \
+                now() \
+           FROM workflow.executions e \
+          WHERE e.id = ANY($1) AND workflow.execution_is_idle(e.id)",
     )
     .bind(&executions)
     .fetch_all(pool)
@@ -2637,10 +2651,13 @@ pub(crate) struct RunLiveness {
     pub missing: std::collections::HashSet<uuid::Uuid>,
     /// Debt D15: of the [`missing`](Self::missing) runs, those whose
     /// execution (the work's `egret.io/execution-id` label) has a row here and
-    /// is terminal, with the execution's end, `COALESCE(ended_at,
-    /// updated_at)`. Such a run was **superseded**: a `LoopUntil` iteration
-    /// renamed its row (debt D12), so no row holds its id any more, but the
-    /// execution it belonged to is this database's and is over.
+    /// is idle (`workflow.execution_is_idle`: terminal, no run live), with the
+    /// end of its last work, `GREATEST(COALESCE(ended_at, updated_at),
+    /// max(COALESCE(task_runs.ended_at, task_runs.updated_at)))` (package
+    /// #2b). Such a run was
+    /// **superseded**: a `LoopUntil` iteration renamed its row (debt D12), so
+    /// no row holds its id any more, but the execution it belonged to is this
+    /// database's and is over.
     pub superseded: std::collections::HashMap<uuid::Uuid, chrono::DateTime<chrono::Utc>>,
 }
 
@@ -2656,19 +2673,29 @@ pub(crate) struct RunLiveness {
 ///   `retention` before `now`; `None` (the setting `0`) keeps it for ever.
 ///   This holds whatever the end state, kill and timeout included;
 /// * debt D15, **superseded** and kept: no row holds the run's id, but its
-///   execution is this database's and terminal ([`RunLiveness::superseded`]),
+///   execution is this database's and idle ([`RunLiveness::superseded`]),
 ///   so a `LoopUntil` iteration renamed it (debt D12). Judged as the row
-///   before, from the EXECUTION's end.
+///   before, from the end of the execution's last work.
 /// * superseded and not kept: removed at once, as a terminal run's (PR-2
 ///   final review I1). Its own `release` normally removes it, but egret can
 ///   die between the commit and the release, and a failed release is only
 ///   logged: the sweep is the backstop `run_one` documents, and the rename
 ///   (D12) must not take that backstop away. Safe for D15's reason: the
-///   execution is this database's and terminal.
+///   execution is this database's and idle.
 ///
-/// Both superseded rules, and the terminal ones, rest on "execution terminal
-/// means no live work of it". That holds while egret runs no `afterExecution:`
-/// (roadmap #2); the package that adds it must re-check this rule.
+/// Both superseded rules rest on "**idle** means no live work of the
+/// execution", and idle is named: `workflow.execution_is_idle` (migration
+/// 0210), terminal AND no task run live. They first rested on "terminal
+/// means no live work", which was false before package #2: an `Exit` with
+/// `SUCCESS`, `WARNING`, `FAILED` or `CANCELLED` leaves its siblings running
+/// in a terminal execution (`executor/exit.rs`), and `afterExecution:`
+/// (package #2b) runs whole lists after the end (a `LoopUntil` is refused
+/// there). The live case is a `LoopUntil` beside an `Exit`: its superseded
+/// iteration's container belongs to an execution that is terminal while a
+/// sibling still runs, so [`run_liveness`] answers it only once the
+/// execution is idle, and measures the retention from its last run's end
+/// (spec §6, D13). The terminal rules read the run's own row and need no
+/// premise.
 pub(crate) fn sweep_decision(
     live: &RunLiveness,
     id: uuid::Uuid,
@@ -2695,6 +2722,28 @@ pub(crate) fn sweep_decision(
         return false;
     };
     now - *ended > retention
+}
+
+/// Test-only (`test-util`; package #2b Task B5): of `work`, the runs
+/// [`run_liveness`] answers as superseded, each with the end it is judged from
+/// and whether [`sweep_decision`] removes it as a kept container under
+/// `retention`. `tests/migration_0210_execution_is_idle.rs` drives the
+/// production query through it.
+#[cfg(any(test, feature = "test-util"))]
+pub async fn superseded_for_tests(
+    pool: &sqlx::PgPool,
+    work: &[(uuid::Uuid, Option<uuid::Uuid>)],
+    retention: Option<std::time::Duration>,
+) -> Result<Vec<(uuid::Uuid, chrono::DateTime<chrono::Utc>, bool)>> {
+    let live = run_liveness(pool, work).await?;
+    let Some(now) = live.now else {
+        return Ok(Vec::new());
+    };
+    Ok(live
+        .superseded
+        .iter()
+        .map(|(id, at)| (*id, *at, sweep_decision(&live, *id, true, retention, now)))
+        .collect())
 }
 
 /// What the Docker half of the sweep does to one listed container

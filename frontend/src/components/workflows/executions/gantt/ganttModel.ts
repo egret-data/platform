@@ -1,5 +1,5 @@
 import type { ExecutionDto, TaskRunDto } from "@/api/generated/model";
-import { isTerminalState } from "@/components/workflows/executionState";
+import { executionLive, isTerminalState } from "@/components/workflows/executionState";
 import { hasRun } from "@/components/workflows/executions/timing";
 
 /**
@@ -153,7 +153,7 @@ function timeRun(run: TaskRunDto, origin: number, now: number, cap: number | und
 
 export function buildGantt(execution: GanttExecution, now: number): GanttModel {
   const origin = Date.parse(execution.created_at);
-  const live = !isTerminalState(execution.state);
+  const live = executionLive(execution, now);
   const executionEnd = parse(execution.ended_at) ?? Date.parse(execution.updated_at);
   const cap = live ? undefined : executionEnd;
 
