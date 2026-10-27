@@ -241,17 +241,85 @@ pub fn catalog_engine_router(state: ApiContext<EngineState>) -> axum::Router {
 ///
 /// `path`/`query` are lakekeeper-relative (the router is mounted under
 /// `/catalog/v1`, so a request to `/catalog/v1/config` arrives here as `/config`).
+///
+/// `body` is the request body for a rename, a multi-table commit or a
+/// single-table commit ([`GuardedBody`]), whose targets are named (or
+/// re-named) there, and `None` for every other request, which streams through
+/// unread.
 #[async_trait::async_trait]
 pub trait CatalogGuard: Send + Sync {
+    /// Verify the bearer token only (authN). The mount calls it before it
+    /// reads a guarded body, so an unauthenticated caller cannot make it
+    /// buffer anything (rename-authz spec §10.2). [`Self::check`] still
+    /// decides the request in full.
+    async fn authenticate(
+        &self,
+        bearer: Option<&str>,
+    ) -> Result<(), (axum::http::StatusCode, String)>;
+
     /// `Ok(caller)` → allowed, by the principal the verified token names;
-    /// `Err((status, message))` → rejected (e.g. 401/403).
+    /// `Err((status, message))` → rejected (e.g. 400/401/403).
     async fn check(
         &self,
         method: &str,
         path: &str,
         query: Option<&str>,
         bearer: Option<&str>,
+        body: Option<&[u8]>,
     ) -> Result<CatalogCaller, (axum::http::StatusCode, String)>;
+}
+
+/// The requests that name their targets only in the body, whose body the
+/// mount hands the guard (rename-authz spec §3.1, §8.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardedBody {
+    /// `POST /{prefix}/tables/rename` or `POST /{prefix}/views/rename`.
+    Rename,
+    /// `POST /{prefix}/transactions/commit`.
+    MultiTableCommit,
+    /// `POST /{prefix}/namespaces/{ns}/tables/{t}`: its body may name another
+    /// table in `identifier`, and lakekeeper commits to that one (§10.3).
+    TableCommit,
+}
+
+impl GuardedBody {
+    /// Which of them this request is, if any.
+    pub fn of(method: &str, path: &str) -> Option<Self> {
+        if method != "POST" {
+            return None;
+        }
+        let segs: Vec<&str> = path
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+        match segs.as_slice() {
+            [_, "tables" | "views", "rename"] => Some(Self::Rename),
+            [_, "transactions", "commit"] => Some(Self::MultiTableCommit),
+            [_, "namespaces", _, "tables", _] => Some(Self::TableCommit),
+            _ => None,
+        }
+    }
+
+    /// The most of the body the mount buffers. A rename body is a few hundred
+    /// bytes. A commit carries whole schemas and snapshots; the table hook
+    /// behind the guard already buffers it up to 16 MiB, so the guard takes
+    /// the same cap and adds no new limit.
+    pub fn limit(self) -> usize {
+        match self {
+            Self::Rename => 1 << 20,
+            Self::MultiTableCommit | Self::TableCommit => 16 << 20,
+        }
+    }
+
+    /// How the guard's 400 names the request.
+    pub fn what(self) -> &'static str {
+        match self {
+            Self::Rename => "rename request",
+            Self::MultiTableCommit => "multi-table commit",
+            Self::TableCommit => "table commit",
+        }
+    }
 }
 
 /// Who sent an allowed Iceberg request: the verified token's `sub` and `aud`.
@@ -328,7 +396,6 @@ async fn guard_then_inject_metadata(
     mut req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    use axum::response::IntoResponse as _;
     let path = req.uri().path().to_string();
     // Capture how the client reached egret, to rewrite the catalog config `uri`
     // lakekeeper otherwise advertises as its hardcoded `http://localhost:8181`.
@@ -353,14 +420,70 @@ async fn guard_then_inject_metadata(
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.strip_prefix("Bearer "))
             .map(str::to_string);
+        // A rename and a multi-table commit name what they touch only in the
+        // body: read it for the guard and put the same bytes back, so the view
+        // hold, the table hook and lakekeeper see exactly what the guard
+        // authorized.
+        let body = if let Some(kind) = GuardedBody::of(&method, &path) {
+            // Authenticate before reading a byte, refuse a declared length
+            // over the cap unread, and a streamed body that crosses it.
+            if let Err((status, msg)) = g.authenticate(bearer.as_deref()).await {
+                return iceberg_error(status, &msg);
+            }
+            let too_large = || {
+                iceberg_error(
+                    axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                    &format!(
+                        "the body of a {} is larger than {} bytes",
+                        kind.what(),
+                        kind.limit()
+                    ),
+                )
+            };
+            let declared = req
+                .headers()
+                .get(axum::http::header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok());
+            if declared.is_some_and(|n| n > kind.limit() as u64) {
+                return too_large();
+            }
+            let (parts, body) = req.into_parts();
+            let bytes = match axum::body::to_bytes(body, kind.limit()).await {
+                Ok(b) => b,
+                Err(e) => {
+                    let over_cap = e
+                        .into_inner()
+                        .downcast_ref::<http_body_util::LengthLimitError>()
+                        .is_some();
+                    if over_cap {
+                        return too_large();
+                    }
+                    return iceberg_error(
+                        axum::http::StatusCode::BAD_REQUEST,
+                        &format!("malformed {}: the body could not be read", kind.what()),
+                    );
+                }
+            };
+            req = axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes.clone()));
+            Some(bytes)
+        } else {
+            None
+        };
         match g
-            .check(&method, &path, query.as_deref(), bearer.as_deref())
+            .check(
+                &method,
+                &path,
+                query.as_deref(),
+                bearer.as_deref(),
+                body.as_deref(),
+            )
             .await
         {
             Ok(caller) => {
                 req.extensions_mut().insert(caller);
             }
-            Err((status, msg)) => return (status, msg).into_response(),
+            Err((status, msg)) => return iceberg_error(status, &msg),
         }
     }
     req.extensions_mut()
@@ -379,6 +502,29 @@ async fn guard_then_inject_metadata(
         }
     }
     response
+}
+
+/// A refusal by the guard or the mount, in the Iceberg REST error model
+/// (`{"error": {"message", "type", "code"}}`), as lakekeeper answers its own
+/// errors, so Iceberg clients parse it (rename-authz spec §10.8).
+fn iceberg_error(status: axum::http::StatusCode, message: &str) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    let kind = match status.as_u16() {
+        400 => "BadRequestException",
+        401 => "NotAuthorizedException",
+        403 => "ForbiddenException",
+        404 => "NoSuchEntityException",
+        413 => "RequestTooLargeException",
+        s if s >= 500 => "ServerErrorException",
+        _ => "RESTException",
+    };
+    (
+        status,
+        axum::Json(serde_json::json!({
+            "error": {"message": message, "type": kind, "code": status.as_u16()}
+        })),
+    )
+        .into_response()
 }
 
 /// Replace lakekeeper's hardcoded `http://localhost:8181` in the `/config` body

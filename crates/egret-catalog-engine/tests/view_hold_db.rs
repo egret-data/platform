@@ -395,7 +395,10 @@ async fn env_with(o: Opts) -> Option<Env> {
     let hold = ViewHold::new(db.clone(), runner.clone())
         .with_limit(limit)
         .with_max_holds(max_holds);
-    let app = front_catalog_router(inner, None, Some(Arc::new(hold)));
+    // A pass-through guard in front, as in production: it reads a rename's
+    // body, so the hold's rename runs on the bytes the mount put back.
+    let guard: Arc<dyn egret_catalog_engine::CatalogGuard> = Arc::new(BodyReadingGuard);
+    let app = front_catalog_router(inner, Some(guard), Some(Arc::new(hold)));
 
     let env = Env {
         db,
@@ -575,6 +578,42 @@ impl Env {
     /// the version its last 200 carried.
     fn start_plugin(&self) -> Plugin {
         plugins::start_trino(self.policy.clone(), self.profile_name.clone(), POLL)
+    }
+}
+
+/// Lets every request through. The mount hands it the body of exactly the
+/// requests `GuardedBody` names; a rename's must be the rename it expects.
+struct BodyReadingGuard;
+
+#[async_trait::async_trait]
+impl egret_catalog_engine::CatalogGuard for BodyReadingGuard {
+    async fn authenticate(&self, _bearer: Option<&str>) -> Result<(), (StatusCode, String)> {
+        Ok(())
+    }
+
+    async fn check(
+        &self,
+        method: &str,
+        path: &str,
+        _query: Option<&str>,
+        _bearer: Option<&str>,
+        body: Option<&[u8]>,
+    ) -> Result<egret_catalog_engine::CatalogCaller, (StatusCode, String)> {
+        let kind = egret_catalog_engine::GuardedBody::of(method, path);
+        assert_eq!(
+            body.is_some(),
+            kind.is_some(),
+            "the body of a guarded request only: {method} {path}"
+        );
+        let rename = kind == Some(egret_catalog_engine::GuardedBody::Rename);
+        if let (true, Some(b)) = (rename, body) {
+            let json: Value = serde_json::from_slice(b).expect("a rename body is JSON");
+            assert!(json.get("source").is_some(), "the rename body: {json}");
+        }
+        Ok(egret_catalog_engine::CatalogCaller {
+            subject: "view-hold-test".into(),
+            audience: "catalog".into(),
+        })
     }
 }
 

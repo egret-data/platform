@@ -74,7 +74,7 @@ pub use lineage_sweep::{
 pub use mount::build_state_with_gc_poll;
 pub use mount::{
     build_state, catalog_engine_router, front_catalog_router, mount_catalog_engine,
-    spawn_gc_workers, CatalogCaller, CatalogGuard, EngineServer, EngineState,
+    spawn_gc_workers, CatalogCaller, CatalogGuard, EngineServer, EngineState, GuardedBody,
 };
 pub use pool::{build_isolated_pool, LAKEKEEPER_SCHEMA};
 pub use recovery::{
@@ -92,7 +92,7 @@ pub use view_hold::{
 };
 #[cfg(feature = "test-utils")]
 pub use warehouse::create_memory_warehouse;
-pub use warehouse::{create_lakekeeper_warehouse, S3StorageConfig};
+pub use warehouse::{create_lakekeeper_warehouse, s3_storage_profile, S3StorageConfig};
 pub use warehouse_admin::{
     catalog_admin_router, BrowseColumn, BrowseDeletedTabular, BrowseNamespace, BrowsePartition,
     BrowseSearchResult, BrowseSnapshot, BrowseSort, BrowseTableDetail, BrowseTabular, BrowseTask,
