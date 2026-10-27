@@ -150,8 +150,8 @@ the view hold's rename run on the body the mount re-injected.
 - `POST /{prefix}/v1/aws/s3/sign` (the S3 request signer) was a catalog-root write by path. Not exploitable on an
   egret warehouse (remote signing is off, §9); since §10.6 the guard refuses every signer route outright.
 - **LOW.** `POST /{prefix}/namespaces` (create namespace) is allowed for any role with any write grant, because its path has no
-  namespace segment and the namespace is named only in the body. Creating one grants the creator nothing: grants are
-  exact, so a new namespace is reachable only through a `catalog` grant or a grant an admin adds on it. The harm is
+  namespace segment and the namespace is named only in the body. Creating one grants the creator nothing: grants name
+  their namespace (up to lakekeeper's collation, §10.4), so a new namespace is reachable only through a `catalog` grant or a grant an admin adds on it. The harm is
   squatting a name and clutter. A narrow fix is obvious and small: hand the guard the body (`{"namespace": [..]}`) as
   for a rename and require a `write`/`manage` `catalog` grant for a top-level namespace, or a `namespace` grant on the
   parent for a nested one. One choice is open: whether a grant on the parent may create children (the parent grant
@@ -408,3 +408,23 @@ mount, seen failing on the code before the fix), what was decided, and how it is
 - **Tests:** `the_guard_refuses_remote_signing_outright` (red, green now: all three routes, GET and PUT, even for
   `catalog` `manage`); unit test `every_signer_route_is_recognised`.
 - "List namespaces" and "create namespace" stay LOW and open (§7).
+
+### 10.7 F4: a read grant gets read-write-delete S3 credentials (HIGH, recorded, not fixed here)
+
+- **Evidence.**
+  - `LK/server/tables.rs:1156-1162`: `loadTable` picks the vended storage scope from the authorizer's answers:
+    `WriteData` allowed → `StoragePermissions::ReadWriteDelete`, else `ReadData` → `Read`.
+    `LK/server/tables/authorize_load.rs:340-370` asks `GetMetadata`, `ReadData` and `WriteData` for that purpose.
+  - egret runs lakekeeper on `AllowAllAuthorizer` (`crates/egret-catalog-engine/src/mount.rs:74`), so `WriteData` is
+    always allowed, and every warehouse has `sts-enabled: true` (`crates/egret-catalog-engine/src/warehouse.rs`,
+    `s3_storage_profile`).
+  - The guard lets `GET …/tables/{t}` and `GET …/tables/{t}/credentials` through for **any** privilege (reads).
+- **Consequence.** A role with only `table` `read` on `sales.orders` that loads it with `X-Iceberg-Access-Delegation:
+  vended-credentials` receives STS credentials scoped to the table's location with read, write and delete. It can
+  overwrite or delete the table's data and metadata files without any catalog write. How far this reaches depends on
+  RustFS honouring the session policy's location scope, not on egret.
+- **Not measured** here (no S3 behind the test warehouses).
+- **Follow-up package** (not this PR): make the decision egret-aware where lakekeeper takes it, e.g. an egret
+  `Authorizer` that answers `WriteData` (and `ReadData`) from the same catalog grants the guard uses, or have the guard
+  strip or downgrade the data-access request for a caller without a write grant on the table. Either needs its own
+  spec: the authorizer is consulted on many paths besides `loadTable`.
