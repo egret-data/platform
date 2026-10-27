@@ -73,11 +73,11 @@ view create needs a namespace-level grant (the existing mapping already treats `
 
 ### 3.4 Case sensitivity (F-B)
 
-The check matches grants exactly as every other guard decision does: namespace arrays element by element, names byte
-for byte. Lakekeeper resolves names case-insensitively; egret's grants do not. The consequence is fail-closed: a grant
-on `Sales.Orders` does not authorize renaming `sales.orders`, as it does not authorize loading it. Folding case here
-alone would make a rename more permissive than a load of the same table; folding belongs in `catalog_grant_covers`
-for every route, as one change (left open, §7).
+*Corrected after review (§10.4).* The first version of this section said exact matching "fails closed". That was
+wrong: the caller chooses the spelling. With a grant on `sales.Secret`, a request spelled `sales.Secret` matched the
+grant byte for byte, and lakekeeper, which compares names under its ICU `case_insensitive` collation, resolved it to
+`sales.secret`. So the outcome depended on the caller's spelling, not on the table. The check now compares names the
+way lakekeeper does, on every route (§10.4).
 
 ### 3.5 Multi-level namespaces
 
@@ -113,7 +113,7 @@ runs before lakekeeper, on names only.
 | D1 | Source needs drop's privilege (write on the table) | a rename removes the source name; mirroring drop keeps one rule per effect |
 | D2 | Destination needs create's privilege (namespace-level write); a `table` grant on the destination name is **not** enough | a `table` grant cannot create a table today; allowing it here would reopen the escalation for any role that holds write on some table and a grant on a future name |
 | D3 | The mount buffers only the two rename routes | no cost or behaviour change for any other request; a large commit body still streams |
-| D4 | Exact, case-sensitive matching (F-B unchanged) | consistent with every other route; fails closed |
+| D4 | ~~Exact, case-sensitive matching~~ Superseded by D12 (§10.4): names compare under lakekeeper's collation | the exact match did not fail closed; the caller picked the spelling |
 | D5 | Malformed body: 400 from the guard, before lakekeeper | the guard cannot authorize what it cannot read; refusing early keeps the hooks from seeing it |
 | D6 | Body cap 1 MiB | a rename body is tiny; the cap bounds what the guard buffers |
 
@@ -156,10 +156,8 @@ the view hold's rename run on the body the mount re-injected.
   for a rename and require a `write`/`manage` `catalog` grant for a top-level namespace, or a `namespace` grant on the
   parent for a nested one. One choice is open: whether a grant on the parent may create children (the parent grant
   already "covers everything in it" for tables).
-- F-B: catalog grants are case-sensitive while lakekeeper's names are not (§3.4). It fails closed everywhere: a grant on
-  `Sales.Orders` neither loads nor renames nor commits to `sales.orders`. The fix is one change in
-  `catalog_grant_covers` (fold both sides, as lakekeeper does), for every route at once, with a migration that flags
-  grants differing only in case. Not done here.
+- F-B: catalog grants were compared byte for byte while lakekeeper's names are not. *Corrected after review:* this
+  did not fail closed (the caller chooses the spelling, §3.4). Fixed in §10.4.
 
 ## 8. The multi-table commit
 
@@ -321,3 +319,51 @@ mount, seen failing on the code before the fix), what was decided, and how it is
   still commit); `a_malformed_single_table_commit_is_a_400_from_the_guard` (red, green now).
 - Not changed: #757's table hook classifies an update by its path, so a Spark branch commit's schema change is seen as
   a change to `db.t`/`branch_x`, not to `db.t`. Recorded, not fixed here.
+
+### 10.4 F3: names compared as lakekeeper compares them (D12)
+
+- **Problem.** lakekeeper stores namespace and table names under its ICU collation `case_insensitive`
+  (`lakekeeper-storage-postgres/migrations/01_setup.sql:33`: `und-u-ks-level2`, non-deterministic), and resolves a
+  request's names with it. The guard compared bytes. A grant then matched or not depending on how the caller spelled
+  the name, while lakekeeper resolved every spelling to the same table (§3.4).
+- **Measured** at `c24c2c23`: with a `table` `read` grant on `sales.Secret`, loading `sales/tables/secret` got 403
+  while `sales/tables/Secret` got 200 on the same table (`a_grant_matches_names_as_the_catalog_does`); with a grant on
+  `sales.secret`, `SECRET` got 403 though lakekeeper finds the table
+  (`the_guard_decides_names_the_way_lakekeeper_resolves_them`); a rename with source `MINE` under a grant on namespace
+  `SALES` got 403 (`a_rename_source_in_another_case_is_decided_on_the_table`).
+- **What the collation equates** (asked of Postgres 16 with that collation): case (`SECRET` = `secret`), width
+  (`ｓｅｃｒｅｔ` = `secret`), compatibility forms (`ﬁle` = `file`), canonical equivalence (`cafe` + U+0301 = `café`)
+  and default-ignorable code points (U+00AD, U+200B); it does **not** equate accents (`cafe` ≠ `café`) or `ß` with
+  `ss`. No Unicode normal form plus case fold reproduces that exactly: NFKC + full case folding maps `ß` to `ss`, so it
+  would match names lakekeeper keeps apart (fail-open), and NFC + simple folding misses width and ignorables
+  (fail-closed and spelling-dependent again).
+- **Decision (D12): ask Postgres.** `CatalogStore::names_equal_in_catalog` compares the request's names with the
+  grants' names under `lakekeeper.case_insensitive`, the collation lakekeeper's own unique indexes use, in one query per
+  request (only pairs that are not already byte-equal; none when every name is byte-equal). `catalog_grant_covers_by`
+  takes that equality, for every route: path, rename, multi-table and single-table commit. Namespace levels compare one
+  by one, as before.
+- **Path decoding (closes the F8 note).** The guard now reads path segments as lakekeeper does: percent-decoded (bad
+  encoding or non-UTF-8 is a 400), the namespace split on `\x1f` with `+` as a space in each level, a table or view name
+  with `+` as a space (`LK/api/iceberg/v1/namespace.rs:131-140`, `tables.rs:31-35`).
+- **Cost.** One extra query on requests whose names differ in bytes from some grant name; it compares at most
+  (grant names × request names) short strings.
+- **Grants that differ only in case** are now the same grant, which is what they already were to lakekeeper; nothing
+  reaches further than before, because any spelling was already accepted by lakekeeper once the guard matched. The
+  write path (`CatalogStore::add_grant`) still refuses only byte-identical duplicates, so an admin can hold `Secret`
+  and `secret` side by side; they are redundant, not wider. No migration. To list them (read-only):
+
+  ```sql
+  SELECT a.catalog_role_id, a.namespace, a.table_name, b.namespace AS other_namespace, b.table_name AS other_table
+    FROM catalog.catalog_grants a
+    JOIN catalog.catalog_grants b
+      ON a.catalog_role_id = b.catalog_role_id AND a.id < b.id
+     AND a.securable_type = b.securable_type AND a.privilege = b.privilege
+     AND a.namespace::text COLLATE lakekeeper.case_insensitive = b.namespace::text
+     AND a.table_name COLLATE lakekeeper.case_insensitive IS NOT DISTINCT FROM b.table_name;
+  ```
+
+- The grant UI keeps showing names as they were typed or picked; the Access page's wording that a grant names "a
+  table" stays true, since the table is the one lakekeeper resolves the name to.
+- **Tests:** the three above (red at `c24c2c23`, green now). The second one is an agreement test: for spellings that
+  differ in case, width, composition, ignorables, accents and length, the guard allows exactly when lakekeeper's own
+  router finds the table, and refuses exactly when it answers 404.

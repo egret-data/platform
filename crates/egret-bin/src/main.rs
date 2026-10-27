@@ -634,123 +634,144 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
                 ));
             }
             let is_write = matches!(method, "POST" | "PUT" | "DELETE" | "PATCH");
+            let malformed =
+                |what: &str, m: String| (StatusCode::BAD_REQUEST, format!("malformed {what}: {m}"));
 
-            // A rename (`/tables/rename`, `/views/rename`) names what it touches
-            // only in its body: it needs what a drop of the source needs and
-            // what a create in the destination's namespace needs (rename-authz
-            // spec §3.2). A multi-table commit (`/transactions/commit`) needs,
-            // for every table it changes, what an update of that table alone
-            // needs (§8.2). A single-table commit needs write on the table its
-            // body names, when it names one (§10.3).
+            // What this request must be granted, each with its refusal. A rename
+            // (`/tables/rename`, `/views/rename`) names what it touches only in
+            // its body: it needs what a drop of the source needs and what a
+            // create in the destination's namespace needs (rename-authz spec
+            // §3.2). A multi-table commit (`/transactions/commit`) needs, for
+            // every table it changes, what an update of that table alone needs
+            // (§8.2). A single-table commit needs write on the table lakekeeper
+            // commits to, which its body may name (§10.3). Any other request is
+            // decided on its path.
+            let mut needs: Vec<Need> = Vec::new();
             match egret_catalog_engine::GuardedBody::of(method, path) {
                 Some(egret_catalog_engine::GuardedBody::Rename) => {
-                    let (src, dst) = parse_rename_body(body).map_err(|m| {
-                        (
-                            StatusCode::BAD_REQUEST,
-                            format!("malformed rename request: {m}"),
-                        )
-                    })?;
-                    if !grants
-                        .iter()
-                        .any(|g| catalog_grant_covers(g, Some(&src.0), Some(&src.1), true))
-                    {
-                        return forbid(format!(
+                    let (src, dst) =
+                        parse_rename_body(body).map_err(|m| malformed("rename request", m))?;
+                    needs.push(Need {
+                        refusal: format!(
                             "role '{token_role}' may not rename {}.{}: renaming needs write on the \
                              source, as dropping it would",
                             src.0.join("."),
                             src.1
-                        ));
-                    }
-                    if !grants
-                        .iter()
-                        .any(|g| catalog_grant_covers(g, Some(&dst.0), None, true))
-                    {
-                        let ns = dst.0.join(".");
-                        return forbid(format!(
+                        ),
+                        ns: src.0,
+                        table: Some(src.1),
+                        write: true,
+                    });
+                    let ns = dst.0.join(".");
+                    needs.push(Need {
+                        refusal: format!(
                             "role '{token_role}' may not rename into {ns}.{}: renaming needs write on \
                              namespace {ns}, as creating a table there would",
                             dst.1
-                        ));
-                    }
-                    return Ok(caller);
+                        ),
+                        ns: dst.0,
+                        table: None,
+                        write: true,
+                    });
                 }
                 Some(egret_catalog_engine::GuardedBody::MultiTableCommit) => {
-                    let tables = parse_commit_body(body).map_err(|m| {
-                        (
-                            StatusCode::BAD_REQUEST,
-                            format!("malformed multi-table commit: {m}"),
-                        )
-                    })?;
-                    for (ns, name) in &tables {
-                        if !grants
-                            .iter()
-                            .any(|g| catalog_grant_covers(g, Some(ns), Some(name), true))
-                        {
-                            return forbid(format!(
+                    let tables =
+                        parse_commit_body(body).map_err(|m| malformed("multi-table commit", m))?;
+                    for (ns, name) in tables {
+                        needs.push(Need {
+                            refusal: format!(
                                 "role '{token_role}' may not commit to {}.{name}: a multi-table \
                                  commit needs write on every table it changes, as updating it \
                                  alone would; nothing was committed",
                                 ns.join(".")
-                            ));
-                        }
+                            ),
+                            ns,
+                            table: Some(name),
+                            write: true,
+                        });
                     }
-                    return Ok(caller);
                 }
                 Some(egret_catalog_engine::GuardedBody::TableCommit) => {
                     // lakekeeper commits to the body's `identifier` whenever
                     // it accepts one (its "Spark branch" fallback included),
                     // and to the path's table otherwise: authorize that table.
-                    let named = parse_table_commit_body(body).map_err(|m| {
-                        (
-                            StatusCode::BAD_REQUEST,
-                            format!("malformed table commit: {m}"),
-                        )
-                    })?;
-                    let (ns, name) =
-                        named.unwrap_or_else(|| (catalog_ns_parts(segs[2]), segs[4].to_string()));
-                    if !grants
-                        .iter()
-                        .any(|g| catalog_grant_covers(g, Some(&ns), Some(&name), true))
-                    {
-                        return forbid(format!(
+                    let named =
+                        parse_table_commit_body(body).map_err(|m| malformed("table commit", m))?;
+                    let (ns, name) = match named {
+                        Some(ident) => ident,
+                        None => (
+                            path_namespace(segs[2])
+                                .ok_or_else(|| malformed("path", "bad percent-encoding".into()))?,
+                            path_tabular(segs[4])
+                                .ok_or_else(|| malformed("path", "bad percent-encoding".into()))?,
+                        ),
+                    };
+                    needs.push(Need {
+                        refusal: format!(
                             "role '{token_role}' may not commit to {}.{name}: it is not granted \
                              write on that table",
                             ns.join(".")
-                        ));
-                    }
-                    return Ok(caller);
+                        ),
+                        ns,
+                        table: Some(name),
+                        write: true,
+                    });
                 }
-                None => {}
+                None => {
+                    // Resolve the request target: /namespaces/{ns}[/tables|views/{table}],
+                    // decoded as lakekeeper decodes its path parameters.
+                    let refusal = format!(
+                        "role '{token_role}' is not granted {} on the requested resource",
+                        if is_write { "write" } else { "read" }
+                    );
+                    let target_ns = match (segs.get(1), segs.get(2)) {
+                        (Some(&"namespaces"), Some(seg)) => Some(
+                            path_namespace(seg)
+                                .ok_or_else(|| malformed("path", "bad percent-encoding".into()))?,
+                        ),
+                        _ => None,
+                    };
+                    let target_table = match (segs.get(3), segs.get(4)) {
+                        (Some(&"tables") | Some(&"views"), Some(seg)) => Some(
+                            path_tabular(seg)
+                                .ok_or_else(|| malformed("path", "bad percent-encoding".into()))?,
+                        ),
+                        _ => None,
+                    };
+                    match target_ns {
+                        // catalog-root op (list namespaces, …): any grant for
+                        // reads, a write/manage grant for writes.
+                        None => {
+                            if !grants.iter().any(|g| !is_write || grants_write(g)) {
+                                return forbid(refusal);
+                            }
+                        }
+                        Some(ns) => needs.push(Need {
+                            ns,
+                            table: target_table,
+                            write: is_write,
+                            refusal,
+                        }),
+                    }
+                }
             }
 
-            // Resolve the request target: /namespaces/{ns}[/tables|views/{table}].
-            let target_ns: Option<Vec<String>> = (segs.get(1) == Some(&"namespaces"))
-                .then(|| segs.get(2))
-                .flatten()
-                .map(|s| catalog_ns_parts(s));
-            let target_table: Option<&str> =
-                matches!(segs.get(3), Some(&"tables") | Some(&"views"))
-                    .then(|| segs.get(4).copied())
-                    .flatten();
-
-            let allowed = if target_ns.is_none() {
-                // catalog-root op (list namespaces, transactions, …): any grant for
-                // reads, a write/manage grant for writes.
-                grants.iter().any(|g| {
-                    !is_write
-                        || g.privilege.eq_ignore_ascii_case("write")
-                        || g.privilege.eq_ignore_ascii_case("manage")
-                })
-            } else {
-                grants
-                    .iter()
-                    .any(|g| catalog_grant_covers(g, target_ns.as_deref(), target_table, is_write))
-            };
-            if !allowed {
-                return forbid(format!(
-                    "role '{token_role}' is not granted {} on the requested resource",
-                    if is_write { "write" } else { "read" }
-                ));
+            // Names compare as lakekeeper compares them (§10.4).
+            let eq = CatalogNameEq::load(&self.catalog, &grants, &needs)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("names: {e}")))?;
+            for need in needs {
+                if !grants.iter().any(|g| {
+                    catalog_grant_covers_by(
+                        g,
+                        Some(&need.ns),
+                        need.table.as_deref(),
+                        need.write,
+                        &|a, b| eq.eq(a, b),
+                    )
+                }) {
+                    return forbid(need.refusal);
+                }
             }
         }
         Ok(caller)
@@ -832,47 +853,141 @@ fn identifier(v: &serde_json::Value, at: &str) -> Result<TableIdent, String> {
     Ok((ns, name.to_string()))
 }
 
-/// Split a namespace path segment into its parts. lakekeeper encodes multipart
-/// Iceberg namespaces with the unit separator (`\x1f`), percent-encoded as `%1F`
-/// in the URL; single-level namespaces are just the plain name.
-fn catalog_ns_parts(seg: &str) -> Vec<String> {
-    seg.replace("%1F", "\u{1f}")
-        .replace("%1f", "\u{1f}")
-        .split('\u{1f}')
-        .map(|s| s.to_string())
-        .collect()
+/// One thing a request must be granted, and what the 403 says if not.
+struct Need {
+    ns: Vec<String>,
+    table: Option<String>,
+    write: bool,
+    refusal: String,
 }
 
-/// Does one grant authorize the requested `(namespace, table)` at the required
-/// privilege? `catalog` covers everything; `namespace` covers its own namespace
-/// and everything in it; `table` covers only its exact table (plus, for reads,
-/// listing the namespace that holds it). Writes require `write`/`manage`.
+/// Name equality as lakekeeper's collation has it, for the names in one
+/// request: byte-equal names are equal, and every other (grant name, request
+/// name) pair is asked of Postgres once ([`CatalogStore::names_equal_in_catalog`]).
+struct CatalogNameEq(std::collections::HashSet<(String, String)>);
+
+impl CatalogNameEq {
+    async fn load(
+        store: &egret_catalog_engine::CatalogStore,
+        grants: &[egret_catalog_engine::CatalogGrant],
+        needs: &[Need],
+    ) -> Result<Self, egret_catalog_engine::CatalogError> {
+        let requested: std::collections::BTreeSet<&str> = needs
+            .iter()
+            .flat_map(|n| n.ns.iter().map(String::as_str).chain(n.table.as_deref()))
+            .collect();
+        let granted: std::collections::BTreeSet<&str> = grants
+            .iter()
+            .flat_map(|g| {
+                g.namespace
+                    .iter()
+                    .flatten()
+                    .map(String::as_str)
+                    .chain(g.table_name.as_deref())
+            })
+            .collect();
+        let pairs: Vec<(String, String)> = granted
+            .iter()
+            .flat_map(|g| requested.iter().map(move |r| (*g, *r)))
+            .filter(|(g, r)| g != r)
+            .map(|(g, r)| (g.to_string(), r.to_string()))
+            .collect();
+        Ok(Self(store.names_equal_in_catalog(&pairs).await?))
+    }
+
+    /// `granted` (a grant's name) and `requested` name the same thing.
+    fn eq(&self, granted: &str, requested: &str) -> bool {
+        granted == requested
+            || self
+                .0
+                .contains(&(granted.to_string(), requested.to_string()))
+    }
+}
+
+/// Percent-decode one path segment, as axum's `Path` does for lakekeeper.
+/// `None` for bad percent-encoding or bytes that are not UTF-8.
+fn percent_decode(seg: &str) -> Option<String> {
+    let bytes = seg.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// A namespace path segment, as lakekeeper reads it (`NamespaceIdentUrl`):
+/// percent-decoded, split on the unit separator (`\x1f`, `%1F` in the URL),
+/// each level with `+` read as a space.
+fn path_namespace(seg: &str) -> Option<Vec<String>> {
+    Some(
+        percent_decode(seg)?
+            .split('\u{1f}')
+            .map(|s| s.replace('+', " "))
+            .collect(),
+    )
+}
+
+/// A table or view path segment, as lakekeeper reads it
+/// (`normalize_tabular_name`): percent-decoded, `+` read as a space.
+fn path_tabular(seg: &str) -> Option<String> {
+    Some(percent_decode(seg)?.replace('+', " "))
+}
+
+/// Does this grant carry `write` or `manage`?
+fn grants_write(g: &egret_catalog_engine::CatalogGrant) -> bool {
+    g.privilege.eq_ignore_ascii_case("write") || g.privilege.eq_ignore_ascii_case("manage")
+}
+
+/// [`catalog_grant_covers_by`] with names compared byte for byte (the
+/// structural unit tests).
+#[cfg(test)]
 fn catalog_grant_covers(
     g: &egret_catalog_engine::CatalogGrant,
     target_ns: Option<&[String]>,
     target_table: Option<&str>,
     is_write: bool,
 ) -> bool {
-    if is_write
-        && !(g.privilege.eq_ignore_ascii_case("write")
-            || g.privilege.eq_ignore_ascii_case("manage"))
-    {
+    catalog_grant_covers_by(g, target_ns, target_table, is_write, &|a, b| a == b)
+}
+
+/// Does one grant authorize the requested `(namespace, table)` at the required
+/// privilege? `catalog` covers everything; `namespace` covers its own namespace
+/// and everything in it; `table` covers only its exact table (plus, for reads,
+/// listing the namespace that holds it). Writes require `write`/`manage`.
+/// `eq(granted, requested)` says whether two names are the same; the guard
+/// passes lakekeeper's collation ([`CatalogNameEq`]).
+fn catalog_grant_covers_by(
+    g: &egret_catalog_engine::CatalogGrant,
+    target_ns: Option<&[String]>,
+    target_table: Option<&str>,
+    is_write: bool,
+    eq: &dyn Fn(&str, &str) -> bool,
+) -> bool {
+    if is_write && !grants_write(g) {
         return false;
     }
+    let ns_match = || match (target_ns, g.namespace.as_deref()) {
+        (Some(t), Some(gn)) => t.len() == gn.len() && gn.iter().zip(t).all(|(a, b)| eq(a, b)),
+        _ => false,
+    };
     match g.securable_type.as_str() {
         "catalog" => true,
-        "namespace" => {
-            matches!((target_ns, g.namespace.as_deref()), (Some(t), Some(gn)) if t == gn)
-        }
+        "namespace" => ns_match(),
         "table" => {
-            let ns_match =
-                matches!((target_ns, g.namespace.as_deref()), (Some(t), Some(gn)) if t == gn);
-            if !ns_match {
+            if !ns_match() {
                 return false;
             }
             match target_table {
                 // A specific table request must hit this grant's exact table.
-                Some(t) => g.table_name.as_deref() == Some(t),
+                Some(t) => g.table_name.as_deref().is_some_and(|gt| eq(gt, t)),
                 // Listing/loading the enclosing namespace is a read affordance for
                 // a table-grant holder, never a write (e.g. creating a table).
                 None => !is_write,
@@ -3248,7 +3363,7 @@ const WORKFLOW_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(1
 
 #[cfg(test)]
 mod catalog_authz_tests {
-    use super::{catalog_grant_covers, catalog_ns_parts};
+    use super::{catalog_grant_covers, path_namespace, path_tabular};
     use egret_catalog_engine::CatalogGrant;
     use uuid::Uuid;
 
@@ -3308,11 +3423,18 @@ mod catalog_authz_tests {
 
     #[test]
     fn ns_parts_handles_multipart() {
-        assert_eq!(catalog_ns_parts("demo_ns"), vec!["demo_ns".to_string()]);
+        assert_eq!(path_namespace("demo_ns"), Some(vec!["demo_ns".to_string()]));
         assert_eq!(
-            catalog_ns_parts("a%1Fb"),
-            vec!["a".to_string(), "b".to_string()]
+            path_namespace("a%1Fb"),
+            Some(vec!["a".to_string(), "b".to_string()])
         );
+        assert_eq!(
+            path_namespace("a%1fb+c"),
+            Some(vec!["a".to_string(), "b c".to_string()])
+        );
+        assert_eq!(path_tabular("caf%C3%A9+x%2B"), Some("café x ".to_string()));
+        assert_eq!(path_tabular("bad%zz"), None);
+        assert_eq!(path_tabular("%FF"), None);
     }
 }
 

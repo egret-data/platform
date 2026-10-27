@@ -473,6 +473,32 @@ impl CatalogStore {
         .await?)
     }
 
+    /// Which of `pairs` are equal the way lakekeeper compares namespace and
+    /// table names: its ICU `case_insensitive` collation (`und-u-ks-level2`,
+    /// non-deterministic), so case, width, compatibility forms, canonical
+    /// equivalence and default-ignorable code points do not tell names apart,
+    /// while accents do (rename-authz spec §10.4). Asked of Postgres itself, so
+    /// the guard cannot drift from the collation lakekeeper's unique indexes
+    /// use.
+    pub async fn names_equal_in_catalog(
+        &self,
+        pairs: &[(String, String)],
+    ) -> Result<std::collections::HashSet<(String, String)>, CatalogError> {
+        if pairs.is_empty() {
+            return Ok(std::collections::HashSet::new());
+        }
+        let (left, right): (Vec<String>, Vec<String>) = pairs.iter().cloned().unzip();
+        let equal: Vec<(String, String)> = sqlx::query_as(
+            "SELECT a, b FROM unnest($1::text[], $2::text[]) AS p(a, b) \
+             WHERE a = b COLLATE lakekeeper.case_insensitive",
+        )
+        .bind(&left)
+        .bind(&right)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(equal.into_iter().collect())
+    }
+
     pub async fn revoke_grant(&self, grant_id: Uuid) -> Result<(), CatalogError> {
         sqlx::query("DELETE FROM catalog.catalog_grants WHERE id = $1")
             .bind(grant_id)

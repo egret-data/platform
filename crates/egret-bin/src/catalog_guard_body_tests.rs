@@ -1433,3 +1433,132 @@ async fn a_malformed_single_table_commit_is_a_400_from_the_guard() {
     }
 }
 
+/// F3: the guard matches names as lakekeeper does (its ICU `case_insensitive`
+/// collation): a grant on `Secret` reaches `secret` however the request spells
+/// it, and the reverse. Before, it matched bytes, so the answer depended on
+/// how the caller spelled the name.
+#[tokio::test]
+async fn a_grant_matches_names_as_the_catalog_does() {
+    let env = env_or_skip!();
+    env.create_table("sales", "secret").await;
+    for (grant_ns, grant_name) in [("sales", "Secret"), ("SALES", "secret")] {
+        let token = env
+            .token_for(
+                "external",
+                &[grant("table", Some(&[grant_ns]), Some(grant_name), "read")],
+            )
+            .await;
+        for (ns, name) in [
+            ("sales", "secret"),
+            ("Sales", "SECRET"),
+            ("sales", "Secret"),
+        ] {
+            assert_eq!(
+                env.load(&token, "tables", ns, name).await,
+                StatusCode::OK,
+                "grant {grant_ns}.{grant_name}, request {ns}.{name}"
+            );
+        }
+    }
+    // A name that is not the same under the collation is still refused.
+    let other = env
+        .token_for(
+            "external",
+            &[grant("table", Some(&["sales"]), Some("secrets"), "read")],
+        )
+        .await;
+    assert_eq!(
+        env.load(&other, "tables", "sales", "secret").await,
+        StatusCode::FORBIDDEN
+    );
+}
+
+/// F3: for spellings that differ in case, width, composition or invisible
+/// characters, the guard's decision for a grant on `sales.secret` agrees with
+/// what lakekeeper resolves: allowed exactly when lakekeeper finds the table.
+#[tokio::test]
+async fn the_guard_decides_names_the_way_lakekeeper_resolves_them() {
+    let env = env_or_skip!();
+    env.create_table("sales", "secret").await;
+    env.create_table("sales", "caf\u{e9}").await;
+    let token = env
+        .token_for(
+            "external",
+            &[
+                grant("table", Some(&["sales"]), Some("secret"), "read"),
+                grant("table", Some(&["sales"]), Some("caf\u{e9}"), "read"),
+            ],
+        )
+        .await;
+    let variants = [
+        "secret",
+        "SECRET",
+        "\u{ff53}\u{ff45}\u{ff43}\u{ff52}\u{ff45}\u{ff54}",
+        "sec\u{ad}ret",
+        "sec\u{200b}ret",
+        "secre",
+        "cafe\u{301}",
+        "CAF\u{c9}",
+        "cafe",
+    ];
+    for v in variants {
+        let path = percent(v);
+        let (raw, _) = env
+            .send(
+                &env.raw,
+                None,
+                "GET",
+                &format!("namespaces/sales/tables/{path}"),
+                Value::Null,
+            )
+            .await;
+        let guarded = env.load(&token, "tables", "sales", &path).await;
+        let expected = match raw {
+            StatusCode::OK => StatusCode::OK,
+            StatusCode::NOT_FOUND => StatusCode::FORBIDDEN,
+            other => panic!("{v:?}: lakekeeper answered {other}"),
+        };
+        assert_eq!(
+            guarded, expected,
+            "{v:?}: lakekeeper answered {raw}, so the guard must answer {expected}"
+        );
+    }
+}
+
+/// Percent-encode every byte that is not ASCII alphanumeric.
+fn percent(s: &str) -> String {
+    s.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
+/// F3 on a body: a rename whose source is spelled in another case is decided
+/// on the table lakekeeper renames.
+#[tokio::test]
+async fn a_rename_source_in_another_case_is_decided_on_the_table() {
+    let env = env_or_skip!();
+    env.create_table("sales", "secret").await;
+    env.create_table("sales", "mine").await;
+    let owner = env
+        .token_for(
+            "external",
+            &[grant("namespace", Some(&["SALES"]), None, "write")],
+        )
+        .await;
+    let (status, body) = env
+        .rename(
+            &owner,
+            "tables",
+            (&["sales"], "MINE"),
+            (&["sales"], "mine2"),
+        )
+        .await;
+    assert!(status.is_success(), "{status} {body}");
+    assert!(env.exists("tables", "sales", "mine2").await);
+}
