@@ -1067,3 +1067,37 @@ async fn a_block_after_another_task_in_a_loop_restarts_with_no_snapshot(pool: Pg
     );
     assert!(swept_at(&pool, block).await.is_some());
 }
+
+/// End hooks A4 fix round: a block in the flow's `finally:` (and one in its
+/// `errors:`) is found by the worker. `block_of` and `parent_block_of` used to
+/// walk `flow.tasks` only, so a block outside it was refused as corrupt.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_block_in_the_flows_finally_or_errors_is_prepared_and_finished(pool: PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    egret_workflow::storage::install_mem_for_tests();
+    let db = egret_metastore::Db { pool: pool.clone() };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    let reg = registry();
+    let block = "  - id: block\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n    tasks:\n      - id: a\n        type: io.kestra.plugin.core.debug.Return\n        format: a\n";
+    for (list, first) in [
+        (
+            "finally",
+            "  - id: ok\n    type: io.kestra.plugin.core.debug.Return\n    format: ok\n",
+        ),
+        (
+            "errors",
+            "  - id: ok\n    type: io.kestra.plugin.core.execution.Fail\n",
+        ),
+    ] {
+        let src = format!("id: wd-end\nnamespace: w6.claims\ntasks:\n{first}{list}:\n{block}");
+        let ex =
+            egret_workflow::worker::start_execution(&pool, ws, None, &src, serde_json::json!({}))
+                .await
+                .expect("start");
+        settle(&pool, &reg, ex, 40).await;
+        let (state, phase, _) = block_row(&pool, ex).await;
+        assert_eq!(state, "SUCCESS", "the block in the flow's `{list}:`");
+        assert_eq!(phase.as_deref(), Some("FINISHED"), "`{list}:`");
+        assert_eq!(child_row(&pool, ex, "a").await.0, "SUCCESS", "`{list}:`");
+    }
+}

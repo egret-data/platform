@@ -29,6 +29,39 @@ pub(crate) fn task_path(prefix: &str, id: &str) -> String {
     format!("{prefix}.{id}")
 }
 
+/// The task `id`, from anywhere in `flow` -- the same tree [`every_task`]
+/// walks (all four root lists, every depth, [`Task::children`] and
+/// [`Task::error_children`]), without building paths.
+///
+/// **The one lookup the worker uses to turn a stored run's task id back into
+/// its model task** (end hooks A4 fix round, 2026-10-27). There were five
+/// private copies (`claim::leaf`, `spawn::find_task`, `subflow::subflow_of`,
+/// `working_dir::block_of` and `parent_block_of`), and each walked a different
+/// subset: `claim::leaf` missed the flow's `finally:`, `spawn::find_task`
+/// missed every `errors:` list below the root, and both `working_dir` walks
+/// saw `flow.tasks` alone. The plan reaches all of these lists, so the worker
+/// was asked to run a task it could not find and failed it as corrupt or as
+/// not a leaf.
+///
+/// Task ids are unique across a whole flow (`spec::validate`'s
+/// `duplicate_task_id` walks this same tree), so the id is a key and the
+/// first match is the only one.
+pub(crate) fn find_task<'a>(flow: &'a Flow, id: &str) -> Option<&'a Task> {
+    fn walk<'a>(task: &'a Task, id: &str) -> Option<&'a Task> {
+        if task.id == id {
+            return Some(task);
+        }
+        task.children()
+            .into_iter()
+            .chain(task.error_children())
+            .find_map(|c| walk(c, id))
+    }
+    root_lists(flow)
+        .into_iter()
+        .flat_map(|(_, list)| list.iter())
+        .find_map(|t| walk(t, id))
+}
+
 /// Every task in `flow` with its path, in all four root lists and at every
 /// depth -- through [`Task::children`] **and** [`Task::error_children`], so a
 /// task inside a flowable's `errors:` is visited. Pre-order: a parent before

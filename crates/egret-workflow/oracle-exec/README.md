@@ -13576,3 +13576,36 @@ pinned: the bank split (301, 229, 72) → (301, 233, 68), the field breakdown
 (2, 70, 72) → (2, 66, 68), baselined terminals 303 → 272, executions
 108 → 104, run-history tokens 1192 → 1076 and execution-history tokens
 389 → 377. The residual `finally:` row went 14 → 10.
+
+**A4 fix round (2026-10-27): the flow's own `finally:` banks (5).** The worker
+turned a stored run's task id back into its model task through five private
+walks, each over a different subset of the tree. `claim::leaf` missed the
+flow's `finally:` (the cause above), `spawn::find_task` missed every `errors:`
+below the root, and `working_dir::block_of`/`parent_block_of` saw `flow.tasks`
+alone. All five now call `spec::path::find_task`, which walks what
+`spec::path::every_task` walks (all four root lists, `children()` and
+`error_children()`). `find_task_resolves_every_planned_task_of_every_corpus_flow`
+pins that it finds every planned task of every corpus flow `build_plan`
+accepts (299 flows, 793 tasks). Banked: `valids/finally-flow`,
+`finally-flow-error`, `finally-flow-error-first`,
+`finally-sequential-error-first` and `restart-with-finally`; 68 / 68 became
+63 / 63.
+
+`valids/task-runif-taskswithstate` stays baselined on a renderer cause: its two
+`runIf:`s are `{{ tasksWithState(state='FAILED') is [not] empty }}`, and
+Pebble's `empty` test is one egret's renderer leaves unknown on purpose (the
+fence test in `runners::env`), so both runs end `CREATED FAILED`.
+`handler_surface.py` gained a `render` blocker for it, and the flow's own
+`finally:` is ported there now: the ceiling went 266 → 271.
+
+Figures that moved, each pinned with a dated note:
+- the bank split: (301, 233, 68) → (301, 238, 63);
+- the field breakdown: runs 51 → 46, total 65 → 60;
+- asserted pairs: 661 → 689;
+- baselined pairs: 455 → 427;
+- the timeout split: (2, 66, 68) → (2, 61, 63);
+- baselined terminals: 272 → 254;
+- baselined executions: 104 → 99;
+- run-history tokens: 1076 → 1007;
+- execution-history tokens: 377 → 362;
+- the residual `finally:` row: 10 → 5.

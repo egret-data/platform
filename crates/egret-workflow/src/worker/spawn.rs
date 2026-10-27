@@ -889,17 +889,11 @@ fn sub_flow_source(source: &str, loop_task_id: &str, owner: Uuid) -> Result<Stri
 /// `duplicate_task_id` is a structural check over the nested walk), so the id
 /// is a key and not a guess — the same rule `claim::leaf_spec` relies on.
 fn find_task<'a>(flow: &'a Flow, want: &str) -> Option<&'a Task> {
-    fn walk<'a>(task: &'a Task, want: &str) -> Option<&'a Task> {
-        if task.id == want {
-            return Some(task);
-        }
-        task.children().into_iter().find_map(|c| walk(c, want))
-    }
-    flow.tasks
-        .iter()
-        .chain(flow.errors.iter())
-        .chain(flow.finally_.iter())
-        .find_map(|t| walk(t, want))
+    // End hooks A4 fix round (2026-10-27): the shared walk. This one walked
+    // `children()` only, so a `Loop` inside any `errors:` list below the root
+    // was not found and the tick aborted ("is not a Loop of the execution's
+    // own source").
+    crate::spec::path::find_task(flow, want)
 }
 
 /// The parent execution and the **loop run** inside it, or `None` when there

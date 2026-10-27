@@ -814,7 +814,11 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
         // (2026-10-27): `valids/finally-dag`, `valids/finally-parallel`,
         // `valids/finally-sequential` and `valids/finally-sequential-error`
         // bank (flowable `finally:` runs by Kestra's list rule); 68 + 233 = 301.
-        (301, 233, 68),
+        // 68 -> 63 baselined, 233 -> 238 matching at the A4 fix round (same
+        // day): `valids/finally-flow`, `-flow-error`, `-flow-error-first`,
+        // `-sequential-error-first` and `valids/restart-with-finally` bank (the
+        // worker finds a flow-level `finally:` leaf); 63 + 238 = 301.
+        (301, 238, 63),
         "301 = matching + baselined, the total beside its parts. It read \
          167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries, W8 \
          Task 4 banked `valids/waitfor-nested`, W8 Task 5 banked seven \
@@ -2511,7 +2515,9 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         // + the 111 top-level pairs of the four entries end hooks A4 banked
         // (2026-10-27: `valids/finally-dag`, `-parallel`, `-sequential`,
         // `-sequential-error`); measured.
-        (558, 103, 661),
+        // + the 28 top-level pairs of the five entries the A4 fix round banked
+        // (the flow-level `finally:` ones and `restart-with-finally`); measured.
+        (586, 103, 689),
         "the pairs a change to which the ratchet REPORTS: they live on entries \
          that match, so any change to one makes its entry a REGRESSION. W6 Task \
          3 moved 3 of them across the line, all top-level: the 12 `Subflow` \
@@ -2536,7 +2542,9 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         // 566 -> 455 at end hooks A4 (2026-10-27): the 111 top-level pairs of
         // `valids/finally-dag`, `-parallel`, `-sequential` and
         // `-sequential-error` moved to the matching side.
-        (331, 124, 455),
+        // 455 -> 427 at the A4 fix round: the 28 top-level pairs of the five
+        // flow-level `finally:` entries it banked.
+        (303, 124, 427),
         "and the pairs a change to which it does not: they live on baselined \
          entries, which mismatch whatever the pair says. Flipping all 704 leaves \
          the ratchet green and unmoved -- at 131 when W6 Task 3 flipped them, at \
@@ -2963,7 +2971,9 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
 // entries' 22 runs.
 // 303 -> 272 at end hooks A4 (2026-10-27, measured): the 31 runs of the four
 // banked `valids/finally-dag`, `-parallel`, `-sequential`, `-sequential-error`.
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 272;
+// 272 -> 254 at the A4 fix round (measured): the 18 runs of the five
+// flow-level `finally:` entries it banked.
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 254;
 /// 43 from W6 Task 4 to W9a Task 10; **40 since W9a Task 11** -- the three
 /// iterations of `valids/loop-values-from-uri`.
 // 40 -> 39 at WorkingDirectory Task 8: `working-directory-taskrun` has one
@@ -2996,7 +3006,8 @@ const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 39;
 // execution each, no sub-execution).
 // 108 -> 104 at end hooks A4 (2026-10-27): the four `finally-*` entries it
 // banked (one top-level execution each, no sub-execution).
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 104;
+// 104 -> 99 at the A4 fix round: the five flow-level `finally:` entries.
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 99;
 /// **1703 through W8 Task 2, 1647 after W8 Task 3, 1610 after W8 Task 4, 1528
 /// now** -- 56 run-history tokens on Task 3's eight, 37 on
 /// `valids/waitfor-nested` (whose seven runs include three loops reading
@@ -3023,7 +3034,9 @@ const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 104;
 /// for a failed one, `CREATED SKIPPED` for a falsy `runIf`; measured).
 /// **1076 since end hooks A4 (2026-10-27)**: 116 on the 31 runs of the four
 /// `finally-*` entries it banked (measured).
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1076;
+/// **1007 since the A4 fix round**: 69 on the 18 runs of the five flow-level
+/// `finally:` entries it banked (measured).
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1007;
 /// **665 through W8 Task 2, 617 after W8 Task 3, 562 after W8 Task 4, 526 after
 /// W8 Task 5, 522 now** -- 48 execution-history tokens on Task 3's eight, i.e.
 /// six apiece (every one of them reads `CREATED RUNNING PAUSED RESTARTED
@@ -3051,7 +3064,8 @@ const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1076;
 /// banked executions (`CREATED RUNNING <terminal>`).
 /// **377 since end hooks A4 (2026-10-27)**: three on each of the four
 /// `finally-*` executions it banked (`CREATED RUNNING <terminal>`).
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 377;
+/// **362 since the A4 fix round**: three on each of the five it banked.
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 362;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -4431,7 +4445,11 @@ const MISMATCH_ON_EXECUTION: usize = 32;
 // The five flow-level `finally:` entries still differ on `runs` (their
 // `finally:` leaves end FAILED: `worker::claim::leaf` does not walk
 // `flow.finally_`), as does `valids/task-runif-taskswithstate`.
-const MISMATCH_ON_RUNS: usize = 51;
+// 51 -> 46 at the A4 fix round (2026-10-27, measured): the worker finds a
+// flow-level `finally:` leaf through `spec::path::find_task`, and those five
+// bank. `valids/task-runif-taskswithstate` still differs on `runs`: its two
+// `runIf:`s use Pebble's `empty` test, which egret's renderer leaves unknown.
+const MISMATCH_ON_RUNS: usize = 46;
 /// **72 through W8 Task 2, 67 after W8 Task 3, 64 now**: five of Task 3's eight
 /// carry an ordered pair, and W8 Task 4 closed THREE on one entry --
 /// `valids/waitfor-nested`'s `loop_1_return`/`loop_2`,
@@ -4522,7 +4540,8 @@ const MISMATCH_ON_SPAWNED: usize = 12;
 // `valids/task-runif-taskswithstate` moved from `refused` to a traced mismatch.
 // 69 -> 65 at end hooks A4 (2026-10-27, measured): `valids/finally-dag`,
 // `-parallel`, `-sequential` and `-sequential-error` banked.
-const MISMATCHING_RUNS_ENTRIES: usize = 65;
+// 65 -> 60 at the A4 fix round: the five flow-level `finally:` entries banked.
+const MISMATCHING_RUNS_ENTRIES: usize = 60;
 /// **84 through W5; 63 after W6 Task 3, and 59 since W6 Task 4 corrected the
 /// classifier.**
 ///
@@ -7043,12 +7062,14 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         // `valids/finally-allowfailure` carry a `finally:` that egret runs now.
         // 14 -> 10 at end hooks A4 (2026-10-27): `valids/finally-dag`,
         // `-parallel`, `-sequential` and `-sequential-error` banked (a flowable
-        // `finally:` runs by Kestra's list rule). The ten left: the five
-        // flow-level `finally:` entries (their leaves are not found by
-        // `worker::claim::leaf`), `task-runif-taskswithstate`, the two
-        // `finally-loop*` (A6), `pause-errors-finally-after-execution` (#9) and
+        // `finally:` runs by Kestra's list rule).
+        // 10 -> 5 at the A4 fix round (same day): the five flow-level
+        // `finally:` entries banked once the worker found their leaves. The
+        // five left: `task-runif-taskswithstate` (Pebble's `empty` test, a
+        // renderer cause), the two `finally-loop*` (A6),
+        // `pause-errors-finally-after-execution` (#9) and
         // `after-execution-finally` (#2b).
-        ("finally:", 10, &["finally:"]),
+        ("finally:", 5, &["finally:"]),
         (
             "ExecutionUpdatableTask",
             // 16 until kill-and-exit Task 3 banked the four `valids/exit*`
@@ -7774,9 +7795,11 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
     // `invalids/invalid-property`, which it banked.
     // (2, 70, 72) -> (2, 66, 68) at end hooks A4 (2026-10-27): nor do
     // `valids/finally-dag`, `-parallel`, `-sequential`, `-sequential-error`.
+    // (2, 66, 68) -> (2, 61, 63) at the A4 fix round: nor do the five
+    // flow-level `finally:` entries it banked.
     assert_eq!(
         (declaring.len(), without, baseline.len()),
-        (2, 66, 68),
+        (2, 61, 63),
         "the baselined population that declares a `timeout:`, and the rest \
          ((2, 106, 108) until no-silent-stall Task 1 banked \
          `invalids/invalid-task`, which declares none). It \

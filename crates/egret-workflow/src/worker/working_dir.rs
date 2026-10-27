@@ -24,7 +24,7 @@ use super::commands::{
 };
 use super::handlers::script::{STORAGE_SCHEME, WORKING_DIR_VAR};
 use super::WorkingDirCarry;
-use crate::models::{Flow, Task, TaskKind, WorkingDirectory};
+use crate::models::{Flow, TaskKind, WorkingDirectory};
 use crate::runners::files::is_namespace_file_uri;
 use crate::runners::{render_str, RenderContext};
 use crate::storage::collect::collect_one;
@@ -183,19 +183,13 @@ pub(crate) async fn run_claim(pool: &PgPool, c: &Claimed, render: &RenderContext
 /// The block's definition, found by its task id in the frozen flow source.
 /// `None` when the flow has no such block, which is corruption.
 fn block_of<'a>(flow: &'a Flow, id: &str) -> Option<&'a WorkingDirectory> {
-    fn walk<'a>(task: &'a Task, id: &str) -> Option<&'a WorkingDirectory> {
-        if task.id == id {
-            return match &task.kind {
-                TaskKind::WorkingDirectory(w) => Some(w),
-                _ => None,
-            };
-        }
-        task.children()
-            .into_iter()
-            .chain(task.error_children())
-            .find_map(|c| walk(c, id))
+    // End hooks A4 fix round (2026-10-27): the shared walk. This walked
+    // `flow.tasks` alone, so a block in the flow's `errors:` or `finally:`
+    // was refused as corrupt.
+    match &crate::spec::path::find_task(flow, id)?.kind {
+        TaskKind::WorkingDirectory(w) => Some(w),
+        _ => None,
     }
-    flow.tasks.iter().find_map(|t| walk(t, id))
 }
 
 /// Renders one string of the block with the block's render context, as a
@@ -662,18 +656,14 @@ async fn save_archive(
 /// The `WorkingDirectory` whose `tasks` hold the child `child`, found in the
 /// frozen flow. `None` when no block of the flow holds it.
 fn parent_block_of<'a>(flow: &'a Flow, child: &str) -> Option<&'a WorkingDirectory> {
-    fn walk<'a>(task: &'a Task, child: &str) -> Option<&'a WorkingDirectory> {
-        if let TaskKind::WorkingDirectory(w) = &task.kind {
-            if w.tasks.iter().any(|t| t.id == child) {
-                return Some(w);
-            }
-        }
-        task.children()
-            .into_iter()
-            .chain(task.error_children())
-            .find_map(|c| walk(c, child))
-    }
-    flow.tasks.iter().find_map(|t| walk(t, child))
+    // End hooks A4 fix round (2026-10-27): over the shared tree, which reaches
+    // every root list (this walked `flow.tasks` alone).
+    crate::spec::path::every_task(flow)
+        .into_iter()
+        .find_map(|(_, task)| match &task.kind {
+            TaskKind::WorkingDirectory(w) if w.tasks.iter().any(|t| t.id == child) => Some(w),
+            _ => None,
+        })
 }
 
 /// The block's `outputFiles`, rendered and checked (spec §2.2): a list of names

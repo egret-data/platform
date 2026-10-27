@@ -203,29 +203,28 @@ def collect_tasks(node, path, out):
 
 
 # End hooks A4 (2026-10-27): the executor runs a `finally:` on these kinds by
-# Kestra's list rule (`flowable::current_list`). Still unported: the flow's own
-# `finally:` (the executor runs it, but the worker's leaf lookup,
-# `worker::claim::leaf`, does not walk `flow.finally_`, so its leaves fail),
-# and `finally:` on `Loop`, `LoopUntil`, `WorkingDirectory` (A5, A6) and
-# `Pause` (refused, #9).
+# Kestra's list rule (`flowable::current_list`), and since its fix round the
+# flow's own `finally:` too (the worker finds its leaves through
+# `spec::path::find_task`). Still unported: `finally:` on `Loop`, `LoopUntil`,
+# `WorkingDirectory` (A5, A6) and `Pause` (refused, #9).
 PORTED_FINALLY = {"allowfailure", "sequential", "parallel", "if", "switch", "dag"}
 
 
-def unported_finally(node, root=True):
+def unported_finally(node):
     """True if some `finally:` is one egret does not run yet.
 
     The AllowFailure flowable runs its own `finally:` (spec §5.2 of its design),
-    and since end hooks A4 so do the kinds in PORTED_FINALLY. `root` is the
-    flow document itself, whose `finally:` is not ported (see above).
+    and since end hooks A4 so do the kinds in PORTED_FINALLY and the flow
+    document itself (a node with no `type`).
     """
     if isinstance(node, dict):
         ty = node.get("type")
         short = ty.rsplit(".", 1)[-1].lower() if isinstance(ty, str) else None
-        if "finally" in node and (root or short not in PORTED_FINALLY):
+        if "finally" in node and short is not None and short not in PORTED_FINALLY:
             return True
-        return any(unported_finally(v, False) for v in node.values())
+        return any(unported_finally(v) for v in node.values())
     if isinstance(node, list):
-        return any(unported_finally(v, False) for v in node)
+        return any(unported_finally(v) for v in node)
     return False
 
 
@@ -736,10 +735,20 @@ LOOP_UNTIL_TYPES = {
     "core.waitfor",
 }
 QUOTED_COMPARISON = re.compile(r"\{\{[^{}]*[<>]=?\s*\\?[\"'][^\"']*\\?[\"']")
+# End hooks A4 fix round (2026-10-27): Pebble's `empty` test (`x is empty`,
+# `x is not empty`). egret's renderer leaves it an unknown test on purpose
+# (`runners::env`'s fence test), so the expression fails to render where the
+# artifact answers.  The corpus has one entry, `valids/task-runif-taskswithstate`,
+# whose two flow-level `finally:` `runIf:`s use it; it reached this file's
+# CEILING once that `finally:` became ported.
+EMPTY_TEST = re.compile(r"\{\{[^{}]*\bis\s+(not\s+)?empty\b")
 
 
 def loop_until_gaps(node, raw, out):
     """The `LoopUntil` properties W8 Task 4 ported and cannot reproduce."""
+    if EMPTY_TEST.search(raw):
+        out.add(("render", "Pebble's `empty` test, which egret's renderer "
+                           "leaves unknown"))
     if QUOTED_COMPARISON.search(raw):
         out.add(("render", "a relational operator against a quoted operand; "
                            "Pebble throws and minijinja answers"))
@@ -1016,9 +1025,13 @@ def check_inputs(flows, kinds, golden, baseline):
     # `invalids/invalid-property` (refused at save, `Seam::Save`).
     # 68 since end hooks A4 (2026-10-27) banked `valids/finally-dag`,
     # `valids/finally-parallel`, `valids/finally-sequential` and
-    # `valids/finally-sequential-error` (flowable `finally:` runs).
-    if len(baseline) != 68:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 68; the split "
+    # `valids/finally-sequential-error` (flowable `finally:` runs); 63 since
+    # its fix round (the same day) banked `valids/finally-flow`,
+    # `-flow-error`, `-flow-error-first`, `-sequential-error-first` and
+    # `valids/restart-with-finally` (the worker finds a flow-level `finally:`
+    # leaf).
+    if len(baseline) != 63:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 63; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1668,8 +1681,8 @@ def self_test():
          "not 273",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 68",
-         "not 68",
+    case("baseline.txt is no longer 63",
+         "not 63",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

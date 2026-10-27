@@ -418,35 +418,25 @@ struct Leaf<'a> {
 /// this arm; `load` plans its stored source without validation
 /// (`executor::plan_stored`), so it does reach it. See `NotALeaf`'s doc.
 fn leaf<'a>(flow: &'a crate::models::Flow, task_id: &str) -> Option<Leaf<'a>> {
-    fn walk<'a>(task: &'a crate::models::Task, want: &str) -> Option<Leaf<'a>> {
-        if task.id == want {
-            return match &task.kind {
-                crate::models::TaskKind::Leaf { spec } => Some(Leaf {
-                    spec,
-                    // **Read from the `Task`, not from `spec`.** `timeout` is
-                    // one of the seven keys `models::Task`'s deserializer takes
-                    // OUT of a leaf's `spec`, which is exactly why a handler
-                    // could not see it and `handlers::sql` used a constant.
-                    timeout: task.timeout.as_ref(),
-                }),
-                _ => None,
-            };
-        }
-        // `children()` AND `error_children()`: an error handler nested inside a
-        // flowable's own `errors:` is a leaf a worker claims like any other,
-        // and a walk that could not reach it aborted the tick with
-        // `WorkerError::Corrupt` and left the run `RUNNING` for ever. See
-        // `models::Task::error_children` for the three corpus entries that
-        // showed it.
-        task.children()
-            .into_iter()
-            .chain(task.error_children())
-            .find_map(|c| walk(c, want))
+    // `spec::path::find_task` walks every list the plan reaches: `children()`
+    // AND `error_children()` (an error handler nested inside a flowable's own
+    // `errors:` is a leaf a worker claims like any other -- a walk that could
+    // not reach it aborted the tick with `WorkerError::Corrupt`; see
+    // `models::Task::error_children`), and all four root lists. End hooks A4
+    // fix round (2026-10-27): this walked `flow.tasks` and `flow.errors` only,
+    // so a leaf in the flow's `finally:` failed with the not-a-leaf line.
+    let task = crate::spec::path::find_task(flow, task_id)?;
+    match &task.kind {
+        crate::models::TaskKind::Leaf { spec } => Some(Leaf {
+            spec,
+            // **Read from the `Task`, not from `spec`.** `timeout` is one of
+            // the seven keys `models::Task`'s deserializer takes OUT of a
+            // leaf's `spec`, which is exactly why a handler could not see it
+            // and `handlers::sql` used a constant.
+            timeout: task.timeout.as_ref(),
+        }),
+        _ => None,
     }
-    flow.tasks
-        .iter()
-        .chain(flow.errors.iter())
-        .find_map(|t| walk(t, task_id))
 }
 
 /// Take up to `limit` runnable task runs, marking each leased.

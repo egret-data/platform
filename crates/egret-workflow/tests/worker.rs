@@ -11898,3 +11898,111 @@ async fn each_loop_until_iteration_has_its_own_task_run_id(pool: sqlx::PgPool) {
         Some(run_id_of(&pool, ex, "collect").await.to_string().as_str()),
     );
 }
+
+/// End hooks A4 fix round: a leaf in the flow's own `finally:` is claimed and
+/// run like any leaf. `claim::leaf` walked `flow.tasks` and `flow.errors` only,
+/// so it was refused with the not-a-leaf line.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_flow_level_finally_leaf_is_claimed_and_run(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let source = "id: fin\nnamespace: t\ntasks:\n\
+         \x20 - id: f\n    type: io.kestra.plugin.core.execution.Fail\n\
+         finally:\n\
+         \x20 - id: z\n    type: io.kestra.plugin.core.debug.Return\n    format: zed\n";
+    let ex = start_execution(&pool, ws, None, source, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    drain(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
+    assert_eq!(run_state(&pool, ex, "f").await.as_deref(), Some("FAILED"));
+    assert_eq!(run_state(&pool, ex, "z").await.as_deref(), Some("SUCCESS"));
+    assert_eq!(
+        run_outputs(&pool, ex, "z").await,
+        Some(serde_json::json!({"value": "zed"})),
+        "the Return handler ran"
+    );
+    assert_eq!(
+        execution_history(&pool, ex).await,
+        serde_json::json!(["CREATED", "RUNNING", "FAILED"]),
+        "the execution's state is its tasks'"
+    );
+}
+
+/// The same for a flowable's `finally:` (and a flowable's `errors:`), which
+/// `Task::children()`/`error_children()` reach.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_flowable_finally_leaf_is_claimed_and_run(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let source = "id: fin\nnamespace: t\ntasks:\n\
+         \x20 - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n\
+         \x20     - id: f\n        type: io.kestra.plugin.core.execution.Fail\n    errors:\n\
+         \x20     - id: e\n        type: io.kestra.plugin.core.debug.Return\n        format: e\n    finally:\n\
+         \x20     - id: z\n        type: io.kestra.plugin.core.debug.Return\n        format: zed\n";
+    let ex = start_execution(&pool, ws, None, source, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    drain(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
+    assert_eq!(run_state(&pool, ex, "e").await.as_deref(), Some("SUCCESS"));
+    assert_eq!(run_state(&pool, ex, "z").await.as_deref(), Some("SUCCESS"));
+    assert_eq!(run_state(&pool, ex, "seq").await.as_deref(), Some("FAILED"));
+    assert_eq!(
+        execution_history(&pool, ex).await,
+        serde_json::json!(["CREATED", "RUNNING", "FAILED"])
+    );
+}
+
+/// End hooks A4 fix round: a `Loop` inside a flowable's `errors:` and one in
+/// the flow's `finally:` spawn their iterations. `spawn::find_task` walked
+/// `Task::children()` only, so a `Loop` under an `errors:` list was not found.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_loop_in_an_errors_or_finally_list_spawns_its_iteration(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let looped = |id: &str, body: &str| {
+        format!(
+            "  - id: {id}\n    type: io.kestra.plugin.core.flow.Loop\n    values: '[\"1\"]'\n    \
+             tasks:\n      - id: {body}\n        type: io.kestra.plugin.core.log.Log\n        message: m\n"
+        )
+    };
+    let indent = |block: String| {
+        block
+            .lines()
+            .map(|l| format!("    {l}\n"))
+            .collect::<String>()
+    };
+    let source = format!(
+        "id: loops\nnamespace: t\ntasks:\n  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    \
+         tasks:\n      - id: f\n        type: io.kestra.plugin.core.execution.Fail\n    errors:\n{}finally:\n{}",
+        indent(looped("in_errors", "b1")),
+        looped("in_finally", "b2"),
+    );
+    let ex = start_execution(&pool, ws, None, &source, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
+    assert_eq!(
+        run_state(&pool, ex, "in_errors").await.as_deref(),
+        Some("SUCCESS")
+    );
+    assert_eq!(
+        run_state(&pool, ex, "in_finally").await.as_deref(),
+        Some("SUCCESS")
+    );
+    assert_eq!(
+        execution_history(&pool, ex).await,
+        serde_json::json!(["CREATED", "RUNNING", "FAILED"])
+    );
+}

@@ -463,6 +463,61 @@ mod tests {
         out
     }
 
+    /// End hooks A4 fix round (2026-10-27): `spec::path::find_task`, the one
+    /// lookup the worker turns a stored run's task id back into its model task
+    /// with, finds EVERY task the plan holds, for every corpus flow that plans,
+    /// and finds the same task `spec::path::every_task` lists under that id.
+    /// The kinds agree where the worker relies on them: a planned `Runnable`
+    /// is a model `Leaf` (`claim::leaf`), a planned `Loop` a model `Loop`
+    /// (`spawn::find_task`), a planned `WorkingDirectory` a model one
+    /// (`working_dir::block_of`). The `finally:` count is the population the
+    /// old `claim::leaf` walk could not reach.
+    #[test]
+    fn find_task_resolves_every_planned_task_of_every_corpus_flow() {
+        use crate::models::TaskKind as M;
+        let (mut flows, mut tasks, mut under_finally) = (0usize, 0usize, 0usize);
+        for (id, source) in every_corpus_flow() {
+            let Ok(flow) = crate::spec::parse(&source) else {
+                continue;
+            };
+            // `build_plan`, the start gate: a flow it refuses never has a run.
+            let Ok(plan) = build_plan(&source) else {
+                continue;
+            };
+            flows += 1;
+            let every = crate::spec::path::every_task(&flow);
+            for (ix, t) in plan.tasks.iter().enumerate() {
+                let found = crate::spec::path::find_task(&flow, &t.id)
+                    .unwrap_or_else(|| panic!("{id}: plan task {ix} `{}` not found", t.id));
+                let listed = every
+                    .iter()
+                    .find(|(_, m)| m.id == t.id)
+                    .map(|(_, m)| *m)
+                    .expect("every_task lists it");
+                assert!(std::ptr::eq(found, listed), "{id}: `{}`", t.id);
+                let agrees = match (&t.kind, &found.kind) {
+                    (TaskKind::Runnable { .. }, k) => matches!(k, M::Leaf { .. }),
+                    (TaskKind::Loop { .. }, k) => matches!(k, M::Loop(_)),
+                    (TaskKind::WorkingDirectory { .. }, k) => matches!(k, M::WorkingDirectory(_)),
+                    _ => true,
+                };
+                assert!(agrees, "{id}: plan task {ix} `{}` kind", t.id);
+                tasks += 1;
+            }
+            under_finally += every
+                .iter()
+                .filter(|(path, _)| path.starts_with("finally."))
+                .filter(|(_, m)| plan.tasks.iter().any(|t| t.id == m.id))
+                .count();
+        }
+        println!("{flows} flows, {tasks} planned tasks, {under_finally} under `finally:`");
+        assert!(flows > 250 && tasks > 700, "{flows} flows, {tasks} tasks");
+        assert!(
+            under_finally > 0,
+            "the corpus plans tasks under the flow's `finally:`"
+        );
+    }
+
     /// One flow's layout as D3 freezes it: index, id, kind, and the children
     /// `Plan::children_of` returned before package #2.
     fn layout(plan: &Plan) -> Vec<(usize, String, String, Vec<usize>)> {
