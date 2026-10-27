@@ -567,16 +567,6 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
         use axum::http::StatusCode;
         let forbid = |m: String| Err((StatusCode::FORBIDDEN, m));
         let claims = self.verify(bearer).await?;
-        // Who sent it (rename spec R7): a layer behind the guard names the
-        // caller from this, not from a claim it would have to verify again.
-        let caller = egret_catalog_engine::CatalogCaller {
-            subject: claims
-                .get("sub")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            audience: CATALOG_AUDIENCE.to_string(),
-        };
         let token_warehouse = claims
             .get("warehouse")
             .and_then(|v| v.as_str())
@@ -587,6 +577,20 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
             .and_then(|a| a.first())
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        // Who sent it (rename spec R7): a layer behind the guard names the
+        // caller from this, not from a claim it would have to verify again,
+        // and lakekeeper's authorizer scopes vended credentials to its role's
+        // grants (vended-credentials spec §4.4).
+        let caller = egret_catalog_engine::CatalogCaller {
+            subject: claims
+                .get("sub")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            audience: CATALOG_AUDIENCE.to_string(),
+            warehouse: token_warehouse.to_string(),
+            role: token_role.to_string(),
+        };
 
         // Remote S3 request signing (`/aws/s3/sign`, `/{prefix}/v1/aws/s3/sign`,
         // `/signer/{prefix}/tabular-id/{id}/v1/aws/s3/sign`): egret's warehouses
@@ -3454,6 +3458,12 @@ mod catalog_authz_tests {
 #[cfg(test)]
 mod catalog_guard_body_tests;
 
+/// Vended S3 credentials follow the caller's grants (F4), through the real
+/// guard and lakekeeper's router on egret's S3 profile over an in-process
+/// object store and STS.
+#[cfg(test)]
+mod catalog_vended_credentials_tests;
+
 #[cfg(test)]
 mod catalog_guard_audience_tests {
     use super::{EgretCatalogGuard, CATALOG_AUDIENCE};
@@ -3514,7 +3524,8 @@ mod catalog_guard_audience_tests {
     }
 
     /// Rename spec R7: the guard returns who the verified token names, so the
-    /// table hook can record the caller of a classification move.
+    /// table hook can record the caller of a classification move, and the
+    /// mount can name its warehouse and role to lakekeeper's authorizer.
     #[tokio::test]
     async fn the_catalog_guard_returns_the_token_subject() {
         let Some(g) = guard().await else {
@@ -3526,6 +3537,7 @@ mod catalog_guard_audience_tests {
             &km,
             &serde_json::json!({
                 "sub": "cat1", "aud": CATALOG_AUDIENCE,
+                "warehouse": "wh1", "roles": ["r1"],
                 "exp": chrono::Utc::now().timestamp() + 600,
             }),
         )
@@ -3539,6 +3551,8 @@ mod catalog_guard_audience_tests {
             egret_catalog_engine::CatalogCaller {
                 subject: "cat1".into(),
                 audience: CATALOG_AUDIENCE.into(),
+                warehouse: "wh1".into(),
+                role: "r1".into(),
             }
         );
     }

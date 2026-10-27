@@ -5,6 +5,7 @@
 
 use crate::bootstrap::system_request_metadata;
 use crate::error::CatalogEngineError;
+use crate::mount::EngineAuthorizer;
 use crate::mount::EngineState;
 use anyhow::Context as _;
 use lakekeeper::api::iceberg::types::PageToken;
@@ -15,13 +16,12 @@ use lakekeeper::api::management::v1::warehouse::{
 };
 use lakekeeper::api::management::v1::{ApiServer, GetWarehouseStatisticsQuery};
 use lakekeeper::api::ApiContext;
-use lakekeeper::service::authz::AllowAllAuthorizer;
 use lakekeeper::service::storage::StorageCredential;
 use lakekeeper::service::WarehouseId;
 use lakekeeper_storage_postgres::{PostgresBackend, SecretsState};
 use uuid::Uuid;
 
-type EngineApiServer = ApiServer<PostgresBackend, AllowAllAuthorizer, SecretsState>;
+type EngineApiServer = ApiServer<PostgresBackend, EngineAuthorizer, SecretsState>;
 
 /// A UI-friendly projection of a warehouse's admin config.
 pub struct WarehouseConfig {

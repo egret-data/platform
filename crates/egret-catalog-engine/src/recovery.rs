@@ -5,6 +5,7 @@
 
 use crate::bootstrap::system_request_metadata;
 use crate::error::CatalogEngineError;
+use crate::mount::EngineAuthorizer;
 use crate::mount::EngineState;
 use anyhow::Context as _;
 use lakekeeper::api::management::v1::namespace::NamespaceManagementService;
@@ -15,12 +16,11 @@ use lakekeeper::api::management::v1::warehouse::{
 };
 use lakekeeper::api::management::v1::{ApiServer, TabularType};
 use lakekeeper::api::ApiContext;
-use lakekeeper::service::authz::AllowAllAuthorizer;
 use lakekeeper::service::{NamespaceId, TableId, TabularId, ViewId, WarehouseId};
 use lakekeeper_storage_postgres::{PostgresBackend, SecretsState};
 use uuid::Uuid;
 
-type EngineApiServer = ApiServer<PostgresBackend, AllowAllAuthorizer, SecretsState>;
+type EngineApiServer = ApiServer<PostgresBackend, EngineAuthorizer, SecretsState>;
 
 /// The kind of a tabular (only tables + views are surfaced; generic tables are skipped).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -63,7 +63,7 @@ pub async fn list_deleted_tabulars(
     let rm = system_request_metadata(system_user).context("system metadata")?;
     let resp = <EngineApiServer as WarehouseMgmtService<
         PostgresBackend,
-        AllowAllAuthorizer,
+        EngineAuthorizer,
         SecretsState,
     >>::list_soft_deleted_tabulars(
         wh(warehouse_id)?,
@@ -112,7 +112,7 @@ pub async fn undrop_tabular(
         TabularKindName::Table => TabularId::Table(TableId::from(id)),
         TabularKindName::View => TabularId::View(ViewId::from(id)),
     };
-    <EngineApiServer as WarehouseMgmtService<PostgresBackend, AllowAllAuthorizer, SecretsState>>::undrop_tabulars(
+    <EngineApiServer as WarehouseMgmtService<PostgresBackend, EngineAuthorizer, SecretsState>>::undrop_tabulars(
         wh(warehouse_id)?,
         rm,
         UndropTabularsRequest { targets: vec![target] },
@@ -138,7 +138,7 @@ pub async fn set_protection(
         ProtectTarget::Table => {
             <EngineApiServer as TableManagementService<
                 PostgresBackend,
-                AllowAllAuthorizer,
+                EngineAuthorizer,
                 SecretsState,
             >>::set_table_protection(TableId::from(id), wid, protected, engine_state, rm)
             .await
@@ -146,7 +146,7 @@ pub async fn set_protection(
         ProtectTarget::View => {
             <EngineApiServer as ViewManagementService<
                 PostgresBackend,
-                AllowAllAuthorizer,
+                EngineAuthorizer,
                 SecretsState,
             >>::set_view_protection(ViewId::from(id), wid, protected, engine_state, rm)
             .await
@@ -154,7 +154,7 @@ pub async fn set_protection(
         ProtectTarget::Namespace => {
             <EngineApiServer as NamespaceManagementService<
                 PostgresBackend,
-                AllowAllAuthorizer,
+                EngineAuthorizer,
                 SecretsState,
             >>::set_namespace_protection(
                 NamespaceId::from(id), wid, protected, engine_state, rm

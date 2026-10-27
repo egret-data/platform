@@ -2,12 +2,12 @@
 //! records a `warehouses` row; this drives the embedded lakekeeper to actually
 //! create the warehouse (with an S3/RustFS storage profile) so data ops work.
 
+use crate::mount::EngineAuthorizer;
 use anyhow::Context as _;
 use lakekeeper::api::management::v1::warehouse::{
     CreateWarehouseRequest, Service as WarehouseService, TabularDeleteProfile,
 };
 use lakekeeper::api::ApiContext;
-use lakekeeper::service::authz::AllowAllAuthorizer;
 use lakekeeper::service::storage::{StorageCredential, StorageProfile};
 use lakekeeper_storage_postgres::{PostgresBackend, SecretsState};
 
@@ -16,7 +16,7 @@ use crate::error::CatalogEngineError;
 use crate::mount::EngineState;
 
 type EngineApiServer =
-    lakekeeper::api::management::v1::ApiServer<PostgresBackend, AllowAllAuthorizer, SecretsState>;
+    lakekeeper::api::management::v1::ApiServer<PostgresBackend, EngineAuthorizer, SecretsState>;
 
 /// S3-compatible storage config for a warehouse (RustFS in dev).
 #[derive(Debug, Clone)]
@@ -34,11 +34,11 @@ pub struct S3StorageConfig {
 /// The lakekeeper storage profile egret gives every S3 warehouse, in its JSON
 /// wire shape.
 ///
-/// Remote request-signing stays OFF, and that is load-bearing: lakekeeper's
-/// signer (`POST /{prefix}/v1/aws/s3/sign`) maps the signed location to a
-/// table and asks its authorizer, which is `AllowAllAuthorizer` here, so with
-/// signing on any catalog role with a write grant would get a signature for
-/// any table's files (rename-authz spec §9). The guard does not check it.
+/// Remote request-signing stays OFF: no egret client uses it, and the guard
+/// refuses every signer route (rename-authz spec §9, §10.6). Before
+/// [`crate::EgretAuthorizer`], lakekeeper's signer asked an allow-all
+/// authorizer, so signing on would have signed any table's files for any
+/// role with a write grant.
 pub fn s3_storage_profile(s3: &S3StorageConfig) -> serde_json::Value {
     serde_json::json!({
         "type": "s3",
@@ -50,8 +50,10 @@ pub fn s3_storage_profile(s3: &S3StorageConfig) -> serde_json::Value {
         // STS-vended credentials: on a `vended-credentials` load, lakekeeper calls
         // AssumeRole on the S3 endpoint (RustFS needs no role-arn for s3-compat) with
         // an inline policy downscoped to the table's location, and hands the client
-        // short-lived, table-scoped creds. Clients that don't request delegation fall
-        // back to their own static access key. Remote request-signing stays off
+        // short-lived, table-scoped creds. A client that sends no delegation header
+        // gets them too; only `client-managed` opts out. Their scope follows the
+        // caller's grants: read-only for a read grant, read-write-delete for write
+        // or manage ([`crate::EgretAuthorizer`]). Remote request-signing stays off
         // (see above).
         "sts-enabled": true,
         "remote-signing-enabled": false,
@@ -96,7 +98,7 @@ pub async fn create_lakekeeper_warehouse(
 
     let response = <EngineApiServer as WarehouseService<
         PostgresBackend,
-        AllowAllAuthorizer,
+        EngineAuthorizer,
         SecretsState,
     >>::create_warehouse(request, engine_state, metadata)
     .await
@@ -126,7 +128,7 @@ pub async fn create_memory_warehouse(
         .build();
     let response = <EngineApiServer as WarehouseService<
         PostgresBackend,
-        AllowAllAuthorizer,
+        EngineAuthorizer,
         SecretsState,
     >>::create_warehouse(request, engine_state, metadata)
     .await
