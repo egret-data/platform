@@ -6,7 +6,7 @@ Programme: Control Plane & DG, security defects. Origin: the grants-after-rename
 (`crates/egret-bin/src/main.rs`, `EgretCatalogGuard::check` and `catalog_grant_covers`).
 
 The controller set every choice here (§4, D1–D6; §8.4, D7–D9); the user may revisit them. §8 extends the package,
-at the user's request (2026-10-27), to the multi-table commit, the sibling hole of §7.
+at the user's request (2026-10-27), to the multi-table commit, and §9 to the S3 signer, the sibling holes of §7.
 
 ## 1. Problem
 
@@ -147,10 +147,19 @@ the view hold's rename run on the body the mount re-injected.
 ## 7. Related defects found, not fixed
 
 - `POST /{prefix}/transactions/commit` (multi-table commit) was also a catalog-root write. Fixed in §8.
-- `POST /{prefix}/v1/aws/s3/sign` (the S3 request signer) is also a catalog-root write by path. By reading only; whether
-  lakekeeper's signer scopes the signature to a tabular the caller could load is not checked.
-- `POST /{prefix}/namespaces` (create namespace) is allowed for any role with any write grant.
-- F-B: case-sensitive grants against a case-insensitive catalog (§3.4).
+- `POST /{prefix}/v1/aws/s3/sign` (the S3 request signer) is also a catalog-root write by path. Not exploitable on an
+  egret warehouse, because remote signing is off; pinned, not changed (§9).
+- `POST /{prefix}/namespaces` (create namespace) is allowed for any role with any write grant, because its path has no
+  namespace segment and the namespace is named only in the body. Creating one grants the creator nothing: grants are
+  exact, so a new namespace is reachable only through a `catalog` grant or a grant an admin adds on it. The harm is
+  squatting a name and clutter. A narrow fix is obvious and small: hand the guard the body (`{"namespace": [..]}`) as
+  for a rename and require a `write`/`manage` `catalog` grant for a top-level namespace, or a `namespace` grant on the
+  parent for a nested one. One choice is open: whether a grant on the parent may create children (the parent grant
+  already "covers everything in it" for tables).
+- F-B: catalog grants are case-sensitive while lakekeeper's names are not (§3.4). It fails closed everywhere: a grant on
+  `Sales.Orders` neither loads nor renames nor commits to `sales.orders`. The fix is one change in
+  `catalog_grant_covers` (fold both sides, as lakekeeper does), for every route at once, with a migration that flags
+  grants differing only in case. Not done here.
 
 ## 8. The multi-table commit
 
@@ -201,3 +210,48 @@ In `crates/egret-bin/src/catalog_guard_body_tests.rs`:
   `a_malformed_multi_table_commit_is_a_400_from_the_guard`;
 - green before and after: `an_authorized_multi_table_commit_still_commits` (table and namespace grants, an engine with
   warehouse manage, a multi-level namespace).
+
+## 9. The S3 signer
+
+### 9.1 What lakekeeper checks (pinned lakekeeper, `LK/` = `crates/lakekeeper/src/` at `791650571d`)
+
+| id | fact | where |
+|---|---|---|
+| E9 | Three routes sign: `/aws/s3/sign`, `/{prefix}/v1/aws/s3/sign`, `/signer/{prefix}/tabular-id/{id}/v1/aws/s3/sign`; the `s3-signer` feature is in lakekeeper's defaults, which egret takes | `LK/api/iceberg/v1/s3_signer.rs:34-75`; `crates/lakekeeper/Cargo.toml:19-22` |
+| E10 | The guard refuses the first and the third (their first segment is not the warehouse prefix) and lets the second through as a catalog-root write: any role with any `write`/`manage` grant | `MAIN` guard prefix check; E2 |
+| E11 | The signer refuses a warehouse whose S3 profile has `remote_signing_enabled = false` with 403 `RemoteSigningDisabled`, and a non-S3 profile with 400, **before** it parses the location or looks up a table | `LK/server/s3_signer/sign.rs:89-104` |
+| E12 | With signing on, it maps the signed location to a table (`get_table_info_by_location`), then asks the authorizer for `ReadData` (GET/HEAD) or `WriteData` (PUT/POST/DELETE) on that table, then checks the URI lies under the table's location | `LK/server/s3_signer/sign.rs:131-231`, `:447` |
+| E13 | egret runs lakekeeper on `AllowAllAuthorizer`, so E12's table check allows every caller | `crates/egret-catalog-engine/src/mount.rs:74` (`EngineState`) |
+| E14 | egret creates every S3 warehouse with `remote-signing-enabled: false`, and no egret route changes a storage profile (the admin API changes only the credential) | `crates/egret-catalog-engine/src/warehouse.rs` (`s3_storage_profile`); `crates/egret-catalog-engine/src/admin.rs:188` |
+
+### 9.2 Measured
+
+Through the real mount, with a role whose only grant is `namespace` `write` on `stage`, against a table `sales.secret`
+(a one-off probe, not committed; lakekeeper's warehouse cache turned off for the run with
+`LAKEKEEPER__CACHE__WAREHOUSE__ENABLED=false` so a profile written to its table took effect):
+
+- the in-memory profile: GET and PUT both 400 `UnsupportedStorageType`;
+- egret's S3 profile (signing off): GET and PUT both 403 `RemoteSigningDisabled`;
+- the same profile with signing **on**, and the table's location moved to `s3://…`: lakekeeper accepted the role for
+  `sales.secret`, matched the URI to the table's location, and stopped only at 412 `SignWithoutCredentials` because the
+  test warehouse has no S3 key. With a key it would have signed: lakekeeper does not tie the signature to anything the
+  caller may read (E12, E13).
+
+### 9.3 Decision (controller default D10)
+
+**No guard change.** The signer is limited on every egret warehouse: signing is off (E14), and lakekeeper refuses
+before any table lookup (E11). What is fixed is that the limit is now explicit and pinned:
+
+- `s3_storage_profile` (extracted from `create_lakekeeper_warehouse`, same JSON) documents that signing off is
+  load-bearing, and a unit test, `egret_s3_warehouses_have_remote_signing_off`, fails if it is turned on;
+- `the_s3_signer_gives_no_signature_on_an_egret_warehouse` drives the real mount on a warehouse with egret's S3 profile:
+  a role with write elsewhere and an engine with warehouse manage both get 403 `RemoteSigningDisabled` for a GET and a
+  PUT, and the table-specific signer route is refused by the guard.
+
+If remote signing is ever wanted, the guard must first authorize the signed location itself: map it to a table
+through lakekeeper's tabular locations (the lookup E12 already does, one indexed query per signed request) and require
+read for GET/HEAD and write for PUT/POST/DELETE on that table, with an unmappable location refused. That check is not
+built now, because no egret warehouse can reach it.
+
+Both tests passed before this change too: they pin the present behaviour. Mutation: turning signing on in
+`s3_storage_profile` fails both.

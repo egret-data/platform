@@ -92,7 +92,7 @@ pub use view_hold::{
 };
 #[cfg(feature = "test-utils")]
 pub use warehouse::create_memory_warehouse;
-pub use warehouse::{create_lakekeeper_warehouse, S3StorageConfig};
+pub use warehouse::{create_lakekeeper_warehouse, s3_storage_profile, S3StorageConfig};
 pub use warehouse_admin::{
     catalog_admin_router, BrowseColumn, BrowseDeletedTabular, BrowseNamespace, BrowsePartition,
     BrowseSearchResult, BrowseSnapshot, BrowseSort, BrowseTableDetail, BrowseTabular, BrowseTask,

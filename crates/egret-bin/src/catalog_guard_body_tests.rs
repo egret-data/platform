@@ -1,6 +1,6 @@
 //! The catalog guard authorizes the requests that name their targets only in
 //! the body: a rename, by its source and its destination, and a multi-table
-//! commit, by every table it changes
+//! commit, by every table it changes; and the S3 signer gives no signature
 //! (spec `docs/en/specs/2026-10-27-catalog-rename-authorizes-source-design.md`).
 //!
 //! Every test drives the REAL [`EgretCatalogGuard`] in front of lakekeeper's
@@ -34,6 +34,9 @@ fn unique(prefix: &str) -> String {
 
 static LAKEKEEPER: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
+/// Held across a warehouse's create and its profile write ([`env_with_profile`]).
+static CREATING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// The view hold's EXPLAIN never runs here: no view in these tests carries
 /// lineage or a classification.
 struct NoExplain;
@@ -59,6 +62,14 @@ struct Env {
 
 /// A warehouse with namespaces `sales`, `stage`, `corp` and `corp.fin`.
 async fn env() -> Option<Env> {
+    env_with_profile(None).await
+}
+
+/// The same, or, with `profile`, a warehouse whose lakekeeper storage profile
+/// is `profile` from the start (no namespaces: nothing touches its storage).
+/// The profile is written before anything loads the warehouse, so
+/// lakekeeper's warehouse cache never holds the in-memory one.
+async fn env_with_profile(profile: Option<Value>) -> Option<Env> {
     let dsn = egret_test_db::url().await?;
     let db = egret_metastore::Db::connect(&dsn, 10)
         .await
@@ -77,9 +88,25 @@ async fn env() -> Option<Env> {
         .await;
     let (state, _) = build_state(&dsn, SYSTEM_USER).await.expect("state");
     let pool = &db.pool;
+    // lakekeeper's create lists the project's warehouses and caches each one
+    // (its location-overlap check), so another test's create between this
+    // create and the profile write would cache the in-memory profile. The
+    // lock keeps the two together.
+    let creating = CREATING.lock().await;
     let prefix = create_memory_warehouse(state.clone(), SYSTEM_USER, &unique("rnwh"))
         .await
         .expect("lakekeeper warehouse");
+    if let Some(profile) = &profile {
+        sqlx::query(
+            "UPDATE lakekeeper.warehouse SET storage_profile = $2 WHERE warehouse_id = $1::uuid",
+        )
+        .bind(&prefix)
+        .bind(profile)
+        .execute(pool)
+        .await
+        .expect("storage profile");
+    }
+    drop(creating);
     let ws: uuid::Uuid =
         sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,'RN') RETURNING id")
             .bind(unique("rn-ws"))
@@ -122,6 +149,9 @@ async fn env() -> Option<Env> {
         warehouse,
         warehouse_id,
     };
+    if profile.is_some() {
+        return Some(env);
+    }
     for ns in [
         json!(["sales"]),
         json!(["stage"]),
@@ -940,5 +970,96 @@ async fn a_malformed_multi_table_commit_is_a_400_from_the_guard() {
                 .starts_with("malformed multi-table commit"),
             "{what}: the guard's own 400, not lakekeeper's: {resp}"
         );
+    }
+}
+
+// ── S3 signer (spec §9) ─────────────────────────────────────────────────────
+
+/// The S3 signer gives no signature: egret's S3 warehouses have remote
+/// signing off, and lakekeeper refuses before it maps the location to a
+/// table. That refusal is the only thing between a role with a write grant
+/// anywhere and a signature for any table's files (lakekeeper's own table
+/// check runs on `AllowAllAuthorizer`), so it is pinned here, for a GET and a
+/// PUT, for a role with write elsewhere and for an engine with manage.
+#[tokio::test]
+async fn the_s3_signer_gives_no_signature_on_an_egret_warehouse() {
+    let profile =
+        egret_catalog_engine::s3_storage_profile(&egret_catalog_engine::S3StorageConfig {
+            bucket: "egret-sign".into(),
+            region: "us-east-1".into(),
+            endpoint: Some("http://127.0.0.1:1/".into()),
+            path_style: true,
+            access_key: "AK".into(),
+            secret_key: "SK".into(),
+            key_prefix: Some("kp".into()),
+        });
+    let Some(env) = env_with_profile(Some(profile)).await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    let elsewhere = env
+        .token_for(
+            "external",
+            &[grant("namespace", Some(&["stage"]), None, "write")],
+        )
+        .await;
+    let engine = env
+        .token_for("engine", &[grant("catalog", None, None, "manage")])
+        .await;
+    for (who, token) in [("write elsewhere", &elsewhere), ("engine", &engine)] {
+        for method in ["GET", "PUT"] {
+            let (status, body) = env
+                .send(
+                    &env.app,
+                    Some(token),
+                    "POST",
+                    "v1/aws/s3/sign",
+                    json!({
+                        "region": "us-east-1",
+                        "uri": "http://127.0.0.1:1/egret-sign/kp/some-table/data/x.parquet",
+                        "method": method,
+                        "headers": {},
+                    }),
+                )
+                .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{who} {method}: {body}");
+            assert_eq!(
+                body["error"]["type"], "RemoteSigningDisabled",
+                "{who} {method}: lakekeeper's refusal, before any table lookup: {body}"
+            );
+        }
+    }
+
+    // The table-specific signer route lakekeeper would advertise does not
+    // even pass the guard: its first segment is not the warehouse prefix.
+    let (status, body) = env.send_signer_route(&elsewhere).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+}
+
+impl Env {
+    async fn send_signer_route(&self, token: &str) -> (StatusCode, Value) {
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/signer/{}/tabular-id/{}/v1/aws/s3/sign",
+                self.prefix,
+                uuid::Uuid::new_v4()
+            ))
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(
+                json!({"region": "us-east-1", "uri": "http://127.0.0.1:1/egret-sign/kp/x", "method": "GET", "headers": {}})
+                    .to_string(),
+            ))
+            .unwrap();
+        let resp = self.app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (
+            status,
+            Value::String(String::from_utf8_lossy(&bytes).into_owned()),
+        )
     }
 }
