@@ -662,6 +662,8 @@ fn the_phase_emits_no_execution_state_retry_or_pause() { /* drive over every cor
 
 ### Task B3: the worker runs the phase; the parent hears at "terminated" (D10)
 
+*Note, 2026-10-28:* wherever this task or the plan says to follow Kestra on D9 (a kill of a terminal execution stays 409), the spec's Q3 supersession of D9 governs what was built: a kill with a live `afterExecution:` run is accepted and stops it (409 `execution_terminated` without one, 409 `kill_not_applied` when the phase kill cannot apply yet).
+
 **Files:** `src/worker/claim.rs` (the settle tail's `terminal:` at `:3487-3497`), `src/worker/render.rs:1504`, `tests/end_hooks.rs` (new; copy the setup of an existing DB test file such as `tests/kill_route.rs`).
 
 - [ ] **Step 1: measure.** List every gate in `worker/render.rs` and `worker/claim.rs` that reads `drives_forward` or `is_terminal()` on the execution: `grep -n "drives_forward\|history.last().*is_terminal\|is_terminal()" src/worker/render.rs src/worker/claim.rs`. Classify each one: widen to `drives_forward || drives_after`, or keep, with the reason. Record the table in the report.
@@ -780,5 +782,7 @@ On the branch rebased onto fresh `origin/main`, with the Global Constraints' env
 4. `cargo test -p egret-server` (OpenAPI: no DTO changes, so expect no diff).
 5. #2b only: `npm --prefix frontend run test`, `lint` and `typecheck`.
 6. #2b only: the migration number re-checked against main and open PRs.
+
+*Note, 2026-10-28 (after #2b):* the measured ratchet is 301 / 52 / 52 / 0, not 51 (item 3). Item 4's "expect no diff" no longer held: `openapi.json` changed (text only, the kill route's and the log page's descriptions), so the `egret-server` drift tests needed a regeneration of `openapi.json` and the generated client.
 
 Known and accepted: the 7 `sql_starrocks_live` tests fail without an engine, and `runtime::a_cancelled_token_stops_both_tickers` can flake under load (it passes alone).
