@@ -784,3 +784,39 @@ filter-subscript-of-values
 # `{{ ',' | split(',') | default('D') }}` is the empty array, and the filter
 # after it sees an array where egret had substituted a String.
 filter-capitalize-of-a-defaulted-empty-array
+
+# --- Package #5a, Task A1 (2026-10-28). The probe batches of
+# docs/en/plans/2026-10-28-workflow-renderer.md A1: every entry where Kestra
+# throws. The message is Pebble's (`Could not perform division`, `... comparison`,
+# a ClassCastException, strict variables), so only the failure is comparable.
+arith-zero-long-div
+arith-zero-long-div-context
+arith-zero-long-mod
+arith-zero-bigdecimal-div
+arith-zero-bigdecimal-mod
+arith-zero-bigdecimal-number-div
+arith-operand-null-left
+arith-operand-null-right
+arith-operand-boolean
+arith-operand-boolean-mul
+arith-operand-bad-string-mul
+arith-operand-long-plus-list
+arith-operand-list-mul
+arith-operand-map-plus-long
+arith-operand-map-plus-map
+cmp-long-lt-string
+cmp-long-gt-numeric-string-context
+cmp-boolean-lt-long
+cmp-boolean-lt-boolean
+cmp-list-lt-list
+cmp-map-lt-map
+chain-lt-ascending
+chain-lt-descending
+chain-lt-missing-operand
+chain-eq-then-lt
+coalesce-missing-right-evaluated
+coalesce-chain-missing-right-evaluated
+operator-contains-number-left
+logic-and-list-left
+logic-or-null-context
+logic-and-map-left

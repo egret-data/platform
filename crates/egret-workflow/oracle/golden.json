@@ -10212,4 +10212,1018 @@
     "l" : [ "b", "a", "c" ]
   },
   "result" : "0/3/2|1/3/1|2/3/0|"
+}, {
+  "id" : "arith-long-div-truncates",
+  "expr" : "{{ 7 / 2 }}",
+  "context" : { },
+  "result" : "3"
+}, {
+  "id" : "arith-long-div-negative-dividend",
+  "expr" : "{{ -7 / 2 }}",
+  "context" : { },
+  "result" : "-3"
+}, {
+  "id" : "arith-long-div-negative-divisor",
+  "expr" : "{{ 7 / -2 }}",
+  "context" : { },
+  "result" : "-3"
+}, {
+  "id" : "arith-long-div-context",
+  "expr" : "{{ a / b }}",
+  "context" : {
+    "a" : 7,
+    "b" : 2
+  },
+  "result" : "3"
+}, {
+  "id" : "arith-long-mod",
+  "expr" : "{{ 7 % 2 }}",
+  "context" : { },
+  "result" : "1"
+}, {
+  "id" : "arith-long-mod-negative-divisor",
+  "expr" : "{{ 7 % -2 }}",
+  "context" : { },
+  "result" : "1"
+}, {
+  "id" : "arith-long-mod-negative-dividend",
+  "expr" : "{{ -7 % 2 }}",
+  "context" : { },
+  "result" : "-1"
+}, {
+  "id" : "arith-long-precedence",
+  "expr" : "{{ 2 + 3 * 4 - 10 / 3 }}",
+  "context" : { },
+  "result" : "11"
+}, {
+  "id" : "arith-long-add-wraps-at-max",
+  "expr" : "{{ 9223372036854775807 + 1 }}",
+  "context" : { },
+  "result" : "-9223372036854775808"
+}, {
+  "id" : "arith-long-sub-wraps-at-min",
+  "expr" : "{{ -9223372036854775807 - 2 }}",
+  "context" : { },
+  "result" : "9223372036854775807"
+}, {
+  "id" : "arith-long-mul-wraps-to-zero",
+  "expr" : "{{ 4611686018427387904 * 4 }}",
+  "context" : { },
+  "result" : "0"
+}, {
+  "id" : "arith-long-mul-wraps-negative",
+  "expr" : "{{ 4611686018427387904 * 3 }}",
+  "context" : { },
+  "result" : "-4611686018427387904"
+}, {
+  "id" : "arith-long-min-div-minus-one",
+  "expr" : "{{ (-9223372036854775807 - 1) / -1 }}",
+  "context" : { },
+  "result" : "-9223372036854775808"
+}, {
+  "id" : "arith-long-min-mod-minus-one",
+  "expr" : "{{ (-9223372036854775807 - 1) % -1 }}",
+  "context" : { },
+  "result" : "0"
+}, {
+  "id" : "arith-long-context-max-plus-one",
+  "expr" : "{{ a + 1 }}",
+  "context" : {
+    "a" : 9223372036854775807
+  },
+  "result" : "-9223372036854775808"
+}, {
+  "id" : "arith-double-div",
+  "expr" : "{{ 7.0 / 2 }}",
+  "context" : { },
+  "result" : "3.5"
+}, {
+  "id" : "arith-double-div-long-left",
+  "expr" : "{{ 7 / 2.0 }}",
+  "context" : { },
+  "result" : "3.5"
+}, {
+  "id" : "arith-double-div-context",
+  "expr" : "{{ a / b }}",
+  "context" : {
+    "a" : 7,
+    "b" : 2.0
+  },
+  "result" : "3.5"
+}, {
+  "id" : "arith-double-add",
+  "expr" : "{{ 0.1 + 0.2 }}",
+  "context" : { },
+  "result" : "0.30000000000000004"
+}, {
+  "id" : "arith-double-mod",
+  "expr" : "{{ 5.5 % 2 }}",
+  "context" : { },
+  "result" : "1.5"
+}, {
+  "id" : "arith-double-mul-whole",
+  "expr" : "{{ 1.5 * 2 }}",
+  "context" : { },
+  "result" : "3.0"
+}, {
+  "id" : "arith-zero-long-div",
+  "expr" : "{{ 1 / 0 }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform division ({{ 1 / 0 }}:1)"
+  }
+}, {
+  "id" : "arith-zero-long-div-context",
+  "expr" : "{{ 1 / n }}",
+  "context" : {
+    "n" : 0
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform division ({{ 1 / n }}:1)"
+  }
+}, {
+  "id" : "arith-zero-long-mod",
+  "expr" : "{{ 7 % 0 }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform greater modulus ({{ 7 % 0 }}:1)"
+  }
+}, {
+  "id" : "arith-zero-double-div",
+  "expr" : "{{ 1.0 / 0 }}",
+  "context" : { },
+  "result" : "Infinity"
+}, {
+  "id" : "arith-zero-double-div-negative",
+  "expr" : "{{ -1.0 / 0 }}",
+  "context" : { },
+  "result" : "-Infinity"
+}, {
+  "id" : "arith-zero-double-zero-div",
+  "expr" : "{{ 0.0 / 0 }}",
+  "context" : { },
+  "result" : "NaN"
+}, {
+  "id" : "arith-zero-double-mod",
+  "expr" : "{{ 1.5 % 0 }}",
+  "context" : { },
+  "result" : "NaN"
+}, {
+  "id" : "arith-zero-bigdecimal-div",
+  "expr" : "{{ fromIon(ion='1.5') / 0 }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform division ({{ fromIon(ion='1.5') / 0 }}:1)"
+  }
+}, {
+  "id" : "arith-zero-bigdecimal-mod",
+  "expr" : "{{ fromIon(ion='1.5') % 0 }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform greater modulus ({{ fromIon(ion='1.5') % 0 }}:1)"
+  }
+}, {
+  "id" : "arith-zero-bigdecimal-number-div",
+  "expr" : "{{ '1.5' | number(type='BIGDECIMAL') / 0 }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform division ({{ '1.5' | number(type='BIGDECIMAL') / 0 }}:1)"
+  }
+}, {
+  "id" : "arith-bigdecimal-add-keeps-scale",
+  "expr" : "{{ fromIon(ion='1.50') + 1 }}",
+  "context" : { },
+  "result" : "2.5"
+}, {
+  "id" : "arith-bigdecimal-sub-double",
+  "expr" : "{{ fromIon(ion='1.5') - 0.5 }}",
+  "context" : { },
+  "result" : "1.0"
+}, {
+  "id" : "arith-bigdecimal-mul-scale",
+  "expr" : "{{ fromIon(ion='1.50') * 2 }}",
+  "context" : { },
+  "result" : "3.00"
+}, {
+  "id" : "arith-bigdecimal-mul-bigdecimal",
+  "expr" : "{{ fromIon(ion='1.5') * fromIon(ion='1.25') }}",
+  "context" : { },
+  "result" : "1.875"
+}, {
+  "id" : "arith-bigdecimal-div-34th-digit",
+  "expr" : "{{ fromIon(ion='1.0') / 3 }}",
+  "context" : { },
+  "result" : "0.3333333333333333333333333333333333"
+}, {
+  "id" : "arith-bigdecimal-div-34th-digit-rounds-up",
+  "expr" : "{{ fromIon(ion='2.0') / 3 }}",
+  "context" : { },
+  "result" : "0.6666666666666666666666666666666667"
+}, {
+  "id" : "arith-bigdecimal-mod",
+  "expr" : "{{ fromIon(ion='5.5') % 2 }}",
+  "context" : { },
+  "result" : "1.5"
+}, {
+  "id" : "arith-ion-integer-div-is-long",
+  "expr" : "{{ fromIon(ion='1') / 3 }}",
+  "context" : { },
+  "result" : "0"
+}, {
+  "id" : "arith-bigdecimal-thirty-digits",
+  "expr" : "{{ '123456789012345678901234567890.5' | number(type='BIGDECIMAL') + 1 }}",
+  "context" : { },
+  "result" : "123456789012345680000000000001.0"
+}, {
+  "id" : "arith-bigdecimal-number-mul",
+  "expr" : "{{ '1.10' | number(type='BIGDECIMAL') * 3 }}",
+  "context" : { },
+  "result" : "3.30"
+}, {
+  "id" : "arith-bigdecimal-classname",
+  "expr" : "{{ (fromIon(ion='1.5') * 2) | className }}",
+  "context" : { },
+  "result" : "java.math.BigDecimal"
+}, {
+  "id" : "arith-operand-null-left",
+  "expr" : "{{ n + 1 }}",
+  "context" : {
+    "n" : null
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform addition ({{ n + 1 }}:1)"
+  }
+}, {
+  "id" : "arith-operand-null-right",
+  "expr" : "{{ 2 * n }}",
+  "context" : {
+    "n" : null
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform multiplication ({{ 2 * n }}:1)"
+  }
+}, {
+  "id" : "arith-operand-boolean",
+  "expr" : "{{ true + 1 }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform addition ({{ true + 1 }}:1)"
+  }
+}, {
+  "id" : "arith-operand-boolean-mul",
+  "expr" : "{{ b * 2 }}",
+  "context" : {
+    "b" : true
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform multiplication ({{ b * 2 }}:1)"
+  }
+}, {
+  "id" : "arith-operand-numeric-string-mul",
+  "expr" : "{{ '5' * 2 }}",
+  "context" : { },
+  "result" : "10"
+}, {
+  "id" : "arith-operand-numeric-string-div",
+  "expr" : "{{ '7' / 2 }}",
+  "context" : { },
+  "result" : "3"
+}, {
+  "id" : "arith-operand-decimal-string-mul",
+  "expr" : "{{ '2.5' * 2 }}",
+  "context" : { },
+  "result" : "5.0"
+}, {
+  "id" : "arith-operand-exponent-string-mul",
+  "expr" : "{{ '1e2' * 1 }}",
+  "context" : { },
+  "result" : "100.0"
+}, {
+  "id" : "arith-operand-bad-string-mul",
+  "expr" : "{{ 'abc' * 2 }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform multiplication ({{ 'abc' * 2 }}:1)"
+  }
+}, {
+  "id" : "arith-operand-string-sub",
+  "expr" : "{{ '5' - 2 }}",
+  "context" : { },
+  "result" : "3"
+}, {
+  "id" : "arith-operand-long-plus-string",
+  "expr" : "{{ 1 + 'a' }}",
+  "context" : { },
+  "result" : "1a"
+}, {
+  "id" : "arith-operand-string-plus-long",
+  "expr" : "{{ 'a' + 1 }}",
+  "context" : { },
+  "result" : "a1"
+}, {
+  "id" : "arith-operand-long-plus-numeric-string",
+  "expr" : "{{ 1 + '2' }}",
+  "context" : { },
+  "result" : "12"
+}, {
+  "id" : "arith-operand-string-plus-string",
+  "expr" : "{{ 'a' + 'b' }}",
+  "context" : { },
+  "result" : "ab"
+}, {
+  "id" : "arith-operand-double-plus-string",
+  "expr" : "{{ 1.5 + 'a' }}",
+  "context" : { },
+  "result" : "1.5a"
+}, {
+  "id" : "arith-operand-string-plus-null",
+  "expr" : "{{ 'a' + n }}",
+  "context" : {
+    "n" : null
+  },
+  "result" : "anull"
+}, {
+  "id" : "arith-operand-string-plus-list",
+  "expr" : "{{ 'a' + [1, 2] }}",
+  "context" : { },
+  "result" : "a[1, 2]"
+}, {
+  "id" : "arith-operand-list-plus-long",
+  "expr" : "{{ [1] + 2 }}",
+  "context" : { },
+  "result" : "[1,2]"
+}, {
+  "id" : "arith-operand-list-plus-list",
+  "expr" : "{{ [1] + [2] }}",
+  "context" : { },
+  "result" : "[1,2]"
+}, {
+  "id" : "arith-operand-long-plus-list",
+  "expr" : "{{ 2 + [1] }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform addition ({{ 2 + [1] }}:1)"
+  }
+}, {
+  "id" : "arith-operand-list-minus-long",
+  "expr" : "{{ [1, 2] - 1 }}",
+  "context" : { },
+  "result" : "[2]"
+}, {
+  "id" : "arith-operand-list-minus-repeated",
+  "expr" : "{{ [1, 2, 1] - 1 }}",
+  "context" : { },
+  "result" : "[2,1]"
+}, {
+  "id" : "arith-operand-list-minus-list",
+  "expr" : "{{ [1, 2, 3] - [1, 3] }}",
+  "context" : { },
+  "result" : "[2]"
+}, {
+  "id" : "arith-operand-list-mul",
+  "expr" : "{{ [1] * 2 }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform multiplication ({{ [1] * 2 }}:1)"
+  }
+}, {
+  "id" : "arith-operand-map-plus-long",
+  "expr" : "{{ m + 1 }}",
+  "context" : {
+    "m" : {
+      "a" : 1
+    }
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform addition ({{ m + 1 }}:1)"
+  }
+}, {
+  "id" : "arith-operand-map-plus-map",
+  "expr" : "{{ m + n }}",
+  "context" : {
+    "m" : {
+      "a" : 1
+    },
+    "n" : {
+      "b" : 2
+    }
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform addition ({{ m + n }}:1)"
+  }
+}, {
+  "id" : "arith-operand-biginteger-add",
+  "expr" : "{{ b + 1 }}",
+  "context" : {
+    "b" : 99999999999999999999
+  },
+  "result" : "7766279631452241920"
+}, {
+  "id" : "arith-operand-biginteger-mul",
+  "expr" : "{{ b * 2 }}",
+  "context" : {
+    "b" : 99999999999999999999
+  },
+  "result" : "-2914184810805067778"
+}, {
+  "id" : "arith-operand-biginteger-plus-double",
+  "expr" : "{{ b + 0.5 }}",
+  "context" : {
+    "b" : 99999999999999999999
+  },
+  "result" : "1.0E20"
+}, {
+  "id" : "arith-operand-context-ints-mul-past-2-31",
+  "expr" : "{{ a * b }}",
+  "context" : {
+    "a" : 65536,
+    "b" : 65536
+  },
+  "result" : "0"
+}, {
+  "id" : "arith-operand-context-ints-add-past-2-31",
+  "expr" : "{{ a + b }}",
+  "context" : {
+    "a" : 2147483647,
+    "b" : 1
+  },
+  "result" : "-2147483648"
+}, {
+  "id" : "arith-operand-context-int-times-literal",
+  "expr" : "{{ a * 65536 }}",
+  "context" : {
+    "a" : 65536
+  },
+  "result" : "4294967296"
+}, {
+  "id" : "cmp-long-lt-string",
+  "expr" : "{{ n < '5' }}",
+  "context" : {
+    "n" : 3
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform less than comparisonPebb ({{ n < '5' }}:1)"
+  }
+}, {
+  "id" : "cmp-long-gt-numeric-string-context",
+  "expr" : "{{ a > b }}",
+  "context" : {
+    "a" : 3,
+    "b" : "2"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform greater than comparison ({{ a > b }}:1)"
+  }
+}, {
+  "id" : "cmp-boolean-lt-long",
+  "expr" : "{{ true < 3 }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform less than comparisonPebb ({{ true < 3 }}:1)"
+  }
+}, {
+  "id" : "cmp-boolean-lt-boolean",
+  "expr" : "{{ false < true }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform less than comparisonPebb ({{ false < true }}:1)"
+  }
+}, {
+  "id" : "cmp-list-lt-list",
+  "expr" : "{{ [1] < [2] }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform less than comparisonPebb ({{ [1] < [2] }}:1)"
+  }
+}, {
+  "id" : "cmp-map-lt-map",
+  "expr" : "{{ m < n }}",
+  "context" : {
+    "m" : {
+      "a" : 1
+    },
+    "n" : {
+      "a" : 2
+    }
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform less than comparisonPebb ({{ m < n }}:1)"
+  }
+}, {
+  "id" : "cmp-null-lt-long",
+  "expr" : "{{ n < 1 }}",
+  "context" : {
+    "n" : null
+  },
+  "result" : "false"
+}, {
+  "id" : "cmp-long-lt-null",
+  "expr" : "{{ 1 < n }}",
+  "context" : {
+    "n" : null
+  },
+  "result" : "false"
+}, {
+  "id" : "cmp-null-gte-null",
+  "expr" : "{{ n >= m }}",
+  "context" : {
+    "n" : null,
+    "m" : null
+  },
+  "result" : "false"
+}, {
+  "id" : "cmp-null-lte-long",
+  "expr" : "{{ n <= 1 }}",
+  "context" : {
+    "n" : null
+  },
+  "result" : "false"
+}, {
+  "id" : "cmp-null-gt-long",
+  "expr" : "{{ n > 1 }}",
+  "context" : {
+    "n" : null
+  },
+  "result" : "false"
+}, {
+  "id" : "cmp-null-lt-string",
+  "expr" : "{{ n < 'a' }}",
+  "context" : {
+    "n" : null
+  },
+  "result" : "false"
+}, {
+  "id" : "cmp-double-gt-long",
+  "expr" : "{{ 1.5 > 1 }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "cmp-string-lt-string",
+  "expr" : "{{ 'a' < 'b' }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "cmp-long-eq-string",
+  "expr" : "{{ 3 == '3' }}",
+  "context" : { },
+  "result" : "false"
+}, {
+  "id" : "cmp-context-long-eq-string",
+  "expr" : "{{ n == '3' }}",
+  "context" : {
+    "n" : 3
+  },
+  "result" : "false"
+}, {
+  "id" : "cmp-long-eq-double",
+  "expr" : "{{ 1 == 1.0 }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "cmp-null-eq-null",
+  "expr" : "{{ n == m }}",
+  "context" : {
+    "n" : null,
+    "m" : null
+  },
+  "result" : "true"
+}, {
+  "id" : "chain-lt-ascending",
+  "expr" : "{{ 1 < 2 < 3 }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform less than comparisonPebb ({{ 1 < 2 < 3 }}:1)"
+  }
+}, {
+  "id" : "chain-lt-descending",
+  "expr" : "{{ 3 < 2 < 1 }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform less than comparisonPebb ({{ 3 < 2 < 1 }}:1)"
+  }
+}, {
+  "id" : "chain-lt-missing-operand",
+  "expr" : "{{ 2 < 1 < missing.x }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.RootAttributeNotFoundException: Root attribute [missing] does not exist or can not be accessed and strict variables is set to true. ({{ 2 < 1 < missing.x }}:1)"
+  }
+}, {
+  "id" : "chain-eq-true",
+  "expr" : "{{ 1 == 1 == true }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "chain-eq-false",
+  "expr" : "{{ 1 == 2 == false }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "chain-ne",
+  "expr" : "{{ 1 != 2 != false }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "chain-lt-then-eq",
+  "expr" : "{{ 1 < 2 == true }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "chain-eq-then-lt",
+  "expr" : "{{ 1 == 1 < 2 }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform less than comparisonPebb ({{ 1 == 1 < 2 }}:1)"
+  }
+}, {
+  "id" : "coalesce-chain-root-member",
+  "expr" : "{{ trigger.body ?? 'h' }}",
+  "context" : { },
+  "result" : "h"
+}, {
+  "id" : "coalesce-chain-root-two-members",
+  "expr" : "{{ trigger.parameters.x ?? 'h' }}",
+  "context" : { },
+  "result" : "h"
+}, {
+  "id" : "coalesce-chain-root-index",
+  "expr" : "{{ trigger.parameters.validationToken[0] ?? 'h' }}",
+  "context" : { },
+  "result" : "h"
+}, {
+  "id" : "coalesce-chain-member-of-empty",
+  "expr" : "{{ obj.a.b ?? 'h' }}",
+  "context" : {
+    "obj" : { }
+  },
+  "result" : "h"
+}, {
+  "id" : "coalesce-chain-member-of-null",
+  "expr" : "{{ obj.a.b ?? 'h' }}",
+  "context" : {
+    "obj" : {
+      "a" : null
+    }
+  },
+  "result" : "h"
+}, {
+  "id" : "coalesce-chain-member-null-leaf",
+  "expr" : "{{ obj.a ?? 'h' }}",
+  "context" : {
+    "obj" : {
+      "a" : null
+    }
+  },
+  "result" : "h"
+}, {
+  "id" : "coalesce-chain-subscript-literal",
+  "expr" : "{{ obj['a']['b'] ?? 'h' }}",
+  "context" : {
+    "obj" : { }
+  },
+  "result" : "h"
+}, {
+  "id" : "coalesce-chain-index-out-of-range",
+  "expr" : "{{ list[5] ?? 'h' }}",
+  "context" : {
+    "list" : [ 1 ]
+  },
+  "result" : "h"
+}, {
+  "id" : "coalesce-chain-present",
+  "expr" : "{{ obj.a.b ?? 'h' }}",
+  "context" : {
+    "obj" : {
+      "a" : {
+        "b" : "x"
+      }
+    }
+  },
+  "result" : "x"
+}, {
+  "id" : "coalesce-chain-undefined-member",
+  "expr" : "{{ obj.a.b ??? 'h' }}",
+  "context" : {
+    "obj" : { }
+  },
+  "result" : "h"
+}, {
+  "id" : "coalesce-chain-undefined-null-leaf",
+  "expr" : "{{ obj.a ??? 'h' }}",
+  "context" : {
+    "obj" : {
+      "a" : null
+    }
+  },
+  "result" : ""
+}, {
+  "id" : "coalesce-lazy-right-missing",
+  "expr" : "{{ x ?? missing.y }}",
+  "context" : {
+    "x" : 1
+  },
+  "result" : "1"
+}, {
+  "id" : "coalesce-lazy-right-division",
+  "expr" : "{{ x ?? (1 / 0) }}",
+  "context" : {
+    "x" : 1
+  },
+  "result" : "1"
+}, {
+  "id" : "coalesce-lazy-undefined-right-missing",
+  "expr" : "{{ x ??? missing.y }}",
+  "context" : {
+    "x" : 1
+  },
+  "result" : "1"
+}, {
+  "id" : "coalesce-missing-right-evaluated",
+  "expr" : "{{ nothere ?? missing.y }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.RootAttributeNotFoundException: Root attribute [missing] does not exist or can not be accessed and strict variables is set to true. ({{ nothere ?? missing.y }}:1)"
+  }
+}, {
+  "id" : "coalesce-chain-missing-right-evaluated",
+  "expr" : "{{ obj.a.b ?? missing.y }}",
+  "context" : {
+    "obj" : { }
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.RootAttributeNotFoundException: Root attribute [missing] does not exist or can not be accessed and strict variables is set to true. ({{ obj.a.b ?? missing.y }}:1)"
+  }
+}, {
+  "id" : "coalesce-non-path-left-missing-right",
+  "expr" : "{{ fromJson('1') ?? missing.y }}",
+  "context" : { },
+  "result" : "1"
+}, {
+  "id" : "coalesce-chain-in-if",
+  "expr" : "{% if obj.a.b ?? false %}y{% else %}n{% endif %}",
+  "context" : {
+    "obj" : { }
+  },
+  "result" : "n"
+}, {
+  "id" : "coalesce-chain-in-filter",
+  "expr" : "{{ (obj.a.b ?? 'h') | upper }}",
+  "context" : {
+    "obj" : { }
+  },
+  "result" : "H"
+}, {
+  "id" : "operator-equals-strings",
+  "expr" : "{{ a equals 'value 2' }}",
+  "context" : {
+    "a" : "value 2"
+  },
+  "result" : "true"
+}, {
+  "id" : "operator-equals-long-double",
+  "expr" : "{{ 1 equals 1.0 }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "operator-equals-long-string",
+  "expr" : "{{ 1 equals '1' }}",
+  "context" : { },
+  "result" : "false"
+}, {
+  "id" : "operator-equals-false",
+  "expr" : "{{ a equals 'x' }}",
+  "context" : {
+    "a" : "y"
+  },
+  "result" : "false"
+}, {
+  "id" : "operator-contains-map-key",
+  "expr" : "{{ m contains 'a' }}",
+  "context" : {
+    "m" : {
+      "a" : 1
+    }
+  },
+  "result" : "true"
+}, {
+  "id" : "operator-contains-map-value",
+  "expr" : "{{ m contains 1 }}",
+  "context" : {
+    "m" : {
+      "a" : 1
+    }
+  },
+  "result" : "false"
+}, {
+  "id" : "operator-contains-list",
+  "expr" : "{{ [1, 2] contains 2 }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "operator-contains-list-missing",
+  "expr" : "{{ [1, 2] contains 3 }}",
+  "context" : { },
+  "result" : "false"
+}, {
+  "id" : "operator-contains-list-of-list",
+  "expr" : "{{ [1, 2, 3] contains [1, 2] }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "operator-contains-string",
+  "expr" : "{{ 'abc' contains 'b' }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "operator-contains-string-missing",
+  "expr" : "{{ 'abc' contains 'z' }}",
+  "context" : { },
+  "result" : "false"
+}, {
+  "id" : "operator-contains-boxed-int-context",
+  "expr" : "{{ l contains n }}",
+  "context" : {
+    "l" : [ 1, 2 ],
+    "n" : 2
+  },
+  "result" : "true"
+}, {
+  "id" : "operator-contains-number-left",
+  "expr" : "{{ n contains 1 }}",
+  "context" : {
+    "n" : 5
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Contains operator can only be used on Collections, Maps and arrays. Actual type was: java.lang.Integer ({{ n contains 1 }}:1)"
+  }
+}, {
+  "id" : "operator-range-ascending",
+  "expr" : "{{ 1 .. 3 }}",
+  "context" : { },
+  "result" : "[1,2,3]"
+}, {
+  "id" : "operator-range-descending",
+  "expr" : "{{ 3 .. 1 }}",
+  "context" : { },
+  "result" : "[]"
+}, {
+  "id" : "operator-range-characters",
+  "expr" : "{{ 'a' .. 'c' }}",
+  "context" : { },
+  "result" : "[\"a\",\"b\",\"c\"]"
+}, {
+  "id" : "operator-range-characters-descending",
+  "expr" : "{{ 'c' .. 'a' }}",
+  "context" : { },
+  "result" : "[]"
+}, {
+  "id" : "operator-range-for",
+  "expr" : "{% for i in 3 .. 1 %}{{ i }};{% endfor %}",
+  "context" : { },
+  "result" : ""
+}, {
+  "id" : "operator-range-single",
+  "expr" : "{{ 2 .. 2 }}",
+  "context" : { },
+  "result" : "[2]"
+}, {
+  "id" : "logic-and-long-left",
+  "expr" : "{{ 1 and true }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "logic-and-string-right",
+  "expr" : "{{ true and 'x' }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "logic-or-string-left",
+  "expr" : "{{ 'a' or false }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "logic-or-long-right",
+  "expr" : "{{ false or 0 }}",
+  "context" : { },
+  "result" : "false"
+}, {
+  "id" : "logic-and-list-left",
+  "expr" : "{{ l and true }}",
+  "context" : {
+    "l" : [ 1 ]
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.ClassCastException: class java.util.ArrayList cannot be cast to class java.lang.Boolean (java.util.ArrayList and java.lang.Boolean are in module java.base of loader 'bootstrap')"
+  }
+}, {
+  "id" : "logic-and-booleans",
+  "expr" : "{{ true and false }}",
+  "context" : { },
+  "result" : "false"
+}, {
+  "id" : "logic-or-booleans",
+  "expr" : "{{ false or true }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "logic-or-lazy",
+  "expr" : "{{ true or missing.y }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "logic-and-lazy",
+  "expr" : "{{ false and missing.y }}",
+  "context" : { },
+  "result" : "false"
+}, {
+  "id" : "logic-and-string-true",
+  "expr" : "{{ 'true' and true }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "logic-or-null-context",
+  "expr" : "{{ n or false }}",
+  "context" : {
+    "n" : null
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: null value used in and operator and strict variables is set to true ({{ n or false }}:1)"
+  }
+}, {
+  "id" : "logic-and-zero-left",
+  "expr" : "{{ 0 and true }}",
+  "context" : { },
+  "result" : "false"
+}, {
+  "id" : "logic-and-two-left",
+  "expr" : "{{ 2 and true }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "logic-or-double-zero-left",
+  "expr" : "{{ 0.0 or false }}",
+  "context" : { },
+  "result" : "false"
+}, {
+  "id" : "logic-or-empty-string-left",
+  "expr" : "{{ '' or false }}",
+  "context" : { },
+  "result" : "false"
+}, {
+  "id" : "logic-or-string-false-left",
+  "expr" : "{{ 'false' or false }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "logic-and-map-left",
+  "expr" : "{{ m and true }}",
+  "context" : {
+    "m" : {
+      "a" : 1
+    }
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.ClassCastException: class java.util.LinkedHashMap cannot be cast to class java.lang.Boolean (java.util.LinkedHashMap and java.lang.Boolean are in module java.base of loader 'bootstrap')"
+  }
+}, {
+  "id" : "logic-and-returns-boolean",
+  "expr" : "{{ (true and 'x') ~ '|' }}",
+  "context" : { },
+  "result" : "true|"
+}, {
+  "id" : "logic-and-in-if",
+  "expr" : "{% if 1 and true %}y{% else %}n{% endif %}",
+  "context" : { },
+  "result" : "y"
 } ]

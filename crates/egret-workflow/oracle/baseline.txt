@@ -837,3 +837,136 @@ filter-regexreplace-of-an-escaped-map
 # iterates: a reader who finds that entry green would reasonably conclude the
 # loop is modelled, and the loop VARIABLE silently is not.
 loop-index-and-revindex
+
+
+# === #5a red ============================================================
+#
+# Package #5a, Task A1 (2026-10-28): the probe batches of
+# docs/en/plans/2026-10-28-workflow-renderer.md, regenerated offline. Each
+# line below fails today; the comment above each group names the task that
+# banks it (or marks it a recorded divergence). Corpus order inside a group.
+
+# A2 (D1): strict comparison, left-associative chains. Kestra fails a
+# mixed or non-number comparison, answers `false` for a null operand, and
+# compares `(a < b) < c`; egret falls back to a total order and chains.
+cmp-long-lt-string
+cmp-long-gt-numeric-string-context
+cmp-boolean-lt-long
+cmp-boolean-lt-boolean
+cmp-list-lt-list
+cmp-map-lt-map
+cmp-null-lt-long
+cmp-null-gte-null
+cmp-null-lte-long
+cmp-null-lt-string
+chain-lt-ascending
+chain-lt-descending
+chain-eq-false
+chain-lt-then-eq
+chain-eq-then-lt
+
+# A3 (D2): Long/Double arithmetic and operand kinds. Kestra divides integers,
+# wraps a long, fails `/ 0`, and treats strings and lists as OperatorUtils does;
+# minijinja divides as floats, widens to i128 and refuses or repeats strings.
+arith-long-div-truncates
+arith-long-div-negative-dividend
+arith-long-div-negative-divisor
+arith-long-div-context
+arith-long-mod-negative-dividend
+arith-long-precedence
+arith-long-add-wraps-at-max
+arith-long-sub-wraps-at-min
+arith-long-mul-wraps-to-zero
+arith-long-mul-wraps-negative
+arith-long-min-div-minus-one
+arith-long-context-max-plus-one
+arith-zero-long-div
+arith-zero-long-div-context
+arith-ion-integer-div-is-long
+arith-operand-boolean
+arith-operand-boolean-mul
+arith-operand-numeric-string-mul
+arith-operand-numeric-string-div
+arith-operand-decimal-string-mul
+arith-operand-exponent-string-mul
+arith-operand-bad-string-mul
+arith-operand-string-sub
+arith-operand-long-plus-string
+arith-operand-string-plus-long
+arith-operand-long-plus-numeric-string
+arith-operand-double-plus-string
+arith-operand-string-plus-null
+arith-operand-string-plus-list
+arith-operand-list-plus-long
+arith-operand-list-minus-long
+arith-operand-list-minus-repeated
+arith-operand-list-minus-list
+arith-operand-list-mul
+arith-operand-biginteger-add
+arith-operand-biginteger-mul
+
+# A4 (D3): BigDecimal. Kestra keeps the scale and divides at DECIMAL128;
+# egret computes a `fromIon` decimal as a Double and refuses a BigNumber.
+arith-zero-bigdecimal-div
+arith-zero-bigdecimal-mod
+arith-bigdecimal-mul-scale
+arith-bigdecimal-div-34th-digit
+arith-bigdecimal-div-34th-digit-rounds-up
+arith-bigdecimal-thirty-digits
+arith-bigdecimal-number-mul
+arith-bigdecimal-classname
+
+# A5 (D6): `??`/`???` through a missing member or index chain, and a lazy
+# right side. egret's strict undefined raises before kestra_null_coalesce runs.
+coalesce-chain-root-member
+coalesce-chain-root-two-members
+coalesce-chain-root-index
+coalesce-chain-member-of-empty
+coalesce-chain-subscript-literal
+coalesce-chain-undefined-member
+coalesce-lazy-right-missing
+coalesce-lazy-undefined-right-missing
+coalesce-chain-in-if
+coalesce-chain-in-filter
+
+# A6 (D5): `equals`, `contains`, `..` do not parse here; `and`/`or` return
+# an operand here and a strict boolean in Kestra (non-empty string and
+# non-zero number are true; a list or map fails; null fails).
+operator-equals-strings
+operator-equals-long-double
+operator-equals-long-string
+operator-equals-false
+operator-contains-map-key
+operator-contains-map-value
+operator-contains-list
+operator-contains-list-missing
+operator-contains-list-of-list
+operator-contains-string
+operator-contains-string-missing
+operator-contains-boxed-int-context
+operator-range-ascending
+operator-range-descending
+operator-range-characters
+operator-range-characters-descending
+operator-range-for
+operator-range-single
+logic-and-string-right
+logic-or-string-left
+logic-or-long-right
+logic-and-list-left
+logic-or-null-context
+logic-or-string-false-left
+logic-and-map-left
+logic-and-returns-boolean
+
+# RECORDED DIVERGENCE (spec D2, Integer vs Long), measured by A1: two
+# context integers that Jackson reads as java.lang.Integer use 32-bit `int`
+# arithmetic in Pebble and wrap at 2^31. egret's values carry no
+# Integer/Long distinction. Not fixed in #5; release note names it.
+arith-operand-context-ints-mul-past-2-31
+arith-operand-context-ints-add-past-2-31
+
+# RECORDED DIVERGENCE (spec D6, non-path `??` left operand), unless A5
+# finds a single-evaluation form: a call on the left keeps the eager
+# kestra_null_coalesce, so `missing.y` on the right is evaluated and raises.
+coalesce-non-path-left-missing-right

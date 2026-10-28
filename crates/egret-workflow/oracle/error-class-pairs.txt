@@ -492,3 +492,38 @@ filter-subscript-of-values                          test:the_collection_kind_gat
 # --- W2a, fix round 2. The same gate, reached through `default`'s emptiness
 # test rather than through a cast.
 filter-capitalize-of-a-defaulted-empty-array        test:the_collection_kind_gate_refuses_what_java_refuses
+
+# --- Package #5a, Task A1 (2026-10-28). Kestra throws on each. Those egret
+# still answers are baselined; those egret already refuses are held by a
+# unit test in runners::env that asserts the failure.
+arith-zero-long-div                                 baselined
+arith-zero-long-div-context                         baselined
+arith-zero-long-mod                                 test:arithmetic_kestra_refuses_is_refused_here_too
+arith-zero-bigdecimal-div                           baselined
+arith-zero-bigdecimal-mod                           baselined
+arith-zero-bigdecimal-number-div                    test:arithmetic_kestra_refuses_is_refused_here_too
+arith-operand-null-left                             test:arithmetic_kestra_refuses_is_refused_here_too
+arith-operand-null-right                            test:arithmetic_kestra_refuses_is_refused_here_too
+arith-operand-boolean                               baselined
+arith-operand-boolean-mul                           baselined
+arith-operand-bad-string-mul                        baselined
+arith-operand-long-plus-list                        test:arithmetic_kestra_refuses_is_refused_here_too
+arith-operand-list-mul                              baselined
+arith-operand-map-plus-long                         test:arithmetic_kestra_refuses_is_refused_here_too
+arith-operand-map-plus-map                          test:arithmetic_kestra_refuses_is_refused_here_too
+cmp-long-lt-string                                  baselined
+cmp-long-gt-numeric-string-context                  baselined
+cmp-boolean-lt-long                                 baselined
+cmp-boolean-lt-boolean                              baselined
+cmp-list-lt-list                                    baselined
+cmp-map-lt-map                                      baselined
+chain-lt-ascending                                  baselined
+chain-lt-descending                                 baselined
+chain-lt-missing-operand                            test:a_missing_operand_kestra_evaluates_fails_here_too
+chain-eq-then-lt                                    baselined
+coalesce-missing-right-evaluated                    test:a_missing_operand_kestra_evaluates_fails_here_too
+coalesce-chain-missing-right-evaluated              test:a_missing_operand_kestra_evaluates_fails_here_too
+operator-contains-number-left                       test:contains_on_a_number_is_refused
+logic-and-list-left                                 baselined
+logic-or-null-context                               baselined
+logic-and-map-left                                  baselined

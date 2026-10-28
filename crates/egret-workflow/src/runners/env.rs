@@ -4020,4 +4020,61 @@ mod tests {
             1
         );
     }
+
+    /// Package #5a, Task A1: the arithmetic probes Kestra refuses and egret
+    /// already refuses. They are `compare: "error-class"` in the oracle corpus
+    /// and born matching, so this is what fails if egret ever starts answering
+    /// one of them (`oracle/error-class-pairs.txt`). Today the refusal is
+    /// minijinja's own; Task A3's arithmetic seam must keep every one of them
+    /// failing (`OperatorUtils` throws `Could not perform …` for each).
+    #[test]
+    fn arithmetic_kestra_refuses_is_refused_here_too() {
+        for (source, ctx) in [
+            ("{{ 7 % 0 }}", json!({})),
+            ("{{ '1.5' | number(type='BIGDECIMAL') / 0 }}", json!({})),
+            ("{{ n + 1 }}", json!({ "n": null })),
+            ("{{ 2 * n }}", json!({ "n": null })),
+            ("{{ 2 + [1] }}", json!({})),
+            ("{{ m + 1 }}", json!({ "m": { "a": 1 } })),
+            ("{{ m + n }}", json!({ "m": { "a": 1 }, "n": { "b": 2 } })),
+        ] {
+            let got = render(source, ctx);
+            assert!(
+                got.is_err(),
+                "{source} must fail, as Kestra's does; got {got:?}"
+            );
+        }
+    }
+
+    /// Package #5a, Task A1: a missing operand that Kestra evaluates fails here
+    /// too. `2 < 1 < missing.x` is `(2 < 1) < missing.x` in Pebble, and
+    /// `nothere ?? missing.y` must evaluate its right side. Task A2's
+    /// left-associative chain and Task A5's lazy `??` must keep both failing.
+    #[test]
+    fn a_missing_operand_kestra_evaluates_fails_here_too() {
+        for (source, ctx) in [
+            ("{{ 2 < 1 < missing.x }}", json!({})),
+            ("{{ nothere ?? missing.y }}", json!({})),
+            ("{{ obj.a.b ?? missing.y }}", json!({ "obj": {} })),
+        ] {
+            let got = render(source, ctx);
+            assert!(
+                got.is_err(),
+                "{source} must fail, as Kestra's does; got {got:?}"
+            );
+        }
+    }
+
+    /// Package #5a, Task A1: Pebble's `contains` refuses a number on its left
+    /// (`Contains operator can only be used on Collections, Maps and arrays`).
+    /// Today egret fails because `contains` does not parse at all; Task A6
+    /// gives it syntax and must keep this failing for Kestra's reason.
+    #[test]
+    fn contains_on_a_number_is_refused() {
+        let got = render("{{ n contains 1 }}", json!({ "n": 5 }));
+        assert!(
+            got.is_err(),
+            "a number cannot contain anything; got {got:?}"
+        );
+    }
 }
