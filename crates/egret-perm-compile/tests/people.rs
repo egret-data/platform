@@ -819,7 +819,10 @@ async fn a_users_stands_for_marks_each_via_and_why_engines_do_not_apply_it() {
     let uc = principal(&e, &format!("/perm/people/users/{}", o.uc)).await;
     let gr = json!({"kind": "group_role", "group": o.n("g2"), "role": o.n("r1")});
     // A role held through a group reaches engines by the members' usernames.
-    assert_eq!(on(entry(&uc, "role", &o.n("r1"), &gr)), (json!(true), Value::Null));
+    assert_eq!(
+        on(entry(&uc, "role", &o.n("r1"), &gr)),
+        (json!(true), Value::Null)
+    );
 
     // No username: no `user` entry, and every entry is `no_username`.
     let ub = principal(&e, &format!("/perm/people/users/{}", o.ub)).await;
