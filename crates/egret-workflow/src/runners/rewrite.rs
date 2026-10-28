@@ -87,11 +87,29 @@
 //! (`Extension.getBinaryOperators()`), but minijinja functions receive their
 //! arguments already evaluated — there is no lazy "don't evaluate the right
 //! side unless needed" hook available to a rewrite that only reshapes text.
-//! `rewrite` therefore produces plain function *calls* —
-//! `kestra_null_coalesce(a, b)` / `kestra_undefined_coalesce(a, b)` — and
-//! leaves it to whatever registers those functions (Task 3) to give them the
-//! right short-circuit/attribute-missing semantics. This module does not
-//! attempt that; it only reshapes syntax.
+//! For a left operand that is anything but a path, `rewrite` therefore
+//! produces plain function *calls* — `kestra_null_coalesce(a, b)` /
+//! `kestra_undefined_coalesce(a, b)` — and both sides are evaluated.
+//!
+//! **A path on the left is lazy (spec D6, package #5a Task A5, 2026-10-29).**
+//! When the left operand is a root name followed by `.name`, `['literal']`
+//! or `[integer]` steps ([`path_operand`]), the operator compiles to
+//! minijinja's inline `if`, which IS lazy:
+//!
+//! ```text
+//! {{ obj.a.b ?? x }}   ->  ((kestra_path(obj, 'a', 'b')) if kestra_present(kestra_path(obj, 'a', 'b')) else ( x ))
+//! {{ obj.a ??? x }}    ->  ((kestra_path(obj, 'a')) if kestra_defined(kestra_path(obj, 'a')) else ( x ))
+//! {{ x ?? missing.y }} ->  ((x) if kestra_present(x) else ( missing.y))
+//! ```
+//!
+//! `kestra_path` reads each step without raising (a missing step, or a step
+//! from a null, is `Undefined` -- Pebble's `AttributeNotFoundException`,
+//! which both operators catch), so `trigger.body ?? 'h'` answers `h` where
+//! strict undefined used to raise before the coalesce ran. This reverses the
+//! "deliberate" `coalesce-nested-absent` ruling (spec Q6). The path is
+//! evaluated twice, which is safe because a path read is pure; a call is
+//! not, which is why a non-path left operand keeps the eager form and
+//! `{{ f() ?? missing.y }}` is a recorded divergence.
 //!
 //! # Pebble's `null` literal, and why it is this module's problem
 //!
@@ -1266,8 +1284,24 @@ fn resolve_pieces(pieces: &[Piece], depth: usize) -> Result<String, RewriteError
         }
 
         if let Some(idx) = find_rightmost_tier30(pieces) {
-            let left = resolve_pieces(&pieces[..idx], depth + 1)?;
             let right = resolve_pieces(&pieces[idx + 1..], depth + 1)?;
+            // Spec D6 (package #5a Task A5): a PATH on the left of `??`/`???`
+            // compiles to the inline-`if` form, so a missing step answers
+            // the right side and the right side is evaluated only when it is
+            // needed -- see [`path_operand`].
+            if let Piece::Op(op @ (OpKind::NullCoalesce | OpKind::UndefinedCoalesce), _) =
+                &pieces[idx]
+            {
+                if let Some(path) = path_operand(&pieces[..idx]) {
+                    let test = if *op == OpKind::NullCoalesce {
+                        "kestra_present"
+                    } else {
+                        "kestra_defined"
+                    };
+                    return Ok(format!("(({path}) if {test}({path}) else ({right}))"));
+                }
+            }
+            let left = resolve_pieces(&pieces[..idx], depth + 1)?;
             return Ok(match &pieces[idx] {
                 Piece::Op(OpKind::NullCoalesce, _) => {
                     format!("kestra_null_coalesce({left}, {right})")
@@ -1487,6 +1521,74 @@ fn find_rightmost_tier30(pieces: &[Piece]) -> Option<usize> {
         .enumerate()
         .rev()
         .find_map(|(i, p)| is_tier30_trigger(p).then_some(i))
+}
+
+/// The left operand of `??`/`???` as a **path** (spec D6), compiled to the
+/// expression that reads it without raising: the root alone (`x`), or
+/// `kestra_path(root, 'a', 'b', 0)` for `root.a['b'][0]`. `None` when the
+/// operand is anything else -- a call, a filter, a string or number literal,
+/// arithmetic, a nested coalesce -- which keeps the eager
+/// `kestra_null_coalesce` form. (`true` or `none` alone pass as a root; their
+/// value is the same either way.)
+///
+/// A path is a root name followed by `.name`, `['literal']` or
+/// `[integer]` steps (whitespace around a `.` is allowed, as Pebble's lexer
+/// allows it). A root or a `.name` step that starts with a digit is not a
+/// name (`1.5` is a number, not `1` then `5`), and a negative or computed
+/// index is not a literal step.
+///
+/// Why only a path: the inline-`if` form evaluates the left operand twice,
+/// once for the test and once for the answer. A path read is pure, so that
+/// is safe; a call (`kv(..)`, `secret(..)`, `now()`) would run twice. Kestra
+/// evaluates the right side lazily for every left operand, so a non-path
+/// left operand with a right side that raises (`f() ?? missing.y`) is the
+/// recorded divergence (`coalesce-non-path-left-missing-right`).
+fn path_operand(pieces: &[Piece]) -> Option<String> {
+    let mut atoms = pieces.iter().filter_map(|p| match p {
+        Piece::Atom(s) if s.chars().all(char::is_whitespace) => None,
+        Piece::Atom(s) => Some(Some(s.as_str())),
+        Piece::Op(..) => Some(None),
+    });
+    let root = atoms.next()??;
+    if !is_name(root) {
+        return None;
+    }
+    let mut steps = Vec::new();
+    while let Some(atom) = atoms.next() {
+        let atom = atom?;
+        if atom == "." {
+            let name = atoms.next()??;
+            if !is_name(name) {
+                return None;
+            }
+            steps.push(format!("'{name}'"));
+        } else {
+            steps.push(literal_subscript(atom)?);
+        }
+    }
+    if steps.is_empty() {
+        return Some(root.to_string());
+    }
+    Some(format!("kestra_path({root}, {})", steps.join(", ")))
+}
+
+/// A name: an identifier that does not start with a digit.
+fn is_name(s: &str) -> bool {
+    s.chars().next().is_some_and(|c| !c.is_ascii_digit())
+        && s.chars().all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// `['literal']` or `[integer]` (an already-resolved bracket group), as the
+/// step argument; `None` for anything else.
+fn literal_subscript(atom: &str) -> Option<String> {
+    let inner = atom.strip_prefix('[')?.strip_suffix(']')?.trim();
+    if !inner.is_empty() && inner.bytes().all(|b| b.is_ascii_digit()) {
+        return Some(inner.to_string());
+    }
+    match tokenize(inner).ok()?.as_slice() {
+        [Tok::Str(s)] => Some(s.clone()),
+        _ => None,
+    }
 }
 
 /// Tokenizes and rewrites the inside of one `{{ }}` region as a single
@@ -1720,7 +1822,7 @@ mod tests {
         // exact-string assertion anywhere until this one.
         assert_eq!(
             rewrite_and_parse("{{ a ??? b }}"),
-            "{{kestra_undefined_coalesce( a ,  b )}}"
+            "{{((a) if kestra_defined(a) else ( b ))}}"
         );
     }
 
@@ -1766,14 +1868,132 @@ mod tests {
     /// must not look like `??`); this pins that a bare `??` DOES produce the
     /// null-coalescing form -- without it, mapping `??` to nothing at all
     /// would still pass every other test in this module.
+    ///
+    /// Since package #5a Task A5 (spec D6) a PATH on the left takes the lazy
+    /// inline-`if` form instead, so the call form is pinned on a non-path
+    /// left operand (a call) and the path form exactly.
     #[test]
     fn double_question_mark_becomes_the_null_coalescing_call() {
-        let out = rewrite_and_parse("{{ a ?? b }}");
-        assert!(
-            out.contains("kestra_null_coalesce("),
-            "expected the null-coalescing call form, got {out}"
+        assert_eq!(
+            rewrite_and_parse("{{ f() ?? b }}"),
+            "{{kestra_null_coalesce( f() ,  b )}}"
         );
-        assert!(!out.contains("undefined"), "{out}");
+        assert_eq!(
+            rewrite_and_parse("{{ a ?? b }}"),
+            "{{((a) if kestra_present(a) else ( b ))}}"
+        );
+    }
+
+    /// Spec D6 (package #5a Task A5): a path on the left of `??`/`???` --
+    /// a root name and `.name`, `['literal']` or `[integer]` steps -- reads
+    /// through `kestra_path` under a lazy inline `if`.
+    #[test]
+    fn a_path_on_the_left_of_coalesce_compiles_to_kestra_path() {
+        for (source, expected) in [
+            (
+                "{{ obj.a.b ?? 'h' }}",
+                "{{((kestra_path(obj, 'a', 'b')) if kestra_present(kestra_path(obj, 'a', 'b')) \
+                 else ( 'h' ))}}",
+            ),
+            (
+                "{{ obj['a'][0] ??? 'h' }}",
+                "{{((kestra_path(obj, 'a', 0)) if kestra_defined(kestra_path(obj, 'a', 0)) \
+                 else ( 'h' ))}}",
+            ),
+            (
+                "{{ t.p.v[0] ?? x.y }}",
+                "{{((kestra_path(t, 'p', 'v', 0)) if kestra_present(kestra_path(t, 'p', 'v', 0)) \
+                 else ( x.y ))}}",
+            ),
+            // Pebble's lexer allows whitespace around the attribute dot.
+            (
+                "{{ o . a ?? 'h' }}",
+                "{{((kestra_path(o, 'a')) if kestra_present(kestra_path(o, 'a')) else ( 'h' ))}}",
+            ),
+            // An attribute named like the null literal stays a name.
+            (
+                "{{ o.null ?? 'h' }}",
+                "{{((kestra_path(o, 'null')) if kestra_present(kestra_path(o, 'null')) \
+                 else ( 'h' ))}}",
+            ),
+            (
+                "{{ o[\"k\"] ?? 'h' }}",
+                "{{((kestra_path(o, \"k\")) if kestra_present(kestra_path(o, \"k\")) \
+                 else ( 'h' ))}}",
+            ),
+        ] {
+            assert_eq!(rewrite_and_parse(source), expected, "{source}");
+        }
+    }
+
+    /// Spec D6's other half: a left operand that is NOT a path keeps the eager
+    /// call form (`f() ?? missing.y` is the recorded divergence). A call, a
+    /// filter, a number (`1.5` is not `1` then `.5`), a computed or negative
+    /// index, a `.0` step, arithmetic, a parenthesised operand and a nested
+    /// coalesce are all not paths.
+    #[test]
+    fn a_left_operand_that_is_not_a_path_keeps_the_eager_call() {
+        for (source, expected) in [
+            ("{{ f() ?? b }}", "{{kestra_null_coalesce( f() ,  b )}}"),
+            (
+                "{{ a | upper ?? b }}",
+                "{{kestra_null_coalesce( a | upper ,  b )}}",
+            ),
+            ("{{ 1.5 ?? b }}", "{{kestra_null_coalesce( 1.5 ,  b )}}"),
+            ("{{ l[i] ?? b }}", "{{kestra_null_coalesce( l[i] ,  b )}}"),
+            ("{{ l[-1] ?? b }}", "{{kestra_null_coalesce( l[-1] ,  b )}}"),
+            ("{{ l.0 ?? b }}", "{{kestra_null_coalesce( l.0 ,  b )}}"),
+            ("{{ a + 1 ?? b }}", "{{kestra_null_coalesce( a + 1 ,  b )}}"),
+            ("{{ (a) ?? b }}", "{{kestra_null_coalesce( (a) ,  b )}}"),
+            ("{{ f().a ?? b }}", "{{kestra_null_coalesce( f().a ,  b )}}"),
+            (
+                "{{ obj.m() ?? b }}",
+                "{{kestra_null_coalesce( obj.m() ,  b )}}",
+            ),
+            (
+                "{{ a ?? b ?? c }}",
+                "{{kestra_null_coalesce(((a) if kestra_present(a) else ( b )),  c )}}",
+            ),
+        ] {
+            assert_eq!(rewrite_and_parse(source), expected, "{source}");
+        }
+    }
+
+    /// The path form at each precedence tier the coalesce search respects
+    /// (`or`, `and`, tier 20's `is`/`contains`, tier 30's comparisons, and
+    /// `isIn`), and nested in a filter, a call, a list, a map, a ternary and
+    /// the `if`/`set`/`for` tags. The boundary is the same one the call form
+    /// had; only the shape of the coalesce changed.
+    #[test]
+    fn the_path_form_keeps_every_precedence_boundary() {
+        const P: &str = "((kestra_path(o, 'a')) if kestra_present(kestra_path(o, 'a')) else ( b ))";
+        // `<Q>` is `<P>` where the right operand ends flush against a `)`,
+        // `]`, `}` or `,`: the right side keeps its source spacing.
+        let p = |s: &str| {
+            s.replace("<P>", P)
+                .replace("<Q>", &P.replace("( b ))", "( b))"))
+        };
+        for (source, expected) in [
+            ("{{ x or o.a ?? b }}", "{{( x ) or (<P>)}}"),
+            ("{{ o.a ?? b and y }}", "{{(<P>) and ( y )}}"),
+            ("{{ o.a ?? b is defined }}", "{{<P> is  defined }}"),
+            ("{{ o.a ?? b == c }}", "{{<P> ==  c }}"),
+            ("{{ o.a ?? b isIn c }}", "{{kestra_is_in((<P>), ( c ))}}"),
+            ("{{ (o.a ?? b) | upper }}", "{{ (<Q>) | upper }}"),
+            ("{{ f(x, o.a ?? b) }}", "{{ f(x,<Q>) }}"),
+            ("{{ [o.a ?? b] }}", "{{ [<Q>] }}"),
+            ("{{ {'k': o.a ?? b} }}", "{{ {'k':<Q>} }}"),
+            ("{{ c ? o.a ?? b : d }}", "{{(<P>) if ( c ) else  d }}"),
+            ("{% if o.a ?? b %}y{% endif %}", "{% if <P>%}y{% endif %}"),
+            ("{% set v = o.a ?? b %}", "{% set v = <P>%}"),
+            (
+                "{% for i in o.a ?? b %}{% endfor %}",
+                "{% for i in <P>%}{% endfor %}",
+            ),
+        ] {
+            let source = p(source);
+            assert_eq!(rewrite_and_parse(&source), p(expected), "{source}");
+        }
     }
 
     /// `isIn` is the fourth operator this module's doc comment claims to
@@ -1809,7 +2029,7 @@ mod tests {
         // split leftmost would still pass one of them.
         assert_eq!(
             rewrite_and_parse("{{ a ?? b isIn c }}"),
-            "{{kestra_is_in((kestra_null_coalesce( a ,  b )), ( c ))}}"
+            "{{kestra_is_in((((a) if kestra_present(a) else ( b ))), ( c ))}}"
         );
         assert_eq!(
             rewrite_and_parse("{{ a isIn b ?? c }}"),
@@ -1915,14 +2135,14 @@ but there is one on the next: '";
     #[test]
     fn commas_bound_operator_rewrites_inside_a_call() {
         let out = rewrite_and_parse("{{ f(x, a ?? b) }}");
-        assert_eq!(out, "{{ f(x,kestra_null_coalesce( a ,  b)) }}");
+        assert_eq!(out, "{{ f(x,((a) if kestra_present(a) else ( b))) }}");
     }
 
     /// Same principle for a list literal's elements.
     #[test]
     fn commas_bound_operator_rewrites_inside_a_list() {
         let out = rewrite_and_parse("{{ [1, a ?? b] }}");
-        assert_eq!(out, "{{ [1,kestra_null_coalesce( a ,  b)] }}");
+        assert_eq!(out, "{{ [1,((a) if kestra_present(a) else ( b))] }}");
     }
 
     /// A ternary as a later argument must not be glued to an earlier one by
@@ -1948,7 +2168,7 @@ but there is one on the next: '";
     #[test]
     fn an_operator_inside_a_map_value_still_resolves() {
         let out = rewrite_and_parse("{{ {'k': a ?? b} }}");
-        assert_eq!(out, "{{ {'k':kestra_null_coalesce( a ,  b)} }}");
+        assert_eq!(out, "{{ {'k':((a) if kestra_present(a) else ( b))} }}");
     }
 
     /// `{% if %}` tag bodies must be rewritten as an expression, not left
@@ -1958,7 +2178,10 @@ but there is one on the next: '";
     #[test]
     fn if_tag_bodies_rewrite_their_condition() {
         let out = rewrite_and_parse("{% if a ?? b %}y{% endif %}");
-        assert_eq!(out, "{% if kestra_null_coalesce( a ,  b )%}y{% endif %}");
+        assert_eq!(
+            out,
+            "{% if ((a) if kestra_present(a) else ( b ))%}y{% endif %}"
+        );
     }
 
     /// `{% set %}`: the target left of `=` is a name, never rewritten; the
@@ -1982,7 +2205,7 @@ but there is one on the next: '";
     #[test]
     fn set_tag_bodies_rewrite_only_the_value_side() {
         let out = rewrite_and_parse("{% set isIn = a ?? b %}");
-        assert_eq!(out, "{% set isIn = kestra_null_coalesce( a ,  b )%}");
+        assert_eq!(out, "{% set isIn = ((a) if kestra_present(a) else ( b ))%}");
     }
 
     /// `{% for %}`: the loop variable left of `in` is a name, never
@@ -1998,7 +2221,7 @@ but there is one on the next: '";
         let out = rewrite_and_parse("{% for isIn in list ?? [] %}y{% endfor %}");
         assert_eq!(
             out,
-            "{% for isIn in kestra_null_coalesce( list ,  [] )%}y{% endfor %}"
+            "{% for isIn in ((list) if kestra_present(list) else ( [] ))%}y{% endfor %}"
         );
     }
 
@@ -2047,7 +2270,7 @@ but there is one on the next: '";
         );
         assert_eq!(
             rewrite_and_parse("{% filter upper %}{{ a ?? b }}{% endfilter %}"),
-            "{% filter upper%}{{kestra_null_coalesce( a ,  b )}}{% endfilter %}"
+            "{% filter upper%}{{((a) if kestra_present(a) else ( b ))}}{% endfilter %}"
         );
     }
 
@@ -2066,7 +2289,7 @@ but there is one on the next: '";
     fn coalesce_does_not_swallow_across_is() {
         assert_eq!(
             rewrite_and_parse("{{ a ?? b is defined }}"),
-            "{{kestra_null_coalesce( a ,  b ) is  defined }}"
+            "{{((a) if kestra_present(a) else ( b )) is  defined }}"
         );
         // `is not none`, not `is not null` -- disclosure, not a silent
         // substitution: minijinja has no `null` test at all (it parses --
@@ -2081,7 +2304,7 @@ but there is one on the next: '";
         // ALSO still mean something once Task 3 renders it, unlike `null`.
         assert_eq!(
             rewrite_and_parse("{{ a ?? b is not none }}"),
-            "{{kestra_null_coalesce( a ,  b ) is  not none }}"
+            "{{((a) if kestra_present(a) else ( b )) is  not none }}"
         );
     }
 
@@ -2139,10 +2362,13 @@ but there is one on the next: '";
     fn coalesce_does_not_swallow_across_equals_or_contains() {
         assert_eq!(
             rewrite_shape_only("{{ a ?? b equals c }}"),
-            "{{kestra_null_coalesce( a ,  b ) equals  c }}"
+            "{{((a) if kestra_present(a) else ( b )) equals  c }}"
         );
         let out = rewrite_shape_only("{{ a ?? b contains c }}");
-        assert_eq!(out, "{{(kestra_null_coalesce( a ,  b )) contains ( c )}}");
+        assert_eq!(
+            out,
+            "{{(((a) if kestra_present(a) else ( b ))) contains ( c )}}"
+        );
     }
 
     /// A disqualified `is` (a tier-30 trigger follows it) must suppress
@@ -2189,7 +2415,7 @@ but there is one on the next: '";
     fn chained_contains_splits_rightmost_for_left_associativity() {
         assert_eq!(
             rewrite_shape_only("{{ w contains x ?? y contains z }}"),
-            "{{(( w ) contains (kestra_null_coalesce( x ,  y ))) contains ( z )}}"
+            "{{(( w ) contains (((x) if kestra_present(x) else ( y )))) contains ( z )}}"
         );
     }
 
@@ -2203,11 +2429,11 @@ but there is one on the next: '";
     fn coalesce_does_not_swallow_across_and_or_or() {
         assert_eq!(
             rewrite_and_parse("{{ a ?? b and c ?? d }}"),
-            "{{(kestra_null_coalesce( a ,  b )) and (kestra_null_coalesce( c ,  d ))}}"
+            "{{(((a) if kestra_present(a) else ( b ))) and (((c) if kestra_present(c) else ( d )))}}"
         );
         assert_eq!(
             rewrite_and_parse("{{ a or b ?? c }}"),
-            "{{( a ) or (kestra_null_coalesce( b ,  c ))}}"
+            "{{( a ) or (((b) if kestra_present(b) else ( c )))}}"
         );
     }
 
@@ -2227,7 +2453,7 @@ but there is one on the next: '";
     fn chained_or_splits_rightmost_for_left_associativity() {
         assert_eq!(
             rewrite_and_parse("{{ a ?? w or b ?? x or c ?? y }}"),
-            "{{((kestra_null_coalesce( a ,  w )) or (kestra_null_coalesce( b ,  x ))) or (kestra_null_coalesce( c ,  y ))}}"
+            "{{((((a) if kestra_present(a) else ( w ))) or (((b) if kestra_present(b) else ( x )))) or (((c) if kestra_present(c) else ( y )))}}"
         );
     }
 
@@ -2242,7 +2468,7 @@ but there is one on the next: '";
     fn coalesce_and_a_same_tier_comparison_chain_left_to_right() {
         assert_eq!(
             rewrite_and_parse("{{ a ?? b == c }}"),
-            "{{kestra_null_coalesce( a ,  b ) ==  c }}"
+            "{{((a) if kestra_present(a) else ( b )) ==  c }}"
         );
     }
 
@@ -2258,7 +2484,7 @@ but there is one on the next: '";
     fn coalesce_does_not_swallow_across_any_tier30_comparison() {
         for op in ["!=", ">", ">=", "<", "<="] {
             let expr = format!("{{{{ a ?? b {op} c }}}}");
-            let expected = format!("{{{{kestra_null_coalesce( a ,  b ) {op}  c }}}}");
+            let expected = format!("{{{{((a) if kestra_present(a) else ( b )) {op}  c }}}}");
             assert_eq!(rewrite_and_parse(&expr), expected, "operator {op:?}");
         }
     }
@@ -2293,7 +2519,7 @@ but there is one on the next: '";
     fn a_map_literal_flush_against_the_regions_close_still_rewrites() {
         assert_eq!(
             rewrite_and_parse("{{ {'a': x ?? y}}}"),
-            "{{ {'a':kestra_null_coalesce( x ,  y)}}}"
+            "{{ {'a':((x) if kestra_present(x) else ( y))}}}"
         );
     }
 
@@ -2345,7 +2571,7 @@ but there is one on the next: '";
     fn whitespace_control_markers_survive_around_a_rewritten_expression() {
         assert_eq!(
             rewrite_and_parse("{{- a ?? b -}}"),
-            "{{-kestra_null_coalesce( a ,  b )-}}"
+            "{{-((a) if kestra_present(a) else ( b ))-}}"
         );
     }
 
@@ -2364,7 +2590,7 @@ but there is one on the next: '";
     fn whitespace_control_markers_survive_around_a_rewritten_tag() {
         assert_eq!(
             rewrite_and_parse("{%- if a ?? b -%}y{%- endif -%}"),
-            "{%- if kestra_null_coalesce( a ,  b )-%}y{%- endif -%}"
+            "{%- if ((a) if kestra_present(a) else ( b ))-%}y{%- endif -%}"
         );
     }
 

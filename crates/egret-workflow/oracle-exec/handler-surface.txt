@@ -320,27 +320,27 @@ Two rules, and they are deliberately different:
   file, with the entry named and the reason given; a ceiling that is too
   high costs nothing at all, which is why it would not be a ceiling.
 
-    256  reproduced today, and by nothing the driver removes
+    257  reproduced today, and by nothing the driver removes
       0  reproduced today ONLY because the feed supplies a terminal
          for a task type W3b has no handler for
      28  not reproduced today, and nothing found here blocks it
-     17  not reproduced today, and blocked -- by cause below
+     16  not reproduced today, and blocked -- by cause below
   -----
     301  TOTAL, the comparable entries
 
-  CEILING, feed removed  = 256 + 28 = **284**
-  CEILING, feed retained = 256 + 0 + 28 = 284
+  CEILING, feed removed  = 257 + 28 = **285**
+  CEILING, feed retained = 257 + 0 + 28 = 285
 
-  Today the ratchet matches 256. The two ceilings are the same
+  Today the ratchet matches 257. The two ceilings are the same
   quantity under the two answers Task 5 may give to `does the driver
   still feed a terminal for a task type it has no handler for?`. They are
   NOT the same set with a different name, and the composition is printed
   above so a reader cannot take one for the other.
 
-  **284 is the bound this package should be held to**, because removing
+  **285 is the bound this package should be held to**, because removing
   the feed is the stated intent of Task 5 step 4. If Task 5 keeps the
   feed for unhandled types it must say so, and then the bound is
-  284 -- reported as a decision, not as progress.
+  285 -- reported as a decision, not as progress.
 
   The 0 at risk, with the type whose terminal is fed:
 
@@ -377,8 +377,8 @@ Two rules, and they are deliberately different:
   What blocks the rest, by cause. The rows OVERLAP -- an entry may be
   blocked several times over -- so they do not sum to the bucket:
 
-        4  construct  flow-level outputs:
         3  construct  flow sla:
+        3  construct  flow-level outputs:
         2  clock      checkFrequency.maxDuration; the golden's iteration count carries the artifact's delay-poller latency
         1  construct  Loop outputs: over a file (STORE mode, executions/{iteration}/{n}.ion)
         1  construct  Pause behavior:
@@ -391,12 +391,12 @@ Two rules, and they are deliberately different:
         1  refusal    egret over-accepts it -- W1's validation, not a handler
         1  render     Pebble's `empty` test, which egret's renderer leaves unknown
     -----
-       17  DISTINCT entries blocked (the rows above overlap)
+       16  DISTINCT entries blocked (the rows above overlap)
 
   The four causes the plan names, and where each landed:
 
         1  a missing handler
-       13  a construct no W3b task owns
+       12  a construct no W3b task owns
         0  a state RunState cannot hold
         1  an over-acceptance -- W1's validation
 
@@ -460,7 +460,7 @@ Two rules, and they are deliberately different:
     valids/retry-failed-flow-duration        maxDuration with no elapsed time
     valids/retry-success                     WARNING, which RunState cannot hold
 
-    working expectation = 284 - 6 = 278
+    working expectation = 285 - 6 = 279
 
   Two of them deserve a sentence each:
 

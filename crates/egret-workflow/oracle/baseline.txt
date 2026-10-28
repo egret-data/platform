@@ -74,8 +74,10 @@ op-contains-boxed-int
 op-contains-literal
 op-range
 
-# UndefinedBehavior::Strict raises before `??` is reached. Deliberate: the alternatives are worse. task-3-report.md S9.
-coalesce-nested-absent
+# (`coalesce-nested-absent` was here, ruled "deliberate" (task-3-report.md
+# S9: strict undefined raises before `??` is reached). Spec Q6 reversed the
+# ruling and Task A5 (2026-10-29) BANKED it: a path on the left of `??`/`???`
+# compiles to `kestra_path(..)` under a lazy inline `if` (spec D6).)
 
 # W2 TASK 4, DELIBERATE, three rows of one fact: egret cannot carry a value's
 # JAVA BOX TYPE without making the value unusable as a value.
@@ -834,25 +836,13 @@ loop-index-and-revindex
 # eight BANKED with Task A4 (2026-10-29), which ports `bigDecimalOperation`
 # on `num-bigint` (`runners::arith::decimal`).)
 
-# A5 (D6): `??`/`???` through a missing member or index chain, and a lazy
-# right side. egret's strict undefined raises before kestra_null_coalesce runs.
-coalesce-chain-root-member
-coalesce-chain-root-two-members
-coalesce-chain-root-index
-coalesce-chain-member-of-empty
-coalesce-chain-subscript-literal
-coalesce-chain-undefined-member
-coalesce-lazy-right-missing
-coalesce-lazy-undefined-right-missing
-# Re-attributed by Task A3 (2026-10-28), measured: `{{ x ?? (1 / 0) }}` passed
-# only because minijinja's `1 / 0` was a float division that answered
-# `inf` without raising, so the eager `kestra_null_coalesce` never saw an
-# error. Task A3 made `/` Pebble's (`1 / 0` fails, as in Kestra), and the
-# entry now fails for the reason this group names: the right side of `??` is
-# evaluated eagerly here and lazily in Kestra. A5's lazy right side banks it.
-coalesce-lazy-right-division
-coalesce-chain-in-if
-coalesce-chain-in-filter
+# (A5 (D6)'s eleven were here -- `??`/`???` through a missing member or
+# index chain (`coalesce-chain-*`, eight) and a lazy right side
+# (`coalesce-lazy-*`, three, one of them `coalesce-lazy-right-division`,
+# re-attributed here by Task A3) -- and all eleven BANKED with Task A5
+# (2026-10-29): a path on the left compiles to `kestra_path(..)` and the
+# operator to `(P) if kestra_present(P) else (R)` (`kestra_defined` for
+# `???`), so `R` is evaluated only when needed.)
 
 # A6 (D5): `equals`, `contains`, `..` do not parse here; `and`/`or` return
 # an operand here and a strict boolean in Kestra (non-empty string and
@@ -891,7 +881,9 @@ logic-and-returns-boolean
 arith-operand-context-ints-mul-past-2-31
 arith-operand-context-ints-add-past-2-31
 
-# RECORDED DIVERGENCE (spec D6, non-path `??` left operand), unless A5
-# finds a single-evaluation form: a call on the left keeps the eager
-# kestra_null_coalesce, so `missing.y` on the right is evaluated and raises.
+# RECORDED DIVERGENCE (spec D6, non-path `??` left operand), confirmed by
+# Task A5 (2026-10-29), which found no single-evaluation form: the lazy form
+# evaluates its left operand twice, safe for a path read and not for a call
+# (`kv(..)`, `secret(..)`), so a call or filter on the left keeps the eager
+# kestra_null_coalesce and `missing.y` on the right is evaluated and raises.
 coalesce-non-path-left-missing-right

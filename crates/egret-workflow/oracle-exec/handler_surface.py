@@ -1039,8 +1039,10 @@ def check_inputs(flows, kinds, golden, baseline):
     # relational operator against a quoted operand now fails as Kestra's does).
     # 45 since package #5a Task A3 (2026-10-28) banked `valids/restart-child`,
     # `-loop`, `-parent` and `-parent-loop` (`1 / 0` fails as Java's does).
-    if len(baseline) != 45:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 45; the split "
+    # 44 since package #5a Task A5 (2026-10-29) banked `valids/webhook-plaintext`
+    # (`??` reads through a missing member chain, spec D6).
+    if len(baseline) != 44:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 44; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1690,8 +1692,8 @@ def self_test():
          "not 273",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 45",
-         "not 45",
+    case("baseline.txt is no longer 44",
+         "not 44",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

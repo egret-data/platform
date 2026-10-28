@@ -170,7 +170,7 @@ now has **no `unported:` line left in it**, and `UNPORTED_ERROR_CLASS` in
 `tests/oracle.rs` is empty. Note that marking an entry error-class does **not**
 make it pass: 17 of the 302 are *also* in `baseline.txt` (19 before package
 #5a's Task A4, 25 before its Task A3, 38 before its Task A2; re-counted from
-the two files 2026-10-29), because egret
+the two files 2026-10-29, and again after Task A5, which moved none of them), because egret
 *succeeds* where Kestra throws — a real divergence, and it stays visible.
 
 ## `name-surface.txt` — which names each side has at all
@@ -240,7 +240,14 @@ Q5 reversing the W9c refusal: a `BigDecimal` operand is
 `DECIMAL128` with Java's preferred scale): A1's eight BigDecimal entries,
 `filter-number-bigdecimal-is-not-a-number-here`, and the twelve
 `function-fromion-decimal-*` entries W2 Task 7 recorded, because an Ion
-decimal is a `java.math.BigDecimal` `BigNumber` again.
+decimal is a `java.math.BigDecimal` `BigNumber` again -- and **140 of 1493**
+after Task A5 (2026-10-29), which BANKED twelve (spec D6, Q6 reversing the
+"deliberate" `coalesce-nested-absent` ruling: a path on the left of
+`??`/`???` compiles to `kestra_path(..)` under a lazy inline `if`): A1's
+eleven coalesce entries (`coalesce-lazy-right-division` among them) and
+`coalesce-nested-absent`. `coalesce-non-path-left-missing-right` stays
+baselined, the recorded D6 divergence (a call on the left keeps the eager
+form).
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
@@ -866,7 +873,14 @@ match.
   `InExpression` from minijinja's `in` (addendum A3, see above), and
   `coalesce-nested-absent` (`{{ obj.missing.deeper ?? 'fallback' }}` — the
   shape a real flow writes most often, and the one place
-  `UndefinedBehavior::Strict` diverges from Kestra's `??`).
+  `UndefinedBehavior::Strict` diverges from Kestra's `??`). Baselined then
+  as "deliberate: the alternatives are worse" (task-3-report.md S9).
+  **Reversed 2026-10-29**: spec
+  `docs/en/specs/2026-10-28-workflow-renderer-design.md` Q6 rules that `??`
+  answers through a missing member or index chain, and package #5a's Task
+  A5 banked the entry (D6: a path on the left compiles to
+  `kestra_path(root, 'a', 'b')` and the operator to
+  `(P) if kestra_present(P) else (R)`, so the right side is lazy too).
 - **`op-range` records that `..` is inclusive**: `{{ a .. b }}` with `a=1,
   b=3` renders `[1,2,3]`, and `{% for i in 1 .. 3 %}` iterates three times.
   minijinja's `range(1, 3)` is `[1, 2]` — exclusive, and printed with spaces.

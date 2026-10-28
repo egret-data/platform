@@ -4334,6 +4334,15 @@ given a slot past the end of `ALL` is caught by nothing here. That limit is on
 > | blocked **+12** | the 11 above plus `webhook-plaintext` | |
 > | **ceiling −1** | `valids/webhook-plaintext` | the only entry that left the ceiling entirely: it matched, it is baselined now, and it is blocked rather than bankable |
 >
+> **2026-10-29, package #5a Task A5 (spec D6, Q6):** `valids/webhook-plaintext`
+> MATCHES again and left the baseline: `{{ trigger.parameters.validationToken[0]
+> ?? 'hello-world' }}` reads through the missing chain (`kestra_path`) and
+> renders the fallback, as Kestra does. `handler-surface.txt` was regenerated:
+> reproduced 256 → 257, blocked 17 → 16 (its `flow-level outputs:` blocker row
+> 4 → 3), **ceiling 284 → 285**, working expectation 278 → 279. Its blocker
+> named a construct; the cause was the renderer, which a declaration-driven
+> rule cannot see.
+>
 > `150 + 21 = 171` and `21 + 123 = 144`, and the generator asserts both. Task 1's
 > **172** and its eleven named entries are not lost by regenerating: they are in
 > this file's coverage statement, in Task 1's and Task 5's reports, and in this

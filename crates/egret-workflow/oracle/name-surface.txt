@@ -177,6 +177,7 @@ function	isLastWorkingDay	yes	yes	function-islastworkingday	-
 function	isPublicHoliday	yes	yes	function-ispublicholiday	egret carries no holiday database and refuses by name rather than answering a date a flow branches on
 function	isWeekend	yes	yes	function-isweekend	-
 function	kestra_add	no	yes	-	egret-only by construction (package #5a Task A3): `super::cmp_rewrite`'s arithmetic pass compiles minijinja's binary `+` into a call to it, so the operator is Pebble's `OperatorUtils` (Long/Double tower, string and list operands)
+function	kestra_defined	no	yes	-	egret-only by construction (package #5a Task A5): `super::rewrite` compiles Kestra's `???` with a path on the left into an inline `if` on it, so the right side is lazy
 function	kestra_div	no	yes	-	egret-only by construction (package #5a Task A3): `super::cmp_rewrite`'s arithmetic pass compiles minijinja's binary `/` into a call to it, so the operator is Pebble's `OperatorUtils` (Long/Double tower, string and list operands)
 function	kestra_eq	no	yes	-	egret-only by construction (W9c Task 4 fix round 1): `super::cmp_rewrite` compiles minijinja's `==` into a call to it, so a comparison on an exact number (`BigDecimal`/`BigInteger`) is exact
 function	kestra_ge	no	yes	-	egret-only by construction (W9c Task 4 fix round 1): `super::cmp_rewrite` compiles minijinja's `>=` into a call to it, so a comparison on an exact number (`BigDecimal`/`BigInteger`) is exact
@@ -190,6 +191,8 @@ function	kestra_mul	no	yes	-	egret-only by construction (package #5a Task A3): `
 function	kestra_ne	no	yes	-	egret-only by construction (W9c Task 4 fix round 1): `super::cmp_rewrite` compiles minijinja's `!=` into a call to it, so a comparison on an exact number (`BigDecimal`/`BigInteger`) is exact
 function	kestra_not_in	no	yes	-	egret-only by construction (W9c Task 4 fix round 1): `super::cmp_rewrite` compiles minijinja's `not in` into a call to it, so a comparison on an exact number (`BigDecimal`/`BigInteger`) is exact
 function	kestra_null_coalesce	no	yes	-	egret-only by construction: `super::rewrite` compiles Kestra's `??` into a call to it, so it is a seam and not a language name
+function	kestra_path	no	yes	-	egret-only by construction (package #5a Task A5): `super::rewrite` compiles a path on the left of `??`/`???` into a call to it, so a missing step answers the right side instead of raising
+function	kestra_present	no	yes	-	egret-only by construction (package #5a Task A5): `super::rewrite` compiles Kestra's `??` with a path on the left into an inline `if` on it, so the right side is lazy
 function	kestra_sub	no	yes	-	egret-only by construction (package #5a Task A3): `super::cmp_rewrite`'s arithmetic pass compiles minijinja's binary `-` into a call to it, so the operator is Pebble's `OperatorUtils` (Long/Double tower, string and list operands)
 function	kestra_undefined_coalesce	no	yes	-	egret-only by construction: `super::rewrite` compiles Kestra's `???` into a call to it
 function	ksuid	yes	yes	function-ksuid	-

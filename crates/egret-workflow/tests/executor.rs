@@ -844,7 +844,10 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
         // (2026-10-28): `valids/restart-child`, `-loop`, `-parent` and
         // `-parent-loop` bank (`1 / 0` fails as Java's does, spec D2);
         // 45 + 256 = 301.
-        (301, 256, 45),
+        // 45 -> 44 baselined, 256 -> 257 matching at package #5a Task A5
+        // (2026-10-29): `valids/webhook-plaintext` banks (`??` reads through
+        // a missing member chain, spec D6); 44 + 257 = 301.
+        (301, 257, 44),
         "301 = matching + baselined, the total beside its parts. It read \
          167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries, W8 \
          Task 4 banked `valids/waitfor-nested`, W8 Task 5 banked seven \
@@ -1109,10 +1112,13 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
         // (38, 31, 28, 3) -> (38, 31, 30, 1) at group C1 Task 2 (2026-10-18):
         // `valids/webhook-outputs` and `valids/webhook-wait` bank, held by
         // their `OutputValues` and not by the webhook trigger.
-        (38, 31, 30, 1),
+        // (38, 31, 30, 1) -> (38, 31, 31, 0) at package #5a Task A5
+        // (2026-10-29): `valids/webhook-plaintext` banks, held by `??` over a
+        // missing chain (spec D6) and not by the webhook trigger.
+        (38, 31, 31, 0),
         "corpus flows declaring one of the three (38 = 7 + 17 + 15 with \
          `invalids/duplicate` declaring two kinds), how many the oracle compares \
-         at all, and the split. **30 MATCHING entries declare a trigger this \
+         at all, and the split. **31 MATCHING entries declare a trigger this \
          package built, and their matching is evidence the trigger was not \
          evaluated on either side** -- which is the inversion this statement \
          exists to prevent a reader making"
@@ -1131,14 +1137,13 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
     );
     assert_eq!(
         trigger_baselined,
-        ["valids/webhook-plaintext"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect::<BTreeSet<_>>(),
+        BTreeSet::<String>::new(),
         "the baselined trigger-declaring entries, all webhook, all baselined for \
          reasons that are not the trigger (the design spec's §1 webhook row: 3, \
          unchanged by this package; 1 since group C1 Task 2 banked \
-         `webhook-outputs` and `webhook-wait`, held by `OutputValues`)"
+         `webhook-outputs` and `webhook-wait`, held by `OutputValues`; none \
+         since package #5a Task A5 banked `webhook-plaintext`, held by `??` \
+         over a missing chain)"
     );
 
     // Not one trigger-fired execution anywhere in the golden.
@@ -3076,7 +3081,8 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
 // 187 -> 184 at package #5a Task A2 (2026-10-28, measured): the 3 run terminals of
 // `valids/loopuntil-failed-flowable`.
 // 184 -> 174 at package #5a Task A3 (2026-10-28, measured): the four `valids/restart-*` entries' 10 run terminals.
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 174;
+// 174 -> 173 at package #5a Task A5 (2026-10-29, measured): `valids/webhook-plaintext`'s 1 run terminal.
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 173;
 /// 43 from W6 Task 4 to W9a Task 10; **40 since W9a Task 11** -- the three
 /// iterations of `valids/loop-values-from-uri`.
 // 40 -> 39 at WorkingDirectory Task 8: `working-directory-taskrun` has one
@@ -3122,7 +3128,8 @@ const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 29;
 // execution (no sub-execution) of `valids/loopuntil-failed-flowable`.
 // 79 -> 73 at package #5a Task A3 (2026-10-28, measured): the four `valids/restart-*` entries:
 // four top-level executions and two sub-executions.
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 73;
+// 73 -> 72 at package #5a Task A5 (2026-10-29, measured): `valids/webhook-plaintext`'s one execution.
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 72;
 /// **1703 through W8 Task 2, 1647 after W8 Task 3, 1610 after W8 Task 4, 1528
 /// now** -- 56 run-history tokens on Task 3's eight, 37 on
 /// `valids/waitfor-nested` (whose seven runs include three loops reading
@@ -3159,7 +3166,8 @@ const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 73;
 // tokens (3 + 3 + 4) of `valids/loopuntil-failed-flowable`.
 // 742 -> 706 at package #5a Task A3 (2026-10-28, measured): the four `valids/restart-*` entries' 36
 // run-history tokens.
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 706;
+// 706 -> 702 at package #5a Task A5 (2026-10-29, measured): `valids/webhook-plaintext`'s 4 run-history tokens.
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 702;
 /// **665 through W8 Task 2, 617 after W8 Task 3, 562 after W8 Task 4, 526 after
 /// W8 Task 5, 522 now** -- 48 execution-history tokens on Task 3's eight, i.e.
 /// six apiece (every one of them reads `CREATED RUNNING PAUSED RESTARTED
@@ -3196,7 +3204,8 @@ const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 706;
 // execution-history tokens of `valids/loopuntil-failed-flowable`.
 // 302 -> 284 at package #5a Task A3 (2026-10-28, measured): the four `valids/restart-*` entries' 18
 // execution-history tokens.
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 284;
+// 284 -> 281 at package #5a Task A5 (2026-10-29, measured): `valids/webhook-plaintext`'s 3 execution-history tokens.
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 281;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -4562,7 +4571,10 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
 // `{{ outputs.loop.iterationCount < "5" }}` now fails as Kestra's does (D1).
 // 31 -> 27 at package #5a Task A3 (2026-10-28, measured): the four `valids/restart-*` entries banked --
 // `{{ 1 / taskrun.attemptsCount }}` fails as Java's `ldiv` does (D2).
-const MISMATCH_ON_EXECUTION: usize = 27;
+// 27 -> 26 at package #5a Task A5 (2026-10-29, measured): `valids/webhook-plaintext`
+// banked -- `trigger.parameters.validationToken[0] ?? 'hello-world'` reads
+// through the missing chain and renders the fallback (D6).
+const MISMATCH_ON_EXECUTION: usize = 26;
 /// **112 through W8 Task 2, 104 after W8 Task 3, 103 after W8 Task 4, 96 after
 /// W8 Task 5, 94 now** -- the same eight, then `valids/waitfor-nested`, then
 /// the seven `allow*` entries, then W8 Task 6's two. The last pair differ on
@@ -4599,7 +4611,8 @@ const MISMATCH_ON_EXECUTION: usize = 27;
 // 46 -> 38 at end hooks #2b Task B1 (2026-10-27, measured): the eight `afterExecution:` entries it banked differed on `runs` (their after-runs were missing).
 // 38 -> 37 at package #5a Task A2 (2026-10-28, measured): `valids/loopuntil-failed-flowable` banked.
 // 37 -> 33 at package #5a Task A3 (2026-10-28, measured): the four `valids/restart-*` entries banked.
-const MISMATCH_ON_RUNS: usize = 33;
+// 33 -> 32 at package #5a Task A5 (2026-10-29, measured): `valids/webhook-plaintext` banked (D6).
+const MISMATCH_ON_RUNS: usize = 32;
 /// **72 through W8 Task 2, 67 after W8 Task 3, 64 now**: five of Task 3's eight
 /// carry an ordered pair, and W8 Task 4 closed THREE on one entry --
 /// `valids/waitfor-nested`'s `loop_1_return`/`loop_2`,
@@ -4705,7 +4718,8 @@ const MISMATCH_ON_SPAWNED: usize = 7;
 // 57 -> 49 at end hooks #2b Task B1 (2026-10-27, measured): the eight `afterExecution:` entries it banked.
 // 49 -> 48 at package #5a Task A2 (2026-10-28, measured): `valids/loopuntil-failed-flowable` banked (D1).
 // 48 -> 44 at package #5a Task A3 (2026-10-28, measured): the four `valids/restart-*` entries banked (D2).
-const MISMATCHING_RUNS_ENTRIES: usize = 44;
+// 44 -> 43 at package #5a Task A5 (2026-10-29, measured): `valids/webhook-plaintext` banked (D6).
+const MISMATCHING_RUNS_ENTRIES: usize = 43;
 /// **84 through W5; 63 after W6 Task 3, and 59 since W6 Task 4 corrected the
 /// classifier.**
 ///
@@ -7696,11 +7710,9 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
             "valids/variables",
             "`render()`, refused by W2 and assigned to W3 in the same table",
         ),
-        (
-            "valids/webhook-plaintext",
-            "`??` over an undefined ROOT (`trigger.…`); egret resolves a missing \
-             member and not a missing root",
-        ),
+        // (`valids/webhook-plaintext` was here: `??` over a missing
+        // `trigger.parameters…` chain. It banked at package #5a Task A5,
+        // 2026-10-29, when a path on the left of `??` became lazy, spec D6.)
         // (`valids/restart-child` was here: `1 / taskrun.attemptsCount` with
         // a 0 count. It banked at package #5a Task A3, 2026-10-28, when `/`
         // became Java's.)
@@ -8117,7 +8129,9 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
         // does `valids/loopuntil-failed-flowable`.
         // (2, 47, 49) -> (2, 43, 45) at package #5a Task A3 (2026-10-28): nor
         // do the four `valids/restart-*` entries.
-        (2, 43, 45),
+        // (2, 43, 45) -> (2, 42, 44) at package #5a Task A5 (2026-10-29): nor
+        // does `valids/webhook-plaintext`.
+        (2, 42, 44),
         "the baselined population that declares a `timeout:`, and the rest \
          ((2, 106, 108) until no-silent-stall Task 1 banked \
          `invalids/invalid-task`, which declares none). It \

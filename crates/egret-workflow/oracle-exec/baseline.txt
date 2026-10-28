@@ -183,6 +183,10 @@
 #   `??` resolves a missing MEMBER (`outputs.not_existing ?? ''` renders) and
 #   not a missing ROOT, so the fallback is never reached. A W2 divergence the
 #   fed terminal used to hide.
+#   (BANKED with package #5a's Task A5, 2026-10-29, spec D6: a path on the
+#   left of `??` reads through a missing chain -- the miss was two levels,
+#   `trigger.parameters` then `.validationToken`, not the root alone -- and
+#   the fallback renders.)
 #   `restart-child` -- `{{ 1 / taskrun.attemptsCount }}` with `attemptsCount`
 #   0 on the first attempt. Java throws `ArithmeticException: / by zero` and the
 #   run FAILED; minijinja divides as floats and renders `Infinity`, so egret
@@ -628,6 +632,5 @@ valids/variables
 # group C1 Task 2 (2026-10-18): `OutputValues` runs now; held by one more `WaitFor` iteration (3 PAUSED, golden 2) under `maxDuration: PT3S`/`PT1S`, the poller-latency shape `loop-until-restart` is held by (measured).
 # Debt D14 (2026-10-19): this entry can MATCH by accident under CPU load, and the ratchet then fails "PROGRESS NOT BANKED". The driver's Tick clock is real time since `executions.created_at` plus what `pass_time` adds, so a slow machine leaks wall time into it and `reached_maximums` (`src/executor/flowable/loop_until.rs`) fires `maxDuration` one iteration early -- golden's 2 PAUSED. Not progress: it needs a virtual clock in the driver. Do not bank it on such a run.
 valids/waitfor-child-task-warning
-valids/webhook-plaintext
 valids/working-directory-invalid-runif
 valids/working-directory-taskrun-nested

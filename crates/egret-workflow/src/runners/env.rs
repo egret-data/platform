@@ -110,7 +110,7 @@ use std::fmt;
 use std::io;
 use std::sync::Arc;
 
-use minijinja::value::{Enumerator, Object, ObjectRepr, Value as MjValue, ValueKind};
+use minijinja::value::{Enumerator, Object, ObjectRepr, Rest, Value as MjValue, ValueKind};
 use minijinja::{AutoEscape, Environment, Error as MjError, State, UndefinedBehavior};
 use regex::Regex;
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
@@ -949,11 +949,13 @@ impl From<BTreeMap<String, JsonValue>> for RenderContext {
 /// precisely what makes this expressible as a function at all.
 ///
 /// Both operands are evaluated before this is called; Kestra's is a lazy
-/// binary operator. That is a real difference, and it is unfixable from a
-/// rewrite that only reshapes text — a wrong-but-cheap right operand costs a
-/// little work here where Kestra would skip it, and a right operand that
-/// *errors* fails the whole render where Kestra would never have reached it.
-/// See [`rewrite`]'s module doc.
+/// binary operator. Since package #5a Task A5 (spec D6) this is reached only
+/// when the left operand is NOT a path (a call, a filter, arithmetic): a path
+/// compiles to an inline `if` on [`kestra_present`] instead, which is lazy.
+/// For what still reaches here, a right operand that *errors* fails the
+/// whole render where Kestra would never have reached it -- the recorded
+/// divergence `coalesce-non-path-left-missing-right`. See [`rewrite`]'s
+/// module doc.
 fn kestra_null_coalesce(_state: &State, left: MjValue, right: MjValue) -> MjValue {
     if left.is_undefined() || left.is_none() {
         right
@@ -979,6 +981,46 @@ fn kestra_undefined_coalesce(_state: &State, left: MjValue, right: MjValue) -> M
     } else {
         left
     }
+}
+
+/// A path read that never raises -- the left operand of `??`/`???` when it is
+/// a path (spec D6; [`rewrite`] compiles `obj.a['b'][0]` there to
+/// `kestra_path(obj, 'a', 'b', 0)`).
+///
+/// Pebble's `GetAttributeExpression` under strict variables throws
+/// `AttributeNotFoundException` for a missing attribute or index and
+/// `RootAttributeNotFoundException` (a subclass, read with `javap`: "Attempt
+/// to get attribute of null object") for a step from `null`; both coalescing
+/// operators catch it and answer their right side. Here each of those is
+/// `Undefined`, which [`kestra_present`] and [`kestra_defined`] both read as
+/// missing. A missing root arrives as `Undefined` already (function
+/// arguments are not subject to strict undefined). `.name` and `['name']` are
+/// one operation in Pebble, so both are an item lookup here.
+fn kestra_path(_state: &State, root: MjValue, steps: Rest<MjValue>) -> MjValue {
+    let mut current = root;
+    for step in steps.iter() {
+        if current.is_undefined() || current.is_none() {
+            return MjValue::UNDEFINED;
+        }
+        current = match current.get_item(step) {
+            Ok(next) => next,
+            Err(_) => return MjValue::UNDEFINED,
+        };
+    }
+    current
+}
+
+/// `??`'s test on a path: present is defined and not null
+/// (`NullCoalescingExpression` answers the left side only when it is
+/// non-null and did not throw).
+fn kestra_present(_state: &State, value: MjValue) -> bool {
+    !value.is_undefined() && !value.is_none()
+}
+
+/// `???`'s test on a path: defined, null included
+/// (`UndefinedCoalescingExpression` answers the left side unless it threw).
+fn kestra_defined(_state: &State, value: MjValue) -> bool {
+    !value.is_undefined()
 }
 
 /// `InExpression` — the `isIn` the rewriter emits calls to.
@@ -1914,6 +1956,11 @@ pub(crate) fn environment() -> Environment<'static> {
 
     env.add_function("kestra_null_coalesce", kestra_null_coalesce);
     env.add_function("kestra_undefined_coalesce", kestra_undefined_coalesce);
+    // Package #5a Task A5 (spec D6): a path on the left of `??`/`???`
+    // compiles to an inline `if` on these three.
+    env.add_function("kestra_path", kestra_path);
+    env.add_function("kestra_present", kestra_present);
+    env.add_function("kestra_defined", kestra_defined);
     env.add_function("kestra_is_in", kestra_is_in);
     // W9c Task 4 fix round 1: the comparison operators, which
     // [`compile_source`]'s second pass compiles into calls to these.
@@ -3216,8 +3263,10 @@ mod tests {
         // to the per-operator functions now); 185 -> 190 at package #5a Task
         // A3, which added the egret-only `kestra_add`, `kestra_sub`,
         // `kestra_mul`, `kestra_div` and `kestra_mod` (the arithmetic pass);
-        // the three engine counts below did not move.
-        assert_eq!(rows, 190, "row count");
+        // 190 -> 193 at package #5a Task A5, which added the egret-only
+        // `kestra_path`, `kestra_present` and `kestra_defined` (a path on the
+        // left of `??`/`???`); the three engine counts below did not move.
+        assert_eq!(rows, 193, "row count");
         assert_eq!(counts.get("filter"), Some(&63), "engine filter count");
         assert_eq!(counts.get("function"), Some(&37), "engine function count");
         assert_eq!(counts.get("test"), Some(&8), "engine test count");
@@ -4080,21 +4129,86 @@ mod tests {
     }
 
     /// Package #5a, Task A1: a missing operand that Kestra evaluates fails here
-    /// too. `2 < 1 < missing.x` is `(2 < 1) < missing.x` in Pebble, and
-    /// `nothere ?? missing.y` must evaluate its right side. Task A2's
-    /// left-associative chain and Task A5's lazy `??` must keep both failing.
+    /// too. `2 < 1 < missing.x` is `(2 < 1) < missing.x` in Pebble. Task A2's
+    /// left-associative chain must keep it failing. (The two `??` rows moved
+    /// to [`a_missing_right_side_kestra_reaches_fails_on_it`] with Task A5.)
     #[test]
     fn a_missing_operand_kestra_evaluates_fails_here_too() {
+        let got = render("{{ 2 < 1 < missing.x }}", json!({}));
+        assert!(got.is_err(), "must fail, as Kestra's does; got {got:?}");
+    }
+
+    /// Package #5a, Task A5 (spec D6, Q6): `??`/`???` answer through a missing
+    /// member or index chain and evaluate the right side only when needed.
+    /// The oracle's `coalesce-chain-*` and `coalesce-lazy-*` entries hold the
+    /// golden values; this adds the rows they do not reach: a step from a
+    /// null under `???` (Pebble's `RootAttributeNotFoundException`, which
+    /// `???` catches too), a present `false`/`0`/`''` (present, so not
+    /// replaced), the `{% set %}` and call positions, and the non-path left
+    /// operand that stays eager (the recorded divergence).
+    #[test]
+    fn a_path_on_the_left_of_coalesce_reads_through_a_missing_chain() {
+        for (source, ctx, expected) in [
+            ("{{ obj.a.b ?? 'h' }}", json!({ "obj": {} }), "h"),
+            (
+                "{{ obj.a.b ??? 'h' }}",
+                json!({ "obj": { "a": null } }),
+                "h",
+            ),
+            ("{{ obj.a ??? 'h' }}", json!({ "obj": { "a": null } }), ""),
+            (
+                "{{ obj.a ?? 'h' }}",
+                json!({ "obj": { "a": false } }),
+                "false",
+            ),
+            ("{{ obj.a ?? 'h' }}", json!({ "obj": { "a": 0 } }), "0"),
+            ("{{ obj.a ?? 'h' }}", json!({ "obj": { "a": "" } }), ""),
+            ("{{ l[1] ?? 'h' }}", json!({ "l": [1, 2] }), "2"),
+            ("{{ l[5] ?? 'h' }}", json!({ "l": [1] }), "h"),
+            ("{{ s.a ?? 'h' }}", json!({ "s": "text" }), "h"),
+            ("{{ x ?? (1 / 0) }}", json!({ "x": 1 }), "1"),
+            ("{{ obj.a.b ?? obj.c ?? 'h' }}", json!({ "obj": {} }), "h"),
+            (
+                "{% set v = obj.a.b ?? 'h' %}{{ v }}",
+                json!({ "obj": {} }),
+                "h",
+            ),
+            ("{{ (obj.a.b ?? 'h') ~ '!' }}", json!({ "obj": {} }), "h!"),
+            ("{{ obj.a.b ?? 1 + 2 }}", json!({ "obj": {} }), "3"),
+        ] {
+            let got = render(source, ctx.clone()).unwrap_or_else(|e| panic!("{source}: {e}"));
+            assert_eq!(got, expected, "{source} with {ctx}");
+        }
+        // The recorded divergence (`coalesce-non-path-left-missing-right`):
+        // Kestra answers `1`; a call on the left keeps the eager form here.
+        assert!(render("{{ fromJson('1') ?? missing.y }}", json!({})).is_err());
+    }
+
+    /// Package #5a, Task A5 (spec D6): `??` reaches its right side when the
+    /// left is missing, and a right side whose root is missing fails there,
+    /// as Kestra's `RootAttributeNotFoundException` for `missing` does
+    /// (`coalesce-missing-right-evaluated`,
+    /// `coalesce-chain-missing-right-evaluated`). **For Kestra's reason, not
+    /// the left side's:** before Task A5, `obj.a.b` raised before the
+    /// coalesce ran, so the row failed whatever the right side was. The
+    /// second half proves the failure is the right side's: the same
+    /// template with `missing.y` present answers it.
+    #[test]
+    fn a_missing_right_side_kestra_reaches_fails_on_it() {
         for (source, ctx) in [
-            ("{{ 2 < 1 < missing.x }}", json!({})),
             ("{{ nothere ?? missing.y }}", json!({})),
             ("{{ obj.a.b ?? missing.y }}", json!({ "obj": {} })),
+            ("{{ obj.a.b ??? missing.y }}", json!({ "obj": {} })),
         ] {
-            let got = render(source, ctx);
+            let got = render(source, ctx.clone());
+            let err = got.expect_err(source).to_string();
             assert!(
-                got.is_err(),
-                "{source} must fail, as Kestra's does; got {got:?}"
+                err.contains("undefined"),
+                "{source}: the right side's missing root fails it; got {err}"
             );
+            let mut present = ctx;
+            present["missing"] = json!({ "y": "r" });
+            assert_eq!(render(source, present).unwrap(), "r", "{source}");
         }
     }
 

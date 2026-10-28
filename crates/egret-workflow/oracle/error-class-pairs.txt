@@ -505,6 +505,11 @@ filter-capitalize-of-a-defaulted-empty-array        test:the_collection_kind_gat
 # (`runners::arith::decimal`): `/ 0` and `% 0` on one fail with Kestra's own
 # `Could not perform division` / `greater modulus`, so the two baselined ones
 # banked and all three are paired with the test that asserts that text.
+# Task A5 (2026-10-29) made a path on the left of `??`/`???` lazy (spec D6):
+# `obj.a.b ?? missing.y` used to fail on `obj.a.b` before the coalesce ran;
+# now both coalesce rows fail on the right side's missing root, Kestra's
+# reason, and are re-paired with the test that proves it (the same template
+# with `missing.y` present answers it).
 arith-zero-long-div                                 test:an_operation_kestra_refuses_fails_with_kestras_text
 arith-zero-long-div-context                         test:an_operation_kestra_refuses_fails_with_kestras_text
 arith-zero-long-mod                                 test:an_operation_kestra_refuses_fails_with_kestras_text
@@ -530,8 +535,8 @@ chain-lt-ascending                                  test:a_comparison_kestra_ref
 chain-lt-descending                                 test:a_comparison_kestra_refuses_fails_with_kestras_text
 chain-lt-missing-operand                            test:a_missing_operand_kestra_evaluates_fails_here_too
 chain-eq-then-lt                                    test:a_comparison_kestra_refuses_fails_with_kestras_text
-coalesce-missing-right-evaluated                    test:a_missing_operand_kestra_evaluates_fails_here_too
-coalesce-chain-missing-right-evaluated              test:a_missing_operand_kestra_evaluates_fails_here_too
+coalesce-missing-right-evaluated                    test:a_missing_right_side_kestra_reaches_fails_on_it
+coalesce-chain-missing-right-evaluated              test:a_missing_right_side_kestra_reaches_fails_on_it
 operator-contains-number-left                       test:contains_on_a_number_is_refused
 logic-and-list-left                                 baselined
 logic-or-null-context                               baselined
