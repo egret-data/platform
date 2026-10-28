@@ -527,3 +527,12 @@ Deviations the code forces are recorded here, per task, as they happen.
   would leave both masks on each column, a pair the copy's overlap check refuses (#757's rule, §5.3): the commit is
   409 and nothing is renamed. Swapped denies carry both sets as §5.4 says. Pinned by
   `swapped_columns_with_different_masks_are_refused_by_the_overlap_check`; the steward removes one mask first.
+- **Task 13, catalog grants.** Selection and the union check use lakekeeper's `case_insensitive` collation element
+  by element (Step 0); a rename whose two names are one name under it moves nothing (D8's case-only rule). The source
+  must be a live table at any depth (`store::embedded::live_table_id_via`); a non-2xx is followed when the
+  destination now carries the source's table id. The follow runs in its own transaction after the hold's `finish`,
+  or after #755's path, inside one uncancellable task. Each event carries `warehouse_id`, so the feed links the
+  registry catalog (`Ref::Catalog`). The end-to-end test through the real `EgretCatalogGuard` and F4's `MockS3` is in
+  `egret-bin/src/catalog_vended_credentials_tests.rs`: the moved read grant vends read-only credentials on the renamed
+  table, the moved write grant read-write-delete, a new table at the old name is 403 for both, and the events name
+  the verified client.

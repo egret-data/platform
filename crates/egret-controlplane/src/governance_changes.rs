@@ -143,6 +143,7 @@ async fn changes(
         ("policy:read", Family::Policy),
         ("tag:read", Family::Tag),
         ("user:read", Family::User),
+        ("catalog_registry:read", Family::Catalog),
     ] {
         match egret_core::authz::require(&*st.pdp, &p, perm).await {
             Ok(()) => families.push(family),
@@ -316,6 +317,8 @@ fn truncated_phrase(action: &str) -> &'static str {
         action::RULE_COPY => "copied a rule to a renamed table",
         action::GRANT_LEFT => "renamed a table an allow grant no longer covers",
         action::RANGER_POLICY_LEFT => "renamed a table a hand-written policy still names",
+        action::CATALOG_GRANT_MOVE => "moved a catalog grant with a renamed table",
+        action::CATALOG_GRANT_DELETE => "removed a catalog grant with a dropped namespace",
         _ => "made a change",
     }
 }
@@ -760,6 +763,53 @@ async fn entry(c: &mut PgConnection, row: ChangeRow) -> Result<ChangeEntry, sqlx
                 Some(Ref::Profile {
                     name: s(p, "service").to_string(),
                 }),
+                live,
+            )
+        }
+        action::CATALOG_GRANT_MOVE | action::CATALOG_GRANT_DELETE => {
+            let at = |v: &Value| {
+                let mut parts = strings(v, "namespace");
+                parts.push(s(v, "table").to_string());
+                parts.join(".")
+            };
+            let (before, after) = (
+                d.get("before").unwrap_or(&Value::Null),
+                d.get("after").unwrap_or(&Value::Null),
+            );
+            let live = exists(
+                c,
+                "SELECT EXISTS (SELECT 1 FROM catalog.catalog_grants WHERE id::text = $1)",
+                &id,
+            )
+            .await?;
+            let grant = format!(
+                "catalog grant {} of role {}",
+                s(d, "privilege"),
+                s(d, "role")
+            );
+            let sentence = if row.action == action::CATALOG_GRANT_MOVE {
+                let merged = if d.get("merged").and_then(Value::as_bool) == Some(true) {
+                    ", merged with the same grant there"
+                } else {
+                    ""
+                };
+                format!(
+                    "{a} moved {grant} from {} to {} (table renamed{merged})",
+                    at(before),
+                    at(after)
+                )
+            } else {
+                format!("{a} removed {grant} on {} (namespace dropped)", at(before))
+            };
+            let catalog: Option<(Uuid, String)> = sqlx::query_as(
+                "SELECT id, name FROM registry.catalogs WHERE warehouse_id::text = $1",
+            )
+            .bind(s(d, "warehouse_id"))
+            .fetch_optional(&mut *c)
+            .await?;
+            (
+                sentence,
+                catalog.map(|(id, name)| Ref::Catalog { id, name }),
                 live,
             )
         }

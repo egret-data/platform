@@ -4791,3 +4791,233 @@ async fn swapped_columns_with_different_masks_are_refused_by_the_overlap_check()
     assert_eq!(env.perm().await, perm);
     assert_eq!(env.source_fields("orders").await.unwrap()[1].1, "a");
 }
+
+// ── Grants follow a rename, Task 13: catalog grants (KI-309, D8) ──
+
+impl Env {
+    /// A role holding one catalog grant; returns the grant id.
+    async fn catalog_grant(
+        &self,
+        securable: &str,
+        ns: Option<&[&str]>,
+        table: Option<&str>,
+        privilege: &str,
+    ) -> Uuid {
+        let store = egret_catalog_engine::CatalogStore::new(self.db.clone());
+        let role = store
+            .create_role(self.warehouse_id, &unique("th-role"), "external", None)
+            .await
+            .expect("role");
+        self.catalog_grant_of(role.id, securable, ns, table, privilege)
+            .await
+    }
+
+    async fn catalog_grant_of(
+        &self,
+        role: Uuid,
+        securable: &str,
+        ns: Option<&[&str]>,
+        table: Option<&str>,
+        privilege: &str,
+    ) -> Uuid {
+        egret_catalog_engine::CatalogStore::new(self.db.clone())
+            .add_grant(
+                role,
+                &egret_catalog_engine::GrantInput {
+                    securable_type: securable.into(),
+                    namespace: ns.map(|n| n.iter().map(|s| s.to_string()).collect()),
+                    table_name: table.map(str::to_string),
+                    privilege: privilege.into(),
+                },
+            )
+            .await
+            .expect("catalog grant")
+            .id
+    }
+
+    /// `(namespace, table)` catalog grant `id` names now, `None` when gone.
+    async fn catalog_grant_at(&self, id: Uuid) -> Option<(Option<Vec<String>>, Option<String>)> {
+        sqlx::query_as("SELECT namespace, table_name FROM catalog.catalog_grants WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.db.pool)
+            .await
+            .expect("catalog grant")
+    }
+
+    async fn catalog_grant_events(&self) -> Vec<(String, String, Value)> {
+        sqlx::query_as(
+            "SELECT action, resource_id, detail FROM audit.audit_log \
+              WHERE resource_type = 'catalog_grant' AND detail ->> 'warehouse_id' = $1 \
+              ORDER BY id",
+        )
+        .bind(self.warehouse_id.to_string())
+        .fetch_all(&self.db.pool)
+        .await
+        .expect("events")
+    }
+}
+
+fn at(ns: &[&str], table: &str) -> Option<(Option<Vec<String>>, Option<String>)> {
+    Some((
+        Some(ns.iter().map(|s| s.to_string()).collect()),
+        Some(table.to_string()),
+    ))
+}
+
+/// KI-309, D8: a `table` catalog grant follows its renamed table, with a
+/// `catalog_grant:move` event by the caller.
+#[tokio::test]
+async fn a_table_catalog_grant_follows_the_rename() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    let grant = env
+        .catalog_grant("table", Some(&["sales"]), Some("orders"), "read")
+        .await;
+    let (_, client) = env.catalog_client("spark-etl").await;
+    *env.caller.lock().unwrap() = client.clone();
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(
+        env.catalog_grant_at(grant).await,
+        at(&["sales"], "orders_v2")
+    );
+    let events = env.catalog_grant_events().await;
+    assert_eq!(events.len(), 1, "{events:?}");
+    let (action, id, d) = &events[0];
+    assert_eq!(action, "catalog_grant:move");
+    assert_eq!(id, &grant.to_string());
+    assert_eq!(d["actor"]["client_id"], json!(client));
+    assert_eq!(
+        d["before"],
+        json!({"namespace": ["sales"], "table": "orders"})
+    );
+    assert_eq!(
+        d["after"],
+        json!({"namespace": ["sales"], "table": "orders_v2"})
+    );
+    assert_eq!(d["merged"], json!(false));
+}
+
+/// D8: a rename into another namespace moves the namespace too, at any depth.
+#[tokio::test]
+async fn a_cross_namespace_rename_moves_the_namespace_too() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    env.create_namespace(&["finance"]).await;
+    let grant = env
+        .catalog_grant("table", Some(&["sales"]), Some("orders"), "read")
+        .await;
+    let (status, body) = env
+        .rename_across((&["sales"], "orders"), (&["finance"], "orders"))
+        .await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(
+        env.catalog_grant_at(grant).await,
+        at(&["finance"], "orders")
+    );
+
+    env.create_namespace(&["sales", "eu"]).await;
+    env.create_namespace(&["sales", "us"]).await;
+    let (status, body) = env
+        .call(
+            "POST",
+            "namespaces/sales%1Feu/tables",
+            Some(json!({"name": "x", "schema": schema(0, &[(1, "id")])})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "create sales.eu.x: {body}");
+    let deep = env
+        .catalog_grant("table", Some(&["sales", "eu"]), Some("x"), "write")
+        .await;
+    let (status, body) = env
+        .rename_across((&["sales", "eu"], "x"), (&["sales", "us"], "x"))
+        .await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(env.catalog_grant_at(deep).await, at(&["sales", "us"], "x"));
+}
+
+/// D8: a moved grant that the role already holds on the new name merges.
+#[tokio::test]
+async fn a_moved_grant_merges_with_an_identical_one() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    let store = egret_catalog_engine::CatalogStore::new(env.db.clone());
+    let role = store
+        .create_role(env.warehouse_id, &unique("th-role"), "external", None)
+        .await
+        .expect("role");
+    let moving = env
+        .catalog_grant_of(role.id, "table", Some(&["sales"]), Some("orders"), "read")
+        .await;
+    let there = env
+        .catalog_grant_of(
+            role.id,
+            "table",
+            Some(&["sales"]),
+            Some("orders_v2"),
+            "read",
+        )
+        .await;
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(env.catalog_grant_at(moving).await, None);
+    assert_eq!(
+        env.catalog_grant_at(there).await,
+        at(&["sales"], "orders_v2")
+    );
+    assert_eq!(env.catalog_grant_events().await[0].2["merged"], json!(true));
+}
+
+/// D8: catalog grants need no hold: a held destination name does not refuse
+/// a rename that carries only catalog grants.
+#[tokio::test]
+async fn catalog_grants_need_no_hold() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    let grant = env
+        .catalog_grant("table", Some(&["sales"]), Some("orders"), "read")
+        .await;
+    let _held = env.hold_name("orders_v2").await;
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(
+        env.catalog_grant_at(grant).await,
+        at(&["sales"], "orders_v2")
+    );
+}
+
+/// D8 guards: a `namespace` grant stays; a rename between two spellings of
+/// one name moves nothing.
+#[tokio::test]
+async fn a_namespace_grant_stays_and_a_case_only_rename_moves_no_catalog_grant() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    env.create_namespace(&["finance"]).await;
+    let ns = env
+        .catalog_grant("namespace", Some(&["sales"]), None, "read")
+        .await;
+    let table = env
+        .catalog_grant("table", Some(&["sales"]), Some("orders"), "read")
+        .await;
+    let _ = env.rename("orders", "ORDERS").await;
+    assert_eq!(env.catalog_grant_at(table).await, at(&["sales"], "orders"));
+    assert!(env.catalog_grant_events().await.is_empty());
+    let source = if env.source("orders").await.is_some() {
+        "orders"
+    } else {
+        "ORDERS"
+    };
+    let (status, body) = env
+        .rename_across((&["sales"], source), (&["finance"], "orders"))
+        .await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(
+        env.catalog_grant_at(ns).await,
+        Some((Some(vec!["sales".to_string()]), None))
+    );
+    assert_eq!(
+        env.catalog_grant_at(table).await,
+        at(&["finance"], "orders")
+    );
+}

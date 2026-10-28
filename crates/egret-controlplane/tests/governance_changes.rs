@@ -1221,3 +1221,65 @@ async fn a_left_handwritten_policy_reads_with_its_catalog_client() {
          lake-trino/orders-read still names sales.orders"
     );
 }
+
+/// Grants-follow spec D9: catalog-grant moves are family `Catalog`, read with
+/// `catalog_registry:read` (inside the feed's own gate), never with
+/// `policy:read` alone.
+#[tokio::test]
+async fn catalog_grant_moves_are_read_with_catalog_registry_read() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    let actor = json!({"kind": "catalog_client", "id": Uuid::new_v4(), "client_id": "spark-etl-1",
+                       "name": "spark-etl", "consumer_type": "external"});
+    let events = [
+        (
+            action::CATALOG_GRANT_MOVE,
+            json!({"warehouse_id": Uuid::new_v4(), "role": "analysts", "privilege": "read",
+                   "before": {"namespace": ["sales"], "table": "orders"},
+                   "after": {"namespace": ["sales"], "table": "orders_v2"},
+                   "merged": false, "trigger": "iceberg_rename", "actor": actor,
+                   "rename": {"from": "sales.orders", "to": "sales.orders_v2"}}),
+        ),
+        (
+            action::CATALOG_GRANT_DELETE,
+            json!({"warehouse_id": Uuid::new_v4(), "role": "analysts", "privilege": "read",
+                   "before": {"namespace": ["sales"], "table": "orders"}, "after": null,
+                   "trigger": "iceberg_drop_namespace", "actor": actor}),
+        ),
+    ];
+    for (a, detail) in events {
+        sqlx::query(
+            "INSERT INTO audit.audit_log (kind, action, resource_type, resource_id, detail) \
+             VALUES ('mutation', $1, 'catalog_grant', $2, $3)",
+        )
+        .bind(a)
+        .bind(Uuid::new_v4().to_string())
+        .bind(detail)
+        .execute(&f.db.pool)
+        .await
+        .expect("event");
+    }
+    let catalog_reader = session(&f, &["tag:read", "catalog_registry:read"]).await;
+    let policy_reader = session(&f, &["policy:read"]).await;
+    let st = state(&f, None).await;
+    let (status, body) = changes(&st, &catalog_reader, "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sentences: Vec<&str> = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["sentence"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        sentences,
+        vec![
+            "Catalog client spark-etl removed catalog grant read of role analysts on \
+             sales.orders (namespace dropped)",
+            "Catalog client spark-etl moved catalog grant read of role analysts from \
+             sales.orders to sales.orders_v2 (table renamed)",
+        ]
+    );
+    let (status, body) = changes(&st, &policy_reader, "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(actions(&body).is_empty(), "family Catalog: {body}");
+}

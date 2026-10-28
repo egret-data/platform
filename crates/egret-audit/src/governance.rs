@@ -59,6 +59,10 @@ pub mod action {
     /// A plain hand-written allow that names a renamed table literally and
     /// still names the old name (spec D5, D9).
     pub const RANGER_POLICY_LEFT: &str = "ranger_policy:left";
+    /// A `table` catalog grant re-pointed to a renamed table, or removed with
+    /// a recursively dropped namespace (spec 2026-10-27 §5.5, §5.6).
+    pub const CATALOG_GRANT_MOVE: &str = "catalog_grant:move";
+    pub const CATALOG_GRANT_DELETE: &str = "catalog_grant:delete";
 }
 
 /// The `resource_type` each governance action is recorded under.
@@ -73,16 +77,21 @@ pub mod resource {
     /// A catalog table or column (`<warehouse_id>:<schema>.<table>`), as the
     /// legacy `tag:assign` sink events record it.
     pub const CATALOG: &str = "catalog";
+    /// An embedded-catalog role's grant (`catalog.catalog_grants.id`).
+    pub const CATALOG_GRANT: &str = "catalog_grant";
 }
 
 /// Which permission reads an event in the feed: `Policy` needs `policy:read`,
-/// `Tag` needs `tag:read`, `User` needs `user:read`. `User` is its own family
-/// because its events carry a person's email (username-takeover spec, D4).
+/// `Tag` needs `tag:read`, `User` needs `user:read`, `Catalog` needs
+/// `catalog_registry:read`. `User` is its own family because its events carry
+/// a person's email (username-takeover spec, D4); `Catalog` because catalog
+/// grants are administered under `catalog_registry:*` (grants-follow D9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Family {
     Policy,
     Tag,
     User,
+    Catalog,
 }
 
 /// Every governance `(action, resource_type)` pair and its family. The last
@@ -165,6 +174,16 @@ pub const FAMILIES: &[(&str, &str, Family)] = &[
         resource::RANGER_POLICY,
         Family::Policy,
     ),
+    (
+        action::CATALOG_GRANT_MOVE,
+        resource::CATALOG_GRANT,
+        Family::Catalog,
+    ),
+    (
+        action::CATALOG_GRANT_DELETE,
+        resource::CATALOG_GRANT,
+        Family::Catalog,
+    ),
     ("role:assign", "grant", Family::Policy),
     ("role:unassign", "grant", Family::Policy),
     ("tag:assign", "catalog", Family::Tag),
@@ -200,6 +219,8 @@ pub const GOVERNANCE_ACTIONS: &[&str] = &[
     action::RULE_COPY,
     action::GRANT_LEFT,
     action::RANGER_POLICY_LEFT,
+    action::CATALOG_GRANT_MOVE,
+    action::CATALOG_GRANT_DELETE,
 ];
 
 /// The family of a stored event, or `None` when it is not governance.

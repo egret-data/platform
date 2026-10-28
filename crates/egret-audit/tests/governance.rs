@@ -239,6 +239,12 @@ const EXPECTED: &[(&str, &str, Family)] = &[
     (action::RULE_COPY, "perm_rule", Family::Policy),
     (action::GRANT_LEFT, "perm_grant", Family::Policy),
     (action::RANGER_POLICY_LEFT, "ranger_policy", Family::Policy),
+    (action::CATALOG_GRANT_MOVE, "catalog_grant", Family::Catalog),
+    (
+        action::CATALOG_GRANT_DELETE,
+        "catalog_grant",
+        Family::Catalog,
+    ),
 ];
 
 #[test]

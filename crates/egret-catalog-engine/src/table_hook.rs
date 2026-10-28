@@ -2074,6 +2074,157 @@ impl TableHook {
     }
 }
 
+/// A live table's rename whose catalog grants follow it after the commit
+/// (grants-follow §5.5, D8).
+struct CatalogFollow {
+    warehouse_id: Uuid,
+    src_ns: Vec<String>,
+    src: String,
+    dst_ns: Vec<String>,
+    dst: String,
+    /// The source's table id: the destination carries it once the rename
+    /// committed.
+    tabular_id: Uuid,
+}
+
+impl CatalogFollow {
+    fn label(ns: &[String], table: &str) -> String {
+        format!("{}.{table}", ns.join("."))
+    }
+}
+
+impl TableHook {
+    /// The catalog-grant follow of a rename body, or `None`: not a rename of
+    /// a live table, or a rename between two spellings of one name (the
+    /// grants match both already).
+    async fn catalog_follow_for(
+        &self,
+        prefix: &str,
+        body: &Value,
+    ) -> Result<Option<CatalogFollow>, String> {
+        let Some(((src_ns, src), (dst_ns, dst))) = rename_of(body) else {
+            return Ok(None);
+        };
+        let split = |ns: &str| -> Vec<String> { ns.split('\u{1f}').map(str::to_string).collect() };
+        let (src_ns, dst_ns) = (split(&src_ns), split(&dst_ns));
+        let mut conn = self.db.pool.acquire().await.map_err(|e| e.to_string())?;
+        let Some((warehouse_id, _)) = resolve(&mut conn, prefix)
+            .await
+            .map_err(|e| e.to_string())?
+        else {
+            return Ok(None);
+        };
+        let Some(tabular_id) =
+            crate::store::embedded::live_table_id_via(&mut conn, warehouse_id, &src_ns, &src)
+                .await
+                .map_err(|e| e.to_string())?
+        else {
+            return Ok(None);
+        };
+        if crate::store::embedded::catalog_names_equal_via(&mut conn, &src_ns, &src, &dst_ns, &dst)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            return Ok(None);
+        }
+        Ok(Some(CatalogFollow {
+            warehouse_id,
+            src_ns,
+            src,
+            dst_ns,
+            dst,
+            tabular_id,
+        }))
+    }
+
+    /// Did the rename commit (lakekeeper answered non-2xx)? The destination is
+    /// the source's table.
+    async fn renamed(&self, cf: &CatalogFollow) -> bool {
+        let seen = async {
+            let mut conn = self.db.pool.acquire().await?;
+            crate::store::embedded::live_table_id_via(
+                &mut conn,
+                cf.warehouse_id,
+                &cf.dst_ns,
+                &cf.dst,
+            )
+            .await
+        }
+        .await;
+        match seen {
+            Ok(id) => id == Some(cf.tabular_id),
+            Err(e) => {
+                tracing::error!(error = %e, "egret could not tell whether a rename committed: \
+                    its catalog grants stay on the old name");
+                false
+            }
+        }
+    }
+
+    /// After a committed rename: re-point the `table` catalog grants on the
+    /// old name, one transaction, with `catalog_grant:move` events by
+    /// `caller` (D8, D9). A failure is logged; the grants stay on the old name.
+    async fn follow_catalog_grants(&self, cf: &CatalogFollow, caller: Option<&CatalogCaller>) {
+        let result: Result<(), String> = async {
+            let err = |e: &dyn std::fmt::Display| e.to_string();
+            let mut tx = self.db.pool.begin().await.map_err(|e| err(&e))?;
+            sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+                .bind(format!("{}ms", self.lock_wait.as_millis()))
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| err(&e))?;
+            let moved = crate::store::embedded::move_table_grants_in_tx(
+                &mut tx,
+                cf.warehouse_id,
+                &cf.src_ns,
+                &cf.src,
+                &cf.dst_ns,
+                &cf.dst,
+            )
+            .await
+            .map_err(|e| err(&e))?;
+            if !moved.is_empty() {
+                let caller = Caller::resolve(&mut tx, caller)
+                    .await
+                    .map_err(|e| err(&e))?;
+                let rename = serde_json::json!({
+                    "from": CatalogFollow::label(&cf.src_ns, &cf.src),
+                    "to": CatalogFollow::label(&cf.dst_ns, &cf.dst),
+                });
+                for m in &moved {
+                    egret_audit::governance::record_change_by(
+                        &mut tx,
+                        caller.actor(),
+                        egret_audit::governance::action::CATALOG_GRANT_MOVE,
+                        egret_audit::governance::resource::CATALOG_GRANT,
+                        m.id.to_string(),
+                        serde_json::json!({
+                            "warehouse_id": cf.warehouse_id,
+                            "role": m.role,
+                            "privilege": m.privilege,
+                            "before": {"namespace": m.before_namespace, "table": m.before_table},
+                            "after": {"namespace": cf.dst_ns, "table": cf.dst},
+                            "merged": m.merged,
+                            "trigger": "iceberg_rename",
+                            "rename": rename,
+                        }),
+                    )
+                    .await
+                    .map_err(|e| err(&e))?;
+                }
+            }
+            tx.commit().await.map_err(|e| err(&e))
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!(error = %e, from = %CatalogFollow::label(&cf.src_ns, &cf.src),
+                to = %CatalogFollow::label(&cf.dst_ns, &cf.dst),
+                "a table was renamed, but moving its catalog grants failed; they stay on the old \
+                 name until moved");
+        }
+    }
+}
+
 /// Who made a change, resolved from the Iceberg caller (rename spec §5.7, R7,
 /// C6a): a catalog client by its `client_id` (one deleted since keeps it), a
 /// user by id (no catalog token names one today), or egret when no guard ran.
@@ -2438,6 +2589,58 @@ async fn handle_table_commit(
     } else {
         (req, Value::Null)
     };
+    // Catalog grants follow a live table's rename after its commit, held or
+    // not (grants-follow §5.5, D8): nothing waits for them, since the guard
+    // reads them on every request.
+    let catalog_follow = match target {
+        Target::Rename => match hook.catalog_follow_for(&prefix, &body).await {
+            Ok(cf) => cf,
+            Err(e) => {
+                return Refusal(format!(
+                    "egret could not check which catalog grants the table carries ({e}); retry"
+                ))
+                .into_response()
+            }
+        },
+        _ => None,
+    };
+    let Some(cf) = catalog_follow else {
+        return handle_parsed(hook, loader, prefix, target, deadline, req, body, next).await;
+    };
+    let caller = req.extensions().get::<CatalogCaller>().cloned();
+    uncancellable(async move {
+        let response = handle_parsed(
+            hook.clone(),
+            loader,
+            prefix,
+            target,
+            deadline,
+            req,
+            body,
+            next,
+        )
+        .await;
+        let committed = response.status().is_success() || hook.renamed(&cf).await;
+        if committed {
+            hook.follow_catalog_grants(&cf, caller.as_ref()).await;
+        }
+        response
+    })
+    .await
+}
+
+/// [`handle_table_commit`] once the body is read.
+#[allow(clippy::too_many_arguments)]
+async fn handle_parsed(
+    hook: Arc<TableHook>,
+    loader: axum::Router,
+    prefix: String,
+    target: Target,
+    deadline: Instant,
+    req: Request,
+    body: Value,
+    next: Next,
+) -> Response {
     let refuse_check = |e: String| {
         Refusal(format!(
             "egret could not check which classifications the table carries ({e}); retry"

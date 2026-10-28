@@ -638,6 +638,150 @@ impl CatalogStore {
     }
 }
 
+// ── catalog grants follow a renamed table (grants-follow spec §5.5, D8) ──────
+
+/// One `table` catalog grant a rename re-pointed, or merged into the same
+/// grant already on the new name.
+#[derive(Clone, Debug)]
+pub struct MovedCatalogGrant {
+    pub id: Uuid,
+    pub role: String,
+    pub privilege: String,
+    pub before_namespace: Vec<String>,
+    pub before_table: String,
+    /// Deleted instead of re-pointed: the role already held the same grant on
+    /// the new name (a union, D8).
+    pub merged: bool,
+}
+
+/// Are two names one name in lakekeeper's catalog (its ICU
+/// `case_insensitive` collation, as the guard compares them)? Element by
+/// element for namespaces.
+pub async fn catalog_names_equal_via(
+    conn: &mut sqlx::PgConnection,
+    a_ns: &[String],
+    a: &str,
+    b_ns: &[String],
+    b: &str,
+) -> Result<bool, sqlx::Error> {
+    if a_ns.len() != b_ns.len() {
+        return Ok(false);
+    }
+    sqlx::query_scalar(
+        "SELECT $3 = $4 COLLATE lakekeeper.case_insensitive \
+            AND NOT EXISTS (SELECT 1 FROM unnest($1::text[], $2::text[]) AS p(x, y) \
+                             WHERE NOT (x = y COLLATE lakekeeper.case_insensitive))",
+    )
+    .bind(a_ns)
+    .bind(b_ns)
+    .bind(a)
+    .bind(b)
+    .fetch_one(&mut *conn)
+    .await
+}
+
+/// The live table id of `ns.table` (any depth) in egret warehouse
+/// `warehouse_id`, `None` when it is not a live table.
+pub async fn live_table_id_via(
+    conn: &mut sqlx::PgConnection,
+    warehouse_id: Uuid,
+    ns: &[String],
+    table: &str,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT t.tabular_id FROM catalog.warehouses w \
+           JOIN lakekeeper.tabular t ON t.warehouse_id::text = w.lakekeeper_warehouse_id \
+          WHERE w.id = $1 AND t.typ = 'table' AND t.deleted_at IS NULL \
+            AND t.metadata_location IS NOT NULL \
+            AND cardinality(t.tabular_namespace_name) = cardinality($2::text[]) \
+            AND NOT EXISTS (SELECT 1 FROM unnest(t.tabular_namespace_name, $2::text[]) AS p(x, y) \
+                             WHERE NOT (x = y COLLATE lakekeeper.case_insensitive)) \
+            AND t.name = $3 COLLATE lakekeeper.case_insensitive",
+    )
+    .bind(warehouse_id)
+    .bind(ns)
+    .bind(table)
+    .fetch_optional(&mut *conn)
+    .await
+}
+
+/// Re-point, on `conn` (the caller's transaction), every `table` catalog
+/// grant of `warehouse_id`'s roles on `src_ns.src` to `dst_ns.dst`, the names
+/// compared as the guard compares them (lakekeeper's collation, element by
+/// element). A grant the role already holds on the destination (same
+/// privilege) is deleted instead. `namespace` and `catalog` grants stay: they
+/// name a location.
+pub async fn move_table_grants_in_tx(
+    conn: &mut sqlx::PgConnection,
+    warehouse_id: Uuid,
+    src_ns: &[String],
+    src: &str,
+    dst_ns: &[String],
+    dst: &str,
+) -> Result<Vec<MovedCatalogGrant>, sqlx::Error> {
+    let rows: Vec<(Uuid, Uuid, String, String, Vec<String>, String)> = sqlx::query_as(
+        "SELECT g.id, g.catalog_role_id, r.name, g.privilege, g.namespace, g.table_name \
+           FROM catalog.catalog_grants g \
+           JOIN catalog.catalog_roles r ON r.id = g.catalog_role_id \
+          WHERE r.warehouse_id = $1 AND g.securable_type = 'table' \
+            AND g.namespace IS NOT NULL AND g.table_name IS NOT NULL \
+            AND cardinality(g.namespace) = cardinality($2::text[]) \
+            AND NOT EXISTS (SELECT 1 FROM unnest(g.namespace, $2::text[]) AS p(x, y) \
+                             WHERE NOT (x = y COLLATE lakekeeper.case_insensitive)) \
+            AND g.table_name = $3 COLLATE lakekeeper.case_insensitive \
+          ORDER BY g.id \
+            FOR UPDATE OF g",
+    )
+    .bind(warehouse_id)
+    .bind(src_ns)
+    .bind(src)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for (id, role_id, role, privilege, namespace, table) in rows {
+        let twin: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM catalog.catalog_grants g \
+              WHERE g.catalog_role_id = $1 AND g.id <> $2 AND g.securable_type = 'table' \
+                AND g.privilege = $3 AND g.namespace IS NOT NULL \
+                AND cardinality(g.namespace) = cardinality($4::text[]) \
+                AND NOT EXISTS (SELECT 1 FROM unnest(g.namespace, $4::text[]) AS p(x, y) \
+                                 WHERE NOT (x = y COLLATE lakekeeper.case_insensitive)) \
+                AND g.table_name = $5 COLLATE lakekeeper.case_insensitive)",
+        )
+        .bind(role_id)
+        .bind(id)
+        .bind(&privilege)
+        .bind(dst_ns)
+        .bind(dst)
+        .fetch_one(&mut *conn)
+        .await?;
+        if twin {
+            sqlx::query("DELETE FROM catalog.catalog_grants WHERE id = $1")
+                .bind(id)
+                .execute(&mut *conn)
+                .await?;
+        } else {
+            sqlx::query(
+                "UPDATE catalog.catalog_grants SET namespace = $2, table_name = $3 WHERE id = $1",
+            )
+            .bind(id)
+            .bind(dst_ns)
+            .bind(dst)
+            .execute(&mut *conn)
+            .await?;
+        }
+        out.push(MovedCatalogGrant {
+            id,
+            role,
+            privilege,
+            before_namespace: namespace,
+            before_table: table,
+            merged: twin,
+        });
+    }
+    Ok(out)
+}
+
 /// The mini-IdP's client verifier, backed by the Catalog Client registry.
 #[async_trait::async_trait]
 impl egret_machine_idp::ClientVerifier for CatalogStore {
