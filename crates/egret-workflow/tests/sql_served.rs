@@ -302,3 +302,220 @@ async fn an_egret_sql_flow_starts_and_runs_against_the_port() {
         .unwrap();
     assert_eq!(state, "SUCCESS");
 }
+
+/// A second member of `ws` with the flow permissions: the editor of final
+/// review I1, who is not the flow's creator.
+async fn editor(db: &Db, ws: Uuid) -> UserId {
+    let uid: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (email, name, provider, status, password_hash) \
+         VALUES ($1, 'e', 'local', 'active', 'x') RETURNING id",
+    )
+    .bind(format!("e_{}@t.local", Uuid::new_v4().simple()))
+    .fetch_one(&db.pool)
+    .await
+    .expect("seed editor");
+    let user = UserId(uid);
+    common::grant(db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    user
+}
+
+/// Spec D10, user decision 2026-10-28 (final review I1): `egret.sql` runs as
+/// the flow's creator, so an editor who is not the creator cannot publish a
+/// flow containing one, and the creator can.
+#[tokio::test]
+async fn only_the_creator_publishes_an_egret_sql_flow() {
+    served_none();
+    let Some(db) = common::db().await else { return };
+    let (ws, creator) = common::seed_workspace(&db).await;
+    let other = editor(&db, ws).await;
+    let database = register_database(&db, ws, creator).await;
+    let refs = real_refs(&db);
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let f = common::draft(
+        &repo,
+        ws,
+        creator,
+        &sql_flow(&fresh_ns(), &database.to_string()),
+    )
+    .await;
+
+    let err = egret_workflow::publish(&repo, &refs, ws, other, f.id, "")
+        .await
+        .expect_err("an editor who is not the creator");
+    match err {
+        egret_core::Error::InvalidInput(m) => {
+            assert!(m.contains("only its creator can publish"), "{m}")
+        }
+        e => panic!("{e:?}"),
+    }
+    let versions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM workflow.flow_versions WHERE flow_id = $1")
+            .bind(f.id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(versions, 0, "the refused publish wrote no version");
+
+    egret_workflow::publish(&repo, &refs, ws, creator, f.id, "")
+        .await
+        .expect("the creator publishes");
+}
+
+/// I1 at the API start: a start runs the DRAFT, which any editor can change,
+/// so only the creator may start a flow containing `egret.sql`.
+#[tokio::test]
+async fn only_the_creator_starts_an_egret_sql_flow() {
+    served_none();
+    let Some(db) = common::db().await else { return };
+    let (ws, creator) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, creator, &["workflow:read", "workflow:manage"]).await;
+    let other = editor(&db, ws).await;
+    let database = register_database(&db, ws, creator).await;
+    let flow = common::seed_flow(
+        &db,
+        ws,
+        creator,
+        &sql_flow(&fresh_ns(), &database.to_string()),
+        "draft",
+    )
+    .await;
+    let app = common::app(&db).await;
+    let path = format!("/api/ws/{ws}/workflows/flows/{flow}/executions");
+
+    let refused = common::post_no_body(&app, &path, other).await;
+    assert_eq!(refused.status(), 400);
+    let text = common::body_text(refused).await;
+    assert!(text.contains("only its creator can start it"), "{text}");
+    assert_eq!(common::execution_count(&db, ws).await, 0);
+
+    let started = common::post_no_body(&app, &path, creator).await;
+    assert_eq!(started.status(), 201, "the creator starts the draft");
+}
+
+/// I1 for a start no person makes (a schedule, a webhook, a Flow trigger):
+/// the source must be one the creator published. A draft never published, a
+/// version published by somebody else and a draft edited after the creator's
+/// publish are all refused; the creator's published source starts.
+#[tokio::test]
+async fn a_trigger_start_needs_a_source_the_creator_published() {
+    served_none();
+    let Some(db) = common::db().await else { return };
+    let (ws, creator) = common::seed_workspace(&db).await;
+    let other = editor(&db, ws).await;
+    let database = register_database(&db, ws, creator).await;
+    let refs = real_refs(&db);
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let source = sql_flow(&fresh_ns(), &database.to_string());
+    let f = common::draft(&repo, ws, creator, &source).await;
+    let start = |src: String| {
+        let pool = db.pool.clone();
+        async move {
+            egret_workflow::worker::start_execution(&pool, ws, Some(f.id), &src, json!({})).await
+        }
+    };
+    let refused = |r: egret_core::Result<Uuid>, what: &str| match r {
+        Err(egret_core::Error::InvalidInput(m)) => {
+            assert!(
+                m.contains("not a version its creator published"),
+                "{what}: {m}"
+            )
+        }
+        other => panic!("{what}: {other:?}"),
+    };
+
+    refused(start(source.clone()).await, "never published");
+
+    // A version holding this exact source, but published by the editor.
+    sqlx::query(
+        "INSERT INTO workflow.flow_versions (flow_id, version, snapshot, created_by) \
+         VALUES ($1, 99, jsonb_build_object('source', $2::text), $3)",
+    )
+    .bind(f.id)
+    .bind(&source)
+    .bind(other.0)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    refused(start(source.clone()).await, "published by somebody else");
+
+    egret_workflow::publish(&repo, &refs, ws, creator, f.id, "")
+        .await
+        .expect("the creator publishes");
+    start(source.clone())
+        .await
+        .expect("the creator's published source starts");
+
+    let edited = format!("{source}description: edited by another editor\n");
+    refused(start(edited).await, "a draft edited after the publish");
+}
+
+/// I1 for a `Subflow` child: another user's flow cannot call a flow that
+/// runs `egret.sql`; a parent with the same creator can.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_subflow_child_with_egret_sql_needs_the_same_creator() {
+    served_none();
+    let _serial = SERIAL.lock().await;
+    let Some(db) = common::db().await else { return };
+    let (ws, creator) = common::seed_workspace(&db).await;
+    let other = editor(&db, ws).await;
+    let database = register_database(&db, ws, creator).await;
+    let refs = real_refs(&db);
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let ns = fresh_ns();
+    let child = common::draft(&repo, ws, creator, &sql_flow(&ns, &database.to_string())).await;
+    egret_workflow::publish(&repo, &refs, ws, creator, child.id, "")
+        .await
+        .expect("the creator publishes the child");
+    let parent_source = |id: &str| {
+        format!(
+            "id: {id}\nnamespace: {ns}\ntasks:\n  - id: sub\n    \
+             type: io.kestra.plugin.core.flow.Subflow\n    namespace: {ns}\n    flowId: q\n"
+        )
+    };
+    let (h, _) = egret_workflow::runtime::handlers_for(
+        &egret_config::Config::default().workflow,
+        db.pool.clone(),
+        Arc::new(NoSecrets),
+        Arc::new(Stub::default()),
+    )
+    .await
+    .unwrap();
+    let mut outcome = Vec::new();
+    for (by, id) in [(other, "foreign"), (creator, "own")] {
+        let src = parent_source(id);
+        let parent = common::draft(&repo, ws, by, &src).await;
+        let ex =
+            egret_workflow::worker::start_execution(&db.pool, ws, Some(parent.id), &src, json!({}))
+                .await
+                .expect("the parent runs no egret.sql");
+        for _ in 0..64 {
+            if egret_workflow::worker::tick(&db.pool, 16, &h)
+                .await
+                .unwrap()
+                == 0
+            {
+                break;
+            }
+        }
+        let (state, message): (String, Option<String>) = sqlx::query_as(
+            "SELECT state, message FROM workflow.task_runs \
+              WHERE execution_id = $1 AND task_id = 'sub'",
+        )
+        .bind(ex)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        outcome.push((id, state, message));
+    }
+    let (_, state, message) = &outcome[0];
+    assert_eq!(state, "FAILED", "{message:?}");
+    assert!(
+        message
+            .as_deref()
+            .unwrap_or("")
+            .contains("only a flow with the same creator"),
+        "{message:?}"
+    );
+    let (_, state, message) = &outcome[1];
+    assert_eq!(state, "SUCCESS", "{message:?}");
+}

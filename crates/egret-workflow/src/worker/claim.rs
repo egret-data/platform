@@ -3762,6 +3762,41 @@ pub async fn start_execution_with_trigger(
     inputs: serde_json::Value,
     trigger: Option<serde_json::Value>,
 ) -> Result<Uuid> {
+    start_with(pool, workspace_id, flow_id, source, inputs, trigger, None).await
+}
+
+/// [`start_execution`] for a start a **person** made: the API start route.
+/// `started_by` is that person, which the `egret.sql` gate reads
+/// ([`NewExecution::started_by`]).
+pub async fn start_execution_by(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    flow_id: Option<Uuid>,
+    source: &str,
+    inputs: serde_json::Value,
+    started_by: Uuid,
+) -> Result<Uuid> {
+    start_with(
+        pool,
+        workspace_id,
+        flow_id,
+        source,
+        inputs,
+        None,
+        Some(started_by),
+    )
+    .await
+}
+
+async fn start_with(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    flow_id: Option<Uuid>,
+    source: &str,
+    inputs: serde_json::Value,
+    trigger: Option<serde_json::Value>,
+    started_by: Option<Uuid>,
+) -> Result<Uuid> {
     transaction!(pool, |at| {
         start_execution_in_with(
             at,
@@ -3794,6 +3829,7 @@ pub async fn start_execution_with_trigger(
                 labels: None,
                 backfill_id: None,
                 variables: None,
+                started_by,
             },
         )
         .await
@@ -3861,6 +3897,13 @@ pub struct NewExecution<'a> {
     /// route (D3, final review I3), as the retry replay copies it. `None`
     /// stores NULL -- "the flow's `variables:`" -- for every other start.
     pub variables: Option<serde_json::Value>,
+    /// **The person who started this execution**: `Some` for the API start
+    /// and a manual replay, `None` for a start no person made (a schedule or
+    /// backfill tick, a webhook, a Flow trigger) and for the test wrappers.
+    /// Read only by the `egret.sql` gate ([`super::sql_principal`], spec
+    /// D10): a person must be the flow's creator; a trigger needs a source
+    /// the creator published.
+    pub started_by: Option<Uuid>,
 }
 
 /// [`start_execution_with_trigger`]'s body, taking the caller's own `conn`
@@ -3968,6 +4011,7 @@ async fn start_execution_in_on(
         labels,
         backfill_id,
         variables,
+        started_by,
     } = new;
 
     let flow = crate::spec::parse(source)
@@ -3985,6 +4029,11 @@ async fn start_execution_in_on(
             crate::spec::describe(&unserved)
         )));
     }
+    // Spec D10 (user decision 2026-10-28, final review I1): `egret.sql` runs
+    // as the flow's creator, so a person who is not the creator cannot start
+    // such a flow, and a trigger can start only a source the creator
+    // published. Every start passes here, as the check above.
+    super::sql_principal::check_start(conn, &flow, flow_id, source, started_by).await?;
 
     let inputs = if inputs.is_object() {
         inputs
@@ -5704,6 +5753,7 @@ mod tests {
                     labels: None,
                     backfill_id: None,
                     variables: None,
+                    started_by: None,
                 },
             )
             .await
@@ -5998,6 +6048,7 @@ mod tests {
                 labels: None,
                 backfill_id: None,
                 variables: None,
+                started_by: None,
             },
         )
         .await
@@ -6285,6 +6336,7 @@ mod tests {
                 labels: None,
                 backfill_id: None,
                 variables: None,
+                started_by: None,
             },
         )
         .await

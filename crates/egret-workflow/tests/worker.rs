@@ -1066,6 +1066,7 @@ async fn an_executions_own_labels_render_over_its_flows(pool: sqlx::PgPool) {
                     labels,
                     backfill_id: None,
                     variables: None,
+                    started_by: None,
                 },
             )
             .await
@@ -2041,6 +2042,7 @@ async fn a_loop_iteration_copies_its_parents_labels_and_a_subflow_child_does_not
             labels: Some(own.clone()),
             backfill_id: None,
             variables: None,
+            started_by: None,
         },
     )
     .await
@@ -8430,6 +8432,7 @@ async fn start_execution_in_commits_nothing_when_the_caller_rolls_back(pool: sql
             labels: None,
             backfill_id: None,
             variables: None,
+            started_by: None,
         },
     )
     .await
@@ -8463,6 +8466,7 @@ async fn start_execution_in_commits_nothing_when_the_caller_rolls_back(pool: sql
             labels: None,
             backfill_id: None,
             variables: None,
+            started_by: None,
         },
     )
     .await
@@ -8505,6 +8509,7 @@ async fn scheduled_date_is_refused_without_a_schedule_trigger(pool: sqlx::PgPool
             labels: None,
             backfill_id: None,
             variables: None,
+            started_by: None,
         },
     )
     .await
@@ -8594,6 +8599,7 @@ async fn a_start_writes_trigger_execution_id_and_depth(pool: sqlx::PgPool) {
             labels: None,
             backfill_id: None,
             variables: None,
+            started_by: None,
         },
     )
     .await
@@ -8722,6 +8728,7 @@ async fn one_event_fires_a_listener_once_and_a_second_event_in_the_same_state_fi
                     labels: None,
                     backfill_id: None,
                     variables: None,
+                    started_by: None,
                 },
             )
             .await;
@@ -8923,6 +8930,7 @@ async fn a_rolled_back_transition_leaves_no_event(pool: sqlx::PgPool) {
         labels: None,
         backfill_id: None,
         variables: None,
+        started_by: None,
     };
 
     let mut tx = pool.begin().await.expect("begin");

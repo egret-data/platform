@@ -444,6 +444,19 @@ pub(super) async fn spawn_one(
             ),
         ));
     }
+    // Spec D10 (user decision 2026-10-28, final review I1): the child is
+    // inserted below, not through `start_execution_in_on`, so the `egret.sql`
+    // gate a start passes is applied here.
+    if let Some(why) =
+        super::sql_principal::refuse_subflow_child(conn, ctx.id, &child, child_flow, &source)
+            .await?
+    {
+        return Ok(fail_run(
+            ctx,
+            r.run,
+            &format!("cannot execute flow '{namespace}'.'{flow_id}': {why}"),
+        ));
+    }
 
     // **The child's `metadata.executionDepth`, and the artifact's refusal on
     // it** (W13a final review I1). `ExecutableUtils.subflowExecution` on the

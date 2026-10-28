@@ -494,6 +494,7 @@ async fn start(
             labels,
             backfill_id: backfill.map(|b| b.id),
             variables: None,
+            started_by: None,
         },
     )
     .await;
