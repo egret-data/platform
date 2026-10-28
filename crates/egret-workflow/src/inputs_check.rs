@@ -38,8 +38,8 @@
 //!    `autoSelectFirst` with no `defaults` picks the first option, and that
 //!    value **is** stored: the render knows nothing of `autoSelectFirst`.
 //! 5. Absent with no default: `Missing required input:<id>` when `required`
-//!    (default true), otherwise absent (Kestra keeps a `null`; egret leaves the
-//!    key out, which renders the same).
+//!    (default true), otherwise stored as `null`, as Kestra keeps it -- a key
+//!    left out would fail egret's strict renderer on `{{ inputs.x }}`.
 //! 6. Parse, then validate. A failure is
 //!    ``Invalid value for input `<id>`. Cause: <cause>`` (D3); a MULTISELECT
 //!    gives one such line per bad element, joined by `\n`.
@@ -400,7 +400,12 @@ impl Resolver<'_> {
             out.errors
                 .push(format!("Missing required input:{}", input.id));
         } else {
+            // Kestra's `resolveInputs` keeps the key with `null`: a flow that
+            // renders `{{ inputs.x }}` for an optional input nobody posted
+            // gets null, where egret's strict renderer would fail on a key
+            // left out (`valids/subflow-nullable-input-parent`).
             out.seen = None;
+            out.value = Some(Value::Null);
         }
         out
     }
@@ -1375,8 +1380,14 @@ mod tests {
         );
     }
 
+    /// Not stored: the render fills it (a default) or nothing reads it.
     fn absent(yaml: &str, posted: Value) {
         assert_eq!(one(yaml, posted), Ok(None), "{yaml}");
+    }
+
+    /// Absent and not required: stored as `null`, as Kestra keeps it.
+    fn stored_null(yaml: &str, posted: Value) {
+        assert_eq!(one(yaml, posted), Ok(Some(Value::Null)), "{yaml}");
     }
 
     // --- required, null, empty string, undeclared keys, order -------------
@@ -1392,9 +1403,9 @@ mod tests {
     }
 
     #[test]
-    fn not_required_absent_is_left_out() {
-        absent("id: n\ntype: INT\nrequired: false\n", Value::Null);
-        absent("id: n\ntype: INT\nrequired: false\n", json!(""));
+    fn not_required_absent_is_stored_as_null() {
+        stored_null("id: n\ntype: INT\nrequired: false\n", Value::Null);
+        stored_null("id: n\ntype: INT\nrequired: false\n", json!(""));
     }
 
     #[test]
@@ -1438,8 +1449,8 @@ mod tests {
     fn a_posted_value_that_is_not_an_object_is_empty() {
         let i = input("id: n\ntype: INT\nrequired: false\n");
         assert_eq!(
-            resolve(&[i], &json!([1, 2]), &no_render).unwrap(),
-            Map::new()
+            Value::Object(resolve(&[i], &json!([1, 2]), &no_render).unwrap()),
+            json!({"n": null})
         );
     }
 
@@ -2177,10 +2188,13 @@ mod tests {
     fn a_disabled_input_is_dropped_and_skips_required() {
         let i = inputs(A_THEN_B);
         // a is null: b is disabled, its required is skipped, its value dropped.
-        assert_eq!(resolve(&i, &json!({}), &no_render), Ok(Map::new()));
+        assert_eq!(
+            Value::Object(resolve(&i, &json!({}), &no_render).unwrap()),
+            json!({"a": null})
+        );
         assert_eq!(
             Value::Object(resolve(&i, &json!({"b": 5}), &no_render).unwrap()),
-            json!({})
+            json!({"a": null})
         );
         // a is set: b is enabled and required.
         assert_eq!(
@@ -2212,7 +2226,10 @@ mod tests {
   required: false
 ",
         );
-        assert_eq!(resolve(&i, &json!({}), &no_render), Ok(Map::new()));
+        assert_eq!(
+            Value::Object(resolve(&i, &json!({}), &no_render).unwrap()),
+            json!({"a": null})
+        );
         assert_eq!(
             resolve(&i, &json!({"a": "x"}), &no_render)
                 .unwrap_err()
@@ -2248,7 +2265,7 @@ mod tests {
         // b is posted but disabled (a is null): c is disabled too.
         assert_eq!(
             Value::Object(resolve(&i, &json!({"b": "y"}), &no_render).unwrap()),
-            json!({})
+            json!({"a": null})
         );
         assert_eq!(
             resolve(&i, &json!({"a": "x", "b": "y"}), &no_render)
