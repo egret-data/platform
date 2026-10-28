@@ -16,6 +16,8 @@ Spec: `docs/en/specs/2026-10-28-workflow-inputs-design.md` (decisions D1–D16).
 
 **A2. Scalar checker.** New `inputs_check.rs` (pure, `#![forbid(unsafe_code)]` style as the crate): `resolve(inputs: &[Input], posted: &Value) -> Result<Value, InputError>`; scalar types, required, empty-string rule (D5), STRING/SECRET `validator` (`fancy-regex`, add as a direct dependency), INT/FLOAT/BOOL/DATETIME/DATE/TIME/DURATION parse + bounds, URI, EMAIL, SELECT `values` (D4 quirk). Table tests per type: valid, every error text, empty string, null, JSON number vs string.
 
+*Note (whole-branch review, M9).* The A2 task report says DATETIME and DURATION are stored normalised (`P1D` becomes `PT24H`). That is stale: they are stored **as posted**, as the code and spec §7 say.
+
 **A3. Collections, dependsOn, expression.** ARRAY/MULTISELECT (+ `itemType`), JSON/YAML/ION parse, `dependsOn.inputs` and `condition` (render via the workflow renderer with the dependency values; locate its entry point first), SELECT/MULTISELECT `expression`, `autoSelectFirst`. Decide `jsonSchema` (D12) by checking for an existing JSON Schema crate in `Cargo.lock`; if none is acceptable, leave the warning and record it.
 
 **A4. Wire in.** Call `inputs_check::resolve` in `worker/claim.rs` `start_execution_in_on` between the object normalisation and `secret_inputs::split`; store the coerced object (D2); skip for `replayed_from_execution_id` and for Flow-trigger starts (D7) — find how a Flow-trigger start is identified in `NewExecution` and add an explicit flag if there is none. Subflow: call the same function in `worker/subflow.rs` before `secret_inputs::split` (:497), failing the parent run with `subflow inputs: …`. Map the error to `Error::InvalidInput`. Update the 400 text in the `start_execution` utoipa docs (`routes.rs` ~2541) and regenerate `openapi.json` (`cargo run -p egret-bin --bin egret -- openapi`) and the client (`npm --prefix frontend run gen:api`). Integration tests (`tests/inputs_start.rs`): API JSON, multipart, webhook, schedule, subflow child, replay not re-checked, Flow trigger not checked and born-FAILED fire still works, SECRET validator sees the clear value, nothing is created on refusal.
@@ -29,6 +31,8 @@ Spec: `docs/en/specs/2026-10-28-workflow-inputs-design.md` (decisions D1–D16).
 ## Part B — PR #3b (validate endpoint and run form)
 
 **B1. Endpoint (D14).** `POST …/flows/{id}/executions/validate`, JSON body, always 200 with Kestra's shape, per-input errors via a `resolve_all` variant of the checker that collects every input's error instead of stopping. Nothing stored or uploaded. 404/409 as the start. utoipa docs, `openapi.json`, client regeneration, drift tests. Route tests (200 on invalid, all inputs listed, no execution row).
+
+*Note (whole-branch review, M6).* `InputOutcome` holds clear SECRET values: `value` and `seen` are the clear text (`inputs_check.rs`, `InputOutcome`), so the validate endpoint must mask them before it serialises `resolve_all`. The same review notes that a SELECT/MULTISELECT `expression` built from a SECRET dependency prints its options in ``it must match the values `[...]` `` (as Kestra does).
 
 **B2. Run form (D15).** `frontend/src/components/workflows/run/inputModel.ts`, `RunFlow.tsx`: new client checks, call the validate endpoint on submit, attribute errors per input, rewrite the stale module comment, fix `BackfillDialog.tsx` `"BOOLEAN"` → `"BOOL"`. Vitest for each. Needs `npm --prefix frontend ci` in the worktree.
 
