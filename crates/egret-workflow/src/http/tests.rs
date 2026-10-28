@@ -917,3 +917,31 @@ fn http_egress_takes_the_deployment_config() {
         std::time::Duration::from_secs(1)
     );
 }
+
+/// Final review I2: a huge, negative or NaN number of seconds is refused
+/// with a message, never a panic (`Duration::from_secs_f64` panics above
+/// `u64::MAX` seconds, and a panicking handler is re-claimed for ever).
+#[test]
+fn http_timeouts_out_of_range_are_refused_not_panicked() {
+    let o = |v: Value| spec(json!({"options": v})).options();
+    for (v, want) in [
+        (json!({"timeout": {"connectTimeout": 1e20}}), "too large"),
+        (json!({"timeout": {"readIdleTimeout": 1e20}}), "too large"),
+        (json!({"timeout": {"connectTimeout": 86401}}), "too large"),
+        (json!({"timeout": {"connectTimeout": "P2D"}}), "too large"),
+        (
+            json!({"timeout": {"connectTimeout": -1}}),
+            "is not a duration",
+        ),
+    ] {
+        let err = o(v.clone()).unwrap_err();
+        assert!(err.contains(want), "{v}: {err}");
+    }
+    let ok = o(json!({"timeout": {"connectTimeout": 86400}})).unwrap();
+    assert_eq!(ok.connect_timeout, Some(spec::MAX_TIMEOUT));
+    assert!(spec::seconds(f64::NAN, "t")
+        .unwrap_err()
+        .contains("not a duration"));
+    assert!(spec::seconds(f64::INFINITY, "t").is_err());
+    assert!(spec::seconds(1e20, "t").unwrap_err().contains("too large"));
+}

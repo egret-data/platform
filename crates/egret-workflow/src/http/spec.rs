@@ -361,17 +361,46 @@ fn codes(v: Option<&Value>) -> Result<Option<Vec<u16>>, String> {
 
 /// An ISO-8601 duration (`PT30S`, Java's `Duration.parse`), or a number of
 /// seconds.
+/// The longest `options.timeout.*` egret accepts: one day. A larger number
+/// once reached `Duration::from_secs_f64`, which panics above `u64::MAX`
+/// seconds, and a panicking handler is re-claimed and panics again on every
+/// lease (final review I2). A day is far beyond any useful connect or
+/// read-idle timeout; the task's own `timeout:` bounds the whole run.
+pub(crate) const MAX_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+
 fn duration(v: Option<&Value>, name: &str) -> Result<Option<Duration>, String> {
-    match v {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Number(n)) => n
-            .as_f64()
-            .filter(|s| s.is_finite() && *s >= 0.0)
-            .map(|s| Some(Duration::from_secs_f64(s)))
-            .ok_or_else(|| format!("{name}: {n} is not a duration")),
+    let d = match v {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::Number(n)) => {
+            let secs = n
+                .as_f64()
+                .ok_or_else(|| format!("{name}: {n} is not a duration"))?;
+            seconds(secs, name)?
+        }
         Some(Value::String(s)) => crate::executor::parse_duration(s)
-            .map(Some)
-            .ok_or_else(|| format!("{name}: {s:?} is not an ISO-8601 duration (e.g. PT30S)")),
-        Some(other) => Err(format!("{name}: expected a duration, got {}", kind(other))),
+            .ok_or_else(|| format!("{name}: {s:?} is not an ISO-8601 duration (e.g. PT30S)"))?,
+        Some(other) => return Err(format!("{name}: expected a duration, got {}", kind(other))),
+    };
+    if d > MAX_TIMEOUT {
+        return Err(format!(
+            "{name}: {} seconds is too large (at most {} seconds)",
+            d.as_secs(),
+            MAX_TIMEOUT.as_secs()
+        ));
     }
+    Ok(Some(d))
+}
+
+/// A number of seconds as a `Duration`, never panicking: negative, NaN,
+/// infinite and out-of-range values are refused naming `name`.
+pub(crate) fn seconds(secs: f64, name: &str) -> Result<Duration, String> {
+    if !secs.is_finite() || secs < 0.0 {
+        return Err(format!("{name}: {secs} is not a duration"));
+    }
+    Duration::try_from_secs_f64(secs).map_err(|_| {
+        format!(
+            "{name}: {secs} seconds is too large (at most {} seconds)",
+            MAX_TIMEOUT.as_secs()
+        )
+    })
 }
