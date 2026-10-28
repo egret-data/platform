@@ -5,12 +5,12 @@ import { reachesAtAll, reachGroup, setReach, type Reach } from "@/routes/governa
 const WS = "6f1c2a90-0000-4000-8000-00000000000a";
 
 // A user `ana` in group `analysts`, holding role `steward` and through
-// `analysts` the role `reader` (egret only), member of workspace WS, and `public`.
+// `analysts` the role `reader`, member of workspace WS, and `public`.
 const ANA: StandsFor[] = [
   { kind: "user", ref: "ana", via: { kind: "itself" }, onEngines: true },
   { kind: "group", ref: "analysts", via: { kind: "group", name: "analysts" }, onEngines: true },
   { kind: "role", ref: "steward", via: { kind: "role", name: "steward" }, onEngines: true },
-  { kind: "role", ref: "reader", via: { kind: "group_role", group: "analysts", role: "reader" }, onEngines: false, notOnEngines: "held_through_group" },
+  { kind: "role", ref: "reader", via: { kind: "group_role", group: "analysts", role: "reader" }, onEngines: true },
   { kind: "workspace_members", ref: WS, via: { kind: "workspace", id: WS, name: "Sales" }, onEngines: true },
   { kind: "group", ref: "public", via: { kind: "public" }, onEngines: true },
 ];
@@ -25,7 +25,7 @@ describe("setReach", () => {
     [
       "a group's role",
       set([{ kind: "role", ref: "reader" }]),
-      [{ position: "include", via: { kind: "group_role", group: "analysts", role: "reader" }, onEngines: false, notOnEngines: "held_through_group" }],
+      [{ position: "include", via: { kind: "group_role", group: "analysts", role: "reader" }, onEngines: true }],
     ],
     ["a workspace", set([{ kind: "workspace_members", ref: WS }]), [{ position: "include", via: { kind: "workspace", id: WS, name: "Sales" }, onEngines: true }]],
     ["public", set([{ kind: "group", ref: "public" }]), [{ position: "include", via: { kind: "public" }, onEngines: true }]],

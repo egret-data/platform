@@ -83,12 +83,12 @@
 //!    recompile. **J-F3 Task 1b removed that obstacle** — every writer now
 //!    recompiles through the `egret_auth::groups::GroupMembershipRecompiler`
 //!    port, and the per-login sync recompiles only the groups a login moved —
-//!    but it expanded only a `group` PRINCIPAL (design R8), not a group
-//!    holding a workspace membership or a role (`role_usernames` reads
-//!    `principal_type = 'user'` too). Extending it there needs
-//!    `affected_services_for_group_membership` to gain the workspace and role
-//!    arms first, or a membership change of such a group goes stale on
-//!    REMOVAL, which fails open; until then the narrowing stands.
+//!    but it expanded only a `group` PRINCIPAL (design R8) and, since the role arm,
+//!    a role a group holds (`role_group_holders_via`). A group holding a
+//!    workspace membership is still not expanded: extending it needs
+//!    `affected_services_for_group_membership` to gain the workspace arm first,
+//!    or a membership change of such a group goes stale on REMOVAL, which fails
+//!    open; until then the narrowing stands.
 //! 2. **An `expires_at` that lapses is not a write, so nothing recompiles.**
 //!    A time-boxed membership (the access-request approval path grants one)
 //!    stays in the compiled policy until the next recompile of that profile
@@ -191,7 +191,8 @@ pub(crate) async fn role_usernames(
     }
     let wanted: Vec<String> = out.keys().cloned().collect();
 
-    let holders = role_holders_via(conn, &wanted).await?;
+    let mut holders = role_holders_via(conn, &wanted).await?;
+    holders.extend(role_group_holders_via(conn, &wanted).await?);
 
     let mut names: HashMap<Uuid, String> = HashMap::new();
     // A `BTreeSet`, so the mints below take each `users` row lock in
@@ -554,6 +555,36 @@ pub(crate) async fn role_holders_via(
            JOIN roles r ON r.id = ag.role_id \
            JOIN users u ON u.id = ag.principal_id \
           WHERE ag.principal_type = 'user' \
+            AND r.name = ANY($1) \
+            AND ag.effect = 'allow' \
+            AND (ag.expires_at IS NULL OR ag.expires_at > now())",
+    )
+    .bind(roles)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|e| CompileError::Db(e.to_string()))
+}
+
+/// The members of each group that holds a role in `roles` (a live `allow`
+/// grant whose principal is a group), one row per member. A role granted to a
+/// group reaches its members on every engine; the PDP already expands it
+/// (`egret_auth::grants`), so the compiled role membership must as well. The
+/// same member may also hold the role directly, so callers dedup names.
+pub(crate) async fn role_group_holders_via(
+    conn: &mut sqlx::PgConnection,
+    roles: &[String],
+) -> Result<Vec<RoleHolderRow>, CompileError> {
+    if roles.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as(
+        "SELECT r.name AS role_name, ug.user_id, \
+            u.username::text AS username, ag.scope_type, ag.scope_id \
+           FROM access_grants ag \
+           JOIN roles r ON r.id = ag.role_id \
+           JOIN user_groups ug ON ug.group_id = ag.principal_id \
+           JOIN users u ON u.id = ug.user_id \
+          WHERE ag.principal_type = 'group' \
             AND r.name = ANY($1) \
             AND ag.effect = 'allow' \
             AND (ag.expires_at IS NULL OR ag.expires_at > now())",

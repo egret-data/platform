@@ -74,7 +74,7 @@ const CLEARANCES: ClearanceFact[] = [
   }),
   fact("t-fin", "Finance", {
     requiredRoles: ["fin_reader"],
-    engines: { kind: "not_cleared", because: "held_through_group" },
+    engines: { kind: "cleared", role: "fin_reader" },
     egret: {
       kind: "cleared",
       via: { kind: "group_role", group: "analysts", role: "fin_reader" },
@@ -136,7 +136,7 @@ describe("a principal's Clearances tab", () => {
     expect(rowOf("Finance")).toEqual([
       "Finance",
       "Roles: fin_reader",
-      "Not cleared: the required role is held through a group, and engines count only roles held directly",
+      "Cleared through role fin_reader",
       "Cleared through role fin_reader, held by group analysts, for workspace Sales's objects only: a workspace role clears only that workspace's objects",
     ]);
     expect(rowOf("Secret")).toEqual([

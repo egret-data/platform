@@ -27,8 +27,6 @@ export function enginesText(e: EngineClearance): string {
       return GROUPS_ONLY_GATE;
     case "not_cleared":
       switch (e.because) {
-        case "held_through_group":
-          return "Not cleared: the required role is held through a group, and engines count only roles held directly";
         case "expired":
           return "Not cleared: the required role has expired. Engines may apply it until the next recompile.";
         case "no_username":

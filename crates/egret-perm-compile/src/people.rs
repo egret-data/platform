@@ -41,7 +41,7 @@ use uuid::Uuid;
 
 use egret_perm::CompileError;
 
-use crate::members::{group_members_via, role_holders_via};
+use crate::members::{group_members_via, role_group_holders_via, role_holders_via};
 
 /// Which of the three listable principal kinds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -317,8 +317,8 @@ pub enum Via {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum NotOnEngines {
-    /// Held by a group: the compiler expands a `group` principal to its
-    /// members, but not a group's own roles or workspace memberships
+    /// A workspace membership held by a group: the compiler expands a `group`
+    /// principal to its members, but not a group's own workspace memberships
     /// (`members.rs` module doc, narrowing 1; measured, live doc §1.1 C3b).
     HeldThroughGroup,
     /// Expired. The compiler reads only unexpired rows, but a lapse is not a
@@ -422,8 +422,6 @@ pub enum EngineClearance {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EngineNotClearedReason {
-    /// A required role held through a group ([`NotOnEngines::HeldThroughGroup`]).
-    HeldThroughGroup,
     /// A required role held directly but expired ([`NotOnEngines::Expired`]).
     Expired,
     /// A required role held directly, but no username ([`NotOnEngines::NoUsername`]).
@@ -836,13 +834,15 @@ pub async fn read_user_via(
         .collect();
     let role_names: Vec<String> = direct
         .iter()
+        .chain(through.iter())
         .map(|r| r.role_name.clone())
         .chain(gates.iter().flat_map(|g| g.required_roles.iter().cloned()))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let holds: BTreeSet<String> = role_holders_via(conn, &role_names)
-        .await?
+    let mut holder_rows = role_holders_via(conn, &role_names).await?;
+    holder_rows.extend(role_group_holders_via(conn, &role_names).await?);
+    let holds: BTreeSet<String> = holder_rows
         .into_iter()
         .filter(|h| h.user_id == id)
         .map(|h| h.role_name)
@@ -926,7 +926,11 @@ pub async fn read_user_via(
                 role: r.role_name.clone(),
             },
             r,
-            mark(has_username, false, through_group),
+            mark(
+                has_username,
+                !r.expired && holds.contains(&r.role_name),
+                expired,
+            ),
         ));
         if let Some(ws) = r.workspace() {
             workspaces.push(membership(
@@ -998,7 +1002,7 @@ pub async fn read_user_via(
                 group: group_of(r),
                 role: r.role_name.clone(),
             },
-            mark(has_username, false, through_group),
+            mark(has_username, holds.contains(&r.role_name), None),
         );
     }
     for r in through.iter().filter(|r| !r.expired) {
@@ -1034,8 +1038,6 @@ pub async fn read_user_via(
                             .any(|r| r.expired && g.required_roles.contains(&r.role_name))
                         {
                             Some(EngineNotClearedReason::Expired)
-                        } else if clearing_row(&through, &g.required_roles).is_some() {
-                            Some(EngineNotClearedReason::HeldThroughGroup)
                         } else if group_ids.iter().any(|gid| g.required_groups.contains(gid)) {
                             Some(EngineNotClearedReason::GroupsNotEnforced)
                         } else {
@@ -1164,10 +1166,13 @@ pub async fn read_group_via(
         on_engines: false,
         not_on_engines: through_group.1,
     };
+    // The compiler expands a group's role to its members (`role_usernames`).
     let roles: Vec<Membership> = held
         .iter()
-        .map(|r| {
-            membership(
+        .map(|r| Membership {
+            on_engines: !r.expired,
+            not_on_engines: r.expired.then_some(NotOnEngines::Expired),
+            ..membership(
                 Via::Role {
                     name: r.role_name.clone(),
                 },
@@ -1211,7 +1216,7 @@ pub async fn read_group_via(
             Via::Role {
                 name: r.role_name.clone(),
             },
-            through_group,
+            (true, None),
         );
     }
     for r in held.iter().filter(|r| !r.expired) {
@@ -1234,11 +1239,13 @@ pub async fn read_group_via(
             let held_role = clearing_row(&held, &g.required_roles);
             let engines = if g.required_roles.is_empty() {
                 EngineClearance::NotEnforcedGroupsOnly
+            } else if let Some(r) = held_role {
+                EngineClearance::Cleared {
+                    role: r.role_name.clone(),
+                }
             } else {
                 EngineClearance::NotCleared {
-                    because: if held_role.is_some() {
-                        Some(EngineNotClearedReason::HeldThroughGroup)
-                    } else if g.required_groups.contains(&gid) {
+                    because: if g.required_groups.contains(&gid) {
                         Some(EngineNotClearedReason::GroupsNotEnforced)
                     } else {
                         None
