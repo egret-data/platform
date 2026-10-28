@@ -1968,6 +1968,9 @@ pub(crate) fn environment() -> Environment<'static> {
     // Package #5a, Task A3: the arithmetic operators, which
     // [`compile_source`]'s third pass compiles into calls to these.
     super::arith::register(&mut env);
+    // Package #5a, Task A6: `contains`, `..` and `and`/`or`'s coercion,
+    // which [`rewrite`] compiles into calls to these.
+    super::operators::register(&mut env);
 
     env
 }
@@ -3265,8 +3268,11 @@ mod tests {
         // `kestra_mul`, `kestra_div` and `kestra_mod` (the arithmetic pass);
         // 190 -> 193 at package #5a Task A5, which added the egret-only
         // `kestra_path`, `kestra_present` and `kestra_defined` (a path on the
-        // left of `??`/`???`); the three engine counts below did not move.
-        assert_eq!(rows, 193, "row count");
+        // left of `??`/`???`); 193 -> 196 at package #5a Task A6
+        // (2026-10-29), which added the egret-only `kestra_contains`,
+        // `kestra_range` and `kestra_bool` (`contains`, `..` and `and`/`or`);
+        // the three engine counts below did not move.
+        assert_eq!(rows, 196, "row count");
         assert_eq!(counts.get("filter"), Some(&63), "engine filter count");
         assert_eq!(counts.get("function"), Some(&37), "engine function count");
         assert_eq!(counts.get("test"), Some(&8), "engine test count");
@@ -4212,16 +4218,7 @@ mod tests {
         }
     }
 
-    /// Package #5a, Task A1: Pebble's `contains` refuses a number on its left
-    /// (`Contains operator can only be used on Collections, Maps and arrays`).
-    /// Today egret fails because `contains` does not parse at all; Task A6
-    /// gives it syntax and must keep this failing for Kestra's reason.
-    #[test]
-    fn contains_on_a_number_is_refused() {
-        let got = render("{{ n contains 1 }}", json!({ "n": 5 }));
-        assert!(
-            got.is_err(),
-            "a number cannot contain anything; got {got:?}"
-        );
-    }
+    // (`contains_on_a_number_is_refused` was here, Task A1's placeholder; Task
+    // A6 ported `contains` and its refusal is asserted with Kestra's text by
+    // `runners::operators::tests::contains_on_what_pebble_cannot_search_fails_with_kestras_text`.)
 }

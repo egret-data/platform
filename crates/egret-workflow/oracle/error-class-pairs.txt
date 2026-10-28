@@ -453,9 +453,13 @@ filter-string-undefined-input                       test:the_string_filter_now_t
 # override a filter, a function and a test -- W2b's final round overrides the
 # `defined` test for exactly that reason -- but not `{% if %}`, `and`, `or`,
 # `not`, or the map-key writer.
+# Package #5a's Task A6 (2026-10-29) reached `and` and `or` from the
+# rewriter: each operand is a `kestra_bool(..)` call that refuses a null with
+# Pebble's own text, so those two banked and are paired with the test that
+# asserts it. `{% if %}` and `not` stay baselined.
 null-literal-in-an-if-condition                     baselined
-null-literal-in-an-and-operand                      baselined
-null-literal-in-an-or-operand                       baselined
+null-literal-in-an-and-operand                      test:an_operand_kestra_cannot_cast_fails_with_kestras_text
+null-literal-in-an-or-operand                       test:an_operand_kestra_cannot_cast_fails_with_kestras_text
 null-literal-in-a-not-operand                       baselined
 null-from-the-context-in-an-if-condition            baselined
 null-literal-as-a-bare-map-key                      baselined
@@ -510,6 +514,12 @@ filter-capitalize-of-a-defaulted-empty-array        test:the_collection_kind_gat
 # now both coalesce rows fail on the right side's missing root, Kestra's
 # reason, and are re-paired with the test that proves it (the same template
 # with `missing.y` present answers it).
+# Task A6 (2026-10-29) ported `contains` and `and`/`or`'s coercion (spec D5):
+# `operator-contains-number-left` used to fail because `contains` did not
+# parse at all; it now fails with `ContainsExpression`'s own text. The three
+# `logic-*` entries were baselined (egret answered); they now fail with
+# Pebble's `ClassCastException` and null-operand texts. All four are paired
+# with the `runners::operators` test that asserts that text.
 arith-zero-long-div                                 test:an_operation_kestra_refuses_fails_with_kestras_text
 arith-zero-long-div-context                         test:an_operation_kestra_refuses_fails_with_kestras_text
 arith-zero-long-mod                                 test:an_operation_kestra_refuses_fails_with_kestras_text
@@ -537,7 +547,7 @@ chain-lt-missing-operand                            test:a_missing_operand_kestr
 chain-eq-then-lt                                    test:a_comparison_kestra_refuses_fails_with_kestras_text
 coalesce-missing-right-evaluated                    test:a_missing_right_side_kestra_reaches_fails_on_it
 coalesce-chain-missing-right-evaluated              test:a_missing_right_side_kestra_reaches_fails_on_it
-operator-contains-number-left                       test:contains_on_a_number_is_refused
-logic-and-list-left                                 baselined
-logic-or-null-context                               baselined
-logic-and-map-left                                  baselined
+operator-contains-number-left                       test:contains_on_what_pebble_cannot_search_fails_with_kestras_text
+logic-and-list-left                                 test:an_operand_kestra_cannot_cast_fails_with_kestras_text
+logic-or-null-context                               test:an_operand_kestra_cannot_cast_fails_with_kestras_text
+logic-and-map-left                                  test:an_operand_kestra_cannot_cast_fails_with_kestras_text

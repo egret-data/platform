@@ -847,7 +847,11 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
         // 45 -> 44 baselined, 256 -> 257 matching at package #5a Task A5
         // (2026-10-29): `valids/webhook-plaintext` banks (`??` reads through
         // a missing member chain, spec D6); 44 + 257 = 301.
-        (301, 257, 44),
+        // 44 -> 42 baselined, 257 -> 259 matching at package #5a Task A6
+        // (2026-10-29): `valids/if-in-flowable` (`equals`) and
+        // `valids/task-runif-workingdirectory` (`contains`) bank (spec D5);
+        // 42 + 259 = 301.
+        (301, 259, 42),
         "301 = matching + baselined, the total beside its parts. It read \
          167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries, W8 \
          Task 4 banked `valids/waitfor-nested`, W8 Task 5 banked seven \
@@ -2495,13 +2499,20 @@ const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 41;
 /// they carry 22 more top-level pairs (measured: the test prints `egret
 /// produces 874 + 216`). The nested figure does not move: a `Loop` iteration
 /// has no `afterExecution:` (D5).
-const EGRET_TOP_LEVEL_PAIRS: usize = 874;
+/// **876 since package #5a Task A6 (2026-10-29)**: `equals` and `contains`
+/// render, so `valids/task-runif-workingdirectory`'s `log_orders` runs and
+/// `valids/if-in-flowable`'s `If` takes its branch (measured: the test prints
+/// `egret produces 876 + 214`).
+const EGRET_TOP_LEVEL_PAIRS: usize = 876;
 // 130 -> 216 at end hooks A6 (2026-10-27, measured): the iterations now run the
 // `Loop`'s own `errors:`/`finally:`, which adds 86 pairs inside `spawned`.
 // 216 -> 210 at package #5a Task A3 (2026-10-28, measured): `restart-loop` and
 // `restart-parent-loop` run one iteration, as Kestra does, where `1 / 0`
 // rendering `Infinity` let them run three. The top-level figure does not move.
-const EGRET_NESTED_PAIRS: usize = 210;
+// 210 -> 214 at package #5a Task A6 (2026-10-29, measured): the `If` inside each
+// of `valids/if-in-flowable`'s three iterations renders its `equals`
+// condition and runs its branch.
+const EGRET_NESTED_PAIRS: usize = 214;
 
 /// **KEPT is not ASSERTED, and the line between them is the baseline rather
 /// than the nesting** — W3b Task 7.
@@ -2610,7 +2621,10 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         // at package #5a Task A2 (2026-10-28, measured).
         // + the 3 top-level and 1 nested pairs of the four `valids/restart-*`
         // entries, banked at package #5a Task A3 (2026-10-28, measured).
-        (616, 198, 814),
+        // + the 3 top-level and 5 nested pairs of `valids/if-in-flowable` and
+        // `valids/task-runif-workingdirectory`, banked at package #5a Task A6
+        // (2026-10-29, measured).
+        (619, 203, 822),
         "the pairs a change to which the ratchet REPORTS: they live on entries \
          that match, so any change to one makes its entry a REGRESSION. W6 Task \
          3 moved 3 of them across the line, all top-level: the 12 `Subflow` \
@@ -2645,7 +2659,10 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         // pairs of `valids/loopuntil-failed-flowable`.
         // 306 -> 302 at package #5a Task A3 (2026-10-28, measured): the 3 top-level
         // and 1 nested pairs of the four `valids/restart-*` entries.
-        (273, 29, 302),
+        // 302 -> 294 at package #5a Task A6 (2026-10-29, measured): the 3 top-level
+        // and 5 nested pairs of `valids/if-in-flowable` and
+        // `valids/task-runif-workingdirectory`.
+        (270, 24, 294),
         "and the pairs a change to which it does not: they live on baselined \
          entries, which mismatch whatever the pair says. Flipping all 704 leaves \
          the ratchet green and unmoved -- at 131 when W6 Task 3 flipped them, at \
@@ -3082,7 +3099,9 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
 // `valids/loopuntil-failed-flowable`.
 // 184 -> 174 at package #5a Task A3 (2026-10-28, measured): the four `valids/restart-*` entries' 10 run terminals.
 // 174 -> 173 at package #5a Task A5 (2026-10-29, measured): `valids/webhook-plaintext`'s 1 run terminal.
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 173;
+// 173 -> 162 at package #5a Task A6 (2026-10-29, measured): `valids/if-in-flowable`'s 8 run terminals (1 top-level, 7 in its
+// three sub-executions) and `valids/task-runif-workingdirectory`'s 3.
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 162;
 /// 43 from W6 Task 4 to W9a Task 10; **40 since W9a Task 11** -- the three
 /// iterations of `valids/loop-values-from-uri`.
 // 40 -> 39 at WorkingDirectory Task 8: `working-directory-taskrun` has one
@@ -3091,7 +3110,8 @@ const TERMINALS_ON_BASELINED_ENTRIES: usize = 173;
 // `Loop` entries it banked.
 // 31 -> 29 at package #5a Task A3 (2026-10-28, measured): the four `valids/restart-*` entries:
 // the one sub-execution each of `restart-loop` and `restart-parent-loop`.
-const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 29;
+// 29 -> 26 at package #5a Task A6 (2026-10-29, measured): the three sub-executions of `valids/if-in-flowable`.
+const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 26;
 /// **165 through W8 Task 2, 157 after W8 Task 3, 156 after W8 Task 4, 149 after
 /// W8 Task 5, 147 now** -- the eight `Pause` entries W8 Task 3 banked, the one
 /// `LoopUntil` entry W8 Task 4 banked, W8 Task 5's seven and W8 Task 6's two.
@@ -3129,7 +3149,9 @@ const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 29;
 // 79 -> 73 at package #5a Task A3 (2026-10-28, measured): the four `valids/restart-*` entries:
 // four top-level executions and two sub-executions.
 // 73 -> 72 at package #5a Task A5 (2026-10-29, measured): `valids/webhook-plaintext`'s one execution.
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 72;
+// 72 -> 67 at package #5a Task A6 (2026-10-29, measured): `valids/if-in-flowable` (one top-level execution and three
+// sub-executions) and `valids/task-runif-workingdirectory` (one).
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 67;
 /// **1703 through W8 Task 2, 1647 after W8 Task 3, 1610 after W8 Task 4, 1528
 /// now** -- 56 run-history tokens on Task 3's eight, 37 on
 /// `valids/waitfor-nested` (whose seven runs include three loops reading
@@ -3167,7 +3189,9 @@ const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 72;
 // 742 -> 706 at package #5a Task A3 (2026-10-28, measured): the four `valids/restart-*` entries' 36
 // run-history tokens.
 // 706 -> 702 at package #5a Task A5 (2026-10-29, measured): `valids/webhook-plaintext`'s 4 run-history tokens.
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 702;
+// 702 -> 666 at package #5a Task A6 (2026-10-29, measured): the run-history tokens of `valids/if-in-flowable` and
+// `valids/task-runif-workingdirectory`, 36 between them.
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 666;
 /// **665 through W8 Task 2, 617 after W8 Task 3, 562 after W8 Task 4, 526 after
 /// W8 Task 5, 522 now** -- 48 execution-history tokens on Task 3's eight, i.e.
 /// six apiece (every one of them reads `CREATED RUNNING PAUSED RESTARTED
@@ -3205,7 +3229,9 @@ const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 702;
 // 302 -> 284 at package #5a Task A3 (2026-10-28, measured): the four `valids/restart-*` entries' 18
 // execution-history tokens.
 // 284 -> 281 at package #5a Task A5 (2026-10-29, measured): `valids/webhook-plaintext`'s 3 execution-history tokens.
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 281;
+// 281 -> 266 at package #5a Task A6 (2026-10-29, measured): `valids/if-in-flowable`'s 12 execution-history tokens (four
+// executions of three) and `valids/task-runif-workingdirectory`'s 3.
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 266;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -3363,7 +3389,11 @@ const RESTRICTION_REMOVES_ENTRIES: usize = 7;
 // 1182 -> 1168 at package #5a Task A3 (2026-10-28, measured): the four
 // `restart-*` entries now fail `restart-child`'s first attempt as Kestra does
 // and run fewer tasks after it.
-const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 1168;
+// 1168 -> 1174 at package #5a Task A6 (2026-10-29, measured): the 2 top-level
+// and 4 nested pairs `EGRET_TOP_LEVEL_PAIRS` and `EGRET_NESTED_PAIRS` gained
+// (`valids/if-in-flowable`'s `If` takes its branch now that `equals` renders,
+// and `valids/task-runif-workingdirectory`'s `log_orders` runs).
+const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 1174;
 
 /// Test names `oracle-exec/README.md` cites that **no longer exist**, each with
 /// its successor or an empty string where there is none — W3b Task 7.
@@ -4574,7 +4604,9 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
 // 27 -> 26 at package #5a Task A5 (2026-10-29, measured): `valids/webhook-plaintext`
 // banked -- `trigger.parameters.validationToken[0] ?? 'hello-world'` reads
 // through the missing chain and renders the fallback (D6).
-const MISMATCH_ON_EXECUTION: usize = 26;
+// 26 -> 24 at package #5a Task A6 (2026-10-29, measured): `valids/if-in-flowable` (its `If` condition uses `equals`) and
+// `valids/task-runif-workingdirectory` (its `runIf` uses `contains`) banked (D5).
+const MISMATCH_ON_EXECUTION: usize = 24;
 /// **112 through W8 Task 2, 104 after W8 Task 3, 103 after W8 Task 4, 96 after
 /// W8 Task 5, 94 now** -- the same eight, then `valids/waitfor-nested`, then
 /// the seven `allow*` entries, then W8 Task 6's two. The last pair differ on
@@ -4612,7 +4644,8 @@ const MISMATCH_ON_EXECUTION: usize = 26;
 // 38 -> 37 at package #5a Task A2 (2026-10-28, measured): `valids/loopuntil-failed-flowable` banked.
 // 37 -> 33 at package #5a Task A3 (2026-10-28, measured): the four `valids/restart-*` entries banked.
 // 33 -> 32 at package #5a Task A5 (2026-10-29, measured): `valids/webhook-plaintext` banked (D6).
-const MISMATCH_ON_RUNS: usize = 32;
+// 32 -> 30 at package #5a Task A6 (2026-10-29, measured): `valids/if-in-flowable` and `valids/task-runif-workingdirectory` banked (D5).
+const MISMATCH_ON_RUNS: usize = 30;
 /// **72 through W8 Task 2, 67 after W8 Task 3, 64 now**: five of Task 3's eight
 /// carry an ordered pair, and W8 Task 4 closed THREE on one entry --
 /// `valids/waitfor-nested`'s `loop_1_return`/`loop_2`,
@@ -4645,7 +4678,9 @@ const MISMATCH_ON_RUNS: usize = 32;
 // `valids/dag`, `full`, `if`, `loop-object`, `loop-object-in-list`, `parallel-disabled-tasks`,
 // `task-runif-workingdirectory` and `variables`; `valids/after-execution` is not among them,
 // so it is the ninth.
-const MISMATCH_ON_ORDER: usize = 8;
+// 8 -> 7 at package #5a Task A6 (2026-10-29, measured): `valids/task-runif-workingdirectory`, one of the eight named above,
+// banked (D5).
+const MISMATCH_ON_ORDER: usize = 7;
 /// The `runs` entries egret refuses on purpose, in golden order: each is a
 /// flow Kestra ran holding a task egret cannot run, which before its refusal
 /// was an opaque runnable that stalled the execution for ever.
@@ -4689,7 +4724,9 @@ const RUNS_REFUSED: [&str; 4] = [
 // `valids/finally-loop-parallel` and `invalids/loop-switch-failed` banked.
 // 9 -> 7 at package #5a Task A3 (2026-10-28, measured): the four `valids/restart-*` entries banked;
 // `restart-loop` and `restart-parent-loop` carried a sub-execution.
-const MISMATCH_ON_SPAWNED: usize = 7;
+// 7 -> 6 at package #5a Task A6 (2026-10-29, measured): `valids/if-in-flowable` banked; its three sub-executions are
+// compared and match now.
+const MISMATCH_ON_SPAWNED: usize = 6;
 /// **122 through W8 Task 2, 114 after W8 Task 3, 113 now** -- the eight `Pause`
 /// entries Task 3 banked and the one `LoopUntil` entry Task 4 did. The
 /// `refused` half of the golden is untouched by either: no `Pause` or
@@ -4719,7 +4756,8 @@ const MISMATCH_ON_SPAWNED: usize = 7;
 // 49 -> 48 at package #5a Task A2 (2026-10-28, measured): `valids/loopuntil-failed-flowable` banked (D1).
 // 48 -> 44 at package #5a Task A3 (2026-10-28, measured): the four `valids/restart-*` entries banked (D2).
 // 44 -> 43 at package #5a Task A5 (2026-10-29, measured): `valids/webhook-plaintext` banked (D6).
-const MISMATCHING_RUNS_ENTRIES: usize = 43;
+// 43 -> 41 at package #5a Task A6 (2026-10-29, measured): `valids/if-in-flowable` and `valids/task-runif-workingdirectory` banked (D5).
+const MISMATCHING_RUNS_ENTRIES: usize = 41;
 /// **84 through W5; 63 after W6 Task 3, and 59 since W6 Task 4 corrected the
 /// classifier.**
 ///
@@ -4981,8 +5019,9 @@ async fn the_sub_executions_are_compared_and_this_is_what_they_cost() {
             // 15 through W9a Task 10; `valids/loop-values-from-uri` left it; 14 ->
             // 13 at WorkingDirectory Task 8, when `working-directory-taskrun` matched;
             // 13 -> 11 at package #5a Task A3 (2026-10-28), when `restart-loop` and
-            // `restart-parent-loop` matched.
-            11,
+            // `restart-parent-loop` matched; 11 -> 10 at package #5a Task A6
+            // (2026-10-29), when `if-in-flowable` matched.
+            10,
             41
         ),
         "the 41 partitioned: how many MATCH, how many agree on everything the \
@@ -4999,7 +5038,8 @@ async fn the_sub_executions_are_compared_and_this_is_what_they_cost() {
 // `valids/finally-loop` and `valids/finally-loop-parallel` banked.
 // 27 -> 29 at package #5a Task A3 (2026-10-28): `valids/restart-loop` and
 // `valids/restart-parent-loop` banked.
-const SPAWNED_ENTRIES_THAT_MATCH: usize = 29;
+// 29 -> 30 at package #5a Task A6 (2026-10-29): `valids/if-in-flowable` banked.
+const SPAWNED_ENTRIES_THAT_MATCH: usize = 30;
 
 /// And the names, which is what `baseline.txt`'s header attributes one by one.
 /// Sixteen banked at W3b Task 5, `valids/replay-loop` at the whole-branch
@@ -5013,6 +5053,8 @@ const SPAWNED_ENTRIES_THAT_MATCH_BY_NAME: &[&str] = &[
     "valids/finally-loop",
     "valids/finally-loop-parallel",
     "valids/flowable-with-parent-fail",
+    // Package #5a Task A6 (2026-10-29): its `If` condition uses `equals`.
+    "valids/if-in-flowable",
     "valids/loop-expression-context",
     "valids/loop-failed",
     "valids/loop-failed-no-transmit",
@@ -5480,8 +5522,10 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
 // 34 -> 36 / 7 -> 5 at package #5a Task A3 (2026-10-28, measured):
 // `valids/restart-loop` and `valids/restart-parent-loop` spawn the one
 // sub-execution Kestra did (they spawned three while `1 / 0` was `Infinity`).
-const TOP_LEVEL_SPAWN_KEYS_IDENTICAL: usize = 36;
-const TOP_LEVEL_SPAWN_KEYS_DIFFER: usize = 5;
+// 36 -> 37 / 5 -> 4 at package #5a Task A6 (2026-10-29, measured):
+// `valids/if-in-flowable` spawns the three sub-executions Kestra did.
+const TOP_LEVEL_SPAWN_KEYS_IDENTICAL: usize = 37;
+const TOP_LEVEL_SPAWN_KEYS_DIFFER: usize = 4;
 
 /// **`concurrencyLimit` defaults to 1, and the corpus can tell** — the one
 /// measurement that separates it from `Parallel::concurrent`'s default of 0.
@@ -7353,7 +7397,9 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
             // `valids/finally-loop` and `valids/finally-loop-parallel` banked.
             // 14 -> 12 at package #5a Task A3 (2026-10-28): `valids/restart-loop`
             // and `valids/restart-parent-loop` banked.
-            12,
+            // 12 -> 11 at package #5a Task A6 (2026-10-29): `valids/if-in-flowable`
+            // banked (its `If` condition uses `equals`, spec D5).
+            11,
             &["io.kestra.plugin.core.flow.Loop\n", "core.loop\n"],
         ),
         // **`Subflow` was a row here with 22 through W5, and W6 Task 3 removed
@@ -7559,7 +7605,10 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
             // 4 -> 3 at WorkingDirectory Task 8: `valids/working-directory-taskrun`
             // is banked; the other three (`task-runif-workingdirectory`,
             // `working-directory-invalid-runif`, `-taskrun-nested`) stay baselined.
-            3,
+            // 3 -> 2 at package #5a Task A6 (2026-10-29):
+            // `valids/task-runif-workingdirectory` banked (its `runIf` uses
+            // `contains`, spec D5).
+            2,
             &[
                 "io.kestra.plugin.core.flow.WorkingDirectory",
                 "core.workingdirectory",
@@ -8131,7 +8180,9 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
         // do the four `valids/restart-*` entries.
         // (2, 43, 45) -> (2, 42, 44) at package #5a Task A5 (2026-10-29): nor
         // does `valids/webhook-plaintext`.
-        (2, 42, 44),
+        // (2, 42, 44) -> (2, 40, 42) at package #5a Task A6 (2026-10-29): nor do
+        // `valids/if-in-flowable` and `valids/task-runif-workingdirectory`.
+        (2, 40, 42),
         "the baselined population that declares a `timeout:`, and the rest \
          ((2, 106, 108) until no-silent-stall Task 1 banked \
          `invalids/invalid-task`, which declares none). It \

@@ -4343,6 +4343,17 @@ given a slot past the end of `ALL` is caught by nothing here. That limit is on
 > named a construct; the cause was the renderer, which a declaration-driven
 > rule cannot see.
 >
+> **2026-10-29, package #5a Task A6 (spec D5, Q3):** `valids/if-in-flowable`
+> (its `If` condition is `{{ item.value equals 'value 2' }}`) and
+> `valids/task-runif-workingdirectory` (its `runIf` is `{{
+> inputs.scripts_to_run contains 'orders' }}`) MATCH and left the baseline:
+> neither `equals` nor `contains` parsed here, so the condition failed to
+> render. `handler-surface.txt` was regenerated: reproduced 257 → 259,
+> not-blocked 28 → 26 (both were bankable, nothing named blocked them), so the
+> **ceiling stays 285** and the working expectation 279. The WorkingDirectory
+> note further down left `task-runif-workingdirectory`'s cause "not isolated
+> further"; it was `contains`.
+>
 > `150 + 21 = 171` and `21 + 123 = 144`, and the generator asserts both. Task 1's
 > **172** and its eleven named entries are not lost by regenerating: they are in
 > this file's coverage statement, in Task 1's and Task 5's reports, and in this

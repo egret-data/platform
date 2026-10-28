@@ -168,9 +168,10 @@ whose deliverable was refusals; Task 8 added 29, which is 17% of the file for
 7% of the corpus, and every one of them is `test:`-paired — the pairing file
 now has **no `unported:` line left in it**, and `UNPORTED_ERROR_CLASS` in
 `tests/oracle.rs` is empty. Note that marking an entry error-class does **not**
-make it pass: 17 of the 302 are *also* in `baseline.txt` (19 before package
-#5a's Task A4, 25 before its Task A3, 38 before its Task A2; re-counted from
-the two files 2026-10-29, and again after Task A5, which moved none of them), because egret
+make it pass: 12 of the 302 are *also* in `baseline.txt` (17 before package
+#5a's Task A6, 19 before its Task A4, 25 before its Task A3, 38 before its
+Task A2; re-counted from the two files 2026-10-29, after Task A5, which moved
+none of them, and again after Task A6, which banked five), because egret
 *succeeds* where Kestra throws — a real divergence, and it stays visible.
 
 ## `name-surface.txt` — which names each side has at all
@@ -247,7 +248,17 @@ after Task A5 (2026-10-29), which BANKED twelve (spec D6, Q6 reversing the
 eleven coalesce entries (`coalesce-lazy-right-division` among them) and
 `coalesce-nested-absent`. `coalesce-non-path-left-missing-right` stays
 baselined, the recorded D6 divergence (a call on the left keeps the eager
-form).
+form) -- and **107 of 1493** after Task A6 (2026-10-29), which BANKED
+thirty-three (spec D5, Q3: `equals` is `==`, `contains` is Pebble's
+`ContainsExpression`, `..` is Kestra's `range`, and each `and`/`or` operand
+is coerced to a strict boolean, `runners::operators`): twenty-five of A1's
+twenty-six operator entries, `op-equals`, `op-contains`,
+`op-contains-literal`, `op-range`, `coalesce-and`, `coalesce-or`, and W2b's
+`null-literal-in-an-and-operand` and `null-literal-in-an-or-operand` (a null
+`and`/`or` operand now fails with Pebble's own text). Two stay, each
+re-attributed with its measured cause: `op-contains-boxed-int` (spec D2's
+Integer/Long divergence) and `logic-and-returns-boolean` (minijinja's `~`
+writes a boolean as `True`).
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
@@ -686,6 +697,13 @@ Three entries pin it: `op-contains` (strings, `true`),
 `op-contains-boxed-int` (context list, `false`), `op-contains-literal`
 (literal list, `true`). Whoever ports `contains` must reproduce all three or
 they have ported a *different*, more sensible operator.
+
+(Package #5a's Task A6, 2026-10-29, ported `contains` as
+`ContainsExpression` does it and reproduces two of the three: egret's values
+carry no Integer/Long distinction, so `op-contains-boxed-int` answers `true`
+and stays baselined as spec D2's recorded divergence -- a "fix" that answered
+`false` there would also answer `false` for
+`operator-contains-boxed-int-context`, where Kestra says `true`.)
 
 ## Value formatting is the ENVIRONMENT's job, not a filter's (W2 Task 3)
 

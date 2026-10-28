@@ -1097,7 +1097,7 @@ const MAX_RANGE_SIZE: i128 = 1_000_000;
 /// - **A character range's increment is truncated to an `int` by the loop's
 ///   own `(int)((long) i + increment)`.** An increment of 2^32 therefore
 ///   leaves `i` unchanged and the loop never ends. Refused, by name.
-fn range(rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+pub(super) fn range(rest: Rest<MjValue>) -> Result<MjValue, MjError> {
     let args = Args::new(rest);
     let start = args.get("start", 0).unwrap_or_default();
     let end = args.get("end", 1).unwrap_or_default();

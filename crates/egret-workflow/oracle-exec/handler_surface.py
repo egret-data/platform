@@ -1041,8 +1041,10 @@ def check_inputs(flows, kinds, golden, baseline):
     # `-loop`, `-parent` and `-parent-loop` (`1 / 0` fails as Java's does).
     # 44 since package #5a Task A5 (2026-10-29) banked `valids/webhook-plaintext`
     # (`??` reads through a missing member chain, spec D6).
-    if len(baseline) != 44:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 44; the split "
+    # 42 since package #5a Task A6 (2026-10-29) banked `valids/if-in-flowable`
+    # (`equals`) and `valids/task-runif-workingdirectory` (`contains`), spec D5.
+    if len(baseline) != 42:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 42; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1692,8 +1694,8 @@ def self_test():
          "not 273",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 44",
-         "not 44",
+    case("baseline.txt is no longer 42",
+         "not 42",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

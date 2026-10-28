@@ -374,7 +374,7 @@ fn list_items(value: &MjValue) -> Vec<MjValue> {
 
 /// `String.valueOf(Object)`: `"null"` for a null (a silent undefined is
 /// egret's spelling of that null), else the value's Java `toString()`.
-fn java_string_value_of(value: &MjValue) -> String {
+pub(super) fn java_string_value_of(value: &MjValue) -> String {
     if value.is_undefined() || value.is_none() {
         return "null".to_string();
     }
@@ -386,7 +386,7 @@ fn java_string_value_of(value: &MjValue) -> String {
 /// `Double` (`1` is not `1.0`), a `Double` equals by its bits (`NaN` equals
 /// `NaN`, `0.0` is not `-0.0`), a `BigDecimal` by value AND scale, lists
 /// element by element, maps entry by entry.
-fn java_equals(a: &MjValue, b: &MjValue) -> bool {
+pub(super) fn java_equals(a: &MjValue, b: &MjValue) -> bool {
     let (ca, cb) = (
         super::filters::big_number_class(a),
         super::filters::big_number_class(b),

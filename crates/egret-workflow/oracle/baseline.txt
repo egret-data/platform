@@ -28,11 +28,10 @@
 # BANKED; `compare::tests::a_comparison_kestra_refuses_fails_with_kestras_text`
 # holds them now.)
 
-# Pebble coerces and/or to a strict boolean; minijinja returns an operand. Needs kestra_and/kestra_or.
-coalesce-and
-
-# as coalesce-and
-coalesce-or
+# (`coalesce-and` and `coalesce-or` were here: Pebble coerces `and`/`or` to a
+# strict boolean and minijinja returned an operand. Package #5a's Task A6
+# (spec D5, 2026-10-29) BANKED both: each operand is wrapped in
+# `kestra_bool(..)`, `runners::operators`.)
 
 # minijinja's null test is spelled `none`; the corpus correctly keeps Kestra's name.
 coalesce-is-not-null
@@ -67,12 +66,21 @@ test-json-false
 # DELIBERATE: Kestra's RAW_PATTERN has no DOTALL so Pebble rejects the tag; minijinja's own raw tag handles it. task-3-report.md S5.
 raw-multiline
 
-# no minijinja syntax for this operator (recorded divergence, task-3-report.md S6)
-op-equals
-op-contains
+# (`op-equals`, `op-contains`, `op-contains-literal` and `op-range` were
+# here, "no minijinja syntax for this operator" (task-3-report.md S6).
+# Package #5a's Task A6 (spec D5, 2026-10-29) BANKED all four: `equals` is
+# tokenized as `==`, `contains` compiles to `kestra_contains`, `..` to
+# `kestra_range`.)
+#
+# RECORDED DIVERGENCE (spec D2, Integer vs Long; spec §2.2 item 10),
+# re-attributed by Task A6 (2026-10-29): `contains` is ported and answers
+# `true` here. Kestra's `false` is `Integer(2).equals(Long(2))`: the context
+# list `[1, 2]` holds Integers and the literal `2` is a Long. egret's values
+# carry no Integer/Long distinction (the same cause as the two
+# `arith-operand-context-ints-*` lines below), so a faithful `contains`
+# cannot answer `false` without also breaking `operator-contains-boxed-int-
+# context` (both sides from the context, `true` in Kestra, banked).
 op-contains-boxed-int
-op-contains-literal
-op-range
 
 # (`coalesce-nested-absent` was here, ruled "deliberate" (task-3-report.md
 # S9: strict undefined raises before `??` is reached). Spec Q6 reversed the
@@ -733,9 +741,11 @@ boolean-literal-python-spelling-is-not-the-literal
 #
 # Not fixable from this crate: minijinja lets a crate override a filter, a
 # function and a test, but not `{% if %}`, `and`, `or` or `not`.
+# (Package #5a's Task A6, 2026-10-29, reached `and` and `or` from the
+# rewriter instead: each operand is a `kestra_bool(..)` call, which refuses a
+# null with Pebble's own text, so `null-literal-in-an-and-operand` and
+# `null-literal-in-an-or-operand` BANKED. `{% if %}` and `not` remain.)
 null-literal-in-an-if-condition
-null-literal-in-an-and-operand
-null-literal-in-an-or-operand
 null-literal-in-a-not-operand
 null-from-the-context-in-an-if-condition
 
@@ -844,34 +854,19 @@ loop-index-and-revindex
 # operator to `(P) if kestra_present(P) else (R)` (`kestra_defined` for
 # `???`), so `R` is evaluated only when needed.)
 
-# A6 (D5): `equals`, `contains`, `..` do not parse here; `and`/`or` return
-# an operand here and a strict boolean in Kestra (non-empty string and
-# non-zero number are true; a list or map fails; null fails).
-operator-equals-strings
-operator-equals-long-double
-operator-equals-long-string
-operator-equals-false
-operator-contains-map-key
-operator-contains-map-value
-operator-contains-list
-operator-contains-list-missing
-operator-contains-list-of-list
-operator-contains-string
-operator-contains-string-missing
-operator-contains-boxed-int-context
-operator-range-ascending
-operator-range-descending
-operator-range-characters
-operator-range-characters-descending
-operator-range-for
-operator-range-single
-logic-and-string-right
-logic-or-string-left
-logic-or-long-right
-logic-and-list-left
-logic-or-null-context
-logic-or-string-false-left
-logic-and-map-left
+# (A6 (D5)'s twenty-six were here -- `operator-equals-*`, `operator-contains-*`,
+# `operator-range-*` and the `logic-*` operands -- and twenty-five BANKED with
+# Task A6 (2026-10-29): `equals` is `==`, `contains` is `kestra_contains`
+# (Pebble's `ContainsExpression`), `..` is `kestra_range` (Kestra's `range`),
+# and each `and`/`or` operand is `kestra_bool(..)` (`compatibleCast` to
+# `Boolean`). The twenty-sixth is re-attributed below.)
+#
+# Re-attributed by Task A6 (2026-10-29), measured: `(true and 'x')` IS the
+# boolean `true` now (`runners::operators::tests::
+# the_boolean_reaches_tilde_and_tilde_spells_it_in_python`), but minijinja's
+# `~` writes any boolean as `True` -- `{{ true ~ '|' }}` is `True|` too --
+# because `~` is not compiled to a port of Pebble's `ConcatenateExpression`
+# (`String.valueOf`). Not an `and`/`or` cause; whoever ports `~` banks it.
 logic-and-returns-boolean
 
 # RECORDED DIVERGENCE (spec D2, Integer vs Long), measured by A1: two

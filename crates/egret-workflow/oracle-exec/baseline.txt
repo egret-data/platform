@@ -588,7 +588,7 @@ valids/flow-concurrency-sla-fail-parent
 valids/flow-with-outputs-failed
 valids/full
 valids/if
-valids/if-in-flowable
+# `valids/if-in-flowable` banked 2026-10-29 (package #5a Task A6, spec D5): its `If` condition is `{{ item.value equals 'value 2' }}`; `equals` did not parse here, so the condition failed to render and the `If` FAILED. `equals` is `==` now.
 # group C1 Task 3 (2026-10-18): `Assert` runs now; held by the `Loop`'s own `outputs:`, which egret does not produce: all three conditions read `outputs.for_each.outputs[i].outputs.*` and fail to render (`undefined value`), so `assert` FAILS where Kestra SUCCEEDED (measured).
 valids/if-in-parallel
 valids/loop-object
@@ -627,7 +627,7 @@ valids/subflow-secret-output-child
 valids/subflow-secret-output-parent
 # end hooks A8 (2026-10-27): the flow-level `finally:` runs now (A4), but this entry did not bank: `write_execution_context` and `skipped_when_failures_exist` are created and end `CREATED FAILED` with no message, because their `runIf` (`tasksWithState(state='FAILED') is [not] empty`) fails to render -- Pebble's `empty` test, a renderer cause owned by package #5 (measured at A4; the 2026-10-18 cause, "egret does not run `finally:`", is history).
 valids/task-runif-taskswithstate
-valids/task-runif-workingdirectory
+# `valids/task-runif-workingdirectory` banked 2026-10-29 (package #5a Task A6, spec D5): both children's `runIf` and `message` are `{{ inputs.scripts_to_run contains '...' }}`; `contains` did not parse here, so `log_orders` FAILED at creation (the cause the 2026-10 WorkingDirectory note in README.md left "not isolated further"). `contains` is Pebble's `ContainsExpression` now.
 valids/variables
 # group C1 Task 2 (2026-10-18): `OutputValues` runs now; held by one more `WaitFor` iteration (3 PAUSED, golden 2) under `maxDuration: PT3S`/`PT1S`, the poller-latency shape `loop-until-restart` is held by (measured).
 # Debt D14 (2026-10-19): this entry can MATCH by accident under CPU load, and the ratchet then fails "PROGRESS NOT BANKED". The driver's Tick clock is real time since `executions.created_at` plus what `pass_time` adds, so a slow machine leaks wall time into it and `reached_maximums` (`src/executor/flowable/loop_until.rs`) fires `maxDuration` one iteration early -- golden's 2 PAUSED. Not progress: it needs a virtual clock in the driver. Do not bank it on such a run.

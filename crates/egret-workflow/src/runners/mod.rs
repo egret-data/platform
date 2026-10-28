@@ -11,7 +11,9 @@
 //!   reads `rewrite`'s output with minijinja's own grammar and turns every
 //!   comparison into a call to `compare`, whose functions compare a
 //!   `BigDecimal`/`BigInteger` exactly and every other pair as minijinja
-//!   does.
+//!   does. Its third pass compiles `+ - * / %` into calls to `arith`.
+//! - `operators` is Pebble's `contains`, `..` and the boolean coercion of
+//!   `and`/`or` (package #5a Task A6), which `rewrite` compiles into calls.
 //! - `filters` is all 35 of Kestra's filters, registered onto that engine.
 //!   Two of its names (`indent`, `string`) override minijinja built-ins
 //!   rather than adding to them.
@@ -54,6 +56,7 @@ mod javafmt;
 mod javaformat;
 mod javare;
 mod jqsandbox;
+mod operators;
 pub mod rewrite;
 pub mod secrets;
 mod yamlfmt;
