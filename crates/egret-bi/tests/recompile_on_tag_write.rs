@@ -128,11 +128,14 @@ async fn policy_count(pool: &sqlx::PgPool, service_id: i64) -> i64 {
 
 /// The `column` resource names of every StarRocks masking policy under
 /// `service_id`, sorted — a value-level view of "which columns are
-/// currently masked," not just how many.
+/// currently masked," not just how many. The `perm-hidden-` deny per masked
+/// table also lives under `service_id`, so only the `perm-rule-` masks count.
 async fn masked_columns(pool: &sqlx::PgPool, service_id: i64) -> Vec<String> {
-    let bodies: Vec<(serde_json::Value,)> =
-        sqlx::query_as("SELECT policy_jsonb FROM policy.authz_policies WHERE service_id = $1")
-            .bind(service_id)
+    let bodies: Vec<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT policy_jsonb FROM policy.authz_policies \
+         WHERE service_id = $1 AND name LIKE 'perm-rule-%'",
+    )
+    .bind(service_id)
             .fetch_all(pool)
             .await
             .expect("policy bodies");
@@ -192,8 +195,9 @@ async fn assign_and_unassign_through_the_real_repo_recompile_the_bound_starrocks
         .expect("assign (and recompile) email");
     assert_eq!(
         policy_count(&pool, f.service_id).await,
-        1,
-        "assign_catalog must recompile the bound StarRocks profile — one masking policy for the tagged column"
+        2,
+        "assign_catalog must recompile the bound StarRocks profile — one masking policy for the tagged column, \
+         plus the hidden-column deny for its table"
     );
     assert_eq!(
         masked_columns(&pool, f.service_id).await,
@@ -206,8 +210,8 @@ async fn assign_and_unassign_through_the_real_repo_recompile_the_bound_starrocks
         .expect("assign (and recompile) phone");
     assert_eq!(
         policy_count(&pool, f.service_id).await,
-        2,
-        "a second tagged column must recompile to a second masking policy"
+        3,
+        "a second tagged column must recompile to a second masking policy (the table's one hidden deny is shared)"
     );
     assert_eq!(
         masked_columns(&pool, f.service_id).await,
@@ -220,7 +224,7 @@ async fn assign_and_unassign_through_the_real_repo_recompile_the_bound_starrocks
         .expect("unassign (and recompile) phone");
     assert_eq!(
         policy_count(&pool, f.service_id).await,
-        1,
+        2,
         "untagging a column must recompile it OUT of the StarRocks profile — the enumeration \
          D5 says would otherwise stay stale"
     );

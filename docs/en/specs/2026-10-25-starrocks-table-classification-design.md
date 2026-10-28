@@ -354,7 +354,8 @@ message grows.
    the whole boot pass back. This package's boot pass is per profile and does not depend on it.
 3. Package 2 live finding 4: a refused preview links the unsaved rule's id. Unchanged.
 4. Masks alone expose `_file`/`_pos` (the object-store path) on `SELECT *` (Step 0 live spike, §14). **§11.4 (2026-10-28):
-   fixed in code, live check pending.** Every StarRocks table with a data mask gets one deny on `_file` and `_pos`
+   fixed in code; live check passed.** Before the fix, `reader` got the hashed `name` plus `_file` (s3 path) and `_pos`
+   on `SELECT * FROM t_mask`; after it, the same query is refused with `ERROR 5204` on `_file`, and `cleared` still reads real values. Every StarRocks table with a data mask gets one deny on `_file` and `_pos`
    (`perm-hidden-{catalog}.{database}.{table}`, `clearance::hidden_column_denies`): `public` is denied, and
    `denyExceptions` are the users with `MASK_NONE` on every masked column of the table. The narrow deny is first; a
    blanket `column: *` is the fallback only if the narrow one fails the live probe. A wildcard or excluded table mask
