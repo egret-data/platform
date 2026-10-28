@@ -551,7 +551,7 @@ function TreeRow({
     const prefix = `${dottedPath(line.owner.path)}.`;
     return (
       <TableRow {...rowProps} className={`${rowClass} hover:bg-transparent`}>
-        <TableCell role="gridcell" style={indent} className="py-1 whitespace-normal">
+        <TableCell role="gridcell" aria-label={dottedPath(line.owner.path)} style={indent} className="py-1 whitespace-normal">
           <div className="ml-7 text-xs text-muted-foreground">
             {line.status === "loading" ? (
               <span className="flex items-center gap-2">
@@ -595,7 +595,7 @@ function TreeRow({
       aria-selected={selected}
       className={`${rowClass} ${selected ? "bg-accent text-accent-foreground hover:bg-accent" : ""}`}
     >
-      <TableCell role="gridcell" style={indent} className="py-0.5">
+      <TableCell role="gridcell" aria-label={full} style={indent} className="py-0.5">
         <span className="flex min-w-0 items-center gap-1">
           {node.expandable ? (
             <IconButton tabIndex={-1} aria-label={`${open ? "Collapse" : "Expand"} ${full}`} onClick={onToggle}>

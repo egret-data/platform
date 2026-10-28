@@ -326,6 +326,18 @@ describe("CatalogTree", () => {
     expect(where()).toBe("/governance/data");
   });
 
+  it("names every gridcell, so a screen reader reads what a cell is", async () => {
+    serveData(fixture());
+    renderData();
+    await waitFor(() => expect(shownPaths()).toEqual(["ice", "pg"]));
+    const cells = within(tree()).getAllByRole("gridcell");
+    expect(cells.length).toBeGreaterThan(0);
+    for (const cell of cells) {
+      expect(cell.getAttribute("aria-label")).toBeTruthy();
+    }
+    expect(within(row("ice")).getByRole("gridcell")).toHaveAccessibleName("ice");
+  });
+
   it("is a keyboard treegrid with one Tab stop", async () => {
     const { browseCalls } = serveData(fixture());
     const user = userEvent.setup();
