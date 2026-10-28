@@ -168,8 +168,9 @@ whose deliverable was refusals; Task 8 added 29, which is 17% of the file for
 7% of the corpus, and every one of them is `test:`-paired — the pairing file
 now has **no `unported:` line left in it**, and `UNPORTED_ERROR_CLASS` in
 `tests/oracle.rs` is empty. Note that marking an entry error-class does **not**
-make it pass: 19 of the 302 are *also* in `baseline.txt` (25 before package
-#5a's Task A3, 38 before its Task A2), because egret
+make it pass: 17 of the 302 are *also* in `baseline.txt` (19 before package
+#5a's Task A4, 25 before its Task A3, 38 before its Task A2; re-counted from
+the two files 2026-10-29), because egret
 *succeeds* where Kestra throws — a real divergence, and it stays visible.
 
 ## `name-surface.txt` — which names each side has at all
@@ -232,7 +233,14 @@ and a chain compiles left-associatively) -- and **173 of 1493** after Task A3
 * / %` are Pebble's `OperatorUtils`, Long and Double, string and list
 operands) and RECORDED one, `coalesce-lazy-right-division`, which had passed
 only because minijinja's `1 / 0` answered `inf`; it now fails for Task A5's
-reason (an eager `??` right side) and is baselined in A5's group.
+reason (an eager `??` right side) and is baselined in A5's group -- and
+**152 of 1493** after Task A4 (2026-10-29), which BANKED twenty-one (spec D3,
+Q5 reversing the W9c refusal: a `BigDecimal` operand is
+`BigDecimal.valueOf(doubleValue())` on both sides, computed at
+`DECIMAL128` with Java's preferred scale): A1's eight BigDecimal entries,
+`filter-number-bigdecimal-is-not-a-number-here`, and the twelve
+`function-fromion-decimal-*` entries W2 Task 7 recorded, because an Ion
+decimal is a `java.math.BigDecimal` `BigNumber` again.
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
@@ -3610,6 +3618,19 @@ compared by its exact binary value, where Pebble 4.1.2 compares any two
 numbers by `doubleValue()` -- W9c spec §15 records the difference.
 `fromIon` decimals are still `f64` (their scale is still what gave way); this
 round does not revisit that.
+
+**2026-10-29, package #5a Task A4 (spec D3; Q5 reverses the W9c ruling).** The
+arithmetic half is closed too. Task A3 compiled `+ - * / %` to
+`runners::arith`, so the operators no longer reach minijinja either, and A4
+ported `bigDecimalOperation` there (`runners::arith::decimal`, on
+`num-bigint`): either operand a `BigDecimal` makes both
+`BigDecimal.valueOf(x.doubleValue())`, `add`/`subtract` exact,
+`multiply`/`divide`/`remainder` at `DECIMAL128` with Java's preferred scale.
+With nothing left that minijinja computes on the object, an Ion decimal is a
+`BigNumber` again (`ionfmt::ion_number`) and `abs` keeps its scale. All
+thirteen entries above BANKED. Still minijinja's: a region the compile passes
+do not mirror (`{% do %}`, macro arguments) and unary minus (`-x`, which
+Pebble computes as `-1 * x`), both of which refuse the object.
 
 ### C-B: an `e` exponent with a dot was classified as a decimal
 

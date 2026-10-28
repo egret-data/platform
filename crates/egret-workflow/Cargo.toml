@@ -62,6 +62,12 @@ chrono-tz.workspace = true
 # version already in Cargo.lock through `iceberg`, so this adds a direct edge
 # and no new crate.
 murmur3 = "=0.5.2"
+# Package #5a Task A4 (spec D3): `runners::arith`'s port of Java's
+# `BigDecimal` (exact `add`/`subtract`, `DECIMAL128` `multiply`/`divide`/
+# `remainder`) carries the unscaled value as a `BigInt`. Pinned to the version
+# already in Cargo.lock through `ion-rs`, so this adds a direct edge and no
+# new crate.
+num-bigint = "=0.4.8"
 anyhow.workspace = true
 
 # Task 6 (publish): `RefKind` and `WorkflowRefPort` -- the port trait publish

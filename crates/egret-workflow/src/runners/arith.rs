@@ -48,11 +48,18 @@
 //! `7766279631452241920`), the `Double` branch through `doubleValue()`, and
 //! with another `BigInteger` the `int` branch through `intValue()`.
 //!
-//! **A `BigDecimal` operand is not computed yet**: Task A4 ports
-//! `bigDecimalOperation`. Until then such an operation fails, naming the
-//! operator in the words minijinja's own refusal used (`tried to use +
-//! operator on unsupported types`), as it did before this pass (W9c spec
-//! §15).
+//! **A `BigDecimal` operand** (package #5a Task A4, spec D3 and Q5, which
+//! reverses W9c's refusal): a `kv()` decimal, `number(type='BIGDECIMAL')`, an
+//! Ion decimal from `fromIon` and the result of an operation on any of them.
+//! `wideningConversionBinaryOperation` turns BOTH operands into
+//! `BigDecimal.valueOf(x.doubleValue())` -- so a 30-digit value loses its
+//! digits past a double's 17th, and `1.50 + 1` is `2.5` -- and
+//! `bigDecimalOperation` computes `add`/`subtract` exactly and `multiply`/
+//! `divide`/`remainder` at `MathContext.DECIMAL128` (34 digits, `HALF_EVEN`)
+//! with Java's preferred scale: `1.5 * 2` is `1.5 * 2.0`, so `3.00`; `1.0 / 3`
+//! is 34 threes; `1.5 / 2` is the exact `0.75`. [`decimal`] is the port, on
+//! `num-bigint`. `/ 0`, `% 0` and a NaN or infinite operand (`valueOf` throws)
+//! fail with the operator's text.
 
 use minijinja::value::{Value as MjValue, ValueKind};
 use minijinja::{Environment, Error as MjError, ErrorKind, State};
@@ -78,17 +85,6 @@ impl ArithOp {
             ArithOp::Mul => "kestra_mul",
             ArithOp::Div => "kestra_div",
             ArithOp::Mod => "kestra_mod",
-        }
-    }
-
-    /// The operator as written.
-    fn symbol(self) -> &'static str {
-        match self {
-            ArithOp::Add => "+",
-            ArithOp::Sub => "-",
-            ArithOp::Mul => "*",
-            ArithOp::Div => "/",
-            ArithOp::Mod => "%",
         }
     }
 
@@ -146,15 +142,10 @@ impl ArithOp {
     fn numeric(self, left: &MjValue, right: &MjValue) -> Result<MjValue, MjError> {
         let a = to_number(left).ok_or_else(|| self.refused())?;
         let b = to_number(right).ok_or_else(|| self.refused())?;
-        if matches!(a, Operand::BigDecimal) || matches!(b, Operand::BigDecimal) {
-            return Err(MjError::new(
-                ErrorKind::InvalidOperation,
-                format!(
-                    "tried to use {} operator on unsupported types: egret does not \
-                     compute on a java.math.BigDecimal",
-                    self.symbol()
-                ),
-            ));
+        if matches!(a, Operand::BigDecimal(_)) || matches!(b, Operand::BigDecimal(_)) {
+            return self
+                .big_decimal(a.double_value(), b.double_value())
+                .ok_or_else(|| self.refused());
         }
         if matches!(a, Operand::Double(_)) || matches!(b, Operand::Double(_)) {
             return Ok(MjValue::from(
@@ -170,6 +161,22 @@ impl ArithOp {
         self.int(a.long_value() as i32, b.long_value() as i32)
             .map(MjValue::from)
             .ok_or_else(|| self.refused())
+    }
+
+    /// `bigDecimalOperation(BigDecimal.valueOf(a), BigDecimal.valueOf(b))`,
+    /// the result a `java.math.BigDecimal` [`super::filters::big_decimal`].
+    /// `None` is the exception: `valueOf` of a NaN or an infinity, a zero
+    /// divisor, `Division impossible`, or a result over the output cap.
+    fn big_decimal(self, a: f64, b: f64) -> Option<MjValue> {
+        let (a, b) = (decimal::Dec::value_of(a)?, decimal::Dec::value_of(b)?);
+        let result = match self {
+            ArithOp::Add => a.add(&b),
+            ArithOp::Sub => a.subtract(&b),
+            ArithOp::Mul => a.multiply(&b),
+            ArithOp::Div => a.divide(&b, decimal::Rounding::HalfEven)?,
+            ArithOp::Mod => a.remainder(&b)?,
+        };
+        super::filters::big_decimal(&result.scientific())
     }
 
     /// `doubleOperation`: IEEE 754, Java's `%` (`drem` is `fmod`, which is
@@ -223,7 +230,9 @@ enum Operand {
         low: i64,
         double: f64,
     },
-    BigDecimal,
+    /// A `java.math.BigDecimal`: its `doubleValue()` (rounded to nearest),
+    /// which is all `wideningConversionBinaryOperation` reads of it.
+    BigDecimal(f64),
 }
 
 impl Operand {
@@ -232,7 +241,7 @@ impl Operand {
             Operand::Long(v) => v as f64,
             Operand::Double(v) => v,
             Operand::BigInteger { double, .. } => double,
-            Operand::BigDecimal => unreachable!("a BigDecimal is handled before"),
+            Operand::BigDecimal(double) => double,
         }
     }
 
@@ -244,7 +253,7 @@ impl Operand {
             // takes the Double branch) and kept total.
             Operand::Double(v) => v as i64,
             Operand::BigInteger { low, .. } => low,
-            Operand::BigDecimal => unreachable!("a BigDecimal is handled before"),
+            Operand::BigDecimal(double) => double as i64,
         }
     }
 }
@@ -253,10 +262,12 @@ impl Operand {
 /// `parseDouble`/`parseLong` throw).
 fn to_number(value: &MjValue) -> Option<Operand> {
     if let Some(class) = super::filters::big_number_class(value) {
-        if class == "java.math.BigDecimal" {
-            return Some(Operand::BigDecimal);
-        }
         let digits = super::filters::big_number_plain(value)?;
+        if class == "java.math.BigDecimal" {
+            // `BigDecimal.doubleValue()` is correctly rounded (JDK 9+), as
+            // Rust's parse of the plain digits is.
+            return digits.parse::<f64>().ok().map(Operand::BigDecimal);
+        }
         return big_integer_of_digits(digits);
     }
     match value.kind() {
@@ -381,8 +392,10 @@ fn java_equals(a: &MjValue, b: &MjValue) -> bool {
         super::filters::big_number_class(b),
     );
     if ca.is_some() || cb.is_some() {
+        // `toString()` is one-to-one on (unscaled, scale); the plain text is
+        // not (`1E+2` and `100` are both `100`).
         return ca == cb
-            && super::filters::big_number_plain(a) == super::filters::big_number_plain(b);
+            && super::filters::big_number_text(a) == super::filters::big_number_text(b);
     }
     match (a.kind(), b.kind()) {
         (ValueKind::None | ValueKind::Undefined, ValueKind::None | ValueKind::Undefined) => true,
@@ -423,6 +436,361 @@ fn java_double_bits(x: f64) -> u64 {
         0x7ff8_0000_0000_0000
     } else {
         x.to_bits()
+    }
+}
+
+/// The part of `java.math.BigDecimal` (JDK 25) that Pebble's
+/// `bigDecimalOperation` reaches, ported on `num-bigint`: a value is an
+/// unscaled integer and a scale, `unscaled × 10^-scale`, and the scale is
+/// part of the value's text (`1.5` and `1.50` print differently).
+///
+/// - [`Dec::value_of`] is `BigDecimal.valueOf(double)`, which is
+///   `new BigDecimal(Double.toString(d))` -- egret's `Double.toString` port
+///   ([`crate::runners::env::write_java_double`]), parsed;
+/// - `add`/`subtract` are exact, at the larger scale;
+/// - `multiply`, `divide` and `remainder` take `MathContext.DECIMAL128`: a
+///   result over 34 significant digits is rounded `HALF_EVEN` (`multiply`'s
+///   `doRound`); an exact quotient is stripped of trailing zeros down to the
+///   preferred scale `this.scale - divisor.scale` and never below it, an
+///   inexact one has exactly 34 digits; `remainder` is `this -
+///   divideToIntegralValue(divisor, mc) × divisor`.
+mod decimal {
+    use std::cmp::Ordering;
+
+    use num_bigint::{BigInt, Sign};
+
+    /// `MathContext.DECIMAL128.getPrecision()`.
+    const PRECISION: u64 = 34;
+
+    /// The two `RoundingMode`s the operations use.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Rounding {
+        /// `DECIMAL128`'s.
+        HalfEven,
+        /// `divideToIntegralValue`'s inner division.
+        Down,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(super) struct Dec {
+        unscaled: BigInt,
+        scale: i64,
+    }
+
+    fn pow10(n: u64) -> BigInt {
+        BigInt::from(10u8).pow(u32::try_from(n).expect("a bounded exponent"))
+    }
+
+    /// `BigInteger`'s decimal precision; `1` for zero, as Java's.
+    fn precision(v: &BigInt) -> u64 {
+        v.magnitude().to_str_radix(10).len() as u64
+    }
+
+    fn is_zero(v: &BigInt) -> bool {
+        v.sign() == Sign::NoSign
+    }
+
+    /// `num / den` rounded by `mode`, and whether it was exact.
+    fn div_round(num: &BigInt, den: &BigInt, mode: Rounding) -> (BigInt, bool) {
+        // `BigInt` division truncates toward zero, as Java's does.
+        let (mut q, r) = (num / den, num % den);
+        if is_zero(&r) {
+            return (q, true);
+        }
+        if mode == Rounding::HalfEven {
+            let twice = r.magnitude() * 2u8;
+            let up = match twice.cmp(den.magnitude()) {
+                Ordering::Greater => true,
+                Ordering::Equal => q.magnitude().bit(0),
+                Ordering::Less => false,
+            };
+            if up {
+                let negative = (num.sign() == Sign::Minus) != (den.sign() == Sign::Minus);
+                q += if negative { -1 } else { 1 };
+            }
+        }
+        (q, false)
+    }
+
+    impl Dec {
+        /// `new BigDecimal(String)` for the forms `Double.toString` writes:
+        /// `1.5`, `-0.0`, `1.2345678901234568E29`, `1.0E-7`.
+        fn parse(text: &str) -> Option<Dec> {
+            let (mantissa, exponent) = match text.split_once(['E', 'e']) {
+                Some((m, e)) => (m, e.parse::<i64>().ok()?),
+                None => (text, 0),
+            };
+            let (int, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+            let unscaled = format!("{int}{fraction}").parse::<BigInt>().ok()?;
+            Some(Dec {
+                unscaled,
+                scale: fraction.len() as i64 - exponent,
+            })
+        }
+
+        /// `BigDecimal.valueOf(double)`; `None` for a NaN or an infinity,
+        /// where Java throws `NumberFormatException`.
+        pub(super) fn value_of(d: f64) -> Option<Dec> {
+            if !d.is_finite() {
+                return None;
+            }
+            let mut text = String::new();
+            crate::runners::env::write_java_double(&mut text, d);
+            Dec::parse(&text)
+        }
+
+        /// `unscaledE-scale`, which `filters::big_decimal` reads back with
+        /// this exact scale.
+        pub(super) fn scientific(&self) -> String {
+            format!("{}E{}", self.unscaled, -self.scale)
+        }
+
+        /// The unscaled value at `scale` (not below `self.scale`).
+        fn at_scale(&self, scale: i64) -> BigInt {
+            &self.unscaled * pow10((scale - self.scale) as u64)
+        }
+
+        fn compare_magnitude(&self, other: &Dec) -> Ordering {
+            let scale = self.scale.max(other.scale);
+            self.at_scale(scale)
+                .magnitude()
+                .cmp(other.at_scale(scale).magnitude())
+        }
+
+        pub(super) fn add(&self, other: &Dec) -> Dec {
+            let scale = self.scale.max(other.scale);
+            Dec {
+                unscaled: self.at_scale(scale) + other.at_scale(scale),
+                scale,
+            }
+        }
+
+        pub(super) fn subtract(&self, other: &Dec) -> Dec {
+            let scale = self.scale.max(other.scale);
+            Dec {
+                unscaled: self.at_scale(scale) - other.at_scale(scale),
+                scale,
+            }
+        }
+
+        fn exact_multiply(&self, other: &Dec) -> Dec {
+            Dec {
+                unscaled: &self.unscaled * &other.unscaled,
+                scale: self.scale + other.scale,
+            }
+        }
+
+        /// `multiply(other, DECIMAL128)`: the exact product, then `doRound`.
+        pub(super) fn multiply(&self, other: &Dec) -> Dec {
+            let mut result = self.exact_multiply(other);
+            loop {
+                let digits = precision(&result.unscaled);
+                if digits <= PRECISION {
+                    return result;
+                }
+                let drop = digits - PRECISION;
+                let (q, _) = div_round(&result.unscaled, &pow10(drop), Rounding::HalfEven);
+                result = Dec {
+                    unscaled: q,
+                    scale: result.scale - drop as i64,
+                };
+            }
+        }
+
+        /// `stripZerosToMatchScale`: trailing zeros off while the scale is
+        /// above `preferred` (a zero, under ten, keeps its scale).
+        fn strip_to(mut self, preferred: i64) -> Dec {
+            let ten = BigInt::from(10u8);
+            while self.scale > preferred && self.unscaled.magnitude() >= ten.magnitude() {
+                if !is_zero(&(&self.unscaled % &ten)) {
+                    break;
+                }
+                self.unscaled /= &ten;
+                self.scale -= 1;
+            }
+            self
+        }
+
+        /// `divide(divisor, new MathContext(34, mode))`; `None` for a zero
+        /// divisor.
+        pub(super) fn divide(&self, divisor: &Dec, mode: Rounding) -> Option<Dec> {
+            if is_zero(&divisor.unscaled) {
+                return None;
+            }
+            let preferred = self.scale - divisor.scale;
+            if is_zero(&self.unscaled) {
+                return Some(Dec {
+                    unscaled: BigInt::from(0u8),
+                    scale: preferred,
+                });
+            }
+            // `unscaled × 10^shift / divisor.unscaled` has 34 or 35 digits
+            // at the first shift; one step down makes it 34.
+            let mut shift = PRECISION as i64 - precision(&self.unscaled) as i64
+                + precision(&divisor.unscaled) as i64;
+            loop {
+                let (num, den) = if shift >= 0 {
+                    (
+                        &self.unscaled * pow10(shift as u64),
+                        divisor.unscaled.clone(),
+                    )
+                } else {
+                    (
+                        self.unscaled.clone(),
+                        &divisor.unscaled * pow10(shift.unsigned_abs()),
+                    )
+                };
+                if precision(&(&num / &den)) > PRECISION {
+                    shift -= 1;
+                    continue;
+                }
+                let (q, exact) = div_round(&num, &den, mode);
+                let result = Dec {
+                    unscaled: q,
+                    scale: shift + preferred,
+                };
+                if exact {
+                    return Some(result.strip_to(preferred));
+                }
+                if precision(&result.unscaled) > PRECISION {
+                    // Rounded up to 10^34: one digit off, exactly.
+                    return Some(Dec {
+                        unscaled: result.unscaled / 10u8,
+                        scale: result.scale - 1,
+                    });
+                }
+                return Some(result);
+            }
+        }
+
+        /// `divideToIntegralValue(divisor, DECIMAL128)`; `None` for a zero
+        /// divisor or `Division impossible` (an integer part over 34 digits).
+        fn divide_to_integral_value(&self, divisor: &Dec) -> Option<Dec> {
+            if is_zero(&divisor.unscaled) {
+                return None;
+            }
+            let preferred = self.scale - divisor.scale;
+            if self.compare_magnitude(divisor) == Ordering::Less {
+                return Some(Dec {
+                    unscaled: BigInt::from(0u8),
+                    scale: preferred,
+                });
+            }
+            let mut result = self.divide(divisor, Rounding::Down)?;
+            if result.scale < 0 {
+                let rest = self.subtract(&result.exact_multiply(divisor));
+                if rest.compare_magnitude(divisor) != Ordering::Less {
+                    return None;
+                }
+            } else if result.scale > 0 {
+                // `setScale(0, DOWN)`.
+                result = Dec {
+                    unscaled: &result.unscaled / pow10(result.scale as u64),
+                    scale: 0,
+                };
+            }
+            let room = PRECISION as i64 - precision(&result.unscaled) as i64;
+            if preferred > result.scale && room > 0 {
+                let scale = result.scale + room.min(preferred - result.scale);
+                return Some(Dec {
+                    unscaled: result.at_scale(scale),
+                    scale,
+                });
+            }
+            Some(result.strip_to(preferred))
+        }
+
+        /// `remainder(divisor, DECIMAL128)`.
+        pub(super) fn remainder(&self, divisor: &Dec) -> Option<Dec> {
+            let q = self.divide_to_integral_value(divisor)?;
+            Some(self.subtract(&q.exact_multiply(divisor)))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn dec(text: &str) -> Dec {
+            Dec::parse(text).expect("a decimal")
+        }
+
+        /// `BigDecimal.toString()`'s digits and scale, as `unscaledE-scale`.
+        fn show(d: Option<Dec>) -> String {
+            d.map_or_else(|| "throws".to_string(), |d| d.scientific())
+        }
+
+        /// Each row's answer is `jshell` arithmetic on `java.math.BigDecimal`
+        /// (JDK 25), written as `unscaledE-scale`.
+        #[test]
+        fn the_operations_keep_javas_scale_and_precision() {
+            let one_third = format!("{}E-34", "3".repeat(34));
+            let two_thirds = format!("{}7E-34", "6".repeat(33));
+            for (got, want) in [
+                (show(Dec::value_of(2.0)), "20E-1"),
+                (show(Dec::value_of(-0.0)), "0E-1"),
+                (show(Dec::value_of(1e20)), "10E19"),
+                (
+                    show(Dec::value_of(1.2345678901234568e29)),
+                    "12345678901234568E13",
+                ),
+                (show(Dec::value_of(f64::NAN)), "throws"),
+                (show(Dec::value_of(f64::INFINITY)), "throws"),
+                (show(Some(dec("1.5").add(&dec("1.0")))), "25E-1"),
+                (show(Some(dec("1.5").subtract(&dec("0.5")))), "10E-1"),
+                (show(Some(dec("1.5").multiply(&dec("2.0")))), "300E-2"),
+                (show(Some(dec("1.5").multiply(&dec("1.25")))), "1875E-3"),
+                (
+                    show(dec("1.0").divide(&dec("3.0"), Rounding::HalfEven)),
+                    one_third.as_str(),
+                ),
+                (
+                    show(dec("2.0").divide(&dec("3.0"), Rounding::HalfEven)),
+                    two_thirds.as_str(),
+                ),
+                (
+                    show(dec("1.5").divide(&dec("2.0"), Rounding::HalfEven)),
+                    "75E-2",
+                ),
+                (
+                    show(dec("100").divide(&dec("4"), Rounding::HalfEven)),
+                    "25E0",
+                ),
+                (
+                    show(dec("1.00").divide(&dec("1"), Rounding::HalfEven)),
+                    "100E-2",
+                ),
+                (
+                    show(dec("0.0").divide(&dec("3"), Rounding::HalfEven)),
+                    "0E-1",
+                ),
+                (
+                    show(dec("1.5").divide(&dec("0.0"), Rounding::HalfEven)),
+                    "throws",
+                ),
+                (show(dec("5.5").remainder(&dec("2.0"))), "15E-1"),
+                (show(dec("-5.5").remainder(&dec("2.0"))), "-15E-1"),
+                (show(dec("1.5").remainder(&dec("2.0"))), "15E-1"),
+                (show(dec("6.0").remainder(&dec("2.0"))), "0E-1"),
+                (show(dec("1.5").remainder(&dec("0.0"))), "throws"),
+            ] {
+                assert_eq!(got, want);
+            }
+            // HALF_EVEN at the 35th digit: ...5 exactly rounds to even.
+            let tie = Dec {
+                unscaled: format!("{}5", "1".repeat(34)).parse().unwrap(),
+                scale: 0,
+            };
+            assert_eq!(
+                tie.multiply(&dec("1")).scientific(),
+                format!("{}2E1", "1".repeat(33))
+            );
+            // Rounding up to 10^34 drops one digit.
+            assert_eq!(
+                dec(&"9".repeat(35)).multiply(&dec("1")).scientific(),
+                format!("1{}E2", "0".repeat(33))
+            );
+        }
     }
 }
 
@@ -718,11 +1086,55 @@ mod tests {
         }
     }
 
-    /// Until Task A4, a `BigDecimal` operand is refused naming the operator.
+    /// Task A4 (spec D3): a `BigDecimal` operand makes both operands
+    /// `BigDecimal.valueOf(x.doubleValue())` and the result a `BigDecimal`,
+    /// at `DECIMAL128` with Java's preferred scale. Every answer is A1's
+    /// golden or `jshell`'s.
     #[test]
-    fn a_big_decimal_operand_is_refused_until_a4() {
-        let error = render("{{ '1.5' | number(type='BIGDECIMAL') * 2 }}").unwrap_err();
-        assert!(error.contains("tried to use * operator"), "{error}");
+    fn big_decimal_arithmetic_is_javas() {
+        for (template, want) in [
+            ("{{ fromIon(ion='1.50') + 1 }}", "2.5"),
+            ("{{ fromIon(ion='1.5') - 0.5 }}", "1.0"),
+            ("{{ fromIon(ion='1.50') * 2 }}", "3.00"),
+            ("{{ fromIon(ion='1.5') * fromIon(ion='1.25') }}", "1.875"),
+            (
+                "{{ fromIon(ion='1.0') / 3 }}",
+                "0.3333333333333333333333333333333333",
+            ),
+            (
+                "{{ fromIon(ion='2.0') / 3 }}",
+                "0.6666666666666666666666666666666667",
+            ),
+            ("{{ fromIon(ion='1.5') / 2 }}", "0.75"),
+            ("{{ fromIon(ion='5.5') % 2 }}", "1.5"),
+            ("{{ 1 - fromIon(ion='1.5') }}", "-0.5"),
+            (
+                "{{ '123456789012345678901234567890.5' | number(type='BIGDECIMAL') + 1 }}",
+                "123456789012345680000000000001.0",
+            ),
+            ("{{ '1.10' | number(type='BIGDECIMAL') * 3 }}", "3.30"),
+            (
+                "{{ (fromIon(ion='1.5') * 2) | className }}",
+                "java.math.BigDecimal",
+            ),
+            // `valueOf(100.0)` is `100.0`, so the scale is 2; a String
+            // operand concatenates `toString()`, which is `1E+2`.
+            ("{{ fromIon(ion='1d2') * 1 }}", "100.00"),
+            ("{{ (fromIon(ion='1d2') * 1) | toJson }}", "100.00"),
+            ("{{ 'x' + fromIon(ion='1d2') }}", "x1E+2"),
+        ] {
+            assert_eq!(render(template).unwrap(), want, "{template}");
+        }
+        for (template, op) in [
+            ("{{ fromIon(ion='1.5') / 0 }}", ArithOp::Div),
+            ("{{ fromIon(ion='1.5') % 0 }}", ArithOp::Mod),
+            ("{{ '1.5' | number(type='BIGDECIMAL') / 0 }}", ArithOp::Div),
+            // `BigDecimal.valueOf(Infinity)` throws.
+            ("{{ fromIon(ion='1.5') + 1.0 / 0 }}", ArithOp::Add),
+        ] {
+            let error = render(template).unwrap_err();
+            assert!(error.contains(op.kestra_refusal()), "{template}: {error}");
+        }
     }
 
     #[test]

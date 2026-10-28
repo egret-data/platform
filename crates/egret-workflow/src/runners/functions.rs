@@ -646,8 +646,9 @@ fn shown_argument(v: &MjValue) -> String {
 /// - a float is an `f64`; a string, a boolean and null are themselves; a list
 ///   a list; a map an ordered map, its fields in their stored order.
 ///
-/// Neither `BigNumber` is arithmetic, so `{{ kv('d') + 1 }}` fails the render
-/// naming the operator (W9c spec §15), where Kestra computes in `BigDecimal`.
+/// Both compute as Kestra does (package #5a, spec D2/D3, reversing W9c spec
+/// §15's refusal): `{{ kv('d') + 1 }}` is `BigDecimal` arithmetic in
+/// `super::arith`, and a `BigInteger` takes `longValue()`.
 /// Both COMPARE exactly (fix round 1, the user's ruling of 2026-10-07):
 /// `kv('d') > 0.9`, `== 1.5`, `in [1.5]` go through `super::compare`.
 ///
@@ -3131,42 +3132,50 @@ mod tests {
         assert_eq!(ok("{{ fromIon(ion='{a:b}') }}"), r#"{"a":"b"}"#);
     }
 
-    /// **Every non-integer Ion number is an `f64` here, and Kestra splits them
-    /// in two**: `e`/`E` is a `java.lang.Double`, and `d`/`D` or a bare `.` is
-    /// a `java.math.BigDecimal`.
+    /// **Kestra splits the non-integer Ion numbers in two**: `e`/`E` is a
+    /// `java.lang.Double`, and `d`/`D` or a bare `.` is a
+    /// `java.math.BigDecimal`, which keeps its scale.
     ///
     /// Fix round 2 carried a decimal as `filters::BigNumber` to keep the
-    /// scale, and that is an `Object`: `value::ops::coerce` has no object arm,
-    /// and `Ord for Value` compares `kind()` first with `ValueKind::Plain`
-    /// above `ValueKind::Number`. So every `+ - * / %` became an error and
-    /// **every `>`/`>=` became unconditionally true**, silently. Reverted
-    /// here, with the scale recorded in `oracle/baseline.txt` instead.
+    /// scale, and that is an `Object`: minijinja's operators had no object
+    /// arm and ordered it above every number, so every `+ - * / %` became an
+    /// error and every `>`/`>=` unconditionally true. Fix round 3 made it an
+    /// `f64`. Package #5a Task A4 (spec D3, Q5) makes it a `BigNumber` again:
+    /// the comparisons are `super::compare`'s and the arithmetic
+    /// `super::arith`'s, which computes it as Kestra does.
     ///
-    /// **This is the axis the test could not see before.** It checked render,
-    /// `className`, `toIon` and `toJson` — exactly where `BigNumber` is right
-    /// — and nothing put an operator on a decimal. Changing what a value *is*
-    /// has a blast radius of every operation the type takes part in, not the
-    /// operations the entry exercises.
+    /// **The operator axis is asserted first** because it is the one fix
+    /// round 2 broke without a test seeing it: changing what a value *is* has
+    /// a blast radius of every operation the type takes part in.
     #[test]
-    fn every_non_integer_ion_number_is_an_f64_and_takes_operators() {
+    fn an_ion_decimal_is_a_big_decimal_and_takes_operators() {
         // The operator axis first, because it is the one that was wrong.
         assert_eq!(ok("{{ fromIon(ion='1.5') + 1 }}"), "2.5");
         assert_eq!(ok("{{ fromIon(ion='1.5') - 1 }}"), "0.5");
         assert_eq!(ok("{{ fromIon(ion='1.5') / 2 }}"), "0.75");
+        assert_eq!(ok("{{ fromIon(ion='1.5') * 2 }}"), "3.00");
         assert_eq!(ok("{{ fromIon(ion='1.5') | abs }}"), "1.5");
+        assert_eq!(ok("{{ fromIon(ion='-1.50') | abs }}"), "1.50");
         assert_eq!(ok("{{ fromIon(ion='1.5') > 1 }}"), "true");
         assert_eq!(ok("{{ fromIon(ion='1.5') < 1 }}"), "false");
         assert_eq!(ok("{{ fromIon(ion='1.5') == 1.5 }}"), "true");
         // The boundary the object ordering made unconditionally true.
         assert_eq!(ok("{{ fromIon(ion='1.') > 1 }}"), "false");
         assert_eq!(ok("{{ fromIon(ion='1d2') > 1000 }}"), "false");
+        // `-0.0` is `0.0`: `BigDecimal` has no negative zero to print.
+        assert_eq!(ok("{{ fromIon(ion='-0.0') }}"), "0.0");
+        // `{% if %}` casts a Number by `doubleValue() != 0`, as the f64 did.
+        for (source, want) in [("0.0", "f"), ("-0.0", "f"), ("0.5", "t"), ("1d-400", "f")] {
+            let template = format!("{{% if fromIon(ion='{source}') %}}t{{% else %}}f{{% endif %}}");
+            assert_eq!(ok(&template), want, "{source}");
+        }
 
         for (source, plain, class, ion) in [
-            // `d`/`D` and a bare `.`: a `BigDecimal` there, an `f64` here.
-            ("1d2", "100.0", "java.lang.Double", "100e0"),
-            ("1.50", "1.5", "java.lang.Double", "1.5e0"),
-            ("1.", "1.0", "java.lang.Double", "1e0"),
-            ("-0.0", "-0.0", "java.lang.Double", "-0e0"),
+            // `d`/`D` and a bare `.`: a `BigDecimal` on both engines.
+            ("1d2", "100", "java.math.BigDecimal", "1d2"),
+            ("1.50", "1.50", "java.math.BigDecimal", "1.50"),
+            ("1.", "1", "java.math.BigDecimal", "1."),
+            ("1.5d2", "150", "java.math.BigDecimal", "15d1"),
             // `e`/`E` is a float on BOTH engines, **with or without a dot**.
             // Fix round 2 classified `1.5E2` by the dot rather than by the
             // exponent letter and made it a decimal; its three float entries
@@ -3197,12 +3206,10 @@ mod tests {
                 "{source} through toIon"
             );
         }
-        // The `number(type='BIGDECIMAL')` path still returns the object, so
-        // arithmetic on it is still refused (recorded in
-        // `oracle/baseline.txt`). Its COMPARISONS are exact since W9c Task 4
-        // fix round 1 (2026-10-08): every comparison is compiled to a
-        // `super::compare` call, so `> 1` is no longer unconditionally true.
-        assert!(render("{{ '1.5' | number(type='BIGDECIMAL') + 1 }}", "{}").is_err());
+        // The `number(type='BIGDECIMAL')` path is the same carrier: its
+        // comparisons are exact since W9c Task 4 fix round 1 and its
+        // arithmetic Kestra's since package #5a Task A4.
+        assert_eq!(ok("{{ '1.5' | number(type='BIGDECIMAL') + 1 }}"), "2.5");
         assert_eq!(ok("{{ '1' | number(type='BIGDECIMAL') > 1 }}"), "false");
 
         // Three writer facts that path DOES get right, all fixed here: a
@@ -4991,29 +4998,29 @@ mod tests {
             }
         }
 
-        /// Fix round 3, re-review P4 (W9c spec §15): arithmetic on an exact
-        /// decimal fails the render naming the operator, and nothing is
-        /// rounded; an int and a float compute. Package #5a, Task A3: an int
-        /// past `i128` is a `java.math.BigInteger`, which Pebble computes
-        /// through `longValue()` (its low 64 bits), so `kv('big') * 2` now
-        /// answers as Kestra does (A1 measured the same branch,
-        /// `arith-operand-biginteger-*`). The decimal is Task A4's.
+        /// Fix round 3, re-review P4 (W9c spec §15) made arithmetic on an
+        /// exact number a named refusal; package #5a reverses it (spec Q5).
+        /// Task A3: an int past `i128` is a `java.math.BigInteger`, which
+        /// Pebble computes through `longValue()` (its low 64 bits), so
+        /// `kv('big') * 2` answers as Kestra does (A1 measured the same
+        /// branch, `arith-operand-biginteger-*`). Task A4 (spec D3): a decimal
+        /// is `BigDecimal.valueOf(doubleValue())` on both sides and the result
+        /// a `BigDecimal`.
         #[test]
-        fn arithmetic_on_an_exact_decimal_or_big_int_is_a_named_refusal() {
+        fn arithmetic_on_an_exact_decimal_or_big_int_is_kestras() {
             let cx = FakeKv::default()
                 .with("d", dec("1.5"))
                 .with("big", int(&"9".repeat(40)))
                 .with("i", int("41"))
                 .with("f", KvData::Number(KvNumber::Float(1.5)))
                 .cx();
-            for (call, op) in [("{{ kv('d') + 1 }}", "+"), ("{{ 1 - kv('d') }}", "-")] {
-                let e = render(call, &cx).expect_err(call);
-                assert!(
-                    e.contains(&format!("tried to use {op} operator"))
-                        && e.contains("unsupported types"),
-                    "{call}: {e}"
-                );
-            }
+            assert_eq!(render("{{ kv('d') + 1 }}", &cx).unwrap(), "2.5");
+            assert_eq!(render("{{ 1 - kv('d') }}", &cx).unwrap(), "-0.5");
+            assert_eq!(render("{{ kv('d') * 2 }}", &cx).unwrap(), "3.00");
+            assert_eq!(
+                render("{{ (kv('d') * 2) | className }}", &cx).unwrap(),
+                "java.math.BigDecimal"
+            );
             // (10^40 - 1) mod 2^64 is -5047021154770878465; doubled, wrapped.
             assert_eq!(
                 render("{{ kv('big') * 2 }}", &cx).unwrap(),
@@ -5120,9 +5127,8 @@ mod tests {
             // refuses (spec D1).
             let e = render("{{ kv('m2') < kv('m1') < kv('d') }}", &cx).unwrap_err();
             assert!(e.contains("Could not perform less than comparison"), "{e}");
-            // Arithmetic stays a named refusal.
-            let e = render("{{ kv('d') + 1 }}", &cx).unwrap_err();
-            assert!(e.contains("tried to use + operator"), "{e}");
+            // Arithmetic is Kestra's since package #5a Task A4.
+            assert_eq!(render("{{ kv('d') + 1 }}", &cx).unwrap(), "2.5");
         }
 
         /// w9c `kv_function.eom_*` (chosen: Kestra throws a raw

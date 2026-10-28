@@ -1346,8 +1346,11 @@ mod tests {
         ] {
             assert_eq!(render(template).unwrap(), want, "{template}");
         }
-        let e = render("{{ '1.5' | number(type='BIGDECIMAL') + 1 }}").unwrap_err();
-        assert!(e.contains("tried to use + operator"), "{e}");
+        // Arithmetic is Kestra's since package #5a Task A4 (spec D3).
+        assert_eq!(
+            render("{{ '1.5' | number(type='BIGDECIMAL') + 1 }}").unwrap(),
+            "2.5"
+        );
     }
 
     /// `sort` orders `BigDecimal`s by value; it refused them before.

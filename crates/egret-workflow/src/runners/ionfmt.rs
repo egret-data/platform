@@ -1084,40 +1084,36 @@ fn ion_number(token: &str) -> Option<Result<MjValue, String>> {
             Err(_) => Err(format!("ion integer out of range: {token}")),
         });
     }
-    // **Every non-integer Ion number is an `f64` here, and Kestra splits them
-    // in two.** An `e`/`E` exponent is a `java.lang.Double` and a `d`/`D` one
-    // or a bare `.` is a `java.math.BigDecimal`, which is a first-class number
-    // there: `1.5 * 2` is `3.00`, `1.5 > 1` is `true`, `(1.5 + 1) | className`
-    // is `java.math.BigDecimal`.
+    // **Kestra splits the non-integer Ion numbers in two**: an `e`/`E`
+    // exponent is a `java.lang.Double`, a `d`/`D` one or a bare `.` is a
+    // `java.math.BigDecimal`, which keeps its scale (`1.50` prints `1.50`,
+    // `1d2` prints `100` and serialises `1E+2`) and is a first-class number:
+    // `1.5 * 2` is `3.00`, `1.5 > 1` is `true`.
     //
-    // **It cannot be one here, and that is a property of minijinja rather than
-    // a choice.** `filters::BigNumber` is an `Object`, and `value::ops::coerce`
-    // matches on `ValueRepr` alone with no object arm, while `Ord for Value`
-    // compares `kind()` FIRST and `ValueKind::Plain` sorts above
-    // `ValueKind::Number`. So routing Ion decimals through `BigNumber` — which
-    // an earlier cut did, to keep the scale — made every `+ - * / %` an error
-    // and made **every `>`/`>=` unconditionally true and every `<`/`<=`
-    // unconditionally false**, silently. `Object::custom_cmp` does not help:
-    // it is consulted only when both sides are objects of the same type.
-    //
-    // Ion is the format Kestra task outputs are written in, so
-    // `{{ fromIon(...) }}` followed by arithmetic is the ordinary case. A
-    // wrong SPELLING is recorded; a wrong COMPARISON is not acceptable, so the
-    // scale is what gives way. Five entries record what that costs, and
-    // `filter-number-bigdecimal-is-not-a-number-here` records the same hole on
-    // the `number(type='BIGDECIMAL')` path, which still has it for
-    // arithmetic. (2026-10-08, W9c Task 4 fix round 1: its COMPARISONS are
-    // exact now -- `super::cmp_rewrite` compiles every comparison to a
-    // `super::compare` call -- but arithmetic is still refused, so the
-    // reasoning above still holds for this path.)
+    // Package #5a Task A4 (spec D3, Q5): a decimal is a `filters::BigNumber`
+    // again. W2 Task 7 fix round 3 had made it an `f64` because minijinja's
+    // own operators refused an object and ordered it above every number; the
+    // comparison operators are `super::compare`'s since W9c Task 4 and the
+    // arithmetic ones `super::arith`'s since Task A3, and A4 ported
+    // `BigDecimal` arithmetic into the latter, so the reason is gone.
     let signed = if negative {
         format!("-{cleaned}")
     } else {
         cleaned
     };
-    // A decimal's exponent letter is the only difference from a float's.
-    let normalised = signed.replacen(['d', 'D'], "e", 1);
-    let value: f64 = normalised.parse().ok()?;
+    if !signed.contains(['e', 'E']) {
+        let java = signed.replacen(['d', 'D'], "E", 1);
+        return match super::filters::big_decimal(&java) {
+            Some(value) => Some(Ok(value)),
+            // Well-formed but past the output cap `big_decimal` shares with
+            // `number(type='BIGDECIMAL')`: an error, never a symbol.
+            None if java.parse::<f64>().is_ok() => {
+                Some(Err(format!("ion decimal too wide to print: {token}")))
+            }
+            None => None,
+        };
+    }
+    let value: f64 = signed.parse().ok()?;
     Some(Ok(MjValue::from(value)))
 }
 

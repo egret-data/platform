@@ -477,40 +477,15 @@ function-fromion-annotation-is-not-a-string
 
 # --- W2 Task 7, fix round 3.
 
-# DELIBERATE, and it is a REVERSAL of fix round 2's F4. An Ion decimal is a
-# `java.math.BigDecimal` in Kestra and a FIRST-CLASS NUMBER there: `1.5 * 2` is
-# `3.00`, `1.5 > 1` is `true`, `(1.5 + 1) | className` is `java.math.BigDecimal`.
-# It cannot be one here, and that is minijinja's shape rather than a choice:
-# `filters::BigNumber` is an `Object`, `value::ops::coerce` matches on
-# `ValueRepr` with no object arm, and `Ord for Value` compares `kind()` FIRST
-# with `ValueKind::Plain` above `ValueKind::Number`. Routing Ion decimals
-# through it made every `+ - * / %` an error and every `>`/`>=` unconditionally
-# TRUE, silently. A wrong spelling is recorded; a wrong comparison is not
-# acceptable, so the scale is what gives way. These are what that costs.
-function-fromion-decimal-exponent
-function-fromion-decimal-exponent-class
-function-fromion-decimal-exponent-round-trip
-function-fromion-decimal-exponent-through-tojson
-function-fromion-decimal-keeps-its-scale
-function-fromion-decimal-negative-zero
-function-fromion-decimal-scale-zero
-function-fromion-decimal-scale-zero-round-trip
-function-fromion-decimal-wide
-function-fromion-decimal-with-a-dot
-function-fromion-decimal-with-a-dot-class
-function-fromion-decimal-multiplication-loses-the-scale
-
-# KNOWN and PRE-EXISTING, on the path that still routes into that hole:
-# `number(type='BIGDECIMAL')` returns the same `Object`, so arithmetic on it is
-# an error here. Recorded rather than fixed because fixing it means a numeric
-# `ValueRepr`, which is the scale again -- but recorded, because before this
-# round nothing in the corpus could see it.
-# 2026-10-08 (W9c Task 4 fix round 1): its COMPARISONS are fixed --
-# `runners::cmp_rewrite` compiles every comparison to a `runners::compare` call
-# that compares a `BigDecimal`/`BigInteger` exactly -- so
-# `filter-number-bigdecimal-comparison` left this file. Arithmetic stays a
-# named refusal (the W9c ruling), so this one stays.
-filter-number-bigdecimal-is-not-a-number-here
+# (W2 Task 7 fix round 3 recorded twelve `function-fromion-decimal-*` entries
+# here, DELIBERATE: an Ion decimal was an `f64` because minijinja's own
+# operators refused a `filters::BigNumber` and ordered it above every number,
+# so the scale gave way. It also recorded `filter-number-bigdecimal-is-not-a-
+# number-here`: arithmetic on `number(type='BIGDECIMAL')` was refused (the
+# W9c ruling). Package #5a Task A4 (2026-10-29, spec D3, Q5 reverses W9c's
+# ruling) ported `BigDecimal` arithmetic into `runners::arith` -- comparisons
+# were already `runners::compare`'s -- and made an Ion decimal a `BigNumber`
+# again, so all thirteen BANKED.)
 
 # DELIBERATE: `IonValue.toString()` re-serialises CANONICALLY and egret keeps
 # the source text, so the two agree only where the source already is canonical.
@@ -854,16 +829,10 @@ loop-index-and-revindex
 # thirty-six BANKED with Task A3 (2026-10-28), which compiles every binary
 # `+ - * / %` into `runners::arith`'s port of Pebble's `OperatorUtils`.)
 
-# A4 (D3): BigDecimal. Kestra keeps the scale and divides at DECIMAL128;
-# egret computes a `fromIon` decimal as a Double and refuses a BigNumber.
-arith-zero-bigdecimal-div
-arith-zero-bigdecimal-mod
-arith-bigdecimal-mul-scale
-arith-bigdecimal-div-34th-digit
-arith-bigdecimal-div-34th-digit-rounds-up
-arith-bigdecimal-thirty-digits
-arith-bigdecimal-number-mul
-arith-bigdecimal-classname
+# (A4 (D3)'s eight were here -- `arith-zero-bigdecimal-div`/`-mod` and the
+# `arith-bigdecimal-*` scale, DECIMAL128 and className probes -- and all
+# eight BANKED with Task A4 (2026-10-29), which ports `bigDecimalOperation`
+# on `num-bigint` (`runners::arith::decimal`).)
 
 # A5 (D6): `??`/`???` through a missing member or index chain, and a lazy
 # right side. egret's strict undefined raises before kestra_null_coalesce runs.

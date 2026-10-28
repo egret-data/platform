@@ -501,12 +501,16 @@ filter-capitalize-of-a-defaulted-empty-array        test:the_collection_kind_gat
 # twelve Long/operand entries below now fail with Kestra's own text and are
 # re-paired with the test that asserts it; the three BigDecimal ones are
 # Task A4's.
+# Task A4 (2026-10-29) computes a BigDecimal as `bigDecimalOperation` does
+# (`runners::arith::decimal`): `/ 0` and `% 0` on one fail with Kestra's own
+# `Could not perform division` / `greater modulus`, so the two baselined ones
+# banked and all three are paired with the test that asserts that text.
 arith-zero-long-div                                 test:an_operation_kestra_refuses_fails_with_kestras_text
 arith-zero-long-div-context                         test:an_operation_kestra_refuses_fails_with_kestras_text
 arith-zero-long-mod                                 test:an_operation_kestra_refuses_fails_with_kestras_text
-arith-zero-bigdecimal-div                           baselined
-arith-zero-bigdecimal-mod                           baselined
-arith-zero-bigdecimal-number-div                    test:arithmetic_kestra_refuses_is_refused_here_too
+arith-zero-bigdecimal-div                           test:big_decimal_arithmetic_is_javas
+arith-zero-bigdecimal-mod                           test:big_decimal_arithmetic_is_javas
+arith-zero-bigdecimal-number-div                    test:big_decimal_arithmetic_is_javas
 arith-operand-null-left                             test:an_operation_kestra_refuses_fails_with_kestras_text
 arith-operand-null-right                            test:an_operation_kestra_refuses_fails_with_kestras_text
 arith-operand-boolean                               test:an_operation_kestra_refuses_fails_with_kestras_text

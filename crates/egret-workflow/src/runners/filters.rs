@@ -1570,6 +1570,14 @@ fn abs(value: MjValue) -> Result<MjValue, MjError> {
     if is_java_null(&value) {
         return Err(pebble_error("Can not pass null value to \"abs\" filter."));
     }
+    // `BigDecimal.abs()` / `BigInteger.abs()`: the sign goes, the scale stays.
+    if let Some(big) = value.downcast_object_ref::<BigNumber>() {
+        return Ok(MjValue::from_object(BigNumber {
+            text: big.text.trim_start_matches('-').to_string(),
+            canonical: big.canonical.trim_start_matches('-').to_string(),
+            class_name: big.class_name,
+        }));
+    }
     if value.kind() != ValueKind::Number {
         return Err(pebble_error(
             "The 'abs' filter does require a number as input.",
@@ -2852,9 +2860,11 @@ fn line_separator(input: &str) -> &'static str {
 /// [`java_class_name`]'s catch-all — measured as
 /// `filter-classname-bigdecimal` / `filter-classname-biginteger`.
 ///
-/// It is deliberately **not** arithmetic:
-/// `{{ x | number(type='BIGDECIMAL') + 1 }}` is not supported here, and
-/// Pebble does not meaningfully support it either.
+/// Arithmetic on it is Pebble's (package #5a Task A4, spec D3): the
+/// operators are compiled to `super::arith`, which computes a `BigDecimal`
+/// operand as `bigDecimalOperation` does and returns a new `BigNumber`.
+/// minijinja's own operators (a region the compile passes do not mirror,
+/// such as `{% do %}`) still refuse it.
 #[derive(Debug)]
 struct BigNumber {
     /// `toPlainString()`: what a **bare** `{{ x }}` renders, measured.
@@ -2879,6 +2889,14 @@ impl Object for BigNumber {
 
     fn render(self: &Arc<Self>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.text)
+    }
+
+    /// Package #5a Task A4: Pebble's `{% if %}` casts a `Number` to a
+    /// boolean as `TypeUtils.compatibleCast` does, `doubleValue()` neither
+    /// NaN nor zero, so a zero decimal is false (an object is otherwise
+    /// always true in minijinja). `1E-400` is false too: its double is `0.0`.
+    fn is_true(self: &Arc<Self>) -> bool {
+        !matches!(self.text.parse::<f64>(), Ok(d) if d == 0.0)
     }
 
     /// W9c Task 4 fix round 1: two `BigNumber`s compare by value, wherever
@@ -2933,8 +2951,10 @@ pub(super) fn big_number_text(value: &MjValue) -> Option<String> {
 /// with their scale): a bare `{{ x }}` prints `plain`, a serialiser writes
 /// `BigDecimal.toString()`. `None` when `plain` is not a decimal literal.
 ///
-/// Not arithmetic, as no [`BigNumber`] is: `{{ kv('d') + 1 }}` fails the
-/// render naming the operator, never computes on an `f64` (W9c spec §15).
+/// Also the result of `super::arith`'s `BigDecimal` arithmetic (from its
+/// `unscaledE-scale` text) and an Ion decimal from `fromIon`. `{{ kv('d') +
+/// 1 }}` computes as Kestra does (package #5a Task A4, spec D3, which
+/// reverses W9c spec §15's refusal).
 pub(crate) fn big_decimal(plain: &str) -> Option<MjValue> {
     let (text, canonical) = big_decimal_strings(plain)?;
     Some(MjValue::from_object(BigNumber {

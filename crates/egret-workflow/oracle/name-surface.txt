@@ -108,7 +108,7 @@ filter	merge	yes	no	-	Pebble core; never in a W2 batch
 filter	min	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
 filter	nindent	yes	yes	filter-nindent	-
 filter	nl2br	yes	no	-	Pebble core; never in a W2 batch
-filter	number	yes	yes	filter-number-bigdecimal-is-not-a-number-here	a `BigDecimal` is an object in minijinja and every operator on it would break; recorded in W2 Task 7's third round
+filter	number	yes	yes	filter-number-bigdecimal-is-not-a-number-here	-
 filter	numberformat	yes	no	-	Pebble core; never in a W2 batch
 filter	pprint	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
 filter	raw	yes	no	-	Pebble core; egret handles raw REGIONS in `env::replace_raw_tags`, but not the filter

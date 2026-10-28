@@ -1981,7 +1981,8 @@ pub fn render_str(template: &str, cx: &RenderContext) -> Result<String, RenderEr
 /// registered for this render only. It writes exactly `toJson`'s text, and
 /// it also converts the value it was given straight to [`KvData`]
 /// ([`typed_data`]), so an exact number keeps its kind and digits: a
-/// `BigDecimal` (a decimal `kv()` read, `number(type='BIGDECIMAL')`) is a
+/// `BigDecimal` (a decimal `kv()` read, `number(type='BIGDECIMAL')`, a
+/// `fromIon` decimal, the result of arithmetic on any of them) is a
 /// `KvNumber::Decimal`, a `BigInteger` a `KvNumber::Int`. Through `toJson`'s
 /// text alone, `serde_json` and `KvData::from_json`, the decimal
 /// `123456789012345678901234567890.5` became the float
@@ -4057,7 +4058,8 @@ mod tests {
     /// failing (`OperatorUtils` throws `Could not perform …` for each). Since
     /// Task A3 every Long/operand row fails with Kestra's own text, which
     /// `runners::arith`'s `an_operation_kestra_refuses_fails_with_kestras_text`
-    /// asserts and pairs; the BigDecimal row is Task A4's.
+    /// asserts and pairs; since Task A4 the BigDecimal row does too, through
+    /// `runners::arith`'s `big_decimal_arithmetic_is_javas`.
     #[test]
     fn arithmetic_kestra_refuses_is_refused_here_too() {
         for (source, ctx) in [
