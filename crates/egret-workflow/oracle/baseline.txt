@@ -887,46 +887,24 @@ coalesce-non-path-left-missing-right
 # Package #5b, Task B1 (2026-10-29): the probe batches of
 # docs/en/plans/2026-10-28-workflow-renderer.md B1, regenerated offline. Each
 # line below fails today; the comment above each group names the task that
-# banks it. Corpus order inside a group. No recorded divergence among them.
+# banks it. Corpus order inside a group. No recorded divergence among them
+# when B1 wrote them; Task B3 re-attributed one (below) as D2's.
 
 # (B2 (D8)'s 49 were here: the tests `null`, `empty`, `map` and `json`, and
 # `even`/`odd`/`iterable` on a String or a Double. Task B2 (2026-10-29)
 # BANKED all 49, with the seven old lines above.)
 
-# B3 (D10)'s 29: `max`/`min` are unknown functions here. Measured: one
-# argument is returned as it is (`max([1, 2])`, `max(null)`, `max()` is empty),
-# nulls are skipped, a tie keeps the FIRST operand with its own type
-# (`max(2.0, 2)` is `2.0`, `max(2, 2.0)` is `2`, `max(fromIon('2.50'), 2.5)`
-# is `2.50`).
-function-max-longs
-function-min-longs
-function-min-three
-function-max-long-double
-function-min-long-double
-function-max-double-long-tie
-function-max-long-double-tie
-function-min-long-double-tie
-function-max-negative
-function-max-one-argument
-function-max-one-list
-function-max-one-string
-function-max-one-null
-function-min-null-first
-function-max-null-last
-function-max-null-middle
-function-max-two-nulls
-function-max-no-argument
-function-max-context
-function-min-context-double
-function-max-bigdecimal-long
-function-min-bigdecimal-long
-function-max-bigdecimal-double
-function-max-bigdecimal-tie
-function-max-double-bigdecimal-tie
-function-max-classname-long-double
-function-max-classname-bigdecimal
+# (B3 (D10)'s 29 were here: `max`/`min`. Task B3 (2026-10-29) BANKED 28;
+# the 29th stays, re-attributed:)
+#
+# RECORDED DIVERGENCE (spec D2, Integer vs Long; the cause of
+# `filter-classname-literal-int` above), re-attributed by Task B3
+# (2026-10-29): `max`/`min` are ported and `min(fromIon('2.50'), 1)` returns
+# the literal `1` itself, as Kestra does, but egret's `className` names a
+# small integer `java.lang.Integer` while Kestra's literal is a Long. The
+# value matches (`function-min-bigdecimal-long` banked); only its class name
+# does not.
 function-min-classname-long
-function-max-in-arithmetic
 
 # B4 (D13)'s 53: the ten filters (`abbreviate`, `base64encode`,
 # `base64decode`, `merge`, `nl2br`, `numberformat`, `raw`, `rsort`, `sha256`,

@@ -268,7 +268,11 @@ heading, each group named with the task that banks it (see "What package #5b's
 Task B1 batches measured" below) -- and **273 of 1753** after package #5b's Task
 B2 (2026-10-29) banked 56: its 49 `#5b red` lines and seven old ones
 (`coalesce-is-not-null`, `test-json-true`, `test-json-false`, `test-even`,
-`test-odd`, `test-iterable`, `null-literal-is-null-test`).
+`test-odd`, `test-iterable`, `null-literal-is-null-test`) -- and **245 of
+1753** after package #5b's Task B3 (2026-10-29) banked 28 of its 29 `#5b red`
+lines (`max`/`min`) and re-attributed the 29th, `function-min-classname-long`,
+as spec D2's Integer/Long divergence (see "What package #5b's Task B3
+measured").
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
@@ -5671,6 +5675,25 @@ A4 it is a `java.math.BigDecimal` (Q5 reverses the W9c refusal), and since A8 a
 unary minus on one is Pebble's `multiply(-1, x)` (`-fromIon(ion='1.50')` is
 `-1.50`). The oracle ends #5a at **107 of 1493** baselined: 103 lines from
 before A1 and those four.
+
+## What package #5b's Task B3 measured (2026-10-29)
+
+Plan B3, spec D10 (and §2.2 item 14). `runners::functions` registers Pebble
+core's `max` and `min` as `MaxFunction`/`MinFunction` read with `javap -c -p`:
+the result starts null, a null result takes the next argument unchecked, and
+otherwise `OperatorUtils.gt(arg, result)` (`lt` for `min`) replaces it. The
+comparison is `runners::compare::math_comparison`: A2's numeric order without
+Kestra's string arm (`OperatorUtils` casts both operands to `Number`, so
+`max('a', 'b')` fails), a null on either side `false`, and every other pair
+`invalid operands for mathematical comparison [GREATER_THAN]` (`[LESS_THAN]`
+under `min`). 28 of B1's 29 lines banked (273 -> 245). B1's placeholder
+`max_and_min_refuse_what_pebble_cannot_compare` moved from `runners::env` to
+`runners::functions` under the same name and now asserts Kestra's text, so
+the five error-class pairs fail for Kestra's reason, not as an unknown
+function. One line stays: `function-min-classname-long`, whose value (`1`,
+the literal itself) matches while egret's `className` says
+`java.lang.Integer` for Kestra's Long -- the D2 cause of
+`filter-classname-literal-int`.
 
 ## What package #5b's Task B2 measured (2026-10-29)
 

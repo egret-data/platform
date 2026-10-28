@@ -4326,9 +4326,10 @@ mod tests {
     // A6 ported `contains` and its refusal is asserted with Kestra's text by
     // `runners::operators::tests::contains_on_what_pebble_cannot_search_fails_with_kestras_text`.)
 
-    /// Asserts that every `(source, context)` row fails to render. The four
-    /// tests below are package #5b Task B1's pairs for its born-matching
-    /// error-class entries (`oracle/error-class-pairs.txt`).
+    /// Asserts that every `(source, context)` row fails to render. B1 wrote
+    /// four tests as the pairs of its born-matching error-class entries
+    /// (`oracle/error-class-pairs.txt`); B2 tightened its own and B3 moved
+    /// `max`/`min`'s to `runners::functions`, so the two below still use this.
     fn assert_each_fails(rows: &[(&str, JsonValue)]) {
         for (source, ctx) in rows {
             let got = render(source, ctx.clone());
@@ -4381,21 +4382,9 @@ mod tests {
         }
     }
 
-    /// Package #5b, Task B1 (spec D10): `max`/`min` refuse an operand that is
-    /// not a number (`invalid operands for mathematical comparison
-    /// [GREATER_THAN]`, `[LESS_THAN]` for `min`). **Placeholder:** today they
-    /// fail because neither function exists here. Task B3 must keep every row
-    /// failing for Kestra's reason, then tighten this to Kestra's text.
-    #[test]
-    fn max_and_min_refuse_what_pebble_cannot_compare() {
-        assert_each_fails(&[
-            ("{{ max('a', 'b') }}", json!({})),
-            ("{{ min('a', 1) }}", json!({})),
-            ("{{ max('5', 1) }}", json!({})),
-            ("{{ max(1, true) }}", json!({})),
-            ("{{ max([1, 2], 3) }}", json!({})),
-        ]);
-    }
+    // (`max_and_min_refuse_what_pebble_cannot_compare` was here, Task B1's
+    // placeholder; Task B3 ported `max`/`min` and its refusal is asserted with
+    // Kestra's text by the test of that name in `runners::functions::tests`.)
 
     /// Package #5b, Task B1 (spec D13): inputs the ten filters refuse in
     /// Kestra: a negative `abbreviate` width, a non-string `abbreviate` input,

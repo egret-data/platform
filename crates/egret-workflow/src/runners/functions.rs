@@ -40,6 +40,9 @@
 //!
 //! W9b Task 4 implemented fileURI over namespace files, and W9c Task 4 kv
 //! over the KV store, both through the same scope
+//!
+//! Package #5b Task B3 added two of Pebble core's own (not Kestra's), which
+//! the built engine also binds: max min
 //! ```
 //!
 //! # Seven of Task 8's "service-backed" functions reach no service
@@ -132,6 +135,7 @@ use rand::RngCore;
 
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 
+use super::compare::{self, MathComparison};
 use super::env::{self, OrderedMap};
 use super::filters::{is_java_null, java_class_name, pebble_error, Args, DateArgs};
 use super::ionfmt::read_ion;
@@ -139,7 +143,8 @@ use super::javafmt::{parse_iso, Zdt, Zone};
 use super::jqsandbox::MAX_VALUE_DEPTH;
 use crate::storage::kv::value::{KvData, KvNumber};
 
-/// Registers the 19 pure functions onto `env`.
+/// Registers the 19 pure functions onto `env`, and the rest of this module's
+/// names (package #5b Task B3 added Pebble core's `max` and `min`).
 ///
 /// **`range` is an override, not an addition** — see this module's doc.
 pub(super) fn register(env: &mut Environment<'static>) {
@@ -196,6 +201,15 @@ pub(super) fn register(env: &mut Environment<'static>) {
     // W9c Task 4: `kv`, over the KV store, through the same scope.
     env.add_function("kv", kv_function);
 
+    // Package #5b Task B3 (spec D10): Pebble core's `max`/`min`, on the
+    // comparison of `super::compare`.
+    env.add_function("max", |state: &State, rest: Rest<MjValue>| {
+        extremum(state, rest, MathComparison::GreaterThan)
+    });
+    env.add_function("min", |state: &State, rest: Rest<MjValue>| {
+        extremum(state, rest, MathComparison::LessThan)
+    });
+
     // W2 Task 8's refusals, six since W9c Task 4. See [`not_implemented`]
     // for the message shape and why the oracle cannot check it.
     for (name, refusal) in REFUSED {
@@ -211,6 +225,50 @@ pub(super) fn register(env: &mut Environment<'static>) {
             },
         );
     }
+}
+
+/// Pebble 4.1.2's `MaxFunction` / `MinFunction` (package #5b Task B3, spec
+/// D10), read with `javap -c -p` from the pinned jar:
+///
+/// ```text
+/// result = null
+/// for i in 0.. while args.containsKey(String.valueOf(i)):
+///     arg = args.get(i)
+///     if result == null: result = arg          // taken unchecked
+///     else if OperatorUtils.gt(arg, result): result = arg   // `lt` for min
+/// return result
+/// ```
+///
+/// So a tie keeps the FIRST operand with its own type (`max(2.0, 2)` is
+/// `2.0`), nulls are skipped (`gt` answers `false` on a null before it casts),
+/// one argument is returned as it is (`max([1, 2])`, `max('a')`), and no
+/// argument or only nulls is null. The comparison and its refusal are
+/// [`compare::math_comparison`]'s.
+///
+/// `getArgumentNames()` is `null`, so Pebble reads only the positional keys
+/// `"0"`, `"1"`, …; a keyword argument is ignored here, the class the
+/// `dayOfWeek` row of `oracle/name-surface.txt` records. Every argument is
+/// evaluated before the loop (Pebble evaluates the argument list first), so a
+/// strict undefined anywhere fails as the VM's own undefined, ahead of any
+/// comparison.
+fn extremum(state: &State, rest: Rest<MjValue>, which: MathComparison) -> Result<MjValue, MjError> {
+    let args = Args::new(rest).positional_only();
+    for arg in &args {
+        compare::assert_defined(state, arg)?;
+    }
+    let mut result = MjValue::from(());
+    for arg in args {
+        if result.is_none() {
+            // A silent undefined (a missing `else`) is egret's spelling of
+            // Java null; keep the result a real null.
+            if !arg.is_undefined() {
+                result = arg;
+            }
+        } else if compare::math_comparison(state, which, &arg, &result)? {
+            result = arg;
+        }
+    }
+    Ok(result)
 }
 
 /// Why a [`REFUSED`] name refuses.
@@ -2545,6 +2603,86 @@ mod tests {
     // so the corpus entry is not what carries them. See
     // `oracle/error-class.txt` and `oracle/error-class-pairs.txt`.
     // -----------------------------------------------------------------
+
+    /// Package #5b, Task B3 (spec D10): `max`/`min` refuse an operand that is
+    /// not a number with `OperatorUtils`' own text, whose bracketed word is
+    /// the `Comparison` constant (`GREATER_THAN` under `max`, `LESS_THAN`
+    /// under `min`), not the operand. Two strings fail too: `OperatorUtils`
+    /// has no string arm. The pair of B1's five error-class entries
+    /// (`oracle/error-class-pairs.txt`); before this task they failed as an
+    /// unknown function.
+    #[test]
+    fn max_and_min_refuse_what_pebble_cannot_compare() {
+        for (source, want) in [
+            ("{{ max('a', 'b') }}", "[GREATER_THAN]"),
+            ("{{ min('a', 1) }}", "[LESS_THAN]"),
+            ("{{ max('5', 1) }}", "[GREATER_THAN]"),
+            ("{{ max(1, true) }}", "[GREATER_THAN]"),
+            ("{{ max([1, 2], 3) }}", "[GREATER_THAN]"),
+            ("{{ min(1, {'a': 1}) }}", "[LESS_THAN]"),
+        ] {
+            let message = err(source);
+            assert!(
+                message.contains(&format!(
+                    "invalid operands for mathematical comparison {want}"
+                )),
+                "{source}: {message}"
+            );
+            assert!(!message.contains("unknown function"), "{source}: {message}");
+        }
+    }
+
+    /// Package #5b, Task B3 (spec D10, §2.2 item 14): `MaxFunction` and
+    /// `MinFunction`, read with `javap -c -p`. The result starts as Java
+    /// `null`; a null result takes the next argument as it is; otherwise
+    /// `gt(arg, result)` (`lt` for `min`) replaces it. So a tie keeps the
+    /// FIRST operand with its own type, nulls are skipped, one argument is
+    /// returned unchecked, and no argument (or only nulls) is null.
+    #[test]
+    fn max_and_min_follow_pebbles_loop() {
+        for (source, want) in [
+            ("{{ max(1, 5, 3) }}", "5"),
+            ("{{ min(3, 1, 2) }}", "1"),
+            ("{{ max(1, 2.5) }}", "2.5"),
+            ("{{ min(1, 2.5) }}", "1"),
+            ("{{ max(2.0, 2) }}", "2.0"),
+            ("{{ max(2, 2.0) }}", "2"),
+            ("{{ min(2.0, 2) }}", "2.0"),
+            ("{{ max(-1, -5) }}", "-1"),
+            ("{{ max('a') }}", "a"),
+            ("{{ max([1, 2]) }}", "[1,2]"),
+            ("<{{ max() }}>", "<>"),
+            ("<{{ min(null) }}>", "<>"),
+            ("<{{ max(null, null) }}>", "<>"),
+            ("{{ min(null, 1) }}", "1"),
+            ("{{ max(1, null) }}", "1"),
+            ("{{ max(1, null, 3) }}", "3"),
+            // A null is skipped before the `(Number)` cast, so a string
+            // beside only nulls is never compared.
+            ("{{ max('a', null) }}", "a"),
+            ("{{ max(1, 2.5) | className }}", "java.lang.Double"),
+            // Kestra answers `java.lang.Long` (a literal is a Long); egret's
+            // `className` cannot tell a literal from a context Integer, the
+            // recorded D2 divergence `function-min-classname-long` stays
+            // baselined under. The VALUE is the Long's own.
+            ("{{ min(fromIon(ion='2.50'), 1) }}", "1"),
+            (
+                "{{ max(fromIon(ion='2.50'), 1) | className }}",
+                "java.math.BigDecimal",
+            ),
+            ("{{ max(fromIon(ion='2.50'), 1) }}", "2.50"),
+            ("{{ max(fromIon(ion='2.50'), 2.5) }}", "2.50"),
+            ("{{ max(2.5, fromIon(ion='2.50')) }}", "2.5"),
+            ("{{ max(1, 2) + 1 }}", "3"),
+        ] {
+            assert_eq!(ok(source), want, "{source}");
+        }
+        // A silent undefined (a missing `else`) is a null; a strict one
+        // fails as the VM's own undefined, as Kestra's strict variables do.
+        assert_eq!(ok("{{ max((1 if false), 4) }}"), "4");
+        let message = err("{{ max(1, missing) }}");
+        assert!(message.contains("undefined"), "{message}");
+    }
 
     #[test]
     fn range_refuses_an_increment_that_cannot_advance_it() {

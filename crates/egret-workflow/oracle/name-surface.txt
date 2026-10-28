@@ -201,8 +201,8 @@ function	kestra_undefined_coalesce	no	yes	-	egret-only by construction: `super::
 function	ksuid	yes	yes	function-ksuid	-
 function	kv	yes	yes	function-kv	-
 function	loopOutputs	yes	yes	function-loopoutputs	-
-function	max	yes	no	-	Pebble core; never in a W2 batch
-function	min	yes	no	-	Pebble core; never in a W2 batch
+function	max	yes	yes	function-max-double-long-tie	-
+function	min	yes	yes	function-min-classname-long	the value is Kestra's (package #5b Task B3); `className` names the literal it returns `java.lang.Integer` where Kestra's is a Long -- spec D2's Integer/Long divergence, recorded in `baseline.txt`
 function	monthOfYear	yes	yes	function-monthofyear	-
 function	namespace	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_GLOBALS` removes it -- the engine answers `Function or Macro [x] does not exist.`
 function	nanoId	yes	yes	function-nanoid	-
