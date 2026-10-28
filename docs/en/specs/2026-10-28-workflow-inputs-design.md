@@ -46,6 +46,8 @@ Resume with `onResume` inputs and resume-validate (#9). Replay with new inputs (
 
 `invalids/inputs-with-multiple-constraint-violations` (D8) and, if D10 allows, `invalids/inputs-bad-validator-syntax`. Everything else must not move: **301 / 52 / 52 / 0 → 301 / 50 / 50 / 0** at best, 301 / 51 / 51 / 0 otherwise. Census `LIVE` 295 is unchanged.
 
+**Measured at Task A6 (2026-10-28): 301 / 50 / 50 / 0**, `(301, 251, 50)`; census 295 live, 25 validate-refused, 21 unknown type, unchanged. Both entries banked: the multi-constraint entry at the new `Seam::Start` (egret's lines equal Kestra's recorded 422 as a multiset), the validator entry at `Seam::Save` (`input_validator_invalid`). Details in `crates/egret-workflow/oracle-exec/README.md`, section "Workflow inputs #3 Task A6".
+
 ## 5. Tests
 
 A table test per type in `inputs_check` (valid, each error text, empty string, null). `dependsOn` enabled/disabled with `required`. One integration test per start path in D7 (API JSON, multipart, webhook, schedule, subflow child, replay not re-checked, Flow-trigger not checked, born-failed skip). The validate endpoint: always 200, every input listed, errors per input, nothing stored (row count unchanged). The drift tests (`openapi.json`, generated client) must pass. Frontend: the form's new checks and the server-error attribution.

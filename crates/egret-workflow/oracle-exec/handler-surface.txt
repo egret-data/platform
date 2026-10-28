@@ -320,27 +320,27 @@ Two rules, and they are deliberately different:
   file, with the entry named and the reason given; a ceiling that is too
   high costs nothing at all, which is why it would not be a ceiling.
 
-    249  reproduced today, and by nothing the driver removes
+    251  reproduced today, and by nothing the driver removes
       0  reproduced today ONLY because the feed supplies a terminal
          for a task type W3b has no handler for
      32  not reproduced today, and nothing found here blocks it
-     20  not reproduced today, and blocked -- by cause below
+     18  not reproduced today, and blocked -- by cause below
   -----
     301  TOTAL, the comparable entries
 
-  CEILING, feed removed  = 249 + 32 = **281**
-  CEILING, feed retained = 249 + 0 + 32 = 281
+  CEILING, feed removed  = 251 + 32 = **283**
+  CEILING, feed retained = 251 + 0 + 32 = 283
 
-  Today the ratchet matches 249. The two ceilings are the same
+  Today the ratchet matches 251. The two ceilings are the same
   quantity under the two answers Task 5 may give to `does the driver
   still feed a terminal for a task type it has no handler for?`. They are
   NOT the same set with a different name, and the composition is printed
   above so a reader cannot take one for the other.
 
-  **281 is the bound this package should be held to**, because removing
+  **283 is the bound this package should be held to**, because removing
   the feed is the stated intent of Task 5 step 4. If Task 5 keeps the
   feed for unhandled types it must say so, and then the bound is
-  281 -- reported as a decision, not as progress.
+  283 -- reported as a decision, not as progress.
 
   The 0 at risk, with the type whose terminal is fed:
 
@@ -383,7 +383,6 @@ Two rules, and they are deliberately different:
 
         4  construct  flow-level outputs:
         3  construct  flow sla:
-        3  refusal    egret over-accepts it -- W1's validation, not a handler
         2  clock      checkFrequency.maxDuration; the golden's iteration count carries the artifact's delay-poller latency
         1  construct  Loop outputs: over a file (STORE mode, executions/{iteration}/{n}.ion)
         1  construct  Pause behavior:
@@ -393,17 +392,18 @@ Two rules, and they are deliberately different:
         1  construct  finally:
         1  construct  flow concurrency:
         1  handler    io.kestra.plugin.core.kv.Set
+        1  refusal    egret over-accepts it -- W1's validation, not a handler
         1  render     Pebble's `empty` test, which egret's renderer leaves unknown
         1  render     a relational operator against a quoted operand; Pebble throws and minijinja answers
     -----
-       20  DISTINCT entries blocked (the rows above overlap)
+       18  DISTINCT entries blocked (the rows above overlap)
 
   The four causes the plan names, and where each landed:
 
         1  a missing handler
        13  a construct no W3b task owns
         0  a state RunState cannot hold
-        3  an over-acceptance -- W1's validation
+        1  an over-acceptance -- W1's validation
 
   `an unreachable ordered pair` and `an output the handler cannot
   produce` are the two causes the plan names that this derivation CANNOT
@@ -419,10 +419,10 @@ Two rules, and they are deliberately different:
         here: blocked: refusal/egret over-accepts it -- W1's validation, not a handler
     invalids/inputs-bad-validator-syntax
         W3a : over-accepted: a java.util.regex dialect
-        here: blocked: refusal/egret over-accepts it -- W1's validation, not a handler
+        here: reproduced today
     invalids/inputs-with-multiple-constraint-violations
         W3a : over-accepted: refused at a different seam
-        here: blocked: refusal/egret over-accepts it -- W1's validation, not a handler
+        here: reproduced today
     invalids/invalid-property
         W3a : over-accepted: an unrecognised plugin property
         here: reproduced today
@@ -465,7 +465,7 @@ Two rules, and they are deliberately different:
     valids/retry-failed-flow-duration        maxDuration with no elapsed time
     valids/retry-success                     WARNING, which RunState cannot hold
 
-    working expectation = 281 - 6 = 275
+    working expectation = 283 - 6 = 277
 
   Two of them deserve a sentence each:
 
