@@ -275,7 +275,7 @@ fn is_blank(v: &Value) -> bool {
     }
 }
 
-fn absent_or_false(v: Option<&Value>) -> bool {
+pub(crate) fn absent_or_false(v: Option<&Value>) -> bool {
     match v {
         None | Some(Value::Null) | Some(Value::Bool(false)) => true,
         Some(Value::String(s)) => s.trim() == "false",

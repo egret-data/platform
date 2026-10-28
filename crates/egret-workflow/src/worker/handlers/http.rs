@@ -291,10 +291,27 @@ pub(super) async fn prepare(
     let mut masks = MaskSet::new(resolved.values.iter());
     let failed = |masks: &MaskSet, m: &str| Ok(Err(Outcome::failed_with(masks.mask(m))));
 
-    let spec = match HttpSpec::from_value(&Value::Object(rendered.clone())) {
+    let mut spec = match HttpSpec::from_value(&Value::Object(rendered.clone())) {
         Ok(s) => s,
         Err(m) => return failed(&masks, &m),
     };
+    // `encryptBody` is Request's property only. On Download and SseRequest a
+    // stored flow that slipped past publish (where it is `unknown_property`)
+    // fails naming the task type, not with the D4 text about Request's `body`
+    // output, which [`build_request`] would give (package #4 Task C7, the C6
+    // review's concern). `false` is harmless and dropped.
+    if type_id != REQUEST {
+        if !crate::http::spec::absent_or_false(spec.encrypt_body.as_ref()) {
+            return failed(
+                &masks,
+                &format!(
+                    "encryptBody: not a property of {type_id} (Kestra declares it on \
+                     io.kestra.plugin.core.http.Request only). Remove it"
+                ),
+            );
+        }
+        spec.encrypt_body = None;
+    }
     let opts = match spec.options() {
         Ok(o) => o,
         Err(m) => return failed(&masks, &m),

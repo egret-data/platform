@@ -848,3 +848,45 @@ async fn the_d4_refusals_apply_to_download_and_sse() {
     }
     assert_eq!(s.hits.count(), 0, "no refused request was sent");
 }
+
+/// Package #4 Task C7 (the C6 review's concern): a stored Download or
+/// SseRequest carrying `encryptBody: true` (publish reports it as
+/// `unknown_property`, not as the Request-only D4 refusal) fails at run time
+/// naming its own type, not with Request's text about the `body` output, and
+/// sends nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn encrypt_body_on_download_and_sse_fails_naming_the_type() {
+    store();
+    let Some(db) = common::db().await else { return };
+    let s = serve().await;
+    let uri = s.url("/sse");
+    for ty in [DOWNLOAD, "io.kestra.plugin.fs.http.Download", SSE] {
+        let source = flow(&task(
+            "t",
+            ty,
+            &format!("    uri: {uri}\n    encryptBody: true\n"),
+        ));
+        let parsed = egret_workflow::spec::parse(&source).unwrap();
+        let report = egret_workflow::spec::validate_source(&source, &parsed);
+        let at_key: Vec<_> = report
+            .errors
+            .iter()
+            .filter(|e| e.path == "tasks.t.encryptBody")
+            .map(|e| e.code)
+            .collect();
+        assert_eq!(at_key, ["unknown_property"], "{ty}: {:?}", report.errors);
+        let r = run(&db, LOCAL, &source).await;
+        let (state, _, message) = r.task("t").await;
+        assert_eq!(state, "FAILED", "{ty}");
+        let message = message.unwrap();
+        assert!(
+            message.starts_with("encryptBody: not a property of "),
+            "{ty}: {message}"
+        );
+        assert!(!message.contains("`body` output"), "{ty}: {message}");
+        let canonical = if ty == SSE { SSE } else { DOWNLOAD };
+        assert!(message.contains(canonical), "{ty}: {message}");
+        assert!(r.files().await.is_empty());
+    }
+    assert_eq!(s.hits.count(), 0, "nothing was sent");
+}
