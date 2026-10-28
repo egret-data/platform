@@ -17,7 +17,9 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, thiserror::Error)]
 pub enum WebhookError {
-    #[error("{0}")]
+    // The shared guard's texts carry no feature name; "webhook " restores
+    // the texts this error had before the guard moved to egret-egress.
+    #[error("webhook {0}")]
     Destination(#[from] super::destination::DestinationError),
     #[error("webhook request failed: {0}")]
     Transport(String),
@@ -158,6 +160,26 @@ mod tests {
         assert_eq!(v["value"], 12.0);
         assert_eq!(v["rows"][0]["n"], 12);
         assert!(v["triggered_at"].is_string());
+    }
+
+    #[test]
+    fn destination_errors_read_as_they_did_before_the_guard_moved() {
+        // Delivery errors are stored and shown; moving the guard to
+        // egret-egress must not change a word of them.
+        use super::super::destination::DestinationError as D;
+        let cases = [
+            (D::BadUrl, "webhook url is not a valid url"),
+            (D::BadScheme, "webhook url must be http or https"),
+            (D::NoHost, "webhook url has no host"),
+            (D::Unresolvable, "webhook host does not resolve"),
+            (
+                D::Blocked("169.254.169.254".parse().unwrap(), "link-local"),
+                "webhook host resolves to a blocked address (169.254.169.254): link-local",
+            ),
+        ];
+        for (err, text) in cases {
+            assert_eq!(WebhookError::Destination(err).to_string(), text);
+        }
     }
 
     /// A blocked destination must fail BEFORE any request is attempted.

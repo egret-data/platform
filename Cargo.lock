@@ -3048,6 +3048,7 @@ dependencies = [
  "egret-core",
  "egret-dataapi",
  "egret-dataapi-api",
+ "egret-egress",
  "egret-events",
  "egret-metastore",
  "egret-query",
@@ -3391,6 +3392,19 @@ dependencies = [
  "thiserror 2.0.20",
  "utoipa",
  "uuid",
+]
+
+[[package]]
+name = "egret-egress"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "bytes",
+ "reqwest 0.12.28",
+ "thiserror 2.0.20",
+ "tokio",
+ "url",
 ]
 
 [[package]]
