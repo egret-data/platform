@@ -3675,6 +3675,17 @@ thirteen entries above BANKED. Still minijinja's: a region the compile passes
 do not mirror (`{% do %}`, macro arguments) and unary minus (`-x`, which
 Pebble computes as `-1 * x`), both of which refuse the object.
 
+**2026-10-29, #5a fix wave (review M3, M8).** Two corrections to the paragraph
+above. Unary minus is Pebble's since Task A8 (`kestra_mul(-1, x)`), and macro
+and `call` regions cannot be reached at all (the `macros` feature is off, so
+minijinja refuses them as unknown statements); only the arguments of a
+`{% do f(..) %}`, which is not Pebble syntax and whose value is discarded,
+keep minijinja's operators. And the id
+`filter-number-bigdecimal-is-not-a-number-here` is now only a label: it names
+the W9c ruling it was written under, but the entry is BANKED and its golden is
+Kestra's computed `2.5`. The id is kept, not renamed, because it is cited in
+the spec, the plan and the survey of #5 and in this file's history.
+
 ### C-B: an `e` exponent with a dot was classified as a decimal
 
 Ion's rule is that `e`/`E` makes a **float regardless of the dot**. Round 2

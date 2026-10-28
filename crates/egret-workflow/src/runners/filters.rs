@@ -2863,8 +2863,8 @@ fn line_separator(input: &str) -> &'static str {
 /// Arithmetic on it is Pebble's (package #5a Task A4, spec D3): the
 /// operators are compiled to `super::arith`, which computes a `BigDecimal`
 /// operand as `bigDecimalOperation` does and returns a new `BigNumber`.
-/// minijinja's own operators (a region the compile passes do not mirror,
-/// such as `{% do %}`) still refuse it.
+/// minijinja's own operators still refuse it, which only the arguments of a
+/// `{% do f(..) %}` (not Pebble syntax; its value is discarded) can reach.
 #[derive(Debug)]
 struct BigNumber {
     /// `toPlainString()`: what a **bare** `{{ x }}` renders, measured.

@@ -29,10 +29,15 @@
 //! b < c`; this pass writes Pebble's reading instead.
 //!
 //! Each operand is exactly the token range minijinja's parser gives that
-//! comparison, so precedence is minijinja's by construction (and minijinja's
-//! comparison tier is Pebble's: one level, below `+`/`-`/`~`, above `not`): `not a == b` stays `not (a == b)`, `a ~ b == c` stays
-//! `(a ~ b) == c`, a filter or a test binds tighter, a parenthesised group is
-//! one operand. A call argument is a full expression, so no operand can bind
+//! comparison, so precedence is minijinja's by construction. minijinja's
+//! comparison tier matches Pebble's against the binary operators (one level,
+//! below `+`/`-`/`~`): `a ~ b == c` stays `(a ~ b) == c`, a filter or a test
+//! binds tighter, a parenthesised group is one operand. It does NOT match
+//! Pebble's `not`: Pebble registers `not` at 500 (`javap -c CoreExtension`),
+//! tighter than every binary operator, so `not a == b` is `(not a) == b` in
+//! Kestra, while minijinja (and so this pass) reads `not (a == b)`; the same
+//! holds for `not a contains b`, `not a ?? b` and `not a + 1` (spec §6.1,
+//! recorded divergence 5; fix wave #5a M1). A call argument is a full expression, so no operand can bind
 //! differently inside the call than it did beside the operator.
 //!
 //! # What is preserved besides the value
@@ -51,7 +56,12 @@
 //!   template this pass cannot even LEX is returned whole and unchanged.
 //! - `{% do %}` is left untouched on purpose: minijinja refuses a `do` whose
 //!   expression is not a call, and turning `{% do a > b %}` into a call
-//!   would turn that refusal into an answer.
+//!   would turn that refusal into an answer. `do` is not Pebble syntax
+//!   (Kestra refuses the tag), and the value of the one form minijinja takes,
+//!   `{% do f(..) %}`, is discarded, so an operator in its arguments can
+//!   change only which error a failing argument raises. `{% macro %}` and
+//!   `{% call %}` are not reachable at all: the `macros` feature is off, and
+//!   minijinja refuses them as unknown statements.
 //! - **A `{% raw %}` block is copied through whole**, found the way
 //!   minijinja's lexer finds it (`skip_basic_tag`), whatever its whitespace
 //!   control. egret's own raw protection (`env::replace_raw_tags`, Kestra's
@@ -115,7 +125,9 @@ pub(crate) fn compile_comparisons(source: &str) -> Result<String, RewriteError> 
 /// becomes `kestra_mul(-1, x)`, Pebble's `unaryMinus` (Task A8); `~`, `//`
 /// and `**` are not touched.
 /// Everything the module doc says about preserved bytes, unparsed regions,
-/// `{% do %}`, raw blocks and the reserved prefix holds for this pass too.
+/// `{% do %}` (its discarded call arguments keep minijinja's operators),
+/// raw blocks and the reserved prefix holds for this pass too. `{% with %}`
+/// and `{% filter %}` are mirrored, so they get Pebble's arithmetic.
 pub(crate) fn compile_arithmetic(source: &str) -> Result<String, RewriteError> {
     compile_pass(source, Pass::Arithmetic)
 }
@@ -909,7 +921,14 @@ impl Parser<'_> {
     /// The operand is Pebble's: the primary **with** its postfix steps, so
     /// `-a.b` is `-(a.b)` and `-f(x)` negates the call's result. minijinja
     /// reads them as `(-a).b` and `(-f)(x)`, which fail on every value
-    /// Pebble's reading answers, so nothing that rendered before changes. A
+    /// Pebble's reading answers, so no such form that rendered before
+    /// changes. One plain `-x` does: an integer past `i64` (a JSON
+    /// `10000000000000000000`). minijinja negated it exactly; here the `-1`
+    /// is a Long, so it takes the Long branch and wraps its low 64 bits
+    /// (`8446744073709551616`); Kestra multiplies by an `Integer` -1, so two
+    /// non-Longs take the `int` branch (`1981284352`, measured 2026-10-29).
+    /// That is the Integer-vs-Long divergence (spec §6.1 item 1; fix wave
+    /// #5a M2). A
     /// number literal with no postfix is left as it is: `-1` and
     /// `kestra_mul(-1, 1)` are the same value in both engines, and the
     /// compiled text stays readable. Kept out of the recursive frames
