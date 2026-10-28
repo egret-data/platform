@@ -398,8 +398,13 @@ async fn entry(c: &mut PgConnection, row: ChangeRow) -> Result<ChangeEntry, sqlx
                 &id,
             )
             .await?;
+            let why = if s(d, "trigger") == "iceberg_drop_namespace" {
+                " (namespace dropped)"
+            } else {
+                ""
+            };
             (
-                format!("{a} {verb} a grant: {}", grant_phrase(side(d))),
+                format!("{a} {verb} a grant: {}{why}", grant_phrase(side(d))),
                 uuid.map(|id| Ref::Grant { id }),
                 live,
             )

@@ -782,6 +782,42 @@ pub async fn move_table_grants_in_tx(
     Ok(out)
 }
 
+/// Delete, on `conn`, every `table` catalog grant of `warehouse_id`'s roles
+/// in namespace `ns` or below it (`namespace[1]` equal under lakekeeper's
+/// collation): a recursive drop of `ns` removed every table there for good
+/// (grants-follow D15). `namespace` and `catalog` grants stay.
+pub async fn delete_table_grants_under_in_tx(
+    conn: &mut sqlx::PgConnection,
+    warehouse_id: Uuid,
+    ns: &str,
+) -> Result<Vec<MovedCatalogGrant>, sqlx::Error> {
+    let rows: Vec<(Uuid, String, String, Vec<String>, String)> = sqlx::query_as(
+        "DELETE FROM catalog.catalog_grants g USING catalog.catalog_roles r \
+          WHERE r.id = g.catalog_role_id AND r.warehouse_id = $1 \
+            AND g.securable_type = 'table' AND g.table_name IS NOT NULL \
+            AND cardinality(g.namespace) >= 1 \
+            AND g.namespace[1] = $2 COLLATE lakekeeper.case_insensitive \
+         RETURNING g.id, r.name, g.privilege, g.namespace, g.table_name",
+    )
+    .bind(warehouse_id)
+    .bind(ns)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(id, role, privilege, namespace, table)| MovedCatalogGrant {
+                id,
+                role,
+                privilege,
+                before_namespace: namespace,
+                before_table: table,
+                merged: false,
+            },
+        )
+        .collect())
+}
+
 /// The mini-IdP's client verifier, backed by the Catalog Client registry.
 #[async_trait::async_trait]
 impl egret_machine_idp::ClientVerifier for CatalogStore {

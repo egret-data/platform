@@ -2041,10 +2041,61 @@ impl TableHook {
             .await
             .map_err(|e| err(&e))?
             .rows_affected();
+            // The literal allow grants on the namespace's tables go too: an
+            // allow on a name that may come back is exposure. Restrictions,
+            // patterns and schema scopes stay (grants-follow D15).
+            let allows: Vec<Uuid> = sqlx::query_scalar(
+                "SELECT g.id FROM perm.grants g \
+                   JOIN registry.catalogs c ON c.id = g.catalog_id \
+                  WHERE c.warehouse_id = $1 AND g.effect = 'allow' AND g.origin = 'explicit' \
+                    AND g.table_name IS NOT NULL \
+                    AND lower(g.schema_name) = lower($2) \
+                    AND strpos(g.schema_name, '*') = 0 AND strpos(g.schema_name, '?') = 0 \
+                    AND strpos(g.table_name, '*') = 0 AND strpos(g.table_name, '?') = 0 \
+                  ORDER BY g.id",
+            )
+            .bind(warehouse_id)
+            .bind(ns)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| err(&e))?;
+            let mut purged = Vec::with_capacity(allows.len());
+            for id in allows {
+                if let Some(g) = egret_perm::get_grant_via(&mut tx, id)
+                    .await
+                    .map_err(|e| err(&e))?
+                {
+                    let summary = follow::grant_summary_via(&mut tx, &g).await?;
+                    egret_perm::delete_grant_in_tx(&mut tx, id)
+                        .await
+                        .map_err(|e| err(&e))?;
+                    purged.push((id, summary));
+                }
+            }
             reach
                 .retag_bump_and_recompile(&mut tx)
                 .await
                 .map_err(|e| err(&e))?;
+            if !purged.is_empty() {
+                let caller = Caller::resolve(&mut tx, caller)
+                    .await
+                    .map_err(|e| err(&e))?;
+                for (id, summary) in purged {
+                    egret_audit::governance::record_change_by(
+                        &mut tx,
+                        caller.actor(),
+                        egret_audit::governance::action::GRANT_DELETE,
+                        egret_audit::governance::resource::PERM_GRANT,
+                        id.to_string(),
+                        serde_json::json!({
+                            "before": summary, "after": null,
+                            "trigger": "iceberg_drop_namespace",
+                        }),
+                    )
+                    .await
+                    .map_err(|e| err(&e))?;
+                }
+            }
             if rows > 0 || !views.is_empty() {
                 let caller = Caller::resolve(&mut tx, caller)
                     .await
@@ -2068,8 +2119,59 @@ impl TableHook {
         .await;
         if let Err(e) = result {
             tracing::warn!(namespace = %ns, error = %e,
-                "a namespace was dropped, but removing its classifications failed; they stay \
-                 until removed");
+                "a namespace was dropped, but removing its classifications and allow grants \
+                 failed; they stay until removed");
+        }
+        self.purge_catalog_grants(prefix, ns, caller).await;
+    }
+
+    /// After a recursive namespace drop, in its own transaction: delete the
+    /// `table` catalog grants in the namespace and below it, with
+    /// `catalog_grant:delete` events by `caller` (grants-follow D15). A
+    /// failure is logged; the grants stay, and the report shows them.
+    async fn purge_catalog_grants(&self, prefix: &str, ns: &str, caller: Option<&CatalogCaller>) {
+        let result: Result<(), String> = async {
+            let err = |e: &dyn std::fmt::Display| e.to_string();
+            let mut tx = self.db.pool.begin().await.map_err(|e| err(&e))?;
+            let Some((warehouse_id, _)) = resolve(&mut tx, prefix).await.map_err(|e| err(&e))?
+            else {
+                return Ok(());
+            };
+            let deleted =
+                crate::store::embedded::delete_table_grants_under_in_tx(&mut tx, warehouse_id, ns)
+                    .await
+                    .map_err(|e| err(&e))?;
+            if !deleted.is_empty() {
+                let caller = Caller::resolve(&mut tx, caller)
+                    .await
+                    .map_err(|e| err(&e))?;
+                for d in &deleted {
+                    egret_audit::governance::record_change_by(
+                        &mut tx,
+                        caller.actor(),
+                        egret_audit::governance::action::CATALOG_GRANT_DELETE,
+                        egret_audit::governance::resource::CATALOG_GRANT,
+                        d.id.to_string(),
+                        serde_json::json!({
+                            "warehouse_id": warehouse_id,
+                            "role": d.role,
+                            "privilege": d.privilege,
+                            "before": {"namespace": d.before_namespace, "table": d.before_table},
+                            "after": null,
+                            "trigger": "iceberg_drop_namespace",
+                        }),
+                    )
+                    .await
+                    .map_err(|e| err(&e))?;
+                }
+            }
+            tx.commit().await.map_err(|e| err(&e))
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!(namespace = %ns, error = %e,
+                "a namespace was dropped, but removing its catalog grants failed; they stay until \
+                 removed");
         }
     }
 }

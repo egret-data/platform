@@ -5021,3 +5021,138 @@ async fn a_namespace_grant_stays_and_a_case_only_rename_moves_no_catalog_grant()
         at(&["finance"], "orders")
     );
 }
+
+// ── Grants follow a rename, Task 14: recursive namespace drop (D15) ──
+
+/// D15: a recursive drop removes the literal allow grants on the namespace's
+/// tables and its `table` catalog grants (children included), with events by
+/// the caller; restrictions, schema and pattern scopes, `namespace` catalog
+/// grants stay.
+#[tokio::test]
+async fn a_recursive_drop_purges_allows_and_catalog_grants_but_keeps_restrictions() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "email")]).await;
+    let allow = env
+        .perm_grant(egret_perm::Effect::Allow, &["sales", "orders"], &["v"])
+        .await;
+    let column_allow = env
+        .perm_grant(
+            egret_perm::Effect::Allow,
+            &["sales", "orders", "email"],
+            &["v"],
+        )
+        .await;
+    let deny = env
+        .perm_grant(egret_perm::Effect::Deny, &["sales", "orders"], &["u"])
+        .await;
+    let mask = env
+        .perm_rule(
+            egret_perm::RuleKind::Mask {
+                mask_type: "MASK_HASH".into(),
+                value_expr: None,
+            },
+            &["sales", "orders", "email"],
+        )
+        .await;
+    let schema_allow = env
+        .perm_grant(egret_perm::Effect::Allow, &["sales"], &["v"])
+        .await;
+    let pattern_allow = env
+        .perm_grant(egret_perm::Effect::Allow, &["sales", "ord*"], &["v"])
+        .await;
+    let table_grant = env
+        .catalog_grant("table", Some(&["sales"]), Some("orders"), "read")
+        .await;
+    let deep_grant = env
+        .catalog_grant("table", Some(&["sales", "eu"]), Some("x"), "read")
+        .await;
+    let ns_grant = env
+        .catalog_grant("namespace", Some(&["sales"]), None, "read")
+        .await;
+    env.recompile_all().await;
+    let (_, client) = env.catalog_client("spark-etl").await;
+    *env.caller.lock().unwrap() = client.clone();
+
+    let (status, body) = env
+        .call("DELETE", "namespaces/sales?recursive=true", None)
+        .await;
+    assert!(status.is_success(), "drop namespace: {status} {body}");
+    let grants: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM perm.grants WHERE id = ANY($1)")
+        .bind(vec![allow, column_allow, deny, schema_allow, pattern_allow])
+        .fetch_all(&env.db.pool)
+        .await
+        .expect("grants");
+    let mut want = vec![deny, schema_allow, pattern_allow];
+    want.sort();
+    let mut grants = grants;
+    grants.sort();
+    assert_eq!(grants, want);
+    let rule: i64 = sqlx::query_scalar("SELECT count(*) FROM perm.rules WHERE id = $1")
+        .bind(mask)
+        .fetch_one(&env.db.pool)
+        .await
+        .expect("rule");
+    assert_eq!(rule, 1, "the mask stays");
+    assert_eq!(env.catalog_grant_at(table_grant).await, None);
+    assert_eq!(env.catalog_grant_at(deep_grant).await, None);
+    assert!(env.catalog_grant_at(ns_grant).await.is_some());
+
+    let deletes: Vec<(String, Value)> = sqlx::query_as(
+        "SELECT resource_id, detail FROM audit.audit_log \
+          WHERE action = 'perm_grant:delete' AND resource_id = ANY($1)",
+    )
+    .bind(vec![allow.to_string(), column_allow.to_string()])
+    .fetch_all(&env.db.pool)
+    .await
+    .expect("events");
+    assert_eq!(deletes.len(), 2, "{deletes:?}");
+    for (_, d) in &deletes {
+        assert_eq!(d["trigger"], "iceberg_drop_namespace");
+        assert_eq!(d["actor"]["client_id"], json!(client));
+    }
+    let catalog_deletes = env.catalog_grant_events().await;
+    assert_eq!(catalog_deletes.len(), 2, "{catalog_deletes:?}");
+    assert!(catalog_deletes
+        .iter()
+        .all(|(a, _, d)| a == "catalog_grant:delete" && d["actor"]["client_id"] == json!(client)));
+    // The served Trino download no longer carries the deleted allows.
+    let served = env
+        .ranger_get(format!(
+            "/plugins/policies/download/{}?lastKnownVersion=-1",
+            env.trino_name
+        ))
+        .await;
+    let names: Vec<&str> = served["policies"]
+        .as_array()
+        .expect("policies")
+        .iter()
+        .filter_map(|p| p["name"].as_str())
+        .collect();
+    for gone in [allow, column_allow] {
+        assert!(
+            !names.iter().any(|n| n.contains(&gone.to_string())),
+            "{gone} still served: {names:?}"
+        );
+    }
+    assert!(
+        names.iter().any(|n| n.contains(&deny.to_string())),
+        "{names:?}"
+    );
+}
+
+/// D15 guard: a plain namespace drop deletes nothing.
+#[tokio::test]
+async fn a_plain_namespace_drop_deletes_no_grant() {
+    let Some(env) = env().await else { return };
+    env.create_namespace(&["empty"]).await;
+    let allow = env
+        .perm_grant(egret_perm::Effect::Allow, &["empty", "t"], &["v"])
+        .await;
+    let grant = env
+        .catalog_grant("table", Some(&["empty"]), Some("t"), "read")
+        .await;
+    let (status, body) = env.call("DELETE", "namespaces/empty", None).await;
+    assert!(status.is_success(), "drop namespace: {status} {body}");
+    assert_eq!(env.grant_at(allow).await, ("t".into(), None));
+    assert!(env.catalog_grant_at(grant).await.is_some());
+}

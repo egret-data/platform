@@ -536,3 +536,6 @@ Deviations the code forces are recorded here, per task, as they happen.
   `egret-bin/src/catalog_vended_credentials_tests.rs`: the moved read grant vends read-only credentials on the renamed
   table, the moved write grant read-write-delete, a new table at the old name is 403 for both, and the events name
   the verified client.
+- **Task 14.** The purge runs for single-level namespaces only, as #757's (a multi-level recursive drop keeps its
+  rows; the reports show them). The allow events reuse `perm_grant:delete` with `detail.trigger =
+  "iceberg_drop_namespace"`, and the feed adds "(namespace dropped)" to that sentence.
