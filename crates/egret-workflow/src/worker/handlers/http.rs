@@ -15,8 +15,10 @@
 //!    `options.auth.type: DIGEST`, `encryptBody`, and a URI with userinfo), so
 //!    a stored flow that slipped past publish fails here naming the property.
 //!    A `kestra://` file part of a multipart `formData` is read from the run's
-//!    readable files; a multipart body is capped at
-//!    `workflow.storage.max_file_bytes` (1 MiB without `[storage]`).
+//!    readable files; a multipart body is built in memory and capped at the
+//!    smaller of `workflow.storage.max_file_bytes` and 16 MiB
+//!    ([`MAX_MULTIPART_BYTES`]; 1 MiB without `[storage]`), checked on the
+//!    indexed sizes before any file is read.
 //! 3. Send it with [`HttpEgress`]: every hop vetted and pinned, no proxy,
 //!    redirects re-vetted, credentials dropped across origins.
 //! 4. Apply the status rule ([`ensure_allowed`]: Kestra's, any code below 400
@@ -91,8 +93,24 @@ pub fn resolves_secrets(t: &str) -> bool {
 pub const MAX_BODY_BYTES: u64 = 1 << 20;
 
 /// The multipart body cap without `[storage]` (with it, the cap is
-/// `workflow.storage.max_file_bytes`).
+/// [`multipart_cap`]).
 pub const MULTIPART_CAP_WITHOUT_STORAGE: u64 = 1 << 20;
+
+/// The largest multipart body egret builds, whatever
+/// `workflow.storage.max_file_bytes` says (16 MiB). The body is built in
+/// memory -- each file part is read whole and copied into the body -- so it
+/// must not inherit a cap meant for streamed storage, 1 GiB by default
+/// (final review I4).
+pub const MAX_MULTIPART_BYTES: u64 = 16 << 20;
+
+/// The multipart body cap: the smaller of `workflow.storage.max_file_bytes`
+/// and [`MAX_MULTIPART_BYTES`], or [`MULTIPART_CAP_WITHOUT_STORAGE`] without
+/// `[storage]`.
+pub(crate) fn multipart_cap(files: Option<&FileStore>) -> u64 {
+    files.map_or(MULTIPART_CAP_WITHOUT_STORAGE, |fs| {
+        fs.caps.max_file_bytes.min(MAX_MULTIPART_BYTES)
+    })
+}
 
 /// The properties `Request` reads (`AbstractHttp.java`), for the save-time
 /// key check (`spec::keys`). The handler itself reads them through
@@ -162,12 +180,9 @@ impl Request {
         }
     }
 
-    /// The multipart body cap: `workflow.storage.max_file_bytes`, or 1 MiB
-    /// without `[storage]`.
+    /// The multipart body cap ([`multipart_cap`]).
     fn multipart_cap(&self) -> u64 {
-        self.files
-            .as_ref()
-            .map_or(MULTIPART_CAP_WITHOUT_STORAGE, |fs| fs.caps.max_file_bytes)
+        multipart_cap(self.files.as_deref())
     }
 }
 
@@ -323,7 +338,7 @@ pub(super) async fn prepare(
             fs: fs.clone(),
             scope: scope.clone(),
             workspace: task.workspace_id,
-            cap: fs.caps.max_file_bytes,
+            cap: self::multipart_cap(Some(fs)),
             read: Mutex::new(0),
             outage: Mutex::new(None),
         }),
@@ -403,7 +418,8 @@ fn multipart_over_cap(req: &egret_egress::RequestSpec, cap: u64) -> Option<Strin
     (multipart && len > cap).then(|| {
         format!(
             "formData: the multipart body is {len} bytes, over the {cap}-byte cap \
-             (workflow.storage.max_file_bytes, or 1 MiB without [storage])"
+             (the smaller of workflow.storage.max_file_bytes and 16 MiB, or 1 MiB without \
+             [storage])"
         )
     })
 }
@@ -442,7 +458,7 @@ impl FormFiles for StoreFiles {
             if *read + meta.size > self.cap {
                 return Err(format!(
                     "formData: {uri} would take the multipart body over the {}-byte cap \
-                     (workflow.storage.max_file_bytes)",
+                     (the smaller of workflow.storage.max_file_bytes and 16 MiB)",
                     self.cap
                 ));
             }
@@ -501,6 +517,25 @@ mod tests {
         for s in [S::OK, S::CREATED, S::NOT_FOUND, S::FOUND] {
             assert!(!has_no_entity(false, s), "{s}");
         }
+    }
+
+    /// Final review I4: the multipart body is built in memory, so its cap
+    /// is at most 16 MiB even when `max_file_bytes` is 1 GiB.
+    #[test]
+    fn the_multipart_cap_is_at_most_sixteen_mebibytes() {
+        assert_eq!(multipart_cap(None), MULTIPART_CAP_WITHOUT_STORAGE);
+        let store = |max_file_bytes: u64| FileStore {
+            store: Arc::new(egret_storage::MemStore::new()),
+            bucket: "egret-test".into(),
+            prefix: "workflow/".into(),
+            caps: crate::storage::Caps {
+                max_file_bytes,
+                ..crate::storage::Caps::default()
+            },
+            retention_days: 30,
+        };
+        assert_eq!(multipart_cap(Some(&store(1 << 30))), 16 << 20);
+        assert_eq!(multipart_cap(Some(&store(1000))), 1000);
     }
 
     #[test]

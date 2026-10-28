@@ -51,7 +51,7 @@ use egret_core::Result;
 use serde_json::{json, Map, Value};
 
 use super::super::super::{Outcome, TaskHandler, TaskInput};
-use super::{prepare, Prepared, MULTIPART_CAP_WITHOUT_STORAGE, SSE_REQUEST};
+use super::{prepare, Prepared, SSE_REQUEST};
 use crate::http::spec::{flag, kind};
 use crate::http::sse::{SseEvent, SseParser};
 use crate::http::{ensure_allowed, log_response_lines, transport_message, HttpEgress};
@@ -115,11 +115,7 @@ impl TaskHandler for SseRequest {
     }
 
     async fn run(&self, task: &TaskInput) -> Result<Outcome> {
-        let multipart_cap = Some(
-            self.files
-                .as_ref()
-                .map_or(MULTIPART_CAP_WITHOUT_STORAGE, |f| f.caps.max_file_bytes),
-        );
+        let multipart_cap = Some(super::multipart_cap(self.files.as_deref()));
         let Prepared {
             rendered,
             opts,

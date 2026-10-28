@@ -945,3 +945,36 @@ fn http_timeouts_out_of_range_are_refused_not_panicked() {
     assert!(spec::seconds(f64::INFINITY, "t").is_err());
     assert!(spec::seconds(1e20, "t").unwrap_err().contains("too large"));
 }
+
+/// Final review I4: a payload log line decodes only the head it can print
+/// (64 KiB plus the longest masked value), never the whole body; and a
+/// secret straddling the 64 KiB mark is still masked whole.
+#[test]
+fn http_payload_log_decodes_only_its_head() {
+    let masks = MaskSet::new([SECRET]);
+    let body = vec![0xFFu8; 4 << 20];
+    let (head, cut) = mask::log_head(&body, &masks);
+    assert!(cut);
+    assert_eq!(head.len(), mask::LOG_BODY_BYTES + SECRET.len());
+    let (head, cut) = mask::log_head(b"short", &masks);
+    assert_eq!((head, cut), (&b"short"[..], false));
+
+    let mut straddling = vec![b'a'; mask::LOG_BODY_BYTES - 5];
+    straddling.extend_from_slice(SECRET.as_bytes());
+    straddling.extend(vec![b'b'; 1 << 20]);
+    let lines = log_request_lines(
+        &reqwest::Method::POST,
+        "http://a.test/",
+        &HeaderMap::new(),
+        Some(&straddling),
+        &[LogKind::RequestBody],
+        &masks,
+    );
+    let line = &lines[0].1;
+    assert!(!line.contains(&SECRET[..5]), "no head of the secret");
+    assert!(
+        line.contains(MASK) && line.ends_with("[truncated]"),
+        "{}",
+        &line[line.len() - 40..]
+    );
+}

@@ -149,12 +149,31 @@ pub fn headers_entry(kind: &str, headers: &HeaderMap, masks: &MaskSet) -> String
     masks.mask(&format!("{kind} headers:\n    {}", lines.join("\n    ")))
 }
 
+/// The bytes of `body` a payload line can need: [`LOG_BODY_BYTES`] plus the
+/// longest masked value (so a value straddling the cut is whole), and whether
+/// anything was left out. Cut **before** the lossy UTF-8 decode, so a large
+/// binary body is never decoded (and tripled by U+FFFD) whole only to print
+/// 64 KiB of it (final review I4).
+pub(crate) fn log_head<'a>(body: &'a [u8], masks: &MaskSet) -> (&'a [u8], bool) {
+    let keep = LOG_BODY_BYTES.saturating_add(masks.longest());
+    if body.len() > keep {
+        (&body[..keep], true)
+    } else {
+        (body, false)
+    }
+}
+
 fn payload_entry(kind: &str, body: Option<&[u8]>, masks: &MaskSet) -> String {
     match body {
         None => format!("{kind} payload: null"),
         Some(b) => {
-            let (text, cut) = masks.truncate_masked(b, LOG_BODY_BYTES);
-            let more = if cut { "\n    [truncated]" } else { "" };
+            let (head, cut_early) = log_head(b, masks);
+            let (text, cut) = masks.truncate_masked(head, LOG_BODY_BYTES);
+            let more = if cut || cut_early {
+                "\n    [truncated]"
+            } else {
+                ""
+            };
             format!("{kind} payload:\n    {text}{more}")
         }
     }

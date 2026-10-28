@@ -47,7 +47,7 @@ use egret_core::{Error, Result};
 use serde_json::{json, Value};
 
 use super::super::super::{Outcome, TaskHandler, TaskInput};
-use super::{prepare, Prepared, DOWNLOAD, MULTIPART_CAP_WITHOUT_STORAGE};
+use super::{prepare, Prepared, DOWNLOAD};
 use crate::http::spec::flag;
 use crate::http::{
     ensure_allowed, headers_output, log_response_lines, transport_message, HttpEgress,
@@ -140,11 +140,7 @@ impl TaskHandler for Download {
             Ok(p) => p,
             Err(why) => return Ok(Outcome::failed_with(format!("{DOWNLOAD}: {why}"))),
         };
-        let multipart_cap = Some(
-            self.files
-                .as_ref()
-                .map_or(MULTIPART_CAP_WITHOUT_STORAGE, |f| f.caps.max_file_bytes),
-        );
+        let multipart_cap = Some(super::multipart_cap(self.files.as_deref()));
         let Prepared {
             rendered,
             opts,
