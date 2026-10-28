@@ -504,7 +504,7 @@ egret routes are under `/api/ws/{ws}/workflows`.
 | Kestra endpoint | egret status | evidence |
 |---|---|---|
 | POST /executions/{ns}/{id} (start, multipart inputs) | supported | routes.rs:2381 |
-| POST /{ns}/{id}/validate (validate inputs) | supported (#3b): always 200, every input with its errors, SECRET masked, no side effects, `WF_MANAGE`. `checks` is always empty; FILE readability is not checked | crates/egret-workflow/src/inputs_check.rs |
+| POST /{ns}/{id}/validate (validate inputs) | supported (#3b): always 200, every input with its errors, SECRET masked, no side effects, `WF_MANAGE`. `checks` is always empty; FILE readability is not checked. JSON body, not Kestra's multipart (recorded divergence) | crates/egret-workflow/src/routes.rs (`validate_execution_inputs`), inputs_check.rs |
 | GET /search, GET /{id}, GET /{id}/flow | supported (list with state/namespace/flow/parent/time filters, detail) | routes.rs:1838,1913 |
 | GET /{id}/graph | supported | routes.rs:1314 |
 | GET /{id}/file, /file/metas, /file/preview | supported | storage/routes.rs:255,322,350 |
