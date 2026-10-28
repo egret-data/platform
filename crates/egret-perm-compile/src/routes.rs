@@ -1338,7 +1338,7 @@ pub(crate) async fn write_grant(
     // The OLD affected set, and the origin the patched row keeps. Read from
     // the stored row BEFORE anything is written — after the UPDATE the old
     // catalog is gone and the profiles it reached are unrecoverable.
-    let (old_services, origin, stored_principals, effect_unchanged) = match id {
+    let (old_services, origin, stored_principals, effect_unchanged, old_scope) = match id {
         Some(id) => {
             let Some(old) = get_grant_via(tx, id).await? else {
                 return Err(PermHttpError::NotFound);
@@ -1371,11 +1371,12 @@ pub(crate) async fn write_grant(
                 old.origin,
                 Some(old.principals),
                 effect_unchanged,
+                Some(old.scope),
             )
         }
         // The database mints the id on a create; `GrantOrigin::Explicit` is the
         // only origin this surface may write — see `NewGrant`'s doc comment.
-        None => (Vec::new(), GrantOrigin::Explicit, None, false),
+        None => (Vec::new(), GrantOrigin::Explicit, None, false, None),
     };
 
     // **Every ref must name someone egret knows** (J-F3) — include AND exclude,
@@ -1473,6 +1474,8 @@ pub(crate) async fn write_grant(
     // this transaction holds a `perm.grants` row lock while reaching for a
     // profile lock, which deadlocks against a concurrent recompile holding
     // that profile and reaching for the grant row. See `lock_services_in_tx`.
+    let held: Vec<&egret_perm::Scope> = old_scope.iter().chain([&g.scope]).collect();
+    refuse_while_held_in_tx(tx, &held).await?;
     lock_services_in_tx(tx, &services).await?;
     let id = match id {
         Some(id) => {
@@ -1533,6 +1536,60 @@ pub(crate) async fn write_grant(
         services,
         summaries,
     })
+}
+
+/// Refuse (409, code `table_change_held`) a grant or rule write that names a
+/// table a held rename is moving (grants-follow spec D10): try, on this
+/// transaction, the hold's name lock of every literal `(schema, table)` the
+/// scopes name, as a catalog-tag write does
+/// ([`crate::view_tags::try_name_lock_in_tx`]). A steward's PATCH opened
+/// before the rename and saved during it would otherwise re-point a moved
+/// allow back, or remove a copy compensation then cannot find. A pattern names
+/// no lockable name, and a catalog without an embedded warehouse has no hold.
+async fn refuse_while_held_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    scopes: &[&egret_perm::Scope],
+) -> Result<(), PermHttpError> {
+    let mut names: Vec<(Uuid, String, String)> = Vec::new();
+    for s in scopes {
+        let (Some(schema), Some(table)) = (&s.schema, &s.table) else {
+            continue;
+        };
+        if !crate::follow::is_literal(schema) || !crate::follow::is_literal(table) {
+            continue;
+        }
+        let warehouse: Option<Option<Uuid>> =
+            sqlx::query_scalar("SELECT warehouse_id FROM registry.catalogs WHERE id = $1")
+                .bind(s.catalog_id)
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(PermHttpError::db)?;
+        let Some(warehouse) = warehouse.flatten() else {
+            continue;
+        };
+        names.push((warehouse, schema.to_lowercase(), table.to_lowercase()));
+    }
+    names.sort();
+    names.dedup();
+    for (warehouse, schema, table) in names {
+        let free = crate::view_tags::try_name_lock_in_tx(tx, warehouse, &schema, &table)
+            .await
+            .map_err(PermHttpError::db)?;
+        if !free {
+            return Err(PermHttpError::Coded {
+                status: axum::http::StatusCode::CONFLICT,
+                body: serde_json::json!({
+                    "error": format!(
+                        "a change to {schema}.{table} (a rename, or a view commit) is being \
+                         held while the engines confirm it; retry when it has finished (at \
+                         most 90 s)"
+                    ),
+                    "code": "table_change_held",
+                }),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Re-read grant `id` now that every profile in `locked` is locked, and refuse
@@ -1601,7 +1658,7 @@ pub(crate) async fn write_rule(
         ));
     }
 
-    let (old_services, old_exempt) = match id {
+    let (old_services, old_exempt, old_selector) = match id {
         Some(id) => {
             let Some(old) = get_rule_via(tx, id).await? else {
                 return Err(PermHttpError::NotFound);
@@ -1612,9 +1669,10 @@ pub(crate) async fn write_rule(
             (
                 affected_services_for_rule(tx, &old).await?,
                 Some(old.exempt),
+                Some(old.selector),
             )
         }
-        None => (Vec::new(), None),
+        None => (Vec::new(), None, None),
     };
 
     // Same check, same position and same reason as [`write_grant`]'s: an
@@ -1691,6 +1749,15 @@ pub(crate) async fn write_rule(
     // The per-group locks were taken before the refs were resolved (above),
     // for the same reason as in `write_grant`: an exemption naming a group
     // compiles to its members.
+    let held: Vec<&egret_perm::Scope> = old_selector
+        .iter()
+        .chain([&r.selector])
+        .filter_map(|s| match s {
+            Selector::Path(scope) => Some(scope),
+            Selector::Tag { .. } => None,
+        })
+        .collect();
+    refuse_while_held_in_tx(tx, &held).await?;
     lock_services_in_tx(tx, &services).await?;
     let id = match id {
         Some(id) => {
@@ -1923,6 +1990,7 @@ async fn delete_grant(
     // see [`confine_to_overlay_workspace`].
     confine_to_overlay_workspace(&mut tx, &p, g.scope.catalog_id).await?;
     let services = affected_services_for_grant(&mut tx, &g).await?;
+    refuse_while_held_in_tx(&mut tx, &[&g.scope]).await?;
     // Before the DELETE, never after — see `lock_services_in_tx`.
     lock_services_in_tx(&mut tx, &services).await?;
     if !delete_grant_in_tx(&mut tx, id).await? {
@@ -2284,6 +2352,9 @@ async fn delete_rule(
     // Same as `delete_grant`'s.
     confine_rule_selector(&mut tx, &p, &r.selector).await?;
     let services = affected_services_for_rule(&mut tx, &r).await?;
+    if let Selector::Path(scope) = &r.selector {
+        refuse_while_held_in_tx(&mut tx, &[scope]).await?;
+    }
     lock_services_in_tx(&mut tx, &services).await?;
     if !delete_rule_in_tx(&mut tx, id).await? {
         return Err(PermHttpError::NotFound);

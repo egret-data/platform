@@ -75,6 +75,8 @@ pub mod effect;
 pub mod engine_capabilities;
 /// F11: compile an engine grant into its engine's profile.
 pub mod engine_grants;
+/// What a table or column rename carries of grants and path rules.
+pub mod follow;
 // DG #3: each profile's last compile (`perm.compile_runs`, migration 0198).
 pub mod compile_runs;
 mod governance_events;

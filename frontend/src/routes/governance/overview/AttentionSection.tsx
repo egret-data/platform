@@ -27,6 +27,11 @@ const CHECKS: Record<string, string> = {
   classifications_on_dropped_tables: "classifications on dropped tables",
   classifications_on_missing_columns: "classifications on columns that do not exist",
   renamed_names_reused: "table names a rename left unclassified under a new table",
+  permissions_on_missing_tables: "permissions on tables that do not exist",
+  permissions_on_missing_columns: "permissions on columns that do not exist",
+  catalog_grants_on_missing_tables: "catalog grants on tables that do not exist",
+  renamed_names_lost_grants: "table names a rename left without their allow grants",
+  renamed_names_lost_catalog_grants: "table names a rename left without their catalog grants",
 };
 
 /** One line per check the reader may not run; checks sharing a sentence share a line. */

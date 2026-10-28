@@ -48,6 +48,21 @@ pub mod action {
     // column's rows moved to its new name, or a dropped namespace's removed.
     pub const CATALOG_TAG_MOVE: &str = "tag:move";
     pub const CATALOG_TAG_PURGE: &str = "tag:purge";
+    // Grants follow a rename (spec 2026-10-27 §5.7, D9): an allow re-pointed
+    // to the renamed table, a restriction copied to it (the original stays).
+    pub const GRANT_MOVE: &str = "perm_grant:move";
+    pub const GRANT_COPY: &str = "perm_grant:copy";
+    pub const RULE_COPY: &str = "perm_rule:copy";
+    /// An allow pattern that covered a renamed table and no longer does:
+    /// nothing written, the event is the record (spec D4, D9).
+    pub const GRANT_LEFT: &str = "perm_grant:left";
+    /// A plain hand-written allow that names a renamed table literally and
+    /// still names the old name (spec D5, D9).
+    pub const RANGER_POLICY_LEFT: &str = "ranger_policy:left";
+    /// A `table` catalog grant re-pointed to a renamed table, or removed with
+    /// a recursively dropped namespace (spec 2026-10-27 §5.5, §5.6).
+    pub const CATALOG_GRANT_MOVE: &str = "catalog_grant:move";
+    pub const CATALOG_GRANT_DELETE: &str = "catalog_grant:delete";
 }
 
 /// The `resource_type` each governance action is recorded under.
@@ -62,16 +77,21 @@ pub mod resource {
     /// A catalog table or column (`<warehouse_id>:<schema>.<table>`), as the
     /// legacy `tag:assign` sink events record it.
     pub const CATALOG: &str = "catalog";
+    /// An embedded-catalog role's grant (`catalog.catalog_grants.id`).
+    pub const CATALOG_GRANT: &str = "catalog_grant";
 }
 
 /// Which permission reads an event in the feed: `Policy` needs `policy:read`,
-/// `Tag` needs `tag:read`, `User` needs `user:read`. `User` is its own family
-/// because its events carry a person's email (username-takeover spec, D4).
+/// `Tag` needs `tag:read`, `User` needs `user:read`, `Catalog` needs
+/// `catalog_registry:read`. `User` is its own family because its events carry
+/// a person's email (username-takeover spec, D4); `Catalog` because catalog
+/// grants are administered under `catalog_registry:*` (grants-follow D9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Family {
     Policy,
     Tag,
     User,
+    Catalog,
 }
 
 /// Every governance `(action, resource_type)` pair and its family. The last
@@ -145,6 +165,25 @@ pub const FAMILIES: &[(&str, &str, Family)] = &[
     (action::USER_DELETE, resource::USER, Family::User),
     (action::CATALOG_TAG_MOVE, resource::CATALOG, Family::Tag),
     (action::CATALOG_TAG_PURGE, resource::CATALOG, Family::Tag),
+    (action::GRANT_MOVE, resource::PERM_GRANT, Family::Policy),
+    (action::GRANT_COPY, resource::PERM_GRANT, Family::Policy),
+    (action::RULE_COPY, resource::PERM_RULE, Family::Policy),
+    (action::GRANT_LEFT, resource::PERM_GRANT, Family::Policy),
+    (
+        action::RANGER_POLICY_LEFT,
+        resource::RANGER_POLICY,
+        Family::Policy,
+    ),
+    (
+        action::CATALOG_GRANT_MOVE,
+        resource::CATALOG_GRANT,
+        Family::Catalog,
+    ),
+    (
+        action::CATALOG_GRANT_DELETE,
+        resource::CATALOG_GRANT,
+        Family::Catalog,
+    ),
     ("role:assign", "grant", Family::Policy),
     ("role:unassign", "grant", Family::Policy),
     ("tag:assign", "catalog", Family::Tag),
@@ -175,6 +214,13 @@ pub const GOVERNANCE_ACTIONS: &[&str] = &[
     action::USER_DELETE,
     action::CATALOG_TAG_MOVE,
     action::CATALOG_TAG_PURGE,
+    action::GRANT_MOVE,
+    action::GRANT_COPY,
+    action::RULE_COPY,
+    action::GRANT_LEFT,
+    action::RANGER_POLICY_LEFT,
+    action::CATALOG_GRANT_MOVE,
+    action::CATALOG_GRANT_DELETE,
 ];
 
 /// The family of a stored event, or `None` when it is not governance.

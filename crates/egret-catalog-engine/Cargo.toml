@@ -147,6 +147,9 @@ egret-catalog-engine = { path = ".", features = ["test-utils"] }
 # Task 9 fix round 1: the race tests drive the real base classification write
 # (`CatalogTagRepo`). egret-bi does not depend on this crate.
 egret-bi.workspace = true
+# Grants-follow spec: the hook tests decide an access, a mask and a row filter
+# from the served download, as an engine's plugin would.
+egret-ranger-eval.workspace = true
 tokio.workspace = true
 # oneshot harness: drive the mounted router with no socket (mirrors
 # egret-catalog/tests/http_roundtrip.rs's pattern). `tower::ServiceExt::oneshot`
