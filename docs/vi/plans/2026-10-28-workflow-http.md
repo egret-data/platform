@@ -4,7 +4,7 @@
 
 Spec: `docs/en/specs/2026-10-28-workflow-http-design.md` (D1–D12). Khảo sát: `docs/en/specs/2026-10-28-workflow-http-survey.md`. Nhánh `feat/workflow-http`. Một PR nếu đợt review còn kiểm soát được; nếu không thì #4a (C1–C3) và #4b (C4–C7).
 
-**Trạng thái, 2026-10-28:** C1–C7 đã xây trên `feat/workflow-http` trong một nhánh; trạng thái như-đã-xây, bảng config và các giới hạn đã biết nằm ở §5 của spec. C2 đặt tên khoá connect timeout là `connect_timeout_secs` (D11 của spec đã sửa). C7 cũng làm cho một `Download`/`SseRequest` đã lưu có `encryptBody: true` hỏng lúc chạy với thông báo nêu đúng kiểu task của nó (mối lo của review C6, D4 của spec).
+**Trạng thái, 2026-10-28:** C1–C7 đã xây trên `feat/workflow-http` trong một nhánh; trạng thái như-đã-xây, bảng config và các giới hạn đã biết nằm ở §5 của spec. C2 đặt tên khoá connect timeout là `connect_timeout_secs` (D11 của spec đã sửa). C7 cũng làm cho một `Download`/`SseRequest` đã lưu có `encryptBody: true` hỏng lúc chạy với thông báo nêu đúng kiểu task của nó (mối lo của review C6, D4 của spec). Đợt sửa sau review toàn nhánh (2026-10-28) đã áp dụng I1–I6 và M1, M3, M6, M7, M9, và ghi lại M2, M4, M5 và M8 (D4–D8, D10, §4, §5 của spec).
 
 ## Ràng buộc chung
 

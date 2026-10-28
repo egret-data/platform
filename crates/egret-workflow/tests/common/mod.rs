@@ -25,7 +25,8 @@ pub async fn db() -> Option<Db> {
 /// Install, for this test binary, the task types a deployment WITH a
 /// container runner serves (`runtime::served_for` with `docker`): every type
 /// egret has a handler for in some configuration, and still none of the
-/// unwired ones (`core.http`, `egret.report.send`, ...). Idempotent; panics if this
+/// unwired ones (the deferred `egret.dataapi.call` and `egret.report.send`).
+/// Idempotent; panics if this
 /// binary already installed a different set (`install_served_for_tests`).
 ///
 /// No-silent-stall spec §4.1: `runtime::served()` panics in a process that

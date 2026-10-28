@@ -3,7 +3,7 @@
  "types": {
   "egret.sql": {
    "title": "Run one SQL statement on a database connection registered in this workspace.",
-   "markdownDescription": "egret's own task. `database` is the id of a connection registered in this workspace; publish refuses an id this workspace does not hold. Every `{{ }}` in `sql` is bound as a parameter, never spliced into the text.\n\n`fetch` decides the outputs: `NONE` gives `{}`, `FETCH_ONE` gives `size` and `row`, `FETCH` gives `size` and `rows` (at most 10,000 rows; more fails the task), `STORE` writes the rows to internal storage as Ion and gives `size` and `uri`.",
+   "markdownDescription": "egret's own task. `database` is the id of a connection registered in this workspace; publish refuses an id this workspace does not hold. Every `{{ }}` in `sql` is bound as a parameter, never spliced into the text.\n\nThe statement runs as the flow's creator, so only the creator can publish or start a flow that contains this task, and a schedule, webhook, Flow trigger or `Subflow` starts it only from a source the creator published.\n\n`fetch` decides the outputs: `NONE` gives `{}`, `FETCH_ONE` gives `size` and `row`, `FETCH` gives `size` and `rows` (at most 10,000 rows; more fails the task), `STORE` writes the rows to internal storage as Ion and gives `size` and `uri`.",
    "properties": {
     "database": {
      "type": "string",

@@ -1045,6 +1045,8 @@ pub struct WorkflowHttpConfig {
     /// **Hosts an http task may reach even though they resolve into private
     /// space** (spec D3). Exact, case-insensitive host match, no wildcard, no
     /// port, no scheme; a listed name is trusted **whatever it resolves to**.
+    /// An IP literal matches by address, so an IPv6 entry may be written with
+    /// or without brackets (`fd00::1` or `[fd00::1]`).
     /// Separate from `automation.webhook_allow_hosts` on purpose: a flow
     /// author is any workspace editor, a different blast radius. Default
     /// empty: only public addresses.

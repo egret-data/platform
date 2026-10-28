@@ -2,7 +2,7 @@
 
 Spec: `docs/en/specs/2026-10-28-workflow-http-design.md` (D1–D12). Survey: `docs/en/specs/2026-10-28-workflow-http-survey.md`. Branch `feat/workflow-http`. One PR if the review wave stays manageable; otherwise #4a (C1–C3) and #4b (C4–C7).
 
-**Status, 2026-10-28:** C1–C7 built on `feat/workflow-http` as one branch; the as-built state, the config table and the known limitations are in spec §5. C2 named the connect timeout key `connect_timeout_secs` (spec D11 corrected). C7 also made a stored `Download`/`SseRequest` with `encryptBody: true` fail at run naming its own type (the C6 review's concern, spec D4).
+**Status, 2026-10-28:** C1–C7 built on `feat/workflow-http` as one branch; the as-built state, the config table and the known limitations are in spec §5. C2 named the connect timeout key `connect_timeout_secs` (spec D11 corrected). C7 also made a stored `Download`/`SseRequest` with `encryptBody: true` fail at run naming its own type (the C6 review's concern, spec D4). The whole-branch review's fix wave (2026-10-28) applied I1–I6 and M1, M3, M6, M7, M9 and recorded M2, M4, M5 and M8 (spec D4–D8, D10, §4, §5).
 
 ## Global constraints
 The spec's D-numbers are binding. Kestra source: `/Users/1pro-l4r8/Documents/github/data-portal/kestra`. Conventional Commits; trailer `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`; no network for subagents; never touch ports 5432 or `egret-dev-*`/`egret-demo-*` containers; scratch never in git. New `std::env::var` needs `cargo test -p egret-config`. Oracle: `cargo test -p egret-workflow --test executor` must stay 301 / 50 / 50 / 0. Test infra: containers `egret-http-postgres` (:5462) and `egret-http-valkey` (:6462). Egress tests must prove each refusal with the allowlist unset.

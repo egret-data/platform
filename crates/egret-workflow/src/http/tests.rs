@@ -1038,7 +1038,7 @@ fn http_a_secret_in_the_uri_is_masked_in_the_url_crates_encodings() {
             let text = format!("request to {url} failed");
             let masked = masks.mask(&text);
             assert!(masked.contains(MASK), "{secret} in {url}: {masked}");
-            for part in [secret, &url.to_string()] {
+            for part in [secret, url.as_str()] {
                 assert!(!masked.contains(part), "{secret}: {masked}");
             }
         }
