@@ -49,6 +49,9 @@ pub struct EgressOptions {
     /// Cap on the whole exchange: every hop, and reading the final body. `None`
     /// leaves only the connect timeout (an SSE stream has no natural end).
     pub timeout: Option<Duration>,
+    /// Cap on the time between two reads of the response (Kestra's
+    /// `options.timeout.readIdleTimeout`). `None` leaves only `timeout`.
+    pub read_timeout: Option<Duration>,
     /// Redirect hops followed before giving up.
     pub max_redirects: u32,
     /// `false` returns a 3xx response as is (Kestra's `followRedirects`).
@@ -60,6 +63,7 @@ impl Default for EgressOptions {
         Self {
             connect_timeout: Duration::from_secs(10),
             timeout: Some(Duration::from_secs(60)),
+            read_timeout: None,
             max_redirects: DEFAULT_MAX_REDIRECTS,
             follow_redirects: true,
         }
@@ -144,6 +148,35 @@ impl EgressClient {
     /// total timeout, if any, still bounds that read. `Response::url()` is the
     /// URL of the last hop.
     pub async fn send(&self, spec: RequestSpec) -> Result<reqwest::Response, EgressError> {
+        send(&self.policy, self.resolver.as_ref(), &self.options, spec).await
+    }
+}
+
+/// [`EgressClient::send`] for a caller that holds its resolver by reference
+/// (alert webhook delivery). Same guarantees, hop for hop.
+pub async fn send(
+    policy: &SsrfPolicy,
+    resolver: &dyn Resolver,
+    options: &EgressOptions,
+    spec: RequestSpec,
+) -> Result<reqwest::Response, EgressError> {
+    Hops {
+        policy,
+        resolver,
+        options,
+    }
+    .send(spec)
+    .await
+}
+
+struct Hops<'a> {
+    policy: &'a SsrfPolicy,
+    resolver: &'a dyn Resolver,
+    options: &'a EgressOptions,
+}
+
+impl Hops<'_> {
+    async fn send(&self, spec: RequestSpec) -> Result<reqwest::Response, EgressError> {
         let deadline = self.options.timeout.map(|t| Instant::now() + t);
         let RequestSpec {
             mut method,
@@ -212,7 +245,7 @@ impl EgressClient {
         body: Option<Bytes>,
         deadline: Option<Instant>,
     ) -> Result<reqwest::Response, EgressError> {
-        let addrs = vet_url(url, &self.policy, self.resolver.as_ref())
+        let addrs = vet_url(url, self.policy, self.resolver)
             .await
             .map_err(|source| EgressError::Destination {
                 url: redact(url),
@@ -221,11 +254,15 @@ impl EgressClient {
         // `vet_url` refused a URL without a host, so this is present.
         let host = url.host_str().unwrap_or_default();
 
-        let client = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(self.options.connect_timeout)
-            .resolve_to_addrs(host, &addrs)
+            .resolve_to_addrs(host, &addrs);
+        if let Some(t) = self.options.read_timeout {
+            builder = builder.read_timeout(t);
+        }
+        let client = builder
             .build()
             .map_err(|e| EgressError::Transport(e.to_string()))?;
 

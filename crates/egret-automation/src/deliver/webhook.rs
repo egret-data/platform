@@ -5,7 +5,10 @@ use std::time::Duration;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
-use super::destination::{vet, Resolver, SsrfPolicy};
+use egret_egress::{EgressError, EgressOptions, RequestSpec};
+use reqwest::header::HeaderValue;
+
+use super::destination::{Resolver, SsrfPolicy};
 
 /// Header carrying the HMAC, so a receiver can tell a real delivery from
 /// anything else that can reach its endpoint.
@@ -56,9 +59,14 @@ pub fn sign(secret: &str, body: &[u8]) -> String {
 
 /// Send `payload` to `url`, after vetting the destination.
 ///
-/// The vetted addresses are PINNED onto the client rather than merely checked:
-/// letting reqwest do its own lookup would reopen the gap between the check and
-/// the connection, which is where DNS rebinding lives.
+/// Sent through [`egret_egress::send`], which vets the destination, PINS every
+/// vetted address onto the client (letting reqwest do its own lookup would
+/// reopen the gap between the check and the connection, which is where DNS
+/// rebinding lives) and never uses a proxy (through an environment
+/// `HTTP_PROXY`, DNS happens at the proxy and pinning means nothing).
+///
+/// Redirects are **not followed**: a redirect is a second destination, and a
+/// receiver answering 3xx gets [`WebhookError::Status`], as any non-2xx does.
 pub async fn deliver(
     url: &str,
     secret: Option<&str>,
@@ -66,39 +74,34 @@ pub async fn deliver(
     policy: &SsrfPolicy,
     resolver: &dyn Resolver,
 ) -> Result<(), WebhookError> {
-    let addrs = vet(url, policy, resolver).await?;
-    let host = url::Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_string))
-        .ok_or(super::destination::DestinationError::NoHost)?;
-
     let body = serde_json::to_vec(payload).map_err(|e| WebhookError::Transport(e.to_string()))?;
 
-    let mut builder = reqwest::Client::builder()
-        .timeout(TIMEOUT)
-        // A redirect is a second destination, and it would not go through
-        // `vet`. Following one would let a public URL bounce the request into
-        // the cluster, which is the whole thing this module exists to prevent.
-        .redirect(reqwest::redirect::Policy::none());
-    for addr in &addrs {
-        builder = builder.resolve(&host, *addr);
-    }
-    let client = builder
-        .build()
-        .map_err(|e| WebhookError::Transport(e.to_string()))?;
-
-    let mut req = client
-        .post(url)
-        .header("Content-Type", "application/json")
-        .body(body.clone());
+    let mut spec = RequestSpec::new(reqwest::Method::POST, url);
+    spec.headers.insert(
+        reqwest::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
     if let Some(secret) = secret {
-        req = req.header(SIGNATURE_HEADER, sign(secret, &body));
+        let signature = HeaderValue::from_str(&sign(secret, &body))
+            .expect("a hex signature is a valid header value");
+        spec.headers.insert(SIGNATURE_HEADER, signature);
     }
+    spec.body = Some(body.into());
 
-    let res = req
-        .send()
+    let options = EgressOptions {
+        connect_timeout: TIMEOUT,
+        timeout: Some(TIMEOUT),
+        read_timeout: None,
+        max_redirects: 0,
+        follow_redirects: false,
+    };
+    let res = egret_egress::send(policy, resolver, &options, spec)
         .await
-        .map_err(|e| WebhookError::Transport(e.to_string()))?;
+        .map_err(|e| match e {
+            EgressError::Destination { source, .. } => WebhookError::Destination(source),
+            EgressError::Transport(t) => WebhookError::Transport(t),
+            other => WebhookError::Transport(other.to_string()),
+        })?;
     let status = res.status();
     if !status.is_success() {
         return Err(WebhookError::Status(status.as_u16()));

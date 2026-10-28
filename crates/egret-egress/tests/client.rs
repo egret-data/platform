@@ -472,6 +472,30 @@ async fn the_total_timeout_is_enforced() {
 }
 
 #[tokio::test]
+async fn the_read_timeout_is_enforced_without_a_total_timeout() {
+    // Kestra's `readIdleTimeout`: no total cap, but a silent server is cut.
+    let a = start().await;
+    let c = client(
+        &["a.test"],
+        EgressOptions {
+            timeout: None,
+            read_timeout: Some(Duration::from_millis(200)),
+            ..EgressOptions::default()
+        },
+    );
+    let started = std::time::Instant::now();
+    let err = c
+        .send(get(format!("http://a.test:{}/slow", a.port)))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EgressError::Timeout), "{err:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "cut by the read timeout"
+    );
+}
+
+#[tokio::test]
 async fn the_environment_proxy_is_ignored() {
     // With a proxy honoured, the request would go to the (dead) proxy and
     // fail; `.no_proxy()` means it goes to the pinned address. Set for this

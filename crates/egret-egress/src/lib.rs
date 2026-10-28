@@ -16,7 +16,7 @@
 pub mod client;
 pub mod guard;
 
-pub use client::{EgressClient, EgressError, EgressOptions, RequestSpec};
+pub use client::{send, EgressClient, EgressError, EgressOptions, RequestSpec};
 pub use guard::{
     blocked_reason, vet, vet_url, DestinationError, Resolver, SsrfPolicy, SystemResolver,
 };
