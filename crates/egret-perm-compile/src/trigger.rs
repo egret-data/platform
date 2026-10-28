@@ -114,7 +114,8 @@ use egret_policy::{
     catalogs_for_service_via, compiler_targeted_services_via, get_service_by_id_via,
     service_id_by_name_via, services_and_tag_services_via, services_for_catalog_via,
     tag_assignments_for_service_via, tag_name_for_key_via, PolicyStore, COMPILER_CLEARANCE_PREFIX,
-    COMPILER_ENGINE_GRANT_PREFIX, COMPILER_GRANT_PREFIX, COMPILER_RULE_PREFIX,
+    COMPILER_ENGINE_GRANT_PREFIX, COMPILER_GRANT_PREFIX, COMPILER_HIDDEN_PREFIX,
+    COMPILER_RULE_PREFIX,
 };
 
 use crate::grants::compile_grant;
@@ -617,6 +618,45 @@ async fn compile_desired(
             &mut skipped,
         )
         .await?;
+    }
+
+    // **§11.4: hide `_file` and `_pos` wherever the profile masks a table.** A
+    // `SELECT *` on a masked StarRocks table still returns those two columns
+    // (the Iceberg data-file path and the row position) with every visible
+    // column nulled, so the masks alone leak the path. The masks are the
+    // profile's compiled ones and its enabled hand-written ones, the same set
+    // the clearance fold sees as `others`. Read `crate::clearance::hidden_column_denies`.
+    if engine == EngineType::StarRocks {
+        let is_mask = |b: &Value| b.get("policyType").and_then(Value::as_i64) == Some(1);
+        let mut masks: Vec<Value> = desired
+            .iter()
+            .filter(|((sid, _), dp)| *sid == service_id && is_mask(&dp.body))
+            .map(|(_, dp)| dp.body.clone())
+            .collect();
+        masks.extend(
+            egret_policy::enabled_policies_for_service_via(conn, service_id)
+                .await
+                .map_err(db_err)?
+                .into_iter()
+                .filter(|b| {
+                    is_mask(b)
+                        && !b
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .is_some_and(egret_policy::is_compiler_owned_policy_name)
+                }),
+        );
+        for (name, body) in crate::clearance::hidden_column_denies(&masks, &svc.name)? {
+            desired.insert(
+                (service_id, name),
+                DesiredPolicy {
+                    body,
+                    source_kind: SourceKind::Clearance,
+                    grant_id: None,
+                    rule_id: None,
+                },
+            );
+        }
     }
 
     // **SP4d debt Task 6, item 1: the write side of `EvalOrderAmbiguous`** —
@@ -1160,7 +1200,7 @@ async fn apply_diff_in_tx(
         "SELECT id, service_id, name, policy_jsonb FROM policy.authz_policies \
          WHERE service_id = ANY($1) \
            AND (name LIKE $2 || '%' OR name LIKE $3 || '%' OR name LIKE $4 || '%' \
-                OR name LIKE $5 || '%')",
+                OR name LIKE $5 || '%' OR name LIKE $6 || '%')",
     )
     .bind(sweep)
     .bind(COMPILER_GRANT_PREFIX)
@@ -1173,6 +1213,9 @@ async fn apply_diff_in_tx(
     // F11: an engine grant's policy is reaped when the grant (or its engine,
     // or its target user) is deleted, for the same reason.
     .bind(COMPILER_ENGINE_GRANT_PREFIX)
+    // §11.4: a hidden-column deny is reaped the moment no column of its table
+    // is masked, for the same reason as the clearance above.
+    .bind(COMPILER_HIDDEN_PREFIX)
     .fetch_all(&mut **tx)
     .await
     .map_err(db_err)?;
