@@ -1031,6 +1031,48 @@ fn check_after_before<T: Ord>(
     Ok(())
 }
 
+/// Save time (review I1): each bound of `input` that does not parse for its
+/// type, as `(field, cause)`, the cause in the text the start check would
+/// give. Kestra's bound fields are typed (`Integer`, `Float`, `Duration`,
+/// `Instant`, `LocalDate`, `LocalTime`), so Jackson refuses such a flow when
+/// it is read; egret's model keeps them loose, and without this the flow
+/// would save and then refuse every start that gives the input a value.
+///
+/// One recorded divergence: Jackson's default `ACCEPT_FLOAT_AS_INT` reads an
+/// INT `min: 1.5` as `1`. egret refuses a non-integral INT bound here instead,
+/// and the start check keeps failing closed on a stored one.
+pub(crate) fn bound_refusals(input: &Input) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    let mut numeric = |check: &dyn Fn(&Value) -> Result<(), String>| {
+        for (field, bound) in [("min", &input.min), ("max", &input.max)] {
+            if let Some(Err(cause)) = bound.as_ref().map(check) {
+                out.push((field, cause));
+            }
+        }
+    };
+    match input.r#type {
+        InputType::Int => numeric(&|v| to_int(v).map(drop)),
+        InputType::Float => numeric(&|v| to_float(v).map(drop)),
+        InputType::Duration => {
+            numeric(&|v| to_bounded(v, "Duration", JavaDuration::parse).map(drop));
+        }
+        InputType::Datetime | InputType::Date | InputType::Time => {
+            let (class, parses): (&str, fn(&str) -> bool) = match input.r#type {
+                InputType::Datetime => ("Instant", |s| parse_instant(s).is_some()),
+                InputType::Date => ("LocalDate", |s| parse_date(s).is_some()),
+                _ => ("LocalTime", |s| parse_time(s).is_some()),
+            };
+            for (field, bound) in [("after", &input.after), ("before", &input.before)] {
+                if let Some(b) = bound.as_deref().filter(|b| !parses(b)) {
+                    out.push((field, cannot_convert(&Value::from(b), class)));
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
 /// Nanoseconds from up to nine fraction digits (`5` is 500 ms).
 fn fraction_nanos(frac: &str) -> u32 {
     let mut padded = frac.to_string();

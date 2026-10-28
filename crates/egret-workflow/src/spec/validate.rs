@@ -1233,6 +1233,12 @@ fn validate_inputs(inputs: &[Input], report: &mut ValidationReport) {
 ///   expanded (W1 does not model FORM).
 /// - `input_defaults_with_prefill`: `InputValidator.java:53-59`, every type.
 /// - `input_file_defaults_invalid`: `FileInputValidator.java:33-50`.
+/// - `input_bound_invalid` (review I1): an INT / FLOAT / DURATION `min` or
+///   `max`, or a DATETIME / DATE / TIME `after` or `before`, that does not
+///   parse for its type. Kestra's fields are typed, so Jackson refuses the
+///   flow when it reads it; a non-integral INT bound, which Jackson would
+///   truncate (`ACCEPT_FLOAT_AS_INT`), is refused here (a recorded
+///   divergence). See `inputs_check::bound_refusals`.
 /// - `input_validator_invalid`: `RegexValidator.java:26-32` on STRING and
 ///   SECRET, compiled with `fancy-regex` (D10) rather than `java.util.regex`.
 ///   Not anchored: Kestra compiles the pattern as written.
@@ -1259,6 +1265,13 @@ fn input_save_findings(inputs: &[Input], report: &mut ValidationReport) {
                     path: format!("inputs.{}.defaults", input.id),
                 });
             }
+        }
+        for (field, cause) in crate::inputs_check::bound_refusals(input) {
+            report.errors.push(Finding {
+                code: "input_bound_invalid",
+                message: format!("input '{}': invalid `{field}`: {cause}", input.id),
+                path: format!("inputs.{}.{field}", input.id),
+            });
         }
         if matches!(input.r#type, InputType::String | InputType::Secret) {
             if let Some(v) = input.validator.as_deref() {
@@ -4120,6 +4133,66 @@ mod tests {
             } else {
                 assert!(got.is_empty(), "{ty} {v}: {got:?}");
             }
+        }
+    }
+
+    /// Review I1: a bound that does not parse for its type is refused at save
+    /// (and not by the run gate), with the cause the start check would give.
+    /// A bound that parses, and a bound on a type that has none, is silent.
+    #[test]
+    fn a_bound_that_does_not_parse_for_its_type_is_refused() {
+        for (decl, want) in [
+            (
+                "type: INT\n    min: abc",
+                Some(("min", "Cannot convert value 'abc' to Integer")),
+            ),
+            (
+                "type: INT\n    max: 1.5",
+                Some(("max", "Cannot convert value '1.5' to Integer")),
+            ),
+            ("type: INT\n    min: 1\n    max: '7'", None),
+            ("type: INT\n    min: 2.0", None),
+            (
+                "type: FLOAT\n    min: x1",
+                Some(("min", "Cannot convert value 'x1' to Float")),
+            ),
+            ("type: FLOAT\n    min: 0.5\n    max: 2", None),
+            (
+                "type: DURATION\n    max: 1h",
+                Some(("max", "Cannot convert value '1h' to Duration")),
+            ),
+            ("type: DURATION\n    min: PT1H", None),
+            (
+                "type: DATE\n    after: yesterday",
+                Some(("after", "Cannot convert value 'yesterday' to LocalDate")),
+            ),
+            ("type: DATE\n    before: '2026-01-01'", None),
+            (
+                "type: DATETIME\n    before: '2026-01-01'",
+                Some(("before", "Cannot convert value '2026-01-01' to Instant")),
+            ),
+            ("type: DATETIME\n    after: '2026-01-01T00:00:00Z'", None),
+            (
+                "type: TIME\n    after: '25:00'",
+                Some(("after", "Cannot convert value '25:00' to LocalTime")),
+            ),
+            ("type: TIME\n    after: '10:00:00'", None),
+            ("type: STRING\n    min: abc\n    after: x", None),
+        ] {
+            let f = with_inputs(&format!("  - id: b\n    {decl}\n    required: false\n"));
+            let got = errors_of(&f, "input_bound_invalid");
+            match want {
+                None => assert!(got.is_empty(), "{decl}: {got:?}"),
+                Some((field, cause)) => assert_eq!(
+                    got,
+                    [(
+                        format!("input 'b': invalid `{field}`: {cause}"),
+                        format!("inputs.b.{field}")
+                    )],
+                    "{decl}"
+                ),
+            }
+            assert!(validate_for_run(&f).errors.is_empty(), "run gate: {decl}");
         }
     }
 
