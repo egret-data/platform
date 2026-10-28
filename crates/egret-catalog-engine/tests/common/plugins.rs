@@ -19,16 +19,30 @@ use tower::ServiceExt as _;
 pub const RANGER_TOKEN: &str = "devtoken";
 
 /// The fake Trino plugin of `service`: polls `download_tags` every `poll`,
-/// reporting the `tagVersion` its last 200 carried.
+/// reporting the `tagVersion` its last 200 carried, and, under the same plugin
+/// id, `/plugins/policies/download/{service}`, reporting the `policyVersion`
+/// its last 200 carried (Trino 483 sends `lastKnownVersion` on its policy
+/// polls too: grants-follow spec E26). `polls` records the tag polls,
+/// `policy_polls` the policy polls.
 pub fn start_trino(policy: PolicyStore, service: String, poll: Duration) -> Plugin {
     let plugin_id = format!("trino@vh-coordinator-abc12-x9z8q-{service}");
-    start(
-        policy,
+    let mut tags = start(
+        policy.clone(),
         format!("/tags/download/{service}"),
-        plugin_id,
+        plugin_id.clone(),
         "tagVersion",
         poll,
-    )
+    );
+    let policies = start(
+        policy,
+        format!("/plugins/policies/download/{service}"),
+        plugin_id,
+        "policyVersion",
+        poll,
+    );
+    tags.policy_polls = policies.polls.clone();
+    tags.others.push(policies);
+    tags
 }
 
 /// The fake StarRocks plugin of `service`: polls
@@ -84,8 +98,10 @@ fn start(
     });
     Plugin {
         id: plugin_id,
-        polls,
+        polls: polls.clone(),
+        policy_polls: polls,
         task,
+        others: Vec::new(),
     }
 }
 
@@ -94,7 +110,12 @@ fn start(
 pub struct Plugin {
     pub id: String,
     pub polls: Arc<Mutex<Vec<(Instant, i64)>>>,
+    /// The policy polls: for Trino its second poller's, for StarRocks the same
+    /// log as `polls`.
+    pub policy_polls: Arc<Mutex<Vec<(Instant, i64)>>>,
     task: tokio::task::JoinHandle<()>,
+    /// Pollers stopped with this one.
+    others: Vec<Plugin>,
 }
 
 impl Plugin {
@@ -120,10 +141,31 @@ impl Plugin {
         panic!("the plugin never reported version {version}");
     }
 
+    /// The first policy poll that reported at least `version`, waiting up to
+    /// 5 s for it.
+    pub async fn policy_report_of(&self, version: i64) -> Instant {
+        for _ in 0..250 {
+            let seen = self
+                .policy_polls
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(_, held)| *held >= version)
+                .map(|(t, _)| *t);
+            if let Some(t) = seen {
+                return t;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the plugin never reported policy version {version}");
+    }
+
     /// Wait until the plugin has polled once, so the ledger knows it.
     pub async fn polled(&self) {
         for _ in 0..100 {
-            if !self.polls.lock().unwrap().is_empty() {
+            if !self.polls.lock().unwrap().is_empty()
+                && !self.policy_polls.lock().unwrap().is_empty()
+            {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;

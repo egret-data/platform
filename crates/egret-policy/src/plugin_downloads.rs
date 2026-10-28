@@ -213,6 +213,9 @@ pub async fn wait_for_tag_version(
 /// policy V is that profile's `policy_version`. A V that is too low confirms
 /// before the plugin has the change; too high never confirms.
 ///
+/// A pair confirmed once is not asked again during the same wait (D7 of the
+/// grants-follow-rename spec).
+///
 /// An empty list is skipped: with both empty this returns at once. The
 /// timeout's `waiting_on` lists plugin ids, prefixed `tags:` / `policies:`
 /// only when one id is behind on both.
@@ -223,17 +226,35 @@ pub async fn wait_for_versions(
     deadline: Duration,
 ) -> Result<(), WaitError> {
     let end = tokio::time::Instant::now() + deadline;
+    // A pair once confirmed stays confirmed for the rest of this wait (spec
+    // `2026-10-27-grants-follow-table-rename-design.md` D7): a version a
+    // plugin reported was applied, and Trino's tag row regresses to `-1` on
+    // the first tag poll after every policy download (the tag retriever
+    // restarts), which would otherwise hold a tag pair hostage to one more tag
+    // poll while a policy pair is waited for.
+    let mut tags_left: Vec<(i64, i64)> = tags.to_vec();
+    let mut policies_left: Vec<(i64, i64)> = policies.to_vec();
     loop {
         let mut behind_tags = Vec::new();
-        for &(id, version) in tags {
+        let mut still = Vec::new();
+        for &(id, version) in &tags_left {
             let s = plugins_hold_tag_version(store, id, version, RECENT).await?;
+            if !s.confirmed {
+                still.push((id, version));
+            }
             behind_tags.extend(s.waiting_on);
         }
+        tags_left = still;
         let mut behind_policies = Vec::new();
-        for &(id, version) in policies {
+        let mut still = Vec::new();
+        for &(id, version) in &policies_left {
             let s = plugins_hold_policy_version(store, id, version, RECENT).await?;
+            if !s.confirmed {
+                still.push((id, version));
+            }
             behind_policies.extend(s.waiting_on);
         }
+        policies_left = still;
         if behind_tags.is_empty() && behind_policies.is_empty() {
             return Ok(());
         }

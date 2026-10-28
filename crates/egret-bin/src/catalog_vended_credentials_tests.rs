@@ -1249,3 +1249,97 @@ async fn a_view_load_vends_read_only_credentials() {
 
     assert!(!policy.can_write(), "a view load is read only: {policy:?}");
 }
+
+// ── Grants follow a rename (spec 2026-10-27, KI-309, D8) ─────────────────────
+
+/// KI-309 through the real guard: a rename the guard authorizes moves the
+/// `table` catalog grants on the old name to the new one, so the renamed
+/// table is readable to its readers, with read-only credentials on its files,
+/// and writable to its writers (F4: the vended scope follows the moved
+/// grant). A new table created under the old name gets nothing from them.
+/// The event names the verified client that renamed.
+#[tokio::test]
+async fn a_renamed_tables_catalog_grants_and_credentials_follow_it() {
+    let env = env_or_skip!();
+    let location = location_of(&env.create_table("sales", "orders").await);
+    let reader = env
+        .token_for(
+            "external",
+            &[("table", Some("sales"), Some("orders"), "read")],
+        )
+        .await;
+    let writer = env
+        .token_for(
+            "external",
+            &[("table", Some("sales"), Some("orders"), "write")],
+        )
+        .await;
+    let (renamer, subject) = env
+        .token_and_subject(
+            "external",
+            &[
+                ("table", Some("sales"), Some("orders"), "write"),
+                ("namespace", Some("sales"), None, "write"),
+            ],
+        )
+        .await;
+
+    let (status, body) = env
+        .send(
+            &env.app,
+            Some(&renamer),
+            "POST",
+            "tables/rename",
+            &[],
+            json!({
+                "source": {"namespace": ["sales"], "name": "orders"},
+                "destination": {"namespace": ["sales"], "name": "orders_v2"},
+            }),
+        )
+        .await;
+    assert!(status.is_success(), "rename: {status} {body}");
+
+    let (key, policy) =
+        env.vended_in_config(&env.load(&reader, "sales", "orders_v2", &[VENDED]).await);
+    assert!(
+        !policy.can_write(),
+        "the reader stays read-only: {policy:?}"
+    );
+    assert!(reaches(&policy, &location), "{policy:?} on {location}");
+    assert!(env.store_permits(&key, "s3:GetObject", &location));
+    let (key, policy) =
+        env.vended_in_config(&env.load(&writer, "sales", "orders_v2", &[VENDED]).await);
+    assert!(
+        policy.can_write(),
+        "the writer writes the renamed table: {policy:?}"
+    );
+    assert!(env.store_permits(&key, "s3:PutObject", &location));
+
+    env.create_table("sales", "orders").await;
+    for token in [&reader, &writer] {
+        let (status, body) = env
+            .send(
+                &env.app,
+                Some(token),
+                "GET",
+                "namespaces/sales/tables/orders",
+                &[VENDED],
+                Value::Null,
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "the new orders: {body}");
+    }
+
+    let actors: Vec<Value> = sqlx::query_scalar(
+        "SELECT detail -> 'actor' FROM audit.audit_log \
+          WHERE action = 'catalog_grant:move' AND detail ->> 'warehouse_id' = $1",
+    )
+    .bind(env.warehouse_id.to_string())
+    .fetch_all(env.catalog.pool())
+    .await
+    .expect("events");
+    assert_eq!(actors.len(), 3, "three table grants moved: {actors:?}");
+    for a in &actors {
+        assert_eq!(a["client_id"], json!(subject), "{a}");
+    }
+}

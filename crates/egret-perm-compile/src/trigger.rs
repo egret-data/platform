@@ -99,7 +99,7 @@
 //! crashed a tag write over an internal invariant would be worse than one that
 //! records it.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::Value;
 use sqlx::{Postgres, Transaction};
@@ -679,9 +679,28 @@ async fn compile_desired(
     .await?;
 
     let levels = crate::grants::resource_level_names(engine);
+    // Only a body the classifications produced leaves with them: a held
+    // rename moves the classification rows, so the source's clearance and
+    // tag-rule bodies are gone once it is done. A grant's or a path rule's
+    // body stays on the old name after the rename (grants-follow spec G2,
+    // D12) and is served afterwards, so it always counts.
+    let tag_rules: HashSet<Uuid> = all_rules
+        .iter()
+        .filter(|r| matches!(r.selector, egret_perm::Selector::Tag { .. }))
+        .map(|r| r.id)
+        .collect();
+    let follows_classifications = |dp: &DesiredPolicy| match dp.source_kind {
+        SourceKind::Clearance => true,
+        SourceKind::Rule => dp.rule_id.is_some_and(|id| tag_rules.contains(&id)),
+        SourceKind::Grant | SourceKind::EngineGrant => false,
+    };
     let uncounted = desired
         .iter()
-        .filter(|((sid, _), dp)| *sid == service_id && !leaving.counts_body(&dp.body, &levels))
+        .filter(|((sid, _), dp)| {
+            *sid == service_id
+                && follows_classifications(dp)
+                && !leaving.counts_body(&dp.body, &levels)
+        })
         .count();
     Ok(Some(Compiled {
         desired,
