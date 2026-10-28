@@ -32929,7 +32929,7 @@
             }
           },
           "400": {
-            "description": "`inputs` is not a JSON object; the flow's stored source does not parse or plan, or uses a task type this deployment does not serve; a `FILE` input's value is not a readable `kestra://` URI or its extension is not allowed; a multipart part names no declared input, names one twice, carries a file for a non-`FILE` input, or has a file name no storage URI can hold; or egret has no internal storage (`[storage]`) for an upload. The message names the input.",
+            "description": "`inputs` is not a JSON object; the flow's stored source does not parse or plan, or uses a task type this deployment does not serve; a declared input is refused by the start check (the first one in declared order, in Kestra's words: `Missing required input:<id>` for a required input with no value and no default, or ``Invalid value for input `<id>`. Cause: <cause>`` for a value that does not parse as its `type` -- a BOOL accepts only `true`/`false` -- or breaks its `validator`, `min`/`max`, `after`/`before`, `values`, or its literal `defaults` does; an input disabled by `dependsOn` is not checked); a `FILE` input's value is not a readable `kestra://` URI or its extension is not allowed; a multipart part names no declared input, names one twice, carries a file for a non-`FILE` input, or has a file name no storage URI can hold; or egret has no internal storage (`[storage]`) for an upload. The message names the input.",
             "content": {
               "application/json": {
                 "schema": {

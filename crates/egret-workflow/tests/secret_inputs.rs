@@ -482,7 +482,12 @@ async fn the_backfill_masks_and_seals_a_secret_stored_in_clear(pool: sqlx::PgPoo
 async fn a_flow_without_a_secret_value_is_unchanged(pool: sqlx::PgPool) {
     // Arrange
     let f = fx(pool).await;
-    let flow = common::seed_flow(&f.db, f.ws, f.user, &source("plain", LOG_TASK), "draft").await;
+    // `pw` optional: package #3 refuses a required SECRET posted as null.
+    let src = source("plain", LOG_TASK).replace(
+        "    type: SECRET\n",
+        "    type: SECRET\n    required: false\n",
+    );
+    let flow = common::seed_flow(&f.db, f.ws, f.user, &src, "draft").await;
 
     // Act
     let (exec, started) = f.start(flow, json!({"who": "world", "pw": null})).await;
