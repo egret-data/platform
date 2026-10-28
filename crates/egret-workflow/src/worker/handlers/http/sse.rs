@@ -28,12 +28,19 @@
 //! - **`workflow.http.max_sse_events`** (default 10 000): at that many events
 //!   the stream is closed and the task SUCCEEDS with them, logging a warning.
 //!   The task's `timeout:` also stops a stream (as a failure, the budget's).
-//! - **Memory bounds**: the stream may carry at most [`MAX_STREAM_BYTES`]
-//!   and the outputs may be at most [`MAX_OUTPUT_BYTES`] of JSON (egret's
-//!   render cap); crossing either fails, naming it.
+//! - **Size bounds**: the stream may carry at most [`MAX_STREAM_BYTES`] of
+//!   raw bytes and the outputs may be at most [`MAX_OUTPUT_BYTES`] of JSON
+//!   (egret's render cap); crossing either fails, naming it. The 16 MiB is a
+//!   bound on the bytes read, **not on memory**: the parsed events are held
+//!   as JSON values and, with `concatJqExpression`, again as one JSON text
+//!   per event, so one task can peak at a few times 16 MiB (final review M5,
+//!   accepted; the parsed events are dropped once their JSON values exist).
 //! - **JQ is `jaq`** through the `jq` filter's sandbox, not jackson-jq 1.6:
 //!   a program jaq does not parse (jackson-jq's `$.field` path form, say)
-//!   fails at the start with egret's message.
+//!   fails at the start with egret's message. The program runs on its own
+//!   thread, awaited rather than joined, with a 1 s deadline per event and
+//!   `runners::filters::JQ_EACH_BUDGET` (60 s) over all events (final review
+//!   I3).
 //! - An event whose `data` lines are all empty has `data` null (Kestra fails
 //!   the task there, on `JacksonMapper.toObject(null)`).
 //! - `retry` is a number of seconds (Jackson writes the `Duration` that way).
@@ -150,7 +157,7 @@ impl TaskHandler for SseRequest {
         // Kestra compiles before the request: a program that cannot run
         // sends nothing.
         if let Some(q) = &jq {
-            if let Err(m) = jq_each(q, Vec::new()) {
+            if let Err(m) = jq_each(q, Vec::new()).await {
                 return failed(&format!("concatJqExpression: {m}"));
             }
         }
@@ -210,10 +217,12 @@ impl TaskHandler for SseRequest {
         }
 
         let values: Vec<Value> = events.iter().map(event_value).collect();
+        let size = events.len();
+        drop(events);
         let mut results: Vec<String> = Vec::new();
         if let Some(q) = &jq {
             let inputs = values.iter().map(Value::to_string).collect();
-            let each = match jq_each(q, inputs) {
+            let each = match jq_each(q, inputs).await {
                 Ok(e) => e,
                 Err(m) => return failed(&format!("concatJqExpression: {m}")),
             };
@@ -249,7 +258,7 @@ impl TaskHandler for SseRequest {
         if results.is_empty() {
             out.insert("events".into(), Value::Array(values));
         }
-        out.insert("size".into(), json!(events.len()));
+        out.insert("size".into(), json!(size));
         if !results.is_empty() {
             out.insert("result".into(), Value::String(results.concat()));
         }
@@ -332,8 +341,8 @@ mod tests {
         assert_eq!(event_value(&SseEvent::default()), json!({}));
     }
 
-    #[test]
-    fn jq_keeps_scalars_as_text_and_stops_at_anything_else() {
+    #[tokio::test]
+    async fn jq_keeps_scalars_as_text_and_stops_at_anything_else() {
         let inputs = vec![
             json!({"data": {"m": "a"}}).to_string(),
             json!({"data": {"m": 2}}).to_string(),
@@ -343,7 +352,7 @@ mod tests {
             json!({"data": {"m": [1]}}).to_string(),
             json!({"data": "text"}).to_string(),
         ];
-        let got = jq_each(".data.m", inputs).unwrap();
+        let got = jq_each(".data.m", inputs).await.unwrap();
         let text = |s: &str| vec![JqScalar::Text(s.into())];
         assert_eq!(got[0].outputs, text("a"));
         assert_eq!(got[1].outputs, text("2"));
@@ -354,9 +363,43 @@ mod tests {
         assert!(got[6].failed, "indexing a string is a jq error");
         assert!(got.iter().all(|e| e.refused.is_none()));
         assert!(
-            jq_each("$.message", Vec::new()).is_err(),
+            jq_each("$.message", Vec::new()).await.is_err(),
             "jackson-jq's path form"
         );
-        assert!(jq_each(".[", Vec::new()).is_err());
+        assert!(jq_each(".[", Vec::new()).await.is_err());
+    }
+
+    /// Final review I3: the jq thread is awaited, never joined, so other
+    /// tasks on a single-threaded runtime run while it works (a blocking
+    /// `join` would hold the only worker until the program finished).
+    #[test]
+    fn jq_each_does_not_block_the_runtime() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let seen = ran.clone();
+            tokio::spawn(async move { seen.store(true, std::sync::atomic::Ordering::SeqCst) });
+            let inputs = (0..200).map(|i| json!({"n": i}).to_string()).collect();
+            let got = jq_each("[range(1000)] | length", inputs).await.unwrap();
+            let ran_meanwhile = ran.load(std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(got.len(), 200);
+            assert!(
+                ran_meanwhile,
+                "the runtime ran another task while jq worked"
+            );
+        });
+    }
+
+    /// Final review I3: the budget is over ALL inputs, not per input.
+    #[tokio::test]
+    async fn jq_each_stops_at_its_total_budget() {
+        let inputs = vec![json!({"n": 1}).to_string(); 3];
+        let err = crate::runners::filters_jq_each_within(".n", inputs, std::time::Duration::ZERO)
+            .await
+            .unwrap_err();
+        assert!(err.contains("total budget"), "{err}");
     }
 }

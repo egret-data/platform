@@ -4229,25 +4229,59 @@ pub(crate) struct JqEach {
     pub refused: Option<String>,
 }
 
+/// The total time [`jq_each`] may spend over all of a stream's inputs.
+/// The per-input deadline ([`jqsandbox`]'s 1 s) restarts for each input, so
+/// without this a 10 000-event stream could keep the jq thread busy for
+/// hours (final review I3). It is checked before each input, so a run ends
+/// at most one per-input deadline past it.
+pub(crate) const JQ_EACH_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// `http.SseRequest`'s `concatJqExpression`: one program, compiled ONCE and
 /// run over every input (each a JSON text), on one thread with the jq stack
 /// and every [`jqsandbox`] bound `run_jq` applies, the deadline restarted per
-/// input. `Err` when the program does not compile or is refused, with the
-/// reason (Kestra fails the task at `JsonQuery.compile`).
-pub(crate) fn jq_each(expression: &str, inputs: Vec<String>) -> Result<Vec<JqEach>, String> {
+/// input, and [`JQ_EACH_BUDGET`] over all of them. `Err` when the program
+/// does not compile or is refused, or the budget is spent, with the reason
+/// (Kestra fails the task at `JsonQuery.compile`).
+///
+/// **Async, and it never blocks the runtime** (final review I3): the jq
+/// thread hands its result back through a oneshot channel that this future
+/// awaits, so a tokio worker is never held in a `join`. Dropping the future
+/// (the task's `timeout:` or a kill) closes the channel, and the jq thread
+/// stops before its next input.
+pub(crate) async fn jq_each(expression: &str, inputs: Vec<String>) -> Result<Vec<JqEach>, String> {
+    jq_each_within(expression, inputs, JQ_EACH_BUDGET).await
+}
+
+/// [`jq_each`] with the total budget given.
+pub(crate) async fn jq_each_within(
+    expression: &str,
+    inputs: Vec<String>,
+    budget: std::time::Duration,
+) -> Result<Vec<JqEach>, String> {
     jqsandbox::check_source(expression).map_err(|e| e.0)?;
     let expression = expression.to_string();
-    let worker = std::thread::Builder::new()
+    let deadline = std::time::Instant::now().checked_add(budget);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
         .name("egret-jq".to_string())
         .stack_size(jqsandbox::JQ_STACK_BYTES)
-        .spawn(move || jq_each_on_this_thread(&expression, inputs))
+        .spawn(move || {
+            let result =
+                jq_each_on_this_thread(&expression, inputs, deadline, budget, &|| tx.is_closed());
+            let _ = tx.send(result);
+        })
         .map_err(|e| format!("jq: could not start the jq thread: {e}"))?;
-    worker
-        .join()
+    rx.await
         .map_err(|_| "jq: the jq program panicked".to_string())?
 }
 
-fn jq_each_on_this_thread(expression: &str, inputs: Vec<String>) -> Result<Vec<JqEach>, String> {
+fn jq_each_on_this_thread(
+    expression: &str,
+    inputs: Vec<String>,
+    deadline: Option<std::time::Instant>,
+    budget: std::time::Duration,
+    abandoned: &dyn Fn() -> bool,
+) -> Result<Vec<JqEach>, String> {
     let program = jaq_core::load::File {
         code: expression,
         path: (),
@@ -4263,6 +4297,16 @@ fn jq_each_on_this_thread(expression: &str, inputs: Vec<String>) -> Result<Vec<J
 
     let mut out = Vec::with_capacity(inputs.len());
     for json in inputs {
+        if abandoned() {
+            return Err("jq: the task stopped waiting for the jq program".to_string());
+        }
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Err(format!(
+                "jq: the program ran for more than its total budget of {} seconds over the \
+                 stream's events",
+                budget.as_secs()
+            ));
+        }
         jqsandbox::start_run();
         let mut each = JqEach::default();
         let Ok(input) = jaq_json::read::parse_single(json.as_bytes()) else {
