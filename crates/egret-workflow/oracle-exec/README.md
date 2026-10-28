@@ -6348,7 +6348,7 @@ exactly as `loop-switch` does. Both are corrected in `baseline.txt`.
 
 ### The residual baseline, by construct and owner
 
-**40 entries** at package #5a's end (2026-10-29, `baseline.len()` printed by the test below; Task A8's sweep corrected this heading and the cells marked so in the table, which had stopped following the banks of the end-hooks package and of #5a). **108 entries** at W9a — it read `111` until W8 Task 7, two banks behind, and `109`
+**37 entries** since package #5b's Task B2 (2026-10-29: `loop-object`, `loop-object-in-list`, `task-runif-taskswithstate` banked). **40 entries** at package #5a's end (2026-10-29, `baseline.len()` printed by the test below; Task A8's sweep corrected this heading and the cells marked so in the table, which had stopped following the banks of the end-hooks package and of #5a). **108 entries** at W9a — it read `111` until W8 Task 7, two banks behind, and `109`
 until W9a Task 11 banked `valids/loop-values-from-uri` (a `Loop` over the ION
 file a `core.storage.Write` wrote; the `Loop` row below fell 19 → 18 with it).
 `the_residual_baseline_is_attributed_to_a_construct_or_named` derives the rows
@@ -6361,9 +6361,9 @@ found.
 
 | baselined entries declaring it | construct | owner |
 |---|---|---|
-| **9** | `Loop` — a sub-execution egret **runs and gets wrong** | see below. **12 at package #5a Task A3 (2026-10-28, measured by the derivation; it read 14 before)**: `restart-loop` and `restart-parent-loop` banked; **11 at Task A6** (`if-in-flowable`), **9 at Task A7** (`all-flowable`, `disable-flowable`). This cell read 18 until Task A8's sweep |
-| **2** | `finally:` | end hooks #2a/#2b banked fourteen; the two left are `task-runif-taskswithstate` (#5b, the `empty` test) and `pause-errors-finally-after-execution` (#9). This cell read 16 until package #5a Task A8's sweep |
-| 1 | `ExecutionUpdatableTask` (`Exit` left at kill-and-exit Task 3, 16 → 12; `Labels`, `SetVariables`, `UnsetVariables` at group C2 Task 5, 12 → 1) | group C2 Task 5 banked eleven; the one left, `valids/task-runif-taskswithstate`, is held by its flow-level `finally:` and not by its `SetVariables` |
+| **7** | `Loop` — a sub-execution egret **runs and gets wrong** | see below. **12 at package #5a Task A3 (2026-10-28, measured by the derivation; it read 14 before)**: `restart-loop` and `restart-parent-loop` banked; **11 at Task A6** (`if-in-flowable`), **9 at Task A7** (`all-flowable`, `disable-flowable`), **7 at package #5b Task B2** (`loop-object`, `loop-object-in-list`: `is json`). This cell read 18 until Task A8's sweep |
+| **1** | `finally:` | end hooks #2a/#2b banked fourteen; package #5b Task B2 (2026-10-29) banked `task-runif-taskswithstate` (the `empty` test); the one left is `pause-errors-finally-after-execution` (#9). This cell read 16 until package #5a Task A8's sweep |
+| ~~1~~ | ~~`ExecutionUpdatableTask`~~ (`Exit` left at kill-and-exit Task 3, 16 → 12; `Labels`, `SetVariables`, `UnsetVariables` at group C2 Task 5, 12 → 1) | **row removed at package #5b Task B2 (2026-10-29)**: its last entry, `valids/task-runif-taskswithstate`, banked, and the derivation drops a row that holds nothing rather than asserting 0 |
 | **2** | `AllowFailure` / `allowFailure:` → `WARNING` | **W8 Task 5 banked seven of its twelve**; the five that remained were held by the FLOWABLE and not by the flag — see the paragraph below. Two now (`retry-with-flowable-errors`, `pause-timeout-allow-failure`); this cell read 5 until package #5a Task A8's sweep |
 | 3 | `Pause` → `PAUSED` | W8 — and **not one of the three is held by the wait**; see below |
 | **2** | `afterExecution:` | end hooks #2b banked eight; `valids/after-execution` (#6, flow `outputs:`) and `pause-errors-finally-after-execution` (#9) remain. This cell read 10 until package #5a Task A8's sweep |

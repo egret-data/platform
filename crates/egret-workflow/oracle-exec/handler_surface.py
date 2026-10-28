@@ -698,7 +698,7 @@ def declared_blockers(entry, flows, kinds):
     if re.search(r"allowFailure:\s*true", raw):
         out.add(("construct", "allowFailure:"))
     pause_gaps(doc, out)
-    loop_until_gaps(doc, raw, out)
+    loop_until_gaps(doc, out)
     loop_store_output_gaps(doc, out)
     return out
 
@@ -731,20 +731,14 @@ LOOP_UNTIL_TYPES = {
     "core.loopuntil",
     "core.waitfor",
 }
-# End hooks A4 fix round (2026-10-27): Pebble's `empty` test (`x is empty`,
-# `x is not empty`). egret's renderer leaves it an unknown test on purpose
-# (`runners::env`'s fence test), so the expression fails to render where the
-# artifact answers.  The corpus has one entry, `valids/task-runif-taskswithstate`,
-# whose two flow-level `finally:` `runIf:`s use it; it reached this file's
-# CEILING once that `finally:` became ported.
-EMPTY_TEST = re.compile(r"\{\{[^{}]*\bis\s+(not\s+)?empty\b")
+# (End hooks A4 fix round (2026-10-27) added a blocker here for Pebble's
+# `empty` test, then an unknown test in egret's renderer, which held
+# `valids/task-runif-taskswithstate`. Package #5b Task B2 (2026-10-29, spec
+# D8) registered it and the entry banked, so the blocker is gone.)
 
 
-def loop_until_gaps(node, raw, out):
+def loop_until_gaps(node, out):
     """The `LoopUntil` properties W8 Task 4 ported and cannot reproduce."""
-    if EMPTY_TEST.search(raw):
-        out.add(("render", "Pebble's `empty` test, which egret's renderer "
-                           "leaves unknown"))
 
     def walk(n):
         if isinstance(n, dict):
@@ -1045,8 +1039,11 @@ def check_inputs(flows, kinds, golden, baseline):
     # (`equals`) and `valids/task-runif-workingdirectory` (`contains`), spec D5.
     # 40 since package #5a Task A7 (2026-10-29) banked `valids/all-flowable` and
     # `valids/disable-flowable` (`taskrun.value` is absent when null, spec D7).
-    if len(baseline) != 40:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 40; the split "
+    # 37 since package #5b Task B2 (2026-10-29) banked `valids/loop-object` and
+    # `valids/loop-object-in-list` (`is json`) and
+    # `valids/task-runif-taskswithstate` (`is empty`), spec D8.
+    if len(baseline) != 37:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 37; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1696,8 +1693,8 @@ def self_test():
          "not 273",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 40",
-         "not 40",
+    case("baseline.txt is no longer 37",
+         "not 37",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

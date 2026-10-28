@@ -169,7 +169,8 @@ whose deliverable was refusals; Task 8 added 29, which is 17% of the file for
 7% of the corpus, and every one of them is `test:`-paired — the pairing file
 now has **no `unported:` line left in it**, and `UNPORTED_ERROR_CLASS` in
 `tests/oracle.rs` is empty. Note that marking an entry error-class does **not**
-make it pass: 16 of the 328 are *also* in `baseline.txt` (12 before package
+make it pass: 10 of the 328 are *also* in `baseline.txt` (16 before package
+#5b's Task B2 banked six, its `even`/`odd` ones; 12 before package
 #5b's Task B1 added four, 17 before package
 #5a's Task A6, 19 before its Task A4, 25 before its Task A3, 38 before its
 Task A2; re-counted from the two files 2026-10-29, after Task A5, which moved
@@ -264,7 +265,10 @@ writes a boolean as `True`) -- and **329 of 1753** after package #5b's Task B1
 (2026-10-29), which added 260 probe entries (tests, `max`/`min`, the ten
 filters, `escape` strategies) and RECORDED the 222 that fail under the `#5b red`
 heading, each group named with the task that banks it (see "What package #5b's
-Task B1 batches measured" below).
+Task B1 batches measured" below) -- and **273 of 1753** after package #5b's Task
+B2 (2026-10-29) banked 56: its 49 `#5b red` lines and seven old ones
+(`coalesce-is-not-null`, `test-json-true`, `test-json-false`, `test-even`,
+`test-odd`, `test-iterable`, `null-literal-is-null-test`).
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
@@ -4757,7 +4761,9 @@ own change broke is not porting the surface, and the difference is a
 **measurement**, not a reading: overriding it moved the ratchet from
 `141 of 1288` to `139 of 1288` — the two entries it fixes, no regression,
 nothing else touched — and
-`the_defined_test_is_pebbles_and_it_is_the_only_one_overridden` asserts the
+`the_defined_test_is_pebbles_and_it_is_the_only_one_overridden` (renamed
+`the_engine_tests_are_egrets_and_none_is_not_one` by package #5b's Task B2,
+which ported the seven; see "What package #5b's Task B2 measured") asserted the
 seven siblings unchanged (`even`, `iterable`, `odd` still answer minijinja's
 way; `empty`, `json`, `map`, `null` are still unknown). "An `add_test` binds one
 name" is a property of minijinja rather than of this crate, so it is asserted
@@ -4770,7 +4776,9 @@ The same surface from the other side: Pebble's null **test** is spelled `null`
 and minijinja's is spelled `none`, so `{{ null is null }}` is `true` there and
 `unknown test: test none is unknown` here. `null-literal-is-null-test` records
 it. The rename W2b added is what would make registering a `none`-spelled `null`
-test a one-liner, which is why it is written down now.
+test a one-liner, which is why it is written down now. (Package #5b's Task B2
+banked it and did NOT do that: Kestra refuses `is none`, so the rewriter leaves
+a test name alone and `null` is bound under its own name.)
 
 ### A bare `null` map key leaks Python's spelling into a KEY
 
@@ -5663,6 +5671,34 @@ A4 it is a `java.math.BigDecimal` (Q5 reverses the W9c refusal), and since A8 a
 unary minus on one is Pebble's `multiply(-1, x)` (`-fromIon(ion='1.50')` is
 `-1.50`). The oracle ends #5a at **107 of 1493** baselined: 103 lines from
 before A1 and those four.
+
+## What package #5b's Task B2 measured (2026-10-29)
+
+Plan B2, spec D8 (and §2.2 item 15). `runners::pebble_tests` registers `null`,
+`empty`, `map`, `json` and overrides minijinja's `even`, `odd`, `iterable`;
+56 lines left `baseline.txt` (329 -> 273), and the six `even`/`odd`
+error-class rows are paired with `even_and_odd_fail_with_pebbles_text` instead
+of `baselined`. Measured through the harness before building, from a scratch
+corpus that was not committed (the answers are pinned by unit tests instead):
+
+- **`is none`, `is NONE`, `is NULL` fail** (`Test [none] does not exist.`):
+  the null literal's spellings are not test names. So `null` is registered
+  as `null`, not as `none` as D8 read, and `rewrite::follows_a_test_operator`
+  keeps the rewriter from translating a word after `is`/`is not`.
+- Every test **ignores its arguments** (`getArgumentNames()` is `null`):
+  `'a' is json(1)` and `'a' is map(1)` are `false`.
+- `null is null` and `null is empty` are `true`, `null is map` `false`,
+  `null is json` fails (`argument "content" is null`); `x is even` on a null
+  fails with `Can not pass null value to "even" test.` (a `PebbleException`),
+  `odd` with the same words for `"odd"` (an `IllegalArgumentException`); a
+  Boolean, a Double (`2.0` too) and a `BigInteger` fail the `(Long)` cast.
+- **`json` is Jackson's `readTree`** (jackson-core 2.22.1, 63 probes): one
+  value then stop; `''` and whitespace are `true`; only space, tab, CR and LF
+  are whitespace; a root number must be followed by whitespace or the end
+  (`1x`, `1,`, `1]`, `1/` are `false`, `1 /* x */` is `true`); `truex`,
+  `true1`, `true_` are `false` while `true,`, `true$`, `true(` are `true`;
+  depth 1 000 passes and 1 001 fails; a 1 001-digit integer fails and a
+  1 000-digit fraction does not; a lone surrogate escape is accepted.
 
 ## What package #5b's Task B1 batches measured (2026-10-29)
 

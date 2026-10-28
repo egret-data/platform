@@ -57,6 +57,7 @@ mod javaformat;
 mod javare;
 mod jqsandbox;
 mod operators;
+mod pebble_tests;
 pub mod rewrite;
 pub mod secrets;
 mod yamlfmt;

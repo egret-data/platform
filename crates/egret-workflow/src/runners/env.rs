@@ -1720,11 +1720,17 @@ const MINIJINJA_ONLY_GLOBALS: &[&str] = &["dict", "debug", "namespace"];
 /// in `oracle/name-surface.txt` probeable through `render_str`, which is what
 /// makes the fixture an assertion rather than a claim.
 ///
-/// The four that stay are **not** semantically identical, and the fixture says
-/// so: Pebble's `even`/`odd` throw a `ClassCastException` on a non-number
-/// where minijinja answers `false`, and Pebble's `iterable` is `false` for a
-/// String where minijinja's is `true`. Porting the `is` surface is not W2's —
-/// no task was given the eight — and those rows carry the reason.
+/// The four that stay were **not** semantically identical: Pebble's
+/// `even`/`odd` throw a `ClassCastException` on a non-number where
+/// minijinja answered `false`, and Pebble's `iterable` is `false` for a
+/// String where minijinja's is `true`. Package #5b's Task B2 (spec D8)
+/// overrides all three and registers the other four engine tests
+/// (`super::pebble_tests`).
+///
+/// **`none` stays in this list.** Pebble's null test is spelled `null`, and
+/// `{{ x is none }}` is `Test [none] does not exist.` there (measured, B2);
+/// the rewriter leaves a test name alone, so `null` is bound under its own
+/// name rather than by putting minijinja's `none` back.
 const MINIJINJA_ONLY_TESTS: &[&str] = &[
     "undefined",
     "none",
@@ -1938,10 +1944,9 @@ pub(crate) fn environment() -> Environment<'static> {
     // one layer up. See `super::functions`' module doc.
     functions::register(&mut env);
 
-    // **`defined` is the ONE test this crate overrides, and it is not a step
-    // into the `is` surface [`MINIJINJA_ONLY_TESTS`] fences off.** That fence
-    // says PORTING the eight is not W2's work; this is one name W2b's own
-    // change broke, put back.
+    // **`defined` was the first test this crate overrode** (W2b), as one name
+    // W2b's own change broke, put back; porting the other seven was left to
+    // package #5b's Task B2, which registers them just below.
     //
     // Pebble's `DefinedTest` is "present **and not null**". Measured against
     // the artifact, one probe per kind: `0`, `false`, `""`, `[]` and `{}` are
@@ -1958,12 +1963,16 @@ pub(crate) fn environment() -> Environment<'static> {
     // present String) agrees either way and could never have separated them.
     //
     // Overriding one name costs one name: `add_test` replaces that binding and
-    // nothing else, and the seven siblings (`empty even iterable json map null
-    // odd`) keep whatever they had. Measured, not assumed -- see
-    // `the_defined_test_is_pebbles_and_it_is_the_only_one_overridden`.
+    // nothing else. Package #5b's Task B2 (spec D8) registers the other seven
+    // engine tests below; which names egret binds itself, and that `none` is
+    // still not one of them, is asserted by
+    // `the_engine_tests_are_egrets_and_none_is_not_one`.
     env.add_test("defined", |value: MjValue| {
         value.kind() != ValueKind::Undefined && !value.is_none()
     });
+    // Package #5b, Task B2 (spec D8): `null`, `empty`, `map`, `json`, and
+    // Pebble's `even`, `odd` and `iterable` over minijinja's defaults.
+    super::pebble_tests::register(&mut env);
 
     env.add_function("kestra_null_coalesce", kestra_null_coalesce);
     env.add_function("kestra_undefined_coalesce", kestra_undefined_coalesce);
@@ -3008,30 +3017,25 @@ mod tests {
     /// binds what the file says it does not), adding one (egret refuses what
     /// the file says it binds), flipping an `engine` column without a reason,
     /// adding a reason to an agreeing row, and deleting a row.
-    /// `defined` is Pebble's — "present **and not null**" — and it is the only
-    /// test this crate overrides.
+    /// `defined` is Pebble's — "present **and not null**".
     ///
     /// Pairs `null-literal-is-defined` and `null-from-the-context-is-defined`,
     /// both banked by the override. Every expected value below was measured on
     /// `io.kestra:core:2.0.0-rc13`, one probe per kind.
     ///
-    /// # Why the second half is here
+    /// # The second half: which tests egret binds itself
     ///
-    /// [`MINIJINJA_ONLY_TESTS`]' doc fences off the `is` surface: porting the
-    /// engine's eight tests was never given to a W2 task. Overriding one name
-    /// that W2b's own change broke is not porting that surface — but the only
-    /// thing that keeps those two claims apart is that the **other seven stay
-    /// exactly as they were**, and "an `add_test` binds one name" is a
-    /// property of minijinja, not of this crate. So it is asserted rather than
-    /// reasoned about: `even`, `iterable` and `odd` still answer minijinja's
-    /// way (the divergences `name-surface.txt` records for them are unchanged),
-    /// and `empty`, `json`, `map` and `null` are still **unknown** here.
-    ///
-    /// Measured cost of the override, for the record: the ratchet moved from
-    /// `141 of 1288` to `139 of 1288`, both moves being the two entries above,
-    /// with no regression and nothing else touched.
+    /// This test used to be the fence for "`defined` is the only test this
+    /// crate overrides": `even`, `iterable` and `odd` answered minijinja's way
+    /// and `empty`, `json`, `map` and `null` were unknown. Package #5b's Task
+    /// B2 (spec D8, 2026-10-29) ported the `is` surface, so the fence now lists
+    /// what egret overrides or adds — all eight engine tests answer the
+    /// engine's way, three of them where minijinja's default used to — and
+    /// asserts that the null literal's other spellings did NOT become test
+    /// names along the way: Kestra refuses `is none`, `is NONE` and `is NULL`
+    /// (`Test [none] does not exist.`, measured), and so does egret.
     #[test]
-    fn the_defined_test_is_pebbles_and_it_is_the_only_one_overridden() {
+    fn the_engine_tests_are_egrets_and_none_is_not_one() {
         // "Present and not null." A falsy-but-present value is DEFINED, which
         // is the half a `!value.is_true()`-shaped mistake would get wrong.
         for (expr, expected) in [
@@ -3066,23 +3070,50 @@ mod tests {
             );
         }
 
-        // **The fence, asserted.** Three siblings still bind and still answer
-        // minijinja's way; four are still unknown. An `add_test` that reached
-        // further than one name would move one of these.
-        let ctx = json!({"s": "x", "two": 2, "lst": [1]});
+        // **The overrides, asserted.** The three names minijinja binds by
+        // default answer Pebble's way now (each row is one minijinja
+        // answered differently), and the four it never had are bound.
+        let ctx = json!({"s": "x", "two": 2, "lst": [1], "m": {}, "n": null});
         assert_eq!(render("{{ two is even }}", ctx.clone()).unwrap(), "true");
-        assert_eq!(render("{{ s is even }}", ctx.clone()).unwrap(), "false");
         assert_eq!(render("{{ two is odd }}", ctx.clone()).unwrap(), "false");
-        assert_eq!(render("{{ s is iterable }}", ctx.clone()).unwrap(), "true");
-        for unknown in ["empty", "json", "map", "null"] {
-            let expr = format!("{{{{ s is {unknown} }}}}");
-            let message = render(&expr, ctx.clone())
-                .expect_err(&format!("{expr} must still be an unknown test"))
-                .to_string();
-            assert!(
-                message.contains("unknown test"),
-                "{expr} must still be UNKNOWN, not answered: {message}"
-            );
+        assert!(
+            render("{{ s is even }}", ctx.clone()).is_err(),
+            "minijinja's `even` answered false"
+        );
+        assert!(
+            render("{{ s is odd }}", ctx.clone()).is_err(),
+            "minijinja's `odd` answered false"
+        );
+        assert_eq!(render("{{ s is iterable }}", ctx.clone()).unwrap(), "false");
+        assert_eq!(render("{{ m is iterable }}", ctx.clone()).unwrap(), "false");
+        assert_eq!(
+            render("{{ lst is iterable }}", ctx.clone()).unwrap(),
+            "true"
+        );
+        for (expr, expected) in [
+            ("{{ n is null }}", "true"),
+            ("{{ m is empty }}", "true"),
+            ("{{ m is map }}", "true"),
+            ("{{ s is json }}", "false"),
+        ] {
+            assert_eq!(render(expr, ctx.clone()).unwrap(), expected, "{expr}");
+        }
+
+        // **The fence.** The null literal's other spellings are not test
+        // names, in Kestra or here.
+        for spelling in ["none", "NONE", "NULL"] {
+            for expr in [
+                format!("{{{{ n is {spelling} }}}}"),
+                format!("{{{{ n is not {spelling} }}}}"),
+            ] {
+                let message = render(&expr, ctx.clone())
+                    .expect_err(&format!("{expr} must be an unknown test"))
+                    .to_string();
+                assert!(
+                    message.contains("unknown test"),
+                    "{expr} must be UNKNOWN, not answered: {message}"
+                );
+            }
         }
     }
 
@@ -3329,6 +3360,7 @@ mod tests {
             ("filters", include_str!("filters.rs")),
             ("functions", include_str!("functions.rs")),
             ("javaformat", include_str!("javaformat.rs")),
+            ("pebble_tests", include_str!("pebble_tests.rs")),
         ];
 
         let mut rows: std::collections::BTreeSet<(String, String)> = Default::default();
@@ -4307,24 +4339,46 @@ mod tests {
         }
     }
 
-    /// Package #5b, Task B1 (spec D8): the tests Kestra refuses. A missing
-    /// root or member under `is null`/`is empty` fails (strict variables),
-    /// and `is json` on anything but a string fails (`ClassCastException`,
-    /// and `argument "content" is null` for a null). **Placeholder:** these
-    /// fail today for the wrong reason (`null`, `empty` and `json` are
-    /// unknown tests here). Task B2 registers them and must keep every row
-    /// failing for Kestra's reason, then tighten this to Kestra's text.
+    /// Package #5b, Task B1 (spec D8): the tests Kestra refuses, tightened to
+    /// Kestra's reason by Task B2. A missing root or member under `is null`/
+    /// `is empty` fails as an undefined value (Kestra's
+    /// `RootAttributeNotFoundException`/`AttributeNotFoundException` under
+    /// strict variables; egret raises the VM's own `UndefinedError`), and
+    /// `is json` on anything but a string fails with `JsonTest`'s
+    /// `(String)` cast (`ClassCastException`) or, for a null, Jackson's
+    /// `argument "content" is null`.
     #[test]
     fn a_test_kestra_refuses_is_refused_here_too() {
-        assert_each_fails(&[
-            ("{{ x is null }}", json!({})),
-            ("{{ o.x is null }}", json!({ "o": {} })),
-            ("{{ x is empty }}", json!({})),
-            ("{{ x is json }}", json!({ "x": { "a": 1 } })),
-            ("{{ x is json }}", json!({ "x": [1] })),
-            ("{{ x is json }}", json!({ "x": 1 })),
-            ("{{ x is json }}", json!({ "x": null })),
-        ]);
+        for (source, ctx, want) in [
+            ("{{ x is null }}", json!({}), "undefined"),
+            ("{{ o.x is null }}", json!({ "o": {} }), "undefined"),
+            ("{{ x is empty }}", json!({}), "undefined"),
+            (
+                "{{ x is json }}",
+                json!({ "x": { "a": 1 } }),
+                "class java.util.LinkedHashMap cannot be cast to class java.lang.String",
+            ),
+            (
+                "{{ x is json }}",
+                json!({ "x": [1] }),
+                "class java.util.ArrayList cannot be cast to class java.lang.String",
+            ),
+            (
+                "{{ x is json }}",
+                json!({ "x": 1 }),
+                "class java.lang.Integer cannot be cast to class java.lang.String",
+            ),
+            (
+                "{{ x is json }}",
+                json!({ "x": null }),
+                "argument \"content\" is null",
+            ),
+        ] {
+            let error = render(source, ctx)
+                .expect_err(&format!("{source} must fail, as Kestra's does"))
+                .to_string();
+            assert!(error.contains(want), "{source}: {error}");
+        }
     }
 
     /// Package #5b, Task B1 (spec D10): `max`/`min` refuse an operand that is

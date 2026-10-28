@@ -222,12 +222,12 @@ function	yaml	yes	yes	function-yaml-yes-is-a-boolean-or-not	the two YAML scalar 
 test	boolean	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
 test	defined	yes	yes	null-literal-is-defined	-
 test	divisibleby	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
-test	empty	yes	no	-	the `is` surface was never given to a W2 task; Pebble's own
+test	empty	yes	yes	test-empty-whitespace	-
 test	endingwith	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
 test	eq	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
 test	equalto	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
 test	escaped	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
-test	even	yes	yes	test-even	Pebble's `even` casts to Long and throws on a String; minijinja's answers false. The `is` surface was never given to a W2 task
+test	even	yes	yes	test-even	-
 test	false	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
 test	filter	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
 test	float	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
@@ -237,19 +237,19 @@ test	gt	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` remov
 test	in	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
 test	int	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
 test	integer	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
-test	iterable	yes	yes	test-iterable	Pebble's `iterable` is false for a String; minijinja's is true. The `is` surface was never given to a W2 task
-test	json	yes	no	-	the `is` surface was never given to a W2 task. This is the ONE test `Extension.getTests()` registers, so it is the only Kestra-owned name in this column
+test	iterable	yes	yes	test-iterable	-
+test	json	yes	yes	test-json-trailing-text	-
 test	le	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
 test	lessthan	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
 test	lower	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
 test	lt	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
-test	map	yes	no	-	the `is` surface was never given to a W2 task; Pebble's own
+test	map	yes	yes	test-map-list	-
 test	mapping	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
 test	ne	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
 test	none	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
-test	null	yes	no	-	the `is` surface was never given to a W2 task; Pebble's own. minijinja spells this test `none`, so `{{ x is null }}` is `unknown test: test none is unknown` here -- `null-literal-is-null-test` is the baselined entry W2b added for it
+test	null	yes	yes	test-null-of-null	-
 test	number	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
-test	odd	yes	yes	test-odd	the same as `even`
+test	odd	yes	yes	test-odd	-
 test	safe	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
 test	sameas	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
 test	sequence	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`

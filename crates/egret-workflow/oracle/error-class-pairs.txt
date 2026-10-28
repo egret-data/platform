@@ -326,10 +326,11 @@ filter-split-missing-delimiter                      test:split_and_slice_refuse_
 filter-slice-to-index-past-the-end                  test:split_and_slice_refuse_what_java_refuses
 
 # Pebble's `even`/`odd` cast to Long and throw on a String; minijinja's answer
-# `false`. egret keeps minijinja's -- the `is` surface was never given to a W2
-# task -- so these are ALSO baselined and the ratchet is what holds them.
-test-even                                           baselined
-test-odd                                            baselined
+# `false`. These were baselined until package #5b's Task B2 (spec D8,
+# 2026-10-29) ported both tests (`runners::pebble_tests`); the unit test
+# asserts the `ClassCastException` text.
+test-even                                           test:even_and_odd_fail_with_pebbles_text
+test-odd                                            test:even_and_odd_fail_with_pebbles_text
 
 # W2 Task 8, fix round 1: the Java COLLECTION INTERFACE is observable and
 # egret had one sequence type. `keys` and `values` return a Set/Collection and
@@ -558,6 +559,9 @@ logic-and-map-left                                  test:an_operand_kestra_canno
 # with a runners::env placeholder test that asserts the failure; the B-task
 # that ports the name keeps it failing for Kestra's reason and tightens the
 # test to Kestra's text.
+# Task B2 (2026-10-29): the seven `test-*` rows below now fail for Kestra's
+# reason and their test asserts it; the four `even`/`odd` rows banked and are
+# held by `even_and_odd_fail_with_pebbles_text`, not the baseline.
 test-null-missing-root                              test:a_test_kestra_refuses_is_refused_here_too
 test-null-missing-member                            test:a_test_kestra_refuses_is_refused_here_too
 test-empty-missing-root                             test:a_test_kestra_refuses_is_refused_here_too
@@ -565,10 +569,10 @@ test-json-map                                       test:a_test_kestra_refuses_i
 test-json-list                                      test:a_test_kestra_refuses_is_refused_here_too
 test-json-number                                    test:a_test_kestra_refuses_is_refused_here_too
 test-json-null                                      test:a_test_kestra_refuses_is_refused_here_too
-test-even-numeric-string                            baselined
-test-odd-numeric-string                             baselined
-test-even-string-literal                            baselined
-test-even-double                                    baselined
+test-even-numeric-string                            test:even_and_odd_fail_with_pebbles_text
+test-odd-numeric-string                             test:even_and_odd_fail_with_pebbles_text
+test-even-string-literal                            test:even_and_odd_fail_with_pebbles_text
+test-even-double                                    test:even_and_odd_fail_with_pebbles_text
 function-max-strings                                test:max_and_min_refuse_what_pebble_cannot_compare
 function-min-string-long                            test:max_and_min_refuse_what_pebble_cannot_compare
 function-max-numeric-string                         test:max_and_min_refuse_what_pebble_cannot_compare

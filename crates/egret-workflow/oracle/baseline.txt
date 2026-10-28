@@ -33,8 +33,9 @@
 # (spec D5, 2026-10-29) BANKED both: each operand is wrapped in
 # `kestra_bool(..)`, `runners::operators`.)
 
-# minijinja's null test is spelled `none`; the corpus correctly keeps Kestra's name.
-coalesce-is-not-null
+# (`coalesce-is-not-null` was here: minijinja's null test is spelled `none`.
+# Package #5b's Task B2 (spec D8, 2026-10-29) BANKED it: the rewriter leaves a
+# test name alone and `runners::pebble_tests` binds `null` under its own name.)
 
 # function not ported (Task 8: the service-backed ones)
 
@@ -59,9 +60,9 @@ function-yaml-octal-looking
 # the pin.
 function-ispublicholiday
 
-# Pebble test not ported
-test-json-true
-test-json-false
+# (`test-json-true` and `test-json-false` were here, "Pebble test not ported".
+# Package #5b's Task B2 (spec D8, 2026-10-29) BANKED both: Kestra's `JsonTest`
+# is `runners::pebble_tests::json`, Jackson's `readTree` ported.)
 
 # DELIBERATE: Kestra's RAW_PATTERN has no DOTALL so Pebble rejects the tag; minijinja's own raw tag handles it. task-3-report.md S5.
 raw-multiline
@@ -575,13 +576,10 @@ filter-escape-js-strategy
 # both insertion order -- and `filter-replace-context-map-order` pins that half.
 filter-replace-literal-order
 filter-replace-literal-order-chained
-# Pebble's `even`/`odd` cast to Long and throw on a String; `iterable` is false
-# for a String where minijinja's is true. The `is` surface -- Kestra's `json`
-# test and Pebble's four -- was never given to a W2 task, so egret keeps
-# minijinja's four and records the difference.
-test-even
-test-odd
-test-iterable
+# (`test-even`, `test-odd` and `test-iterable` were here: Pebble's `even`/`odd`
+# cast to Long and throw on a String, and `iterable` is false for a String
+# where minijinja's is true. Package #5b's Task B2 (spec D8, 2026-10-29)
+# BANKED all three: `runners::pebble_tests` overrides minijinja's defaults.)
 
 # --- W2 Task 8, fix round 1, found by attacking the sixteen filter ports OFF
 # their own axis: which Java collection a filter RETURNS decides whether the
@@ -760,14 +758,15 @@ null-from-the-context-in-an-if-condition
 # porting them, and the measured cost was exactly these two entries and nothing
 # else: the ratchet moved 141 -> 139 with no regression. The seven siblings are
 # asserted unchanged by
-# `runners::env::tests::the_defined_test_is_pebbles_and_it_is_the_only_one_overridden`.)
+# `runners::env::tests::the_defined_test_is_pebbles_and_it_is_the_only_one_overridden`,
+# renamed `the_engine_tests_are_egrets_and_none_is_not_one` when package #5b's
+# Task B2 ported the other seven.)
 
-# The same unported `is` surface, seen from the other side: Pebble's null TEST
-# is spelled `null` and minijinja's is spelled `none`, so `{{ null is null }}`
-# is `true` there and `unknown test: test none is unknown` here. The rename W2b
-# added is what would make registering a `none`-spelled `null` test a one-liner,
-# which is why this is recorded now rather than left unwritten.
-null-literal-is-null-test
+# (`null-literal-is-null-test` was here: Pebble's null TEST is spelled `null`
+# and minijinja's `none`. Package #5b's Task B2 (spec D8, 2026-10-29) BANKED
+# it, and NOT by registering a `none`-spelled test as this note once proposed:
+# Kestra refuses `is none`, `is NONE` and `is NULL`, so the rewriter now
+# leaves a test name alone and `null` is bound under its own name.)
 
 # A BARE `null` map key is a Java null key and Jackson refuses it. egret builds
 # a key from it either way: `{"":1}` at 4498b48b, `{"None":1}` at W2b's head,
@@ -890,59 +889,9 @@ coalesce-non-path-left-missing-right
 # line below fails today; the comment above each group names the task that
 # banks it. Corpus order inside a group. No recorded divergence among them.
 
-# B2 (D8)'s 49: the tests `null` (reached as `none`), `empty`, `map` and
-# `json` are unknown here, and `even`/`odd` answer on a String or a Double
-# where Pebble's cast to Long fails (four error-class rows, paired
-# `baselined`). `iterable` is true for a String here and false in Pebble.
-test-null-of-null
-test-null-of-one
-test-null-of-zero
-test-null-of-empty-string
-test-not-null-of-one
-test-not-null-of-null
-test-null-in-if
-test-empty-string
-test-empty-whitespace
-test-empty-tab-newline
-test-empty-nbsp
-test-empty-list
-test-empty-map
-test-empty-null
-test-empty-zero
-test-empty-false
-test-empty-text
-test-empty-one-element-list
-test-empty-one-key-map
-test-empty-list-literal
-test-not-empty-list
-test-not-empty-whitespace
-test-map-empty-map
-test-map-map
-test-map-list
-test-map-string
-test-map-null
-test-map-number
-test-map-literal
-test-json-number-string
-test-json-object-string
-test-json-array-string
-test-json-quoted-string
-test-json-true-string
-test-json-null-string
-test-json-plain
-test-json-empty-string
-test-json-unclosed
-test-json-padded
-test-json-trailing-text
-test-not-json-plain
-test-even-numeric-string
-test-odd-numeric-string
-test-even-string-literal
-test-even-double
-test-iterable-string-literal
-test-iterable-empty-string
-test-iterable-map
-test-iterable-null
+# (B2 (D8)'s 49 were here: the tests `null`, `empty`, `map` and `json`, and
+# `even`/`odd`/`iterable` on a String or a Double. Task B2 (2026-10-29)
+# BANKED all 49, with the seven old lines above.)
 
 # B3 (D10)'s 29: `max`/`min` are unknown functions here. Measured: one
 # argument is returned as it is (`max([1, 2])`, `max(null)`, `max()` is empty),
