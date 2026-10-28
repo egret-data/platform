@@ -366,6 +366,9 @@ async fn only_the_creator_publishes_an_egret_sql_flow() {
 #[tokio::test]
 async fn only_the_creator_starts_an_egret_sql_flow() {
     served_none();
+    // Its execution is never ticked here; another test's global tick must
+    // not run it, so it holds the tick lock and deletes it afterwards.
+    let _serial = SERIAL.lock().await;
     let Some(db) = common::db().await else { return };
     let (ws, creator) = common::seed_workspace(&db).await;
     common::grant(&db, ws, creator, &["workflow:read", "workflow:manage"]).await;
@@ -390,6 +393,16 @@ async fn only_the_creator_starts_an_egret_sql_flow() {
 
     let started = common::post_no_body(&app, &path, creator).await;
     assert_eq!(started.status(), 201, "the creator starts the draft");
+    forget_executions(&db, ws).await;
+}
+
+/// Delete `ws`'s executions, so a later test's global tick does not run them.
+async fn forget_executions(db: &Db, ws: Uuid) {
+    sqlx::query("DELETE FROM workflow.executions WHERE workspace_id = $1")
+        .bind(ws)
+        .execute(&db.pool)
+        .await
+        .expect("delete executions");
 }
 
 /// I1 for a start no person makes (a schedule, a webhook, a Flow trigger):
@@ -399,6 +412,7 @@ async fn only_the_creator_starts_an_egret_sql_flow() {
 #[tokio::test]
 async fn a_trigger_start_needs_a_source_the_creator_published() {
     served_none();
+    let _serial = SERIAL.lock().await;
     let Some(db) = common::db().await else { return };
     let (ws, creator) = common::seed_workspace(&db).await;
     let other = editor(&db, ws).await;
@@ -447,6 +461,7 @@ async fn a_trigger_start_needs_a_source_the_creator_published() {
 
     let edited = format!("{source}description: edited by another editor\n");
     refused(start(edited).await, "a draft edited after the publish");
+    forget_executions(&db, ws).await;
 }
 
 /// I1 for a `Subflow` child: another user's flow cannot call a flow that
