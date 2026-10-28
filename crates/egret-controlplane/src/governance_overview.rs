@@ -2168,16 +2168,17 @@ fn lost_sentence(n: usize, what: &str) -> String {
 
 /// D17: a table renamed away took its allow grants to its new name (G2), and
 /// a new table now holds the old name with none of them (the swap pattern).
-/// From each grant's latest `perm_grant:move` of a table rename: the old name
-/// is a live table again and carries no allow with the moved grant's actions
-/// and subjects.
+/// From each `perm_grant:move` of a table rename, every move counts: a grant
+/// moved on again leaves its earlier old name behind too. The old name is a
+/// live table again and carries no allow with a moved grant's actions and
+/// subjects; a name that still carries only some of them is reported.
 async fn renamed_names_lost_grants(c: &mut PgConnection) -> Result<Option<Finding>, SourceError> {
     use serde_json::Value;
     let events: Vec<Value> = sqlx::query_scalar(
-        "SELECT DISTINCT ON (resource_id) detail FROM audit.audit_log \
+        "SELECT detail FROM audit.audit_log \
           WHERE kind = 'mutation' AND action = 'perm_grant:move' \
             AND resource_type = 'perm_grant' AND detail->>'trigger' = 'iceberg_rename' \
-          ORDER BY resource_id, ts DESC, id DESC",
+          ORDER BY ts DESC, id DESC",
     )
     .fetch_all(&mut *c)
     .await?;
@@ -2194,10 +2195,11 @@ async fn renamed_names_lost_grants(c: &mut PgConnection) -> Result<Option<Findin
         out.sort();
         out
     };
-    // Old name (folded catalog, schema, table) → (spelling, renamed to, moved).
+    // Old name (folded catalog, schema, table) → (spelling, renamed to, moved
+    // allows by grant id). Events come newest first, so the first `to` wins.
     type Moved = (Vec<String>, Vec<String>);
     type Name = (String, String, String);
-    type Entry = (Name, String, Vec<Moved>);
+    type Entry = (Name, String, BTreeMap<String, Moved>);
     let mut names: BTreeMap<Name, Entry> = BTreeMap::new();
     for d in &events {
         let before = &d["before"];
@@ -2224,12 +2226,13 @@ async fn renamed_names_lost_grants(c: &mut PgConnection) -> Result<Option<Findin
                 (
                     (catalog.clone(), schema.clone(), table.clone()),
                     to,
-                    Vec::new(),
+                    BTreeMap::new(),
                 )
             });
         entry
             .2
-            .push((list(before, "actions"), list(before, "include")));
+            .entry(text(before, "id"))
+            .or_insert_with(|| (list(before, "actions"), list(before, "include")));
     }
     if names.is_empty() {
         return Ok(None);
@@ -2268,7 +2271,7 @@ async fn renamed_names_lost_grants(c: &mut PgConnection) -> Result<Option<Findin
         .bind(table)
         .fetch_all(&mut *c)
         .await?;
-        if moved.iter().any(|m| here.contains(m)) {
+        if moved.values().all(|m| here.contains(m)) {
             continue;
         }
         let (to_schema, to_table) = to.split_once('.').unwrap_or((to.as_str(), ""));
@@ -2296,7 +2299,7 @@ async fn renamed_names_lost_grants(c: &mut PgConnection) -> Result<Option<Findin
     ))
 }
 
-/// D17 for catalog grants: from each grant's latest `catalog_grant:move`, the
+/// D17 for catalog grants: from each `catalog_grant:move`, newest first, the
 /// old name is a live table again and the role holds no grant of that
 /// privilege on it.
 async fn renamed_names_lost_catalog_grants(
@@ -2304,10 +2307,10 @@ async fn renamed_names_lost_catalog_grants(
 ) -> Result<Option<Finding>, SourceError> {
     use serde_json::Value;
     let events: Vec<Value> = sqlx::query_scalar(
-        "SELECT DISTINCT ON (resource_id) detail FROM audit.audit_log \
+        "SELECT detail FROM audit.audit_log \
           WHERE kind = 'mutation' AND action = 'catalog_grant:move' \
             AND resource_type = 'catalog_grant' AND detail->>'trigger' = 'iceberg_rename' \
-          ORDER BY resource_id, ts DESC, id DESC",
+          ORDER BY ts DESC, id DESC",
     )
     .fetch_all(&mut *c)
     .await?;

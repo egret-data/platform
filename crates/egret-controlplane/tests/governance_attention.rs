@@ -2045,8 +2045,13 @@ async fn catalog_grants_on_missing_tables_are_findings() {
 
 /// One `perm_grant:move` of a table rename, as the table hook stores it.
 async fn grant_moved_event(f: &Fixture, from: &str, to: &str, include: &[&str]) {
+    grant_move_of(f, Uuid::new_v4(), from, to, include).await;
+}
+
+/// One `perm_grant:move` of grant `id`: a grant moved again keeps its id.
+async fn grant_move_of(f: &Fixture, id: Uuid, from: &str, to: &str, include: &[&str]) {
     let summary = |table: &str| {
-        json!({"id": Uuid::new_v4(), "catalog": "lake", "schema": "sales", "table": table,
+        json!({"id": id, "catalog": "lake", "schema": "sales", "table": table,
                "column": null, "effect": "allow", "actions": ["read"], "include": include,
                "exclude": []})
     };
@@ -2054,7 +2059,7 @@ async fn grant_moved_event(f: &Fixture, from: &str, to: &str, include: &[&str]) 
         "INSERT INTO audit.audit_log (kind, action, resource_type, resource_id, detail) \
          VALUES ('mutation', 'perm_grant:move', 'perm_grant', $1, $2)",
     )
-    .bind(Uuid::new_v4().to_string())
+    .bind(id.to_string())
     .bind(json!({
         "before": summary(from), "after": summary(to),
         "rename": {"from": format!("sales.{from}"), "to": format!("sales.{to}")},
@@ -2189,5 +2194,74 @@ async fn a_reused_name_that_lost_its_catalog_grants_is_a_finding() {
         json!([{"label": format!("{warehouse_name}.sales.t"),
                 "detail": "role analysts, read moved to sales.t_old by a rename",
                 "ref": {"type": "catalog", "id": cat, "name": "lake"}}])
+    );
+}
+
+/// D17, partly kept: a new table that carries only some of the moved allows
+/// is still reported, and the sample counts the allows the name lost.
+#[tokio::test]
+async fn a_reused_name_that_keeps_only_some_of_its_allows_is_a_finding() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    sqlx::query("TRUNCATE audit.audit_log")
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    let (_, lk) = stub_warehouse(&f, "lake").await;
+    for table in ["t", "t_old"] {
+        lakekeeper_stub::add_table(&f.db, lk, &["sales"], table, &["id"]).await;
+    }
+    let cat = catalog_id(&f, "lake").await;
+    grant_moved_event(&f, "t", "t_old", &["user:ana"]).await;
+    grant_moved_event(&f, "t", "t_old", &["user:bob"]).await;
+    // The new `t` carries ana's allow again, not bob's.
+    let again = perm_grant(&f, cat, "allow", "t", None).await;
+    sqlx::query("INSERT INTO perm.grant_principals (grant_id, kind, ref, mode) VALUES ($1, 'user', 'ana', 'include')")
+        .bind(again)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    let policy_reader = session(&f, &["policy:read"]).await;
+    let st = state(&f).await;
+
+    let (status, body) = attention(&st, &policy_reader).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let lost = finding(&body, "renamed_names_lost_grants").expect("lost grants");
+    assert_eq!(lost["count"], 1);
+    assert_eq!(
+        lost["sample"],
+        json!([{"label": "lake.sales.t", "detail": "2 allow grants moved to lake.sales.t_old by a rename",
+                "ref": {"type": "object", "catalog": "lake", "schema": "sales", "object": "t_old"}}])
+    );
+}
+
+/// D17 after a second move: a grant moved on again (same id) still reports
+/// the name it left first, which is live again with none of its allows.
+#[tokio::test]
+async fn a_grant_moved_on_again_still_reports_the_name_it_left() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    sqlx::query("TRUNCATE audit.audit_log")
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    let (_, lk) = stub_warehouse(&f, "lake").await;
+    for table in ["t", "t_older"] {
+        lakekeeper_stub::add_table(&f.db, lk, &["sales"], table, &["id"]).await;
+    }
+    let grant = Uuid::new_v4();
+    grant_move_of(&f, grant, "t", "t_old", &["user:ana"]).await;
+    grant_move_of(&f, grant, "t_old", "t_older", &["user:ana"]).await;
+    let policy_reader = session(&f, &["policy:read"]).await;
+    let st = state(&f).await;
+
+    let (status, body) = attention(&st, &policy_reader).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let lost = finding(&body, "renamed_names_lost_grants").expect("lost grants");
+    assert_eq!(lost["count"], 1);
+    assert_eq!(
+        lost["sample"],
+        json!([{"label": "lake.sales.t", "detail": "1 allow grant moved to lake.sales.t_old by a rename",
+                "ref": {"type": "object", "catalog": "lake", "schema": "sales", "object": "t_old"}}])
     );
 }
