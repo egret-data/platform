@@ -122,6 +122,24 @@ describe("BackfillDialog (W7f §4.3)", () => {
     expect(toast.error).toHaveBeenCalledWith(expect.stringContaining("already has a backfill"));
   });
 
+  it("prefills a BOOL input from the schedule's value, a boolean or its text", async () => {
+    const source = SOURCE.replace(
+      "  - id: upload\n",
+      "  - id: loud\n    type: BOOL\n  - id: quiet\n    type: BOOL\n    defaults: true\n  - id: upload\n",
+    ).replace("      region: eu\n", "      region: eu\n      loud: true\n      quiet: \"FALSE\"\n");
+    const { onClose } = renderDialog(source);
+    // `loud` has no default, so only the schedule can turn it on; `quiet`'s default is on, so only the schedule can turn it off.
+    expect(screen.getByRole("switch", { name: /^loud/ })).toBeChecked();
+    expect(screen.getByRole("switch", { name: /^quiet/ })).not.toBeChecked();
+    fireEvent.change(screen.getByLabelText("Start"), { target: { value: "2020-01-01T00:00:00" } });
+    await userEvent.type(screen.getByRole("textbox", { name: /^req/ }), "x");
+    await userEvent.click(screen.getByRole("button", { name: "Start backfill" }));
+
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    const [post] = server.callsTo("POST", createPath);
+    expect(post.body).toMatchObject({ inputs: { region: "eu", req: "x", loud: true, quiet: false } });
+  });
+
   it("a required FILE input keeps the submit off, saying a backfill cannot carry it", () => {
     renderDialog(FILE_REQUIRED);
     expect(screen.getByRole("button", { name: "Start backfill" })).toBeDisabled();

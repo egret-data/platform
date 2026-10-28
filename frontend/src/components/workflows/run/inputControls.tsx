@@ -23,6 +23,11 @@ export interface InputFieldProps {
   value: FieldValue;
   onChange: (value: FieldValue) => void;
   error?: string;
+  /**
+   * The validate endpoint said `dependsOn` turns this input off with the values
+   * entered: the start ignores it. Said under the field, which stays editable.
+   */
+  inactive?: boolean;
   /** Unique to the form, so two forms on a page never share an id. */
   idPrefix: string;
 }
@@ -30,12 +35,12 @@ export interface InputFieldProps {
 /** `datetime-local`/`time` carry seconds only with a step under a minute. */
 const SECONDS = 1;
 
-export function InputField({ input, value, onChange, error, idPrefix }: InputFieldProps) {
+export function InputField({ input, value, onChange, error, inactive, idPrefix }: InputFieldProps) {
   const id = `${idPrefix}-${input.id}`;
   const errorId = `${id}-error`;
   const helpId = `${id}-help`;
   const name = input.displayName ?? input.id;
-  const help = helpText(input);
+  const help = [helpText(input), inactive ? INACTIVE : null].filter(Boolean).join(" ") || null;
   const describedBy = [help ? helpId : null, error ? errorId : null].filter(Boolean).join(" ") || undefined;
   const aria = { "aria-invalid": error ? true : undefined, "aria-describedby": describedBy };
   const group = input.type === "MULTISELECT" || input.type === "ARRAY";
@@ -75,7 +80,8 @@ export function InputField({ input, value, onChange, error, idPrefix }: InputFie
         </p>
       ) : null}
       {error ? (
-        <p id={errorId} className="text-xs text-destructive">
+        // A refusal of several values has one line per value.
+        <p id={errorId} className="text-xs whitespace-pre-line text-destructive">
           {error}
         </p>
       ) : null}
@@ -83,10 +89,28 @@ export function InputField({ input, value, onChange, error, idPrefix }: InputFie
   );
 }
 
-/** The input's description, then what the form cannot do for it. */
+const INACTIVE = "With the values entered, the inputs it depends on turn this input off, so the run ignores it.";
+
+/** `min`/`max` or `after`/`before` as a sentence, or undefined when the input has none. */
+function boundsText(input: RunInput): string | undefined {
+  const [low, high, below, above] = ["DATETIME", "DATE", "TIME"].includes(input.type)
+    ? [input.after, input.before, "On or after", "On or before"]
+    : ["INT", "FLOAT", "DURATION"].includes(input.type)
+      ? [input.min, input.max, "At least", "At most"]
+      : [];
+  if (low !== undefined && high !== undefined) return `From ${low} to ${high}.`;
+  if (low !== undefined) return `${below} ${low}.`;
+  if (high !== undefined) return `${above} ${high}.`;
+  return undefined;
+}
+
+/** The input's description, then its bounds and pattern, then what the form cannot do for it. */
 function helpText(input: RunInput): string | null {
   const parts = [input.description];
   if (input.type === "DURATION") parts.push("An ISO-8601 duration, such as PT1H or P1D.");
+  parts.push(boundsText(input));
+  // Checked by the server on Run; Java's regex dialect is not the browser's, so it is not run here.
+  if (input.validator) parts.push(`It must match the pattern ${input.validator}`);
   if (input.expressionDefault) parts.push(`Left empty, the flow's default applies: ${input.expressionDefault}`);
   if (input.valuesExpression) parts.push(`Its values come from an expression (${input.valuesExpression}), so type one.`);
   if (input.dependsOn) parts.push("This input depends on other inputs; its values here are not updated from them.");
