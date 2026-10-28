@@ -63,6 +63,7 @@ import type {
   TriggerPageDto,
   UpdateFlowRequest,
   ValidateFlowRequest,
+  ValidateInputsDto,
   ValidationReportDto,
   WorkflowCreateNamespaceDirectoryParams,
   WorkflowDeleteNamespaceFileParams,
@@ -2577,6 +2578,122 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getWorkflowStartFlowExecutionMutationOptions(options), queryClient);
+    }
+    export type workflowValidateExecutionInputsResponse200 = {
+  data: ValidateInputsDto
+  status: 200
+}
+
+export type workflowValidateExecutionInputsResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowValidateExecutionInputsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowValidateExecutionInputsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowValidateExecutionInputsResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowValidateExecutionInputsResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workflowValidateExecutionInputsResponse413 = {
+  data: ErrorBody
+  status: 413
+}
+
+export type workflowValidateExecutionInputsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowValidateExecutionInputsResponseSuccess = (workflowValidateExecutionInputsResponse200) & {
+  headers: Headers;
+};
+export type workflowValidateExecutionInputsResponseError = (workflowValidateExecutionInputsResponse400 | workflowValidateExecutionInputsResponse401 | workflowValidateExecutionInputsResponse403 | workflowValidateExecutionInputsResponse404 | workflowValidateExecutionInputsResponse409 | workflowValidateExecutionInputsResponse413 | workflowValidateExecutionInputsResponse500) & {
+  headers: Headers;
+};
+
+export type workflowValidateExecutionInputsResponse = (workflowValidateExecutionInputsResponseSuccess | workflowValidateExecutionInputsResponseError)
+
+export const getWorkflowValidateExecutionInputsUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/flows/${encodeURIComponent(id)}/executions/validate`
+}
+
+export const workflowValidateExecutionInputs = async (workspace: string,
+    id: string,
+    startExecutionRequest: StartExecutionRequest, options?: Parameters<typeof customInstance>[1]): Promise<workflowValidateExecutionInputsResponse> => {
+
+  return customInstance<workflowValidateExecutionInputsResponse>(getWorkflowValidateExecutionInputsUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(startExecutionRequest)
+  }
+);}
+
+
+
+
+
+export const getWorkflowValidateExecutionInputsMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowValidateExecutionInputs>>, TError,{workspace: string;id: string;data: StartExecutionRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowValidateExecutionInputs>>, TError,{workspace: string;id: string;data: StartExecutionRequest}, TContext> => {
+
+const mutationKey = ['workflowValidateExecutionInputs'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowValidateExecutionInputs>>, {workspace: string;id: string;data: StartExecutionRequest}> = (props) => {
+          const {workspace,id,data} = props ?? {};
+
+          return  workflowValidateExecutionInputs(workspace,id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowValidateExecutionInputsMutationResult = NonNullable<Awaited<ReturnType<typeof workflowValidateExecutionInputs>>>
+    export type WorkflowValidateExecutionInputsMutationBody = StartExecutionRequest
+    export type WorkflowValidateExecutionInputsMutationError = ErrorBody
+
+    export const useWorkflowValidateExecutionInputs = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowValidateExecutionInputs>>, TError,{workspace: string;id: string;data: StartExecutionRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowValidateExecutionInputs>>,
+        TError,
+        {workspace: string;id: string;data: StartExecutionRequest},
+        TContext
+      > => {
+      return useMutation(getWorkflowValidateExecutionInputsMutationOptions(options), queryClient);
     }
     export type workflowGetFlowGraphResponse200 = {
   data: FlowGraph

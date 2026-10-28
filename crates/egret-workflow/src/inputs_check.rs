@@ -161,6 +161,11 @@ pub struct InputOutcome {
     pub is_default: bool,
     /// Full messages, in Kestra's form.
     pub errors: Vec<String>,
+    /// `errors` come from a template that failed to render (a
+    /// `dependsOn.condition` or a SELECT / MULTISELECT `expression`), not from
+    /// the value: Kestra's `InputOutputValidationException.isRenderError`,
+    /// which the validate endpoint reports as `renderError`.
+    pub render_error: bool,
 }
 
 /// Check `posted` against `inputs` and return the coerced object, or the
@@ -279,6 +284,7 @@ impl Resolver<'_> {
             enabled: true,
             is_default: false,
             errors: Vec::new(),
+            render_error: false,
         };
         if matches!(input.r#type, InputType::Form | InputType::ReusableInputs) {
             out.value = raw.cloned();
@@ -307,6 +313,7 @@ impl Resolver<'_> {
                         Ok(_) => enabled = false,
                         Err(msg) => {
                             out.errors.push(format!("Invalid condition: {msg}"));
+                            out.render_error = true;
                             enabled = false;
                         }
                     }
@@ -332,6 +339,7 @@ impl Resolver<'_> {
                     }
                     Err(message) => {
                         out.errors.push(message);
+                        out.render_error = true;
                         return out;
                     }
                 }
@@ -2531,6 +2539,30 @@ mod tests {
         let all = resolve_all(&i, &json!({"a": "yes"}), &boom);
         assert!(!all[1].enabled);
         assert_eq!(all[1].errors, ["Invalid condition: boom"]);
+        // A broken template, not a bad value (the validate endpoint's
+        // `renderError`); the enabled input's errors are the value's.
+        assert!(all[1].render_error);
+        assert!(!all[0].render_error);
+    }
+
+    #[test]
+    fn a_failing_expression_is_a_render_error_and_a_bad_value_is_not() {
+        let i = inputs(
+            "
+- id: s
+  type: SELECT
+  expression: \"{{ boom }}\"
+- id: n
+  type: INT
+",
+        );
+        let boom =
+            |_: &str, _: &Map<String, Value>| -> Result<Value, String> { Err("boom".to_string()) };
+        let all = resolve_all(&i, &json!({"s": "a", "n": "x"}), &boom);
+        assert!(all[0].render_error, "{:?}", all[0]);
+        assert_eq!(all[0].errors.len(), 1);
+        assert!(!all[1].render_error);
+        assert_eq!(all[1].errors.len(), 1);
     }
 
     #[test]
