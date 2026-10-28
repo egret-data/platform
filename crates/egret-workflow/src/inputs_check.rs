@@ -51,8 +51,10 @@
 //! INT, FLOAT and BOOL are stored as typed JSON. DATETIME, DATE, TIME and
 //! DURATION are validated and bound-checked but stored **as posted**
 //! (`P1D` stays `P1D`, `10:00:00` stays `10:00:00`). JSON, YAML and ION are
-//! stored as the parsed value. ARRAY and MULTISELECT are stored as the list
-//! of parsed elements.
+//! stored as the parsed value, except a JSON input whose value is a string:
+//! the render reads a JSON input's string as JSON text, so that one is stored
+//! as its JSON text and renders as the string (review M1). ARRAY and
+//! MULTISELECT are stored as the list of parsed elements.
 //!
 //! # Not here
 //!
@@ -347,8 +349,8 @@ impl Resolver<'_> {
         if let Some(value) = value {
             match check_value(input, value) {
                 Ok(v) => {
-                    out.seen = Some(v.clone());
-                    out.value = Some(v);
+                    out.value = Some(stored_form(input, &v));
+                    out.seen = Some(v);
                 }
                 Err(causes) => out.errors = fail(causes),
             }
@@ -443,6 +445,20 @@ impl Resolver<'_> {
 /// `InputOutputValidationException.of(message, input)`.
 fn invalid(input: &Input, cause: &str) -> String {
     format!("Invalid value for input `{}`. Cause: {cause}", input.id)
+}
+
+/// The stored form of a checked value (review M1). The render
+/// (`worker::render::with_declared_defaults`) reads a JSON input's **string**
+/// as JSON text, as it must for rows written before this check and for the
+/// run form, which posts the text typed. So a JSON input whose parsed value is
+/// itself a string (`"123"` posted as text) is stored as that string's JSON
+/// text, which the render reads back to the same string, and a re-check
+/// stores again unchanged. Any other value is stored as parsed.
+fn stored_form(input: &Input, parsed: &Value) -> Value {
+    match (input.r#type, parsed) {
+        (InputType::Json, Value::String(_)) => Value::String(parsed.to_string()),
+        _ => parsed.clone(),
+    }
 }
 
 /// `FlowInputOutput.isTextType`: the types for which `""` is a value.
@@ -2225,7 +2241,9 @@ mod tests {
             &[
                 (json!("{\"a\": 1}"), Ok(json!({"a": 1}))),
                 (json!("[1, 2]"), Ok(json!([1, 2]))),
-                (json!("\"s\""), Ok(json!("s"))),
+                // A JSON string is stored as its JSON text, which the render
+                // reads back to the string (review M1).
+                (json!("\"s\""), Ok(json!("\"s\""))),
                 (json!({"a": [1]}), Ok(json!({"a": [1]}))),
                 (json!([1]), Ok(json!([1]))),
                 (json!(5), Ok(json!(5))),
