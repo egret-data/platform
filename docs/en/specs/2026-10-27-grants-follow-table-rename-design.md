@@ -516,3 +516,9 @@ Deviations the code forces are recorded here, per task, as they happen.
 - **Task 9, covers.** `follow::plan` applies G5 itself: a covered pattern row goes to `PermFollow::covered` with no
   refusal. Two follow tests of Task 2 met G5: `ord*` covered `orders*` (same body), and a column move's own mask copy
   (D21) covered a mask pattern `e*`; the tests now give those rows another subject or mask type.
+- **Task 11, no fix needed.** Every red of Task 11 already passed on the Task 10 code (the swap, D13, the
+  non-2xx-after-commit path); they were shown red on the pre-Task-6 hook and by mutation (D13's skip, the case-only
+  test), and the commit is `test(catalog)`. The migration-undo pair drives the real `migrate` and `undo` routes in
+  `egret-perm-compile/tests/migrate_route.rs`, with the follow module's writes (the ones the hook makes) standing in
+  for the rename: a catalog-engine test cannot reach the perm router. `an_allow_only_rename_is_held_without_a_wait` is
+  Task 7's `a_renamed_tables_allows_move_and_keep_their_ids` (no plugin runs; a wait would 409).
