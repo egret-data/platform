@@ -4583,3 +4583,211 @@ async fn a_non_2xx_after_a_committed_rename_still_moves_allows() {
         ]
     );
 }
+
+// ── Grants follow a rename, Task 12: column renames (spec §5.4) ──
+
+/// G1, §5.4: a renamed column keeps its path mask and its column deny on both
+/// names, copied before the commit, which waits for Trino's policy version.
+#[tokio::test]
+async fn a_renamed_column_keeps_its_mask_and_deny_on_both_names() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "email")]).await;
+    env.perm_grant(egret_perm::Effect::Allow, &[], &["u", "v"])
+        .await;
+    env.perm_grant(
+        egret_perm::Effect::Deny,
+        &["sales", "orders", "email"],
+        &["u"],
+    )
+    .await;
+    env.perm_rule(
+        egret_perm::RuleKind::Mask {
+            mask_type: "MASK_HASH".into(),
+            value_expr: None,
+        },
+        &["sales", "orders", "email"],
+    )
+    .await;
+    env.recompile_all().await;
+    let trino = plugins::start_trino(env.policy.clone(), env.trino_name.clone(), POLL * 5);
+    let starrocks = env.start_starrocks_plugin(POLL);
+    trino.polled().await;
+    starrocks.polled().await;
+    env.probe_reach("namespaces/sales/tables/orders");
+
+    let (status, body) = env
+        .commit_schema("orders", 1, &[(1, "id"), (2, "mail")])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        env.perm().await,
+        vec![
+            perm_row("grant", "allow", "", ""),
+            perm_row("grant", "deny", "orders", "email"),
+            perm_row("grant", "deny", "orders", "mail"),
+            perm_row("rule", "mask", "orders", "email"),
+            perm_row("rule", "mask", "orders", "mail"),
+        ]
+    );
+    let reached = env.reached();
+    assert!(
+        reached
+            .perm
+            .contains(&perm_row("rule", "mask", "orders", "mail")),
+        "{:?}",
+        reached.perm
+    );
+    assert!(trino.policy_report_of(reached.trino_policy_version).await < reached.at);
+    let mail = env.column("orders", "mail", "database");
+    let mail: Vec<(&str, &str)> = mail.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    assert_eq!(
+        engine_eval::mask_type(
+            &engine_eval::starrocks_mask(&env.db, env.profile_id, "v", &mail).await
+        )
+        .as_deref(),
+        Some("MASK_HASH")
+    );
+}
+
+/// G2, §5.4: a column allow follows its column after the commit, id kept.
+#[tokio::test]
+async fn a_renamed_columns_allow_moves() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "email")]).await;
+    let allow = env
+        .perm_grant(
+            egret_perm::Effect::Allow,
+            &["sales", "orders", "email"],
+            &["v"],
+        )
+        .await;
+    let (status, body) = env
+        .commit_schema("orders", 1, &[(1, "id"), (2, "mail")])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        env.grant_at(allow).await,
+        ("orders".into(), Some("mail".into()))
+    );
+}
+
+/// G4 one level down: a column pattern that would stop covering the renamed
+/// column refuses the commit.
+#[tokio::test]
+async fn a_column_pattern_that_stops_matching_refuses() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "email")]).await;
+    env.perm_rule(
+        egret_perm::RuleKind::Mask {
+            mask_type: "MASK_HASH".into(),
+            value_expr: None,
+        },
+        &["sales", "orders", "e*"],
+    )
+    .await;
+    let (status, body) = env
+        .commit_schema("orders", 1, &[(1, "id"), (2, "mail")])
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("(sales.orders.e*)"),
+        "{body}"
+    );
+    assert_eq!(env.source_fields("orders").await.unwrap()[1].1, "email");
+}
+
+/// §5.4: swapped columns carry both sets of restrictions: each name keeps its
+/// own and gets the other's copy.
+#[tokio::test]
+async fn swapped_columns_carry_both_sets() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "a"), (3, "b")])
+        .await;
+    env.perm_grant(egret_perm::Effect::Deny, &["sales", "orders", "a"], &["u"])
+        .await;
+    env.perm_grant(egret_perm::Effect::Deny, &["sales", "orders", "b"], &["w"])
+        .await;
+    let _plugins = env.start_plugins().await;
+    let (status, body) = env
+        .commit_schema("orders", 1, &[(1, "id"), (2, "b"), (3, "a")])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(env.denied_on_column("a").await, vec!["u", "w"]);
+    assert_eq!(env.denied_on_column("b").await, vec!["u", "w"]);
+}
+
+impl Env {
+    /// The principals the catalog's grants on `sales.orders.{column}` name.
+    async fn denied_on_column(&self, column: &str) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT p.ref FROM perm.grants g \
+               JOIN perm.grant_principals p ON p.grant_id = g.id \
+               JOIN registry.catalogs c ON c.id = g.catalog_id \
+              WHERE c.name = $1 AND g.column_name = $2 ORDER BY 1",
+        )
+        .bind(&self.catalog)
+        .bind(column)
+        .fetch_all(&self.db.pool)
+        .await
+        .expect("denied")
+    }
+}
+
+/// #757 guards with a column deny: a dropped column keeps its rows and takes
+/// no hold.
+#[tokio::test]
+async fn a_dropped_column_keeps_its_grants_and_takes_no_hold() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "email")]).await;
+    env.perm_grant(
+        egret_perm::Effect::Deny,
+        &["sales", "orders", "email"],
+        &["u"],
+    )
+    .await;
+    let perm = env.perm().await;
+    let _held = env.hold_name("orders").await;
+    let (status, body) = env.commit_schema("orders", 1, &[(1, "id")]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(env.perm().await, perm);
+}
+
+/// §5.4 with masks: swapping two columns whose path masks differ would put
+/// both masks on each column, a pair the overlap check refuses (#757's rule
+/// for a copied mask meeting one already on the destination): 409, nothing
+/// renamed, no copy left.
+#[tokio::test]
+async fn swapped_columns_with_different_masks_are_refused_by_the_overlap_check() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "a"), (3, "b")])
+        .await;
+    for (column, mask_type) in [("a", "MASK_HASH"), ("b", "MASK_NULL")] {
+        env.perm_rule(
+            egret_perm::RuleKind::Mask {
+                mask_type: mask_type.into(),
+                value_expr: None,
+            },
+            &["sales", "orders", column],
+        )
+        .await;
+    }
+    env.recompile_all().await;
+    let perm = env.perm().await;
+    let _plugins = env.start_plugins().await;
+    let (status, body) = env
+        .commit_schema("orders", 1, &[(1, "id"), (2, "b"), (3, "a")])
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .ends_with("Nothing was renamed."),
+        "{body}"
+    );
+    assert_eq!(env.perm().await, perm);
+    assert_eq!(env.source_fields("orders").await.unwrap()[1].1, "a");
+}

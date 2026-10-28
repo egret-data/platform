@@ -522,3 +522,8 @@ Deviations the code forces are recorded here, per task, as they happen.
   `egret-perm-compile/tests/migrate_route.rs`, with the follow module's writes (the ones the hook makes) standing in
   for the rename: a catalog-engine test cannot reach the perm router. `an_allow_only_rename_is_held_without_a_wait` is
   Task 7's `a_renamed_tables_allows_move_and_keep_their_ids` (no plugin runs; a wait would 409).
+- **Task 12, swapped masked columns.** The column plan already carried grants and path rules since Task 6's commit;
+  Task 12's reds ran on the pre-Task-6 hook. Swapping two columns whose path masks differ (`a` HASH, `b` NULL)
+  would leave both masks on each column, a pair the copy's overlap check refuses (#757's rule, §5.3): the commit is
+  409 and nothing is renamed. Swapped denies carry both sets as §5.4 says. Pinned by
+  `swapped_columns_with_different_masks_are_refused_by_the_overlap_check`; the steward removes one mask first.
