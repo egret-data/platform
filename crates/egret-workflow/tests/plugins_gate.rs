@@ -557,7 +557,9 @@ async fn allowed_types_on_a_runner_entry_is_refused_at_boot() {
     // The boot path runs it first, before `container_runner = none` returns.
     cfg.plugin_configurations = PluginConfigurations(vec![runner_entry(Some(&["*"]))]);
     let pool = sqlx::PgPool::connect_lazy("postgres://nobody@localhost:1/none").unwrap();
-    let Err(e) = egret_workflow::runtime::handlers_for(&cfg, pool.clone(), no_secrets()).await
+    let Err(e) =
+        egret_workflow::runtime::handlers_for(&cfg, pool.clone(), no_secrets(), common::no_query())
+            .await
     else {
         panic!("handlers_for must refuse the configuration");
     };
@@ -568,7 +570,7 @@ async fn allowed_types_on_a_runner_entry_is_refused_at_boot() {
         PluginConfigurations(vec![runner_entry(None), kestra_entry(Some(&["*"]))]);
     cfg.validate_plugin_configurations().unwrap();
     assert!(
-        egret_workflow::runtime::handlers_for(&cfg, pool, no_secrets())
+        egret_workflow::runtime::handlers_for(&cfg, pool, no_secrets(), common::no_query())
             .await
             .is_ok()
     );

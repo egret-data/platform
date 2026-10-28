@@ -7,7 +7,7 @@
 //! | `RefKind` | Resolves? | Through | Port that would close the gap |
 //! |---|---|---|---|
 //! | [`RefKind::DataApiEndpoint`] | Yes | `egret_dataapi_api::DataApiEndpointPort::workspace_of` | already exists |
-//! | [`RefKind::Database`] | **No — `None`, always** | nothing | a `query.databases`-owning port; `QueryExecPort` *executes* SQL, it does not answer "which workspace owns this database id" |
+//! | [`RefKind::Database`] | Yes (package #4 Task C5, 2026-10-28) | `egret_query_api::DatabaseOwnerPort::workspace_of`, implemented by `egret_query::DatabaseRepo` | already exists |
 //! | [`RefKind::Dataset`] | **No — `None`, always** | nothing | an `analytics.datasets`-owning port (none exists in the workspace) |
 //! | [`RefKind::Chart`] | **No — `None`, always** | nothing | an `analytics.charts`-owning port (none exists in the workspace) |
 //!
@@ -16,13 +16,15 @@
 //! caller's workspace only (`FlowRepo::find_in_workspace`), and the unscoped
 //! `FlowRepo::find_by_name` this port used for it is gone.
 //!
-//! **`None` is the correct, deliberate answer for the three unresolved
+//! **`None` is the correct, deliberate answer for the two unresolved
 //! kinds — not a placeholder to widen later without a port.** `publish`
 //! treats `None` exactly like a foreign reference: `Error::NotFound`, and a
-//! flow naming a `database:`/`dataset:`/`chart:` therefore cannot be
-//! published until a real port exists. That is fail-closed, and it is the
-//! right failure mode: a flow referencing a database cannot be proven to
-//! belong to the caller's workspace, so it must not be trusted with one.
+//! flow naming a `dataset:`/`chart:` therefore cannot be published until a
+//! real port exists. That is fail-closed, and it is the right failure mode: a
+//! flow referencing an object that cannot be proven to belong to the
+//! caller's workspace must not be trusted with one. (`database:` was in this
+//! list until package #4 Task C5 gave it a port; its test was updated to
+//! route `Database` through that port, as the sentences below ask.)
 //! `an_unresolvable_kind_refuses_rather_than_resolving_vacuously` (this
 //! module's own test) pins exactly this, specifically so a future change
 //! that "fixes" the gap by returning `Some` for an untrusted kind — silently
@@ -31,7 +33,7 @@
 //! that actually carries that property is
 //! `a_kind_with_no_port_refuses_even_a_well_formed_reference`** (a
 //! syntactically valid `Uuid`, not a string that merely fails to parse) —
-//! whoever next wires a real port for `Database`/`Dataset`/`Chart` should
+//! whoever next wires a real port for `Dataset`/`Chart` should
 //! expect to UPDATE that test (to route the newly-ported kind through its
 //! real port instead of asserting `None`), not delete it, and should add an
 //! equivalent one for whichever kind(s) remain unported.
@@ -59,6 +61,9 @@ use egret_workflow_api::{RefKind, WorkflowRefPort};
 /// port (if any — see the module doc's table) can answer for it.
 pub struct WorkflowRefs {
     pub dataapi_endpoints: Arc<dyn egret_dataapi_api::DataApiEndpointPort>,
+    /// `RefKind::Database` (an `egret.sql` task's `database:`), package #4
+    /// Task C5.
+    pub databases: Arc<dyn egret_query_api::DatabaseOwnerPort>,
 }
 
 /// `name_or_id` for every `RefKind` is a plain
@@ -88,11 +93,18 @@ impl WorkflowRefPort for WorkflowRefs {
                 let ws = self.dataapi_endpoints.workspace_of(id).await?;
                 Ok(ws.map(|ws| (id, ws)))
             }
-            // No port anywhere in the workspace owns these three yet — see
+            RefKind::Database => {
+                let Some(id) = as_uuid(name_or_id) else {
+                    return Ok(None);
+                };
+                let ws = self.databases.workspace_of(id).await?;
+                Ok(ws.map(|ws| (id, ws)))
+            }
+            // No port anywhere in the workspace owns these two yet — see
             // the module doc's table. `None`, always, is the fail-closed
             // answer: `publish` refuses it exactly like a foreign reference,
             // never like a resolved one.
-            RefKind::Database | RefKind::Dataset | RefKind::Chart => Ok(None),
+            RefKind::Dataset | RefKind::Chart => Ok(None),
         }
     }
 }
@@ -105,31 +117,53 @@ mod tests {
     #[async_trait::async_trait]
     impl egret_dataapi_api::DataApiEndpointPort for UnreachableDataApi {
         async fn workspace_of(&self, _id: Uuid) -> Result<Option<Uuid>, Error> {
-            unreachable!("Database/Dataset/Chart must never reach a port that does not exist")
+            unreachable!("Database/Dataset/Chart must never reach the Data API port")
+        }
+    }
+
+    struct UnreachableDatabases;
+    #[async_trait::async_trait]
+    impl egret_query_api::DatabaseOwnerPort for UnreachableDatabases {
+        async fn workspace_of(&self, _id: Uuid) -> Result<Option<Uuid>, Error> {
+            unreachable!("only `RefKind::Database`, with a well-formed id, may ask this port")
+        }
+    }
+
+    /// A database port that knows one `(id, workspace)` pair and records
+    /// every id it was asked about.
+    struct OneDatabase {
+        id: Uuid,
+        ws: Uuid,
+        asked: std::sync::Mutex<Vec<Uuid>>,
+    }
+    #[async_trait::async_trait]
+    impl egret_query_api::DatabaseOwnerPort for OneDatabase {
+        async fn workspace_of(&self, id: Uuid) -> Result<Option<Uuid>, Error> {
+            self.asked.lock().unwrap().push(id);
+            Ok((id == self.id).then_some(self.ws))
+        }
+    }
+
+    fn unreachable_refs() -> WorkflowRefs {
+        WorkflowRefs {
+            dataapi_endpoints: Arc::new(UnreachableDataApi),
+            databases: Arc::new(UnreachableDatabases),
         }
     }
 
     /// Named for what it actually proves: `workspace_of("anything-at-all")`
-    /// for `Database`/`Dataset`/`Chart` refuses -- but `"anything-at-all"`
-    /// fails `Uuid` parsing, so this only pins the MALFORMED-input property,
-    /// which [`a_non_uuid_value_for_an_id_based_kind_refuses_without_asking_the_port`]
+    /// for `Dataset`/`Chart` refuses -- but `"anything-at-all"` fails `Uuid`
+    /// parsing, so this only pins the MALFORMED-input property, which
+    /// [`a_non_uuid_value_for_an_id_based_kind_refuses_without_asking_the_port`]
     /// already covers for the id-based kinds. It does NOT, on its own, prove
-    /// these three kinds refuse a well-formed reference for lack of a port —
+    /// these kinds refuse a well-formed reference for lack of a port --
     /// [`a_kind_with_no_port_refuses_even_a_well_formed_reference`] (below)
-    /// is the test that carries that property, and is the one to keep
-    /// green: fix round 1 review found that a future permissive change to
-    /// the `RefKind::Database | RefKind::Dataset | RefKind::Chart` arm above
-    /// (say, wiring a real port using the same `as_uuid`-then-look-up shape
-    /// the other kinds use) would leave THIS test passing unchanged, because
-    /// a non-`Uuid` string never reaches a port either way. Kept anyway,
-    /// alongside the new one, because malformed- and well-formed-input are
-    /// two different properties and both are worth pinning.
+    /// is the test that carries that property. `Database` left this list in
+    /// package #4 Task C5, when it got a port.
     #[tokio::test]
     async fn an_unresolvable_kind_refuses_rather_than_resolving_vacuously() {
-        let refs = WorkflowRefs {
-            dataapi_endpoints: Arc::new(UnreachableDataApi),
-        };
-        for kind in [RefKind::Database, RefKind::Dataset, RefKind::Chart] {
+        let refs = unreachable_refs();
+        for kind in [RefKind::Dataset, RefKind::Chart] {
             let got = refs
                 .workspace_of(kind, "anything-at-all")
                 .await
@@ -139,24 +173,20 @@ mod tests {
     }
 
     /// THE test this module exists to carry, per fix round 1: a
-    /// SYNTACTICALLY VALID reference (a real `Uuid`, not a string that fails
-    /// to parse) for `Database`/`Dataset`/`Chart` still refuses, because no
-    /// port exists for any of the three — not because the input happened to
-    /// be malformed. `Unreachable*` ports (above) assert the stronger
-    /// property this test rides on: these three kinds must not even ASK a
-    /// port, well-formed input or not — there is nothing to ask. Pinned here
-    /// so a future change cannot "fix" one of the three into a permissive
-    /// `Some` (by wiring a real port behind the same `as_uuid`-then-look-up
-    /// shape the other kinds use) without this test going red first, and
-    /// silently reopen the cross-workspace hole migration 0128 is this
-    /// programme's recorded case of.
+    /// SYNTACTICALLY VALID reference (a real `Uuid`) for `Dataset`/`Chart`
+    /// still refuses, because no port exists for either -- not because the
+    /// input happened to be malformed. The `Unreachable*` ports assert the
+    /// stronger property: these kinds must not even ASK a port. Pinned so a
+    /// future change cannot "fix" one of them into a permissive `Some`
+    /// without this test going red first, and silently reopen the
+    /// cross-workspace hole migration 0128 is this programme's recorded case
+    /// of. `Database` was in this list until package #4 Task C5; it is now
+    /// routed through its real port, in the two tests below.
     #[tokio::test]
     async fn a_kind_with_no_port_refuses_even_a_well_formed_reference() {
-        let refs = WorkflowRefs {
-            dataapi_endpoints: Arc::new(UnreachableDataApi),
-        };
+        let refs = unreachable_refs();
         let well_formed = Uuid::new_v4().to_string();
-        for kind in [RefKind::Database, RefKind::Dataset, RefKind::Chart] {
+        for kind in [RefKind::Dataset, RefKind::Chart] {
             let got = refs
                 .workspace_of(kind, &well_formed)
                 .await
@@ -169,17 +199,71 @@ mod tests {
         }
     }
 
+    /// Package #4 Task C5: `Database` resolves through its port to the
+    /// OWNER's workspace, and an id the port has never heard of is `None`.
+    /// `publish` compares that workspace with the caller's, so a database of
+    /// another workspace is refused exactly like a fictional one (publish's
+    /// own tests pin that comparison).
     #[tokio::test]
-    async fn a_non_uuid_value_for_an_id_based_kind_refuses_without_asking_the_port() {
+    async fn a_database_resolves_through_its_port_to_the_owning_workspace() {
+        let (id, ws) = (Uuid::new_v4(), Uuid::new_v4());
+        let port = Arc::new(OneDatabase {
+            id,
+            ws,
+            asked: Default::default(),
+        });
         let refs = WorkflowRefs {
             dataapi_endpoints: Arc::new(UnreachableDataApi),
+            databases: port.clone(),
         };
-        for kind in [RefKind::DataApiEndpoint] {
+        assert_eq!(
+            refs.workspace_of(RefKind::Database, &id.to_string())
+                .await
+                .unwrap(),
+            Some((id, ws)),
+            "the id is kept as written and the owner is the port's answer"
+        );
+        let unknown = Uuid::new_v4();
+        assert_eq!(
+            refs.workspace_of(RefKind::Database, &unknown.to_string())
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(*port.asked.lock().unwrap(), vec![id, unknown]);
+    }
+
+    /// A port error is the caller's outage, not a refusal: it propagates
+    /// rather than turning into `None` (which publish would report as "not
+    /// found" and blame the author for).
+    #[tokio::test]
+    async fn a_database_port_error_propagates_rather_than_reading_as_absent() {
+        struct Down;
+        #[async_trait::async_trait]
+        impl egret_query_api::DatabaseOwnerPort for Down {
+            async fn workspace_of(&self, _id: Uuid) -> Result<Option<Uuid>, Error> {
+                Err(Error::Internal(anyhow::anyhow!("metastore down")))
+            }
+        }
+        let refs = WorkflowRefs {
+            dataapi_endpoints: Arc::new(UnreachableDataApi),
+            databases: Arc::new(Down),
+        };
+        let got = refs
+            .workspace_of(RefKind::Database, &Uuid::new_v4().to_string())
+            .await;
+        assert!(matches!(got, Err(Error::Internal(_))), "{got:?}");
+    }
+
+    #[tokio::test]
+    async fn a_non_uuid_value_for_an_id_based_kind_refuses_without_asking_the_port() {
+        let refs = unreachable_refs();
+        for kind in [RefKind::DataApiEndpoint, RefKind::Database] {
             let got = refs
                 .workspace_of(kind, "not-a-uuid")
                 .await
                 .expect("must not error");
-            assert_eq!(got, None);
+            assert_eq!(got, None, "{kind:?}");
         }
     }
 }

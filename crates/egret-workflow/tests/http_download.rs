@@ -200,9 +200,14 @@ async fn registry(pool: &sqlx::PgPool, http: Http<'_>) -> Handlers {
     if let Some(n) = http.max_sse_events {
         cfg.http.max_sse_events = n;
     }
-    let (h, runner) = egret_workflow::runtime::handlers_for(&cfg, pool.clone(), Arc::new(Secrets))
-        .await
-        .expect("the shipping registry builds");
+    let (h, runner) = egret_workflow::runtime::handlers_for(
+        &cfg,
+        pool.clone(),
+        Arc::new(Secrets),
+        common::no_query(),
+    )
+    .await
+    .expect("the shipping registry builds");
     assert!(runner.is_none());
     h
 }

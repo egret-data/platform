@@ -1142,9 +1142,9 @@ fn a_five_thousand_and_one_task_flow_is_refused_without_building_past_the_limit(
 #[test]
 fn a_task_type_this_deployment_does_not_serve_is_its_refusal() {
     let served = crate::runtime::served_for(&egret_config::Config::default().workflow);
-    assert!(!served.serves("egret.sql"));
+    assert!(!served.serves("egret.report.send"));
     let yaml = format!(
-        "id: f\nnamespace: company.team\ntasks:\n  - {{id: q, type: egret.sql, database: d, sql: SELECT 1}}\n  - {}\n  - {{id: bad, type: no.such.Type}}\n",
+        "id: f\nnamespace: company.team\ntasks:\n  - {{id: q, type: egret.report.send, chart: c}}\n  - {}\n  - {{id: bad, type: no.such.Type}}\n",
         leaf("a")
     );
     let flow = parse(&yaml).unwrap();

@@ -2233,8 +2233,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // (or no cluster client) stops the process here rather than starting
     // without the containers the operator asked for.
     //
-    // `egret.sql` is not registered: it needs an `Arc<dyn QueryExecPort>`
-    // that nothing here provides.
+    // `egret.sql` is registered on every deployment since package #4 Task C5,
+    // over `query_port` -- the ONE `Arc<EngineState>` the Data API and the
+    // Data Apps gateway below share, built here so `handlers_for` can take it
+    // (it was built after this call until then, and the comment here said
+    // "`egret.sql` is not registered: it needs an `Arc<dyn QueryExecPort>`
+    // that nothing here provides").
     //
     // **A flow whose task type has no handler here no longer HANGS** (a
     // `TASK_TYPES` type this deployment does not wire in). Since
@@ -2259,11 +2263,14 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // `WorkingDirectory`, ...) is covered too: the worker plans a stored
     // execution without validation (`executor::plan_stored`; validation gates
     // starts only), so its run reaches `NoHandler` or `NotALeaf` and fails.
-    // **Six of twenty-three registered types have no handler, whatever the
-    // runner**, and since Task 3 none of them publishes or starts (`egret.sql`,
-    // `egret.dataapi.call`, `egret.dataset.refresh`,
-    // `egret.report.send`, `core.http`, `core.slack`): 23 rows = these 6 + the
-    // 13 core handlers above + the 4 script types a runner serves. All nine
+    // **Five registered `egret.*`/short `core.*` types have no handler,
+    // whatever the runner**, and since Task 3 none of them publishes or starts
+    // (`egret.dataapi.call`, `egret.dataset.refresh`, `egret.report.send`,
+    // `core.http`, `core.slack`). `egret.sql` was the sixth until package #4
+    // Task C5 (2026-10-28) registered it; this said "Six of twenty-three ...
+    // 23 rows = these 6 + the 13 core handlers above + the 4 script types a
+    // runner serves" until then, and the row count was already stale (see
+    // `spec::registry::TASK_TYPES`). All nine
     // core storage tasks are registered -- W9a Task 11's `Write` and `Size`
     // and Task 12's five in `with_core_tasks`, `Delete` and
     // `PurgeCurrentExecutionFiles` by `handlers::storage::register` inside
@@ -2286,6 +2293,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // the claim loop's end, not by the token, so a tick in flight finishes
     // writing before the writer drains; `workflow_runtime.join()` below waits
     // for that at shutdown.
+    //
+    // ONE `Arc` around the query engine, cloned into every seam that reaches it
+    // as a `QueryExecPort` (`egret.sql` here, the Data API and the Data Apps
+    // gateway below), so there is exactly one `EngineState` behind all three.
+    let query_port = std::sync::Arc::new(engine_state);
     let (workflow_handlers, container_runner) = egret_workflow::runtime::handlers_for(
         &config.workflow,
         db.pool.clone(),
@@ -2294,6 +2306,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         std::sync::Arc::new(egret_bin::workflow_secrets::WorkspaceSecretSource::new(
             workspace_secrets.clone(),
         )),
+        // Package #4 Task C5: `egret.sql`'s port.
+        query_port.clone(),
     )
     .await
     .map_err(|e| anyhow::anyhow!("workflow.container_runner: {e}"))?;
@@ -2976,11 +2990,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // a new client points somewhere they can actually reach.
     // Data Apps and Workflow Management share the SAME object store
     // (this `S3Store`, the `[storage]` bucket -- one client, not a second one).
-    let apps_storage = engine_state.storage.clone();
-    // ONE `Arc` around the query engine, cloned into every seam that reaches it
-    // as a `QueryExecPort` (the Data API and the Data Apps gateway), so there is
-    // exactly one `EngineState` behind both.
-    let query_port = std::sync::Arc::new(engine_state);
+    let apps_storage = query_port.storage.clone();
+    // `query_port` (the ONE `Arc<EngineState>`) is built above, before
+    // `runtime::handlers_for`, which hands it to `egret.sql` (package #4 Task
+    // C5); the Data API and the Data Apps gateway below clone the same one.
     let dataapi = Some(egret_dataapi::DataApiState {
         db: db.clone(),
         clients: egret_dataapi::ClientStore::new(db.clone()),
@@ -3029,12 +3042,13 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     });
 
     // Workflow management surface (W1 Task 7). `refs` is the real
-    // `WorkflowRefPort`: `RefKind::DataApiEndpoint`/`Notebook` through the two ports
-    // already wired above for `automation`/`dataapi`, and
-    // `RefKind::Database`/`Dataset`/`Chart` resolve to `None` always -- no
-    // port for any of the three exists anywhere in the workspace yet, and
-    // `None` is the fail-closed answer `publish` needs: see
-    // `egret_workflow::refs`'s module doc for the full per-kind table.
+    // `WorkflowRefPort`: `RefKind::DataApiEndpoint` through the port already
+    // wired above for `automation`/`dataapi`, `RefKind::Database` through the
+    // shared `databases` repo (package #4 Task C5), and `RefKind::Dataset`/
+    // `Chart` resolve to `None` always -- no port for either exists anywhere
+    // in the workspace yet, and `None` is the fail-closed answer `publish`
+    // needs: see `egret_workflow::refs`'s module doc for the full per-kind
+    // table.
     //
     // A fresh `EndpointStore`, same reasoning `automation`/`automation_runner`
     // above give for their own fresh instances rather than reusing
@@ -3048,6 +3062,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         logs: egret_workflow::logs::LogRepo::new(db.pool.clone()),
         refs: std::sync::Arc::new(egret_workflow::WorkflowRefs {
             dataapi_endpoints: std::sync::Arc::new(egret_dataapi::EndpointStore::new(db.clone())),
+            // Package #4 Task C5: an `egret.sql` task's `database:`.
+            databases: std::sync::Arc::new(databases.clone()),
         }),
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),

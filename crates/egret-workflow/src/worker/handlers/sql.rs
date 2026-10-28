@@ -113,7 +113,9 @@
 //! `port_impl::run_bounded` awaits the whole result). So STORE is capped by
 //! [`MAX_FETCH_ROWS`] and fails at the cap exactly as `FETCH` does; what it
 //! changes is where the rows go -- a file instead of `task_runs.outputs` --
-//! not how many egret holds. `egret.sql` is in no production registry (§1).
+//! not how many egret holds. Since package #4 Task C5 (2026-10-28)
+//! `runtime::handlers_for` registers this handler on every deployment, over
+//! egret-bin's one `EngineState`.
 //!
 //! `NONE` is the default because an output is **persisted**: `task_runs.outputs`
 //! is a JSONB column and every later render context in the execution carries it.

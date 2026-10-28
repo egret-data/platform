@@ -10,8 +10,10 @@
 //! is the first one installed whichever test the harness runs first; the
 //! `common` helpers install the runner set only when nothing is installed.
 //!
-//! The probe is `egret.sql`: it is in `spec::registry`, so validation accepts
-//! it by type, and no deployment has a handler for it.
+//! The probe is `egret.report.send`: it is in `spec::registry`, so validation
+//! accepts it by type, and no deployment has a handler for it (spec D10 of
+//! package #4 defers it). It was `egret.sql` until package #4 Task C5 served
+//! that type on every deployment.
 //!
 //! DB-gated; self-skips ONLY when `EGRET_ALLOW_DB_SKIP` is set.
 
@@ -28,19 +30,19 @@ use uuid::Uuid;
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 const NOT_SERVED: &str = "task_type_not_served";
-const NO_HANDLER: &str = "this egret deployment has no handler for `egret.sql`";
+const NO_HANDLER: &str = "this egret deployment has no handler for `egret.report.send`";
 const START_REFUSAL: &str = "the flow cannot run on this deployment";
 
 fn served_none() -> &'static egret_workflow::runtime::Served {
     common::install_served_none()
 }
 
-/// A flow `id` whose one task is `egret.sql`. `extra` is appended at the
+/// A flow `id` whose one task is `egret.report.send`. `extra` is appended at the
 /// flow level (a `triggers:` block).
-fn sql_flow(ns: &str, id: &str, extra: &str) -> String {
+fn unserved_flow(ns: &str, id: &str, extra: &str) -> String {
     format!(
-        "id: {id}\nnamespace: {ns}\n{extra}tasks:\n  - id: q\n    type: egret.sql\n    \
-         database: trino_prod\n    sql: SELECT 1\n"
+        "id: {id}\nnamespace: {ns}\n{extra}tasks:\n  - id: q\n    type: egret.report.send\n    \
+         chart: monthly\n"
     )
 }
 
@@ -82,12 +84,14 @@ fn not_served_at<'a>(errors: &'a serde_json::Value, path: &str) -> Option<&'a se
         .find(|e| e["code"] == NOT_SERVED && e["path"] == path)
 }
 
-/// The installed set is the `none` one: no `egret.sql`, no script type, and
-/// `core.log`. Every other test here rests on it.
+/// The installed set is the `none` one: no `egret.report.send`, no script
+/// type, and `core.log` -- and, since package #4 Task C5, `egret.sql`. Every
+/// other test here rests on it.
 #[test]
 fn this_binary_serves_the_none_set() {
     let s = served_none();
-    assert!(!s.serves("egret.sql"));
+    assert!(!s.serves("egret.report.send"));
+    assert!(s.serves("egret.sql"));
     assert!(!s.serves("io.kestra.plugin.scripts.shell.Commands"));
     assert!(s.serves("io.kestra.plugin.core.log.Log"));
 }
@@ -120,7 +124,7 @@ async fn a_draft_saves_and_every_report_of_it_carries_task_type_not_served() {
     );
     let id = created["id"].as_str().unwrap().to_string();
 
-    let source = sql_flow(&ns, "f", "");
+    let source = unserved_flow(&ns, "f", "");
     let res = common::put(
         &app,
         &format!("/api/ws/{}/workflows/flows/{id}", fx.ws),
@@ -165,7 +169,7 @@ async fn both_validate_routes_report_task_type_not_served() {
     let app = common::app(&fx.db).await;
     let ns = fresh_ns();
     let flow = common::seed_flow(&fx.db, fx.ws, fx.user, &log_flow(&ns, "f", ""), "draft").await;
-    let source = sql_flow(&ns, "f", "");
+    let source = unserved_flow(&ns, "f", "");
 
     let by_id = common::post(
         &app,
@@ -201,7 +205,14 @@ async fn publish_refuses_with_the_message() {
     let Some(fx) = fx().await else { return };
     let app = common::app(&fx.db).await;
     let ns = fresh_ns();
-    let flow = common::seed_flow(&fx.db, fx.ws, fx.user, &sql_flow(&ns, "f", ""), "draft").await;
+    let flow = common::seed_flow(
+        &fx.db,
+        fx.ws,
+        fx.user,
+        &unserved_flow(&ns, "f", ""),
+        "draft",
+    )
+    .await;
 
     let res = common::post(
         &app,
@@ -270,7 +281,14 @@ async fn the_api_start_refuses_and_writes_no_execution() {
     let Some(fx) = fx().await else { return };
     let app = common::app(&fx.db).await;
     let ns = fresh_ns();
-    let flow = common::seed_flow(&fx.db, fx.ws, fx.user, &sql_flow(&ns, "f", ""), "draft").await;
+    let flow = common::seed_flow(
+        &fx.db,
+        fx.ws,
+        fx.user,
+        &unserved_flow(&ns, "f", ""),
+        "draft",
+    )
+    .await;
 
     let res = common::post(
         &app,
@@ -295,7 +313,14 @@ async fn a_webhook_start_is_refused_the_same_way() {
     let ns = fresh_ns();
     let hook = "triggers:\n  - id: hook\n    type: io.kestra.plugin.core.trigger.Webhook\n    \
                 key: the-key\n";
-    common::seed_flow(&fx.db, fx.ws, fx.user, &sql_flow(&ns, "f", hook), "draft").await;
+    common::seed_flow(
+        &fx.db,
+        fx.ws,
+        fx.user,
+        &unserved_flow(&ns, "f", hook),
+        "draft",
+    )
+    .await;
     let app = common::webhook_app(&fx.db).await;
 
     let res = common::anon(
@@ -322,7 +347,7 @@ async fn a_replay_of_an_execution_of_it_is_refused_the_same_way() {
     let Some(fx) = fx().await else { return };
     let app = common::app(&fx.db).await;
     let ns = fresh_ns();
-    let source = sql_flow(&ns, "f", "");
+    let source = unserved_flow(&ns, "f", "");
     let flow = common::seed_flow(&fx.db, fx.ws, fx.user, &source, "draft").await;
     let done: Uuid = sqlx::query_scalar(
         "INSERT INTO workflow.executions \
@@ -373,8 +398,14 @@ async fn a_schedule_fire_is_refused_and_taken_off_the_queue() {
     let ns = fresh_ns();
     let cron = "triggers:\n  - id: s\n    type: io.kestra.plugin.core.trigger.Schedule\n    \
                 cron: \"*/1 * * * *\"\n";
-    let refused =
-        common::seed_flow(&fx.db, fx.ws, fx.user, &sql_flow(&ns, "f", cron), "draft").await;
+    let refused = common::seed_flow(
+        &fx.db,
+        fx.ws,
+        fx.user,
+        &unserved_flow(&ns, "f", cron),
+        "draft",
+    )
+    .await;
     let sibling =
         common::seed_flow(&fx.db, fx.ws, fx.user, &log_flow(&ns, "g", cron), "draft").await;
     common::make_due(&fx.db, refused, "s", 2).await;
@@ -447,7 +478,7 @@ async fn a_flow_trigger_fire_is_refused_and_the_event_is_done_with() {
         &fx.db,
         fx.ws,
         fx.user,
-        &sql_flow(&ns, "listener", listen),
+        &unserved_flow(&ns, "listener", listen),
         "draft",
     )
     .await;
@@ -503,7 +534,7 @@ async fn settle(pool: &sqlx::PgPool) {
     panic!("never settled in 64 rounds");
 }
 
-/// A `Subflow` whose target uses `egret.sql` creates no child: its run fails
+/// A `Subflow` whose target uses `egret.report.send` creates no child: its run fails
 /// with "cannot execute an invalid flow" naming the type, and the parent ends
 /// `FAILED` instead of waiting on a child that would stall.
 #[tokio::test]
@@ -515,7 +546,7 @@ async fn a_subflow_to_it_fails_its_run_with_the_message() {
         &fx.db,
         fx.ws,
         fx.user,
-        &sql_flow(&ns, "target", ""),
+        &unserved_flow(&ns, "target", ""),
         "draft",
     )
     .await;
@@ -568,8 +599,9 @@ async fn a_subflow_to_it_fails_its_run_with_the_message() {
 
 // ── 8: the schema ───────────────────────────────────────────────────────────
 
-/// The schema offers none of the six unwired types, still offers `Log`, and
-/// its `ETag` differs from the one built for a set that serves `egret.sql`.
+/// The schema offers none of the five unwired types, still offers `Log` and
+/// (since package #4 Task C5) `egret.sql`, and its `ETag` differs from the
+/// one built for a set that serves `egret.report.send`.
 #[test]
 fn the_schema_offers_no_unserved_type() {
     let served = served_none();
@@ -581,7 +613,6 @@ fn the_schema_offers_no_unserved_type() {
     let schema = egret_workflow::spec::schema::served(&features, &deployment);
     let defs = schema.value["$defs"].as_object().expect("$defs");
     for t in [
-        "egret.sql",
         "core.http",
         "core.slack",
         "egret.dataapi.call",
@@ -591,6 +622,7 @@ fn the_schema_offers_no_unserved_type() {
         assert!(!defs.contains_key(t), "{t} is offered");
     }
     assert!(defs.contains_key("io.kestra.plugin.core.log.Log"));
+    assert!(defs.contains_key("egret.sql"), "served on every deployment");
     // Nor any script or plugin type: this deployment has no runner, whatever
     // the deployment's script settings say.
     assert!(!defs.contains_key("io.kestra.plugin.scripts.shell.Commands"));
@@ -598,14 +630,17 @@ fn the_schema_offers_no_unserved_type() {
         .keys()
         .any(|k| k.starts_with(egret_workflow::plugins::PREFIX)));
 
-    let with_sql = egret_workflow::runtime::Served::from_type_ids(
+    let with_report = egret_workflow::runtime::Served::from_type_ids(
         served
             .type_ids()
             .map(str::to_string)
-            .chain(["egret.sql".to_string()]),
+            .chain(["egret.report.send".to_string()]),
     );
-    let other = egret_workflow::spec::schema::served_with(&features, &deployment, &with_sql);
-    assert!(other.value["$defs"]["egret.sql"].is_object(), "control");
+    let other = egret_workflow::spec::schema::served_with(&features, &deployment, &with_report);
+    assert!(
+        other.value["$defs"]["egret.report.send"].is_object(),
+        "control"
+    );
     assert_ne!(schema.etag, other.etag);
 }
 

@@ -25,7 +25,7 @@ pub async fn db() -> Option<Db> {
 /// Install, for this test binary, the task types a deployment WITH a
 /// container runner serves (`runtime::served_for` with `docker`): every type
 /// egret has a handler for in some configuration, and still none of the
-/// unwired ones (`egret.sql`, `core.http`, ...). Idempotent; panics if this
+/// unwired ones (`core.http`, `egret.report.send`, ...). Idempotent; panics if this
 /// binary already installed a different set (`install_served_for_tests`).
 ///
 /// No-silent-stall spec §4.1: `runtime::served()` panics in a process that
@@ -425,6 +425,7 @@ fn app_with_dbs_and_pdp(
         logs: egret_workflow::logs::LogRepo::new(db.pool.clone()),
         refs: std::sync::Arc::new(egret_workflow::WorkflowRefs {
             dataapi_endpoints: std::sync::Arc::new(UnreachableDataApi),
+            databases: std::sync::Arc::new(UnreachableDatabases),
         }),
         sessions: sessions.clone(),
         workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),
@@ -481,6 +482,7 @@ pub fn audit_mutations(app: &App) -> Vec<(String, Option<String>, serde_json::Va
 pub fn workflow_refs() -> egret_workflow::WorkflowRefs {
     egret_workflow::WorkflowRefs {
         dataapi_endpoints: std::sync::Arc::new(UnreachableDataApi),
+        databases: std::sync::Arc::new(UnreachableDatabases),
     }
 }
 
@@ -493,6 +495,47 @@ struct UnreachableDataApi;
 impl egret_dataapi_api::DataApiEndpointPort for UnreachableDataApi {
     async fn workspace_of(&self, _id: Uuid) -> egret_core::Result<Option<Uuid>> {
         unreachable!("tests/routes.rs must not publish a flow with a dataapi.call task")
+    }
+}
+
+/// The same for `RefKind::Database` (package #4 Task C5): a test that
+/// publishes an `egret.sql` builds its own `WorkflowRefs`
+/// (`tests/sql_served.rs`, `tests/publish.rs`).
+struct UnreachableDatabases;
+#[async_trait::async_trait]
+impl egret_query_api::DatabaseOwnerPort for UnreachableDatabases {
+    async fn workspace_of(&self, _id: Uuid) -> egret_core::Result<Option<Uuid>> {
+        unreachable!("this route test must not publish a flow with an egret.sql task")
+    }
+}
+
+/// `egret.sql`'s port for a test that builds `runtime::handlers_for` and runs
+/// no `egret.sql` task (package #4 Task C5).
+pub fn no_query() -> std::sync::Arc<dyn egret_query_api::QueryExecPort> {
+    std::sync::Arc::new(NoQuery)
+}
+
+struct NoQuery;
+#[async_trait::async_trait]
+impl egret_query_api::QueryExecPort for NoQuery {
+    async fn describe_as(
+        &self,
+        _ws: Uuid,
+        _database_id: Uuid,
+        _principal: egret_core::UserId,
+        _sql: &str,
+    ) -> egret_core::Result<Vec<egret_query_api::ColumnMeta>> {
+        unreachable!("this test runs no egret.sql task")
+    }
+    async fn execute_as(
+        &self,
+        _ws: Uuid,
+        _database_id: Uuid,
+        _principal: egret_core::UserId,
+        _sql: &str,
+        _limits: egret_query_api::Limits,
+    ) -> egret_core::Result<egret_query_api::TabularResult> {
+        unreachable!("this test runs no egret.sql task")
     }
 }
 
@@ -820,6 +863,7 @@ pub async fn webhook_app_with_guard(
         logs: egret_workflow::logs::LogRepo::new(db.pool.clone()),
         refs: std::sync::Arc::new(egret_workflow::WorkflowRefs {
             dataapi_endpoints: std::sync::Arc::new(UnreachableDataApi),
+            databases: std::sync::Arc::new(UnreachableDatabases),
         }),
         sessions,
         workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),

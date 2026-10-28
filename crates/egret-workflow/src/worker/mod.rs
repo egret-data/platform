@@ -304,6 +304,11 @@ pub struct TaskInput {
     /// is started; W6 (triggers) is the package that has to decide what a
     /// scheduled run acts as, so it is left to own that column rather than
     /// guessed at here.
+    ///
+    /// *(2026-10-28, package #4 Task C5: `egret.sql` is served now, and both
+    /// holes were accepted as they stand -- `created_by` stays the principal
+    /// until a `run_as` column exists; spec D10, follow-up recorded in the
+    /// package #4 plan.)*
     pub principal: Option<egret_core::UserId>,
     /// **The instant this claim of the run was taken** -- the value the
     /// claim's own `UPDATE … SET claimed_at = now()` wrote

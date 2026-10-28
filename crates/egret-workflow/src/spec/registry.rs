@@ -75,7 +75,7 @@ pub struct TaskTypeSpec {
 /// **Not guarding it HERE is still the right call**, and the reason is the panic in
 /// [`add_publishable`](crate::worker::Handlers::add_publishable): the same
 /// mechanism facing this way would refuse to start any deployment that declines
-/// to wire `egret.sql`, `core.http` or the container tasks — which is every
+/// to wire `core.http` or the container tasks — which is every
 /// deployment, since `with_core_tasks` is eleven handlers and this table is
 /// twenty-four rows (5 `egret.*`, 2 short `core.*`, 17 Kestra FQCNs -- W5a replaced
 /// the `egret.container`/`egret.script.python` rows with four script-task

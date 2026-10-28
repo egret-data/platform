@@ -427,6 +427,7 @@ pub async fn publish_corpus(pool: &PgPool, ws: Uuid, by: UserId) -> BTreeMap<Str
     // then 0/0) was removed with it: a publish cannot go back to the port.
     let refs = WorkflowRefs {
         dataapi_endpoints: Arc::new(NoDataApi),
+        databases: Arc::new(NoDatabases),
     };
     for (corpus_id, flow) in &drafts {
         let outcome = match egret_workflow::publish::publish_gated(
@@ -1118,6 +1119,17 @@ struct NoDataApi;
 impl egret_dataapi_api::DataApiEndpointPort for NoDataApi {
     async fn workspace_of(&self, _id: Uuid) -> Result<Option<Uuid>, egret_core::Error> {
         unreachable!("no corpus flow names an `egret.dataapi.call`")
+    }
+}
+
+/// The same for `RefKind::Database` (package #4 Task C5): no corpus flow
+/// names an `egret.sql`, which is Kestra's corpus's absence, not egret's.
+struct NoDatabases;
+
+#[async_trait::async_trait]
+impl egret_query_api::DatabaseOwnerPort for NoDatabases {
+    async fn workspace_of(&self, _id: Uuid) -> Result<Option<Uuid>, egret_core::Error> {
+        unreachable!("no corpus flow names an `egret.sql`")
     }
 }
 

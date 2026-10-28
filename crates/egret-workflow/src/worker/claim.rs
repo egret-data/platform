@@ -974,7 +974,9 @@ pub async fn wake(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
 /// Task 3 fix round 1: `TASK_TYPES` is 34 rows now, and the "23" above was
 /// already stale. The newest row, `Exit`, has no handler and is never claimed:
 /// it is executor-level (`spec::registry::EXECUTOR_LEVEL`), so it is not one of
-/// the types this paragraph is about.)* [`reap`] then
+/// the types this paragraph is about.)* *(2026-10-28, package #4 Task C5:
+/// `egret.sql` is no longer one of the six -- `runtime::handlers_for`
+/// registers it on every deployment, over egret-bin's query port.)* [`reap`] then
 /// clears `claimed_at` and **nothing else** — its statement is
 /// `SET claimed_at = NULL, updated_at = now()`, so the state stays `RUNNING` and
 /// the attempt stays open — and `claim`'s own predicate is
