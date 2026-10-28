@@ -24,6 +24,9 @@ export type TableTagMaskConflict = {
   mask: string;
   maskOrigin: "rule" | "policy";
   moreTables: boolean;
+  /** The other table-level attachments, up to a server limit (absent from an older server). */
+  otherTables?: { warehouseId: string; schema: string; table: string }[];
+  otherTablesTruncated?: boolean;
 };
 
 /** `rule_overlap` (409): two masks or row filters would decide one coordinate. */
@@ -60,6 +63,15 @@ function bodyOf<T>(e: unknown, code: string): T | null {
 }
 
 export const tableTagMaskConflict = (e: unknown) => bodyOf<TableTagMaskConflict>(e, "table_tag_mask_conflict");
+
+/** "Other tables carry it too: a.b, c.d, and more." — or `null` when no other table is on the tag. */
+export function otherTablesText(conflict: TableTagMaskConflict): string | null {
+  if (!conflict.moreTables) return null;
+  const listed = (conflict.otherTables ?? []).map((t) => `${t.schema}.${t.table}`);
+  if (listed.length === 0) return "Other tables carry it too.";
+  const more = conflict.otherTablesTruncated ? ", and more" : "";
+  return `Other tables carry it too: ${listed.join(", ")}${more}.`;
+}
 export const ruleOverlap = (e: unknown) => bodyOf<RuleOverlapBody>(e, "rule_overlap");
 export const tagInUse = (e: unknown) => bodyOf<TagInUse>(e, "tag_in_use");
 export const tagNameTaken = (e: unknown) => bodyOf<TagNameTaken>(e, "tag_name_taken");

@@ -221,13 +221,26 @@ pub struct UnreadableTableMask {
     pub warehouse_id: Option<Uuid>,
     pub schema: String,
     pub table: String,
-    /// The tag has other table-level attachments besides the one named here.
-    /// An attachment is a `(warehouse, schema, table)`: the same `schema.table`
-    /// attached in two warehouses is two attachments, so this is `true` then
-    /// too. `warehouse_id`/`schema`/`table` name the first in
-    /// `(schema, table, warehouse)` order, so the one reported is stable.
-    /// Always `false` for the Attachment arm, which reads no attachment.
-    pub more_tables: bool,
+    /// The tag's other table-level attachments, in `(schema, table, warehouse)`
+    /// order, after the one named above: at most [`LISTED_OTHER_TABLES`]. An
+    /// attachment is a `(warehouse, schema, table)`, so the same `schema.table`
+    /// in two warehouses is two entries. Empty for the Attachment arm, which
+    /// reads no attachment.
+    pub other_tables: Vec<TableRef>,
+    /// More attachments exist than `other_tables` lists.
+    pub other_tables_truncated: bool,
+}
+
+/// How many other table-level attachments a refusal lists. The refusal names
+/// them so the steward sees every table the tag is on, not only the first.
+pub const LISTED_OTHER_TABLES: usize = 49;
+
+/// One table-level attachment in a refusal's list of other tables.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableRef {
+    pub warehouse_id: Uuid,
+    pub schema: String,
+    pub table: String,
 }
 
 impl UnreadableTableMask {
@@ -307,7 +320,17 @@ impl UnreadableTableMask {
                 MaskOrigin::Rule => "rule",
                 MaskOrigin::Policy => "policy",
             },
-            "moreTables": self.more_tables,
+            "moreTables": !self.other_tables.is_empty() || self.other_tables_truncated,
+            "otherTables": self
+                .other_tables
+                .iter()
+                .map(|t| serde_json::json!({
+                    "warehouseId": t.warehouse_id,
+                    "schema": t.schema,
+                    "table": t.table,
+                }))
+                .collect::<Vec<_>>(),
+            "otherTablesTruncated": self.other_tables_truncated,
         })
     }
 }
@@ -443,7 +466,7 @@ impl<'a> From<TagRef<'a>> for TagBy<'a> {
 async fn table_level_attachment_of(
     conn: &mut sqlx::PgConnection,
     tag: TagBy<'_>,
-) -> Result<Option<(TableLevel, bool)>, sqlx::Error> {
+) -> Result<Option<(TableLevel, Vec<TableRef>, bool)>, sqlx::Error> {
     let (key, name, id) = match tag {
         TagBy::Key(k) => (Some(k), None, None),
         TagBy::Name(n) => (None, Some(n), None),
@@ -459,16 +482,29 @@ async fn table_level_attachment_of(
             AND ($2::text IS NULL OR t.name = $2) \
             AND ($3::uuid IS NULL OR t.id = $3) \
           ORDER BY a.schema_name, a.table_name, a.warehouse_id \
-          LIMIT 2",
+          LIMIT $4",
     )
     .bind(key)
     .bind(name)
     .bind(id)
+    .bind((LISTED_OTHER_TABLES + 2) as i64)
     .fetch_all(conn)
     .await?;
-    let more = rows.len() > 1;
-    rows.truncate(1);
-    Ok(rows.pop().map(|row| (row, more)))
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let first = rows.remove(0);
+    let truncated = rows.len() > LISTED_OTHER_TABLES;
+    rows.truncate(LISTED_OTHER_TABLES);
+    let others = rows
+        .into_iter()
+        .map(|row| TableRef {
+            warehouse_id: row.warehouse_id,
+            schema: row.schema,
+            table: row.table,
+        })
+        .collect();
+    Ok(Some((first, others, truncated)))
 }
 
 /// One table-level attachment, as [`table_level_attachment_of`] reads it.
@@ -583,7 +619,7 @@ pub async fn unreadable_table_mask_for(
     match write {
         TagWrite::Mask { tag, origin, name } => Ok(table_level_attachment_of(conn, tag.into())
             .await?
-            .map(|(row, more_tables)| UnreadableTableMask {
+            .map(|(row, others, truncated)| UnreadableTableMask {
                 mask_origin: origin,
                 mask: name.to_string(),
                 tag: row.tag,
@@ -591,7 +627,8 @@ pub async fn unreadable_table_mask_for(
                 warehouse_id: Some(row.warehouse_id),
                 schema: row.schema,
                 table: row.table,
-                more_tables,
+                other_tables: others,
+                other_tables_truncated: truncated,
             })),
         TagWrite::Attachment {
             tag_id,
@@ -621,7 +658,8 @@ pub async fn unreadable_table_mask_for(
                     warehouse_id: None,
                     schema: schema.to_string(),
                     table: table.to_string(),
-                    more_tables: false,
+                    other_tables: Vec::new(),
+                    other_tables_truncated: false,
                 }))
         }
         TagWrite::Rename { tag_id, new_name } => {
@@ -629,7 +667,7 @@ pub async fn unreadable_table_mask_for(
             // SAME predicate the Mask arm asks, located by id because the name
             // is the thing in flight. A tag with no table-level attachment
             // cannot be half of this pair whatever it is called.
-            let Some((attachment, more_tables)) =
+            let Some((attachment, others, truncated)) =
                 table_level_attachment_of(&mut *conn, TagBy::Id(tag_id)).await?
             else {
                 return Ok(None);
@@ -651,7 +689,8 @@ pub async fn unreadable_table_mask_for(
                     warehouse_id: Some(attachment.warehouse_id),
                     schema: attachment.schema,
                     table: attachment.table,
-                    more_tables,
+                    other_tables: others,
+                    other_tables_truncated: truncated,
                 }))
         }
     }
@@ -673,7 +712,12 @@ mod tests {
             warehouse_id: Some(wh),
             schema: "analytics".into(),
             table: "orders".into(),
-            more_tables: true,
+            other_tables: vec![TableRef {
+                warehouse_id: wh,
+                schema: "analytics".into(),
+                table: "returns".into(),
+            }],
+            other_tables_truncated: false,
         };
         let body = pair.refusal_body();
         assert_eq!(body["error"], pair.refusal());
@@ -688,6 +732,29 @@ mod tests {
         assert_eq!(body["mask"], "hash email");
         assert_eq!(body["maskOrigin"], "rule");
         assert_eq!(body["moreTables"], true);
+        assert_eq!(
+            body["otherTables"],
+            serde_json::json!([{"warehouseId": wh, "schema": "analytics", "table": "returns"}])
+        );
+        assert_eq!(body["otherTablesTruncated"], false);
+    }
+
+    #[test]
+    fn a_refusal_with_no_other_table_says_so() {
+        let pair = UnreadableTableMask {
+            mask_origin: MaskOrigin::Rule,
+            mask: "hash email".into(),
+            tag: "PII".into(),
+            tag_id: Uuid::nil(),
+            warehouse_id: Some(Uuid::nil()),
+            schema: "analytics".into(),
+            table: "orders".into(),
+            other_tables: Vec::new(),
+            other_tables_truncated: false,
+        };
+        let body = pair.refusal_body();
+        assert_eq!(body["moreTables"], false);
+        assert_eq!(body["otherTables"], serde_json::json!([]));
     }
 
     /// The refusal must carry **all three** remedies and the table, from either
@@ -721,7 +788,8 @@ mod tests {
                 warehouse_id: None,
                 schema: "sales".into(),
                 table: "orders".into(),
-                more_tables: false,
+                other_tables: Vec::new(),
+                other_tables_truncated: false,
             }
             .refusal();
             assert!(msg.contains("sales.orders"), "names the table: {msg}");
