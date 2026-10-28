@@ -78,11 +78,25 @@ pub struct SsrfPolicy {
 }
 
 impl SsrfPolicy {
+    /// `host` is a URL's `host_str`. A name matches case-insensitively; an IP
+    /// literal matches by address, so a bare IPv6 entry (`fd00::1`) matches
+    /// the bracketed host the URL gives (`[fd00::1]`), and so does any other
+    /// spelling of the same address (final review M1).
     pub fn allows(&self, host: &str) -> bool {
+        let ip = literal_ip(host);
         self.allow_hosts
             .iter()
-            .any(|h| h.eq_ignore_ascii_case(host))
+            .any(|h| h.eq_ignore_ascii_case(host) || (ip.is_some() && literal_ip(h) == ip))
     }
+}
+
+/// `s` as an IP address, with or without IPv6 brackets.
+fn literal_ip(s: &str) -> Option<IpAddr> {
+    s.strip_prefix('[')
+        .and_then(|t| t.strip_suffix(']'))
+        .unwrap_or(s)
+        .parse()
+        .ok()
 }
 
 /// Vet `url` and return the addresses it is allowed to be sent to.
@@ -327,6 +341,27 @@ fn blocked_v6(ip: Ipv6Addr) -> Option<&'static str> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    /// Final review M1: a bare IPv6 entry matches the bracketed host a URL
+    /// gives, by address, and a different address does not.
+    #[test]
+    fn an_ipv6_allowlist_entry_matches_with_or_without_brackets() {
+        let url = Url::parse("http://[fd00::1]:8080/").unwrap();
+        let host = url.host_str().unwrap();
+        assert_eq!(host, "[fd00::1]");
+        for entry in ["fd00::1", "[fd00::1]", "FD00:0:0::1"] {
+            let p = SsrfPolicy {
+                allow_hosts: vec![entry.into()],
+            };
+            assert!(p.allows(host), "{entry}");
+        }
+        let other = SsrfPolicy {
+            allow_hosts: vec!["fd00::2".into(), "a.test".into()],
+        };
+        assert!(!other.allows(host));
+        assert!(other.allows("A.TEST"));
+        assert!(!other.allows("b.test"));
+    }
 
     /// A resolver with a fixed table, so "this public name resolves into
     /// private space" is a test rather than a hope.
