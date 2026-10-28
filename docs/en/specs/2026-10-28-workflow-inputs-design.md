@@ -1,6 +1,6 @@
 # Workflow package #3 "Inputs checked at start"
 
-**Status:** designed 2026-10-28; #3a built (Tasks A1-A7, PR #3a in review); #3b not built. Roadmap row #3 of `docs/en/plans/2026-10-18-workflow-kestra-parity-roadmap.md`. Plan: `docs/en/plans/2026-10-28-workflow-inputs.md`. Branch `feat/workflow-inputs`. Two PRs: **#3a** (the start check, the save-time gaps, the harness seam) and **#3b** (the validate endpoint and the run form).
+**Status:** designed 2026-10-28; #3a built and merged (#762); #3b built (Tasks B1-B3, PR in review). Roadmap row #3 of `docs/en/plans/2026-10-18-workflow-kestra-parity-roadmap.md`. Plan: `docs/en/plans/2026-10-28-workflow-inputs.md`. Branch `feat/workflow-inputs`. Two PRs: **#3a** (the start check, the save-time gaps, the harness seam) and **#3b** (the validate endpoint and the run form).
 
 **Where the claims come from.** The survey is `docs/en/specs/2026-10-28-workflow-inputs-survey.md` (a copy of the read-only survey made 2026-10-28; every Kestra claim has file:line there). Kestra is the checkout at `data-portal/kestra`, `96893b58`, which is **newer than the pinned golden image**. FORM, `prefill`, `renderError` and the "a default must be required" rule may not exist in the image. Anything that depends on one of them says so.
 
@@ -82,3 +82,39 @@ What Tasks A1-A6 found differs from, or adds to, the decisions above. The decisi
 - **Oracle seam (D8).** `Seam::Start` was added to the oracle: a start refused with `InvalidInput` is `Ran::StartRefused`, and the golden 422 is compared as a multiset of lines. It banks `invalids/inputs-with-multiple-constraint-violations`.
 - **Ratchet.** Measured **301 / 50 / 50 / 0**, `(301, 251, 50)` (§4).
 - **Other.** A literal default is validated at start but not stored. A SELECT `values` check is skipped when there are no `values` and no `expression`. Undeclared keys are dropped on every checked path, so six existing tests that relied on them were changed. The client was regenerated with a borrowed `node_modules`; only the `spec` hash changed.
+
+## 8. As built (#3b)
+
+What Tasks B1 and B2 built, and what they left open. Where this differs from D14 and D15, this section governs.
+
+### The validate endpoint (B1, D14)
+
+- **Route.** `POST /api/ws/{ws}/workflows/flows/{id}/executions/validate`, body the same `StartExecutionRequest` as the start (JSON; an empty body is `{}`). Gate `WF_MANAGE`, then the start's flow lookup in the same order: 404 for a missing, trashed or foreign flow, 409 for a flow disabled by its column or by its YAML, 400 for a flow whose YAML does not parse. 400 also for a body that is not JSON or not an object, and for `inputs` that is not an object.
+- **Always 200 for a checkable flow.** Shape: `{ id, namespace, inputs: [{ input, value, enabled, isDefault, errors: [{ message, renderError }] }], checks: [] }`. Every declared input is listed, with all of its errors (the start stops at the first bad input; this lists them all). `checks` is always empty. DTOs `ValidateInputsDto`, `InputValidationDto` and `InputErrorDto` are in the OpenAPI components, with an example.
+- **`input`** is the input's entry from the draft's YAML **as written** (the first declaration of a repeated id). It is not egret's model and not Kestra's rendered `Input`: a SELECT `expression`'s rendered options are not echoed. The raw YAML carries a SECRET's literal `defaults`, which `GET flow` shows anyway.
+- **`value`** is the parsed value, the literal default, or the raw posted value when it failed to parse; it falls back to the stored value. A JSON input whose value is a string shows the string, not the stored JSON text.
+- **`enabled`** is `false` when `dependsOn` turns the input off for the posted values. **`isDefault`** is true when the value came from the default.
+- **Masking.** A SECRET `value` is `******` whenever it is non-null, errors included. The SECRET `validator` cause is `<id>: it must match the pattern ...` and does not carry the value.
+- **`errors`.** The errors of one input are merged into one entry joined with `\n` (Kestra's merged exception; the same text as the start's 400). `renderError` is `true` for a failing `dependsOn.condition` or a failing SELECT/MULTISELECT `expression`. A templated default that fails to render is not an error at start, so it never yields `renderError: true` here (consistent with the start, not with Kestra).
+- **No side effects.** No execution row, no upload, no audit record (all asserted by tests). The renderer of the start check moved into `start_renderer(flow)` and `worker::input_outcomes` is `resolve_all` with it, so the two paths share one checker.
+- **Checks that are skipped.** FILE readability (`check_file_inputs`) needs a row, and the start's plan and served-task refusals are not input checks; neither runs here. A valid answer therefore does not promise that the start will succeed.
+- **Content-Type.** The body is read as bytes and parsed as JSON whatever the `Content-Type`; the start answers 415 for a type that is neither JSON nor multipart.
+
+### The run form (B2, D15)
+
+- **Run asks validate first.** On submit the form runs its own checks, then calls the validate endpoint with the start's JSON body (a chosen FILE goes as its file name; nothing is uploaded). Errors of **enabled** inputs that the form shows are placed beside their field, in the server's words, multi-line text kept. Errors of inputs the form has no control for (unsupported or undeclared) and of `enabled: false` inputs are ignored. If no showable error remains, the start is sent.
+- **Validate never blocks.** Any validate failure (network, 4xx, 5xx, an odd body) falls back to the start, whose error is shown as before. The start is the final word.
+- **`enabled: false` is noted, not hidden.** Validate runs only on submit, and whether `dependsOn` turns an input off depends on the other values, so hiding the field would need validate on change. The field gets a note in its help text ("With the values entered, the inputs it depends on turn this input off, so the run ignores it."), cleared on any edit.
+- **Per-line attribution of the start's 400.** A refusal is split by line; a line goes to the declared input it names (``input `x` `` or `Missing required input:x`), a line naming none continues the previous one, and lines before any named one are form-level. `backfillForm.placeError` understands `Missing required input:x` too.
+- **Client checks** (`inputModel.ts`, a first pass; the server decides). INT/FLOAT `min`/`max`; DURATION `min`/`max` compared as lengths; DATETIME, DATE and TIME `after`/`before` (TIME in seconds since midnight, so `17:30` equals `17:30:00`); all inclusive like `inputs_check`. SELECT membership only when `required` (the Kestra quirk of D4) and not `allowCustomValue`; MULTISELECT always unless `allowCustomValue`. A bound the form cannot parse is left to the server.
+- **`validator` is server-only.** The form never evaluates it (the regex dialect differs); it shows "It must match the pattern ..." in the help text, as it shows the bounds ("From 10 to 20.", "At least ...", "On or after ...").
+- **BackfillDialog.** `"BOOLEAN"` became `"BOOL"`. A schedule's `"true"`/`"false"` text (any case) now prefills the switch as a boolean; before, `"true"` showed off and was sent as `false`.
+
+### Open follow-ups
+
+- **Validate on change.** Each Run makes two requests (validate, then start). Validating while the user types would also let `dependsOn` hide or disable fields live.
+- **Required check against `dependsOn`.** The client's `required` check runs before validate, so a required input that `dependsOn` turns off still blocks Run with "Enter a value". Fixing it needs validate before the client checks, or validate on change.
+- **SELECT custom value.** The check honours `allowCustomValue`, but a SELECT is still a picker of `values`, so a custom value cannot be typed. The control was not redesigned.
+- **`renderError` display.** An error with `renderError: true` (a broken `dependsOn.condition` or `expression`) is shown on the field like any other error, not as a problem in the flow definition.
+- **Screenshots owed** for the user docs: the help lines with bounds and pattern, the inactive-input note, and validate errors under fields.
+- **Still outside #3** (unchanged from §3 and §6): `jsonSchema`, FORM and REUSABLE_INPUTS, templated (`{{ }}`) defaults.
