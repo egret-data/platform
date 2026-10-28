@@ -315,8 +315,20 @@ function ConflictButtons({ conflict, actions }: { conflict: TableTagMaskConflict
  * (spec C5) and an overlap of two masks (spec C6.3), each with the server's
  * sentence under Details. Without `actions` (the refusal of an earlier
  * version of the form) the conflict is explained but offers nothing to do.
+ * `unsavedName` is the name of the rule being created: a refused preview of a
+ * new rule names it with an id that was rolled back, so it is not linked (KI-289).
  */
-export function RefusalBody({ error, message, actions }: { error: unknown; message: string; actions?: ConflictActions }) {
+export function RefusalBody({
+  error,
+  message,
+  actions,
+  unsavedName,
+}: {
+  error: unknown;
+  message: string;
+  actions?: ConflictActions;
+  unsavedName?: string;
+}) {
   const conflict = tableTagMaskConflict(error);
   if (conflict) {
     return (
@@ -338,7 +350,7 @@ export function RefusalBody({ error, message, actions }: { error: unknown; messa
           {overlap.rules.map((r, i) => (
             <Fragment key={`${r.id ?? ""}-${r.name}`}>
               {i > 0 && (i === overlap.rules.length - 1 ? " and " : ", ")}
-              {r.id ? (
+              {r.id && r.name !== unsavedName ? (
                 <Link to={ruleHref(r.id)} className="font-medium underline">
                   {r.name}
                 </Link>

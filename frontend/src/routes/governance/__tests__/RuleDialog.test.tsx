@@ -1108,6 +1108,21 @@ describe("RuleDialog — a second mask on a column is never silent (C6)", () => 
     expect(screen.getByText("Details").closest("details")).toHaveTextContent("recompiling profile …");
     expect(screen.queryByRole("checkbox", { name: /Create anyway/ })).not.toBeInTheDocument();
   });
+
+  test("a refused preview of a new rule does not link the rolled-back rule to its own id (KI-289)", async () => {
+    const user = userEvent.setup();
+    previewMutateAsync.mockRejectedValueOnce(new ApiError(409, "recompiling profile …", "rule_overlap", {
+      error: "recompiling profile …", code: "rule_overlap", rules: [{ id: "a", name: "Hash A" }, { id: "draft", name: "Null B" }], coordinate: "wh.s.t.email", kind: "mask",
+    }));
+    renderDialog({ entry: { kind: "classification", tagKey: "pii_v2", tagName: "PII Data" } });
+    await user.clear(screen.getByLabelText(/^Name/));
+    await user.type(screen.getByLabelText(/^Name/), "Null B");
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    expect(await screen.findByText(/would make two masks decide wh\.s\.t\.email differently/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Hash A" })).toHaveAttribute("href", "/governance/rules/a");
+    expect(screen.queryByRole("link", { name: "Null B" })).not.toBeInTheDocument();
+    expect(screen.getByText(/would make two masks decide wh\.s\.t\.email differently/)).toHaveTextContent("Null B");
+  });
 });
 
 describe("RuleDialog — the table-level classification conflict, said short (C5)", () => {
