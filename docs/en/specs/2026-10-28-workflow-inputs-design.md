@@ -1,6 +1,6 @@
 # Workflow package #3 "Inputs checked at start"
 
-**Status:** designed 2026-10-28. Not built. Roadmap row #3 of `docs/en/plans/2026-10-18-workflow-kestra-parity-roadmap.md`. Plan: `docs/en/plans/2026-10-28-workflow-inputs.md`. Branch `feat/workflow-inputs`. Two PRs: **#3a** (the start check, the save-time gaps, the harness seam) and **#3b** (the validate endpoint and the run form).
+**Status:** designed 2026-10-28; #3a built (Tasks A1-A7, PR #3a in review); #3b not built. Roadmap row #3 of `docs/en/plans/2026-10-18-workflow-kestra-parity-roadmap.md`. Plan: `docs/en/plans/2026-10-28-workflow-inputs.md`. Branch `feat/workflow-inputs`. Two PRs: **#3a** (the start check, the save-time gaps, the harness seam) and **#3b** (the validate endpoint and the run form).
 
 **Where the claims come from.** The survey is `docs/en/specs/2026-10-28-workflow-inputs-survey.md` (a copy of the read-only survey made 2026-10-28; every Kestra claim has file:line there). Kestra is the checkout at `data-portal/kestra`, `96893b58`, which is **newer than the pinned golden image**. FORM, `prefill`, `renderError` and the "a default must be required" rule may not exist in the image. Anything that depends on one of them says so.
 
@@ -55,3 +55,18 @@ A table test per type in `inputs_check` (valid, each error text, empty string, n
 ## 6. Follow-ups recorded
 
 Check FORM against the pinned image. Templated-default validation at start. A save-time check of a schedule's literal inputs. `jsonSchema` if D12 defers it. `defaults ⇒ required` if the pinned image has it. Webhook/API status 422 if a client ever needs Kestra's exact status.
+
+## 7. As built (2026-10-28, #3a)
+
+What Tasks A1-A6 found differs from, or adds to, the decisions above. The decisions stay as the record; where they differ, this section governs.
+
+- **`jsonSchema` (D12, D16).** Stays unchecked. `Cargo.lock` has no JSON Schema validator (`jsonschema`, `boon` and `valico` are absent), so nothing was added. It keeps its `not_honoured` warning, and `json_schema` was taken out of `models::Input` (D16 listed it): a modelled key that the flow schema does not serve broke `flow_schema`. A follow-up must re-add the field, the `input_keys` entry and the treatment entry together.
+- **Absent optional input (D2).** `null` is stored for an optional input nobody posted (no `required`, no `defaults`, no `autoSelectFirst`), as Kestra does. Without it a Subflow reading `{{ inputs.x }}` failed under the strict renderer (`valids/subflow-nullable-input-parent`). Inputs with a default and disabled inputs are still left out.
+- **`dependsOn` and defaults (D6).** An input disabled by `dependsOn` is dropped from the stored object, but the render still fills its declared default (Kestra drops it). Recorded divergence; fixing it needs a marker in the stored object or the render re-running `dependsOn`.
+- **`autoSelectFirst` (D13).** The first option is stored as the value, an exception to D2 (a declared default stays unstored), because `render.rs` knows nothing of `autoSelectFirst`.
+- **Flow-trigger starts (D7).** Identified by `flow_trigger_event_id` (migration 0157 sets it iff the trigger is a Flow record); no new field was added. `born_failed` is skipped as well, belt and braces.
+- **Dates, times and durations (D4).** DATETIME, DATE, TIME and DURATION are parsed and bound-checked, and the **posted string** is stored (`P1D`, `10:00:00`, offsets kept). INT, FLOAT and BOOL are stored typed.
+- **Save-time findings (D11).** Five codes, in `save_only_findings`, so they reach save and publish but **not** the run gate (a published version keeps running): `input_depends_on_unknown`, `input_depends_on_cycle`, `input_defaults_with_prefill`, `input_file_defaults_invalid`, `input_validator_invalid`. `fancy-regex` rejects `\` as Java does, so `invalids/inputs-bad-validator-syntax` is banked at `Seam::Save`.
+- **Oracle seam (D8).** `Seam::Start` was added to the oracle: a start refused with `InvalidInput` is `Ran::StartRefused`, and the golden 422 is compared as a multiset of lines. It banks `invalids/inputs-with-multiple-constraint-violations`.
+- **Ratchet.** Measured **301 / 50 / 50 / 0**, `(301, 251, 50)` (§4).
+- **Other.** A literal default is validated at start but not stored. A SELECT `values` check is skipped when there are no `values` and no `expression`. Undeclared keys are dropped on every checked path, so six existing tests that relied on them were changed. The client was regenerated with a borrowed `node_modules`; only the `spec` hash changed.
