@@ -14,6 +14,7 @@
 //! - [`response`]: the status rule (`HttpClient.isAllowedStatusCode`), the
 //!   capped body read, the failure message (at most 4 KiB of body, masked),
 //!   and the `headers` output.
+//! - [`sse`]: the Server-Sent Events parser of `SseRequest`.
 //! - [`mask`]: masking of resolved secrets and credentials, and the
 //!   `options.logs` lines with credential headers never printed.
 //!
@@ -25,6 +26,7 @@ pub mod mask;
 pub mod request;
 pub mod response;
 pub mod spec;
+pub mod sse;
 
 #[cfg(test)]
 mod tests;

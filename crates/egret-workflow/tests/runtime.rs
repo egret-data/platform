@@ -2716,6 +2716,10 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
     want.extend([
         egret_workflow::worker::handlers::http::REQUEST.to_string(),
         egret_workflow::worker::handlers::http::REQUEST_ALIAS.to_string(),
+        // Package #4 Task C4: Download, its alias, and SseRequest.
+        egret_workflow::worker::handlers::http::DOWNLOAD.to_string(),
+        egret_workflow::worker::handlers::http::DOWNLOAD_ALIAS.to_string(),
+        egret_workflow::worker::handlers::http::SSE_REQUEST.to_string(),
     ]);
     want.sort_unstable();
     assert_eq!(reg.type_ids(), want);
@@ -2768,8 +2772,10 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
         vec![
             "egret.container",
             "egret.script.python",
-            // Package #4 Task C3, and its alias below.
+            // Package #4 Tasks C3 and C4, and the two aliases below.
+            "io.kestra.plugin.core.http.Download",
             "io.kestra.plugin.core.http.Request",
+            "io.kestra.plugin.core.http.SseRequest",
             // W9c Task 5.
             "io.kestra.plugin.core.kv.Delete",
             "io.kestra.plugin.core.kv.Get",
@@ -2785,6 +2791,7 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
             "io.kestra.plugin.core.namespace.UploadFiles",
             "io.kestra.plugin.core.storage.Delete",
             "io.kestra.plugin.core.storage.PurgeCurrentExecutionFiles",
+            "io.kestra.plugin.fs.http.Download",
             "io.kestra.plugin.fs.http.Request",
             "io.kestra.plugin.scripts.python.Commands",
             "io.kestra.plugin.scripts.python.Script",
@@ -2792,7 +2799,7 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
             "io.kestra.plugin.scripts.shell.Script",
         ]
     );
-    assert_eq!(reg.type_ids().len(), core + 2 + 4 + 6 + 6 + 1 + 2 + 9);
+    assert_eq!(reg.type_ids().len(), core + 2 + 4 + 6 + 6 + 1 + 5 + 9);
     assert_eq!(default_runner, Some(RunnerKind::Docker));
     assert!(
         reg.orphan_sweep().is_some(),

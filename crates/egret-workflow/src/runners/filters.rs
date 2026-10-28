@@ -4204,6 +4204,142 @@ fn read_tree(text: &str) -> Option<jaq_json::Val> {
     jaq_json::read::parse_single(first.to_string().as_bytes()).ok()
 }
 
+/// One output of a `concatJqExpression` (`http.SseRequest`), as
+/// `SseRequest.java:168-179` reads it: a text, number or boolean node becomes
+/// its text (a number as `numberValue().toString()`, so a double is
+/// `Double.toString`), and anything else -- null, an array, an object -- is
+/// the "Expected text value" failure, named by Jackson's node type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum JqScalar {
+    Text(String),
+    NotText(&'static str),
+}
+
+/// What one input gave a [`jq_each`] program.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct JqEach {
+    /// The outputs, in order, up to and including the first
+    /// [`JqScalar::NotText`] (Kestra's lambda throws there, so nothing after
+    /// it is seen).
+    pub outputs: Vec<JqScalar>,
+    /// jq raised an error on this input (Kestra: the catch around `apply`).
+    pub failed: bool,
+    /// egret's own bound stopped the program (a `jq: ` refusal): not the
+    /// author's data, so the task fails whatever `failedOnMissingJq` says.
+    pub refused: Option<String>,
+}
+
+/// `http.SseRequest`'s `concatJqExpression`: one program, compiled ONCE and
+/// run over every input (each a JSON text), on one thread with the jq stack
+/// and every [`jqsandbox`] bound `run_jq` applies, the deadline restarted per
+/// input. `Err` when the program does not compile or is refused, with the
+/// reason (Kestra fails the task at `JsonQuery.compile`).
+pub(crate) fn jq_each(expression: &str, inputs: Vec<String>) -> Result<Vec<JqEach>, String> {
+    jqsandbox::check_source(expression).map_err(|e| e.0)?;
+    let expression = expression.to_string();
+    let worker = std::thread::Builder::new()
+        .name("egret-jq".to_string())
+        .stack_size(jqsandbox::JQ_STACK_BYTES)
+        .spawn(move || jq_each_on_this_thread(&expression, inputs))
+        .map_err(|e| format!("jq: could not start the jq thread: {e}"))?;
+    worker
+        .join()
+        .map_err(|_| "jq: the jq program panicked".to_string())?
+}
+
+fn jq_each_on_this_thread(expression: &str, inputs: Vec<String>) -> Result<Vec<JqEach>, String> {
+    let program = jaq_core::load::File {
+        code: expression,
+        path: (),
+    };
+    let loader = jaq_core::load::Loader::new(jqsandbox::definitions());
+    let arena = jaq_core::load::Arena::default();
+    let not_compiled = || format!("{expression:?} is not a valid jq expression");
+    let modules = loader.load(&arena, program).map_err(|_| not_compiled())?;
+    let filter = jaq_core::Compiler::default()
+        .with_funs(jqsandbox::natives())
+        .compile(modules)
+        .map_err(|_| not_compiled())?;
+
+    let mut out = Vec::with_capacity(inputs.len());
+    for json in inputs {
+        jqsandbox::start_run();
+        let mut each = JqEach::default();
+        let Ok(input) = jaq_json::read::parse_single(json.as_bytes()) else {
+            each.failed = true;
+            out.push(each);
+            continue;
+        };
+        let ctx = jaq_core::Ctx::<jqsandbox::Data>::new(&filter.lut, jaq_core::Vars::new([]));
+        let mut bytes = 0usize;
+        for result in filter.id.run((ctx, input)) {
+            let value = match result {
+                Ok(v) => v,
+                Err(exn) => {
+                    if let Ok(error) = exn.get_err() {
+                        let message = error.to_string();
+                        let unquoted = message.trim_matches('"');
+                        if unquoted.starts_with(EGRET_JQ_PREFIX) {
+                            each.refused = Some(unquoted.to_string());
+                        }
+                    }
+                    each.failed = true;
+                    break;
+                }
+            };
+            let scalar = match value {
+                jaq_json::Val::BStr(s) | jaq_json::Val::TStr(s) => {
+                    JqScalar::Text(String::from_utf8_lossy(&s).into_owned())
+                }
+                jaq_json::Val::Bool(b) => JqScalar::Text(b.to_string()),
+                jaq_json::Val::Num(n) => JqScalar::Text(java_number_text(&n)),
+                jaq_json::Val::Null => JqScalar::NotText("NULL"),
+                jaq_json::Val::Arr(_) => JqScalar::NotText("ARRAY"),
+                jaq_json::Val::Obj(_) => JqScalar::NotText("OBJECT"),
+            };
+            if let JqScalar::Text(t) = &scalar {
+                bytes = bytes.saturating_add(t.len());
+                if bytes > MAX_OUTPUT_BYTES {
+                    each.refused = Some(format!(
+                        "{EGRET_JQ_PREFIX}one event's results are over {MAX_OUTPUT_BYTES} bytes"
+                    ));
+                    each.failed = true;
+                    break;
+                }
+            }
+            let stop = matches!(scalar, JqScalar::NotText(_));
+            each.outputs.push(scalar);
+            if stop {
+                break;
+            }
+        }
+        out.push(each);
+    }
+    Ok(out)
+}
+
+/// `NumericNode.numberValue().toString()`: an integer as written, a double
+/// as `Double.toString` (a decimal literal is a `DoubleNode` in Jackson).
+fn java_number_text(n: &jaq_json::Num) -> String {
+    match n {
+        jaq_json::Num::Int(i) => i.to_string(),
+        jaq_json::Num::BigInt(i) => i.to_string(),
+        jaq_json::Num::Float(f) => {
+            let mut s = String::new();
+            write_java_double(&mut s, *f);
+            s
+        }
+        jaq_json::Num::Dec(d) => match d.parse::<f64>() {
+            Ok(f) => {
+                let mut s = String::new();
+                write_java_double(&mut s, f);
+                s
+            }
+            Err(_) => d.to_string(),
+        },
+    }
+}
+
 /// The `regex` argument, which all three regex filters read the same way.
 ///
 /// Kestra's guard is `args.get("regex") == null`, so an *explicitly null*

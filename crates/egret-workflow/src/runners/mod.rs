@@ -73,6 +73,9 @@ pub(crate) use filters::big_decimal_to_string;
 /// W9a: `storage::uri` builds Kestra's URIs from these two (`Slugify.of`, and
 /// the base62 of `IdUtils.from`).
 pub(crate) use filters::slugify_str;
+/// Package #4 Task C4: `http.SseRequest`'s `concatJqExpression`, run with the
+/// `jq` filter's sandbox.
+pub(crate) use filters::{jq_each, JqScalar};
 pub(crate) use functions::base62;
 /// The refusal every render but a `kestra.*` task's gives `secret()`, also
 /// the message of `spec::validate`'s publish-time refusal (W5b fix round 1).

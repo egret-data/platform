@@ -531,3 +531,28 @@ async fn each_refused_property_is_a_publish_error_and_a_run_failure() {
     }
     assert_eq!(s.hits.count(), 0, "no refused request was sent");
 }
+
+// ---- Download without [storage] (package #4 Task C4) ---------------------------
+
+/// This binary installs no store: `http.Download` fails naming the missing
+/// configuration, before anything is sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_download_without_storage_fails_naming_it_and_sends_nothing() {
+    let Some(db) = common::db().await else { return };
+    let s = serve().await;
+    let r = run(
+        &db,
+        LOCAL,
+        &one(
+            "io.kestra.plugin.core.http.Download",
+            &format!("    uri: {}\n", s.url("/json")),
+        ),
+    )
+    .await;
+    let (state, outputs, message) = r.task("req").await;
+    assert_eq!(state, "FAILED");
+    assert!(outputs.is_none());
+    let message = message.unwrap();
+    assert!(message.contains("`[storage]`"), "{message}");
+    assert_eq!(s.hits.count(), 0);
+}

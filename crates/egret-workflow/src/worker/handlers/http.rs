@@ -37,6 +37,9 @@
 //!   C3).
 //! - A failure message quotes at most 4 KiB of the body, masked.
 
+pub mod download;
+pub mod sse;
+
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -48,8 +51,10 @@ use unicode_general_category::{get_general_category, GeneralCategory};
 use super::super::{Handlers, Outcome, TaskHandler, TaskInput};
 use crate::http::{
     build_request, ensure_allowed, headers_output, log_request_lines, log_response_lines,
-    read_capped, transport_message, FormFiles, HttpEgress, HttpSpec, MaskSet,
+    read_capped, transport_message, BuiltRequest, FormFiles, HttpEgress, HttpSpec, MaskSet,
+    ResolvedOptions,
 };
+use crate::logs::RunLog;
 use crate::runners::secrets::{render_with_secrets, SecretSource};
 use crate::runners::FileScope;
 use crate::storage::FileStore;
@@ -107,15 +112,34 @@ pub(crate) struct Spec {
     options: Option<Value>,
 }
 
-/// Register [`Request`]: `runtime::handlers_for` calls this for every
-/// deployment, with or without a container runner.
+/// Register the three http tasks ([`Request`], [`download::Download`],
+/// [`sse::SseRequest`]): `runtime::handlers_for` calls this for every
+/// deployment, with or without a container runner. `cfg` gives the caps
+/// (`workflow.http.max_download_bytes`, `max_sse_events`).
 pub fn register(
     handlers: &mut Handlers,
+    cfg: &egret_config::WorkflowHttpConfig,
     egress: HttpEgress,
     secrets: Arc<dyn SecretSource>,
     files: Option<Arc<FileStore>>,
 ) {
-    handlers.add_publishable(Arc::new(Request::new(egress, secrets, files)));
+    handlers.add_publishable(Arc::new(Request::new(
+        egress.clone(),
+        secrets.clone(),
+        files.clone(),
+    )));
+    handlers.add_publishable(Arc::new(download::Download::new(
+        egress.clone(),
+        secrets.clone(),
+        files.clone(),
+        cfg.max_download_bytes,
+    )));
+    handlers.add_publishable(Arc::new(sse::SseRequest::new(
+        egress,
+        secrets,
+        files,
+        cfg.max_sse_events,
+    )));
 }
 
 /// `io.kestra.plugin.core.http.Request`.
@@ -154,76 +178,27 @@ impl TaskHandler for Request {
     }
 
     async fn run(&self, task: &TaskInput) -> Result<Outcome> {
-        let serde_json::Value::Object(props) = &task.spec else {
-            return Ok(Outcome::failed_with(format!(
-                "{REQUEST}: the task's properties are not a map"
-            )));
-        };
-
-        // 1. Render once, resolving secret() (D5). The error is masked already.
-        let (rendered, resolved) = match render_with_secrets(
-            props,
-            &task.render,
-            task.workspace_id,
+        // 1-2. Render (secret() resolving, D5) and build (D4 refusals first).
+        let p = match prepare(
+            REQUEST,
+            task,
             self.secrets.as_ref(),
+            self.files.as_ref(),
+            Some(self.multipart_cap()),
         )
-        .await
+        .await?
         {
-            Ok(r) => r,
-            Err(message) => {
-                super::storage::outage(REQUEST, task)?;
-                return Ok(Outcome::failed_with(message));
-            }
+            Ok(p) => p,
+            Err(failed) => return Ok(failed),
         };
-        super::storage::outage(REQUEST, task)?;
-        let mut masks = MaskSet::new(resolved.values.iter());
+        let Prepared {
+            opts,
+            built,
+            masks,
+            log,
+            ..
+        } = p;
         let failed = |masks: &MaskSet, m: &str| Ok(Outcome::failed_with(masks.mask(m)));
-
-        let spec = match HttpSpec::from_value(&Value::Object(rendered)) {
-            Ok(s) => s,
-            Err(m) => return failed(&masks, &m),
-        };
-        let opts = match spec.options() {
-            Ok(o) => o,
-            Err(m) => return failed(&masks, &m),
-        };
-
-        // 2. Build (the D4 refusals run first).
-        let form_files = match (&self.files, task.render.files()) {
-            (Some(fs), Some(scope)) => Some(StoreFiles {
-                fs: fs.clone(),
-                scope: scope.clone(),
-                workspace: task.workspace_id,
-                cap: fs.caps.max_file_bytes,
-                read: Mutex::new(0),
-                outage: Mutex::new(None),
-            }),
-            _ => None,
-        };
-        let built = build_request(&spec, form_files.as_ref().map(|f| f as &dyn FormFiles)).await;
-        if let Some(why) = form_files.as_ref().and_then(StoreFiles::outage) {
-            // A store outage is egret's, not the author's (W9b spec §11).
-            return Err(Error::Internal(anyhow::anyhow!("{REQUEST}: {why}")));
-        }
-        let built = match built {
-            Ok(b) => b,
-            Err(m) => return failed(&masks, &m),
-        };
-        masks.extend(built.credentials.iter());
-        if let Some(message) = multipart_over_cap(&built.request, self.multipart_cap()) {
-            return failed(&masks, &message);
-        }
-        let log = task.log.masked(masks.values());
-        for (level, line) in log_request_lines(
-            &built.request.method,
-            &built.uri,
-            &built.request.headers,
-            built.request.body.as_deref(),
-            &opts.logs,
-            &masks,
-        ) {
-            log.line(level, &line).await;
-        }
 
         // 3. Send.
         let head = built.request.method == reqwest::Method::HEAD;
@@ -269,6 +244,107 @@ impl TaskHandler for Request {
     async fn cancel(&self, _task: &TaskInput) -> Result<()> {
         Ok(())
     }
+}
+
+/// What the three http tasks share before sending: the rendered
+/// properties, the converted options, the built request, the values to mask
+/// and the masked log.
+pub(super) struct Prepared {
+    /// The rendered properties, for a task's own keys (`saveAs`, ...).
+    pub rendered: serde_json::Map<String, Value>,
+    pub opts: ResolvedOptions,
+    pub built: BuiltRequest,
+    pub masks: MaskSet,
+    pub log: RunLog,
+}
+
+/// Steps 1 and 2 of every http task: render once with `secret()` resolving
+/// (D5), read the shared model, build the request (the D4 refusals first),
+/// cap a multipart body at `multipart_cap` (when `Some`), and log the
+/// `options.logs` request lines.
+///
+/// `Ok(Err(outcome))` is the task's failure, masked; `Err` a worker failure
+/// (a store outage met while rendering or reading a file part).
+pub(super) async fn prepare(
+    type_id: &str,
+    task: &TaskInput,
+    secrets: &dyn SecretSource,
+    files: Option<&Arc<FileStore>>,
+    multipart_cap: Option<u64>,
+) -> Result<std::result::Result<Prepared, Outcome>> {
+    let serde_json::Value::Object(props) = &task.spec else {
+        return Ok(Err(Outcome::failed_with(format!(
+            "{type_id}: the task's properties are not a map"
+        ))));
+    };
+
+    // 1. Render once, resolving secret() (D5). The error is masked already.
+    let (rendered, resolved) =
+        match render_with_secrets(props, &task.render, task.workspace_id, secrets).await {
+            Ok(r) => r,
+            Err(message) => {
+                super::storage::outage(type_id, task)?;
+                return Ok(Err(Outcome::failed_with(message)));
+            }
+        };
+    super::storage::outage(type_id, task)?;
+    let mut masks = MaskSet::new(resolved.values.iter());
+    let failed = |masks: &MaskSet, m: &str| Ok(Err(Outcome::failed_with(masks.mask(m))));
+
+    let spec = match HttpSpec::from_value(&Value::Object(rendered.clone())) {
+        Ok(s) => s,
+        Err(m) => return failed(&masks, &m),
+    };
+    let opts = match spec.options() {
+        Ok(o) => o,
+        Err(m) => return failed(&masks, &m),
+    };
+
+    // 2. Build (the D4 refusals run first).
+    let form_files = match (files, task.render.files()) {
+        (Some(fs), Some(scope)) => Some(StoreFiles {
+            fs: fs.clone(),
+            scope: scope.clone(),
+            workspace: task.workspace_id,
+            cap: fs.caps.max_file_bytes,
+            read: Mutex::new(0),
+            outage: Mutex::new(None),
+        }),
+        _ => None,
+    };
+    let built = build_request(&spec, form_files.as_ref().map(|f| f as &dyn FormFiles)).await;
+    if let Some(why) = form_files.as_ref().and_then(StoreFiles::outage) {
+        // A store outage is egret's, not the author's (W9b spec §11).
+        return Err(Error::Internal(anyhow::anyhow!("{type_id}: {why}")));
+    }
+    let built = match built {
+        Ok(b) => b,
+        Err(m) => return failed(&masks, &m),
+    };
+    masks.extend(built.credentials.iter());
+    if let Some(cap) = multipart_cap {
+        if let Some(message) = multipart_over_cap(&built.request, cap) {
+            return failed(&masks, &message);
+        }
+    }
+    let log = task.log.masked(masks.values());
+    for (level, line) in log_request_lines(
+        &built.request.method,
+        &built.uri,
+        &built.request.headers,
+        built.request.body.as_deref(),
+        &opts.logs,
+        &masks,
+    ) {
+        log.line(level, &line).await;
+    }
+    Ok(Ok(Prepared {
+        rendered,
+        opts,
+        built,
+        masks,
+        log,
+    }))
 }
 
 /// A response Apache's client gives no entity, so Kestra's `body` is `null`:

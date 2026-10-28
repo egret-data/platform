@@ -381,6 +381,21 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
         aliases: &[crate::worker::handlers::http::REQUEST_ALIAS],
         references: &[],
     },
+    // ── Package #4 Task C4: `http.Download` (`handlers::http::download`) and
+    // `http.SseRequest` (`handlers::http::sse`), registered by the same
+    // `handlers::http::register`. Download's one alias is Kestra's own
+    // (`@Plugin(aliases = "io.kestra.plugin.fs.http.Download")`,
+    // `Download.java:60`); SseRequest declares none. ──
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::http::DOWNLOAD,
+        aliases: &[crate::worker::handlers::http::DOWNLOAD_ALIAS],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::http::SSE_REQUEST,
+        aliases: &[],
+        references: &[],
+    },
 ];
 
 /// The registered types `advance()` runs itself, with no worker handler:

@@ -359,6 +359,9 @@ pub(crate) fn leaf_keys(t: &str) -> Option<Vec<&'static str>> {
         h::kv::PURGE_KV => wire_fields_of::<h::kv::PurgeSpec>(),
         // Package #4 Task C3: both spellings Kestra declares.
         h::http::REQUEST | h::http::REQUEST_ALIAS => wire_fields_of::<h::http::Spec>(),
+        // Package #4 Task C4.
+        h::http::DOWNLOAD | h::http::DOWNLOAD_ALIAS => wire_fields_of::<h::http::download::Spec>(),
+        h::http::SSE_REQUEST => wire_fields_of::<h::http::sse::Spec>(),
         // Kill-and-exit Task 3: no handler -- the executor runs it -- and
         // `build_plan` reads its leaf spec through this struct.
         crate::executor::exit::TYPE_ID => wire_fields_of::<crate::executor::exit::Spec>(),

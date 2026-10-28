@@ -314,7 +314,7 @@ pub(crate) fn kind(v: &Value) -> &'static str {
     }
 }
 
-fn flag(v: Option<&Value>, name: &str) -> Result<Option<bool>, String> {
+pub(crate) fn flag(v: Option<&Value>, name: &str) -> Result<Option<bool>, String> {
     match v {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Bool(b)) => Ok(Some(*b)),

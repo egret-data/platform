@@ -784,11 +784,13 @@ pub async fn handlers_for(
     // Group C1 Task 4: `PurgeLogs`, which needs the pool too (it deletes
     // `workflow.task_logs` rows, scoped to the flow's namespace).
     crate::worker::handlers::purge_logs::register(&mut handlers, pool.clone());
-    // Package #4 Task C3: `http.Request`, which needs no pool: the egress
-    // policy (`workflow.http`), the secret source (`secret()` resolves on the
-    // http tasks, spec D5) and the store (multipart file parts).
+    // Package #4 Tasks C3 and C4: `http.Request`, `http.Download` and
+    // `http.SseRequest`, which need no pool: the egress policy and caps
+    // (`workflow.http`), the secret source (`secret()` resolves on the http
+    // tasks, spec D5) and the store (multipart file parts; Download's file).
     crate::worker::handlers::http::register(
         &mut handlers,
+        &cfg.http,
         crate::http::HttpEgress::from_config(&cfg.http, Arc::new(egret_egress::SystemResolver)),
         secrets.clone(),
         crate::storage::current(),
@@ -1024,8 +1026,10 @@ pub fn served_for(cfg: &egret_config::WorkflowConfig) -> Served {
         kv::PURGE_KV,
         // `handlers::purge_logs::register` (group C1 Task 4).
         purge_logs::TYPE_ID,
-        // `handlers::http::register` (package #4 Task C3).
+        // `handlers::http::register` (package #4 Tasks C3 and C4).
         http::REQUEST,
+        http::DOWNLOAD,
+        http::SSE_REQUEST,
     ];
     let mut out = std::collections::BTreeSet::new();
     let mut add_publishable = |type_id: &str| {
