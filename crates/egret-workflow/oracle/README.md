@@ -140,7 +140,8 @@ Verified by deliberate breakage before committing: an unpaired new entry, a
 renamed paired test, a false `baselined` claim and a quietly-added
 `unported:` all fail, each naming the id.
 
-**302** entries carry it today (271 before package #5a's Task A1 added
+**328** entries carry it today (302 before package #5b's Task B1 added
+twenty-six, 271 before package #5a's Task A1 added
 thirty-one, 251 after W2b's fix round, 245 before it, 240
 before W2b, 153 before W2 Task 8, 182 before its fix round), counted out of
 `golden.json` rather than added up (39 of them W2 Task 7's, listed at the end of `error-class.txt`): the four `*-mixed` comparisons (Pebble throws on a String/Number mix), the
@@ -168,7 +169,8 @@ whose deliverable was refusals; Task 8 added 29, which is 17% of the file for
 7% of the corpus, and every one of them is `test:`-paired — the pairing file
 now has **no `unported:` line left in it**, and `UNPORTED_ERROR_CLASS` in
 `tests/oracle.rs` is empty. Note that marking an entry error-class does **not**
-make it pass: 12 of the 302 are *also* in `baseline.txt` (17 before package
+make it pass: 16 of the 328 are *also* in `baseline.txt` (12 before package
+#5b's Task B1 added four, 17 before package
 #5a's Task A6, 19 before its Task A4, 25 before its Task A3, 38 before its
 Task A2; re-counted from the two files 2026-10-29, after Task A5, which moved
 none of them, and again after Task A6, which banked five), because egret
@@ -258,7 +260,11 @@ twenty-six operator entries, `op-equals`, `op-contains`,
 `and`/`or` operand now fails with Pebble's own text). Two stay, each
 re-attributed with its measured cause: `op-contains-boxed-int` (spec D2's
 Integer/Long divergence) and `logic-and-returns-boolean` (minijinja's `~`
-writes a boolean as `True`).
+writes a boolean as `True`) -- and **329 of 1753** after package #5b's Task B1
+(2026-10-29), which added 260 probe entries (tests, `max`/`min`, the ten
+filters, `escape` strategies) and RECORDED the 222 that fail under the `#5b red`
+heading, each group named with the task that banks it (see "What package #5b's
+Task B1 batches measured" below).
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
@@ -5658,3 +5664,91 @@ unary minus on one is Pebble's `multiply(-1, x)` (`-fromIon(ion='1.50')` is
 `-1.50`). The oracle ends #5a at **107 of 1493** baselined: 103 lines from
 before A1 and those four.
 
+## What package #5b's Task B1 batches measured (2026-10-29)
+
+Plan `docs/en/plans/2026-10-28-workflow-renderer.md` B1; spec
+`docs/en/specs/2026-10-28-workflow-renderer-design.md` D8, D10, D12, D13.
+260 entries, appended at the end of `corpus.json` in nine blank-line batches:
+`test-` (59, spec D8), `function-max-`/`function-min-` (34, D10), the ten
+filters (60, D13), `filter-escape-` with the survey's inputs, the position
+rules and the unknown strategies (23, D12), and one boundary batch per
+`escape` strategy (`filter-escape-<strategy>-boundary-`, 84 together). The
+regeneration changed only the eight `NON_DETERMINISTIC` ids and
+`function-fromion-annotation-of-a-list`/`-in-a-list`; those ten were kept at
+their committed values, so the `golden.json` diff is only the new entries.
+
+26 are Kestra exceptions (`error-class.txt`): 4 baselined (`even`/`odd` on a
+String or a Double answer here), 22 born matching for the WRONG reason (the
+name is unknown here) and paired with four `runners::env` placeholder tests
+(`a_test_kestra_refuses_is_refused_here_too`,
+`max_and_min_refuse_what_pebble_cannot_compare`,
+`a_filter_input_kestra_refuses_is_refused_here_too`,
+`an_escape_strategy_pebble_does_not_know_is_refused`). 38 pass today: those 22,
+`even`/`odd` on a Long, `iterable` on a list, the twelve `html` strategy entries (the
+default escaper is already Pebble's) and `escape(strategy='js')` of a null. The other **222** are baselined under
+`#5b red`: B2 49, B3 29, B4 53, B5 91.
+
+**How the boundary batches were chosen.** Pebble 4.1.2's `EscapeFilter` maps
+`html`, `js`, `css`, `url_param` and `json` to unbescape's
+`HtmlEscape.escapeHtml4Xml`, `JavaScriptEscape.escapeJavaScript`,
+`CssEscape.escapeCssIdentifier`, `UriEscape.escapeUriQueryParam` and
+`JsonEscape.escapeJson` (`javap -v`, bootstrap method handles). Each was called
+on every code point from U+0000 to U+10001 (after an `a`, so in the middle of
+a string) and the output classified by shape (unchanged, single-character
+escape, `\xHH`, `\uHHHH`, CSS `\H..`, `%HH` by byte count, named or numeric
+entity). Each run of one shape is one entry holding both ends of the run
+between `z`s (`z` is not a hex digit, so a CSS escape before it takes no
+space); the last run's upper end is U+10FFFF. Plus the surrogate gap, U+D7FF
+and U+E000, which is a boundary of the UTF-8 encoding on the Rust side.
+
+**Measured answers B2-B5 follow.**
+
+- **Tests.** `is null`: a null is `true`, `0` and `''` are `false`; a missing
+  root or member fails (strict). `is empty`: `''`, whitespace (`trim()`, so a
+  tab and a newline count, a no-break space U+00A0 does not), `[]`, `{}` and
+  null are empty; `0`, `false` are not; a missing root fails. `is map`: a map
+  only (null, a list, a string, a number are `false`). `is json`: a string
+  that Jackson reads as a value -- `'1'`, `'[1, 2]'`, `'"s"'`, `'true'`,
+  `'null'`, `'  1  '`, **`''`** and **`'1 x'`** (Jackson stops after the
+  first value) are `true`; `'plain'` and `'{'` are `false`; a map, list or
+  number fails (`ClassCastException` to String), a null fails (`argument
+  "content" is null`). `even`/`odd` cast to Long: a String or a Double fails.
+  `iterable` is `instanceof Iterable`: a list is `true`; a String, a map and
+  null are `false`.
+- **`max`/`min`.** One argument is returned as it is (`max([1, 2])` is
+  `[1,2]`); `max()` and `max(null)` and `max(null, null)` render empty; nulls
+  are skipped; the larger operand keeps its own type (`max(1, 2.5) |
+  className` is `java.lang.Double`, `min(fromIon(ion='2.50'), 1) | className`
+  is `java.lang.Long`); **a tie keeps the first operand** (`max(2.0, 2)` is
+  `2.0`, `max(2, 2.0)` is `2`, `max(fromIon(ion='2.50'), 2.5)` is `2.50`); a
+  string, boolean or list operand fails with `invalid operands for
+  mathematical comparison [GREATER_THAN]` (`[LESS_THAN]` under `min`).
+- **Filters.** `abbreviate`: `'abcdef' | abbreviate(6)` is `abc...` (a
+  string of exactly the width is cut too), `abbreviate(3)` of `abcdefg` is
+  `abc`, `abbreviate(4)` is `a...`, **`abbreviate(0)` is the input
+  unchanged** (only a negative width fails: `Invalid argument to abbreviate
+  filter; must be greater than zero`), a number input fails, a null renders
+  empty. `base64decode` accepts an unpadded input (`'YWI'` is `ab`); a bad one
+  fails with `Please provide a correctly Base64 encoded string ...`. `merge`:
+  list+list concatenates, map+map right wins, list+map appends the map,
+  **map+list adds each element as a key mapped to itself**
+  (`{'a': 1} | merge([1])` is `{"a":1,"1":1}`), a null argument answers the
+  input, a string input fails (`The object being filtered is not a
+  Map/List/Array`). `nl2br` turns `\r\n` into one `<br />`. `numberformat`:
+  with no argument, three fraction digits at most (`1,234.568`, `0.123`);
+  `'0.00'` rounds `0.125` to `0.12` (HALF_EVEN on the double); `'#%'`; a
+  BigDecimal formats; a string fails (`The input for the 'NumberFormat'
+  filter has to be a number.`); null renders empty. The JVM locale was
+  `en_VN`, so D13's locale divergence is not exercised. `raw` is the
+  identity (`'<b>' | escape | raw` stays escaped). `rsort` of a context list
+  mixing a Double with Integers fails (`ClassCastException`), as a String with
+  a Long does. `urlencode` is `URLEncoder` (`~` is `%7E`, `*` stays).
+- **`escape`.** `json` escapes **every** non-ASCII character as `\uHHHH`
+  (`é` is `\u00E9`; the survey's table showed it unescaped), `&` as
+  `\u0026` and `/` after `<`; `js` writes U+0000 as `\0`, U+007F-U+00FF as
+  `\xHH`, `&` as `\x26`, `/` after `<`. `css` escapes a leading digit as
+  `\31 `, a leading `-` before a digit, `--` and a leading `_`; a hex escape
+  takes a trailing space only before a hex digit (`\E9 a`, `\E9z`), and a
+  space after it is itself escaped (`\E9\ z`). An unknown strategy, an
+  upper-case name (`JS`) and `html_attr` fail with `Unknown escaping strategy
+  [x]`.

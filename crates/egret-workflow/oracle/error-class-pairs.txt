@@ -551,3 +551,36 @@ operator-contains-number-left                       test:contains_on_what_pebble
 logic-and-list-left                                 test:an_operand_kestra_cannot_cast_fails_with_kestras_text
 logic-or-null-context                               test:an_operand_kestra_cannot_cast_fails_with_kestras_text
 logic-and-map-left                                  test:an_operand_kestra_cannot_cast_fails_with_kestras_text
+# Package #5b, Task B1 (2026-10-29): 26 entries. Four are baselined (egret
+# answers today: `even`/`odd` on a string or a Double). The other 22 are born
+# matching for the WRONG reason (the test, function or filter is unknown here,
+# or the escape strategy is refused with egret's own text), so each is paired
+# with a runners::env placeholder test that asserts the failure; the B-task
+# that ports the name keeps it failing for Kestra's reason and tightens the
+# test to Kestra's text.
+test-null-missing-root                              test:a_test_kestra_refuses_is_refused_here_too
+test-null-missing-member                            test:a_test_kestra_refuses_is_refused_here_too
+test-empty-missing-root                             test:a_test_kestra_refuses_is_refused_here_too
+test-json-map                                       test:a_test_kestra_refuses_is_refused_here_too
+test-json-list                                      test:a_test_kestra_refuses_is_refused_here_too
+test-json-number                                    test:a_test_kestra_refuses_is_refused_here_too
+test-json-null                                      test:a_test_kestra_refuses_is_refused_here_too
+test-even-numeric-string                            baselined
+test-odd-numeric-string                             baselined
+test-even-string-literal                            baselined
+test-even-double                                    baselined
+function-max-strings                                test:max_and_min_refuse_what_pebble_cannot_compare
+function-min-string-long                            test:max_and_min_refuse_what_pebble_cannot_compare
+function-max-numeric-string                         test:max_and_min_refuse_what_pebble_cannot_compare
+function-max-boolean                                test:max_and_min_refuse_what_pebble_cannot_compare
+function-max-list-long                              test:max_and_min_refuse_what_pebble_cannot_compare
+filter-abbreviate-negative                          test:a_filter_input_kestra_refuses_is_refused_here_too
+filter-abbreviate-number                            test:a_filter_input_kestra_refuses_is_refused_here_too
+filter-base64decode-bad                             test:a_filter_input_kestra_refuses_is_refused_here_too
+filter-merge-string                                 test:a_filter_input_kestra_refuses_is_refused_here_too
+filter-numberformat-string                          test:a_filter_input_kestra_refuses_is_refused_here_too
+filter-rsort-context-mixed-numbers                  test:a_filter_input_kestra_refuses_is_refused_here_too
+filter-rsort-mixed                                  test:a_filter_input_kestra_refuses_is_refused_here_too
+filter-escape-html-attr                             test:an_escape_strategy_pebble_does_not_know_is_refused
+filter-escape-unknown-strategy                      test:an_escape_strategy_pebble_does_not_know_is_refused
+filter-escape-uppercase-strategy                    test:an_escape_strategy_pebble_does_not_know_is_refused

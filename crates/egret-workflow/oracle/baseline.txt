@@ -882,3 +882,260 @@ arith-operand-context-ints-add-past-2-31
 # (`kv(..)`, `secret(..)`), so a call or filter on the left keeps the eager
 # kestra_null_coalesce and `missing.y` on the right is evaluated and raises.
 coalesce-non-path-left-missing-right
+
+# === #5b red ============================================================
+#
+# Package #5b, Task B1 (2026-10-29): the probe batches of
+# docs/en/plans/2026-10-28-workflow-renderer.md B1, regenerated offline. Each
+# line below fails today; the comment above each group names the task that
+# banks it. Corpus order inside a group. No recorded divergence among them.
+
+# B2 (D8)'s 49: the tests `null` (reached as `none`), `empty`, `map` and
+# `json` are unknown here, and `even`/`odd` answer on a String or a Double
+# where Pebble's cast to Long fails (four error-class rows, paired
+# `baselined`). `iterable` is true for a String here and false in Pebble.
+test-null-of-null
+test-null-of-one
+test-null-of-zero
+test-null-of-empty-string
+test-not-null-of-one
+test-not-null-of-null
+test-null-in-if
+test-empty-string
+test-empty-whitespace
+test-empty-tab-newline
+test-empty-nbsp
+test-empty-list
+test-empty-map
+test-empty-null
+test-empty-zero
+test-empty-false
+test-empty-text
+test-empty-one-element-list
+test-empty-one-key-map
+test-empty-list-literal
+test-not-empty-list
+test-not-empty-whitespace
+test-map-empty-map
+test-map-map
+test-map-list
+test-map-string
+test-map-null
+test-map-number
+test-map-literal
+test-json-number-string
+test-json-object-string
+test-json-array-string
+test-json-quoted-string
+test-json-true-string
+test-json-null-string
+test-json-plain
+test-json-empty-string
+test-json-unclosed
+test-json-padded
+test-json-trailing-text
+test-not-json-plain
+test-even-numeric-string
+test-odd-numeric-string
+test-even-string-literal
+test-even-double
+test-iterable-string-literal
+test-iterable-empty-string
+test-iterable-map
+test-iterable-null
+
+# B3 (D10)'s 29: `max`/`min` are unknown functions here. Measured: one
+# argument is returned as it is (`max([1, 2])`, `max(null)`, `max()` is empty),
+# nulls are skipped, a tie keeps the FIRST operand with its own type
+# (`max(2.0, 2)` is `2.0`, `max(2, 2.0)` is `2`, `max(fromIon('2.50'), 2.5)`
+# is `2.50`).
+function-max-longs
+function-min-longs
+function-min-three
+function-max-long-double
+function-min-long-double
+function-max-double-long-tie
+function-max-long-double-tie
+function-min-long-double-tie
+function-max-negative
+function-max-one-argument
+function-max-one-list
+function-max-one-string
+function-max-one-null
+function-min-null-first
+function-max-null-last
+function-max-null-middle
+function-max-two-nulls
+function-max-no-argument
+function-max-context
+function-min-context-double
+function-max-bigdecimal-long
+function-min-bigdecimal-long
+function-max-bigdecimal-double
+function-max-bigdecimal-tie
+function-max-double-bigdecimal-tie
+function-max-classname-long-double
+function-max-classname-bigdecimal
+function-min-classname-long
+function-max-in-arithmetic
+
+# B4 (D13)'s 53: the ten filters (`abbreviate`, `base64encode`,
+# `base64decode`, `merge`, `nl2br`, `numberformat`, `raw`, `rsort`, `sha256`,
+# `urlencode`) are unknown here. Measured against D13: `abbreviate(0)` is the
+# input unchanged (only a negative width fails), an unpadded base64 decodes,
+# `merge` of a map with a list adds each element as a key of itself, and a
+# null `merge` argument is the input. `numberformat` ran on an `en_VN` JVM, so
+# the D13 locale divergence is not exercised.
+filter-abbreviate
+filter-abbreviate-short
+filter-abbreviate-exact-length
+filter-abbreviate-one-over
+filter-abbreviate-three
+filter-abbreviate-four
+filter-abbreviate-zero
+filter-abbreviate-null
+filter-base64encode
+filter-base64encode-empty
+filter-base64encode-null
+filter-base64encode-padding
+filter-base64decode
+filter-base64decode-padded
+filter-base64decode-unpadded
+filter-base64decode-null
+filter-merge-list-list
+filter-merge-map-map
+filter-merge-list-map
+filter-merge-map-list
+filter-merge-context-lists
+filter-merge-context-maps
+filter-merge-null-argument
+filter-nl2br
+filter-nl2br-no-escaping
+filter-nl2br-crlf
+filter-nl2br-null
+filter-numberformat
+filter-numberformat-no-argument
+filter-numberformat-long
+filter-numberformat-long-pattern
+filter-numberformat-negative
+filter-numberformat-half-even
+filter-numberformat-percent
+filter-numberformat-optional-digits
+filter-numberformat-bigdecimal
+filter-numberformat-no-argument-many-digits
+filter-numberformat-null
+filter-raw
+filter-raw-after-escape
+filter-raw-number
+filter-raw-null
+filter-rsort-longs
+filter-rsort-strings
+filter-rsort-context
+filter-rsort-null
+filter-sha256
+filter-sha256-empty
+filter-sha256-utf8
+filter-sha256-null
+filter-urlencode
+filter-urlencode-unreserved
+filter-urlencode-null
+
+# B5 (D12)'s 91: every `escape` strategy but `html` is refused here. One
+# entry per run of unbescape 1.1.6's level-2 tables (both ends of the run,
+# separated by `z`; runs measured by calling unbescape directly), the
+# surrogate gap (U+D7FF, U+E000), the survey's inputs and the position rules
+# (`css` escapes a leading digit, `-` before a digit, `--` and `_`; a hex
+# escape is followed by a space only before a hex digit). Measured: `json`
+# escapes every non-ASCII character as `\uHHHH` (the survey's table showed
+# `é` unescaped), and both `js` and `json` escape `&` and `/` after `<`.
+filter-escape-js-survey
+filter-escape-js-ascii
+filter-escape-js-number
+filter-escape-js-slash
+filter-escape-css-survey
+filter-escape-css-ascii
+filter-escape-css-leading-digit
+filter-escape-css-leading-hyphen-digit
+filter-escape-css-hyphen-alone
+filter-escape-css-two-hyphens
+filter-escape-css-leading-underscore
+filter-escape-css-hex-then-hex-digit
+filter-escape-css-hex-then-space
+filter-escape-css-hex-then-letter
+filter-escape-url-param-survey
+filter-escape-url-param-reserved
+filter-escape-json-survey
+filter-escape-json-slash
+filter-escape-js-boundary-u0000
+filter-escape-js-boundary-u0001-u0007
+filter-escape-js-boundary-u0008-u000a
+filter-escape-js-boundary-u000b
+filter-escape-js-boundary-u000c-u000d
+filter-escape-js-boundary-u000e-u001f
+filter-escape-js-boundary-u0020-u0021
+filter-escape-js-boundary-u0022
+filter-escape-js-boundary-u0023-u0025
+filter-escape-js-boundary-u0026
+filter-escape-js-boundary-u0027
+filter-escape-js-boundary-u0028-u005b
+filter-escape-js-boundary-u005c
+filter-escape-js-boundary-u005d-u007e
+filter-escape-js-boundary-u007f-u00ff
+filter-escape-js-boundary-u0100-uffff
+filter-escape-js-boundary-u10000-u10ffff
+filter-escape-js-boundary-ud7ff-ue000
+filter-escape-css-boundary-u0000-u000f
+filter-escape-css-boundary-u0010-u001f
+filter-escape-css-boundary-u0020-u002c
+filter-escape-css-boundary-u002d
+filter-escape-css-boundary-u002e-u002f
+filter-escape-css-boundary-u0030-u0039
+filter-escape-css-boundary-u003a
+filter-escape-css-boundary-u003b-u0040
+filter-escape-css-boundary-u0041-u005a
+filter-escape-css-boundary-u005b-u005e
+filter-escape-css-boundary-u005f
+filter-escape-css-boundary-u0060
+filter-escape-css-boundary-u0061-u007a
+filter-escape-css-boundary-u007b-u007e
+filter-escape-css-boundary-u007f-u00ff
+filter-escape-css-boundary-u0100-u0fff
+filter-escape-css-boundary-u1000-uffff
+filter-escape-css-boundary-u10000-u10ffff
+filter-escape-css-boundary-ud7ff-ue000
+filter-escape-url-param-boundary-u0000-u0020
+filter-escape-url-param-boundary-u0021
+filter-escape-url-param-boundary-u0022-u0023
+filter-escape-url-param-boundary-u0024
+filter-escape-url-param-boundary-u0025-u0026
+filter-escape-url-param-boundary-u0027-u002a
+filter-escape-url-param-boundary-u002b
+filter-escape-url-param-boundary-u002c-u003b
+filter-escape-url-param-boundary-u003c-u003e
+filter-escape-url-param-boundary-u003f-u005a
+filter-escape-url-param-boundary-u005b-u005e
+filter-escape-url-param-boundary-u005f
+filter-escape-url-param-boundary-u0060
+filter-escape-url-param-boundary-u0061-u007a
+filter-escape-url-param-boundary-u007b-u007d
+filter-escape-url-param-boundary-u007e
+filter-escape-url-param-boundary-u007f
+filter-escape-url-param-boundary-u0080-u07ff
+filter-escape-url-param-boundary-u0800-uffff
+filter-escape-url-param-boundary-u10000-u10ffff
+filter-escape-url-param-boundary-ud7ff-ue000
+filter-escape-json-boundary-u0000-u0007
+filter-escape-json-boundary-u0008-u000a
+filter-escape-json-boundary-u000b
+filter-escape-json-boundary-u000c-u000d
+filter-escape-json-boundary-u000e-u001f
+filter-escape-json-boundary-u0020-u0021
+filter-escape-json-boundary-u0022
+filter-escape-json-boundary-u0023-u0025
+filter-escape-json-boundary-u0026
+filter-escape-json-boundary-u0027-u005b
+filter-escape-json-boundary-u005c
+filter-escape-json-boundary-u005d-u007e
+filter-escape-json-boundary-u007f-uffff
+filter-escape-json-boundary-u10000-u10ffff
+filter-escape-json-boundary-ud7ff-ue000

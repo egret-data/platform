@@ -11226,4 +11226,1756 @@
   "expr" : "{% if 1 and true %}y{% else %}n{% endif %}",
   "context" : { },
   "result" : "y"
+}, {
+  "id" : "test-null-of-null",
+  "expr" : "{{ x is null }}",
+  "context" : {
+    "x" : null
+  },
+  "result" : "true"
+}, {
+  "id" : "test-null-of-one",
+  "expr" : "{{ x is null }}",
+  "context" : {
+    "x" : 1
+  },
+  "result" : "false"
+}, {
+  "id" : "test-null-of-zero",
+  "expr" : "{{ x is null }}",
+  "context" : {
+    "x" : 0
+  },
+  "result" : "false"
+}, {
+  "id" : "test-null-of-empty-string",
+  "expr" : "{{ x is null }}",
+  "context" : {
+    "x" : ""
+  },
+  "result" : "false"
+}, {
+  "id" : "test-not-null-of-one",
+  "expr" : "{{ x is not null }}",
+  "context" : {
+    "x" : 1
+  },
+  "result" : "true"
+}, {
+  "id" : "test-not-null-of-null",
+  "expr" : "{{ x is not null }}",
+  "context" : {
+    "x" : null
+  },
+  "result" : "false"
+}, {
+  "id" : "test-null-missing-root",
+  "expr" : "{{ x is null }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.RootAttributeNotFoundException: Root attribute [x] does not exist or can not be accessed and strict variables is set to true. ({{ x is null }}:1)"
+  }
+}, {
+  "id" : "test-null-missing-member",
+  "expr" : "{{ o.x is null }}",
+  "context" : {
+    "o" : { }
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.AttributeNotFoundException: Attribute [x] of [java.util.LinkedHashMap] does not exist or can not be accessed and strict variables is set to true. ({{ o.x is null }}:1)"
+  }
+}, {
+  "id" : "test-null-in-if",
+  "expr" : "{% if x is null %}y{% else %}n{% endif %}",
+  "context" : {
+    "x" : null
+  },
+  "result" : "y"
+}, {
+  "id" : "test-empty-string",
+  "expr" : "{{ x is empty }}",
+  "context" : {
+    "x" : ""
+  },
+  "result" : "true"
+}, {
+  "id" : "test-empty-whitespace",
+  "expr" : "{{ x is empty }}",
+  "context" : {
+    "x" : "  "
+  },
+  "result" : "true"
+}, {
+  "id" : "test-empty-tab-newline",
+  "expr" : "{{ x is empty }}",
+  "context" : {
+    "x" : "\t\n"
+  },
+  "result" : "true"
+}, {
+  "id" : "test-empty-nbsp",
+  "expr" : "{{ x is empty }}",
+  "context" : {
+    "x" : " "
+  },
+  "result" : "false"
+}, {
+  "id" : "test-empty-list",
+  "expr" : "{{ x is empty }}",
+  "context" : {
+    "x" : [ ]
+  },
+  "result" : "true"
+}, {
+  "id" : "test-empty-map",
+  "expr" : "{{ x is empty }}",
+  "context" : {
+    "x" : { }
+  },
+  "result" : "true"
+}, {
+  "id" : "test-empty-null",
+  "expr" : "{{ x is empty }}",
+  "context" : {
+    "x" : null
+  },
+  "result" : "true"
+}, {
+  "id" : "test-empty-zero",
+  "expr" : "{{ x is empty }}",
+  "context" : {
+    "x" : 0
+  },
+  "result" : "false"
+}, {
+  "id" : "test-empty-false",
+  "expr" : "{{ x is empty }}",
+  "context" : {
+    "x" : false
+  },
+  "result" : "false"
+}, {
+  "id" : "test-empty-text",
+  "expr" : "{{ x is empty }}",
+  "context" : {
+    "x" : "a"
+  },
+  "result" : "false"
+}, {
+  "id" : "test-empty-one-element-list",
+  "expr" : "{{ x is empty }}",
+  "context" : {
+    "x" : [ 1 ]
+  },
+  "result" : "false"
+}, {
+  "id" : "test-empty-one-key-map",
+  "expr" : "{{ x is empty }}",
+  "context" : {
+    "x" : {
+      "a" : 1
+    }
+  },
+  "result" : "false"
+}, {
+  "id" : "test-empty-list-literal",
+  "expr" : "{{ [] is empty }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "test-not-empty-list",
+  "expr" : "{{ x is not empty }}",
+  "context" : {
+    "x" : [ 1 ]
+  },
+  "result" : "true"
+}, {
+  "id" : "test-not-empty-whitespace",
+  "expr" : "{{ x is not empty }}",
+  "context" : {
+    "x" : " "
+  },
+  "result" : "false"
+}, {
+  "id" : "test-empty-missing-root",
+  "expr" : "{{ x is empty }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.RootAttributeNotFoundException: Root attribute [x] does not exist or can not be accessed and strict variables is set to true. ({{ x is empty }}:1)"
+  }
+}, {
+  "id" : "test-map-empty-map",
+  "expr" : "{{ x is map }}",
+  "context" : {
+    "x" : { }
+  },
+  "result" : "true"
+}, {
+  "id" : "test-map-map",
+  "expr" : "{{ x is map }}",
+  "context" : {
+    "x" : {
+      "a" : 1
+    }
+  },
+  "result" : "true"
+}, {
+  "id" : "test-map-list",
+  "expr" : "{{ x is map }}",
+  "context" : {
+    "x" : [ ]
+  },
+  "result" : "false"
+}, {
+  "id" : "test-map-string",
+  "expr" : "{{ x is map }}",
+  "context" : {
+    "x" : "a"
+  },
+  "result" : "false"
+}, {
+  "id" : "test-map-null",
+  "expr" : "{{ x is map }}",
+  "context" : {
+    "x" : null
+  },
+  "result" : "false"
+}, {
+  "id" : "test-map-number",
+  "expr" : "{{ x is map }}",
+  "context" : {
+    "x" : 1
+  },
+  "result" : "false"
+}, {
+  "id" : "test-map-literal",
+  "expr" : "{{ {'a': 1} is map }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "test-json-number-string",
+  "expr" : "{{ x is json }}",
+  "context" : {
+    "x" : "1"
+  },
+  "result" : "true"
+}, {
+  "id" : "test-json-object-string",
+  "expr" : "{{ x is json }}",
+  "context" : {
+    "x" : "{\"key\":1}"
+  },
+  "result" : "true"
+}, {
+  "id" : "test-json-array-string",
+  "expr" : "{{ x is json }}",
+  "context" : {
+    "x" : "[1, 2]"
+  },
+  "result" : "true"
+}, {
+  "id" : "test-json-quoted-string",
+  "expr" : "{{ x is json }}",
+  "context" : {
+    "x" : "\"s\""
+  },
+  "result" : "true"
+}, {
+  "id" : "test-json-true-string",
+  "expr" : "{{ x is json }}",
+  "context" : {
+    "x" : "true"
+  },
+  "result" : "true"
+}, {
+  "id" : "test-json-null-string",
+  "expr" : "{{ x is json }}",
+  "context" : {
+    "x" : "null"
+  },
+  "result" : "true"
+}, {
+  "id" : "test-json-plain",
+  "expr" : "{{ x is json }}",
+  "context" : {
+    "x" : "plain"
+  },
+  "result" : "false"
+}, {
+  "id" : "test-json-empty-string",
+  "expr" : "{{ x is json }}",
+  "context" : {
+    "x" : ""
+  },
+  "result" : "true"
+}, {
+  "id" : "test-json-unclosed",
+  "expr" : "{{ x is json }}",
+  "context" : {
+    "x" : "{"
+  },
+  "result" : "false"
+}, {
+  "id" : "test-json-padded",
+  "expr" : "{{ x is json }}",
+  "context" : {
+    "x" : "  1  "
+  },
+  "result" : "true"
+}, {
+  "id" : "test-json-trailing-text",
+  "expr" : "{{ x is json }}",
+  "context" : {
+    "x" : "1 x"
+  },
+  "result" : "true"
+}, {
+  "id" : "test-json-map",
+  "expr" : "{{ x is json }}",
+  "context" : {
+    "x" : {
+      "a" : 1
+    }
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.ClassCastException: class java.util.LinkedHashMap cannot be cast to class java.lang.String (java.util.LinkedHashMap and java.lang.String are in module java.base of loader 'bootstrap')"
+  }
+}, {
+  "id" : "test-json-list",
+  "expr" : "{{ x is json }}",
+  "context" : {
+    "x" : [ 1 ]
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.ClassCastException: class java.util.ArrayList cannot be cast to class java.lang.String (java.util.ArrayList and java.lang.String are in module java.base of loader 'bootstrap')"
+  }
+}, {
+  "id" : "test-json-number",
+  "expr" : "{{ x is json }}",
+  "context" : {
+    "x" : 1
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.ClassCastException: class java.lang.Integer cannot be cast to class java.lang.String (java.lang.Integer and java.lang.String are in module java.base of loader 'bootstrap')"
+  }
+}, {
+  "id" : "test-json-null",
+  "expr" : "{{ x is json }}",
+  "context" : {
+    "x" : null
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.IllegalArgumentException: argument \"content\" is null"
+  }
+}, {
+  "id" : "test-not-json-plain",
+  "expr" : "{{ x is not json }}",
+  "context" : {
+    "x" : "plain"
+  },
+  "result" : "true"
+}, {
+  "id" : "test-even-numeric-string",
+  "expr" : "{{ s is even }}",
+  "context" : {
+    "s" : "2"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.ClassCastException: class java.lang.String cannot be cast to class java.lang.Long (java.lang.String and java.lang.Long are in module java.base of loader 'bootstrap')"
+  }
+}, {
+  "id" : "test-odd-numeric-string",
+  "expr" : "{{ s is odd }}",
+  "context" : {
+    "s" : "3"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.ClassCastException: class java.lang.String cannot be cast to class java.lang.Long (java.lang.String and java.lang.Long are in module java.base of loader 'bootstrap')"
+  }
+}, {
+  "id" : "test-even-string-literal",
+  "expr" : "{{ 'x' is even }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.ClassCastException: class java.lang.String cannot be cast to class java.lang.Long (java.lang.String and java.lang.Long are in module java.base of loader 'bootstrap')"
+  }
+}, {
+  "id" : "test-even-long",
+  "expr" : "{{ n is even }}",
+  "context" : {
+    "n" : 2
+  },
+  "result" : "true"
+}, {
+  "id" : "test-odd-long",
+  "expr" : "{{ n is odd }}",
+  "context" : {
+    "n" : 3
+  },
+  "result" : "true"
+}, {
+  "id" : "test-even-double",
+  "expr" : "{{ n is even }}",
+  "context" : {
+    "n" : 2.0
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.ClassCastException: class java.lang.Double cannot be cast to class java.lang.Long (java.lang.Double and java.lang.Long are in module java.base of loader 'bootstrap')"
+  }
+}, {
+  "id" : "test-iterable-string-literal",
+  "expr" : "{{ 'abc' is iterable }}",
+  "context" : { },
+  "result" : "false"
+}, {
+  "id" : "test-iterable-empty-string",
+  "expr" : "{{ s is iterable }}",
+  "context" : {
+    "s" : ""
+  },
+  "result" : "false"
+}, {
+  "id" : "test-iterable-list",
+  "expr" : "{{ l is iterable }}",
+  "context" : {
+    "l" : [ 1 ]
+  },
+  "result" : "true"
+}, {
+  "id" : "test-iterable-map",
+  "expr" : "{{ m is iterable }}",
+  "context" : {
+    "m" : {
+      "a" : 1
+    }
+  },
+  "result" : "false"
+}, {
+  "id" : "test-iterable-null",
+  "expr" : "{{ n is iterable }}",
+  "context" : {
+    "n" : null
+  },
+  "result" : "false"
+}, {
+  "id" : "function-max-longs",
+  "expr" : "{{ max(1, 5, 3) }}",
+  "context" : { },
+  "result" : "5"
+}, {
+  "id" : "function-min-longs",
+  "expr" : "{{ min(2, 1) }}",
+  "context" : { },
+  "result" : "1"
+}, {
+  "id" : "function-min-three",
+  "expr" : "{{ min(3, 1, 2) }}",
+  "context" : { },
+  "result" : "1"
+}, {
+  "id" : "function-max-long-double",
+  "expr" : "{{ max(1, 2.5) }}",
+  "context" : { },
+  "result" : "2.5"
+}, {
+  "id" : "function-min-long-double",
+  "expr" : "{{ min(1, 2.5) }}",
+  "context" : { },
+  "result" : "1"
+}, {
+  "id" : "function-max-double-long-tie",
+  "expr" : "{{ max(2.0, 2) }}",
+  "context" : { },
+  "result" : "2.0"
+}, {
+  "id" : "function-max-long-double-tie",
+  "expr" : "{{ max(2, 2.0) }}",
+  "context" : { },
+  "result" : "2"
+}, {
+  "id" : "function-min-long-double-tie",
+  "expr" : "{{ min(2, 2.0) }}",
+  "context" : { },
+  "result" : "2"
+}, {
+  "id" : "function-max-negative",
+  "expr" : "{{ max(-1, -5) }}",
+  "context" : { },
+  "result" : "-1"
+}, {
+  "id" : "function-max-one-argument",
+  "expr" : "{{ max(4) }}",
+  "context" : { },
+  "result" : "4"
+}, {
+  "id" : "function-max-one-list",
+  "expr" : "{{ max([1, 2]) }}",
+  "context" : { },
+  "result" : "[1,2]"
+}, {
+  "id" : "function-max-one-string",
+  "expr" : "{{ max('a') }}",
+  "context" : { },
+  "result" : "a"
+}, {
+  "id" : "function-max-one-null",
+  "expr" : "<{{ max(null) }}>",
+  "context" : { },
+  "result" : "<>"
+}, {
+  "id" : "function-min-null-first",
+  "expr" : "{{ min(null, 1) }}",
+  "context" : { },
+  "result" : "1"
+}, {
+  "id" : "function-max-null-last",
+  "expr" : "{{ max(1, null) }}",
+  "context" : { },
+  "result" : "1"
+}, {
+  "id" : "function-max-null-middle",
+  "expr" : "{{ max(1, null, 3) }}",
+  "context" : { },
+  "result" : "3"
+}, {
+  "id" : "function-max-two-nulls",
+  "expr" : "<{{ max(null, null) }}>",
+  "context" : { },
+  "result" : "<>"
+}, {
+  "id" : "function-max-strings",
+  "expr" : "{{ max('a', 'b') }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.RuntimeException: invalid operands for mathematical comparison [GREATER_THAN]"
+  }
+}, {
+  "id" : "function-min-string-long",
+  "expr" : "{{ min('a', 1) }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.RuntimeException: invalid operands for mathematical comparison [LESS_THAN]"
+  }
+}, {
+  "id" : "function-max-numeric-string",
+  "expr" : "{{ max('5', 1) }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.RuntimeException: invalid operands for mathematical comparison [GREATER_THAN]"
+  }
+}, {
+  "id" : "function-max-boolean",
+  "expr" : "{{ max(1, true) }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.RuntimeException: invalid operands for mathematical comparison [GREATER_THAN]"
+  }
+}, {
+  "id" : "function-max-list-long",
+  "expr" : "{{ max([1, 2], 3) }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.RuntimeException: invalid operands for mathematical comparison [GREATER_THAN]"
+  }
+}, {
+  "id" : "function-max-no-argument",
+  "expr" : "<{{ max() }}>",
+  "context" : { },
+  "result" : "<>"
+}, {
+  "id" : "function-max-context",
+  "expr" : "{{ max(a, b) }}",
+  "context" : {
+    "a" : 7,
+    "b" : 3
+  },
+  "result" : "7"
+}, {
+  "id" : "function-min-context-double",
+  "expr" : "{{ min(a, b) }}",
+  "context" : {
+    "a" : 1.5,
+    "b" : 3
+  },
+  "result" : "1.5"
+}, {
+  "id" : "function-max-bigdecimal-long",
+  "expr" : "{{ max(fromIon(ion='2.50'), 1) }}",
+  "context" : { },
+  "result" : "2.50"
+}, {
+  "id" : "function-min-bigdecimal-long",
+  "expr" : "{{ min(fromIon(ion='2.50'), 1) }}",
+  "context" : { },
+  "result" : "1"
+}, {
+  "id" : "function-max-bigdecimal-double",
+  "expr" : "{{ max(fromIon(ion='1.50'), 1.25) }}",
+  "context" : { },
+  "result" : "1.50"
+}, {
+  "id" : "function-max-bigdecimal-tie",
+  "expr" : "{{ max(fromIon(ion='2.50'), 2.5) }}",
+  "context" : { },
+  "result" : "2.50"
+}, {
+  "id" : "function-max-double-bigdecimal-tie",
+  "expr" : "{{ max(2.5, fromIon(ion='2.50')) }}",
+  "context" : { },
+  "result" : "2.5"
+}, {
+  "id" : "function-max-classname-long-double",
+  "expr" : "{{ max(1, 2.5) | className }}",
+  "context" : { },
+  "result" : "java.lang.Double"
+}, {
+  "id" : "function-max-classname-bigdecimal",
+  "expr" : "{{ max(fromIon(ion='2.50'), 1) | className }}",
+  "context" : { },
+  "result" : "java.math.BigDecimal"
+}, {
+  "id" : "function-min-classname-long",
+  "expr" : "{{ min(fromIon(ion='2.50'), 1) | className }}",
+  "context" : { },
+  "result" : "java.lang.Long"
+}, {
+  "id" : "function-max-in-arithmetic",
+  "expr" : "{{ max(1, 2) + 1 }}",
+  "context" : { },
+  "result" : "3"
+}, {
+  "id" : "filter-abbreviate",
+  "expr" : "{{ 'this is a long sentence' | abbreviate(10) }}",
+  "context" : { },
+  "result" : "this is..."
+}, {
+  "id" : "filter-abbreviate-short",
+  "expr" : "{{ 'abc' | abbreviate(2) }}",
+  "context" : { },
+  "result" : "abc"
+}, {
+  "id" : "filter-abbreviate-exact-length",
+  "expr" : "{{ 'abcdef' | abbreviate(6) }}",
+  "context" : { },
+  "result" : "abc..."
+}, {
+  "id" : "filter-abbreviate-one-over",
+  "expr" : "{{ 'abcdefg' | abbreviate(6) }}",
+  "context" : { },
+  "result" : "abc..."
+}, {
+  "id" : "filter-abbreviate-three",
+  "expr" : "{{ 'abcdefg' | abbreviate(3) }}",
+  "context" : { },
+  "result" : "abc"
+}, {
+  "id" : "filter-abbreviate-four",
+  "expr" : "{{ 'abcdefg' | abbreviate(4) }}",
+  "context" : { },
+  "result" : "a..."
+}, {
+  "id" : "filter-abbreviate-zero",
+  "expr" : "{{ 'abc' | abbreviate(0) }}",
+  "context" : { },
+  "result" : "abc"
+}, {
+  "id" : "filter-abbreviate-negative",
+  "expr" : "{{ 'abc' | abbreviate(-1) }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid argument to abbreviate filter; must be greater than zero ({{ 'abc' | abbreviate(-1) }}:1)"
+  }
+}, {
+  "id" : "filter-abbreviate-null",
+  "expr" : "<{{ n | abbreviate(3) }}>",
+  "context" : {
+    "n" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-abbreviate-number",
+  "expr" : "{{ n | abbreviate(3) }}",
+  "context" : {
+    "n" : 123456
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.ClassCastException: class java.lang.Integer cannot be cast to class java.lang.String (java.lang.Integer and java.lang.String are in module java.base of loader 'bootstrap')"
+  }
+}, {
+  "id" : "filter-base64encode",
+  "expr" : "{{ 'héllo' | base64encode }}",
+  "context" : { },
+  "result" : "aMOpbGxv"
+}, {
+  "id" : "filter-base64encode-empty",
+  "expr" : "<{{ '' | base64encode }}>",
+  "context" : { },
+  "result" : "<>"
+}, {
+  "id" : "filter-base64encode-null",
+  "expr" : "<{{ n | base64encode }}>",
+  "context" : {
+    "n" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-base64encode-padding",
+  "expr" : "{{ 'ab' | base64encode }}",
+  "context" : { },
+  "result" : "YWI="
+}, {
+  "id" : "filter-base64decode",
+  "expr" : "{{ 'aMOpbGxv' | base64decode }}",
+  "context" : { },
+  "result" : "héllo"
+}, {
+  "id" : "filter-base64decode-padded",
+  "expr" : "{{ 'YWI=' | base64decode }}",
+  "context" : { },
+  "result" : "ab"
+}, {
+  "id" : "filter-base64decode-unpadded",
+  "expr" : "{{ 'YWI' | base64decode }}",
+  "context" : { },
+  "result" : "ab"
+}, {
+  "id" : "filter-base64decode-bad",
+  "expr" : "{{ '!!' | base64decode }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Please provide a correctly Base64 encoded string containing an UTF-8 string\n ({{ '!!' | base64decode }}:1)"
+  }
+}, {
+  "id" : "filter-base64decode-null",
+  "expr" : "<{{ n | base64decode }}>",
+  "context" : {
+    "n" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-merge-list-list",
+  "expr" : "{{ [1, 2] | merge([3]) }}",
+  "context" : { },
+  "result" : "[1,2,3]"
+}, {
+  "id" : "filter-merge-map-map",
+  "expr" : "{{ {'a': 1, 'b': 2} | merge({'b': 3, 'c': 4}) }}",
+  "context" : { },
+  "result" : "{\"a\":1,\"b\":3,\"c\":4}"
+}, {
+  "id" : "filter-merge-list-map",
+  "expr" : "{{ [1] | merge({'a': 1}) }}",
+  "context" : { },
+  "result" : "[1,{\"a\":1}]"
+}, {
+  "id" : "filter-merge-map-list",
+  "expr" : "{{ {'a': 1} | merge([1]) }}",
+  "context" : { },
+  "result" : "{\"a\":1,\"1\":1}"
+}, {
+  "id" : "filter-merge-context-lists",
+  "expr" : "{{ a | merge(b) }}",
+  "context" : {
+    "a" : [ "x" ],
+    "b" : [ "y", "z" ]
+  },
+  "result" : "[\"x\",\"y\",\"z\"]"
+}, {
+  "id" : "filter-merge-context-maps",
+  "expr" : "{{ a | merge(b) }}",
+  "context" : {
+    "a" : {
+      "k" : 1
+    },
+    "b" : {
+      "k" : 2
+    }
+  },
+  "result" : "{\"k\":2}"
+}, {
+  "id" : "filter-merge-string",
+  "expr" : "{{ 'a' | merge(['b']) }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The object being filtered is not a Map/List/Array ({{ 'a' | merge(['b']) }}:1)"
+  }
+}, {
+  "id" : "filter-merge-null-argument",
+  "expr" : "{{ [1] | merge(n) }}",
+  "context" : {
+    "n" : null
+  },
+  "result" : "[1]"
+}, {
+  "id" : "filter-nl2br",
+  "expr" : "{{ 'a\nb' | nl2br }}",
+  "context" : { },
+  "result" : "a<br />b"
+}, {
+  "id" : "filter-nl2br-no-escaping",
+  "expr" : "{{ '<a>\nb' | nl2br }}",
+  "context" : { },
+  "result" : "<a><br />b"
+}, {
+  "id" : "filter-nl2br-crlf",
+  "expr" : "{{ s | nl2br }}",
+  "context" : {
+    "s" : "a\r\nb"
+  },
+  "result" : "a<br />b"
+}, {
+  "id" : "filter-nl2br-null",
+  "expr" : "<{{ n | nl2br }}>",
+  "context" : {
+    "n" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-numberformat",
+  "expr" : "{{ 1234.5678 | numberformat('#,##0.00') }}",
+  "context" : { },
+  "result" : "1,234.57"
+}, {
+  "id" : "filter-numberformat-no-argument",
+  "expr" : "{{ 1234.5678 | numberformat }}",
+  "context" : { },
+  "result" : "1,234.568"
+}, {
+  "id" : "filter-numberformat-long",
+  "expr" : "{{ 1234567 | numberformat }}",
+  "context" : { },
+  "result" : "1,234,567"
+}, {
+  "id" : "filter-numberformat-long-pattern",
+  "expr" : "{{ 1234567 | numberformat('#,##0.00') }}",
+  "context" : { },
+  "result" : "1,234,567.00"
+}, {
+  "id" : "filter-numberformat-negative",
+  "expr" : "{{ -1234.5 | numberformat('#,##0.00') }}",
+  "context" : { },
+  "result" : "-1,234.50"
+}, {
+  "id" : "filter-numberformat-half-even",
+  "expr" : "{{ 0.125 | numberformat('0.00') }}",
+  "context" : { },
+  "result" : "0.12"
+}, {
+  "id" : "filter-numberformat-percent",
+  "expr" : "{{ 0.256 | numberformat('#%') }}",
+  "context" : { },
+  "result" : "26%"
+}, {
+  "id" : "filter-numberformat-optional-digits",
+  "expr" : "{{ 1.5 | numberformat('0.###') }}",
+  "context" : { },
+  "result" : "1.5"
+}, {
+  "id" : "filter-numberformat-bigdecimal",
+  "expr" : "{{ fromIon(ion='1234.5678') | numberformat('#,##0.00') }}",
+  "context" : { },
+  "result" : "1,234.57"
+}, {
+  "id" : "filter-numberformat-no-argument-many-digits",
+  "expr" : "{{ 0.123456 | numberformat }}",
+  "context" : { },
+  "result" : "0.123"
+}, {
+  "id" : "filter-numberformat-string",
+  "expr" : "{{ '12' | numberformat }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The input for the 'NumberFormat' filter has to be a number. ({{ '12' | numberformat }}:1)"
+  }
+}, {
+  "id" : "filter-numberformat-null",
+  "expr" : "<{{ n | numberformat }}>",
+  "context" : {
+    "n" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-raw",
+  "expr" : "{{ '<b>' | raw }}",
+  "context" : { },
+  "result" : "<b>"
+}, {
+  "id" : "filter-raw-after-escape",
+  "expr" : "{{ '<b>' | escape | raw }}",
+  "context" : { },
+  "result" : "&lt;b&gt;"
+}, {
+  "id" : "filter-raw-number",
+  "expr" : "{{ 12 | raw }}",
+  "context" : { },
+  "result" : "12"
+}, {
+  "id" : "filter-raw-null",
+  "expr" : "<{{ n | raw }}>",
+  "context" : {
+    "n" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-rsort-longs",
+  "expr" : "{{ [3, 1, 2] | rsort }}",
+  "context" : { },
+  "result" : "[3,2,1]"
+}, {
+  "id" : "filter-rsort-strings",
+  "expr" : "{{ ['b', 'a', 'c'] | rsort }}",
+  "context" : { },
+  "result" : "[\"c\",\"b\",\"a\"]"
+}, {
+  "id" : "filter-rsort-context-mixed-numbers",
+  "expr" : "{{ l | rsort }}",
+  "context" : {
+    "l" : [ 1.5, 3, 2 ]
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.ClassCastException: class java.lang.Integer cannot be cast to class java.lang.Double (java.lang.Integer and java.lang.Double are in module java.base of loader 'bootstrap')"
+  }
+}, {
+  "id" : "filter-rsort-context",
+  "expr" : "{{ l | rsort }}",
+  "context" : {
+    "l" : [ 1, 3, 2 ]
+  },
+  "result" : "[3,2,1]"
+}, {
+  "id" : "filter-rsort-mixed",
+  "expr" : "{{ [1, 'a'] | rsort }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.ClassCastException: class java.lang.String cannot be cast to class java.lang.Long (java.lang.String and java.lang.Long are in module java.base of loader 'bootstrap')"
+  }
+}, {
+  "id" : "filter-rsort-null",
+  "expr" : "<{{ n | rsort }}>",
+  "context" : {
+    "n" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-sha256",
+  "expr" : "{{ 'abc' | sha256 }}",
+  "context" : { },
+  "result" : "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+}, {
+  "id" : "filter-sha256-empty",
+  "expr" : "{{ '' | sha256 }}",
+  "context" : { },
+  "result" : "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}, {
+  "id" : "filter-sha256-utf8",
+  "expr" : "{{ 'é' | sha256 }}",
+  "context" : { },
+  "result" : "4a99557e4033c3539de2eb65472017cad5f9557f7a0625a09f1c3f6e2ba69c4c"
+}, {
+  "id" : "filter-sha256-null",
+  "expr" : "<{{ n | sha256 }}>",
+  "context" : {
+    "n" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-urlencode",
+  "expr" : "{{ 'a b&c=d/é' | urlencode }}",
+  "context" : { },
+  "result" : "a+b%26c%3Dd%2F%C3%A9"
+}, {
+  "id" : "filter-urlencode-unreserved",
+  "expr" : "{{ s | urlencode }}",
+  "context" : {
+    "s" : "a-b_c.d*e~f!g'h(i)j"
+  },
+  "result" : "a-b_c.d*e%7Ef%21g%27h%28i%29j"
+}, {
+  "id" : "filter-urlencode-null",
+  "expr" : "<{{ n | urlencode }}>",
+  "context" : {
+    "n" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-escape-js-survey",
+  "expr" : "{{ s | escape(strategy='js') }}",
+  "context" : {
+    "s" : "a'b\"</script>\n é"
+  },
+  "result" : "a\\'b\\\"<\\/script>\\n\\u2028\\xE9"
+}, {
+  "id" : "filter-escape-js-ascii",
+  "expr" : "{{ s | escape(strategy='js') }}",
+  "context" : {
+    "s" : "a-b_c.d e:f=g&h"
+  },
+  "result" : "a-b_c.d e:f=g\\x26h"
+}, {
+  "id" : "filter-escape-js-number",
+  "expr" : "{{ n | escape(strategy='js') }}",
+  "context" : {
+    "n" : 12
+  },
+  "result" : "12"
+}, {
+  "id" : "filter-escape-js-slash",
+  "expr" : "{{ s | escape(strategy='js') }}",
+  "context" : {
+    "s" : "a/b</c"
+  },
+  "result" : "a/b<\\/c"
+}, {
+  "id" : "filter-escape-css-survey",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "a b;é"
+  },
+  "result" : "a\\ b\\;\\E9"
+}, {
+  "id" : "filter-escape-css-ascii",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "a-b_c#d1"
+  },
+  "result" : "a-b_c\\#d1"
+}, {
+  "id" : "filter-escape-css-leading-digit",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "1a"
+  },
+  "result" : "\\31 a"
+}, {
+  "id" : "filter-escape-css-leading-hyphen-digit",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "-1a"
+  },
+  "result" : "\\-1a"
+}, {
+  "id" : "filter-escape-css-hyphen-alone",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "-"
+  },
+  "result" : "-"
+}, {
+  "id" : "filter-escape-css-two-hyphens",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "--a"
+  },
+  "result" : "\\--a"
+}, {
+  "id" : "filter-escape-css-leading-underscore",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "_a"
+  },
+  "result" : "\\_a"
+}, {
+  "id" : "filter-escape-css-hex-then-hex-digit",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "éa"
+  },
+  "result" : "\\E9 a"
+}, {
+  "id" : "filter-escape-css-hex-then-space",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "é z"
+  },
+  "result" : "\\E9\\ z"
+}, {
+  "id" : "filter-escape-css-hex-then-letter",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "éz"
+  },
+  "result" : "\\E9z"
+}, {
+  "id" : "filter-escape-url-param-survey",
+  "expr" : "{{ s | escape(strategy='url_param') }}",
+  "context" : {
+    "s" : "a b&c=é/"
+  },
+  "result" : "a%20b%26c%3D%C3%A9/"
+}, {
+  "id" : "filter-escape-url-param-reserved",
+  "expr" : "{{ s | escape(strategy='url_param') }}",
+  "context" : {
+    "s" : "a+b~c*d!e'f(g)h-_.i"
+  },
+  "result" : "a%2Bb~c*d!e'f(g)h-_.i"
+}, {
+  "id" : "filter-escape-json-survey",
+  "expr" : "{{ s | escape(strategy='json') }}",
+  "context" : {
+    "s" : "a\"b\\c\n/é\u0001"
+  },
+  "result" : "a\\\"b\\\\c\\n/\\u00E9\\u0001"
+}, {
+  "id" : "filter-escape-json-slash",
+  "expr" : "{{ s | escape(strategy='json') }}",
+  "context" : {
+    "s" : "a/b</c"
+  },
+  "result" : "a/b<\\/c"
+}, {
+  "id" : "filter-escape-html-default",
+  "expr" : "{{ s | escape(strategy='html') }}",
+  "context" : {
+    "s" : "<é>"
+  },
+  "result" : "&lt;é&gt;"
+}, {
+  "id" : "filter-escape-html-attr",
+  "expr" : "{{ s | escape(strategy='html_attr') }}",
+  "context" : {
+    "s" : "a b"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unknown escaping strategy [html_attr] ({{ s | escape(strategy='html_attr') }}:1)"
+  }
+}, {
+  "id" : "filter-escape-unknown-strategy",
+  "expr" : "{{ s | escape(strategy='nope') }}",
+  "context" : {
+    "s" : "a"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unknown escaping strategy [nope] ({{ s | escape(strategy='nope') }}:1)"
+  }
+}, {
+  "id" : "filter-escape-uppercase-strategy",
+  "expr" : "{{ s | escape(strategy='JS') }}",
+  "context" : {
+    "s" : "a"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unknown escaping strategy [JS] ({{ s | escape(strategy='JS') }}:1)"
+  }
+}, {
+  "id" : "filter-escape-js-null",
+  "expr" : "<{{ n | escape(strategy='js') }}>",
+  "context" : {
+    "n" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-escape-html-boundary-u0000-u0021",
+  "expr" : "{{ s | escape(strategy='html') }}",
+  "context" : {
+    "s" : "z\u0000z!z"
+  },
+  "result" : "z\u0000z!z"
+}, {
+  "id" : "filter-escape-html-boundary-u0022",
+  "expr" : "{{ s | escape(strategy='html') }}",
+  "context" : {
+    "s" : "z\"z"
+  },
+  "result" : "z&quot;z"
+}, {
+  "id" : "filter-escape-html-boundary-u0023-u0025",
+  "expr" : "{{ s | escape(strategy='html') }}",
+  "context" : {
+    "s" : "z#z%z"
+  },
+  "result" : "z#z%z"
+}, {
+  "id" : "filter-escape-html-boundary-u0026",
+  "expr" : "{{ s | escape(strategy='html') }}",
+  "context" : {
+    "s" : "z&z"
+  },
+  "result" : "z&amp;z"
+}, {
+  "id" : "filter-escape-html-boundary-u0027",
+  "expr" : "{{ s | escape(strategy='html') }}",
+  "context" : {
+    "s" : "z'z"
+  },
+  "result" : "z&#39;z"
+}, {
+  "id" : "filter-escape-html-boundary-u0028-u003b",
+  "expr" : "{{ s | escape(strategy='html') }}",
+  "context" : {
+    "s" : "z(z;z"
+  },
+  "result" : "z(z;z"
+}, {
+  "id" : "filter-escape-html-boundary-u003c",
+  "expr" : "{{ s | escape(strategy='html') }}",
+  "context" : {
+    "s" : "z<z"
+  },
+  "result" : "z&lt;z"
+}, {
+  "id" : "filter-escape-html-boundary-u003d",
+  "expr" : "{{ s | escape(strategy='html') }}",
+  "context" : {
+    "s" : "z=z"
+  },
+  "result" : "z=z"
+}, {
+  "id" : "filter-escape-html-boundary-u003e",
+  "expr" : "{{ s | escape(strategy='html') }}",
+  "context" : {
+    "s" : "z>z"
+  },
+  "result" : "z&gt;z"
+}, {
+  "id" : "filter-escape-html-boundary-u003f-u10ffff",
+  "expr" : "{{ s | escape(strategy='html') }}",
+  "context" : {
+    "s" : "z?z\uDBFF\uDFFFz"
+  },
+  "result" : "z?z\uDBFF\uDFFFz"
+}, {
+  "id" : "filter-escape-html-boundary-ud7ff-ue000",
+  "expr" : "{{ s | escape(strategy='html') }}",
+  "context" : {
+    "s" : "z퟿zz"
+  },
+  "result" : "z퟿zz"
+}, {
+  "id" : "filter-escape-js-boundary-u0000",
+  "expr" : "{{ s | escape(strategy='js') }}",
+  "context" : {
+    "s" : "z\u0000z"
+  },
+  "result" : "z\\0z"
+}, {
+  "id" : "filter-escape-js-boundary-u0001-u0007",
+  "expr" : "{{ s | escape(strategy='js') }}",
+  "context" : {
+    "s" : "z\u0001z\u0007z"
+  },
+  "result" : "z\\x01z\\x07z"
+}, {
+  "id" : "filter-escape-js-boundary-u0008-u000a",
+  "expr" : "{{ s | escape(strategy='js') }}",
+  "context" : {
+    "s" : "z\bz\nz"
+  },
+  "result" : "z\\bz\\nz"
+}, {
+  "id" : "filter-escape-js-boundary-u000b",
+  "expr" : "{{ s | escape(strategy='js') }}",
+  "context" : {
+    "s" : "z\u000Bz"
+  },
+  "result" : "z\\x0Bz"
+}, {
+  "id" : "filter-escape-js-boundary-u000c-u000d",
+  "expr" : "{{ s | escape(strategy='js') }}",
+  "context" : {
+    "s" : "z\fz\rz"
+  },
+  "result" : "z\\fz\\rz"
+}, {
+  "id" : "filter-escape-js-boundary-u000e-u001f",
+  "expr" : "{{ s | escape(strategy='js') }}",
+  "context" : {
+    "s" : "z\u000Ez\u001Fz"
+  },
+  "result" : "z\\x0Ez\\x1Fz"
+}, {
+  "id" : "filter-escape-js-boundary-u0020-u0021",
+  "expr" : "{{ s | escape(strategy='js') }}",
+  "context" : {
+    "s" : "z z!z"
+  },
+  "result" : "z z!z"
+}, {
+  "id" : "filter-escape-js-boundary-u0022",
+  "expr" : "{{ s | escape(strategy='js') }}",
+  "context" : {
+    "s" : "z\"z"
+  },
+  "result" : "z\\\"z"
+}, {
+  "id" : "filter-escape-js-boundary-u0023-u0025",
+  "expr" : "{{ s | escape(strategy='js') }}",
+  "context" : {
+    "s" : "z#z%z"
+  },
+  "result" : "z#z%z"
+}, {
+  "id" : "filter-escape-js-boundary-u0026",
+  "expr" : "{{ s | escape(strategy='js') }}",
+  "context" : {
+    "s" : "z&z"
+  },
+  "result" : "z\\x26z"
+}, {
+  "id" : "filter-escape-js-boundary-u0027",
+  "expr" : "{{ s | escape(strategy='js') }}",
+  "context" : {
+    "s" : "z'z"
+  },
+  "result" : "z\\'z"
+}, {
+  "id" : "filter-escape-js-boundary-u0028-u005b",
+  "expr" : "{{ s | escape(strategy='js') }}",
+  "context" : {
+    "s" : "z(z[z"
+  },
+  "result" : "z(z[z"
+}, {
+  "id" : "filter-escape-js-boundary-u005c",
+  "expr" : "{{ s | escape(strategy='js') }}",
+  "context" : {
+    "s" : "z\\z"
+  },
+  "result" : "z\\\\z"
+}, {
+  "id" : "filter-escape-js-boundary-u005d-u007e",
+  "expr" : "{{ s | escape(strategy='js') }}",
+  "context" : {
+    "s" : "z]z~z"
+  },
+  "result" : "z]z~z"
+}, {
+  "id" : "filter-escape-js-boundary-u007f-u00ff",
+  "expr" : "{{ s | escape(strategy='js') }}",
+  "context" : {
+    "s" : "zzÿz"
+  },
+  "result" : "z\\x7Fz\\xFFz"
+}, {
+  "id" : "filter-escape-js-boundary-u0100-uffff",
+  "expr" : "{{ s | escape(strategy='js') }}",
+  "context" : {
+    "s" : "zĀz￿z"
+  },
+  "result" : "z\\u0100z\\uFFFFz"
+}, {
+  "id" : "filter-escape-js-boundary-u10000-u10ffff",
+  "expr" : "{{ s | escape(strategy='js') }}",
+  "context" : {
+    "s" : "z\uD800\uDC00z\uDBFF\uDFFFz"
+  },
+  "result" : "z\\uD800\\uDC00z\\uDBFF\\uDFFFz"
+}, {
+  "id" : "filter-escape-js-boundary-ud7ff-ue000",
+  "expr" : "{{ s | escape(strategy='js') }}",
+  "context" : {
+    "s" : "z퟿zz"
+  },
+  "result" : "z\\uD7FFz\\uE000z"
+}, {
+  "id" : "filter-escape-css-boundary-u0000-u000f",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "z\u0000z\u000Fz"
+  },
+  "result" : "z\\0z\\Fz"
+}, {
+  "id" : "filter-escape-css-boundary-u0010-u001f",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "z\u0010z\u001Fz"
+  },
+  "result" : "z\\10z\\1Fz"
+}, {
+  "id" : "filter-escape-css-boundary-u0020-u002c",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "z z,z"
+  },
+  "result" : "z\\ z\\,z"
+}, {
+  "id" : "filter-escape-css-boundary-u002d",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "z-z"
+  },
+  "result" : "z-z"
+}, {
+  "id" : "filter-escape-css-boundary-u002e-u002f",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "z.z/z"
+  },
+  "result" : "z\\.z\\/z"
+}, {
+  "id" : "filter-escape-css-boundary-u0030-u0039",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "z0z9z"
+  },
+  "result" : "z0z9z"
+}, {
+  "id" : "filter-escape-css-boundary-u003a",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "z:z"
+  },
+  "result" : "z\\3Az"
+}, {
+  "id" : "filter-escape-css-boundary-u003b-u0040",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "z;z@z"
+  },
+  "result" : "z\\;z\\@z"
+}, {
+  "id" : "filter-escape-css-boundary-u0041-u005a",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "zAzZz"
+  },
+  "result" : "zAzZz"
+}, {
+  "id" : "filter-escape-css-boundary-u005b-u005e",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "z[z^z"
+  },
+  "result" : "z\\[z\\^z"
+}, {
+  "id" : "filter-escape-css-boundary-u005f",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "z_z"
+  },
+  "result" : "z_z"
+}, {
+  "id" : "filter-escape-css-boundary-u0060",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "z`z"
+  },
+  "result" : "z\\`z"
+}, {
+  "id" : "filter-escape-css-boundary-u0061-u007a",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "zazzz"
+  },
+  "result" : "zazzz"
+}, {
+  "id" : "filter-escape-css-boundary-u007b-u007e",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "z{z~z"
+  },
+  "result" : "z\\{z\\~z"
+}, {
+  "id" : "filter-escape-css-boundary-u007f-u00ff",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "zzÿz"
+  },
+  "result" : "z\\7Fz\\FFz"
+}, {
+  "id" : "filter-escape-css-boundary-u0100-u0fff",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "zĀz࿿z"
+  },
+  "result" : "z\\100z\\FFFz"
+}, {
+  "id" : "filter-escape-css-boundary-u1000-uffff",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "zကz￿z"
+  },
+  "result" : "z\\1000z\\FFFFz"
+}, {
+  "id" : "filter-escape-css-boundary-u10000-u10ffff",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "z\uD800\uDC00z\uDBFF\uDFFFz"
+  },
+  "result" : "z\\10000z\\10FFFFz"
+}, {
+  "id" : "filter-escape-css-boundary-ud7ff-ue000",
+  "expr" : "{{ s | escape(strategy='css') }}",
+  "context" : {
+    "s" : "z퟿zz"
+  },
+  "result" : "z\\D7FFz\\E000z"
+}, {
+  "id" : "filter-escape-url-param-boundary-u0000-u0020",
+  "expr" : "{{ s | escape(strategy='url_param') }}",
+  "context" : {
+    "s" : "z\u0000z z"
+  },
+  "result" : "z%00z%20z"
+}, {
+  "id" : "filter-escape-url-param-boundary-u0021",
+  "expr" : "{{ s | escape(strategy='url_param') }}",
+  "context" : {
+    "s" : "z!z"
+  },
+  "result" : "z!z"
+}, {
+  "id" : "filter-escape-url-param-boundary-u0022-u0023",
+  "expr" : "{{ s | escape(strategy='url_param') }}",
+  "context" : {
+    "s" : "z\"z#z"
+  },
+  "result" : "z%22z%23z"
+}, {
+  "id" : "filter-escape-url-param-boundary-u0024",
+  "expr" : "{{ s | escape(strategy='url_param') }}",
+  "context" : {
+    "s" : "z$z"
+  },
+  "result" : "z$z"
+}, {
+  "id" : "filter-escape-url-param-boundary-u0025-u0026",
+  "expr" : "{{ s | escape(strategy='url_param') }}",
+  "context" : {
+    "s" : "z%z&z"
+  },
+  "result" : "z%25z%26z"
+}, {
+  "id" : "filter-escape-url-param-boundary-u0027-u002a",
+  "expr" : "{{ s | escape(strategy='url_param') }}",
+  "context" : {
+    "s" : "z'z*z"
+  },
+  "result" : "z'z*z"
+}, {
+  "id" : "filter-escape-url-param-boundary-u002b",
+  "expr" : "{{ s | escape(strategy='url_param') }}",
+  "context" : {
+    "s" : "z+z"
+  },
+  "result" : "z%2Bz"
+}, {
+  "id" : "filter-escape-url-param-boundary-u002c-u003b",
+  "expr" : "{{ s | escape(strategy='url_param') }}",
+  "context" : {
+    "s" : "z,z;z"
+  },
+  "result" : "z,z;z"
+}, {
+  "id" : "filter-escape-url-param-boundary-u003c-u003e",
+  "expr" : "{{ s | escape(strategy='url_param') }}",
+  "context" : {
+    "s" : "z<z>z"
+  },
+  "result" : "z%3Cz%3Ez"
+}, {
+  "id" : "filter-escape-url-param-boundary-u003f-u005a",
+  "expr" : "{{ s | escape(strategy='url_param') }}",
+  "context" : {
+    "s" : "z?zZz"
+  },
+  "result" : "z?zZz"
+}, {
+  "id" : "filter-escape-url-param-boundary-u005b-u005e",
+  "expr" : "{{ s | escape(strategy='url_param') }}",
+  "context" : {
+    "s" : "z[z^z"
+  },
+  "result" : "z%5Bz%5Ez"
+}, {
+  "id" : "filter-escape-url-param-boundary-u005f",
+  "expr" : "{{ s | escape(strategy='url_param') }}",
+  "context" : {
+    "s" : "z_z"
+  },
+  "result" : "z_z"
+}, {
+  "id" : "filter-escape-url-param-boundary-u0060",
+  "expr" : "{{ s | escape(strategy='url_param') }}",
+  "context" : {
+    "s" : "z`z"
+  },
+  "result" : "z%60z"
+}, {
+  "id" : "filter-escape-url-param-boundary-u0061-u007a",
+  "expr" : "{{ s | escape(strategy='url_param') }}",
+  "context" : {
+    "s" : "zazzz"
+  },
+  "result" : "zazzz"
+}, {
+  "id" : "filter-escape-url-param-boundary-u007b-u007d",
+  "expr" : "{{ s | escape(strategy='url_param') }}",
+  "context" : {
+    "s" : "z{z}z"
+  },
+  "result" : "z%7Bz%7Dz"
+}, {
+  "id" : "filter-escape-url-param-boundary-u007e",
+  "expr" : "{{ s | escape(strategy='url_param') }}",
+  "context" : {
+    "s" : "z~z"
+  },
+  "result" : "z~z"
+}, {
+  "id" : "filter-escape-url-param-boundary-u007f",
+  "expr" : "{{ s | escape(strategy='url_param') }}",
+  "context" : {
+    "s" : "zz"
+  },
+  "result" : "z%7Fz"
+}, {
+  "id" : "filter-escape-url-param-boundary-u0080-u07ff",
+  "expr" : "{{ s | escape(strategy='url_param') }}",
+  "context" : {
+    "s" : "zz߿z"
+  },
+  "result" : "z%C2%80z%DF%BFz"
+}, {
+  "id" : "filter-escape-url-param-boundary-u0800-uffff",
+  "expr" : "{{ s | escape(strategy='url_param') }}",
+  "context" : {
+    "s" : "zࠀz￿z"
+  },
+  "result" : "z%E0%A0%80z%EF%BF%BFz"
+}, {
+  "id" : "filter-escape-url-param-boundary-u10000-u10ffff",
+  "expr" : "{{ s | escape(strategy='url_param') }}",
+  "context" : {
+    "s" : "z\uD800\uDC00z\uDBFF\uDFFFz"
+  },
+  "result" : "z%F0%90%80%80z%F4%8F%BF%BFz"
+}, {
+  "id" : "filter-escape-url-param-boundary-ud7ff-ue000",
+  "expr" : "{{ s | escape(strategy='url_param') }}",
+  "context" : {
+    "s" : "z퟿zz"
+  },
+  "result" : "z%ED%9F%BFz%EE%80%80z"
+}, {
+  "id" : "filter-escape-json-boundary-u0000-u0007",
+  "expr" : "{{ s | escape(strategy='json') }}",
+  "context" : {
+    "s" : "z\u0000z\u0007z"
+  },
+  "result" : "z\\u0000z\\u0007z"
+}, {
+  "id" : "filter-escape-json-boundary-u0008-u000a",
+  "expr" : "{{ s | escape(strategy='json') }}",
+  "context" : {
+    "s" : "z\bz\nz"
+  },
+  "result" : "z\\bz\\nz"
+}, {
+  "id" : "filter-escape-json-boundary-u000b",
+  "expr" : "{{ s | escape(strategy='json') }}",
+  "context" : {
+    "s" : "z\u000Bz"
+  },
+  "result" : "z\\u000Bz"
+}, {
+  "id" : "filter-escape-json-boundary-u000c-u000d",
+  "expr" : "{{ s | escape(strategy='json') }}",
+  "context" : {
+    "s" : "z\fz\rz"
+  },
+  "result" : "z\\fz\\rz"
+}, {
+  "id" : "filter-escape-json-boundary-u000e-u001f",
+  "expr" : "{{ s | escape(strategy='json') }}",
+  "context" : {
+    "s" : "z\u000Ez\u001Fz"
+  },
+  "result" : "z\\u000Ez\\u001Fz"
+}, {
+  "id" : "filter-escape-json-boundary-u0020-u0021",
+  "expr" : "{{ s | escape(strategy='json') }}",
+  "context" : {
+    "s" : "z z!z"
+  },
+  "result" : "z z!z"
+}, {
+  "id" : "filter-escape-json-boundary-u0022",
+  "expr" : "{{ s | escape(strategy='json') }}",
+  "context" : {
+    "s" : "z\"z"
+  },
+  "result" : "z\\\"z"
+}, {
+  "id" : "filter-escape-json-boundary-u0023-u0025",
+  "expr" : "{{ s | escape(strategy='json') }}",
+  "context" : {
+    "s" : "z#z%z"
+  },
+  "result" : "z#z%z"
+}, {
+  "id" : "filter-escape-json-boundary-u0026",
+  "expr" : "{{ s | escape(strategy='json') }}",
+  "context" : {
+    "s" : "z&z"
+  },
+  "result" : "z\\u0026z"
+}, {
+  "id" : "filter-escape-json-boundary-u0027-u005b",
+  "expr" : "{{ s | escape(strategy='json') }}",
+  "context" : {
+    "s" : "z'z[z"
+  },
+  "result" : "z'z[z"
+}, {
+  "id" : "filter-escape-json-boundary-u005c",
+  "expr" : "{{ s | escape(strategy='json') }}",
+  "context" : {
+    "s" : "z\\z"
+  },
+  "result" : "z\\\\z"
+}, {
+  "id" : "filter-escape-json-boundary-u005d-u007e",
+  "expr" : "{{ s | escape(strategy='json') }}",
+  "context" : {
+    "s" : "z]z~z"
+  },
+  "result" : "z]z~z"
+}, {
+  "id" : "filter-escape-json-boundary-u007f-uffff",
+  "expr" : "{{ s | escape(strategy='json') }}",
+  "context" : {
+    "s" : "zz￿z"
+  },
+  "result" : "z\\u007Fz\\uFFFFz"
+}, {
+  "id" : "filter-escape-json-boundary-u10000-u10ffff",
+  "expr" : "{{ s | escape(strategy='json') }}",
+  "context" : {
+    "s" : "z\uD800\uDC00z\uDBFF\uDFFFz"
+  },
+  "result" : "z\\uD800\\uDC00z\\uDBFF\\uDFFFz"
+}, {
+  "id" : "filter-escape-json-boundary-ud7ff-ue000",
+  "expr" : "{{ s | escape(strategy='json') }}",
+  "context" : {
+    "s" : "z퟿zz"
+  },
+  "result" : "z\\uD7FFz\\uE000z"
 } ]

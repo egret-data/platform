@@ -4293,4 +4293,91 @@ mod tests {
     // (`contains_on_a_number_is_refused` was here, Task A1's placeholder; Task
     // A6 ported `contains` and its refusal is asserted with Kestra's text by
     // `runners::operators::tests::contains_on_what_pebble_cannot_search_fails_with_kestras_text`.)
+
+    /// Asserts that every `(source, context)` row fails to render. The four
+    /// tests below are package #5b Task B1's pairs for its born-matching
+    /// error-class entries (`oracle/error-class-pairs.txt`).
+    fn assert_each_fails(rows: &[(&str, JsonValue)]) {
+        for (source, ctx) in rows {
+            let got = render(source, ctx.clone());
+            assert!(
+                got.is_err(),
+                "{source} must fail, as Kestra's does; got {got:?}"
+            );
+        }
+    }
+
+    /// Package #5b, Task B1 (spec D8): the tests Kestra refuses. A missing
+    /// root or member under `is null`/`is empty` fails (strict variables),
+    /// and `is json` on anything but a string fails (`ClassCastException`,
+    /// and `argument "content" is null` for a null). **Placeholder:** these
+    /// fail today for the wrong reason (`null`, `empty` and `json` are
+    /// unknown tests here). Task B2 registers them and must keep every row
+    /// failing for Kestra's reason, then tighten this to Kestra's text.
+    #[test]
+    fn a_test_kestra_refuses_is_refused_here_too() {
+        assert_each_fails(&[
+            ("{{ x is null }}", json!({})),
+            ("{{ o.x is null }}", json!({ "o": {} })),
+            ("{{ x is empty }}", json!({})),
+            ("{{ x is json }}", json!({ "x": { "a": 1 } })),
+            ("{{ x is json }}", json!({ "x": [1] })),
+            ("{{ x is json }}", json!({ "x": 1 })),
+            ("{{ x is json }}", json!({ "x": null })),
+        ]);
+    }
+
+    /// Package #5b, Task B1 (spec D10): `max`/`min` refuse an operand that is
+    /// not a number (`invalid operands for mathematical comparison
+    /// [GREATER_THAN]`, `[LESS_THAN]` for `min`). **Placeholder:** today they
+    /// fail because neither function exists here. Task B3 must keep every row
+    /// failing for Kestra's reason, then tighten this to Kestra's text.
+    #[test]
+    fn max_and_min_refuse_what_pebble_cannot_compare() {
+        assert_each_fails(&[
+            ("{{ max('a', 'b') }}", json!({})),
+            ("{{ min('a', 1) }}", json!({})),
+            ("{{ max('5', 1) }}", json!({})),
+            ("{{ max(1, true) }}", json!({})),
+            ("{{ max([1, 2], 3) }}", json!({})),
+        ]);
+    }
+
+    /// Package #5b, Task B1 (spec D13): inputs the ten filters refuse in
+    /// Kestra: a negative `abbreviate` width, a non-string `abbreviate` input,
+    /// a bad base64 string, `merge` on a string, `numberformat` on a string,
+    /// and `rsort` of mixed classes (a context list of a Double and two
+    /// Integers fails too). **Placeholder:** today they fail because the
+    /// filters are unknown here. Task B4 must keep every row failing for
+    /// Kestra's reason, then tighten this to Kestra's text.
+    #[test]
+    fn a_filter_input_kestra_refuses_is_refused_here_too() {
+        assert_each_fails(&[
+            ("{{ 'abc' | abbreviate(-1) }}", json!({})),
+            ("{{ n | abbreviate(3) }}", json!({ "n": 123456 })),
+            ("{{ '!!' | base64decode }}", json!({})),
+            ("{{ 'a' | merge(['b']) }}", json!({})),
+            ("{{ '12' | numberformat }}", json!({})),
+            ("{{ l | rsort }}", json!({ "l": [1.5, 3, 2] })),
+            ("{{ [1, 'a'] | rsort }}", json!({})),
+        ]);
+    }
+
+    /// Package #5b, Task B1 (spec D12): a strategy Pebble's `EscapeFilter`
+    /// does not register fails (`Unknown escaping strategy [x]`); the names
+    /// are case-sensitive, so `JS` is unknown too. **Placeholder:** today
+    /// every strategy but `html` is refused with egret's own text. Task B5
+    /// must keep these failing when it adds the other four, then tighten
+    /// this to Kestra's text.
+    #[test]
+    fn an_escape_strategy_pebble_does_not_know_is_refused() {
+        assert_each_fails(&[
+            (
+                "{{ s | escape(strategy='html_attr') }}",
+                json!({ "s": "a b" }),
+            ),
+            ("{{ s | escape(strategy='nope') }}", json!({ "s": "a" })),
+            ("{{ s | escape(strategy='JS') }}", json!({ "s": "a" })),
+        ]);
+    }
 }

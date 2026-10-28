@@ -820,3 +820,36 @@ operator-contains-number-left
 logic-and-list-left
 logic-or-null-context
 logic-and-map-left
+
+# --- Package #5b, Task B1 (2026-10-29). The probe batches of
+# docs/en/plans/2026-10-28-workflow-renderer.md B1 (tests, max/min, the ten
+# filters, escape strategies): every entry where Kestra throws -- strict
+# variables under `is null`/`is empty`, a ClassCastException from `json`,
+# `even`/`odd`, `abbreviate`, `rsort`, `invalid operands for mathematical
+# comparison` from max/min, and the filters' own PebbleException texts.
+test-null-missing-root
+test-null-missing-member
+test-empty-missing-root
+test-json-map
+test-json-list
+test-json-number
+test-json-null
+test-even-numeric-string
+test-odd-numeric-string
+test-even-string-literal
+test-even-double
+function-max-strings
+function-min-string-long
+function-max-numeric-string
+function-max-boolean
+function-max-list-long
+filter-abbreviate-negative
+filter-abbreviate-number
+filter-base64decode-bad
+filter-merge-string
+filter-numberformat-string
+filter-rsort-context-mixed-numbers
+filter-rsort-mixed
+filter-escape-html-attr
+filter-escape-unknown-strategy
+filter-escape-uppercase-strategy
