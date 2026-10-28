@@ -118,8 +118,14 @@ impl ArithOp {
             ArithOp::Add if is_list(left) => {
                 let mut items = list_items(left);
                 if is_list(right) {
-                    items.extend(list_items(right));
+                    let more = list_items(right);
+                    let total = items.len().saturating_add(more.len());
+                    check_list_length(total)?;
+                    charge_list_work(state, total as u64)?;
+                    items.extend(more);
                 } else {
+                    check_list_length(items.len().saturating_add(1))?;
+                    charge_list_work(state, items.len() as u64 + 1)?;
                     items.push(right.clone());
                 }
                 Ok(MjValue::from(items))
@@ -128,9 +134,14 @@ impl ArithOp {
                 let mut items = list_items(left);
                 if is_list(right) {
                     let remove = list_items(right);
+                    // `removeAll`: every element against every one removed.
+                    charge_list_work(state, pair_work(items.len(), remove.len()))?;
                     items.retain(|item| !remove.iter().any(|r| java_equals(item, r)));
-                } else if let Some(at) = items.iter().position(|item| java_equals(right, item)) {
-                    items.remove(at);
+                } else {
+                    charge_list_work(state, items.len() as u64)?;
+                    if let Some(at) = items.iter().position(|item| java_equals(right, item)) {
+                        items.remove(at);
+                    }
                 }
                 Ok(MjValue::from(items))
             }
@@ -370,6 +381,82 @@ fn is_list(value: &MjValue) -> bool {
 
 fn list_items(value: &MjValue) -> Vec<MjValue> {
     value.try_iter().map(Iterator::collect).unwrap_or_default()
+}
+
+/// **egret-only bounds on the list operators** (fix wave #5a, I1; spec §6.1
+/// "Bounds on the list operators"). Kestra has neither.
+///
+/// `ArrayList.removeAll` and `containsAll` compare every element of one list
+/// with every element of the other, so `(0..999999) - (0..999999)` -- 35
+/// bytes of template, or of webhook data a fixpoint render evaluates -- is
+/// 10^12 comparisons (measured: 30 000 x 30 000 took 5.9 s, so that one is
+/// about 1.8 h). Fuel cannot stop it: a function call is one VM instruction.
+/// And list `+` materialises its result, so ten `{% set l = l + l %}` on a
+/// million-element list is 10^9 values, an OOM kill of the whole worker.
+///
+/// Two ceilings, each named in the refusal:
+///
+/// - [`MAX_LIST_OPERATOR_WORK`]: every list operator (`+`, `-`, `contains`)
+///   charges what it will do -- `n x m` element comparisons for `removeAll`
+///   and `containsAll`, `n` for a scan or a copy -- to ONE budget for the
+///   whole render, before doing it. A budget per render rather than per call,
+///   because fuel lets 50 000 calls through and 50 000 x anything-per-call is
+///   no bound at all. Ten million is ~70 ms of comparisons (measured
+///   10^8 in 0.66 s).
+/// - [`MAX_LIST_OPERATOR_LENGTH`]: no list operator builds a list longer than
+///   a million elements, Kestra's own `range` ceiling
+///   (`BoundedRangeFunction.MAX_RANGE_SIZE`), so a list operator can build
+///   nothing `..` could not.
+pub(super) const MAX_LIST_OPERATOR_WORK: u64 = 10_000_000;
+
+/// See [`MAX_LIST_OPERATOR_WORK`].
+pub(super) const MAX_LIST_OPERATOR_LENGTH: usize = 1_000_000;
+
+/// The per-render tally behind [`MAX_LIST_OPERATOR_WORK`], kept in the
+/// render's temps (one `State` per render, shared by every nested call).
+#[derive(Debug, Default)]
+struct ListOperatorWork(std::sync::atomic::AtomicU64);
+
+impl minijinja::value::Object for ListOperatorWork {}
+
+/// `n x m` comparisons, never less than the `n` the copy itself costs.
+pub(super) fn pair_work(n: usize, m: usize) -> u64 {
+    (n as u64).saturating_mul(m as u64).max(n as u64)
+}
+
+/// Charge `units` of list work to this render, or refuse BEFORE the work.
+pub(super) fn charge_list_work(state: &State, units: u64) -> Result<(), MjError> {
+    use std::sync::atomic::Ordering;
+    let tally = state.get_or_set_temp_object("egret.list_operator_work", ListOperatorWork::default);
+    let mut spent = tally.0.load(Ordering::Relaxed);
+    loop {
+        let after = spent.saturating_add(units);
+        if after > MAX_LIST_OPERATOR_WORK {
+            return Err(super::filters::pebble_error(format!(
+                "egret refuses list operations that compare or copy more than \
+                 {MAX_LIST_OPERATOR_WORK} elements in one render; this one would bring the \
+                 total to {after}"
+            )));
+        }
+        match tally
+            .0
+            .compare_exchange(spent, after, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(_) => return Ok(()),
+            Err(now) => spent = now,
+        }
+    }
+}
+
+/// Refuse a list operator result past [`MAX_LIST_OPERATOR_LENGTH`].
+fn check_list_length(len: usize) -> Result<(), MjError> {
+    if len > MAX_LIST_OPERATOR_LENGTH {
+        return Err(super::filters::pebble_error(format!(
+            "egret refuses a list operation whose result would have more than \
+             {MAX_LIST_OPERATOR_LENGTH} elements; this one would have {len}"
+        )));
+    }
+    Ok(())
 }
 
 /// `String.valueOf(Object)`: `"null"` for a null (a silent undefined is
@@ -1053,6 +1140,76 @@ mod tests {
         ] {
             assert_eq!(render_in(template, ctx).unwrap(), want, "{template}");
         }
+    }
+
+    /// I1 (fix wave #5a): the list operators' egret-only bounds. Each refused
+    /// template here would run for seconds to hours, or allocate gigabytes,
+    /// without them (sizes in the comments); with them each fails before the
+    /// work, so the whole test takes well under a second of operator time.
+    #[test]
+    fn the_list_operators_refuse_unbounded_work() {
+        let started = std::time::Instant::now();
+        let work = format!("compare or copy more than {MAX_LIST_OPERATOR_WORK} elements");
+        let length = format!("more than {MAX_LIST_OPERATOR_LENGTH} elements;");
+        for (template, ctx, cap) in [
+            // `removeAll`: 10^12 comparisons, about 1.8 h.
+            ("{{ ((0..999999) - (0..999999)) | length }}", json!({}), &work),
+            // `containsAll`: 5 x 10^11 comparisons.
+            ("{{ (0..999999) contains (0..999999) }}", json!({}), &work),
+            // The same, reached from data a fixpoint render evaluates.
+            (
+                "{{ s }}",
+                json!({"s": "{{ (0..999999) contains (0..999999) }}"}),
+                &work,
+            ),
+            // Cheap calls, many of them: one budget for the whole render.
+            // 2 x 10^9 comparisons (tens of seconds) without it.
+            (
+                "{% set big = 0..999999 %}{% for i in 0..1999 %}{{ big contains -1 }}{% endfor %}",
+                json!({}),
+                &work,
+            ),
+            (
+                "{% set big = 0..999999 %}{% for i in 0..1999 %}{{ (big - -1) | length }}{% endfor %}",
+                json!({}),
+                &work,
+            ),
+            // List `+`: ten doublings of a million is 10^9 values (tens of GB).
+            (
+                "{% set l = 0..999999 %}{% set l = l + l %}{% set l = l + l %}{% set l = l + l %}\
+                 {% set l = l + l %}{% set l = l + l %}{% set l = l + l %}{% set l = l + l %}\
+                 {% set l = l + l %}{% set l = l + l %}{% set l = l + l %}{{ l | length }}",
+                json!({}),
+                &length,
+            ),
+            ("{{ ((0..999999) + 1) | length }}", json!({}), &length),
+        ] {
+            let err = render_in(template, ctx).expect_err(template);
+            assert!(err.contains("egret refuses"), "{template}: {err}");
+            assert!(err.contains(cap.as_str()), "{template}: {err}");
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "the refusals took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Below the bounds the list operators answer as before.
+    #[test]
+    fn the_list_operator_bounds_leave_ordinary_lists_alone() {
+        for (template, want) in [
+            ("{{ (0..2999) - (0..2998) }}", "[2999]"),
+            ("{{ (0..2999) contains (0..2999) }}", "true"),
+            ("{{ ((0..499999) + (0..499998)) | length }}", "999999"),
+            ("{{ ((0..999998) + 1) | length }}", "1000000"),
+            ("{{ ((0..999999) - 5) | length }}", "999999"),
+        ] {
+            assert_eq!(render(template).unwrap(), want, "{template}");
+        }
+        assert_eq!(pair_work(0, 7), 0);
+        assert_eq!(pair_work(3, 0), 3);
+        assert_eq!(pair_work(usize::MAX, usize::MAX), u64::MAX);
     }
 
     /// Every arithmetic probe Kestra refuses fails here with Kestra's own

@@ -1216,6 +1216,18 @@ fn resolve_pieces(pieces: &[Piece], depth: usize) -> Result<String, RewriteError
         return Ok(resolved?.join(","));
     }
 
+    // A keyword argument (`f(k=v)`) or an assignment target (`{% with k = v
+    // %}`): `name =` is not part of any operand, so only the value is
+    // resolved. Without this an operator in the value took the name into its
+    // left operand (`abbreviate(kestra_bool(length=t) and ..)`, fix wave
+    // #5a I2) or, for `??` and `? :`, split it off into a call the parser
+    // refuses.
+    if let Some(eq_idx) = keyword_argument_equals(pieces) {
+        let name: String = pieces[..=eq_idx].iter().map(piece_text).collect();
+        let value = resolve_pieces(&pieces[eq_idx + 1..], depth + 1)?;
+        return Ok(format!("{name}{value}"));
+    }
+
     if let Some(colon_idx) = find_map_separator_colon(pieces) {
         let key = resolve_pieces(&pieces[..colon_idx], depth + 1)?;
         let value = resolve_pieces(&pieces[colon_idx + 1..], depth + 1)?;
@@ -1492,23 +1504,35 @@ fn range_operands(texts: &[String], dot: usize) -> Option<(usize, usize)> {
     loop {
         if end < texts.len() && (texts[end].starts_with('(') || texts[end].starts_with('[')) {
             end += 1;
-        } else if end + 1 < texts.len()
-            && texts[end] == "."
-            && texts[end + 1] != "."
-            && starts_operand(&texts[end + 1])
-        {
-            end += 2;
-        } else {
-            break;
+            continue;
         }
+        // A member step, with whitespace around its `.` as Pebble's lexer
+        // allows it (`1 .. o . x`, fix wave #5a M5; `path_operand` reads
+        // `o . a` the same way). A `.` followed by `.` is the next `..`.
+        let dot_at = skip_ws(end);
+        if dot_at + 1 < texts.len() && texts[dot_at] == "." && texts[dot_at + 1] != "." {
+            let name = skip_ws(dot_at + 1);
+            if name < texts.len() && starts_operand(&texts[name]) {
+                end = name + 1;
+                continue;
+            }
+        }
+        break;
     }
     Some((start, end))
 }
 
 /// Walks a postfix chain back from its last atom at `last`: a group right
 /// after an operand is a call or a subscript, and `.` between two operands is
-/// a member step.
+/// a member step, with whitespace allowed around that `.` (fix wave #5a M5).
 fn postfix_chain_start(texts: &[String], last: usize) -> usize {
+    let is_ws = |s: &str| !s.is_empty() && s.chars().all(char::is_whitespace);
+    let skip_ws_back = |mut at: usize| {
+        while at > 0 && is_ws(&texts[at - 1]) {
+            at -= 1;
+        }
+        at
+    };
     let mut start = last;
     loop {
         if start > 0
@@ -1516,11 +1540,19 @@ fn postfix_chain_start(texts: &[String], last: usize) -> usize {
             && ends_operand(&texts[start - 1])
         {
             start -= 1;
-        } else if start >= 2 && texts[start - 1] == "." && ends_operand(&texts[start - 2]) {
-            start -= 2;
-        } else {
-            return start;
+            continue;
         }
+        // `dot` is just past the `.`; one before it, a second `.`, would make
+        // it the end of a `..`, not a member step.
+        let dot = skip_ws_back(start);
+        if dot >= 1 && texts[dot - 1] == "." && !(dot >= 2 && texts[dot - 2] == ".") {
+            let before = skip_ws_back(dot - 1);
+            if before >= 1 && ends_operand(&texts[before - 1]) {
+                start = before - 1;
+                continue;
+            }
+        }
+        return start;
     }
 }
 
@@ -1574,6 +1606,38 @@ fn split_on_top_level_commas(pieces: &[Piece]) -> Option<Vec<&[Piece]>> {
     }
     segments.push(&pieces[start..]);
     Some(segments)
+}
+
+/// The verbatim text of one piece.
+fn piece_text(piece: &Piece) -> &str {
+    match piece {
+        Piece::Atom(s) | Piece::Op(_, s) => s,
+    }
+}
+
+/// Is this (already comma-isolated) slice `name = value`? Returns the index
+/// of the `=`: a single `=` atom (the tokenizer keeps `==`, `!=`, `<=` and
+/// `>=` whole, so this is never half of one) after one identifier, with only
+/// whitespace around them. That is minijinja's keyword argument and its
+/// `with`/`set` target, and in Kestra a named argument (Pebble's
+/// `NamedArgumentExpression`): never an operand of anything.
+fn keyword_argument_equals(pieces: &[Piece]) -> Option<usize> {
+    let is_space = |p: &Piece| matches!(p, Piece::Atom(s) if !s.is_empty() && s.trim().is_empty());
+    let mut i = pieces.iter().position(|p| !is_space(p))?;
+    match &pieces[i] {
+        Piece::Atom(name)
+            if name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphabetic() || c == '_')
+                && name.chars().all(|c| c.is_alphanumeric() || c == '_') => {}
+        _ => return None,
+    }
+    i += 1;
+    while i < pieces.len() && is_space(&pieces[i]) {
+        i += 1;
+    }
+    matches!(pieces.get(i), Some(Piece::Atom(s)) if s == "=").then_some(i)
 }
 
 /// Finds a map literal's key/value `:` -- distinguished from a ternary's `:`
@@ -2694,6 +2758,39 @@ but there is one on the next: '";
                 "{{ 1 .. 3 contains 2 }}",
                 "{{kestra_contains(( kestra_range(1, 3) ), ( 2 ))}}",
             ),
+        ] {
+            assert_eq!(rewrite_and_parse(source), expected, "{source}");
+        }
+    }
+
+    /// Fix wave #5a I2: `name =` is a boundary, so an operator in a named
+    /// argument's (or a `with` target's) value takes only the value.
+    #[test]
+    fn a_named_arguments_name_is_not_an_operand() {
+        for (source, expected) in [
+            (
+                "{{ f(k=a or b) }}",
+                "{{ f(k=kestra_bool(a ) or kestra_bool( b)) }}",
+            ),
+            (
+                "{{ f(k = a and b) }}",
+                "{{ f(k =kestra_bool( a ) and kestra_bool( b)) }}",
+            ),
+            (
+                "{{ f(k=l contains x) }}",
+                "{{ f(k=kestra_contains((l ), ( x))) }}",
+            ),
+            (
+                "{{ f(k=a ?? b) }}",
+                "{{ f(k=((a) if kestra_present(a) else ( b))) }}",
+            ),
+            ("{{ f(k=c ? 1 : 2) }}", "{{ f(k=( 1 ) if (c ) else  2) }}"),
+            (
+                "{{ f(x, k=a or b) }}",
+                "{{ f(x, k=kestra_bool(a ) or kestra_bool( b)) }}",
+            ),
+            // `==` is a comparison, never a named argument.
+            ("{{ f(a == b) }}", "{{ f(a == b) }}"),
         ] {
             assert_eq!(rewrite_and_parse(source), expected, "{source}");
         }

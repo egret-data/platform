@@ -44,7 +44,7 @@
 use minijinja::value::{Rest, Value as MjValue, ValueKind};
 use minijinja::{Environment, Error as MjError, State};
 
-use super::arith::{java_equals, java_string_value_of};
+use super::arith::{charge_list_work, java_equals, java_string_value_of, pair_work};
 use super::compare::assert_defined;
 use super::filters::{big_number_text, is_big_number, java_class_name, pebble_error};
 
@@ -79,14 +79,21 @@ fn kestra_contains(state: &State, left: MjValue, right: MjValue) -> Result<MjVal
             let items: Vec<MjValue> = left.try_iter()?.collect();
             let has = |needle: &MjValue| items.iter().any(|item| java_equals(item, needle));
             if matches!(right.kind(), ValueKind::Seq | ValueKind::Iterable) {
-                // `Collection.containsAll`.
-                right.try_iter()?.all(|needle| has(&needle))
+                // `Collection.containsAll`: every needle against every item,
+                // charged before the search (`super::arith`'s list bounds).
+                let needles: Vec<MjValue> = right.try_iter()?.collect();
+                charge_list_work(state, pair_work(items.len(), needles.len()))?;
+                needles.iter().all(has)
             } else {
+                charge_list_work(state, items.len() as u64)?;
                 has(&right)
             }
         }
         // `Map.containsKey`: the keys, never the values.
-        ValueKind::Map => left.try_iter()?.any(|key| java_equals(&key, &right)),
+        ValueKind::Map => {
+            charge_list_work(state, left.len().unwrap_or(0) as u64)?;
+            left.try_iter()?.any(|key| java_equals(&key, &right))
+        }
         ValueKind::String => {
             let haystack = left.as_str().unwrap_or_default();
             haystack.contains(java_string_value_of(&right).as_str())
@@ -258,11 +265,84 @@ mod tests {
             ("{% set r = 1 .. 2 %}{{ r }}", json!({}), "[1,2]"),
             ("{{ 2 isIn 1 .. 3 }}", json!({}), "true"),
             ("{{ 1 .. 3 contains 2 }}", json!({}), "true"),
+            // Whitespace around a member dot, on either side (fix wave #5a
+            // M5; Kestra answers `[1,2,3]` for the first, oracle probe
+            // 2026-10-29).
+            ("{{ 1 .. o . x }}", json!({"o": {"x": 3}}), "[1,2,3]"),
+            ("{{ o . x .. 4 }}", json!({"o": {"x": 3}}), "[3,4]"),
+            (
+                "{{ o .x .. o. y }}",
+                json!({"o": {"x": 1, "y": 2}}),
+                "[1,2]",
+            ),
             // A `.` that is not `..` is untouched.
             ("{{ 1.5 }}", json!({}), "1.5"),
             ("{{ '1..3' }}", json!({}), "1..3"),
         ] {
             assert_eq!(ok(template, ctx), want, "{template}");
+        }
+    }
+
+    /// Fix wave #5a I2: an operator in a named argument's value. Each
+    /// answer is Kestra's, measured with the oracle harness on 2026-10-29
+    /// (a probe batch against the pinned artifact).
+    #[test]
+    fn an_operator_in_a_named_argument_is_the_arguments_value() {
+        for (template, ctx, want) in [
+            (
+                "{{ range(start=0, end=l contains 'x' ? 2 : 3) }}",
+                json!({"l": ["x"]}),
+                "[0,1,2]",
+            ),
+            (
+                "{{ range(start=0, end=l contains 'y' ? 2 : 3) }}",
+                json!({"l": ["x"]}),
+                "[0,1,2,3]",
+            ),
+            (
+                "{{ range(start=0, end=(t and 5) ? 1 : 2) }}",
+                json!({"t": true}),
+                "[0,1]",
+            ),
+            (
+                "{{ range(start=0, end = f or t ? 1 : 2) }}",
+                json!({"t": true, "f": false}),
+                "[0,1]",
+            ),
+            (
+                "{{ range(start=0, end=o.a ?? 2) }}",
+                json!({"o": {}}),
+                "[0,1,2]",
+            ),
+            (
+                "{{ range(start=0, end=n ?? 3) }}",
+                json!({"n": null}),
+                "[0,1,2,3]",
+            ),
+            (
+                "{{ [1, 2, 3, 4, 5] | chunk(size=t and f ? 1 : 2) }}",
+                json!({"t": true, "f": false}),
+                "[[1,2],[3,4],[5]]",
+            ),
+            ("{{ fromIon(ion=x ?? '1') }}", json!({"x": null}), "1"),
+        ] {
+            assert_eq!(ok(template, ctx), want, "{template}");
+        }
+        // The value is a Boolean, which `range` refuses with Kestra's text --
+        // no longer the kwargs map reaching `kestra_bool` (a
+        // `LinkedHashMap` cast) or a syntax error.
+        for template in [
+            "{{ range(start=0, end=t and 5) }}",
+            "{{ range(start=0, end=t or f) }}",
+            "{{ range(start=0, end=l contains 2) }}",
+        ] {
+            let error = render_in(template, json!({"t": true, "f": false, "l": [2]})).unwrap_err();
+            assert!(
+                error.contains(
+                    "Arguments of range function must be of type Number or String with a length of 1"
+                ),
+                "{template}: {error}"
+            );
         }
     }
 
