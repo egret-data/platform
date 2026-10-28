@@ -22,13 +22,11 @@
 # "W2 Task 6, fix round 2".
 
 
-# Pebble THROWS on a String/Number mix; minijinja coerces. Recorded divergence, task-3-report.md S4.
-gt-mixed
-
-# as gt-mixed
-lt-mixed
-lte-mixed
-gte-mixed
+# (W2 Task 3's `gt-mixed`, `lt-mixed`, `lte-mixed` and `gte-mixed` were here:
+# Pebble THROWS on a String/Number mix and minijinja coerced. Package #5a's
+# Task A2 (spec D1) made egret's relational operators Kestra's, so all four
+# BANKED; `compare::tests::a_comparison_kestra_refuses_fails_with_kestras_text`
+# holds them now.)
 
 # Pebble coerces and/or to a strict boolean; minijinja returns an operand. Needs kestra_and/kestra_or.
 coalesce-and
@@ -846,24 +844,9 @@ loop-index-and-revindex
 # line below fails today; the comment above each group names the task that
 # banks it (or marks it a recorded divergence). Corpus order inside a group.
 
-# A2 (D1): strict comparison, left-associative chains. Kestra fails a
-# mixed or non-number comparison, answers `false` for a null operand, and
-# compares `(a < b) < c`; egret falls back to a total order and chains.
-cmp-long-lt-string
-cmp-long-gt-numeric-string-context
-cmp-boolean-lt-long
-cmp-boolean-lt-boolean
-cmp-list-lt-list
-cmp-map-lt-map
-cmp-null-lt-long
-cmp-null-gte-null
-cmp-null-lte-long
-cmp-null-lt-string
-chain-lt-ascending
-chain-lt-descending
-chain-eq-false
-chain-lt-then-eq
-chain-eq-then-lt
+# (A2 (D1)'s fifteen were here -- `cmp-*` mixed, non-number and null
+# comparisons and `chain-*` -- and all fifteen BANKED with Task A2, which
+# made `<`, `<=`, `>`, `>=` Kestra's and compiles a chain left-associatively.)
 
 # A3 (D2): Long/Double arithmetic and operand kinds. Kestra divides integers,
 # wraps a long, fails `/ 0`, and treats strings and lists as OperatorUtils does;

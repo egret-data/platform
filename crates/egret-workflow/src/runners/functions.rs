@@ -5066,11 +5066,18 @@ mod tests {
                 ("{{ kv('d') != kv('d150') }}".into(), "false"),
                 ("{{ kv('d9') >= kv('d10') }}".into(), "false"),
                 ("{{ kv('m2') <= kv('m1') }}".into(), "true"),
+                // (Two chains were here. Since package #5a Task A2 a chain is
+                // Pebble's left-associative one, which fails; it is asserted
+                // below, and the pairwise comparisons it meant are here.)
                 (
-                    "{{ kv('m2') < kv('m1') < kv('d') < kv('d10') }}".into(),
+                    "{{ kv('m2') < kv('m1') and kv('m1') < kv('d') and kv('d') < kv('d10') }}"
+                        .into(),
                     "true",
                 ),
-                ("{{ kv('m1') > kv('m2') > kv('d') }}".into(), "false"),
+                (
+                    "{{ kv('m1') > kv('m2') and kv('m2') > kv('d') }}".into(),
+                    "false",
+                ),
                 // An int on the other side, either side.
                 ("{{ kv('d') > 1 }}".into(), "true"),
                 ("{{ 2 > kv('d') }}".into(), "true"),
@@ -5105,6 +5112,10 @@ mod tests {
             for (template, want) in &rows {
                 assert_eq!(render(template, &cx).unwrap(), *want, "{template}");
             }
+            // A chain compares a boolean on its outer step, which Kestra
+            // refuses (spec D1).
+            let e = render("{{ kv('m2') < kv('m1') < kv('d') }}", &cx).unwrap_err();
+            assert!(e.contains("Could not perform less than comparison"), "{e}");
             // Arithmetic stays a named refusal.
             let e = render("{{ kv('d') + 1 }}", &cx).unwrap_err();
             assert!(e.contains("tried to use + operator"), "{e}");

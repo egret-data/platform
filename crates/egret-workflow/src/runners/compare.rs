@@ -23,14 +23,23 @@
 //!
 //! - answers **exactly** when a `BigNumber` meets a number or another
 //!   `BigNumber` (see [`exact_cmp`]), and
-//! - otherwise answers **with minijinja's own `PartialEq`/`Ord`**, after the
-//!   same undefined checks, in the same order, raising the same error the VM
-//!   instruction would have raised.
+//! - otherwise answers `==`, `!=`, `in` and `not in` **with minijinja's own
+//!   `PartialEq`**, after the same undefined checks, in the same order,
+//!   raising the same error the VM instruction would have raised.
 //!
-//! The second half is what makes the pass safe to apply to every comparison
-//! in every template: for any pair without a `BigNumber` the function and the
-//! instruction are the same code. `tests::the_comparator_agrees_with_minijinja_on_every_other_pair`
+//! The second half is what makes the pass safe to apply to every equality and
+//! containment test in every template: for any pair without a `BigNumber` the
+//! function and the instruction are the same code.
+//! `tests::equality_and_containment_agree_with_minijinja_on_every_other_pair`
 //! is the differential that holds it to that.
+//!
+//! **`<`, `<=`, `>` and `>=` are Kestra's, not minijinja's** (package #5a,
+//! spec D1): two strings or two numbers are ordered, a null answers `false`,
+//! and every other pair fails with Kestra's own text -- see [`relational`].
+//! minijinja's total order across kinds (`'2' > 10` was `true`) is gone. A
+//! chain `a < b < c` is no longer minijinja's `a < b and b < c`: the pass
+//! compiles it left-associatively, as Pebble parses it, so the outer
+//! comparison sees a boolean and fails.
 //!
 //! **A float is compared by its exact binary value** (the ruling, 2026-10-08).
 //! `0.1` the float is `0.1000000000000000055511151231257827…`, so
@@ -43,7 +52,7 @@
 
 use std::cmp::Ordering;
 
-use minijinja::value::{ObjectRepr, Rest, StringInput, Value as MjValue};
+use minijinja::value::{ObjectRepr, StringInput, Value as MjValue};
 use minijinja::{Environment, Error as MjError, ErrorKind, State};
 
 pub(super) use super::cmp_rewrite::compile_comparisons;
@@ -294,7 +303,7 @@ fn assert_defined(state: &State, value: &MjValue) -> Result<(), MjError> {
     }
 }
 
-/// A comparison operator, as the rewriter spells it in a chain.
+/// A comparison operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CmpOp {
     Eq,
@@ -308,8 +317,7 @@ pub(super) enum CmpOp {
 }
 
 impl CmpOp {
-    /// The function a single comparison becomes, and the word a chain names
-    /// the operator by.
+    /// The function a comparison becomes.
     pub(super) fn function(self) -> &'static str {
         match self {
             CmpOp::Eq => "kestra_eq",
@@ -323,38 +331,14 @@ impl CmpOp {
         }
     }
 
-    pub(super) fn word(self) -> &'static str {
-        match self {
-            CmpOp::Eq => "eq",
-            CmpOp::Ne => "ne",
-            CmpOp::Lt => "lt",
-            CmpOp::Le => "le",
-            CmpOp::Gt => "gt",
-            CmpOp::Ge => "ge",
-            CmpOp::In => "in",
-            CmpOp::NotIn => "not_in",
-        }
-    }
-
-    fn from_word(word: &str) -> Option<CmpOp> {
-        Some(match word {
-            "eq" => CmpOp::Eq,
-            "ne" => CmpOp::Ne,
-            "lt" => CmpOp::Lt,
-            "le" => CmpOp::Le,
-            "gt" => CmpOp::Gt,
-            "ge" => CmpOp::Ge,
-            "in" => CmpOp::In,
-            "not_in" => CmpOp::NotIn,
-            _ => return None,
-        })
-    }
-
     /// One comparison, with the VM's checks in the VM's order.
     ///
-    /// `Eq`..`Gte` (`op_binop!` and `CompareAndPreserve`): the left operand,
-    /// then the right. `In` (`Instruction::In`): the CONTAINER first
-    /// (`assert_iterable`), then the needle, then `ops::contains`.
+    /// `Eq`/`Ne` (`op_binop!`): the left operand, then the right, then
+    /// minijinja's `PartialEq` (exact for a `BigNumber`). `In`
+    /// (`Instruction::In`): the CONTAINER first (`assert_iterable`), then the
+    /// needle, then `ops::contains`. `Lt`..`Ge`: the left operand, then the
+    /// right, then [`relational`] -- Kestra's rule, not minijinja's total
+    /// order (package #5a, D1).
     fn apply(self, state: &State, left: &MjValue, right: &MjValue) -> Result<bool, MjError> {
         match self {
             CmpOp::In | CmpOp::NotIn => {
@@ -363,21 +347,97 @@ impl CmpOp {
                 let found = contains(right, left)?;
                 Ok(if self == CmpOp::In { found } else { !found })
             }
-            _ => {
+            CmpOp::Eq | CmpOp::Ne => {
                 assert_defined(state, left)?;
                 assert_defined(state, right)?;
-                Ok(match self {
-                    CmpOp::Eq => values_eq(left, right),
-                    CmpOp::Ne => !values_eq(left, right),
-                    CmpOp::Lt => values_cmp(left, right) == Ordering::Less,
-                    CmpOp::Le => values_cmp(left, right) != Ordering::Greater,
-                    CmpOp::Gt => values_cmp(left, right) == Ordering::Greater,
-                    CmpOp::Ge => values_cmp(left, right) != Ordering::Less,
-                    CmpOp::In | CmpOp::NotIn => unreachable!("handled above"),
-                })
+                let equal = values_eq(left, right);
+                Ok(if self == CmpOp::Eq { equal } else { !equal })
+            }
+            CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge => {
+                assert_defined(state, left)?;
+                assert_defined(state, right)?;
+                match relational(left, right) {
+                    Relational::Ordered(ordering) => Ok(match self {
+                        CmpOp::Lt => ordering == Ordering::Less,
+                        CmpOp::Le => ordering != Ordering::Greater,
+                        CmpOp::Gt => ordering == Ordering::Greater,
+                        _ => ordering != Ordering::Less,
+                    }),
+                    Relational::Unordered => Ok(false),
+                    Relational::Refused => Err(MjError::new(
+                        ErrorKind::InvalidOperation,
+                        self.kestra_refusal(),
+                    )),
+                }
             }
         }
     }
+
+    /// The text Kestra's `LessThanExpression` & co. wrap `OperatorUtils`'
+    /// failure in, verbatim -- `comparisonPebb` included: that is how
+    /// `io.kestra.core.runners.pebble.expression.LessThanExpression` spells
+    /// it, and the oracle's goldens (`lt-mixed`, `cmp-*`, `chain-*`) hold it.
+    fn kestra_refusal(self) -> &'static str {
+        match self {
+            CmpOp::Lt => "Could not perform less than comparisonPebb",
+            CmpOp::Le => "Could not perform less than or equals comparison",
+            CmpOp::Gt => "Could not perform greater than comparison",
+            CmpOp::Ge => "Could not perform greater than or equals comparison",
+            _ => unreachable!("only a relational operator is refused"),
+        }
+    }
+}
+
+/// What a relational operator (`<`, `<=`, `>`, `>=`) makes of a pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Relational {
+    Ordered(Ordering),
+    /// The answer is `false` whatever the operator: a null on either side,
+    /// or a NaN.
+    Unordered,
+    /// Kestra fails the render.
+    Refused,
+}
+
+/// Kestra's relational comparison (`io.kestra.core.runners.pebble.expression
+/// .LessThanExpression` and its three siblings, over Pebble 4.1.2's
+/// `OperatorUtils.wideningConversionBinaryComparison`, read with `javap -c`):
+///
+/// 1. two strings compare with `String.compareTo`, which orders UTF-16 code
+///    units (so a supplementary character sorts below U+E000..U+FFFF, where
+///    Rust's `str` order would put it above);
+/// 2. otherwise a null on either side answers `false` -- a silent undefined
+///    (a missing `else`) is egret's spelling of that null;
+/// 3. otherwise two numbers compare numerically, and any comparison with a
+///    NaN is `false` (`dcmpl`/`dcmpg`);
+/// 4. anything else -- a string against a number, a boolean, a list, a map,
+///    and so the boolean a left-associative chain `a < b < c` hands its outer
+///    comparison -- fails (`ClassCastException`, wrapped as `Could not perform
+///    … comparison`).
+///
+/// **Numbers compare as egret has compared them since W9c Task 4**, exactly
+/// for a `BigNumber` and with minijinja's numeric order otherwise; Pebble
+/// compares every pair by `doubleValue()`. The two differ only past 2^53 or
+/// past a double's 17th digit (spec §15 of W9c records it).
+fn relational(left: &MjValue, right: &MjValue) -> Relational {
+    if let (Some(a), Some(b)) = (left.as_str(), right.as_str()) {
+        return Relational::Ordered(a.encode_utf16().cmp(b.encode_utf16()));
+    }
+    let is_null = |v: &MjValue| v.is_none() || v.is_undefined();
+    if is_null(left) || is_null(right) {
+        return Relational::Unordered;
+    }
+    let is_numeric = |v: &MjValue| v.is_number() || super::filters::is_big_number(v);
+    if !is_numeric(left) || !is_numeric(right) {
+        return Relational::Refused;
+    }
+    let is_nan = |v: &MjValue| {
+        v.is_number() && !v.is_integer() && f64::try_from(v.clone()).is_ok_and(f64::is_nan)
+    };
+    if is_nan(left) || is_nan(right) {
+        return Relational::Unordered;
+    }
+    Relational::Ordered(values_cmp(left, right))
 }
 
 /// minijinja's `value::ops::contains`, line for line, with the element test
@@ -429,52 +489,7 @@ comparison_function!(kestra_ge, CmpOp::Ge);
 comparison_function!(kestra_in, CmpOp::In);
 comparison_function!(kestra_not_in, CmpOp::NotIn);
 
-/// A chained comparison, `a < b < c`: `kestra_compare_chain(a, 'lt', b,
-/// 'lt', c)`.
-///
-/// minijinja's chain (`compile_compare`) compares left to right, each operand
-/// evaluated once, and stops at the first `false`, which is the answer; the
-/// last comparison's result is the answer otherwise. This does the same, so a
-/// later operand's UNDEFINED check never runs after a `false` -- as there.
-///
-/// **One difference, and it is the price of a call:** every operand is
-/// evaluated before the call, so an operand whose EVALUATION raises (a missing
-/// attribute of a missing variable, a failing filter) raises here even when an
-/// earlier comparison was already `false`, where minijinja's chain would never
-/// have evaluated it. `tests::a_chain_evaluates_every_operand` pins it.
-fn kestra_compare_chain(state: &State, args: Rest<MjValue>) -> Result<bool, MjError> {
-    let args = &args.0;
-    if args.len() < 3 || args.len().is_multiple_of(2) {
-        return Err(MjError::new(
-            ErrorKind::InvalidOperation,
-            "kestra_compare_chain takes operands separated by operator names",
-        ));
-    }
-    let mut result = true;
-    let mut index = 1;
-    while index < args.len() {
-        let op = args[index]
-            .as_str()
-            .and_then(CmpOp::from_word)
-            .ok_or_else(|| {
-                MjError::new(
-                    ErrorKind::InvalidOperation,
-                    "kestra_compare_chain: an operator name was expected",
-                )
-            })?;
-        result = op.apply(state, &args[index - 1], &args[index + 1])?;
-        if !result {
-            return Ok(false);
-        }
-        index += 2;
-    }
-    Ok(result)
-}
-
-/// The name of the chain function, for the rewriter.
-pub(super) const CHAIN_FUNCTION: &str = "kestra_compare_chain";
-
-/// Registers the nine functions.
+/// Registers the eight functions.
 pub(super) fn register(env: &mut Environment<'static>) {
     env.add_function("kestra_eq", kestra_eq);
     env.add_function("kestra_ne", kestra_ne);
@@ -484,7 +499,6 @@ pub(super) fn register(env: &mut Environment<'static>) {
     env.add_function("kestra_ge", kestra_ge);
     env.add_function("kestra_in", kestra_in);
     env.add_function("kestra_not_in", kestra_not_in);
-    env.add_function(CHAIN_FUNCTION, kestra_compare_chain);
 }
 
 /// For the `sort` filter and `BigNumber::custom_cmp`: the exact order of two
@@ -588,17 +602,58 @@ mod tests {
 
     const OPS: &[&str] = &["==", "!=", "<", "<=", ">", ">=", "in", "not in"];
 
-    /// **The differential.** For every pair of [`OPERANDS`] under every
-    /// operator, the compiled template answers -- or refuses, word for word --
-    /// exactly as minijinja's own operator did.
+    /// The operators that still answer as minijinja does.
+    const EQUALITY_OPS: &[&str] = &["==", "!=", "in", "not in"];
+
+    /// The operators that answer as Kestra does (D1).
+    const RELATIONAL_OPS: &[&str] = &["<", "<=", ">", ">="];
+
+    /// Kestra's refusal text for each relational operator.
+    fn kestra_refusal(op: &str) -> &'static str {
+        match op {
+            "<" => "Could not perform less than comparisonPebb",
+            "<=" => "Could not perform less than or equals comparison",
+            ">" => "Could not perform greater than comparison",
+            ">=" => "Could not perform greater than or equals comparison",
+            _ => unreachable!(),
+        }
+    }
+
+    /// What an [`OPERANDS`] entry is to a relational operator, written out by
+    /// hand so the test does not ask the code under test.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Class {
+        Number,
+        NaN,
+        Text,
+        Null,
+        Undefined,
+        Other,
+    }
+
+    fn class(operand: &str) -> Class {
+        match operand {
+            "(1e400 - 1e400)" => Class::NaN,
+            "'a'" | "'b'" | "''" | "'1'" | "'1.5'" | "'abc'" | "cs" => Class::Text,
+            "none" | "cn" | "(1 if false)" => Class::Null,
+            "nothere" => Class::Undefined,
+            "true" | "false" | "[]" | "[1]" | "[1, 2]" | "['a']" | "[none]" | "{}" | "{'a': 1}"
+            | "cl" | "cm" => Class::Other,
+            _ => Class::Number,
+        }
+    }
+
+    /// **The differential.** For every pair of [`OPERANDS`] under `==`, `!=`,
+    /// `in` and `not in`, the compiled template answers -- or refuses, word
+    /// for word -- exactly as minijinja's own operator did.
     #[test]
-    fn the_comparator_agrees_with_minijinja_on_every_other_pair() {
+    fn equality_and_containment_agree_with_minijinja_on_every_other_pair() {
         let ctx = context();
         let mut checked = 0usize;
         let mut errors = 0usize;
         for a in OPERANDS {
             for b in OPERANDS {
-                for op in OPS {
+                for op in EQUALITY_OPS {
                     let template = format!("{{{{ {a} {op} {b} }}}}");
                     let (old, new, compiled) = old_and_new(&template, &ctx);
                     assert!(compiled.contains("kestra_"), "{template} was not compiled");
@@ -609,36 +664,157 @@ mod tests {
             }
         }
         // Both halves are populated: answers and refusals.
-        assert_eq!(checked, OPERANDS.len() * OPERANDS.len() * OPS.len());
+        assert_eq!(
+            checked,
+            OPERANDS.len() * OPERANDS.len() * EQUALITY_OPS.len()
+        );
         assert!(
             errors > 100 && errors < checked / 2,
             "{errors} of {checked} refused"
         );
     }
 
-    /// The same for two-operator chains, which minijinja evaluates
-    /// left to right and stops at the first `false`.
+    /// **D1, over every pair of [`OPERANDS`].** A relational operator answers
+    /// as Kestra's `LessThanExpression` & co.: an undefined operand raises
+    /// minijinja's own error as before, two strings and two numbers are
+    /// ordered as before, a null on either side or a NaN answers `false`, and
+    /// every other pair fails with Kestra's text.
     #[test]
-    fn a_chain_agrees_with_minijinja_on_every_other_triple() {
+    fn a_relational_operator_answers_as_kestra_on_every_pair() {
         let ctx = context();
-        let operands = ["1", "2", "1.5", "'a'", "none", "[1]", "nothere", "ci"];
+        let (mut ordered, mut unordered, mut refused) = (0usize, 0usize, 0usize);
+        for a in OPERANDS {
+            for b in OPERANDS {
+                for op in RELATIONAL_OPS {
+                    let template = format!("{{{{ {a} {op} {b} }}}}");
+                    let (old, new, compiled) = old_and_new(&template, &ctx);
+                    assert!(compiled.contains("kestra_"), "{template} was not compiled");
+                    let (ca, cb) = (class(a), class(b));
+                    if ca == Class::Undefined || cb == Class::Undefined {
+                        assert_eq!(new, old, "{template}");
+                        assert!(new.is_err(), "{template}");
+                    } else if ca == Class::Text && cb == Class::Text
+                        || ca == Class::Number && cb == Class::Number
+                    {
+                        assert_eq!(new, old, "{template}");
+                        ordered += 1;
+                    } else if ca == Class::Null
+                        || cb == Class::Null
+                        || matches!((ca, cb), (Class::NaN, Class::Number | Class::NaN))
+                        || (ca, cb) == (Class::Number, Class::NaN)
+                    {
+                        assert_eq!(new.as_deref(), Ok("false"), "{template}");
+                        unordered += 1;
+                    } else {
+                        let error = new.expect_err(&template);
+                        assert!(error.contains(kestra_refusal(op)), "{template}: {error}");
+                        refused += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            ordered > 500 && unordered > 300 && refused > 1000,
+            "{ordered} ordered, {unordered} unordered, {refused} refused"
+        );
+    }
+
+    /// **A chain is left-associative** (D1): every two-operator chain renders
+    /// -- or fails, word for word -- as its parenthesised left-hand reading.
+    #[test]
+    fn a_chain_is_its_left_associative_reading_on_every_triple() {
+        let ctx = context();
+        let operands = [
+            "1", "2", "1.5", "'a'", "none", "[1]", "nothere", "ci", "true",
+        ];
         let mut checked = 0usize;
         for a in operands {
             for b in operands {
                 for c in operands {
                     for op1 in OPS {
-                        for op2 in ["<", "==", "in", ">="] {
-                            let template = format!("{{{{ {a} {op1} {b} {op2} {c} }}}}");
-                            let (old, new, compiled) = old_and_new(&template, &ctx);
-                            assert!(compiled.contains(CHAIN_FUNCTION), "{compiled}");
-                            assert_eq!(new, old, "{template} (compiled: {compiled})");
+                        for op2 in ["<", "==", "in", ">=", "!="] {
+                            let chain = format!("{{{{ {a} {op1} {b} {op2} {c} }}}}");
+                            let grouped = format!("{{{{ ({a} {op1} {b}) {op2} {c} }}}}");
+                            let (_, new, compiled) = old_and_new(&chain, &ctx);
+                            let (_, want, _) = old_and_new(&grouped, &ctx);
+                            assert_eq!(compiled.matches("kestra_").count(), 2, "{compiled}");
+                            assert_eq!(new, want, "{chain} (compiled: {compiled})");
                             checked += 1;
                         }
                     }
                 }
             }
         }
-        assert_eq!(checked, 8 * 8 * 8 * 8 * 4);
+        assert_eq!(checked, 9 * 9 * 9 * 8 * 5);
+    }
+
+    /// The oracle's comparison entries (`gt-mixed`, `lt-mixed`, `lte-mixed`,
+    /// `gte-mixed`, `cmp-*`, `chain-*`), as unit tests: what Kestra refuses
+    /// fails here with Kestra's own text, and what it answers is answered.
+    /// `oracle/error-class-pairs.txt` pairs the refused ones with this test.
+    #[test]
+    fn a_comparison_kestra_refuses_fails_with_kestras_text() {
+        for (template, ctx, op) in [
+            ("{{ '2' > 10 }}", json!({}), ">"),
+            ("{{ '2' < 10 }}", json!({}), "<"),
+            ("{{ '2' <= 10 }}", json!({}), "<="),
+            ("{{ '2' >= 10 }}", json!({}), ">="),
+            ("{{ n < '5' }}", json!({"n": 3}), "<"),
+            ("{{ a > b }}", json!({"a": 3, "b": "2"}), ">"),
+            ("{{ true < 3 }}", json!({}), "<"),
+            ("{{ false < true }}", json!({}), "<"),
+            ("{{ [1] < [2] }}", json!({}), "<"),
+            ("{{ m < n }}", json!({"m": {"a": 1}, "n": {"a": 2}}), "<"),
+            ("{{ 1 < 2 < 3 }}", json!({}), "<"),
+            ("{{ 3 < 2 < 1 }}", json!({}), "<"),
+            ("{{ 1 == 1 < 2 }}", json!({}), "<"),
+            // The corpus's one flow that writes it
+            // (`valids/loopuntil-failed-flowable`).
+            (
+                "{{ outputs.loop.iterationCount < \"5\" }}",
+                json!({"outputs": {"loop": {"iterationCount": 1}}}),
+                "<",
+            ),
+        ] {
+            let cx = RenderContext::from_json_object(&ctx).unwrap();
+            let error = render_str(template, &cx).unwrap_err().to_string();
+            assert!(error.contains(kestra_refusal(op)), "{template}: {error}");
+        }
+        for (template, ctx, want) in [
+            ("{{ n < 1 }}", json!({"n": null}), "false"),
+            ("{{ 1 < n }}", json!({"n": null}), "false"),
+            ("{{ n >= m }}", json!({"n": null, "m": null}), "false"),
+            ("{{ n <= 1 }}", json!({"n": null}), "false"),
+            ("{{ n > 1 }}", json!({"n": null}), "false"),
+            ("{{ n < 'a' }}", json!({"n": null}), "false"),
+            ("{{ 1.5 > 1 }}", json!({}), "true"),
+            ("{{ 'a' < 'b' }}", json!({}), "true"),
+            ("{{ 1 == 1 == true }}", json!({}), "true"),
+            ("{{ 1 == 2 == false }}", json!({}), "true"),
+            ("{{ 1 != 2 != false }}", json!({}), "true"),
+            ("{{ 1 < 2 == true }}", json!({}), "true"),
+            ("{{ (1e400 - 1e400) < 1 }}", json!({}), "false"),
+            (
+                "{{ (1e400 - 1e400) >= (1e400 - 1e400) }}",
+                json!({}),
+                "false",
+            ),
+        ] {
+            let cx = RenderContext::from_json_object(&ctx).unwrap();
+            assert_eq!(render_str(template, &cx).unwrap(), want, "{template}");
+        }
+    }
+
+    /// `String.compareTo` orders UTF-16 code units: a supplementary character
+    /// (a surrogate pair, `0xD83D…`) sorts BELOW U+FF21, where Rust's `str`
+    /// order (code points) puts it above.
+    #[test]
+    fn strings_compare_by_utf16_code_units_as_java_does() {
+        assert_eq!(render("{{ '\u{1F600}' < '\u{FF21}' }}").unwrap(), "true");
+        assert_eq!(render("{{ '\u{FF21}' > '\u{1F600}' }}").unwrap(), "true");
+        assert_eq!(render("{{ 'B' < 'a' }}").unwrap(), "true");
+        assert_eq!(render("{{ 'ab' <= 'ab' }}").unwrap(), "true");
+        assert_eq!(render("{{ 'abc' > 'ab' }}").unwrap(), "true");
     }
 
     /// Precedence, associativity and statement positions: each shape renders
@@ -658,7 +834,6 @@ mod tests {
             "{{ a ** 2 >= b }}",
             "{{ -a < b }}",
             "{{ l | length > 2 }}",
-            "{{ l | length > 2 | string }}",
             "{{ a is defined == true }}",
             "{{ a is not defined == false }}",
             "{{ (a > b) == (b > c) }}",
@@ -674,15 +849,11 @@ mod tests {
             "{{ l[0:a > 1] }}",
             "{{ m.k == 1 }}",
             "{{ m['k'] != 1 }}",
-            "{{ a > b > c }}",
-            "{{ a < b > c }}",
-            "{{ a < b == c in l }}",
             "{{ a not in l }}",
             "{{ not a not in l }}",
             "{{ 'a' in s }}",
             "{{ s in 'xaby' }}",
             "{{ (a > b) is defined }}",
-            "{{ a > b is defined }}",
             "{% if a > b %}x{% elif a == b %}y{% else %}z{% endif %}",
             "{% if not a > b %}x{% endif %}",
             "{% for x in l if x > 1 %}{{ x }}{% endfor %}",
@@ -699,7 +870,6 @@ mod tests {
             // The first pass's own output composes.
             "{{ a ?? b > c }}",
             "{{ a > b ? 'y' : 'n' }}",
-            "{{ a isIn l == true }}",
             "{{ nothere ?? 1 > 0 }}",
         ];
         for template in shapes {
@@ -710,6 +880,28 @@ mod tests {
             );
             assert!(old.is_ok(), "{template}: {old:?}");
             assert_eq!(new, old, "{template} (compiled: {compiled})");
+        }
+        // The shapes whose answer D1 changed: a chain is left-associative,
+        // and a relational operator over a string and a number, or a boolean,
+        // fails as Kestra fails.
+        let cx = RenderContext::from_json_object(&ctx).unwrap();
+        for (template, want) in [
+            ("{{ a > b > c }}", Err(">")),
+            ("{{ a < b > c }}", Err(">")),
+            ("{{ a > b is defined }}", Err(">")),
+            ("{{ l | length > 2 | string }}", Err(">")),
+            ("{{ a < b == true }}", Ok("true")),
+            ("{{ a isIn l == true }}", Ok("true")),
+            ("{{ a < b == c in [false] }}", Ok("true")),
+        ] {
+            match (render_str(template, &cx), want) {
+                (Ok(got), Ok(want)) => assert_eq!(got, want, "{template}"),
+                (Err(error), Err(op)) => {
+                    let error = error.to_string();
+                    assert!(error.contains(kestra_refusal(op)), "{template}: {error}");
+                }
+                (got, want) => panic!("{template}: {got:?}, want {want:?}"),
+            }
         }
     }
 
@@ -722,9 +914,18 @@ mod tests {
             ("{{a==b}}", "{{ kestra_eq(a,b)}}"),
             // The gap between `not` and `in` is kept too.
             ("{{ a not in b }}", "{{ kestra_not_in( a ,  b) }}"),
+            // A chain, left-associatively (D1).
             (
                 "{{ a < b <= c }}",
-                "{{ kestra_compare_chain( a , 'lt', b , 'le', c) }}",
+                "{{ kestra_le( kestra_lt( a , b ), c) }}",
+            ),
+            (
+                "{{ a in b not in c }}",
+                "{{ kestra_not_in( kestra_in( a , b ),  c) }}",
+            ),
+            (
+                "{{ a == b != c > d }}",
+                "{{ kestra_gt( kestra_ne( kestra_eq( a , b ), c ), d) }}",
             ),
             ("{% if not a > b %}", "{% if not kestra_gt( a , b) %}"),
             (
@@ -801,11 +1002,8 @@ mod tests {
             "line one\n{{ a\n  >\n  nothere }}\nafter {{ nothere2 }}",
             "{% if\n  nothere > 1 %}x{% endif %}",
             "{% for x in l if\n x > nothere %}{{ x }}{% endfor %}",
-            "{{ (1 if false) > 1 }}",
             "{{ (1 if false) == (2 if false) }}",
             "{{ 1 in (1 if false) }}",
-            "{{ 1 > 2 > nothere }}",
-            "{{ 1 < 2 > nothere }}",
         ] {
             let (old, new, compiled) = old_and_new(template, &ctx);
             assert_eq!(new, old, "{template} (compiled: {compiled})");
@@ -815,17 +1013,21 @@ mod tests {
         let (old, new, _) = old_and_new("{{\n  a\n  >\n  nothere\n}}", &ctx);
         assert_eq!(old.unwrap_err(), "undefined value (in <string>:4)");
         assert_eq!(new.unwrap_err(), "undefined value (in <string>:4)");
-    }
-
-    /// The one recorded difference of a chain: every operand is evaluated
-    /// before the call, so an operand whose EVALUATION raises raises even
-    /// after an earlier `false`. (A merely undefined operand does not; see
-    /// the test above.)
-    #[test]
-    fn a_chain_evaluates_every_operand() {
-        let (old, new, _) = old_and_new("{{ 1 > 2 > nothere.x }}", &json!({}));
-        assert_eq!(old.unwrap(), "false");
-        assert_eq!(new.unwrap_err(), "undefined value (in <string>:1)");
+        // A chain evaluates every operand before its outer comparison, as
+        // Pebble's left-associative tree does, so a strictly undefined third
+        // operand raises even after a `false` (D1; Kestra's
+        // `chain-lt-missing-operand` raises too).
+        for template in ["{{ 1 > 2 > nothere }}", "{{ 1 < 2 > nothere }}"] {
+            let (_, new, _) = old_and_new(template, &ctx);
+            assert_eq!(
+                new.unwrap_err(),
+                "undefined value (in <string>:1)",
+                "{template}"
+            );
+        }
+        // A silent undefined (a missing `else`) is egret's null: `false`.
+        let (_, new, _) = old_and_new("{{ (1 if false) > 1 }}", &ctx);
+        assert_eq!(new.unwrap(), "false");
     }
 
     /// Parenthesised comparisons nested to minijinja's own limit compile and
@@ -929,8 +1131,8 @@ mod tests {
                 "kestra_eq",
             ),
             (
-                "{% for k, kestra_compare_chain in {'a': 1} | items %}{% endfor %}",
-                "kestra_compare_chain",
+                "{% for k, kestra_le in {'a': 1} | items %}{% endfor %}",
+                "kestra_le",
             ),
             (
                 "{% with kestra_null_coalesce = 1 %}{% endwith %}",
@@ -1018,9 +1220,22 @@ mod tests {
                     ] {
                         let (old, new, compiled) = old_and_new(&template, &ctx);
                         assert!(compiled.contains("kestra_"), "{template}");
-                        assert_eq!(new, old, "{template} (compiled: {compiled})");
                         checked += 1;
-                        errors += usize::from(old.is_err());
+                        if !RELATIONAL_OPS.contains(op) {
+                            assert_eq!(new, old, "{template} (compiled: {compiled})");
+                            errors += usize::from(old.is_err());
+                            continue;
+                        }
+                        // D1: a null is `false`, an undefined raises as
+                        // before, anything else is Kestra's refusal.
+                        match class(other) {
+                            Class::Null => assert_eq!(new.as_deref(), Ok("false"), "{template}"),
+                            Class::Undefined => assert_eq!(new, old, "{template}"),
+                            _ => {
+                                let error = new.expect_err(&template);
+                                assert!(error.contains(kestra_refusal(op)), "{template}: {error}");
+                            }
+                        }
                     }
                 }
             }

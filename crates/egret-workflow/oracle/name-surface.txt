@@ -176,7 +176,6 @@ function	isFileEmpty	yes	yes	function-isfileempty	-
 function	isLastWorkingDay	yes	yes	function-islastworkingday	-
 function	isPublicHoliday	yes	yes	function-ispublicholiday	egret carries no holiday database and refuses by name rather than answering a date a flow branches on
 function	isWeekend	yes	yes	function-isweekend	-
-function	kestra_compare_chain	no	yes	-	egret-only by construction (W9c Task 4 fix round 1): `super::cmp_rewrite` compiles minijinja's chained comparison (`a < b < c`) into a call to it, so a comparison on an exact number (`BigDecimal`/`BigInteger`) is exact
 function	kestra_eq	no	yes	-	egret-only by construction (W9c Task 4 fix round 1): `super::cmp_rewrite` compiles minijinja's `==` into a call to it, so a comparison on an exact number (`BigDecimal`/`BigInteger`) is exact
 function	kestra_ge	no	yes	-	egret-only by construction (W9c Task 4 fix round 1): `super::cmp_rewrite` compiles minijinja's `>=` into a call to it, so a comparison on an exact number (`BigDecimal`/`BigInteger`) is exact
 function	kestra_gt	no	yes	-	egret-only by construction (W9c Task 4 fix round 1): `super::cmp_rewrite` compiles minijinja's `>` into a call to it, so a comparison on an exact number (`BigDecimal`/`BigInteger`) is exact

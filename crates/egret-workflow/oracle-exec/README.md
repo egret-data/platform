@@ -6322,7 +6322,7 @@ found.
 | 5 | `AllowFailure` / `allowFailure:` → `WARNING` | **W8 Task 5 banked seven of its twelve**; the five that remain are held by the FLOWABLE and not by the flag — see the paragraph below |
 | 3 | `Pause` → `PAUSED` | W8 — and **not one of the three is held by the wait**; see below |
 | 10 | `afterExecution:` | **unclaimed** |
-| 3 | `LoopUntil` / `WaitFor` | W8 — **and not one of the three is held by the loop** (eight until group C1 Task 2); see below. **8 → 3 at group C1 Task 2**: five of the six `OutputValues` ones banked |
+| 2 | `LoopUntil` / `WaitFor` | W8 — **and not one of the two is held by the loop** (eight until group C1 Task 2); see below. **8 → 3 at group C1 Task 2**: five of the six `OutputValues` ones banked. **3 → 2 at package #5a Task A2 (2026-10-28)**: `loopuntil-failed-flowable` banked (spec D1) |
 | 3 | `sla:` | **W8 Task 6 banked two of the five**; the three that remain are `MAX_DURATION`s and **no implementation can bank them under this harness** — see the fifth blindness mechanism below |
 | 4 | `WorkingDirectory` (planned opaque) | **unclaimed** |
 | **29** | **none of the above** | named individually in `UNATTRIBUTED` (36 → 30 at group C1 Task 2: six entries held by `OutputValues` alone banked; 30 → 29 at group C1 Task 3: `valids/assert` banked) |
@@ -6348,8 +6348,11 @@ further than it was.) `valids/loopuntil-failed-flowable` differs on ONE
 field — its condition is `{{ outputs.loop.iterationCount < "5" }}`, Pebble
 widens both operands of a relational operator to `Number` and throws on a
 `String`, minijinja orders across kinds and answers `True`, so the loop succeeds
-where the artifact failed the task; it is registered in
+where the artifact failed the task; it was registered in
 `STILL_OVER_ACCEPTED_AT_RUNTIME` with the four other renderer divergences.
+**(Package #5a Task A2, 2026-10-28: banked.** egret's `<`, `<=`, `>`, `>=` are
+Kestra's now (spec D1), the condition fails with Kestra's text, and the entry
+left the baseline and that register.)
 `valids/loop-until-restart` differs on ONE field too — four iterations against a
 golden of three, under `maxDuration: PT3S` with `interval: PT1S`, because the
 golden's third iteration is past that bound only by the **artifact's

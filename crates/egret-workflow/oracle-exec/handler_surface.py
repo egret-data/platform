@@ -720,22 +720,17 @@ def declared_blockers(entry, flows, kinds):
 #    that this is the construct and not the entry: `valids/waitfor-max-duration`
 #    is one of only two corpus flows Kestra itself could not reproduce across
 #    five rounds, so it has no golden entry at all.
-# 2. A relational operator against a QUOTED operand inside an expression.
-#    Pebble's `OperatorUtils` widens both sides to `Number` and throws on a
-#    `String`; minijinja orders values across types and answers a boolean.  The
-#    corpus has exactly one --- `valids/loopuntil-failed-flowable`'s
-#    `{{ outputs.loop.iterationCount < "5" }}`, where the artifact FAILS the
-#    task and egret succeeds --- and the regex is deliberately narrow enough to
-#    match only that shape: `valids/retry-with-flowable-errors` writes
-#    `{{ kv(...) < 2 ? ko : 'It works' }}`, whose operand is a bare number, and
-#    must NOT be blocked by this.
+# (2. was a relational operator against a QUOTED operand,
+#    `valids/loopuntil-failed-flowable`'s `{{ outputs.loop.iterationCount <
+#    "5" }}`: Pebble throws and minijinja answered. Package #5a Task A2 (spec
+#    D1) made egret's relational operators Kestra's and the entry banked, so
+#    the blocker is gone.)
 LOOP_UNTIL_TYPES = {
     "io.kestra.plugin.core.flow.LoopUntil",
     "io.kestra.plugin.core.flow.WaitFor",
     "core.loopuntil",
     "core.waitfor",
 }
-QUOTED_COMPARISON = re.compile(r"\{\{[^{}]*[<>]=?\s*\\?[\"'][^\"']*\\?[\"']")
 # End hooks A4 fix round (2026-10-27): Pebble's `empty` test (`x is empty`,
 # `x is not empty`). egret's renderer leaves it an unknown test on purpose
 # (`runners::env`'s fence test), so the expression fails to render where the
@@ -750,9 +745,6 @@ def loop_until_gaps(node, raw, out):
     if EMPTY_TEST.search(raw):
         out.add(("render", "Pebble's `empty` test, which egret's renderer "
                            "leaves unknown"))
-    if QUOTED_COMPARISON.search(raw):
-        out.add(("render", "a relational operator against a quoted operand; "
-                           "Pebble throws and minijinja answers"))
 
     def walk(n):
         if isinstance(n, dict):
@@ -1042,9 +1034,11 @@ def check_inputs(flows, kinds, golden, baseline):
     # once the execution is terminal). 50 since workflow-inputs Task A6
     # (2026-10-28) banked `invalids/inputs-bad-validator-syntax` (refused at
     # save, `Seam::Save`) and `invalids/inputs-with-multiple-constraint-
-    # violations` (refused at start, the new `Seam::Start`).
-    if len(baseline) != 50:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 50; the split "
+    # violations` (refused at start, the new `Seam::Start`). 49 since package
+    # #5a Task A2 (2026-10-28) banked `valids/loopuntil-failed-flowable` (a
+    # relational operator against a quoted operand now fails as Kestra's does).
+    if len(baseline) != 49:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 49; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1694,8 +1688,8 @@ def self_test():
          "not 273",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 50",
-         "not 50",
+    case("baseline.txt is no longer 49",
+         "not 49",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

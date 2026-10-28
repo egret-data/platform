@@ -836,7 +836,11 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
         // `Seam::Save` group (`input_validator_invalid`) and
         // `invalids/inputs-with-multiple-constraint-violations` through the
         // new `Seam::Start` group; 50 + 251 = 301.
-        (301, 251, 50),
+        // 50 -> 49 baselined, 251 -> 252 matching at package #5a Task A2
+        // (2026-10-28): `valids/loopuntil-failed-flowable` banks (a relational
+        // operator against a quoted operand fails as Kestra's does, spec D1);
+        // 49 + 252 = 301.
+        (301, 252, 49),
         "301 = matching + baselined, the total beside its parts. It read \
          167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries, W8 \
          Task 4 banked `valids/waitfor-nested`, W8 Task 5 banked seven \
@@ -2575,7 +2579,9 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         // `valids/finally-loop-parallel`); measured.
         // + the 24 top-level pairs of the eight entries end hooks #2b Task B1
         // banked (2026-10-27: the `afterExecution:` ones); measured.
-        (610, 197, 807),
+        // + the 3 top-level pairs of `valids/loopuntil-failed-flowable`, banked
+        // at package #5a Task A2 (2026-10-28, measured).
+        (613, 197, 810),
         "the pairs a change to which the ratchet REPORTS: they live on entries \
          that match, so any change to one makes its entry a REGRESSION. W6 Task \
          3 moved 3 of them across the line, all top-level: the 12 `Subflow` \
@@ -2606,7 +2612,9 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         // three `Loop` entries it banked moved to the matching side.
         // 333 -> 309 at end hooks #2b Task B1 (2026-10-27): the 24 top-level
         // pairs of the eight `afterExecution:` entries it banked.
-        (279, 30, 309),
+        // 309 -> 306 at package #5a Task A2 (2026-10-28, measured): the 3 top-level
+        // pairs of `valids/loopuntil-failed-flowable`.
+        (276, 30, 306),
         "and the pairs a change to which it does not: they live on baselined \
          entries, which mismatch whatever the pair says. Flipping all 704 leaves \
          the ratchet green and unmoved -- at 131 when W6 Task 3 flipped them, at \
@@ -3039,7 +3047,9 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
 // `Loop` entries it banked.
 // 210 -> 187 at end hooks #2b Task B1 (2026-10-27, measured): the 23 run terminals of
 // the eight `afterExecution:` entries it banked.
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 187;
+// 187 -> 184 at package #5a Task A2 (2026-10-28, measured): the 3 run terminals of
+// `valids/loopuntil-failed-flowable`.
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 184;
 /// 43 from W6 Task 4 to W9a Task 10; **40 since W9a Task 11** -- the three
 /// iterations of `valids/loop-values-from-uri`.
 // 40 -> 39 at WorkingDirectory Task 8: `working-directory-taskrun` has one
@@ -3079,7 +3089,9 @@ const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 31;
 // sub-executions of the `Loop` entries it banked.
 // 88 -> 80 at end hooks #2b Task B1 (2026-10-27, measured): the eight top-level executions (no sub-execution) of
 // the eight `afterExecution:` entries it banked.
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 80;
+// 80 -> 79 at package #5a Task A2 (2026-10-28, measured): the one top-level
+// execution (no sub-execution) of `valids/loopuntil-failed-flowable`.
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 79;
 /// **1703 through W8 Task 2, 1647 after W8 Task 3, 1610 after W8 Task 4, 1528
 /// now** -- 56 run-history tokens on Task 3's eight, 37 on
 /// `valids/waitfor-nested` (whose seven runs include three loops reading
@@ -3112,7 +3124,9 @@ const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 80;
 // `Loop` entries it banked.
 // 842 -> 752 at end hooks #2b Task B1 (2026-10-27, measured): the 90 run-history tokens of
 // the eight `afterExecution:` entries it banked.
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 752;
+// 752 -> 742 at package #5a Task A2 (2026-10-28, measured): the 10 run-history
+// tokens (3 + 3 + 4) of `valids/loopuntil-failed-flowable`.
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 742;
 /// **665 through W8 Task 2, 617 after W8 Task 3, 562 after W8 Task 4, 526 after
 /// W8 Task 5, 522 now** -- 48 execution-history tokens on Task 3's eight, i.e.
 /// six apiece (every one of them reads `CREATED RUNNING PAUSED RESTARTED
@@ -3145,7 +3159,9 @@ const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 752;
 // three `Loop` entries it banked.
 // 329 -> 305 at end hooks #2b Task B1 (2026-10-27, measured): the 24 execution-history tokens (three each) of
 // the eight `afterExecution:` entries it banked.
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 305;
+// 305 -> 302 at package #5a Task A2 (2026-10-28, measured): the 3
+// execution-history tokens of `valids/loopuntil-failed-flowable`.
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 302;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -4500,7 +4516,10 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
 // runs, and its `purge_logs` FAILS on the decided scope rule (namespace
 // `purge.namespace` from a flow of `io.kestra.tests`), so the execution FAILS
 // where Kestra's SUCCEEDED. Permanent (spec §2.3).
-const MISMATCH_ON_EXECUTION: usize = 32;
+// 32 -> 31 at package #5a Task A2 (2026-10-28, measured):
+// `valids/loopuntil-failed-flowable` banked -- its `LoopUntil` condition
+// `{{ outputs.loop.iterationCount < "5" }}` now fails as Kestra's does (D1).
+const MISMATCH_ON_EXECUTION: usize = 31;
 /// **112 through W8 Task 2, 104 after W8 Task 3, 103 after W8 Task 4, 96 after
 /// W8 Task 5, 94 now** -- the same eight, then `valids/waitfor-nested`, then
 /// the seven `allow*` entries, then W8 Task 6's two. The last pair differ on
@@ -4535,7 +4554,8 @@ const MISMATCH_ON_EXECUTION: usize = 32;
 // bank. `valids/task-runif-taskswithstate` still differs on `runs`: its two
 // `runIf:`s use Pebble's `empty` test, which egret's renderer leaves unknown.
 // 46 -> 38 at end hooks #2b Task B1 (2026-10-27, measured): the eight `afterExecution:` entries it banked differed on `runs` (their after-runs were missing).
-const MISMATCH_ON_RUNS: usize = 38;
+// 38 -> 37 at package #5a Task A2 (2026-10-28, measured): `valids/loopuntil-failed-flowable` banked.
+const MISMATCH_ON_RUNS: usize = 37;
 /// **72 through W8 Task 2, 67 after W8 Task 3, 64 now**: five of Task 3's eight
 /// carry an ordered pair, and W8 Task 4 closed THREE on one entry --
 /// `valids/waitfor-nested`'s `loop_1_return`/`loop_2`,
@@ -4637,7 +4657,8 @@ const MISMATCH_ON_SPAWNED: usize = 9;
 // 65 -> 60 at the A4 fix round: the five flow-level `finally:` entries banked.
 // 60 -> 57 at end hooks A6 (2026-10-27, measured): the three `Loop` entries above.
 // 57 -> 49 at end hooks #2b Task B1 (2026-10-27, measured): the eight `afterExecution:` entries it banked.
-const MISMATCHING_RUNS_ENTRIES: usize = 49;
+// 49 -> 48 at package #5a Task A2 (2026-10-28, measured): `valids/loopuntil-failed-flowable` banked (D1).
+const MISMATCHING_RUNS_ENTRIES: usize = 48;
 /// **84 through W5; 63 after W6 Task 3, and 59 since W6 Task 4 corrected the
 /// classifier.**
 ///
@@ -5322,22 +5343,12 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
         "W8: `MAX_DURATION` killed the `Sleep`; egret completes it",
     ),
     ("valids/sla-subflow", "W8: the same, through a subflow"),
-    // **W8 Task 4: the same class as the four `W2:` rows at the top of this
-    // list, on a new operator.** Kestra renders through Pebble, whose
-    // `OperatorUtils` widens both operands of `<` to `Number` and throws on a
-    // `String`; minijinja orders values across types and answers a boolean. So
-    // the `LoopUntil`'s condition evaluates to `true` here, the loop SUCCEEDS
-    // on its first iteration, and Kestra FAILED the task instead. It is a
-    // RENDERER divergence wearing a loop's name, and it is the corpus's only
-    // number-against-string comparison --
-    // `the_one_corpus_comparison_pebble_refuses_and_minijinja_answers` is what
-    // says so and what would fail if egret ever gained Pebble-strict operators.
-    (
-        "valids/loopuntil-failed-flowable",
-        "W2/W8: `{{ outputs.loop.iterationCount < \"5\" }}` -- Pebble throws on a relational \
-         operator against a quoted operand and minijinja answers `True`, so the loop's condition \
-         is truthy, the loop SUCCEEDS on iteration 1 and Kestra FAILED the task",
-    ),
+    // (W8 Task 4's `valids/loopuntil-failed-flowable` was here: its
+    // `LoopUntil` condition `{{ outputs.loop.iterationCount < "5" }}` is a
+    // relational operator against a quoted operand, which Pebble refuses and
+    // minijinja answered. Package #5a Task A2 (spec D1) made egret's `<`
+    // Kestra's, and the entry banked;
+    // `the_one_corpus_comparison_pebble_refuses_is_refused_here_too` pins it.)
     // **Unclaimed: a `Loop`'s own `outputs:`.** `advance()` does not implement
     // them, so a loop whose `outputs:` fails to render — Kestra FAILED it at
     // the first iteration — succeeds here and runs the other two. Named as a
@@ -7386,9 +7397,13 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         // `waitfor-child-task-warning`, runs one more iteration than the golden
         // under `maxDuration: PT3S` -- the poller-latency cause
         // `loop-until-restart` is held by.
+        //
+        // **2 since package #5a Task A2 (2026-10-28)**:
+        // `loopuntil-failed-flowable` banked when egret's relational operators
+        // became Kestra's (spec D1).
         (
             "LoopUntil / WaitFor",
-            3,
+            2,
             &[
                 "io.kestra.plugin.core.flow.LoopUntil",
                 "io.kestra.plugin.core.flow.WaitFor",
@@ -8059,7 +8074,9 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
         // do the eight `afterExecution:` entries it banked.
         // (2, 50, 52) -> (2, 48, 50) at workflow-inputs Task A6 (2026-10-28):
         // nor do the two `invalids/inputs-*` entries it banked.
-        (2, 48, 50),
+        // (2, 48, 50) -> (2, 47, 49) at package #5a Task A2 (2026-10-28): nor
+        // does `valids/loopuntil-failed-flowable`.
+        (2, 47, 49),
         "the baselined population that declares a `timeout:`, and the rest \
          ((2, 106, 108) until no-silent-stall Task 1 banked \
          `invalids/invalid-task`, which declares none). It \

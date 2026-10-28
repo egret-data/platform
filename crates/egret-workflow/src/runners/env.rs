@@ -1846,7 +1846,9 @@ pub(crate) fn environment() -> Environment<'static> {
     //   without. They are egret-only and the fixture says so. Since W9c Task 4
     //   fix round 1 (2026-10-08) nine more are the same kind of seam:
     //   `super::cmp_rewrite` compiles every comparison operator into a call to
-    //   one of `super::compare`'s `kestra_eq` .. `kestra_compare_chain`.
+    //   one of `super::compare`'s `kestra_eq` .. `kestra_not_in` (eight since
+    //   package #5a's Task A2 compiled a chain left-associatively and removed
+    //   `kestra_compare_chain`).
     //
     // `pprint` and `debug` were already removed in Task 3 for a different
     // reason (both dump internal state); they are two of the 62 and are now
@@ -3199,8 +3201,12 @@ mod tests {
 
         // A row cannot be deleted to make a failure go away: these three are
         // `host.Oracle dump`'s own counts for the built engine, plus Pebble's
-        // core/escaper/i18n extensions.
-        assert_eq!(rows, 186, "row count");
+        // core/escaper/i18n extensions. The total also holds the egret-only
+        // rows: 186 -> 185 at package #5a Task A2, which removed the egret-only
+        // function `kestra_compare_chain` (a chain compiles left-associatively
+        // to the per-operator functions now); the three engine counts below
+        // did not move.
+        assert_eq!(rows, 185, "row count");
         assert_eq!(counts.get("filter"), Some(&63), "engine filter count");
         assert_eq!(counts.get("function"), Some(&37), "engine function count");
         assert_eq!(counts.get("test"), Some(&8), "engine test count");

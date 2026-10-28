@@ -30,12 +30,13 @@
 #                     these is ALSO pinned, as a const in tests/oracle.rs, so
 #                     a new one cannot be added quietly here.
 
-# --- W2 Task 3: egret SUCCEEDS where Pebble throws on a String/Number mix, so
-# these are real mismatches and the ratchet holds them.
-gt-mixed                            baselined
-lt-mixed                            baselined
-lte-mixed                           baselined
-gte-mixed                           baselined
+# --- W2 Task 3: Pebble throws on a String/Number mix. egret SUCCEEDED until
+# package #5a's Task A2 (spec D1), so the four were baselined; they banked
+# there and the unit test asserting Kestra's own text holds them now.
+gt-mixed                            test:a_comparison_kestra_refuses_fails_with_kestras_text
+lt-mixed                            test:a_comparison_kestra_refuses_fails_with_kestras_text
+lte-mixed                           test:a_comparison_kestra_refuses_fails_with_kestras_text
+gte-mixed                           test:a_comparison_kestra_refuses_fails_with_kestras_text
 
 # --- W2 Task 3: minijinja has a real multiline `{% raw %}` and Kestra's
 # RAW_PATTERN has no DOTALL. Deliberate divergence, and baselined.
@@ -511,16 +512,16 @@ arith-operand-long-plus-list                        test:arithmetic_kestra_refus
 arith-operand-list-mul                              baselined
 arith-operand-map-plus-long                         test:arithmetic_kestra_refuses_is_refused_here_too
 arith-operand-map-plus-map                          test:arithmetic_kestra_refuses_is_refused_here_too
-cmp-long-lt-string                                  baselined
-cmp-long-gt-numeric-string-context                  baselined
-cmp-boolean-lt-long                                 baselined
-cmp-boolean-lt-boolean                              baselined
-cmp-list-lt-list                                    baselined
-cmp-map-lt-map                                      baselined
-chain-lt-ascending                                  baselined
-chain-lt-descending                                 baselined
+cmp-long-lt-string                                  test:a_comparison_kestra_refuses_fails_with_kestras_text
+cmp-long-gt-numeric-string-context                  test:a_comparison_kestra_refuses_fails_with_kestras_text
+cmp-boolean-lt-long                                 test:a_comparison_kestra_refuses_fails_with_kestras_text
+cmp-boolean-lt-boolean                              test:a_comparison_kestra_refuses_fails_with_kestras_text
+cmp-list-lt-list                                    test:a_comparison_kestra_refuses_fails_with_kestras_text
+cmp-map-lt-map                                      test:a_comparison_kestra_refuses_fails_with_kestras_text
+chain-lt-ascending                                  test:a_comparison_kestra_refuses_fails_with_kestras_text
+chain-lt-descending                                 test:a_comparison_kestra_refuses_fails_with_kestras_text
 chain-lt-missing-operand                            test:a_missing_operand_kestra_evaluates_fails_here_too
-chain-eq-then-lt                                    baselined
+chain-eq-then-lt                                    test:a_comparison_kestra_refuses_fails_with_kestras_text
 coalesce-missing-right-evaluated                    test:a_missing_operand_kestra_evaluates_fails_here_too
 coalesce-chain-missing-right-evaluated              test:a_missing_operand_kestra_evaluates_fails_here_too
 operator-contains-number-left                       test:contains_on_a_number_is_refused

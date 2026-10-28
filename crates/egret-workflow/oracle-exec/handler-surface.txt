@@ -320,27 +320,27 @@ Two rules, and they are deliberately different:
   file, with the entry named and the reason given; a ceiling that is too
   high costs nothing at all, which is why it would not be a ceiling.
 
-    251  reproduced today, and by nothing the driver removes
+    252  reproduced today, and by nothing the driver removes
       0  reproduced today ONLY because the feed supplies a terminal
          for a task type W3b has no handler for
      32  not reproduced today, and nothing found here blocks it
-     18  not reproduced today, and blocked -- by cause below
+     17  not reproduced today, and blocked -- by cause below
   -----
     301  TOTAL, the comparable entries
 
-  CEILING, feed removed  = 251 + 32 = **283**
-  CEILING, feed retained = 251 + 0 + 32 = 283
+  CEILING, feed removed  = 252 + 32 = **284**
+  CEILING, feed retained = 252 + 0 + 32 = 284
 
-  Today the ratchet matches 251. The two ceilings are the same
+  Today the ratchet matches 252. The two ceilings are the same
   quantity under the two answers Task 5 may give to `does the driver
   still feed a terminal for a task type it has no handler for?`. They are
   NOT the same set with a different name, and the composition is printed
   above so a reader cannot take one for the other.
 
-  **283 is the bound this package should be held to**, because removing
+  **284 is the bound this package should be held to**, because removing
   the feed is the stated intent of Task 5 step 4. If Task 5 keeps the
   feed for unhandled types it must say so, and then the bound is
-  283 -- reported as a decision, not as progress.
+  284 -- reported as a decision, not as progress.
 
   The 0 at risk, with the type whose terminal is fed:
 
@@ -394,9 +394,8 @@ Two rules, and they are deliberately different:
         1  handler    io.kestra.plugin.core.kv.Set
         1  refusal    egret over-accepts it -- W1's validation, not a handler
         1  render     Pebble's `empty` test, which egret's renderer leaves unknown
-        1  render     a relational operator against a quoted operand; Pebble throws and minijinja answers
     -----
-       18  DISTINCT entries blocked (the rows above overlap)
+       17  DISTINCT entries blocked (the rows above overlap)
 
   The four causes the plan names, and where each landed:
 
@@ -465,7 +464,7 @@ Two rules, and they are deliberately different:
     valids/retry-failed-flow-duration        maxDuration with no elapsed time
     valids/retry-success                     WARNING, which RunState cannot hold
 
-    working expectation = 283 - 6 = 277
+    working expectation = 284 - 6 = 278
 
   Two of them deserve a sentence each:
 

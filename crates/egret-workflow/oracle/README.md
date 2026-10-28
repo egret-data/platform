@@ -104,7 +104,8 @@ an entry matches on any failure at all, so it is born matching and cannot fail
 **for the reason it was written** — a refusal that becomes a different refusal
 is invisible. It is not literally unfailable, and an earlier version of this
 sentence ("never enters `baseline.txt`, and can never fail") was wrong about
-that: **thirty-eight ids are in this file AND in `baseline.txt`** (eighteen until
+that: **twenty-five ids are in this file AND in `baseline.txt`** (thirty-eight
+until package #5a's Task A2 banked thirteen, eighteen until
 package #5a's Task A1 added twenty, thirty-one until
 W2a banked fourteen of them and added one back), because such an
 entry still fails when egret *succeeds* where Kestra threw. (This said "five"
@@ -166,7 +167,8 @@ whose deliverable was refusals; Task 8 added 29, which is 17% of the file for
 7% of the corpus, and every one of them is `test:`-paired — the pairing file
 now has **no `unported:` line left in it**, and `UNPORTED_ERROR_CLASS` in
 `tests/oracle.rs` is empty. Note that marking an entry error-class does **not**
-make it pass: 38 of the 302 are *also* in `baseline.txt`, because egret
+make it pass: 25 of the 302 are *also* in `baseline.txt` (38 before package
+#5a's Task A2), because egret
 *succeeds* where Kestra throws — a real divergence, and it stays visible.
 
 ## `name-surface.txt` — which names each side has at all
@@ -221,7 +223,10 @@ round 1 (2026-10-08), which BANKED one, `filter-number-bigdecimal-comparison`
 1493** after package #5a's Task A1 (2026-10-28), which added 157 probe
 entries and RECORDED the 98 that fail under the `#5a red` heading, each group
 named with the task that banks it (see "What package #5a's Task A1 batches
-measured" below).
+measured" below) -- and **208 of 1493** after Task A2 (2026-10-28), which
+BANKED nineteen: W2 Task 3's four `*-mixed` comparisons and A1's fifteen
+comparison and chain entries (spec D1: `<`, `<=`, `>`, `>=` are Kestra's,
+and a chain compiles left-associatively).
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;

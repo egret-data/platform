@@ -16,11 +16,18 @@
 //! |---|---|
 //! | `a > b` | `kestra_gt(a, b)` |
 //! | `a not in b` | `kestra_not_in(a, b)` |
-//! | `a < b < c` (minijinja chains it) | `kestra_compare_chain(a, 'lt', b, 'lt', c)` |
+//! | `a < b <= c` (minijinja chains it) | `kestra_le(kestra_lt(a, b), c)` |
+//!
+//! **A chain is compiled left-associatively** (package #5a, spec D1). Pebble
+//! has no chained comparison: Kestra's `==`, `!=`, `<`, `<=`, `>`, `>=` and
+//! `isIn` all sit at precedence 30, left-associative, so `a < b < c` is
+//! `(a < b) < c` there, and the outer comparison sees a boolean and fails;
+//! `1 < 2 == true` is `true`. minijinja reads the same source as `a < b and
+//! b < c`; this pass writes Pebble's reading instead.
 //!
 //! Each operand is exactly the token range minijinja's parser gives that
-//! comparison, so precedence and associativity are minijinja's by
-//! construction: `not a == b` stays `not (a == b)`, `a ~ b == c` stays
+//! comparison, so precedence is minijinja's by construction (and minijinja's
+//! comparison tier is Pebble's: one level, below `+`/`-`/`~`, above `not`): `not a == b` stays `not (a == b)`, `a ~ b == c` stays
 //! `(a ~ b) == c`, a filter or a test binds tighter, a parenthesised group is
 //! one operand. A call argument is a full expression, so no operand can bind
 //! differently inside the call than it did beside the operator.
@@ -59,12 +66,13 @@
 //! time with [`RewriteError::ReservedName`] (W9c Task 4 cleanup, N2). An
 //! attribute (`x.kestra_gt`) is not a variable and is not refused.
 //!
-//! The functions answer with minijinja's own `PartialEq`/`Ord` for every pair
-//! that is not a `BigNumber` against a number, after the same undefined checks
-//! in the same order (`super::compare`'s doc), so for those pairs the pass
-//! changes the spelling and not the answer.
+//! The functions answer `==`, `!=`, `in` and `not in` with minijinja's own
+//! `PartialEq` for every pair that is not a `BigNumber` against a number,
+//! after the same undefined checks in the same order (`super::compare`'s doc),
+//! so for those the pass changes the spelling and not the answer. The four
+//! relational operators answer as Kestra does (`super::compare::relational`).
 
-use super::compare::{CmpOp, CHAIN_FUNCTION};
+use super::compare::CmpOp;
 use super::rewrite::RewriteError;
 
 /// The deepest bracket nesting this pass follows. minijinja's parser refuses
@@ -955,21 +963,20 @@ fn emit(
     let mut replacement: Vec<Option<String>> = vec![None; n];
     let mut suffixes: Vec<usize> = vec![0; n];
     for site in sites {
-        let chained = site.ops.len() > 1;
-        let name = if chained {
-            CHAIN_FUNCTION
-        } else {
-            site.ops[0].2.function()
-        };
+        // `a op1 b op2 c` becomes `op2(op1(a, b), c)`: the calls open
+        // outermost first before the left operand, each operator becomes `,`
+        // and every operator after the first also closes the call before it.
         // A leading space: the token before may be an identifier (`if`,
         // `and`, `not`), and gluing would make one name of the two.
-        prefix[site.start] = Some(format!(" {name}("));
-        for &(first, last, op) in &site.ops {
-            replacement[first] = Some(if chained {
-                format!(", '{}',", op.word())
-            } else {
-                ",".to_string()
-            });
+        let mut open = String::new();
+        for &(_, _, op) in site.ops.iter().rev() {
+            open.push(' ');
+            open.push_str(op.function());
+            open.push('(');
+        }
+        prefix[site.start] = Some(open);
+        for (index, &(first, last, _)) in site.ops.iter().enumerate() {
+            replacement[first] = Some(if index == 0 { "," } else { ")," }.to_string());
             if last != first {
                 replacement[last] = Some(String::new());
             }

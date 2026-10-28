@@ -472,19 +472,14 @@
 #   and watching it stall at `CREATED RUNNING`. "Held twice over" is now held
 #   once.
 #
-#   `loopuntil-failed-flowable` differs on ONE field: the loop's terminal.
-#   Its runs, attempts and order pairs are reproduced exactly and its execution
-#   reads `CREATED RUNNING SUCCESS` where the golden reads `CREATED RUNNING
-#   FAILED`. The condition is `{{ outputs.loop.iterationCount < "5" }}` -- a
-#   relational operator over a NUMBER and a STRING. Pebble refuses it and the
-#   exception fails the task; minijinja answers `True` and the loop succeeds.
-#   Measured both ways: `the_one_corpus_comparison_pebble_refuses_and_minijinja
-#   _answers` renders it through egret's own environment, and the artifact's own
-#   trace fails the `loop` taskrun 11 ms after its child succeeded, with no
-#   `PAUSED` -- the only path in `LoopUntil.resolveState` that can do that is
-#   `runContext.render(this.condition)` throwing. It is a RENDERER divergence
-#   wearing a loop's name, and it is the corpus's ONLY number-against-string
-#   comparison.
+#   (`loopuntil-failed-flowable` was here, differing on ONE field: its
+#   `LoopUntil` ended `SUCCESS` where the golden reads `FAILED`, because its
+#   condition `{{ outputs.loop.iterationCount < "5" }}` -- a relational
+#   operator over a NUMBER and a STRING -- is refused by Pebble and was
+#   answered by minijinja. A renderer divergence wearing a loop's name; it
+#   BANKED with package #5a's Task A2 (2026-10-28, spec D1), which made egret's
+#   relational operators Kestra's.
+#   `the_one_corpus_comparison_pebble_refuses_is_refused_here_too` pins it.)
 #
 #   `loop-until-restart` differs on ONE field too: it runs FOUR iterations
 #   where the golden holds three. Everything else -- both run histories, both
@@ -596,7 +591,6 @@ valids/loop-outputs-auto
 valids/loop-outputs-failed-render
 valids/loop-outputs-store
 valids/loop-until-restart
-valids/loopuntil-failed-flowable
 valids/parallel-disabled-tasks
 valids/parallel-fail-with-flowable
 valids/pause-behavior
