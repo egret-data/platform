@@ -3220,6 +3220,7 @@ dependencies = [
  "egret-perm",
  "egret-perm-compile",
  "egret-policy",
+ "egret-ranger-eval",
  "egret-secrets",
  "egret-storage",
  "egret-test-db",

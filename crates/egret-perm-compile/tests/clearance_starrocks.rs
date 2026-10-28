@@ -2392,3 +2392,78 @@ async fn a_moving_table_is_counted_once_against_the_profile_total() {
     .expect("the moving table is counted once in the profile total");
     assert_eq!(clearance_masks(&db, f.service_id, moving).await.len(), 800);
 }
+
+// ── Grants follow a rename, Task 4: dormant restrictions count (D12) ──
+
+/// `n` table-level deny grants on `sales.{table}`, each its own policy.
+async fn deny_grants(f: &Fixture, table: &str, n: usize) {
+    for i in 0..n {
+        f.perm
+            .create_grant(&egret_perm::Grant {
+                id: Uuid::nil(),
+                effect: egret_perm::Effect::Deny,
+                actions: vec![egret_perm::Action::Read],
+                scope: egret_perm::Scope {
+                    catalog_id: f.catalog_id,
+                    schema: Some("sales".into()),
+                    table: Some(table.into()),
+                    column: None,
+                },
+                principals: egret_perm::PrincipalSet {
+                    include: vec![egret_perm::Principal {
+                        kind: egret_perm::PrincipalKind::User,
+                        r#ref: format!("u{i}"),
+                    }],
+                    exclude: Vec::new(),
+                },
+                origin: egret_perm::GrantOrigin::Explicit,
+            })
+            .await
+            .expect("deny grant");
+    }
+}
+
+/// D12: a held rename's copy leaves the source's restrictive grants in place
+/// (G2), so the copy's compile must count them: the bodies of a path grant on
+/// a leaving table are served after the rename too. Two 450-column classified
+/// tables (902 policies) and 50 denies on `orders` fit the profile total of
+/// 1000; 50 copies on `orders_v2` with `orders` leaving do not.
+#[tokio::test]
+async fn a_path_policy_on_a_leaving_table_still_counts() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks(&db).await;
+    let lk = lakekeeper_stub::link_warehouse(&db, f.warehouse_id).await;
+    let cols = many_columns(450);
+    let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
+    for table in ["a", "b"] {
+        lakekeeper_stub::add_table(&db, lk, &["sales"], table, &refs).await;
+        let (tag, _) = new_tag(&db).await;
+        tag_table(&db, tag, f.warehouse_id, table).await;
+        cleared_pair(&db, tag).await;
+    }
+    lakekeeper_stub::add_table(&db, lk, &["sales"], "orders", &["id"]).await;
+    deny_grants(&f, "orders", 50).await;
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("the profile fits before the rename");
+
+    deny_grants(&f, "orders_v2", 50).await;
+    let id = vec!["id".to_string()];
+    let err = recompile_with_overlay(
+        &db,
+        f.service_id,
+        serde_json::json!([
+            pending(&f, "orders_v2", &id, &[], false),
+            pending(&f, "orders", &id, &[], true),
+        ]),
+    )
+    .await
+    .expect_err("the dormant denies on the leaving table still count");
+    assert!(
+        matches!(
+            err,
+            egret_perm::CompileError::ProfileExpansionCeiling { .. }
+        ),
+        "{err:?}"
+    );
+}

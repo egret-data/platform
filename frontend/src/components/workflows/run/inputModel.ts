@@ -1,22 +1,31 @@
 import { parse, stringify } from "yaml";
+import type { ValidateInputsDto } from "@/api/generated/model";
 
 /**
  * THE RUN FORM'S MODEL (W7a spec §6.1): a flow's `inputs:` turned into form
  * state, checked, and turned into the body of `POST …/flows/{id}/executions`.
  *
  * **Read from the YAML, not from the stored plan.** egret's parsed `Input`
- * (`crates/egret-workflow/src/models/input.rs`) has no `values` field, so the
- * plan has no SELECT or MULTISELECT values to offer; the source still does.
+ * (`crates/egret-workflow/src/models/input.rs`) is not served with the flow,
+ * so the source is where the form finds `values`, bounds and `validator`.
  *
- * **What the backend does with each value** (`start_flow_execution` and
- * `with_declared_defaults` in `crates/egret-workflow/src/worker/render.rs`):
- * the JSON body's `inputs` is an object, kept as sent. A **string** posted for
- * INT, FLOAT, BOOL, JSON, ARRAY or MULTISELECT is parsed as JSON; every other
- * type keeps its string. An input left out gets the flow's `defaults:`. No
- * type, `required` or SELECT membership is checked server side, so this form is
- * the only place those are checked. A FILE value must be uploaded: the request
- * becomes `multipart/form-data`, one part per input id, where a part with a
- * file name is the file and every other part is a text value.
+ * **The server decides** (workflow inputs #3, D1 and D14). Every start checks
+ * the inputs (`crates/egret-workflow/src/inputs_check.rs`): `required`, the
+ * type, `validator`, `min`/`max`, `after`/`before`, SELECT/MULTISELECT
+ * `values`, literal `defaults` and `dependsOn`, and refuses the first bad one
+ * with a 400 that names it in backticks. `POST …/executions/validate` runs the
+ * same check without starting anything and lists every input's errors; the
+ * form calls it on Run, before the start. The checks here are a quick first
+ * pass that answers without a round trip; the server's answer is the one that
+ * counts. A `validator` is only shown, never run here: its dialect is Java's,
+ * which the browser's `RegExp` is not.
+ *
+ * **What the body carries.** The JSON body's `inputs` is an object; a
+ * **string** posted for INT, FLOAT, BOOL, JSON, ARRAY or MULTISELECT is parsed
+ * as JSON. An input left out gets the flow's `defaults:`. A FILE value must be
+ * uploaded: the start becomes `multipart/form-data`, one part per input id,
+ * where a part with a file name is the file and every other part is a text
+ * value. The validate endpoint uploads nothing and takes the file's name.
  */
 
 /** Every type Kestra's `Input.java` registers (`InputType` in `models/input.rs`). */
@@ -78,6 +87,16 @@ export interface RunInput {
   /** Kestra's `dependsOn`: not evaluated here (spec §6.2); the control carries a note. */
   dependsOn: boolean;
   allowedFileExtensions?: string[];
+  /** INT, FLOAT and DURATION bounds as written (inclusive). */
+  min?: string;
+  max?: string;
+  /** DATETIME, DATE and TIME bounds as written (inclusive). */
+  after?: string;
+  before?: string;
+  /** A Java regex the server matches the whole value against; shown, never run here. */
+  validator?: string;
+  /** SELECT/MULTISELECT: a value outside `values` is accepted. */
+  allowCustomValue: boolean;
 }
 
 /** A control's value: text, a switch, a list (MULTISELECT, ARRAY rows), or a chosen file. */
@@ -93,6 +112,9 @@ export type RunRequest = { json: { inputs: Record<string, unknown> } } | { multi
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isExpression = (v: unknown): v is string => typeof v === "string" && v.includes("{{");
 const optString = (v: unknown) => (typeof v === "string" && v !== "" ? v : undefined);
+/** A bound as text: YAML reads `min: 10` as a number and `after: 2026-01-01` as a string. */
+const optBound = (v: unknown) =>
+  typeof v === "number" ? String(v) : v instanceof Date ? v.toISOString() : optString(v);
 
 /** The `inputs:` of a flow's YAML. A source that does not parse is an error, never "no inputs". */
 export function inputsFromSource(source: string): { inputs: RunInput[] } | { error: string } {
@@ -129,6 +151,12 @@ export function inputsFromSource(source: string): { inputs: RunInput[] } | { err
       allowedFileExtensions: Array.isArray(item.allowedFileExtensions)
         ? item.allowedFileExtensions.map(String)
         : undefined,
+      min: optBound(item.min),
+      max: optBound(item.max),
+      after: optBound(item.after),
+      before: optBound(item.before),
+      validator: optString(item.validator),
+      allowCustomValue: item.allowCustomValue === true,
     });
   }
   return { inputs };
@@ -251,6 +279,64 @@ function itemError(itemType: string | undefined, item: string): string | null {
   return null;
 }
 
+const setIf = (errors: Record<string, string>, id: string, message: string | null) => {
+  if (message) errors[id] = message;
+};
+
+/** A parsed value or bound; `NaN` or `null` is one the form cannot read. */
+const known = (n: number | null): n is number => n !== null && !Number.isNaN(n);
+
+/** `min`/`max`, inclusive as the server's (`check_int_bounds` and its siblings). */
+function rangeError(
+  input: RunInput,
+  value: number | null,
+  read: (bound: string) => number | null,
+  what: (bound: string) => string,
+): string | null {
+  if (!known(value)) return null;
+  const min = input.min === undefined ? null : read(input.min);
+  const max = input.max === undefined ? null : read(input.max);
+  if (known(min) && value < min) return `Enter ${what(`at least ${input.min}`)}.`;
+  if (known(max) && value > max) return `Enter ${what(`at most ${input.max}`)}.`;
+  return null;
+}
+
+/** `after`/`before`, inclusive as the server's (`check_after_before`). */
+function orderError(input: RunInput, value: number | null, read: (bound: string) => number | null, what: string): string | null {
+  if (!known(value)) return null;
+  const after = input.after === undefined ? null : read(input.after);
+  const before = input.before === undefined ? null : read(input.before);
+  if (known(after) && value < after) return `Enter ${what} on or after ${input.after}.`;
+  if (known(before) && value > before) return `Enter ${what} on or before ${input.before}.`;
+  return null;
+}
+
+/** A `YYYY-MM-DD` date as a number that orders as the date does. */
+function dateKey(text: string): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text.trim());
+  return m ? Number(m[1]) * 10000 + Number(m[2]) * 100 + Number(m[3]) : null;
+}
+
+/** `HH:MM`, `HH:MM:SS` or `HH:MM:SS.fff` as seconds since midnight. */
+function timeSeconds(text: string): number | null {
+  const m = /^(\d{2}):(\d{2})(?::(\d{2}(?:\.\d{1,9})?))?$/.exec(text.trim());
+  return m ? Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3] ?? 0) : null;
+}
+
+/** The parts of an ISO-8601 duration that {@link DURATION} accepts. */
+const DURATION_PARTS = /^([-+]?)P(?:([-+]?\d+)D)?(?:T(?:([-+]?\d+)H)?(?:([-+]?\d+)M)?(?:([-+]?\d+)(?:[.,](\d{0,9}))?S)?)?$/i;
+
+/** A duration as seconds, as Java's `Duration.parse` reads it: a fraction takes its seconds' sign. */
+function durationSeconds(text: string): number | null {
+  if (!DURATION.test(text)) return null;
+  const m = DURATION_PARTS.exec(text);
+  if (!m) return null;
+  const [, sign, d, h, min, sec, frac] = m;
+  const seconds = sec === undefined ? 0 : Number(frac ? `${sec}.${frac}` : sec);
+  const total = Number(d ?? 0) * 86400 + Number(h ?? 0) * 3600 + Number(min ?? 0) * 60 + seconds;
+  return sign === "-" ? -total : total;
+}
+
 const REQUIRED_MESSAGE: Record<string, string> = {
   SELECT: "Choose a value.",
   MULTISELECT: "Choose at least one value.",
@@ -259,9 +345,10 @@ const REQUIRED_MESSAGE: Record<string, string> = {
 };
 
 /**
- * The form's own checks, by input id. The backend checks none of these (see
- * the module comment), so a wrong value would otherwise start an execution
- * that fails later, or not at all.
+ * The form's own checks, by input id: the first pass before the validate
+ * endpoint (see the module comment), so a value the form can already tell is
+ * wrong is answered at once, in the form's words. A bound that does not parse
+ * here is left to the server, which refuses such a flow at save.
  */
 export function validateForm(form: FormState): Record<string, string> {
   const errors: Record<string, string> = {};
@@ -277,13 +364,36 @@ export function validateForm(form: FormState): Record<string, string> {
     switch (input.type) {
       case "INT":
         if (!INTEGER.test(text.trim())) errors[input.id] = "Enter a whole number.";
+        else setIf(errors, input.id, rangeError(input, Number(text), Number, (b) => `a number of ${b}`));
         break;
       case "FLOAT":
         if (!isNumber(text)) errors[input.id] = "Enter a number.";
+        else setIf(errors, input.id, rangeError(input, Number(text), Number, (b) => `a number of ${b}`));
         break;
-      case "DATETIME":
-        if (Number.isNaN(new Date(text).getTime())) errors[input.id] = "Enter a date and time.";
+      case "DATETIME": {
+        const at = new Date(text).getTime();
+        if (Number.isNaN(at)) errors[input.id] = "Enter a date and time.";
+        else setIf(errors, input.id, orderError(input, at, (b) => new Date(b).getTime(), "a date and time"));
         break;
+      }
+      case "DATE":
+        setIf(errors, input.id, orderError(input, dateKey(text), dateKey, "a date"));
+        break;
+      case "TIME":
+        setIf(errors, input.id, orderError(input, timeSeconds(text), timeSeconds, "a time"));
+        break;
+      case "SELECT":
+        // Kestra checks a SELECT's `values` only when it is required (D4); its picker offers
+        // only them, but a `defaults` outside them fills it in.
+        if (input.required && !input.allowCustomValue && input.values.length > 0 && !input.values.includes(text)) {
+          errors[input.id] = `Choose one of the listed values; ${text} is not one of them.`;
+        }
+        break;
+      case "MULTISELECT": {
+        const stray = input.allowCustomValue || input.values.length === 0 ? [] : (value as string[]).filter((v) => !input.values.includes(v));
+        if (stray.length > 0) errors[input.id] = `Untick ${stray.join(", ")}: only the listed values are accepted.`;
+        break;
+      }
       case "EMAIL":
         if (!EMAIL.test(text.trim())) errors[input.id] = "Enter an email address, such as name@example.com.";
         break;
@@ -292,6 +402,7 @@ export function validateForm(form: FormState): Record<string, string> {
         break;
       case "DURATION":
         if (!DURATION.test(text.trim())) errors[input.id] = "Enter an ISO-8601 duration, such as PT1H or P1DT12H.";
+        else setIf(errors, input.id, rangeError(input, durationSeconds(text.trim()), durationSeconds, (b) => `a duration of ${b}`));
         break;
       case "JSON":
         try {
@@ -349,6 +460,19 @@ function wireValue(input: RunInput, value: Exclude<FieldValue, null | File>): un
   }
 }
 
+/** Each non-empty value as the request carries it; a chosen file stays a `File`. */
+function requestEntries(form: FormState): [string, unknown][] {
+  const entries: [string, unknown][] = [];
+  for (const input of form.inputs) {
+    if (!SUPPORTED.has(input.type)) continue;
+    const value = form.values[input.id] ?? null;
+    if (isEmpty(value)) continue;
+    if (value instanceof File) entries.push([input.id, value]);
+    else if (input.type !== "FILE") entries.push([input.id, wireValue(input, value as Exclude<FieldValue, null | File>)]);
+  }
+  return entries;
+}
+
 /**
  * The body of `POST …/flows/{id}/executions`. JSON, unless a file was chosen:
  * then multipart, the file under its input id, every other value a text part
@@ -356,20 +480,8 @@ function wireValue(input: RunInput, value: Exclude<FieldValue, null | File>): un
  * it is). Empty values are left out, so the flow's defaults apply.
  */
 export function requestFromForm(form: FormState): RunRequest {
-  const entries: [string, unknown][] = [];
-  let file = false;
-  for (const input of form.inputs) {
-    if (!SUPPORTED.has(input.type)) continue;
-    const value = form.values[input.id] ?? null;
-    if (isEmpty(value)) continue;
-    if (value instanceof File) {
-      file = true;
-      entries.push([input.id, value]);
-    } else if (input.type !== "FILE") {
-      entries.push([input.id, wireValue(input, value as Exclude<FieldValue, null | File>)]);
-    }
-  }
-  if (!file) return { json: { inputs: Object.fromEntries(entries) } };
+  const entries = requestEntries(form);
+  if (!entries.some(([, v]) => v instanceof File)) return { json: { inputs: Object.fromEntries(entries) } };
   const body = new FormData();
   for (const [id, v] of entries) {
     if (v instanceof File) body.append(id, v, v.name);
@@ -380,14 +492,80 @@ export function requestFromForm(form: FormState): RunRequest {
 }
 
 /**
- * The declared input a server refusal names. The backend names one in
- * backticks ("Invalid value for input `data`: …", `storage/inputs.rs` and
- * `read_text_part` in `routes.rs`); a message naming no declared input stays
- * a form-level error.
+ * The body of `POST …/flows/{id}/executions/validate`: the start's JSON body,
+ * with a chosen file as its name. The endpoint uploads nothing and takes a
+ * FILE input's name or URI (B1), so a file's contents and extension are left
+ * to the start, which stays the final word.
  */
-export function serverErrorInput(message: string, inputs: RunInput[]): string | undefined {
-  for (const m of message.matchAll(/input `([^`]+)`/g)) {
-    if (inputs.some((i) => i.id === m[1])) return m[1];
+export function validationRequestFromForm(form: FormState): { inputs: Record<string, unknown> } {
+  return { inputs: Object.fromEntries(requestEntries(form).map(([id, v]) => [id, v instanceof File ? v.name : v])) };
+}
+
+/** What the form shows from a validate answer. */
+export interface ValidationView {
+  /** The errors of each input the form shows and the start would check, by input id. */
+  errors: Record<string, string>;
+  /** Inputs `dependsOn` turns off with these values: the start ignores them. */
+  inactive: string[];
+}
+
+/**
+ * The validate answer (`ValidateInputsDto`) for this form. An input turned off
+ * by `dependsOn` is listed with its errors, but a start would not report them
+ * (B1), so they are not shown; nor are errors of an input the form has no
+ * control for. The input is matched by the `id` of its YAML entry.
+ */
+export function validationView(answer: ValidateInputsDto, inputs: RunInput[]): ValidationView {
+  const shown = new Set(inputs.filter((i) => SUPPORTED.has(i.type)).map((i) => i.id));
+  const view: ValidationView = { errors: {}, inactive: [] };
+  // A body of another shape (no `inputs` list) tells nothing; the start then decides.
+  for (const outcome of Array.isArray(answer.inputs) ? answer.inputs : []) {
+    const id = outcome.input.id;
+    if (typeof id !== "string" || !shown.has(id)) continue;
+    if (!outcome.enabled) {
+      view.inactive.push(id);
+      continue;
+    }
+    const message = outcome.errors.map((e) => e.message).join("\n");
+    if (message) view.errors[id] = message;
   }
-  return undefined;
+  return view;
+}
+
+/** The declared input one line of a server refusal names, in backticks or in Kestra's `Missing required input:<id>`. */
+function lineInput(line: string, declared: Set<string>): string | undefined {
+  for (const m of line.matchAll(/input `([^`]+)`/g)) if (declared.has(m[1])) return m[1];
+  const missing = /^Missing required input:(\S+)/.exec(line.trim());
+  return missing && declared.has(missing[1]) ? missing[1] : undefined;
+}
+
+/**
+ * A server refusal split by the declared inputs it names, line by line. The
+ * backend names an input in backticks ("Invalid value for input `data`: …",
+ * `inputs_check.rs`, and `read_text_part` in `routes.rs`) or as
+ * `Missing required input:<id>`; a refusal of several values has one line per
+ * value. A line naming no input continues the line before it; one before any
+ * named line is `rest`, a form-level error.
+ */
+export function serverErrorsByInput(message: string, inputs: RunInput[]): { fields: Record<string, string>; rest: string[] } {
+  const declared = new Set(inputs.map((i) => i.id));
+  const fields: Record<string, string> = {};
+  const rest: string[] = [];
+  let last: string | undefined;
+  for (const line of message.split("\n")) {
+    if (line.trim() === "") continue;
+    const id = lineInput(line, declared) ?? last;
+    if (id === undefined) {
+      rest.push(line);
+      continue;
+    }
+    fields[id] = fields[id] ? `${fields[id]}\n${line}` : line;
+    last = id;
+  }
+  return { fields, rest };
+}
+
+/** The first declared input a server refusal names, for a form that shows one error (the backfill dialog). */
+export function serverErrorInput(message: string, inputs: RunInput[]): string | undefined {
+  return Object.keys(serverErrorsByInput(message, inputs).fields)[0];
 }

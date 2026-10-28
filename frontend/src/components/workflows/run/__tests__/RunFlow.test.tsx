@@ -9,17 +9,42 @@ const WS = "eng";
 const FLOW = "0a7c1d2e-0000-4000-8000-000000000001";
 const EXEC = "5e5e5e5e-0000-4000-8000-0000000000aa";
 const START = `/api/ws/${WS}/workflows/flows/${FLOW}/executions`;
+const VALIDATE = `${START}/validate`;
 
 type Call = { method: string; path: string; body: unknown; contentType: string | null };
+type Reply = { status: number; body: unknown };
 
-/** `POST …/executions` answers `reply`; every request is recorded with its body (JSON parsed, FormData kept). */
-function serve(reply: { status: number; body: unknown } = { status: 201, body: execution() }) {
+/** A validate answer (`ValidateInputsDto`) with these outcomes; no outcome means every input is valid. */
+function validation(...inputs: { id: string; enabled?: boolean; errors?: string[] }[]): Reply {
+  return {
+    status: 200,
+    body: {
+      id: "hello",
+      namespace: "company.team",
+      checks: [],
+      inputs: inputs.map(({ id, enabled = true, errors = [] }) => ({
+        input: { id, type: "STRING" },
+        value: null,
+        enabled,
+        isDefault: false,
+        errors: errors.map((message) => ({ message, renderError: false })),
+      })),
+    },
+  };
+}
+
+/**
+ * `POST …/executions` answers `reply` and `POST …/executions/validate` answers
+ * `check`; every request is recorded with its body (JSON parsed, FormData kept).
+ */
+function serve(reply: Reply = { status: 201, body: execution() }, check: Reply = validation()) {
   const calls: Call[] = [];
   vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
     const method = (init?.method ?? "GET").toUpperCase();
     const body = typeof init?.body === "string" ? JSON.parse(init.body) : init?.body;
     calls.push({ method, path: String(input), body, contentType: new Headers(init?.headers).get("content-type") });
-    return new Response(JSON.stringify(reply.body), { status: reply.status, headers: { "content-type": "application/json" } });
+    const answer = String(input) === VALIDATE ? check : reply;
+    return new Response(JSON.stringify(answer.body), { status: answer.status, headers: { "content-type": "application/json" } });
   }));
   return calls;
 }
@@ -83,6 +108,7 @@ function renderRun(source: string, workerEnabled = true) {
 
 const runButton = () => screen.getByRole("button", { name: "Run" });
 const starts = (calls: Call[]) => calls.filter((c) => c.method === "POST" && c.path === START);
+const validations = (calls: Call[]) => calls.filter((c) => c.method === "POST" && c.path === VALIDATE);
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -316,5 +342,114 @@ describe("RunFlow: what it says", () => {
     renderRun(flowWith("  - id: a\n    type: STRING\n  - id: b\n    type: SELECT\n    values: [x]\n    dependsOn:\n      inputs: [a]"));
     await screen.findByRole("dialog");
     expect(within(screen.getByTestId("run-input-b")).getByText(/depends on other inputs/)).toBeInTheDocument();
+  });
+});
+
+describe("RunFlow: the server's check before the start (D15)", () => {
+  it("asks validate with the start's own body, then starts", async () => {
+    const calls = serve();
+    renderRun(flowWith("  - id: n\n    type: INT\n  - id: who\n    type: STRING\n    required: false"));
+    await screen.findByRole("dialog");
+    fireEvent.change(screen.getByLabelText(/^n/), { target: { value: "12" } });
+    await userEvent.click(runButton());
+    await waitFor(() => expect(screen.getByTestId("path")).toHaveTextContent(`/explore/${WS}/workflows/executions/${EXEC}`));
+    expect(calls.map((c) => c.path)).toEqual([VALIDATE, START]);
+    expect(validations(calls)[0].body).toEqual({ inputs: { n: 12 } });
+    expect(validations(calls)[0].body).toEqual(starts(calls)[0].body);
+    expect(validations(calls)[0].contentType).toBe("application/json");
+  });
+
+  it("shows validate's errors beside their inputs and starts nothing; ignores a turned-off input's errors and says it is off", async () => {
+    const tooSmall = "Invalid value for input `n`. Cause: it must be more than `10`";
+    const calls = serve(undefined, validation(
+      { id: "n", errors: [tooSmall] },
+      { id: "who" },
+      { id: "extra", enabled: false, errors: ["Missing required input:extra"] },
+      { id: "ghost", errors: ["Missing required input:ghost"] },
+    ));
+    renderRun(flowWith("  - id: n\n    type: INT\n  - id: who\n    type: STRING\n    required: false\n  - id: extra\n    type: STRING\n    required: false\n    dependsOn:\n      inputs: [who]"));
+    await screen.findByRole("dialog");
+    fireEvent.change(screen.getByLabelText(/^n/), { target: { value: "5" } });
+    await userEvent.click(runButton());
+
+    expect(await within(screen.getByTestId("run-input-n")).findByText(tooSmall)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^n/)).toHaveAccessibleDescription(tooSmall);
+    expect(within(screen.getByTestId("run-input-extra")).queryByText("Missing required input:extra")).not.toBeInTheDocument();
+    expect(within(screen.getByTestId("run-input-extra")).getByText(/turn this input off, so the run ignores it/)).toBeInTheDocument();
+    expect(screen.queryByText(/ghost/)).not.toBeInTheDocument();
+    expect(starts(calls)).toHaveLength(0);
+    expect(screen.getByLabelText(/^n/)).toHaveValue(5);
+
+    // An edit of another input may turn it back on, so the note goes; the edited field's error goes too.
+    fireEvent.change(screen.getByLabelText(/^who/), { target: { value: "ada" } });
+    expect(screen.queryByText(/turn this input off/)).not.toBeInTheDocument();
+    expect(within(screen.getByTestId("run-input-n")).getByText(tooSmall)).toBeInTheDocument();
+  });
+
+  it("starts when validate reports errors only on inputs the form does not show or the start ignores", async () => {
+    const calls = serve(undefined, validation(
+      { id: "who" },
+      { id: "extra", enabled: false, errors: ["Missing required input:extra"] },
+      { id: "ghost", errors: ["Missing required input:ghost"] },
+    ));
+    renderRun(flowWith("  - id: who\n    type: STRING\n    defaults: ada\n  - id: extra\n    type: STRING\n    required: false"));
+    await screen.findByRole("dialog");
+    await userEvent.click(runButton());
+    await waitFor(() => expect(starts(calls)).toHaveLength(1));
+  });
+
+  it("starts anyway when validate itself fails, and shows the start's answer", async () => {
+    const refusal = "Invalid value for input `n`. Cause: it must be more than `10`";
+    const calls = serve({ status: 400, body: { error: refusal } }, { status: 500, body: { error: "boom" } });
+    renderRun(flowWith("  - id: n\n    type: INT"));
+    await screen.findByRole("dialog");
+    fireEvent.change(screen.getByLabelText(/^n/), { target: { value: "5" } });
+    await userEvent.click(runButton());
+    expect(await within(screen.getByTestId("run-input-n")).findByText(refusal)).toBeInTheDocument();
+    expect(validations(calls)).toHaveLength(1);
+    expect(starts(calls)).toHaveLength(1);
+    expect(screen.queryByText(/boom/)).not.toBeInTheDocument();
+  });
+
+  it("validates a chosen file by its name, then starts multipart", async () => {
+    const calls = serve();
+    renderRun(flowWith("  - id: who\n    type: STRING\n  - id: f\n    type: FILE"));
+    await screen.findByRole("dialog");
+    fireEvent.change(screen.getByLabelText(/^who/), { target: { value: "ada" } });
+    await userEvent.upload(screen.getByLabelText(/^f/), new File(["x"], "rows.csv"));
+    await userEvent.click(runButton());
+    await waitFor(() => expect(starts(calls)).toHaveLength(1));
+    expect(validations(calls)[0].body).toEqual({ inputs: { who: "ada", f: "rows.csv" } });
+    expect(starts(calls)[0].body).toBeInstanceOf(FormData);
+  });
+
+  it("puts each line of a start's multi-line refusal under the input it names", async () => {
+    const m = "Invalid value for input `m`. Cause: value `D` doesn't match the values `[A]`";
+    const n = "Invalid value for input `n`. Cause: it must be more than `10`";
+    serve({ status: 400, body: { error: `${m}\n${n}` } });
+    renderRun(flowWith("  - id: n\n    type: INT\n  - id: m\n    type: STRING"));
+    await screen.findByRole("dialog");
+    fireEvent.change(screen.getByLabelText(/^n/), { target: { value: "5" } });
+    fireEvent.change(screen.getByLabelText(/^m/), { target: { value: "D" } });
+    await userEvent.click(runButton());
+    expect(await within(screen.getByTestId("run-input-n")).findByText(n)).toBeInTheDocument();
+    expect(within(screen.getByTestId("run-input-m")).getByText(m)).toBeInTheDocument();
+    expect(within(screen.getByTestId("run-input-m")).queryByText(n)).not.toBeInTheDocument();
+    expect(screen.queryByText(/The run could not be started/)).not.toBeInTheDocument();
+  });
+
+  it("refuses a value outside its bounds without asking the server, and names the bounds and the pattern under the field", async () => {
+    const calls = serve();
+    renderRun(flowWith('  - id: n\n    type: INT\n    min: 10\n    max: 20\n  - id: code\n    type: STRING\n    validator: "[A-Z]+"'));
+    await screen.findByRole("dialog");
+    expect(within(screen.getByTestId("run-input-n")).getByText("From 10 to 20.")).toBeInTheDocument();
+    expect(within(screen.getByTestId("run-input-code")).getByText("It must match the pattern [A-Z]+")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/^n/), { target: { value: "21" } });
+    fireEvent.change(screen.getByLabelText(/^code/), { target: { value: "lower" } });
+    await userEvent.click(runButton());
+    expect(within(screen.getByTestId("run-input-n")).getByText("Enter a number of at most 20.")).toBeInTheDocument();
+    // The pattern is the server's to check (Java's dialect), so it blocks nothing here.
+    expect(within(screen.getByTestId("run-input-code")).queryByText(/Enter/)).not.toBeInTheDocument();
+    expect(calls).toHaveLength(0);
   });
 });

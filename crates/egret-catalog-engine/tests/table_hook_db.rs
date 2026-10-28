@@ -9,6 +9,8 @@
 //!   DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test \
 //!     cargo test -p egret-catalog-engine --test table_hook_db
 
+#[path = "../../egret-perm-compile/tests/support/engine_eval.rs"]
+mod engine_eval;
 #[path = "common/plugins.rs"]
 mod plugins;
 
@@ -107,6 +109,11 @@ struct AtReach {
     tables: Vec<String>,
     tag_version: i64,
     policy_version: i64,
+    /// The Trino profile's policy version (grants-follow D6).
+    trino_policy_version: i64,
+    /// `(kind, effect or rule kind, table, column)` of every grant and path
+    /// rule of the warehouse's catalog, sorted.
+    perm: Vec<(String, String, String, String)>,
 }
 
 /// Armed with `(METHOD /path, signal)`: [`observe`] signals when that request
@@ -171,12 +178,21 @@ async fn observe(
                 .fetch_one(&db.pool)
                 .await
                 .expect("policy version at reach");
+        let trino_policy_version: i64 =
+            sqlx::query_scalar("SELECT policy_version FROM policy.authz_services WHERE id = $1")
+                .bind(trino)
+                .fetch_one(&db.pool)
+                .await
+                .expect("trino policy version at reach");
+        let perm = perm_rows(&db, warehouse).await;
         if let Some(slot) = rows_at_reach.lock().unwrap().as_mut() {
             slot.3 = Some(AtReach {
                 at,
                 tables,
                 tag_version,
                 policy_version,
+                trino_policy_version,
+                perm,
             });
         }
     }
@@ -242,6 +258,25 @@ async fn observe(
         }
     }
     response
+}
+
+/// `(kind, effect or rule kind, table, column)` of every grant and path rule
+/// of `warehouse`'s registry catalog, sorted (`""` for no column).
+async fn perm_rows(db: &Db, warehouse: Uuid) -> Vec<(String, String, String, String)> {
+    sqlx::query_as(
+        "SELECT 'grant', g.effect::text, coalesce(g.table_name, ''), coalesce(g.column_name, '') \
+           FROM perm.grants g JOIN registry.catalogs c ON c.id = g.catalog_id \
+          WHERE c.warehouse_id = $1 \
+         UNION ALL \
+         SELECT 'rule', r.kind::text, coalesce(r.table_name, ''), coalesce(r.column_name, '') \
+           FROM perm.rules r JOIN registry.catalogs c ON c.id = r.catalog_id \
+          WHERE c.warehouse_id = $1 \
+         ORDER BY 1, 2, 3, 4",
+    )
+    .bind(warehouse)
+    .fetch_all(&db.pool)
+    .await
+    .expect("perm rows")
 }
 
 /// A lakekeeper warehouse with namespace `sales`, and the egret warehouse over
@@ -1861,10 +1896,11 @@ async fn a_failed_rename_undoes_the_copy() {
     assert_eq!(env.tag_version().await, before + 2);
 }
 
-/// R4: only classification rows move; a path deny grant on `sales.orders`
-/// stays where it is (spec §11 item 1, recorded, not fixed).
+/// R4, as the grants-follow package changed it (G2): the classification rows
+/// move; a path deny grant on `sales.orders` stays where it is, and a copy of
+/// it now restricts the new name.
 #[tokio::test]
-async fn a_rename_moves_classifications_only() {
+async fn a_rename_keeps_a_deny_on_the_old_name_and_copies_it() {
     let Some(env) = env().await else { return };
     env.classified_orders().await;
     let catalog_id: Uuid = sqlx::query_scalar("SELECT id FROM registry.catalogs WHERE name = $1")
@@ -1890,6 +1926,10 @@ async fn a_rename_moves_classifications_only() {
         .await
         .expect("grant");
     assert_eq!(table, "orders");
+    assert!(env
+        .perm()
+        .await
+        .contains(&perm_row("grant", "deny", "orders_v2", "")));
 }
 
 // ── Task 4: wait for StarRocks too; no Trino, silent engines (C4, C5, R5) ──
@@ -3424,4 +3464,1785 @@ async fn a_client_that_cancels_mid_hold_does_not_stop_the_move() {
     }
     assert_eq!(env.rows().await, moved);
     assert!(env.source("orders_v2").await.is_some(), "the rename landed");
+}
+
+// ── Grants follow a rename, Task 6: restrictions copied before the commit ──
+
+impl Env {
+    async fn catalog_id(&self) -> Uuid {
+        sqlx::query_scalar("SELECT id FROM registry.catalogs WHERE name = $1")
+            .bind(&self.catalog)
+            .fetch_one(&self.db.pool)
+            .await
+            .expect("catalog id")
+    }
+
+    /// A grant on `levels` under the catalog, to `users`.
+    async fn perm_grant(
+        &self,
+        effect: egret_perm::Effect,
+        levels: &[&str],
+        users: &[&str],
+    ) -> Uuid {
+        let at = |i: usize| levels.get(i).map(|s| s.to_string());
+        egret_perm::PermStore::new(self.db.pool.clone())
+            .create_grant(&egret_perm::Grant {
+                id: Uuid::nil(),
+                effect,
+                actions: vec![egret_perm::Action::Read],
+                scope: egret_perm::Scope {
+                    catalog_id: self.catalog_id().await,
+                    schema: at(0),
+                    table: at(1),
+                    column: at(2),
+                },
+                principals: egret_perm::PrincipalSet {
+                    include: users
+                        .iter()
+                        .map(|u| egret_perm::Principal {
+                            kind: egret_perm::PrincipalKind::User,
+                            r#ref: u.to_string(),
+                        })
+                        .collect(),
+                    exclude: Vec::new(),
+                },
+                origin: egret_perm::GrantOrigin::Explicit,
+            })
+            .await
+            .expect("grant")
+    }
+
+    /// A path rule on `levels`, exempting nobody.
+    async fn perm_rule(&self, kind: egret_perm::RuleKind, levels: &[&str]) -> Uuid {
+        let at = |i: usize| levels.get(i).map(|s| s.to_string());
+        egret_perm::PermStore::new(self.db.pool.clone())
+            .create_rule(&egret_perm::Rule {
+                id: Uuid::nil(),
+                name: unique("th-rule"),
+                kind,
+                selector: egret_perm::Selector::Path(egret_perm::Scope {
+                    catalog_id: self.catalog_id().await,
+                    schema: at(0),
+                    table: at(1),
+                    column: at(2),
+                }),
+                exempt: egret_perm::PrincipalSet::default(),
+            })
+            .await
+            .expect("rule")
+    }
+
+    async fn perm(&self) -> Vec<(String, String, String, String)> {
+        perm_rows(&self.db, self.warehouse_id).await
+    }
+
+    /// `orders(id, email)`, readable to `u` and `v` everywhere in the
+    /// catalog; `u` denied `sales.orders`, `email` hash-masked and `orders`
+    /// filtered to `region = 'eu'`: `(deny, mask, filter)`. Compiled into
+    /// every bound profile.
+    async fn restricted_orders(&self) -> (Uuid, Uuid, Uuid) {
+        self.create_table("orders", &[(1, "id"), (2, "email")])
+            .await;
+        self.perm_grant(egret_perm::Effect::Allow, &[], &["u", "v"])
+            .await;
+        let deny = self
+            .perm_grant(egret_perm::Effect::Deny, &["sales", "orders"], &["u"])
+            .await;
+        let mask = self
+            .perm_rule(
+                egret_perm::RuleKind::Mask {
+                    mask_type: "MASK_HASH".into(),
+                    value_expr: None,
+                },
+                &["sales", "orders", "email"],
+            )
+            .await;
+        let filter = self
+            .perm_rule(
+                egret_perm::RuleKind::RowFilter {
+                    filter_expr: "region = 'eu'".into(),
+                },
+                &["sales", "orders"],
+            )
+            .await;
+        self.recompile_all().await;
+        (deny, mask, filter)
+    }
+
+    fn column(
+        &self,
+        table: &'static str,
+        column: &'static str,
+        schema_level: &'static str,
+    ) -> Vec<(String, String)> {
+        vec![
+            ("catalog".into(), self.catalog.clone()),
+            (schema_level.into(), "sales".into()),
+            ("table".into(), table.into()),
+            ("column".into(), column.into()),
+        ]
+    }
+
+    /// What `user` reading `sales.{table}.id` gets from Trino's download.
+    async fn trino_reads(&self, user: &str, table: &'static str) -> bool {
+        let r = self.column(table, "id", "schema");
+        let r: Vec<(&str, &str)> = r.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        engine_eval::allowed(
+            &engine_eval::trino_decides(&self.db, self.trino_id, user, "select", &r).await,
+        )
+    }
+
+    /// What `user` reading `sales.{table}.id` gets from StarRocks' download.
+    async fn starrocks_reads(&self, user: &str, table: &'static str) -> bool {
+        let r = self.column(table, "id", "database");
+        let r: Vec<(&str, &str)> = r.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        engine_eval::allowed(
+            &engine_eval::starrocks_decides(&self.db, self.profile_id, user, "select", &r).await,
+        )
+    }
+
+    /// The mask StarRocks applies to `user` reading `sales.{table}.email`.
+    async fn starrocks_mask_of(&self, user: &str, table: &'static str) -> Option<String> {
+        let r = self.column(table, "email", "database");
+        let r: Vec<(&str, &str)> = r.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        engine_eval::mask_type(
+            &engine_eval::starrocks_mask(&self.db, self.profile_id, user, &r).await,
+        )
+    }
+
+    /// The row filter StarRocks applies to `user` reading `sales.{table}`.
+    async fn starrocks_filter_of(&self, user: &str, table: &'static str) -> Option<String> {
+        let r = self.column(table, "id", "database");
+        let r: Vec<(&str, &str)> = r[..3]
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        match engine_eval::starrocks_row_filter(&self.db, self.profile_id, user, &r).await {
+            egret_ranger_eval::eval::RowFilterDecision::Filtered(f) => Some(f.filter_expr),
+            egret_ranger_eval::eval::RowFilterDecision::NoFilter => None,
+            other => panic!("undecidable row filter: {other:?}"),
+        }
+    }
+}
+
+fn perm_row(kind: &str, what: &str, table: &str, column: &str) -> (String, String, String, String) {
+    (kind.into(), what.into(), table.into(), column.into())
+}
+
+/// G2, D1: a rename copies the deny, the path mask and the path row filter to
+/// the new name before the commit and keeps the originals; both engines'
+/// downloads restrict both names.
+#[tokio::test]
+async fn a_renamed_table_keeps_its_restrictions_on_both_names() {
+    let Some(env) = env().await else { return };
+    let (deny, mask, filter) = env.restricted_orders().await;
+    let _plugins = env.start_plugins().await;
+    let before = {
+        let mut conn = env.db.pool.acquire().await.expect("acquire");
+        (
+            egret_perm::get_grant_via(&mut conn, deny)
+                .await
+                .expect("deny"),
+            egret_perm::get_rule_via(&mut conn, mask)
+                .await
+                .expect("mask"),
+            egret_perm::get_rule_via(&mut conn, filter)
+                .await
+                .expect("filter"),
+        )
+    };
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(
+        env.perm().await,
+        vec![
+            perm_row("grant", "allow", "", ""),
+            perm_row("grant", "deny", "orders", ""),
+            perm_row("grant", "deny", "orders_v2", ""),
+            perm_row("rule", "mask", "orders", "email"),
+            perm_row("rule", "mask", "orders_v2", "email"),
+            perm_row("rule", "row_filter", "orders", ""),
+            perm_row("rule", "row_filter", "orders_v2", ""),
+        ]
+    );
+    let after = {
+        let mut conn = env.db.pool.acquire().await.expect("acquire");
+        (
+            egret_perm::get_grant_via(&mut conn, deny)
+                .await
+                .expect("deny"),
+            egret_perm::get_rule_via(&mut conn, mask)
+                .await
+                .expect("mask"),
+            egret_perm::get_rule_via(&mut conn, filter)
+                .await
+                .expect("filter"),
+        )
+    };
+    assert_eq!(after, before, "the originals keep their ids and bodies");
+    for table in ["orders", "orders_v2"] {
+        assert!(
+            !env.trino_reads("u", table).await,
+            "Trino lets u read {table}"
+        );
+        assert!(
+            env.trino_reads("v", table).await,
+            "Trino refuses v on {table}"
+        );
+        assert!(
+            !env.starrocks_reads("u", table).await,
+            "StarRocks lets u read {table}"
+        );
+        assert_eq!(
+            env.starrocks_mask_of("v", table).await.as_deref(),
+            Some("MASK_HASH"),
+            "{table}"
+        );
+        assert_eq!(
+            env.starrocks_filter_of("v", table).await.as_deref(),
+            Some("region = 'eu'"),
+            "{table}"
+        );
+    }
+}
+
+/// D6: the rename reaches lakekeeper only once the copies exist and the Trino
+/// plugin has reported the policy version the copy left.
+#[tokio::test]
+async fn the_rename_reaches_lakekeeper_only_after_trino_serves_the_copied_restrictions() {
+    let Some(env) = env().await else { return };
+    env.restricted_orders().await;
+    // Five times slower than StarRocks: a rename that waited for StarRocks
+    // alone reaches lakekeeper before Trino reports.
+    let trino = plugins::start_trino(env.policy.clone(), env.trino_name.clone(), POLL * 5);
+    let starrocks = env.start_starrocks_plugin(POLL);
+    trino.polled().await;
+    starrocks.polled().await;
+    env.probe_reach("tables/rename");
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    let reached = env.reached();
+    assert!(
+        reached
+            .perm
+            .contains(&perm_row("grant", "deny", "orders_v2", "")),
+        "{:?}",
+        reached.perm
+    );
+    let reported = trino.policy_report_of(reached.trino_policy_version).await;
+    assert!(
+        reported < reached.at,
+        "the Trino plugin reported the copy's policy version {} only after the rename reached \
+         lakekeeper",
+        reached.trino_policy_version
+    );
+}
+
+/// D1: a rename lakekeeper refuses undoes the copies; the originals stay.
+#[tokio::test]
+async fn a_failed_rename_deletes_the_copies() {
+    let Some(env) = env().await else { return };
+    env.restricted_orders().await;
+    env.create_table("orders_v2", &[(1, "id")]).await;
+    let _plugins = env.start_plugins().await;
+    let before = env.perm().await;
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(!status.is_success(), "{status} {body}");
+    assert!(
+        !body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("egret refused"),
+        "lakekeeper's own answer: {body}"
+    );
+    assert_eq!(env.perm().await, before);
+}
+
+/// D6, #757 R5: a bound Trino whose plugin never confirms refuses the rename
+/// at the deadline and undoes the copies.
+#[tokio::test]
+async fn a_rename_no_trino_plugin_confirms_is_refused_and_undone() {
+    let Some(env) = env_with_limit(Duration::from_secs(2)).await else {
+        return;
+    };
+    env.restricted_orders().await;
+    let starrocks = env.start_starrocks_plugin(POLL);
+    starrocks.polled().await;
+    let before = env.perm().await;
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let message = body["error"]["message"].as_str().expect("message");
+    assert!(
+        message.starts_with(
+            "egret refused the table change: engines did not confirm the copied restrictions \
+             within 2 s: "
+        ),
+        "{message}"
+    );
+    assert!(message.ends_with(". Nothing was renamed."), "{message}");
+    assert_eq!(env.perm().await, before);
+    assert!(env.source("orders").await.is_some(), "not renamed");
+}
+
+/// #757 interplay: a classified table with a deny moves its classifications
+/// and copies its deny in one hold.
+#[tokio::test]
+async fn a_classified_rename_still_moves_its_classifications() {
+    let Some(env) = env().await else { return };
+    let (a, b) = env.classified_orders().await;
+    env.perm_grant(egret_perm::Effect::Deny, &["sales", "orders"], &["u"])
+        .await;
+    env.recompile_all().await;
+    let _plugins = env.start_plugins().await;
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(
+        env.rows().await,
+        sorted(vec![row(a, "orders_v2", ""), row(b, "orders_v2", "email")])
+    );
+    assert_eq!(
+        env.perm().await,
+        vec![
+            perm_row("grant", "deny", "orders", ""),
+            perm_row("grant", "deny", "orders_v2", ""),
+        ]
+    );
+}
+
+// ── Grants follow a rename, Task 7: allows move after the commit; events ──
+
+impl Env {
+    /// `(table, column)` grant `id` names now.
+    async fn grant_at(&self, id: Uuid) -> (String, Option<String>) {
+        sqlx::query_as("SELECT table_name, column_name FROM perm.grants WHERE id = $1")
+            .bind(id)
+            .fetch_one(&self.db.pool)
+            .await
+            .expect("grant")
+    }
+
+    /// The grant and rule events of the warehouse's catalog, oldest first:
+    /// `(action, resource id, detail)`.
+    async fn perm_events(&self) -> Vec<(String, String, Value)> {
+        sqlx::query_as(
+            "SELECT action, resource_id, detail FROM audit.audit_log \
+              WHERE kind = 'mutation' AND action IN ('perm_grant:move', 'perm_grant:copy', \
+                    'perm_rule:copy', 'perm_grant:left', 'ranger_policy:left') \
+                AND (detail -> 'after' ->> 'catalog' = $1 OR detail ->> 'catalog' = $1 \
+                     OR detail -> 'before' ->> 'catalog' = $1 \
+                     OR starts_with(detail -> 'after' ->> 'selector', $1 || '.')) \
+              ORDER BY id",
+        )
+        .bind(&self.catalog)
+        .fetch_all(&self.db.pool)
+        .await
+        .expect("events")
+    }
+}
+
+/// G2, D2: the allows follow the renamed table in place, ids kept, after the
+/// commit; a rename that carries only allows waits for no plugin.
+#[tokio::test]
+async fn a_renamed_tables_allows_move_and_keep_their_ids() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "email")]).await;
+    let allow = env
+        .perm_grant(egret_perm::Effect::Allow, &["sales", "orders"], &["u"])
+        .await;
+    let column = env
+        .perm_grant(
+            egret_perm::Effect::Allow,
+            &["sales", "orders", "email"],
+            &["v"],
+        )
+        .await;
+    env.recompile_all().await;
+    // No plugin runs: a hold that waited would time out with a 409 naming
+    // `<no plugin has polled>`, so the 2xx itself proves it did not wait.
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(env.grant_at(allow).await, ("orders_v2".into(), None));
+    assert_eq!(
+        env.grant_at(column).await,
+        ("orders_v2".into(), Some("email".into()))
+    );
+    assert!(env.trino_reads("u", "orders_v2").await);
+    assert!(!env.trino_reads("u", "orders").await);
+}
+
+/// G6: before the commit no allow names the new name.
+#[tokio::test]
+async fn an_allow_is_not_on_the_new_name_before_the_commit() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    env.perm_grant(egret_perm::Effect::Allow, &["sales", "orders"], &["u"])
+        .await;
+    env.probe_reach("tables/rename");
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(
+        env.reached().perm,
+        vec![perm_row("grant", "allow", "orders", "")]
+    );
+    assert_eq!(
+        env.perm().await,
+        vec![perm_row("grant", "allow", "orders_v2", "")]
+    );
+}
+
+/// D9: a completed rename records one `perm_grant:move` per allow and one
+/// `perm_grant:copy` / `perm_rule:copy` per restriction, by its caller.
+#[tokio::test]
+async fn a_completed_rename_records_move_and_copy_events_by_its_caller() {
+    let Some(env) = env().await else { return };
+    let (deny, mask, filter) = env.restricted_orders().await;
+    let allow = env
+        .perm_grant(egret_perm::Effect::Allow, &["sales", "orders"], &["w"])
+        .await;
+    let (_, client) = env.catalog_client("trino-main").await;
+    *env.caller.lock().unwrap() = client.clone();
+    let _plugins = env.start_plugins().await;
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    let events = env.perm_events().await;
+    let of = |a: &str| -> Vec<&(String, String, Value)> {
+        events.iter().filter(|(x, _, _)| x == a).collect()
+    };
+    let moves = of("perm_grant:move");
+    assert_eq!(moves.len(), 1, "{events:?}");
+    assert_eq!(moves[0].1, allow.to_string());
+    let copies = of("perm_grant:copy");
+    assert_eq!(copies.len(), 1, "{events:?}");
+    assert_eq!(copies[0].2["before"]["id"], json!(deny));
+    assert_ne!(copies[0].1, deny.to_string());
+    let rules = of("perm_rule:copy");
+    let mut sources: Vec<Value> = rules.iter().map(|e| e.2["before"]["id"].clone()).collect();
+    sources.sort_by_key(Value::to_string);
+    let mut want = vec![json!(mask), json!(filter)];
+    want.sort_by_key(Value::to_string);
+    assert_eq!(sources, want);
+    for (_, _, d) in &events {
+        assert_eq!(d["actor"]["client_id"], json!(client), "{d}");
+        assert_eq!(d["actor"]["name"], json!("trino-main"), "{d}");
+        assert_eq!(d["trigger"], "iceberg_rename", "{d}");
+        assert_eq!(
+            d["rename"],
+            json!({"from": "sales.orders", "to": "sales.orders_v2"}),
+            "{d}"
+        );
+        if d["after"]["selector"].is_string() {
+            let at = |side: &str| d[side]["selector"].as_str().unwrap().to_string();
+            assert!(at("after").contains(".sales.orders_v2"), "{d}");
+            assert!(!at("before").contains(".sales.orders_v2"), "{d}");
+        } else {
+            assert_eq!(d["after"]["table"], "orders_v2", "{d}");
+            assert_eq!(d["before"]["table"], "orders", "{d}");
+        }
+    }
+}
+
+/// D9: a refused or undone rename records no grant event.
+#[tokio::test]
+async fn a_refused_or_undone_rename_records_no_grant_event() {
+    let Some(env) = env_with_limit(Duration::from_secs(2)).await else {
+        return;
+    };
+    env.restricted_orders().await;
+    env.perm_grant(egret_perm::Effect::Allow, &["sales", "orders"], &["w"])
+        .await;
+    // No plugin: the wait times out and the copy is undone.
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    // Lakekeeper refuses: the copy is undone.
+    env.create_table("orders_v2", &[(1, "id")]).await;
+    let _plugins = env.start_plugins().await;
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(!status.is_success(), "{status} {body}");
+    assert!(env.perm_events().await.is_empty());
+}
+
+// ── Grants follow a rename, Task 8: patterns refuse or are reported (G4) ──
+
+impl Env {
+    async fn create_namespace(&self, levels: &[&str]) {
+        let (status, body) = self
+            .call_raw("POST", "namespaces", Some(json!({"namespace": levels})))
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "create namespace {levels:?}: {body}"
+        );
+    }
+
+    /// Hold the table hook's profile lock on the lowest bound profile from a
+    /// connection of the test's own: a held rename plans, then waits for it.
+    async fn hold_profile_lock(&self) -> sqlx::PgConnection {
+        use sqlx::Connection as _;
+        let mut conn = sqlx::PgConnection::connect(&egret_test_db::url().await.expect("url"))
+            .await
+            .expect("connect");
+        sqlx::query("SELECT pg_advisory_lock(hashtextextended('egret-table-hook\u{1e}' || $1, 0))")
+            .bind(self.trino_id.min(self.profile_id).to_string())
+            .execute(&mut conn)
+            .await
+            .expect("profile lock");
+        conn
+    }
+
+    async fn assert_refused_and_unrenamed(
+        &self,
+        status: StatusCode,
+        body: &Value,
+        names: &[String],
+    ) {
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        let message = body["error"]["message"].as_str().expect("message");
+        assert!(
+            message.starts_with("egret refused the table change: "),
+            "{message}"
+        );
+        assert!(message.ends_with(". Nothing was renamed."), "{message}");
+        for n in names {
+            assert!(message.contains(n.as_str()), "{n} not in {message}");
+        }
+        assert!(self.source("orders").await.is_some(), "not renamed");
+    }
+}
+
+/// G4, D4: a restrictive pattern that would stop covering the table refuses
+/// the rename at plan time; nothing is locked, written or recompiled.
+#[tokio::test]
+async fn a_restrictive_pattern_that_would_stop_covering_the_table_refuses_the_rename() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    let pattern = env
+        .perm_grant(egret_perm::Effect::Deny, &["sales", "orders*"], &["u"])
+        .await;
+    env.recompile_all().await;
+    let (perm, versions) = (env.perm().await, env.versions().await);
+
+    let (status, body) = env.rename("orders", "archive").await;
+    env.assert_refused_and_unrenamed(
+        status,
+        &body,
+        &[format!("deny grant {pattern} (sales.orders*)")],
+    )
+    .await;
+    assert_eq!(env.perm().await, perm);
+    assert_eq!(env.versions().await, versions);
+    // No lock was left: the same refusal again, not "being held".
+    let (status, body) = env.rename("orders", "archive").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        !body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("being held"),
+        "{body}"
+    );
+
+    // A schema-level row filter and a rename into another namespace.
+    drop(env);
+    let Some(env) = self::env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    env.create_namespace(&["finance"]).await;
+    env.perm_rule(
+        egret_perm::RuleKind::RowFilter {
+            filter_expr: "region = 'eu'".into(),
+        },
+        &["sales"],
+    )
+    .await;
+    let (status, body) = env
+        .rename_across((&["sales"], "orders"), (&["finance"], "orders"))
+        .await;
+    env.assert_refused_and_unrenamed(status, &body, &["(sales)".to_string()])
+        .await;
+}
+
+/// G4, D4: an allow pattern that stops covering the table is left as it is
+/// and reported (`perm_grant:left`).
+#[tokio::test]
+async fn an_allow_pattern_is_left_and_reported() {
+    let Some(env) = env().await else { return };
+    env.create_table("tmp_a", &[(1, "id")]).await;
+    let pattern = env
+        .perm_grant(egret_perm::Effect::Allow, &["sales", "tmp_*"], &["u"])
+        .await;
+
+    let (status, body) = env.rename("tmp_a", "a").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(env.grant_at(pattern).await, ("tmp_*".into(), None));
+    let events = env.perm_events().await;
+    let left: Vec<_> = events
+        .iter()
+        .filter(|(a, _, _)| a == "perm_grant:left")
+        .collect();
+    assert_eq!(left.len(), 1, "{events:?}");
+    assert_eq!(left[0].1, pattern.to_string());
+    assert_eq!(
+        left[0].2["rename"],
+        json!({"from": "sales.tmp_a", "to": "sales.a"})
+    );
+}
+
+/// D14: a restriction cannot follow into a namespace of several levels.
+#[tokio::test]
+async fn a_restriction_into_a_multi_level_namespace_refuses() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    env.create_namespace(&["sales", "eu"]).await;
+    let deny = env
+        .perm_grant(egret_perm::Effect::Deny, &["sales", "orders"], &["u"])
+        .await;
+    let (status, body) = env
+        .rename_across((&["sales"], "orders"), (&["sales", "eu"], "orders"))
+        .await;
+    env.assert_refused_and_unrenamed(status, &body, &[deny.to_string()])
+        .await;
+}
+
+/// D4 under the locks: a pattern written after the plan read is caught by the
+/// copy transaction's re-read, which rolls the copy back.
+#[tokio::test]
+async fn a_pattern_written_during_the_plan_is_caught_under_the_locks() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    env.perm_grant(egret_perm::Effect::Deny, &["sales", "orders"], &["u"])
+        .await;
+    let _plugins = env.start_plugins().await;
+    let lock = env.hold_profile_lock().await;
+    let perm = env.perm().await;
+
+    let app = env.app.clone();
+    let prefix = env.prefix.clone();
+    let rename = tokio::spawn(async move {
+        send(
+            &app,
+            &prefix,
+            "POST",
+            "tables/rename",
+            Some(json!({
+                "source": {"namespace": ["sales"], "name": "orders"},
+                "destination": {"namespace": ["sales"], "name": "archive"},
+            })),
+        )
+        .await
+    });
+    // The rename has planned and waits for the profile lock.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // Another subject than the copied deny's, which would cover it (G5, D21).
+    let pattern = env
+        .perm_grant(egret_perm::Effect::Deny, &["sales", "ord*"], &["w"])
+        .await;
+    {
+        use sqlx::Connection as _;
+        lock.close().await.expect("release");
+    }
+    let (status, body) = rename.await.expect("rename task");
+    env.assert_refused_and_unrenamed(status, &body, &[pattern.to_string()])
+        .await;
+    let mut want = perm;
+    want.push(perm_row("grant", "deny", "ord*", ""));
+    want.sort();
+    assert_eq!(env.perm().await, want, "the copy was rolled back");
+}
+
+/// D4: a pattern that covers both names changes nothing.
+#[tokio::test]
+async fn a_pattern_that_covers_both_names_changes_nothing() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    env.perm_grant(egret_perm::Effect::Deny, &["sales", "ord*"], &["u"])
+        .await;
+    let perm = env.perm().await;
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(env.perm().await, perm);
+    assert!(env.perm_events().await.is_empty());
+}
+
+// ── Grants follow a rename, Task 9: a covered destination (G5, §5.9) ──
+
+/// G5: a pattern deny that would stop covering the table does not refuse
+/// when the new name already carries an equal deny; nothing is copied for it
+/// and the exact-name row restricts the renamed table.
+#[tokio::test]
+async fn a_covered_destination_lets_the_rename_through() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    env.perm_grant(egret_perm::Effect::Allow, &[], &["u", "v"])
+        .await;
+    let pattern = env
+        .perm_grant(egret_perm::Effect::Deny, &["sales", "orders*"], &["u"])
+        .await;
+    env.perm_grant(egret_perm::Effect::Deny, &["sales", "archive"], &["u"])
+        .await;
+    env.recompile_all().await;
+    let perm = env.perm().await;
+    let _plugins = env.start_plugins().await;
+
+    let (status, body) = env.rename("orders", "archive").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(env.grant_at(pattern).await, ("orders*".into(), None));
+    assert_eq!(env.perm().await, perm, "nothing copied, nothing moved");
+    assert!(!env.trino_reads("u", "archive").await);
+    assert!(!env.starrocks_reads("u", "archive").await);
+    assert!(env.trino_reads("v", "archive").await);
+}
+
+/// G5: a partial cover refuses, naming what the new name lacks.
+#[tokio::test]
+async fn a_partially_covered_destination_is_refused_with_what_is_missing() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    env.perm_grant(egret_perm::Effect::Deny, &["sales", "orders*"], &["u", "w"])
+        .await;
+    env.perm_grant(egret_perm::Effect::Deny, &["sales", "archive"], &["u"])
+        .await;
+    let (status, body) = env.rename("orders", "archive").await;
+    env.assert_refused_and_unrenamed(
+        status,
+        &body,
+        &["lacks a deny of read for user:w".to_string()],
+    )
+    .await;
+}
+
+/// G5 under the locks: a cover deleted after the plan read refuses in the
+/// copy transaction.
+#[tokio::test]
+async fn a_cover_deleted_before_the_copy_refuses() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    env.perm_grant(egret_perm::Effect::Deny, &["sales", "orders*"], &["u"])
+        .await;
+    let cover = env
+        .perm_grant(egret_perm::Effect::Deny, &["sales", "archive"], &["u"])
+        .await;
+    let _plugins = env.start_plugins().await;
+    let lock = env.hold_profile_lock().await;
+    let app = env.app.clone();
+    let prefix = env.prefix.clone();
+    let rename = tokio::spawn(async move {
+        send(
+            &app,
+            &prefix,
+            "POST",
+            "tables/rename",
+            Some(json!({
+                "source": {"namespace": ["sales"], "name": "orders"},
+                "destination": {"namespace": ["sales"], "name": "archive"},
+            })),
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // Straight to the store: the hold already holds the name lock a route
+    // write would take (D10).
+    sqlx::query("DELETE FROM perm.grants WHERE id = $1")
+        .bind(cover)
+        .execute(&env.db.pool)
+        .await
+        .expect("delete the cover");
+    {
+        use sqlx::Connection as _;
+        lock.close().await.expect("release");
+    }
+    let (status, body) = rename.await.expect("rename task");
+    env.assert_refused_and_unrenamed(
+        status,
+        &body,
+        &["lacks a deny of read for user:u".to_string()],
+    )
+    .await;
+}
+
+// ── Grants follow a rename, Task 10: hand-written policies (G3, D5) ──
+
+impl Env {
+    /// An operator policy on the Trino profile, returning its id.
+    async fn handwritten(&self, body: Value, enabled: bool) -> i64 {
+        sqlx::query_scalar(
+            "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, enabled, managed_by) \
+             VALUES ($1, $2, $3, $4, 'operator') RETURNING id",
+        )
+        .bind(self.trino_id)
+        .bind(unique("th-hand"))
+        .bind(body)
+        .bind(enabled)
+        .fetch_one(&self.db.pool)
+        .await
+        .expect("hand-written policy")
+    }
+
+    async fn policy_row(&self, id: i64) -> (Value, i64) {
+        sqlx::query_as("SELECT policy_jsonb, version FROM policy.authz_policies WHERE id = $1")
+            .bind(id)
+            .fetch_one(&self.db.pool)
+            .await
+            .expect("policy")
+    }
+
+    fn access_policy(&self, table: &[&str], excludes: bool, deny: bool) -> Value {
+        let item = json!([{"users": ["u"], "accesses": [{"type": "select", "isAllowed": true}]}]);
+        json!({
+            "policyType": 0,
+            "resources": {
+                "catalog": {"values": [self.catalog], "isExcludes": false},
+                "schema": {"values": ["sales"], "isExcludes": false},
+                "table": {"values": table, "isExcludes": excludes},
+                "column": {"values": ["*"], "isExcludes": false},
+            },
+            "policyItems": if deny { json!([]) } else { item.clone() },
+            "denyPolicyItems": if deny { item } else { json!([]) },
+        })
+    }
+}
+
+/// G3, D5: an enabled operator mask, an exclusion-list allow or a deny naming
+/// the table refuses the rename, naming the policy; the policy is untouched.
+#[tokio::test]
+async fn a_handwritten_mask_naming_the_table_refuses_the_rename() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "email")]).await;
+    let mask = env
+        .handwritten(
+            json!({
+                "policyType": 1,
+                "resources": {
+                    "catalog": {"values": [env.catalog]}, "schema": {"values": ["sales"]},
+                    "table": {"values": ["orders"]}, "column": {"values": ["email"]},
+                },
+                "dataMaskPolicyItems": [{"users": ["u"],
+                                         "dataMaskInfo": {"dataMaskType": "MASK_HASH"}}],
+            }),
+            true,
+        )
+        .await;
+    let before = env.policy_row(mask).await;
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    let label = format!("{}/", env.trino_name);
+    env.assert_refused_and_unrenamed(status, &body, &[label.clone(), format!("({mask})")])
+        .await;
+    assert_eq!(
+        env.policy_row(mask).await,
+        before,
+        "byte-identical, same version"
+    );
+
+    for (excludes, deny) in [(true, false), (false, true)] {
+        sqlx::query(
+            "DELETE FROM policy.authz_policies WHERE service_id = $1 AND managed_by = 'operator'",
+        )
+        .bind(env.trino_id)
+        .execute(&env.db.pool)
+        .await
+        .expect("clear");
+        let id = env
+            .handwritten(env.access_policy(&["orders"], excludes, deny), true)
+            .await;
+        let (status, body) = env.rename("orders", "orders_v2").await;
+        env.assert_refused_and_unrenamed(status, &body, &[format!("({id})")])
+            .await;
+    }
+}
+
+/// D5: a plain hand-written allow naming the table is reported
+/// (`ranger_policy:left`), not refused, and stays as it was.
+#[tokio::test]
+async fn a_plain_handwritten_allow_is_reported() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    let allow = env
+        .handwritten(
+            env.access_policy(&["orders", "customers"], false, false),
+            true,
+        )
+        .await;
+    let before = env.policy_row(allow).await;
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(env.policy_row(allow).await, before);
+    let left: Vec<(String, Value)> = sqlx::query_as(
+        "SELECT resource_id, detail FROM audit.audit_log \
+          WHERE action = 'ranger_policy:left' AND resource_id = $1",
+    )
+    .bind(allow.to_string())
+    .fetch_all(&env.db.pool)
+    .await
+    .expect("events");
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert_eq!(left[0].1["before"]["service"], json!(env.trino_name));
+    assert_eq!(
+        left[0].1["rename"],
+        json!({"from": "sales.orders", "to": "sales.orders_v2"})
+    );
+}
+
+/// D5 guards: a disabled policy, or one on a profile not bound to the
+/// catalog, does not refuse.
+#[tokio::test]
+async fn a_disabled_or_unbound_policy_does_not_refuse() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    env.handwritten(env.access_policy(&["orders"], false, true), false)
+        .await;
+    let unbound = env
+        .policy
+        .create_service(&unique("th_unbound"), "trino", &json!({}))
+        .await
+        .expect("unbound profile");
+    sqlx::query(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, enabled, managed_by) \
+         VALUES ($1, $2, $3, true, 'operator')",
+    )
+    .bind(unbound.id)
+    .bind(unique("th-unbound"))
+    .bind(env.access_policy(&["orders"], false, true))
+    .execute(&env.db.pool)
+    .await
+    .expect("unbound policy");
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+}
+
+// ── Grants follow a rename, Task 11: the defaults (D11, D13, swap) ──
+
+impl Env {
+    /// The grants of the catalog on `sales.{table}`: `(id, effect)`, sorted.
+    async fn grants_on(&self, table: &str) -> Vec<(Uuid, String)> {
+        sqlx::query_as(
+            "SELECT g.id, g.effect::text FROM perm.grants g \
+               JOIN registry.catalogs c ON c.id = g.catalog_id \
+              WHERE c.warehouse_id = $1 AND g.table_name = $2 ORDER BY 2, 1",
+        )
+        .bind(self.warehouse_id)
+        .bind(table)
+        .fetch_all(&self.db.pool)
+        .await
+        .expect("grants")
+    }
+}
+
+/// G2: the swap pattern (`t → t_old`, `t_new → t`) leaves the new `t`
+/// restricted by the original deny, while the allows follow their tables.
+#[tokio::test]
+async fn the_swap_pattern_leaves_the_new_table_restricted() {
+    let Some(env) = env().await else { return };
+    env.create_table("t", &[(1, "id")]).await;
+    env.create_table("t_new", &[(1, "id")]).await;
+    env.perm_grant(egret_perm::Effect::Allow, &[], &["u"]).await;
+    let deny = env
+        .perm_grant(egret_perm::Effect::Deny, &["sales", "t"], &["u"])
+        .await;
+    let a = env
+        .perm_grant(egret_perm::Effect::Allow, &["sales", "t"], &["v"])
+        .await;
+    let a2 = env
+        .perm_grant(egret_perm::Effect::Allow, &["sales", "t_new"], &["w"])
+        .await;
+    env.recompile_all().await;
+    let _plugins = env.start_plugins().await;
+
+    let (status, body) = env.rename("t", "t_old").await;
+    assert!(status.is_success(), "t → t_old: {status} {body}");
+    let (status, body) = env.rename("t_new", "t").await;
+    assert!(status.is_success(), "t_new → t: {status} {body}");
+
+    let t_old = env.grants_on("t_old").await;
+    assert_eq!(t_old.len(), 2, "{t_old:?}");
+    assert!(t_old.contains(&(a, "allow".into())), "{t_old:?}");
+    assert!(
+        t_old.iter().any(|(id, e)| e == "deny" && *id != deny),
+        "{t_old:?}"
+    );
+    let mut t = env.grants_on("t").await;
+    t.sort();
+    let mut want = vec![(deny, "deny".to_string()), (a2, "allow".to_string())];
+    want.sort();
+    assert_eq!(t, want);
+    assert!(!env.trino_reads("u", "t").await, "the new t is restricted");
+    assert!(!env.trino_reads("u", "t_old").await);
+}
+
+/// D13: renaming back and forth does not stack equivalent copies.
+#[tokio::test]
+async fn a_rename_onto_a_name_with_dormant_copies_does_not_stack_them() {
+    let Some(env) = env().await else { return };
+    env.create_table("t", &[(1, "id")]).await;
+    env.perm_grant(egret_perm::Effect::Deny, &["sales", "t"], &["u"])
+        .await;
+    let _plugins = env.start_plugins().await;
+    for (from, to) in [("t", "t_old"), ("t_old", "t"), ("t", "t_old")] {
+        let (status, body) = env.rename(from, to).await;
+        assert!(status.is_success(), "{from} → {to}: {status} {body}");
+    }
+    assert_eq!(env.grants_on("t").await.len(), 1);
+    assert_eq!(env.grants_on("t_old").await.len(), 1);
+}
+
+/// #757 C10: a rename that changes case only moves, copies and records
+/// nothing (every engine folds case).
+#[tokio::test]
+async fn a_case_only_rename_moves_nothing() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    env.perm_grant(egret_perm::Effect::Deny, &["sales", "orders"], &["u"])
+        .await;
+    env.perm_grant(egret_perm::Effect::Allow, &["sales", "orders"], &["v"])
+        .await;
+    let perm = env.perm().await;
+    let _ = env.rename("orders", "Orders").await;
+    assert_eq!(env.perm().await, perm);
+    assert!(env.perm_events().await.is_empty());
+}
+
+/// #757 C9: a view sent to the table rename endpoint carries no grant.
+#[tokio::test]
+async fn a_view_sent_to_the_table_rename_endpoint_moves_no_grant() {
+    let Some(env) = env().await else { return };
+    let (status, body) = env
+        .call(
+            "POST",
+            "namespaces/sales/views",
+            Some(json!({
+                "name": "v_orders",
+                "schema": schema(0, &[(1, "id")]),
+                "view-version": {
+                    "version-id": 1, "schema-id": 0,
+                    "timestamp-ms": 1_700_000_000_000_i64,
+                    "summary": {"engine-name": "trino"},
+                    "default-namespace": ["sales"],
+                    "representations": [{"type": "sql", "sql": "SELECT 1 AS id", "dialect": "trino"}]
+                },
+                "properties": {}
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "create view: {body}");
+    env.perm_grant(egret_perm::Effect::Allow, &["sales", "v_orders"], &["v"])
+        .await;
+    env.perm_grant(egret_perm::Effect::Deny, &["sales", "v_orders"], &["u"])
+        .await;
+    let perm = env.perm().await;
+    let _ = env.rename("v_orders", "v_orders_2").await;
+    assert_eq!(env.perm().await, perm);
+}
+
+/// D11: a rename whose source carries nothing takes #755's path: no hold,
+/// no compile.
+#[tokio::test]
+async fn a_rename_whose_source_carries_nothing_takes_the_755_path() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    env.perm_grant(egret_perm::Effect::Deny, &["sales", "events"], &["u"])
+        .await;
+    env.recompile().await;
+    let compiled = env.last_compile().await;
+    let perm = env.perm().await;
+    // A held name refuses a hold at once; #755's path takes no name lock.
+    let _held = env.hold_name("orders_v2").await;
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(env.perm().await, perm);
+    assert_eq!(env.last_compile().await, compiled, "no compile ran");
+}
+
+/// #757 review finding 4: lakekeeper answers 500 after committing; the move
+/// still finishes: the allow moves and the copy stays.
+#[tokio::test]
+async fn a_non_2xx_after_a_committed_rename_still_moves_allows() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    let allow = env
+        .perm_grant(egret_perm::Effect::Allow, &["sales", "orders"], &["v"])
+        .await;
+    env.perm_grant(egret_perm::Effect::Deny, &["sales", "orders"], &["u"])
+        .await;
+    let _plugins = env.start_plugins().await;
+    *env.fail_after_commit.lock().unwrap() = Some(format!("POST /{}/tables/rename", env.prefix));
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(env.grant_at(allow).await, ("orders_v2".into(), None));
+    assert_eq!(
+        env.perm().await,
+        vec![
+            perm_row("grant", "allow", "orders_v2", ""),
+            perm_row("grant", "deny", "orders", ""),
+            perm_row("grant", "deny", "orders_v2", ""),
+        ]
+    );
+}
+
+// ── Grants follow a rename, Task 12: column renames (spec §5.4) ──
+
+/// G1, §5.4: a renamed column keeps its path mask and its column deny on both
+/// names, copied before the commit, which waits for Trino's policy version.
+#[tokio::test]
+async fn a_renamed_column_keeps_its_mask_and_deny_on_both_names() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "email")]).await;
+    env.perm_grant(egret_perm::Effect::Allow, &[], &["u", "v"])
+        .await;
+    env.perm_grant(
+        egret_perm::Effect::Deny,
+        &["sales", "orders", "email"],
+        &["u"],
+    )
+    .await;
+    env.perm_rule(
+        egret_perm::RuleKind::Mask {
+            mask_type: "MASK_HASH".into(),
+            value_expr: None,
+        },
+        &["sales", "orders", "email"],
+    )
+    .await;
+    env.recompile_all().await;
+    let trino = plugins::start_trino(env.policy.clone(), env.trino_name.clone(), POLL * 5);
+    let starrocks = env.start_starrocks_plugin(POLL);
+    trino.polled().await;
+    starrocks.polled().await;
+    env.probe_reach("namespaces/sales/tables/orders");
+
+    let (status, body) = env
+        .commit_schema("orders", 1, &[(1, "id"), (2, "mail")])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        env.perm().await,
+        vec![
+            perm_row("grant", "allow", "", ""),
+            perm_row("grant", "deny", "orders", "email"),
+            perm_row("grant", "deny", "orders", "mail"),
+            perm_row("rule", "mask", "orders", "email"),
+            perm_row("rule", "mask", "orders", "mail"),
+        ]
+    );
+    let reached = env.reached();
+    assert!(
+        reached
+            .perm
+            .contains(&perm_row("rule", "mask", "orders", "mail")),
+        "{:?}",
+        reached.perm
+    );
+    assert!(trino.policy_report_of(reached.trino_policy_version).await < reached.at);
+    let mail = env.column("orders", "mail", "database");
+    let mail: Vec<(&str, &str)> = mail.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    assert_eq!(
+        engine_eval::mask_type(
+            &engine_eval::starrocks_mask(&env.db, env.profile_id, "v", &mail).await
+        )
+        .as_deref(),
+        Some("MASK_HASH")
+    );
+}
+
+/// G2, §5.4: a column allow follows its column after the commit, id kept.
+#[tokio::test]
+async fn a_renamed_columns_allow_moves() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "email")]).await;
+    let allow = env
+        .perm_grant(
+            egret_perm::Effect::Allow,
+            &["sales", "orders", "email"],
+            &["v"],
+        )
+        .await;
+    let (status, body) = env
+        .commit_schema("orders", 1, &[(1, "id"), (2, "mail")])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        env.grant_at(allow).await,
+        ("orders".into(), Some("mail".into()))
+    );
+}
+
+/// G4 one level down: a column pattern that would stop covering the renamed
+/// column refuses the commit.
+#[tokio::test]
+async fn a_column_pattern_that_stops_matching_refuses() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "email")]).await;
+    env.perm_rule(
+        egret_perm::RuleKind::Mask {
+            mask_type: "MASK_HASH".into(),
+            value_expr: None,
+        },
+        &["sales", "orders", "e*"],
+    )
+    .await;
+    let (status, body) = env
+        .commit_schema("orders", 1, &[(1, "id"), (2, "mail")])
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("(sales.orders.e*)"),
+        "{body}"
+    );
+    assert_eq!(env.source_fields("orders").await.unwrap()[1].1, "email");
+}
+
+/// §5.4: swapped columns carry both sets of restrictions: each name keeps its
+/// own and gets the other's copy.
+#[tokio::test]
+async fn swapped_columns_carry_both_sets() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "a"), (3, "b")])
+        .await;
+    env.perm_grant(egret_perm::Effect::Deny, &["sales", "orders", "a"], &["u"])
+        .await;
+    env.perm_grant(egret_perm::Effect::Deny, &["sales", "orders", "b"], &["w"])
+        .await;
+    let _plugins = env.start_plugins().await;
+    let (status, body) = env
+        .commit_schema("orders", 1, &[(1, "id"), (2, "b"), (3, "a")])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(env.denied_on_column("a").await, vec!["u", "w"]);
+    assert_eq!(env.denied_on_column("b").await, vec!["u", "w"]);
+}
+
+impl Env {
+    /// The principals the catalog's grants on `sales.orders.{column}` name.
+    async fn denied_on_column(&self, column: &str) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT p.ref FROM perm.grants g \
+               JOIN perm.grant_principals p ON p.grant_id = g.id \
+               JOIN registry.catalogs c ON c.id = g.catalog_id \
+              WHERE c.name = $1 AND g.column_name = $2 ORDER BY 1",
+        )
+        .bind(&self.catalog)
+        .bind(column)
+        .fetch_all(&self.db.pool)
+        .await
+        .expect("denied")
+    }
+}
+
+/// #757 guards with a column deny: a dropped column keeps its rows and takes
+/// no hold.
+#[tokio::test]
+async fn a_dropped_column_keeps_its_grants_and_takes_no_hold() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "email")]).await;
+    env.perm_grant(
+        egret_perm::Effect::Deny,
+        &["sales", "orders", "email"],
+        &["u"],
+    )
+    .await;
+    let perm = env.perm().await;
+    let _held = env.hold_name("orders").await;
+    let (status, body) = env.commit_schema("orders", 1, &[(1, "id")]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(env.perm().await, perm);
+}
+
+/// §5.4 with masks: swapping two columns whose path masks differ would put
+/// both masks on each column, a pair the overlap check refuses (#757's rule
+/// for a copied mask meeting one already on the destination): 409, nothing
+/// renamed, no copy left.
+#[tokio::test]
+async fn swapped_columns_with_different_masks_are_refused_by_the_overlap_check() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "a"), (3, "b")])
+        .await;
+    for (column, mask_type) in [("a", "MASK_HASH"), ("b", "MASK_NULL")] {
+        env.perm_rule(
+            egret_perm::RuleKind::Mask {
+                mask_type: mask_type.into(),
+                value_expr: None,
+            },
+            &["sales", "orders", column],
+        )
+        .await;
+    }
+    env.recompile_all().await;
+    let perm = env.perm().await;
+    let _plugins = env.start_plugins().await;
+    let (status, body) = env
+        .commit_schema("orders", 1, &[(1, "id"), (2, "b"), (3, "a")])
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .ends_with("Nothing was renamed."),
+        "{body}"
+    );
+    assert_eq!(env.perm().await, perm);
+    assert_eq!(env.source_fields("orders").await.unwrap()[1].1, "a");
+}
+
+// ── Grants follow a rename, Task 13: catalog grants (KI-309, D8) ──
+
+impl Env {
+    /// A role holding one catalog grant; returns the grant id.
+    async fn catalog_grant(
+        &self,
+        securable: &str,
+        ns: Option<&[&str]>,
+        table: Option<&str>,
+        privilege: &str,
+    ) -> Uuid {
+        let store = egret_catalog_engine::CatalogStore::new(self.db.clone());
+        let role = store
+            .create_role(self.warehouse_id, &unique("th-role"), "external", None)
+            .await
+            .expect("role");
+        self.catalog_grant_of(role.id, securable, ns, table, privilege)
+            .await
+    }
+
+    async fn catalog_grant_of(
+        &self,
+        role: Uuid,
+        securable: &str,
+        ns: Option<&[&str]>,
+        table: Option<&str>,
+        privilege: &str,
+    ) -> Uuid {
+        egret_catalog_engine::CatalogStore::new(self.db.clone())
+            .add_grant(
+                role,
+                &egret_catalog_engine::GrantInput {
+                    securable_type: securable.into(),
+                    namespace: ns.map(|n| n.iter().map(|s| s.to_string()).collect()),
+                    table_name: table.map(str::to_string),
+                    privilege: privilege.into(),
+                },
+            )
+            .await
+            .expect("catalog grant")
+            .id
+    }
+
+    /// `(namespace, table)` catalog grant `id` names now, `None` when gone.
+    async fn catalog_grant_at(&self, id: Uuid) -> Option<(Option<Vec<String>>, Option<String>)> {
+        sqlx::query_as("SELECT namespace, table_name FROM catalog.catalog_grants WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.db.pool)
+            .await
+            .expect("catalog grant")
+    }
+
+    async fn catalog_grant_events(&self) -> Vec<(String, String, Value)> {
+        sqlx::query_as(
+            "SELECT action, resource_id, detail FROM audit.audit_log \
+              WHERE resource_type = 'catalog_grant' AND detail ->> 'warehouse_id' = $1 \
+              ORDER BY id",
+        )
+        .bind(self.warehouse_id.to_string())
+        .fetch_all(&self.db.pool)
+        .await
+        .expect("events")
+    }
+}
+
+fn at(ns: &[&str], table: &str) -> Option<(Option<Vec<String>>, Option<String>)> {
+    Some((
+        Some(ns.iter().map(|s| s.to_string()).collect()),
+        Some(table.to_string()),
+    ))
+}
+
+/// KI-309, D8: a `table` catalog grant follows its renamed table, with a
+/// `catalog_grant:move` event by the caller.
+#[tokio::test]
+async fn a_table_catalog_grant_follows_the_rename() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    let grant = env
+        .catalog_grant("table", Some(&["sales"]), Some("orders"), "read")
+        .await;
+    let (_, client) = env.catalog_client("spark-etl").await;
+    *env.caller.lock().unwrap() = client.clone();
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(
+        env.catalog_grant_at(grant).await,
+        at(&["sales"], "orders_v2")
+    );
+    let events = env.catalog_grant_events().await;
+    assert_eq!(events.len(), 1, "{events:?}");
+    let (action, id, d) = &events[0];
+    assert_eq!(action, "catalog_grant:move");
+    assert_eq!(id, &grant.to_string());
+    assert_eq!(d["actor"]["client_id"], json!(client));
+    assert_eq!(
+        d["before"],
+        json!({"namespace": ["sales"], "table": "orders"})
+    );
+    assert_eq!(
+        d["after"],
+        json!({"namespace": ["sales"], "table": "orders_v2"})
+    );
+    assert_eq!(d["merged"], json!(false));
+}
+
+/// D8: a rename into another namespace moves the namespace too, at any depth.
+#[tokio::test]
+async fn a_cross_namespace_rename_moves_the_namespace_too() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    env.create_namespace(&["finance"]).await;
+    let grant = env
+        .catalog_grant("table", Some(&["sales"]), Some("orders"), "read")
+        .await;
+    let (status, body) = env
+        .rename_across((&["sales"], "orders"), (&["finance"], "orders"))
+        .await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(
+        env.catalog_grant_at(grant).await,
+        at(&["finance"], "orders")
+    );
+
+    env.create_namespace(&["sales", "eu"]).await;
+    env.create_namespace(&["sales", "us"]).await;
+    let (status, body) = env
+        .call(
+            "POST",
+            "namespaces/sales%1Feu/tables",
+            Some(json!({"name": "x", "schema": schema(0, &[(1, "id")])})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "create sales.eu.x: {body}");
+    let deep = env
+        .catalog_grant("table", Some(&["sales", "eu"]), Some("x"), "write")
+        .await;
+    let (status, body) = env
+        .rename_across((&["sales", "eu"], "x"), (&["sales", "us"], "x"))
+        .await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(env.catalog_grant_at(deep).await, at(&["sales", "us"], "x"));
+}
+
+/// D8: a moved grant that the role already holds on the new name merges.
+#[tokio::test]
+async fn a_moved_grant_merges_with_an_identical_one() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    let store = egret_catalog_engine::CatalogStore::new(env.db.clone());
+    let role = store
+        .create_role(env.warehouse_id, &unique("th-role"), "external", None)
+        .await
+        .expect("role");
+    let moving = env
+        .catalog_grant_of(role.id, "table", Some(&["sales"]), Some("orders"), "read")
+        .await;
+    let there = env
+        .catalog_grant_of(
+            role.id,
+            "table",
+            Some(&["sales"]),
+            Some("orders_v2"),
+            "read",
+        )
+        .await;
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(env.catalog_grant_at(moving).await, None);
+    assert_eq!(
+        env.catalog_grant_at(there).await,
+        at(&["sales"], "orders_v2")
+    );
+    assert_eq!(env.catalog_grant_events().await[0].2["merged"], json!(true));
+}
+
+/// D8: catalog grants need no hold: a held destination name does not refuse
+/// a rename that carries only catalog grants.
+#[tokio::test]
+async fn catalog_grants_need_no_hold() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    let grant = env
+        .catalog_grant("table", Some(&["sales"]), Some("orders"), "read")
+        .await;
+    let _held = env.hold_name("orders_v2").await;
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(
+        env.catalog_grant_at(grant).await,
+        at(&["sales"], "orders_v2")
+    );
+}
+
+/// D8 guards: a `namespace` grant stays; a rename between two spellings of
+/// one name moves nothing.
+#[tokio::test]
+async fn a_namespace_grant_stays_and_a_case_only_rename_moves_no_catalog_grant() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    env.create_namespace(&["finance"]).await;
+    let ns = env
+        .catalog_grant("namespace", Some(&["sales"]), None, "read")
+        .await;
+    let table = env
+        .catalog_grant("table", Some(&["sales"]), Some("orders"), "read")
+        .await;
+    let _ = env.rename("orders", "ORDERS").await;
+    assert_eq!(env.catalog_grant_at(table).await, at(&["sales"], "orders"));
+    assert!(env.catalog_grant_events().await.is_empty());
+    let source = if env.source("orders").await.is_some() {
+        "orders"
+    } else {
+        "ORDERS"
+    };
+    let (status, body) = env
+        .rename_across((&["sales"], source), (&["finance"], "orders"))
+        .await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    assert_eq!(
+        env.catalog_grant_at(ns).await,
+        Some((Some(vec!["sales".to_string()]), None))
+    );
+    assert_eq!(
+        env.catalog_grant_at(table).await,
+        at(&["finance"], "orders")
+    );
+}
+
+// ── Grants follow a rename, Task 14: recursive namespace drop (D15) ──
+
+/// D15: a recursive drop removes the literal allow grants on the namespace's
+/// tables and its `table` catalog grants (children included), with events by
+/// the caller; restrictions, schema and pattern scopes, `namespace` catalog
+/// grants stay.
+#[tokio::test]
+async fn a_recursive_drop_purges_allows_and_catalog_grants_but_keeps_restrictions() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "email")]).await;
+    let allow = env
+        .perm_grant(egret_perm::Effect::Allow, &["sales", "orders"], &["v"])
+        .await;
+    let column_allow = env
+        .perm_grant(
+            egret_perm::Effect::Allow,
+            &["sales", "orders", "email"],
+            &["v"],
+        )
+        .await;
+    let deny = env
+        .perm_grant(egret_perm::Effect::Deny, &["sales", "orders"], &["u"])
+        .await;
+    let mask = env
+        .perm_rule(
+            egret_perm::RuleKind::Mask {
+                mask_type: "MASK_HASH".into(),
+                value_expr: None,
+            },
+            &["sales", "orders", "email"],
+        )
+        .await;
+    let schema_allow = env
+        .perm_grant(egret_perm::Effect::Allow, &["sales"], &["v"])
+        .await;
+    let pattern_allow = env
+        .perm_grant(egret_perm::Effect::Allow, &["sales", "ord*"], &["v"])
+        .await;
+    let table_grant = env
+        .catalog_grant("table", Some(&["sales"]), Some("orders"), "read")
+        .await;
+    let deep_grant = env
+        .catalog_grant("table", Some(&["sales", "eu"]), Some("x"), "read")
+        .await;
+    let ns_grant = env
+        .catalog_grant("namespace", Some(&["sales"]), None, "read")
+        .await;
+    env.recompile_all().await;
+    let (_, client) = env.catalog_client("spark-etl").await;
+    *env.caller.lock().unwrap() = client.clone();
+
+    let (status, body) = env
+        .call("DELETE", "namespaces/sales?recursive=true", None)
+        .await;
+    assert!(status.is_success(), "drop namespace: {status} {body}");
+    let grants: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM perm.grants WHERE id = ANY($1)")
+        .bind(vec![allow, column_allow, deny, schema_allow, pattern_allow])
+        .fetch_all(&env.db.pool)
+        .await
+        .expect("grants");
+    let mut want = vec![deny, schema_allow, pattern_allow];
+    want.sort();
+    let mut grants = grants;
+    grants.sort();
+    assert_eq!(grants, want);
+    let rule: i64 = sqlx::query_scalar("SELECT count(*) FROM perm.rules WHERE id = $1")
+        .bind(mask)
+        .fetch_one(&env.db.pool)
+        .await
+        .expect("rule");
+    assert_eq!(rule, 1, "the mask stays");
+    assert_eq!(env.catalog_grant_at(table_grant).await, None);
+    assert_eq!(env.catalog_grant_at(deep_grant).await, None);
+    assert!(env.catalog_grant_at(ns_grant).await.is_some());
+
+    let deletes: Vec<(String, Value)> = sqlx::query_as(
+        "SELECT resource_id, detail FROM audit.audit_log \
+          WHERE action = 'perm_grant:delete' AND resource_id = ANY($1)",
+    )
+    .bind(vec![allow.to_string(), column_allow.to_string()])
+    .fetch_all(&env.db.pool)
+    .await
+    .expect("events");
+    assert_eq!(deletes.len(), 2, "{deletes:?}");
+    for (_, d) in &deletes {
+        assert_eq!(d["trigger"], "iceberg_drop_namespace");
+        assert_eq!(d["actor"]["client_id"], json!(client));
+    }
+    let catalog_deletes = env.catalog_grant_events().await;
+    assert_eq!(catalog_deletes.len(), 2, "{catalog_deletes:?}");
+    assert!(catalog_deletes
+        .iter()
+        .all(|(a, _, d)| a == "catalog_grant:delete" && d["actor"]["client_id"] == json!(client)));
+    // The served Trino download no longer carries the deleted allows.
+    let served = env
+        .ranger_get(format!(
+            "/plugins/policies/download/{}?lastKnownVersion=-1",
+            env.trino_name
+        ))
+        .await;
+    let names: Vec<&str> = served["policies"]
+        .as_array()
+        .expect("policies")
+        .iter()
+        .filter_map(|p| p["name"].as_str())
+        .collect();
+    for gone in [allow, column_allow] {
+        assert!(
+            !names.iter().any(|n| n.contains(&gone.to_string())),
+            "{gone} still served: {names:?}"
+        );
+    }
+    assert!(
+        names.iter().any(|n| n.contains(&deny.to_string())),
+        "{names:?}"
+    );
+}
+
+/// D15 guard: a plain namespace drop deletes nothing.
+#[tokio::test]
+async fn a_plain_namespace_drop_deletes_no_grant() {
+    let Some(env) = env().await else { return };
+    env.create_namespace(&["empty"]).await;
+    let allow = env
+        .perm_grant(egret_perm::Effect::Allow, &["empty", "t"], &["v"])
+        .await;
+    let grant = env
+        .catalog_grant("table", Some(&["empty"]), Some("t"), "read")
+        .await;
+    let (status, body) = env.call("DELETE", "namespaces/empty", None).await;
+    assert!(status.is_success(), "drop namespace: {status} {body}");
+    assert_eq!(env.grant_at(allow).await, ("t".into(), None));
+    assert!(env.catalog_grant_at(grant).await.is_some());
+}
+
+// ── Grants follow a rename, Task 15: table states at any depth (drift) ──
+
+/// D16, the drift guard of `table_states_ns_via` against the REAL Lakekeeper:
+/// a table in `["sales", "eu"]` is live under any spelling of each level; its
+/// old name after a rename is missing; single-level answers equal
+/// `table_states_via`'s.
+#[tokio::test]
+async fn table_states_follow_lakekeeper_at_any_depth() {
+    use egret_perm_compile::table_columns::{
+        table_states_ns_via, table_states_via, NsTableKey, TableKey, TableState,
+    };
+    let Some(env) = env().await else { return };
+    env.create_namespace(&["sales", "eu"]).await;
+    let (status, body) = env
+        .call_raw(
+            "POST",
+            "namespaces/sales%1Feu/tables",
+            Some(json!({"name": "x", "schema": schema(0, &[(1, "id")])})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "create sales.eu.x: {body}");
+    env.create_table("orders", &[(1, "id")]).await;
+    let key = |ns: &[&str], t: &str| NsTableKey {
+        warehouse_id: env.warehouse_id,
+        namespace: ns.iter().map(|s| s.to_string()).collect(),
+        table: t.into(),
+    };
+    let mut conn = env.db.pool.acquire().await.expect("acquire");
+    let states = table_states_ns_via(
+        &mut conn,
+        &[
+            key(&["sales", "eu"], "x"),
+            key(&["SALES", "Eu"], "X"),
+            key(&["sales"], "x"),
+            key(&["sales", "eu", "x"], "x"),
+            key(&["sales"], "orders"),
+            key(&["sales\u{1f}eu"], "x"),
+        ],
+    )
+    .await
+    .expect("states");
+    assert_eq!(
+        states,
+        vec![
+            TableState::Live,
+            TableState::Live,
+            TableState::Missing,
+            TableState::Missing,
+            TableState::Live,
+            TableState::Missing,
+        ]
+    );
+    drop(conn);
+    let (status, body) = env
+        .rename_across((&["sales", "eu"], "x"), (&["sales", "eu"], "y"))
+        .await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    let mut conn = env.db.pool.acquire().await.expect("acquire");
+    assert_eq!(
+        table_states_ns_via(
+            &mut conn,
+            &[key(&["sales", "eu"], "x"), key(&["sales", "eu"], "y")]
+        )
+        .await
+        .expect("states"),
+        vec![TableState::Missing, TableState::Live]
+    );
+    let single = [
+        TableKey {
+            warehouse_id: env.warehouse_id,
+            schema: "sales".into(),
+            table: "orders".into(),
+        },
+        TableKey {
+            warehouse_id: env.warehouse_id,
+            schema: "sales".into(),
+            table: "nothing".into(),
+        },
+    ];
+    assert_eq!(
+        table_states_via(&mut conn, &single).await.expect("states"),
+        table_states_ns_via(
+            &mut conn,
+            &[key(&["sales"], "orders"), key(&["sales"], "nothing")]
+        )
+        .await
+        .expect("states")
+    );
 }

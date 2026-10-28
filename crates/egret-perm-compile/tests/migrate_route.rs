@@ -1758,3 +1758,88 @@ async fn a_migration_refused_for_an_unknown_principal_names_the_policy() {
     assert_eq!(grants_on_catalog(&f).await, 0, "nothing written");
     assert!(enabled(&f, id).await, "the original stays on");
 }
+
+// ── Grants follow a rename (spec §10, E9): migrated rows and undo ──
+
+/// A deny policy on `catalog.sales.orders.*` for `user`.
+fn deny_policy(catalog: &str, user: &str) -> Value {
+    let mut p = access_policy(catalog, "sales", "nobody");
+    p["policyItems"] = json!([]);
+    p["denyPolicyItems"] = json!([{
+        "users": [user], "groups": [], "roles": [],
+        "accesses": [{"type": "select", "isAllowed": true}]
+    }]);
+    p
+}
+
+fn orders_move(f: &Fixture) -> egret_perm_compile::follow::Move {
+    let at = |t: &str| egret_perm_compile::follow::Coord {
+        schema: "sales".into(),
+        table: t.into(),
+        column: None,
+    };
+    egret_perm_compile::follow::Move {
+        catalog_id: f.catalog_id,
+        from: at("orders"),
+        to: at("orders_v2"),
+    }
+}
+
+/// D1, E9: a rename copies a migrated restriction and leaves the original
+/// untouched, so the migration stays undoable. The rename's writes are the
+/// follow module's, which the table hook calls.
+#[tokio::test]
+async fn a_migrated_restriction_stays_undoable() {
+    let Some(f) = setup().await else { return };
+    let name = unique("alice denied orders");
+    insert(&f, f.p, &name, "operator", deny_policy(&f.catalog, "alice")).await;
+    let (status, body) = migrate(&f, f.p, &[&name], false).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let mv = orders_move(&f);
+    let mut tx = f.db.pool.begin().await.expect("begin");
+    let plan = egret_perm_compile::follow::plan_via(&mut tx, &mv)
+        .await
+        .expect("plan");
+    let copies = egret_perm_compile::follow::copy_in_tx(&mut tx, &plan, &mv)
+        .await
+        .expect("copy");
+    tx.commit().await.expect("commit");
+    assert_eq!(copies.grants.len(), 1, "the deny was copied");
+
+    let (status, body) = undo(&f, f.p, &[&name]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// Spec §10: moving a migrated allow changes its hash, so that migration's
+/// undo answers 409 until the allow is put back.
+#[tokio::test]
+async fn moving_a_migrated_allow_makes_undo_refuse() {
+    let Some(f) = setup().await else { return };
+    let name = unique("alice reads orders");
+    insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+    let (status, body) = migrate(&f, f.p, &[&name], false).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let gid: Uuid = body["policies"][0]["grant_ids"][0]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let mut tx = f.db.pool.begin().await.expect("begin");
+    let moved = egret_perm_compile::follow::move_allows_in_tx(&mut tx, &[gid], &orders_move(&f))
+        .await
+        .expect("move");
+    tx.commit().await.expect("commit");
+    assert_eq!(moved.len(), 1);
+
+    let (status, body) = undo(&f, f.p, &[&name]).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+}

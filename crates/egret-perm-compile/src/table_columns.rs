@@ -341,34 +341,75 @@ pub enum TableState {
 
 /// The [`TableState`] of each of `keys`, in `keys`' order, in one query. A
 /// multi-level namespace holds no classification row and is `Missing`; so is
-/// a warehouse with no Lakekeeper warehouse.
+/// a warehouse with no Lakekeeper warehouse. [`table_states_ns_via`] over
+/// single-level namespaces.
 pub async fn table_states_via(
     conn: &mut sqlx::PgConnection,
     keys: &[TableKey],
+) -> Result<Vec<TableState>, CompileError> {
+    let keys: Vec<NsTableKey> = keys
+        .iter()
+        .map(|k| NsTableKey {
+            warehouse_id: k.warehouse_id,
+            namespace: vec![k.schema.clone()],
+            table: k.table.clone(),
+        })
+        .collect();
+    table_states_ns_via(conn, &keys).await
+}
+
+/// One table to look up in a namespace of any depth (a catalog grant's
+/// `namespace text[]`), in any spelling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NsTableKey {
+    pub warehouse_id: Uuid,
+    pub namespace: Vec<String>,
+    pub table: String,
+}
+
+/// The [`TableState`] of each of `keys` at any namespace depth, in `keys'`
+/// order, in one query. Each level is folded (`lower`, as every resolver
+/// folds); a level holding lakekeeper's separator `\u{1f}` names no table.
+pub async fn table_states_ns_via(
+    conn: &mut sqlx::PgConnection,
+    keys: &[NsTableKey],
 ) -> Result<Vec<TableState>, CompileError> {
     if keys.is_empty() {
         return Ok(Vec::new());
     }
     let warehouses: Vec<Uuid> = keys.iter().map(|k| k.warehouse_id).collect();
-    let schemas: Vec<String> = keys.iter().map(|k| k.schema.clone()).collect();
+    // A namespace travels joined with lakekeeper's own separator, which no
+    // level contains, and is compared the same way: element by element.
+    let namespaces: Vec<String> = keys.iter().map(|k| k.namespace.join("\u{1f}")).collect();
+    let depths: Vec<i32> = keys
+        .iter()
+        .map(|k| {
+            if k.namespace.iter().any(|l| l.contains('\u{1f}')) {
+                -1
+            } else {
+                k.namespace.len() as i32
+            }
+        })
+        .collect();
     let tables: Vec<String> = keys.iter().map(|k| k.table.clone()).collect();
     let rows: Vec<(i64, bool, bool)> = sqlx::query_as(
         "SELECT q.ord, \
                 COALESCE(bool_or(t.deleted_at IS NULL AND t.metadata_location IS NOT NULL), \
                          false), \
                 COALESCE(bool_or(t.deleted_at IS NOT NULL), false) \
-           FROM unnest($1::uuid[], $2::text[], $3::text[]) WITH ORDINALITY \
-                AS q(warehouse_id, schema_name, table_name, ord) \
+           FROM unnest($1::uuid[], $2::text[], $3::int[], $4::text[]) WITH ORDINALITY \
+                AS q(warehouse_id, namespace, depth, table_name, ord) \
            LEFT JOIN catalog.warehouses w ON w.id = q.warehouse_id \
            LEFT JOIN lakekeeper.tabular t \
              ON t.warehouse_id::text = w.lakekeeper_warehouse_id \
-            AND cardinality(t.tabular_namespace_name) = 1 \
-            AND lower(t.tabular_namespace_name[1]) = lower(q.schema_name) \
+            AND cardinality(t.tabular_namespace_name) = q.depth \
+            AND lower(array_to_string(t.tabular_namespace_name, chr(31))) = lower(q.namespace) \
             AND lower(t.name) = lower(q.table_name) \
           GROUP BY q.ord ORDER BY q.ord",
     )
     .bind(&warehouses)
-    .bind(&schemas)
+    .bind(&namespaces)
+    .bind(&depths)
     .bind(&tables)
     .fetch_all(&mut *conn)
     .await

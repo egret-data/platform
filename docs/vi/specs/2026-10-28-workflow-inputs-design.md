@@ -2,7 +2,7 @@
 
 # Gói workflow #3 "Kiểm inputs khi start"
 
-**Trạng thái:** thiết kế ngày 2026-10-28; #3a đã xây (Task A1-A7, PR #3a đang review); #3b chưa xây. Dòng #3 của lộ trình `docs/en/plans/2026-10-18-workflow-kestra-parity-roadmap.md`. Kế hoạch: `docs/en/plans/2026-10-28-workflow-inputs.md`. Nhánh `feat/workflow-inputs`. Hai PR: **#3a** (việc kiểm lúc start, các khoảng trống lúc lưu, seam của harness) và **#3b** (endpoint validate và form run).
+**Trạng thái:** thiết kế ngày 2026-10-28; #3a đã xây và đã merge (#762); #3b đã xây (Task B1-B3, PR đang review). Dòng #3 của lộ trình `docs/en/plans/2026-10-18-workflow-kestra-parity-roadmap.md`. Kế hoạch: `docs/en/plans/2026-10-28-workflow-inputs.md`. Nhánh `feat/workflow-inputs` (#3a) và `feat/workflow-inputs-b` (#3b). Hai PR: **#3a** (việc kiểm lúc start, các khoảng trống lúc lưu, seam của harness) và **#3b** (endpoint validate và form run).
 
 **Các khẳng định lấy từ đâu.** Bản khảo sát là `docs/en/specs/2026-10-28-workflow-inputs-survey.md` (bản sao của khảo sát chỉ-đọc làm ngày 2026-10-28; mọi khẳng định về Kestra có file:line ở đó). Kestra là bản checkout `data-portal/kestra`, `96893b58`, **mới hơn golden image đã ghim**. FORM, `prefill`, `renderError` và quy tắc "default phải là required" có thể chưa có trong image. Mọi điều phụ thuộc vào một trong số đó đều nói rõ.
 
@@ -80,7 +80,44 @@ Những gì Task A1-A6 tìm thấy khác với, hoặc thêm vào, các quyết 
 - **Neo validator (review I2, D10).** Lưu và start compile `validator` bằng cùng một `inputs_check::anchored_validator`: trước hết là pattern như đã viết (như Java), rồi `\A(?:v)\z`, với một dấu xuống dòng trước `)\z` đóng chỉ khi dòng cuối của `v` có comment `#` của extended mode. `(?x) [a-z]+ # letters` nay chạy được lúc start; một `abc)|(?:.*` đã lưu fail closed thay vì khớp mọi thứ.
 - **Giá trị string của JSON (review M1, D2).** Một input JSON có giá trị đã parse là string (`"123"` post dạng text) được lưu dưới dạng text JSON của string đó, vì render đọc string của input JSON như JSON (như nó phải làm với các dòng cũ và với form run). Mọi giá trị khác được lưu như đã parse.
 - **Tạo backfill (D7, review M7).** Route tạo chạy việc kiểm lúc start trên `inputs:` của schedule được phủ bởi của backfill, sau các kiểm object / FILE / template / required của chính nó, nên một giá trị mà mọi tick đều từ chối bị từ chối ngay lúc tạo (với câu của việc kiểm lúc start) thay vì kết thúc backfill ở tick đầu.
-- **Flow đang chạy thấy giá trị đã parse (review M2).** Các execution mới của flow sẵn có thay đổi: input YAML và ION post dạng text nay được lưu và render thành **object đã parse** (trước đây `{{ inputs.y }}` in ra text YAML), và một STRING post dạng số được lưu thành string. Các dòng ghi trước #3a không bị đụng (`render.rs` không đổi). Tài liệu người dùng (B3) phải nói điều này.
+- **Flow đang chạy thấy giá trị đã parse (review M2).** Các execution mới của flow sẵn có thay đổi: input YAML và ION post dạng text nay được lưu và render thành **object đã parse** (trước đây `{{ inputs.y }}` in ra text YAML), và một STRING post dạng số được lưu thành string. Các dòng ghi trước #3a không bị đụng (`render.rs` không đổi). Tài liệu người dùng phải nói điều này: nó nằm trong ghi chú cho `egret-data/docs` và trong các việc theo sau ở §8.
 - **Seam của oracle (D8).** `Seam::Start` được thêm vào oracle: một start bị từ chối với `InvalidInput` là `Ran::StartRefused`, và 422 golden được so như multiset các dòng. Nó bank `invalids/inputs-with-multiple-constraint-violations`.
 - **Ratchet.** Đo được **301 / 50 / 50 / 0**, `(301, 251, 50)` (§4).
 - **Khác.** Một default literal được kiểm lúc start nhưng không lưu. Việc kiểm `values` của SELECT bị bỏ qua khi không có `values` và không có `expression`. Key không khai báo bị bỏ trên mọi đường đã kiểm, nên sáu test sẵn có dựa vào chúng đã được đổi. Client được sinh lại với một `node_modules` mượn; chỉ hash `spec` đổi.
+
+## 8. Như đã xây (#3b)
+
+Những gì Task B1 và B2 đã xây, và những gì còn để ngỏ. Chỗ nào khác D14 và D15, mục này thắng.
+
+### Endpoint validate (B1, D14)
+
+- **Route.** `POST /api/ws/{ws}/workflows/flows/{id}/executions/validate`, body là cùng `StartExecutionRequest` như start (JSON; body rỗng là `{}`). Cổng `WF_MANAGE`, rồi tra flow như start theo cùng thứ tự: 404 cho flow không có, đã vào thùng rác hoặc của workspace khác, 409 cho flow bị tắt bởi cột hoặc bởi YAML, 400 cho flow có YAML không parse được. 400 cả với body không phải JSON hoặc không phải object, và với `inputs` không phải object.
+- **Luôn 200 với flow kiểm được.** Dạng: `{ id, namespace, inputs: [{ input, value, enabled, isDefault, errors: [{ message, renderError }] }], checks: [] }`. Mọi input đã khai báo đều được liệt kê, kèm tất cả lỗi của nó (start dừng ở input xấu đầu tiên; endpoint này liệt kê hết). `checks` luôn rỗng. DTO `ValidateInputsDto`, `InputValidationDto` và `InputErrorDto` nằm trong components của OpenAPI, kèm ví dụ.
+- **`input`** là mục của input trong YAML của bản nháp **như đã viết** (khai báo đầu tiên của một id lặp). Nó không phải model của egret và không phải `Input` đã render của Kestra: các option đã render của `expression` ở SELECT không được echo. YAML thô mang `defaults` literal của SECRET, mà `GET flow` vốn đã hiện.
+- **`value`** là giá trị đã parse, default literal, hoặc giá trị thô đã post khi parse hỏng; nếu không có thì lấy giá trị đã lưu. Input JSON có giá trị là string hiện string đó, không phải text JSON đã lưu.
+- **`enabled`** là `false` khi `dependsOn` tắt input với các giá trị đã post. **`isDefault`** đúng khi giá trị đến từ default.
+- **Che.** `value` của SECRET là `******` mỗi khi khác null, kể cả khi có lỗi. Cause của `validator` SECRET là `<id>: it must match the pattern ...` và không mang giá trị.
+- **`errors`.** Các lỗi của một input được gộp thành một mục, nối bằng `\n` (exception gộp của Kestra; cùng câu với 400 của start). `renderError` là `true` với `dependsOn.condition` hoặc `expression` của SELECT/MULTISELECT bị lỗi. Một default có template render hỏng không là lỗi lúc start, nên ở đây không bao giờ ra `renderError: true` (khớp với start, không khớp với Kestra).
+- **Không tác dụng phụ.** Không dòng execution, không upload, không bản ghi audit (đều được test khẳng định). Renderer của việc kiểm lúc start được chuyển vào `start_renderer(flow)` và `worker::input_outcomes` là `resolve_all` với nó, nên hai đường dùng chung một checker.
+- **Các kiểm bị bỏ qua.** Khả năng đọc FILE (`check_file_inputs`) cần một dòng, và các từ chối về plan và task chưa được phục vụ của start không phải kiểm input; cả hai không chạy ở đây. Vì vậy một câu trả lời hợp lệ không hứa rằng start sẽ thành công.
+- **Content-Type.** Body được đọc dạng bytes và parse là JSON bất kể `Content-Type`; start trả 415 cho type không phải JSON hay multipart.
+
+### Form run (B2, D15)
+
+- **Run hỏi validate trước.** Khi submit, form chạy các kiểm của chính nó, rồi gọi endpoint validate với body JSON của start (FILE đã chọn đi dưới dạng tên file; không upload gì). Lỗi của input **enabled** mà form hiển thị được đặt cạnh field, bằng lời của server, giữ nhiều dòng. Lỗi của input mà form không có control (không được hỗ trợ hoặc không khai báo) và của input `enabled: false` bị bỏ qua. Nếu không còn lỗi hiển thị được thì gửi start.
+- **Validate không bao giờ chặn.** Mọi lỗi của validate (mạng, 4xx, 5xx, body lạ) quay về start, mà lỗi của nó hiện như trước. Start là tiếng nói cuối cùng.
+- **`enabled: false` được ghi chú, không ẩn.** Validate chỉ chạy lúc submit, và việc `dependsOn` có tắt một input hay không phụ thuộc vào các giá trị khác, nên ẩn field cần validate khi đổi giá trị. Field có một ghi chú trong help text ("With the values entered, the inputs it depends on turn this input off, so the run ignores it."), được xoá khi sửa bất cứ gì.
+- **Gán từng dòng cho 400 của start.** Một lời từ chối được tách theo dòng; dòng nào gọi tên một input đã khai báo (``input `x` `` hoặc `Missing required input:x`) thì thuộc input đó, dòng không gọi tên nào nối tiếp dòng trước, và các dòng trước dòng có tên đầu tiên thuộc cấp form. `backfillForm.placeError` cũng hiểu `Missing required input:x`.
+- **Kiểm phía client** (`inputModel.ts`, lượt kiểm đầu; server quyết định). `min`/`max` của INT/FLOAT; `min`/`max` của DURATION so như độ dài; `after`/`before` của DATETIME, DATE và TIME (TIME tính bằng giây từ nửa đêm, nên `17:30` bằng `17:30:00`); đều bao gồm biên như `inputs_check`. Thành viên của SELECT chỉ khi `required` (điểm lạ của Kestra ở D4) và không `allowCustomValue`; MULTISELECT luôn kiểm trừ khi `allowCustomValue`. Biên mà form không parse được thì để server.
+- **`validator` chỉ ở server.** Form không bao giờ đánh giá nó (phương ngữ regex khác nhau); nó hiện "It must match the pattern ..." trong help text, như hiện các biên ("From 10 to 20.", "At least ...", "On or after ...").
+- **BackfillDialog.** `"BOOLEAN"` đổi thành `"BOOL"`. Text `"true"`/`"false"` (mọi kiểu chữ) của schedule nay điền sẵn switch như boolean; trước đây `"true"` hiện tắt và được gửi là `false`.
+
+### Việc theo sau còn mở
+
+- **Validate khi đổi giá trị.** Mỗi lần Run gửi hai request (validate, rồi start). Validate trong lúc gõ cũng cho phép `dependsOn` ẩn hoặc vô hiệu field ngay.
+- **Kiểm required so với `dependsOn`.** Kiểm `required` của client chạy trước validate, nên một input bắt buộc mà `dependsOn` tắt vẫn chặn Run với "Enter a value". Sửa cần validate trước các kiểm của client, hoặc validate khi đổi giá trị.
+- **Giá trị tuỳ ý của SELECT.** Việc kiểm tôn trọng `allowCustomValue`, nhưng SELECT vẫn là bộ chọn chỉ trong `values`, nên không gõ được giá trị tuỳ ý. Control chưa được thiết kế lại.
+- **Hiển thị `renderError`.** Lỗi có `renderError: true` (`dependsOn.condition` hoặc `expression` hỏng) hiện trên field như mọi lỗi khác, không như một vấn đề của định nghĩa flow.
+- **Còn nợ ảnh chụp màn hình** cho tài liệu người dùng: các dòng help có biên và pattern, ghi chú input bị vô hiệu, và lỗi validate dưới field.
+- **Vẫn ngoài #3** (không đổi so với §3 và §6): `jsonSchema`, FORM và REUSABLE_INPUTS, default có template (`{{ }}`).
+- **Còn nợ tài liệu người dùng cho thay đổi M2.** Flow sẵn có nay thấy input YAML/ION dạng text là object đã parse; PR `egret-data/docs` phải nói điều này (đã có trong file ghi chú).

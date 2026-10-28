@@ -118,7 +118,8 @@ fn db(what: &'static str) -> impl FnOnce(sqlx::Error) -> CpError {
     description = "Governance events, newest first: grant, rule, hand-written policy, \
                    migration and compile changes and role assignments for a `policy:read` \
                    reader; clearance changes and catalog-column tags for a `tag:read` reader; \
-                   user deletes for a reader who also holds `user:read`. \
+                   user deletes for a reader who also holds `user:read`; catalog-grant moves and \
+                   removals for a reader who also holds `catalog_registry:read`. \
                    Recorded from the version that introduced this feed on; role assignments and \
                    catalog tags are best-effort (recorded after commit).",
     responses(
@@ -143,6 +144,7 @@ async fn changes(
         ("policy:read", Family::Policy),
         ("tag:read", Family::Tag),
         ("user:read", Family::User),
+        ("catalog_registry:read", Family::Catalog),
     ] {
         match egret_core::authz::require(&*st.pdp, &p, perm).await {
             Ok(()) => families.push(family),
@@ -311,7 +313,40 @@ fn truncated_phrase(action: &str) -> &'static str {
         action::USER_DELETE => "deleted a user",
         action::CATALOG_TAG_MOVE => "moved classifications with a renamed table",
         action::CATALOG_TAG_PURGE => "removed classifications with a dropped namespace",
+        action::GRANT_MOVE => "moved a grant with a renamed table",
+        action::GRANT_COPY => "copied a grant to a renamed table",
+        action::RULE_COPY => "copied a rule to a renamed table",
+        action::GRANT_LEFT => "renamed a table an allow grant no longer covers",
+        action::RANGER_POLICY_LEFT => "renamed a table a hand-written policy still names",
+        action::CATALOG_GRANT_MOVE => "moved a catalog grant with a renamed table",
+        action::CATALOG_GRANT_DELETE => "removed a catalog grant with a dropped namespace",
         _ => "made a change",
+    }
+}
+
+/// `schema.table[.column]` of a grant summary, the catalog left out.
+fn rename_path(g: &Value) -> String {
+    ["schema", "table", "column"]
+        .iter()
+        .map_while(|k| g.get(*k).and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// A rule summary's path selector, the catalog left out.
+fn selector_path(r: &Value) -> String {
+    let sel = s(r, "selector");
+    sel.split_once('.')
+        .map_or(sel, |(_, rest)| rest)
+        .to_string()
+}
+
+/// `table renamed` or `column renamed`, from a rename event's trigger.
+fn renamed(d: &Value) -> &'static str {
+    if s(d, "trigger") == "iceberg_column_rename" {
+        "column renamed"
+    } else {
+        "table renamed"
     }
 }
 
@@ -364,8 +399,13 @@ async fn entry(c: &mut PgConnection, row: ChangeRow) -> Result<ChangeEntry, sqlx
                 &id,
             )
             .await?;
+            let why = if s(d, "trigger") == "iceberg_drop_namespace" {
+                " (namespace dropped)"
+            } else {
+                ""
+            };
             (
-                format!("{a} {verb} a grant: {}", grant_phrase(side(d))),
+                format!("{a} {verb} a grant: {}{why}", grant_phrase(side(d))),
                 uuid.map(|id| Ref::Grant { id }),
                 live,
             )
@@ -652,6 +692,158 @@ async fn entry(c: &mut PgConnection, row: ChangeRow) -> Result<ChangeEntry, sqlx
                     at(after)
                 ),
                 target,
+                live,
+            )
+        }
+        action::GRANT_MOVE | action::GRANT_COPY => {
+            let (before, after) = (
+                d.get("before").unwrap_or(&Value::Null),
+                d.get("after").unwrap_or(&Value::Null),
+            );
+            let live = exists(
+                c,
+                "SELECT EXISTS (SELECT 1 FROM perm.grants WHERE id::text = $1)",
+                &id,
+            )
+            .await?;
+            let what = format!(
+                "{} grant ({})",
+                s(after, "effect"),
+                strings(after, "actions").join(", ")
+            );
+            let (from, to) = (rename_path(before), rename_path(after));
+            let sentence = if row.action == action::GRANT_MOVE {
+                format!("{a} moved {what} from {from} to {to} ({})", renamed(d))
+            } else {
+                format!(
+                    "{a} copied {what} from {from} to {to}; the original stays on {from} ({})",
+                    renamed(d)
+                )
+            };
+            (sentence, uuid.map(|id| Ref::Grant { id }), live)
+        }
+        action::GRANT_LEFT => {
+            let g = d.get("before").unwrap_or(&Value::Null);
+            let rename = d.get("rename").unwrap_or(&Value::Null);
+            let live = exists(
+                c,
+                "SELECT EXISTS (SELECT 1 FROM perm.grants WHERE id::text = $1)",
+                &id,
+            )
+            .await?;
+            let on = rename_path(g);
+            let on = if on.is_empty() {
+                "the whole catalog".to_string()
+            } else {
+                on
+            };
+            (
+                format!(
+                    "{a} renamed {} to {}; {} grant on {on} no longer covers it",
+                    s(rename, "from"),
+                    s(rename, "to"),
+                    s(g, "effect")
+                ),
+                uuid.map(|id| Ref::Grant { id }),
+                live,
+            )
+        }
+        action::RANGER_POLICY_LEFT => {
+            let p = d.get("before").unwrap_or(&Value::Null);
+            let rename = d.get("rename").unwrap_or(&Value::Null);
+            let live = exists(
+                c,
+                "SELECT EXISTS (SELECT 1 FROM policy.authz_policies WHERE id::text = $1)",
+                &id,
+            )
+            .await?;
+            (
+                format!(
+                    "{a} renamed {} to {}; hand-written policy {}/{} still names {}",
+                    s(rename, "from"),
+                    s(rename, "to"),
+                    s(p, "service"),
+                    s(p, "name"),
+                    s(rename, "from")
+                ),
+                Some(Ref::Profile {
+                    name: s(p, "service").to_string(),
+                }),
+                live,
+            )
+        }
+        action::CATALOG_GRANT_MOVE | action::CATALOG_GRANT_DELETE => {
+            let at = |v: &Value| {
+                let mut parts = strings(v, "namespace");
+                parts.push(s(v, "table").to_string());
+                parts.join(".")
+            };
+            let (before, after) = (
+                d.get("before").unwrap_or(&Value::Null),
+                d.get("after").unwrap_or(&Value::Null),
+            );
+            let live = exists(
+                c,
+                "SELECT EXISTS (SELECT 1 FROM catalog.catalog_grants WHERE id::text = $1)",
+                &id,
+            )
+            .await?;
+            let grant = format!(
+                "catalog grant {} of role {}",
+                s(d, "privilege"),
+                s(d, "role")
+            );
+            let sentence = if row.action == action::CATALOG_GRANT_MOVE {
+                let merged = if d.get("merged").and_then(Value::as_bool) == Some(true) {
+                    ", merged with the same grant there"
+                } else {
+                    ""
+                };
+                format!(
+                    "{a} moved {grant} from {} to {} (table renamed{merged})",
+                    at(before),
+                    at(after)
+                )
+            } else {
+                format!("{a} removed {grant} on {} (namespace dropped)", at(before))
+            };
+            let catalog: Option<(Uuid, String)> = sqlx::query_as(
+                "SELECT id, name FROM registry.catalogs WHERE warehouse_id::text = $1",
+            )
+            .bind(s(d, "warehouse_id"))
+            .fetch_optional(&mut *c)
+            .await?;
+            (
+                sentence,
+                catalog.map(|(id, name)| Ref::Catalog { id, name }),
+                live,
+            )
+        }
+        action::RULE_COPY => {
+            let (before, after) = (
+                d.get("before").unwrap_or(&Value::Null),
+                d.get("after").unwrap_or(&Value::Null),
+            );
+            let live = exists(
+                c,
+                "SELECT EXISTS (SELECT 1 FROM perm.rules WHERE id::text = $1)",
+                &id,
+            )
+            .await?;
+            let kind = match s(after, "kind") {
+                "row_filter" => "row-filter",
+                _ => "mask",
+            };
+            let (from, to) = (selector_path(before), selector_path(after));
+            (
+                format!(
+                    "{a} copied {kind} rule {} from {from} to {to} as {}; the original stays on \
+                     {from} ({})",
+                    s(before, "name"),
+                    s(after, "name"),
+                    renamed(d)
+                ),
+                uuid.map(|id| Ref::Rule { id }),
                 live,
             )
         }

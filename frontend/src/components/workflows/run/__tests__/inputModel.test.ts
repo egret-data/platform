@@ -5,8 +5,11 @@ import {
   inputsFromSource,
   requestFromForm,
   serverErrorInput,
+  serverErrorsByInput,
   unsupportedInputs,
   validateForm,
+  validationRequestFromForm,
+  validationView,
   type FormState,
   type RunInput,
 } from "@/components/workflows/run/inputModel";
@@ -240,7 +243,7 @@ describe("validateForm", () => {
     expect(validateForm(set(form, "s", ""))).toEqual({});
   });
 
-  it("checks EMAIL, URI and DURATION, which the backend does not", () => {
+  it("checks EMAIL, URI and DURATION before asking the server", () => {
     const list = inputs("  - id: e\n    type: EMAIL\n  - id: u\n    type: URI\n  - id: d\n    type: DURATION");
     const check = (values: Record<string, string>) => validateForm({ ...formFromInputs(list), values });
     expect(check({ e: "abc", u: "example.com", d: "1h" })).toEqual({
@@ -306,13 +309,182 @@ describe("unsupportedInputs and containerFor", () => {
   });
 });
 
-describe("serverErrorInput", () => {
-  const list = () => inputs("  - id: data\n    type: FILE\n  - id: n\n    type: INT");
-  it("finds the declared input a server message names", () => {
-    expect(serverErrorInput("Invalid value for input `data`: \"x.exe\": File type not allowed.", list())).toBe("data");
+describe("validateForm: bounds and listed values", () => {
+  const check = (yaml: string, value: FormState["values"][string]) => {
+    const { input, form } = one(yaml);
+    return validateForm(set(form, input.id, value))[input.id];
+  };
+
+  it("reads min, max, after, before, validator and allowCustomValue from the YAML as text", () => {
+    const [n, d] = inputs(
+      [
+        "  - id: n",
+        "    type: INT",
+        "    min: 10",
+        "    max: 20",
+        "  - id: d",
+        "    type: DATE",
+        "    after: 2023-01-01",
+        "    before: 2023-12-31",
+        '    validator: "\\\\d+"',
+        "    allowCustomValue: true",
+      ].join("\n"),
+    );
+    expect(n).toMatchObject({ min: "10", max: "20", allowCustomValue: false });
+    expect(d).toMatchObject({ after: "2023-01-01", before: "2023-12-31", validator: "\\d+", allowCustomValue: true });
   });
+
+  it("INT and FLOAT: min and max, both inclusive", () => {
+    const int = "  - id: n\n    type: INT\n    min: 10\n    max: 20";
+    expect(check(int, "9")).toBe("Enter a number of at least 10.");
+    expect(check(int, "21")).toBe("Enter a number of at most 20.");
+    expect(check(int, "10")).toBeUndefined();
+    expect(check(int, "20")).toBeUndefined();
+    const float = "  - id: f\n    type: FLOAT\n    min: 0.1\n    max: 0.5";
+    expect(check(float, "0.05")).toBe("Enter a number of at least 0.1.");
+    expect(check(float, "0.6")).toBe("Enter a number of at most 0.5.");
+    expect(check(float, "0.5")).toBeUndefined();
+    // A malformed number keeps its own message, not a bound's.
+    expect(check(int, "x")).toBe("Enter a whole number.");
+  });
+
+  it("DURATION: min and max compare the length, not the text", () => {
+    const yaml = "  - id: d\n    type: DURATION\n    min: PT1H\n    max: P1D";
+    // As text "PT30M" > "PT1H"; as a length it is shorter.
+    expect(check(yaml, "PT30M")).toBe("Enter a duration of at least PT1H.");
+    expect(check(yaml, "P1DT1S")).toBe("Enter a duration of at most P1D.");
+    expect(check(yaml, "PT60M")).toBeUndefined();
+    expect(check(yaml, "PT24H")).toBeUndefined();
+    expect(check(yaml, "PT3600.5S")).toBeUndefined();
+    expect(check(yaml, "-PT2H")).toBe("Enter a duration of at least PT1H.");
+  });
+
+  it("DATETIME, DATE and TIME: after and before, both inclusive", () => {
+    const dt = '  - id: t\n    type: DATETIME\n    after: "2023-01-01T00:00:00Z"\n    before: "2023-12-31T23:59:59Z"';
+    // The control holds local wall time; the bound is an instant.
+    const local = (iso: string) => {
+      const d = new Date(iso);
+      const p = (n: number) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    };
+    expect(check(dt, local("2022-12-31T23:59:59Z"))).toBe("Enter a date and time on or after 2023-01-01T00:00:00Z.");
+    expect(check(dt, local("2024-01-01T00:00:00Z"))).toBe("Enter a date and time on or before 2023-12-31T23:59:59Z.");
+    expect(check(dt, local("2023-01-01T00:00:00Z"))).toBeUndefined();
+    const date = "  - id: d\n    type: DATE\n    after: 2023-01-01\n    before: 2023-12-31";
+    expect(check(date, "2022-12-31")).toBe("Enter a date on or after 2023-01-01.");
+    expect(check(date, "2024-01-01")).toBe("Enter a date on or before 2023-12-31.");
+    expect(check(date, "2023-12-31")).toBeUndefined();
+    const time = '  - id: t\n    type: TIME\n    after: "09:00"\n    before: "17:30:00"';
+    expect(check(time, "08:59:59")).toBe("Enter a time on or after 09:00.");
+    expect(check(time, "17:31")).toBe("Enter a time on or before 17:30:00.");
+    // "9:00" < "10:00" holds as text only by luck; "17:30" and "17:30:00" are the same time.
+    expect(check(time, "17:30")).toBeUndefined();
+    expect(check(time, "09:00")).toBeUndefined();
+  });
+
+  it("leaves a bound it cannot read to the server", () => {
+    expect(check("  - id: n\n    type: INT\n    min: abc", "1")).toBeUndefined();
+    expect(check("  - id: d\n    type: DATE\n    after: soon", "2023-01-01")).toBeUndefined();
+  });
+
+  it("SELECT: a value outside `values` is refused when required, as the server does, unless allowCustomValue", () => {
+    expect(check("  - id: s\n    type: SELECT\n    values: [a, b]", "z")).toBe("Choose one of the listed values; z is not one of them.");
+    expect(check("  - id: s\n    type: SELECT\n    values: [a, b]", "b")).toBeUndefined();
+    // Kestra checks a SELECT's values only when it is required (D4).
+    expect(check("  - id: s\n    type: SELECT\n    values: [a, b]\n    required: false", "z")).toBeUndefined();
+    expect(check("  - id: s\n    type: SELECT\n    values: [a, b]\n    allowCustomValue: true", "z")).toBeUndefined();
+    // Values from an expression: there is no list to check against.
+    expect(check('  - id: s\n    type: SELECT\n    values: "{{ x }}"', "z")).toBeUndefined();
+  });
+
+  it("MULTISELECT: every chosen value must be listed, unless allowCustomValue", () => {
+    const yaml = "  - id: m\n    type: MULTISELECT\n    values: [a, b]\n    required: false";
+    expect(check(yaml, ["a", "z", "y"])).toBe("Untick z, y: only the listed values are accepted.");
+    expect(check(yaml, ["b", "a"])).toBeUndefined();
+    expect(check(`${yaml}\n    allowCustomValue: true`, ["z"])).toBeUndefined();
+  });
+});
+
+describe("validationRequestFromForm", () => {
+  it("is the start's JSON body, with a chosen file as its name", () => {
+    const list = inputs("  - id: data\n    type: FILE\n  - id: n\n    type: INT\n  - id: j\n    type: JSON");
+    const file = new File(["a,b\n"], "rows.csv", { type: "text/csv" });
+    const form = { ...formFromInputs(list), values: { data: file, n: "5", j: '"123"' } };
+    expect(validationRequestFromForm(form)).toEqual({ inputs: { data: "rows.csv", n: 5, j: '"123"' } });
+    // Without a file it is exactly the start's body.
+    const noFile = set(form, "data", null);
+    expect(validationRequestFromForm(noFile)).toEqual({ inputs: jsonInputs(noFile) });
+  });
+});
+
+describe("validationView", () => {
+  const list = () => inputs("  - id: n\n    type: INT\n  - id: m\n    type: MULTISELECT\n    values: [A]\n  - id: off\n    type: STRING\n  - id: grp\n    type: FORM");
+  const outcome = (id: string, enabled: boolean, ...messages: string[]) => ({
+    input: { id, type: "X" },
+    value: null,
+    enabled,
+    isDefault: false,
+    errors: messages.map((message) => ({ message, renderError: false })),
+  });
+
+  it("keeps the errors of enabled inputs the form shows, by id, and names the inputs dependsOn turns off", () => {
+    const view = validationView(
+      {
+        id: "f",
+        namespace: "n",
+        checks: [],
+        inputs: [
+          outcome("n", true, "Invalid value for input `n`. Cause: it must be more than `10`"),
+          outcome("m", true, "Invalid value for input `m`. Cause: value `D` doesn't match the values `[A]`\nInvalid value for input `m`. Cause: value `E` doesn't match the values `[A]`"),
+          outcome("off", false, "Missing required input:off"),
+          outcome("grp", true, "Invalid value for input `grp`. Cause: not supported"),
+          outcome("ghost", true, "Missing required input:ghost"),
+        ],
+      },
+      list(),
+    );
+    expect(view.errors).toEqual({
+      n: "Invalid value for input `n`. Cause: it must be more than `10`",
+      m: "Invalid value for input `m`. Cause: value `D` doesn't match the values `[A]`\nInvalid value for input `m`. Cause: value `E` doesn't match the values `[A]`",
+    });
+    expect(view.inactive).toEqual(["off"]);
+  });
+
+  it("answers no errors for a valid answer, or one of another shape", () => {
+    expect(validationView({ id: "f", namespace: "n", checks: [], inputs: [outcome("n", true)] }, list())).toEqual({ errors: {}, inactive: [] });
+    expect(validationView({} as never, list())).toEqual({ errors: {}, inactive: [] });
+  });
+});
+
+describe("serverErrorsByInput", () => {
+  const list = () => inputs("  - id: data\n    type: FILE\n  - id: n\n    type: INT\n  - id: m\n    type: MULTISELECT\n    values: [A]");
+  it("finds the declared input a server message names", () => {
+    const message = 'Invalid value for input `data`: "x.exe": File type not allowed.';
+    expect(serverErrorsByInput(message, list())).toEqual({ fields: { data: message }, rest: [] });
+    expect(serverErrorsByInput("Missing required input:n", list())).toEqual({ fields: { n: "Missing required input:n" }, rest: [] });
+  });
+
+  it("attaches each line of a multi-line refusal to the input it names, keeping lines of one input together", () => {
+    const d = "Invalid value for input `m`. Cause: value `D` doesn't match the values `[A]`";
+    const e = "Invalid value for input `m`. Cause: value `E` doesn't match the values `[A]`";
+    const n = "Invalid value for input `n`. Cause: it must be more than `10`";
+    expect(serverErrorsByInput([d, n, e].join("\n"), list())).toEqual({ fields: { m: `${d}\n${e}`, n }, rest: [] });
+    // A line naming no input continues the one before it.
+    expect(serverErrorsByInput(`${n}\n  and more`, list()).fields).toEqual({ n: `${n}\n  and more` });
+  });
+
   it("answers nothing for a message naming no declared input, or none at all", () => {
-    expect(serverErrorInput("the flow declares no input `zz`: each multipart part is named by an input id", list())).toBeUndefined();
-    expect(serverErrorInput("Cannot execute flow: flow is disabled.", list())).toBeUndefined();
+    const zz = "the flow declares no input `zz`: each multipart part is named by an input id";
+    expect(serverErrorsByInput(zz, list())).toEqual({ fields: {}, rest: [zz] });
+    expect(serverErrorsByInput("Cannot execute flow: flow is disabled.", list()).fields).toEqual({});
+    expect(serverErrorsByInput("Missing required input:zz", list()).fields).toEqual({});
+  });
+});
+
+describe("serverErrorInput", () => {
+  it("answers the first declared input a refusal names, or nothing", () => {
+    const list = inputs("  - id: a\n    type: STRING\n  - id: b\n    type: STRING");
+    expect(serverErrorInput("Missing required input:b\nInvalid value for input `a`. Cause: x", list)).toBe("b");
+    expect(serverErrorInput("Cannot execute flow: flow is disabled.", list)).toBeUndefined();
   });
 });

@@ -589,3 +589,79 @@ async fn an_empty_list_is_skipped_but_an_empty_wait_is_still_a_timeout_for_the_t
         Err(WaitError::Timeout { .. })
     ));
 }
+
+/// Spec D7 (E27): Trino's tag row regresses to `-1` on the first tag poll
+/// after every policy download. A tag pair confirmed once stays confirmed for
+/// the rest of the wait, so the wait ends as soon as the policy pair is
+/// reported, not one more tag poll later.
+#[tokio::test]
+async fn a_tag_pair_confirmed_once_stays_confirmed_while_the_policy_pair_waits() {
+    let Some(db) = db().await else { return };
+    let (store, pool, svc, id) = setup(db).await;
+    sqlx::query("UPDATE policy.authz_services SET policy_version = 7 WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let plugin = format!("trino@h-{svc}");
+    let tags = |v: i64| format!("/tags/download/{svc}?pluginId={plugin}&lastKnownVersion={v}");
+    let policies =
+        |v: i64| format!("/plugins/policies/download/{svc}?pluginId={plugin}&lastKnownVersion={v}");
+    // Both known to the ledger, neither confirmed yet.
+    poll(&store, &tags(0)).await;
+    poll(&store, &policies(6)).await;
+
+    let s2 = store.clone();
+    let (t1, p1, t2) = (tags(1), policies(7), tags(-1));
+    let reported = tokio::spawn(async move {
+        // The tag version is reported...
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        poll(&s2, &t1).await;
+        // ...then the policy download restarts the tag retriever: -1...
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        poll(&s2, &t2).await;
+        // ...and only then is the policy version reported.
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        poll(&s2, &p1).await;
+        Instant::now()
+    });
+    wait_for_versions(&store, &[(id, 1)], &[(id, 7)], Duration::from_secs(3))
+        .await
+        .expect("the tag pair stays confirmed once reported");
+    let done = Instant::now();
+    let at = reported.await.unwrap();
+    assert!(
+        done >= at,
+        "confirmed before the policy version was reported"
+    );
+}
+
+/// Spec D7: the latch confirms nothing that was never reported.
+#[tokio::test]
+async fn a_pair_never_confirmed_still_times_out() {
+    let Some(db) = db().await else { return };
+    let (store, pool, svc, id) = setup(db).await;
+    sqlx::query("UPDATE policy.authz_services SET policy_version = 7 WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let plugin = format!("trino@h-{svc}");
+    poll(
+        &store,
+        &format!("/tags/download/{svc}?pluginId={plugin}&lastKnownVersion=1"),
+    )
+    .await;
+    poll(
+        &store,
+        &format!("/plugins/policies/download/{svc}?pluginId={plugin}&lastKnownVersion=6"),
+    )
+    .await;
+    let err = wait_for_versions(&store, &[(id, 1)], &[(id, 7)], Duration::from_millis(1200))
+        .await
+        .unwrap_err();
+    match err {
+        WaitError::Timeout { waiting_on } => assert_eq!(waiting_on, vec![plugin]),
+        other => panic!("expected Timeout, got {other:?}"),
+    }
+}

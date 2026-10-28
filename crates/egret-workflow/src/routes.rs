@@ -25,6 +25,7 @@
 //! POST   /api/ws/{workspace}/workflows/flows/graph
 //! GET    /api/ws/{workspace}/workflows/flows/{id}/graph
 //! POST   /api/ws/{workspace}/workflows/flows/{id}/executions
+//! POST   /api/ws/{workspace}/workflows/flows/{id}/executions/validate
 //! GET    /api/ws/{workspace}/workflows/executions
 //! GET    /api/ws/{workspace}/workflows/executions/{id}
 //! GET    /api/ws/{workspace}/workflows/executions/{id}/logs
@@ -2270,6 +2271,7 @@ async fn get_execution_logs(
 //
 // ```text
 // POST /api/ws/{workspace}/workflows/flows/{id}/executions   start
+// POST /api/ws/{workspace}/workflows/flows/{id}/executions/validate  check inputs, store nothing
 // POST /api/ws/{workspace}/workflows/executions/{id}/resume  resume a pause
 // POST /api/ws/{workspace}/workflows/executions/{id}/replay  run it again
 // POST /api/ws/{workspace}/workflows/executions/{id}/kill    kill it
@@ -2662,6 +2664,199 @@ async fn start_flow_execution(
             st.trigger_flags.worker_enabled,
         )),
     ))
+}
+
+/// One error of one input in `ValidateInputsDto` -- Kestra's `ApiInputError`.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct InputErrorDto {
+    /// The start check's message, in Kestra's form: ``Invalid value for input
+    /// `<id>`. Cause: <cause>``, `Missing required input:<id>`, or
+    /// `Invalid condition: <msg>`. A MULTISELECT with several bad elements has
+    /// one line per element, joined by `\n`, as the start's 400 has.
+    #[schema(example = "Invalid value for input `n`. Cause: it must be more than `1`")]
+    pub message: String,
+    /// The input's definition is broken, not its value: a `dependsOn.condition`
+    /// or a SELECT / MULTISELECT `expression` failed to render.
+    pub render_error: bool,
+}
+
+/// One declared input in `ValidateInputsDto` -- Kestra's `ApiInputAndValue`.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct InputValidationDto {
+    /// The input's definition as the flow's YAML declares it.
+    #[schema(value_type = Object, example = json!({"id": "n", "type": "INT", "min": 1}))]
+    pub input: serde_json::Value,
+    /// The value the start would see: the parsed value, a literal default's,
+    /// or, on an error, the value as posted; `null` when there is none. **A
+    /// SECRET input's value is always `******`**, never the clear text. A
+    /// `FILE` input's is what was posted (nothing is uploaded or checked for
+    /// readability here).
+    pub value: serde_json::Value,
+    /// `false` when `dependsOn` disables the input: its errors are listed but
+    /// a start would not report them.
+    pub enabled: bool,
+    /// The value came from `defaults` or `autoSelectFirst`.
+    pub is_default: bool,
+    /// Empty when the input is valid.
+    pub errors: Vec<InputErrorDto>,
+}
+
+/// `POST .../flows/{id}/executions/validate`'s answer -- Kestra's
+/// `ApiValidateExecutionInputsResponse`.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[schema(example = json!({
+    "id": "hello",
+    "namespace": "company.team",
+    "inputs": [
+        {"input": {"id": "n", "type": "INT", "min": 1}, "value": "0", "enabled": true,
+         "isDefault": false,
+         "errors": [{"message": "Invalid value for input `n`. Cause: it must be more than `1`",
+                     "renderError": false}]},
+        {"input": {"id": "token", "type": "SECRET"}, "value": "******", "enabled": true,
+         "isDefault": false, "errors": []}
+    ],
+    "checks": []
+}))]
+pub struct ValidateInputsDto {
+    /// The flow's `id:` (its key, not the draft's UUID).
+    pub id: String,
+    pub namespace: String,
+    /// Every declared input, in declared order (a repeated id keeps its first
+    /// declaration), disabled ones included.
+    pub inputs: Vec<InputValidationDto>,
+    /// The flow's `checks:`; always empty until they are supported.
+    #[schema(value_type = Vec<Object>)]
+    pub checks: Vec<serde_json::Value>,
+}
+
+/// Each declared input's definition as the YAML spells it, by id (the first
+/// declaration of a repeated id), so the answer echoes what the author wrote
+/// rather than egret's model of it.
+fn declared_inputs(source: &str) -> std::collections::HashMap<String, serde_json::Value> {
+    let mut out = std::collections::HashMap::new();
+    let Ok(doc) = serde_norway::from_str::<serde_json::Value>(source) else {
+        return out;
+    };
+    for input in doc
+        .get("inputs")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(id) = input.get("id").and_then(serde_json::Value::as_str) {
+            out.entry(id.to_string()).or_insert_with(|| input.clone());
+        }
+    }
+    out
+}
+
+/// The validate answer for `posted` against `flow`'s draft: the start check
+/// ([`crate::worker::input_outcomes`]), every input listed, SECRET values
+/// masked (review M6).
+fn validate_inputs_answer(
+    row: &crate::repo::FlowRow,
+    flow: &crate::models::Flow,
+    posted: &serde_json::Value,
+) -> ValidateInputsDto {
+    let mut declared = declared_inputs(&row.source);
+    let types: std::collections::HashMap<&str, &crate::models::Input> = flow
+        .inputs
+        .iter()
+        .rev()
+        .map(|i| (i.id.as_str(), i))
+        .collect();
+    let inputs = crate::worker::input_outcomes(flow, posted)
+        .into_iter()
+        .map(|o| {
+            let model = types.get(o.id.as_str()).copied();
+            let input = declared.remove(&o.id).unwrap_or_else(|| {
+                model
+                    .and_then(|i| serde_json::to_value(i).ok())
+                    .unwrap_or(serde_json::Value::Null)
+            });
+            let value = o.seen.or(o.value).unwrap_or(serde_json::Value::Null);
+            let secret =
+                model.is_some_and(|i| matches!(i.r#type, crate::models::InputType::Secret));
+            let value = if secret && !value.is_null() {
+                serde_json::Value::from(crate::secret_inputs::MASK)
+            } else {
+                value
+            };
+            let errors = if o.errors.is_empty() {
+                Vec::new()
+            } else {
+                vec![InputErrorDto {
+                    message: o.errors.join("\n"),
+                    render_error: o.render_error,
+                }]
+            };
+            InputValidationDto {
+                input,
+                value,
+                enabled: o.enabled,
+                is_default: o.is_default,
+                errors,
+            }
+        })
+        .collect();
+    ValidateInputsDto {
+        id: flow.id.clone(),
+        namespace: flow.namespace.clone(),
+        inputs,
+        checks: Vec::new(),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/flows/{id}/executions/validate",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Flow id"),
+    ),
+    request_body(
+        description = "The inputs a start would be given, as `StartExecutionRequest` (JSON, at most 2 MiB; an absent body is `{}`). A `FILE` input's value is its file name or URI only: nothing is uploaded.",
+        content((StartExecutionRequest = "application/json")),
+    ),
+    responses(
+        (status = 200, description = "**Always 200 when the flow can be started**, valid or not: every declared input of the flow's draft, in declared order, with the start check's errors (Kestra's validate shape). The check is the start's own (`required`, the type, `validator`, `min`/`max`, `after`/`before`, `values`, literal `defaults`, `dependsOn`), but it lists every input instead of stopping at the first, and an input disabled by `dependsOn` is listed with `enabled: false`. A `FILE` input's readability is not checked. **Nothing is stored**: no execution, no upload, no audit record. A SECRET input's `value` is `******`.", body = ValidateInputsDto),
+        (status = 400, description = "The body is not a JSON object, `inputs` is not a JSON object, or the flow's stored source does not parse.", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission (the start's), or the workflows module is disabled for this workspace.", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such flow in this workspace, or it is in the trash, as the start answers.", body = egret_core::http::ErrorBody),
+        (status = 409, description = "The flow is disabled, as the start answers.", body = egret_core::http::ErrorBody),
+        (status = 413, description = "The body is over 2 MiB.", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn validate_execution_inputs(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    body: axum::body::Bytes,
+) -> EgretResult<Json<ValidateInputsDto>> {
+    // The start's gate, its flow lookup and its refusals, in its order, so
+    // this answers nothing a start would not (D14).
+    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    let row = startable_flow(&st, ctx.workspace_id.0, id).await?;
+    let request = if body.is_empty() {
+        StartExecutionRequest::default()
+    } else {
+        let value: serde_json::Value = serde_json::from_slice(&body)
+            .map_err(|e| Error::InvalidInput(format!("the body is not JSON: {e}")))?;
+        if !value.is_object() {
+            return Err(Error::InvalidInput("the body must be a JSON object".into()));
+        }
+        serde_json::from_value(value)
+            .map_err(|e| Error::InvalidInput(format!("the body is not valid: {e}")))?
+    };
+    let posted = start_inputs(Some(Json(request)))?;
+    let flow = parse(&row.source)
+        .map_err(|e| Error::InvalidInput(format!("the flow does not parse: {}", e.message)))?;
+    Ok(Json(validate_inputs_answer(&row, &flow, &posted)))
 }
 
 /// The multipart start (W9a spec §7.1), in its order: the execution id is
@@ -3676,6 +3871,11 @@ pub fn management_router() -> Router<WorkflowState> {
             post(start_flow_execution).layer(axum::extract::DefaultBodyLimit::disable()),
         )
         .route(
+            "/ws/{workspace}/workflows/flows/{id}/executions/validate",
+            // axum's default body cap (2 MiB), as the JSON start's.
+            post(validate_execution_inputs),
+        )
+        .route(
             "/ws/{workspace}/workflows/flows/{id}/versions",
             get(list_flow_versions),
         )
@@ -3884,6 +4084,7 @@ pub fn management_router() -> Router<WorkflowState> {
         crate::storage::routes::execution_file_metas,
         crate::storage::routes::preview_execution_file,
         start_flow_execution,
+        validate_execution_inputs,
         resume_execution,
         replay_execution,
         kill_execution,
@@ -3937,6 +4138,9 @@ pub fn management_router() -> Router<WorkflowState> {
         ExecutionPageDto,
         StartExecutionRequest,
         StartExecutionMultipart,
+        ValidateInputsDto,
+        InputValidationDto,
+        InputErrorDto,
         LogLevel,
         LogLineDto,
         LogPageDto,

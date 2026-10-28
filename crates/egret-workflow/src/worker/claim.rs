@@ -3960,6 +3960,28 @@ pub(crate) fn checked_inputs(
     flow: &crate::models::Flow,
     posted: &serde_json::Value,
 ) -> std::result::Result<serde_json::Value, crate::inputs_check::InputError> {
+    crate::inputs_check::resolve(&flow.inputs, posted, &start_renderer(flow))
+        .map(serde_json::Value::Object)
+}
+
+/// Every declared input's outcome under [`checked_inputs`]'s renderer, for the
+/// validate endpoint (package #3b, D14): the same check, listing every input
+/// instead of stopping at the first error. **The values are clear**, SECRET
+/// ones included (review M6); the caller masks them before it answers.
+pub(crate) fn input_outcomes(
+    flow: &crate::models::Flow,
+    posted: &serde_json::Value,
+) -> Vec<crate::inputs_check::InputOutcome> {
+    crate::inputs_check::resolve_all(&flow.inputs, posted, &start_renderer(flow))
+}
+
+/// The renderer [`checked_inputs`] documents, built once per check.
+fn start_renderer(
+    flow: &crate::models::Flow,
+) -> impl Fn(
+    &str,
+    &serde_json::Map<String, serde_json::Value>,
+) -> std::result::Result<serde_json::Value, String> {
     use crate::runners::env::{render_typed, RenderContext};
     let flow_binding = serde_json::json!({"id": flow.id, "namespace": flow.namespace});
     let vars = serde_json::to_value(&flow.variables).unwrap_or(serde_json::Value::Null);
@@ -3969,9 +3991,9 @@ pub(crate) fn checked_inputs(
         .filter(|i| i.defaults.is_some())
         .map(|i| (i.id.clone(), serde_json::Value::Null))
         .collect();
-    let renderer = |template: &str,
-                    deps: &serde_json::Map<String, serde_json::Value>|
-     -> std::result::Result<serde_json::Value, String> {
+    move |template: &str,
+          deps: &serde_json::Map<String, serde_json::Value>|
+          -> std::result::Result<serde_json::Value, String> {
         let mut bound = defaulted.clone();
         bound.extend(deps.iter().map(|(k, v)| (k.clone(), v.clone())));
         let mut cx = RenderContext::new();
@@ -3983,8 +4005,7 @@ pub(crate) fn checked_inputs(
             Ok(Err(e)) => Err(e.to_string()),
             Err(e) => Err(e.to_string()),
         }
-    };
-    crate::inputs_check::resolve(&flow.inputs, posted, &renderer).map(serde_json::Value::Object)
+    }
 }
 
 /// The body of [`start_execution_in_with`] (and of the test-only

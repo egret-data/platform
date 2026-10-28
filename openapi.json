@@ -6525,7 +6525,7 @@
           "control-plane-governance"
         ],
         "summary": "Recent governance changes, newest first.",
-        "description": "Governance events, newest first: grant, rule, hand-written policy, migration and compile changes and role assignments for a `policy:read` reader; clearance changes and catalog-column tags for a `tag:read` reader; user deletes for a reader who also holds `user:read`. Recorded from the version that introduced this feed on; role assignments and catalog tags are best-effort (recorded after commit).",
+        "description": "Governance events, newest first: grant, rule, hand-written policy, migration and compile changes and role assignments for a `policy:read` reader; clearance changes and catalog-column tags for a `tag:read` reader; user deletes for a reader who also holds `user:read`; catalog-grant moves and removals for a reader who also holds `catalog_registry:read`. Recorded from the version that introduced this feed on; role assignments and catalog tags are best-effort (recorded after commit).",
         "operationId": "changes",
         "parameters": [
           {
@@ -33021,6 +33021,136 @@
         }
       }
     },
+    "/api/ws/{workspace}/workflows/flows/{id}/executions/validate": {
+      "post": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "validate_execution_inputs",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The inputs a start would be given, as `StartExecutionRequest` (JSON, at most 2 MiB; an absent body is `{}`). A `FILE` input's value is its file name or URI only: nothing is uploaded.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartExecutionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "**Always 200 when the flow can be started**, valid or not: every declared input of the flow's draft, in declared order, with the start check's errors (Kestra's validate shape). The check is the start's own (`required`, the type, `validator`, `min`/`max`, `after`/`before`, `values`, literal `defaults`, `dependsOn`), but it lists every input instead of stopping at the first, and an input disabled by `dependsOn` is listed with `enabled: false`. A `FILE` input's readability is not checked. **Nothing is stored**: no execution, no upload, no audit record. A SECRET input's `value` is `******`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidateInputsDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body is not a JSON object, `inputs` is not a JSON object, or the flow's stored source does not parse.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission (the start's), or the workflows module is disabled for this workspace.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such flow in this workspace, or it is in the trash, as the start answers.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The flow is disabled, as the start answers.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 2 MiB.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/workflows/flows/{id}/graph": {
       "get": {
         "tags": [
@@ -47446,6 +47576,60 @@
           }
         }
       },
+      "InputErrorDto": {
+        "type": "object",
+        "description": "One error of one input in `ValidateInputsDto` -- Kestra's `ApiInputError`.",
+        "required": [
+          "message",
+          "renderError"
+        ],
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "The start check's message, in Kestra's form: ``Invalid value for input\n`<id>`. Cause: <cause>``, `Missing required input:<id>`, or\n`Invalid condition: <msg>`. A MULTISELECT with several bad elements has\none line per element, joined by `\\n`, as the start's 400 has.",
+            "example": "Invalid value for input `n`. Cause: it must be more than `1`"
+          },
+          "renderError": {
+            "type": "boolean",
+            "description": "The input's definition is broken, not its value: a `dependsOn.condition`\nor a SELECT / MULTISELECT `expression` failed to render."
+          }
+        }
+      },
+      "InputValidationDto": {
+        "type": "object",
+        "description": "One declared input in `ValidateInputsDto` -- Kestra's `ApiInputAndValue`.",
+        "required": [
+          "input",
+          "value",
+          "enabled",
+          "isDefault",
+          "errors"
+        ],
+        "properties": {
+          "input": {
+            "type": "object",
+            "description": "The input's definition as the flow's YAML declares it."
+          },
+          "value": {
+            "description": "The value the start would see: the parsed value, a literal default's,\nor, on an error, the value as posted; `null` when there is none. **A\nSECRET input's value is always `******`**, never the clear text. A\n`FILE` input's is what was posted (nothing is uploaded or checked for\nreadability here)."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "`false` when `dependsOn` disables the input: its errors are listed but\na start would not report them."
+          },
+          "isDefault": {
+            "type": "boolean",
+            "description": "The value came from `defaults` or `autoSelectFirst`."
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InputErrorDto"
+            },
+            "description": "Empty when the input is valid."
+          }
+        }
+      },
       "InviteDto": {
         "type": "object",
         "description": "A pre-registered email waiting for its SSO user's first sign-in.",
@@ -57766,6 +57950,72 @@
           "source": {
             "type": "string"
           }
+        }
+      },
+      "ValidateInputsDto": {
+        "type": "object",
+        "description": "`POST .../flows/{id}/executions/validate`'s answer -- Kestra's\n`ApiValidateExecutionInputsResponse`.",
+        "required": [
+          "id",
+          "namespace",
+          "inputs",
+          "checks"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The flow's `id:` (its key, not the draft's UUID)."
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "inputs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InputValidationDto"
+            },
+            "description": "Every declared input, in declared order (a repeated id keeps its first\ndeclaration), disabled ones included."
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "The flow's `checks:`; always empty until they are supported."
+          }
+        },
+        "example": {
+          "id": "hello",
+          "namespace": "company.team",
+          "inputs": [
+            {
+              "input": {
+                "id": "n",
+                "type": "INT",
+                "min": 1
+              },
+              "value": "0",
+              "enabled": true,
+              "isDefault": false,
+              "errors": [
+                {
+                  "message": "Invalid value for input `n`. Cause: it must be more than `1`",
+                  "renderError": false
+                }
+              ]
+            },
+            {
+              "input": {
+                "id": "token",
+                "type": "SECRET"
+              },
+              "value": "******",
+              "enabled": true,
+              "isDefault": false,
+              "errors": []
+            }
+          ],
+          "checks": []
         }
       },
       "ValidationReportDto": {
