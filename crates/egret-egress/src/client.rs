@@ -14,8 +14,22 @@
 //!   included, up to [`EgressOptions::max_redirects`] hops. A public URL that
 //!   answers `302 Location: http://169.254.169.254/` is refused, never dialled.
 //! - **Credentials stay with their origin.** When a hop changes scheme, host
-//!   or port, `Authorization`, `Proxy-Authorization` and `Cookie` are removed
-//!   and stay removed for the rest of the chain.
+//!   or port, `Authorization`, `Proxy-Authorization`, `Cookie`, every header
+//!   whose name contains `key`, `token`, `auth`, `secret` or `cookie`
+//!   (case-insensitive: `X-Api-Key`, `X-Auth-Token`, ...) and `Host` are
+//!   removed and stay removed for the rest of the chain. A custom credential
+//!   header with another name (`X-Signature`, say) still follows the
+//!   redirect.
+//! - **The caller cannot set the framing or the target.** `Host`,
+//!   `Content-Length`, `Transfer-Encoding`, `Connection`, `Upgrade`, `TE`,
+//!   `Keep-Alive`, `Trailer` and every `Proxy-*` header are dropped from the
+//!   request ([`FORBIDDEN_REQUEST_HEADERS`]): hyper writes `Host` from the
+//!   vetted URL and the framing from the body. A caller-supplied `Host` would
+//!   reach other virtual hosts behind an allowlisted address, and the
+//!   framing headers are request-smuggling primitives.
+//! - **Error texts carry no query.** A refused destination is quoted as
+//!   scheme, host, port and path ([`redact`]); an unparseable URL or
+//!   `Location` is not quoted at all.
 //! - **Method rules** follow the Fetch standard, as Apache HttpClient (Kestra)
 //!   does: 303 turns any method but HEAD into GET; 301/302 turn POST into GET;
 //!   307/308 keep the method and the body. A dropped body takes its
@@ -27,7 +41,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use reqwest::header::{
     HeaderMap, HeaderName, AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, COOKIE,
-    LOCATION, PROXY_AUTHORIZATION, TRANSFER_ENCODING,
+    HOST, LOCATION, PROXY_AUTHORIZATION, TRANSFER_ENCODING,
 };
 use reqwest::{Method, StatusCode};
 use url::Url;
@@ -39,8 +53,38 @@ use crate::guard::{vet_url, DestinationError, Resolver, SsrfPolicy};
 pub const DEFAULT_MAX_REDIRECTS: u32 = 10;
 
 /// Headers that carry credentials and must not follow a request to another
-/// origin.
+/// origin. [`is_credential_like`] adds the custom ones.
 const CREDENTIAL_HEADERS: [HeaderName; 3] = [AUTHORIZATION, PROXY_AUTHORIZATION, COOKIE];
+
+/// Header names a caller may not send (hop-by-hop, framing, and the target
+/// host); every `Proxy-*` name is refused too ([`is_forbidden_request_header`]).
+pub const FORBIDDEN_REQUEST_HEADERS: [&str; 8] = [
+    "host",
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "upgrade",
+    "te",
+    "keep-alive",
+    "trailer",
+];
+
+/// Whether a caller-supplied header `name` must not reach the wire
+/// ([`FORBIDDEN_REQUEST_HEADERS`] or a `Proxy-*` name), case-insensitive.
+pub fn is_forbidden_request_header(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    FORBIDDEN_REQUEST_HEADERS.contains(&lower.as_str()) || lower.starts_with("proxy-")
+}
+
+/// Whether a header name looks like it carries a credential: it contains
+/// `key`, `token`, `auth`, `secret` or `cookie`, case-insensitive. Such a
+/// header is dropped on a cross-origin redirect (final review M7).
+pub fn is_credential_like(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    ["key", "token", "auth", "secret", "cookie"]
+        .iter()
+        .any(|w| lower.contains(w))
+}
 
 #[derive(Debug, Clone)]
 pub struct EgressOptions {
@@ -99,9 +143,10 @@ pub enum EgressError {
         #[source]
         source: DestinationError,
     },
-    /// A `Location` header that is not a URL, even relative to the current one.
-    #[error("redirect location is not a valid url: {0}")]
-    BadRedirect(String),
+    /// A `Location` header that is not a URL, even relative to the current
+    /// one. Not quoted: it may carry a token.
+    #[error("redirect location is not a valid url")]
+    BadRedirect,
     #[error("too many redirects (more than {0})")]
     TooManyRedirects(u32),
     #[error("request timed out")]
@@ -184,10 +229,13 @@ impl Hops<'_> {
             mut headers,
             mut body,
         } = spec;
+        // Not quoted: a URL that does not parse cannot be redacted, and it
+        // may carry a password or a token (final review M3).
         let mut current = Url::parse(&url).map_err(|_| EgressError::Destination {
-            url: url.clone(),
+            url: "the request URL".into(),
             source: DestinationError::BadUrl,
         })?;
+        drop_forbidden(&mut headers);
         let mut hops = 0u32;
 
         loop {
@@ -203,12 +251,10 @@ impl Hops<'_> {
             let Some(location) = res.headers().get(LOCATION) else {
                 return Ok(res);
             };
-            let location = location
-                .to_str()
-                .map_err(|_| EgressError::BadRedirect("<non-ascii>".into()))?;
+            let location = location.to_str().map_err(|_| EgressError::BadRedirect)?;
             let next = current
                 .join(location)
-                .map_err(|_| EgressError::BadRedirect(location.to_string()))?;
+                .map_err(|_| EgressError::BadRedirect)?;
 
             hops += 1;
             if hops > self.options.max_redirects {
@@ -231,6 +277,15 @@ impl Hops<'_> {
                 for h in CREDENTIAL_HEADERS {
                     headers.remove(h);
                 }
+                let custom: Vec<HeaderName> = headers
+                    .keys()
+                    .filter(|n| is_credential_like(n.as_str()))
+                    .cloned()
+                    .collect();
+                for h in custom {
+                    headers.remove(h);
+                }
+                headers.remove(HOST);
             }
             current = next;
         }
@@ -310,12 +365,27 @@ fn method_becomes_get(status: StatusCode, method: &Method) -> bool {
     }
 }
 
-/// The URL without userinfo, for error texts.
+/// The URL without userinfo, query or fragment, for error texts (final
+/// review I5: a token in the query must not reach a message).
 fn redact(url: &Url) -> String {
     let mut u = url.clone();
     let _ = u.set_username("");
     let _ = u.set_password(None);
+    u.set_query(None);
+    u.set_fragment(None);
     u.to_string()
+}
+
+/// Drop every [`is_forbidden_request_header`] name from `headers`.
+fn drop_forbidden(headers: &mut HeaderMap) {
+    let names: Vec<HeaderName> = headers
+        .keys()
+        .filter(|n| is_forbidden_request_header(n.as_str()))
+        .cloned()
+        .collect();
+    for n in names {
+        headers.remove(n);
+    }
 }
 
 #[cfg(test)]
@@ -343,8 +413,41 @@ mod tests {
     }
 
     #[test]
-    fn redact_drops_userinfo_only() {
-        let u = Url::parse("https://user:pw@api.example.com:8443/p?q=1").unwrap();
-        assert_eq!(redact(&u), "https://api.example.com:8443/p?q=1");
+    fn redact_drops_userinfo_query_and_fragment() {
+        let u = Url::parse("https://user:pw@api.example.com:8443/p?q=1#f").unwrap();
+        assert_eq!(redact(&u), "https://api.example.com:8443/p");
+    }
+
+    #[test]
+    fn forbidden_and_credential_like_names() {
+        for n in [
+            "Host",
+            "content-length",
+            "Transfer-Encoding",
+            "Connection",
+            "Upgrade",
+            "TE",
+            "Keep-Alive",
+            "Trailer",
+            "Proxy-Authorization",
+            "proxy-connection",
+        ] {
+            assert!(is_forbidden_request_header(n), "{n}");
+        }
+        for n in ["Accept", "X-Host", "Content-Type", "Authorization"] {
+            assert!(!is_forbidden_request_header(n), "{n}");
+        }
+        for n in [
+            "X-Api-Key",
+            "x-auth-token",
+            "X-SECRET",
+            "Set-Cookie",
+            "Authorization",
+        ] {
+            assert!(is_credential_like(n), "{n}");
+        }
+        for n in ["Accept", "X-Request-Id", "Content-Type"] {
+            assert!(!is_credential_like(n), "{n}");
+        }
     }
 }

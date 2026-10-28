@@ -241,7 +241,7 @@ async fn http_auth_without_a_type_or_with_an_unknown_one_fails() {
         (json!({"token": "t"}), "options.auth.type: must not be null"),
         (
             json!({"type": "NTLM"}),
-            "\"NTLM\" is not one of BASIC, BEARER, DIGEST",
+            "\"NTLM\" is not one of BASIC, BEARER",
         ),
     ] {
         let s = spec(json!({"uri": "http://a.test/", "options": {"auth": auth}}));
@@ -608,6 +608,41 @@ async fn http_d4_refusals_name_the_property_at_publish_and_at_run() {
             json!({"options": {"auth": {"type": "DIGEST", "username": "u", "password": "p"}}}),
             "options.auth.type: DIGEST",
         ),
+        // Final review M6: any case is the DIGEST refusal, and an unknown
+        // literal type is named at publish without listing DIGEST.
+        (
+            json!({"options": {"auth": {"type": "digest"}}}),
+            "options.auth.type: DIGEST",
+        ),
+        (
+            json!({"options": {"auth": {"type": "Digest"}}}),
+            "options.auth.type: DIGEST",
+        ),
+        (
+            json!({"options": {"auth": {"type": "basic"}}}),
+            "options.auth.type: \"basic\" is not one of BASIC, BEARER",
+        ),
+        // Final review I6: the target host and the framing are egret's.
+        (
+            json!({"headers": {"Host": "grafana.monitoring.svc"}}),
+            "headers.Host",
+        ),
+        (
+            json!({"headers": {"content-length": "9"}}),
+            "headers.content-length",
+        ),
+        (
+            json!({"headers": {"Transfer-Encoding": "chunked"}}),
+            "headers.Transfer-Encoding",
+        ),
+        (
+            json!({"headers": {"Connection": "close"}}),
+            "headers.Connection",
+        ),
+        (
+            json!({"headers": {"Proxy-Authorization": "x"}}),
+            "headers.Proxy-Authorization",
+        ),
         (json!({"encryptBody": true}), "encryptBody"),
         (json!({"encryptBody": "true"}), "encryptBody"),
         // Controller decision (C3): userinfo would reach the `uri` output.
@@ -643,6 +678,11 @@ async fn http_d4_refusals_name_the_property_at_publish_and_at_run() {
         }
     }));
     assert!(refusals(&ok).is_empty());
+    assert!(refusals(&spec(
+        json!({"uri": "http://a.test/", "options": {"auth": {"type": "{{ inputs.t }}"}},
+               "headers": {"X-Host": "x", "Accept": "y"}})
+    ))
+    .is_empty());
     assert!(refusals(&spec(json!({"uri": "http://a.test/"}))).is_empty());
     // A templated host cannot be judged unrendered; the run judges it.
     assert!(refusals(&spec(json!({"uri": "{{ inputs.base }}/x"}))).is_empty());
@@ -848,9 +888,12 @@ async fn http_private_destinations_are_refused_with_the_allowlist_unset() {
 #[tokio::test]
 async fn http_transport_errors_mask_secrets_in_the_url() {
     let eg = egress(&[]);
-    let s = spec(json!({"uri": format!("http://nowhere.test/?key={SECRET}")}));
+    // A secret in the path is masked; the query is not quoted at all
+    // (final review I5).
+    let s = spec(json!({"uri": format!("http://nowhere.test/{SECRET}/x?key={SECRET}")}));
     let err = run(&eg, &s, None, &[SECRET]).await.unwrap_err();
     assert!(!err.contains(SECRET) && err.contains(MASK), "{err}");
+    assert!(!err.contains("key="), "{err}");
 }
 
 // ---- reading the body -----------------------------------------------------
@@ -977,4 +1020,37 @@ fn http_payload_log_decodes_only_its_head() {
         "{}",
         &line[line.len() - 40..]
     );
+}
+
+/// Final review I5: a secret rendered into the `uri` is encoded by the `url`
+/// crate's path, query or fragment set (neither the raw value nor its form
+/// encoding), and is masked in that form too.
+#[test]
+fn http_a_secret_in_the_uri_is_masked_in_the_url_crates_encodings() {
+    for secret in ["p@ss word", "päss/word", "a b:c\"<d>", "x`{y}z"] {
+        let masks = MaskSet::new([secret]);
+        for template in [
+            "https://api.example.com/v1?key={}",
+            "https://api.example.com/v1/{}/items",
+            "https://api.example.com/v1#{}",
+        ] {
+            let url = url::Url::parse(&template.replace("{}", secret)).unwrap();
+            let text = format!("request to {url} failed");
+            let masked = masks.mask(&text);
+            assert!(masked.contains(MASK), "{secret} in {url}: {masked}");
+            for part in [secret, &url.to_string()] {
+                assert!(!masked.contains(part), "{secret}: {masked}");
+            }
+        }
+    }
+}
+
+/// Final review M3: a `uri` that does not parse is not quoted, so a literal
+/// password in it (not masked yet at that point) is not printed.
+#[tokio::test]
+async fn http_an_unparseable_uri_is_not_quoted() {
+    let s = spec(json!({"uri": "http://u:s3cret@[::1/x"}));
+    let err = build_request(&s, None).await.unwrap_err();
+    assert!(err.starts_with("uri: not a valid URI"), "{err}");
+    assert!(!err.contains("s3cret"), "{err}");
 }

@@ -230,13 +230,35 @@ pub fn refusals(spec: &HttpSpec) -> Vec<String> {
             );
         }
     }
-    if let Some(a) = &o.auth {
-        if a.kind.as_deref() == Some("DIGEST") {
+    if let Some(kind) = o.auth.as_ref().and_then(|a| a.kind.as_deref()) {
+        // Any case (final review M6): `digest` is the same refusal, not an
+        // unknown type whose message lists DIGEST as valid.
+        if kind.eq_ignore_ascii_case("DIGEST") {
             out.push(
                 "options.auth.type: DIGEST is not supported by egret; use BASIC or BEARER, \
                  or send the credentials in headers"
                     .to_string(),
             );
+        } else if kind != "BASIC" && kind != "BEARER" && !kind.contains("{{") {
+            out.push(format!(
+                "options.auth.type: {kind:?} is not one of BASIC, BEARER"
+            ));
+        }
+    }
+    // Final review I6: a flow-chosen `Host` would reach other virtual hosts
+    // behind an allowlisted address, and the framing headers are
+    // request-smuggling primitives. `egret_egress` drops them from every
+    // request anyway; refusing names the property instead of ignoring it.
+    if let Some(headers) = &spec.headers {
+        for name in headers.keys() {
+            if egret_egress::is_forbidden_request_header(name) {
+                out.push(format!(
+                    "headers.{name}: egret does not let a flow set this header (Host, \
+                     Content-Length, Transfer-Encoding, Connection, Upgrade, TE, Keep-Alive, \
+                     Trailer or Proxy-*); egret writes Host from the uri and the framing from \
+                     the body. Remove it"
+                ));
+            }
         }
     }
     if uri_has_userinfo(spec.uri.as_ref()) {

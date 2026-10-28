@@ -321,6 +321,9 @@ async fn a_cross_origin_redirect_drops_credentials_and_keeps_other_headers() {
         .insert("proxy-authorization", "Basic eDp5".parse().unwrap());
     spec.headers.insert("cookie", "sid=1".parse().unwrap());
     spec.headers.insert("x-keep", "yes".parse().unwrap());
+    spec.headers.insert("x-api-key", "k3y".parse().unwrap());
+    spec.headers.insert("X-Auth-Token", "t0k".parse().unwrap());
+    spec.headers.insert("x-client-secret", "s".parse().unwrap());
 
     let res = allowed().send(spec).await.unwrap();
     assert_eq!(res.status(), 200);
@@ -332,10 +335,82 @@ async fn a_cross_origin_redirect_drops_credentials_and_keeps_other_headers() {
         "origin hop keeps it"
     );
     let (_, _, second, _) = b.last();
-    for h in ["authorization", "proxy-authorization", "cookie"] {
+    for h in [
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        // Final review M7: credential-looking custom headers too.
+        "x-api-key",
+        "x-auth-token",
+        "x-client-secret",
+    ] {
         assert!(!second.contains_key(h), "{h} crossed origins");
     }
+    assert_eq!(first["x-api-key"], "k3y", "origin hop keeps it");
     assert_eq!(second["x-keep"], "yes");
+    assert_eq!(
+        second["host"],
+        format!("b.test:{}", b.port).as_str(),
+        "the next origin's own Host"
+    );
+}
+
+/// Final review I6: a caller-supplied `Host` would reach other virtual hosts
+/// behind the vetted address, and `Content-Length`/`Transfer-Encoding` are
+/// request-smuggling primitives. They never reach the wire; hyper writes
+/// them from the URL and the body.
+#[tokio::test]
+async fn a_caller_cannot_set_the_host_or_the_framing() {
+    let a = start().await;
+    let mut spec = RequestSpec::new(Method::POST, format!("http://a.test:{}/echo", a.port));
+    spec.body = Some("hi".into());
+    for (name, value) in [
+        ("host", "grafana.monitoring.svc"),
+        ("content-length", "999"),
+        ("transfer-encoding", "chunked"),
+        ("connection", "close"),
+        ("upgrade", "websocket"),
+        ("te", "trailers"),
+        ("proxy-x", "1"),
+    ] {
+        spec.headers.insert(name, value.parse().unwrap());
+    }
+    let res = allowed().send(spec).await.unwrap();
+    assert_eq!(res.status(), 200);
+    let (_, _, h, body) = a.last();
+    assert_eq!(h["host"], format!("a.test:{}", a.port).as_str());
+    assert_eq!(h["content-length"], "2");
+    assert_eq!(body, "hi");
+    for name in ["transfer-encoding", "upgrade", "te", "proxy-x"] {
+        assert!(!h.contains_key(name), "{name} reached the wire");
+    }
+}
+
+/// Final review I5/M3: an error quotes no query, fragment or userinfo, and
+/// an unparseable URL is not quoted at all.
+#[tokio::test]
+async fn an_error_quotes_no_query_and_no_unparseable_url() {
+    let a = start().await;
+    let err = client(&[], EgressOptions::default())
+        .send(get(format!(
+            "http://u:pw1@a.test:{}/p?token=s3cret#frag-s3cret",
+            a.port
+        )))
+        .await
+        .unwrap_err();
+    let text = err.to_string();
+    assert!(
+        text.contains(&format!("http://a.test:{}/p", a.port)),
+        "{text}"
+    );
+    assert!(!text.contains("s3cret") && !text.contains("pw1"), "{text}");
+    assert_eq!(a.count(), 0);
+
+    let err = allowed()
+        .send(get("http://u:s3cret@[::1"))
+        .await
+        .unwrap_err();
+    assert!(!err.to_string().contains("s3cret"), "{err}");
 }
 
 #[tokio::test]

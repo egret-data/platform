@@ -5,8 +5,9 @@
 //! ([`crate::runners::secrets::Resolved::values`]), and the credentials the
 //! task wrote itself ([`super::BuiltRequest::credentials`]: `options.auth`, a
 //! credential header, a URL password), masked whether or not they came from
-//! `secret()`. Each value is also masked in its percent-encoded form, the form
-//! it takes in a URL a message may quote.
+//! `secret()`. Each value is also masked in its percent-encoded forms: the
+//! form encoding, and the `url` crate's path, query and fragment encodings,
+//! the forms it takes in a URL a message may quote.
 //!
 //! Credential headers (`Authorization`, `Proxy-Authorization`, `Cookie`,
 //! `Set-Cookie`) are never printed: their value is replaced by [`MASK`]
@@ -62,7 +63,9 @@ impl MaskSet {
             }
             let encoded: String = url::form_urlencoded::byte_serialize(v.as_bytes()).collect();
             let pct = encoded.replace('+', "%20");
-            for form in [encoded, pct] {
+            let mut forms = vec![encoded, pct];
+            forms.extend(url_forms(&v));
+            for form in forms {
                 if form != v && !self.values.contains(&form) {
                     self.values.push(form);
                 }
@@ -122,6 +125,31 @@ impl MaskSet {
         let truncated = cut < text.len();
         (self.mask(&text[..cut]), truncated)
     }
+}
+
+/// `v` as the `url` crate writes it in a path, a query and a fragment (final
+/// review I5). A secret rendered into the `uri` is encoded by `Url::parse`
+/// with these component sets, which leave `@`, `:`, `/` and friends alone
+/// but encode a space, `"`, `<`, `>` and non-ASCII -- neither the raw value
+/// nor its form encoding. The forms are produced by the same `Url` setters,
+/// so they cannot drift from what a parsed `uri` holds.
+fn url_forms(v: &str) -> Vec<String> {
+    let Ok(mut u) = url::Url::parse("http://h/") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    u.set_query(Some(v));
+    out.extend(u.query().map(str::to_string));
+    u.set_query(None);
+    u.set_fragment(Some(v));
+    out.extend(u.fragment().map(str::to_string));
+    u.set_fragment(None);
+    u.set_path(&format!("/{v}"));
+    if let Some(path) = u.path().strip_prefix('/') {
+        out.push(path.to_string());
+    }
+    out.retain(|f| !f.is_empty());
+    out
 }
 
 /// Credential headers, whose value is never printed.

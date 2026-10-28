@@ -127,7 +127,9 @@ pub async fn build_request(
         None => return Err("uri: must not be null".into()),
     };
     let raw = raw.replace(' ', "%20");
-    let mut url = Url::parse(&raw).map_err(|e| format!("uri: {raw:?} is not a valid URI: {e}"))?;
+    // Not quoted (final review M3): a URI that does not parse cannot be
+    // redacted, and a literal password in it is not masked yet.
+    let mut url = Url::parse(&raw).map_err(|e| format!("uri: not a valid URI: {e}"))?;
     if let Some(p) = url.password() {
         credentials.push(p.to_string());
         if let Ok(decoded) = percent_decode(p) {
@@ -252,7 +254,7 @@ pub async fn build_request(
             }
             Some(other) => {
                 return Err(format!(
-                    "options.auth.type: {other:?} is not one of BASIC, BEARER, DIGEST"
+                    "options.auth.type: {other:?} is not one of BASIC, BEARER"
                 ))
             }
             None => return Err("options.auth.type: must not be null (BASIC or BEARER)".into()),
