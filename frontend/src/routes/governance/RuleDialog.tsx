@@ -920,6 +920,7 @@ function RuleForm({
                 error={footerError.error}
                 message={footerError.message}
                 actions={footerError.actionable ? conflictActions : undefined}
+                unsavedName={existing ? undefined : name}
               />
             </AlertDescription>
           </Alert>
