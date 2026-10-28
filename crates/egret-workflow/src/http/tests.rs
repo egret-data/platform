@@ -610,10 +610,20 @@ async fn http_d4_refusals_name_the_property_at_publish_and_at_run() {
         ),
         (json!({"encryptBody": true}), "encryptBody"),
         (json!({"encryptBody": "true"}), "encryptBody"),
+        // Controller decision (C3): userinfo would reach the `uri` output.
+        (json!({"uri": "http://u:p@a.test/"}), "uri: credentials"),
+        (json!({"uri": "http://u@a.test/"}), "uri: credentials"),
+        (json!({"uri": "http://:p@a.test/"}), "uri: credentials"),
+        (
+            json!({"uri": "http://{{ inputs.u }}@a.test/"}),
+            "uri: credentials",
+        ),
     ];
     for (props, key) in cases {
         let mut v = props.clone();
-        v["uri"] = json!("http://a.test/");
+        if v.get("uri").is_none() {
+            v["uri"] = json!("http://a.test/");
+        }
         let s = spec(v);
         let r = refusals(&s);
         assert_eq!(r.len(), 1, "{props}: {r:?}");
@@ -634,6 +644,9 @@ async fn http_d4_refusals_name_the_property_at_publish_and_at_run() {
     }));
     assert!(refusals(&ok).is_empty());
     assert!(refusals(&spec(json!({"uri": "http://a.test/"}))).is_empty());
+    // A templated host cannot be judged unrendered; the run judges it.
+    assert!(refusals(&spec(json!({"uri": "{{ inputs.base }}/x"}))).is_empty());
+    assert!(refusals(&spec(json!({"uri": "http://{{ inputs.h }}/x"}))).is_empty());
 
     // All four at once: each named.
     let all = spec(json!({

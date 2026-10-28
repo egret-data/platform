@@ -239,6 +239,13 @@ pub fn refusals(spec: &HttpSpec) -> Vec<String> {
             );
         }
     }
+    if uri_has_userinfo(spec.uri.as_ref()) {
+        out.push(
+            "uri: credentials in the URI (user:password@host) are not supported: the URI is \
+             stored as the task's `uri` output. Use options.auth or an Authorization header"
+                .to_string(),
+        );
+    }
     if !absent_or_false(spec.encrypt_body.as_ref()) {
         out.push(
             "encryptBody: not supported by egret: the response body is stored as the `body` \
@@ -247,6 +254,17 @@ pub fn refusals(spec: &HttpSpec) -> Vec<String> {
         );
     }
     out
+}
+
+/// Whether `uri` parses (as the request builder parses it) with a user name
+/// or a password. Unrendered, a URI whose host is still a template does not
+/// parse and is judged at run time, once rendered.
+fn uri_has_userinfo(uri: Option<&Value>) -> bool {
+    let Some(Value::String(raw)) = uri else {
+        return false;
+    };
+    url::Url::parse(&raw.replace(' ', "%20"))
+        .is_ok_and(|u| !u.username().is_empty() || u.password().is_some())
 }
 
 fn is_blank(v: &Value) -> bool {
