@@ -41,7 +41,8 @@ const ALL: [SchemaFeatures; 4] = [
 /// The task types this binary serves (no-silent-stall §4.4): a deployment
 /// with a container runner, so every script and plugin type is served and
 /// the publish gates alone decide them, as before; the types no handler runs
-/// (`egret.sql`, `core.http`, ...) are served by no deployment.
+/// (`core.http`, `egret.report.send`, ...) are served by no deployment.
+/// `egret.sql` is served by every deployment since package #4 Task C5.
 fn served_set() -> &'static egret_workflow::runtime::Served {
     let mut cfg = egret_config::Config::default().workflow;
     cfg.container_runner = egret_config::ContainerRunner::Docker;
@@ -620,20 +621,19 @@ fn every_type_with_known_outputs_carries_x_egret_outputs() {
     assert_eq!(names, ["row", "rows", "size", "uri"]);
 }
 
-/// The six egret-only types, which no deployment serves yet.
-const EGRET_ONLY: [&str; 6] = [
-    "egret.sql",
-    "egret.dataapi.call",
-    "egret.dataset.refresh",
-    "egret.report.send",
-    "core.http",
-    "core.slack",
-];
+/// The three egret-only types. `egret.sql` is served by every deployment
+/// since package #4 Task C5; the other two ([`UNSERVED`]) by none. Package #4
+/// Task C6 removed `egret.dataset.refresh`, `core.http` and `core.slack`
+/// (spec D10), which were six and five until then.
+const EGRET_ONLY: [&str; 3] = ["egret.sql", "egret.dataapi.call", "egret.report.send"];
+
+/// The egret-only types no deployment serves.
+const UNSERVED: [&str; 2] = ["egret.dataapi.call", "egret.report.send"];
 
 /// Test 6: egret's own types are described, and require at least the
 /// fields publish resolves -- in the schema of a deployment that serves them
-/// (none does yet, so the test names such a set; their definitions are kept
-/// for the day a handler is wired).
+/// (none serves the two [`UNSERVED`] ones, so the test names such a set;
+/// their definitions are kept for the day a handler is wired).
 #[test]
 fn egret_only_types_are_described_with_their_required_properties() {
     let with_them = egret_workflow::runtime::Served::from_type_ids(
@@ -671,16 +671,18 @@ fn egret_only_types_are_described_with_their_required_properties() {
     );
 }
 
-/// No-silent-stall §4.4: under this binary's set none of the six is offered,
-/// for any features or deployment, and `Log` still is.
+/// No-silent-stall §4.4: under this binary's set none of the two unserved
+/// types is offered, for any features or deployment, and `Log` and (since
+/// package #4 Task C5) `egret.sql` still are.
 #[test]
 fn no_type_the_deployment_does_not_serve_is_offered() {
     for (name, d) in deployments() {
         for f in ALL {
             let s = served(&flow_schema(&f, &d));
-            for t in EGRET_ONLY {
+            for t in UNSERVED {
                 assert!(!s.task_spellings.contains_key(t), "{name} {f:?}: {t}");
             }
+            assert!(s.task_spellings.contains_key("egret.sql"), "{name} {f:?}");
             assert!(
                 s.task_spellings
                     .contains_key("io.kestra.plugin.core.log.Log"),

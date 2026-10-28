@@ -16,9 +16,9 @@ where each comes from and how to reproduce it.
 |---|---|
 | Kestra version | `2.0.0-rc13` (`GET /api/v1/configs` → `version`; OSS, commit `fde6740`, 2026-09-01) — the programme's pinned artifact |
 | Image | `kestra/kestra`, untagged, ID `sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd` (created 2026-09-01) |
-| Exported | 2026-10-18 (first 2026-10-10; re-exported from the same image on 2026-10-17 when kill-and-exit Task 3 added `io.kestra.plugin.core.execution.Exit` to `KESTRA_TYPES`, and on 2026-10-18 when group C1 Task 1 added the six group-C types) |
-| Raw export | 16,533,865 bytes, 1,850 definitions, draft-07, sha256 `68018b24b699e1ee1e9fe68848195c4aadb913cfed9b9c57a35316c97333556c` |
-| Committed after `trim.py` | about 778 KB, 115 definitions |
+| Exported | 2026-10-28 (first 2026-10-10; re-exported from the same image on 2026-10-17 when kill-and-exit Task 3 added `io.kestra.plugin.core.execution.Exit` to `KESTRA_TYPES`, on 2026-10-18 when group C1 Task 1 added the six group-C types, on 2026-10-28 when package #4 Task C3 added `io.kestra.plugin.core.http.Request`, and re-trimmed offline from that same raw export on 2026-10-28 when Task C4 added `Download` and `SseRequest`) |
+| Raw export | 16,533,865 bytes, 1,850 definitions, draft-07, sha256 `7c458a25e0191105f74776fcf4e012753ad2e9a27cc62bbe190aa9d1d5c78e26` |
+| Committed after `trim.py` | about 820 KB, 126 definitions |
 
 **The raw export is not byte-stable across runs of the same image.** The
 2026-10-10 export had the same size and definition count and the sha256
@@ -33,6 +33,18 @@ The 2026-10-18 export hashes differently again. It differs from the
 plus the same two `x-kestra-export` fields.
 So the difference is in what `trim.py` drops, not in any definition it
 kept.
+The 2026-10-28 export (same size and definition count, another hash)
+differs from the 2026-10-18 file only by the nine definitions `Request`
+reaches -- `io.kestra.plugin.core.http.Request`, `HttpConfiguration`,
+`TimeoutConfiguration`, `ProxyConfiguration`, `SslOptions`, the three
+auth configurations and `java.nio.charset.Charset` -- plus the two
+`x-kestra-export` fields and `x-egret-source.exported_at`: no definition
+the file already had changed.
+Task C4 (2026-10-28) ran `trim.py` again over that same raw file (no new
+export, so the raw hash is unchanged) with `Download` and `SseRequest` added
+to `KESTRA_TYPES`: the two definitions are added, `kept_definitions` goes
+from 124 to 126, and nothing else changed (both reach only definitions
+`Request` already kept).
 
 The raw export is over 5 MB, so it is not committed; `trim.py` reproduces
 `kestra-flow-schema.json` from it byte for byte (the raw file's hash is
@@ -75,7 +87,7 @@ not there.
 ## 2. The property-treatment measurement (W7a Task 1 Step 2, fix round 1)
 
 Every object the served schema can offer is a *row*: each Kestra class egret
-accepts (50), the flow document (`Flow`), and every nested Kestra definition
+accepts (53), the flow document (`Flow`), and every nested Kestra definition
 those reach that egret parses -- the 20 input definitions, `DependsOn`, the
 three retry definitions, `Concurrency`, `Check`, `Quota`, both SLA
 definitions, `Output`, `Label`, the Flow trigger's `Flow-Dependency` and
@@ -181,7 +193,7 @@ class needs `plugins::gate::check` (both features, a runner, its FQCN in
 
 ### Result
 
-1625 properties over 97 rows: 1153 honoured, 4 warned, 343 ignored, 125 refused (counted from `property-treatment.json`, 2026-10-28, after inputs package A3 moved `JsonInput.jsonSchema` back to `ignored`, because no JSON Schema validator is in the dependency tree (spec D12); A5 then took `jsonSchema` out of `models::Input` so the served inputs stay exactly the keys `models::Input` keeps, which leaves every count unchanged; before that, 1154 honoured, 4 warned, 342 ignored, 125 refused, 2026-10-28, after inputs package A1 modelled the 24 input validation keys `validator`, `min`, `max`, `after`, `before`, `values`, `expression`, `allowCustomValue`, `isRadio`, `autoSelectFirst`, `jsonSchema` and moved them from `ignored` to `honoured`; before that, 1130 honoured, 4 warned, 366 ignored, 125 refused, 2026-10-27, after end hooks A2 moved `finally` on the flowables and `errors` on the three loop-like ones from `ignored` to `honoured` and `Pause.finally` to `refused`; before that, 1119 honoured, 4 warned, 378 ignored, 124 refused, 2026-10-26, after package #1 moved the two `onChildFailure` rows from `ignored` to `refused`; before that, 380 ignored and 122 refused, counted from `property-treatment.json`, 2026-10-25, after KI-121 measured the three retry rows' `warningOnRetry` `ignored`; the line said 1512 / 1051 / 335 before, counted 2026-10-17, while the committed file already held 1625 / 1122 / 377).
+1702 properties over 100 rows: 1208 honoured, 4 warned, 364 ignored, 126 refused (counted from `property-treatment.json`, 2026-10-28, after package #4 Task C4 added the `io.kestra.plugin.core.http.Download` and `io.kestra.plugin.core.http.SseRequest` rows: 19 honoured each, the *base 7* ignored; before that, 1650 properties over 98 rows: 1170 honoured, 4 warned, 350 ignored, 126 refused, 2026-10-28, after package #4 Task C3 added the `io.kestra.plugin.core.http.Request` row: 17 honoured, the *base 7* ignored, and `encryptBody` refused, which egret refuses unless it is false (spec D4); before that, 1625 properties over 97 rows: 1153 honoured, 4 warned, 343 ignored, 125 refused, 2026-10-28, after inputs package A3 moved `JsonInput.jsonSchema` back to `ignored`, because no JSON Schema validator is in the dependency tree (spec D12); A5 then took `jsonSchema` out of `models::Input` so the served inputs stay exactly the keys `models::Input` keeps, which leaves every count unchanged; before that, 1154 honoured, 4 warned, 342 ignored, 125 refused, 2026-10-28, after inputs package A1 modelled the 24 input validation keys `validator`, `min`, `max`, `after`, `before`, `values`, `expression`, `allowCustomValue`, `isRadio`, `autoSelectFirst`, `jsonSchema` and moved them from `ignored` to `honoured`; before that, 1130 honoured, 4 warned, 366 ignored, 125 refused, 2026-10-27, after end hooks A2 moved `finally` on the flowables and `errors` on the three loop-like ones from `ignored` to `honoured` and `Pause.finally` to `refused`; before that, 1119 honoured, 4 warned, 378 ignored, 124 refused, 2026-10-26, after package #1 moved the two `onChildFailure` rows from `ignored` to `refused`; before that, 380 ignored and 122 refused, counted from `property-treatment.json`, 2026-10-25, after KI-121 measured the three retry rows' `warningOnRetry` `ignored`; the line said 1512 / 1051 / 335 before, counted 2026-10-17, while the committed file already held 1625 / 1122 / 377).
 
 *base 7* = `assets`, `logLevel`, `logToFile`, `policyRefs`, `taskCache`, `version`, `workerSelector`: `ignored` on core tasks and flowables, `refused` on script and plugin tasks.
 
@@ -203,6 +215,9 @@ class needs `plugins::gate::check` (both features, a runner, its FQCN in
 | `io.kestra.plugin.core.flow.Subflow` | 14 | — | *base 7*, `inheritLabels`, `labels`, `restartBehavior`, `revision`, `scheduleDate` | — |
 | `io.kestra.plugin.core.flow.Switch` | 13 | — | *base 7*, `finally` | — |
 | `io.kestra.plugin.core.flow.WorkingDirectory` | 11 | — | *base 7*, `cache`, `errors`, `finally`, `inputFiles`, `outputFiles` | — |
+| `io.kestra.plugin.core.http.Download` | 19 | — | *base 7* | — |
+| `io.kestra.plugin.core.http.Request` | 17 | — | *base 7* | `encryptBody` |
+| `io.kestra.plugin.core.http.SseRequest` | 19 | — | *base 7* | — |
 | `io.kestra.plugin.core.kv.Delete` | 12 | — | *base 7* | — |
 | `io.kestra.plugin.core.kv.Get` | 12 | — | *base 7* | — |
 | `io.kestra.plugin.core.kv.GetKeys` | 11 | — | *base 7* | — |
@@ -298,13 +313,17 @@ class needs `plugins::gate::check` (both features, a runner, its FQCN in
 
 Hand-written, for what the export cannot describe:
 
-* `egret.sql`, `egret.dataapi.call`, `egret.dataset.refresh`,
-  `egret.report.send`, `core.http`, `core.slack` -- egret's own registry
-  types. `mod.rs` adds Kestra's schemas of the base task properties
+* `egret.sql`, `egret.dataapi.call`, `egret.report.send` -- egret's own
+  registry types. `mod.rs` adds Kestra's schemas of the base task properties
   (`id`, `type`, `description`, `retry`, `timeout`, `disabled`, `runIf`,
   `allowFailure`, `allowWarning`). `egret.sql`'s properties are its handler's
-  struct; the other five have no handler in this build, so each offers only the
-  field publish resolves (none for `core.http`/`core.slack`), and says so.
+  struct; the other two have no handler on any deployment (package #4 spec
+  D10 defers them), so each offers only the field publish resolves, and says
+  so. They are never served (`runtime::served()` lacks them); their
+  definitions are kept for the day a handler is wired. `egret.dataset.refresh`,
+  `core.http` and `core.slack` had entries here until package #4 Task C6
+  (2026-10-28) removed their registry rows; none of them is a measured row,
+  so `property-treatment.json` did not change.
 * `taskRunner` on the four script tasks: Kestra's definition offers
   `io.kestra.plugin.core.runner.Process` (refused by egret) and lacks
   Kubernetes (Enterprise-only in Kestra, implemented by egret), so it is

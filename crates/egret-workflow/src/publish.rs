@@ -316,6 +316,11 @@ pub async fn publish_gated(
         return Err(Error::InvalidInput(crate::spec::describe(&report.errors)));
     }
 
+    // Step 3a (spec D10, user decision 2026-10-28 on final review I1):
+    // `egret.sql` runs as the flow's creator, so only the creator publishes a
+    // flow that contains one.
+    crate::worker::sql_principal::refuse_publish(&parsed, draft.created_by, by.0)?;
+
     // Step 3b (W5a).
     check_script_tasks(&parsed, gate)?;
     // Step 3c (W5b).

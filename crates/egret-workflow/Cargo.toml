@@ -300,6 +300,18 @@ crc32fast = "=1.5.0"
 # Kestra's 10 s timeout. Pinned to the version already in Cargo.lock (through
 # `starlark`), so this adds a direct edge and no new crate.
 fancy-regex = "=0.16.2"
+# Package #4 (http tasks): every request to a flow-chosen URL goes through
+# the shared egress guard (vetted, pinned, no proxy, redirects re-vetted).
+# `reqwest` for its request/response types, `url` to parse and extend the
+# task's `uri`, `bytes` for bodies. All three were already in Cargo.lock.
+egret-egress.workspace = true
+reqwest.workspace = true
+url.workspace = true
+bytes.workspace = true
+# Package #4 Task C3 (spec D6): `http.Request` fails on a code point Java's
+# `Character.isDefined` rejects, which needs Unicode's unassigned table.
+# Pinned to the version already in Cargo.lock, so this adds an edge only.
+unicode-general-category = "=1.1.0"
 
 [features]
 # `storage::install_mem_for_tests` and `egret_storage::MemStore`; and
@@ -351,9 +363,6 @@ egret-workflow = { path = ".", features = ["test-util"] }
 # test (`#[tokio::test(start_paused = true)]`).
 tokio = { workspace = true, features = ["test-util"] }
 egret-analytics-api.workspace = true
-# `EGRET_TEST_STARROCKS_URL` is a URL, parsed the same way `egret-dataapi`'s live
-# suite parses it.
-url.workspace = true
 
 # W10 Task 2, `tests/runtime.rs` ONLY, and for exactly one assertion:
 # `the_config_default_working_timeout_equals_the_workers_own`. The two numbers

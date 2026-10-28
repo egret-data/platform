@@ -2685,10 +2685,14 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
         egret_config::ContainerRunner::None,
         "`none` is the shipping default"
     );
-    let (reg, default_runner) =
-        egret_workflow::runtime::handlers_for(&cfg, unconnected_pool(), no_secrets())
-            .await
-            .expect("`none` needs nothing");
+    let (reg, default_runner) = egret_workflow::runtime::handlers_for(
+        &cfg,
+        unconnected_pool(),
+        no_secrets(),
+        common::no_query(),
+    )
+    .await
+    .expect("`none` needs nothing");
     let mut want: Vec<String> = Handlers::with_core_tasks(egret_workflow::storage::current())
         .type_ids()
         .into_iter()
@@ -2712,6 +2716,17 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
     );
     // Group C1 Task 4: `PurgeLogs`, registered beside them.
     want.push(egret_workflow::worker::handlers::purge_logs::TYPE_ID.to_string());
+    // Package #4 Task C3: `http.Request` and Kestra's `fs.http` alias.
+    want.extend([
+        egret_workflow::worker::handlers::http::REQUEST.to_string(),
+        egret_workflow::worker::handlers::http::REQUEST_ALIAS.to_string(),
+        // Package #4 Task C4: Download, its alias, and SseRequest.
+        egret_workflow::worker::handlers::http::DOWNLOAD.to_string(),
+        egret_workflow::worker::handlers::http::DOWNLOAD_ALIAS.to_string(),
+        egret_workflow::worker::handlers::http::SSE_REQUEST.to_string(),
+    ]);
+    // Package #4 Task C5: `egret.sql`, over the query port.
+    want.push(egret_workflow::worker::handlers::sql::TYPE_ID.to_string());
     want.sort_unstable();
     assert_eq!(reg.type_ids(), want);
     assert_eq!(default_runner, None, "publish has no runner to default to");
@@ -2721,18 +2736,27 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
     // so the equality above is not a function that never registers anything.
     cfg.container_runner = egret_config::ContainerRunner::Docker;
     // W5b: a runner needs the plugin host's image, a boot error without it.
-    let err = egret_workflow::runtime::handlers_for(&cfg, unconnected_pool(), no_secrets())
-        .await
-        .expect_err("a runner without workflow.plugin_host.image");
+    let err = egret_workflow::runtime::handlers_for(
+        &cfg,
+        unconnected_pool(),
+        no_secrets(),
+        common::no_query(),
+    )
+    .await
+    .expect_err("a runner without workflow.plugin_host.image");
     assert!(
         err.to_string().contains("workflow.plugin_host.image"),
         "{err}"
     );
     cfg.plugin_host.image = Some("egret-plugin-host:dev".into());
-    let (reg, default_runner) =
-        egret_workflow::runtime::handlers_for(&cfg, unconnected_pool(), no_secrets())
-            .await
-            .expect("the Docker runner is built without a daemon");
+    let (reg, default_runner) = egret_workflow::runtime::handlers_for(
+        &cfg,
+        unconnected_pool(),
+        no_secrets(),
+        common::no_query(),
+    )
+    .await
+    .expect("the Docker runner is built without a daemon");
     let core = Handlers::with_core_tasks(egret_workflow::storage::current())
         .type_ids()
         .len();
@@ -2763,6 +2787,12 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
         vec![
             "egret.container",
             "egret.script.python",
+            // Package #4 Task C5.
+            "egret.sql",
+            // Package #4 Tasks C3 and C4, and the two aliases below.
+            "io.kestra.plugin.core.http.Download",
+            "io.kestra.plugin.core.http.Request",
+            "io.kestra.plugin.core.http.SseRequest",
             // W9c Task 5.
             "io.kestra.plugin.core.kv.Delete",
             "io.kestra.plugin.core.kv.Get",
@@ -2778,13 +2808,16 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
             "io.kestra.plugin.core.namespace.UploadFiles",
             "io.kestra.plugin.core.storage.Delete",
             "io.kestra.plugin.core.storage.PurgeCurrentExecutionFiles",
+            "io.kestra.plugin.fs.http.Download",
+            "io.kestra.plugin.fs.http.Request",
             "io.kestra.plugin.scripts.python.Commands",
             "io.kestra.plugin.scripts.python.Script",
             "io.kestra.plugin.scripts.shell.Commands",
             "io.kestra.plugin.scripts.shell.Script",
         ]
     );
-    assert_eq!(reg.type_ids().len(), core + 2 + 4 + 6 + 6 + 1 + 9);
+    // The `+ 1` before the plugins' 9 is `egret.sql` (package #4 Task C5).
+    assert_eq!(reg.type_ids().len(), core + 2 + 4 + 6 + 6 + 1 + 5 + 1 + 9);
     assert_eq!(default_runner, Some(RunnerKind::Docker));
     assert!(
         reg.orphan_sweep().is_some(),
@@ -2802,9 +2835,14 @@ async fn a_refused_kubernetes_configuration_stops_the_process_at_start() {
     // W5b: an image, so the refusal under test is the uid's and not the
     // missing plugin host image's (checked first).
     cfg.plugin_host.image = Some("egret-plugin-host:dev".into());
-    let err = egret_workflow::runtime::handlers_for(&cfg, unconnected_pool(), no_secrets())
-        .await
-        .expect_err("runAsNonRoot pods cannot run as uid 0");
+    let err = egret_workflow::runtime::handlers_for(
+        &cfg,
+        unconnected_pool(),
+        no_secrets(),
+        common::no_query(),
+    )
+    .await
+    .expect_err("runAsNonRoot pods cannot run as uid 0");
     assert!(err.to_string().contains("run_as_user"), "{err}");
 }
 

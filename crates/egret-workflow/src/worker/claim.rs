@@ -974,7 +974,16 @@ pub async fn wake(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
 /// Task 3 fix round 1: `TASK_TYPES` is 34 rows now, and the "23" above was
 /// already stale. The newest row, `Exit`, has no handler and is never claimed:
 /// it is executor-level (`spec::registry::EXECUTOR_LEVEL`), so it is not one of
-/// the types this paragraph is about.)* [`reap`] then
+/// the types this paragraph is about.)* *(2026-10-28, package #4 Task C5:
+/// `egret.sql` is no longer one of the six -- `runtime::handlers_for`
+/// registers it on every deployment, over egret-bin's query port.)*
+/// *(2026-10-28, package #4 Task C6: `egret.dataset.refresh`, `core.http` and
+/// `core.slack` are no longer rows at all, so the types no deployment serves
+/// are `egret.dataapi.call` and `egret.report.send`; `TASK_TYPES` is 40 rows,
+/// 30 of them served on every deployment by `runtime::handlers_for`, which
+/// `runtime`'s `every_row_is_served_executor_level_a_script_or_deferred`
+/// holds. And since no-silent-stall Task 4 none of this hangs: the worker
+/// FAILS such a run -- the paragraph below is the history that fix closed.)* [`reap`] then
 /// clears `claimed_at` and **nothing else** — its statement is
 /// `SET claimed_at = NULL, updated_at = now()`, so the state stays `RUNNING` and
 /// the attempt stays open — and `claim`'s own predicate is
@@ -3753,6 +3762,41 @@ pub async fn start_execution_with_trigger(
     inputs: serde_json::Value,
     trigger: Option<serde_json::Value>,
 ) -> Result<Uuid> {
+    start_with(pool, workspace_id, flow_id, source, inputs, trigger, None).await
+}
+
+/// [`start_execution`] for a start a **person** made: the API start route.
+/// `started_by` is that person, which the `egret.sql` gate reads
+/// ([`NewExecution::started_by`]).
+pub async fn start_execution_by(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    flow_id: Option<Uuid>,
+    source: &str,
+    inputs: serde_json::Value,
+    started_by: Uuid,
+) -> Result<Uuid> {
+    start_with(
+        pool,
+        workspace_id,
+        flow_id,
+        source,
+        inputs,
+        None,
+        Some(started_by),
+    )
+    .await
+}
+
+async fn start_with(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    flow_id: Option<Uuid>,
+    source: &str,
+    inputs: serde_json::Value,
+    trigger: Option<serde_json::Value>,
+    started_by: Option<Uuid>,
+) -> Result<Uuid> {
     transaction!(pool, |at| {
         start_execution_in_with(
             at,
@@ -3785,6 +3829,7 @@ pub async fn start_execution_with_trigger(
                 labels: None,
                 backfill_id: None,
                 variables: None,
+                started_by,
             },
         )
         .await
@@ -3852,6 +3897,13 @@ pub struct NewExecution<'a> {
     /// route (D3, final review I3), as the retry replay copies it. `None`
     /// stores NULL -- "the flow's `variables:`" -- for every other start.
     pub variables: Option<serde_json::Value>,
+    /// **The person who started this execution**: `Some` for the API start
+    /// and a manual replay, `None` for a start no person made (a schedule or
+    /// backfill tick, a webhook, a Flow trigger) and for the test wrappers.
+    /// Read only by the `egret.sql` gate ([`super::sql_principal`], spec
+    /// D10): a person must be the flow's creator; a trigger needs a source
+    /// the creator published.
+    pub started_by: Option<Uuid>,
 }
 
 /// [`start_execution_with_trigger`]'s body, taking the caller's own `conn`
@@ -3980,6 +4032,7 @@ async fn start_execution_in_on(
         labels,
         backfill_id,
         variables,
+        started_by,
     } = new;
 
     let flow = crate::spec::parse(source)
@@ -3997,6 +4050,11 @@ async fn start_execution_in_on(
             crate::spec::describe(&unserved)
         )));
     }
+    // Spec D10 (user decision 2026-10-28, final review I1): `egret.sql` runs
+    // as the flow's creator, so a person who is not the creator cannot start
+    // such a flow, and a trigger can start only a source the creator
+    // published. Every start passes here, as the check above.
+    super::sql_principal::check_start(conn, &flow, flow_id, source, started_by).await?;
 
     let inputs = if inputs.is_object() {
         inputs
@@ -5716,6 +5774,7 @@ mod tests {
                     labels: None,
                     backfill_id: None,
                     variables: None,
+                    started_by: None,
                 },
             )
             .await
@@ -6010,6 +6069,7 @@ mod tests {
                 labels: None,
                 backfill_id: None,
                 variables: None,
+                started_by: None,
             },
         )
         .await
@@ -6297,6 +6357,7 @@ mod tests {
                 labels: None,
                 backfill_id: None,
                 variables: None,
+                started_by: None,
             },
         )
         .await

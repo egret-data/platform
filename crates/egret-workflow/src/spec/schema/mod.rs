@@ -25,8 +25,9 @@
 //!   `workflow_containers`, the plugin types need it **and**
 //!   `workflow_kestra_plugins` -- the order the two publish gates check;
 //! * minus every task type this deployment does not serve
-//!   (`runtime::served()`, no-silent-stall §4.4): `egret.sql`, `core.http`
-//!   and the other types no handler runs, and, with no container runner,
+//!   (`runtime::served()`, no-silent-stall §4.4): `egret.dataapi.call`
+//!   and `egret.report.send`, which no handler runs (`core.http` was named
+//!   here until package #4 Task C6 removed its row), and, with no container runner,
 //!   the script and plugin types -- the types publish refuses as
 //!   `task_type_not_served`;
 //! * of each Kestra type, only the properties egret honours or warns about.
@@ -864,16 +865,19 @@ mod tests {
         };
         let d = permissive_deployment();
         let runner = runner();
-        let with_sql = crate::runtime::Served::from_type_ids(
+        // `egret.report.send` is a registered row no deployment serves
+        // (spec D10 defers it); `egret.sql` was the probe until package #4
+        // Task C5 served it.
+        let with_report = crate::runtime::Served::from_type_ids(
             runner
                 .type_ids()
                 .map(str::to_string)
-                .chain(["egret.sql".to_string()]),
+                .chain(["egret.report.send".to_string()]),
         );
         let without = served_with(&f, &d, &runner);
-        let with = served_with(&f, &d, &with_sql);
-        assert!(without.value["$defs"].get("egret.sql").is_none());
-        assert!(with.value["$defs"]["egret.sql"].is_object());
+        let with = served_with(&f, &d, &with_report);
+        assert!(without.value["$defs"].get("egret.report.send").is_none());
+        assert!(with.value["$defs"]["egret.report.send"].is_object());
         assert!(without.value["$defs"]["io.kestra.plugin.core.log.Log"].is_object());
         assert_ne!(without.etag, with.etag);
         // Asked again in the other order: each set still gets its own entry.

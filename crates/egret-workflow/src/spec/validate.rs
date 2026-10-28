@@ -393,6 +393,7 @@ fn save_only_findings(flow: &Flow, report: &mut ValidationReport) {
     }
     duplicate_trigger_ids(flow, report);
     secret_findings(flow, report);
+    http_findings(flow, report);
     schedule_findings(flow, report);
     input_save_findings(&flow.inputs, report);
 }
@@ -486,6 +487,47 @@ fn duplicate_trigger_ids(flow: &Flow, report: &mut ValidationReport) {
                 code: "duplicate_trigger_id",
                 message: format!("trigger id '{}' is declared more than once", t.id),
                 path: format!("triggers.{}", t.id),
+            });
+        }
+    }
+}
+
+/// The code of an http task property egret refuses (spec D4): a finding at
+/// save, and the same refusal fails a stored flow's run
+/// (`http::build_request`).
+pub const CODE_HTTP_OPTION_REFUSED: &str = "http_option_refused";
+
+/// Package #4 (spec D4): every http task's [`crate::http::refusals`], one
+/// error each, at the property's path. **Save-only**, as D4 states: a stored
+/// version that carries one still plans and its run fails at the task naming
+/// the same property, rather than the whole execution being refused at start.
+/// A task whose properties do not even read as an http task is left to the
+/// run, which names the shape (publish cannot know what a template renders
+/// to).
+fn http_findings(flow: &Flow, report: &mut ValidationReport) {
+    for (path, task, spec) in crate::plugins::leaves(flow) {
+        if !crate::worker::handlers::http::resolves_secrets(&task.r#type) {
+            continue;
+        }
+        let Ok(parsed) = crate::http::HttpSpec::from_value(spec) else {
+            continue;
+        };
+        // `encryptBody` is a property of `Request` only, and the refusal's
+        // text is about Request's `body` output. On `Download`/`SseRequest`
+        // the key is not Kestra's at all, so `spec::keys` already reports it
+        // as `unknown_property`, an error at the same path; a second finding
+        // there would be noise with the wrong reason (package #4 Task C6).
+        let is_request = registry::known_type(&task.r#type)
+            .is_some_and(|row| row.r#type == crate::worker::handlers::http::REQUEST);
+        for message in crate::http::refusals(&parsed) {
+            let key = message.split(':').next().unwrap_or_default().to_string();
+            if key == "encryptBody" && !is_request {
+                continue;
+            }
+            report.errors.push(Finding {
+                code: CODE_HTTP_OPTION_REFUSED,
+                message: format!("task '{}': {message}", task.id),
+                path: format!("{path}.{key}"),
             });
         }
     }
@@ -652,10 +694,17 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
     let Ok(doc) = serde_json::to_value(flow) else {
         return;
     };
-    let tasks = crate::plugins::plugin_tasks(flow);
+    // Package #4 Task C3 (spec D5): `secret()` resolves on the http tasks
+    // too (`worker::handlers::http::SECRET_TYPES`, every spelling), so their
+    // properties are exempt as a plugin task's are.
+    let tasks = crate::plugins::leaves(flow)
+        .into_iter()
+        .filter(|(_, t, _)| {
+            t.r#type.starts_with(crate::plugins::PREFIX)
+                || crate::worker::handlers::http::resolves_secrets(&t.r#type)
+        });
     let mut walk = Walk {
         plugin: tasks
-            .iter()
             .map(|(_, t, _)| (t.id.as_str(), t.r#type.as_str()))
             .collect(),
         report,
@@ -2225,8 +2274,9 @@ fn walk_task(
         //      -- this is what catches a typo like `egret.sqll`.
         // Both were warnings until no-silent-stall Task 1 made them errors,
         // so publish and every start refuse them.
-        // `registry::known_type` is checked FIRST, so `core.log`/`core.http`/
-        // `core.slack` -- which share the `core.` alias spelling with real
+        // `registry::known_type` is checked FIRST, so `core.log` (and until
+        // package #4 Task C6 removed their rows, `core.http`/`core.slack`;
+        // see `registry::REMOVED_TYPES`) -- which share the `core.` alias spelling with real
         // Kestra control-flow aliases -- never reach either error: the
         // rule is "neither a control-flow variant nor a registered type",
         // not "starts with `core.`".
@@ -2240,7 +2290,21 @@ fn walk_task(
                 && !task.r#type.starts_with(crate::plugins::PREFIX)
                 && crate::plugins::bare_hint(&task.r#type).is_none() =>
         {
-            if canonical_flow_type(&task.r#type).as_deref() == Some("foreach") {
+            if let Some(hint) = registry::removed_type(&task.r#type) {
+                // Package #4 Task C6 (2026-10-28, spec D10): a type egret
+                // registered once and removed. Checked before the `core.`
+                // control-flow arm, which would otherwise call `core.http`
+                // and `core.slack` Kestra control-flow tasks.
+                report.errors.push(Finding {
+                    code: "unknown_task_type",
+                    message: format!(
+                        "task '{}' has type '{}', which egret no longer recognises: the type \
+                         was removed because egret never ran it; {hint}",
+                        task.id, task.r#type
+                    ),
+                    path: path.clone(),
+                });
+            } else if canonical_flow_type(&task.r#type).as_deref() == Some("foreach") {
                 // **`ForEach` is an ERROR, the user's ruling of 2026-10-12**
                 // (W7b Task 7b). It is not a class in the pinned checkout --
                 // Kestra's name for it is `Loop` (`models::task`'s
@@ -4273,7 +4337,7 @@ mod tests {
     /// via `dependsOn` must produce zero errors.
     #[test]
     fn a_legitimate_flow_with_nested_control_flow_produces_no_spurious_errors() {
-        let yaml = "id: nightly\nnamespace: company.analytics\ninputs:\n  - id: run_date\n    type: DATE\n  - id: dry_run\n    type: BOOL\n    dependsOn:\n      inputs: [run_date]\ntasks:\n  - id: pipeline\n    type: core.dag\n    tasks:\n      - task:\n          id: extract\n          type: egret.sql\n          database: d\n          sql: SELECT 1\n      - task:\n          id: load\n          type: egret.sql\n          database: d\n          sql: SELECT 2\n        dependsOn: [extract]\n  - id: fanout\n    type: core.parallel\n    tasks:\n      - id: enrich\n        type: egret.sql\n        database: d\n        sql: SELECT 3\nerrors:\n  - id: alert\n    type: core.slack\nfinally:\n  - id: cleanup\n    type: core.log\n";
+        let yaml = "id: nightly\nnamespace: company.analytics\ninputs:\n  - id: run_date\n    type: DATE\n  - id: dry_run\n    type: BOOL\n    dependsOn:\n      inputs: [run_date]\ntasks:\n  - id: pipeline\n    type: core.dag\n    tasks:\n      - task:\n          id: extract\n          type: egret.sql\n          database: d\n          sql: SELECT 1\n      - task:\n          id: load\n          type: egret.sql\n          database: d\n          sql: SELECT 2\n        dependsOn: [extract]\n  - id: fanout\n    type: core.parallel\n    tasks:\n      - id: enrich\n        type: egret.sql\n        database: d\n        sql: SELECT 3\nerrors:\n  - id: alert\n    type: core.log\nfinally:\n  - id: cleanup\n    type: core.log\n";
         let f = parse(yaml).unwrap();
         let r = validate(&f);
         assert!(r.errors.is_empty(), "{r:?}");
@@ -4353,18 +4417,62 @@ mod tests {
     }
 
     /// The false-positive guard the fix round asked for by name: egret's own
-    /// registered leaf types (`core.log`/`core.http`/`core.slack`, which
-    /// share the `core.` alias spelling with real Kestra control-flow
-    /// aliases), an ordinary `egret.*` leaf, and every ported control-flow
+    /// registered leaf types (`core.log`, which shares the `core.` alias
+    /// spelling with real Kestra control-flow aliases; `core.http` and
+    /// `core.slack` were here until package #4 Task C6 removed their rows --
+    /// see `a_removed_type_is_unknown_with_a_hint_under_every_position`), an
+    /// ordinary `egret.*` leaf, and every ported control-flow
     /// type must all stay completely silent -- "neither a control-flow
     /// variant nor a registered type", not "starts with `core.`".
     ///
     /// `core.allowfailure` and `core.workingdirectory` left this flow at
     /// no-silent-stall Task 1: they are typed variants egret does NOT run, so
     /// each is an error now (`every_static_refusal_is_an_error_at_its_path_under_every_spelling_and_position`).
+    /// Package #4 Task C6 (2026-10-28, spec D10): `core.http`, `core.slack`
+    /// and `egret.dataset.refresh` lost their rows. A flow still naming one is
+    /// `unknown_task_type` with the type's hint -- one finding, at its path,
+    /// in `tasks:` and `errors:` alike -- and NOT `unsupported_flow_task`,
+    /// which the `core.` spelling would otherwise reach.
+    #[test]
+    fn a_removed_type_is_unknown_with_a_hint_under_every_position() {
+        for (t, hint) in crate::spec::registry::REMOVED_TYPES {
+            assert!(
+                crate::spec::registry::known_type(t).is_none(),
+                "{t} has a row"
+            );
+            let yaml = format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: a\n    type: {t}\nerrors:\n  - id: b\n    type: {t}\n"
+            );
+            let r = validate(&parse(&yaml).unwrap());
+            assert_eq!(r.errors.len(), 2, "{t}: {r:?}");
+            for path in ["tasks.a", "errors.b"] {
+                let e = r
+                    .errors
+                    .iter()
+                    .find(|e| e.path == path)
+                    .unwrap_or_else(|| panic!("{t} at {path}: {r:?}"));
+                assert_eq!(e.code, "unknown_task_type", "{t}");
+                assert!(
+                    e.message.contains("no longer recognises") && e.message.ends_with(hint),
+                    "{t}: {}",
+                    e.message
+                );
+            }
+        }
+        // The control: an unknown `core.` spelling that was never a row is
+        // still the control-flow refusal.
+        let r = validate(
+            &parse("id: f\nnamespace: a.b\ntasks:\n  - id: a\n    type: core.ftp\n").unwrap(),
+        );
+        assert!(
+            r.errors.iter().any(|e| e.code == "unsupported_flow_task"),
+            "{r:?}"
+        );
+    }
+
     #[test]
     fn registered_leaf_types_and_every_ported_control_flow_type_stay_silent() {
-        let yaml = "id: f\nnamespace: a.b\ntasks:\n  - id: log\n    type: core.log\n  - id: http\n    type: core.http\n  - id: slack\n    type: core.slack\n  - id: sql\n    type: egret.sql\n    sql: SELECT 1\n  - id: seq\n    type: core.sequential\n    tasks:\n      - id: seq_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: par\n    type: core.parallel\n    tasks:\n      - id: par_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: cond\n    type: core.if\n    condition: \"true\"\n    then:\n      - id: cond_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: sw\n    type: core.switch\n    value: x\n    defaults:\n      - id: sw_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: d\n    type: core.dag\n    tasks:\n      - task:\n          id: d_child\n          type: egret.sql\n          sql: SELECT 1\n  - id: lp\n    type: core.loop\n    values: [1]\n    tasks:\n      - id: lp_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: lpu\n    type: core.loopuntil\n    condition: x\n    tasks:\n      - id: lpu_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: sf\n    type: core.subflow\n    namespace: a.b\n    flowId: other\n";
+        let yaml = "id: f\nnamespace: a.b\ntasks:\n  - id: log\n    type: core.log\n  - id: sql\n    type: egret.sql\n    sql: SELECT 1\n  - id: seq\n    type: core.sequential\n    tasks:\n      - id: seq_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: par\n    type: core.parallel\n    tasks:\n      - id: par_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: cond\n    type: core.if\n    condition: \"true\"\n    then:\n      - id: cond_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: sw\n    type: core.switch\n    value: x\n    defaults:\n      - id: sw_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: d\n    type: core.dag\n    tasks:\n      - task:\n          id: d_child\n          type: egret.sql\n          sql: SELECT 1\n  - id: lp\n    type: core.loop\n    values: [1]\n    tasks:\n      - id: lp_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: lpu\n    type: core.loopuntil\n    condition: x\n    tasks:\n      - id: lpu_child\n        type: egret.sql\n        sql: SELECT 1\n  - id: sf\n    type: core.subflow\n    namespace: a.b\n    flowId: other\n";
         let f = parse(yaml).unwrap();
         let r = validate(&f);
         assert!(
@@ -5600,6 +5708,147 @@ mod tests {
             vec!["tasks.s.value".to_string()]
         );
         assert!(paths_of(src, CODE_SECRET_IN_KV_VALUE).is_empty());
+    }
+
+    /// Package #4 Task C3 (spec D5): `secret()` resolves on the http tasks, so
+    /// their properties are exempt under every spelling -- while their `runIf`
+    /// (which egret's task model reads, not the handler) and a `Log` beside
+    /// them are still refused. A `namespace=` written in the call is refused
+    /// there as on a plugin task.
+    #[test]
+    fn a_secret_in_an_http_tasks_properties_is_allowed_under_every_spelling() {
+        use crate::plugins::{CODE_SECRET_ARGUMENT_REFUSED, CODE_SECRET_OUTSIDE_PLUGIN_TASK};
+        for ty in [
+            "io.kestra.plugin.core.http.Request",
+            "io.kestra.plugin.fs.http.Request",
+        ] {
+            let src = format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: r\n    type: {ty}\n    \
+                 uri: https://example.com/\n    \
+                 headers:\n      Authorization: \"Bearer {{{{ secret('TOKEN') }}}}\"\n    \
+                 options:\n      auth:\n        type: BASIC\n        username: u\n        \
+                 password: \"{{{{ secret('PW') }}}}\"\n    \
+                 runIf: \"{{{{ secret('X') }}}}\"\n  \
+                 - id: l\n    type: io.kestra.plugin.core.log.Log\n    \
+                 message: \"{{{{ secret('X') }}}}\"\n"
+            );
+            assert_eq!(
+                paths_of(&src, CODE_SECRET_OUTSIDE_PLUGIN_TASK),
+                vec!["tasks.r.runIf".to_string(), "tasks.l.message".to_string()],
+                "{ty}"
+            );
+            let src = format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: r\n    type: {ty}\n    \
+                 uri: \"https://example.com/{{{{ secret('K', namespace='x') }}}}\"\n"
+            );
+            assert_eq!(
+                paths_of(&src, CODE_SECRET_ARGUMENT_REFUSED),
+                vec!["tasks.r.uri".to_string()],
+                "{ty}"
+            );
+            assert!(paths_of(&src, CODE_SECRET_OUTSIDE_PLUGIN_TASK).is_empty());
+        }
+    }
+
+    /// Package #4 (spec D4, and the C3 userinfo decision): each refused http
+    /// property is an error at its path, at save only -- the run gate leaves
+    /// it to the task, which fails naming the same property.
+    #[test]
+    fn the_http_refusals_are_save_time_errors_at_their_paths() {
+        use crate::spec::validate::CODE_HTTP_OPTION_REFUSED;
+        let src = "id: f\nnamespace: a.b\ntasks:\n  - id: r\n    \
+                   type: io.kestra.plugin.fs.http.Request\n    \
+                   uri: https://user:pw@example.com/\n    encryptBody: true\n    \
+                   options:\n      proxy:\n        address: proxy.corp\n      \
+                   ssl:\n        insecureTrustAllCertificates: true\n      \
+                   auth:\n        type: DIGEST\n";
+        let mut paths = paths_of(src, CODE_HTTP_OPTION_REFUSED);
+        paths.sort();
+        assert_eq!(
+            paths,
+            [
+                "tasks.r.encryptBody",
+                "tasks.r.options.auth.type",
+                "tasks.r.options.proxy",
+                "tasks.r.options.ssl.insecureTrustAllCertificates",
+                "tasks.r.uri",
+            ]
+        );
+        let f = parse(src).unwrap();
+        let messages: Vec<String> = validate(&f)
+            .errors
+            .into_iter()
+            .filter(|e| e.code == CODE_HTTP_OPTION_REFUSED)
+            .map(|e| e.message)
+            .collect();
+        assert!(
+            messages.iter().all(|m| m.starts_with("task 'r': ")),
+            "{messages:?}"
+        );
+        assert!(
+            !messages.iter().any(|m| m.contains("pw")),
+            "the URI's password is never echoed: {messages:?}"
+        );
+        // Save-only: the run gate does not raise it.
+        assert!(!validate_for_run(&f)
+            .errors
+            .iter()
+            .any(|e| e.code == CODE_HTTP_OPTION_REFUSED));
+        // The control: the allowed spellings are clean.
+        let ok = "id: f\nnamespace: a.b\ntasks:\n  - id: r\n    \
+                  type: io.kestra.plugin.core.http.Request\n    \
+                  uri: https://example.com/\n    encryptBody: false\n    \
+                  options:\n      ssl:\n        insecureTrustAllCertificates: false\n      \
+                  auth:\n        type: BEARER\n        token: t\n";
+        assert!(paths_of(ok, CODE_HTTP_OPTION_REFUSED).is_empty());
+        assert!(validate(&parse(ok).unwrap()).errors.is_empty());
+    }
+
+    /// Package #4 Task C6 (the C4 review's concern): `encryptBody` on
+    /// `Download`/`SseRequest` is ONE finding, `unknown_property` (the key is
+    /// not Kestra's on those classes), not that plus Request's refusal, whose
+    /// text is about Request's `body` output. On `Request` it is the refusal
+    /// alone: `spec::keys` no longer ALSO calls it unknown there.
+    #[test]
+    fn encrypt_body_is_one_finding_on_each_http_task() {
+        use crate::spec::validate::CODE_HTTP_OPTION_REFUSED;
+        for (ty, code) in [
+            ("io.kestra.plugin.core.http.Download", "unknown_property"),
+            ("io.kestra.plugin.fs.http.Download", "unknown_property"),
+            ("io.kestra.plugin.core.http.SseRequest", "unknown_property"),
+            (
+                "io.kestra.plugin.core.http.Request",
+                CODE_HTTP_OPTION_REFUSED,
+            ),
+            ("io.kestra.plugin.fs.http.Request", CODE_HTTP_OPTION_REFUSED),
+        ] {
+            let src = format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: r\n    type: {ty}\n    \
+                 uri: https://example.com/\n    encryptBody: true\n"
+            );
+            let r = crate::spec::validate::validate_source(&src, &parse(&src).unwrap());
+            let at: Vec<&str> = r
+                .errors
+                .iter()
+                .filter(|e| e.path == "tasks.r.encryptBody")
+                .map(|e| e.code)
+                .collect();
+            assert_eq!(at, [code], "{ty}: {r:?}");
+        }
+        // `false` is accepted on Request -- it was `unknown_property` until
+        // this task -- and is still unknown on the other two.
+        for (ty, findings) in [
+            ("io.kestra.plugin.core.http.Request", 0),
+            ("io.kestra.plugin.fs.http.Request", 0),
+            ("io.kestra.plugin.core.http.Download", 1),
+        ] {
+            let src = format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: r\n    type: {ty}\n    \
+                 uri: https://example.com/\n    encryptBody: false\n"
+            );
+            let r = crate::spec::validate::validate_source(&src, &parse(&src).unwrap());
+            assert_eq!(r.errors.len(), findings, "{ty}: {r:?}");
+        }
     }
 
     /// The corpus's two KV flows carry no `secret()`: the scan adds no

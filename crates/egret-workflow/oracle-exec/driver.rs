@@ -427,6 +427,7 @@ pub async fn publish_corpus(pool: &PgPool, ws: Uuid, by: UserId) -> BTreeMap<Str
     // then 0/0) was removed with it: a publish cannot go back to the port.
     let refs = WorkflowRefs {
         dataapi_endpoints: Arc::new(NoDataApi),
+        databases: Arc::new(NoDatabases),
     };
     for (corpus_id, flow) in &drafts {
         let outcome = match egret_workflow::publish::publish_gated(
@@ -884,6 +885,10 @@ const LIVE: usize = 295;
 /// `DeduplicateItems`, `FilterItems`), which the corpus writes in no flow, so
 /// they move no count here. **Since W9c Task 5** it holds the six
 /// `io.kestra.plugin.core.kv.*` FQCNs, which move one (see [`LIVE`]).
+/// *(2026-10-28, package #4 Task C6: `core.http`, `core.slack` and
+/// `egret.dataset.refresh` are no longer rows -- the corpus writes none of
+/// them, so their removal moves no count here; the "twenty-four" above was
+/// stale long before, and `TASK_TYPES` is the count.)*
 ///
 /// **The FQCN rows are what make most of [`LIVE`].** (This sentence said
 /// "makes `LIVE` 248" and "false for 227 of the 248" after `LIVE` had moved
@@ -1118,6 +1123,17 @@ struct NoDataApi;
 impl egret_dataapi_api::DataApiEndpointPort for NoDataApi {
     async fn workspace_of(&self, _id: Uuid) -> Result<Option<Uuid>, egret_core::Error> {
         unreachable!("no corpus flow names an `egret.dataapi.call`")
+    }
+}
+
+/// The same for `RefKind::Database` (package #4 Task C5): no corpus flow
+/// names an `egret.sql`, which is Kestra's corpus's absence, not egret's.
+struct NoDatabases;
+
+#[async_trait::async_trait]
+impl egret_query_api::DatabaseOwnerPort for NoDatabases {
+    async fn workspace_of(&self, _id: Uuid) -> Result<Option<Uuid>, egret_core::Error> {
+        unreachable!("no corpus flow names an `egret.sql`")
     }
 }
 

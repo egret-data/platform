@@ -42,6 +42,7 @@
 pub mod assert;
 pub mod container;
 pub mod fail;
+pub mod http;
 pub mod kestra;
 pub mod kv;
 pub mod log;

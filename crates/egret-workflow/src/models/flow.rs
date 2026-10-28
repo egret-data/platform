@@ -470,7 +470,7 @@ tasks:
         sql: SELECT 2
 errors:
   - id: alert
-    type: core.slack
+    type: core.log
     message: FAILED
 triggers:
   - id: nightly

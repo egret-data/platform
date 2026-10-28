@@ -246,6 +246,18 @@ impl DatabaseRepo {
         .into_database()
     }
 
+    /// The workspace that owns database `id`, or `None` when no row has that
+    /// id. Unscoped on purpose: the caller compares the answer with its own
+    /// workspace (see [`egret_query_api::DatabaseOwnerPort`]).
+    pub async fn workspace_of(&self, id: Uuid) -> Result<Option<Uuid>, DatabaseError> {
+        Ok(
+            sqlx::query_scalar("SELECT workspace_id FROM query.databases WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.db.pool)
+                .await?,
+        )
+    }
+
     /// Databases owned by a workspace (ordered by name).
     ///
     /// Ownership query (ADR-19 per-workspace model): rows are filtered by their
@@ -560,5 +572,18 @@ impl DatabaseRepo {
         .execute(&self.db.pool)
         .await?;
         Ok(())
+    }
+}
+
+/// The Workflow seam's `RefKind::Database` resolver reaches this through the
+/// leaf port, never through `egret-query` itself. `self.workspace_of(id)`
+/// below is the INHERENT method (inherent methods win over trait methods), so
+/// this is a delegation, not a recursion.
+#[async_trait::async_trait]
+impl egret_query_api::DatabaseOwnerPort for DatabaseRepo {
+    async fn workspace_of(&self, id: Uuid) -> Result<Option<Uuid>, egret_core::Error> {
+        DatabaseRepo::workspace_of(self, id)
+            .await
+            .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("query.databases: {e}")))
     }
 }

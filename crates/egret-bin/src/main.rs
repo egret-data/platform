@@ -2225,7 +2225,18 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // `core.storage.Concat`/`Split`/`Reverse`/`DeduplicateItems`/`FilterItems`,
     // the storage ones over the store installed above -- plus
     // `core.storage.Delete`/`PurgeCurrentExecutionFiles`, which need the
-    // pool: thirteen of `spec::registry::TASK_TYPES`' twenty-three rows. With `docker` or `kubernetes` it adds Kestra's four script
+    // pool: thirteen of `spec::registry::TASK_TYPES`' twenty-three rows.
+    // *(2026-10-28, package #4 Task C6: that count was long stale. Counted
+    // now: `with_core_tasks` is thirteen handlers -- the eleven above plus
+    // group C1's `OutputValues` and `Assert` -- and `handlers_for` adds
+    // seventeen on every deployment (the two storage tasks, four namespace
+    // files tasks, six KV tasks, `PurgeLogs`, the three http tasks and
+    // `egret.sql`): thirty of the forty rows. The other ten are the four
+    // script types below, the four executor-level rows
+    // (`spec::registry::EXECUTOR_LEVEL`, no handler on purpose) and the two
+    // deferred `egret.*` types; `egret_workflow::runtime`'s
+    // `every_row_is_served_executor_level_a_script_or_deferred` holds that
+    // partition.)* With `docker` or `kubernetes` it adds Kestra's four script
     // task types and W4's two aliases over ONE runner built here, gated at run
     // time by the workspace feature `workflow_containers` (off by default) and
     // the `plugin_configurations` image allowlist, and the reaper's tick
@@ -2233,8 +2244,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // (or no cluster client) stops the process here rather than starting
     // without the containers the operator asked for.
     //
-    // `egret.sql` is not registered: it needs an `Arc<dyn QueryExecPort>`
-    // that nothing here provides.
+    // `egret.sql` is registered on every deployment since package #4 Task C5,
+    // over `query_port` -- the ONE `Arc<EngineState>` the Data API and the
+    // Data Apps gateway below share, built here so `handlers_for` can take it
+    // (it was built after this call until then, and the comment here said
+    // "`egret.sql` is not registered: it needs an `Arc<dyn QueryExecPort>`
+    // that nothing here provides").
     //
     // **A flow whose task type has no handler here no longer HANGS** (a
     // `TASK_TYPES` type this deployment does not wire in). Since
@@ -2259,11 +2274,17 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // `WorkingDirectory`, ...) is covered too: the worker plans a stored
     // execution without validation (`executor::plan_stored`; validation gates
     // starts only), so its run reaches `NoHandler` or `NotALeaf` and fails.
-    // **Six of twenty-three registered types have no handler, whatever the
-    // runner**, and since Task 3 none of them publishes or starts (`egret.sql`,
-    // `egret.dataapi.call`, `egret.dataset.refresh`,
-    // `egret.report.send`, `core.http`, `core.slack`): 23 rows = these 6 + the
-    // 13 core handlers above + the 4 script types a runner serves. All nine
+    // **Two registered `egret.*` types have no handler, whatever the
+    // runner**, and since Task 3 neither publishes nor starts
+    // (`egret.dataapi.call`, `egret.report.send`; package #4 spec D10 defers
+    // them). This said "Five registered `egret.*`/short `core.*` types" and
+    // also listed `egret.dataset.refresh`, `core.http` and `core.slack` until
+    // package #4 Task C6 (2026-10-28) removed those three rows: a flow naming
+    // one is now `unknown_task_type`. `egret.sql` was the sixth until package #4
+    // Task C5 (2026-10-28) registered it; this said "Six of twenty-three ...
+    // 23 rows = these 6 + the 13 core handlers above + the 4 script types a
+    // runner serves" until then, and the row count was already stale (see
+    // `spec::registry::TASK_TYPES`). All nine
     // core storage tasks are registered -- W9a Task 11's `Write` and `Size`
     // and Task 12's five in `with_core_tasks`, `Delete` and
     // `PurgeCurrentExecutionFiles` by `handlers::storage::register` inside
@@ -2286,6 +2307,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // the claim loop's end, not by the token, so a tick in flight finishes
     // writing before the writer drains; `workflow_runtime.join()` below waits
     // for that at shutdown.
+    //
+    // ONE `Arc` around the query engine, cloned into every seam that reaches it
+    // as a `QueryExecPort` (`egret.sql` here, the Data API and the Data Apps
+    // gateway below), so there is exactly one `EngineState` behind all three.
+    let query_port = std::sync::Arc::new(engine_state);
     let (workflow_handlers, container_runner) = egret_workflow::runtime::handlers_for(
         &config.workflow,
         db.pool.clone(),
@@ -2294,6 +2320,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         std::sync::Arc::new(egret_bin::workflow_secrets::WorkspaceSecretSource::new(
             workspace_secrets.clone(),
         )),
+        // Package #4 Task C5: `egret.sql`'s port.
+        query_port.clone(),
     )
     .await
     .map_err(|e| anyhow::anyhow!("workflow.container_runner: {e}"))?;
@@ -2976,11 +3004,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // a new client points somewhere they can actually reach.
     // Data Apps and Workflow Management share the SAME object store
     // (this `S3Store`, the `[storage]` bucket -- one client, not a second one).
-    let apps_storage = engine_state.storage.clone();
-    // ONE `Arc` around the query engine, cloned into every seam that reaches it
-    // as a `QueryExecPort` (the Data API and the Data Apps gateway), so there is
-    // exactly one `EngineState` behind both.
-    let query_port = std::sync::Arc::new(engine_state);
+    let apps_storage = query_port.storage.clone();
+    // `query_port` (the ONE `Arc<EngineState>`) is built above, before
+    // `runtime::handlers_for`, which hands it to `egret.sql` (package #4 Task
+    // C5); the Data API and the Data Apps gateway below clone the same one.
     let dataapi = Some(egret_dataapi::DataApiState {
         db: db.clone(),
         clients: egret_dataapi::ClientStore::new(db.clone()),
@@ -3029,12 +3056,13 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     });
 
     // Workflow management surface (W1 Task 7). `refs` is the real
-    // `WorkflowRefPort`: `RefKind::DataApiEndpoint`/`Notebook` through the two ports
-    // already wired above for `automation`/`dataapi`, and
-    // `RefKind::Database`/`Dataset`/`Chart` resolve to `None` always -- no
-    // port for any of the three exists anywhere in the workspace yet, and
-    // `None` is the fail-closed answer `publish` needs: see
-    // `egret_workflow::refs`'s module doc for the full per-kind table.
+    // `WorkflowRefPort`: `RefKind::DataApiEndpoint` through the port already
+    // wired above for `automation`/`dataapi`, `RefKind::Database` through the
+    // shared `databases` repo (package #4 Task C5), and `RefKind::Dataset`/
+    // `Chart` resolve to `None` always -- no port for either exists anywhere
+    // in the workspace yet, and `None` is the fail-closed answer `publish`
+    // needs: see `egret_workflow::refs`'s module doc for the full per-kind
+    // table.
     //
     // A fresh `EndpointStore`, same reasoning `automation`/`automation_runner`
     // above give for their own fresh instances rather than reusing
@@ -3048,6 +3076,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         logs: egret_workflow::logs::LogRepo::new(db.pool.clone()),
         refs: std::sync::Arc::new(egret_workflow::WorkflowRefs {
             dataapi_endpoints: std::sync::Arc::new(egret_dataapi::EndpointStore::new(db.clone())),
+            // Package #4 Task C5: an `egret.sql` task's `database:`.
+            databases: std::sync::Arc::new(databases.clone()),
         }),
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),

@@ -2570,7 +2570,7 @@ async fn start_flow_execution(
         .await
         .map_err(core_refusal)?;
     let execution_id = if is_multipart(req.headers()) {
-        start_multipart(&st, ctx.workspace_id.0, &flow, req).await?
+        start_multipart(&st, ctx.workspace_id.0, ctx.principal.user_id.0, &flow, req).await?
     } else {
         // The JSON body keeps axum's 2 MiB: the route's own limit is off
         // (`DefaultBodyLimit::disable` in [`management_router`]) so that the
@@ -2624,12 +2624,13 @@ async fn start_flow_execution(
         // API start has none, and `start_execution` is that function with
         // `None` already written in. A FILE input given here is checked by
         // `start_execution_in` (`storage::inputs::check_file_inputs`).
-        crate::worker::start_execution(
+        crate::worker::start_execution_by(
             &st.db.pool,
             ctx.workspace_id.0,
             Some(flow.id),
             &flow.source,
             inputs,
+            ctx.principal.user_id.0,
         )
         .await
         .map_err(core_refusal)?
@@ -2871,6 +2872,7 @@ async fn validate_execution_inputs(
 async fn start_multipart(
     st: &WorkflowState,
     workspace: Uuid,
+    started_by: Uuid,
     flow: &crate::repo::FlowRow,
     req: axum::extract::Request,
 ) -> std::result::Result<Uuid, axum::response::Response> {
@@ -2908,6 +2910,7 @@ async fn start_multipart(
         st,
         &fs,
         workspace,
+        started_by,
         flow,
         &parsed,
         execution,
@@ -2935,6 +2938,7 @@ async fn read_parts_and_start(
     st: &WorkflowState,
     fs: &crate::storage::FileStore,
     workspace: Uuid,
+    started_by: Uuid,
     flow: &crate::repo::FlowRow,
     parsed: &crate::models::Flow,
     execution: Uuid,
@@ -3023,6 +3027,7 @@ async fn read_parts_and_start(
                 labels: None,
                 backfill_id: None,
                 variables: None,
+                started_by: Some(started_by),
             },
         )
         .await
@@ -3316,6 +3321,8 @@ async fn replay_execution(
                 // D3 (final review I3): the run's `variables` travel with it,
                 // as the retry replay's do and Kestra's `childExecution`'s.
                 variables: source.variables.clone(),
+                // A replay is a start a person makes (the `egret.sql` gate).
+                started_by: Some(ctx.principal.user_id.0),
             },
         )
         .await

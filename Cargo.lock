@@ -3048,6 +3048,7 @@ dependencies = [
  "egret-core",
  "egret-dataapi",
  "egret-dataapi-api",
+ "egret-egress",
  "egret-events",
  "egret-metastore",
  "egret-query",
@@ -3392,6 +3393,19 @@ dependencies = [
  "thiserror 2.0.20",
  "utoipa",
  "uuid",
+]
+
+[[package]]
+name = "egret-egress"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "bytes",
+ "reqwest 0.12.28",
+ "thiserror 2.0.20",
+ "tokio",
+ "url",
 ]
 
 [[package]]
@@ -3802,6 +3816,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "bytes",
  "chrono",
  "chrono-tz",
  "crc32fast",
@@ -3811,6 +3826,7 @@ dependencies = [
  "egret-config",
  "egret-core",
  "egret-dataapi-api",
+ "egret-egress",
  "egret-events",
  "egret-metastore",
  "egret-query",
@@ -3837,6 +3853,7 @@ dependencies = [
  "rand 0.8.7",
  "regex",
  "regex-syntax",
+ "reqwest 0.12.28",
  "rustls",
  "serde",
  "serde_json",
@@ -3850,6 +3867,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "unicode-general-category",
  "unicode-normalization",
  "url",
  "utoipa",

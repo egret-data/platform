@@ -1021,6 +1021,127 @@ pub struct WorkflowConfig {
     /// author-settable. `EGRET_WORKFLOW__PLUGIN_HOST__IMAGE=egret-plugin-host:dev`.
     #[serde(default)]
     pub plugin_host: PluginHostConfig,
+
+    /// `[workflow.http]` -- the egress policy and caps of the `http.Request`,
+    /// `http.Download` and `http.SseRequest` tasks (package #4 spec D1, D3,
+    /// D7, D8, D11). None of it is author-settable.
+    /// `EGRET_WORKFLOW__HTTP__ALLOW_HOSTS='["erp.internal"]'`.
+    #[serde(default)]
+    pub http: WorkflowHttpConfig,
+}
+
+/// `[workflow.http]`: what the in-process http tasks may reach and how much
+/// they may read (package #4 spec D1, D3, D7, D8, D11).
+///
+/// These tasks run **inside the egret process**, so they share its network
+/// position (the metadata Postgres, the Kubernetes API, engine admin ports,
+/// cloud metadata). Every request is therefore vetted: only `http`/`https`,
+/// every resolved address public, the vetted addresses pinned, no proxy,
+/// every redirect hop vetted again. A security divergence from Kestra, which
+/// has no default block.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowHttpConfig {
+    /// **Hosts an http task may reach even though they resolve into private
+    /// space** (spec D3). Exact, case-insensitive host match, no wildcard, no
+    /// port, no scheme; a listed name is trusted **whatever it resolves to**.
+    /// An IP literal matches by address, so an IPv6 entry may be written with
+    /// or without brackets (`fd00::1` or `[fd00::1]`).
+    /// Separate from `automation.webhook_allow_hosts` on purpose: a flow
+    /// author is any workspace editor, a different blast radius. Default
+    /// empty: only public addresses.
+    /// `EGRET_WORKFLOW__HTTP__ALLOW_HOSTS='["erp.internal","10.0.0.7"]'`.
+    #[serde(default)]
+    pub allow_hosts: Vec<String>,
+    /// The largest file one `http.Download` may store; crossing it fails the
+    /// task naming the cap (Kestra has none). Default 1 GiB.
+    /// `EGRET_WORKFLOW__HTTP__MAX_DOWNLOAD_BYTES=1073741824`.
+    #[serde(default = "default_http_max_download_bytes")]
+    pub max_download_bytes: u64,
+    /// The most events one `http.SseRequest` reads before it stops (Kestra
+    /// has no cap). Default 10 000.
+    /// `EGRET_WORKFLOW__HTTP__MAX_SSE_EVENTS=10000`.
+    #[serde(default = "default_http_max_sse_events")]
+    pub max_sse_events: u64,
+    /// Redirect hops an http task follows before failing (each hop is vetted
+    /// again). Default 10. `EGRET_WORKFLOW__HTTP__MAX_REDIRECTS=10`.
+    #[serde(default = "default_http_max_redirects")]
+    pub max_redirects: u32,
+    /// Seconds allowed to establish one connection when the task sets no
+    /// `options.timeout.connectTimeout`. Default 10.
+    /// `EGRET_WORKFLOW__HTTP__CONNECT_TIMEOUT_SECS=10`.
+    #[serde(default = "default_http_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+}
+
+impl Default for WorkflowHttpConfig {
+    fn default() -> Self {
+        Self {
+            allow_hosts: Vec::new(),
+            max_download_bytes: default_http_max_download_bytes(),
+            max_sse_events: default_http_max_sse_events(),
+            max_redirects: default_http_max_redirects(),
+            connect_timeout_secs: default_http_connect_timeout_secs(),
+        }
+    }
+}
+
+impl WorkflowHttpConfig {
+    /// The boot check, called from [`Config::validate`]: every cap and the
+    /// connect timeout are at least 1, and every `allow_hosts` entry is a bare
+    /// host (not empty, no scheme, path, port or whitespace), because the
+    /// match is exact and `https://erp.internal` would silently match nothing.
+    /// Each refusal names its key.
+    pub fn validate(&self) -> Result<(), String> {
+        for (key, value) in [
+            ("max_download_bytes", self.max_download_bytes),
+            ("max_sse_events", self.max_sse_events),
+            ("connect_timeout_secs", self.connect_timeout_secs),
+        ] {
+            if value == 0 {
+                return Err(format!(
+                    "workflow.http.{key} must be at least 1 (EGRET_WORKFLOW__HTTP__{})",
+                    key.to_ascii_uppercase()
+                ));
+            }
+        }
+        for host in &self.allow_hosts {
+            let bare = !host.is_empty()
+                && !host.contains(['/', '@', '?', '#'])
+                && !host.chars().any(char::is_whitespace)
+                // A port: one `:` outside an IPv6 literal. `[::1]` and a bare
+                // `::1` are both hosts.
+                && (host.matches(':').count() != 1);
+            if !bare {
+                return Err(format!(
+                    "workflow.http.allow_hosts entry {host:?} is not a bare host name or IP \
+                     address (no scheme, port, path or spaces; the match is exact) \
+                     (EGRET_WORKFLOW__HTTP__ALLOW_HOSTS)"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 1 GiB -- see [`WorkflowHttpConfig::max_download_bytes`].
+fn default_http_max_download_bytes() -> u64 {
+    1 << 30
+}
+
+/// 10 000 -- see [`WorkflowHttpConfig::max_sse_events`].
+fn default_http_max_sse_events() -> u64 {
+    10_000
+}
+
+/// 10 -- see [`WorkflowHttpConfig::max_redirects`].
+fn default_http_max_redirects() -> u32 {
+    10
+}
+
+/// 10 -- see [`WorkflowHttpConfig::connect_timeout_secs`].
+fn default_http_connect_timeout_secs() -> u64 {
+    10
 }
 
 /// `[workflow.storage]`: execution files (W9a spec §3, §4.5, §7.2). The
@@ -1686,6 +1807,7 @@ fn default_workflow() -> WorkflowConfig {
         container_runner: ContainerRunner::None,
         kubernetes: WorkflowKubernetesConfig::default(),
         plugin_host: PluginHostConfig::default(),
+        http: WorkflowHttpConfig::default(),
     }
 }
 
@@ -1984,6 +2106,7 @@ impl Config {
             );
         }
         self.workflow.storage.validate()?;
+        self.workflow.http.validate()?;
         if self.workflow.kill_poll_ms < MIN_KILL_POLL_MS {
             return Err(format!(
                 "workflow.kill_poll_ms: {} is below the minimum {MIN_KILL_POLL_MS} \
@@ -2843,6 +2966,94 @@ values = { allowed-images = [] }
             assert_eq!(cfg.workflow.storage_retention_days, 0);
             Ok(())
         });
+    }
+
+    /// Package #4 (spec D11): `[workflow.http]` has the documented defaults
+    /// on BOTH paths, every key is settable from the environment, and the
+    /// boot check refuses a zero cap and a non-bare allowlist entry naming
+    /// the key.
+    #[test]
+    fn workflow_http_defaults_env_and_validation() {
+        let want = WorkflowHttpConfig {
+            allow_hosts: vec![],
+            max_download_bytes: 1_073_741_824,
+            max_sse_events: 10_000,
+            max_redirects: 10,
+            connect_timeout_secs: 10,
+        };
+        figment::Jail::expect_with(|_jail| {
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(cfg.workflow.http, want);
+            assert_eq!(default_workflow().http, want);
+            Ok(())
+        });
+        figment::Jail::expect_with(|jail| {
+            jail.set_env(
+                "EGRET_WORKFLOW__HTTP__ALLOW_HOSTS",
+                r#"["erp.internal","10.0.0.7"]"#,
+            );
+            jail.set_env("EGRET_WORKFLOW__HTTP__MAX_DOWNLOAD_BYTES", "11");
+            jail.set_env("EGRET_WORKFLOW__HTTP__MAX_SSE_EVENTS", "22");
+            jail.set_env("EGRET_WORKFLOW__HTTP__MAX_REDIRECTS", "0");
+            jail.set_env("EGRET_WORKFLOW__HTTP__CONNECT_TIMEOUT_SECS", "3");
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(
+                cfg.workflow.http,
+                WorkflowHttpConfig {
+                    allow_hosts: vec!["erp.internal".into(), "10.0.0.7".into()],
+                    max_download_bytes: 11,
+                    max_sse_events: 22,
+                    max_redirects: 0,
+                    connect_timeout_secs: 3,
+                }
+            );
+            Ok(())
+        });
+
+        let check = |f: &dyn Fn(&mut WorkflowHttpConfig)| {
+            let mut cfg = Config::default();
+            cfg.storage.bucket = "b".into();
+            cfg.storage.access_key = "a".into();
+            cfg.storage.secret_key = "s".into();
+            f(&mut cfg.workflow.http);
+            cfg.validate()
+        };
+        assert_eq!(check(&|_| {}), Ok(()));
+        assert_eq!(
+            check(&|h| {
+                h.allow_hosts = vec![
+                    "erp.internal".into(),
+                    "10.0.0.7".into(),
+                    "[::1]".into(),
+                    "fd00::1".into(),
+                ]
+            }),
+            Ok(())
+        );
+        for key in [
+            "max_download_bytes",
+            "max_sse_events",
+            "connect_timeout_secs",
+        ] {
+            let err = check(&|h| match key {
+                "max_download_bytes" => h.max_download_bytes = 0,
+                "max_sse_events" => h.max_sse_events = 0,
+                _ => h.connect_timeout_secs = 0,
+            })
+            .unwrap_err();
+            assert!(err.contains(&format!("workflow.http.{key}")), "{err}");
+        }
+        for bad in [
+            "",
+            "https://erp.internal",
+            "erp.internal:8443",
+            "erp.internal/api",
+            "erp internal",
+            "user@erp.internal",
+        ] {
+            let err = check(&|h| h.allow_hosts = vec![bad.into()]).expect_err(bad);
+            assert!(err.contains("workflow.http.allow_hosts"), "{bad:?}: {err}");
+        }
     }
 
     /// Debt D3: `kept_container_retention_days` defaults to 7 on BOTH paths

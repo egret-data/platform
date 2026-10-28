@@ -7765,6 +7765,14 @@ will trip over it.**
   than this bullet used to state: `reap` clears only `claimed_at` and leaves the
   run `RUNNING`, which is what `claim` re-selects — and **it is one of two
   causes, not the only one.**
+  *(2026-10-28, package #4: this bullet's examples are history. `core.http`,
+  `core.slack` and `egret.dataset.refresh` are no longer `TASK_TYPES` rows,
+  `egret.sql` is served by `runtime::handlers_for` on every deployment, and
+  the only rows with no handler on any deployment are the deferred
+  `egret.dataapi.call` and `egret.report.send`, refused at publish and every
+  start as `task_type_not_served` since no-silent-stall. `egret.sql` is still
+  in neither `with_core_tasks` nor `driver::registry()`, so this oracle still
+  never runs it. See *Package #4* at the end.)*
 - **Logs are W11 and the trigger loop is W12**, and both deferrals carry a
   measurement rather than a preference. Logs: **`LogSink` has three
   implementations under `crates/egret-workflow/src/` and none of them persists a
@@ -9066,6 +9074,11 @@ minutes; its timing test is the instrument, unmutated.
 2. **Seven of fifteen publishable types still hang** (item 19 (a)):
    `egret.sql`, `egret.python`, `egret.dataapi.call`,
    `egret.dataset.refresh`, `egret.report.send`, `core.http`, `core.slack`.
+   *(2026-10-28, package #4: no longer true of any of them. The hang was
+   closed by no-silent-stall (2026-10-12); `egret.sql` is now served on
+   every deployment; `core.http`, `core.slack` and `egret.dataset.refresh`
+   are no longer rows; `egret.dataapi.call` and `egret.report.send` are
+   refused at publish and every start.)*
    A script task reached without publish (a draft run) under `none` hangs the
    same way.
 3. **Spec §11's limits hold as written:** a pod that outlives egret entirely
@@ -10999,6 +11012,9 @@ item necessary rather than what makes it unnecessary.** Four things a green
   `core.http`, `core.slack`. The four script rows are served when a runner is
   configured and refused at publish when it is not; a draft run of one under
   `none` still reaches this loop. See the W5a section.)*
+  *(Package #4, 2026-10-28: of that list, `egret.sql` is now served on every
+  deployment and `core.http`, `core.slack`, `egret.dataset.refresh` are no
+  longer rows; `TASK_TYPES` has 40 rows.)*
   *(No-silent-stall, 2026-10-12: **(a) is closed.** Tasks 2–3 refuse a type
   this deployment does not serve at validate, publish and every start
   (`task_type_not_served`), so no new execution of one is created; Task 4
@@ -13802,4 +13818,29 @@ Both rows left `STILL_OVER_ACCEPTED` (one row left:
 lines were deleted. `handler_surface.py`'s baseline size moved 52 -> 50 and
 `handler-surface.txt` was regenerated: matched 249 -> 251, blocked 20 -> 18,
 the over-acceptance cause 3 -> 1, ceiling 281 -> 283.
+
+## Package #4 — http tasks, `egret.sql`, three rows removed (2026-10-28)
+
+**Nothing in this oracle moved, as the package's spec expected.** Ratchet
+`301 golden entries, 50 mismatching, 50 baselined, 0 broken`; census `295
+live, 21 unported task type, 25 egret's own validate`. The corpus has no flow
+with `http.Request`, `Download` or `SseRequest` (only the two
+`fs.http.Trigger` flows, whose task is a `Log`), and writes none of the three
+removed types, so `UNKNOWN_TYPE_REFUSED` did not move.
+
+- **Served now, outside this oracle.** The three http tasks (with the
+  `fs.http` aliases) and `egret.sql` are registered by
+  `runtime::handlers_for` on every deployment. `driver::registry()` builds
+  neither: the http tasks would need the network and `egret.sql` an engine.
+  Their evidence is `tests/http_request.rs`, `tests/http_download.rs`,
+  `tests/sql_served.rs` and `tests/sql_starrocks_live.rs` (engine-gated).
+- **Removed rows.** `core.http`, `core.slack` and `egret.dataset.refresh` are
+  gone from `TASK_TYPES` (40 rows). A flow naming one gets one
+  `unknown_task_type` with a hint (`registry::REMOVED_TYPES`), not
+  `task_type_not_served`. Every earlier section of this file that lists them
+  as rows with no handler (W3b, W5a, item 19) is a dated record of its day.
+- **Unregistered-type probes.** The tests that used `http.Request` as the
+  example of an unregistered type now use
+  `io.kestra.plugin.core.execution.PurgeExecutions`; the unserved probe moved
+  from `egret.sql` to `egret.report.send`.
 

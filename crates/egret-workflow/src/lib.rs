@@ -48,6 +48,11 @@ pub mod flow_trigger;
 /// W7c: the read-only topology graph of a flow (`flow_graph`), pure like
 /// `executor`. `pub` because the routes (Task 2) and the corpus sweep use it.
 pub mod graph;
+/// Package #4: the HTTP client core of `http.Request`, `Download` and
+/// `SseRequest` -- the option model and its D4 refusals, the request
+/// builder, the response rules and masking -- over `egret-egress`. `pub`
+/// because publish (the refusals) and the handlers share it.
+pub mod http;
 /// Package #3: the start-time input check (`inputs_check::resolve`) -- the
 /// declared `inputs:` against the posted object, pure. `pub` so the start
 /// paths, the subflow child and the validate endpoint share one checker.

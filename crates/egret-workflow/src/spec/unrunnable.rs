@@ -90,7 +90,8 @@ mod tests {
 
     #[test]
     fn an_unserved_known_type_is_task_type_not_served_at_its_path() {
-        let fs = findings("id: f\nnamespace: a.b\ntasks:\n  - id: q\n    type: egret.sql\n");
+        let fs =
+            findings("id: f\nnamespace: a.b\ntasks:\n  - id: q\n    type: egret.report.send\n");
         assert_eq!(paths(&fs), vec![("task_type_not_served", "tasks.q")]);
     }
 
@@ -108,16 +109,19 @@ tasks:
         message: hi
     errors:
       - id: h1
-        type: core.http
+        type: egret.report.send
+        chart: c
   - id: dag
     type: io.kestra.plugin.core.flow.Dag
     tasks:
       - task:
           id: h3
-          type: core.http
+          type: egret.report.send
+          chart: c
 finally:
   - id: h2
-    type: core.http
+    type: egret.report.send
+    chart: c
 ";
         let mut got: Vec<(&str, String)> = findings(src)
             .into_iter()
@@ -225,7 +229,7 @@ tasks:
     type: kestra.io.kestra.plugin.jdbc.postgresql.Query
     sql: select 1
   - id: q
-    type: egret.sql
+    type: egret.report.send
 ";
         let fs = findings(src);
         assert_eq!(fs.len(), 4, "{fs:?}");
@@ -240,7 +244,8 @@ tasks:
         let sql = &fs[3];
         assert_eq!(sql.path, "tasks.q");
         assert!(
-            sql.message.contains("has no handler for `egret.sql`"),
+            sql.message
+                .contains("has no handler for `egret.report.send`"),
             "{sql:?}"
         );
         for f in &fs {

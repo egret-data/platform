@@ -357,6 +357,11 @@ pub(crate) fn leaf_keys(t: &str) -> Option<Vec<&'static str>> {
         h::kv::DELETE => wire_fields_of::<h::kv::DeleteSpec>(),
         h::kv::PUT => wire_fields_of::<h::kv::PutSpec>(),
         h::kv::PURGE_KV => wire_fields_of::<h::kv::PurgeSpec>(),
+        // Package #4 Task C3: both spellings Kestra declares.
+        h::http::REQUEST | h::http::REQUEST_ALIAS => wire_fields_of::<h::http::Spec>(),
+        // Package #4 Task C4.
+        h::http::DOWNLOAD | h::http::DOWNLOAD_ALIAS => wire_fields_of::<h::http::download::Spec>(),
+        h::http::SSE_REQUEST => wire_fields_of::<h::http::sse::Spec>(),
         // Kill-and-exit Task 3: no handler -- the executor runs it -- and
         // `build_plan` reads its leaf spec through this struct.
         crate::executor::exit::TYPE_ID => wire_fields_of::<crate::executor::exit::Spec>(),
@@ -1082,6 +1087,15 @@ impl Walk<'_> {
             if read.contains(&key) || TASK_MODEL_KEYS.contains(&key) {
                 continue;
             }
+            // `Request.encryptBody` is Kestra's, and egret judges it itself:
+            // `false` is accepted, anything else is `http_option_refused`
+            // (`validate::http_findings`, spec D4). It is not in the handler's
+            // struct, so without this it was ALSO `unknown_property`, whose
+            // "neither Kestra nor egret accepts it" is false here, and
+            // `encryptBody: false` could not be published (package #4 Task C6).
+            if canonical == h::http::REQUEST && key == "encryptBody" {
+                continue;
+            }
             let at = format!("{path}.{key}");
             if TASK_JAVA_UNREAD.contains(&key) {
                 if is_non_runnable(canonical) && matches!(key, "taskCache" | "workerSelector") {
@@ -1395,6 +1409,11 @@ mod tests {
                 "io.kestra.plugin.core.flow.Dag",
                 "onChildFailure",
                 "not at the pin; unknown_property",
+            ),
+            (
+                "io.kestra.plugin.core.http.Request",
+                "encryptBody",
+                "refused by egret unless false (package #4 spec D4); http_option_refused",
             ),
         ];
         use crate::spec::schema::{kestra_definition, FLOWABLE_TYPES, TRIGGER_TYPES};

@@ -3,13 +3,13 @@
  "types": {
   "egret.sql": {
    "title": "Run one SQL statement on a database connection registered in this workspace.",
-   "markdownDescription": "egret's own task. `database` names a connection registered in this workspace; publish resolves it and refuses a name that does not exist here. Every `{{ }}` in `sql` is bound as a parameter, never spliced into the text.\n\n`fetch` decides the outputs: `NONE` gives `{}`, `FETCH_ONE` gives `size` and `row`, `FETCH` gives `size` and `rows` (at most 10,000 rows; more fails the task), `STORE` writes the rows to internal storage as Ion and gives `size` and `uri`.",
+   "markdownDescription": "egret's own task. `database` is the id of a connection registered in this workspace; publish refuses an id this workspace does not hold. Every `{{ }}` in `sql` is bound as a parameter, never spliced into the text.\n\nThe statement runs as the flow's creator, so only the creator can publish or start a flow that contains this task, and a schedule, webhook, Flow trigger or `Subflow` starts it only from a source the creator published.\n\n`fetch` decides the outputs: `NONE` gives `{}`, `FETCH_ONE` gives `size` and `row`, `FETCH` gives `size` and `rows` (at most 10,000 rows; more fails the task), `STORE` writes the rows to internal storage as Ion and gives `size` and `uri`.",
    "properties": {
     "database": {
      "type": "string",
      "minLength": 1,
-     "title": "The registered database connection, by name or id.",
-     "markdownDescription": "Resolved at publish within this workspace."
+     "title": "The registered database connection, by id.",
+     "markdownDescription": "The connection's id (a UUID), checked at publish against this workspace. A name is refused."
     },
     "sql": {
      "type": "string",
@@ -36,47 +36,28 @@
   },
   "egret.dataapi.call": {
    "title": "Call a Data API endpoint of this workspace.",
-   "markdownDescription": "egret's own task. Publish resolves `endpoint` within this workspace and refuses a name that does not exist here.\n\n**This egret build registers no handler for this type**: a flow using it publishes, and its run does not progress past this task.",
+   "markdownDescription": "egret's own task. `endpoint` is the id of a Data API endpoint of this workspace; publish refuses an id this workspace does not hold.\n\n**No egret deployment runs this type yet**: publish and every start refuse a flow that uses it (`task_type_not_served`), and the flow schema does not offer it.",
    "properties": {
     "endpoint": {
      "type": "string",
      "minLength": 1,
-     "title": "The Data API endpoint, by name or id."
+     "title": "The Data API endpoint, by id.",
+     "markdownDescription": "The endpoint's id (a UUID), checked at publish against this workspace. A name is refused."
     }
    },
    "required": ["endpoint"]
   },
-  "egret.dataset.refresh": {
-   "title": "Refresh a dataset of this workspace.",
-   "markdownDescription": "egret's own task. Publish resolves `dataset` within this workspace and refuses a name that does not exist here.\n\n**This egret build registers no handler for this type**: a flow using it publishes, and its run does not progress past this task.",
-   "properties": {
-    "dataset": {
-     "type": "string",
-     "minLength": 1,
-     "title": "The dataset, by name or id."
-    }
-   },
-   "required": ["dataset"]
-  },
   "egret.report.send": {
    "title": "Send a chart of this workspace as a report.",
-   "markdownDescription": "egret's own task. Publish resolves `chart` within this workspace and refuses a name that does not exist here.\n\n**This egret build registers no handler for this type**: a flow using it publishes, and its run does not progress past this task.",
+   "markdownDescription": "egret's own task. `chart` names a chart of this workspace by id; publish cannot yet prove a chart's workspace, so it refuses every `chart`.\n\n**No egret deployment runs this type yet**: publish and every start refuse a flow that uses it (`task_type_not_served`), and the flow schema does not offer it.",
    "properties": {
     "chart": {
      "type": "string",
      "minLength": 1,
-     "title": "The chart, by name or id."
+     "title": "The chart, by id."
     }
    },
    "required": ["chart"]
-  },
-  "core.http": {
-   "title": "An HTTP request (reserved).",
-   "markdownDescription": "A type egret's registry accepts and publishes. It has no properties yet, because nothing reads any: **this egret build registers no handler for it**, so a flow using it publishes and its run does not progress past this task. For an HTTP call today, use a script task."
-  },
-  "core.slack": {
-   "title": "A Slack message (reserved).",
-   "markdownDescription": "A type egret's registry accepts and publishes. It has no properties yet, because nothing reads any: **this egret build registers no handler for it**, so a flow using it publishes and its run does not progress past this task."
   }
  },
  "property_overrides": {

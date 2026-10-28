@@ -36,6 +36,9 @@ pub mod catalog_listing;
 pub mod port;
 pub use port::QueryExecPort;
 
+pub mod owner;
+pub use owner::DatabaseOwnerPort;
+
 pub mod failure;
 pub use failure::{ExecFailure, ExecFailureKind};
 

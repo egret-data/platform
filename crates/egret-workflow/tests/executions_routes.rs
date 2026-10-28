@@ -2933,7 +2933,10 @@ async fn replay_closes_the_same_three_doors_start_does() {
 /// than through `POST .../publish`**, and that is measured rather than lazy:
 /// `spec::registry` knows exactly three task types — `core.http`, `core.slack`
 /// and `core.log` — so `io.kestra.plugin.core.log.Log`, which is what every
-/// executable fixture in this file uses, cannot be published at all. The two
+/// executable fixture in this file uses, cannot be published at all.
+/// *(Stale since W10 Task 6 fix round 1 made the FQCN a row; `core.http` and
+/// `core.slack` are not rows at all since package #4 Task C6, 2026-10-28. The
+/// repository calls stay: they are what isolates the draft-vs-version read.)* The two
 /// repository calls leave precisely the row publish leaves: a `flow_versions`
 /// snapshot, `live_version_id` pointing at it, and `state = 'live'`.
 ///

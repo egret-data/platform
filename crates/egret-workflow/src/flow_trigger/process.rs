@@ -1020,6 +1020,7 @@ async fn start_fire(
             labels: None,
             backfill_id: None,
             variables: None,
+            started_by: None,
         },
     )
     .await;

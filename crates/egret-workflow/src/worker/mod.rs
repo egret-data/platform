@@ -93,6 +93,7 @@ mod replay;
 #[allow(dead_code)]
 pub(crate) mod snapshot;
 mod spawn;
+pub(crate) mod sql_principal;
 mod stamps;
 mod subflow;
 mod timeout;
@@ -108,8 +109,8 @@ pub use claim::{apply_outcome, start_execution_in};
 pub(crate) use claim::{checked_inputs, input_outcomes, start_execution_in_with};
 pub use claim::{
     claim, commit_outcome, due_retries, resume, resume_by_hand, start_claimed, start_execution,
-    start_execution_with_trigger, tick, tick_with, wake, Claimed, NewExecution, Resumed,
-    WorkerTiming,
+    start_execution_by, start_execution_with_trigger, tick, tick_with, wake, Claimed, NewExecution,
+    Resumed, WorkerTiming,
 };
 /// Test-only (`test-util`; W7b Task 1): `persist`'s two state `UPDATE`s, so
 /// `tests/execution_timestamps.rs` can drive the production text against a
@@ -304,6 +305,18 @@ pub struct TaskInput {
     /// is started; W6 (triggers) is the package that has to decide what a
     /// scheduled run acts as, so it is left to own that column rather than
     /// guessed at here.
+    ///
+    /// *(2026-10-28, package #4 Task C5: `egret.sql` is served now, and both
+    /// holes were accepted as they stand -- `created_by` stays the principal
+    /// until a `run_as` column exists; spec D10, follow-up recorded in the
+    /// package #4 plan.)*
+    ///
+    /// *(2026-10-28, user decision on the package #4 final review I1: a third
+    /// hole -- any editor could add an `egret.sql` to another user's flow and
+    /// run it with that user's data rights -- is closed by
+    /// [`sql_principal`]: only the creator publishes or starts such a flow,
+    /// and a trigger or `Subflow` starts only a source the creator
+    /// published.)*
     pub principal: Option<egret_core::UserId>,
     /// **The instant this claim of the run was taken** -- the value the
     /// claim's own `UPDATE … SET claimed_at = now()` wrote

@@ -5,29 +5,18 @@ mod common;
 use egret_workflow::{RefKind, WorkflowRefPort};
 use uuid::Uuid;
 
-/// The task types this binary serves: the runner set, plus `egret.sql`.
-///
-/// No deployment serves `egret.sql` today, so since no-silent-stall Task 3
-/// publish refuses it at step 3 (`task_type_not_served`), before the
-/// reference resolution these tests are about. `egret.sql` is the one task
-/// type with a `RefField` (`database`), so the tests keep it and run as a
-/// deployment that serves it would: the resolution of steps 4-6 is the same
-/// code either way. The refusal itself is `tests/not_served.rs`'s.
+/// The task types this binary serves: the runner set, which includes
+/// `egret.sql` since package #4 Task C5. `egret.sql` is the one served task
+/// type with a `RefField` (`database`), so these tests use it for the
+/// reference resolution of publish steps 4-6. Until C5 this installed the
+/// runner set plus `egret.sql` by hand, because no deployment served it.
 ///
 /// Every test here calls [`db`] first, so this is the set installed before
 /// any `common` helper installs its default.
 fn served_with_sql() -> &'static egret_workflow::runtime::Served {
-    let mut cfg = egret_config::Config::default().workflow;
-    cfg.container_runner = egret_config::ContainerRunner::Docker;
-    let runner = egret_workflow::runtime::served_for(&cfg);
-    egret_workflow::runtime::install_served_for_tests(
-        egret_workflow::runtime::Served::from_type_ids(
-            runner
-                .type_ids()
-                .map(str::to_string)
-                .chain(["egret.sql".to_string()]),
-        ),
-    )
+    let s = common::install_served_runner();
+    assert!(s.serves("egret.sql"));
+    s
 }
 
 async fn db() -> Option<egret_metastore::Db> {

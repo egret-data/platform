@@ -245,17 +245,18 @@ async fn post_yaml_that_fails_validation_still_gets_its_graph_with_refusals() {
 /// The final review's Important: the graph marks what THIS deployment will
 /// not run, as the validate routes, the draft DTO and publish do. This binary
 /// serves the runner set (`common::install_served_default`), which still has
-/// no handler for `egret.sql`; a `Subflow` child expanded in place is judged
-/// against the same set.
+/// no handler for `egret.report.send` (deferred, spec D10; the probe was
+/// `egret.sql` until package #4 Task C5 served it); a `Subflow` child
+/// expanded in place is judged against the same set.
 #[tokio::test]
 async fn a_task_type_this_deployment_does_not_serve_is_refused_here_and_in_an_expansion() {
     let Some(db) = common::db().await else { return };
     let (ws, user) = reader(&db).await;
     assert!(
-        !egret_workflow::runtime::served().serves("egret.sql"),
+        !egret_workflow::runtime::served().serves("egret.report.send"),
         "the fixture needs a type this binary does not serve"
     );
-    let unserved = "{id: q, type: egret.sql, database: d, sql: SELECT 1}";
+    let unserved = "{id: q, type: egret.report.send, chart: c}";
     common::seed_flow(
         &db,
         ws,

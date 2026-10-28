@@ -64,7 +64,9 @@
 //! shipped worker can execute.
 //!
 //! `spec::registry::TASK_TYPES` — publish's table — spelled egret's tasks
-//! `core.log`, `egret.sql`, `core.http`; `Handlers::with_core_tasks(egret_workflow::storage::current())`, which
+//! `core.log`, `egret.sql`, `core.http` (the spellings of that time; `core.log`
+//! and `core.http` are gone since, the latter in package #4 Task C6);
+//! `Handlers::with_core_tasks(egret_workflow::storage::current())`, which
 //! is what `egret-bin` hands the runtime, registers Kestra's FQCNs, because
 //! that is what `executor::build_plan` copies verbatim out of `Task::type`.
 //! **The intersection was empty for every core task**, and worse: each of the
@@ -647,8 +649,9 @@ async fn both_spellings_publish_and_both_dispatch(pool: sqlx::PgPool) {
     /// really has it; egret has no handler and no row, and both ends must say
     /// so — this is the control that keeps "both spellings publish" from being
     /// satisfiable by a table that refuses nothing.
-    /// (`core.output.OutputValues` until group C1 Task 2 implemented it.)
-    const UNIMPLEMENTED: &str = "io.kestra.plugin.core.http.Request";
+    /// (`core.output.OutputValues` until group C1 Task 2 implemented it, then
+    /// `core.http.Request` until package #4 Task C3 did.)
+    const UNIMPLEMENTED: &str = "io.kestra.plugin.core.execution.PurgeExecutions";
 
     // ---- leg 1: publish, over HTTP ----
     let measured = [

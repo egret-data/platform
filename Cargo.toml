@@ -9,6 +9,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 egret-core = { path = "crates/egret-core" }
+egret-egress = { path = "crates/egret-egress" }
 egret-config = { path = "crates/egret-config" }
 egret-metastore = { path = "crates/egret-metastore" }
 egret-server = { path = "crates/egret-server" }

@@ -746,10 +746,15 @@ pub async fn reaper_pass(
 /// `secrets` is where their `secret()` reads (egret-bin passes its
 /// `WorkspaceSecretSource`). `workflow.plugin_host.image` is then required
 /// (`WorkflowConfig::validate_plugin_host`), a boot error.
+///
+/// Package #4 Task C5: `egret.sql` ([`crate::worker::handlers::sql`]) is
+/// registered on every deployment, over `query` (egret-bin passes its one
+/// `EngineState`) and the installed store (`fetch: STORE`).
 pub async fn handlers_for(
     cfg: &egret_config::WorkflowConfig,
     pool: PgPool,
     secrets: Arc<dyn crate::runners::secrets::SecretSource>,
+    query: Arc<dyn egret_query_api::QueryExecPort>,
 ) -> egret_core::Result<(Handlers, Option<crate::scripts::RunnerKind>)> {
     use crate::scripts::RunnerKind;
     use crate::worker::commands::{DockerRunner, OrphanSweep, TaskRunner};
@@ -784,6 +789,21 @@ pub async fn handlers_for(
     // Group C1 Task 4: `PurgeLogs`, which needs the pool too (it deletes
     // `workflow.task_logs` rows, scoped to the flow's namespace).
     crate::worker::handlers::purge_logs::register(&mut handlers, pool.clone());
+    // Package #4 Tasks C3 and C4: `http.Request`, `http.Download` and
+    // `http.SseRequest`, which need no pool: the egress policy and caps
+    // (`workflow.http`), the secret source (`secret()` resolves on the http
+    // tasks, spec D5) and the store (multipart file parts; Download's file).
+    crate::worker::handlers::http::register(
+        &mut handlers,
+        &cfg.http,
+        crate::http::HttpEgress::from_config(&cfg.http, Arc::new(egret_egress::SystemResolver)),
+        secrets.clone(),
+        crate::storage::current(),
+    );
+    // Package #4 Task C5: `egret.sql`, over the query port and the store.
+    handlers.add_publishable(Arc::new(
+        crate::worker::handlers::sql::Sql::new(query).with_files(crate::storage::current()),
+    ));
     let kept_retention = kept_retention(cfg.kept_container_retention_days);
     let (kind, runner, sweep): (RunnerKind, Arc<dyn TaskRunner>, Arc<dyn OrphanSweep>) =
         match cfg.container_runner {
@@ -975,11 +995,12 @@ impl Served {
 /// so a handler added to one and not the other fails by name.
 pub fn served_for(cfg: &egret_config::WorkflowConfig) -> Served {
     use crate::worker::handlers::{
-        assert, fail, kv, log, namespace, output_values, purge_logs, ret, sleep, storage,
+        assert, fail, http, kv, log, namespace, output_values, purge_logs, ret, sleep, sql, storage,
     };
 
     // Every deployment: `Handlers::with_core_tasks`, then the storage,
-    // namespace, KV and PurgeLogs `register`s -- all through `add_publishable`.
+    // namespace, KV, PurgeLogs and http `register`s and `egret.sql` -- all
+    // through `add_publishable`.
     let publishable: Vec<&str> = vec![
         // `Handlers::with_core_tasks`.
         log::TYPE_ID,
@@ -1014,6 +1035,12 @@ pub fn served_for(cfg: &egret_config::WorkflowConfig) -> Served {
         kv::PURGE_KV,
         // `handlers::purge_logs::register` (group C1 Task 4).
         purge_logs::TYPE_ID,
+        // `handlers::http::register` (package #4 Tasks C3 and C4).
+        http::REQUEST,
+        http::DOWNLOAD,
+        http::SSE_REQUEST,
+        // `egret.sql` (package #4 Task C5).
+        sql::TYPE_ID,
     ];
     let mut out = std::collections::BTreeSet::new();
     let mut add_publishable = |type_id: &str| {
@@ -1101,6 +1128,33 @@ mod tests {
         }
     }
 
+    /// `egret.sql`'s port. `handlers_for` only stores it; nothing here runs
+    /// a statement.
+    struct NoQuery;
+
+    #[async_trait::async_trait]
+    impl egret_query_api::QueryExecPort for NoQuery {
+        async fn describe_as(
+            &self,
+            _ws: uuid::Uuid,
+            _database_id: uuid::Uuid,
+            _principal: egret_core::UserId,
+            _sql: &str,
+        ) -> egret_core::Result<Vec<egret_query_api::ColumnMeta>> {
+            unreachable!("no statement runs in these tests")
+        }
+        async fn execute_as(
+            &self,
+            _ws: uuid::Uuid,
+            _database_id: uuid::Uuid,
+            _principal: egret_core::UserId,
+            _sql: &str,
+            _limits: egret_query_api::Limits,
+        ) -> egret_core::Result<egret_query_api::TabularResult> {
+            unreachable!("no statement runs in these tests")
+        }
+    }
+
     /// Never connected: `handlers_for` only stores it.
     fn unconnected_pool() -> PgPool {
         sqlx::postgres::PgPoolOptions::new()
@@ -1117,10 +1171,60 @@ mod tests {
     }
 
     async fn built(cfg: &egret_config::WorkflowConfig) -> Served {
-        let (h, _) = handlers_for(cfg, unconnected_pool(), Arc::new(NoSecrets))
-            .await
-            .expect("builds without a database or a docker daemon");
+        let (h, _) = handlers_for(
+            cfg,
+            unconnected_pool(),
+            Arc::new(NoSecrets),
+            Arc::new(NoQuery),
+        )
+        .await
+        .expect("builds without a database or a docker daemon");
         Served::from_handlers(&h)
+    }
+
+    /// Package #4 Task C6 (spec D10): every `TASK_TYPES` row is exactly one
+    /// of: served on every deployment (a handler of `handlers_for(none)`),
+    /// executor-level, a script type a runner serves, or one of the two
+    /// deferred `egret.*` types. A new row with no handler, or a deferred type
+    /// that gains one, fails here -- and the counts the comments in
+    /// `spec::registry`, `worker::claim` and egret-bin's `main.rs` give (40 =
+    /// 30 + 4 + 4 + 2) are this test's, so they need not be restated.
+    #[tokio::test]
+    async fn every_row_is_served_executor_level_a_script_or_deferred() {
+        const DEFERRED: [&str; 2] = ["egret.dataapi.call", "egret.report.send"];
+        let none = built(&cfg(egret_config::ContainerRunner::None)).await;
+        let scripts: Vec<&str> = crate::scripts::ScriptKind::ALL
+            .into_iter()
+            .map(|k| k.fqcn())
+            .collect();
+        let (mut served, mut executor, mut script, mut deferred) = (0, 0, 0, 0);
+        for row in crate::spec::registry::TASK_TYPES {
+            let t = row.r#type;
+            let kinds = [
+                none.0.contains(t),
+                crate::spec::registry::executor_level(t),
+                scripts.contains(&t),
+                DEFERRED.contains(&t),
+            ];
+            assert_eq!(
+                kinds.iter().filter(|k| **k).count(),
+                1,
+                "{t}: served/executor/script/deferred = {kinds:?}"
+            );
+            served += usize::from(kinds[0]);
+            executor += usize::from(kinds[1]);
+            script += usize::from(kinds[2]);
+            deferred += usize::from(kinds[3]);
+        }
+        assert_eq!(
+            (served, executor, script, deferred),
+            (30, 4, 4, 2),
+            "the counts the comments quote"
+        );
+        for removed in ["core.http", "core.slack", "egret.dataset.refresh"] {
+            assert!(crate::spec::registry::known_type(removed).is_none());
+            assert!(crate::spec::registry::removed_type(removed).is_some());
+        }
     }
 
     /// The drift test (spec §4.1): a handler registered without `served_for`
@@ -1151,6 +1255,7 @@ mod tests {
             &super::tests::cfg(egret_config::ContainerRunner::None),
             unconnected_pool(),
             Arc::new(NoSecrets),
+            Arc::new(NoQuery),
         )
         .await
         .expect("`none` builds");
@@ -1176,9 +1281,14 @@ mod tests {
         let mut c = cfg(egret_config::ContainerRunner::Docker);
         for (days, want) in [(3, Some(Duration::from_secs(3 * 86_400))), (0, None)] {
             c.kept_container_retention_days = days;
-            let (h, _) = handlers_for(&c, unconnected_pool(), Arc::new(NoSecrets))
-                .await
-                .expect("builds without a daemon");
+            let (h, _) = handlers_for(
+                &c,
+                unconnected_pool(),
+                Arc::new(NoSecrets),
+                Arc::new(NoQuery),
+            )
+            .await
+            .expect("builds without a daemon");
             let sweep = h.orphan_sweep().expect("the runner is the sweep");
             assert_eq!(sweep.kept_retention(), want, "{days} day(s)");
         }
@@ -1210,6 +1320,10 @@ mod tests {
         assert!(s.serves("io.kestra.plugin.core.log.Log"));
         assert!(s.serves("core.log"));
         assert!(!s.serves("io.kestra.plugin.core.log.log"));
-        assert!(!s.serves("egret.sql"));
+        // Package #4 Task C5: served on every deployment.
+        assert!(s.serves("egret.sql"));
+        assert!(!s.serves("egret.sqll"));
+        // A deferred row stays unserved (spec D10).
+        assert!(!s.serves("egret.report.send"));
     }
 }

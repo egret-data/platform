@@ -9,6 +9,9 @@ license.workspace = true
 # following egret-bi/egret-analytics-api.
 [dependencies]
 egret-core = { workspace = true, features = ["http"] }
+# The SSRF guard behind `deliver::destination` (moved there in workflow #4 C1,
+# shared with egret-workflow). A leaf crate: no cycle.
+egret-egress.workspace = true
 egret-automation-api.workspace = true
 egret-metastore.workspace = true
 egret-workspace.workspace = true
