@@ -539,3 +539,18 @@ Deviations the code forces are recorded here, per task, as they happen.
 - **Task 14.** The purge runs for single-level namespaces only, as #757's (a multi-level recursive drop keeps its
   rows; the reports show them). The allow events reuse `perm_grant:delete` with `detail.trigger =
   "iceberg_drop_namespace"`, and the feed adds "(namespace dropped)" to that sentence.
+
+### Task 18: local gate (2026-10-28, on `fd0d57ae`; `b3445b33` adds docs only)
+
+- `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, `just test-shipping-resolution`,
+  `just test-ranger-gates`: pass. `openapi.json` regenerated (the changes route's description names the Catalog
+  family) and the client regenerated with it; `npm run gen:api` then shows no diff.
+- `cargo test --workspace --no-fail-fast` against the per-process test DB, `EGRET_ALLOW_DB_SKIP` unset: 8573 passed,
+  0 DB skips, 3 failing targets: `egret-workflow --test sql_starrocks_live` (needs a live StarRocks, known);
+  `egret-dataapi --test serving_shared_store` (needs `EGRET_TEST_SHARED_STORE_URL`; 14/14 with a throwaway valkey);
+  `table_hook_db`'s `a_rename_with_nothing_bound_moves_at_once` (a `< LIMIT/2` timing assertion, load average ~40
+  from other sessions; the binary passed 100/100 rerun alone).
+- Frontend: lint 0 errors, `tsc -b`, build and all eleven `test:bundle*` pass; vitest 8518/8527 under load (another
+  session's builds and this package's live-check image build), the 7 failing files untouched by this package; rerun
+  alone, all pass but `ScheduleDetail.test.tsx`'s "creates an alert through the real body shape", which times out at
+  5 s while the load lasts.
