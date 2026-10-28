@@ -346,6 +346,18 @@ pub const SOURCES: &[Source] = &[
         run: |c| Box::pin(catalog_grants_on_missing_tables(c)),
     },
     Source {
+        kind: "renamed_names_lost_grants",
+        what: "renamed tables' allow grants",
+        requires: POLICY,
+        run: |c| Box::pin(renamed_names_lost_grants(c)),
+    },
+    Source {
+        kind: "renamed_names_lost_catalog_grants",
+        what: "renamed tables' catalog grants",
+        requires: Requires::All(&[CATALOG_READ]),
+        run: |c| Box::pin(renamed_names_lost_catalog_grants(c)),
+    },
+    Source {
         kind: "renamed_names_reused",
         what: "renamed classified tables",
         requires: Requires::All(&[TAG_READ]),
@@ -2133,6 +2145,256 @@ async fn catalog_grants_on_missing_tables(
         Severity::Warning,
         n,
         sentence,
+        sample,
+        Some(Ref::Catalogs),
+    ))
+}
+
+/// R10's sentence for what a rename took away from a name (D17).
+fn lost_sentence(n: usize, what: &str) -> String {
+    if n == 1 {
+        format!(
+            "1 table name lost its {what} when its table was renamed, and a new table now holds \
+             the name without them: check whether it needs the {what} of the renamed table."
+        )
+    } else {
+        format!(
+            "{n} table names lost their {what} when their tables were renamed, and new tables \
+             now hold the names without them: check whether they need the {what} of the renamed \
+             tables."
+        )
+    }
+}
+
+/// D17: a table renamed away took its allow grants to its new name (G2), and
+/// a new table now holds the old name with none of them (the swap pattern).
+/// From each grant's latest `perm_grant:move` of a table rename: the old name
+/// is a live table again and carries no allow with the moved grant's actions
+/// and subjects.
+async fn renamed_names_lost_grants(c: &mut PgConnection) -> Result<Option<Finding>, SourceError> {
+    use serde_json::Value;
+    let events: Vec<Value> = sqlx::query_scalar(
+        "SELECT DISTINCT ON (resource_id) detail FROM audit.audit_log \
+          WHERE kind = 'mutation' AND action = 'perm_grant:move' \
+            AND resource_type = 'perm_grant' AND detail->>'trigger' = 'iceberg_rename' \
+          ORDER BY resource_id, ts DESC, id DESC",
+    )
+    .fetch_all(&mut *c)
+    .await?;
+    let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let list = |v: &Value, k: &str| -> Vec<String> {
+        let mut out: Vec<String> = v
+            .get(k)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+        out.sort();
+        out
+    };
+    // Old name (folded catalog, schema, table) → (spelling, renamed to, moved).
+    type Moved = (Vec<String>, Vec<String>);
+    type Name = (String, String, String);
+    type Entry = (Name, String, Vec<Moved>);
+    let mut names: BTreeMap<Name, Entry> = BTreeMap::new();
+    for d in &events {
+        let before = &d["before"];
+        let (catalog, schema, table) = (
+            text(before, "catalog"),
+            text(before, "schema"),
+            text(before, "table"),
+        );
+        if catalog.is_empty() || schema.is_empty() || table.is_empty() {
+            continue;
+        }
+        let to = format!(
+            "{}.{}",
+            text(&d["after"], "schema"),
+            text(&d["after"], "table")
+        );
+        let entry = names
+            .entry((
+                catalog.to_lowercase(),
+                schema.to_lowercase(),
+                table.to_lowercase(),
+            ))
+            .or_insert_with(|| {
+                (
+                    (catalog.clone(), schema.clone(), table.clone()),
+                    to,
+                    Vec::new(),
+                )
+            });
+        entry
+            .2
+            .push((list(before, "actions"), list(before, "include")));
+    }
+    if names.is_empty() {
+        return Ok(None);
+    }
+    let mut sample = Vec::new();
+    for ((catalog, schema, table), to, moved) in names.values() {
+        let warehouse: Option<Uuid> =
+            sqlx::query_scalar("SELECT warehouse_id FROM registry.catalogs WHERE name = $1")
+                .bind(catalog)
+                .fetch_optional(&mut *c)
+                .await?
+                .flatten();
+        let Some(warehouse_id) = warehouse else {
+            continue;
+        };
+        let key = TableKey {
+            warehouse_id,
+            schema: schema.clone(),
+            table: table.clone(),
+        };
+        if table_states_via(c, std::slice::from_ref(&key)).await? != [TableState::Live] {
+            continue;
+        }
+        // The allows on the old name now: (actions, subjects), each sorted.
+        let here: Vec<(Vec<String>, Vec<String>)> = sqlx::query_as(
+            "SELECT (SELECT array_agg(a ORDER BY a) FROM unnest(g.actions) a), \
+                    COALESCE((SELECT array_agg(p.kind::text || ':' || p.ref ORDER BY 1) \
+                                FROM perm.grant_principals p \
+                               WHERE p.grant_id = g.id AND p.mode = 'include'), '{}') \
+               FROM perm.grants g JOIN registry.catalogs rc ON rc.id = g.catalog_id \
+              WHERE rc.name = $1 AND g.effect = 'allow' \
+                AND lower(g.schema_name) = lower($2) AND lower(g.table_name) = lower($3)",
+        )
+        .bind(catalog)
+        .bind(schema)
+        .bind(table)
+        .fetch_all(&mut *c)
+        .await?;
+        if moved.iter().any(|m| here.contains(m)) {
+            continue;
+        }
+        let (to_schema, to_table) = to.split_once('.').unwrap_or((to.as_str(), ""));
+        sample.push(Sample {
+            label: format!("{catalog}.{schema}.{table}"),
+            detail: Some(format!(
+                "{} moved to {catalog}.{to} by a rename",
+                plural(moved.len(), "allow grant", "allow grants")
+            )),
+            r#ref: Some(Ref::Object {
+                catalog: catalog.clone(),
+                schema: to_schema.to_string(),
+                object: to_table.to_string(),
+            }),
+        });
+    }
+    let n = sample.len();
+    Ok(finding(
+        "renamed_names_lost_grants",
+        Severity::Warning,
+        n,
+        lost_sentence(n, "allow grants"),
+        sample,
+        Some(Ref::Data),
+    ))
+}
+
+/// D17 for catalog grants: from each grant's latest `catalog_grant:move`, the
+/// old name is a live table again and the role holds no grant of that
+/// privilege on it.
+async fn renamed_names_lost_catalog_grants(
+    c: &mut PgConnection,
+) -> Result<Option<Finding>, SourceError> {
+    use serde_json::Value;
+    let events: Vec<Value> = sqlx::query_scalar(
+        "SELECT DISTINCT ON (resource_id) detail FROM audit.audit_log \
+          WHERE kind = 'mutation' AND action = 'catalog_grant:move' \
+            AND resource_type = 'catalog_grant' AND detail->>'trigger' = 'iceberg_rename' \
+          ORDER BY resource_id, ts DESC, id DESC",
+    )
+    .fetch_all(&mut *c)
+    .await?;
+    let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let ns_of = |v: &Value| -> Vec<String> {
+        v.get("namespace")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect()
+    };
+    let mut sample = Vec::new();
+    let mut seen = HashSet::new();
+    for d in &events {
+        let Ok(warehouse_id) = text(d, "warehouse_id").parse::<Uuid>() else {
+            continue;
+        };
+        let (ns, table) = (ns_of(&d["before"]), text(&d["before"], "table"));
+        let (role, privilege) = (text(d, "role"), text(d, "privilege"));
+        if ns.is_empty() || table.is_empty() {
+            continue;
+        }
+        let key = NsTableKey {
+            warehouse_id,
+            namespace: ns.clone(),
+            table: table.clone(),
+        };
+        if table_states_ns_via(c, std::slice::from_ref(&key)).await? != [TableState::Live] {
+            continue;
+        }
+        let still: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM catalog.catalog_grants g \
+               JOIN catalog.catalog_roles r ON r.id = g.catalog_role_id \
+              WHERE r.warehouse_id = $1 AND r.name = $2 AND g.privilege = $3 \
+                AND g.securable_type = 'table' \
+                AND lower(array_to_string(g.namespace, chr(31))) = lower($4) \
+                AND lower(g.table_name) = lower($5))",
+        )
+        .bind(warehouse_id)
+        .bind(&role)
+        .bind(&privilege)
+        .bind(ns.join("\u{1f}"))
+        .bind(&table)
+        .fetch_one(&mut *c)
+        .await?;
+        if still {
+            continue;
+        }
+        let (warehouse, catalog): (String, Option<(Uuid, String)>) = {
+            let w: String = sqlx::query_scalar("SELECT name FROM catalog.warehouses WHERE id = $1")
+                .bind(warehouse_id)
+                .fetch_optional(&mut *c)
+                .await?
+                .unwrap_or_else(|| warehouse_id.to_string());
+            let cat: Option<(Uuid, String)> = sqlx::query_as(
+                "SELECT id, name FROM registry.catalogs WHERE warehouse_id = $1 ORDER BY name \
+                  LIMIT 1",
+            )
+            .bind(warehouse_id)
+            .fetch_optional(&mut *c)
+            .await?;
+            (w, cat)
+        };
+        let label = format!("{warehouse}.{}.{table}", ns.join("."));
+        if !seen.insert(label.clone()) {
+            continue;
+        }
+        let after = &d["after"];
+        sample.push(Sample {
+            label,
+            detail: Some(format!(
+                "role {role}, {privilege} moved to {}.{} by a rename",
+                ns_of(after).join("."),
+                text(after, "table")
+            )),
+            r#ref: catalog.map(|(id, name)| Ref::Catalog { id, name }),
+        });
+    }
+    sample.sort_by(|a, b| a.label.cmp(&b.label));
+    let n = sample.len();
+    Ok(finding(
+        "renamed_names_lost_catalog_grants",
+        Severity::Warning,
+        n,
+        lost_sentence(n, "catalog grants"),
         sample,
         Some(Ref::Catalogs),
     ))

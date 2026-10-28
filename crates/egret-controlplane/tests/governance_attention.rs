@@ -2040,3 +2040,154 @@ async fn catalog_grants_on_missing_tables_are_findings() {
         json!(["catalog_registry:read"])
     )));
 }
+
+// ── Grants follow a rename, Task 16: names a rename left without allows (D17) ──
+
+/// One `perm_grant:move` of a table rename, as the table hook stores it.
+async fn grant_moved_event(f: &Fixture, from: &str, to: &str, include: &[&str]) {
+    let summary = |table: &str| {
+        json!({"id": Uuid::new_v4(), "catalog": "lake", "schema": "sales", "table": table,
+               "column": null, "effect": "allow", "actions": ["read"], "include": include,
+               "exclude": []})
+    };
+    sqlx::query(
+        "INSERT INTO audit.audit_log (kind, action, resource_type, resource_id, detail) \
+         VALUES ('mutation', 'perm_grant:move', 'perm_grant', $1, $2)",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(json!({
+        "before": summary(from), "after": summary(to),
+        "rename": {"from": format!("sales.{from}"), "to": format!("sales.{to}")},
+        "trigger": "iceberg_rename",
+    }))
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+}
+
+/// D17: after `t -> t_old` moved an allow and a new `t` took the name with no
+/// equivalent allow, the Overview says so for a `policy:read` reader and links
+/// the renamed table; a name whose new table carries the allow again, and a
+/// name with no live table, are not reported.
+#[tokio::test]
+async fn a_reused_name_that_lost_its_allows_is_a_finding() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    sqlx::query("TRUNCATE audit.audit_log")
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    let (_, lk) = stub_warehouse(&f, "lake").await;
+    for table in ["t", "t_old", "u", "u_old"] {
+        lakekeeper_stub::add_table(&f.db, lk, &["sales"], table, &["id"]).await;
+    }
+    let cat = catalog_id(&f, "lake").await;
+    grant_moved_event(&f, "t", "t_old", &["user:ana"]).await;
+    grant_moved_event(&f, "u", "u_old", &["user:ana"]).await;
+    grant_moved_event(&f, "gone", "gone_old", &["user:ana"]).await;
+    // The new `u` carries the same allow again.
+    let again = perm_grant(&f, cat, "allow", "u", None).await;
+    sqlx::query("INSERT INTO perm.grant_principals (grant_id, kind, ref, mode) VALUES ($1, 'user', 'ana', 'include')")
+        .bind(again)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    let policy_reader = session(&f, &["policy:read"]).await;
+    let tag_reader = session(&f, &["tag:read"]).await;
+    let st = state(&f).await;
+
+    let (status, body) = attention(&st, &policy_reader).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let lost = finding(&body, "renamed_names_lost_grants").expect("lost grants");
+    assert_eq!(lost["count"], 1);
+    assert_eq!(
+        lost["sentence"],
+        "1 table name lost its allow grants when its table was renamed, and a new table now \
+         holds the name without them: check whether it needs the allow grants of the renamed \
+         table."
+    );
+    assert_eq!(
+        lost["sample"],
+        json!([{"label": "lake.sales.t", "detail": "1 allow grant moved to lake.sales.t_old by a rename",
+                "ref": {"type": "object", "catalog": "lake", "schema": "sales", "object": "t_old"}}])
+    );
+    let (status, body) = attention(&st, &tag_reader).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(not_checked(&body).contains(&(
+        "renamed_names_lost_grants".to_string(),
+        json!(["policy:read"])
+    )));
+}
+
+/// D17 for catalog grants, for a `catalog_registry:read` reader.
+#[tokio::test]
+async fn a_reused_name_that_lost_its_catalog_grants_is_a_finding() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    sqlx::query("TRUNCATE audit.audit_log")
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM catalog.catalog_grants")
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    let (warehouse, lk) = stub_warehouse(&f, "lake").await;
+    for table in ["t", "t_old", "u", "u_old"] {
+        lakekeeper_stub::add_table(&f.db, lk, &["sales"], table, &["id"]).await;
+    }
+    let warehouse_name: String =
+        sqlx::query_scalar("SELECT name FROM catalog.warehouses WHERE id = $1")
+            .bind(warehouse)
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    let store = egret_catalog_engine::CatalogStore::new(f.db.clone());
+    let role = store
+        .create_role(warehouse, "analysts", "external", None)
+        .await
+        .unwrap();
+    for table in ["t_old", "u_old", "u"] {
+        store
+            .add_grant(
+                role.id,
+                &egret_catalog_engine::GrantInput {
+                    securable_type: "table".into(),
+                    namespace: Some(vec!["sales".into()]),
+                    table_name: Some(table.into()),
+                    privilege: "read".into(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    for (from, to) in [("t", "t_old"), ("u", "u_old")] {
+        sqlx::query(
+            "INSERT INTO audit.audit_log (kind, action, resource_type, resource_id, detail) \
+             VALUES ('mutation', 'catalog_grant:move', 'catalog_grant', $1, $2)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(json!({
+            "warehouse_id": warehouse, "role": "analysts", "privilege": "read",
+            "before": {"namespace": ["sales"], "table": from},
+            "after": {"namespace": ["sales"], "table": to},
+            "merged": false, "trigger": "iceberg_rename",
+        }))
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    }
+    let catalog_reader = session(&f, &["tag:read", "catalog_registry:read"]).await;
+    let st = state(&f).await;
+    let (status, body) = attention(&st, &catalog_reader).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let lost = finding(&body, "renamed_names_lost_catalog_grants").expect("lost catalog grants");
+    assert_eq!(lost["count"], 1);
+    let cat = catalog_id(&f, "lake").await;
+    assert_eq!(
+        lost["sample"],
+        json!([{"label": format!("{warehouse_name}.sales.t"),
+                "detail": "role analysts, read moved to sales.t_old by a rename",
+                "ref": {"type": "catalog", "id": cat, "name": "lake"}}])
+    );
+}
