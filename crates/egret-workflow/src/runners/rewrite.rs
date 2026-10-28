@@ -46,9 +46,9 @@
 //!   parse — but only when a ternary is actually present, since some tag
 //!   bodies (`{% filter %}`) are not expression positions at all; see
 //!   "`{{ }}` expressions vs. `{% %}` tags" below and [`rewrite_tag_body`].
-//! - *Precedence tiers below and at 30 need boundary-awareness even where
-//!   this rewrite never touches the operator itself* (`and`/`or`, the
-//!   comparison operators, `equals`), or a coalesce search swallows across
+//! - *Precedence tiers below and at 30 need boundary-awareness* (`and`/`or`,
+//!   `contains`, the comparison operators and `equals`, which this rewrite
+//!   compiles since package #5a Task A6), or a coalesce search swallows across
 //!   them — and `is`/`is not` specifically can only ever extend LEFT
 //!   (Pebble's `BinaryOperatorType.TEST`), never right, unlike every other
 //!   tier; see [`resolve_pieces`] and [`find_rightmost_tier20`].
@@ -87,11 +87,29 @@
 //! (`Extension.getBinaryOperators()`), but minijinja functions receive their
 //! arguments already evaluated — there is no lazy "don't evaluate the right
 //! side unless needed" hook available to a rewrite that only reshapes text.
-//! `rewrite` therefore produces plain function *calls* —
-//! `kestra_null_coalesce(a, b)` / `kestra_undefined_coalesce(a, b)` — and
-//! leaves it to whatever registers those functions (Task 3) to give them the
-//! right short-circuit/attribute-missing semantics. This module does not
-//! attempt that; it only reshapes syntax.
+//! For a left operand that is anything but a path, `rewrite` therefore
+//! produces plain function *calls* — `kestra_null_coalesce(a, b)` /
+//! `kestra_undefined_coalesce(a, b)` — and both sides are evaluated.
+//!
+//! **A path on the left is lazy (spec D6, package #5a Task A5, 2026-10-29).**
+//! When the left operand is a root name followed by `.name`, `['literal']`
+//! or `[integer]` steps ([`path_operand`]), the operator compiles to
+//! minijinja's inline `if`, which IS lazy:
+//!
+//! ```text
+//! {{ obj.a.b ?? x }}   ->  ((kestra_path(obj, 'a', 'b')) if kestra_present(kestra_path(obj, 'a', 'b')) else ( x ))
+//! {{ obj.a ??? x }}    ->  ((kestra_path(obj, 'a')) if kestra_defined(kestra_path(obj, 'a')) else ( x ))
+//! {{ x ?? missing.y }} ->  ((x) if kestra_present(x) else ( missing.y))
+//! ```
+//!
+//! `kestra_path` reads each step without raising (a missing step, or a step
+//! from a null, is `Undefined` -- Pebble's `AttributeNotFoundException`,
+//! which both operators catch), so `trigger.body ?? 'h'` answers `h` where
+//! strict undefined used to raise before the coalesce ran. This reverses the
+//! "deliberate" `coalesce-nested-absent` ruling (spec Q6). The path is
+//! evaluated twice, which is safe because a path read is pure; a call is
+//! not, which is why a non-path left operand keeps the eager form and
+//! `{{ f() ?? missing.y }}` is a recorded divergence.
 //!
 //! # Pebble's `null` literal, and why it is this module's problem
 //!
@@ -157,6 +175,26 @@
 //! a same-shaped-looking example that merely reads as if it should).
 //! Everything else — identifiers, numbers, whitespace, dots, `|`, the
 //! untouched comparison operators — is copied through byte-for-byte.
+//!
+//! # `equals`, `contains`, `..`, `and`, `or` (package #5a Task A6, spec D5)
+//!
+//! minijinja has no `equals`, `contains` or `..`, and its `and`/`or` return
+//! an operand where Pebble's return a strict boolean. Each is compiled at
+//! Pebble's precedence into syntax minijinja parses:
+//!
+//! ```text
+//! {{ a equals b }}    ->  {{ a == b }}                     (tokenize; then kestra_eq)
+//! {{ l contains x }}  ->  {{kestra_contains(( l ), ( x ))}} (tier 20, resolve_pieces)
+//! {{ 1 .. n }}        ->  {{ kestra_range(1, n) }}         (120, compile_ranges)
+//! {{ a and b or c }}  ->  {{kestra_bool(kestra_bool( a ) and kestra_bool( b )) or kestra_bool( c )}}
+//! ```
+//!
+//! The functions are `super::operators`. A word in attribute position
+//! (`x.equals`, `x.or`) is a name, not the operator. `contains` evaluates its
+//! right side eagerly where Pebble skips it under a null left side: a right
+//! side that RAISES (`n contains (1 / 0)` with `n` null) fails here and
+//! answers `false` in Kestra; a merely missing one does not, because
+//! `kestra_contains` answers a null left side before it looks at the right.
 //!
 //! # `isIn` — settled: a function, not minijinja's `in`
 //!
@@ -864,6 +902,12 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, RewriteError> {
                 // included, and so would not have demonstrated anything).
                 if word == "isIn" {
                     toks.push(Tok::IsIn(word.to_string()));
+                } else if word == "equals" && !follows_an_attribute_dot(&toks) {
+                    // Pebble's `equals` is `EqualExpression`, the class `==`
+                    // compiles to, at the same precedence (30): spelling it
+                    // `==` hands it to the comparison pass, which makes it
+                    // `kestra_eq` (package #5a Task A6, spec D5).
+                    toks.push(Tok::Text("==".to_string()));
                 } else if is_null_literal_spelling(word) && !follows_an_attribute_dot(&toks) {
                     toks.push(Tok::Text(NULL_LITERAL_IN_MINIJINJA.to_string()));
                 } else {
@@ -1084,8 +1128,9 @@ fn resolve_flat(tokens: &[Tok], depth: usize) -> Result<String, RewriteError> {
 ///    nesting. The then-branch (and defensively the condition) are wrapped
 ///    in parens on the way out; see the comment at the `format!` below for
 ///    why that parenthesization is not cosmetic.
-/// 4. Only when this slice actually contains a `??`/`???`/`isIn` somewhere
-///    (see `has_rewritable_op` below) -- Pebble 4.1.2's full binary-operator
+/// 4. Only when this slice actually contains a `??`/`???`/`isIn`, or (since
+///    package #5a Task A6, spec D5) a top-level `or`/`and`/`contains`,
+///    somewhere (see `has_rewritable_op` below) -- Pebble 4.1.2's full binary-operator
 ///    precedence table, read out of the pinned jar's bytecode (not just the
 ///    subset this rewrite acts on), WITH each operator's `BinaryOperatorType`
 ///    (also read from the bytecode -- this is not cosmetic, see below):
@@ -1148,10 +1193,13 @@ fn resolve_flat(tokens: &[Tok], depth: usize) -> Result<String, RewriteError> {
 ///    `Op` piece's own original text (an operator with no matching partner,
 ///    e.g. a stray `:` with no preceding `?`, is left untouched rather than
 ///    guessed at). This is also where a slice with comparison operators but
-///    NO `??`/`???`/`isIn` ends up (step 4 is skipped entirely for it), so a
-///    plain `{{ 'b' > 'a' }}` still reconstructs byte-for-byte instead of
-///    being re-formatted through the tier-30 `{left} {op} {right}` shape for
-///    no reason.
+///    none of step 4's operators ends up (step 4 is skipped entirely for
+///    it), so a plain `{{ 'b' > 'a' }}` still reconstructs byte-for-byte
+///    instead of being re-formatted through the tier-30 `{left} {op}
+///    {right}` shape for no reason. Every `..` in the slice is compiled to
+///    `kestra_range(a, b)` here ([`compile_ranges`]): it binds tighter than
+///    every operator this function splits on, so both its operands are
+///    always inside one such leaf.
 fn resolve_pieces(pieces: &[Piece], depth: usize) -> Result<String, RewriteError> {
     if depth > MAX_NESTING_DEPTH {
         return Err(RewriteError::TooDeeplyNested {
@@ -1166,6 +1214,18 @@ fn resolve_pieces(pieces: &[Piece], depth: usize) -> Result<String, RewriteError
             .map(|s| resolve_pieces(s, depth + 1))
             .collect();
         return Ok(resolved?.join(","));
+    }
+
+    // A keyword argument (`f(k=v)`) or an assignment target (`{% with k = v
+    // %}`): `name =` is not part of any operand, so only the value is
+    // resolved. Without this an operator in the value took the name into its
+    // left operand (`abbreviate(kestra_bool(length=t) and ..)`, fix wave
+    // #5a I2) or, for `??` and `? :`, split it off into a call the parser
+    // refuses.
+    if let Some(eq_idx) = keyword_argument_equals(pieces) {
+        let name: String = pieces[..=eq_idx].iter().map(piece_text).collect();
+        let value = resolve_pieces(&pieces[eq_idx + 1..], depth + 1)?;
+        return Ok(format!("{name}{value}"));
     }
 
     if let Some(colon_idx) = find_map_separator_colon(pieces) {
@@ -1194,6 +1254,9 @@ fn resolve_pieces(pieces: &[Piece], depth: usize) -> Result<String, RewriteError
         return Ok(format!("({then_branch}) if ({cond}) else {else_branch}"));
     }
 
+    // Package #5a Task A6 (spec D5): `and`, `or` and `contains` are compiled
+    // too, so a slice holding one of them takes the precedence walk below
+    // even with no `??`/`???`/`isIn` in it.
     let has_rewritable_op = pieces.iter().any(|p| {
         matches!(
             p,
@@ -1202,7 +1265,9 @@ fn resolve_pieces(pieces: &[Piece], depth: usize) -> Result<String, RewriteError
                 _
             )
         )
-    });
+    }) || ["or", "and", "contains"]
+        .iter()
+        .any(|word| find_rightmost_word(pieces, word).is_some());
 
     if has_rewritable_op {
         // `or`/`and` wrap both sides in parens -- redundant for correctness
@@ -1217,16 +1282,20 @@ fn resolve_pieces(pieces: &[Piece], depth: usize) -> Result<String, RewriteError
         // observable in the output, which is what
         // `chained_or_splits_rightmost_for_left_associativity` below
         // depends on.
-        if let Some(idx) = find_rightmost_word(pieces, "or") {
-            let left = resolve_pieces(&pieces[..idx], depth + 1)?;
-            let right = resolve_pieces(&pieces[idx + 1..], depth + 1)?;
-            return Ok(format!("({left}) or ({right})"));
-        }
-
-        if let Some(idx) = find_rightmost_word(pieces, "and") {
-            let left = resolve_pieces(&pieces[..idx], depth + 1)?;
-            let right = resolve_pieces(&pieces[idx + 1..], depth + 1)?;
-            return Ok(format!("({left}) and ({right})"));
+        //
+        // Package #5a Task A6 (spec D5): each operand is wrapped in
+        // `kestra_bool(..)`, Pebble's `compatibleCast(.., Boolean)`, so the
+        // result is a strict boolean, and minijinja's own `or`/`and` keep the
+        // short circuit. A chain is split at EVERY top-level occurrence and
+        // rejoined flat (`kestra_bool(a) or kestra_bool(b) or kestra_bool(c)`):
+        // minijinja's `or`/`and` are left-associative like Pebble's, and a
+        // flat chain does not nest one call per operator, which a long
+        // `{% if a and b and ... %}` would otherwise walk into minijinja's
+        // parser recursion limit with.
+        for word in ["or", "and"] {
+            if find_rightmost_word(pieces, word).is_some() {
+                return bool_chain(pieces, word, depth);
+            }
         }
 
         // Tier 20: `is`/`is not`/`contains`, still lower precedence than
@@ -1257,7 +1326,9 @@ fn resolve_pieces(pieces: &[Piece], depth: usize) -> Result<String, RewriteError
             // `find_rightmost_tier20` (not a rendering trick) is what keeps
             // an `is` node from ever incorrectly becoming the outer split.
             if is_contains {
-                return Ok(format!("({left}) contains ({right})"));
+                // Package #5a Task A6 (spec D5): Pebble's
+                // `ContainsExpression`, `super::operators`.
+                return Ok(format!("kestra_contains(({left}), ({right}))"));
             }
             // Only ever `is` here -- `find_rightmost_tier20` returns just
             // `is`/`contains`, and `contains` already returned above, so
@@ -1266,8 +1337,24 @@ fn resolve_pieces(pieces: &[Piece], depth: usize) -> Result<String, RewriteError
         }
 
         if let Some(idx) = find_rightmost_tier30(pieces) {
-            let left = resolve_pieces(&pieces[..idx], depth + 1)?;
             let right = resolve_pieces(&pieces[idx + 1..], depth + 1)?;
+            // Spec D6 (package #5a Task A5): a PATH on the left of `??`/`???`
+            // compiles to the inline-`if` form, so a missing step answers
+            // the right side and the right side is evaluated only when it is
+            // needed -- see [`path_operand`].
+            if let Piece::Op(op @ (OpKind::NullCoalesce | OpKind::UndefinedCoalesce), _) =
+                &pieces[idx]
+            {
+                if let Some(path) = path_operand(&pieces[..idx]) {
+                    let test = if *op == OpKind::NullCoalesce {
+                        "kestra_present"
+                    } else {
+                        "kestra_defined"
+                    };
+                    return Ok(format!("(({path}) if {test}({path}) else ({right}))"));
+                }
+            }
+            let left = resolve_pieces(&pieces[..idx], depth + 1)?;
             return Ok(match &pieces[idx] {
                 Piece::Op(OpKind::NullCoalesce, _) => {
                     format!("kestra_null_coalesce({left}, {right})")
@@ -1298,13 +1385,199 @@ fn resolve_pieces(pieces: &[Piece], depth: usize) -> Result<String, RewriteError
         }
     }
 
-    Ok(pieces
+    let mut texts: Vec<String> = pieces
         .iter()
         .map(|p| match p {
-            Piece::Atom(s) => s.as_str(),
-            Piece::Op(_, s) => s.as_str(),
+            Piece::Atom(s) | Piece::Op(_, s) => s.clone(),
         })
-        .collect())
+        .collect();
+    compile_ranges(&mut texts);
+    Ok(texts.concat())
+}
+
+/// Resolves an `or` (or `and`) chain: every top-level `word` splits it, each
+/// operand is resolved on its own and wrapped in `kestra_bool(..)`, and the
+/// chain is rejoined flat. See the call site.
+fn bool_chain(pieces: &[Piece], word: &str, depth: usize) -> Result<String, RewriteError> {
+    let mut operands = Vec::new();
+    let mut start = 0usize;
+    for i in 0..pieces.len() {
+        if is_word_at(pieces, i, word) {
+            operands.push(&pieces[start..i]);
+            start = i + 1;
+        }
+    }
+    operands.push(&pieces[start..]);
+    let resolved: Result<Vec<String>, RewriteError> = operands
+        .into_iter()
+        .map(|operand| {
+            Ok(format!(
+                "kestra_bool({})",
+                resolve_pieces(operand, depth + 1)?
+            ))
+        })
+        .collect();
+    Ok(resolved?.join(&format!(" {word} ")))
+}
+
+/// Compiles every Pebble `..` (precedence 120, above every binary operator
+/// but below the unary ones and a postfix step) in one fully resolved flat
+/// slice into `kestra_range(a, b)` (package #5a Task A6, spec D5).
+///
+/// `..` binds tighter than anything this rewrite splits on, so its operands
+/// are always inside one leaf: the left one is the postfix chain that ends
+/// right before it (a name, number, string or group, then `.name`, `(..)` and
+/// `[..]` steps; `1.5` is `1`, `.`, `5` here and is one chain), with a unary
+/// sign in front of it and a filter chain it is the end of (`a | f .. b` is
+/// `(a | f) .. b` in Pebble, which applies a filter at 100 before it reaches
+/// the `..`); the right one is a postfix chain with an optional unary sign, so
+/// `1 .. n | length` is `(1 .. n) | length`. Chained `..` compiles left to
+/// right (`(a .. b) .. c`), as Pebble's left-associative operator does. A `..`
+/// with no operand on a side is left as it is, for minijinja to refuse.
+fn compile_ranges(texts: &mut Vec<String>) {
+    let mut from = 0usize;
+    while let Some(dot) =
+        (from..texts.len().saturating_sub(1)).find(|&i| texts[i] == "." && texts[i + 1] == ".")
+    {
+        match range_operands(texts, dot) {
+            Some((start, end)) => {
+                let left = texts[start..dot].concat();
+                let right = texts[dot + 2..end].concat();
+                let call = format!("kestra_range({}, {})", left.trim(), right.trim());
+                texts.splice(start..end, [call]);
+                from = start;
+            }
+            None => from = dot + 2,
+        }
+    }
+}
+
+/// The span `start..end` of `left .. right` around the `..` at `dot`, or
+/// `None` when either operand is missing.
+fn range_operands(texts: &[String], dot: usize) -> Option<(usize, usize)> {
+    let is_ws = |s: &str| !s.is_empty() && s.chars().all(char::is_whitespace);
+    let skip_ws_back = |mut at: usize| {
+        while at > 0 && is_ws(&texts[at - 1]) {
+            at -= 1;
+        }
+        at
+    };
+    let skip_ws = |mut at: usize| {
+        while at < texts.len() && is_ws(&texts[at]) {
+            at += 1;
+        }
+        at
+    };
+
+    // Left: postfix chains joined by filters, then a unary sign.
+    let mut start = dot;
+    loop {
+        let end = skip_ws_back(start);
+        if end == 0 || !ends_operand(&texts[end - 1]) {
+            return None;
+        }
+        start = postfix_chain_start(texts, end - 1);
+        let before = skip_ws_back(start);
+        if before > 0 && texts[before - 1] == "|" {
+            start = before - 1;
+            continue;
+        }
+        if before > 0 && matches!(texts[before - 1].as_str(), "-" | "+") {
+            let sign = before - 1;
+            let prior = skip_ws_back(sign);
+            if prior == 0 || !ends_operand(&texts[prior - 1]) {
+                start = sign;
+            }
+        }
+        break;
+    }
+
+    // Right: a unary sign, then one postfix chain.
+    let mut at = skip_ws(dot + 2);
+    if at < texts.len() && matches!(texts[at].as_str(), "-" | "+") {
+        at = skip_ws(at + 1);
+    }
+    if at >= texts.len() || !starts_operand(&texts[at]) {
+        return None;
+    }
+    let mut end = at + 1;
+    loop {
+        if end < texts.len() && (texts[end].starts_with('(') || texts[end].starts_with('[')) {
+            end += 1;
+            continue;
+        }
+        // A member step, with whitespace around its `.` as Pebble's lexer
+        // allows it (`1 .. o . x`, fix wave #5a M5; `path_operand` reads
+        // `o . a` the same way). A `.` followed by `.` is the next `..`.
+        let dot_at = skip_ws(end);
+        if dot_at + 1 < texts.len() && texts[dot_at] == "." && texts[dot_at + 1] != "." {
+            let name = skip_ws(dot_at + 1);
+            if name < texts.len() && starts_operand(&texts[name]) {
+                end = name + 1;
+                continue;
+            }
+        }
+        break;
+    }
+    Some((start, end))
+}
+
+/// Walks a postfix chain back from its last atom at `last`: a group right
+/// after an operand is a call or a subscript, and `.` between two operands is
+/// a member step, with whitespace allowed around that `.` (fix wave #5a M5).
+fn postfix_chain_start(texts: &[String], last: usize) -> usize {
+    let is_ws = |s: &str| !s.is_empty() && s.chars().all(char::is_whitespace);
+    let skip_ws_back = |mut at: usize| {
+        while at > 0 && is_ws(&texts[at - 1]) {
+            at -= 1;
+        }
+        at
+    };
+    let mut start = last;
+    loop {
+        if start > 0
+            && (texts[start].starts_with('(') || texts[start].starts_with('['))
+            && ends_operand(&texts[start - 1])
+        {
+            start -= 1;
+            continue;
+        }
+        // `dot` is just past the `.`; one before it, a second `.`, would make
+        // it the end of a `..`, not a member step.
+        let dot = skip_ws_back(start);
+        if dot >= 1 && texts[dot - 1] == "." && !(dot >= 2 && texts[dot - 2] == ".") {
+            let before = skip_ws_back(dot - 1);
+            if before >= 1 && ends_operand(&texts[before - 1]) {
+                start = before - 1;
+                continue;
+            }
+        }
+        return start;
+    }
+}
+
+/// Words that are operators or tag syntax, never an operand.
+fn is_keyword(s: &str) -> bool {
+    matches!(
+        s,
+        "and" | "or" | "not" | "in" | "is" | "if" | "else" | "contains"
+    )
+}
+
+/// Can this atom end an operand (a name, number, string or group)?
+fn ends_operand(s: &str) -> bool {
+    !is_keyword(s)
+        && s.chars()
+            .last()
+            .is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | '\'' | '"' | ')' | ']' | '}'))
+}
+
+/// Can this atom start an operand?
+fn starts_operand(s: &str) -> bool {
+    !is_keyword(s)
+        && s.chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | '\'' | '"' | '(' | '[' | '{'))
 }
 
 /// Splits `pieces` on every top-level `,` (there are none nested inside a
@@ -1333,6 +1606,38 @@ fn split_on_top_level_commas(pieces: &[Piece]) -> Option<Vec<&[Piece]>> {
     }
     segments.push(&pieces[start..]);
     Some(segments)
+}
+
+/// The verbatim text of one piece.
+fn piece_text(piece: &Piece) -> &str {
+    match piece {
+        Piece::Atom(s) | Piece::Op(_, s) => s,
+    }
+}
+
+/// Is this (already comma-isolated) slice `name = value`? Returns the index
+/// of the `=`: a single `=` atom (the tokenizer keeps `==`, `!=`, `<=` and
+/// `>=` whole, so this is never half of one) after one identifier, with only
+/// whitespace around them. That is minijinja's keyword argument and its
+/// `with`/`set` target, and in Kestra a named argument (Pebble's
+/// `NamedArgumentExpression`): never an operand of anything.
+fn keyword_argument_equals(pieces: &[Piece]) -> Option<usize> {
+    let is_space = |p: &Piece| matches!(p, Piece::Atom(s) if !s.is_empty() && s.trim().is_empty());
+    let mut i = pieces.iter().position(|p| !is_space(p))?;
+    match &pieces[i] {
+        Piece::Atom(name)
+            if name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphabetic() || c == '_')
+                && name.chars().all(|c| c.is_alphanumeric() || c == '_') => {}
+        _ => return None,
+    }
+    i += 1;
+    while i < pieces.len() && is_space(&pieces[i]) {
+        i += 1;
+    }
+    matches!(pieces.get(i), Some(Piece::Atom(s)) if s == "=").then_some(i)
 }
 
 /// Finds a map literal's key/value `:` -- distinguished from a ternary's `:`
@@ -1388,15 +1693,26 @@ fn find_ternary(pieces: &[Piece]) -> Option<(usize, usize)> {
 /// point for left-associative chaining, same reasoning as
 /// [`find_rightmost_tier30`].
 fn find_rightmost_word(pieces: &[Piece], word: &str) -> Option<usize> {
-    pieces.iter().enumerate().rev().find_map(|(i, p)| match p {
-        Piece::Atom(s) if s == word => Some(i),
-        _ => None,
-    })
+    (0..pieces.len())
+        .rev()
+        .find(|&i| is_word_at(pieces, i, word))
+}
+
+/// Is `pieces[i]` the operator word `word`, and not an attribute of that name
+/// (`x.or`, across whitespace as [`follows_an_attribute_dot`] reads it)?
+fn is_word_at(pieces: &[Piece], i: usize, word: &str) -> bool {
+    let is_word = matches!(&pieces[i], Piece::Atom(s) if s == word);
+    is_word
+        && !pieces[..i]
+            .iter()
+            .rev()
+            .find(|p| !matches!(p, Piece::Atom(s) if !s.is_empty() && s.chars().all(char::is_whitespace)))
+            .is_some_and(|p| matches!(p, Piece::Atom(s) if s == "."))
 }
 
 /// True for a piece this rewrite treats as a tier-30 boundary
-/// (`??`/`???`/`isIn`, or the untouched `==`/`!=`/`>`/`>=`/`<`/`<=`/
-/// `equals`) -- shared by [`find_rightmost_tier20`] (to disqualify an `is`
+/// (`??`/`???`/`isIn`, or the untouched `==`/`!=`/`>`/`>=`/`<`/`<=`;
+/// `equals` arrives as `==` from [`tokenize`]) -- shared by [`find_rightmost_tier20`] (to disqualify an `is`
 /// candidate that one of these follows) and [`find_rightmost_tier30`]
 /// itself.
 fn is_tier30_trigger(p: &Piece) -> bool {
@@ -1408,7 +1724,7 @@ fn is_tier30_trigger(p: &Piece) -> bool {
         )
     ) || matches!(
         p,
-        Piece::Atom(s) if matches!(s.as_str(), "==" | "!=" | ">" | ">=" | "<" | "<=" | "equals")
+        Piece::Atom(s) if matches!(s.as_str(), "==" | "!=" | ">" | ">=" | "<" | "<=")
     )
 }
 
@@ -1438,7 +1754,7 @@ fn is_tier30_trigger(p: &Piece) -> bool {
 fn find_rightmost_tier20(pieces: &[Piece]) -> Option<usize> {
     for (i, p) in pieces.iter().enumerate().rev() {
         match p {
-            Piece::Atom(s) if s == "contains" => return Some(i),
+            Piece::Atom(_) if is_word_at(pieces, i, "contains") => return Some(i),
             Piece::Atom(s) if s == "is" => {
                 // A disqualified `is` (a tier-30 trigger follows it)
                 // suppresses the WHOLE tier-20 step here -- it must not
@@ -1467,8 +1783,8 @@ fn find_rightmost_tier20(pieces: &[Piece]) -> Option<usize> {
 
 /// Finds the last (rightmost) precedence-30 boundary among `pieces` --
 /// `??`/`???`/`isIn` (which this rewrite acts on) together with
-/// `==`/`!=`/`>`/`>=`/`<`/`<=` AND their word alias `equals` (all of which
-/// it recognises as fellow same-tier operators but never touches).
+/// `==`/`!=`/`>`/`>=`/`<`/`<=` (`equals`, their word alias, is `==` from
+/// [`tokenize`] on) (all of which it recognises as fellow same-tier operators but never touches).
 /// Rightmost is correct for left-associative chaining among
 /// SAME-precedence operators regardless of which specific operator each
 /// occurrence is: `a ?? b == c` chains left-to-right through the tier
@@ -1477,16 +1793,82 @@ fn find_rightmost_tier20(pieces: &[Piece]) -> Option<usize> {
 /// against real Pebble, not assumed (see `oracle/corpus.json`'s
 /// `coalesce-eq` entry).
 fn find_rightmost_tier30(pieces: &[Piece]) -> Option<usize> {
-    // `equals` (Pebble's word alias for `==`, same tier) is folded into
-    // `is_tier30_trigger` -- omitting it would not silently misgroup
-    // anything on its own (an unrecognised bare word is just inert text),
-    // but it would let a coalesce search swallow straight across it exactly
-    // like the pre-fix `==` gap did.
+    // `equals` (Pebble's word alias for `==`, same tier) used to be its own
+    // entry in `is_tier30_trigger`; since package #5a Task A6 [`tokenize`]
+    // spells it `==`, so the `==` entry covers it.
     pieces
         .iter()
         .enumerate()
         .rev()
         .find_map(|(i, p)| is_tier30_trigger(p).then_some(i))
+}
+
+/// The left operand of `??`/`???` as a **path** (spec D6), compiled to the
+/// expression that reads it without raising: the root alone (`x`), or
+/// `kestra_path(root, 'a', 'b', 0)` for `root.a['b'][0]`. `None` when the
+/// operand is anything else -- a call, a filter, a string or number literal,
+/// arithmetic, a nested coalesce -- which keeps the eager
+/// `kestra_null_coalesce` form. (`true` or `none` alone pass as a root; their
+/// value is the same either way.)
+///
+/// A path is a root name followed by `.name`, `['literal']` or
+/// `[integer]` steps (whitespace around a `.` is allowed, as Pebble's lexer
+/// allows it). A root or a `.name` step that starts with a digit is not a
+/// name (`1.5` is a number, not `1` then `5`), and a negative or computed
+/// index is not a literal step.
+///
+/// Why only a path: the inline-`if` form evaluates the left operand twice,
+/// once for the test and once for the answer. A path read is pure, so that
+/// is safe; a call (`kv(..)`, `secret(..)`, `now()`) would run twice. Kestra
+/// evaluates the right side lazily for every left operand, so a non-path
+/// left operand with a right side that raises (`f() ?? missing.y`) is the
+/// recorded divergence (`coalesce-non-path-left-missing-right`).
+fn path_operand(pieces: &[Piece]) -> Option<String> {
+    let mut atoms = pieces.iter().filter_map(|p| match p {
+        Piece::Atom(s) if s.chars().all(char::is_whitespace) => None,
+        Piece::Atom(s) => Some(Some(s.as_str())),
+        Piece::Op(..) => Some(None),
+    });
+    let root = atoms.next()??;
+    if !is_name(root) {
+        return None;
+    }
+    let mut steps = Vec::new();
+    while let Some(atom) = atoms.next() {
+        let atom = atom?;
+        if atom == "." {
+            let name = atoms.next()??;
+            if !is_name(name) {
+                return None;
+            }
+            steps.push(format!("'{name}'"));
+        } else {
+            steps.push(literal_subscript(atom)?);
+        }
+    }
+    if steps.is_empty() {
+        return Some(root.to_string());
+    }
+    Some(format!("kestra_path({root}, {})", steps.join(", ")))
+}
+
+/// A name: an identifier that does not start with a digit.
+fn is_name(s: &str) -> bool {
+    s.chars().next().is_some_and(|c| !c.is_ascii_digit())
+        && s.chars().all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// `['literal']` or `[integer]` (an already-resolved bracket group), as the
+/// step argument; `None` for anything else.
+fn literal_subscript(atom: &str) -> Option<String> {
+    let inner = atom.strip_prefix('[')?.strip_suffix(']')?.trim();
+    if !inner.is_empty() && inner.bytes().all(|b| b.is_ascii_digit()) {
+        return Some(inner.to_string());
+    }
+    match tokenize(inner).ok()?.as_slice() {
+        [Tok::Str(s)] => Some(s.clone()),
+        _ => None,
+    }
 }
 
 /// Tokenizes and rewrites the inside of one `{{ }}` region as a single
@@ -1537,6 +1919,23 @@ fn rewrite_tag_body(body: &str) -> Result<String, RewriteError> {
             let target: String = rest[..b_idx].iter().map(Tok::text).collect();
             let boundary_text = rest[b_idx].text();
             let value_tokens = &rest[b_idx + 1..];
+            // minijinja's loop filter, `{% for x in l if cond %}`: not
+            // Pebble syntax, but egret has always passed it through, and
+            // since package #5a Task A6 compiles `and`/`or` the iterable and
+            // the condition must be resolved apart, or an `and` in the
+            // condition would swallow the iterable into its left operand.
+            let loop_filter = if keyword == "for" {
+                find_top_level_word(value_tokens, "if")
+            } else {
+                None
+            };
+            let (value_tokens, loop_filter) = match loop_filter {
+                Some(at) => {
+                    let condition = resolve_flat(&value_tokens[at + 1..], 0)?;
+                    (&value_tokens[..at], format!(" if {}", condition.trim()))
+                }
+                None => (value_tokens, String::new()),
+            };
             let value_pieces = expand(value_tokens, 0)?;
             let value_has_top_level_ternary = find_ternary(&value_pieces).is_some();
             let value = resolve_pieces(&value_pieces, 0)?;
@@ -1557,7 +1956,7 @@ fn rewrite_tag_body(body: &str) -> Result<String, RewriteError> {
             } else {
                 value.to_string()
             };
-            format!("{} {boundary_text} {value}", target.trim())
+            format!("{} {boundary_text} {value}{loop_filter}", target.trim())
         }
         None => {
             let pieces = expand(rest, 0)?;
@@ -1668,28 +2067,6 @@ mod tests {
         out
     }
 
-    /// Asserts the rewritten STRING only, deliberately bypassing the
-    /// minijinja parse gate `rewrite_and_parse` enforces everywhere else in
-    /// this module. This exists for exactly one, narrow reason: `equals`
-    /// and `contains`, as bare infix words, are not valid minijinja syntax
-    /// under ANY spelling -- confirmed directly against
-    /// `Environment::template_from_str` (`{{ a equals b }}` and
-    /// `{{ a contains b }}` both fail with "unexpected identifier, expected
-    /// end of variable block"), independent of this rewrite entirely. That
-    /// means `rewrite_and_parse` would panic at the parse gate on BOTH a
-    /// correct and a wrong rewrite of any expression using either word,
-    /// telling you nothing about whether the rewrite got the boundary in
-    /// the right place -- the one thing this helper is for asserting.
-    ///
-    /// This is NOT a general escape hatch from the parse gate. Every other
-    /// test in this module routes through `rewrite_and_parse`, and a new
-    /// use of this helper should come with the same justification as the
-    /// ones below: the word involved has no minijinja spelling at all, so
-    /// parseability cannot be the thing under test here -- shape is.
-    fn rewrite_shape_only(expr: &str) -> String {
-        rewrite(expr).unwrap_or_else(|e| panic!("rewrite({expr:?}) failed: {e}"))
-    }
-
     /// The rewriter must not touch an operator inside a string literal. A
     /// regex would; that is why this is a tokenizer.
     #[test]
@@ -1720,7 +2097,7 @@ mod tests {
         // exact-string assertion anywhere until this one.
         assert_eq!(
             rewrite_and_parse("{{ a ??? b }}"),
-            "{{kestra_undefined_coalesce( a ,  b )}}"
+            "{{((a) if kestra_defined(a) else ( b ))}}"
         );
     }
 
@@ -1766,14 +2143,138 @@ mod tests {
     /// must not look like `??`); this pins that a bare `??` DOES produce the
     /// null-coalescing form -- without it, mapping `??` to nothing at all
     /// would still pass every other test in this module.
+    ///
+    /// Since package #5a Task A5 (spec D6) a PATH on the left takes the lazy
+    /// inline-`if` form instead, so the call form is pinned on a non-path
+    /// left operand (a call) and the path form exactly.
     #[test]
     fn double_question_mark_becomes_the_null_coalescing_call() {
-        let out = rewrite_and_parse("{{ a ?? b }}");
-        assert!(
-            out.contains("kestra_null_coalesce("),
-            "expected the null-coalescing call form, got {out}"
+        assert_eq!(
+            rewrite_and_parse("{{ f() ?? b }}"),
+            "{{kestra_null_coalesce( f() ,  b )}}"
         );
-        assert!(!out.contains("undefined"), "{out}");
+        assert_eq!(
+            rewrite_and_parse("{{ a ?? b }}"),
+            "{{((a) if kestra_present(a) else ( b ))}}"
+        );
+    }
+
+    /// Spec D6 (package #5a Task A5): a path on the left of `??`/`???` --
+    /// a root name and `.name`, `['literal']` or `[integer]` steps -- reads
+    /// through `kestra_path` under a lazy inline `if`.
+    #[test]
+    fn a_path_on_the_left_of_coalesce_compiles_to_kestra_path() {
+        for (source, expected) in [
+            (
+                "{{ obj.a.b ?? 'h' }}",
+                "{{((kestra_path(obj, 'a', 'b')) if kestra_present(kestra_path(obj, 'a', 'b')) \
+                 else ( 'h' ))}}",
+            ),
+            (
+                "{{ obj['a'][0] ??? 'h' }}",
+                "{{((kestra_path(obj, 'a', 0)) if kestra_defined(kestra_path(obj, 'a', 0)) \
+                 else ( 'h' ))}}",
+            ),
+            (
+                "{{ t.p.v[0] ?? x.y }}",
+                "{{((kestra_path(t, 'p', 'v', 0)) if kestra_present(kestra_path(t, 'p', 'v', 0)) \
+                 else ( x.y ))}}",
+            ),
+            // Pebble's lexer allows whitespace around the attribute dot.
+            (
+                "{{ o . a ?? 'h' }}",
+                "{{((kestra_path(o, 'a')) if kestra_present(kestra_path(o, 'a')) else ( 'h' ))}}",
+            ),
+            // An attribute named like the null literal stays a name.
+            (
+                "{{ o.null ?? 'h' }}",
+                "{{((kestra_path(o, 'null')) if kestra_present(kestra_path(o, 'null')) \
+                 else ( 'h' ))}}",
+            ),
+            (
+                "{{ o[\"k\"] ?? 'h' }}",
+                "{{((kestra_path(o, \"k\")) if kestra_present(kestra_path(o, \"k\")) \
+                 else ( 'h' ))}}",
+            ),
+        ] {
+            assert_eq!(rewrite_and_parse(source), expected, "{source}");
+        }
+    }
+
+    /// Spec D6's other half: a left operand that is NOT a path keeps the eager
+    /// call form (`f() ?? missing.y` is the recorded divergence). A call, a
+    /// filter, a number (`1.5` is not `1` then `.5`), a computed or negative
+    /// index, a `.0` step, arithmetic, a parenthesised operand and a nested
+    /// coalesce are all not paths.
+    #[test]
+    fn a_left_operand_that_is_not_a_path_keeps_the_eager_call() {
+        for (source, expected) in [
+            ("{{ f() ?? b }}", "{{kestra_null_coalesce( f() ,  b )}}"),
+            (
+                "{{ a | upper ?? b }}",
+                "{{kestra_null_coalesce( a | upper ,  b )}}",
+            ),
+            ("{{ 1.5 ?? b }}", "{{kestra_null_coalesce( 1.5 ,  b )}}"),
+            ("{{ l[i] ?? b }}", "{{kestra_null_coalesce( l[i] ,  b )}}"),
+            ("{{ l[-1] ?? b }}", "{{kestra_null_coalesce( l[-1] ,  b )}}"),
+            ("{{ l.0 ?? b }}", "{{kestra_null_coalesce( l.0 ,  b )}}"),
+            ("{{ a + 1 ?? b }}", "{{kestra_null_coalesce( a + 1 ,  b )}}"),
+            ("{{ (a) ?? b }}", "{{kestra_null_coalesce( (a) ,  b )}}"),
+            ("{{ f().a ?? b }}", "{{kestra_null_coalesce( f().a ,  b )}}"),
+            (
+                "{{ obj.m() ?? b }}",
+                "{{kestra_null_coalesce( obj.m() ,  b )}}",
+            ),
+            (
+                "{{ a ?? b ?? c }}",
+                "{{kestra_null_coalesce(((a) if kestra_present(a) else ( b )),  c )}}",
+            ),
+        ] {
+            assert_eq!(rewrite_and_parse(source), expected, "{source}");
+        }
+    }
+
+    /// The path form at each precedence tier the coalesce search respects
+    /// (`or`, `and`, tier 20's `is`/`contains`, tier 30's comparisons, and
+    /// `isIn`), and nested in a filter, a call, a list, a map, a ternary and
+    /// the `if`/`set`/`for` tags. The boundary is the same one the call form
+    /// had; only the shape of the coalesce changed.
+    #[test]
+    fn the_path_form_keeps_every_precedence_boundary() {
+        const P: &str = "((kestra_path(o, 'a')) if kestra_present(kestra_path(o, 'a')) else ( b ))";
+        // `<Q>` is `<P>` where the right operand ends flush against a `)`,
+        // `]`, `}` or `,`: the right side keeps its source spacing.
+        let p = |s: &str| {
+            s.replace("<P>", P)
+                .replace("<Q>", &P.replace("( b ))", "( b))"))
+        };
+        for (source, expected) in [
+            (
+                "{{ x or o.a ?? b }}",
+                "{{kestra_bool( x ) or kestra_bool(<P>)}}",
+            ),
+            (
+                "{{ o.a ?? b and y }}",
+                "{{kestra_bool(<P>) and kestra_bool( y )}}",
+            ),
+            ("{{ o.a ?? b is defined }}", "{{<P> is  defined }}"),
+            ("{{ o.a ?? b == c }}", "{{<P> ==  c }}"),
+            ("{{ o.a ?? b isIn c }}", "{{kestra_is_in((<P>), ( c ))}}"),
+            ("{{ (o.a ?? b) | upper }}", "{{ (<Q>) | upper }}"),
+            ("{{ f(x, o.a ?? b) }}", "{{ f(x,<Q>) }}"),
+            ("{{ [o.a ?? b] }}", "{{ [<Q>] }}"),
+            ("{{ {'k': o.a ?? b} }}", "{{ {'k':<Q>} }}"),
+            ("{{ c ? o.a ?? b : d }}", "{{(<P>) if ( c ) else  d }}"),
+            ("{% if o.a ?? b %}y{% endif %}", "{% if <P>%}y{% endif %}"),
+            ("{% set v = o.a ?? b %}", "{% set v = <P>%}"),
+            (
+                "{% for i in o.a ?? b %}{% endfor %}",
+                "{% for i in <P>%}{% endfor %}",
+            ),
+        ] {
+            let source = p(source);
+            assert_eq!(rewrite_and_parse(&source), p(expected), "{source}");
+        }
     }
 
     /// `isIn` is the fourth operator this module's doc comment claims to
@@ -1809,7 +2310,7 @@ mod tests {
         // split leftmost would still pass one of them.
         assert_eq!(
             rewrite_and_parse("{{ a ?? b isIn c }}"),
-            "{{kestra_is_in((kestra_null_coalesce( a ,  b )), ( c ))}}"
+            "{{kestra_is_in((((a) if kestra_present(a) else ( b ))), ( c ))}}"
         );
         assert_eq!(
             rewrite_and_parse("{{ a isIn b ?? c }}"),
@@ -1818,7 +2319,7 @@ mod tests {
         // Lower-tier `and` is a boundary: neither `isIn` may swallow it.
         assert_eq!(
             rewrite_and_parse("{{ a isIn b and c isIn d }}"),
-            "{{(kestra_is_in(( a ), ( b ))) and (kestra_is_in(( c ), ( d )))}}"
+            "{{kestra_bool(kestra_is_in(( a ), ( b ))) and kestra_bool(kestra_is_in(( c ), ( d )))}}"
         );
         // As a ternary condition, and inside a tag body -- the two positions
         // where a bare `in` used to be at risk of colliding with the `for`
@@ -1915,14 +2416,14 @@ but there is one on the next: '";
     #[test]
     fn commas_bound_operator_rewrites_inside_a_call() {
         let out = rewrite_and_parse("{{ f(x, a ?? b) }}");
-        assert_eq!(out, "{{ f(x,kestra_null_coalesce( a ,  b)) }}");
+        assert_eq!(out, "{{ f(x,((a) if kestra_present(a) else ( b))) }}");
     }
 
     /// Same principle for a list literal's elements.
     #[test]
     fn commas_bound_operator_rewrites_inside_a_list() {
         let out = rewrite_and_parse("{{ [1, a ?? b] }}");
-        assert_eq!(out, "{{ [1,kestra_null_coalesce( a ,  b)] }}");
+        assert_eq!(out, "{{ [1,((a) if kestra_present(a) else ( b))] }}");
     }
 
     /// A ternary as a later argument must not be glued to an earlier one by
@@ -1948,7 +2449,7 @@ but there is one on the next: '";
     #[test]
     fn an_operator_inside_a_map_value_still_resolves() {
         let out = rewrite_and_parse("{{ {'k': a ?? b} }}");
-        assert_eq!(out, "{{ {'k':kestra_null_coalesce( a ,  b)} }}");
+        assert_eq!(out, "{{ {'k':((a) if kestra_present(a) else ( b))} }}");
     }
 
     /// `{% if %}` tag bodies must be rewritten as an expression, not left
@@ -1958,7 +2459,10 @@ but there is one on the next: '";
     #[test]
     fn if_tag_bodies_rewrite_their_condition() {
         let out = rewrite_and_parse("{% if a ?? b %}y{% endif %}");
-        assert_eq!(out, "{% if kestra_null_coalesce( a ,  b )%}y{% endif %}");
+        assert_eq!(
+            out,
+            "{% if ((a) if kestra_present(a) else ( b ))%}y{% endif %}"
+        );
     }
 
     /// `{% set %}`: the target left of `=` is a name, never rewritten; the
@@ -1982,7 +2486,7 @@ but there is one on the next: '";
     #[test]
     fn set_tag_bodies_rewrite_only_the_value_side() {
         let out = rewrite_and_parse("{% set isIn = a ?? b %}");
-        assert_eq!(out, "{% set isIn = kestra_null_coalesce( a ,  b )%}");
+        assert_eq!(out, "{% set isIn = ((a) if kestra_present(a) else ( b ))%}");
     }
 
     /// `{% for %}`: the loop variable left of `in` is a name, never
@@ -1998,7 +2502,7 @@ but there is one on the next: '";
         let out = rewrite_and_parse("{% for isIn in list ?? [] %}y{% endfor %}");
         assert_eq!(
             out,
-            "{% for isIn in kestra_null_coalesce( list ,  [] )%}y{% endfor %}"
+            "{% for isIn in ((list) if kestra_present(list) else ( [] ))%}y{% endfor %}"
         );
     }
 
@@ -2047,7 +2551,7 @@ but there is one on the next: '";
         );
         assert_eq!(
             rewrite_and_parse("{% filter upper %}{{ a ?? b }}{% endfilter %}"),
-            "{% filter upper%}{{kestra_null_coalesce( a ,  b )}}{% endfilter %}"
+            "{% filter upper%}{{((a) if kestra_present(a) else ( b ))}}{% endfilter %}"
         );
     }
 
@@ -2066,7 +2570,7 @@ but there is one on the next: '";
     fn coalesce_does_not_swallow_across_is() {
         assert_eq!(
             rewrite_and_parse("{{ a ?? b is defined }}"),
-            "{{kestra_null_coalesce( a ,  b ) is  defined }}"
+            "{{((a) if kestra_present(a) else ( b )) is  defined }}"
         );
         // `is not none`, not `is not null` -- disclosure, not a silent
         // substitution: minijinja has no `null` test at all (it parses --
@@ -2081,7 +2585,7 @@ but there is one on the next: '";
         // ALSO still mean something once Task 3 renders it, unlike `null`.
         assert_eq!(
             rewrite_and_parse("{{ a ?? b is not none }}"),
-            "{{kestra_null_coalesce( a ,  b ) is  not none }}"
+            "{{((a) if kestra_present(a) else ( b )) is  not none }}"
         );
     }
 
@@ -2113,36 +2617,27 @@ but there is one on the next: '";
     /// `contains` is `BinaryOperatorType.NORMAL` (unlike `is`/`is not`),
     /// confirmed against the harness: `{{ list contains a ?? b }}` groups
     /// as `list contains (a ?? b)`, ordinary rightmost-among-the-tier
-    /// behavior, no left-only restriction needed. Routed through
-    /// `rewrite_shape_only`, not `rewrite_and_parse`: `contains`, as a bare
-    /// infix word, is not valid minijinja syntax under any spelling (see
-    /// that helper's doc) -- this asserts the REWRITE'S shape, which is
-    /// independently correct regardless of whether minijinja can parse the
-    /// word `contains` itself.
+    /// behavior, no left-only restriction needed. `equals` is `==` from the
+    /// tokenizer on (package #5a Task A6), so it is the same tier-30
+    /// boundary `==` is. Both used to be asserted as a shape only, because
+    /// neither word parsed in minijinja; since Task A6 (spec D5) `equals` is
+    /// `==` and `contains` is `kestra_contains`, so they go through the parse
+    /// gate like every other test here.
     ///
-    /// Also pins two mutations, both confirmed live (mutated and re-run,
-    /// not assumed) before finalizing this test:
-    ///
-    /// - Dropping `"equals"` from `find_rightmost_tier30`'s atom set
-    ///   changes the FIRST assertion's output to
-    ///   `"{{kestra_null_coalesce( a ,  b equals c )}}"` (the coalesce
-    ///   swallows straight across `equals`, same failure class as the
-    ///   pre-fix `==` gap).
-    /// - Hardcoding the WRONG word in the `contains` branch (i.e. the bug
-    ///   "emits a hardcoded word instead of the matched one" actually looks
-    ///   like now that `contains` has its own branch -- it renders as
-    ///   `is` there, not as the shared `{word}` fallback below it, which is
-    ///   only ever reached with `word == "is"` since `contains` returns
-    ///   early) changes the SECOND assertion's output to
-    ///   `"{{(kestra_null_coalesce( a ,  b )) is ( c )}}"`.
+    /// Pins two mutations: dropping `"=="` from `is_tier30_trigger` lets the
+    /// coalesce swallow across `equals` (`kestra_null_coalesce( a ,  b ==
+    /// c )`), and a `contains` branch that emitted the wrong call (or the
+    /// `is` form) changes the second assertion.
     #[test]
     fn coalesce_does_not_swallow_across_equals_or_contains() {
         assert_eq!(
-            rewrite_shape_only("{{ a ?? b equals c }}"),
-            "{{kestra_null_coalesce( a ,  b ) equals  c }}"
+            rewrite_and_parse("{{ a ?? b equals c }}"),
+            "{{((a) if kestra_present(a) else ( b )) ==  c }}"
         );
-        let out = rewrite_shape_only("{{ a ?? b contains c }}");
-        assert_eq!(out, "{{(kestra_null_coalesce( a ,  b )) contains ( c )}}");
+        assert_eq!(
+            rewrite_and_parse("{{ a ?? b contains c }}"),
+            "{{kestra_contains((((a) if kestra_present(a) else ( b ))), ( c ))}}"
+        );
     }
 
     /// A disqualified `is` (a tier-30 trigger follows it) must suppress
@@ -2152,83 +2647,153 @@ but there is one on the next: '";
     /// is `true` (grouped `((l contains x) is defined) ?? y`); a version
     /// that let the search continue past the disqualified `is` to accept
     /// the earlier `contains` instead grouped `contains` as the OUTER
-    /// operation and produced Pebble's `false` reading. Routed through
-    /// `rewrite_shape_only`: `contains` cannot parse in minijinja under any
-    /// spelling (see that helper's doc), so this is latent -- provably the
-    /// correct SHAPE, not yet renderable -- until `contains` gets a real
-    /// minijinja translation.
+    /// operation and produced Pebble's `false` reading. Renderable since
+    /// package #5a Task A6: the `contains` inside the coalesce's left operand
+    /// is compiled when that operand is resolved, as the inner operation.
     #[test]
     fn a_disqualified_is_suppresses_the_whole_tier20_step() {
         assert_eq!(
-            rewrite_shape_only("{{ l contains x is defined ?? y }}"),
-            "{{kestra_null_coalesce( l contains x is defined ,  y )}}"
+            rewrite_and_parse("{{ l contains x is defined ?? y }}"),
+            "{{kestra_null_coalesce(kestra_contains(( l ), ( x )) is  defined ,  y )}}"
         );
     }
 
-    /// `find_rightmost_tier20`'s rightmost-split direction, proven the same
-    /// way `chained_or_splits_rightmost_for_left_associativity` proves it
-    /// for `or`: three `contains`-chained, `??`-bearing operands. A
-    /// rightmost split recurses on the LEFT side (left-deep parens); a
-    /// leftmost split would recurse on the right (right-deep) -- see that
-    /// sibling test's doc for the full reasoning (identical here). Routed
-    /// through `rewrite_shape_only` for the same reason as the sibling test
-    /// above.
+    /// `find_rightmost_tier20`'s rightmost-split direction: three
+    /// `contains`-chained operands. A rightmost split recurses on the LEFT
+    /// side, so the first `contains` is the INNER call; a leftmost split
+    /// would nest the other way.
     ///
-    /// **The expected value below cannot be validated against the oracle.**
-    /// Confirmed directly: real Pebble rejects this exact input --
-    /// `Contains operator can only be used on Collections, Maps and arrays.
-    /// Actual type was: java.lang.Boolean` -- because the INNER `contains`
-    /// (once evaluated) yields a boolean, and a boolean can never be the
-    /// left operand of Pebble's own `contains`. This test legitimately
-    /// proves the split direction this rewrite implements (a purely
-    /// syntactic property, checkable without evaluating anything), but its
-    /// specific three-`contains` shape is not itself valid Kestra input
-    /// Pebble could ever render, so there is no golden value to pin it
-    /// against and no corpus entry for it.
+    /// **The expected value cannot be validated against the oracle.** Real
+    /// Pebble rejects this input -- `Contains operator can only be used on
+    /// Collections, Maps and arrays. Actual type was: java.lang.Boolean` --
+    /// because the inner `contains` yields a boolean, and egret now does too
+    /// (`kestra_contains` on a boolean left side). The split direction is a
+    /// purely syntactic property, which is what this pins.
     #[test]
     fn chained_contains_splits_rightmost_for_left_associativity() {
         assert_eq!(
-            rewrite_shape_only("{{ w contains x ?? y contains z }}"),
-            "{{(( w ) contains (kestra_null_coalesce( x ,  y ))) contains ( z )}}"
+            rewrite_and_parse("{{ w contains x ?? y contains z }}"),
+            "{{kestra_contains((kestra_contains(( w ), (((x) if kestra_present(x) else ( y ))))), ( z ))}}"
         );
     }
 
     /// `??`/`???`/`isIn` must not swallow across a LOWER-precedence `and`/
     /// `or` -- Pebble's `CoreExtension` gives `or`=10, `and`=15, both below
-    /// the 30 `??`/`???`/`isIn` share with the comparison operators. Not a
-    /// regression from any round of this module; unchanged since Task 2's
-    /// first submission, and the same failure mode as I3 (valid minijinja,
-    /// silently different semantics) rather than a parse error.
+    /// the 30 `??`/`???`/`isIn` share with the comparison operators. Since
+    /// package #5a Task A6 each operand is wrapped in `kestra_bool(..)`.
     #[test]
     fn coalesce_does_not_swallow_across_and_or_or() {
         assert_eq!(
             rewrite_and_parse("{{ a ?? b and c ?? d }}"),
-            "{{(kestra_null_coalesce( a ,  b )) and (kestra_null_coalesce( c ,  d ))}}"
+            "{{kestra_bool(((a) if kestra_present(a) else ( b ))) and kestra_bool(((c) if kestra_present(c) else ( d )))}}"
         );
         assert_eq!(
             rewrite_and_parse("{{ a or b ?? c }}"),
-            "{{( a ) or (kestra_null_coalesce( b ,  c ))}}"
+            "{{kestra_bool( a ) or kestra_bool(((b) if kestra_present(b) else ( c )))}}"
         );
     }
 
-    /// The sibling test above only ever has ONE `or` (and one `and`) per
-    /// assertion, so it cannot tell a rightmost split from a leftmost one --
-    /// traced by hand for both directions before writing this: with no
-    /// parens at all, `A or B or C` comes out byte-identical regardless of
-    /// which `or` is chosen as the split point (each direction's recursion
-    /// just reconstructs the same flat text). The parens `or`/`and` now
-    /// wrap their operands in specifically make the split point observable:
-    /// a rightmost split recurses on the LEFT side, producing a left-deep
-    /// `((A or B) or C)` shape; a leftmost split would instead recurse on
-    /// the right, producing right-deep `(A or (B or C))`. Chained three
-    /// deep, with a `??` in every operand so each one's own position in the
-    /// tree is independently visible in the output.
+    /// An `or`/`and` chain splits at EVERY top-level occurrence and is
+    /// rejoined flat, each operand in its own `kestra_bool(..)` (package #5a
+    /// Task A6, spec D5): minijinja's `or`/`and` are left-associative like
+    /// Pebble's, so the flat chain groups as Pebble's does, and a flat chain
+    /// costs no parser recursion per operator. `and` binds tighter than
+    /// `or`, so an `and` chain is one `or` operand.
     #[test]
-    fn chained_or_splits_rightmost_for_left_associativity() {
+    fn an_and_or_chain_is_flat_with_each_operand_coerced() {
         assert_eq!(
             rewrite_and_parse("{{ a ?? w or b ?? x or c ?? y }}"),
-            "{{((kestra_null_coalesce( a ,  w )) or (kestra_null_coalesce( b ,  x ))) or (kestra_null_coalesce( c ,  y ))}}"
+            "{{kestra_bool(((a) if kestra_present(a) else ( w ))) or kestra_bool(((b) if kestra_present(b) else ( x ))) or kestra_bool(((c) if kestra_present(c) else ( y )))}}"
         );
+        assert_eq!(
+            rewrite_and_parse("{{ a or b and c or d }}"),
+            "{{kestra_bool( a ) or kestra_bool(kestra_bool( b ) and kestra_bool( c )) or kestra_bool( d )}}"
+        );
+        assert_eq!(
+            rewrite_and_parse("{{ a and b }}"),
+            "{{kestra_bool( a ) and kestra_bool( b )}}"
+        );
+        // An attribute named `or` is not the operator.
+        assert_eq!(rewrite_and_parse("{{ x.or }}"), "{{ x.or }}");
+        // A long chain does not nest: 400 operands still parse.
+        let long = format!("{{{{ {} }}}}", vec!["a"; 400].join(" and "));
+        assert_eq!(
+            rewrite_and_parse(&long).matches("kestra_bool(").count(),
+            400
+        );
+    }
+
+    /// `equals` is spelled `==` and `..` compiles to `kestra_range` (package
+    /// #5a Task A6, spec D5), at Pebble's precedence: `..` (120) binds
+    /// tighter than every binary operator, a filter included, and its
+    /// operands are postfix chains with an optional unary sign.
+    #[test]
+    fn equals_and_range_compile_at_pebbles_precedence() {
+        for (source, expected) in [
+            ("{{ a equals b }}", "{{ a == b }}"),
+            ("{{ x.equals }}", "{{ x.equals }}"),
+            ("{{ 1 .. 3 }}", "{{ kestra_range(1, 3) }}"),
+            ("{{ 1..3 }}", "{{ kestra_range(1, 3) }}"),
+            ("{{ -1 .. -n }}", "{{ kestra_range(-1, -n) }}"),
+            ("{{ a - 1 .. 3 }}", "{{ a - kestra_range(1, 3) }}"),
+            (
+                "{{ o.a[0] .. f(x).b }}",
+                "{{ kestra_range(o.a[0], f(x).b) }}",
+            ),
+            ("{{ 1.5 .. 2.5 }}", "{{ kestra_range(1.5, 2.5) }}"),
+            ("{{ 1 .. n | length }}", "{{ kestra_range(1, n) | length }}"),
+            ("{{ l | first .. 3 }}", "{{ kestra_range(l | first, 3) }}"),
+            ("{{ 'x' ~ 1 .. 2 }}", "{{ 'x' ~ kestra_range(1, 2) }}"),
+            (
+                "{{ 1 .. 2 .. 3 }}",
+                "{{ kestra_range(kestra_range(1, 2), 3) }}",
+            ),
+            ("{{ (1 .. 2) }}", "{{ (kestra_range(1, 2)) }}"),
+            ("{{ '1..2' }}", "{{ '1..2' }}"),
+            (
+                "{% for i in 1 .. n %}{% endfor %}",
+                "{% for i in kestra_range(1, n)%}{% endfor %}",
+            ),
+            (
+                "{{ 1 .. 3 contains 2 }}",
+                "{{kestra_contains(( kestra_range(1, 3) ), ( 2 ))}}",
+            ),
+        ] {
+            assert_eq!(rewrite_and_parse(source), expected, "{source}");
+        }
+    }
+
+    /// Fix wave #5a I2: `name =` is a boundary, so an operator in a named
+    /// argument's (or a `with` target's) value takes only the value.
+    #[test]
+    fn a_named_arguments_name_is_not_an_operand() {
+        for (source, expected) in [
+            (
+                "{{ f(k=a or b) }}",
+                "{{ f(k=kestra_bool(a ) or kestra_bool( b)) }}",
+            ),
+            (
+                "{{ f(k = a and b) }}",
+                "{{ f(k =kestra_bool( a ) and kestra_bool( b)) }}",
+            ),
+            (
+                "{{ f(k=l contains x) }}",
+                "{{ f(k=kestra_contains((l ), ( x))) }}",
+            ),
+            (
+                "{{ f(k=a ?? b) }}",
+                "{{ f(k=((a) if kestra_present(a) else ( b))) }}",
+            ),
+            ("{{ f(k=c ? 1 : 2) }}", "{{ f(k=( 1 ) if (c ) else  2) }}"),
+            (
+                "{{ f(x, k=a or b) }}",
+                "{{ f(x, k=kestra_bool(a ) or kestra_bool( b)) }}",
+            ),
+            // `==` is a comparison, never a named argument.
+            ("{{ f(a == b) }}", "{{ f(a == b) }}"),
+        ] {
+            assert_eq!(rewrite_and_parse(source), expected, "{source}");
+        }
     }
 
     /// `??` and `==` share the SAME precedence tier (30) with LEFT
@@ -2242,23 +2807,22 @@ but there is one on the next: '";
     fn coalesce_and_a_same_tier_comparison_chain_left_to_right() {
         assert_eq!(
             rewrite_and_parse("{{ a ?? b == c }}"),
-            "{{kestra_null_coalesce( a ,  b ) ==  c }}"
+            "{{((a) if kestra_present(a) else ( b )) ==  c }}"
         );
     }
 
     /// `==` (above) and `equals` (`coalesce_does_not_swallow_across_equals_
-    /// or_contains`) were the only two of `is_tier30_trigger`'s six
-    /// comparison-operator entries with any coverage -- deleting any of the
-    /// other five (`!=`/`>`/`>=`/`<`/`<=`) individually left all 31 tests
-    /// green (round 3 fixed the NAMED mutant, `equals`, rather than the
-    /// class this belongs to). All five parse natively in minijinja (unlike
-    /// `equals`/`contains`), so this routes through `rewrite_and_parse` like
-    /// the `==` case, not `rewrite_shape_only`.
+    /// or_contains`) were the only two of `is_tier30_trigger`'s comparison
+    /// entries with any coverage -- deleting any of the other five
+    /// (`!=`/`>`/`>=`/`<`/`<=`) individually left all 31 tests green (round 3
+    /// fixed the NAMED mutant, `equals`, rather than the class this belongs
+    /// to). Since package #5a Task A6 `equals` is tokenized as `==`, so the
+    /// set is these five and `==`.
     #[test]
     fn coalesce_does_not_swallow_across_any_tier30_comparison() {
         for op in ["!=", ">", ">=", "<", "<="] {
             let expr = format!("{{{{ a ?? b {op} c }}}}");
-            let expected = format!("{{{{kestra_null_coalesce( a ,  b ) {op}  c }}}}");
+            let expected = format!("{{{{((a) if kestra_present(a) else ( b )) {op}  c }}}}");
             assert_eq!(rewrite_and_parse(&expr), expected, "operator {op:?}");
         }
     }
@@ -2293,7 +2857,7 @@ but there is one on the next: '";
     fn a_map_literal_flush_against_the_regions_close_still_rewrites() {
         assert_eq!(
             rewrite_and_parse("{{ {'a': x ?? y}}}"),
-            "{{ {'a':kestra_null_coalesce( x ,  y)}}}"
+            "{{ {'a':((x) if kestra_present(x) else ( y))}}}"
         );
     }
 
@@ -2345,7 +2909,7 @@ but there is one on the next: '";
     fn whitespace_control_markers_survive_around_a_rewritten_expression() {
         assert_eq!(
             rewrite_and_parse("{{- a ?? b -}}"),
-            "{{-kestra_null_coalesce( a ,  b )-}}"
+            "{{-((a) if kestra_present(a) else ( b ))-}}"
         );
     }
 
@@ -2364,7 +2928,7 @@ but there is one on the next: '";
     fn whitespace_control_markers_survive_around_a_rewritten_tag() {
         assert_eq!(
             rewrite_and_parse("{%- if a ?? b -%}y{%- endif -%}"),
-            "{%- if kestra_null_coalesce( a ,  b )-%}y{%- endif -%}"
+            "{%- if ((a) if kestra_present(a) else ( b ))-%}y{%- endif -%}"
         );
     }
 

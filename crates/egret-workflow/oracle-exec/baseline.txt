@@ -183,10 +183,16 @@
 #   `??` resolves a missing MEMBER (`outputs.not_existing ?? ''` renders) and
 #   not a missing ROOT, so the fallback is never reached. A W2 divergence the
 #   fed terminal used to hide.
+#   (BANKED with package #5a's Task A5, 2026-10-29, spec D6: a path on the
+#   left of `??` reads through a missing chain -- the miss was two levels,
+#   `trigger.parameters` then `.validationToken`, not the root alone -- and
+#   the fallback renders.)
 #   `restart-child` -- `{{ 1 / taskrun.attemptsCount }}` with `attemptsCount`
 #   0 on the first attempt. Java throws `ArithmeticException: / by zero` and the
 #   run FAILED; minijinja divides as floats and renders `Infinity`, so egret
 #   SUCCEEDS and runs one more task. Also W2, also hidden by the feed.
+#   (BANKED with package #5a's Task A3, 2026-10-28, spec D2: integer `/` is
+#   Java's now and `/ 0` fails with Kestra's text.)
 #   `parallel-fail-with-flowable` -- Kestra FAILED a `Sleep` that was still in
 #   flight when its sibling failed the `Parallel`. W4 Task 3 wired
 #   `TaskHandler::cancel`, and deliberately not to this seam: the kill path
@@ -299,7 +305,8 @@
 # accumulates a sub-execution's retries INSIDE the parent's attempt);
 # `subflow-secret-output-parent` on the unevaluated flow-level `outputs:`;
 # `task-runif` on `OutputValues` having no handler; `restart-parent` and
-# `restart-parent-loop` on W2's `Infinity` render inside `restart-child`;
+# `restart-parent-loop` on W2's `Infinity` render inside `restart-child`
+# (both banked with `restart-child` at package #5a Task A3, 2026-10-28);
 # `sla-parent-flow` and `flow-concurrency-sla-fail-parent` on `sla:` inside
 # their children; and the two `task-allow-*-executable-flow` on `WARNING`,
 # which `RunState` could not hold WHEN THIS WAS WRITTEN -- W8 Task 5 added the
@@ -472,19 +479,14 @@
 #   and watching it stall at `CREATED RUNNING`. "Held twice over" is now held
 #   once.
 #
-#   `loopuntil-failed-flowable` differs on ONE field: the loop's terminal.
-#   Its runs, attempts and order pairs are reproduced exactly and its execution
-#   reads `CREATED RUNNING SUCCESS` where the golden reads `CREATED RUNNING
-#   FAILED`. The condition is `{{ outputs.loop.iterationCount < "5" }}` -- a
-#   relational operator over a NUMBER and a STRING. Pebble refuses it and the
-#   exception fails the task; minijinja answers `True` and the loop succeeds.
-#   Measured both ways: `the_one_corpus_comparison_pebble_refuses_and_minijinja
-#   _answers` renders it through egret's own environment, and the artifact's own
-#   trace fails the `loop` taskrun 11 ms after its child succeeded, with no
-#   `PAUSED` -- the only path in `LoopUntil.resolveState` that can do that is
-#   `runContext.render(this.condition)` throwing. It is a RENDERER divergence
-#   wearing a loop's name, and it is the corpus's ONLY number-against-string
-#   comparison.
+#   (`loopuntil-failed-flowable` was here, differing on ONE field: its
+#   `LoopUntil` ended `SUCCESS` where the golden reads `FAILED`, because its
+#   condition `{{ outputs.loop.iterationCount < "5" }}` -- a relational
+#   operator over a NUMBER and a STRING -- is refused by Pebble and was
+#   answered by minijinja. A renderer divergence wearing a loop's name; it
+#   BANKED with package #5a's Task A2 (2026-10-28, spec D1), which made egret's
+#   relational operators Kestra's.
+#   `the_one_corpus_comparison_pebble_refuses_is_refused_here_too` pins it.)
 #
 #   `loop-until-restart` differs on ONE field too: it runs FOUR iterations
 #   where the golden holds three. Everything else -- both run histories, both
@@ -577,16 +579,15 @@ invalids/dag-invalid-subtask
 # `invalids/invalid-property` banked 2026-10-26 (no-silent-drops Task 8b): Kestra refuses it (`Unrecognized field "invalid"`) and egret refuses it at save (`spec::validate_source`, `unknown_property`); the oracle counts a save-time refusal of an id in a `Seam::Save` refusal group.
 # end hooks #2b Task B1 (2026-10-27): `afterExecution:` runs now; held by flow `outputs:`, which egret never evaluates: `end` renders `{{ execution.outputs.final }}` (worker/render.rs; package #6, roadmap note 6). Re-checked at #2b Task B7 (2026-10-28): it differs on `runs` only, no longer on `order`.
 valids/after-execution
-valids/all-flowable
+# `valids/all-flowable` and `valids/disable-flowable` banked 2026-10-29 (package #5a Task A7, spec D7): both render `{{ taskrun.value }}` in a `Switch` case (and `all-flowable` in its `Loop` body too); egret wrote `"value": null` and rendered it empty, Kestra's `RunVariables` omits a null value and the strict renderer FAILED the task. The key is absent now, so the case fails as in Kestra.
 valids/dag
-valids/disable-flowable
 valids/errors
 valids/flow-concurrency-sla-fail-child
 valids/flow-concurrency-sla-fail-parent
 valids/flow-with-outputs-failed
 valids/full
 valids/if
-valids/if-in-flowable
+# `valids/if-in-flowable` banked 2026-10-29 (package #5a Task A6, spec D5): its `If` condition is `{{ item.value equals 'value 2' }}`; `equals` did not parse here, so the condition failed to render and the `If` FAILED. `equals` is `==` now.
 # group C1 Task 3 (2026-10-18): `Assert` runs now; held by the `Loop`'s own `outputs:`, which egret does not produce: all three conditions read `outputs.for_each.outputs[i].outputs.*` and fail to render (`undefined value`), so `assert` FAILS where Kestra SUCCEEDED (measured).
 valids/if-in-parallel
 valids/loop-object
@@ -596,7 +597,6 @@ valids/loop-outputs-auto
 valids/loop-outputs-failed-render
 valids/loop-outputs-store
 valids/loop-until-restart
-valids/loopuntil-failed-flowable
 valids/parallel-disabled-tasks
 valids/parallel-fail-with-flowable
 valids/pause-behavior
@@ -605,10 +605,7 @@ valids/pause_on_pause
 # Permanent, not a gap (group C spec §2.3, the user's ruling 2026-10-18): a flow
 # purges logs only of its own namespace and its children; Kestra OSS checks nothing.
 valids/purge_logs_full_arguments
-valids/restart-child
-valids/restart-loop
-valids/restart-parent
-valids/restart-parent-loop
+# `valids/restart-child`, `restart-loop`, `restart-parent` and `restart-parent-loop` banked 2026-10-28 (package #5a Task A3, spec D2): `{{ 1 / taskrun.attemptsCount }}` with `attemptsCount` 0 now fails as Java's `ldiv` does (`Could not perform division`), so the child's first attempt FAILS and is restarted as in Kestra, and the three entries that reach the same child through a `Loop` or a `Subflow` bank with it.
 valids/retry-failed-flow-duration
 # Egret retries without scheduler latency; Kestra adds about 0.6 s per retry, so its
 # fourth attempt falls outside maxDuration and egret's does not. Same class as
@@ -629,11 +626,10 @@ valids/subflow-secret-output-child
 valids/subflow-secret-output-parent
 # end hooks A8 (2026-10-27): the flow-level `finally:` runs now (A4), but this entry did not bank: `write_execution_context` and `skipped_when_failures_exist` are created and end `CREATED FAILED` with no message, because their `runIf` (`tasksWithState(state='FAILED') is [not] empty`) fails to render -- Pebble's `empty` test, a renderer cause owned by package #5 (measured at A4; the 2026-10-18 cause, "egret does not run `finally:`", is history).
 valids/task-runif-taskswithstate
-valids/task-runif-workingdirectory
+# `valids/task-runif-workingdirectory` banked 2026-10-29 (package #5a Task A6, spec D5): both children's `runIf` and `message` are `{{ inputs.scripts_to_run contains '...' }}`; `contains` did not parse here, so `log_orders` FAILED at creation (the cause the 2026-10 WorkingDirectory note in README.md left "not isolated further"). `contains` is Pebble's `ContainsExpression` now.
 valids/variables
 # group C1 Task 2 (2026-10-18): `OutputValues` runs now; held by one more `WaitFor` iteration (3 PAUSED, golden 2) under `maxDuration: PT3S`/`PT1S`, the poller-latency shape `loop-until-restart` is held by (measured).
 # Debt D14 (2026-10-19): this entry can MATCH by accident under CPU load, and the ratchet then fails "PROGRESS NOT BANKED". The driver's Tick clock is real time since `executions.created_at` plus what `pass_time` adds, so a slow machine leaks wall time into it and `reached_maximums` (`src/executor/flowable/loop_until.rs`) fires `maxDuration` one iteration early -- golden's 2 PAUSED. Not progress: it needs a virtual clock in the driver. Do not bank it on such a run.
 valids/waitfor-child-task-warning
-valids/webhook-plaintext
 valids/working-directory-invalid-runif
 valids/working-directory-taskrun-nested

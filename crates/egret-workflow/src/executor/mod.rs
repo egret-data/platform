@@ -9676,36 +9676,30 @@ tasks:
     }
 
     /// **The one expression in this corpus that Pebble refuses and minijinja
-    /// answers**, and the whole of why `valids/loopuntil-failed-flowable` is
-    /// still baselined.
+    /// answered**, and the whole of why `valids/loopuntil-failed-flowable` was
+    /// baselined until package #5a's Task A2.
     ///
-    /// That entry's runs, attempts and ordered pairs are reproduced exactly and
-    /// it differs on ONE field: its `LoopUntil` ends `SUCCESS` where the golden
-    /// holds `FAILED`. The condition is
+    /// That entry's runs, attempts and ordered pairs were reproduced exactly
+    /// and it differed on ONE field: its `LoopUntil` ended `SUCCESS` where the
+    /// golden holds `FAILED`. The condition is
     /// `{{ outputs.loop.iterationCount < "5" }}` -- a relational operator over
-    /// a number and a string. Pebble's `OperatorUtils` widens both operands to
-    /// `Number` and throws on a `String`, the exception comes out of
-    /// `runContext.render(this.condition)` inside `nextExecutionDate`, and the
-    /// task fails; the artifact's own trace agrees, failing the `loop` taskrun
-    /// 11 ms after its only child SUCCEEDED with no `PAUSED` in between, which
-    /// is the only outcome `LoopUntil.resolveState` has no other path to.
-    /// minijinja orders values across kinds instead and answers a truthy
-    /// string, so the loop stops on its first iteration and succeeds.
+    /// a number and a string. Kestra's `LessThanExpression` hands both to
+    /// Pebble's `OperatorUtils`, which casts them to `Number` and throws on a
+    /// `String`; the exception comes out of `runContext.render(this.condition)`
+    /// inside `nextExecutionDate`, and the task fails. The artifact's own trace
+    /// agrees, failing the `loop` taskrun 11 ms after its only child SUCCEEDED
+    /// with no `PAUSED` in between. minijinja ordered values across kinds and
+    /// answered a truthy boolean; since A2 (spec D1) egret's `<` is Kestra's
+    /// and refuses with Kestra's text.
     ///
     /// **Two halves, and the first is what keeps the second from being a
     /// sentence about one flow.** The scan derives, from all 351 corpus flows,
-    /// that this shape occurs exactly once -- so the divergence is bounded, and
-    /// a flow added later that writes another one fails here rather than
-    /// quietly joining the baseline.
-    ///
-    /// **This test asserts egret's DIVERGENT answer on purpose**, which is the
-    /// one thing a test may not normally do. It is here because the answer is
-    /// load-bearing for a baseline line: if egret ever gains Pebble-strict
-    /// relational operators, this fails, and the reader is sent to
-    /// `oracle-exec/baseline.txt`'s entry for that id -- which will by then be
-    /// bankable. A comment claiming the same thing would not be.
+    /// that this shape occurs exactly once -- so a flow added later that writes
+    /// another one fails here and is reasoned about rather than discovered.
+    /// The second half pins the refusal: if egret ever answers this again, the
+    /// entry regresses in the executor oracle and this names why.
     #[test]
-    fn the_one_corpus_comparison_pebble_refuses_and_minijinja_answers() {
+    fn the_one_corpus_comparison_pebble_refuses_is_refused_here_too() {
         /// Every `{{ … }}` region in `src` holding a relational operator whose
         /// right-hand side opens with a quote.
         ///
@@ -9781,15 +9775,15 @@ tasks:
             "outputs",
             serde_json::json!({"loop": {"iterationCount": 1}}),
         );
-        let rendered = crate::render_str("{{ outputs.loop.iterationCount < \"5\" }}", &cx).expect(
-            "egret's renderer ANSWERS this, and the artifact throws -- if this \
-             becomes an error, `valids/loopuntil-failed-flowable` is bankable and \
-             `oracle-exec/baseline.txt` says so",
-        );
+        let error = crate::render_str("{{ outputs.loop.iterationCount < \"5\" }}", &cx)
+            .expect_err(
+                "Kestra throws on this and FAILS the loop; egret must refuse it too, or \
+                 `valids/loopuntil-failed-flowable` succeeds on its first iteration again",
+            )
+            .to_string();
         assert!(
-            crate::executor::is_truthy(&rendered),
-            "and the answer is truthy, which is what makes the loop SUCCEED on its \
-             first iteration where the artifact FAILED the task: {rendered:?}"
+            error.contains("Could not perform less than comparisonPebb"),
+            "and with Kestra's own text: {error}"
         );
     }
 

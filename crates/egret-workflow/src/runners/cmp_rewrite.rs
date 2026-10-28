@@ -1,6 +1,9 @@
 //! The rewriter's second pass (W9c Task 4 fix round 1, the user's option A,
 //! 2026-10-08): every comparison in the minijinja source becomes a call to
-//! `super::compare`'s functions.
+//! `super::compare`'s functions. The same parser also runs a third pass
+//! (package #5a, Task A3, [`compile_arithmetic`]) over the second pass's
+//! output, which turns every binary `+`, `-`, `*`, `/` and `%` into a call to
+//! `super::arith`'s functions; everything below holds for both passes.
 //!
 //! # Why a second pass, and why it parses minijinja rather than Pebble
 //!
@@ -16,13 +19,25 @@
 //! |---|---|
 //! | `a > b` | `kestra_gt(a, b)` |
 //! | `a not in b` | `kestra_not_in(a, b)` |
-//! | `a < b < c` (minijinja chains it) | `kestra_compare_chain(a, 'lt', b, 'lt', c)` |
+//! | `a < b <= c` (minijinja chains it) | `kestra_le(kestra_lt(a, b), c)` |
+//!
+//! **A chain is compiled left-associatively** (package #5a, spec D1). Pebble
+//! has no chained comparison: Kestra's `==`, `!=`, `<`, `<=`, `>`, `>=` and
+//! `isIn` all sit at precedence 30, left-associative, so `a < b < c` is
+//! `(a < b) < c` there, and the outer comparison sees a boolean and fails;
+//! `1 < 2 == true` is `true`. minijinja reads the same source as `a < b and
+//! b < c`; this pass writes Pebble's reading instead.
 //!
 //! Each operand is exactly the token range minijinja's parser gives that
-//! comparison, so precedence and associativity are minijinja's by
-//! construction: `not a == b` stays `not (a == b)`, `a ~ b == c` stays
-//! `(a ~ b) == c`, a filter or a test binds tighter, a parenthesised group is
-//! one operand. A call argument is a full expression, so no operand can bind
+//! comparison, so precedence is minijinja's by construction. minijinja's
+//! comparison tier matches Pebble's against the binary operators (one level,
+//! below `+`/`-`/`~`): `a ~ b == c` stays `(a ~ b) == c`, a filter or a test
+//! binds tighter, a parenthesised group is one operand. It does NOT match
+//! Pebble's `not`: Pebble registers `not` at 500 (`javap -c CoreExtension`),
+//! tighter than every binary operator, so `not a == b` is `(not a) == b` in
+//! Kestra, while minijinja (and so this pass) reads `not (a == b)`; the same
+//! holds for `not a contains b`, `not a ?? b` and `not a + 1` (spec §6.1,
+//! recorded divergence 5; fix wave #5a M1). A call argument is a full expression, so no operand can bind
 //! differently inside the call than it did beside the operator.
 //!
 //! # What is preserved besides the value
@@ -41,7 +56,12 @@
 //!   template this pass cannot even LEX is returned whole and unchanged.
 //! - `{% do %}` is left untouched on purpose: minijinja refuses a `do` whose
 //!   expression is not a call, and turning `{% do a > b %}` into a call
-//!   would turn that refusal into an answer.
+//!   would turn that refusal into an answer. `do` is not Pebble syntax
+//!   (Kestra refuses the tag), and the value of the one form minijinja takes,
+//!   `{% do f(..) %}`, is discarded, so an operator in its arguments can
+//!   change only which error a failing argument raises. `{% macro %}` and
+//!   `{% call %}` are not reachable at all: the `macros` feature is off, and
+//!   minijinja refuses them as unknown statements.
 //! - **A `{% raw %}` block is copied through whole**, found the way
 //!   minijinja's lexer finds it (`skip_basic_tag`), whatever its whitespace
 //!   control. egret's own raw protection (`env::replace_raw_tags`, Kestra's
@@ -59,12 +79,14 @@
 //! time with [`RewriteError::ReservedName`] (W9c Task 4 cleanup, N2). An
 //! attribute (`x.kestra_gt`) is not a variable and is not refused.
 //!
-//! The functions answer with minijinja's own `PartialEq`/`Ord` for every pair
-//! that is not a `BigNumber` against a number, after the same undefined checks
-//! in the same order (`super::compare`'s doc), so for those pairs the pass
-//! changes the spelling and not the answer.
+//! The functions answer `==`, `!=`, `in` and `not in` with minijinja's own
+//! `PartialEq` for every pair that is not a `BigNumber` against a number,
+//! after the same undefined checks in the same order (`super::compare`'s doc),
+//! so for those the pass changes the spelling and not the answer. The four
+//! relational operators answer as Kestra does (`super::compare::relational`).
 
-use super::compare::{CmpOp, CHAIN_FUNCTION};
+use super::arith::ArithOp;
+use super::compare::CmpOp;
 use super::rewrite::RewriteError;
 
 /// The deepest bracket nesting this pass follows. minijinja's parser refuses
@@ -84,7 +106,41 @@ pub(crate) const RESERVED_PREFIX: &str = "kestra_";
 /// ([`RewriteError::ReservedName`]). Anything else this pass does not
 /// understand is left as it was.
 pub(crate) fn compile_comparisons(source: &str) -> Result<String, RewriteError> {
-    match compile(source) {
+    compile_pass(source, Pass::Comparisons)
+}
+
+/// The third pass (package #5a, Task A3, spec D2): every binary `+`, `-`,
+/// `*`, `/` and `%` in `source` (the comparison pass's output) becomes a call
+/// to one of `super::arith`'s `kestra_add` .. `kestra_mod`.
+///
+/// It reads the source with the same mirror of minijinja's grammar as the
+/// comparison pass and records the operators minijinja's `parse_math1`
+/// (`+`, `-`) and `parse_math2` (`*`, `/`, `%`) would build, so every operand
+/// is exactly the token range minijinja gives it and precedence is
+/// minijinja's by construction: `a + b * c` is `kestra_add(a, kestra_mul(b,
+/// c))`, `a - b + c` is `kestra_add(kestra_sub(a, b), c)` (left-associative,
+/// as Pebble's `+`/`-` and `*`/`/`/`%` are), `-a / b` divides the negated
+/// `a`, and `a ~ b + c` is `(a ~ b) + c` in both engines (`~` is 110 in
+/// Pebble, above `+`). A unary minus on anything but a number literal
+/// becomes `kestra_mul(-1, x)`, Pebble's `unaryMinus` (Task A8); `~`, `//`
+/// and `**` are not touched.
+/// Everything the module doc says about preserved bytes, unparsed regions,
+/// `{% do %}` (its discarded call arguments keep minijinja's operators),
+/// raw blocks and the reserved prefix holds for this pass too. `{% with %}`
+/// and `{% filter %}` are mirrored, so they get Pebble's arithmetic.
+pub(crate) fn compile_arithmetic(source: &str) -> Result<String, RewriteError> {
+    compile_pass(source, Pass::Arithmetic)
+}
+
+/// Which operators a pass compiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    Comparisons,
+    Arithmetic,
+}
+
+fn compile_pass(source: &str, pass: Pass) -> Result<String, RewriteError> {
+    match compile(source, pass) {
         Some(Ok(out)) => Ok(out),
         Some(Err(name)) => Err(RewriteError::ReservedName { name }),
         None => Ok(source.to_string()),
@@ -116,7 +172,7 @@ struct Tok {
 /// The whole template: copy the data, rewrite each `{{ }}` and `{% %}`.
 /// `None` when the lexer cannot follow minijinja's; `Some(Err(name))` for a
 /// reserved assignment target in a region that parsed.
-fn compile(src: &str) -> Option<Result<String, String>> {
+fn compile(src: &str, pass: Pass) -> Option<Result<String, String>> {
     let bytes = src.as_bytes();
     let mut out = String::with_capacity(src.len() + src.len() / 4);
     let mut i = 0usize;
@@ -176,6 +232,7 @@ fn compile(src: &str) -> Option<Result<String, String>> {
             depth: 0,
             sites: Vec::new(),
             reserved: None,
+            pass,
         };
         let parsed = if marker == b'{' {
             parser.whole_expression()
@@ -451,16 +508,17 @@ fn number_len(s: &str) -> (usize, bool) {
     )
 }
 
-/// One comparison minijinja's parser would build, as token indices.
+/// One comparison (or one run of same-tier arithmetic operators)
+/// minijinja's parser would build, as token indices.
 #[derive(Debug)]
 struct Site {
     /// The first token of the left operand.
     start: usize,
     /// The last token of the last operand.
     end: usize,
-    /// Each operator: its first and last token (`not in` is two), and what
-    /// it is.
-    ops: Vec<(usize, usize, CmpOp)>,
+    /// Each operator: its first and last token (`not in` is two), and the
+    /// function it becomes.
+    ops: Vec<(usize, usize, &'static str)>,
 }
 
 struct Parser<'a> {
@@ -472,6 +530,8 @@ struct Parser<'a> {
     sites: Vec<Site>,
     /// The first assignment target named with [`RESERVED_PREFIX`].
     reserved: Option<usize>,
+    /// Which operators become calls.
+    pass: Pass,
 }
 
 type Parsed = Result<(), ()>;
@@ -735,10 +795,10 @@ impl Parser<'_> {
             };
             let op_end = self.pos;
             self.pos += 1;
-            ops.push((op_start, op_end, op));
+            ops.push((op_start, op_end, op.function()));
             self.math1()?;
         }
-        if !ops.is_empty() {
+        if !ops.is_empty() && self.pass == Pass::Comparisons {
             self.sites.push(Site {
                 start,
                 end: self.pos - 1,
@@ -749,12 +809,33 @@ impl Parser<'_> {
     }
 
     fn math1(&mut self) -> Parsed {
+        let start = self.pos;
         self.concat()?;
-        while self.is_op("+") || self.is_op("-") {
+        let mut ops = Vec::new();
+        loop {
+            let op = match self.kind() {
+                Some(Kind::Op("+")) => ArithOp::Add,
+                Some(Kind::Op("-")) => ArithOp::Sub,
+                _ => break,
+            };
+            ops.push((self.pos, self.pos, op.function()));
             self.pos += 1;
             self.concat()?;
         }
+        self.arithmetic_site(start, ops);
         Ok(())
+    }
+
+    /// Records a run of arithmetic operators of one tier, in the arithmetic
+    /// pass only.
+    fn arithmetic_site(&mut self, start: usize, ops: Vec<(usize, usize, &'static str)>) {
+        if !ops.is_empty() && self.pass == Pass::Arithmetic {
+            self.sites.push(Site {
+                start,
+                end: self.pos - 1,
+                ops,
+            });
+        }
     }
 
     fn concat(&mut self) -> Parsed {
@@ -766,12 +847,38 @@ impl Parser<'_> {
         Ok(())
     }
 
+    /// `parse_math2`. A `//` (minijinja's floor division, no Pebble
+    /// operator) between two arithmetic operators ends the run:
+    /// `a * b // c * d` is `((a * b) // c) * d`, so the run before the `//`
+    /// becomes one call, that call is the left operand of the untouched
+    /// `//`, and the whole of that is the left operand of the run after it.
     fn math2(&mut self) -> Parsed {
+        let start = self.pos;
         self.pow()?;
-        while self.is_op("*") || self.is_op("/") || self.is_op("//") || self.is_op("%") {
+        let mut ops = Vec::new();
+        loop {
+            let op = match self.kind() {
+                Some(Kind::Op("*")) => ArithOp::Mul,
+                Some(Kind::Op("/")) => ArithOp::Div,
+                Some(Kind::Op("%")) => ArithOp::Mod,
+                Some(Kind::Op("//")) => {
+                    // Close the run so far (it ends on the token before
+                    // the `//`); the `//` and everything left of it are the
+                    // next run's left operand, which starts where this one
+                    // did.
+                    let done = std::mem::take(&mut ops);
+                    self.arithmetic_site(start, done);
+                    self.pos += 1;
+                    self.pow()?;
+                    continue;
+                }
+                _ => break,
+            };
+            ops.push((self.pos, self.pos, op.function()));
             self.pos += 1;
             self.pow()?;
         }
+        self.arithmetic_site(start, ops);
         Ok(())
     }
 
@@ -786,17 +893,69 @@ impl Parser<'_> {
 
     /// `parse_unary`: unary minus, postfix, then filters and tests.
     fn unary(&mut self) -> Parsed {
+        let first = self.pos;
         self.unary_only()?;
         self.postfix()?;
+        self.unary_minus_sites(first);
         self.filter_expr()
     }
 
     /// `unaryop!(parse_unary_only, parse_primary, -)`, iteratively.
+    ///
+    /// In the arithmetic pass a unary minus becomes `kestra_mul(-1, x)`
+    /// ([`Self::unary_minus_sites`], recorded once the postfix steps are
+    /// read).
     fn unary_only(&mut self) -> Parsed {
         while self.is_op("-") {
             self.pos += 1;
         }
         self.primary()
+    }
+
+    /// Records `kestra_mul(-1, x)` for each leading `-` of the operand that
+    /// starts at `first` and ends where the parse is now, in the arithmetic
+    /// pass. This is Pebble's `OperatorUtils.unaryMinus` (`multiply(-1, x)`,
+    /// read with `javap -c`), so `-fromIon(ion='1.50')` is the BigDecimal
+    /// `-1.50` and `-'5'` is `-5` (package #5a Task A8, 2026-10-29).
+    ///
+    /// The operand is Pebble's: the primary **with** its postfix steps, so
+    /// `-a.b` is `-(a.b)` and `-f(x)` negates the call's result. minijinja
+    /// reads them as `(-a).b` and `(-f)(x)`, which fail on every value
+    /// Pebble's reading answers, so no such form that rendered before
+    /// changes. One plain `-x` does: an integer past `i64` (a JSON
+    /// `10000000000000000000`). minijinja negated it exactly; here the `-1`
+    /// is a Long, so it takes the Long branch and wraps its low 64 bits
+    /// (`8446744073709551616`); Kestra multiplies by an `Integer` -1, so two
+    /// non-Longs take the `int` branch (`1981284352`, measured 2026-10-29).
+    /// That is the Integer-vs-Long divergence (spec §6.1 item 1; fix wave
+    /// #5a M2). A
+    /// number literal with no postfix is left as it is: `-1` and
+    /// `kestra_mul(-1, 1)` are the same value in both engines, and the
+    /// compiled text stays readable. Kept out of the recursive frames
+    /// ([`Self::unary`]), which every bracket level passes through:
+    /// `deep_nesting_is_bounded` runs the pass on a 256 KiB stack.
+    #[inline(never)]
+    fn unary_minus_sites(&mut self, first: usize) {
+        if self.pass != Pass::Arithmetic {
+            return;
+        }
+        let mut primary = first;
+        while primary < self.pos && matches!(self.toks[primary].kind, Kind::Op("-")) {
+            primary += 1;
+        }
+        let literal =
+            self.pos == primary + 1 && matches!(self.toks[primary].kind, Kind::Num { .. });
+        if primary == first || literal {
+            return;
+        }
+        // Innermost first, as every other site is recorded.
+        for minus in (first..primary).rev() {
+            self.sites.push(Site {
+                start: minus,
+                end: self.pos - 1,
+                ops: vec![(minus, minus, ArithOp::Mul.function())],
+            });
+        }
     }
 
     fn primary(&mut self) -> Parsed {
@@ -879,8 +1038,10 @@ impl Parser<'_> {
                         | Kind::Open(b'[')
                         | Kind::Open(b'{'),
                     ) => {
+                        let first = self.pos;
                         self.unary_only()?;
                         self.postfix()?;
+                        self.unary_minus_sites(first);
                     }
                     _ => {}
                 }
@@ -955,21 +1116,37 @@ fn emit(
     let mut replacement: Vec<Option<String>> = vec![None; n];
     let mut suffixes: Vec<usize> = vec![0; n];
     for site in sites {
-        let chained = site.ops.len() > 1;
-        let name = if chained {
-            CHAIN_FUNCTION
-        } else {
-            site.ops[0].2.function()
-        };
+        // `a op1 b op2 c` becomes `op2(op1(a, b), c)`: the calls open
+        // outermost first before the left operand, each operator becomes `,`
+        // and every operator after the first also closes the call before it.
         // A leading space: the token before may be an identifier (`if`,
         // `and`, `not`), and gluing would make one name of the two.
-        prefix[site.start] = Some(format!(" {name}("));
-        for &(first, last, op) in &site.ops {
-            replacement[first] = Some(if chained {
-                format!(", '{}',", op.word())
+        let mut open = String::new();
+        for &(_, _, function) in site.ops.iter().rev() {
+            open.push(' ');
+            open.push_str(function);
+            open.push('(');
+        }
+        // Sites are recorded innermost first (a parse finishes an operand
+        // before the operator around it), so a later site that starts on the
+        // same token encloses the earlier one and opens before it:
+        // `a * b + c` is `kestra_add( kestra_mul(a, b), c)`.
+        if let Some(inner) = prefix[site.start].take() {
+            open.push_str(&inner);
+        }
+        prefix[site.start] = Some(open);
+        for (index, &(first, last, _)) in site.ops.iter().enumerate() {
+            // An operator on the site's own first token has no left operand:
+            // it is a unary minus (`Parser::unary_minus_sites`), and `-x` becomes
+            // `kestra_mul(-1, x)`.
+            let text = if first == site.start {
+                "-1,"
+            } else if index == 0 {
+                ","
             } else {
-                ",".to_string()
-            });
+                "),"
+            };
+            replacement[first] = Some(text.to_string());
             if last != first {
                 replacement[last] = Some(String::new());
             }

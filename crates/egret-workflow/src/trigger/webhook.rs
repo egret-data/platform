@@ -202,11 +202,14 @@
 //!    misses at `trigger.parameters` and *then* indexes `.validationToken` on
 //!    the result — two levels, where `oracle-exec/baseline.txt`'s
 //!    missing-root/missing-member sentence is about one. With the root absent
-//!    it errors; with the root present and empty it errors identically.
-//!    [`tests::the_missing_root_is_why_webhook_plaintext_is_baselined`] is the
-//!    running program that holds all four rows, and the task report records
-//!    the direct ratchet measurement taken by temporarily adding the root to
-//!    `worker/render.rs`: **127 before, 127 after, zero entries moved.**
+//!    it errored; with the root present and empty it errored identically. The
+//!    task report records the direct ratchet measurement taken by temporarily
+//!    adding the root to `worker/render.rs`: **127 before, 127 after, zero
+//!    entries moved.** Since package #5a Task A5 (2026-10-29, spec D6) `??`
+//!    answers through a missing chain, so both contexts render the fallback,
+//!    `hello-world`, as Kestra does, and the entry banked;
+//!    [`tests::a_missing_trigger_chain_renders_webhook_plaintexts_fallback`]
+//!    is the running program that holds all four rows.
 //!
 //!    So the reason not to publish it here is the 293, not the one.
 //! 2. `worker/render.rs` already carries two findings assigned to W6 Task 8.
@@ -2180,42 +2183,32 @@ triggers:
         );
     }
 
-    /// **Step 4's measurement, and it falsifies the premise it was given.**
+    /// **Step 4's measurement, and what package #5a Task A5 changed in it.**
     ///
     /// *Deleted by accident in fix round 1 and restored here (fix round 2,
-    /// Important 4).* It went out with the block of `inputs:` tests that
-    /// Critical 2 replaced wholesale, and the module doc kept citing it as
-    /// "the running program that holds all four rows" — a citation to a test
-    /// that no longer existed. Restoring it is the right repair rather than
-    /// deleting the citation, because the measurement is still the reason the
-    /// `trigger` root is withheld.
-    ///
-    /// The task brief warned that publishing a `trigger` root into the render
-    /// context "would make `valids/webhook-plaintext` diverge further". It
-    /// would not — not for an empty root — and this is the running program that
-    /// says so.
+    /// Important 4).* The module doc cites it as the running program that
+    /// holds all four rows.
     ///
     /// `valids/webhook-plaintext`'s only task renders
     /// `{{ trigger.parameters.validationToken[0] ?? 'hello-world' }}`. Kestra
     /// renders `hello-world` (the golden was harvested through a plain
-    /// execution POST, so its `Execution.trigger` is null). egret errors, and
-    /// `oracle-exec/baseline.txt` attributes that to `??` resolving a missing
-    /// MEMBER but not a missing ROOT.
+    /// execution POST, so its `Execution.trigger` is null).
     ///
-    /// | context | result |
-    /// |---|---|
-    /// | no `trigger` root at all | `Err(undefined value)` |
-    /// | `trigger` root present, no `parameters` | **`Err(undefined value)` — the same** |
-    /// | `trigger.parameters.validationToken` present | `Ok("tok")` |
+    /// | context | before Task A5 | since Task A5 (2026-10-29) |
+    /// |---|---|---|
+    /// | no `trigger` root at all | `Err(undefined value)` | **`hello-world`** |
+    /// | `trigger` root present, no `parameters` | `Err(undefined value)` | **`hello-world`** |
+    /// | `trigger.parameters.validationToken` present | `Ok("tok")` | `Ok("tok")` |
     ///
-    /// The middle row is the one that matters: **defining the root changes
-    /// nothing**, because the expression misses at `trigger.parameters` and
-    /// then indexes `.validationToken` on the result — two levels, not one, and
-    /// the baseline's one-level sentence does not reach it. The entry stays
-    /// baselined either way, which is why the ratchet reads 127 before and 127
-    /// after.
+    /// Step 4's finding stands as history: defining the root changed nothing,
+    /// because the expression misses at `trigger.parameters` and then indexes
+    /// `.validationToken` on the result -- two levels, not one. Spec D6 (Q6)
+    /// compiles a path on the left of `??` to `kestra_path(..)`, which answers
+    /// `Undefined` at the first missing step instead of raising, so both
+    /// missing contexts reach the fallback and the executor entry banked
+    /// (`oracle-exec/baseline.txt` lost `valids/webhook-plaintext`).
     #[test]
-    fn the_missing_root_is_why_webhook_plaintext_is_baselined() {
+    fn a_missing_trigger_chain_renders_webhook_plaintexts_fallback() {
         const EXPR: &str = "{{ trigger.parameters.validationToken[0] ?? 'hello-world' }}";
 
         fn cx(trigger: Option<Value>) -> RenderContext {
@@ -2230,15 +2223,15 @@ triggers:
             cx
         }
 
-        // Row 1 -- today's shipping context.
-        assert!(
-            render_str(EXPR, &cx(None)).is_err(),
-            "egret cannot render it with no trigger root -- this is why the entry is baselined"
+        // Row 1 -- today's shipping context: no `trigger` root.
+        assert_eq!(
+            render_str(EXPR, &cx(None)).expect("a missing root reaches the fallback"),
+            "hello-world"
         );
-        // Row 2 -- the change Step 4 warned about. IT IS THE SAME ANSWER.
-        assert!(
-            render_str(EXPR, &cx(Some(json!({})))).is_err(),
-            "a defined-but-empty trigger root does NOT rescue it, and does not break it either"
+        // Row 2 -- a defined-but-empty root: the same answer.
+        assert_eq!(
+            render_str(EXPR, &cx(Some(json!({})))).expect("a missing member reaches the fallback"),
+            "hello-world"
         );
         // Row 3 -- the control, without which rows 1 and 2 are satisfied by a
         // renderer that can never render this expression at all.
@@ -2250,8 +2243,7 @@ triggers:
             .expect("a fully populated trigger root renders"),
             "tok"
         );
-        // Row 4 -- the one-level miss the baseline's sentence IS about, kept as
-        // the discriminator between "?? never works" and "?? works on a member".
+        // Row 4 -- the one-level miss the old baseline sentence was about.
         let mut one_level = cx(None);
         one_level.insert("outputs", json!({}));
         assert_eq!(

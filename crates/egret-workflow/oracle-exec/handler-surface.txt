@@ -320,38 +320,35 @@ Two rules, and they are deliberately different:
   file, with the entry named and the reason given; a ceiling that is too
   high costs nothing at all, which is why it would not be a ceiling.
 
-    251  reproduced today, and by nothing the driver removes
+    261  reproduced today, and by nothing the driver removes
       0  reproduced today ONLY because the feed supplies a terminal
          for a task type W3b has no handler for
-     32  not reproduced today, and nothing found here blocks it
-     18  not reproduced today, and blocked -- by cause below
+     24  not reproduced today, and nothing found here blocks it
+     16  not reproduced today, and blocked -- by cause below
   -----
     301  TOTAL, the comparable entries
 
-  CEILING, feed removed  = 251 + 32 = **283**
-  CEILING, feed retained = 251 + 0 + 32 = 283
+  CEILING, feed removed  = 261 + 24 = **285**
+  CEILING, feed retained = 261 + 0 + 24 = 285
 
-  Today the ratchet matches 251. The two ceilings are the same
+  Today the ratchet matches 261. The two ceilings are the same
   quantity under the two answers Task 5 may give to `does the driver
   still feed a terminal for a task type it has no handler for?`. They are
   NOT the same set with a different name, and the composition is printed
   above so a reader cannot take one for the other.
 
-  **283 is the bound this package should be held to**, because removing
+  **285 is the bound this package should be held to**, because removing
   the feed is the stated intent of Task 5 step 4. If Task 5 keeps the
   feed for unhandled types it must say so, and then the bound is
-  283 -- reported as a decision, not as progress.
+  285 -- reported as a decision, not as progress.
 
   The 0 at risk, with the type whose terminal is fed:
 
-  The 32 nothing here blocks:
-    valids/all-flowable
+  The 24 nothing here blocks:
     valids/dag
-    valids/disable-flowable
     valids/errors
     valids/full
     valids/if
-    valids/if-in-flowable
     valids/if-in-parallel
     valids/loop-object
     valids/loop-object-in-list
@@ -361,10 +358,6 @@ Two rules, and they are deliberately different:
     valids/parallel-disabled-tasks
     valids/parallel-fail-with-flowable
     valids/purge_logs_full_arguments
-    valids/restart-child
-    valids/restart-loop
-    valids/restart-parent
-    valids/restart-parent-loop
     valids/retry-failed-flow-duration
     valids/retry-failed-task-duration
     valids/retry-flowable-parallel
@@ -373,7 +366,6 @@ Two rules, and they are deliberately different:
     valids/sla-parent-flow
     valids/subflow-parent-retry
     valids/subflow-secret-output-parent
-    valids/task-runif-workingdirectory
     valids/variables
     valids/working-directory-invalid-runif
     valids/working-directory-taskrun-nested
@@ -381,8 +373,8 @@ Two rules, and they are deliberately different:
   What blocks the rest, by cause. The rows OVERLAP -- an entry may be
   blocked several times over -- so they do not sum to the bucket:
 
-        4  construct  flow-level outputs:
         3  construct  flow sla:
+        3  construct  flow-level outputs:
         2  clock      checkFrequency.maxDuration; the golden's iteration count carries the artifact's delay-poller latency
         1  construct  Loop outputs: over a file (STORE mode, executions/{iteration}/{n}.ion)
         1  construct  Pause behavior:
@@ -394,14 +386,13 @@ Two rules, and they are deliberately different:
         1  handler    io.kestra.plugin.core.kv.Set
         1  refusal    egret over-accepts it -- W1's validation, not a handler
         1  render     Pebble's `empty` test, which egret's renderer leaves unknown
-        1  render     a relational operator against a quoted operand; Pebble throws and minijinja answers
     -----
-       18  DISTINCT entries blocked (the rows above overlap)
+       16  DISTINCT entries blocked (the rows above overlap)
 
   The four causes the plan names, and where each landed:
 
         1  a missing handler
-       13  a construct no W3b task owns
+       12  a construct no W3b task owns
         0  a state RunState cannot hold
         1  an over-acceptance -- W1's validation
 
@@ -465,7 +456,7 @@ Two rules, and they are deliberately different:
     valids/retry-failed-flow-duration        maxDuration with no elapsed time
     valids/retry-success                     WARNING, which RunState cannot hold
 
-    working expectation = 283 - 6 = 277
+    working expectation = 285 - 6 = 279
 
   Two of them deserve a sentence each:
 

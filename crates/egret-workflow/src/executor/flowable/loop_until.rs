@@ -88,15 +88,16 @@
 //!   is one of only **two** corpus flows Kestra ITSELF could not reproduce
 //!   across five rounds, which is the corroboration that this is a property of
 //!   the construct and not of one entry.
-//! * `valids/loopuntil-failed-flowable`'s loop ends `SUCCESS` where the golden
-//!   holds `FAILED`, because its condition is
-//!   `{{ outputs.loop.iterationCount < "5" }}`: Pebble widens both operands of
-//!   a relational operator to `Number` and throws on a `String`, and minijinja
-//!   orders values across kinds and answers `True`. A RENDERER divergence
-//!   wearing a loop's name.
+//! * `valids/loopuntil-failed-flowable`'s loop ended `SUCCESS` where the
+//!   golden holds `FAILED`, because its condition is
+//!   `{{ outputs.loop.iterationCount < "5" }}`: Pebble throws on a relational
+//!   operator over a `String`, and minijinja ordered values across kinds and
+//!   answered `True`. A RENDERER divergence wearing a loop's name -- and it
+//!   BANKED with package #5a's Task A2 (2026-10-28, spec D1), which made
+//!   egret's relational operators Kestra's, without a change to this module.
 //!
-//! `oracle-exec/baseline.txt` and `oracle-exec/README.md` carry both, and
-//! `handler_surface.py` carries a blocker row for each so the ceiling does not
+//! `oracle-exec/baseline.txt` and `oracle-exec/README.md` carry the first, and
+//! `handler_surface.py` carries a blocker row for it so the ceiling does not
 //! name an entry nothing can bank.
 
 use crate::executor::command::Command;

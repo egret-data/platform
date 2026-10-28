@@ -568,9 +568,14 @@ fn render_typed_matches_the_artifact() {
                 chrono::DateTime::parse_from_rfc3339(inner).is_ok(),
                 "{name}: {got}"
             );
+        } else if name == "tr_div" {
+            // The cell's `ion_bytes` is the 2026-10-08 "chosen" value
+            // (egret's float division, `3.5e0`). Package #5a (spec Q2, D2,
+            // 2026-10-29) adopted Kestra's integer division, so egret now
+            // stores what the artifact measured: `{{ 7 / 2 }}` is `3`.
+            assert_eq!(json!(got), cell["kestra"]["ion_bytes"], "{name}");
+            assert_eq!(cell["kestra"]["ion_bytes"], json!("3"), "{name}");
         } else {
-            // `tr_div` included: chosen (the user's ruling, 2026-10-08),
-            // egret's float division `3.5e0` at its top level.
             assert_eq!(json!(got), cell["ion_bytes"], "{name}");
         }
         examined += 1;

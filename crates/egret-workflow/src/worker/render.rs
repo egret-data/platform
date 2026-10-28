@@ -805,81 +805,67 @@ impl Surface {
                 // variable -- so leaving it out failed 20 entries whose only
                 // expression was that.
                 if let Some(t) = plan.tasks.get(r.task) {
-                    // **`task.type` is `null` for every kind `build_plan`
-                    // descends into, and Kestra's is always the FQCN.** The
-                    // divergence set is exactly `{Sequential, Parallel, If,
-                    // Switch, Loop, Dag, Subflow}` -- note both ends of it:
-                    // `Subflow` is in (it is `Executable`, not a flowable the
-                    // renderer sees), and **`Pause` is in too since W8 Task 3**
-                    // -- a `TaskKind::Pause` gets no `type_id` either, for the
-                    // same reason and by the same line of `claim::persist`.
-                    // **`LoopUntil` joined them at W8 Task 4, under BOTH its
-                    // spellings** -- a `plan::TaskKind::LoopUntil` gets no
-                    // `type_id` either, and `kind_for` now maps
-                    // `io.kestra.plugin.core.flow.WaitFor` to the same
-                    // `models::TaskKind` as `...LoopUntil`, so the two
-                    // spellings no longer disagree here or anywhere else.
-                    // (They did through W8 Task 1 fix round 5, when `WaitFor`
-                    // reached `models::TaskKind::Leaf`; it changed nothing in
-                    // THIS comment even then, because the conclusion is drawn
-                    // from the PLAN kind and that was `Runnable` for both.)
-                    // The two opaque flowables left, `AllowFailure` and
-                    // `WorkingDirectory`, are OUT: they are planned `Runnable`
-                    // and so their `type_id` is populated -- as is a `Pause` or
-                    // a `LoopUntil` whose own properties `build_plan` cannot
-                    // read (`pause_gap`, `loop_until_gap`).
-                    //
-                    // **Latent, and the reason is nameable rather than
-                    // incidental**: only two corpus flows write `{{task.type}}`
-                    // (`valids/logs`, `valids/disable-simple`) and both write it
-                    // on a `core.log.Log` leaf, so no golden entry can fail on
-                    // it and no assertion here could either. The element of the
-                    // class this corpus does not contain is **a `{{ task.type }}`
-                    // on a flowable**. Recorded here and in
-                    // `oracle-exec/README.md`'s unclaimed table rather than only
-                    // in a completed task's report, because a finding that lives
-                    // in a report is a finding that has to be rediscovered.
-                    // Found by W8 Task 1's predicate sweep; not fixed by it.
-                    cx.insert(
-                        "task",
-                        json!({
-                            "id": t.id,
-                            "type": match &t.kind {
-                                TaskKind::Runnable { type_id } => Some(type_id.clone()),
-                                // Kill-and-exit Task 3: the one executor-level
-                                // kind with a single FQCN, which Kestra's is.
-                                TaskKind::Exit { .. } => {
-                                    Some(crate::executor::exit::TYPE_ID.to_string())
-                                }
-                                // Group C2 Task 3: one FQCN per op.
-                                TaskKind::ExecutionUpdate { op, .. } => Some(op.type_id().to_string()),
-                                _ => None,
-                            },
-                        }),
+                    // **`task.type` is the `type:` as written, on every kind**
+                    // (package #5a Task A7, spec D7). Kestra's
+                    // `RunVariables.of(Task)` is `Map.of("id", task.getId(),
+                    // "type", task.getType())` (`RunVariables.java:124-129`),
+                    // and `getType()` is the author's own string -- see
+                    // [`PlanTask::type_name`](crate::executor::PlanTask). Until
+                    // A7 this was `null` for every kind `build_plan` descends
+                    // into (`Sequential`, `Parallel`, `If`, `Switch`, `Loop`,
+                    // `Dag`, `Subflow`, `Pause`, `LoopUntil`, `AllowFailure`,
+                    // `WorkingDirectory`) and the canonical class name, not the
+                    // spelling, on `Exit` and the execution updates;
+                    // `task_type_is_the_type_as_written_on_every_kind` pins all
+                    // fourteen kinds. No corpus entry moved on it: the two
+                    // flows that write `{{task.type}}` (`valids/logs`,
+                    // `valids/disable-simple`) write it on a `Log` leaf.
+                    cx.insert("task", json!({"id": t.id, "type": t.type_name}));
+                }
+                // **`RunVariables.of(TaskRun)`, key for key**
+                // (`RunVariables.java:150-170`): `id`, `startDate` and
+                // `attemptsCount` always; `parentId`, `value` and `iteration`
+                // ONLY when non-null (package #5a Task A7, spec D7). The
+                // renderer is strict, so an absent key FAILS a render that
+                // reads it where a `null` one rendered empty: `{{ taskrun.value
+                // }}` in a `Loop` body or a `Switch` case -- `valids/all-flowable`
+                // and `valids/disable-flowable` -- is a failed task in Kestra,
+                // whose `TaskRun.value` is null on all 840 golden runs.
+                let mut taskrun = json!({
+                    "id": self.ids.get(&ix).map(Uuid::to_string),
+                    "startDate": self.started.get(&ix),
+                    // **The attempts already FINISHED, which is one fewer
+                    // than egret holds while the current one is open.**
+                    // Measured from the golden rather than reasoned:
+                    // `valids/restart-child`'s `failFirstTime` renders
+                    // `{{ 1 / taskrun.attemptsCount }}` and Kestra FAILED
+                    // it, and `valids/restart_last_failed`'s `c` renders
+                    // `{{ taskrun.attemptsCount == 1 ? 'ok' : ko }}` and
+                    // Kestra FAILED that too — `ko` is an undefined
+                    // variable, so the ternary must have taken the ELSE
+                    // branch, so the count was not 1. Both are only
+                    // explained by 0 on the first attempt. egret opens the
+                    // attempt before the handler runs, so it is one behind.
+                    "attemptsCount": r.attempts.len().saturating_sub(1),
+                });
+                let fields = taskrun.as_object_mut().expect("built as an object");
+                // `parentTaskRunId` is the parent's task-run ID. It was the
+                // parent's `run_ix` until A7. A parent created in the same
+                // settle as the child has no id reserved yet, and reads
+                // `null` here exactly as its own `taskrun.id` does.
+                if let Some(parent) = r.parent {
+                    fields.insert(
+                        "parentId".into(),
+                        json!(self.ids.get(&parent).map(Uuid::to_string)),
                     );
                 }
-                cx.insert(
-                    "taskrun",
-                    json!({
-                        "id": self.ids.get(&ix).map(Uuid::to_string),
-                        "startDate": self.started.get(&ix),
-                        "value": r.value,
-                        // **The attempts already FINISHED, which is one fewer
-                        // than egret holds while the current one is open.**
-                        // Measured from the golden rather than reasoned:
-                        // `valids/restart-child`'s `failFirstTime` renders
-                        // `{{ 1 / taskrun.attemptsCount }}` and Kestra FAILED
-                        // it, and `valids/restart_last_failed`'s `c` renders
-                        // `{{ taskrun.attemptsCount == 1 ? 'ok' : ko }}` and
-                        // Kestra FAILED that too — `ko` is an undefined
-                        // variable, so the ternary must have taken the ELSE
-                        // branch, so the count was not 1. Both are only
-                        // explained by 0 on the first attempt. egret opens the
-                        // attempt before the handler runs, so it is one behind.
-                        "attemptsCount": r.attempts.len().saturating_sub(1),
-                        "parentId": r.parent,
-                    }),
-                );
+                if let Some(value) = &r.value {
+                    fields.insert("value".into(), json!(value));
+                }
+                if let Some(iteration) = taskrun_iteration(plan, state, ix) {
+                    fields.insert("iteration".into(), json!(iteration));
+                }
+                cx.insert("taskrun", taskrun);
             }
         }
         match &self.files {
@@ -887,6 +873,43 @@ impl Surface {
             None => cx,
         }
     }
+}
+
+/// `taskrun.iteration` for run `ix`, `None` where Kestra's `TaskRun.iteration`
+/// is null (package #5a Task A7, spec D7).
+///
+/// Kestra sets the field in two places and both belong to `LoopUntil`
+/// (`WaitFor`): `FlowableUtils.resolveWaitForNext` creates each of the loop's
+/// children (its `tasks`, `errors` and `finally` lists alike) through
+/// `toNextTaskRunIncrementIteration(execution, parentTaskRun.getIteration())`,
+/// which is the loop run's iteration with `null` read as `0`; and
+/// `ExecutionService`'s `WaitFor` restart is
+/// `taskRun.resetAttempts().incrementIteration()` on the loop's own run
+/// (`null` becomes `1`). No other path writes it (`TaskRun.java:206` copies
+/// it, `:220` takes the `ResolvedTask`'s, which only the first sets).
+///
+/// So with `k` = [`loop_iteration`](crate::executor::loop_iteration), the
+/// 1-based iteration the loop is in: the loop's own run carries `k - 1` from
+/// `k = 2` on, and a direct child carries `k - 1` from `k = 1`. A child is
+/// always of the CURRENT iteration, because `Command::RestartLoop` resets every
+/// descendant (Kestra removes them) before the next iteration builds them back.
+/// A `Loop` (Kestra's `ForEach`) iteration is a sub-execution, and its runs
+/// carry neither `iteration` nor `value`: `TaskRun.value` is null on all 840
+/// golden runs.
+fn taskrun_iteration(plan: &Plan, state: &ExecutionState, ix: RunIx) -> Option<usize> {
+    let is_loop_until = |run: RunIx| {
+        state
+            .runs
+            .get(run)
+            .and_then(|r| plan.tasks.get(r.task))
+            .is_some_and(|t| matches!(t.kind, TaskKind::LoopUntil { .. }))
+    };
+    if is_loop_until(ix) {
+        let k = crate::executor::loop_iteration(state, ix);
+        return (k >= 2).then(|| k - 1);
+    }
+    let parent = state.runs.get(ix)?.parent?;
+    is_loop_until(parent).then(|| crate::executor::loop_iteration(state, parent).saturating_sub(1))
 }
 
 /// The `labels` render value: each label by key, then the `system` entry --
@@ -1157,6 +1180,213 @@ mod tests {
             ids: std::collections::BTreeMap::new(),
             files: None,
         }
+    }
+
+    /// A run of `task` under `parent`, whose history is `history`.
+    fn run_of(
+        task: usize,
+        parent: Option<usize>,
+        history: Vec<RunState>,
+    ) -> crate::executor::TaskRun {
+        crate::executor::TaskRun {
+            task,
+            parent,
+            value: None,
+            rendered: None,
+            rendered_run_if: None,
+            history,
+            attempts: Vec::new(),
+            not_before: None,
+            resume_with: None,
+            working_dir: None,
+        }
+    }
+
+    fn state_of(runs: Vec<crate::executor::TaskRun>) -> ExecutionState {
+        ExecutionState {
+            runs,
+            history: vec![RunState::Created, RunState::Running],
+            metadata: crate::executor::ExecutionMeta::default(),
+        }
+    }
+
+    /// Every kind `plan_stored` builds, each under the `type:` it is written
+    /// with -- two of them under an alias (`WaitFor` for `LoopUntil`, the
+    /// `core.` spelling for `Sequential`), which is what "as written" is
+    /// tested by.
+    const EVERY_KIND: &str = "id: k\nnamespace: t\ntasks:\n\
+         \x20 - id: leaf\n    type: io.kestra.plugin.core.log.Log\n    message: m\n\
+         \x20 - id: sub\n    type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    flowId: c\n\
+         \x20 - id: seq\n    type: core.sequential\n    tasks:\n\
+         \x20     - id: seq-1\n        type: io.kestra.plugin.core.log.Log\n        message: m\n\
+         \x20 - id: af\n    type: io.kestra.plugin.core.flow.AllowFailure\n    tasks:\n\
+         \x20     - id: af-1\n        type: io.kestra.plugin.core.log.Log\n        message: m\n\
+         \x20 - id: wd\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n    tasks:\n\
+         \x20     - id: wd-1\n        type: io.kestra.plugin.core.log.Log\n        message: m\n\
+         \x20 - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n\
+         \x20     - id: par-1\n        type: io.kestra.plugin.core.log.Log\n        message: m\n\
+         \x20 - id: if\n    type: io.kestra.plugin.core.flow.If\n    condition: \"{{ true }}\"\n    then:\n\
+         \x20     - id: if-1\n        type: io.kestra.plugin.core.log.Log\n        message: m\n\
+         \x20 - id: sw\n    type: io.kestra.plugin.core.flow.Switch\n    value: a\n    cases:\n      a:\n\
+         \x20       - id: sw-1\n          type: io.kestra.plugin.core.log.Log\n          message: m\n\
+         \x20 - id: dag\n    type: io.kestra.plugin.core.flow.Dag\n    tasks:\n\
+         \x20     - task:\n          id: dag-1\n          type: io.kestra.plugin.core.log.Log\n          message: m\n\
+         \x20 - id: loop\n    type: io.kestra.plugin.core.flow.Loop\n    values: '[1]'\n    tasks:\n\
+         \x20     - id: loop-1\n        type: io.kestra.plugin.core.log.Log\n        message: m\n\
+         \x20 - id: pause\n    type: io.kestra.plugin.core.flow.Pause\n\
+         \x20 - id: wait\n    type: io.kestra.plugin.core.flow.WaitFor\n    condition: \"{{ true }}\"\n    tasks:\n\
+         \x20     - id: wait-1\n        type: io.kestra.plugin.core.log.Log\n        message: m\n\
+         \x20 - id: set\n    type: io.kestra.plugin.core.execution.SetVariables\n    variables:\n      a: 1\n\
+         \x20 - id: exit\n    type: io.kestra.plugin.core.execution.Exit\n    state: SUCCESS\n";
+
+    /// **`{{ task.type }}` is the `type:` as written, on every kind** --
+    /// package #5a Task A7, spec D7. It was `null` on every kind `build_plan`
+    /// descends into and the class name on `Exit` and the execution updates;
+    /// Kestra's `RunVariables.of(Task)` is `task.getType()` on all of them.
+    #[test]
+    fn task_type_is_the_type_as_written_on_every_kind() {
+        use crate::executor::{plan_stored, TaskKind};
+        use std::collections::BTreeSet;
+        // Arrange
+        let plan = plan_stored(EVERY_KIND).expect("the probe flow plans");
+        let state = state_of(
+            (0..plan.tasks.len())
+                .map(|ix| run_of(ix, None, vec![RunState::Created]))
+                .collect(),
+        );
+        let surface = bare_surface();
+        let written: std::collections::BTreeMap<&str, &str> = EVERY_KIND
+            .lines()
+            .zip(EVERY_KIND.lines().skip(1))
+            .filter_map(|(a, b)| {
+                let id = a.trim().trim_start_matches("- ").strip_prefix("id: ")?;
+                Some((id, b.trim().strip_prefix("type: ")?))
+            })
+            .collect();
+        let mut kinds = BTreeSet::new();
+
+        for (ix, task) in plan.tasks.iter().enumerate() {
+            // Act
+            let cx = surface.context(&plan, &state, Some(ix));
+            let got = crate::render_str("{{ task.type }}", &cx);
+
+            // Assert
+            let want = written
+                .get(task.id.as_str())
+                .unwrap_or_else(|| panic!("{} is written in the probe", task.id));
+            assert_eq!(got.as_deref(), Ok(*want), "task {}", task.id);
+            // Exhaustive on purpose: a new variant fails to compile here
+            // until it has a row in the probe.
+            kinds.insert(match &task.kind {
+                TaskKind::Runnable { .. } => "Runnable",
+                TaskKind::Executable { .. } => "Executable",
+                TaskKind::Sequential { .. } => "Sequential",
+                TaskKind::AllowFailure { .. } => "AllowFailure",
+                TaskKind::WorkingDirectory { .. } => "WorkingDirectory",
+                TaskKind::Parallel { .. } => "Parallel",
+                TaskKind::If { .. } => "If",
+                TaskKind::Switch { .. } => "Switch",
+                TaskKind::Dag { .. } => "Dag",
+                TaskKind::Loop { .. } => "Loop",
+                TaskKind::Pause { .. } => "Pause",
+                TaskKind::LoopUntil { .. } => "LoopUntil",
+                TaskKind::Exit { .. } => "Exit",
+                TaskKind::ExecutionUpdate { .. } => "ExecutionUpdate",
+            });
+        }
+        assert_eq!(kinds.len(), 14, "one row per `TaskKind` variant: {kinds:?}");
+    }
+
+    /// **`taskrun.value`, `taskrun.parentId` and `taskrun.iteration` are
+    /// ABSENT when null** -- `RunVariables.of(TaskRun)` puts each only when it
+    /// is non-null, and the renderer is strict, so `{{ taskrun.value }}` on a
+    /// run with no value FAILS in Kestra (`valids/all-flowable`,
+    /// `valids/disable-flowable`). Package #5a Task A7, spec D7.
+    #[test]
+    fn a_null_taskrun_key_is_absent_and_a_present_one_is_kestras() {
+        use crate::executor::plan_stored;
+        // Arrange
+        let plan = plan_stored(EVERY_KIND).expect("the probe flow plans");
+        let ix = |id: &str| plan.tasks.iter().position(|t| t.id == id).unwrap();
+        let (seq, seq1) = (ix("seq"), ix("seq-1"));
+        let mut state = state_of(vec![
+            run_of(seq, None, vec![RunState::Created, RunState::Running]),
+            run_of(seq1, Some(0), vec![RunState::Created]),
+        ]);
+        let mut surface = bare_surface();
+        let parent_id = Uuid::new_v4();
+        surface.ids.insert(0, parent_id);
+        let render = |surface: &Surface, state: &ExecutionState, run: usize, text: &str| {
+            crate::render_str(text, &surface.context(&plan, state, Some(run)))
+        };
+
+        // Act / Assert: a top-level run has none of the three.
+        for key in ["value", "parentId", "iteration"] {
+            let text = format!("{{{{ taskrun.{key} }}}}");
+            assert!(
+                render(&surface, &state, 0, &text).is_err(),
+                "{key} is absent on a top-level run with no value"
+            );
+        }
+        // The child has a parent: its id, the parent's `taskrun.id`.
+        assert_eq!(
+            render(&surface, &state, 1, "{{ taskrun.parentId }}").as_deref(),
+            Ok(parent_id.to_string().as_str())
+        );
+        assert!(render(&surface, &state, 1, "{{ taskrun.value }}").is_err());
+        // A run that carries a value has it.
+        state.runs[1].value = Some("v".into());
+        assert_eq!(
+            render(&surface, &state, 1, "{{ taskrun.value }}").as_deref(),
+            Ok("v")
+        );
+    }
+
+    /// **A `LoopUntil`'s children carry `taskrun.iteration`, 0-based, and the
+    /// loop's own run carries it from its second iteration** -- the one place
+    /// Kestra sets the field: `FlowableUtils.resolveWaitForNext` creates every
+    /// child through `toNextTaskRunIncrementIteration(execution,
+    /// parentTaskRun.getIteration())` (`null` becomes `0`), and
+    /// `ExecutionService`'s `WaitFor` restart is
+    /// `taskRun.resetAttempts().incrementIteration()` on the loop's run
+    /// (`null` becomes `1`). A child of any other flowable has none.
+    #[test]
+    fn a_loop_until_child_carries_the_iteration_kestra_gives_it() {
+        use crate::executor::plan_stored;
+        // Arrange
+        let plan = plan_stored(EVERY_KIND).expect("the probe flow plans");
+        let ix = |id: &str| plan.tasks.iter().position(|t| t.id == id).unwrap();
+        let (wait, wait1) = (ix("wait"), ix("wait-1"));
+        let first = vec![RunState::Created, RunState::Running];
+        let second = vec![
+            RunState::Created,
+            RunState::Running,
+            RunState::Paused,
+            RunState::Running,
+        ];
+        let surface = bare_surface();
+        let render = |state: &ExecutionState, run: usize| {
+            crate::render_str(
+                "{{ taskrun.iteration }}",
+                &surface.context(&plan, state, Some(run)),
+            )
+        };
+
+        // Act / Assert: the first iteration.
+        let state = state_of(vec![
+            run_of(wait, None, first),
+            run_of(wait1, Some(0), vec![RunState::Created]),
+        ]);
+        assert!(render(&state, 0).is_err(), "the loop's own: null, absent");
+        assert_eq!(render(&state, 1).as_deref(), Ok("0"));
+
+        // The second.
+        let state = state_of(vec![
+            run_of(wait, None, second),
+            run_of(wait1, Some(0), vec![RunState::Created]),
+        ]);
+        assert_eq!(render(&state, 0).as_deref(), Ok("1"));
+        assert_eq!(render(&state, 1).as_deref(), Ok("1"));
     }
 
     /// One `CREATED` run of the flow's only task, under an execution whose

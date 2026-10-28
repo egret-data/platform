@@ -22,19 +22,16 @@
 # "W2 Task 6, fix round 2".
 
 
-# Pebble THROWS on a String/Number mix; minijinja coerces. Recorded divergence, task-3-report.md S4.
-gt-mixed
+# (W2 Task 3's `gt-mixed`, `lt-mixed`, `lte-mixed` and `gte-mixed` were here:
+# Pebble THROWS on a String/Number mix and minijinja coerced. Package #5a's
+# Task A2 (spec D1) made egret's relational operators Kestra's, so all four
+# BANKED; `compare::tests::a_comparison_kestra_refuses_fails_with_kestras_text`
+# holds them now.)
 
-# as gt-mixed
-lt-mixed
-lte-mixed
-gte-mixed
-
-# Pebble coerces and/or to a strict boolean; minijinja returns an operand. Needs kestra_and/kestra_or.
-coalesce-and
-
-# as coalesce-and
-coalesce-or
+# (`coalesce-and` and `coalesce-or` were here: Pebble coerces `and`/`or` to a
+# strict boolean and minijinja returned an operand. Package #5a's Task A6
+# (spec D5, 2026-10-29) BANKED both: each operand is wrapped in
+# `kestra_bool(..)`, `runners::operators`.)
 
 # minijinja's null test is spelled `none`; the corpus correctly keeps Kestra's name.
 coalesce-is-not-null
@@ -69,15 +66,26 @@ test-json-false
 # DELIBERATE: Kestra's RAW_PATTERN has no DOTALL so Pebble rejects the tag; minijinja's own raw tag handles it. task-3-report.md S5.
 raw-multiline
 
-# no minijinja syntax for this operator (recorded divergence, task-3-report.md S6)
-op-equals
-op-contains
+# (`op-equals`, `op-contains`, `op-contains-literal` and `op-range` were
+# here, "no minijinja syntax for this operator" (task-3-report.md S6).
+# Package #5a's Task A6 (spec D5, 2026-10-29) BANKED all four: `equals` is
+# tokenized as `==`, `contains` compiles to `kestra_contains`, `..` to
+# `kestra_range`.)
+#
+# RECORDED DIVERGENCE (spec D2, Integer vs Long; spec §2.2 item 10),
+# re-attributed by Task A6 (2026-10-29): `contains` is ported and answers
+# `true` here. Kestra's `false` is `Integer(2).equals(Long(2))`: the context
+# list `[1, 2]` holds Integers and the literal `2` is a Long. egret's values
+# carry no Integer/Long distinction (the same cause as the two
+# `arith-operand-context-ints-*` lines below), so a faithful `contains`
+# cannot answer `false` without also breaking `operator-contains-boxed-int-
+# context` (both sides from the context, `true` in Kestra, banked).
 op-contains-boxed-int
-op-contains-literal
-op-range
 
-# UndefinedBehavior::Strict raises before `??` is reached. Deliberate: the alternatives are worse. task-3-report.md S9.
-coalesce-nested-absent
+# (`coalesce-nested-absent` was here, ruled "deliberate" (task-3-report.md
+# S9: strict undefined raises before `??` is reached). Spec Q6 reversed the
+# ruling and Task A5 (2026-10-29) BANKED it: a path on the left of `??`/`???`
+# compiles to `kestra_path(..)` under a lazy inline `if` (spec D6).)
 
 # W2 TASK 4, DELIBERATE, three rows of one fact: egret cannot carry a value's
 # JAVA BOX TYPE without making the value unusable as a value.
@@ -479,40 +487,15 @@ function-fromion-annotation-is-not-a-string
 
 # --- W2 Task 7, fix round 3.
 
-# DELIBERATE, and it is a REVERSAL of fix round 2's F4. An Ion decimal is a
-# `java.math.BigDecimal` in Kestra and a FIRST-CLASS NUMBER there: `1.5 * 2` is
-# `3.00`, `1.5 > 1` is `true`, `(1.5 + 1) | className` is `java.math.BigDecimal`.
-# It cannot be one here, and that is minijinja's shape rather than a choice:
-# `filters::BigNumber` is an `Object`, `value::ops::coerce` matches on
-# `ValueRepr` with no object arm, and `Ord for Value` compares `kind()` FIRST
-# with `ValueKind::Plain` above `ValueKind::Number`. Routing Ion decimals
-# through it made every `+ - * / %` an error and every `>`/`>=` unconditionally
-# TRUE, silently. A wrong spelling is recorded; a wrong comparison is not
-# acceptable, so the scale is what gives way. These are what that costs.
-function-fromion-decimal-exponent
-function-fromion-decimal-exponent-class
-function-fromion-decimal-exponent-round-trip
-function-fromion-decimal-exponent-through-tojson
-function-fromion-decimal-keeps-its-scale
-function-fromion-decimal-negative-zero
-function-fromion-decimal-scale-zero
-function-fromion-decimal-scale-zero-round-trip
-function-fromion-decimal-wide
-function-fromion-decimal-with-a-dot
-function-fromion-decimal-with-a-dot-class
-function-fromion-decimal-multiplication-loses-the-scale
-
-# KNOWN and PRE-EXISTING, on the path that still routes into that hole:
-# `number(type='BIGDECIMAL')` returns the same `Object`, so arithmetic on it is
-# an error here. Recorded rather than fixed because fixing it means a numeric
-# `ValueRepr`, which is the scale again -- but recorded, because before this
-# round nothing in the corpus could see it.
-# 2026-10-08 (W9c Task 4 fix round 1): its COMPARISONS are fixed --
-# `runners::cmp_rewrite` compiles every comparison to a `runners::compare` call
-# that compares a `BigDecimal`/`BigInteger` exactly -- so
-# `filter-number-bigdecimal-comparison` left this file. Arithmetic stays a
-# named refusal (the W9c ruling), so this one stays.
-filter-number-bigdecimal-is-not-a-number-here
+# (W2 Task 7 fix round 3 recorded twelve `function-fromion-decimal-*` entries
+# here, DELIBERATE: an Ion decimal was an `f64` because minijinja's own
+# operators refused a `filters::BigNumber` and ordered it above every number,
+# so the scale gave way. It also recorded `filter-number-bigdecimal-is-not-a-
+# number-here`: arithmetic on `number(type='BIGDECIMAL')` was refused (the
+# W9c ruling). Package #5a Task A4 (2026-10-29, spec D3, Q5 reverses W9c's
+# ruling) ported `BigDecimal` arithmetic into `runners::arith` -- comparisons
+# were already `runners::compare`'s -- and made an Ion decimal a `BigNumber`
+# again, so all thirteen BANKED.)
 
 # DELIBERATE: `IonValue.toString()` re-serialises CANONICALLY and egret keeps
 # the source text, so the two agree only where the source already is canonical.
@@ -758,9 +741,11 @@ boolean-literal-python-spelling-is-not-the-literal
 #
 # Not fixable from this crate: minijinja lets a crate override a filter, a
 # function and a test, but not `{% if %}`, `and`, `or` or `not`.
+# (Package #5a's Task A6, 2026-10-29, reached `and` and `or` from the
+# rewriter instead: each operand is a `kestra_bool(..)` call, which refuses a
+# null with Pebble's own text, so `null-literal-in-an-and-operand` and
+# `null-literal-in-an-or-operand` BANKED. `{% if %}` and `not` remain.)
 null-literal-in-an-if-condition
-null-literal-in-an-and-operand
-null-literal-in-an-or-operand
 null-literal-in-a-not-operand
 null-from-the-context-in-an-if-condition
 
@@ -837,3 +822,63 @@ filter-regexreplace-of-an-escaped-map
 # iterates: a reader who finds that entry green would reasonably conclude the
 # loop is modelled, and the loop VARIABLE silently is not.
 loop-index-and-revindex
+
+
+# === #5a red ============================================================
+#
+# Package #5a, Task A1 (2026-10-28): the probe batches of
+# docs/en/plans/2026-10-28-workflow-renderer.md, regenerated offline. Each
+# line below fails today; the comment above each group names the task that
+# banks it (or marks it a recorded divergence). Corpus order inside a group.
+
+# (A2 (D1)'s fifteen were here -- `cmp-*` mixed, non-number and null
+# comparisons and `chain-*` -- and all fifteen BANKED with Task A2, which
+# made `<`, `<=`, `>`, `>=` Kestra's and compiles a chain left-associatively.)
+
+# (A3 (D2)'s thirty-six were here -- `arith-long-*` integer division, `%`,
+# wrapping and precedence, `arith-zero-long-*` `/ 0`, the ion integer, and the
+# `arith-operand-*` string, list, boolean and BigInteger operands -- and all
+# thirty-six BANKED with Task A3 (2026-10-28), which compiles every binary
+# `+ - * / %` into `runners::arith`'s port of Pebble's `OperatorUtils`.)
+
+# (A4 (D3)'s eight were here -- `arith-zero-bigdecimal-div`/`-mod` and the
+# `arith-bigdecimal-*` scale, DECIMAL128 and className probes -- and all
+# eight BANKED with Task A4 (2026-10-29), which ports `bigDecimalOperation`
+# on `num-bigint` (`runners::arith::decimal`).)
+
+# (A5 (D6)'s eleven were here -- `??`/`???` through a missing member or
+# index chain (`coalesce-chain-*`, eight) and a lazy right side
+# (`coalesce-lazy-*`, three, one of them `coalesce-lazy-right-division`,
+# re-attributed here by Task A3) -- and all eleven BANKED with Task A5
+# (2026-10-29): a path on the left compiles to `kestra_path(..)` and the
+# operator to `(P) if kestra_present(P) else (R)` (`kestra_defined` for
+# `???`), so `R` is evaluated only when needed.)
+
+# (A6 (D5)'s twenty-six were here -- `operator-equals-*`, `operator-contains-*`,
+# `operator-range-*` and the `logic-*` operands -- and twenty-five BANKED with
+# Task A6 (2026-10-29): `equals` is `==`, `contains` is `kestra_contains`
+# (Pebble's `ContainsExpression`), `..` is `kestra_range` (Kestra's `range`),
+# and each `and`/`or` operand is `kestra_bool(..)` (`compatibleCast` to
+# `Boolean`). The twenty-sixth is re-attributed below.)
+#
+# Re-attributed by Task A6 (2026-10-29), measured: `(true and 'x')` IS the
+# boolean `true` now (`runners::operators::tests::
+# the_boolean_reaches_tilde_and_tilde_spells_it_in_python`), but minijinja's
+# `~` writes any boolean as `True` -- `{{ true ~ '|' }}` is `True|` too --
+# because `~` is not compiled to a port of Pebble's `ConcatenateExpression`
+# (`String.valueOf`). Not an `and`/`or` cause; whoever ports `~` banks it.
+logic-and-returns-boolean
+
+# RECORDED DIVERGENCE (spec D2, Integer vs Long), measured by A1: two
+# context integers that Jackson reads as java.lang.Integer use 32-bit `int`
+# arithmetic in Pebble and wrap at 2^31. egret's values carry no
+# Integer/Long distinction. Not fixed in #5; release note names it.
+arith-operand-context-ints-mul-past-2-31
+arith-operand-context-ints-add-past-2-31
+
+# RECORDED DIVERGENCE (spec D6, non-path `??` left operand), confirmed by
+# Task A5 (2026-10-29), which found no single-evaluation form: the lazy form
+# evaluates its left operand twice, safe for a path read and not for a call
+# (`kv(..)`, `secret(..)`), so a call or filter on the left keeps the eager
+# kestra_null_coalesce and `missing.y` on the right is evaluated and raises.
+coalesce-non-path-left-missing-right

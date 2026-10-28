@@ -110,7 +110,7 @@ use std::fmt;
 use std::io;
 use std::sync::Arc;
 
-use minijinja::value::{Enumerator, Object, ObjectRepr, Value as MjValue, ValueKind};
+use minijinja::value::{Enumerator, Object, ObjectRepr, Rest, Value as MjValue, ValueKind};
 use minijinja::{AutoEscape, Environment, Error as MjError, State, UndefinedBehavior};
 use regex::Regex;
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
@@ -949,11 +949,13 @@ impl From<BTreeMap<String, JsonValue>> for RenderContext {
 /// precisely what makes this expressible as a function at all.
 ///
 /// Both operands are evaluated before this is called; Kestra's is a lazy
-/// binary operator. That is a real difference, and it is unfixable from a
-/// rewrite that only reshapes text — a wrong-but-cheap right operand costs a
-/// little work here where Kestra would skip it, and a right operand that
-/// *errors* fails the whole render where Kestra would never have reached it.
-/// See [`rewrite`]'s module doc.
+/// binary operator. Since package #5a Task A5 (spec D6) this is reached only
+/// when the left operand is NOT a path (a call, a filter, arithmetic): a path
+/// compiles to an inline `if` on [`kestra_present`] instead, which is lazy.
+/// For what still reaches here, a right operand that *errors* fails the
+/// whole render where Kestra would never have reached it -- the recorded
+/// divergence `coalesce-non-path-left-missing-right`. See [`rewrite`]'s
+/// module doc.
 fn kestra_null_coalesce(_state: &State, left: MjValue, right: MjValue) -> MjValue {
     if left.is_undefined() || left.is_none() {
         right
@@ -979,6 +981,46 @@ fn kestra_undefined_coalesce(_state: &State, left: MjValue, right: MjValue) -> M
     } else {
         left
     }
+}
+
+/// A path read that never raises -- the left operand of `??`/`???` when it is
+/// a path (spec D6; [`rewrite`] compiles `obj.a['b'][0]` there to
+/// `kestra_path(obj, 'a', 'b', 0)`).
+///
+/// Pebble's `GetAttributeExpression` under strict variables throws
+/// `AttributeNotFoundException` for a missing attribute or index and
+/// `RootAttributeNotFoundException` (a subclass, read with `javap`: "Attempt
+/// to get attribute of null object") for a step from `null`; both coalescing
+/// operators catch it and answer their right side. Here each of those is
+/// `Undefined`, which [`kestra_present`] and [`kestra_defined`] both read as
+/// missing. A missing root arrives as `Undefined` already (function
+/// arguments are not subject to strict undefined). `.name` and `['name']` are
+/// one operation in Pebble, so both are an item lookup here.
+fn kestra_path(_state: &State, root: MjValue, steps: Rest<MjValue>) -> MjValue {
+    let mut current = root;
+    for step in steps.iter() {
+        if current.is_undefined() || current.is_none() {
+            return MjValue::UNDEFINED;
+        }
+        current = match current.get_item(step) {
+            Ok(next) => next,
+            Err(_) => return MjValue::UNDEFINED,
+        };
+    }
+    current
+}
+
+/// `??`'s test on a path: present is defined and not null
+/// (`NullCoalescingExpression` answers the left side only when it is
+/// non-null and did not throw).
+fn kestra_present(_state: &State, value: MjValue) -> bool {
+    !value.is_undefined() && !value.is_none()
+}
+
+/// `???`'s test on a path: defined, null included
+/// (`UndefinedCoalescingExpression` answers the left side unless it threw).
+fn kestra_defined(_state: &State, value: MjValue) -> bool {
+    !value.is_undefined()
 }
 
 /// `InExpression` — the `isIn` the rewriter emits calls to.
@@ -1413,12 +1455,15 @@ fn uppercase_unicode_escapes(quoted: &str) -> String {
 /// exponent, and for every value in the normal range that is the same digit
 /// sequence Java picks, so this only has to re-lay-out what it gives.
 ///
-/// **The digit sequences diverge at subnormals.** `5e-324` (the smallest
-/// positive double) is `4.9E-324` in Java and `5.0E-324` here: both round-trip
-/// to the same bit pattern, but Java's shortest-decimal algorithm and Rust's
-/// break the tie differently down there. No corpus entry reaches it and no
-/// plausible flow does; recorded so the claim above is not read as
-/// unconditional.
+/// **One digit is never enough for Java.** `Double.toString` (JDK 19+, the
+/// Raffaello Giulietti algorithm Kestra's JVM runs) takes the shortest decimal
+/// that round-trips, but when that is ONE digit it takes instead the
+/// two-digit decimal closest to the double. In the normal range the two agree
+/// (`2.0`, `1.0E-5`); at subnormals the rounding interval is wide enough that
+/// they do not: the smallest positive double is `5e-324` shortest and
+/// `4.9E-324` in Java, twice it `1e-323` and `9.9E-324` (measured with
+/// `jshell` on JDK 25, fix wave #5a M9). So a one-digit result is replaced by
+/// Rust's correctly rounded two-digit form whenever that round-trips too.
 pub(crate) fn write_java_double(out: &mut String, x: f64) {
     if x.is_nan() {
         out.push_str("NaN");
@@ -1429,7 +1474,15 @@ pub(crate) fn write_java_double(out: &mut String, x: f64) {
         return;
     }
 
-    let sci = format!("{x:e}");
+    let mut sci = format!("{x:e}");
+    if !sci.contains('.') {
+        let two = format!("{x:.1e}");
+        // `d.0` is the one-digit form again; only a different second digit
+        // is Java's correction.
+        if !two.contains(".0e") && two.parse::<f64>() == Ok(x) {
+            sci = two;
+        }
+    }
     let (mantissa, exponent) = match sci.split_once('e') {
         Some(parts) => parts,
         None => {
@@ -1846,7 +1899,11 @@ pub(crate) fn environment() -> Environment<'static> {
     //   without. They are egret-only and the fixture says so. Since W9c Task 4
     //   fix round 1 (2026-10-08) nine more are the same kind of seam:
     //   `super::cmp_rewrite` compiles every comparison operator into a call to
-    //   one of `super::compare`'s `kestra_eq` .. `kestra_compare_chain`.
+    //   one of `super::compare`'s `kestra_eq` .. `kestra_not_in` (eight since
+    //   package #5a's Task A2 compiled a chain left-associatively and removed
+    //   `kestra_compare_chain`). Since package #5a's Task A3 five more:
+    //   `super::cmp_rewrite`'s arithmetic pass compiles every binary `+`, `-`,
+    //   `*`, `/`, `%` into `super::arith`'s `kestra_add` .. `kestra_mod`.
     //
     // `pprint` and `debug` were already removed in Task 3 for a different
     // reason (both dump internal state); they are two of the 62 and are now
@@ -1910,21 +1967,35 @@ pub(crate) fn environment() -> Environment<'static> {
 
     env.add_function("kestra_null_coalesce", kestra_null_coalesce);
     env.add_function("kestra_undefined_coalesce", kestra_undefined_coalesce);
+    // Package #5a Task A5 (spec D6): a path on the left of `??`/`???`
+    // compiles to an inline `if` on these three.
+    env.add_function("kestra_path", kestra_path);
+    env.add_function("kestra_present", kestra_present);
+    env.add_function("kestra_defined", kestra_defined);
     env.add_function("kestra_is_in", kestra_is_in);
     // W9c Task 4 fix round 1: the comparison operators, which
     // [`compile_source`]'s second pass compiles into calls to these.
     super::compare::register(&mut env);
+    // Package #5a, Task A3: the arithmetic operators, which
+    // [`compile_source`]'s third pass compiles into calls to these.
+    super::arith::register(&mut env);
+    // Package #5a, Task A6: `contains`, `..` and `and`/`or`'s coercion,
+    // which [`rewrite`] compiles into calls to these.
+    super::operators::register(&mut env);
 
     env
 }
 
 /// What the engine parses: Kestra's operators reshaped by [`rewrite`], then
 /// every comparison compiled to a `super::compare` call
-/// (`super::cmp_rewrite`, W9c Task 4 fix round 1). Every path that hands a
+/// (`super::cmp_rewrite`, W9c Task 4 fix round 1), then every binary `+`,
+/// `-`, `*`, `/`, `%` compiled to a `super::arith` call (package #5a, Task
+/// A3). Every path that hands a
 /// template to the parser goes through this one function, so a probe
 /// ([`referenced_roots`], [`name_in_code`]) sees what a render runs.
 fn compile_source(protected: &str) -> Result<String, RewriteError> {
-    super::compare::compile_comparisons(&rewrite(protected)?)
+    let compared = super::compare::compile_comparisons(&rewrite(protected)?)?;
+    super::arith::compile_arithmetic(&compared)
 }
 
 /// Renders a template string against `cx`, mirroring
@@ -1971,7 +2042,8 @@ pub fn render_str(template: &str, cx: &RenderContext) -> Result<String, RenderEr
 /// registered for this render only. It writes exactly `toJson`'s text, and
 /// it also converts the value it was given straight to [`KvData`]
 /// ([`typed_data`]), so an exact number keeps its kind and digits: a
-/// `BigDecimal` (a decimal `kv()` read, `number(type='BIGDECIMAL')`) is a
+/// `BigDecimal` (a decimal `kv()` read, `number(type='BIGDECIMAL')`, a
+/// `fromIon` decimal, the result of arithmetic on any of them) is a
 /// `KvNumber::Decimal`, a `BigInteger` a `KvNumber::Int`. Through `toJson`'s
 /// text alone, `serde_json` and `KvData::from_json`, the decimal
 /// `123456789012345678901234567890.5` became the float
@@ -3199,8 +3271,19 @@ mod tests {
 
         // A row cannot be deleted to make a failure go away: these three are
         // `host.Oracle dump`'s own counts for the built engine, plus Pebble's
-        // core/escaper/i18n extensions.
-        assert_eq!(rows, 186, "row count");
+        // core/escaper/i18n extensions. The total also holds the egret-only
+        // rows: 186 -> 185 at package #5a Task A2, which removed the egret-only
+        // function `kestra_compare_chain` (a chain compiles left-associatively
+        // to the per-operator functions now); 185 -> 190 at package #5a Task
+        // A3, which added the egret-only `kestra_add`, `kestra_sub`,
+        // `kestra_mul`, `kestra_div` and `kestra_mod` (the arithmetic pass);
+        // 190 -> 193 at package #5a Task A5, which added the egret-only
+        // `kestra_path`, `kestra_present` and `kestra_defined` (a path on the
+        // left of `??`/`???`); 193 -> 196 at package #5a Task A6
+        // (2026-10-29), which added the egret-only `kestra_contains`,
+        // `kestra_range` and `kestra_bool` (`contains`, `..` and `and`/`or`);
+        // the three engine counts below did not move.
+        assert_eq!(rows, 196, "row count");
         assert_eq!(counts.get("filter"), Some(&63), "engine filter count");
         assert_eq!(counts.get("function"), Some(&37), "engine function count");
         assert_eq!(counts.get("test"), Some(&8), "engine test count");
@@ -3694,6 +3777,36 @@ mod tests {
         assert_eq!(f(f64::NAN), "NaN");
         assert_eq!(f(f64::INFINITY), "Infinity");
         assert_eq!(f(f64::NEG_INFINITY), "-Infinity");
+        assert_eq!(f(2.0), "2.0");
+        assert_eq!(f(100.0), "100.0");
+        assert_eq!(f(1e23), "1.0E23");
+        assert_eq!(f(1e-5), "1.0E-5");
+    }
+
+    /// Fix wave #5a M9: a one-digit shortest decimal becomes Java's closest
+    /// two-digit one. Every right-hand side is `Double.toString(
+    /// Double.MIN_VALUE * k)` measured with `jshell` on JDK 25.
+    #[test]
+    fn subnormals_print_javas_two_digits() {
+        let f = |x: f64| {
+            let mut s = String::new();
+            write_java_double(&mut s, x);
+            s
+        };
+        for (k, want) in [
+            (1u32, "4.9E-324"),
+            (2, "9.9E-324"),
+            (3, "1.5E-323"),
+            (4, "2.0E-323"),
+            (9, "4.4E-323"),
+            (10, "4.9E-323"),
+            (12, "5.9E-323"),
+        ] {
+            assert_eq!(f(f64::from_bits(1) * f64::from(k)), want, "MIN_VALUE * {k}");
+        }
+        assert_eq!(f(-f64::from_bits(1)), "-4.9E-324");
+        assert_eq!(f(1e-310), "1.0E-310");
+        assert_eq!(f(f64::MIN_POSITIVE), "2.2250738585072014E-308");
     }
 
     /// **C2.** `isIn` became a function call, and minijinja does not apply
@@ -3787,12 +3900,19 @@ mod tests {
         );
     }
 
-    /// Fuel bounds instructions, not bytes. `'a' * n` is a handful of
-    /// instructions and an arbitrary number of bytes, so without the sink cap
-    /// this allocates ~8 MB from one short expression.
+    /// Fuel bounds instructions, not bytes. Doubling a string twenty times
+    /// is a handful of instructions and 8 MiB, so without the sink cap this
+    /// allocates that much from one short template. (It was `'a' * 8000000`
+    /// until package #5a's Task A3 made `*` Pebble's, which refuses a string
+    /// that is not a number.)
     #[test]
     fn an_oversized_render_is_refused_by_the_output_cap() {
-        let err = render("{{ 'a' * 8000000 }}", json!({})).unwrap_err();
+        let doubling = "{% set s = s ~ s %}".repeat(20);
+        let err = render(
+            &format!("{{% set s = 'aaaaaaaa' %}}{doubling}{{{{ s }}}}"),
+            json!({}),
+        )
+        .unwrap_err();
         assert_eq!(
             err,
             RenderError::OutputTooLarge {
@@ -3800,8 +3920,13 @@ mod tests {
             }
         );
         // And the budget itself is real: just under it still renders.
-        let ok = render("{{ 'a' * 1000 }}", json!({})).unwrap();
-        assert_eq!(ok.len(), 1000);
+        let doubling = "{% set s = s ~ s %}".repeat(10);
+        let ok = render(
+            &format!("{{% set s = 'a' %}}{doubling}{{{{ s }}}}"),
+            json!({}),
+        )
+        .unwrap();
+        assert_eq!(ok.len(), 1024);
     }
 
     /// All three spellings `PebbleVariableRendererTest.raw` asserts, plus the
@@ -4020,4 +4145,152 @@ mod tests {
             1
         );
     }
+
+    /// Package #5a, Task A1: the arithmetic probes Kestra refuses and egret
+    /// already refuses. They are `compare: "error-class"` in the oracle corpus
+    /// and born matching, so this is what fails if egret ever starts answering
+    /// one of them (`oracle/error-class-pairs.txt`). Today the refusal is
+    /// minijinja's own; Task A3's arithmetic seam must keep every one of them
+    /// failing (`OperatorUtils` throws `Could not perform …` for each). Since
+    /// Task A3 every Long/operand row fails with Kestra's own text, which
+    /// `runners::arith`'s `an_operation_kestra_refuses_fails_with_kestras_text`
+    /// asserts and pairs; since Task A4 the BigDecimal row does too, through
+    /// `runners::arith`'s `big_decimal_arithmetic_is_javas`.
+    #[test]
+    fn arithmetic_kestra_refuses_is_refused_here_too() {
+        for (source, ctx, text) in [
+            (
+                "{{ 7 % 0 }}",
+                json!({}),
+                "Could not perform greater modulus",
+            ),
+            (
+                "{{ '1.5' | number(type='BIGDECIMAL') / 0 }}",
+                json!({}),
+                "Could not perform division",
+            ),
+            (
+                "{{ n + 1 }}",
+                json!({ "n": null }),
+                "Could not perform addition",
+            ),
+            (
+                "{{ 2 * n }}",
+                json!({ "n": null }),
+                "Could not perform multiplication",
+            ),
+            ("{{ 2 + [1] }}", json!({}), "Could not perform addition"),
+            (
+                "{{ m + 1 }}",
+                json!({ "m": { "a": 1 } }),
+                "Could not perform addition",
+            ),
+            (
+                "{{ m + n }}",
+                json!({ "m": { "a": 1 }, "n": { "b": 2 } }),
+                "Could not perform addition",
+            ),
+        ] {
+            let got = render(source, ctx);
+            assert!(
+                matches!(got, Err(RenderError::Template(ref m)) if m.contains(text)),
+                "{source} must fail with Kestra's `{text}`; got {got:?}"
+            );
+        }
+    }
+
+    /// Package #5a, Task A1: a missing operand that Kestra evaluates fails here
+    /// too. `2 < 1 < missing.x` is `(2 < 1) < missing.x` in Pebble. Task A2's
+    /// left-associative chain must keep it failing. (The two `??` rows moved
+    /// to [`a_missing_right_side_kestra_reaches_fails_on_it`] with Task A5.)
+    #[test]
+    fn a_missing_operand_kestra_evaluates_fails_here_too() {
+        // Kestra fails on the missing root (`LessThanExpression` evaluates
+        // both operands before comparing), not on comparing the boolean
+        // `2 < 1` (`Could not perform less than comparison`): fix wave #5a M6.
+        let got = render("{{ 2 < 1 < missing.x }}", json!({}));
+        assert!(
+            matches!(got, Err(RenderError::Template(ref m))
+                if m.contains("undefined") && !m.contains("comparison")),
+            "must fail on the undefined operand, as Kestra's does; got {got:?}"
+        );
+    }
+
+    /// Package #5a, Task A5 (spec D6, Q6): `??`/`???` answer through a missing
+    /// member or index chain and evaluate the right side only when needed.
+    /// The oracle's `coalesce-chain-*` and `coalesce-lazy-*` entries hold the
+    /// golden values; this adds the rows they do not reach: a step from a
+    /// null under `???` (Pebble's `RootAttributeNotFoundException`, which
+    /// `???` catches too), a present `false`/`0`/`''` (present, so not
+    /// replaced), the `{% set %}` and call positions, and the non-path left
+    /// operand that stays eager (the recorded divergence).
+    #[test]
+    fn a_path_on_the_left_of_coalesce_reads_through_a_missing_chain() {
+        for (source, ctx, expected) in [
+            ("{{ obj.a.b ?? 'h' }}", json!({ "obj": {} }), "h"),
+            (
+                "{{ obj.a.b ??? 'h' }}",
+                json!({ "obj": { "a": null } }),
+                "h",
+            ),
+            ("{{ obj.a ??? 'h' }}", json!({ "obj": { "a": null } }), ""),
+            (
+                "{{ obj.a ?? 'h' }}",
+                json!({ "obj": { "a": false } }),
+                "false",
+            ),
+            ("{{ obj.a ?? 'h' }}", json!({ "obj": { "a": 0 } }), "0"),
+            ("{{ obj.a ?? 'h' }}", json!({ "obj": { "a": "" } }), ""),
+            ("{{ l[1] ?? 'h' }}", json!({ "l": [1, 2] }), "2"),
+            ("{{ l[5] ?? 'h' }}", json!({ "l": [1] }), "h"),
+            ("{{ s.a ?? 'h' }}", json!({ "s": "text" }), "h"),
+            ("{{ x ?? (1 / 0) }}", json!({ "x": 1 }), "1"),
+            ("{{ obj.a.b ?? obj.c ?? 'h' }}", json!({ "obj": {} }), "h"),
+            (
+                "{% set v = obj.a.b ?? 'h' %}{{ v }}",
+                json!({ "obj": {} }),
+                "h",
+            ),
+            ("{{ (obj.a.b ?? 'h') ~ '!' }}", json!({ "obj": {} }), "h!"),
+            ("{{ obj.a.b ?? 1 + 2 }}", json!({ "obj": {} }), "3"),
+        ] {
+            let got = render(source, ctx.clone()).unwrap_or_else(|e| panic!("{source}: {e}"));
+            assert_eq!(got, expected, "{source} with {ctx}");
+        }
+        // The recorded divergence (`coalesce-non-path-left-missing-right`):
+        // Kestra answers `1`; a call on the left keeps the eager form here.
+        assert!(render("{{ fromJson('1') ?? missing.y }}", json!({})).is_err());
+    }
+
+    /// Package #5a, Task A5 (spec D6): `??` reaches its right side when the
+    /// left is missing, and a right side whose root is missing fails there,
+    /// as Kestra's `RootAttributeNotFoundException` for `missing` does
+    /// (`coalesce-missing-right-evaluated`,
+    /// `coalesce-chain-missing-right-evaluated`). **For Kestra's reason, not
+    /// the left side's:** before Task A5, `obj.a.b` raised before the
+    /// coalesce ran, so the row failed whatever the right side was. The
+    /// second half proves the failure is the right side's: the same
+    /// template with `missing.y` present answers it.
+    #[test]
+    fn a_missing_right_side_kestra_reaches_fails_on_it() {
+        for (source, ctx) in [
+            ("{{ nothere ?? missing.y }}", json!({})),
+            ("{{ obj.a.b ?? missing.y }}", json!({ "obj": {} })),
+            ("{{ obj.a.b ??? missing.y }}", json!({ "obj": {} })),
+        ] {
+            let got = render(source, ctx.clone());
+            let err = got.expect_err(source).to_string();
+            assert!(
+                err.contains("undefined"),
+                "{source}: the right side's missing root fails it; got {err}"
+            );
+            let mut present = ctx;
+            present["missing"] = json!({ "y": "r" });
+            assert_eq!(render(source, present).unwrap(), "r", "{source}");
+        }
+    }
+
+    // (`contains_on_a_number_is_refused` was here, Task A1's placeholder; Task
+    // A6 ported `contains` and its refusal is asserted with Kestra's text by
+    // `runners::operators::tests::contains_on_what_pebble_cannot_search_fails_with_kestras_text`.)
 }

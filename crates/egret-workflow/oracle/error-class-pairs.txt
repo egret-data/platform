@@ -30,12 +30,13 @@
 #                     these is ALSO pinned, as a const in tests/oracle.rs, so
 #                     a new one cannot be added quietly here.
 
-# --- W2 Task 3: egret SUCCEEDS where Pebble throws on a String/Number mix, so
-# these are real mismatches and the ratchet holds them.
-gt-mixed                            baselined
-lt-mixed                            baselined
-lte-mixed                           baselined
-gte-mixed                           baselined
+# --- W2 Task 3: Pebble throws on a String/Number mix. egret SUCCEEDED until
+# package #5a's Task A2 (spec D1), so the four were baselined; they banked
+# there and the unit test asserting Kestra's own text holds them now.
+gt-mixed                            test:a_comparison_kestra_refuses_fails_with_kestras_text
+lt-mixed                            test:a_comparison_kestra_refuses_fails_with_kestras_text
+lte-mixed                           test:a_comparison_kestra_refuses_fails_with_kestras_text
+gte-mixed                           test:a_comparison_kestra_refuses_fails_with_kestras_text
 
 # --- W2 Task 3: minijinja has a real multiline `{% raw %}` and Kestra's
 # RAW_PATTERN has no DOTALL. Deliberate divergence, and baselined.
@@ -452,9 +453,13 @@ filter-string-undefined-input                       test:the_string_filter_now_t
 # override a filter, a function and a test -- W2b's final round overrides the
 # `defined` test for exactly that reason -- but not `{% if %}`, `and`, `or`,
 # `not`, or the map-key writer.
+# Package #5a's Task A6 (2026-10-29) reached `and` and `or` from the
+# rewriter: each operand is a `kestra_bool(..)` call that refuses a null with
+# Pebble's own text, so those two banked and are paired with the test that
+# asserts it. `{% if %}` and `not` stay baselined.
 null-literal-in-an-if-condition                     baselined
-null-literal-in-an-and-operand                      baselined
-null-literal-in-an-or-operand                       baselined
+null-literal-in-an-and-operand                      test:an_operand_kestra_cannot_cast_fails_with_kestras_text
+null-literal-in-an-or-operand                       test:an_operand_kestra_cannot_cast_fails_with_kestras_text
 null-literal-in-a-not-operand                       baselined
 null-from-the-context-in-an-if-condition            baselined
 null-literal-as-a-bare-map-key                      baselined
@@ -492,3 +497,57 @@ filter-subscript-of-values                          test:the_collection_kind_gat
 # --- W2a, fix round 2. The same gate, reached through `default`'s emptiness
 # test rather than through a cast.
 filter-capitalize-of-a-defaulted-empty-array        test:the_collection_kind_gate_refuses_what_java_refuses
+
+# --- Package #5a, Task A1 (2026-10-28). Kestra throws on each. Those egret
+# still answers are baselined; those egret already refuses are held by a
+# unit test in runners::env that asserts the failure.
+# Task A3 (2026-10-28) made `+ - * / %` Pebble's (`runners::arith`): the
+# twelve Long/operand entries below now fail with Kestra's own text and are
+# re-paired with the test that asserts it; the three BigDecimal ones are
+# Task A4's.
+# Task A4 (2026-10-29) computes a BigDecimal as `bigDecimalOperation` does
+# (`runners::arith::decimal`): `/ 0` and `% 0` on one fail with Kestra's own
+# `Could not perform division` / `greater modulus`, so the two baselined ones
+# banked and all three are paired with the test that asserts that text.
+# Task A5 (2026-10-29) made a path on the left of `??`/`???` lazy (spec D6):
+# `obj.a.b ?? missing.y` used to fail on `obj.a.b` before the coalesce ran;
+# now both coalesce rows fail on the right side's missing root, Kestra's
+# reason, and are re-paired with the test that proves it (the same template
+# with `missing.y` present answers it).
+# Task A6 (2026-10-29) ported `contains` and `and`/`or`'s coercion (spec D5):
+# `operator-contains-number-left` used to fail because `contains` did not
+# parse at all; it now fails with `ContainsExpression`'s own text. The three
+# `logic-*` entries were baselined (egret answered); they now fail with
+# Pebble's `ClassCastException` and null-operand texts. All four are paired
+# with the `runners::operators` test that asserts that text.
+arith-zero-long-div                                 test:an_operation_kestra_refuses_fails_with_kestras_text
+arith-zero-long-div-context                         test:an_operation_kestra_refuses_fails_with_kestras_text
+arith-zero-long-mod                                 test:an_operation_kestra_refuses_fails_with_kestras_text
+arith-zero-bigdecimal-div                           test:big_decimal_arithmetic_is_javas
+arith-zero-bigdecimal-mod                           test:big_decimal_arithmetic_is_javas
+arith-zero-bigdecimal-number-div                    test:big_decimal_arithmetic_is_javas
+arith-operand-null-left                             test:an_operation_kestra_refuses_fails_with_kestras_text
+arith-operand-null-right                            test:an_operation_kestra_refuses_fails_with_kestras_text
+arith-operand-boolean                               test:an_operation_kestra_refuses_fails_with_kestras_text
+arith-operand-boolean-mul                           test:an_operation_kestra_refuses_fails_with_kestras_text
+arith-operand-bad-string-mul                        test:an_operation_kestra_refuses_fails_with_kestras_text
+arith-operand-long-plus-list                        test:an_operation_kestra_refuses_fails_with_kestras_text
+arith-operand-list-mul                              test:an_operation_kestra_refuses_fails_with_kestras_text
+arith-operand-map-plus-long                         test:an_operation_kestra_refuses_fails_with_kestras_text
+arith-operand-map-plus-map                          test:an_operation_kestra_refuses_fails_with_kestras_text
+cmp-long-lt-string                                  test:a_comparison_kestra_refuses_fails_with_kestras_text
+cmp-long-gt-numeric-string-context                  test:a_comparison_kestra_refuses_fails_with_kestras_text
+cmp-boolean-lt-long                                 test:a_comparison_kestra_refuses_fails_with_kestras_text
+cmp-boolean-lt-boolean                              test:a_comparison_kestra_refuses_fails_with_kestras_text
+cmp-list-lt-list                                    test:a_comparison_kestra_refuses_fails_with_kestras_text
+cmp-map-lt-map                                      test:a_comparison_kestra_refuses_fails_with_kestras_text
+chain-lt-ascending                                  test:a_comparison_kestra_refuses_fails_with_kestras_text
+chain-lt-descending                                 test:a_comparison_kestra_refuses_fails_with_kestras_text
+chain-lt-missing-operand                            test:a_missing_operand_kestra_evaluates_fails_here_too
+chain-eq-then-lt                                    test:a_comparison_kestra_refuses_fails_with_kestras_text
+coalesce-missing-right-evaluated                    test:a_missing_right_side_kestra_reaches_fails_on_it
+coalesce-chain-missing-right-evaluated              test:a_missing_right_side_kestra_reaches_fails_on_it
+operator-contains-number-left                       test:contains_on_what_pebble_cannot_search_fails_with_kestras_text
+logic-and-list-left                                 test:an_operand_kestra_cannot_cast_fails_with_kestras_text
+logic-or-null-context                               test:an_operand_kestra_cannot_cast_fails_with_kestras_text
+logic-and-map-left                                  test:an_operand_kestra_cannot_cast_fails_with_kestras_text

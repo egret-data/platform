@@ -104,7 +104,10 @@ an entry matches on any failure at all, so it is born matching and cannot fail
 **for the reason it was written** — a refusal that becomes a different refusal
 is invisible. It is not literally unfailable, and an earlier version of this
 sentence ("never enters `baseline.txt`, and can never fail") was wrong about
-that: **eighteen ids are in this file AND in `baseline.txt`** (thirty-one until
+that: **nineteen ids are in this file AND in `baseline.txt`** (twenty-five
+until package #5a's Task A3 banked six, thirty-eight
+until package #5a's Task A2 banked thirteen, eighteen until
+package #5a's Task A1 added twenty, thirty-one until
 W2a banked fourteen of them and added one back), because such an
 entry still fails when egret *succeeds* where Kestra threw. (This said "five"
 until W2 Task 8, and it was already stale at six -- Task 7's fix round 3 added
@@ -137,7 +140,8 @@ Verified by deliberate breakage before committing: an unpaired new entry, a
 renamed paired test, a false `baselined` claim and a quietly-added
 `unported:` all fail, each naming the id.
 
-**271** entries carry it today (251 after W2b's fix round, 245 before it, 240
+**302** entries carry it today (271 before package #5a's Task A1 added
+thirty-one, 251 after W2b's fix round, 245 before it, 240
 before W2b, 153 before W2 Task 8, 182 before its fix round), counted out of
 `golden.json` rather than added up (39 of them W2 Task 7's, listed at the end of `error-class.txt`): the four `*-mixed` comparisons (Pebble throws on a String/Number mix), the
 eight registered-but-null-backed functions, `raw-multiline`, the three `isin-*`
@@ -164,7 +168,10 @@ whose deliverable was refusals; Task 8 added 29, which is 17% of the file for
 7% of the corpus, and every one of them is `test:`-paired — the pairing file
 now has **no `unported:` line left in it**, and `UNPORTED_ERROR_CLASS` in
 `tests/oracle.rs` is empty. Note that marking an entry error-class does **not**
-make it pass: 18 of the 271 are *also* in `baseline.txt`, because egret
+make it pass: 12 of the 302 are *also* in `baseline.txt` (17 before package
+#5a's Task A6, 19 before its Task A4, 25 before its Task A3, 38 before its
+Task A2; re-counted from the two files 2026-10-29, after Task A5, which moved
+none of them, and again after Task A6, which banked five), because egret
 *succeeds* where Kestra throws — a real divergence, and it stays visible.
 
 ## `name-surface.txt` — which names each side has at all
@@ -215,7 +222,43 @@ a crate can reach -- is closed by overriding a single test -- and **130 of 1336*
 after W2a, which added 48, BANKED **fourteen** (every pair W2 Task 8 had recorded
 as unfixable) and RECORDED four -- and **129 of 1336** after W9c Task 4's fix
 round 1 (2026-10-08), which BANKED one, `filter-number-bigdecimal-comparison`
-(see "The same hole" below), and changed no other answer.
+(see "The same hole" below), and changed no other answer -- and **227 of
+1493** after package #5a's Task A1 (2026-10-28), which added 157 probe
+entries and RECORDED the 98 that fail under the `#5a red` heading, each group
+named with the task that banks it (see "What package #5a's Task A1 batches
+measured" below) -- and **208 of 1493** after Task A2 (2026-10-28), which
+BANKED nineteen: W2 Task 3's four `*-mixed` comparisons and A1's fifteen
+comparison and chain entries (spec D1: `<`, `<=`, `>`, `>=` are Kestra's,
+and a chain compiles left-associatively) -- and **173 of 1493** after Task A3
+(2026-10-28), which BANKED A1's thirty-six arithmetic entries (spec D2: `+ -
+* / %` are Pebble's `OperatorUtils`, Long and Double, string and list
+operands) and RECORDED one, `coalesce-lazy-right-division`, which had passed
+only because minijinja's `1 / 0` answered `inf`; it now fails for Task A5's
+reason (an eager `??` right side) and is baselined in A5's group -- and
+**152 of 1493** after Task A4 (2026-10-29), which BANKED twenty-one (spec D3,
+Q5 reversing the W9c refusal: a `BigDecimal` operand is
+`BigDecimal.valueOf(doubleValue())` on both sides, computed at
+`DECIMAL128` with Java's preferred scale): A1's eight BigDecimal entries,
+`filter-number-bigdecimal-is-not-a-number-here`, and the twelve
+`function-fromion-decimal-*` entries W2 Task 7 recorded, because an Ion
+decimal is a `java.math.BigDecimal` `BigNumber` again -- and **140 of 1493**
+after Task A5 (2026-10-29), which BANKED twelve (spec D6, Q6 reversing the
+"deliberate" `coalesce-nested-absent` ruling: a path on the left of
+`??`/`???` compiles to `kestra_path(..)` under a lazy inline `if`): A1's
+eleven coalesce entries (`coalesce-lazy-right-division` among them) and
+`coalesce-nested-absent`. `coalesce-non-path-left-missing-right` stays
+baselined, the recorded D6 divergence (a call on the left keeps the eager
+form) -- and **107 of 1493** after Task A6 (2026-10-29), which BANKED
+thirty-three (spec D5, Q3: `equals` is `==`, `contains` is Pebble's
+`ContainsExpression`, `..` is Kestra's `range`, and each `and`/`or` operand
+is coerced to a strict boolean, `runners::operators`): twenty-five of A1's
+twenty-six operator entries, `op-equals`, `op-contains`,
+`op-contains-literal`, `op-range`, `coalesce-and`, `coalesce-or`, and W2b's
+`null-literal-in-an-and-operand` and `null-literal-in-an-or-operand` (a null
+`and`/`or` operand now fails with Pebble's own text). Two stay, each
+re-attributed with its measured cause: `op-contains-boxed-int` (spec D2's
+Integer/Long divergence) and `logic-and-returns-boolean` (minijinja's `~`
+writes a boolean as `True`).
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
@@ -487,6 +530,13 @@ has no parent BOM to inherit a version from.
   just cannot be used to catch a wrong-grouping REWRITE bug by rendering,
   the same limitation `coalesce-is-not-null` (below) has for an unrelated
   reason.
+
+  **(Superseded 2026-10-29, package #5a Task A6, spec D5 and Q3.)** The
+  `kestra_or`/`kestra_and` wrapper this note asked for was built as
+  `kestra_bool` (`runners::operators`): every `and`/`or` operand is coerced
+  as Pebble's `TypeUtils.compatibleCast(x, Boolean)` does, so the result is a
+  strict boolean, and **both entries are banked** -- their golden values are
+  reproduced, not just their grouping.
 - **`coalesce-is-not-null` can never be rendered once Task 3 wires up
   minijinja, for a naming reason unrelated to this rewrite.** minijinja has
   no test named `null` — confirmed directly: `{{ a is null }}` PARSES (the
@@ -654,6 +704,13 @@ Three entries pin it: `op-contains` (strings, `true`),
 `op-contains-boxed-int` (context list, `false`), `op-contains-literal`
 (literal list, `true`). Whoever ports `contains` must reproduce all three or
 they have ported a *different*, more sensible operator.
+
+(Package #5a's Task A6, 2026-10-29, ported `contains` as
+`ContainsExpression` does it and reproduces two of the three: egret's values
+carry no Integer/Long distinction, so `op-contains-boxed-int` answers `true`
+and stays baselined as spec D2's recorded divergence -- a "fix" that answered
+`false` there would also answer `false` for
+`operator-contains-boxed-int-context`, where Kestra says `true`.)
 
 ## Value formatting is the ENVIRONMENT's job, not a filter's (W2 Task 3)
 
@@ -841,12 +898,23 @@ match.
   `InExpression` from minijinja's `in` (addendum A3, see above), and
   `coalesce-nested-absent` (`{{ obj.missing.deeper ?? 'fallback' }}` — the
   shape a real flow writes most often, and the one place
-  `UndefinedBehavior::Strict` diverges from Kestra's `??`).
+  `UndefinedBehavior::Strict` diverges from Kestra's `??`). Baselined then
+  as "deliberate: the alternatives are worse" (task-3-report.md S9).
+  **Reversed 2026-10-29**: spec
+  `docs/en/specs/2026-10-28-workflow-renderer-design.md` Q6 rules that `??`
+  answers through a missing member or index chain, and package #5a's Task
+  A5 banked the entry (D6: a path on the left compiles to
+  `kestra_path(root, 'a', 'b')` and the operator to
+  `(P) if kestra_present(P) else (R)`, so the right side is lazy too).
 - **`op-range` records that `..` is inclusive**: `{{ a .. b }}` with `a=1,
   b=3` renders `[1,2,3]`, and `{% for i in 1 .. 3 %}` iterates three times.
   minijinja's `range(1, 3)` is `[1, 2]` — exclusive, and printed with spaces.
   Whoever ports `range` (Task 7's `BoundedRangeFunction`) owns both
   differences.
+  *(2026-10-29, package #5a Task A6: `a .. b` compiles to
+  `kestra_range(a, b)`, Kestra's inclusive `range`, and `op-range` is
+  banked. Descending (`3 .. 1`) and character (`'c' .. 'a'`) ranges are
+  `[]`, as A1 measured.)*
 
 ## What W2 Task 4's 103 new entries measured (read before porting a filter)
 
@@ -3594,6 +3662,30 @@ numbers by `doubleValue()` -- W9c spec §15 records the difference.
 `fromIon` decimals are still `f64` (their scale is still what gave way); this
 round does not revisit that.
 
+**2026-10-29, package #5a Task A4 (spec D3; Q5 reverses the W9c ruling).** The
+arithmetic half is closed too. Task A3 compiled `+ - * / %` to
+`runners::arith`, so the operators no longer reach minijinja either, and A4
+ported `bigDecimalOperation` there (`runners::arith::decimal`, on
+`num-bigint`): either operand a `BigDecimal` makes both
+`BigDecimal.valueOf(x.doubleValue())`, `add`/`subtract` exact,
+`multiply`/`divide`/`remainder` at `DECIMAL128` with Java's preferred scale.
+With nothing left that minijinja computes on the object, an Ion decimal is a
+`BigNumber` again (`ionfmt::ion_number`) and `abs` keeps its scale. All
+thirteen entries above BANKED. Still minijinja's: a region the compile passes
+do not mirror (`{% do %}`, macro arguments) and unary minus (`-x`, which
+Pebble computes as `-1 * x`), both of which refuse the object.
+
+**2026-10-29, #5a fix wave (review M3, M8).** Two corrections to the paragraph
+above. Unary minus is Pebble's since Task A8 (`kestra_mul(-1, x)`), and macro
+and `call` regions cannot be reached at all (the `macros` feature is off, so
+minijinja refuses them as unknown statements); only the arguments of a
+`{% do f(..) %}`, which is not Pebble syntax and whose value is discarded,
+keep minijinja's operators. And the id
+`filter-number-bigdecimal-is-not-a-number-here` is now only a label: it names
+the W9c ruling it was written under, but the entry is BANKED and its golden is
+Kestra's computed `2.5`. The id is kept, not renamed, because it is cited in
+the spec, the plan and the survey of #5 and in this file's history.
+
 ### C-B: an `e` exponent with a dot was classified as a decimal
 
 Ion's rule is that `e`/`E` makes a **float regardless of the dot**. Round 2
@@ -5479,3 +5571,90 @@ would have been wrong — 25 at the base, 31 at W2b's tip, 12 at W2a's, and
 **18** merged. It is smaller than either side because W2a DELETES baseline
 lines when it banks, so the intersection is not monotone and no choice between
 two claims could have produced it.
+
+## What package #5a's Task A1 batches measured (2026-10-28)
+
+Plan `docs/en/plans/2026-10-28-workflow-renderer.md` A1; spec
+`docs/en/specs/2026-10-28-workflow-renderer-design.md` D1-D6. 157 entries,
+appended at the end of `corpus.json` in eleven batches, each a blank-line
+group whose id prefix names it: `arith-long-` (and `arith-double-`),
+`arith-zero-`, `arith-bigdecimal-` (and `arith-ion-`), `arith-operand-`,
+`cmp-`, `chain-`, `coalesce-chain-`/`coalesce-lazy-`/`coalesce-...`,
+`operator-` and `logic-`. Four survey probes were left out because an
+existing entry already holds the same expression and context
+(`function-fromion-decimal-arithmetic`, `-division`, `-greater-than`,
+`op-contains-boxed-int`). 31 golden values are Kestra exceptions and are
+`error-class`; 20 of them are baselined (egret answers), 11 are born matching
+and paired with three `runners::env` tests that assert the failure.
+
+The golden file was regenerated offline with the recipe above (`mvn -o`).
+The regeneration changed exactly the eight `NON_DETERMINISTIC` ids and
+`function-fromion-annotation-of-a-list`, as this file predicts; those nine
+were kept at their committed values so the diff is only the new entries.
+
+What the batches measured that a later task depends on:
+
+- **Long arithmetic is Java's.** `7 / 2` is `3`, `-7 / 2` and `7 / -2` are
+  `-3`, `-7 % 2` is `-1`, `7 % -2` is `1`; `+ - *` wrap at both ends;
+  `Long.MIN_VALUE / -1` is `Long.MIN_VALUE` and `% -1` is `0` (no exception).
+  `/ 0` fails `Could not perform division`; `% 0` fails `Could not perform
+  greater modulus` (Pebble's text, verbatim). Double: `1.0 / 0` is
+  `Infinity`, `-1.0 / 0` is `-Infinity`, `0.0 / 0` and `1.5 % 0` are `NaN`.
+- **Two context integers wrap at 2^31** (`65536 * 65536` is `0`,
+  `2147483647 + 1` is `-2147483648`), and a context integer times a literal
+  does not (`4294967296`): spec D2's Integer-vs-Long divergence is real. Both
+  entries are baselined as that recorded divergence.
+- **A context `BigInteger` goes down the Long branch through `longValue()`**,
+  not `intValue()`: `99999999999999999999 + 1` is `7766279631452241920`
+  (the value mod 2^64, plus one). `+ 0.5` makes it a Double (`1.0E20`).
+- **Operand kinds.** A string on either side of `+` concatenates
+  (`1 + 'a'` is `1a`, `'a' + null` is `anull`, `'a' + [1, 2]` is
+  `a[1, 2]` -- Java's `List.toString`, with a space). Otherwise a string
+  goes through `toNumber`: `'5' * 2` is `10`, `'7' / 2` is `3`, `'2.5' * 2`
+  is `5.0`, `'1e2' * 1` is `100.0`, `'abc' * 2` fails. A list on the left of
+  `+` appends (`[1] + 2` and `[1] + [2]` are both `[1,2]`); on the left of
+  `-` it removes the first occurrence (`[1, 2, 1] - 1` is `[2,1]`) or every
+  element of a right-hand list (`[1, 2, 3] - [1, 3]` is `[2]`). `2 + [1]`,
+  `[1] * 2`, a map operand, a null operand and a boolean operand fail.
+- **BigDecimal** follows D3: `fromIon('1.50') * 2` is `3.00` (both operands
+  through `BigDecimal.valueOf(double)`, so `1.5 * 2.0`), `fromIon('1.50') + 1`
+  is `2.5`, `fromIon('1.0') / 3` rounds at the 34th digit (`...3333` and
+  `...6667` for `2.0 / 3`), `fromIon('1') / 3` is Long division (`0`), and a
+  30-digit value loses its precision through the double. egret today computes
+  a `fromIon` decimal as a Double (`(fromIon('1.5') * 2) | className` is
+  `java.lang.Double` here, `java.math.BigDecimal` there): that is A4's first
+  check, answered.
+- **Comparison.** Every non-number, non-string pair fails, and so does a
+  number against a string; a null operand answers `false` for all four
+  relational operators, null against null included. `==` and `<` share a
+  precedence tier and associate left: `1 < 2 == true` is `true`,
+  `1 == 1 < 2` fails, `1 == 2 == false` is `true`.
+- **`??`/`???`** answer through every missing member, literal subscript and
+  out-of-range index, on a missing root or a missing member, and inside `{% if
+  %}` and a filter's operand; the right side is lazy (`x ?? missing.y`,
+  `x ?? (1 / 0)`). `obj.a ??? 'h'` with `a: null` is the empty string. A
+  call on the left (`fromJson('1') ?? missing.y`) is `1` in Kestra and is
+  the D6 non-path divergence, baselined as such.
+- **`equals`** is `==` (`1 equals 1.0` is `true`, `1 equals '1'` is `false`).
+  **`contains`** checks a map's keys, not its values, a list's elements
+  (and every element of a list on the right), and a substring; a number on
+  the left fails. **`..`** is ascending only: `3 .. 1` and `'c' .. 'a'` are
+  `[]`.
+- **`and`/`or`** return a boolean and coerce each operand: a number is true
+  when non-zero, a string when non-empty (`'false' or false` is `true`); a
+  list or map fails with a `ClassCastException`; a null fails, with the text
+  `null value used in and operator` even under `or`.
+
+**What #5a did with them (Task A8, 2026-10-29).** Of the 98 lines A1 recorded
+under `#5a red` (and the one A3 added, `coalesce-lazy-right-division`), **four
+remain**, each a recorded divergence named in spec
+`docs/en/specs/2026-10-28-workflow-renderer-design.md` §6.1: the two
+context-integer probes (D2, Integer vs Long), `coalesce-non-path-left-missing-right`
+(D6: a call on the left keeps the eager form) and `logic-and-returns-boolean`
+(minijinja's `~` writes a boolean as `True`). The sentence above that says egret
+"today" computes a `fromIon` decimal as a Double is A1's measurement: since Task
+A4 it is a `java.math.BigDecimal` (Q5 reverses the W9c refusal), and since A8 a
+unary minus on one is Pebble's `multiply(-1, x)` (`-fromIon(ion='1.50')` is
+`-1.50`). The oracle ends #5a at **107 of 1493** baselined: 103 lines from
+before A1 and those four.
+

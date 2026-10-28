@@ -3850,6 +3850,7 @@ dependencies = [
  "md-5 0.10.6",
  "minijinja",
  "murmur3",
+ "num-bigint",
  "rand 0.8.7",
  "regex",
  "regex-syntax",
