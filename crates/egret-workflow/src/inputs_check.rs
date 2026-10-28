@@ -75,6 +75,7 @@
 //! - **validator** is `fancy-regex` with a backtrack limit, not
 //!   `java.util.regex` with a 10 s timeout (D10). A pattern that does not
 //!   compile (save time refuses it, Task A5) gives ``invalid pattern [<v>]``.
+//!   Save and start compile it with the same `anchored_validator`.
 //! - **URI** syntax errors follow `java.net.URI`'s message shapes
 //!   (`Illegal character in <part> at index <n>: <uri>`) for the common
 //!   cases only; a missing scheme is Kestra's `Invalid URI format.` exactly.
@@ -776,18 +777,45 @@ fn check_validator(validator: Option<&str>, s: &str) -> Result<(), String> {
     let Some(v) = validator else {
         return Ok(());
     };
-    // `\A(?:..)\z` is `Matcher.matches`: the whole text, with alternation
-    // backtracking into a longer branch when a shorter one leaves text over.
-    let re = fancy_regex::RegexBuilder::new(&format!(r"\A(?:{v})\z"))
-        .backtrack_limit(VALIDATOR_BACKTRACK_LIMIT)
-        .build()
-        .map_err(|_| format!("invalid pattern [{v}]"))?;
+    let re = anchored_validator(v).map_err(|()| format!("invalid pattern [{v}]"))?;
     match re.is_match(s) {
         Ok(true) => Ok(()),
         Ok(false) => Err(format!("it must match the pattern `{v}`")),
         Err(_) => Err(format!(
             "the validator pattern `{v}` timed out — it may be too complex"
         )),
+    }
+}
+
+/// A `validator` compiled for `Matcher.matches`: `\A(?:v)\z`, the whole text,
+/// with alternation backtracking into a longer branch when a shorter one
+/// leaves text over. The save check (`input_validator_invalid`) and the start
+/// check both call this, so the two cannot disagree (review I2).
+///
+/// The textual wrapper must not change what `v` means:
+/// - `v` must compile **as written** first, as Java's `Pattern.compile` does.
+///   Then its own groups are balanced, and a stray `)` cannot close the
+///   wrapper (`abc)|(?:.*` would otherwise wrap to a pattern that accepts
+///   everything).
+/// - The prefix `\A(?:` changes no lexer state, so the wrapped `v` lexes as
+///   written. With `v` balanced, the only way the wrapper's closing `)\z`
+///   is not read is an extended-mode `#` comment running to the end of `v`'s
+///   last line. Only then is a newline put before it: the comment ends there,
+///   and in extended mode the newline itself is ignored.
+pub(crate) fn anchored_validator(v: &str) -> Result<fancy_regex::Regex, ()> {
+    fancy_regex::Regex::new(v).map_err(drop)?;
+    let build = |pattern: String| {
+        fancy_regex::RegexBuilder::new(&pattern)
+            .backtrack_limit(VALIDATOR_BACKTRACK_LIMIT)
+            .build()
+            .ok()
+    };
+    match build(format!(r"\A(?:{v})\z")) {
+        Some(re) => Ok(re),
+        None if v.rsplit('\n').next().is_some_and(|last| last.contains('#')) => {
+            build(format!("\\A(?:{v}\n)\\z")).ok_or(())
+        }
+        None => Err(()),
     }
 }
 
@@ -1578,6 +1606,54 @@ mod tests {
             "id: s\ntype: STRING\nvalidator: '('\n",
             &[(json!("x"), Err("invalid pattern [(]"))],
         );
+    }
+
+    /// Review I2: the anchoring cannot change what the pattern means. An
+    /// extended-mode `#` comment would swallow a wrapper's closing `)\z` on
+    /// its line; Java's `matches()` takes the pattern, so egret does too.
+    #[test]
+    fn an_extended_mode_comment_does_not_swallow_the_anchoring() {
+        let y = "id: s\ntype: STRING\nvalidator: '(?x) [a-z]+ # letters'\n";
+        table(
+            y,
+            &[
+                (json!("abc"), Ok(json!("abc"))),
+                (
+                    json!("ab1"),
+                    Err("it must match the pattern `(?x) [a-z]+ # letters`"),
+                ),
+            ],
+        );
+        // A comment on an earlier line: the anchoring is still whole-text.
+        let y = "id: s\ntype: STRING\nvalidator: \"(?x) a # one\\n b # two\"\n";
+        table(
+            y,
+            &[
+                (json!("ab"), Ok(json!("ab"))),
+                (
+                    json!("abb"),
+                    Err("it must match the pattern `(?x) a # one\n b # two`"),
+                ),
+            ],
+        );
+        assert!(anchored_validator("(?x) [a-z]+ # letters").is_ok());
+    }
+
+    /// Review I2, the reverse case: a pattern that does not compile as
+    /// written (refused at save) must not compile once wrapped either, where
+    /// `\A(?:abc)|(?:.*)\z` would accept every value. A stored one fails
+    /// closed at start.
+    #[test]
+    fn a_stray_paren_cannot_escape_the_anchoring() {
+        let y = "id: s\ntype: STRING\nvalidator: 'abc)|(?:.*'\n";
+        table(
+            y,
+            &[
+                (json!("zzz"), Err("invalid pattern [abc)|(?:.*]")),
+                (json!("abc"), Err("invalid pattern [abc)|(?:.*]")),
+            ],
+        );
+        assert!(anchored_validator("abc)|(?:.*").is_err());
     }
 
     #[test]

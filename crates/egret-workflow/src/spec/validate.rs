@@ -1241,7 +1241,9 @@ fn validate_inputs(inputs: &[Input], report: &mut ValidationReport) {
 ///   divergence). See `inputs_check::bound_refusals`.
 /// - `input_validator_invalid`: `RegexValidator.java:26-32` on STRING and
 ///   SECRET, compiled with `fancy-regex` (D10) rather than `java.util.regex`.
-///   Not anchored: Kestra compiles the pattern as written.
+///   Compiled by `inputs_check::anchored_validator`, the start check's own
+///   function: the pattern as written (as Kestra compiles it) and its
+///   anchored form, so save and start cannot disagree (review I2).
 ///
 /// Not added (D11): "a default needs `required: true`".
 fn input_save_findings(inputs: &[Input], report: &mut ValidationReport) {
@@ -1275,7 +1277,7 @@ fn input_save_findings(inputs: &[Input], report: &mut ValidationReport) {
         }
         if matches!(input.r#type, InputType::String | InputType::Secret) {
             if let Some(v) = input.validator.as_deref() {
-                if fancy_regex::Regex::new(v).is_err() {
+                if crate::inputs_check::anchored_validator(v).is_err() {
                     report.errors.push(Finding {
                         code: "input_validator_invalid",
                         message: format!("input '{}': invalid pattern [{v}]", input.id),
@@ -4117,6 +4119,11 @@ mod tests {
             ("STRING", r"'(?=.*\d)\w+'", false),
             ("SECRET", r"'(a)\1'", false),
             ("INT", r"'\'", false),
+            // Review I2's probes: an extended-mode comment passes (Java
+            // compiles it, and the start check now anchors it); a stray `)`
+            // that would escape the anchoring is refused.
+            ("STRING", "'(?x) [a-z]+ # letters'", false),
+            ("STRING", "'abc)|(?:.*'", true),
         ] {
             let f = with_inputs(&format!("  - id: v\n    type: {ty}\n    validator: {v}\n"));
             let got = errors_of(&f, "input_validator_invalid");
