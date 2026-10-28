@@ -378,7 +378,7 @@ export default function Alerts() {
                 server-side ("Name already used by a schedule of this type") —
                 so this is the one thing on the row that tells them apart.
                 `variant="outline"`, not `variant="success"`: that variant is a
-                hardcoded `bg-green-600` reserved elsewhere in this app for an
+                hardcoded `bg-green-700` reserved elsewhere in this app for an
                 actual state, and a type is not a status. Those state badges
                 (Endpoints/Versions/Clients' "Live"/"Active") no longer read
                 `bg-success/15 text-success`, as this comment used to say —

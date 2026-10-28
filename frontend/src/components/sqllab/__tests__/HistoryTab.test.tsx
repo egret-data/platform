@@ -21,8 +21,8 @@ beforeEach(() => {
 
 test("renders status badge, db name, and sql for each row", () => {
   render(<HistoryTab ws="eng" databases={databases} onLoad={vi.fn()} onRun={vi.fn()} />);
-  expect(screen.getByText("finished")).toBeInTheDocument();
-  expect(screen.getByText("failed")).toBeInTheDocument();
+  expect(screen.getByText("Finished")).toBeInTheDocument();
+  expect(screen.getByText("Failed")).toBeInTheDocument();
   expect(screen.getAllByText("trino-local").length).toBe(2);
   expect(screen.getByText("SELECT 42")).toBeInTheDocument();
 });
