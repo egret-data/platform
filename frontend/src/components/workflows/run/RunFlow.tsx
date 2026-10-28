@@ -5,6 +5,7 @@ import { Loader2, Play } from "lucide-react";
 import {
   getWorkflowStartFlowExecutionUrl,
   useWorkflowStartFlowExecution,
+  useWorkflowValidateExecutionInputs,
   type workflowStartFlowExecutionResponse,
 } from "@/api/generated/workflow/workflow";
 import { customInstance } from "@/api/mutator";
@@ -34,9 +35,11 @@ import {
   formFromInputs,
   inputsFromSource,
   requestFromForm,
-  serverErrorInput,
+  serverErrorsByInput,
   unsupportedInputs,
   validateForm,
+  validationRequestFromForm,
+  validationView,
   type FieldValue,
   type RunInput,
 } from "@/components/workflows/run/inputModel";
@@ -92,10 +95,13 @@ function RunForm({
   // Its JSON body goes out as `application/json` by `customInstance` (`api/mutator.ts`):
   // the route takes two body types, so orval writes no `Content-Type` (W7a Task 8).
   const start = useWorkflowStartFlowExecution();
+  // The start's own check, run without starting (D14): one source of truth decides (D15).
+  const validate = useWorkflowValidateExecutionInputs();
   const idPrefix = useId();
   const [form, setForm] = useState(() => formFromInputs(inputs));
   const [clientErrors, setClientErrors] = useState<Record<string, string>>({});
   const [serverErrors, setServerErrors] = useState<Record<string, string>>({});
+  const [inactive, setInactive] = useState<string[]>([]);
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -114,6 +120,22 @@ function RunForm({
     // An edit answers that field's error; the others stay until the next Run.
     setClientErrors((errors) => without(errors, id));
     setServerErrors((errors) => without(errors, id));
+    // Whether `dependsOn` turns an input off depends on the other values, so any edit makes it unknown again.
+    setInactive([]);
+  };
+
+  /**
+   * The validate endpoint's answer for what the start would send, or null when
+   * it could not be had (the network, a 5xx, a refusal): the start is then sent
+   * as it is and its own answer is shown, so a validate failure never blocks a run.
+   */
+  const validated = async () => {
+    try {
+      const res = await validate.mutateAsync({ workspace: ws, id: flowId, data: validationRequestFromForm(form) });
+      return res.status === 200 ? validationView(res.data, inputs) : null;
+    } catch {
+      return null;
+    }
   };
 
   const submit = async (e?: FormEvent) => {
@@ -122,10 +144,17 @@ function RunForm({
     const errors = validateForm(form);
     setClientErrors(errors);
     setServerErrors({});
+    setInactive([]);
     setFormError(null);
     if (Object.keys(errors).length > 0) return;
     setSubmitting(true);
     try {
+      const checked = await validated();
+      if (checked && Object.keys(checked.errors).length > 0) {
+        setServerErrors(checked.errors);
+        setInactive(checked.inactive);
+        return;
+      }
       const req = requestFromForm(form);
       // The generated function always `JSON.stringify`s its body, so a multipart
       // start goes through the same mutator with the `FormData` as the body, and
@@ -145,9 +174,10 @@ function RunForm({
     } catch (err) {
       // Nothing typed is cleared (FE-ACTION-3); an input the server names gets the message beside it (FE-FORM-4).
       const message = err instanceof Error && err.message ? err.message : "the request failed";
-      const field = serverErrorInput(message, inputs);
-      if (field) setServerErrors({ [field]: message });
-      else setFormError(`The run could not be started: ${message}. Fix it, then run again.`);
+      const { fields, rest } = serverErrorsByInput(message, inputs);
+      setServerErrors(fields);
+      if (Object.keys(fields).length === 0) setFormError(`The run could not be started: ${message}. Fix it, then run again.`);
+      else if (rest.length > 0) setFormError(`The run could not be started: ${rest.join(" ")}. Fix it, then run again.`);
     } finally {
       setSubmitting(false);
     }
@@ -253,6 +283,7 @@ function RunForm({
                 value={form.values[input.id] ?? null}
                 onChange={(v) => setValue(input.id, v)}
                 error={serverErrors[input.id] ?? clientErrors[input.id]}
+                inactive={inactive.includes(input.id)}
                 idPrefix={idPrefix}
               />
             ))}

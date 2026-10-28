@@ -105,7 +105,7 @@ pub use claim::CREATE_BESIDE_A_CREATED_SIBLING;
 /// read. Production goes through `worker::txn`.
 #[cfg(any(test, feature = "test-util"))]
 pub use claim::{apply_outcome, start_execution_in};
-pub(crate) use claim::{checked_inputs, start_execution_in_with};
+pub(crate) use claim::{checked_inputs, input_outcomes, start_execution_in_with};
 pub use claim::{
     claim, commit_outcome, due_retries, resume, resume_by_hand, start_claimed, start_execution,
     start_execution_with_trigger, tick, tick_with, wake, Claimed, NewExecution, Resumed,

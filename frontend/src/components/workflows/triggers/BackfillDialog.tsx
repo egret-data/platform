@@ -42,7 +42,11 @@ import { workflowsKeys } from "@/routes/workflows/queryKeys";
 
 /** A schedule's value from the flow's YAML, as the form's control takes it; null when it does not fit the input's type. */
 function fromSchedule(input: RunInput, v: unknown): FieldValue | null {
-  if (input.type === "BOOLEAN" && typeof v === "boolean") return v;
+  if (input.type === "BOOL") {
+    // The switch holds a boolean; `"true"`/`"false"` (any case) is what the start accepts as text.
+    if (typeof v === "boolean") return v;
+    return typeof v === "string" && /^(true|false)$/i.test(v) ? v.toLowerCase() === "true" : null;
+  }
   if (Array.isArray(v)) return v.map(String);
   if (typeof v === "string" || typeof v === "number") return String(v);
   return null;
