@@ -44,6 +44,7 @@
 use egret_metastore::Db;
 use egret_policy::{
     seed_tag, seed_trino, unreadable_table_mask_for, MaskOrigin, PolicyStore, TagRef, TagWrite,
+    LISTED_OTHER_TABLES,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -785,5 +786,72 @@ async fn the_renames_that_cannot_create_the_pair_are_accepted() {
         "a rename must not be refused because a `perm.rules` mask selects the tag by KEY — \
          the rename cannot change that pair in either direction, and refusing it would leave \
          the tag unrenameable forever"
+    );
+}
+
+/// The refusal names the OTHER tables the tag is on, not only the first one
+/// (the defect was `LIMIT 1`: `moreTables` said there were more, and listed none).
+#[tokio::test]
+async fn a_refused_mask_lists_every_other_table_the_tag_is_on() {
+    let Some(db) = db().await else { return };
+    let t = tag(&db.pool, "listed").await;
+    attach(&db.pool, &t, "orders", "").await;
+    attach(&db.pool, &t, "returns", "").await;
+    attach(&db.pool, &t, "refunds", "").await;
+
+    let mut conn = db.pool.acquire().await.expect("acquire");
+    let pair = unreadable_table_mask_for(
+        &mut conn,
+        TagWrite::Mask {
+            tag: TagRef::Key(&t.key),
+            origin: MaskOrigin::Rule,
+            name: "mask-pii",
+        },
+    )
+    .await
+    .expect("query")
+    .expect("the pair must be refused");
+
+    assert_eq!(
+        (pair.schema.as_str(), pair.table.as_str()),
+        ("sales", "orders"),
+        "the first table in (schema, table, warehouse) order is named"
+    );
+    let others: Vec<&str> = pair.other_tables.iter().map(|t| t.table.as_str()).collect();
+    assert_eq!(
+        others,
+        vec!["refunds", "returns"],
+        "every other table is listed, in order"
+    );
+    assert!(!pair.other_tables_truncated);
+}
+
+/// A tag on more tables than a refusal lists says so, and lists the first
+/// `LISTED_OTHER_TABLES` of them.
+#[tokio::test]
+async fn a_refused_mask_on_many_tables_says_the_list_is_cut_short() {
+    let Some(db) = db().await else { return };
+    let t = tag(&db.pool, "many").await;
+    for i in 0..(LISTED_OTHER_TABLES + 3) {
+        attach(&db.pool, &t, &format!("t{i:03}"), "").await;
+    }
+
+    let mut conn = db.pool.acquire().await.expect("acquire");
+    let pair = unreadable_table_mask_for(
+        &mut conn,
+        TagWrite::Mask {
+            tag: TagRef::Key(&t.key),
+            origin: MaskOrigin::Rule,
+            name: "mask-pii",
+        },
+    )
+    .await
+    .expect("query")
+    .expect("the pair must be refused");
+
+    assert_eq!(pair.other_tables.len(), LISTED_OTHER_TABLES);
+    assert!(
+        pair.other_tables_truncated,
+        "more tables exist than are listed"
     );
 }

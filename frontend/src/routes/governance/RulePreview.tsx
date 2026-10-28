@@ -7,7 +7,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
-import { ruleOverlap, tableTagMaskConflict, type TableTagMaskConflict } from "@/routes/governance/apiErrors";
+import { otherTablesText, ruleOverlap, tableTagMaskConflict, type TableTagMaskConflict } from "@/routes/governance/apiErrors";
 import {
   effectivePerPrincipal,
   effectSentence,
@@ -334,7 +334,7 @@ export function RefusalBody({
     return (
       <div className="space-y-2">
         <p>{`${conflict.tag} is on the whole table ${conflict.schema}.${conflict.table}, so masking by ${conflict.tag} would make that table unreadable.`}</p>
-        {conflict.moreTables && <p>Other tables carry it too; each will be shown after this one.</p>}
+        {otherTablesText(conflict) && <p>{otherTablesText(conflict)}</p>}
         {actions && <ConflictButtons conflict={conflict} actions={actions} />}
         <ServerDetails message={conflict.error} />
       </div>

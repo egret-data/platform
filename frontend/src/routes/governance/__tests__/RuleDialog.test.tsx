@@ -1160,11 +1160,15 @@ describe("RuleDialog — the table-level classification conflict, said short (C5
   test("other tables are announced, and without catalog_registry:update Remove is replaced by the reason", async () => {
     const user = userEvent.setup();
     const err = CONFLICT();
-    (err.body as { moreTables: boolean }).moreTables = true;
+    Object.assign(err.body as object, {
+      moreTables: true,
+      otherTables: [{ warehouseId: "wh-1", schema: "sales", table: "returns" }],
+      otherTablesTruncated: false,
+    });
     previewMutateAsync.mockRejectedValueOnce(err);
     renderDialog({ entry: CLASSIFICATION_ENTRY }, { ...ME, platform_roles: [], permissions: ["policy:create"] });
     await user.click(screen.getByRole("button", { name: "Preview" }));
-    expect(await screen.findByText("Other tables carry it too; each will be shown after this one.")).toBeInTheDocument();
+    expect(await screen.findByText("Other tables carry it too: sales.returns.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Remove from table" })).not.toBeInTheDocument();
     expect(screen.getByText("Removing needs the catalog_registry:update permission.")).toBeInTheDocument();
   });

@@ -44,7 +44,8 @@ pub use unit_overlap::{
     StoredUnit, UnitIds, UnitOverlap, UnitPolicy,
 };
 pub use unreadable_table_mask::{
-    unreadable_table_mask_for, MaskOrigin, TagRef, TagWrite, UnreadableTableMask,
+    unreadable_table_mask_for, MaskOrigin, TableRef, TagRef, TagWrite, UnreadableTableMask,
+    LISTED_OTHER_TABLES,
 };
 
 pub use store::{

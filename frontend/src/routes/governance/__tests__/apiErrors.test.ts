@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "@/api/client";
-import { ruleOverlap, tableTagMaskConflict, tagInUse, tagKeyInvalid, tagKeyTaken, tagNameTaken } from "@/routes/governance/apiErrors";
+import { otherTablesText, ruleOverlap, tableTagMaskConflict, tagInUse, tagKeyInvalid, tagKeyTaken, tagNameTaken, type TableTagMaskConflict } from "@/routes/governance/apiErrors";
 
 const err = (status: number, body: Record<string, unknown>) =>
   new ApiError(status, String(body.error), body.code as string | undefined, body);
@@ -28,5 +28,26 @@ describe("apiErrors", () => {
   it("a coded error with no object body is not narrowed", () => {
     expect(tagInUse(new ApiError(409, "x", "tag_in_use"))).toBeNull();
     expect(tagInUse(new ApiError(409, "x", "tag_in_use", "not an object"))).toBeNull();
+  });
+
+  it("names every other table the tag is on, and says when the list is cut short", () => {
+    const base = {
+      error: "tag \"PII\" is attached…", code: "table_tag_mask_conflict" as const, tag: "PII", tagId: "t1", warehouseId: "w1",
+      schema: "analytics", table: "orders", mask: "m", maskOrigin: "rule" as const,
+    };
+    const none: TableTagMaskConflict = { ...base, moreTables: false };
+    const listed: TableTagMaskConflict = {
+      ...base,
+      moreTables: true,
+      otherTables: [{ warehouseId: "w1", schema: "sales", table: "returns" }, { warehouseId: "w2", schema: "sales", table: "refunds" }],
+      otherTablesTruncated: false,
+    };
+    const cut: TableTagMaskConflict = { ...listed, otherTablesTruncated: true };
+    const older: TableTagMaskConflict = { ...base, moreTables: true };
+
+    expect(otherTablesText(none)).toBeNull();
+    expect(otherTablesText(listed)).toBe("Other tables carry it too: sales.returns, sales.refunds.");
+    expect(otherTablesText(cut)).toBe("Other tables carry it too: sales.returns, sales.refunds, and more.");
+    expect(otherTablesText(older)).toBe("Other tables carry it too.");
   });
 });

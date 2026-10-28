@@ -15,7 +15,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { tableTagMaskConflict, type TableTagMaskConflict } from "@/routes/governance/apiErrors";
+import { otherTablesText, tableTagMaskConflict, type TableTagMaskConflict } from "@/routes/governance/apiErrors";
 import { DEFAULT_COLOR } from "@/routes/governance/classifications/tagParts";
 import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
 import { rulesOnTag } from "@/routes/governance/ruleMatch";
@@ -465,7 +465,7 @@ function ServerConflict({
     <div className="space-y-2 rounded-md border border-destructive/50 p-3 text-sm">
       <p role="alert" className="text-destructive">
         {conflictSentence(conflict.mask, conflict.tag, conflict.schema, conflict.table)}
-        {conflict.moreTables ? " Other tables carry it too." : ""}
+        {otherTablesText(conflict) ? ` ${otherTablesText(conflict)}` : ""}
       </p>
       <ColumnsWayOut canColumns={canColumns} onColumns={onColumns} />
       <details className="text-xs text-muted-foreground">
