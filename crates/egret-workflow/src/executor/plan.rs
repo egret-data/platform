@@ -347,6 +347,18 @@ pub struct PlanTask {
     /// `AllowFailure` (where it always was), appended for every other kind (D3).
     /// Empty for a `Loop`, whose `finally:` is not planned in the parent (D5).
     pub finally: Vec<TaskIx>,
+    /// The task's `type:` **as the author wrote it**, for every kind -- what
+    /// `{{ task.type }}` reads (package #5a Task A7, spec D7).
+    ///
+    /// Kestra's `RunVariables.of(Task)` writes `task.getType()`, and
+    /// `Task.type` is a plain field (`Task.java:42`) Jackson fills from the
+    /// flow's own `type` node: `PluginDeserializer.fromObjectNode` resolves
+    /// the class by that identifier and then `treeToValue`s the same node, so
+    /// an alias (`io.kestra.plugin.core.flow.WaitFor` on `LoopUntil`) stays the
+    /// alias and is never replaced by the class name. [`TaskKind::Runnable`]'s
+    /// `type_id` holds the same string for a leaf; this field holds it for the
+    /// kinds `build_plan` descends into as well, which had none.
+    pub type_name: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1411,6 +1423,7 @@ fn flatten_one<'a>(
         allow_failure: task.allow_failure,
         allow_warning: task.allow_warning,
         finally: Vec::new(),
+        type_name: task.r#type.clone(),
     });
 
     // Kestra dispatches on the wire `type`, and so does this -- through the

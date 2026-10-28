@@ -1043,8 +1043,10 @@ def check_inputs(flows, kinds, golden, baseline):
     # (`??` reads through a missing member chain, spec D6).
     # 42 since package #5a Task A6 (2026-10-29) banked `valids/if-in-flowable`
     # (`equals`) and `valids/task-runif-workingdirectory` (`contains`), spec D5.
-    if len(baseline) != 42:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 42; the split "
+    # 40 since package #5a Task A7 (2026-10-29) banked `valids/all-flowable` and
+    # `valids/disable-flowable` (`taskrun.value` is absent when null, spec D7).
+    if len(baseline) != 40:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 40; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1694,8 +1696,8 @@ def self_test():
          "not 273",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 42",
-         "not 42",
+    case("baseline.txt is no longer 40",
+         "not 40",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a
