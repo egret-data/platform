@@ -884,3 +884,12 @@ Deviations the code forces are recorded here, per task, as they happen.
   `just test-ranger-gates` OK; `openapi.json` regenerates identical.
 - Frontend: `gen:api` with no diff, lint 0 errors, `tsc -b` OK, vitest 8500/8500, build OK, all ten `test:bundle*`
   OK.
+
+### 2026-10-28: §11 items 1-3 fixed by the grants-follow package
+
+§11 items 1 (path-selector grants and rules), 2 (hand-written Ranger policies) and 3 (`catalog.catalog_grants`) are
+fixed on `fix/grants-follow-table-rename`, spec
+[`2026-10-27-grants-follow-table-rename-design.md`](2026-10-27-grants-follow-table-rename-design.md): restrictions
+are copied to the new name before the commit and stay on the old one, allows and catalog grants move after it, and a
+restrictive pattern or a hand-written restriction naming the table refuses the rename instead of being rewritten.
+This hold now also runs for an unclassified table whose rename carries grants or rules.
