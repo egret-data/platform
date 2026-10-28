@@ -1523,6 +1523,20 @@ mod tests {
         assert!(report.warnings.iter().all(|w| w.code != "ignored_property"));
     }
 
+    /// Inputs package A5: `jsonSchema` is not modelled (D12), so a JSON
+    /// input that writes it keeps the `not_honoured` warning naming #3.
+    #[test]
+    fn a_json_inputs_json_schema_is_not_honoured() {
+        let source = "id: f\nnamespace: a.b\ninputs:\n  - id: j\n    type: JSON\n    jsonSchema: '{}'\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n";
+        let r = report(source);
+        let w = r
+            .warnings
+            .iter()
+            .find(|w| w.code == "not_honoured" && w.path == "inputs.j.jsonSchema")
+            .unwrap_or_else(|| panic!("{r:#?}"));
+        assert!(w.message.contains("roadmap package #3 lifts it"), "{w:?}");
+    }
+
     /// The save-time report every test below reads (spec D11).
     fn report(src: &str) -> ValidationReport {
         crate::spec::validate_source(src, &crate::spec::parse(src).unwrap())

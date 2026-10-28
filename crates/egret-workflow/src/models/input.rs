@@ -131,10 +131,11 @@ pub struct Input {
     /// `SelectInput` / `MultiselectInput` `autoSelectFirst`. `None` when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_select_first: Option<bool>,
-    /// `JsonInput.jsonSchema`: a JSON Schema the value must satisfy, kept as
-    /// written (an object, or a string Kestra would parse).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub json_schema: Option<serde_json::Value>,
+    // `JsonInput.jsonSchema` is deliberately NOT modelled (spec D12): no JSON
+    // Schema validator is in the dependency tree, so egret would keep the key
+    // and do nothing with it. Left out, it is `ignored` like every other key
+    // egret drops: the flow schema does not offer it and a draft that writes
+    // it gets the `not_honoured` warning (`spec::keys::lift_of`).
 }
 
 const fn default_true() -> bool {
@@ -270,7 +271,6 @@ prefill: world
             "id: d\ntype: DURATION\nmin: PT1S\nmax: PT1H\n",
             "id: t\ntype: DATE\nafter: '2024-01-01'\nbefore: '2025-01-01'\n",
             "id: s\ntype: SELECT\nvalues:\n- a\n- 2\n- label: L\n  value: v\nexpression: '{{ x }}'\nallowCustomValue: true\nisRadio: true\nautoSelectFirst: false\n",
-            "id: j\ntype: JSON\njsonSchema:\n  type: object\n",
         ];
         for yaml in cases {
             let i: Input = serde_norway::from_str(yaml).unwrap_or_else(|e| panic!("{yaml}: {e}"));
@@ -299,7 +299,6 @@ prefill: world
             "allowCustomValue",
             "isRadio",
             "autoSelectFirst",
-            "jsonSchema",
         ] {
             assert!(json.get(k).is_none(), "{k}");
         }
