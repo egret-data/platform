@@ -4,7 +4,9 @@
 
 Spec: `docs/en/specs/2026-10-28-workflow-renderer-design.md` (Q1–Q6, D1–D14). Khảo sát: `docs/en/specs/2026-10-28-workflow-renderer-survey.md`. Nhánh `feat/workflow-renderer` cho #5a; #5b tách nhánh từ main sau khi #5a merge (hoặc từ #5a, xếp chồng, nếu người dùng yêu cầu). Hai PR: **#5a** (A1–A8) và **#5b** (B1–B9).
 
-**Trạng thái, 2026-10-28:** đã thiết kế; chưa xây.
+**Trạng thái, 2026-10-29:** #5a đã xây (A1–A8, nhánh `feat/workflow-renderer`, PR đang review; spec §6.1); #5b chưa xây. Đo ở cuối #5a: executor **301 / 40 / 40 / 0**, census 295 / 25 / 21; biểu thức **1 493** entry, **107** dòng baseline (103 dòng cũ + 4 dòng khác biệt đã ghi nhận của A1).
+
+**Mục tiêu đã sửa, 2026-10-29 (A8).** Văn bản các task bên dưới là kế hoạch như đã viết; khi một số đo làm dịch mục tiêu, ghi chú này có hiệu lực. A4 bank mười ba entry cũ chứ không phải hai (cả khối `function-fromion-decimal-*` của W2 Task 7), A6 bank hai entry `null-literal-in-an-and/or-operand` của W2b, còn `op-contains-boxed-int` ở lại (D2, spec §2.2 mục 10): 26 entry cũ rời baseline, không phải 14. Vì vậy dòng chấp nhận của A8 là **107** dòng baseline (103 cũ + 4 khác biệt đã ghi nhận: hai probe số nguyên ngữ cảnh của D2, D6 vế trái không phải đường dẫn, `~` in `True`), không phải 115/116, và của B9 là **95 dòng cũ** cộng chỉ các dòng khác biệt đã ghi nhận, không phải 107. A3 bank cả bốn `restart-*` khỏi `STILL_OVER_ACCEPTED_AT_RUNTIME`, không chỉ `restart-child`. Cả hai entry "có thể" của A6 đều chuyển, nên A7 kết thúc ở 301 / 40 / 40 / 0. A8 còn biên dịch dấu trừ một ngôi (`kestra_mul(-1, x)`, `unaryMinus` của Pebble) để đóng hồi quy của A4 khi đổi dấu một số thập phân (`-d`, `-fromIon(..)`).
 
 ## Ràng buộc chung
 

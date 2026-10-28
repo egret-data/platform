@@ -6187,6 +6187,13 @@ measured at `{before, overlapping}` over all **791** pairs it produces,
 sub-executions included, so dropping a pair is exactly accepting either value
 Kestra was seen to produce.
 
+*(**21 across 6 over 1111 at package #5a's end, 2026-10-29** — `RESTRICTION_REMOVES`,
+`RESTRICTION_REMOVES_ENTRIES` and `EGRET_PAIRS_BEFORE_RESTRICTION`; Task A7's `all-flowable` took 63
+of 84 with it. The kept pairs the ratchet reports are **849** (643 top-level + 206 nested) and the
+ones it does not **267** (246 + 21), asserted by
+`kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line`; the 1104-row table above is
+W3b's moment. Task A8's sweep added this note rather than re-deriving every figure in the section.)*
+
 *(**80 across 6 over 771 through W5; 85 across 9 over 791 at W6 Task 3.** The
 three entries added are `valids/restart-parent`, `valids/restart-parent-loop`
 and `valids/subflow-secret-output-parent` — `Subflow` parents that used to stall
@@ -6272,12 +6279,18 @@ have made the control vacuous in its turn.
   41   golden entries carry a sub-execution
  142   sub-executions they carry between them
 
-  22   of the 41 now MATCH
-   4   agree on everything the parent execution holds and differ INSIDE `spawned`
-  15   differ on something else as well
+  32   of the 41 now MATCH
+   1   agrees on everything the parent execution holds and differs INSIDE `spawned`
+   8   differ on something else as well
   ---
   41   TOTAL
 ```
+
+*(**32 / 1 / 8 at package #5a's end, 2026-10-29**, from `SPAWNED_ENTRIES_THAT_MATCH` = 32 and
+`SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED` = 1; the block read 22 / 4 / 15 until Task A8's
+sweep, behind the banks of the end-hooks package and of #5a: A3's `restart-loop` and
+`restart-parent-loop`, A6's `if-in-flowable`, A7's `all-flowable` and `disable-flowable` among
+them. The parentheticals below are the record of the earlier moments.)*
 
 *(**17/8/16 through W5; 18/8/15 at W6 Task 3; 22/4/15 since W6 Task 4** — the
 four `valids/retry-new-execution-*` entries moved from the middle row to the
@@ -6335,7 +6348,7 @@ exactly as `loop-switch` does. Both are corrected in `baseline.txt`.
 
 ### The residual baseline, by construct and owner
 
-**108 entries** — it read `111` until W8 Task 7, two banks behind, and `109`
+**40 entries** at package #5a's end (2026-10-29, `baseline.len()` printed by the test below; Task A8's sweep corrected this heading and the cells marked so in the table, which had stopped following the banks of the end-hooks package and of #5a). **108 entries** at W9a — it read `111` until W8 Task 7, two banks behind, and `109`
 until W9a Task 11 banked `valids/loop-values-from-uri` (a `Loop` over the ION
 file a `core.storage.Write` wrote; the `Loop` row below fell 19 → 18 with it).
 `the_residual_baseline_is_attributed_to_a_construct_or_named` derives the rows
@@ -6348,16 +6361,16 @@ found.
 
 | baselined entries declaring it | construct | owner |
 |---|---|---|
-| 18 | `Loop` — a sub-execution egret **runs and gets wrong** | see below. **12 at package #5a Task A3 (2026-10-28, measured by the derivation; it read 14 before)**: `restart-loop` and `restart-parent-loop` banked |
-| 16 | `finally:` | **unclaimed** |
+| **9** | `Loop` — a sub-execution egret **runs and gets wrong** | see below. **12 at package #5a Task A3 (2026-10-28, measured by the derivation; it read 14 before)**: `restart-loop` and `restart-parent-loop` banked; **11 at Task A6** (`if-in-flowable`), **9 at Task A7** (`all-flowable`, `disable-flowable`). This cell read 18 until Task A8's sweep |
+| **2** | `finally:` | end hooks #2a/#2b banked fourteen; the two left are `task-runif-taskswithstate` (#5b, the `empty` test) and `pause-errors-finally-after-execution` (#9). This cell read 16 until package #5a Task A8's sweep |
 | 1 | `ExecutionUpdatableTask` (`Exit` left at kill-and-exit Task 3, 16 → 12; `Labels`, `SetVariables`, `UnsetVariables` at group C2 Task 5, 12 → 1) | group C2 Task 5 banked eleven; the one left, `valids/task-runif-taskswithstate`, is held by its flow-level `finally:` and not by its `SetVariables` |
-| 5 | `AllowFailure` / `allowFailure:` → `WARNING` | **W8 Task 5 banked seven of its twelve**; the five that remain are held by the FLOWABLE and not by the flag — see the paragraph below |
+| **2** | `AllowFailure` / `allowFailure:` → `WARNING` | **W8 Task 5 banked seven of its twelve**; the five that remained were held by the FLOWABLE and not by the flag — see the paragraph below. Two now (`retry-with-flowable-errors`, `pause-timeout-allow-failure`); this cell read 5 until package #5a Task A8's sweep |
 | 3 | `Pause` → `PAUSED` | W8 — and **not one of the three is held by the wait**; see below |
-| 10 | `afterExecution:` | **unclaimed** |
+| **2** | `afterExecution:` | end hooks #2b banked eight; `valids/after-execution` (#6, flow `outputs:`) and `pause-errors-finally-after-execution` (#9) remain. This cell read 10 until package #5a Task A8's sweep |
 | 2 | `LoopUntil` / `WaitFor` | W8 — **and not one of the two is held by the loop** (eight until group C1 Task 2); see below. **8 → 3 at group C1 Task 2**: five of the six `OutputValues` ones banked. **3 → 2 at package #5a Task A2 (2026-10-28)**: `loopuntil-failed-flowable` banked (spec D1) |
 | 3 | `sla:` | **W8 Task 6 banked two of the five**; the three that remain are `MAX_DURATION`s and **no implementation can bank them under this harness** — see the fifth blindness mechanism below |
-| 4 | `WorkingDirectory` (planned opaque) | **unclaimed** |
-| **29** | **none of the above** | named individually in `UNATTRIBUTED` (36 → 30 at group C1 Task 2: six entries held by `OutputValues` alone banked; 30 → 29 at group C1 Task 3: `valids/assert` banked) |
+| **2** | `WorkingDirectory` (planned opaque) | **unclaimed**; 3 → 2 at package #5a Task A6 (`task-runif-workingdirectory`: its `contains` did not parse). This cell read 4 until Task A8's sweep |
+| **19** | **none of the above** | named individually in `UNATTRIBUTED` (36 → 30 at group C1 Task 2: six entries held by `OutputValues` alone banked; 30 → 29 at group C1 Task 3: `valids/assert` banked; **20 before package #5a Task A5, 19 since** (`webhook-plaintext`); this cell read 29 until Task A8's sweep, already stale before #5a) |
 
 **The `LoopUntil` / `WaitFor` row is 9 → 8 at W8 Task 4, and the eight that
 remain are held by three things, none of which is the construct.** SIX have an

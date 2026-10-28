@@ -2,7 +2,9 @@
 
 Spec: `docs/en/specs/2026-10-28-workflow-renderer-design.md` (Q1–Q6, D1–D14). Survey: `docs/en/specs/2026-10-28-workflow-renderer-survey.md`. Branch `feat/workflow-renderer` for #5a; #5b branches from main after #5a merges (or from #5a, stacked, if the user asks). Two PRs: **#5a** (A1–A8) and **#5b** (B1–B9).
 
-**Status, 2026-10-28:** designed; not built.
+**Status, 2026-10-29:** #5a built (A1–A8, branch `feat/workflow-renderer`, PR in review; spec §6.1); #5b not built. Measured at #5a's end: executor **301 / 40 / 40 / 0**, census 295 / 25 / 21; expression **1 493** entries, **107** baselined (103 old lines + 4 recorded-divergence lines of A1's).
+
+**Corrected targets, 2026-10-29 (A8).** The task texts below are the plan as written; where a measurement moved a target, this note governs. A4 banked thirteen old entries, not two (W2 Task 7's whole `function-fromion-decimal-*` block), and A6 banked W2b's two `null-literal-in-an-and/or-operand`, while `op-contains-boxed-int` stayed (D2, spec §2.2 item 10): 26 old entries left the baseline, not 14. So A8's accept line reads **107** baselined (103 old + 4 recorded divergences: two D2 context-integer probes, D6 non-path, `~` printing `True`), not 115/116, and B9's reads **95 old lines** plus only recorded-divergence lines, not 107. A3 banked all four `restart-*` from `STILL_OVER_ACCEPTED_AT_RUNTIME`, not only `restart-child`. A6's two possible movers both moved, so A7 ended at 301 / 40 / 40 / 0. A8 also compiled unary minus (`kestra_mul(-1, x)`, Pebble's `unaryMinus`) to close A4's regression on a negated decimal (`-d`, `-fromIon(..)`).
 
 ## Global constraints
 

@@ -530,6 +530,13 @@ has no parent BOM to inherit a version from.
   just cannot be used to catch a wrong-grouping REWRITE bug by rendering,
   the same limitation `coalesce-is-not-null` (below) has for an unrelated
   reason.
+
+  **(Superseded 2026-10-29, package #5a Task A6, spec D5 and Q3.)** The
+  `kestra_or`/`kestra_and` wrapper this note asked for was built as
+  `kestra_bool` (`runners::operators`): every `and`/`or` operand is coerced
+  as Pebble's `TypeUtils.compatibleCast(x, Boolean)` does, so the result is a
+  strict boolean, and **both entries are banked** -- their golden values are
+  reproduced, not just their grouping.
 - **`coalesce-is-not-null` can never be rendered once Task 3 wires up
   minijinja, for a naming reason unrelated to this rewrite.** minijinja has
   no test named `null` — confirmed directly: `{{ a is null }}` PARSES (the
@@ -904,6 +911,10 @@ match.
   minijinja's `range(1, 3)` is `[1, 2]` — exclusive, and printed with spaces.
   Whoever ports `range` (Task 7's `BoundedRangeFunction`) owns both
   differences.
+  *(2026-10-29, package #5a Task A6: `a .. b` compiles to
+  `kestra_range(a, b)`, Kestra's inclusive `range`, and `op-range` is
+  banked. Descending (`3 .. 1`) and character (`'c' .. 'a'`) ranges are
+  `[]`, as A1 measured.)*
 
 ## What W2 Task 4's 103 new entries measured (read before porting a filter)
 
@@ -5622,4 +5633,17 @@ What the batches measured that a later task depends on:
   when non-zero, a string when non-empty (`'false' or false` is `true`); a
   list or map fails with a `ClassCastException`; a null fails, with the text
   `null value used in and operator` even under `or`.
+
+**What #5a did with them (Task A8, 2026-10-29).** Of the 98 lines A1 recorded
+under `#5a red` (and the one A3 added, `coalesce-lazy-right-division`), **four
+remain**, each a recorded divergence named in spec
+`docs/en/specs/2026-10-28-workflow-renderer-design.md` §6.1: the two
+context-integer probes (D2, Integer vs Long), `coalesce-non-path-left-missing-right`
+(D6: a call on the left keeps the eager form) and `logic-and-returns-boolean`
+(minijinja's `~` writes a boolean as `True`). The sentence above that says egret
+"today" computes a `fromIon` decimal as a Double is A1's measurement: since Task
+A4 it is a `java.math.BigDecimal` (Q5 reverses the W9c refusal), and since A8 a
+unary minus on one is Pebble's `multiply(-1, x)` (`-fromIon(ion='1.50')` is
+`-1.50`). The oracle ends #5a at **107 of 1493** baselined: 103 lines from
+before A1 and those four.
 
