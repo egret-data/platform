@@ -1848,7 +1848,9 @@ pub(crate) fn environment() -> Environment<'static> {
     //   `super::cmp_rewrite` compiles every comparison operator into a call to
     //   one of `super::compare`'s `kestra_eq` .. `kestra_not_in` (eight since
     //   package #5a's Task A2 compiled a chain left-associatively and removed
-    //   `kestra_compare_chain`).
+    //   `kestra_compare_chain`). Since package #5a's Task A3 five more:
+    //   `super::cmp_rewrite`'s arithmetic pass compiles every binary `+`, `-`,
+    //   `*`, `/`, `%` into `super::arith`'s `kestra_add` .. `kestra_mod`.
     //
     // `pprint` and `debug` were already removed in Task 3 for a different
     // reason (both dump internal state); they are two of the 62 and are now
@@ -1916,17 +1918,23 @@ pub(crate) fn environment() -> Environment<'static> {
     // W9c Task 4 fix round 1: the comparison operators, which
     // [`compile_source`]'s second pass compiles into calls to these.
     super::compare::register(&mut env);
+    // Package #5a, Task A3: the arithmetic operators, which
+    // [`compile_source`]'s third pass compiles into calls to these.
+    super::arith::register(&mut env);
 
     env
 }
 
 /// What the engine parses: Kestra's operators reshaped by [`rewrite`], then
 /// every comparison compiled to a `super::compare` call
-/// (`super::cmp_rewrite`, W9c Task 4 fix round 1). Every path that hands a
+/// (`super::cmp_rewrite`, W9c Task 4 fix round 1), then every binary `+`,
+/// `-`, `*`, `/`, `%` compiled to a `super::arith` call (package #5a, Task
+/// A3). Every path that hands a
 /// template to the parser goes through this one function, so a probe
 /// ([`referenced_roots`], [`name_in_code`]) sees what a render runs.
 fn compile_source(protected: &str) -> Result<String, RewriteError> {
-    super::compare::compile_comparisons(&rewrite(protected)?)
+    let compared = super::compare::compile_comparisons(&rewrite(protected)?)?;
+    super::arith::compile_arithmetic(&compared)
 }
 
 /// Renders a template string against `cx`, mirroring
@@ -3204,9 +3212,11 @@ mod tests {
         // core/escaper/i18n extensions. The total also holds the egret-only
         // rows: 186 -> 185 at package #5a Task A2, which removed the egret-only
         // function `kestra_compare_chain` (a chain compiles left-associatively
-        // to the per-operator functions now); the three engine counts below
-        // did not move.
-        assert_eq!(rows, 185, "row count");
+        // to the per-operator functions now); 185 -> 190 at package #5a Task
+        // A3, which added the egret-only `kestra_add`, `kestra_sub`,
+        // `kestra_mul`, `kestra_div` and `kestra_mod` (the arithmetic pass);
+        // the three engine counts below did not move.
+        assert_eq!(rows, 190, "row count");
         assert_eq!(counts.get("filter"), Some(&63), "engine filter count");
         assert_eq!(counts.get("function"), Some(&37), "engine function count");
         assert_eq!(counts.get("test"), Some(&8), "engine test count");
@@ -3793,12 +3803,19 @@ mod tests {
         );
     }
 
-    /// Fuel bounds instructions, not bytes. `'a' * n` is a handful of
-    /// instructions and an arbitrary number of bytes, so without the sink cap
-    /// this allocates ~8 MB from one short expression.
+    /// Fuel bounds instructions, not bytes. Doubling a string twenty times
+    /// is a handful of instructions and 8 MiB, so without the sink cap this
+    /// allocates that much from one short template. (It was `'a' * 8000000`
+    /// until package #5a's Task A3 made `*` Pebble's, which refuses a string
+    /// that is not a number.)
     #[test]
     fn an_oversized_render_is_refused_by_the_output_cap() {
-        let err = render("{{ 'a' * 8000000 }}", json!({})).unwrap_err();
+        let doubling = "{% set s = s ~ s %}".repeat(20);
+        let err = render(
+            &format!("{{% set s = 'aaaaaaaa' %}}{doubling}{{{{ s }}}}"),
+            json!({}),
+        )
+        .unwrap_err();
         assert_eq!(
             err,
             RenderError::OutputTooLarge {
@@ -3806,8 +3823,13 @@ mod tests {
             }
         );
         // And the budget itself is real: just under it still renders.
-        let ok = render("{{ 'a' * 1000 }}", json!({})).unwrap();
-        assert_eq!(ok.len(), 1000);
+        let doubling = "{% set s = s ~ s %}".repeat(10);
+        let ok = render(
+            &format!("{{% set s = 'a' %}}{doubling}{{{{ s }}}}"),
+            json!({}),
+        )
+        .unwrap();
+        assert_eq!(ok.len(), 1024);
     }
 
     /// All three spellings `PebbleVariableRendererTest.raw` asserts, plus the
@@ -4032,7 +4054,10 @@ mod tests {
     /// and born matching, so this is what fails if egret ever starts answering
     /// one of them (`oracle/error-class-pairs.txt`). Today the refusal is
     /// minijinja's own; Task A3's arithmetic seam must keep every one of them
-    /// failing (`OperatorUtils` throws `Could not perform …` for each).
+    /// failing (`OperatorUtils` throws `Could not perform …` for each). Since
+    /// Task A3 every Long/operand row fails with Kestra's own text, which
+    /// `runners::arith`'s `an_operation_kestra_refuses_fails_with_kestras_text`
+    /// asserts and pairs; the BigDecimal row is Task A4's.
     #[test]
     fn arithmetic_kestra_refuses_is_refused_here_too() {
         for (source, ctx) in [

@@ -104,7 +104,8 @@ an entry matches on any failure at all, so it is born matching and cannot fail
 **for the reason it was written** — a refusal that becomes a different refusal
 is invisible. It is not literally unfailable, and an earlier version of this
 sentence ("never enters `baseline.txt`, and can never fail") was wrong about
-that: **twenty-five ids are in this file AND in `baseline.txt`** (thirty-eight
+that: **nineteen ids are in this file AND in `baseline.txt`** (twenty-five
+until package #5a's Task A3 banked six, thirty-eight
 until package #5a's Task A2 banked thirteen, eighteen until
 package #5a's Task A1 added twenty, thirty-one until
 W2a banked fourteen of them and added one back), because such an
@@ -167,8 +168,8 @@ whose deliverable was refusals; Task 8 added 29, which is 17% of the file for
 7% of the corpus, and every one of them is `test:`-paired — the pairing file
 now has **no `unported:` line left in it**, and `UNPORTED_ERROR_CLASS` in
 `tests/oracle.rs` is empty. Note that marking an entry error-class does **not**
-make it pass: 25 of the 302 are *also* in `baseline.txt` (38 before package
-#5a's Task A2), because egret
+make it pass: 19 of the 302 are *also* in `baseline.txt` (25 before package
+#5a's Task A3, 38 before its Task A2), because egret
 *succeeds* where Kestra throws — a real divergence, and it stays visible.
 
 ## `name-surface.txt` — which names each side has at all
@@ -226,7 +227,12 @@ named with the task that banks it (see "What package #5a's Task A1 batches
 measured" below) -- and **208 of 1493** after Task A2 (2026-10-28), which
 BANKED nineteen: W2 Task 3's four `*-mixed` comparisons and A1's fifteen
 comparison and chain entries (spec D1: `<`, `<=`, `>`, `>=` are Kestra's,
-and a chain compiles left-associatively).
+and a chain compiles left-associatively) -- and **173 of 1493** after Task A3
+(2026-10-28), which BANKED A1's thirty-six arithmetic entries (spec D2: `+ -
+* / %` are Pebble's `OperatorUtils`, Long and Double, string and list
+operands) and RECORDED one, `coalesce-lazy-right-division`, which had passed
+only because minijinja's `1 / 0` answered `inf`; it now fails for Task A5's
+reason (an eager `??` right side) and is baselined in A5's group.
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;

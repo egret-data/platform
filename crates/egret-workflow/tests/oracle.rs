@@ -505,6 +505,7 @@ fn declared_test_names() -> BTreeSet<String> {
     // existing. `every_runners_module_is_scanned_for_declared_tests` is what
     // keeps this list and the directory the same.
     const SOURCES: &[&str] = &[
+        include_str!("../src/runners/arith.rs"),
         include_str!("../src/runners/cmp_rewrite.rs"),
         include_str!("../src/runners/compare.rs"),
         include_str!("../src/runners/env.rs"),
@@ -591,9 +592,10 @@ fn every_runners_module_is_scanned_for_declared_tests() {
              `test:` pairing naming one of its tests would be rejected as nonexistent"
         );
     }
-    // 14 since W9c Task 4 fix round 1 added `cmp_rewrite.rs` and `compare.rs`
-    // (12 since W9a Task 4's `files.rs`, 11 since W5b Task 4's `secrets.rs`).
-    assert_eq!(on_disk.len(), 14, "a module was added or removed");
+    // 15 since package #5a Task A3 added `arith.rs` (14 since W9c Task 4 fix
+    // round 1 added `cmp_rewrite.rs` and `compare.rs`, 12 since W9a Task 4's
+    // `files.rs`, 11 since W5b Task 4's `secrets.rs`).
+    assert_eq!(on_disk.len(), 15, "a module was added or removed");
 }
 
 #[test]

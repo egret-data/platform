@@ -848,45 +848,11 @@ loop-index-and-revindex
 # comparisons and `chain-*` -- and all fifteen BANKED with Task A2, which
 # made `<`, `<=`, `>`, `>=` Kestra's and compiles a chain left-associatively.)
 
-# A3 (D2): Long/Double arithmetic and operand kinds. Kestra divides integers,
-# wraps a long, fails `/ 0`, and treats strings and lists as OperatorUtils does;
-# minijinja divides as floats, widens to i128 and refuses or repeats strings.
-arith-long-div-truncates
-arith-long-div-negative-dividend
-arith-long-div-negative-divisor
-arith-long-div-context
-arith-long-mod-negative-dividend
-arith-long-precedence
-arith-long-add-wraps-at-max
-arith-long-sub-wraps-at-min
-arith-long-mul-wraps-to-zero
-arith-long-mul-wraps-negative
-arith-long-min-div-minus-one
-arith-long-context-max-plus-one
-arith-zero-long-div
-arith-zero-long-div-context
-arith-ion-integer-div-is-long
-arith-operand-boolean
-arith-operand-boolean-mul
-arith-operand-numeric-string-mul
-arith-operand-numeric-string-div
-arith-operand-decimal-string-mul
-arith-operand-exponent-string-mul
-arith-operand-bad-string-mul
-arith-operand-string-sub
-arith-operand-long-plus-string
-arith-operand-string-plus-long
-arith-operand-long-plus-numeric-string
-arith-operand-double-plus-string
-arith-operand-string-plus-null
-arith-operand-string-plus-list
-arith-operand-list-plus-long
-arith-operand-list-minus-long
-arith-operand-list-minus-repeated
-arith-operand-list-minus-list
-arith-operand-list-mul
-arith-operand-biginteger-add
-arith-operand-biginteger-mul
+# (A3 (D2)'s thirty-six were here -- `arith-long-*` integer division, `%`,
+# wrapping and precedence, `arith-zero-long-*` `/ 0`, the ion integer, and the
+# `arith-operand-*` string, list, boolean and BigInteger operands -- and all
+# thirty-six BANKED with Task A3 (2026-10-28), which compiles every binary
+# `+ - * / %` into `runners::arith`'s port of Pebble's `OperatorUtils`.)
 
 # A4 (D3): BigDecimal. Kestra keeps the scale and divides at DECIMAL128;
 # egret computes a `fromIon` decimal as a Double and refuses a BigNumber.
@@ -909,6 +875,13 @@ coalesce-chain-subscript-literal
 coalesce-chain-undefined-member
 coalesce-lazy-right-missing
 coalesce-lazy-undefined-right-missing
+# Re-attributed by Task A3 (2026-10-28), measured: `{{ x ?? (1 / 0) }}` passed
+# only because minijinja's `1 / 0` was a float division that answered
+# `inf` without raising, so the eager `kestra_null_coalesce` never saw an
+# error. Task A3 made `/` Pebble's (`1 / 0` fails, as in Kestra), and the
+# entry now fails for the reason this group names: the right side of `??` is
+# evaluated eagerly here and lazily in Kestra. A5's lazy right side banks it.
+coalesce-lazy-right-division
 coalesce-chain-in-if
 coalesce-chain-in-filter
 

@@ -497,21 +497,25 @@ filter-capitalize-of-a-defaulted-empty-array        test:the_collection_kind_gat
 # --- Package #5a, Task A1 (2026-10-28). Kestra throws on each. Those egret
 # still answers are baselined; those egret already refuses are held by a
 # unit test in runners::env that asserts the failure.
-arith-zero-long-div                                 baselined
-arith-zero-long-div-context                         baselined
-arith-zero-long-mod                                 test:arithmetic_kestra_refuses_is_refused_here_too
+# Task A3 (2026-10-28) made `+ - * / %` Pebble's (`runners::arith`): the
+# twelve Long/operand entries below now fail with Kestra's own text and are
+# re-paired with the test that asserts it; the three BigDecimal ones are
+# Task A4's.
+arith-zero-long-div                                 test:an_operation_kestra_refuses_fails_with_kestras_text
+arith-zero-long-div-context                         test:an_operation_kestra_refuses_fails_with_kestras_text
+arith-zero-long-mod                                 test:an_operation_kestra_refuses_fails_with_kestras_text
 arith-zero-bigdecimal-div                           baselined
 arith-zero-bigdecimal-mod                           baselined
 arith-zero-bigdecimal-number-div                    test:arithmetic_kestra_refuses_is_refused_here_too
-arith-operand-null-left                             test:arithmetic_kestra_refuses_is_refused_here_too
-arith-operand-null-right                            test:arithmetic_kestra_refuses_is_refused_here_too
-arith-operand-boolean                               baselined
-arith-operand-boolean-mul                           baselined
-arith-operand-bad-string-mul                        baselined
-arith-operand-long-plus-list                        test:arithmetic_kestra_refuses_is_refused_here_too
-arith-operand-list-mul                              baselined
-arith-operand-map-plus-long                         test:arithmetic_kestra_refuses_is_refused_here_too
-arith-operand-map-plus-map                          test:arithmetic_kestra_refuses_is_refused_here_too
+arith-operand-null-left                             test:an_operation_kestra_refuses_fails_with_kestras_text
+arith-operand-null-right                            test:an_operation_kestra_refuses_fails_with_kestras_text
+arith-operand-boolean                               test:an_operation_kestra_refuses_fails_with_kestras_text
+arith-operand-boolean-mul                           test:an_operation_kestra_refuses_fails_with_kestras_text
+arith-operand-bad-string-mul                        test:an_operation_kestra_refuses_fails_with_kestras_text
+arith-operand-long-plus-list                        test:an_operation_kestra_refuses_fails_with_kestras_text
+arith-operand-list-mul                              test:an_operation_kestra_refuses_fails_with_kestras_text
+arith-operand-map-plus-long                         test:an_operation_kestra_refuses_fails_with_kestras_text
+arith-operand-map-plus-map                          test:an_operation_kestra_refuses_fails_with_kestras_text
 cmp-long-lt-string                                  test:a_comparison_kestra_refuses_fails_with_kestras_text
 cmp-long-gt-numeric-string-context                  test:a_comparison_kestra_refuses_fails_with_kestras_text
 cmp-boolean-lt-long                                 test:a_comparison_kestra_refuses_fails_with_kestras_text

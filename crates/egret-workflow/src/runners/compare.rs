@@ -293,7 +293,7 @@ pub(super) fn values_cmp(a: &MjValue, b: &MjValue) -> Ordering {
 /// public API that applies exactly that check, `StringInput::new`. Its error
 /// is `Error::from(ErrorKind::UndefinedError)`, the very value the VM raises,
 /// and the VM attaches the same location to it either way.
-fn assert_defined(state: &State, value: &MjValue) -> Result<(), MjError> {
+pub(super) fn assert_defined(state: &State, value: &MjValue) -> Result<(), MjError> {
     if !value.is_undefined() {
         return Ok(());
     }

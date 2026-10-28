@@ -6316,7 +6316,7 @@ found.
 
 | baselined entries declaring it | construct | owner |
 |---|---|---|
-| 18 | `Loop` — a sub-execution egret **runs and gets wrong** | see below |
+| 18 | `Loop` — a sub-execution egret **runs and gets wrong** | see below. **12 at package #5a Task A3 (2026-10-28, measured by the derivation; it read 14 before)**: `restart-loop` and `restart-parent-loop` banked |
 | 16 | `finally:` | **unclaimed** |
 | 1 | `ExecutionUpdatableTask` (`Exit` left at kill-and-exit Task 3, 16 → 12; `Labels`, `SetVariables`, `UnsetVariables` at group C2 Task 5, 12 → 1) | group C2 Task 5 banked eleven; the one left, `valids/task-runif-taskswithstate`, is held by its flow-level `finally:` and not by its `SetVariables` |
 | 5 | `AllowFailure` / `allowFailure:` → `WARNING` | **W8 Task 5 banked seven of its twelve**; the five that remain are held by the FLOWABLE and not by the flag — see the paragraph below |
@@ -10361,7 +10361,7 @@ sub-executions, or a run Kestra ended `KILLED`/`FAILED` that egret ended
 
 | owner | entries | what egret does that Kestra did not |
 |---|---|---|
-| **W2** (the renderer answers where Java throws) | `all-flowable`, `disable-flowable`, `restart-child`, `restart-loop` | `{{ taskrun.value }}` is undefined in a `Loop` body and a `Switch` case in this artifact and Kestra FAILED both; `{{ 1 / taskrun.attemptsCount }}` renders `Infinity` where Java throws. So the run succeeds and everything after it runs — `all-flowable` 12 runs and 3 sub-executions against Kestra's 3 and 1 |
+| **W2** (the renderer answers where Java throws) | `all-flowable`, `disable-flowable`, `restart-child`, `restart-loop` | `{{ taskrun.value }}` is undefined in a `Loop` body and a `Switch` case in this artifact and Kestra FAILED both; `{{ 1 / taskrun.attemptsCount }}` renders `Infinity` where Java throws. So the run succeeds and everything after it runs — `all-flowable` 12 runs and 3 sub-executions against Kestra's 3 and 1 **(Package #5a Task A3, 2026-10-28: `restart-child` and `restart-loop` left the register and the baseline, with `restart-parent` and `restart-parent-loop`: integer `/` is Java's now and `1 / 0` fails with Kestra's text, spec D2.)** |
 | **W4** (the kill path) | `parallel-fail-with-flowable` | a `Sleep` still in flight when its sibling failed the `Parallel`. W4 Task 3 wired `TaskHandler::cancel` to the budget's expiry — the artifact's only `kill(null)` site — and this entry is not that: `advance()` abandoned the run, and `advance()` has no worker to tell. The row stands and the owner is still W4 |
 | **W8** (`sla:`) | ~~`flow-concurrency-sla-assert-cancel`~~, `flow-concurrency-sla-fail-child`, ~~`sla-execution-condition`~~, `sla-max-duration-fail`, `sla-subflow` | **Five until W8 Task 6, three now.** The two struck out are the `EXECUTION_ASSERTION`s: egret cancels the execution before any run exists, so it no longer runs anything Kestra did not, and both bank. The three left are `MAX_DURATION`s, where Kestra KILLED the `Sleep` and egret completes it — and that is an over-acceptance of the **harness** rather than of egret, because `driver.rs` caps the `Sleep` to `ZERO` and no window exists to kill it in. They stay registered rather than excused |
 | **unclaimed** (a `Loop`'s own `outputs:`) | `loop-outputs-failed-render` | Kestra FAILED the loop at iteration 1 when its `outputs:` could not render; `advance()` has no loop `outputs:`, so egret runs all three |

@@ -187,6 +187,8 @@
 #   0 on the first attempt. Java throws `ArithmeticException: / by zero` and the
 #   run FAILED; minijinja divides as floats and renders `Infinity`, so egret
 #   SUCCEEDS and runs one more task. Also W2, also hidden by the feed.
+#   (BANKED with package #5a's Task A3, 2026-10-28, spec D2: integer `/` is
+#   Java's now and `/ 0` fails with Kestra's text.)
 #   `parallel-fail-with-flowable` -- Kestra FAILED a `Sleep` that was still in
 #   flight when its sibling failed the `Parallel`. W4 Task 3 wired
 #   `TaskHandler::cancel`, and deliberately not to this seam: the kill path
@@ -299,7 +301,8 @@
 # accumulates a sub-execution's retries INSIDE the parent's attempt);
 # `subflow-secret-output-parent` on the unevaluated flow-level `outputs:`;
 # `task-runif` on `OutputValues` having no handler; `restart-parent` and
-# `restart-parent-loop` on W2's `Infinity` render inside `restart-child`;
+# `restart-parent-loop` on W2's `Infinity` render inside `restart-child`
+# (both banked with `restart-child` at package #5a Task A3, 2026-10-28);
 # `sla-parent-flow` and `flow-concurrency-sla-fail-parent` on `sla:` inside
 # their children; and the two `task-allow-*-executable-flow` on `WARNING`,
 # which `RunState` could not hold WHEN THIS WAS WRITTEN -- W8 Task 5 added the
@@ -599,10 +602,7 @@ valids/pause_on_pause
 # Permanent, not a gap (group C spec §2.3, the user's ruling 2026-10-18): a flow
 # purges logs only of its own namespace and its children; Kestra OSS checks nothing.
 valids/purge_logs_full_arguments
-valids/restart-child
-valids/restart-loop
-valids/restart-parent
-valids/restart-parent-loop
+# `valids/restart-child`, `restart-loop`, `restart-parent` and `restart-parent-loop` banked 2026-10-28 (package #5a Task A3, spec D2): `{{ 1 / taskrun.attemptsCount }}` with `attemptsCount` 0 now fails as Java's `ldiv` does (`Could not perform division`), so the child's first attempt FAILS and is restarted as in Kestra, and the three entries that reach the same child through a `Loop` or a `Subflow` bank with it.
 valids/retry-failed-flow-duration
 # Egret retries without scheduler latency; Kestra adds about 0.6 s per retry, so its
 # fourth attempt falls outside maxDuration and egret's does not. Same class as

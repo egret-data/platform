@@ -42,6 +42,7 @@
 //!   `render_str_with` that resolves it for `kestra.*` plugin tasks only. The
 //!   shared environment keeps refusing it (see `secrets`' module doc).
 
+mod arith;
 mod cmp_rewrite;
 mod compare;
 pub mod env;

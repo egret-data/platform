@@ -4992,9 +4992,12 @@ mod tests {
         }
 
         /// Fix round 3, re-review P4 (W9c spec §15): arithmetic on an exact
-        /// decimal, or on an int past `i128`, fails the render naming the
-        /// operator (minijinja's `InvalidOperation`), and nothing is
-        /// rounded; an int within `i128` and a float compute.
+        /// decimal fails the render naming the operator, and nothing is
+        /// rounded; an int and a float compute. Package #5a, Task A3: an int
+        /// past `i128` is a `java.math.BigInteger`, which Pebble computes
+        /// through `longValue()` (its low 64 bits), so `kv('big') * 2` now
+        /// answers as Kestra does (A1 measured the same branch,
+        /// `arith-operand-biginteger-*`). The decimal is Task A4's.
         #[test]
         fn arithmetic_on_an_exact_decimal_or_big_int_is_a_named_refusal() {
             let cx = FakeKv::default()
@@ -5003,11 +5006,7 @@ mod tests {
                 .with("i", int("41"))
                 .with("f", KvData::Number(KvNumber::Float(1.5)))
                 .cx();
-            for (call, op) in [
-                ("{{ kv('d') + 1 }}", "+"),
-                ("{{ kv('big') * 2 }}", "*"),
-                ("{{ 1 - kv('d') }}", "-"),
-            ] {
+            for (call, op) in [("{{ kv('d') + 1 }}", "+"), ("{{ 1 - kv('d') }}", "-")] {
                 let e = render(call, &cx).expect_err(call);
                 assert!(
                     e.contains(&format!("tried to use {op} operator"))
@@ -5015,6 +5014,11 @@ mod tests {
                     "{call}: {e}"
                 );
             }
+            // (10^40 - 1) mod 2^64 is -5047021154770878465; doubled, wrapped.
+            assert_eq!(
+                render("{{ kv('big') * 2 }}", &cx).unwrap(),
+                "8352701764167794686"
+            );
             assert_eq!(render("{{ kv('i') + 1 }}", &cx).unwrap(), "42");
             assert_eq!(render("{{ kv('f') + 1 }}", &cx).unwrap(), "2.5");
         }
