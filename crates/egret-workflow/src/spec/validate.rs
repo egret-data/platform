@@ -75,8 +75,8 @@ use regex::Regex;
 use serde::Serialize;
 
 use crate::models::{
-    canonical_flow_type, Flow, Input, InputType, Retry, Sla, SlaCommon, Task, TaskKind, Trigger,
-    TriggerKind,
+    canonical_flow_type, Flow, Input, InputType, Property, Retry, Sla, SlaCommon, Task, TaskKind,
+    Trigger, TriggerKind,
 };
 use crate::spec::registry;
 use crate::trigger::depends_on::{depends_on_refusals, RefusalAt};
@@ -394,6 +394,7 @@ fn save_only_findings(flow: &Flow, report: &mut ValidationReport) {
     duplicate_trigger_ids(flow, report);
     secret_findings(flow, report);
     schedule_findings(flow, report);
+    input_save_findings(&flow.inputs, report);
 }
 
 /// The warning for a Schedule `when` or `lateMaximumDelay`: Kestra accepts and
@@ -1211,6 +1212,202 @@ fn validate_inputs(inputs: &[Input], report: &mut ValidationReport) {
             });
         }
     }
+}
+
+/// Inputs package #3a (spec D11): the input checks Kestra makes when a flow
+/// is SAVED and egret did not. Save-only ([`save_only_findings`]), never the
+/// run gate: a version published before these existed keeps running, and at
+/// run time Kestra ignores an unknown `dependsOn` id too (D6). The text after
+/// `input '<id>': ` is Kestra's own message, character for character; the
+/// two `dependsOn` messages name the input themselves, as Kestra's do.
+///
+/// - `input_depends_on_unknown`, `input_depends_on_cycle`:
+///   `FlowValidator.checkFlowInputsDependencyGraph` (FlowValidator.java:241-270).
+///   The graph is keyed by input id; a repeated id merges its `dependsOn`
+///   lists, as Java's `putIfAbsent` + `addAll` does. Inputs are visited in
+///   declared order (Java's is `HashMap` order). For each input, its unknown
+///   dependencies in listed order, then the cycle `CycleDependency.findCycle`
+///   finds from it, printed as Java's `List.toString` (`[a, b]`). Every input
+///   on a cycle reports it from its own start, as in Kestra; one that only
+///   leads INTO a cycle reports the cycle too. FORM children are not
+///   expanded (W1 does not model FORM).
+/// - `input_defaults_with_prefill`: `InputValidator.java:53-59`, every type.
+/// - `input_file_defaults_invalid`: `FileInputValidator.java:33-50`.
+/// - `input_validator_invalid`: `RegexValidator.java:26-32` on STRING and
+///   SECRET, compiled with `fancy-regex` (D10) rather than `java.util.regex`.
+///   Not anchored: Kestra compiles the pattern as written.
+///
+/// Not added (D11): "a default needs `required: true`".
+fn input_save_findings(inputs: &[Input], report: &mut ValidationReport) {
+    input_dependency_findings(inputs, report);
+    for input in inputs {
+        if input.defaults.is_some() && input.prefill.is_some() {
+            report.errors.push(Finding {
+                code: "input_defaults_with_prefill",
+                message: format!(
+                    "input '{}': Inputs with a default value cannot also have a prefill.",
+                    input.id
+                ),
+                path: format!("inputs.{}.prefill", input.id),
+            });
+        }
+        if input.r#type == InputType::File {
+            if let Some(why) = input.defaults.as_ref().and_then(file_defaults_refusal) {
+                report.errors.push(Finding {
+                    code: "input_file_defaults_invalid",
+                    message: format!("input '{}': {why}", input.id),
+                    path: format!("inputs.{}.defaults", input.id),
+                });
+            }
+        }
+        if matches!(input.r#type, InputType::String | InputType::Secret) {
+            if let Some(v) = input.validator.as_deref() {
+                if fancy_regex::Regex::new(v).is_err() {
+                    report.errors.push(Finding {
+                        code: "input_validator_invalid",
+                        message: format!("input '{}': invalid pattern [{v}]", input.id),
+                        path: format!("inputs.{}.validator", input.id),
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// The two `dependsOn` checks of [`input_save_findings`].
+fn input_dependency_findings(inputs: &[Input], report: &mut ValidationReport) {
+    let mut order: Vec<&str> = Vec::new();
+    let mut graph: HashMap<&str, Vec<&str>> = HashMap::new();
+    for input in inputs {
+        let deps = graph.entry(input.id.as_str()).or_insert_with(|| {
+            order.push(input.id.as_str());
+            Vec::new()
+        });
+        if let Some(d) = &input.depends_on {
+            deps.extend(d.inputs.iter().map(String::as_str));
+        }
+    }
+    for &id in &order {
+        for &dep in &graph[id] {
+            if !graph.contains_key(dep) {
+                report.errors.push(Finding {
+                    code: "input_depends_on_unknown",
+                    message: format!(
+                        "Input with id '{id}' depends on a non-existent input '{dep}'."
+                    ),
+                    path: format!("inputs.{id}.dependsOn.inputs"),
+                });
+            }
+        }
+        let mut visiting = HashSet::new();
+        let mut visited = HashSet::new();
+        let mut path = Vec::new();
+        if let Some(cycle) = find_input_cycle(id, &graph, &mut visiting, &mut visited, &mut path) {
+            report.errors.push(Finding {
+                code: "input_depends_on_cycle",
+                message: format!(
+                    "Cycle dependency detected for input with id '{id}': [{}]",
+                    cycle.join(", ")
+                ),
+                path: format!("inputs.{id}.dependsOn"),
+            });
+        }
+    }
+}
+
+/// kestra: `FlowValidator.CycleDependency.findCycle`, line for line: the
+/// part of the current path from the first visit of the node met again.
+fn find_input_cycle<'a>(
+    id: &'a str,
+    graph: &HashMap<&'a str, Vec<&'a str>>,
+    visiting: &mut HashSet<&'a str>,
+    visited: &mut HashSet<&'a str>,
+    path: &mut Vec<&'a str>,
+) -> Option<Vec<&'a str>> {
+    if visiting.contains(id) {
+        let start = path.iter().position(|p| *p == id).unwrap_or(0);
+        return Some(path[start..].to_vec());
+    }
+    if visited.contains(id) {
+        return None;
+    }
+    visiting.insert(id);
+    path.push(id);
+    if let Some(deps) = graph.get(id) {
+        for &dep in deps {
+            if let Some(cycle) = find_input_cycle(dep, graph, visiting, visited, path) {
+                return Some(cycle);
+            }
+        }
+    }
+    visiting.remove(id);
+    visited.insert(id);
+    path.pop();
+    None
+}
+
+/// Why a FILE input's `defaults` is refused, in Kestra's words, or `None`.
+///
+/// Kestra renders the property with an empty context and converts it to a
+/// `java.net.URI`: a render or conversion failure is the "rendered
+/// immediately" message, and a URI whose scheme is not `file` or `nsfile`
+/// (no scheme included: `something` is refused) is the other one. The render
+/// here is egret's with an empty context; the URI is checked by
+/// [`java_uri_scheme`].
+fn file_defaults_refusal(defaults: &Property<serde_json::Value>) -> Option<&'static str> {
+    const NOT_IMMEDIATE: &str = "inputs of type 'FILE' only support `defaults` with expression \
+                                 that can be rendered immediately";
+    const BAD_SCHEME: &str = "inputs of type 'FILE' only support `defaults` as local files \
+                              using a file URI or as namespace files using a nsfile URI";
+    let Ok(rendered) = crate::runners::env::render_str(
+        defaults.source(),
+        &crate::runners::env::RenderContext::new(),
+    ) else {
+        return Some(NOT_IMMEDIATE);
+    };
+    match java_uri_scheme(&rendered) {
+        Err(()) => Some(NOT_IMMEDIATE),
+        Ok(Some(scheme)) if scheme == "file" || scheme == "nsfile" => None,
+        Ok(_) => Some(BAD_SCHEME),
+    }
+}
+
+/// The scheme `java.net.URI.create(text)` would give: `Err` when Java throws
+/// (a character RFC 2396 forbids, a `%` not followed by two hex digits, or an
+/// empty scheme-specific part after the scheme), `Ok(None)` for a relative
+/// reference. An approximation of Java's parser: the characters it refuses
+/// and the scheme rule (`ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )` before
+/// the first `:`, which must come before any `/`, `?` or `#`).
+fn java_uri_scheme(text: &str) -> Result<Option<&str>, ()> {
+    let bytes = text.as_bytes();
+    for (i, c) in text.char_indices() {
+        let forbidden = c.is_ascii_control()
+            || matches!(
+                c,
+                ' ' | '"' | '<' | '>' | '\\' | '^' | '`' | '{' | '|' | '}'
+            );
+        let bad_escape = c == '%'
+            && !(bytes.get(i + 1).is_some_and(u8::is_ascii_hexdigit)
+                && bytes.get(i + 2).is_some_and(u8::is_ascii_hexdigit));
+        if forbidden || bad_escape {
+            return Err(());
+        }
+    }
+    let Some(colon) = text.find(':') else {
+        return Ok(None);
+    };
+    let head = &text[..colon];
+    if head.contains(['/', '?', '#']) {
+        return Ok(None);
+    }
+    let mut chars = head.chars();
+    let scheme_like = chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    if !scheme_like || colon + 1 == text.len() {
+        // `:x` / `1a:b` and `file:` all throw in Java.
+        return Err(());
+    }
+    Ok(Some(head))
 }
 
 /// A `Schedule` trigger must be able to supply every input that has no
@@ -3744,6 +3941,186 @@ mod tests {
             r.errors.iter().any(|e| e.code == "duplicate_input_id"),
             "{r:?}"
         );
+    }
+
+    /// Inputs package #3a: a flow with `inputs_yaml` under `inputs:`.
+    fn with_inputs(inputs_yaml: &str) -> crate::models::Flow {
+        parse(&format!(
+            "id: f\nnamespace: a.b\ninputs:\n{inputs_yaml}tasks:\n  - id: t\n    type: core.log\n"
+        ))
+        .unwrap_or_else(|e| panic!("{inputs_yaml}: {e:?}"))
+    }
+
+    /// (code, message, path) of every error with `code`, in report order.
+    fn errors_of(f: &crate::models::Flow, code: &str) -> Vec<(String, String)> {
+        validate(f)
+            .errors
+            .into_iter()
+            .filter(|e| e.code == code)
+            .map(|e| (e.message, e.path))
+            .collect()
+    }
+
+    /// kestra: FlowValidator.java:241-270. A `dependsOn` id no input has is
+    /// refused at save, in Kestra's words, for each unknown id in order; and
+    /// only at save -- the run gate (D6: ignored at run time) stays silent.
+    #[test]
+    fn depends_on_an_unknown_input_is_refused_at_save_only() {
+        let f = with_inputs(
+            "  - id: a\n    type: STRING\n  - id: b\n    type: STRING\n    dependsOn:\n      \
+             inputs: [a, x, y]\n",
+        );
+        assert_eq!(
+            errors_of(&f, "input_depends_on_unknown"),
+            [
+                (
+                    "Input with id 'b' depends on a non-existent input 'x'.".to_string(),
+                    "inputs.b.dependsOn.inputs".to_string()
+                ),
+                (
+                    "Input with id 'b' depends on a non-existent input 'y'.".to_string(),
+                    "inputs.b.dependsOn.inputs".to_string()
+                ),
+            ]
+        );
+        assert!(validate_for_run(&f).errors.is_empty(), "run gate");
+        let ok = with_inputs(
+            "  - id: a\n    type: STRING\n  - id: b\n    type: STRING\n    dependsOn:\n      \
+             inputs: [a]\n",
+        );
+        assert!(validate(&ok).errors.is_empty(), "{:?}", validate(&ok));
+    }
+
+    /// kestra: `CycleDependency.findCycle`. Each input on the cycle reports it
+    /// from its own start, as Java's `List.toString`; a self-dependency is a
+    /// cycle of one; an input that only leads into a cycle reports it too.
+    #[test]
+    fn a_depends_on_cycle_is_refused_with_kestras_path() {
+        let f = with_inputs(
+            "  - id: a\n    type: STRING\n    dependsOn:\n      inputs: [b]\n\
+             \x20 - id: b\n    type: STRING\n    dependsOn:\n      inputs: [c]\n\
+             \x20 - id: c\n    type: STRING\n    dependsOn:\n      inputs: [b]\n\
+             \x20 - id: s\n    type: STRING\n    dependsOn:\n      inputs: [s]\n",
+        );
+        let got: Vec<String> = errors_of(&f, "input_depends_on_cycle")
+            .into_iter()
+            .map(|(m, _)| m)
+            .collect();
+        assert_eq!(
+            got,
+            [
+                "Cycle dependency detected for input with id 'a': [b, c]",
+                "Cycle dependency detected for input with id 'b': [b, c]",
+                "Cycle dependency detected for input with id 'c': [c, b]",
+                "Cycle dependency detected for input with id 's': [s]",
+            ]
+        );
+        assert_eq!(
+            errors_of(&f, "input_depends_on_cycle")[0].1,
+            "inputs.a.dependsOn"
+        );
+        assert!(validate_for_run(&f).errors.is_empty(), "run gate");
+        // A diamond is not a cycle.
+        let ok = with_inputs(
+            "  - id: a\n    type: STRING\n\
+             \x20 - id: b\n    type: STRING\n    dependsOn:\n      inputs: [a]\n\
+             \x20 - id: c\n    type: STRING\n    dependsOn:\n      inputs: [a]\n\
+             \x20 - id: d\n    type: STRING\n    dependsOn:\n      inputs: [b, c]\n",
+        );
+        assert!(errors_of(&ok, "input_depends_on_cycle").is_empty());
+    }
+
+    /// kestra: InputValidator.java:53-59, on any input type.
+    #[test]
+    fn defaults_with_prefill_is_refused() {
+        let f = with_inputs(
+            "  - id: n\n    type: INT\n    defaults: 1\n    prefill: 2\n\
+             \x20 - id: d\n    type: STRING\n    defaults: x\n\
+             \x20 - id: p\n    type: STRING\n    required: false\n    prefill: y\n",
+        );
+        assert_eq!(
+            errors_of(&f, "input_defaults_with_prefill"),
+            [(
+                "input 'n': Inputs with a default value cannot also have a prefill.".to_string(),
+                "inputs.n.prefill".to_string()
+            )]
+        );
+        assert!(validate_for_run(&f).errors.is_empty(), "run gate");
+    }
+
+    /// kestra: FileInputValidator.java:33-50. `file` and `nsfile` pass; any
+    /// other scheme, and no scheme at all (`invalids/inputs-validation`'s
+    /// `something`), is the scheme message; a value Java's URI parser throws
+    /// on, or a default that does not render, is the other one.
+    #[test]
+    fn a_file_default_must_be_a_file_or_nsfile_uri() {
+        const SCHEME: &str = "only support `defaults` as local files using a file URI or as \
+                              namespace files using a nsfile URI";
+        const RENDER: &str = "only support `defaults` with expression that can be rendered \
+                              immediately";
+        for (default, want) in [
+            ("file:///tmp/a.csv", None),
+            ("nsfile:///data/a.csv", None),
+            ("'{{ \"nsfile:///a\" }}'", None),
+            ("something", Some(SCHEME)),
+            ("https://example.com/a.csv", Some(SCHEME)),
+            ("s3://bucket/a", Some(SCHEME)),
+            ("'file:///a b'", Some(RENDER)),
+            ("'{{ inputs.nope }}'", Some(RENDER)),
+        ] {
+            let f = with_inputs(&format!(
+                "  - id: up\n    type: FILE\n    defaults: {default}\n"
+            ));
+            let got = errors_of(&f, "input_file_defaults_invalid");
+            match want {
+                None => assert!(got.is_empty(), "{default}: {got:?}"),
+                Some(w) => {
+                    assert_eq!(got.len(), 1, "{default}: {got:?}");
+                    assert_eq!(
+                        got[0].0,
+                        format!("input 'up': inputs of type 'FILE' {w}"),
+                        "{default}"
+                    );
+                    assert_eq!(got[0].1, "inputs.up.defaults");
+                }
+            }
+        }
+        // Only FILE: the same default on a STRING input is silent.
+        let f = with_inputs("  - id: s\n    type: STRING\n    defaults: something\n");
+        assert!(errors_of(&f, "input_file_defaults_invalid").is_empty());
+    }
+
+    /// kestra: RegexValidator.java:26-32 on STRING and SECRET.
+    /// `invalids/inputs-bad-validator-syntax`'s lone `\` is refused, with
+    /// Kestra's text; Java-valid lookaround and backreferences compile under
+    /// fancy-regex (D10); another type's `validator` is not read.
+    #[test]
+    fn a_validator_that_does_not_compile_is_refused() {
+        for (ty, v, bad) in [
+            ("STRING", r"'\'", true),
+            ("SECRET", "'[a-'", true),
+            ("STRING", "'(unclosed'", true),
+            ("STRING", "'^[a-z]+$'", false),
+            ("STRING", r"'(?=.*\d)\w+'", false),
+            ("SECRET", r"'(a)\1'", false),
+            ("INT", r"'\'", false),
+        ] {
+            let f = with_inputs(&format!("  - id: v\n    type: {ty}\n    validator: {v}\n"));
+            let got = errors_of(&f, "input_validator_invalid");
+            if bad {
+                let raw: String = serde_norway::from_str(v).unwrap();
+                assert_eq!(
+                    got,
+                    [(
+                        format!("input 'v': invalid pattern [{raw}]"),
+                        "inputs.v.validator".to_string()
+                    )],
+                    "{ty} {v}"
+                );
+            } else {
+                assert!(got.is_empty(), "{ty} {v}: {got:?}");
+            }
+        }
     }
 
     /// Companion: distinct input ids must not be flagged.

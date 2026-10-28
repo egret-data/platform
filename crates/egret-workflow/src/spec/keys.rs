@@ -2131,7 +2131,7 @@ mod tests {
 
     #[test]
     fn the_keys_egret_reads_on_an_input_are_silent_on_their_own_type() {
-        let r = report("id: f\nnamespace: a.b\ninputs:\n  - id: a\n    type: ARRAY\n    itemType: INT\n  - id: m\n    type: MULTISELECT\n    itemType: STRING\n    values: [x]\n  - id: f1\n    type: FILE\n    allowedFileExtensions: [.csv]\n  - id: b\n    type: BOOL\n    defaults: true\n    required: false\n    displayName: B\n    description: d\n    prefill: true\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n");
+        let r = report("id: f\nnamespace: a.b\ninputs:\n  - id: a\n    type: ARRAY\n    itemType: INT\n  - id: m\n    type: MULTISELECT\n    itemType: STRING\n    values: [x]\n  - id: f1\n    type: FILE\n    allowedFileExtensions: [.csv]\n  - id: b\n    type: BOOL\n    defaults: true\n    required: false\n    displayName: B\n    description: d\n  - id: p\n    type: BOOL\n    required: false\n    prefill: true\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n");
         let w: Vec<_> = r.warnings.iter().map(|w| w.path.as_str()).collect();
         assert!(w.is_empty(), "{r:?}");
         assert!(r.errors.is_empty(), "{r:?}");
