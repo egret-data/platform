@@ -136,9 +136,9 @@ async fn masked_columns(pool: &sqlx::PgPool, service_id: i64) -> Vec<String> {
          WHERE service_id = $1 AND name LIKE 'perm-rule-%'",
     )
     .bind(service_id)
-            .fetch_all(pool)
-            .await
-            .expect("policy bodies");
+    .fetch_all(pool)
+    .await
+    .expect("policy bodies");
     let mut cols: Vec<String> = bodies
         .into_iter()
         .map(|(b,)| {
