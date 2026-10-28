@@ -288,6 +288,33 @@ describe("Needs attention", () => {
     }
   });
 
+  // Grants follow a rename (spec 2026-10-27 §5.8, D16, D17).
+  it("names the stale permission checks for a reader who may not run them", async () => {
+    serve(
+      ok(
+        response({
+          notChecked: [
+            { kind: "permissions_on_missing_tables", requires: ["policy:read"], any: false },
+            { kind: "permissions_on_missing_columns", requires: ["policy:read"], any: false },
+            { kind: "renamed_names_lost_grants", requires: ["policy:read"], any: false },
+            { kind: "catalog_grants_on_missing_tables", requires: ["catalog_registry:read"], any: false },
+            { kind: "renamed_names_lost_catalog_grants", requires: ["catalog_registry:read"], any: false },
+          ],
+        }),
+      ),
+    );
+    openOverview({ user_id: "t", email: "t@x", platform_roles: [], permissions: ["tag:read"] });
+    for (const [what, perm] of [
+      ["permissions on tables that do not exist", "policy:read"],
+      ["permissions on columns that do not exist", "policy:read"],
+      ["table names a rename left without their allow grants", "policy:read"],
+      ["catalog grants on tables that do not exist", "catalog_registry:read"],
+      ["table names a rename left without their catalog grants", "catalog_registry:read"],
+    ]) {
+      expect(await screen.findByText(`Not checked for you: ${what} (needs \`${perm}\`).`)).toBeInTheDocument();
+    }
+  });
+
   it("names the reused-username check for a reader who is not a platform admin", async () => {
     serve(ok(response({ notChecked: [{ kind: "username_reuse", requires: ["platform_admin"], any: false }] })));
     openOverview({ user_id: "p", email: "p@x", platform_roles: [], permissions: ["policy:read"] });
