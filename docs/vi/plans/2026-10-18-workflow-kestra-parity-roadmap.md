@@ -33,7 +33,7 @@
 Trong 84 trường hợp lệch đo ngày 2026-10-18, C2 chiếm 12. 72 trường hợp còn lại theo nguyên nhân: `finally:` 11, `afterExecution:` 9, renderer lệch 8, `sla: MAX_DURATION` 5, `outputs:` riêng của `Loop` 5, độ trễ timing/poller 4, các cặp thứ tự mà driver không có đồng hồ không thể đạt tới 4, flow invalid bị chấp nhận thừa 4, các lệch `Loop` chưa quy được nguyên nhân 4, `Pause` 3, flow `outputs:`/SECRET 3, `WorkingDirectory`+`runIf` 3, retry của Subflow 2, thiếu hàm Pebble 2, nguyên nhân đơn lẻ 4, cố ý 1.
 
 **Bề mặt tính năng** (Kestra 2.0 OSS, ngoài corpus; bằng chứng ở Phụ lục B):
-- **Core task:** 49. C2 đã xong, nên 41 được hỗ trợ, trong đó 11 chỉ hỗ trợ một phần. 8 còn thiếu: `http.Request`, `http.Download`, `http.SseRequest`, `PurgeExecutions`, `PurgeFlows`, `PurgeStorage`, `metric.Publish`, `TemplatedTask`.
+- **Core task:** 49. C2 đã xong, nên 41 được hỗ trợ, trong đó 11 chỉ hỗ trợ một phần. 8 còn thiếu: `http.Request`, `http.Download`, `http.SseRequest`, `PurgeExecutions`, `PurgeFlows`, `PurgeStorage`, `metric.Publish`, `TemplatedTask`. *(2026-10-28, #4 đã xây: ba task http được phục vụ, nên 44 được hỗ trợ và 5 còn thiếu.)*
 - **Bỏ qua im lặng, nhóm tệ nhất:**
   - `finally:` và `afterExecution:` ở cấp flow được parse nhưng không bao giờ được lập kế hoạch;
   - `finally:` bị bỏ trên mọi flowable trừ `AllowFailure`;
@@ -41,7 +41,7 @@ Trong 84 trường hợp lệch đo ngày 2026-10-18, C2 chiếm 12. 72 trườn
   - các key của Subflow và của input mà egret không mô hình hoá bị bỏ;
   - property lạ trên core task bị bỏ qua.
   Không có cảnh báo nào nêu tên chúng.
-- **Đã đăng ký nhưng không có ai phục vụ:** `egret.sql`, `egret.dataapi.call`, `egret.dataset.refresh`, `egret.report.send`, `core.http`, `core.slack`.
+- **Đã đăng ký nhưng không có ai phục vụ:** `egret.sql`, `egret.dataapi.call`, `egret.dataset.refresh`, `egret.report.send`, `core.http`, `core.slack`. *(2026-10-28, #4 đã xây: `egret.sql` được phục vụ trên mọi deployment; `core.http`, `core.slack` và `egret.dataset.refresh` không còn là dòng; `egret.dataapi.call` và `egret.report.send` bị hoãn và vẫn bị từ chối với `task_type_not_served`.)*
 - **Inputs:** không cái nào trong `required`, type, `values`, `validator`, min/max hay giới hạn ngày được kiểm khi start thủ công, qua API, webhook hay flow-trigger.
 - **Trigger:**
   - thiếu: `ScheduleOnDates`, `http.Trigger`, trigger dạng plugin;
@@ -76,7 +76,7 @@ Mỗi gói đi qua quy trình thường lệ: spec (hoặc một mục spec) →
 | 1 | **Không bỏ qua im lặng** | Một lỗi từ chối hoặc cảnh báo có nêu tên, kèm tên gói sẽ gỡ nó, cho mọi key được parse mà bị bỏ qua, trừ `finally:`/`afterExecution:` của flow. Gồm: `finally:` của flowable nằm ngoài tầm #2, `stopAfter` (#11), `retry.warningOnRetry` (#13), các key của Subflow (#12), các key của input (#3), và property lạ trên core task, thứ mà schema của Kestra từ chối (căn theo mục 15 của Phụ lục B §8). Đồng thời sửa các con số "345" cũ trong `driver.rs` | 0 (đúng đắn) | S |
 | 2 | **Hook kết thúc** | `finally:` và `afterExecution:` ở cấp flow. `finally:` trên mọi flowable: Sequential, Parallel, If, Switch, Dag, Loop, LoopUntil, Pause. `errors:` của `Loop`. Kiểm lại tiền đề của việc dọn container (Quy tắc 2) | ~20 cận trên, 14–15 chặt | M |
 | 3 | **Kiểm inputs khi start** — a xong (PR #3a đang review), b chưa | `required`, lỗi ép kiểu, `values`/`allowCustomValue` của SELECT/MULTISELECT, `validator` của STRING, min/max của INT/FLOAT, giới hạn ngày/giờ, items của ARRAY, kiểm kiểu SECRET/URI/EMAIL/YAML/ION, khi start thủ công, qua API, webhook và flow-trigger. Endpoint `validate inputs` | một vài invalid | M |
-| 4 | **HTTP và các task nền tảng chưa được phục vụ** | `http.Request`, `http.Download`, `http.SseRequest` làm worker handler có egress policy. Quyết định và nối `egret.sql` (cần một `QueryExecPort`) cùng các dòng `egret.*`/`core.*` khác, hoặc gỡ các dòng đó | 0 | M |
+| 4 | **HTTP và các task nền tảng chưa được phục vụ** — đã xây (PR đang review, `feat/workflow-http`) | `http.Request`, `http.Download`, `http.SseRequest` làm worker handler có egress policy. Quyết định và nối `egret.sql` (cần một `QueryExecPort`) cùng các dòng `egret.*`/`core.*` khác, hoặc gỡ các dòng đó | 0 | M |
 | 5 | **Parity của renderer** | Chia cho 0 (trường hợp Infinity của `restart-*`), `taskrun.value` không xác định, so sánh số với chuỗi, `??` trên root không tồn tại. `render`/`renderOnce`, `errorLogs`, `subflow`, `max`/`min`. Mười filter và bốn test còn thiếu. Các strategy `js`/`css`/`url_param` của `escape`. So sánh chuỗi tính lười, số học BigDecimal, `{{ task.type }}` trên flowable | ~8–10 | M |
 | 6 | **`outputs:` riêng của `Loop`** | `outputs:` của `Loop` được đánh giá khi nó kết thúc, kể cả STORE/AUTO (mở lại). Trước hết xác định nguyên nhân của 4 mục `Loop` chưa quy được | 3 (+ tối đa 4) | M |
 | 7 | **Thao tác trên execution** | Restart task lỗi tại chỗ, replay từ một task được chọn (kèm inputs và chọn revision), change-status và trạng thái task-run, pause, delete (kèm logs và storage), API labels. Resume kèm inputs `onResume`, và resume-validate. Logs follow (SSE), tải về và xoá. Execution follow (SSE), endpoint eval biểu thức, export/distinct/average-duration/latest. Sau đó là mọi thao tác hàng loạt `by-ids`/`by-query` | 0 (vận hành) | L |
@@ -120,6 +120,14 @@ Mỗi gói đi qua quy trình thường lệ: spec (hoặc một mục spec) →
   - `jsonSchema` vẫn không được kiểm và giữ cảnh báo `not_honoured` (không có crate JSON Schema trong cây; việc theo sau).
   - Một input bị `dependsOn` vô hiệu nhưng có `defaults` vẫn nhận giá trị mặc định lúc render.
 
+**Dòng #4 đã xây, 2026-10-28 (`feat/workflow-http`, Task C1–C7; PR đang review; dòng chỉ được đánh dấu merged sau khi PR merge; dòng ở trên không bị sửa).** Spec `2026-10-28-workflow-http-design.md`, §5 "As built". Đo bằng `cargo test -p egret-workflow --test executor`: ratchet **301 / 50 / 50 / 0**, không đổi, đúng như số "0" của dòng. `LIVE` 295, `VALIDATE_REFUSED` 25, `UNKNOWN_TYPE_REFUSED` 21 không đổi.
+- **Đã xây:** `io.kestra.plugin.core.http.Request`, `Download` và `SseRequest` làm worker handler trên mọi deployment, với alias của Kestra `io.kestra.plugin.fs.http.Request`/`Download`; `secret()` được resolve trên cả ba (kéo lên từ #10, người dùng Q2); một egress guard trong crate mới `egret-egress`, dùng chung với webhook của alert (§3.1); config `workflow.http.{allow_hosts, max_download_bytes, max_sse_events, max_redirects, connect_timeout_secs}`.
+- **Sáu dòng chưa được phục vụ:** `egret.sql` được nối và phục vụ trên mọi deployment (`database:` hiện chỉ nhận UUID của connection); `core.http`, `core.slack` và `egret.dataset.refresh` bị gỡ (một flow nêu một trong số đó nhận một lỗi `unknown_task_type` kèm gợi ý); `egret.dataapi.call` và `egret.report.send` bị hoãn, vẫn bị từ chối với `task_type_not_served`. `TASK_TYPES` có 40 dòng.
+- **Bị từ chối, đã ghi lại (spec D4):** `options.proxy`, `options.ssl.insecureTrustAllCertificates`, `options.auth.type: DIGEST`, `encryptBody`, và một `uri` có userinfo.
+- **Khác Kestra, đã ghi lại (spec D6–D8):** giới hạn body của `Request` là 1 MiB (Kestra 19 MiB); có giới hạn cho `Download` (Kestra không có); `SseRequest` hỏng với status từ 400 trở lên, dừng ở `max_sse_events` và giới hạn stream (16 MiB) cùng output (1 MiB); JQ là `jaq`, nên `$.field` của jackson-jq không parse được.
+- **Giới hạn đã biết** (spec §5): schema của editor vẫn đưa ra các `options` bị từ chối; template cho cả map của `headers`/`formData`/`params` hỏng lúc chạy; output không được che (giống Kestra).
+- **Chuyển sang chỗ khác:** `http.Trigger` vẫn ở #11; allowlist theo workspace, egress proxy ở mức deployment, `egret.dataapi.call`/`egret.report.run` và một cột `run_as` là các việc theo sau đã ghi (spec §4).
+
 *Quy tắc 2 như đã xây, 2026-10-28 (#2b Task B5).* Quy tắc 2 đã đóng. Quy tắc superseded của orphan sweep, storage pruner và `complete` của route log đọc `workflow.execution_is_idle` (migration 0210: terminal và không run nào còn sống); `_wd` sweep đọc state của chính block. Hai khoản nợ được ghi ở spec end-hooks §6 như-đã-xây: rò rỉ `Exit`-anh-em (dòng #20 bên dưới) và chi phí của `protected_set` (0,12 giây lên khoảng 4 giây trên 100 000 execution, mỗi giờ; một dạng rẻ hơn được nêu ở đó).
 
 **Ghi chú, 2026-10-28 (gói #2b, D9, D12 và §6 của spec end-hooks như đã xây; các dòng ở trên không bị sửa).**
@@ -153,6 +161,7 @@ Những điểm này được giữ vì làm giống Kestra sẽ mở lỗ hổn
 - **Runner:** runner `Process` bị từ chối, và chart từ chối runner Docker trong production (mục 2 của §8). `WorkingDirectory` sẽ có Kubernetes ở #17 thay thế.
 - **`secret()` trong giá trị KV:** `secret()` bên trong giá trị của KV `Set`/`Put` vẫn bị từ chối lúc publish, để secret không bao giờ được lưu dạng rõ. Phần còn lại của mục 3 của §8 được #10 gỡ.
 - **`http()` trong biểu thức:** bị từ chối, vì nó render trên control plane (mục 4 của §8). Các task http ở #4 chạy trên worker, sau một egress policy.
+- **Egress của task http (đã xây ở #4, người dùng Q1, 2026-10-28).** Task http của Kestra tới được mọi địa chỉ, đi theo redirect mà không vet, và cho flow chọn proxy hoặc tin mọi chứng chỉ. Của egret chạy trong process egret, nên có cùng vị trí mạng với nó: mọi địa chỉ resolve ra phải là public trừ khi host nằm trong `workflow.http.allow_hosts`, các địa chỉ đã vet được ghim, mọi bước redirect được vet lại, `Authorization`/`Proxy-Authorization`/`Cookie` bị bỏ khi đổi origin, không dùng proxy, và `options.proxy`, trust-all, `DIGEST`, `encryptBody` cùng một `uri` có userinfo bị từ chối (spec `2026-10-28-workflow-http-design.md` D1–D4).
 - **`allowedFileExtensions`:** allowlist của input FILE được thực thi (mục 5 của §8).
 - **Giới hạn trong namespace:** KV, ghi namespace file, `PurgeKV`, `PurgeFiles` và `PurgeLogs` chỉ tác động lên namespace của chính flow và các namespace con (mục 6 của §8).
 - **Giới hạn kích thước:** kích thước và mật độ giá trị KV, số chữ số (mục 7 của §8), và `executions.variables`/`Labels` (D8, D9 của gói nợ).

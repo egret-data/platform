@@ -31,7 +31,7 @@
 In the 2026-10-18 count of 84, C2 accounted for 12 entries. The other 72, by cause: `finally:` 11, `afterExecution:` 9, renderer divergences 8, `sla: MAX_DURATION` 5, `Loop` own `outputs:` 5, timing/poller latency 4, order pairs a clockless driver cannot reach 4, invalid flows over-accepted 4, unattributed `Loop` divergences 4, `Pause` 3, flow `outputs:`/SECRET 3, `WorkingDirectory`+`runIf` 3, Subflow retry 2, missing Pebble functions 2, single causes 4, deliberate 1.
 
 **Feature surface** (Kestra 2.0 OSS, beyond the corpus; Appendix B has the evidence):
-- **Core tasks:** 49. C2 is done, so 41 are supported, 11 of them only partly. 8 are missing: `http.Request`, `http.Download`, `http.SseRequest`, `PurgeExecutions`, `PurgeFlows`, `PurgeStorage`, `metric.Publish`, `TemplatedTask`.
+- **Core tasks:** 49. C2 is done, so 41 are supported, 11 of them only partly. 8 are missing: `http.Request`, `http.Download`, `http.SseRequest`, `PurgeExecutions`, `PurgeFlows`, `PurgeStorage`, `metric.Publish`, `TemplatedTask`. *(2026-10-28, #4 built: the three http tasks are served, so 44 are supported and 5 missing.)*
 - **Silent drops, the worst class:**
   - flow-level `finally:` and `afterExecution:` are parsed and never planned;
   - `finally:` is dropped on every flowable except `AllowFailure`;
@@ -39,7 +39,7 @@ In the 2026-10-18 count of 84, C2 accounted for 12 entries. The other 72, by cau
   - the Subflow and input keys egret does not model are dropped;
   - unknown properties on core tasks are ignored.
   No warning names any of them.
-- **Registered but unserved:** `egret.sql`, `egret.dataapi.call`, `egret.dataset.refresh`, `egret.report.send`, `core.http`, `core.slack`.
+- **Registered but unserved:** `egret.sql`, `egret.dataapi.call`, `egret.dataset.refresh`, `egret.report.send`, `core.http`, `core.slack`. *(2026-10-28, #4 built: `egret.sql` is served on every deployment; `core.http`, `core.slack` and `egret.dataset.refresh` are no longer rows; `egret.dataapi.call` and `egret.report.send` are deferred and still refused as `task_type_not_served`.)*
 - **Inputs:** none of `required`, type, `values`, `validator`, min/max or date bounds is checked at manual, API, webhook or flow-trigger start.
 - **Triggers:**
   - missing: `ScheduleOnDates`, `http.Trigger`, plugin triggers;
@@ -74,7 +74,7 @@ Each package goes through the usual flow: spec (or a spec section) → plan → 
 | 1 | **No silent drops** | A named refusal or warning, naming the package that lifts it, for every parsed-but-ignored key except flow `finally:`/`afterExecution:`. That covers flowable `finally:` outside #2's reach, `stopAfter` (#11), `retry.warningOnRetry` (#13), the Subflow keys (#12), the input keys (#3), and unknown properties on core tasks, which Kestra's schema refuses (aligns Appendix B §8 item 15). Also fix the stale "345" figures in `driver.rs` | 0 (correctness) | S |
 | 2 | **End hooks** | Flow-level `finally:` and `afterExecution:`. `finally:` on every flowable: Sequential, Parallel, If, Switch, Dag, Loop, LoopUntil, Pause. `Loop errors:`. Re-check the sweep's premise (Rule 2) | ~20 upper, 14–15 strict | M |
 | 3 | **Inputs checked at start** — a done (#3a PR in review), b pending | `required`, type coercion errors, SELECT/MULTISELECT `values`/`allowCustomValue`, STRING `validator`, INT/FLOAT min/max, date/time bounds, ARRAY items, SECRET/URI/EMAIL/YAML/ION type checks, at manual, API, webhook and flow-trigger start. The `validate inputs` endpoint | a few invalids | M |
-| 4 | **HTTP and the unserved platform tasks** | `http.Request`, `http.Download`, `http.SseRequest` as worker handlers with an egress policy. Decide and wire `egret.sql` (needs a `QueryExecPort`) and the other `egret.*`/`core.*` rows, or remove the rows | 0 | M |
+| 4 | **HTTP and the unserved platform tasks** — built (PR in review, `feat/workflow-http`) | `http.Request`, `http.Download`, `http.SseRequest` as worker handlers with an egress policy. Decide and wire `egret.sql` (needs a `QueryExecPort`) and the other `egret.*`/`core.*` rows, or remove the rows | 0 | M |
 | 5 | **Renderer parity** | Division by zero (the `restart-*` Infinity case), undefined `taskrun.value`, number-vs-string comparison, `??` on a missing root. `render`/`renderOnce`, `errorLogs`, `subflow`, `max`/`min`. The ten missing filters and four missing tests. `escape` strategies `js`/`css`/`url_param`. Lazy chained comparisons, BigDecimal arithmetic, `{{ task.type }}` on a flowable | ~8–10 | M |
 | 6 | **`Loop` own `outputs:`** | A `Loop`'s `outputs:` evaluated at its end, including STORE/AUTO (reopened). Name the cause of the 4 unattributed `Loop` entries first | 3 (+ up to 4) | M |
 | 7 | **Execution operations** | Restart failed tasks in place, replay from a chosen task (with inputs and a revision choice), change-status and task-run state, pause, delete (with logs and storage), labels API. Resume with `onResume` inputs, and resume-validate. Logs follow (SSE), download and delete. Execution follow (SSE), the expression-eval endpoint, export/distinct/average-duration/latest. Then every `by-ids`/`by-query` bulk operation | 0 (operability) | L |
@@ -118,6 +118,14 @@ Each package goes through the usual flow: spec (or a spec section) → plan → 
   - `jsonSchema` stays unchecked and keeps its `not_honoured` warning (no JSON Schema crate in the tree; follow-up).
   - A disabled-by-`dependsOn` input with a `defaults` still gets the default at render.
 
+**Row #4 built, 2026-10-28 (`feat/workflow-http`, Tasks C1–C7; PR in review; the row is marked merged only after it merges; the row above is not edited).** Spec `2026-10-28-workflow-http-design.md`, §5 "As built". Measured with `cargo test -p egret-workflow --test executor`: ratchet **301 / 50 / 50 / 0**, unchanged, as the row's "0" expected. `LIVE` 295, `VALIDATE_REFUSED` 25, `UNKNOWN_TYPE_REFUSED` 21 unchanged.
+- **Built:** `io.kestra.plugin.core.http.Request`, `Download` and `SseRequest` as worker handlers on every deployment, with Kestra's aliases `io.kestra.plugin.fs.http.Request`/`Download`; `secret()` resolves on the three (pulled forward from #10, user Q2); one egress guard in the new crate `egret-egress`, shared with alert webhooks (§3.1); config `workflow.http.{allow_hosts, max_download_bytes, max_sse_events, max_redirects, connect_timeout_secs}`.
+- **The six unserved rows:** `egret.sql` wired and served on every deployment (`database:` takes a connection UUID only for now); `core.http`, `core.slack` and `egret.dataset.refresh` removed (a flow naming one gets one `unknown_task_type` error with a hint); `egret.dataapi.call` and `egret.report.send` deferred, still refused as `task_type_not_served`. `TASK_TYPES` is 40 rows.
+- **Refused, recorded (spec D4):** `options.proxy`, `options.ssl.insecureTrustAllCertificates`, `options.auth.type: DIGEST`, `encryptBody`, and a `uri` with userinfo.
+- **Divergences from Kestra, recorded (spec D6–D8):** `Request` body cap 1 MiB (Kestra 19 MiB); a `Download` cap (Kestra none); `SseRequest` fails on a status of 400 or more, stops at `max_sse_events` and bounds the stream (16 MiB) and its output (1 MiB); JQ is `jaq`, so jackson-jq's `$.field` does not parse.
+- **Known limitations** (spec §5): the editor schema still offers the refused `options`; a whole-map template for `headers`/`formData`/`params` fails at run; outputs are not masked (Kestra parity).
+- **Moved elsewhere:** `http.Trigger` stays in #11; a per-workspace allowlist, a deployment egress proxy, `egret.dataapi.call`/`egret.report.run` and a `run_as` column are recorded follow-ups (spec §4).
+
 *Rule 2 as built, 2026-10-28 (#2b Task B5).* Rule 2 is closed. The orphan sweep's superseded rule, the storage pruner and the logs route's `complete` read `workflow.execution_is_idle` (migration 0210: terminal and no live run); the `_wd` sweep reads the block's own state. Two debts are recorded in the end-hooks spec §6 as-built: the `Exit`-sibling leak (row #20 below) and the `protected_set` cost (0.12 s to about 4 s per 100 000 executions, hourly; a cheaper form is named there).
 
 **Notes, 2026-10-28 (package #2b, end-hooks spec D9, D12 and §6 as built; the rows above are not edited).**
@@ -151,6 +159,7 @@ These stay because matching Kestra would open a cross-workspace hole, an SSRF, o
 - **Runners:** the `Process` task runner is refused, and the chart refuses the Docker runner in production (§8 item 2). `WorkingDirectory` gets Kubernetes in #17 instead.
 - **`secret()` in KV values:** `secret()` inside a KV `Set`/`Put` value stays refused at publish, so a secret is never persisted in clear. The rest of §8 item 3 is lifted by #10.
 - **`http()` in expressions:** refused, because it renders on the control plane (§8 item 4). The http tasks in #4 run on workers behind an egress policy.
+- **http task egress (built in #4, user Q1, 2026-10-28).** Kestra's http tasks reach any address, follow redirects unvetted, and let the flow choose a proxy or trust every certificate. egret's run in the egret process, so they share its network position: every resolved address must be public unless the host is in `workflow.http.allow_hosts`, the vetted addresses are pinned, every redirect hop is vetted again, `Authorization`/`Proxy-Authorization`/`Cookie` are dropped across origins, no proxy is used, and `options.proxy`, trust-all, `DIGEST`, `encryptBody` and a `uri` with userinfo are refused (spec `2026-10-28-workflow-http-design.md` D1–D4).
 - **`allowedFileExtensions`:** a FILE input's allowlist is enforced (§8 item 5).
 - **Namespace confinement:** KV, namespace-file writes, `PurgeKV`, `PurgeFiles` and `PurgeLogs` are confined to the flow's own namespace and its children (§8 item 6).
 - **Caps:** KV value size and density, number digits (§8 item 7), and `executions.variables`/`Labels` (debt D8, D9).
@@ -383,9 +392,9 @@ Out of the count are: abstract classes and interfaces; the purge-behaviour subty
 | flow.Subflow | partial: `revision`, `labels`, `inheritLabels`, `scheduleDate` and `restartBehavior` are not modelled; `namespace`, `flowId`, `inputs`, `wait` and `transmitFailed` are | plan.rs:1340, models/task.rs:481-510 vs kestra flow/Subflow.java:87-144 |
 | flow.Switch | partial: no `finally:` | plan.rs:1308, models/task.rs:326 |
 | flow.WorkingDirectory | partial: **Docker runner only, refused on Kubernetes**, and the chart refuses Docker in production | plan.rs:1276; docs/en/specs/2026-10-16-workflow-working-directory-design.md:3,112 |
-| http.Request | **missing**. A `core.http` registry row exists with no handler, so it is refused at publish and start as `task_type_not_served` | registry.rs:161; crates/egret-bin/src/main.rs:1861-1864 |
-| http.Download | **missing** | not in TASK_TYPES |
-| http.SseRequest | **missing** | not in TASK_TYPES |
+| http.Request | **missing**. A `core.http` registry row exists with no handler, so it is refused at publish and start as `task_type_not_served`. *2026-10-28: supported (#4), alias `fs.http.Request`; `core.http` removed* | registry.rs:161; crates/egret-bin/src/main.rs:1861-1864 |
+| http.Download | **missing**. *2026-10-28: supported (#4), alias `fs.http.Download`* | not in TASK_TYPES |
+| http.SseRequest | **missing**. *2026-10-28: supported (#4)* | not in TASK_TYPES |
 | kv.Set / Get / GetKeys / Delete / Put / PurgeKV | supported (6). Divergence: writes only to the flow's own namespace | registry.rs:321-350, handlers/kv.rs; W9c spec §15 |
 | log.Log | supported (alias `core.log`) | registry.rs:189 |
 | log.PurgeLogs | supported (C1). Scoped to the flow's own namespace and its children | registry.rs:229, handlers/purge_logs.rs |
@@ -398,7 +407,7 @@ Out of the count are: abstract classes and interfaces; the purge-behaviour subty
 | templating.TemplatedTask | **missing** | not in TASK_TYPES |
 | dashboard.chart.* / dashboard.data.* (20), preview.* renderers (4) | out (Kestra UI dashboards and previews; nothing to do with flow execution) | n/a |
 
-**egret-only task rows that are registered but have no handler (6 of them).** They publish nowhere, because `task_type_not_served` refuses them: `egret.sql`, `egret.dataapi.call`, `egret.dataset.refresh`, `egret.report.send`, `core.http`, `core.slack`. Evidence: egret-bin/src/main.rs:1835-1864. In practice the egret-native platform tasks do not run in production.
+**egret-only task rows that are registered but have no handler (6 of them).** They publish nowhere, because `task_type_not_served` refuses them: `egret.sql`, `egret.dataapi.call`, `egret.dataset.refresh`, `egret.report.send`, `core.http`, `core.slack`. Evidence: egret-bin/src/main.rs:1835-1864. In practice the egret-native platform tasks do not run in production. *(2026-10-28, #4: `egret.sql` is served on every deployment; `core.http`, `core.slack` and `egret.dataset.refresh` are removed; `egret.dataapi.call` and `egret.report.send` remain registered and unserved.)*
 
 **Script tasks (separate Kestra plugin repositories).** These are supported: `scripts.shell.{Commands,Script}` and `scripts.python.{Commands,Script}` (registry.rs:116-135). Python's `dependencies`, `packageManager`, `pythonVersion` and uv auto-install are refused, and so are `targetOS` and most Docker options (scripts/mod.rs:200-247). node, R, Julia, Ruby, Go and the rest are missing; W5a spec §10 says they are "addable later".
 
