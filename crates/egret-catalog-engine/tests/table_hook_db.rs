@@ -5156,3 +5156,93 @@ async fn a_plain_namespace_drop_deletes_no_grant() {
     assert_eq!(env.grant_at(allow).await, ("t".into(), None));
     assert!(env.catalog_grant_at(grant).await.is_some());
 }
+
+// ── Grants follow a rename, Task 15: table states at any depth (drift) ──
+
+/// D16, the drift guard of `table_states_ns_via` against the REAL Lakekeeper:
+/// a table in `["sales", "eu"]` is live under any spelling of each level; its
+/// old name after a rename is missing; single-level answers equal
+/// `table_states_via`'s.
+#[tokio::test]
+async fn table_states_follow_lakekeeper_at_any_depth() {
+    use egret_perm_compile::table_columns::{
+        table_states_ns_via, table_states_via, NsTableKey, TableKey, TableState,
+    };
+    let Some(env) = env().await else { return };
+    env.create_namespace(&["sales", "eu"]).await;
+    let (status, body) = env
+        .call_raw(
+            "POST",
+            "namespaces/sales%1Feu/tables",
+            Some(json!({"name": "x", "schema": schema(0, &[(1, "id")])})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "create sales.eu.x: {body}");
+    env.create_table("orders", &[(1, "id")]).await;
+    let key = |ns: &[&str], t: &str| NsTableKey {
+        warehouse_id: env.warehouse_id,
+        namespace: ns.iter().map(|s| s.to_string()).collect(),
+        table: t.into(),
+    };
+    let mut conn = env.db.pool.acquire().await.expect("acquire");
+    let states = table_states_ns_via(
+        &mut conn,
+        &[
+            key(&["sales", "eu"], "x"),
+            key(&["SALES", "Eu"], "X"),
+            key(&["sales"], "x"),
+            key(&["sales", "eu", "x"], "x"),
+            key(&["sales"], "orders"),
+            key(&["sales\u{1f}eu"], "x"),
+        ],
+    )
+    .await
+    .expect("states");
+    assert_eq!(
+        states,
+        vec![
+            TableState::Live,
+            TableState::Live,
+            TableState::Missing,
+            TableState::Missing,
+            TableState::Live,
+            TableState::Missing,
+        ]
+    );
+    drop(conn);
+    let (status, body) = env
+        .rename_across((&["sales", "eu"], "x"), (&["sales", "eu"], "y"))
+        .await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    let mut conn = env.db.pool.acquire().await.expect("acquire");
+    assert_eq!(
+        table_states_ns_via(
+            &mut conn,
+            &[key(&["sales", "eu"], "x"), key(&["sales", "eu"], "y")]
+        )
+        .await
+        .expect("states"),
+        vec![TableState::Missing, TableState::Live]
+    );
+    let single = [
+        TableKey {
+            warehouse_id: env.warehouse_id,
+            schema: "sales".into(),
+            table: "orders".into(),
+        },
+        TableKey {
+            warehouse_id: env.warehouse_id,
+            schema: "sales".into(),
+            table: "nothing".into(),
+        },
+    ];
+    assert_eq!(
+        table_states_via(&mut conn, &single).await.expect("states"),
+        table_states_ns_via(
+            &mut conn,
+            &[key(&["sales"], "orders"), key(&["sales"], "nothing")]
+        )
+        .await
+        .expect("states")
+    );
+}

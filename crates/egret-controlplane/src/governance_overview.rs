@@ -32,7 +32,7 @@ use chrono::{DateTime, Utc};
 use egret_auth::principal::Auth;
 use egret_core::http::ErrorBody;
 use egret_perm_compile::table_columns::{
-    missing_columns_via, table_states_via, TableKey, TableState,
+    missing_columns_via, table_states_ns_via, table_states_via, NsTableKey, TableKey, TableState,
 };
 use futures_util::future::BoxFuture;
 use serde::Serialize;
@@ -326,6 +326,24 @@ pub const SOURCES: &[Source] = &[
         what: "classified columns",
         requires: Requires::All(&[TAG_READ]),
         run: |c| Box::pin(classifications_on_missing_columns(c)),
+    },
+    Source {
+        kind: "permissions_on_missing_tables",
+        what: "tables named by grants, rules and hand-written policies",
+        requires: POLICY,
+        run: |c| Box::pin(permissions_on_missing_tables(c)),
+    },
+    Source {
+        kind: "permissions_on_missing_columns",
+        what: "columns named by grants and rules",
+        requires: POLICY,
+        run: |c| Box::pin(permissions_on_missing_columns(c)),
+    },
+    Source {
+        kind: "catalog_grants_on_missing_tables",
+        what: "tables named by catalog grants",
+        requires: Requires::All(&[CATALOG_READ]),
+        run: |c| Box::pin(catalog_grants_on_missing_tables(c)),
     },
     Source {
         kind: "renamed_names_reused",
@@ -1700,6 +1718,423 @@ async fn renamed_names_reused(c: &mut PgConnection) -> Result<Option<Finding>, S
         sentence,
         sample,
         Some(Ref::Tags),
+    ))
+}
+
+// ── Grants follow a rename (spec 2026-10-27 §5.8, D16): stale references ──
+
+/// One literal grant, path rule or hand-written policy that names a table.
+struct NamedTable {
+    key: TableKey,
+    catalog: String,
+    column: Option<String>,
+    /// `deny grant`, `mask rule pii-email`, `hand-written policy p/n`.
+    what: String,
+    r#ref: Ref,
+}
+
+/// No `*` or `?`.
+fn literal(level: &str) -> bool {
+    !level.contains(['*', '?'])
+}
+
+/// Every explicit grant and path rule whose schema and table levels are
+/// literal, on a catalog over an embedded warehouse.
+async fn literal_perm_rows(c: &mut PgConnection) -> Result<Vec<NamedTable>, sqlx::Error> {
+    type Row = (
+        String,
+        Uuid,
+        String,
+        Uuid,
+        String,
+        String,
+        Option<String>,
+        String,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT 'grant', g.id, g.effect::text, c.warehouse_id, g.schema_name, g.table_name, \
+                g.column_name, c.name \
+           FROM perm.grants g JOIN registry.catalogs c ON c.id = g.catalog_id \
+          WHERE g.origin = 'explicit' AND c.warehouse_id IS NOT NULL \
+            AND g.schema_name IS NOT NULL AND g.table_name IS NOT NULL \
+         UNION ALL \
+         SELECT r.kind::text, r.id, r.name, c.warehouse_id, r.schema_name, r.table_name, \
+                r.column_name, c.name \
+           FROM perm.rules r JOIN registry.catalogs c ON c.id = r.catalog_id \
+          WHERE r.selector_kind = 'path' AND c.warehouse_id IS NOT NULL \
+            AND r.schema_name IS NOT NULL AND r.table_name IS NOT NULL",
+    )
+    .fetch_all(&mut *c)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter(|r| literal(&r.4) && literal(&r.5))
+        .map(
+            |(kind, id, name, warehouse_id, schema, table, column, catalog)| NamedTable {
+                key: TableKey {
+                    warehouse_id,
+                    schema,
+                    table,
+                },
+                catalog,
+                column,
+                what: match kind.as_str() {
+                    "grant" => format!("{name} grant"),
+                    "mask" => format!("mask rule {name}"),
+                    _ => format!("row-filter rule {name}"),
+                },
+                r#ref: if kind == "grant" {
+                    Ref::Grant { id }
+                } else {
+                    Ref::Rule { id }
+                },
+            },
+        )
+        .collect())
+}
+
+/// The literal tables enabled operator policies name, on the profiles bound
+/// to a catalog over an embedded warehouse (D5's reading: the catalog level
+/// names the registry catalog).
+async fn handwritten_tables(c: &mut PgConnection) -> Result<Vec<NamedTable>, sqlx::Error> {
+    use serde_json::Value;
+    let rows: Vec<(String, String, Value, String, Uuid)> = sqlx::query_as(
+        "SELECT DISTINCT s.name, p.name, p.policy_jsonb, c.name, c.warehouse_id \
+           FROM policy.authz_policies p \
+           JOIN policy.authz_services s ON s.id = p.service_id \
+           JOIN engine_mgmt.engines e ON e.authz_service_id = s.id \
+           JOIN registry.engine_catalog_attachments a ON a.engine_id = e.id \
+           JOIN registry.catalogs c ON c.id = a.catalog_id \
+          WHERE p.enabled AND p.managed_by = 'operator' AND c.warehouse_id IS NOT NULL",
+    )
+    .fetch_all(&mut *c)
+    .await?;
+    let values = |body: &Value, level: &str| -> Vec<String> {
+        body.get("resources")
+            .and_then(|r| r.get(level))
+            .and_then(|l| l.get("values"))
+            .and_then(Value::as_array)
+            .map(|vs| {
+                vs.iter()
+                    .filter_map(Value::as_str)
+                    .filter(|v| literal(v))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut out = Vec::new();
+    for (profile, name, body, catalog, warehouse_id) in rows {
+        if !values(&body, "catalog")
+            .iter()
+            .any(|v| v.to_lowercase() == catalog.to_lowercase())
+        {
+            continue;
+        }
+        let mut schemas = values(&body, "schema");
+        schemas.extend(values(&body, "database"));
+        for schema in &schemas {
+            for table in values(&body, "table") {
+                out.push(NamedTable {
+                    key: TableKey {
+                        warehouse_id,
+                        schema: schema.clone(),
+                        table,
+                    },
+                    catalog: catalog.clone(),
+                    column: None,
+                    what: format!("hand-written policy {profile}/{name}"),
+                    r#ref: Ref::Profile {
+                        name: profile.clone(),
+                    },
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `catalog.schema.table` (folded) → `schema.table` it was renamed to, from
+/// the restrictive copies the table hook recorded (`perm_grant:copy`,
+/// `perm_rule:copy`), newest first.
+async fn renamed_to(
+    c: &mut PgConnection,
+) -> Result<std::collections::HashMap<(String, String, String), String>, sqlx::Error> {
+    use serde_json::Value;
+    let rows: Vec<Value> = sqlx::query_scalar(
+        "SELECT detail FROM audit.audit_log \
+          WHERE kind = 'mutation' AND action IN ('perm_grant:copy', 'perm_rule:copy') \
+            AND detail ->> 'trigger' = 'iceberg_rename' \
+          ORDER BY ts, id",
+    )
+    .fetch_all(&mut *c)
+    .await?;
+    let mut out = std::collections::HashMap::new();
+    for d in rows {
+        let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let (before, after) = (&d["before"], &d["after"]);
+        let from = if before.get("selector").is_some() {
+            let parts: Vec<String> = text(before, "selector")
+                .split('.')
+                .map(str::to_string)
+                .collect();
+            match parts.as_slice() {
+                [cat, schema, table, ..] => (cat.clone(), schema.clone(), table.clone()),
+                _ => continue,
+            }
+        } else {
+            (
+                text(before, "catalog"),
+                text(before, "schema"),
+                text(before, "table"),
+            )
+        };
+        let to = d
+            .get("rename")
+            .map(|r| text(r, "to"))
+            .unwrap_or_else(|| format!("{}.{}", text(after, "schema"), text(after, "table")));
+        out.insert(
+            (
+                from.0.to_lowercase(),
+                from.1.to_lowercase(),
+                from.2.to_lowercase(),
+            ),
+            to,
+        );
+    }
+    Ok(out)
+}
+
+/// D16: grants, path rules and hand-written policies on table names the
+/// catalog has no table for (missing, not dropped: an undrop restores a
+/// dropped one). One sample per name, naming each kind and, when egret kept
+/// a restriction there on purpose, the table it was renamed to.
+async fn permissions_on_missing_tables(
+    c: &mut PgConnection,
+) -> Result<Option<Finding>, SourceError> {
+    let mut rows = literal_perm_rows(c).await?;
+    rows.extend(handwritten_tables(c).await?);
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let keys: Vec<TableKey> = rows.iter().map(|r| r.key.clone()).collect();
+    let states = table_states_via(c, &keys).await?;
+    let renamed = renamed_to(c).await?;
+    let mut by_name: BTreeMap<(String, String, String), Vec<&NamedTable>> = BTreeMap::new();
+    for (r, state) in rows.iter().zip(states) {
+        if state != TableState::Missing {
+            continue;
+        }
+        by_name
+            .entry((
+                r.catalog.to_lowercase(),
+                r.key.schema.to_lowercase(),
+                r.key.table.to_lowercase(),
+            ))
+            .or_default()
+            .push(r);
+    }
+    let n = by_name.len();
+    let mut sample = Vec::new();
+    for (name, named) in &by_name {
+        let first = named[0];
+        let mut what: Vec<&str> = named.iter().map(|r| r.what.as_str()).collect();
+        what.dedup();
+        let mut detail = what.join(", ");
+        if let Some(to) = renamed.get(name) {
+            detail.push_str(&format!("; kept when the table was renamed to {to}"));
+        }
+        sample.push(Sample {
+            label: format!("{}.{}.{}", first.catalog, first.key.schema, first.key.table),
+            detail: Some(detail),
+            r#ref: Some(first.r#ref.clone()),
+        });
+    }
+    let sentence = if n == 1 {
+        "1 table name carries grants, rules or hand-written policies but has no table: left by a \
+         rename (egret keeps restrictions on the old name on purpose), a purge, or written before \
+         the table existed. A table created under that name is governed by them."
+            .to_string()
+    } else {
+        format!(
+            "{n} table names carry grants, rules or hand-written policies but have no table: left \
+             by a rename (egret keeps restrictions on the old name on purpose), a purge, or \
+             written before the table existed. A table created under such a name is governed by \
+             them."
+        )
+    };
+    Ok(finding(
+        "permissions_on_missing_tables",
+        Severity::Warning,
+        n,
+        sentence,
+        sample,
+        Some(Ref::Data),
+    ))
+}
+
+/// D16: literal column-level grants and path rules of live tables whose
+/// column is not in the table, each with its rename candidate.
+async fn permissions_on_missing_columns(
+    c: &mut PgConnection,
+) -> Result<Option<Finding>, SourceError> {
+    let rows: Vec<NamedTable> = literal_perm_rows(c)
+        .await?
+        .into_iter()
+        .filter(|r| {
+            r.column
+                .as_deref()
+                .is_some_and(|col| col != "*" && literal(col))
+        })
+        .collect();
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let keys: Vec<TableKey> = rows.iter().map(|r| r.key.clone()).collect();
+    let states = table_states_via(c, &keys).await?;
+    let live: Vec<&NamedTable> = rows
+        .iter()
+        .zip(states)
+        .filter(|(_, s)| *s == TableState::Live)
+        .map(|(r, _)| r)
+        .collect();
+    let asked: Vec<(TableKey, Vec<String>)> = live
+        .iter()
+        .map(|r| (r.key.clone(), vec![r.column.clone().unwrap_or_default()]))
+        .collect();
+    let missing = missing_columns_via(c, &asked).await?;
+    let mut sample = Vec::new();
+    let mut renamed = 0;
+    for r in &live {
+        let column = r.column.clone().unwrap_or_default();
+        let Some(m) = missing
+            .iter()
+            .find(|m| m.key == r.key && m.column == column)
+        else {
+            continue;
+        };
+        if m.renamed_to.is_some() {
+            renamed += 1;
+        }
+        sample.push(Sample {
+            label: format!("{}.{}.{}.{column}", r.catalog, r.key.schema, r.key.table),
+            detail: Some(match &m.renamed_to {
+                Some(to) => format!("renamed to {to}"),
+                None => "not in the table".to_string(),
+            }),
+            r#ref: Some(r.r#ref.clone()),
+        });
+    }
+    sample.sort_by(|a, b| a.label.cmp(&b.label));
+    let n = sample.len();
+    let dropped = n - renamed;
+    let was = |k: usize| if k == 1 { "was" } else { "were" };
+    let head = if n == 1 {
+        "1 grant or rule names a column that is not in its table".to_string()
+    } else {
+        format!("{n} grants or rules name columns that are not in their table")
+    };
+    let sentence = match (renamed, dropped) {
+        (0, _) => format!(
+            "{head}: {} dropped or never existed.",
+            if n == 1 { "it was" } else { "they were" }
+        ),
+        (_, 0) => format!(
+            "{head}: {} renamed (egret names the new column).",
+            if n == 1 { "it was" } else { "they were" }
+        ),
+        (r, d) => format!(
+            "{head}: {r} {} renamed (egret names the new column), {d} {} dropped or never \
+             existed.",
+            was(r),
+            was(d)
+        ),
+    };
+    Ok(finding(
+        "permissions_on_missing_columns",
+        Severity::Warning,
+        n,
+        sentence,
+        sample,
+        Some(Ref::Data),
+    ))
+}
+
+/// D16: `table` catalog grants whose table does not exist (missing, at any
+/// namespace depth).
+async fn catalog_grants_on_missing_tables(
+    c: &mut PgConnection,
+) -> Result<Option<Finding>, SourceError> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        role: String,
+        privilege: String,
+        namespace: Vec<String>,
+        table_name: String,
+        warehouse_id: Uuid,
+        warehouse: String,
+        catalog_id: Option<Uuid>,
+        catalog: Option<String>,
+    }
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT r.name AS role, g.privilege, g.namespace, g.table_name, w.id AS warehouse_id, \
+                w.name AS warehouse, \
+                (SELECT rc.id FROM registry.catalogs rc WHERE rc.warehouse_id = w.id \
+                  ORDER BY rc.name LIMIT 1) AS catalog_id, \
+                (SELECT rc.name FROM registry.catalogs rc WHERE rc.warehouse_id = w.id \
+                  ORDER BY rc.name LIMIT 1) AS catalog \
+           FROM catalog.catalog_grants g \
+           JOIN catalog.catalog_roles r ON r.id = g.catalog_role_id \
+           JOIN catalog.warehouses w ON w.id = r.warehouse_id \
+          WHERE g.securable_type = 'table' AND g.namespace IS NOT NULL \
+            AND g.table_name IS NOT NULL AND w.lakekeeper_warehouse_id IS NOT NULL \
+          ORDER BY w.name, g.namespace, g.table_name, r.name",
+    )
+    .fetch_all(&mut *c)
+    .await?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let keys: Vec<NsTableKey> = rows
+        .iter()
+        .map(|r| NsTableKey {
+            warehouse_id: r.warehouse_id,
+            namespace: r.namespace.clone(),
+            table: r.table_name.clone(),
+        })
+        .collect();
+    let states = table_states_ns_via(c, &keys).await?;
+    let sample: Vec<Sample> = rows
+        .iter()
+        .zip(states)
+        .filter(|(_, s)| *s == TableState::Missing)
+        .map(|(r, _)| Sample {
+            label: format!("{}.{}.{}", r.warehouse, r.namespace.join("."), r.table_name),
+            detail: Some(format!("role {}, {}", r.role, r.privilege)),
+            r#ref: r
+                .catalog_id
+                .zip(r.catalog.clone())
+                .map(|(id, name)| Ref::Catalog { id, name }),
+        })
+        .collect();
+    let n = sample.len();
+    let sentence = if n == 1 {
+        "1 catalog grant names a table that does not exist: it covers nothing until a table takes \
+         the name."
+            .to_string()
+    } else {
+        format!(
+            "{n} catalog grants name tables that do not exist: they cover nothing until a table \
+             takes the name."
+        )
+    };
+    Ok(finding(
+        "catalog_grants_on_missing_tables",
+        Severity::Warning,
+        n,
+        sentence,
+        sample,
+        Some(Ref::Catalogs),
     ))
 }
 

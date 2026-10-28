@@ -118,7 +118,8 @@ fn db(what: &'static str) -> impl FnOnce(sqlx::Error) -> CpError {
     description = "Governance events, newest first: grant, rule, hand-written policy, \
                    migration and compile changes and role assignments for a `policy:read` \
                    reader; clearance changes and catalog-column tags for a `tag:read` reader; \
-                   user deletes for a reader who also holds `user:read`. \
+                   user deletes for a reader who also holds `user:read`; catalog-grant moves and \
+                   removals for a reader who also holds `catalog_registry:read`. \
                    Recorded from the version that introduced this feed on; role assignments and \
                    catalog tags are best-effort (recorded after commit).",
     responses(
