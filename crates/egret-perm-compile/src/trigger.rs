@@ -2175,6 +2175,22 @@ pub async fn affected_services_for_group_membership(
     }
     // F11: the profile of every engine whose engine grants name the group.
     ids.extend(engine_grant_profiles_naming_via(conn, "group", &names).await?);
+    // A role granted to the group: its members are role holders, so a change
+    // of who is in the group changes every role membership it feeds.
+    let roles: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT r.name FROM access_grants ag \
+           JOIN groups g ON g.id = ag.principal_id \
+           JOIN roles r ON r.id = ag.role_id \
+          WHERE ag.principal_type = 'group' AND g.name = ANY($1) \
+          ORDER BY r.name",
+    )
+    .bind(&names)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    for role in &roles {
+        ids.extend(affected_services_for_role_membership(conn, role).await?);
+    }
     // F11: a group holding `platform_admin` makes its members platform admins,
     // whom an impersonation grant may not target; joining or leaving it
     // re-checks every impersonation grant's target.

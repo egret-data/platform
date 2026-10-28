@@ -931,3 +931,120 @@ async fn concurrent_recompiles_minting_the_same_people_in_opposite_orders_both_s
         }
     }
 }
+
+/// A role granted to a GROUP reaches the group's members on the engine, by
+/// their stored usernames, exactly as a role granted to a user does. Before
+/// this, `role_usernames` read only `principal_type = 'user'`, so the compiled
+/// policy named nobody for it while `egret_auth`'s PDP let the members in.
+#[tokio::test]
+async fn a_role_granted_to_a_group_names_its_members_usernames() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+
+    let local = unique("grouprole");
+    let member = new_user(&db, &format!("{local}@egret.local"), Some(&local)).await;
+    let outsider = new_user(
+        &db,
+        &format!("{}@egret.local", unique("outsider")),
+        Some("grouprole-outsider"),
+    )
+    .await;
+    let group_name = unique("analysts");
+    let group_id: Uuid = sqlx::query_scalar("INSERT INTO groups (name) VALUES ($1) RETURNING id")
+        .bind(&group_name)
+        .fetch_one(&db.pool)
+        .await
+        .expect("insert group");
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(member)
+        .bind(group_id)
+        .execute(&db.pool)
+        .await
+        .expect("join group");
+    let role_name = unique("group-reader");
+    let role_id = new_role(&db, &role_name).await;
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ('group', $1, $2, 'platform', NULL)",
+    )
+    .bind(group_id)
+    .bind(role_id)
+    .execute(&db.pool)
+    .await
+    .expect("grant the role to the group");
+    let _ = outsider; // not in the group, so not named
+
+    let grant_id = f
+        .perm
+        .create_grant(&read_grant(
+            f.catalog_id,
+            PrincipalSet {
+                include: vec![role_principal(&role_name)],
+                exclude: vec![],
+            },
+        ))
+        .await
+        .expect("create role grant");
+
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+
+    let body = compiled_policy(&db, f.service_id, grant_id)
+        .await
+        .expect("a role grant must compile to a policy");
+    assert_eq!(
+        users_of(only_item(&body)),
+        vec![local.clone()],
+        "the group's member holds the role through the group, so is named; the outsider is not: {body:#}"
+    );
+}
+
+/// A group membership change recompiles every profile whose role grants reach
+/// that group's members. Without the role arm in `affected_services_for_group_membership`
+/// a member who leaves the group would keep the role on the engine (fail open).
+#[tokio::test]
+async fn a_group_membership_change_reaches_a_role_granted_to_that_group() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+
+    let group_name = unique("leavers");
+    let group_id: Uuid = sqlx::query_scalar("INSERT INTO groups (name) VALUES ($1) RETURNING id")
+        .bind(&group_name)
+        .fetch_one(&db.pool)
+        .await
+        .expect("insert group");
+    let role_name = unique("group-leaver-role");
+    let role_id = new_role(&db, &role_name).await;
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ('group', $1, $2, 'platform', NULL)",
+    )
+    .bind(group_id)
+    .bind(role_id)
+    .execute(&db.pool)
+    .await
+    .expect("grant the role to the group");
+    f.perm
+        .create_grant(&read_grant(
+            f.catalog_id,
+            PrincipalSet {
+                include: vec![role_principal(&role_name)],
+                exclude: vec![],
+            },
+        ))
+        .await
+        .expect("create role grant");
+
+    let mut conn = db.pool.acquire().await.expect("acquire");
+    let services = egret_perm_compile::affected_services_for_group_membership(
+        &mut conn,
+        std::slice::from_ref(&group_name),
+    )
+    .await
+    .expect("affected services");
+    assert!(
+        services.contains(&f.service_id),
+        "a membership change of {group_name:?} must reach the profile that names its role: {services:?}"
+    );
+}

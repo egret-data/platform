@@ -818,10 +818,8 @@ async fn a_users_stands_for_marks_each_via_and_why_engines_do_not_apply_it() {
 
     let uc = principal(&e, &format!("/perm/people/users/{}", o.uc)).await;
     let gr = json!({"kind": "group_role", "group": o.n("g2"), "role": o.n("r1")});
-    assert_eq!(
-        on(entry(&uc, "role", &o.n("r1"), &gr)),
-        (json!(false), json!("held_through_group"))
-    );
+    // A role held through a group reaches engines by the members' usernames.
+    assert_eq!(on(entry(&uc, "role", &o.n("r1"), &gr)), (json!(true), Value::Null));
 
     // No username: no `user` entry, and every entry is `no_username`.
     let ub = principal(&e, &format!("/perm/people/users/{}", o.ub)).await;
@@ -964,11 +962,7 @@ async fn a_group_lists_members_with_and_without_a_username_and_what_it_holds() {
         [
             ("group".to_string(), o.n("g1"), String::new()),
             ("group".to_string(), "public".to_string(), String::new()),
-            (
-                "role".to_string(),
-                o.n("rw"),
-                "held_through_group".to_string()
-            ),
+            ("role".to_string(), o.n("rw"), String::new()),
             (
                 "workspace_members".to_string(),
                 o.ws.to_string(),
@@ -979,11 +973,7 @@ async fn a_group_lists_members_with_and_without_a_username_and_what_it_holds() {
         .collect()
     );
     let g2 = principal(&e, &format!("/perm/people/groups/{}", o.n("g2"))).await;
-    assert!(sf(&g2).contains(&(
-        "role".to_string(),
-        o.n("r1"),
-        "held_through_group".to_string()
-    )));
+    assert!(sf(&g2).contains(&("role".to_string(), o.n("r1"), String::new())));
     let _ = o.g2;
 }
 
@@ -1105,12 +1095,12 @@ async fn clearances_answer_for_engines_and_for_egret_per_gate() {
     );
     assert_eq!(both(&ua, c), (engines_no(Value::Null), not_cleared.clone()));
 
-    // uc: cleared in egret through its group, never on engines.
+    // uc: cleared in egret through its group, and on engines the same way.
     let uc = principal(&e, &user(o.uc)).await;
     assert_eq!(
         both(&uc, a),
         (
-            engines_no(json!("held_through_group")),
+            json!({"kind": "cleared", "role": o.n("r1")}),
             json!({"kind": "cleared", "via": {"kind": "group_role", "group": o.n("g2"), "role": o.n("r1")}, "scope": {"type": "platform"}})
         )
     );
@@ -1145,7 +1135,7 @@ async fn clearances_answer_for_engines_and_for_egret_per_gate() {
     assert_eq!(
         both(&g2, a),
         (
-            engines_no(json!("held_through_group")),
+            json!({"kind": "cleared", "role": o.n("r1")}),
             json!({"kind": "cleared", "via": {"kind": "role", "name": o.n("r1")}, "scope": {"type": "platform"}})
         )
     );
