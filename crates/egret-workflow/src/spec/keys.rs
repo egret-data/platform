@@ -1087,6 +1087,15 @@ impl Walk<'_> {
             if read.contains(&key) || TASK_MODEL_KEYS.contains(&key) {
                 continue;
             }
+            // `Request.encryptBody` is Kestra's, and egret judges it itself:
+            // `false` is accepted, anything else is `http_option_refused`
+            // (`validate::http_findings`, spec D4). It is not in the handler's
+            // struct, so without this it was ALSO `unknown_property`, whose
+            // "neither Kestra nor egret accepts it" is false here, and
+            // `encryptBody: false` could not be published (package #4 Task C6).
+            if canonical == h::http::REQUEST && key == "encryptBody" {
+                continue;
+            }
             let at = format!("{path}.{key}");
             if TASK_JAVA_UNREAD.contains(&key) {
                 if is_non_runnable(canonical) && matches!(key, "taskCache" | "workerSelector") {

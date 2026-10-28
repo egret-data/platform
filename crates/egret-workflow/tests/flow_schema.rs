@@ -621,29 +621,18 @@ fn every_type_with_known_outputs_carries_x_egret_outputs() {
     assert_eq!(names, ["row", "rows", "size", "uri"]);
 }
 
-/// The six egret-only types. `egret.sql` is served by every deployment since
-/// package #4 Task C5; the other five ([`UNSERVED`]) by none.
-const EGRET_ONLY: [&str; 6] = [
-    "egret.sql",
-    "egret.dataapi.call",
-    "egret.dataset.refresh",
-    "egret.report.send",
-    "core.http",
-    "core.slack",
-];
+/// The three egret-only types. `egret.sql` is served by every deployment
+/// since package #4 Task C5; the other two ([`UNSERVED`]) by none. Package #4
+/// Task C6 removed `egret.dataset.refresh`, `core.http` and `core.slack`
+/// (spec D10), which were six and five until then.
+const EGRET_ONLY: [&str; 3] = ["egret.sql", "egret.dataapi.call", "egret.report.send"];
 
 /// The egret-only types no deployment serves.
-const UNSERVED: [&str; 5] = [
-    "egret.dataapi.call",
-    "egret.dataset.refresh",
-    "egret.report.send",
-    "core.http",
-    "core.slack",
-];
+const UNSERVED: [&str; 2] = ["egret.dataapi.call", "egret.report.send"];
 
 /// Test 6: egret's own types are described, and require at least the
 /// fields publish resolves -- in the schema of a deployment that serves them
-/// (none serves the five [`UNSERVED`] ones, so the test names such a set;
+/// (none serves the two [`UNSERVED`] ones, so the test names such a set;
 /// their definitions are kept for the day a handler is wired).
 #[test]
 fn egret_only_types_are_described_with_their_required_properties() {
@@ -682,7 +671,7 @@ fn egret_only_types_are_described_with_their_required_properties() {
     );
 }
 
-/// No-silent-stall §4.4: under this binary's set none of the five unserved
+/// No-silent-stall §4.4: under this binary's set none of the two unserved
 /// types is offered, for any features or deployment, and `Log` and (since
 /// package #4 Task C5) `egret.sql` still are.
 #[test]

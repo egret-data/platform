@@ -36,47 +36,28 @@
   },
   "egret.dataapi.call": {
    "title": "Call a Data API endpoint of this workspace.",
-   "markdownDescription": "egret's own task. Publish resolves `endpoint` within this workspace and refuses a name that does not exist here.\n\n**This egret build registers no handler for this type**: a flow using it publishes, and its run does not progress past this task.",
+   "markdownDescription": "egret's own task. `endpoint` is the id of a Data API endpoint of this workspace; publish refuses an id this workspace does not hold.\n\n**No egret deployment runs this type yet**: publish and every start refuse a flow that uses it (`task_type_not_served`), and the flow schema does not offer it.",
    "properties": {
     "endpoint": {
      "type": "string",
      "minLength": 1,
-     "title": "The Data API endpoint, by name or id."
+     "title": "The Data API endpoint, by id.",
+     "markdownDescription": "The endpoint's id (a UUID), checked at publish against this workspace. A name is refused."
     }
    },
    "required": ["endpoint"]
   },
-  "egret.dataset.refresh": {
-   "title": "Refresh a dataset of this workspace.",
-   "markdownDescription": "egret's own task. Publish resolves `dataset` within this workspace and refuses a name that does not exist here.\n\n**This egret build registers no handler for this type**: a flow using it publishes, and its run does not progress past this task.",
-   "properties": {
-    "dataset": {
-     "type": "string",
-     "minLength": 1,
-     "title": "The dataset, by name or id."
-    }
-   },
-   "required": ["dataset"]
-  },
   "egret.report.send": {
    "title": "Send a chart of this workspace as a report.",
-   "markdownDescription": "egret's own task. Publish resolves `chart` within this workspace and refuses a name that does not exist here.\n\n**This egret build registers no handler for this type**: a flow using it publishes, and its run does not progress past this task.",
+   "markdownDescription": "egret's own task. `chart` names a chart of this workspace by id; publish cannot yet prove a chart's workspace, so it refuses every `chart`.\n\n**No egret deployment runs this type yet**: publish and every start refuse a flow that uses it (`task_type_not_served`), and the flow schema does not offer it.",
    "properties": {
     "chart": {
      "type": "string",
      "minLength": 1,
-     "title": "The chart, by name or id."
+     "title": "The chart, by id."
     }
    },
    "required": ["chart"]
-  },
-  "core.http": {
-   "title": "An HTTP request (reserved).",
-   "markdownDescription": "A type egret's registry accepts and publishes. It has no properties yet, because nothing reads any: **this egret build registers no handler for it**, so a flow using it publishes and its run does not progress past this task. For an HTTP call today, use a script task."
-  },
-  "core.slack": {
-   "title": "A Slack message (reserved).",
-   "markdownDescription": "A type egret's registry accepts and publishes. It has no properties yet, because nothing reads any: **this egret build registers no handler for it**, so a flow using it publishes and its run does not progress past this task."
   }
  },
  "property_overrides": {

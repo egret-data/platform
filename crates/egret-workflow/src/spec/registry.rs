@@ -51,8 +51,11 @@ pub struct TaskTypeSpec {
 ///
 /// **The converse does not hold, is not meant to, and does NOT fail the way its
 /// mirror did.** A row here with no handler is a type egret publishes and does
-/// not run: `core.http`, `core.slack`, and every `egret.*` task a given
-/// deployment does not wire in.
+/// not run: every `egret.*` task a given deployment does not wire in.
+/// *(2026-10-28, package #4 Task C6: this read "`core.http`, `core.slack`,
+/// and every `egret.*` task ..." until those two rows were removed; the
+/// types no deployment serves are now `egret.dataapi.call` and
+/// `egret.report.send` only, plus the script tasks without a runner.)*
 ///
 /// It would be easy to read that as "the same defect facing the other way".
 /// The missing-row case was a **400 at publish** — loud, immediate, and about a
@@ -75,7 +78,8 @@ pub struct TaskTypeSpec {
 /// **Not guarding it HERE is still the right call**, and the reason is the panic in
 /// [`add_publishable`](crate::worker::Handlers::add_publishable): the same
 /// mechanism facing this way would refuse to start any deployment that declines
-/// to wire `core.http` or the container tasks — which is every
+/// to wire `core.http` or the container tasks (since package #4 Task C6:
+/// `egret.dataapi.call`, `egret.report.send` or the container tasks) — which is every
 /// deployment, since `with_core_tasks` is eleven handlers and this table is
 /// twenty-four rows (5 `egret.*`, 2 short `core.*`, 17 Kestra FQCNs -- W5a replaced
 /// the `egret.container`/`egret.script.python` rows with four script-task
@@ -84,7 +88,12 @@ pub struct TaskTypeSpec {
 /// whole-file ones, all in it). *(2026-10-17, kill-and-exit Task 3 fix round 1:
 /// those counts were already stale; counted then, the table is 34 rows, the
 /// last added being `io.kestra.plugin.core.execution.Exit`, a row with no
-/// handler on purpose -- see [`EXECUTOR_LEVEL`].)* The
+/// handler on purpose -- see [`EXECUTOR_LEVEL`].)* *(2026-10-28, package #4
+/// Task C6: 40 rows -- 30 served on every deployment, the 4 script types a
+/// runner serves, the 4 [`EXECUTOR_LEVEL`] rows, and the 2 deferred
+/// `egret.*` types. `runtime`'s
+/// `every_row_is_served_executor_level_a_script_or_deferred` holds that
+/// partition, so the figures need not be restated here again.)* The
 /// asymmetry is deliberate, `main.rs` documents the shipping set, and what a
 /// flow using an unwired type gets is the per-deployment refusal above, not a
 /// startup panic.
@@ -142,14 +151,6 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
         }],
     },
     TaskTypeSpec {
-        r#type: "egret.dataset.refresh",
-        aliases: &[],
-        references: &[RefField {
-            field: "dataset",
-            kind: RefKind::Dataset,
-        }],
-    },
-    TaskTypeSpec {
         r#type: "egret.report.send",
         aliases: &[],
         references: &[RefField {
@@ -157,16 +158,9 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
             kind: RefKind::Chart,
         }],
     },
-    TaskTypeSpec {
-        r#type: "core.http",
-        aliases: &[],
-        references: &[],
-    },
-    TaskTypeSpec {
-        r#type: "core.slack",
-        aliases: &[],
-        references: &[],
-    },
+    // `egret.dataset.refresh`, `core.http` and `core.slack` had rows here
+    // until package #4 Task C6 (2026-10-28, spec D10) removed them: no
+    // deployment ever ran them. See [`REMOVED_TYPES`].
     // ── The four tasks `worker::Handlers::with_core_tasks` implements ────
     //
     // **FQCN canonical, short form as an alias, per programme spec section 8
@@ -397,6 +391,37 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
         references: &[],
     },
 ];
+
+/// Task types egret registered once and has since removed, each with the hint
+/// its `unknown_task_type` finding gives (`spec::validate`).
+///
+/// Package #4 Task C6 (2026-10-28, spec D10). None of the three ever had a
+/// handler, and since no-silent-stall Task 3 none could be published or
+/// started (`task_type_not_served`), so removing the rows changes only the
+/// finding a flow that still names one gets: `unknown_task_type`, with a
+/// hint. Without this table `core.http` and `core.slack` would get
+/// `unsupported_flow_task`, whose text calls them Kestra control-flow tasks,
+/// because they share the `core.` alias spelling.
+pub const REMOVED_TYPES: &[(&str, &str)] = &[
+    (
+        "core.http",
+        "use io.kestra.plugin.core.http.Request (or Download, or SseRequest)",
+    ),
+    (
+        "core.slack",
+        "egret has no Slack task; post to a Slack incoming webhook with \
+         io.kestra.plugin.core.http.Request",
+    ),
+    ("egret.dataset.refresh", "egret has no dataset refresh task"),
+];
+
+/// The hint for `t` if it is one of [`REMOVED_TYPES`].
+pub fn removed_type(t: &str) -> Option<&'static str> {
+    REMOVED_TYPES
+        .iter()
+        .find(|(r, _)| *r == t)
+        .map(|(_, hint)| *hint)
+}
 
 /// The registered types `advance()` runs itself, with no worker handler:
 /// `build_plan` plans them as executor-level kinds, so no run of one is ever

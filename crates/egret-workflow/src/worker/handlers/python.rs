@@ -30,7 +30,8 @@
 //! meaning with fixtures behind it; this handler is the new thing, so this
 //! handler is what renamed. `egret.script.python` follows the vocabulary that is
 //! already there (`egret.dataapi.call`, `egret.dataset.refresh`,
-//! `egret.report.send` all namespace before the verb) and reads as what it is —
+//! `egret.report.send` all namespace before the verb; `egret.dataset.refresh`
+//! was removed in package #4 Task C6) and reads as what it is —
 //! a script task, in Python. Nothing outside `crates/egret-workflow` referenced
 //! either name; measured with a repo-wide grep over `*.rs`, `*.ts`, `*.tsx`,
 //! `*.md`, `*.yaml`, `*.json`.

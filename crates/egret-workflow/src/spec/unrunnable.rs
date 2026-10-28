@@ -109,16 +109,19 @@ tasks:
         message: hi
     errors:
       - id: h1
-        type: core.http
+        type: egret.report.send
+        chart: c
   - id: dag
     type: io.kestra.plugin.core.flow.Dag
     tasks:
       - task:
           id: h3
-          type: core.http
+          type: egret.report.send
+          chart: c
 finally:
   - id: h2
-    type: core.http
+    type: egret.report.send
+    chart: c
 ";
         let mut got: Vec<(&str, String)> = findings(src)
             .into_iter()

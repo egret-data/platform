@@ -25,8 +25,9 @@
 //!   `workflow_containers`, the plugin types need it **and**
 //!   `workflow_kestra_plugins` -- the order the two publish gates check;
 //! * minus every task type this deployment does not serve
-//!   (`runtime::served()`, no-silent-stall §4.4): `core.http`,
-//!   `egret.report.send` and the other types no handler runs, and, with no container runner,
+//!   (`runtime::served()`, no-silent-stall §4.4): `egret.dataapi.call`
+//!   and `egret.report.send`, which no handler runs (`core.http` was named
+//!   here until package #4 Task C6 removed its row), and, with no container runner,
 //!   the script and plugin types -- the types publish refuses as
 //!   `task_type_not_served`;
 //! * of each Kestra type, only the properties egret honours or warns about.

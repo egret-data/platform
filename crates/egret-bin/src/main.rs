@@ -2225,7 +2225,18 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // `core.storage.Concat`/`Split`/`Reverse`/`DeduplicateItems`/`FilterItems`,
     // the storage ones over the store installed above -- plus
     // `core.storage.Delete`/`PurgeCurrentExecutionFiles`, which need the
-    // pool: thirteen of `spec::registry::TASK_TYPES`' twenty-three rows. With `docker` or `kubernetes` it adds Kestra's four script
+    // pool: thirteen of `spec::registry::TASK_TYPES`' twenty-three rows.
+    // *(2026-10-28, package #4 Task C6: that count was long stale. Counted
+    // now: `with_core_tasks` is thirteen handlers -- the eleven above plus
+    // group C1's `OutputValues` and `Assert` -- and `handlers_for` adds
+    // seventeen on every deployment (the two storage tasks, four namespace
+    // files tasks, six KV tasks, `PurgeLogs`, the three http tasks and
+    // `egret.sql`): thirty of the forty rows. The other ten are the four
+    // script types below, the four executor-level rows
+    // (`spec::registry::EXECUTOR_LEVEL`, no handler on purpose) and the two
+    // deferred `egret.*` types; `egret_workflow::runtime`'s
+    // `every_row_is_served_executor_level_a_script_or_deferred` holds that
+    // partition.)* With `docker` or `kubernetes` it adds Kestra's four script
     // task types and W4's two aliases over ONE runner built here, gated at run
     // time by the workspace feature `workflow_containers` (off by default) and
     // the `plugin_configurations` image allowlist, and the reaper's tick
@@ -2263,10 +2274,13 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // `WorkingDirectory`, ...) is covered too: the worker plans a stored
     // execution without validation (`executor::plan_stored`; validation gates
     // starts only), so its run reaches `NoHandler` or `NotALeaf` and fails.
-    // **Five registered `egret.*`/short `core.*` types have no handler,
-    // whatever the runner**, and since Task 3 none of them publishes or starts
-    // (`egret.dataapi.call`, `egret.dataset.refresh`, `egret.report.send`,
-    // `core.http`, `core.slack`). `egret.sql` was the sixth until package #4
+    // **Two registered `egret.*` types have no handler, whatever the
+    // runner**, and since Task 3 neither publishes nor starts
+    // (`egret.dataapi.call`, `egret.report.send`; package #4 spec D10 defers
+    // them). This said "Five registered `egret.*`/short `core.*` types" and
+    // also listed `egret.dataset.refresh`, `core.http` and `core.slack` until
+    // package #4 Task C6 (2026-10-28) removed those three rows: a flow naming
+    // one is now `unknown_task_type`. `egret.sql` was the sixth until package #4
     // Task C5 (2026-10-28) registered it; this said "Six of twenty-three ...
     // 23 rows = these 6 + the 13 core handlers above + the 4 script types a
     // runner serves" until then, and the row count was already stale (see

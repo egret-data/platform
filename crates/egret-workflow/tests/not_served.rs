@@ -273,6 +273,64 @@ async fn a_script_task_under_none_is_refused_once_by_the_served_check() {
     assert!(!body.contains("no default container runner"), "{body}");
 }
 
+/// Package #4 Task C6 (2026-10-28, spec D10): `core.http`, `core.slack` and
+/// `egret.dataset.refresh` lost their rows. A stored draft that still names
+/// one now reports `unknown_task_type` (with the type's hint) where it
+/// reported `task_type_not_served`, and publish and the API start refuse it
+/// as before, writing no execution. Only the code and the text moved.
+#[tokio::test]
+async fn a_stored_flow_using_a_removed_type_is_unknown_and_still_refused() {
+    let Some(fx) = fx().await else { return };
+    let app = common::app(&fx.db).await;
+    for (t, hint) in egret_workflow::spec::registry::REMOVED_TYPES {
+        let ns = fresh_ns();
+        let src = format!("id: f\nnamespace: {ns}\ntasks:\n  - id: q\n    type: {t}\n");
+        let flow = common::seed_flow(&fx.db, fx.ws, fx.user, &src, "draft").await;
+
+        let got = common::json(
+            common::get(
+                &app,
+                &format!("/api/ws/{}/workflows/flows/{flow}", fx.ws),
+                fx.user,
+            )
+            .await,
+        )
+        .await;
+        let errors = got["validation"]["errors"].as_array().expect("errors");
+        assert_eq!(errors.len(), 1, "{t}: {got}");
+        assert_eq!(errors[0]["code"], "unknown_task_type", "{t}");
+        assert_eq!(errors[0]["path"], "tasks.q", "{t}");
+        assert!(
+            errors[0]["message"].as_str().unwrap().ends_with(hint),
+            "{t}: {got}"
+        );
+        assert!(not_served_at(&got["validation"]["errors"], "tasks.q").is_none());
+
+        let res = common::post(
+            &app,
+            &format!("/api/ws/{}/workflows/flows/{flow}/publish", fx.ws),
+            fx.user,
+            serde_json::json!({ "note": "" }),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{t}");
+        let body = common::body_text(res).await;
+        assert!(body.contains("no longer recognises"), "{t}: {body}");
+
+        let res = common::post(
+            &app,
+            &format!("/api/ws/{}/workflows/flows/{flow}/executions", fx.ws),
+            fx.user,
+            serde_json::json!({ "inputs": {} }),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{t}");
+        let body = common::body_text(res).await;
+        assert!(body.contains("no longer recognises"), "{t}: {body}");
+    }
+    assert_eq!(executions_of_ws(&fx.db, fx.ws).await, 0);
+}
+
 // ── 4, 5: the API start, the webhook, replay ────────────────────────────────
 
 /// The API start answers 400 and writes no execution row.
@@ -599,7 +657,9 @@ async fn a_subflow_to_it_fails_its_run_with_the_message() {
 
 // ── 8: the schema ───────────────────────────────────────────────────────────
 
-/// The schema offers none of the five unwired types, still offers `Log` and
+/// The schema offers none of the unwired types (two since package #4 Task
+/// C6 removed the `core.http`, `core.slack` and `egret.dataset.refresh`
+/// rows), still offers `Log` and
 /// (since package #4 Task C5) `egret.sql`, and its `ETag` differs from the
 /// one built for a set that serves `egret.report.send`.
 #[test]
@@ -613,11 +673,12 @@ fn the_schema_offers_no_unserved_type() {
     let schema = egret_workflow::spec::schema::served(&features, &deployment);
     let defs = schema.value["$defs"].as_object().expect("$defs");
     for t in [
+        "egret.dataapi.call",
+        "egret.report.send",
+        // Not rows since package #4 Task C6: never offered either.
         "core.http",
         "core.slack",
-        "egret.dataapi.call",
         "egret.dataset.refresh",
-        "egret.report.send",
     ] {
         assert!(!defs.contains_key(t), "{t} is offered");
     }

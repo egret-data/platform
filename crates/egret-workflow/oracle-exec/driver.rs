@@ -885,6 +885,10 @@ const LIVE: usize = 295;
 /// `DeduplicateItems`, `FilterItems`), which the corpus writes in no flow, so
 /// they move no count here. **Since W9c Task 5** it holds the six
 /// `io.kestra.plugin.core.kv.*` FQCNs, which move one (see [`LIVE`]).
+/// *(2026-10-28, package #4 Task C6: `core.http`, `core.slack` and
+/// `egret.dataset.refresh` are no longer rows -- the corpus writes none of
+/// them, so their removal moves no count here; the "twenty-four" above was
+/// stale long before, and `TASK_TYPES` is the count.)*
 ///
 /// **The FQCN rows are what make most of [`LIVE`].** (This sentence said
 /// "makes `LIVE` 248" and "false for 227 of the 248" after `LIVE` had moved

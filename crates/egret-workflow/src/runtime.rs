@@ -1182,6 +1182,51 @@ mod tests {
         Served::from_handlers(&h)
     }
 
+    /// Package #4 Task C6 (spec D10): every `TASK_TYPES` row is exactly one
+    /// of: served on every deployment (a handler of `handlers_for(none)`),
+    /// executor-level, a script type a runner serves, or one of the two
+    /// deferred `egret.*` types. A new row with no handler, or a deferred type
+    /// that gains one, fails here -- and the counts the comments in
+    /// `spec::registry`, `worker::claim` and egret-bin's `main.rs` give (40 =
+    /// 30 + 4 + 4 + 2) are this test's, so they need not be restated.
+    #[tokio::test]
+    async fn every_row_is_served_executor_level_a_script_or_deferred() {
+        const DEFERRED: [&str; 2] = ["egret.dataapi.call", "egret.report.send"];
+        let none = built(&cfg(egret_config::ContainerRunner::None)).await;
+        let scripts: Vec<&str> = crate::scripts::ScriptKind::ALL
+            .into_iter()
+            .map(|k| k.fqcn())
+            .collect();
+        let (mut served, mut executor, mut script, mut deferred) = (0, 0, 0, 0);
+        for row in crate::spec::registry::TASK_TYPES {
+            let t = row.r#type;
+            let kinds = [
+                none.0.contains(t),
+                crate::spec::registry::executor_level(t),
+                scripts.contains(&t),
+                DEFERRED.contains(&t),
+            ];
+            assert_eq!(
+                kinds.iter().filter(|k| **k).count(),
+                1,
+                "{t}: served/executor/script/deferred = {kinds:?}"
+            );
+            served += usize::from(kinds[0]);
+            executor += usize::from(kinds[1]);
+            script += usize::from(kinds[2]);
+            deferred += usize::from(kinds[3]);
+        }
+        assert_eq!(
+            (served, executor, script, deferred),
+            (30, 4, 4, 2),
+            "the counts the comments quote"
+        );
+        for removed in ["core.http", "core.slack", "egret.dataset.refresh"] {
+            assert!(crate::spec::registry::known_type(removed).is_none());
+            assert!(crate::spec::registry::removed_type(removed).is_some());
+        }
+    }
+
     /// The drift test (spec §4.1): a handler registered without `served_for`
     /// knowing, or the reverse, fails here.
     #[tokio::test]

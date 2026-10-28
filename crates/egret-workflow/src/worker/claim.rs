@@ -976,7 +976,14 @@ pub async fn wake(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
 /// it is executor-level (`spec::registry::EXECUTOR_LEVEL`), so it is not one of
 /// the types this paragraph is about.)* *(2026-10-28, package #4 Task C5:
 /// `egret.sql` is no longer one of the six -- `runtime::handlers_for`
-/// registers it on every deployment, over egret-bin's query port.)* [`reap`] then
+/// registers it on every deployment, over egret-bin's query port.)*
+/// *(2026-10-28, package #4 Task C6: `egret.dataset.refresh`, `core.http` and
+/// `core.slack` are no longer rows at all, so the types no deployment serves
+/// are `egret.dataapi.call` and `egret.report.send`; `TASK_TYPES` is 40 rows,
+/// 30 of them served on every deployment by `runtime::handlers_for`, which
+/// `runtime`'s `every_row_is_served_executor_level_a_script_or_deferred`
+/// holds. And since no-silent-stall Task 4 none of this hangs: the worker
+/// FAILS such a run -- the paragraph below is the history that fix closed.)* [`reap`] then
 /// clears `claimed_at` and **nothing else** — its statement is
 /// `SET claimed_at = NULL, updated_at = now()`, so the state stays `RUNNING` and
 /// the attempt stays open — and `claim`'s own predicate is

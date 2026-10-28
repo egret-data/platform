@@ -313,13 +313,17 @@ class needs `plugins::gate::check` (both features, a runner, its FQCN in
 
 Hand-written, for what the export cannot describe:
 
-* `egret.sql`, `egret.dataapi.call`, `egret.dataset.refresh`,
-  `egret.report.send`, `core.http`, `core.slack` -- egret's own registry
-  types. `mod.rs` adds Kestra's schemas of the base task properties
+* `egret.sql`, `egret.dataapi.call`, `egret.report.send` -- egret's own
+  registry types. `mod.rs` adds Kestra's schemas of the base task properties
   (`id`, `type`, `description`, `retry`, `timeout`, `disabled`, `runIf`,
   `allowFailure`, `allowWarning`). `egret.sql`'s properties are its handler's
-  struct; the other five have no handler in this build, so each offers only the
-  field publish resolves (none for `core.http`/`core.slack`), and says so.
+  struct; the other two have no handler on any deployment (package #4 spec
+  D10 defers them), so each offers only the field publish resolves, and says
+  so. They are never served (`runtime::served()` lacks them); their
+  definitions are kept for the day a handler is wired. `egret.dataset.refresh`,
+  `core.http` and `core.slack` had entries here until package #4 Task C6
+  (2026-10-28) removed their registry rows; none of them is a measured row,
+  so `property-treatment.json` did not change.
 * `taskRunner` on the four script tasks: Kestra's definition offers
   `io.kestra.plugin.core.runner.Process` (refused by egret) and lacks
   Kubernetes (Enterprise-only in Kestra, implemented by egret), so it is
