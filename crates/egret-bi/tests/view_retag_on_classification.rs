@@ -116,28 +116,26 @@ async fn setup() -> Option<Fx> {
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     let pool = &db.pool;
-    // Every test in this binary seeds this def at once, against one database.
-    // `ON CONFLICT (id)` makes only the primary key the arbiter, so a racer that
-    // misses the other's uncommitted `id` still collides on the `name` UNIQUE
-    // index and raises `authz_service_defs_name_key` instead of doing nothing.
-    // With no conflict target every unique index is an arbiter.
-    sqlx::query(
-        "INSERT INTO policy.authz_service_defs (id, name, def_jsonb) VALUES ($1, $2, '{}'::jsonb) \
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(950951_i64)
-    .bind("trino_vr")
-    .execute(pool)
-    .await
-    .unwrap();
-    let service: i64 = sqlx::query_scalar(
-        "INSERT INTO policy.authz_services (name, type, config_jsonb) \
-         VALUES ($1, 'trino_vr', '{}'::jsonb) RETURNING id",
-    )
-    .bind(unique("trino_vr"))
-    .fetch_one(pool)
-    .await
-    .unwrap();
+    // The real Trino and tag service-defs, seeded as the server does at startup,
+    // and a Trino profile of its own type with a tag service. An engine bound to a
+    // profile of another type is refused at compile (d-i), so a fake type would not compile.
+    let store = egret_policy::PolicyStore::new(db.clone());
+    egret_policy::seed_trino(&store).await.expect("seed trino service-def");
+    egret_policy::seed_tag(&store).await.expect("seed tag service-def");
+    let tag_service = unique("vr_tag");
+    store
+        .create_service(&tag_service, "tag", &serde_json::json!({}))
+        .await
+        .expect("tag service");
+    let service: i64 = store
+        .create_service(
+            &unique("trino_vr"),
+            "trino",
+            &serde_json::json!({ "tagService": tag_service }),
+        )
+        .await
+        .expect("profile")
+        .id;
     let engine: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
          VALUES ($1, 'trino', 'egret', '{}'::jsonb, $2) RETURNING id",

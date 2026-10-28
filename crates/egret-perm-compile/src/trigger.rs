@@ -1518,11 +1518,44 @@ async fn record_compiled(
 /// lock ([`crate::members::lock_compile_mints_in_tx`], which states the order:
 /// profiles, then that lock, then any row write or mint), which is what rules
 /// the cycle out — the sweep keeps it to one acquisition in the common case.
+/// Refuse to compile a profile that an engine of another type is bound to (d-i).
+/// `check_profile_bindable` refuses such a bind; this catches a binding that
+/// predates it, on every write that would recompile the profile.
+async fn refuse_engine_of_another_type(
+    tx: &mut Transaction<'_, Postgres>,
+    service_id: i64,
+) -> Result<(), CompileError> {
+    let mismatch: Option<(String, String, String, String)> = sqlx::query_as(
+        "SELECT s.name, s.type, e.name, e.type \
+           FROM engine_mgmt.engines e \
+           JOIN policy.authz_services s ON s.id = e.authz_service_id \
+          WHERE e.authz_service_id = $1 AND e.type <> s.type \
+          ORDER BY e.name \
+          LIMIT 1",
+    )
+    .bind(service_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    match mismatch {
+        None => Ok(()),
+        Some((profile, profile_type, engine, engine_type)) => {
+            Err(CompileError::EngineTypeMismatch {
+                profile,
+                profile_type,
+                engine,
+                engine_type,
+            })
+        }
+    }
+}
+
 pub async fn recompile_service_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     service_id: i64,
 ) -> Result<CompileSummary, CompileError> {
     lock_services_in_tx(tx, &[service_id]).await?;
+    refuse_engine_of_another_type(tx, service_id).await?;
     crate::members::premint_model_usernames(tx).await?;
     recompile_locked_service_in_tx(tx, service_id).await
 }

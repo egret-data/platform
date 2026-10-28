@@ -13027,6 +13027,17 @@ async fn a_late_bind_that_cannot_complete_fails_the_apply_and_leaves_the_engine_
     assert!(authz_service_of(&f, &name).await.is_some());
 }
 
+/// A StarRocks engine bound to a Trino profile is refused with the cross-type
+/// message, not created (d-i).
+fn assert_cross_type_refusal(status: StatusCode, body: &serde_json::Value) {
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("has type trino, but engine") && error.contains("is a starrocks engine"),
+        "the refusal names the two types: {body}"
+    );
+}
+
 /// C1, StarRocks: `POST /engines` with `authzServiceId`.
 #[tokio::test]
 async fn a_starrocks_create_with_authz_service_id_that_creates_an_overlap_is_409_and_creates_nothing(
@@ -13048,7 +13059,9 @@ async fn a_starrocks_create_with_authz_service_id_that_creates_an_overlap_is_409
         Some(starrocks_create_body(&name, wh, unit.profile)),
     )
     .await;
-    assert_rule_overlap(status, &body);
+    // The tag profile is Trino and the engine StarRocks: a cross-type bind is
+    // refused before any overlap is weighed, and the create is undone (d-i).
+    assert_cross_type_refusal(status, &body);
     assert_eq!(
         engine_rows_named(&f, &name).await,
         0,
@@ -13071,8 +13084,12 @@ async fn a_starrocks_create_with_authz_service_id_that_creates_an_overlap_is_409
         Some(starrocks_create_body(&ok_name, wh2, ok.profile)),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-    assert_eq!(authz_service_of(&f, &ok_name).await, Some(ok.profile));
+    assert_cross_type_refusal(status, &body);
+    assert_eq!(
+        engine_rows_named(&f, &ok_name).await,
+        0,
+        "the create is undone"
+    );
 }
 
 /// C1, the late-bind inside an apply: Ranger turned on after an unbound create
