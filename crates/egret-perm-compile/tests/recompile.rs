@@ -145,8 +145,9 @@ async fn seed_starrocks_engine_with_tag_rule(db: &Db) -> Fixture {
         .await
         .expect("initial recompile");
     assert_eq!(
-        summary.created, 1,
-        "the fixture's one pre-tagged column must compile to exactly one StarRocks masking policy"
+        summary.created, 2,
+        "the fixture's one pre-tagged column must compile to one StarRocks masking policy and \
+         the hidden-column deny on its table (§11.4)"
     );
 
     Fixture {
@@ -286,8 +287,16 @@ async fn tagging_a_new_column_recompiles_the_starrocks_profile() {
     let pool = &db.pool;
 
     let before = policies_for(pool, f.service_id).await;
-    assert_eq!(before.len(), 1, "fixture seeded exactly one tagged column");
-    let (email_id, email_name, email_body) = before[0].clone();
+    assert_eq!(
+        before.len(),
+        2,
+        "fixture seeded exactly one tagged column: its masking policy and its hidden-column deny"
+    );
+    let (email_id, email_name, email_body) = before
+        .iter()
+        .find(|(_, name, _)| name.starts_with(egret_policy::COMPILER_RULE_PREFIX))
+        .cloned()
+        .expect("the tagged column's masking policy");
 
     let tag_key: String = sqlx::query_scalar(
         "SELECT t.key FROM tags t JOIN catalog_tag_assignments a ON a.tag_id = t.id \
@@ -333,8 +342,10 @@ async fn tagging_a_new_column_recompiles_the_starrocks_profile() {
     // engine, as a masking policy — value-level, not just "a row appeared".
     let new_policy = after
         .iter()
-        .find(|(id, ..)| *id != email_id)
-        .expect("a new policy row must exist");
+        .find(|(id, name, _)| {
+            *id != email_id && name.starts_with(egret_policy::COMPILER_RULE_PREFIX)
+        })
+        .expect("a new masking policy row must exist");
     assert_eq!(new_policy.2["policyType"], 1, "masking policy");
     assert_eq!(
         new_policy.2["serviceType"], "starrocks",
@@ -366,7 +377,10 @@ async fn recompiling_an_unchanged_model_writes_nothing_and_keeps_policy_ids() {
     assert_eq!(summary.created, 0);
     assert_eq!(summary.updated, 0);
     assert_eq!(summary.deleted, 0);
-    assert_eq!(summary.unchanged, 1);
+    assert_eq!(
+        summary.unchanged, 2,
+        "the masking policy and its hidden-column deny"
+    );
     assert!(!summary.wrote_anything());
 
     let after = policies_for(pool, f.service_id).await;
@@ -446,8 +460,8 @@ async fn an_implicit_grant_for_an_empty_workspace_compiles_to_nothing() {
         "the grant must compile to NO policy (skipped), and the rule was already compiled (unchanged)"
     );
     assert_eq!(
-        summary.unchanged, 1,
-        "the existing StarRocks masking policy is untouched"
+        summary.unchanged, 2,
+        "the existing StarRocks masking policy and its hidden-column deny are untouched"
     );
     assert_eq!(
         summary.skipped.len(),
@@ -563,12 +577,12 @@ async fn deleting_a_grant_reaps_its_policy_on_the_next_recompile() {
 
     // The unrelated, still-live rule-based policy from the fixture must be
     // untouched by this — proves the sweep reaps the RIGHT policy, not just
-    // any policy.
+    // any policy. Its hidden-column deny stays too: the mask it guards stays.
     let remaining = policies_for(pool, f.service_id).await;
     assert_eq!(
         remaining.len(),
-        1,
-        "only the pre-existing rule-based policy should remain"
+        2,
+        "only the pre-existing rule-based policy and its hidden-column deny should remain"
     );
     assert_ne!(remaining[0].0, grant_policy_id);
 }
@@ -857,7 +871,8 @@ async fn the_profile_total_ceiling_refuses_and_names_the_profile_and_the_total()
             ..
         } => {
             assert_eq!(profile, service_name, "the refusal must name the PROFILE");
-            assert_eq!(total, 1200, "the refusal must name the running TOTAL");
+            // 1200 column masks plus one hidden-column deny per masked table (§11.4).
+            assert_eq!(total, 1204, "the refusal must name the running TOTAL");
             assert_eq!(ceiling, 1000);
         }
         other => panic!("expected ProfileExpansionCeiling, got {other:?}"),
@@ -926,8 +941,9 @@ async fn a_profile_already_over_the_cap_can_still_shrink_by_deleting_a_rule() {
             .await
             .expect("count");
     assert_eq!(
-        stored_before_first, 1650,
-        "sanity: 1 real + 1649 dummy, already over PROFILE_EXPANSION_CEILING (1000)"
+        stored_before_first, 1651,
+        "sanity: 1 masked column + its hidden-column deny + 1649 dummy, already over \
+         PROFILE_EXPANSION_CEILING (1000)"
     );
 
     // First recompile: desired 1600 is OVER the ceiling, but the STORED
@@ -944,8 +960,8 @@ async fn a_profile_already_over_the_cap_can_still_shrink_by_deleting_a_rule() {
     let after_first = policies_for(pool, f.service_id).await;
     assert_eq!(
         after_first.len(),
-        1600,
-        "1 unchanged (email) + 1599 newly created = 1600 real compiler-owned policies"
+        1604,
+        "1600 column masks (the email one unchanged) + 4 hidden-column denies, one per masked table"
     );
 
     // Now delete ONE of the three extra rules: desired drops from 1600 to
@@ -965,15 +981,15 @@ async fn a_profile_already_over_the_cap_can_still_shrink_by_deleting_a_rule() {
              shrank from 1600 to 1200, even though 1200 is still over the ceiling",
         );
     assert_eq!(
-        summary2.deleted, 400,
-        "the deleted rule's 400 policies must be reaped"
+        summary2.deleted, 401,
+        "the deleted rule's 400 masks and the hidden-column deny of its table must be reaped"
     );
 
     let after_second = policies_for(pool, f.service_id).await;
     assert_eq!(
         after_second.len(),
-        1200,
-        "1200 real compiler-owned policies remain after the rule delete"
+        1203,
+        "1200 column masks + 3 hidden-column denies remain after the rule delete"
     );
 }
 

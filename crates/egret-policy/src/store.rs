@@ -125,6 +125,14 @@ pub const COMPILER_CLEARANCE_PREFIX: &str = "perm-clearance-";
 /// Migration 0195 renamed every hand-written policy that carried it before the
 /// reservation (spec E19).
 pub const COMPILER_ENGINE_GRANT_PREFIX: &str = "perm-engine-";
+/// Name prefix every HIDDEN-COLUMN policy the compiler produces on StarRocks —
+/// `format!("{COMPILER_HIDDEN_PREFIX}{catalog}.{database}.{table}")`, one per
+/// masked table (§11.4). It denies `public` the hidden `_file` and `_pos`
+/// columns that a `SELECT *` still reaches past the masks. Its own prefix for
+/// the reason the clearance has one: its name is keyed by a table, not by a
+/// row a reader could mistake for a grant, and the sweep must reap it the
+/// moment no column of that table is masked any more.
+pub const COMPILER_HIDDEN_PREFIX: &str = "perm-hidden-";
 
 /// Whether `name` identifies a policy the SP4a permission-model compiler
 /// owns (produced by `compile_grant`/`compile_rule`/`compile_clearance` and
@@ -136,6 +144,7 @@ pub fn is_compiler_owned_policy_name(name: &str) -> bool {
         || name.starts_with(COMPILER_RULE_PREFIX)
         || name.starts_with(COMPILER_CLEARANCE_PREFIX)
         || name.starts_with(COMPILER_ENGINE_GRANT_PREFIX)
+        || name.starts_with(COMPILER_HIDDEN_PREFIX)
 }
 
 /// SP4a Task 8 fix round 3: refuse a human write that would put (or leave) a
@@ -163,7 +172,8 @@ pub(crate) fn refuse_reserved_name(name: &str) -> Result<(), PolicyStoreError> {
         return Err(PolicyStoreError::CompilerOwned(format!(
             "policy name {name:?} starts with a prefix reserved for the SP4a permission model \
              ({COMPILER_GRANT_PREFIX:?} / {COMPILER_RULE_PREFIX:?} / \
-             {COMPILER_CLEARANCE_PREFIX:?} / {COMPILER_ENGINE_GRANT_PREFIX:?}) — only its \
+             {COMPILER_CLEARANCE_PREFIX:?} / {COMPILER_ENGINE_GRANT_PREFIX:?} / \
+             {COMPILER_HIDDEN_PREFIX:?}) — only its \
              compiler writes policies there; rename this policy instead of retrying"
         )));
     }

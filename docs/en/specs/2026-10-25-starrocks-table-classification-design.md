@@ -353,9 +353,14 @@ message grows.
 2. `recompile_role_referencing_profiles` recompiles every profile in one transaction (E13): one refusing profile rolls
    the whole boot pass back. This package's boot pass is per profile and does not depend on it.
 3. Package 2 live finding 4: a refused preview links the unsaved rule's id. Unchanged.
-4. Masks alone expose `_file`/`_pos` (the object-store path) on `SELECT *` (Step 0 live spike, §14). Today's
-   column-level clearance on a table where EVERY column is classified probably has the same exposure: pre-existing,
-   unmeasured.
+4. Masks alone expose `_file`/`_pos` (the object-store path) on `SELECT *` (Step 0 live spike, §14). **§11.4 (2026-10-28):
+   fixed in code; live check passed.** Before the fix, `reader` got the hashed `name` plus `_file` (s3 path) and `_pos`
+   on `SELECT * FROM t_mask`; after it, the same query is refused with `ERROR 5204` on `_file`, and `cleared` still reads real values. Every StarRocks table with a data mask gets one deny on `_file` and `_pos`
+   (`perm-hidden-{catalog}.{database}.{table}`, `clearance::hidden_column_denies`): `public` is denied, and
+   `denyExceptions` are the users with `MASK_NONE` on every masked column of the table. The narrow deny is first; a
+   blanket `column: *` is the fallback only if the narrow one fails the live probe. A wildcard or excluded table mask
+   names no one table, so it gets no deny: a known gap. Today's column-level clearance on a table where EVERY column is
+   classified probably has the same exposure: pre-existing, unmeasured.
 5. A table-commit recompile that fails AFTER the commit (a lock wait past `DEFAULT_LOCK_WAIT`, 10 s, while other
    permission writes hold the profile; or a register whose compensating drop fails) is logged and recorded in
    `perm.compile_runs` (the Overview's `compile_failed` shows it) and retried only by the next recompile of that

@@ -59,7 +59,7 @@ pub use store::{
     tag_name_for_key_via, tag_names_for_keys_via, update_policy_via, usable_tag_services_via,
     CatalogRow, PolicyRow, PolicyStore, ResolvedTag, ServiceRow, ServiceTagAssignmentRow,
     TagAssignmentRow, COMPILER_CLEARANCE_PREFIX, COMPILER_ENGINE_GRANT_PREFIX,
-    COMPILER_GRANT_PREFIX, COMPILER_RULE_PREFIX,
+    COMPILER_GRANT_PREFIX, COMPILER_HIDDEN_PREFIX, COMPILER_RULE_PREFIX,
 };
 
 /// The Policy/Ranger seam's OpenAPI document (E0·P4b-5): the admin Policies
