@@ -1455,12 +1455,15 @@ fn uppercase_unicode_escapes(quoted: &str) -> String {
 /// exponent, and for every value in the normal range that is the same digit
 /// sequence Java picks, so this only has to re-lay-out what it gives.
 ///
-/// **The digit sequences diverge at subnormals.** `5e-324` (the smallest
-/// positive double) is `4.9E-324` in Java and `5.0E-324` here: both round-trip
-/// to the same bit pattern, but Java's shortest-decimal algorithm and Rust's
-/// break the tie differently down there. No corpus entry reaches it and no
-/// plausible flow does; recorded so the claim above is not read as
-/// unconditional.
+/// **One digit is never enough for Java.** `Double.toString` (JDK 19+, the
+/// Raffaello Giulietti algorithm Kestra's JVM runs) takes the shortest decimal
+/// that round-trips, but when that is ONE digit it takes instead the
+/// two-digit decimal closest to the double. In the normal range the two agree
+/// (`2.0`, `1.0E-5`); at subnormals the rounding interval is wide enough that
+/// they do not: the smallest positive double is `5e-324` shortest and
+/// `4.9E-324` in Java, twice it `1e-323` and `9.9E-324` (measured with
+/// `jshell` on JDK 25, fix wave #5a M9). So a one-digit result is replaced by
+/// Rust's correctly rounded two-digit form whenever that round-trips too.
 pub(crate) fn write_java_double(out: &mut String, x: f64) {
     if x.is_nan() {
         out.push_str("NaN");
@@ -1471,7 +1474,15 @@ pub(crate) fn write_java_double(out: &mut String, x: f64) {
         return;
     }
 
-    let sci = format!("{x:e}");
+    let mut sci = format!("{x:e}");
+    if !sci.contains('.') {
+        let two = format!("{x:.1e}");
+        // `d.0` is the one-digit form again; only a different second digit
+        // is Java's correction.
+        if !two.contains(".0e") && two.parse::<f64>() == Ok(x) {
+            sci = two;
+        }
+    }
     let (mantissa, exponent) = match sci.split_once('e') {
         Some(parts) => parts,
         None => {
@@ -3766,6 +3777,36 @@ mod tests {
         assert_eq!(f(f64::NAN), "NaN");
         assert_eq!(f(f64::INFINITY), "Infinity");
         assert_eq!(f(f64::NEG_INFINITY), "-Infinity");
+        assert_eq!(f(2.0), "2.0");
+        assert_eq!(f(100.0), "100.0");
+        assert_eq!(f(1e23), "1.0E23");
+        assert_eq!(f(1e-5), "1.0E-5");
+    }
+
+    /// Fix wave #5a M9: a one-digit shortest decimal becomes Java's closest
+    /// two-digit one. Every right-hand side is `Double.toString(
+    /// Double.MIN_VALUE * k)` measured with `jshell` on JDK 25.
+    #[test]
+    fn subnormals_print_javas_two_digits() {
+        let f = |x: f64| {
+            let mut s = String::new();
+            write_java_double(&mut s, x);
+            s
+        };
+        for (k, want) in [
+            (1u32, "4.9E-324"),
+            (2, "9.9E-324"),
+            (3, "1.5E-323"),
+            (4, "2.0E-323"),
+            (9, "4.4E-323"),
+            (10, "4.9E-323"),
+            (12, "5.9E-323"),
+        ] {
+            assert_eq!(f(f64::from_bits(1) * f64::from(k)), want, "MIN_VALUE * {k}");
+        }
+        assert_eq!(f(-f64::from_bits(1)), "-4.9E-324");
+        assert_eq!(f(1e-310), "1.0E-310");
+        assert_eq!(f(f64::MIN_POSITIVE), "2.2250738585072014E-308");
     }
 
     /// **C2.** `isIn` became a function call, and minijinja does not apply
@@ -4117,19 +4158,43 @@ mod tests {
     /// `runners::arith`'s `big_decimal_arithmetic_is_javas`.
     #[test]
     fn arithmetic_kestra_refuses_is_refused_here_too() {
-        for (source, ctx) in [
-            ("{{ 7 % 0 }}", json!({})),
-            ("{{ '1.5' | number(type='BIGDECIMAL') / 0 }}", json!({})),
-            ("{{ n + 1 }}", json!({ "n": null })),
-            ("{{ 2 * n }}", json!({ "n": null })),
-            ("{{ 2 + [1] }}", json!({})),
-            ("{{ m + 1 }}", json!({ "m": { "a": 1 } })),
-            ("{{ m + n }}", json!({ "m": { "a": 1 }, "n": { "b": 2 } })),
+        for (source, ctx, text) in [
+            (
+                "{{ 7 % 0 }}",
+                json!({}),
+                "Could not perform greater modulus",
+            ),
+            (
+                "{{ '1.5' | number(type='BIGDECIMAL') / 0 }}",
+                json!({}),
+                "Could not perform division",
+            ),
+            (
+                "{{ n + 1 }}",
+                json!({ "n": null }),
+                "Could not perform addition",
+            ),
+            (
+                "{{ 2 * n }}",
+                json!({ "n": null }),
+                "Could not perform multiplication",
+            ),
+            ("{{ 2 + [1] }}", json!({}), "Could not perform addition"),
+            (
+                "{{ m + 1 }}",
+                json!({ "m": { "a": 1 } }),
+                "Could not perform addition",
+            ),
+            (
+                "{{ m + n }}",
+                json!({ "m": { "a": 1 }, "n": { "b": 2 } }),
+                "Could not perform addition",
+            ),
         ] {
             let got = render(source, ctx);
             assert!(
-                got.is_err(),
-                "{source} must fail, as Kestra's does; got {got:?}"
+                matches!(got, Err(RenderError::Template(ref m)) if m.contains(text)),
+                "{source} must fail with Kestra's `{text}`; got {got:?}"
             );
         }
     }
@@ -4140,8 +4205,15 @@ mod tests {
     /// to [`a_missing_right_side_kestra_reaches_fails_on_it`] with Task A5.)
     #[test]
     fn a_missing_operand_kestra_evaluates_fails_here_too() {
+        // Kestra fails on the missing root (`LessThanExpression` evaluates
+        // both operands before comparing), not on comparing the boolean
+        // `2 < 1` (`Could not perform less than comparison`): fix wave #5a M6.
         let got = render("{{ 2 < 1 < missing.x }}", json!({}));
-        assert!(got.is_err(), "must fail, as Kestra's does; got {got:?}");
+        assert!(
+            matches!(got, Err(RenderError::Template(ref m))
+                if m.contains("undefined") && !m.contains("comparison")),
+            "must fail on the undefined operand, as Kestra's does; got {got:?}"
+        );
     }
 
     /// Package #5a, Task A5 (spec D6, Q6): `??`/`???` answer through a missing
