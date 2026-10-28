@@ -111,7 +111,9 @@ pub(crate) fn compile_comparisons(source: &str) -> Result<String, RewriteError> 
 /// c))`, `a - b + c` is `kestra_add(kestra_sub(a, b), c)` (left-associative,
 /// as Pebble's `+`/`-` and `*`/`/`/`%` are), `-a / b` divides the negated
 /// `a`, and `a ~ b + c` is `(a ~ b) + c` in both engines (`~` is 110 in
-/// Pebble, above `+`). Unary minus, `~`, `//` and `**` are not touched.
+/// Pebble, above `+`). A unary minus on anything but a number literal
+/// becomes `kestra_mul(-1, x)`, Pebble's `unaryMinus` (Task A8); `~`, `//`
+/// and `**` are not touched.
 /// Everything the module doc says about preserved bytes, unparsed regions,
 /// `{% do %}`, raw blocks and the reserved prefix holds for this pass too.
 pub(crate) fn compile_arithmetic(source: &str) -> Result<String, RewriteError> {
@@ -879,17 +881,62 @@ impl Parser<'_> {
 
     /// `parse_unary`: unary minus, postfix, then filters and tests.
     fn unary(&mut self) -> Parsed {
+        let first = self.pos;
         self.unary_only()?;
         self.postfix()?;
+        self.unary_minus_sites(first);
         self.filter_expr()
     }
 
     /// `unaryop!(parse_unary_only, parse_primary, -)`, iteratively.
+    ///
+    /// In the arithmetic pass a unary minus becomes `kestra_mul(-1, x)`
+    /// ([`Self::unary_minus_sites`], recorded once the postfix steps are
+    /// read).
     fn unary_only(&mut self) -> Parsed {
         while self.is_op("-") {
             self.pos += 1;
         }
         self.primary()
+    }
+
+    /// Records `kestra_mul(-1, x)` for each leading `-` of the operand that
+    /// starts at `first` and ends where the parse is now, in the arithmetic
+    /// pass. This is Pebble's `OperatorUtils.unaryMinus` (`multiply(-1, x)`,
+    /// read with `javap -c`), so `-fromIon(ion='1.50')` is the BigDecimal
+    /// `-1.50` and `-'5'` is `-5` (package #5a Task A8, 2026-10-29).
+    ///
+    /// The operand is Pebble's: the primary **with** its postfix steps, so
+    /// `-a.b` is `-(a.b)` and `-f(x)` negates the call's result. minijinja
+    /// reads them as `(-a).b` and `(-f)(x)`, which fail on every value
+    /// Pebble's reading answers, so nothing that rendered before changes. A
+    /// number literal with no postfix is left as it is: `-1` and
+    /// `kestra_mul(-1, 1)` are the same value in both engines, and the
+    /// compiled text stays readable. Kept out of the recursive frames
+    /// ([`Self::unary`]), which every bracket level passes through:
+    /// `deep_nesting_is_bounded` runs the pass on a 256 KiB stack.
+    #[inline(never)]
+    fn unary_minus_sites(&mut self, first: usize) {
+        if self.pass != Pass::Arithmetic {
+            return;
+        }
+        let mut primary = first;
+        while primary < self.pos && matches!(self.toks[primary].kind, Kind::Op("-")) {
+            primary += 1;
+        }
+        let literal =
+            self.pos == primary + 1 && matches!(self.toks[primary].kind, Kind::Num { .. });
+        if primary == first || literal {
+            return;
+        }
+        // Innermost first, as every other site is recorded.
+        for minus in (first..primary).rev() {
+            self.sites.push(Site {
+                start: minus,
+                end: self.pos - 1,
+                ops: vec![(minus, minus, ArithOp::Mul.function())],
+            });
+        }
     }
 
     fn primary(&mut self) -> Parsed {
@@ -972,8 +1019,10 @@ impl Parser<'_> {
                         | Kind::Open(b'[')
                         | Kind::Open(b'{'),
                     ) => {
+                        let first = self.pos;
                         self.unary_only()?;
                         self.postfix()?;
+                        self.unary_minus_sites(first);
                     }
                     _ => {}
                 }
@@ -1068,7 +1117,17 @@ fn emit(
         }
         prefix[site.start] = Some(open);
         for (index, &(first, last, _)) in site.ops.iter().enumerate() {
-            replacement[first] = Some(if index == 0 { "," } else { ")," }.to_string());
+            // An operator on the site's own first token has no left operand:
+            // it is a unary minus (`Parser::unary_minus_sites`), and `-x` becomes
+            // `kestra_mul(-1, x)`.
+            let text = if first == site.start {
+                "-1,"
+            } else if index == 0 {
+                ","
+            } else {
+                "),"
+            };
+            replacement[first] = Some(text.to_string());
             if last != first {
                 replacement[last] = Some(String::new());
             }

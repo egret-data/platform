@@ -864,8 +864,8 @@ mod tests {
                 "{{ a / b % c }}",
                 "{{ kestra_mod( kestra_div( a , b ), c) }}",
             ),
-            ("{{ -a / b }}", "{{ kestra_div( -a , b) }}"),
-            ("{{ a - -b }}", "{{ kestra_sub( a , -b) }}"),
+            ("{{ -a / b }}", "{{ kestra_div( kestra_mul( -1,a) , b) }}"),
+            ("{{ a - -b }}", "{{ kestra_sub( a , kestra_mul( -1,b)) }}"),
             ("{{ a ~ b + c }}", "{{ kestra_add( a ~ b , c) }}"),
             ("{{ a + b ~ c }}", "{{ kestra_add( a , b ~ c) }}"),
             (
@@ -881,7 +881,17 @@ mod tests {
                 "{{ kestra_mul( kestra_mul( a , b) // c , d) }}",
             ),
             ("{{ a ** b + c }}", "{{ kestra_add( a ** b , c) }}"),
-            ("{{ -a }}", "{{ -a }}"),
+            // Task A8 (2026-10-29): unary minus is Pebble's `multiply(-1, x)`;
+            // a number literal is left alone.
+            ("{{ -a }}", "{{ kestra_mul( -1,a) }}"),
+            ("{{ --a }}", "{{ kestra_mul( -1, kestra_mul(-1,a)) }}"),
+            // The operand is Pebble's: the primary with its postfix.
+            ("{{ -a.b }}", "{{ kestra_mul( -1,a.b) }}"),
+            (
+                "{{ -f(x * 2) | abs }}",
+                "{{ kestra_mul( -1,f( kestra_mul(x , 2))) | abs }}",
+            ),
+            ("{{ -1 + -2.5 }}", "{{ kestra_add( -1 , -2.5) }}"),
             (
                 "{% if a + 1 > 2 %}y{% endif %}",
                 "{% if kestra_add( a , 1) > 2 %}y{% endif %}",
@@ -903,6 +913,11 @@ mod tests {
             ("{{ a + b * c }}", "13"),
             ("{{ a - b - c }}", "2"),
             ("{{ -a / b }}", "-3"),
+            ("{{ -a }}", "-7"),
+            ("{{ -'5' }}", "-5"),
+            ("{{ -(a + 0.5) }}", "-7.5"),
+            ("{{ -l[0] }}", "-1"),
+            ("{{ -(l | length) * 2 }}", "-6"),
             // `(a ~ b) + c` in both engines, and a String operand makes `+`
             // a concatenation.
             ("{{ a ~ b + c }}", "723"),
@@ -1108,6 +1123,12 @@ mod tests {
             ("{{ fromIon(ion='1.5') / 2 }}", "0.75"),
             ("{{ fromIon(ion='5.5') % 2 }}", "1.5"),
             ("{{ 1 - fromIon(ion='1.5') }}", "-0.5"),
+            // Task A8 (2026-10-29): unary minus is `multiply(-1, x)`, so the
+            // operand goes through `valueOf(doubleValue())` like any other.
+            ("{{ -fromIon(ion='1.50') }}", "-1.50"),
+            // A4's regression: a decimal held in a variable.
+            ("{% set d = fromIon(ion='1.50') %}{{ -d }}", "-1.50"),
+            ("{{ -('1.10' | number(type='BIGDECIMAL')) }}", "-1.10"),
             (
                 "{{ '123456789012345678901234567890.5' | number(type='BIGDECIMAL') + 1 }}",
                 "123456789012345680000000000001.0",
