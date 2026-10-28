@@ -570,6 +570,15 @@ set. Publish-time and execution-time validation are two different gates. It is
 recorded as `rejected` because Kestra does refuse it; the reason string names
 both statuses so the seam is visible.
 
+**2026-10-28 (workflow inputs, package #3, Task A6):** that seam now exists on
+egret's side too. The start checks the posted values against the declared
+`inputs:` and refuses with `Error::InvalidInput`; the driver returns that as
+`Ran::StartRefused`, and the ratchet compares it, through a `Seam::Start`
+group, against the lines of this `reason` after `publish -> 200; POST execution
+-> 422: `. `golden.json` records only `verdict: refused` for the entry, so the
+harvest's `reason` is the machine-readable record. The entry is banked (see the
+section "Workflow inputs #3 Task A6" at the end).
+
 ## The 57 flows whose inputs live in Java, not in YAML
 
 **57 of the 317 `valids` declare `inputs:`** — 53 `.yaml` and 4 `.yml`. The YAML
@@ -3580,6 +3589,17 @@ The other two are each their own:
   `build_plan(&str)` takes no input values, so **no change to it can reach that
   seam**. Owner: W3b/W1 input coercion.
 
+**Both banked 2026-10-28 (workflow inputs, package #3, Tasks A5 and A6); their
+`STILL_OVER_ACCEPTED` and `UNATTRIBUTED` rows are deleted, and one row is
+left (`invalids/dag-invalid-subtask`).** `inputs-bad-validator-syntax`: A5
+compiles a STRING/SECRET `validator` with `fancy-regex` at save (spec D10/D11),
+which keeps lookaround and backreferences, so the over-refusal above does not
+happen, and `\` is refused as `java.util.regex.Pattern` refuses it
+(`input_validator_invalid`, `input 'badValidatorSyntax': invalid pattern
+[\]`). It is counted through a `Seam::Save` group, as `invalids/invalid-property`
+is. `inputs-with-multiple-constraint-violations`: the seam is the START, and
+A6 added it as `Seam::Start` (section at the end).
+
 ### The price of running `validate`: two over-refusals the ratchet cannot see
 
 > **Superseded in scope at the final review, not in content.** Task 8 pinned
@@ -3705,6 +3725,11 @@ execution's *input values* were read. It must still **plan**: `build_plan(&str)`
 never sees an input value, so refusing it here would be refusing it for a reason
 egret cannot have. That is the same seam its `STILL_OVER_ACCEPTED` row records,
 seen from the other side.
+
+**2026-10-28 (package #3, Task A6):** it still plans, and still saves without
+an error; `egret_refuses_every_flow_kestra_refuses` now asserts both for every
+`Seam::Start` group. The `STILL_OVER_ACCEPTED` row is gone: the start refuses
+it.
 
 The sweep costs about a third of a second over 295 flows.
 
@@ -13714,3 +13739,67 @@ instead):
   `afterExecution:`;
 - the sweeps, the pruner and the logs route: the harness has no storage or
   container clock.
+
+## Workflow inputs #3 Task A6 (2026-10-28): the start seam, and two banks
+
+Measured on `feat/workflow-inputs` on top of A5 `55ab2568` (`cargo test -p
+egret-workflow --test executor -- --nocapture`): ratchet **301 / 50 / 50 / 0**
+(it read 301 / 50 / 52 / 2 at A4 and A5), `(301, 251, 50)`; census 295 live,
+25 validate-refused, 21 unknown type, unchanged. The spec's best case (§4).
+
+**The start seam (spec D8).** `driver::run_with` used to turn every error of
+`worker::start_execution` into `Ran::Broken`. Since A4 the start checks the
+posted values against the declared `inputs:` and refuses with
+`egret_core::Error::InvalidInput`, which is the product answering, not the
+instrument failing. The driver now matches that variant (by type, not by its
+text) and returns `Ran::StartRefused(message)`; any other start error is still
+`Broken`. `InvalidInput` also covers start refusals that are not about input
+values (a flow that does not parse or plan, which `build_plan` catches first;
+a type this deployment does not serve; a FILE URI). Those are not silently
+counted as matches: a `StartRefused` matches a golden `refused` entry only
+through a `Seam::Start` group, and only when its lines equal Kestra's.
+
+- **What it is compared against.** `golden.json` holds only `verdict: refused`
+  and the class. The 422's text is in `corpus.json`'s `reason`, after `publish
+  -> 200; POST execution -> 422: `, one line per error. `refused_at_start`
+  sorts both sides' non-empty lines and compares them as a multiset (Kestra
+  reports a MULTISELECT's bad elements in `HashSet` order: `H` then `F`; egret
+  reports declared order, `F` then `H`), and requires every egret line to
+  start with the group's prefix (``Invalid value for input `multi`. Cause:
+  value ` ``). A multiset, not a set: a repeated line does not stand in for a
+  missing one.
+- **Pinned in both directions.** `a_start_time_refusal_banks_only_for_its_own_group_and_lines`
+  drives the comparison with one line of two, a repeated line, another cause
+  and an id in no `Seam::Start` group, and each must say no. Mutation measured
+  2026-10-28: a driver that kept only the first line of the refusal made the
+  ratchet read 301 / 51 / 50 / 0 with the entry reported as "egret refused
+  the START, but not as Kestra's recorded 422 does".
+- **The other two directions of the ratchet.** A `StartRefused` for a `runs`
+  entry is a mismatch ("egret REFUSED THE START of a flow Kestra ran") and is
+  counted with the refusals in
+  `every_mismatching_entry_is_attributed_to_the_field_it_differs_on`. A
+  `StartRefused` for an id in a `Seam::Save` group is a match, as a trace
+  is: the driver does not save, so it starts a flow egret would never have
+  stored.
+- `egret_refuses_every_flow_kestra_refuses` checks a `Seam::Start` group's
+  flows the way Kestra treated them: the run gate plans them, the save gate
+  gives no error, and `corpus.json` records a start 422 whose every line starts
+  with the group's prefix.
+
+**Banked:**
+- `invalids/inputs-with-multiple-constraint-violations`, through the new
+  `Seam::Start` group. It is live (filed by `publish_corpus`), and nothing
+  about the census moved: egret publishes it, as Kestra did.
+- `invalids/inputs-bad-validator-syntax`, through a `Seam::Save` group
+  naming `input_validator_invalid` (A5). It is a name-contested loser (`id:
+  empty`), never filed, so `VALIDATE_REFUSED` did not move. Before this task
+  the driver started it and got `Missing required input:badValidatorSyntax`,
+  which was `Broken`; that refusal is now a `StartRefused`, which the
+  `Seam::Save` match covers.
+
+Both rows left `STILL_OVER_ACCEPTED` (one row left:
+`invalids/dag-invalid-subtask`) and `UNATTRIBUTED`, and both `baseline.txt`
+lines were deleted. `handler_surface.py`'s baseline size moved 52 -> 50 and
+`handler-surface.txt` was regenerated: matched 249 -> 251, blocked 20 -> 18,
+the over-acceptance cause 3 -> 1, ceiling 281 -> 283.
+

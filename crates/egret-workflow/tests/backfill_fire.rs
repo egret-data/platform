@@ -211,9 +211,10 @@ fn live_record(src: &str, date: DateTime<Utc>) -> Value {
 #[tokio::test]
 async fn a_window_drains_tick_by_tick_and_the_row_goes_with_the_last() {
     let Some(fx) = fx().await else { return };
+    // Declared: package #3 stores only declared inputs (spec D2).
     let src = flow_yaml(
         "drain",
-        "",
+        "inputs:\n  - id: region\n    type: STRING\n  - id: size\n    type: INT\n",
         "    inputs:\n      region: us\n      size: 3\n",
     );
     let flow = fx.flow(&src).await;

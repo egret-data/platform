@@ -573,8 +573,7 @@
 # no golden entry, so each stays a mismatch for a new reason: refused where
 # Kestra ran it.
 invalids/dag-invalid-subtask
-invalids/inputs-bad-validator-syntax
-invalids/inputs-with-multiple-constraint-violations
+# `invalids/inputs-bad-validator-syntax` and `invalids/inputs-with-multiple-constraint-violations` banked 2026-10-28 (workflow-inputs Task A6): the first is refused at save (`input_validator_invalid`, a `Seam::Save` group; `fancy-regex` rejects `\` as `java.util.regex.Pattern` does), the second at START (`Error::InvalidInput`, the new `Seam::Start` group: its lines equal Kestra's recorded 422 as a multiset, since Kestra's order is `HashSet` order).
 # `invalids/invalid-property` banked 2026-10-26 (no-silent-drops Task 8b): Kestra refuses it (`Unrecognized field "invalid"`) and egret refuses it at save (`spec::validate_source`, `unknown_property`); the oracle counts a save-time refusal of an id in a `Seam::Save` refusal group.
 # end hooks #2b Task B1 (2026-10-27): `afterExecution:` runs now; held by flow `outputs:`, which egret never evaluates: `end` renders `{{ execution.outputs.final }}` (worker/render.rs; package #6, roadmap note 6). Re-checked at #2b Task B7 (2026-10-28): it differs on `runs` only, no longer on `order`.
 valids/after-execution

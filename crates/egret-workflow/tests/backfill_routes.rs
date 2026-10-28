@@ -1092,6 +1092,67 @@ async fn create_refuses_inputs_and_labels_it_cannot_run() {
     .await;
 }
 
+/// Review M7: the start-time input check runs at create, on the schedule's
+/// `inputs:` overlaid by the backfill's, so a value every tick would refuse
+/// is refused here -- not at the first tick, which would end the backfill.
+/// The text is the start check's own.
+#[tokio::test]
+async fn create_refuses_an_input_value_its_ticks_would_refuse() {
+    let Some(fx) = fx().await else { return };
+    let inputs = "  - id: n\n    type: INT\n    min: 1\n";
+    let triggers = format!(
+        "{}{}",
+        cron("s", "*/1 * * * *", ""),
+        cron("bad", "*/1 * * * *", "    inputs:\n      n: abc\n")
+    );
+    let flow = fx.flow_src(&src_inputs("checked", inputs, &triggers)).await;
+    let m = fx.minute().await;
+    let w = |extra: Value| {
+        let mut b =
+            json!({"start": rfc(m - Duration::minutes(5)), "end": rfc(m - Duration::minutes(1))});
+        b.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        b
+    };
+    const BAD: StatusCode = StatusCode::BAD_REQUEST;
+
+    // The backfill's own value.
+    let msg = refused(
+        &fx,
+        flow,
+        "s",
+        w(json!({"inputs": {"n": 0}})),
+        BAD,
+        "backfill_inputs_invalid",
+    )
+    .await;
+    assert!(
+        msg.contains("Invalid value for input `n`. Cause: it must be more than `1`"),
+        "{msg}"
+    );
+    // The schedule's own value, not overridden.
+    let msg = refused(
+        &fx,
+        flow,
+        "bad",
+        w(json!({})),
+        BAD,
+        "backfill_inputs_invalid",
+    )
+    .await;
+    assert!(
+        msg.contains("Invalid value for input `n`. Cause: Cannot convert value 'abc' to Integer"),
+        "{msg}"
+    );
+
+    // Overridden by a good value, the schedule's bad one is accepted.
+    let (status, e) = fx.create(flow, "bad", w(json!({"inputs": {"n": 3}}))).await;
+    assert_eq!(status, StatusCode::CREATED, "{e}");
+    let (status, e) = fx.create(flow, "s", w(json!({"inputs": {"n": "2"}}))).await;
+    assert_eq!(status, StatusCode::CREATED, "{e}");
+}
+
 /// Test 3, the trigger's state: a webhook, a YAML-disabled trigger, a
 /// switched-off one, a `disabled` flow, a schedule off the queue (its
 /// `last_error` in the message), an unknown id, another workspace's flow, a

@@ -280,8 +280,8 @@ pub(crate) async fn create(
     }))
 }
 
-/// §3.4's input rules; the backfill's own map (what is stored), or the
-/// sentence naming the input.
+/// §3.4's input rules, then the start-time input check (package #3); the
+/// backfill's own map (what is stored), or the sentence naming the input.
 fn inputs_refusal(
     flow: &Flow,
     schedule: &crate::models::Schedule,
@@ -314,6 +314,12 @@ fn inputs_refusal(
     }) {
         return Err(format!("{} is required", missing.id));
     }
+    // Review M7: the start-time check every tick runs (`claim::checked_inputs`,
+    // on the same merged map, `scheduler::fire`), so a value each tick would
+    // refuse is refused here rather than ending the backfill at its first
+    // tick. Its text is the start's (``Invalid value for input `n`. ..``).
+    let merged = serde_json::Value::Object(merged.into_iter().collect());
+    crate::worker::checked_inputs(flow, &merged).map_err(|e| e.message)?;
     Ok(own)
 }
 

@@ -1039,9 +1039,12 @@ def check_inputs(flows, kinds, golden, baseline):
     # `valids/flow-concurrency-queue-killed-after-execution`,
     # `valids/restart-with-after-execution`, `valids/sleep-long` and
     # `valids/sleep-long-after-execution-flowable` (`afterExecution:` runs
-    # once the execution is terminal).
-    if len(baseline) != 52:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 52; the split "
+    # once the execution is terminal). 50 since workflow-inputs Task A6
+    # (2026-10-28) banked `invalids/inputs-bad-validator-syntax` (refused at
+    # save, `Seam::Save`) and `invalids/inputs-with-multiple-constraint-
+    # violations` (refused at start, the new `Seam::Start`).
+    if len(baseline) != 50:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 50; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1691,8 +1694,8 @@ def self_test():
          "not 273",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 52",
-         "not 52",
+    case("baseline.txt is no longer 50",
+         "not 50",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

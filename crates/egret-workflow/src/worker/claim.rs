@@ -3891,6 +3891,71 @@ pub(crate) async fn start_execution_in_with(
     start_execution_in_on(conn, gate, new).await
 }
 
+/// The start-time input check (package #3, spec D1/D2): `posted` against
+/// `flow`'s declared `inputs:`, giving the **coerced** object to store or the
+/// first error in declared order. The start chokepoint and the `Subflow`
+/// child share it, so the two can never disagree.
+///
+/// The renderer is Kestra's `runContext.renderTyped` over the context
+/// `buildRunContextForExecutionAndInputs` gives a start: `flow` (`id`,
+/// `namespace`), `vars` (the flow's `variables:`) and `inputs`. `inputs` binds
+/// `null` for every declared input that has a `defaults` -- as Kestra does, so
+/// a condition naming an absent defaulted input renders instead of failing on
+/// egret's strict undefined -- and then the dependencies' values the checker
+/// hands over. There is no execution yet, so no `execution` binding; labels
+/// are not bound either (no corpus or test flow reads them in an input).
+pub(crate) fn checked_inputs(
+    flow: &crate::models::Flow,
+    posted: &serde_json::Value,
+) -> std::result::Result<serde_json::Value, crate::inputs_check::InputError> {
+    crate::inputs_check::resolve(&flow.inputs, posted, &start_renderer(flow))
+        .map(serde_json::Value::Object)
+}
+
+/// Every declared input's outcome under [`checked_inputs`]'s renderer, for the
+/// validate endpoint (package #3b, D14): the same check, listing every input
+/// instead of stopping at the first error. **The values are clear**, SECRET
+/// ones included (review M6); the caller masks them before it answers.
+pub(crate) fn input_outcomes(
+    flow: &crate::models::Flow,
+    posted: &serde_json::Value,
+) -> Vec<crate::inputs_check::InputOutcome> {
+    crate::inputs_check::resolve_all(&flow.inputs, posted, &start_renderer(flow))
+}
+
+/// The renderer [`checked_inputs`] documents, built once per check.
+fn start_renderer(
+    flow: &crate::models::Flow,
+) -> impl Fn(
+    &str,
+    &serde_json::Map<String, serde_json::Value>,
+) -> std::result::Result<serde_json::Value, String> {
+    use crate::runners::env::{render_typed, RenderContext};
+    let flow_binding = serde_json::json!({"id": flow.id, "namespace": flow.namespace});
+    let vars = serde_json::to_value(&flow.variables).unwrap_or(serde_json::Value::Null);
+    let defaulted: serde_json::Map<String, serde_json::Value> = flow
+        .inputs
+        .iter()
+        .filter(|i| i.defaults.is_some())
+        .map(|i| (i.id.clone(), serde_json::Value::Null))
+        .collect();
+    move |template: &str,
+          deps: &serde_json::Map<String, serde_json::Value>|
+          -> std::result::Result<serde_json::Value, String> {
+        let mut bound = defaulted.clone();
+        bound.extend(deps.iter().map(|(k, v)| (k.clone(), v.clone())));
+        let mut cx = RenderContext::new();
+        cx.insert("flow", flow_binding.clone());
+        cx.insert("vars", vars.clone());
+        cx.insert("inputs", serde_json::Value::Object(bound));
+        match render_typed(template, &cx) {
+            Ok(Ok(v)) => Ok(v.to_json()),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
 /// The body of [`start_execution_in_with`] (and of the test-only
 /// [`start_execution_in`]). Private, as [`apply_outcome_on`].
 async fn start_execution_in_on(
@@ -3937,6 +4002,22 @@ async fn start_execution_in_on(
         inputs
     } else {
         serde_json::json!({})
+    };
+    // Package #3 (spec D1, D2, D7): the declared `inputs:` are checked HERE,
+    // before `split`, because a SECRET `validator` must see the clear value,
+    // and the coerced object is what is stored. Not re-checked: a replay
+    // (Kestra copies the stored inputs, which were checked at their own start)
+    // and a Flow-trigger fire -- Kestra renders a Flow trigger's inputs and
+    // never validates them, and a born-FAILED fire carries `{}`, which a
+    // `required` check would turn into a refusal. `flow_trigger_event_id` is
+    // set iff `trigger` is a Flow record (migration 0157's CHECK), so it is
+    // the Flow-trigger start's identity; `born_failed` is set only with it.
+    let check =
+        replayed_from_execution_id.is_none() && flow_trigger_event_id.is_none() && !born_failed;
+    let inputs = if check {
+        checked_inputs(&flow, &inputs).map_err(|e| Error::InvalidInput(e.message))?
+    } else {
+        inputs
     };
     // KI-112: a SECRET input's value is masked in `inputs`, which every read
     // returns, and sealed into `secret_inputs`, which only the render opens.

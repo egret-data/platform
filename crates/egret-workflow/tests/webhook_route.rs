@@ -1994,6 +1994,8 @@ variables:
 inputs:
   - id: x
     type: STRING
+  - id: nested
+    type: JSON
 tasks:
   - id: fx-task
     type: core.log

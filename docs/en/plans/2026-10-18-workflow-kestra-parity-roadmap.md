@@ -73,7 +73,7 @@ Each package goes through the usual flow: spec (or a spec section) → plan → 
 | — | **Debt package** — done, #696 (`92c0a66a`) and #698 (`071973c9`) | Kill and `WorkingDirectory` follow-ups; C2 caps and ordering; `LoopUntil` task-run ids; publish refs scoped to the workspace (2 over-refusals lifted) | 0 (LIVE +2) | M |
 | 1 | **No silent drops** | A named refusal or warning, naming the package that lifts it, for every parsed-but-ignored key except flow `finally:`/`afterExecution:`. That covers flowable `finally:` outside #2's reach, `stopAfter` (#11), `retry.warningOnRetry` (#13), the Subflow keys (#12), the input keys (#3), and unknown properties on core tasks, which Kestra's schema refuses (aligns Appendix B §8 item 15). Also fix the stale "345" figures in `driver.rs` | 0 (correctness) | S |
 | 2 | **End hooks** | Flow-level `finally:` and `afterExecution:`. `finally:` on every flowable: Sequential, Parallel, If, Switch, Dag, Loop, LoopUntil, Pause. `Loop errors:`. Re-check the sweep's premise (Rule 2) | ~20 upper, 14–15 strict | M |
-| 3 | **Inputs checked at start** | `required`, type coercion errors, SELECT/MULTISELECT `values`/`allowCustomValue`, STRING `validator`, INT/FLOAT min/max, date/time bounds, ARRAY items, SECRET/URI/EMAIL/YAML/ION type checks, at manual, API, webhook and flow-trigger start. The `validate inputs` endpoint | a few invalids | M |
+| 3 | **Inputs checked at start** — **done**: a merged (#762), b built (PR in review; marked merged after it merges) | `required`, type coercion errors, SELECT/MULTISELECT `values`/`allowCustomValue`, STRING `validator`, INT/FLOAT min/max, date/time bounds, ARRAY items, SECRET/URI/EMAIL/YAML/ION type checks, at manual, API, webhook and flow-trigger start. The `validate inputs` endpoint | a few invalids | M |
 | 4 | **HTTP and the unserved platform tasks** | `http.Request`, `http.Download`, `http.SseRequest` as worker handlers with an egress policy. Decide and wire `egret.sql` (needs a `QueryExecPort`) and the other `egret.*`/`core.*` rows, or remove the rows | 0 | M |
 | 5 | **Renderer parity** | Division by zero (the `restart-*` Infinity case), undefined `taskrun.value`, number-vs-string comparison, `??` on a missing root. `render`/`renderOnce`, `errorLogs`, `subflow`, `max`/`min`. The ten missing filters and four missing tests. `escape` strategies `js`/`css`/`url_param`. Lazy chained comparisons, BigDecimal arithmetic, `{{ task.type }}` on a flowable | ~8–10 | M |
 | 6 | **`Loop` own `outputs:`** | A `Loop`'s `outputs:` evaluated at its end, including STORE/AUTO (reopened). Name the cause of the 4 unattributed `Loop` entries first | 3 (+ up to 4) | M |
@@ -104,6 +104,23 @@ Each package goes through the usual flow: spec (or a spec section) → plan → 
 - **#2b banked all 8 expected:** `valids/after-execution-error`, `-finally`, `-flowable`, `flow-concurrency-queue-after-execution`, `flow-concurrency-queue-killed-after-execution`, `restart-with-after-execution`, `sleep-long`, `sleep-long-after-execution-flowable`.
 - **Not banked, owned elsewhere:** `valids/after-execution` (flow `outputs:`, #6, note 6), `valids/pause-errors-finally-after-execution` (#9), `valids/task-runif-taskswithstate` (#5, note 10).
 - **Built besides the banks:** the post-terminal phase never writes the execution; a parent hears its child once its `afterExecution:` is done; `Pause` and `LoopUntil`/`WaitFor` inside `afterExecution:` refused naming #9, `Exit` naming #20, a `retry:` there warned naming #13; Rule 2 (below); the kill divergences (§3.1); the execution pages follow after-runs (bounded to 30 minutes after the end).
+
+**Row #3a done, 2026-10-28 (#3a built on `feat/workflow-inputs`; PR #3a in review; the row is marked merged only after both #3a and #3b merge; the row above is not edited).** Spec `2026-10-28-workflow-inputs-design.md`, section "As built". Measured with `cargo test -p egret-workflow --test executor -- --nocapture`: ratchet **301 / 50 / 50 / 0**, `(301, 251, 50)` (from 301 / 52 / 52 / 0). `LIVE` 295, `VALIDATE_REFUSED` 25, `UNKNOWN_TYPE_REFUSED` 21 unchanged.
+- **Banked 2:** `invalids/inputs-with-multiple-constraint-violations` at the new `Seam::Start` and `invalids/inputs-bad-validator-syntax` at `Seam::Save`.
+- **Built:** one checker (`inputs_check`) called from `start_execution_in_on` before the secret split and for a Subflow child; the coerced value is stored; five save-time findings (unknown `dependsOn`, `dependsOn` cycle, `defaults` with `prefill`, FILE `defaults` scheme, a `validator` that does not compile).
+- **Was pending, built in #3b (below):** the validate endpoint (`POST .../executions/validate`) and the run form.
+- **Divergences from Kestra, recorded:**
+  - BOOL is strict: anything but `true`/`false` is refused (Kestra turns it into `false`).
+  - FLOAT `NaN`/`Infinity` are refused (they break JSON storage).
+  - The refusal is HTTP 400 with `{"error": ...}` (Kestra: 422); a webhook answers 400 with the message.
+  - Flow-trigger starts are not checked (Kestra does not check them either; the row said "flow-trigger" and that is dropped).
+  - A SELECT checks `values` only when `required` (Kestra's quirk, kept).
+  - `jsonSchema` stays unchecked and keeps its `not_honoured` warning (no JSON Schema crate in the tree; follow-up).
+  - A disabled-by-`dependsOn` input with a `defaults` still gets the default at render.
+
+**Row #3b done, 2026-10-28 (#3b built on `feat/workflow-inputs-b`; PR in review; with #3a merged as #762, row #3 is done and is marked merged after the #3b PR merges).** Spec `2026-10-28-workflow-inputs-design.md`, §8 "As built (#3b)". The oracle ratchet is unchanged by #3b (301 / 50 / 50 / 0).
+- **Built:** `POST /api/ws/{ws}/workflows/flows/{id}/executions/validate` (always 200; every input with its errors; SECRET `value` masked as `******`; no execution, upload or audit record; `WF_MANAGE`), and the run form: Run asks validate first and falls back to the start on any validate failure, errors are placed per input (also per line of the start's 400), client checks for `min`/`max`/`after`/`before`/SELECT/MULTISELECT, `validator` shown but evaluated only by the server. `BackfillDialog` sends `BOOL`, not `BOOLEAN`.
+- **Remaining gaps in row #3:** `jsonSchema` (no JSON Schema crate), FORM and REUSABLE_INPUTS, templated (`{{ }}`) defaults (not validated at start). Open UI follow-ups (validate on change, SELECT custom value, `required` against `dependsOn`, `renderError` display) are in spec §8.
 
 *Rule 2 as built, 2026-10-28 (#2b Task B5).* Rule 2 is closed. The orphan sweep's superseded rule, the storage pruner and the logs route's `complete` read `workflow.execution_is_idle` (migration 0210: terminal and no live run); the `_wd` sweep reads the block's own state. Two debts are recorded in the end-hooks spec §6 as-built: the `Exit`-sibling leak (row #20 below) and the `protected_set` cost (0.12 s to about 4 s per 100 000 executions, hourly; a cheaper form is named there).
 
@@ -416,18 +433,18 @@ Out of the count are: abstract classes and interfaces; the purge-behaviour subty
 | policyRefs (EE) | ignored | models/flow.rs:32-35 |
 | revision, updated, deleted, tenantId | egret-managed (versions table) | models/flow.rs:26-29 |
 
-**Input types (Kestra's `Type` enum has 20).** All 20 parse (models/input.rs:19-41), with `item_type` and `allowedFileExtensions`. What is wrong is how they are enforced:
+**Input types (Kestra's `Type` enum has 20).** All 20 parse (models/input.rs:19-41), with `item_type` and `allowedFileExtensions`. *Updated 2026-10-28 (#3a):* `models::Input` now also keeps `validator`, `min`, `max`, `after`, `before`, `values`, `expression`, `allowCustomValue`, `isRadio` and `autoSelectFirst`, and the start path checks them. The rows below are the 2026-10-18 record, with the #3a result in the last column; #3b changed only the `dependsOn` row (and the run form, below the table).
 
-| Kestra item | egret status | evidence |
+| Kestra item | egret status (2026-10-18) | after #3a |
 |---|---|---|
-| STRING, INT, FLOAT, BOOL, JSON, ARRAY, MULTISELECT | partial: structured types are JSON-coerced at render time (worker/render.rs:856-905). INT `min`/`max`, FLOAT bounds, STRING `validator` regex, SELECT/MULTISELECT `values`/`allowCustomValue` and ARRAY item validation are **not modelled**, so they are dropped silently | models/input.rs:53-90 (no such fields) |
-| DATETIME, DATE, TIME, DURATION | partial: passed as strings, with no `after`/`before`/`min`/`max` validation | as above |
-| FILE | supported (upload, `kestra://`, extension allowlist, which is stricter than Kestra) | storage/inputs.rs:107,246 |
-| SECRET, URI, EMAIL, YAML, ION | partial: parse only, no type validation | models/input.rs |
-| FORM, REUSABLE_INPUTS (EE) | parse only | models/input.rs:39-40 |
-| `required` | **not enforced at manual, API, webhook or flow-trigger start**. Only backfill checks it (triggers/backfill.rs:311-315). The 400 list for start never mentions a missing required input (routes.rs:2396) | |
-| `defaults` | supported, coerced by declared type | worker/render.rs:856-905 |
-| `prefill`, `dependsOn`, `displayName` | parsed. `dependsOn` is not supported in the UI (W7a §13) | models/input.rs:62-68 |
+| STRING, INT, FLOAT, BOOL, JSON, ARRAY, MULTISELECT | partial: structured types are JSON-coerced at render time (worker/render.rs:856-905). INT `min`/`max`, FLOAT bounds, STRING `validator` regex, SELECT/MULTISELECT `values`/`allowCustomValue` and ARRAY item validation are **not modelled**, so they are dropped silently | checked at start (`inputs_check.rs`). JSON `jsonSchema` is still unchecked |
+| DATETIME, DATE, TIME, DURATION | partial: passed as strings, with no `after`/`before`/`min`/`max` validation | checked at start; the posted string is stored |
+| FILE | supported (upload, `kestra://`, extension allowlist, which is stricter than Kestra) | unchanged; a required FILE is satisfied by its upload |
+| SECRET, URI, EMAIL, YAML, ION | partial: parse only, no type validation | checked at start; a SECRET `validator` sees the clear value before sealing |
+| FORM, REUSABLE_INPUTS (EE) | parse only | unchanged |
+| `required` | **not enforced at manual, API, webhook or flow-trigger start**. Only backfill checks it (triggers/backfill.rs:311-315) | enforced at manual, API, webhook, schedule, backfill and Subflow start (`Missing required input:<id>`); Flow-trigger starts are not checked, as in Kestra |
+| `defaults` | supported, coerced by declared type | unchanged; a literal default is validated at start, a templated one is not |
+| `prefill`, `dependsOn`, `displayName` | parsed. `dependsOn` is not supported in the UI (W7a §13) | `dependsOn` is evaluated at start (disabled inputs skip `required`); the run form notes an input that `dependsOn` turns off (from the validate endpoint, on submit) but does not hide it; the form has no control for `isRadio` or a SELECT custom value |
 
 ---
 
@@ -487,7 +504,7 @@ egret routes are under `/api/ws/{ws}/workflows`.
 | Kestra endpoint | egret status | evidence |
 |---|---|---|
 | POST /executions/{ns}/{id} (start, multipart inputs) | supported | routes.rs:2381 |
-| POST /{ns}/{id}/validate (validate inputs) | missing | – |
+| POST /{ns}/{id}/validate (validate inputs) | supported (#3b): always 200, every input with its errors, SECRET masked, no side effects, `WF_MANAGE`. `checks` is always empty; FILE readability is not checked. JSON body, not Kestra's multipart (recorded divergence) | crates/egret-workflow/src/routes.rs (`validate_execution_inputs`), inputs_check.rs |
 | GET /search, GET /{id}, GET /{id}/flow | supported (list with state/namespace/flow/parent/time filters, detail) | routes.rs:1838,1913 |
 | GET /{id}/graph | supported | routes.rs:1314 |
 | GET /{id}/file, /file/metas, /file/preview | supported | storage/routes.rs:255,322,350 |

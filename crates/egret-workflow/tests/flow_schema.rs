@@ -569,7 +569,9 @@ fn the_inputs_offer_exactly_the_fields_models_input_accepts() {
         }
     }
     assert_eq!(union, fields);
-    // The ones the review named, by name.
+    // The ones the review named, by name. Inputs package A1 modelled them, so
+    // they are offered now; `jsonSchema` stays out (spec D12: not modelled,
+    // `not_honoured`).
     let select = &schema["$defs"]["io.kestra.core.models.flows.input.SelectInput-2"]["properties"];
     for p in [
         "values",
@@ -578,12 +580,14 @@ fn the_inputs_offer_exactly_the_fields_models_input_accepts() {
         "isRadio",
         "autoSelectFirst",
     ] {
-        assert!(select.get(p).is_none(), "SELECT offers {p}");
+        assert!(select.get(p).is_some(), "SELECT does not offer {p}");
     }
     let string = &schema["$defs"]["io.kestra.core.models.flows.input.StringInput-2"]["properties"];
-    assert!(string.get("validator").is_none());
+    assert!(string.get("validator").is_some());
     let int = &schema["$defs"]["io.kestra.core.models.flows.input.IntInput-2"]["properties"];
-    assert!(int.get("min").is_none() && int.get("max").is_none());
+    assert!(int.get("min").is_some() && int.get("max").is_some());
+    let json = &schema["$defs"]["io.kestra.core.models.flows.input.JsonInput-2"]["properties"];
+    assert!(json.get("jsonSchema").is_none(), "JSON offers jsonSchema");
 }
 
 /// Test 5: every served type with a known outputs list carries it.

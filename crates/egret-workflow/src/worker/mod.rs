@@ -99,13 +99,13 @@ mod timeout;
 pub(crate) mod txn;
 pub(crate) mod working_dir;
 
-pub(crate) use claim::start_execution_in_with;
 pub use claim::CREATE_BESIDE_A_CREATED_SIBLING;
 /// Test-only (`test-util`; W9c Task 9, final review m3): an outcome or a
 /// start in the CALLER's transaction, answering `Err` when a render needed a
 /// read. Production goes through `worker::txn`.
 #[cfg(any(test, feature = "test-util"))]
 pub use claim::{apply_outcome, start_execution_in};
+pub(crate) use claim::{checked_inputs, input_outcomes, start_execution_in_with};
 pub use claim::{
     claim, commit_outcome, due_retries, resume, resume_by_hand, start_claimed, start_execution,
     start_execution_with_trigger, tick, tick_with, wake, Claimed, NewExecution, Resumed,

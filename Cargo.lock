@@ -3821,6 +3821,7 @@ dependencies = [
  "egret-workflow",
  "egret-workflow-api",
  "egret-workspace",
+ "fancy-regex",
  "futures-util",
  "hex",
  "http-body-util",
