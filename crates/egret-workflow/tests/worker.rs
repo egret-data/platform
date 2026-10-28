@@ -1556,8 +1556,9 @@ async fn a_stored_allow_failure_run_fails_with_the_not_a_leaf_line(pool: sqlx::P
 }
 
 /// A type Kestra ships and egret has no `TASK_TYPES` row for. It was
-/// `core.output.OutputValues` until group C1 Task 2 registered that.
-const UNREGISTERED: &str = "io.kestra.plugin.core.http.Request";
+/// `core.output.OutputValues` until group C1 Task 2 registered that, then
+/// `core.http.Request` until package #4 Task C3 registered that.
+const UNREGISTERED: &str = "io.kestra.plugin.core.execution.PurgeExecutions";
 
 /// **A stored execution of a type with no `TASK_TYPES` row reaches
 /// `NoHandler` and FAILS with its line.** Such a type is

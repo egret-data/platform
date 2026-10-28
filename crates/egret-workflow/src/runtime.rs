@@ -784,6 +784,15 @@ pub async fn handlers_for(
     // Group C1 Task 4: `PurgeLogs`, which needs the pool too (it deletes
     // `workflow.task_logs` rows, scoped to the flow's namespace).
     crate::worker::handlers::purge_logs::register(&mut handlers, pool.clone());
+    // Package #4 Task C3: `http.Request`, which needs no pool: the egress
+    // policy (`workflow.http`), the secret source (`secret()` resolves on the
+    // http tasks, spec D5) and the store (multipart file parts).
+    crate::worker::handlers::http::register(
+        &mut handlers,
+        crate::http::HttpEgress::from_config(&cfg.http, Arc::new(egret_egress::SystemResolver)),
+        secrets.clone(),
+        crate::storage::current(),
+    );
     let kept_retention = kept_retention(cfg.kept_container_retention_days);
     let (kind, runner, sweep): (RunnerKind, Arc<dyn TaskRunner>, Arc<dyn OrphanSweep>) =
         match cfg.container_runner {
@@ -975,11 +984,12 @@ impl Served {
 /// so a handler added to one and not the other fails by name.
 pub fn served_for(cfg: &egret_config::WorkflowConfig) -> Served {
     use crate::worker::handlers::{
-        assert, fail, kv, log, namespace, output_values, purge_logs, ret, sleep, storage,
+        assert, fail, http, kv, log, namespace, output_values, purge_logs, ret, sleep, storage,
     };
 
     // Every deployment: `Handlers::with_core_tasks`, then the storage,
-    // namespace, KV and PurgeLogs `register`s -- all through `add_publishable`.
+    // namespace, KV, PurgeLogs and http `register`s -- all through
+    // `add_publishable`.
     let publishable: Vec<&str> = vec![
         // `Handlers::with_core_tasks`.
         log::TYPE_ID,
@@ -1014,6 +1024,8 @@ pub fn served_for(cfg: &egret_config::WorkflowConfig) -> Served {
         kv::PURGE_KV,
         // `handlers::purge_logs::register` (group C1 Task 4).
         purge_logs::TYPE_ID,
+        // `handlers::http::register` (package #4 Task C3).
+        http::REQUEST,
     ];
     let mut out = std::collections::BTreeSet::new();
     let mut add_publishable = |type_id: &str| {

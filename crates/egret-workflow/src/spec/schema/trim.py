@@ -76,6 +76,8 @@ KESTRA_TYPES = [
     "io.kestra.plugin.core.kv.Delete",
     "io.kestra.plugin.core.kv.Put",
     "io.kestra.plugin.core.kv.PurgeKV",
+    # registry.rs: the http tasks (package #4)
+    "io.kestra.plugin.core.http.Request",
     # registry.rs: the four script tasks
     "io.kestra.plugin.scripts.shell.Commands",
     "io.kestra.plugin.scripts.shell.Script",

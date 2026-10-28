@@ -393,6 +393,7 @@ fn save_only_findings(flow: &Flow, report: &mut ValidationReport) {
     }
     duplicate_trigger_ids(flow, report);
     secret_findings(flow, report);
+    http_findings(flow, report);
     schedule_findings(flow, report);
     input_save_findings(&flow.inputs, report);
 }
@@ -486,6 +487,37 @@ fn duplicate_trigger_ids(flow: &Flow, report: &mut ValidationReport) {
                 code: "duplicate_trigger_id",
                 message: format!("trigger id '{}' is declared more than once", t.id),
                 path: format!("triggers.{}", t.id),
+            });
+        }
+    }
+}
+
+/// The code of an http task property egret refuses (spec D4): a finding at
+/// save, and the same refusal fails a stored flow's run
+/// (`http::build_request`).
+pub const CODE_HTTP_OPTION_REFUSED: &str = "http_option_refused";
+
+/// Package #4 (spec D4): every http task's [`crate::http::refusals`], one
+/// error each, at the property's path. **Save-only**, as D4 states: a stored
+/// version that carries one still plans and its run fails at the task naming
+/// the same property, rather than the whole execution being refused at start.
+/// A task whose properties do not even read as an http task is left to the
+/// run, which names the shape (publish cannot know what a template renders
+/// to).
+fn http_findings(flow: &Flow, report: &mut ValidationReport) {
+    for (path, task, spec) in crate::plugins::leaves(flow) {
+        if !crate::worker::handlers::http::resolves_secrets(&task.r#type) {
+            continue;
+        }
+        let Ok(parsed) = crate::http::HttpSpec::from_value(spec) else {
+            continue;
+        };
+        for message in crate::http::refusals(&parsed) {
+            let key = message.split(':').next().unwrap_or_default().to_string();
+            report.errors.push(Finding {
+                code: CODE_HTTP_OPTION_REFUSED,
+                message: format!("task '{}': {message}", task.id),
+                path: format!("{path}.{key}"),
             });
         }
     }
@@ -652,10 +684,17 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
     let Ok(doc) = serde_json::to_value(flow) else {
         return;
     };
-    let tasks = crate::plugins::plugin_tasks(flow);
+    // Package #4 Task C3 (spec D5): `secret()` resolves on the http tasks
+    // too (`worker::handlers::http::SECRET_TYPES`, every spelling), so their
+    // properties are exempt as a plugin task's are.
+    let tasks = crate::plugins::leaves(flow)
+        .into_iter()
+        .filter(|(_, t, _)| {
+            t.r#type.starts_with(crate::plugins::PREFIX)
+                || crate::worker::handlers::http::resolves_secrets(&t.r#type)
+        });
     let mut walk = Walk {
         plugin: tasks
-            .iter()
             .map(|(_, t, _)| (t.id.as_str(), t.r#type.as_str()))
             .collect(),
         report,
@@ -5600,6 +5639,100 @@ mod tests {
             vec!["tasks.s.value".to_string()]
         );
         assert!(paths_of(src, CODE_SECRET_IN_KV_VALUE).is_empty());
+    }
+
+    /// Package #4 Task C3 (spec D5): `secret()` resolves on the http tasks, so
+    /// their properties are exempt under every spelling -- while their `runIf`
+    /// (which egret's task model reads, not the handler) and a `Log` beside
+    /// them are still refused. A `namespace=` written in the call is refused
+    /// there as on a plugin task.
+    #[test]
+    fn a_secret_in_an_http_tasks_properties_is_allowed_under_every_spelling() {
+        use crate::plugins::{CODE_SECRET_ARGUMENT_REFUSED, CODE_SECRET_OUTSIDE_PLUGIN_TASK};
+        for ty in [
+            "io.kestra.plugin.core.http.Request",
+            "io.kestra.plugin.fs.http.Request",
+        ] {
+            let src = format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: r\n    type: {ty}\n    \
+                 uri: https://example.com/\n    \
+                 headers:\n      Authorization: \"Bearer {{{{ secret('TOKEN') }}}}\"\n    \
+                 options:\n      auth:\n        type: BASIC\n        username: u\n        \
+                 password: \"{{{{ secret('PW') }}}}\"\n    \
+                 runIf: \"{{{{ secret('X') }}}}\"\n  \
+                 - id: l\n    type: io.kestra.plugin.core.log.Log\n    \
+                 message: \"{{{{ secret('X') }}}}\"\n"
+            );
+            assert_eq!(
+                paths_of(&src, CODE_SECRET_OUTSIDE_PLUGIN_TASK),
+                vec!["tasks.r.runIf".to_string(), "tasks.l.message".to_string()],
+                "{ty}"
+            );
+            let src = format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: r\n    type: {ty}\n    \
+                 uri: \"https://example.com/{{{{ secret('K', namespace='x') }}}}\"\n"
+            );
+            assert_eq!(
+                paths_of(&src, CODE_SECRET_ARGUMENT_REFUSED),
+                vec!["tasks.r.uri".to_string()],
+                "{ty}"
+            );
+            assert!(paths_of(&src, CODE_SECRET_OUTSIDE_PLUGIN_TASK).is_empty());
+        }
+    }
+
+    /// Package #4 (spec D4, and the C3 userinfo decision): each refused http
+    /// property is an error at its path, at save only -- the run gate leaves
+    /// it to the task, which fails naming the same property.
+    #[test]
+    fn the_http_refusals_are_save_time_errors_at_their_paths() {
+        use crate::spec::validate::CODE_HTTP_OPTION_REFUSED;
+        let src = "id: f\nnamespace: a.b\ntasks:\n  - id: r\n    \
+                   type: io.kestra.plugin.fs.http.Request\n    \
+                   uri: https://user:pw@example.com/\n    encryptBody: true\n    \
+                   options:\n      proxy:\n        address: proxy.corp\n      \
+                   ssl:\n        insecureTrustAllCertificates: true\n      \
+                   auth:\n        type: DIGEST\n";
+        let mut paths = paths_of(src, CODE_HTTP_OPTION_REFUSED);
+        paths.sort();
+        assert_eq!(
+            paths,
+            [
+                "tasks.r.encryptBody",
+                "tasks.r.options.auth.type",
+                "tasks.r.options.proxy",
+                "tasks.r.options.ssl.insecureTrustAllCertificates",
+                "tasks.r.uri",
+            ]
+        );
+        let f = parse(src).unwrap();
+        let messages: Vec<String> = validate(&f)
+            .errors
+            .into_iter()
+            .filter(|e| e.code == CODE_HTTP_OPTION_REFUSED)
+            .map(|e| e.message)
+            .collect();
+        assert!(
+            messages.iter().all(|m| m.starts_with("task 'r': ")),
+            "{messages:?}"
+        );
+        assert!(
+            !messages.iter().any(|m| m.contains("pw")),
+            "the URI's password is never echoed: {messages:?}"
+        );
+        // Save-only: the run gate does not raise it.
+        assert!(!validate_for_run(&f)
+            .errors
+            .iter()
+            .any(|e| e.code == CODE_HTTP_OPTION_REFUSED));
+        // The control: the allowed spellings are clean.
+        let ok = "id: f\nnamespace: a.b\ntasks:\n  - id: r\n    \
+                  type: io.kestra.plugin.core.http.Request\n    \
+                  uri: https://example.com/\n    encryptBody: false\n    \
+                  options:\n      ssl:\n        insecureTrustAllCertificates: false\n      \
+                  auth:\n        type: BEARER\n        token: t\n";
+        assert!(paths_of(ok, CODE_HTTP_OPTION_REFUSED).is_empty());
+        assert!(validate(&parse(ok).unwrap()).errors.is_empty());
     }
 
     /// The corpus's two KV flows carry no `secret()`: the scan adds no

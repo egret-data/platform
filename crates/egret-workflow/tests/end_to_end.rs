@@ -647,8 +647,9 @@ async fn both_spellings_publish_and_both_dispatch(pool: sqlx::PgPool) {
     /// really has it; egret has no handler and no row, and both ends must say
     /// so — this is the control that keeps "both spellings publish" from being
     /// satisfiable by a table that refuses nothing.
-    /// (`core.output.OutputValues` until group C1 Task 2 implemented it.)
-    const UNIMPLEMENTED: &str = "io.kestra.plugin.core.http.Request";
+    /// (`core.output.OutputValues` until group C1 Task 2 implemented it, then
+    /// `core.http.Request` until package #4 Task C3 did.)
+    const UNIMPLEMENTED: &str = "io.kestra.plugin.core.execution.PurgeExecutions";
 
     // ---- leg 1: publish, over HTTP ----
     let measured = [

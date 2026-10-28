@@ -2712,6 +2712,11 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
     );
     // Group C1 Task 4: `PurgeLogs`, registered beside them.
     want.push(egret_workflow::worker::handlers::purge_logs::TYPE_ID.to_string());
+    // Package #4 Task C3: `http.Request` and Kestra's `fs.http` alias.
+    want.extend([
+        egret_workflow::worker::handlers::http::REQUEST.to_string(),
+        egret_workflow::worker::handlers::http::REQUEST_ALIAS.to_string(),
+    ]);
     want.sort_unstable();
     assert_eq!(reg.type_ids(), want);
     assert_eq!(default_runner, None, "publish has no runner to default to");
@@ -2763,6 +2768,8 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
         vec![
             "egret.container",
             "egret.script.python",
+            // Package #4 Task C3, and its alias below.
+            "io.kestra.plugin.core.http.Request",
             // W9c Task 5.
             "io.kestra.plugin.core.kv.Delete",
             "io.kestra.plugin.core.kv.Get",
@@ -2778,13 +2785,14 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
             "io.kestra.plugin.core.namespace.UploadFiles",
             "io.kestra.plugin.core.storage.Delete",
             "io.kestra.plugin.core.storage.PurgeCurrentExecutionFiles",
+            "io.kestra.plugin.fs.http.Request",
             "io.kestra.plugin.scripts.python.Commands",
             "io.kestra.plugin.scripts.python.Script",
             "io.kestra.plugin.scripts.shell.Commands",
             "io.kestra.plugin.scripts.shell.Script",
         ]
     );
-    assert_eq!(reg.type_ids().len(), core + 2 + 4 + 6 + 6 + 1 + 9);
+    assert_eq!(reg.type_ids().len(), core + 2 + 4 + 6 + 6 + 1 + 2 + 9);
     assert_eq!(default_runner, Some(RunnerKind::Docker));
     assert!(
         reg.orphan_sweep().is_some(),

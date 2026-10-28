@@ -357,6 +357,8 @@ pub(crate) fn leaf_keys(t: &str) -> Option<Vec<&'static str>> {
         h::kv::DELETE => wire_fields_of::<h::kv::DeleteSpec>(),
         h::kv::PUT => wire_fields_of::<h::kv::PutSpec>(),
         h::kv::PURGE_KV => wire_fields_of::<h::kv::PurgeSpec>(),
+        // Package #4 Task C3: both spellings Kestra declares.
+        h::http::REQUEST | h::http::REQUEST_ALIAS => wire_fields_of::<h::http::Spec>(),
         // Kill-and-exit Task 3: no handler -- the executor runs it -- and
         // `build_plan` reads its leaf spec through this struct.
         crate::executor::exit::TYPE_ID => wire_fields_of::<crate::executor::exit::Spec>(),
@@ -1395,6 +1397,11 @@ mod tests {
                 "io.kestra.plugin.core.flow.Dag",
                 "onChildFailure",
                 "not at the pin; unknown_property",
+            ),
+            (
+                "io.kestra.plugin.core.http.Request",
+                "encryptBody",
+                "refused by egret unless false (package #4 spec D4); http_option_refused",
             ),
         ];
         use crate::spec::schema::{kestra_definition, FLOWABLE_TYPES, TRIGGER_TYPES};

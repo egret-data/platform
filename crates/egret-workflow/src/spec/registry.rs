@@ -368,6 +368,19 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
         aliases: &[],
         references: &[],
     },
+    // ── Package #4 Task C3: `http.Request` (`worker::handlers::http`),
+    // registered by `handlers::http::register`, which
+    // `runtime::handlers_for` calls for every deployment. **The one alias is
+    // Kestra's own** (`@Plugin(aliases = "io.kestra.plugin.fs.http.Request")`,
+    // `Request.java:333`), not a spelling egret invents: the rule above against
+    // inventing short aliases is about spellings nobody has published, and a
+    // flow pasted from Kestra may write this one (spec D9). No reference: a
+    // URL is not an egret object. ──
+    TaskTypeSpec {
+        r#type: crate::worker::handlers::http::REQUEST,
+        aliases: &[crate::worker::handlers::http::REQUEST_ALIAS],
+        references: &[],
+    },
 ];
 
 /// The registered types `advance()` runs itself, with no worker handler:

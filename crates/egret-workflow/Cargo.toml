@@ -308,6 +308,10 @@ egret-egress.workspace = true
 reqwest.workspace = true
 url.workspace = true
 bytes.workspace = true
+# Package #4 Task C3 (spec D6): `http.Request` fails on a code point Java's
+# `Character.isDefined` rejects, which needs Unicode's unassigned table.
+# Pinned to the version already in Cargo.lock, so this adds an edge only.
+unicode-general-category = "=1.1.0"
 
 [features]
 # `storage::install_mem_for_tests` and `egret_storage::MemStore`; and
