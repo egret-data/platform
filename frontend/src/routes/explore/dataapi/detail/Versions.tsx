@@ -283,7 +283,7 @@ export default function VersionsSection() {
                       {/* The same shared tone the endpoint list and the editor
                           pill wear (`chipTone.ts`), so this `Live` and the one
                           a click away are the same chip. Not `variant="success"`:
-                          that resolves to a hardcoded `bg-green-600`, not the
+                          that resolves to a hardcoded `bg-green-700`, not the
                           OKLCH `--success` token. The ink is `--foreground` for
                           the reason recorded in `chipTone.ts` — `text-success`
                           on this wash measures 3.72:1 in light mode, and the

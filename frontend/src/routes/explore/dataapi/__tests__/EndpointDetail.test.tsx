@@ -1511,7 +1511,7 @@ describe("VersionsSection", () => {
    * under WCAG 2.2 1.4.3's 4.5:1 for its 12px text — and moved onto the shared
    * map in `chipTone.ts` so that this `Live` and the header pill one click away
    * are the same chip. The test above finds the badge by its WORD, which is
-   * true of a `variant="success"` badge (a hardcoded `bg-green-600`, not the
+   * true of a `variant="success"` badge (a hardcoded `bg-green-700`, not the
    * OKLCH token) and of an untoned one, so it does not hold the tone.
    *
    * Expected classes are read out of `CHIP_TONE.success` rather than typed, so
