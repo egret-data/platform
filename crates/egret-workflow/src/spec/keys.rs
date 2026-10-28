@@ -190,13 +190,8 @@ pub(crate) fn lift_of(site: Site<'_>, key: &str) -> Option<Lift> {
             }
         }
         Site::Input(ty) => match (ty, key) {
-            ("STRING" | "SECRET", "validator") => Some(Package(3)),
-            ("INT" | "FLOAT" | "DURATION", "min" | "max") => Some(Package(3)),
-            ("DATE" | "DATETIME" | "TIME", "after" | "before") => Some(Package(3)),
-            (
-                "SELECT" | "MULTISELECT",
-                "values" | "expression" | "allowCustomValue" | "isRadio" | "autoSelectFirst",
-            ) => Some(Package(3)),
+            // No JSON Schema validator is in the dependency tree (spec D12):
+            // the value is parsed but not checked against the schema.
             ("JSON", "jsonSchema") => Some(Package(3)),
             ("FORM", "inputs") => Some(Enterprise),
             ("REUSABLE_INPUTS", "ref" | "namespace" | "revision") => Some(Enterprise),
@@ -303,8 +298,25 @@ const INPUT_COMMON_KEYS: &[&str] = &[
 pub(crate) fn input_keys(ty: &str) -> Vec<&'static str> {
     let mut keys = INPUT_COMMON_KEYS.to_vec();
     match ty {
-        "ARRAY" | "MULTISELECT" => keys.push("itemType"),
+        "ARRAY" => keys.push("itemType"),
         "FILE" => keys.push("allowedFileExtensions"),
+        "STRING" | "SECRET" => keys.push("validator"),
+        "INT" | "FLOAT" | "DURATION" => keys.extend(["min", "max"]),
+        "DATE" | "DATETIME" | "TIME" => keys.extend(["after", "before"]),
+        "SELECT" => keys.extend([
+            "values",
+            "expression",
+            "allowCustomValue",
+            "isRadio",
+            "autoSelectFirst",
+        ]),
+        "MULTISELECT" => keys.extend([
+            "itemType",
+            "values",
+            "expression",
+            "allowCustomValue",
+            "autoSelectFirst",
+        ]),
         _ => {}
     }
     keys
@@ -1309,7 +1321,8 @@ mod tests {
             ),
             Some(Package(11))
         );
-        assert_eq!(lift_of(Site::Input("SELECT"), "values"), Some(Package(3)));
+        assert_eq!(lift_of(Site::Input("FORM"), "inputs"), Some(Enterprise));
+        assert_eq!(lift_of(Site::Input("SELECT"), "values"), None);
         assert_eq!(lift_of(Site::Flow, "policyRefs"), Some(Enterprise));
         // Not lifted by #1's table: honoured or unknown to Kestra.
         assert_eq!(lift_of(Site::Task(log), "message"), None);
@@ -1508,6 +1521,20 @@ mod tests {
         assert!(at("tasks.t.retry.warningOnRetry").contains("roadmap package #13 lifts it"));
         assert_eq!(got.len(), 3, "{got:#?}");
         assert!(report.warnings.iter().all(|w| w.code != "ignored_property"));
+    }
+
+    /// Inputs package A5: `jsonSchema` is not modelled (D12), so a JSON
+    /// input that writes it keeps the `not_honoured` warning naming #3.
+    #[test]
+    fn a_json_inputs_json_schema_is_not_honoured() {
+        let source = "id: f\nnamespace: a.b\ninputs:\n  - id: j\n    type: JSON\n    jsonSchema: '{}'\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n";
+        let r = report(source);
+        let w = r
+            .warnings
+            .iter()
+            .find(|w| w.code == "not_honoured" && w.path == "inputs.j.jsonSchema")
+            .unwrap_or_else(|| panic!("{r:#?}"));
+        assert!(w.message.contains("roadmap package #3 lifts it"), "{w:?}");
     }
 
     /// The save-time report every test below reads (spec D11).
@@ -2082,15 +2109,9 @@ mod tests {
     /// One egret struct serves twenty Kestra classes: a key of another subtype
     /// is unknown to Kestra (spec 3.5).
     #[test]
-    fn an_input_key_of_another_type_is_refused_and_its_own_kestra_key_is_warned() {
+    fn an_input_key_of_another_type_is_refused_and_its_own_kestra_key_is_read() {
         let r = report("id: f\nnamespace: a.b\ninputs:\n  - id: n\n    type: INT\n    min: 1\n    validator: \"^a$\"\n  - id: s\n    type: STRING\n    itemType: INT\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n");
-        assert!(
-            r.warnings
-                .iter()
-                .any(|w| w.path == "inputs.n.min"
-                    && w.message.ends_with("roadmap package #3 lifts it")),
-            "{r:?}"
-        );
+        assert!(r.warnings.is_empty(), "{r:?}");
         let unknown: std::collections::BTreeSet<_> = r
             .errors
             .iter()
@@ -2110,9 +2131,9 @@ mod tests {
 
     #[test]
     fn the_keys_egret_reads_on_an_input_are_silent_on_their_own_type() {
-        let r = report("id: f\nnamespace: a.b\ninputs:\n  - id: a\n    type: ARRAY\n    itemType: INT\n  - id: m\n    type: MULTISELECT\n    itemType: STRING\n    values: [x]\n  - id: f1\n    type: FILE\n    allowedFileExtensions: [.csv]\n  - id: b\n    type: BOOL\n    defaults: true\n    required: false\n    displayName: B\n    description: d\n    prefill: true\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n");
+        let r = report("id: f\nnamespace: a.b\ninputs:\n  - id: a\n    type: ARRAY\n    itemType: INT\n  - id: m\n    type: MULTISELECT\n    itemType: STRING\n    values: [x]\n  - id: f1\n    type: FILE\n    allowedFileExtensions: [.csv]\n  - id: b\n    type: BOOL\n    defaults: true\n    required: false\n    displayName: B\n    description: d\n  - id: p\n    type: BOOL\n    required: false\n    prefill: true\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n");
         let w: Vec<_> = r.warnings.iter().map(|w| w.path.as_str()).collect();
-        assert_eq!(w, vec!["inputs.m.values"], "{r:?}");
+        assert!(w.is_empty(), "{r:?}");
         assert!(r.errors.is_empty(), "{r:?}");
     }
 
@@ -2121,22 +2142,6 @@ mod tests {
     fn the_input_rows_name_the_package_the_roadmap_gives() {
         use Lift::{Enterprise, Package};
         let rows = [
-            ("STRING", "validator", Package(3)),
-            ("SECRET", "validator", Package(3)),
-            ("INT", "min", Package(3)),
-            ("INT", "max", Package(3)),
-            ("FLOAT", "min", Package(3)),
-            ("DURATION", "max", Package(3)),
-            ("DATE", "after", Package(3)),
-            ("DATETIME", "before", Package(3)),
-            ("TIME", "after", Package(3)),
-            ("SELECT", "values", Package(3)),
-            ("SELECT", "expression", Package(3)),
-            ("SELECT", "allowCustomValue", Package(3)),
-            ("SELECT", "isRadio", Package(3)),
-            ("SELECT", "autoSelectFirst", Package(3)),
-            ("MULTISELECT", "values", Package(3)),
-            ("MULTISELECT", "autoSelectFirst", Package(3)),
             ("JSON", "jsonSchema", Package(3)),
             ("FORM", "inputs", Enterprise),
             ("REUSABLE_INPUTS", "ref", Enterprise),

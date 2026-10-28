@@ -1128,6 +1128,12 @@ pub enum Ran {
     /// `build_plan` refused the flow. The one thing a `refused` golden entry
     /// compares.
     Refused(String),
+    /// The flow planned, and `start_execution` refused the START with
+    /// `Error::InvalidInput` -- the posted input values, checked against the
+    /// declared `inputs:` (package #3, spec D8). Kestra's counterpart is the
+    /// 422 its `POST /executions` returns after a 200 publish. Carries the
+    /// error's own message, without `Display`'s `invalid input: ` prefix.
+    StartRefused(String),
     /// The instrument failed: the step bound was exceeded, or a database error
     /// nothing about the flow explains.
     Broken(String),
@@ -1172,8 +1178,16 @@ pub async fn run_with(
     if let Err(e) = egret_workflow::executor::build_plan(source) {
         return Ran::Refused(e.message);
     }
+    // Package #3 (spec D8): a start refused for its input VALUES is the
+    // product answering, not the instrument failing, so it is a refusal at a
+    // third seam rather than `Broken`. Matched on the error's TYPE; the
+    // ratchet then compares the message against Kestra's recorded 422, so an
+    // `InvalidInput` for any other cause (a FILE URI, a type this deployment
+    // does not serve) is a mismatch there, never a silent match. Every other
+    // start error is still the instrument's.
     let id = match worker::start_execution(pool, workspace, None, source, inputs).await {
         Ok(id) => id,
+        Err(egret_core::Error::InvalidInput(message)) => return Ran::StartRefused(message),
         Err(e) => return Ran::Broken(format!("start_execution: {e}")),
     };
 

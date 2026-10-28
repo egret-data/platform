@@ -294,6 +294,13 @@ egret-storage.workspace = true
 # pull it), so no new crate enters the build.
 crc32fast = "=1.5.0"
 
+# Package #3 Task A2 (spec D10): an input's `validator` is a Java regex, full
+# match, with lookaround and backreferences, which `regex` cannot express.
+# `fancy-regex` gives both plus a backtrack limit, which stands in for
+# Kestra's 10 s timeout. Pinned to the version already in Cargo.lock (through
+# `starlark`), so this adds a direct edge and no new crate.
+fancy-regex = "=0.16.2"
+
 [features]
 # `storage::install_mem_for_tests` and `egret_storage::MemStore`; and
 # `runtime::install_served_for_tests` (no-silent-stall Task 2).

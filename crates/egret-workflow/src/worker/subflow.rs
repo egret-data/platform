@@ -493,6 +493,22 @@ pub(super) async fn spawn_one(
             return Ok(fail_run(ctx, r.run, &format!("subflow inputs: {e}")));
         }
     };
+    // Package #3 (spec D7): the CHILD's declared `inputs:` are checked as a
+    // top-level start's are -- the same checker, before `split` so a SECRET
+    // `validator` sees the clear value -- and the coerced object is stored.
+    // A refusal fails this `Subflow` run, as Kestra's "Subflow task FAILED".
+    // The child does not go through `start_execution_in_on`: it has its own
+    // INSERT below.
+    let inputs = match claim::checked_inputs(&child, &inputs) {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok(fail_run(
+                ctx,
+                r.run,
+                &format!("subflow inputs: {}", e.message),
+            ));
+        }
+    };
     // KI-112: the CHILD's declaration decides which of them are SECRET.
     let (inputs, secret_inputs) = match crate::secret_inputs::split(&child, inputs) {
         Ok(split) => split,

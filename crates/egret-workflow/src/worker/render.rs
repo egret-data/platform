@@ -1328,6 +1328,40 @@ mod tests {
         assert_eq!(surface.reserve_id(4), (fresh, false));
     }
 
+    /// Review M1: what the start check stores for a JSON input, rendered,
+    /// is the value the check parsed -- parsed once, not twice. The run form
+    /// sends a JSON input as the text typed (`inputModel.ts`, `wireValue`),
+    /// so `"123"` typed is the JSON string `123`, which must not render as
+    /// the number. Checking the stored form again stores the same thing.
+    #[test]
+    fn a_checked_json_input_renders_the_value_it_was_checked_as() {
+        let f = flow(
+            "id: x\nnamespace: t\ninputs:\n  - id: j\n    type: JSON\ntasks:\n\
+             \x20 - id: t1\n    type: io.kestra.plugin.core.debug.Return\n    format: x\n",
+        );
+        let no_render = |_: &str, _: &Map<String, Value>| -> std::result::Result<Value, String> {
+            Err("none".into())
+        };
+        for (posted, want) in [
+            (json!("123"), json!(123)),
+            (json!("\"123\""), json!("123")),
+            (json!("\"true\""), json!("true")),
+            (json!("\"[1,2]\""), json!("[1,2]")),
+            (json!({"a": 1}), json!({"a": 1})),
+            (json!("{\"a\":1}"), json!({"a": 1})),
+        ] {
+            let stored =
+                crate::inputs_check::resolve(&f.inputs, &json!({ "j": posted }), &no_render)
+                    .unwrap();
+            let rendered = with_declared_defaults(Value::Object(stored.clone()), Some(&f));
+            assert_eq!(rendered["j"], want, "posted {posted}");
+            let again =
+                crate::inputs_check::resolve(&f.inputs, &Value::Object(stored.clone()), &no_render)
+                    .unwrap();
+            assert_eq!(again, stored, "re-checking posted {posted}");
+        }
+    }
+
     /// A flow with no `inputs:` gets what it was posted, unchanged — the
     /// control for the case above, which would otherwise pass against a
     /// function that parsed everything.

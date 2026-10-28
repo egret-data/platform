@@ -639,13 +639,15 @@ async fn a_json_file_input_that_is_not_a_readable_uri_is_refused_naming_the_inpu
 }
 
 /// **The two-sided guard `start_inputs` has**, unchanged for a flow with no
-/// FILE input: non-objects 400; no body, `{}` and `null` start; values are
-/// stored verbatim. A FILE input given no value is not checked.
+/// FILE input: non-objects 400; no body, `{}` and `null` start; declared
+/// values are stored (package #3: coerced, which leaves these as posted). A
+/// FILE input given no value is checked for `required` only (package #3).
 #[tokio::test]
 async fn a_json_start_with_no_file_input_is_unchanged() {
     let Some(fx) = fx().await else { return };
     let src = format!(
-        "id: plain\nnamespace: {NS}\ninputs:\n  - id: who\n    type: STRING\n\
+        "id: plain\nnamespace: {NS}\ninputs:\n  - id: who\n    type: STRING\n    \
+         required: false\n  - id: n\n    type: INT\n    required: false\n\
          tasks:\n  - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
     );
     let flow = fx.flow(&src).await;
@@ -685,10 +687,23 @@ async fn a_json_start_with_no_file_input_is_unchanged() {
     let ex = id_of(res).await;
     assert_eq!(fx.inputs_of(ex).await, json!({ "who": "world", "n": 3 }));
 
-    // A FILE input left out is not checked (the render decides).
+    // A FILE input left out: a required one is refused at start (package
+    // #3, Kestra's `Missing required input`); an optional one starts and the
+    // render decides.
     let files = fx.flow(&reader_flow("no-value", NS, "")).await;
     assert_eq!(
-        fx.start_json(files, json!({ "t": "x" })).await.status(),
+        refusal(fx.start_json(files, json!({ "t": "x" })).await, 400).await,
+        "invalid input: Missing required input:f"
+    );
+    let optional = fx
+        .flow(&reader_flow(
+            "no-value-optional",
+            NS,
+            "    required: false\n",
+        ))
+        .await;
+    assert_eq!(
+        fx.start_json(optional, json!({ "t": "x" })).await.status(),
         201
     );
 }
@@ -1018,7 +1033,8 @@ async fn a_subflow_in_a_loop_iteration_reads_the_loop_roots_file_input() {
 async fn a_start_with_no_content_type_is_json_and_an_unsupported_type_is_415() {
     let Some(fx) = fx().await else { return };
     let src = format!(
-        "id: no-ct\nnamespace: {NS}\ninputs:\n  - id: who\n    type: STRING\n\
+        "id: no-ct\nnamespace: {NS}\ninputs:\n  - id: who\n    type: STRING\n    \
+         required: false\n\
          tasks:\n  - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
     );
     let flow = fx.flow(&src).await;
@@ -1042,7 +1058,8 @@ async fn a_start_with_no_content_type_is_json_and_an_unsupported_type_is_415() {
     let res = send("", Vec::new()).await;
     assert_eq!(res.status(), 201);
     let ex = id_of(res).await;
-    assert_eq!(fx.inputs_of(ex).await, json!({}));
+    // Package #3: an optional input nobody posted is stored as `null`.
+    assert_eq!(fx.inputs_of(ex).await, json!({ "who": null }));
 
     // Headerless and not JSON: refused, not started with `{}`.
     let res = send("", b"who=x".to_vec()).await;

@@ -1692,7 +1692,11 @@ async fn a_start_runs_the_drafts_source_with_the_inputs_the_caller_sent() {
     let Some(db) = common::db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     common::grant(&db, ws, user, &["workflow:manage", "workflow:read"]).await;
-    let source = runnable_source("start-shape");
+    // Declared: package #3 stores only declared inputs (spec D2).
+    let source = "id: start-shape\nnamespace: a.write\ninputs:\n  - id: who\n    type: STRING\n  \
+         - id: n\n    type: INT\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    \
+         message: hi\n"
+        .to_string();
     let flow = common::seed_flow(&db, ws, user, &source, "draft").await;
 
     let app = common::app(&db).await;

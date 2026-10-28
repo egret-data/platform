@@ -48,6 +48,10 @@ pub mod flow_trigger;
 /// W7c: the read-only topology graph of a flow (`flow_graph`), pure like
 /// `executor`. `pub` because the routes (Task 2) and the corpus sweep use it.
 pub mod graph;
+/// Package #3: the start-time input check (`inputs_check::resolve`) -- the
+/// declared `inputs:` against the posted object, pure. `pub` so the start
+/// paths, the subflow child and the validate endpoint share one checker.
+pub mod inputs_check;
 /// W7f: execution-label merge and the backfill's label checks. Crate-private.
 pub(crate) mod labels;
 /// W11: `workflow.task_logs` -- the log vocabulary and `LogRepo`. `pub`

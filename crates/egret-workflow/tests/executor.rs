@@ -353,6 +353,9 @@ enum Outcome {
     Trace(Trace),
     /// egret refused the flow at plan time.
     Refused(String),
+    /// egret planned the flow and refused its START for the posted input
+    /// values (`driver::Ran::StartRefused`, spec D8 of package #3).
+    StartRefused(String),
     /// The DRIVER failed: a panic, or the step bound. Never covered by the
     /// baseline — see this module's doc. An execution that merely stalls is a
     /// `Trace`, not this.
@@ -828,7 +831,12 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
         // `valids/sleep-long` and `valids/sleep-long-after-execution-flowable`
         // bank (`afterExecution:` runs once the execution is terminal);
         // 52 + 249 = 301.
-        (301, 249, 52),
+        // 52 -> 50 baselined, 249 -> 251 matching at workflow-inputs Task A6
+        // (2026-10-28): `invalids/inputs-bad-validator-syntax` banks through a
+        // `Seam::Save` group (`input_validator_invalid`) and
+        // `invalids/inputs-with-multiple-constraint-violations` through the
+        // new `Seam::Start` group; 50 + 251 = 301.
+        (301, 251, 50),
         "301 = matching + baselined, the total beside its parts. It read \
          167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries, W8 \
          Task 4 banked `valids/waitfor-nested`, W8 Task 5 banked seven \
@@ -1522,6 +1530,7 @@ async fn egret_side() -> &'static Side {
             let outcome = match joined {
                 Ok(driver::Ran::Trace(t)) => Outcome::Trace(*t),
                 Ok(driver::Ran::Refused(msg)) => Outcome::Refused(msg),
+                Ok(driver::Ran::StartRefused(msg)) => Outcome::StartRefused(msg),
                 Ok(driver::Ran::Broken(msg)) => Outcome::Broken(msg),
                 Err(e) if e.is_panic() => {
                     Outcome::Broken(format!("PANIC: {}", panic_message(e.into_panic())))
@@ -2041,7 +2050,24 @@ async fn executor_matches_golden() {
         match (entry.verdict, evaluate(side, entry)) {
             (Verdict::Refused, Outcome::Refused(_)) => {}
             // Kestra refuses at save, and so does egret (Seam::Save group).
-            (Verdict::Refused, Outcome::Trace(_)) if refused_at_save(&entry.id) => {}
+            // The driver does not save, so it goes on to start the flow, and
+            // what the start then does is moot: the flow never got that far.
+            (Verdict::Refused, Outcome::Trace(_) | Outcome::StartRefused(_))
+                if refused_at_save(&entry.id) => {}
+            // Kestra published it and refused the START with a 422; egret
+            // refuses the start with the same lines (Seam::Start group).
+            (Verdict::Refused, Outcome::StartRefused(msg)) if refused_at_start(&entry.id, msg) => {}
+            (Verdict::Refused, Outcome::StartRefused(msg)) => {
+                mismatched.insert(entry.id.clone());
+                detail.insert(
+                    entry.id.clone(),
+                    format!(
+                        "  {}: egret refused the START, but not as Kestra's recorded 422 \
+                         does (no Seam::Start group, or other lines): {msg}",
+                        entry.id
+                    ),
+                );
+            }
             (Verdict::Refused, Outcome::Trace(_)) => {
                 mismatched.insert(entry.id.clone());
                 detail.insert(
@@ -2061,6 +2087,16 @@ async fn executor_matches_golden() {
                 detail.insert(
                     entry.id.clone(),
                     format!("  {}: egret REFUSED a flow Kestra ran: {msg}", entry.id),
+                );
+            }
+            (Verdict::Runs, Outcome::StartRefused(msg)) => {
+                mismatched.insert(entry.id.clone());
+                detail.insert(
+                    entry.id.clone(),
+                    format!(
+                        "  {}: egret REFUSED THE START of a flow Kestra ran: {msg}",
+                        entry.id
+                    ),
                 );
             }
             (Verdict::Runs, Outcome::Trace(actual)) => {
@@ -4150,7 +4186,7 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
                 t.restrict_order_to(&expected);
                 t
             }
-            Outcome::Refused(why) => {
+            Outcome::Refused(why) | Outcome::StartRefused(why) => {
                 refused += 1;
                 refused_ids.push((entry.id.clone(), why.clone()));
                 total += 1;
@@ -6660,6 +6696,62 @@ enum Seam {
     /// the run gate never does, spec D1): `message` is the `code` of an error
     /// finding. No-silent-drops Task 8b (spec Q1 (b), 2026-10-26).
     Save,
+    /// START time, the declared inputs checked against the posted values
+    /// (`worker::start_execution` -> `Error::InvalidInput`, which the driver
+    /// returns as `Ran::StartRefused`). Kestra PUBLISHED these flows (200) and
+    /// refused the `POST /executions` (422). `message` is the prefix every
+    /// line of the refusal starts with; the lines themselves are compared
+    /// against the 422 `corpus.json` recorded, as a multiset, because Kestra
+    /// reports a MULTISELECT's bad elements in Java `HashSet` order. Package
+    /// #3 (spec D8, 2026-10-28).
+    Start,
+}
+
+/// What `harvest.py` recorded, in `corpus.json`'s `reason`, for a flow Kestra
+/// published and then refused to START: this prefix, then the 422's lines.
+/// `golden.json` records only `verdict: refused` for such an entry, so the
+/// message is read from the harvest record beside it.
+const START_REFUSAL_REASON: &str = "publish -> 200; POST execution -> 422: ";
+
+/// The lines of Kestra's recorded start refusal for `id`, sorted -- `None` if
+/// `corpus.json`'s `reason` does not record a refused START.
+fn kestra_start_refusal(id: &str) -> Option<Vec<String>> {
+    let reason = corpus_json().get(id)?.get("reason")?.as_str()?;
+    Some(sorted_lines(reason.strip_prefix(START_REFUSAL_REASON)?))
+}
+
+/// A refusal's non-empty lines, sorted: the order-free comparison spec D8
+/// asks for, kept a multiset (not a set) so a line egret repeated, or dropped
+/// in favour of a duplicate, still differs.
+fn sorted_lines(message: &str) -> Vec<String> {
+    let mut lines: Vec<String> = message
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    lines.sort();
+    lines
+}
+
+/// Did egret refuse the start of `id` as Kestra's recorded 422 did? `false`
+/// for an id in no `Seam::Start` group, so a start refusal for some other
+/// cause never banks.
+fn refused_at_start(id: &str, egret: &str) -> bool {
+    REFUSAL_GROUPS
+        .iter()
+        .find(|g| g.seam == Seam::Start && g.ids.contains(&id))
+        .is_some_and(|group| start_refusal_matches(id, group.message, egret))
+}
+
+/// egret's refusal `egret` has the same lines as Kestra's recorded 422 for
+/// `id`, in any order, and every line starts with the group's `prefix`.
+fn start_refusal_matches(id: &str, prefix: &str, egret: &str) -> bool {
+    let Some(kestra) = kestra_start_refusal(id) else {
+        return false;
+    };
+    let egret = sorted_lines(egret);
+    !egret.is_empty() && egret.iter().all(|l| l.starts_with(prefix)) && egret == kestra
 }
 
 /// Does `spec::validate_source` -- the function production calls when a flow
@@ -6721,6 +6813,46 @@ fn a_save_time_refusal_banks_only_for_its_own_group_and_code() {
         "the control: save refuses invalids/duplicate"
     );
     assert!(!refused_at_save("invalids/duplicate"));
+    // Package #3 Task A6: the validator group, and the run gate that plans it.
+    assert!(refused_at_save("invalids/inputs-bad-validator-syntax"));
+    assert!(!save_refusal_has_code(
+        "invalids/inputs-bad-validator-syntax",
+        "unknown_property"
+    ));
+}
+
+/// The comparison `refused_at_start` makes, driven in each direction that
+/// must say no. The ratchet runs it on egret's real start refusal; this pins
+/// what it accepts, so loosening it (to a prefix alone, or to one line) fails
+/// here rather than banking silently.
+#[test]
+fn a_start_time_refusal_banks_only_for_its_own_group_and_lines() {
+    const ID: &str = "invalids/inputs-with-multiple-constraint-violations";
+    let f =
+        "Invalid value for input `multi`. Cause: value `F` doesn't match the values `[A, B, C]`";
+    let h =
+        "Invalid value for input `multi`. Cause: value `H` doesn't match the values `[A, B, C]`";
+    // Kestra recorded H first (hash order); egret's declared-order F first matches.
+    assert_eq!(
+        kestra_start_refusal(ID),
+        Some(sorted_lines(&format!("{h}\n{f}"))),
+        "corpus.json records the 422 for {ID}"
+    );
+    assert!(refused_at_start(ID, &format!("{f}\n{h}")));
+    assert!(refused_at_start(ID, &format!("{h}\n{f}")));
+    // One bad element of two is not the refusal Kestra made.
+    assert!(!refused_at_start(ID, f));
+    // A repeated line is not the other one.
+    assert!(!refused_at_start(ID, &format!("{f}\n{f}")));
+    // A different cause, at the same seam.
+    assert!(!refused_at_start(ID, "Missing required input:multi"));
+    // The right lines for an id in no Seam::Start group (a SAVE refusal, and
+    // a flow Kestra ran) never bank.
+    assert!(!refused_at_start(
+        "invalids/inputs-bad-validator-syntax",
+        &format!("{f}\n{h}")
+    ));
+    assert!(kestra_start_refusal("invalids/inputs-bad-validator-syntax").is_none());
 }
 
 /// The 23 refusals, by cause. Not by directory: `invalids/loop-switch-failed`
@@ -6884,6 +7016,28 @@ const REFUSAL_GROUPS: &[RefusalGroup] = &[
         seam: Seam::Save,
         ids: &["invalids/invalid-property"],
     },
+    // Package #3 Task A6 (2026-10-28). Was `STILL_OVER_ACCEPTED`'s row
+    // ("compiling it with the `regex` crate would refuse valid Java
+    // patterns"); A5 compiles `validator` with `fancy-regex` at save (spec
+    // D10/D11), which keeps lookaround and backreferences, and measured that
+    // it rejects `\` as `java.util.regex.Pattern` does.
+    RefusalGroup {
+        cause: "a STRING input whose `validator` does not compile. Kestra: \
+                `inputs[badValidatorSyntax].validator: invalid pattern [\\]`",
+        message: "input_validator_invalid",
+        seam: Seam::Save,
+        ids: &["invalids/inputs-bad-validator-syntax"],
+    },
+    // Package #3 Task A6 (2026-10-28). Was `STILL_OVER_ACCEPTED`'s row
+    // ("`build_plan(&str)` takes no input values, so no change to it can
+    // reach this seam") -- the seam is the start, and it exists now.
+    RefusalGroup {
+        cause: "a MULTISELECT value outside `values:` -- Kestra publishes the flow \
+                and refuses the START that posts `[F, H]`, one line per bad element",
+        message: "Invalid value for input `multi`. Cause: value `",
+        seam: Seam::Start,
+        ids: &["invalids/inputs-with-multiple-constraint-violations"],
+    },
 ];
 
 /// The refusals egret does NOT make, each with the reason and the owner.
@@ -6892,27 +7046,11 @@ const REFUSAL_GROUPS: &[RefusalGroup] = &[
 /// above: an over-acceptance that quietly becomes a refusal must fail this
 /// test and force the record to be corrected, exactly as the ratchet's
 /// `banked` arm does for the other direction.
-const STILL_OVER_ACCEPTED: &[(&str, &str)] = &[
-    (
-        "invalids/dag-invalid-subtask",
-        "`tasks[task1].tasks[task1].task.message: must not be null` — a `@NotNull` on \
+const STILL_OVER_ACCEPTED: &[(&str, &str)] = &[(
+    "invalids/dag-invalid-subtask",
+    "`tasks[task1].tasks[task1].task.message: must not be null` — a `@NotNull` on \
          `Log.message`, i.e. bean validation of a plugin's own property. Same gap again.",
-    ),
-    (
-        "invalids/inputs-bad-validator-syntax",
-        "`inputs[badValidatorSyntax].validator: invalid pattern [\\]` — Kestra compiles it \
-         with `java.util.regex.Pattern`. Compiling it with the `regex` crate instead would \
-         refuse valid Java patterns (lookaround, backreferences), which is an OVER-refusal \
-         traded for an over-acceptance. Owner: W1, and it needs a Java-Pattern-compatible \
-         syntax check, not `Regex::new`.",
-    ),
-    (
-        "invalids/inputs-with-multiple-constraint-violations",
-        "publish returned **200**; Kestra refuses it when the execution's input VALUES are \
-         read (`value `H` doesn't match the values `[A, B, C]`). `build_plan(&str)` takes no \
-         input values, so no change to it can reach this seam. Owner: W3b/W1 input coercion.",
-    ),
-];
+)];
 
 /// egret refuses every flow this Kestra refuses, or the exception is named.
 ///
@@ -6966,6 +7104,34 @@ fn egret_refuses_every_flow_kestra_refuses() {
                     failures.push(format!(
                         "  {id}: the RUN gate refuses it now; move it to a Seam::Run group"
                     ));
+                }
+                continue;
+            }
+            if group.seam == Seam::Start {
+                // Kestra PUBLISHED it, so neither egret gate may refuse it;
+                // what refuses it is the start, which the ratchet drives and
+                // compares (`refused_at_start`). Here: the record it is
+                // compared against exists, and the group's prefix is Kestra's.
+                if build_plan(&source).is_err() {
+                    failures.push(format!(
+                        "  {id}: the RUN gate refuses it; Kestra published it (200)"
+                    ));
+                }
+                let flow = egret_workflow::spec::parse(&source).expect("it plans, so it parses");
+                let save = egret_workflow::spec::validate_source(&source, &flow);
+                if !save.errors.is_empty() {
+                    failures.push(format!(
+                        "  {id}: refused at SAVE ({:?}); Kestra published it (200)",
+                        save.errors.iter().map(|f| &f.code).collect::<Vec<_>>()
+                    ));
+                }
+                match kestra_start_refusal(id) {
+                    Some(lines) if lines.iter().all(|l| l.starts_with(group.message)) => {}
+                    other => failures.push(format!(
+                        "  {id}: corpus.json records no start 422 whose every line starts \
+                         with {:?}: {other:?}",
+                        group.message
+                    )),
                 }
                 continue;
             }
@@ -7357,14 +7523,6 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         (
             "invalids/dag-invalid-subtask",
             "over-accepted: a @NotNull on a plugin property",
-        ),
-        (
-            "invalids/inputs-bad-validator-syntax",
-            "over-accepted: a java.util.regex dialect",
-        ),
-        (
-            "invalids/inputs-with-multiple-constraint-violations",
-            "over-accepted: refused at a different seam",
         ),
         (
             "valids/dag",
@@ -7899,7 +8057,9 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
         // three `Loop` entries it banked.
         // (2, 58, 60) -> (2, 50, 52) at end hooks #2b Task B1 (2026-10-27): nor
         // do the eight `afterExecution:` entries it banked.
-        (2, 50, 52),
+        // (2, 50, 52) -> (2, 48, 50) at workflow-inputs Task A6 (2026-10-28):
+        // nor do the two `invalids/inputs-*` entries it banked.
+        (2, 48, 50),
         "the baselined population that declares a `timeout:`, and the rest \
          ((2, 106, 108) until no-silent-stall Task 1 banked \
          `invalids/invalid-task`, which declares none). It \
@@ -9258,7 +9418,7 @@ async fn the_execution_assertion_banks_discriminate_on_the_inputs_the_harvest_di
     for (label, inputs, expect_cancelled, expect_runs) in cases {
         let t = match driver::run(&db.pool, ws, &reg, &source, inputs.clone()).await {
             driver::Ran::Trace(t) => *t,
-            driver::Ran::Refused(msg) => {
+            driver::Ran::Refused(msg) | driver::Ran::StartRefused(msg) => {
                 wrong.push(format!("{label}: egret REFUSED the flow: {msg}"));
                 continue;
             }
@@ -9330,7 +9490,9 @@ async fn the_driver_resumes_a_run_whose_short_deadline_passed_before_pass_time()
     .await
     {
         driver::Ran::Trace(t) => *t,
-        driver::Ran::Refused(msg) => panic!("egret REFUSED {ID}: {msg}"),
+        driver::Ran::Refused(msg) | driver::Ran::StartRefused(msg) => {
+            panic!("egret REFUSED {ID}: {msg}")
+        }
         driver::Ran::Broken(msg) => panic!("the driver broke on {ID}: {msg}"),
     };
 
