@@ -557,6 +557,16 @@ pub enum CompileError {
     /// the parse error itself.
     #[error("database error: {0}")]
     Db(String),
+    /// A hidden-column deny the compiler cannot plan: the wildcard data mask
+    /// `selector` (`catalog.database.table`) matches tables that cannot be
+    /// listed, because no registered catalog matches its catalog level or the
+    /// matched catalog has no warehouse. Refused rather than denied broadly:
+    /// a guessed scope would either over-deny or leave a table unprotected.
+    #[error(
+        "the data mask on {selector:?} cannot be compiled: its tables cannot be listed ({reason}), \
+         so the hidden-column deny on them cannot be planned"
+    )]
+    HiddenColumnsUnenumerable { selector: String, reason: String },
     /// An engine grant (F11, `perm.engine_grants`) the compiler cannot express:
     /// an unknown capability, a capability of another engine than the
     /// profile's, a value that breaks the catalogue's rules, or an exclude.
