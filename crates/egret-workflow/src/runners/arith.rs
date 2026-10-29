@@ -61,6 +61,8 @@
 //! `num-bigint`. `/ 0`, `% 0` and a NaN or infinite operand (`valueOf` throws)
 //! fail with the operator's text.
 
+use std::sync::Arc;
+
 use minijinja::value::{Value as MjValue, ValueKind};
 use minijinja::{Environment, Error as MjError, ErrorKind, State};
 
@@ -396,8 +398,8 @@ fn list_items(value: &MjValue) -> Vec<MjValue> {
 ///
 /// Two ceilings, each named in the refusal:
 ///
-/// - [`MAX_LIST_OPERATOR_WORK`]: every list operator (`+`, `-`, `contains`)
-///   charges what it will do -- `n x m` element comparisons for `removeAll`
+/// - [`MAX_LIST_OPERATOR_WORK`]: every list operator (`+`, `-`, `contains`,
+///   and the `merge` filter, fix wave #5b I1) charges what it will do -- `n x m` element comparisons for `removeAll`
 ///   and `containsAll`, `n` for a scan or a copy -- to ONE budget for the
 ///   whole render, before doing it. A budget per render rather than per call,
 ///   because fuel lets 50 000 calls through and 50 000 x anything-per-call is
@@ -412,12 +414,32 @@ pub(super) const MAX_LIST_OPERATOR_WORK: u64 = 10_000_000;
 /// See [`MAX_LIST_OPERATOR_WORK`].
 pub(super) const MAX_LIST_OPERATOR_LENGTH: usize = 1_000_000;
 
-/// The per-render tally behind [`MAX_LIST_OPERATOR_WORK`], kept in the
-/// render's temps (one `State` per render, shared by every nested call).
+/// The per-render tally behind [`MAX_LIST_OPERATOR_WORK`], cached in each
+/// pass's temps.
+///
+/// **One tally per top-level render** (fix wave #5b, M3): every pass is a
+/// `State` of its own -- each fixpoint pass of `env::render_str`, and each
+/// pass of a nested `render()` -- and every one of them charges the tally
+/// the top-level render installed (`super::nested::render_list_work`, kept
+/// in its `Scope`). Before the fix wave this doc said "one `State` per
+/// render"; in fact each fixpoint pass started a fresh tally, so a render
+/// that kept changing got up to 101 x the budget. Outside an installed
+/// render (an environment composed by hand) a `State` keeps its own.
 #[derive(Debug, Default)]
-struct ListOperatorWork(std::sync::atomic::AtomicU64);
+struct ListOperatorWork(Arc<std::sync::atomic::AtomicU64>);
 
 impl minijinja::value::Object for ListOperatorWork {}
+
+/// This render's list-work tally: the top-level render's (see
+/// [`ListOperatorWork`]).
+pub(super) fn list_work_tally(state: &State) -> Arc<std::sync::atomic::AtomicU64> {
+    state
+        .get_or_set_temp_object("egret.list_operator_work", || {
+            ListOperatorWork(super::nested::render_list_work().unwrap_or_default())
+        })
+        .0
+        .clone()
+}
 
 /// `n x m` comparisons, never less than the `n` the copy itself costs.
 pub(super) fn pair_work(n: usize, m: usize) -> u64 {
@@ -426,9 +448,16 @@ pub(super) fn pair_work(n: usize, m: usize) -> u64 {
 
 /// Charge `units` of list work to this render, or refuse BEFORE the work.
 pub(super) fn charge_list_work(state: &State, units: u64) -> Result<(), MjError> {
+    charge_tally(&list_work_tally(state), units)
+}
+
+/// [`charge_list_work`] on a tally already in hand.
+pub(super) fn charge_tally(
+    tally: &Arc<std::sync::atomic::AtomicU64>,
+    units: u64,
+) -> Result<(), MjError> {
     use std::sync::atomic::Ordering;
-    let tally = state.get_or_set_temp_object("egret.list_operator_work", ListOperatorWork::default);
-    let mut spent = tally.0.load(Ordering::Relaxed);
+    let mut spent = tally.load(Ordering::Relaxed);
     loop {
         let after = spent.saturating_add(units);
         if after > MAX_LIST_OPERATOR_WORK {
@@ -438,10 +467,7 @@ pub(super) fn charge_list_work(state: &State, units: u64) -> Result<(), MjError>
                  total to {after}"
             )));
         }
-        match tally
-            .0
-            .compare_exchange(spent, after, Ordering::Relaxed, Ordering::Relaxed)
-        {
+        match tally.compare_exchange(spent, after, Ordering::Relaxed, Ordering::Relaxed) {
             Ok(_) => return Ok(()),
             Err(now) => spent = now,
         }
@@ -449,7 +475,7 @@ pub(super) fn charge_list_work(state: &State, units: u64) -> Result<(), MjError>
 }
 
 /// Refuse a list operator result past [`MAX_LIST_OPERATOR_LENGTH`].
-fn check_list_length(len: usize) -> Result<(), MjError> {
+pub(super) fn check_list_length(len: usize) -> Result<(), MjError> {
     if len > MAX_LIST_OPERATOR_LENGTH {
         return Err(super::filters::pebble_error(format!(
             "egret refuses a list operation whose result would have more than \

@@ -39,6 +39,11 @@
 //! Read `javare`'s module doc before touching any pattern: nine of Java's
 //! commonest constructs answer a DIFFERENT question in the crate, silently.
 //!
+//! Package #5b Task B4 added Pebble core's ten that Kestra does not register
+//! itself but its engine binds (`abbreviate`, `base64decode`, `base64encode`,
+//! `merge`, `nl2br`, `numberformat`, `raw`, `rsort`, `sha256`, `urlencode`);
+//! `numberformat`'s `DecimalFormat` is [`super::decimalformat`].
+//!
 //! # The null-input branch is not the same in all seven
 //!
 //! `toJson`, `toIon` and `yaml` return the four-character *string* `"null"`
@@ -184,6 +189,19 @@ pub(super) fn register(env: &mut Environment<'static>) {
     env.add_filter("urldecode", urldecode);
     env.add_filter("values", values);
     env.add_filter("yaml", yaml);
+    // Package #5b Task B4 (spec D13): Pebble core's ten, which Kestra does
+    // not register itself and which minijinja does not bind under this
+    // workspace's features (its `urlencode` is off).
+    env.add_filter("abbreviate", abbreviate);
+    env.add_filter("base64decode", base64decode);
+    env.add_filter("base64encode", base64encode);
+    env.add_filter("merge", merge);
+    env.add_filter("nl2br", nl2br);
+    env.add_filter("numberformat", numberformat);
+    env.add_filter("raw", raw);
+    env.add_filter("rsort", rsort);
+    env.add_filter("sha256", sha256);
+    env.add_filter("urlencode", urlencode);
 }
 
 // ---------------------------------------------------------------------------
@@ -595,7 +613,7 @@ fn java_seq(kind: JavaSeqKind, items: Vec<MjValue>) -> MjValue {
 /// The [`JavaSeqKind`] of a value — [`JavaSeqKind::MutableList`] for anything
 /// untagged, which is every list that came from the context, from `fromJson`,
 /// from `range` or from a filter that builds a fresh `ArrayList`.
-fn java_seq_kind(value: &MjValue) -> JavaSeqKind {
+pub(super) fn java_seq_kind(value: &MjValue) -> JavaSeqKind {
     value
         .downcast_object_ref::<JavaSeq>()
         .map(|seq| seq.kind)
@@ -947,6 +965,8 @@ fn replace(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
 // and recorded** instead — in `oracle/name-surface.txt`'s `semantics` column,
 // which names a baselined corpus id per row, so the record is in the ratchet
 // rather than in prose.
+// (Package #5b's Task B5 later ported `escape`'s other strategies; see
+// [`escape`].)
 
 /// The guard every filter W2 Task 8's fix round ported runs **first**, before
 /// its `input == null` branch.
@@ -1760,6 +1780,32 @@ fn sort(value: MjValue) -> Result<MjValue, MjError> {
     if input_kind == JavaSeqKind::Collection {
         return Err(pebble_error("Unsupported input type for sort filter"));
     }
+    java_list_sort(&mut items, input_kind, false)?;
+    // **`SortFilter` `areturn`s the list it sorted**, so the kind SURVIVES it
+    // — `{{ [] | chunk(size=2) | sort | className }}` is still
+    // `Lists$RandomAccessPartition`, measured. The one input that does not
+    // come back as itself is an array: that branch is `Arrays.asList(array)`,
+    // a mutable `Arrays$ArrayList`, which is why
+    // `{{ 'a,b,c' | split(',') | sort | reverse }}` answers where
+    // `{{ 'a,b,c' | split(',') | reverse }}` throws.
+    let out_kind = match input_kind {
+        JavaSeqKind::Array => JavaSeqKind::MutableList,
+        kind => kind,
+    };
+    Ok(java_seq(out_kind, items))
+}
+
+/// `List.sort` with `Comparable`'s natural order (`sort`) or
+/// `Collections.reverseOrder()` (`rsort`, package #5b Task B4): the
+/// in-place refusal of an immutable list, the class check, then one
+/// comparator for the one class. `reverse` flips the comparator, not the
+/// result, so equal elements keep their input order as Java's stable sort
+/// keeps them under `reverseOrder()`.
+fn java_list_sort(
+    items: &mut [MjValue],
+    input_kind: JavaSeqKind,
+    reverse: bool,
+) -> Result<(), MjError> {
     if input_kind.sort_in_place_throws(items.len()) {
         return Err(pebble_error(
             "'sort' filter cannot sort an immutable list in place: 'flatten', 'chunk' \
@@ -1813,6 +1859,24 @@ fn sort(value: MjValue) -> Result<MjValue, MjError> {
         "java.lang.Integer" | "java.lang.Long" | "java.math.BigInteger"
     );
     items.sort_by(|a, b| {
+        let order = natural_order(a, b, integers, &first_class);
+        if reverse {
+            order.reverse()
+        } else {
+            order
+        }
+    });
+    Ok(())
+}
+
+/// `compareTo` between two elements of one `Comparable` class (`first_class`).
+fn natural_order(
+    a: &MjValue,
+    b: &MjValue,
+    integers: bool,
+    first_class: &str,
+) -> std::cmp::Ordering {
+    {
         // W9c Task 4 fix round 1: `BigDecimal.compareTo` and
         // `BigInteger.compareTo` are exact. A `BigDecimal` list used to be
         // refused as not `Comparable` (it is), and a `BigInteger` past `i128`
@@ -1846,19 +1910,7 @@ fn sort(value: MjValue) -> Result<MjValue, MjError> {
         // with Java only for a supplementary character against U+E000..U+FFFF,
         // which `oracle/name-surface.txt` records.
         kestra_to_string(a).cmp(&kestra_to_string(b))
-    });
-    // **`SortFilter` `areturn`s the list it sorted**, so the kind SURVIVES it
-    // — `{{ [] | chunk(size=2) | sort | className }}` is still
-    // `Lists$RandomAccessPartition`, measured. The one input that does not
-    // come back as itself is an array: that branch is `Arrays.asList(array)`,
-    // a mutable `Arrays$ArrayList`, which is why
-    // `{{ 'a,b,c' | split(',') | sort | reverse }}` answers where
-    // `{{ 'a,b,c' | split(',') | reverse }}` throws.
-    let out_kind = match input_kind {
-        JavaSeqKind::Array => JavaSeqKind::MutableList,
-        kind => kind,
-    };
-    Ok(java_seq(out_kind, items))
+    }
 }
 
 /// `ReverseFilter` — `(List) input`, so a String or a Map is a
@@ -1907,36 +1959,353 @@ fn reverse(value: MjValue) -> Result<MjValue, MjError> {
     Ok(java_seq(kind, items))
 }
 
-/// The `escape` filter's null and stringify branches.
+/// `EscapeFilter` (Pebble 4.1.2's escaper extension).
 ///
-/// `EscaperExtension`'s filter takes a `strategy` argument and Pebble's own
-/// escaper library implements `html`, `js`, `css` and `url_param`. Only the
-/// default — HTML — is ported; the other three are **recorded**, because they
-/// are three character tables this fix round was not scoped to and because
-/// refusing them is the safe direction (an author gets an error, never a
-/// wrong escape).
+/// The bytecode, in order: a null input or a `SafeString` is returned as it
+/// is (so a null renders empty, whatever the strategy names: even an unknown
+/// one); the input goes through `StringUtils.toString` (`Object::toString`,
+/// [`kestra_to_string`], never `Display`); the `strategy` argument is
+/// `(String) args.get("strategy")`, `html` when absent or null; a name the
+/// filter's map does not hold throws `Unknown escaping strategy [x]` (the
+/// names are case-sensitive, so `JS` is unknown); the strategy's result is
+/// wrapped in a `SafeString`.
 ///
-/// What is fixed is the part that was silently wrong: a null rendered `None`
-/// and a boolean rendered `True`, both `Display` rather than
-/// `Object::toString`. And `&#x27;` was `&#39;` on Kestra — the same
-/// character, a different spelling, and a byte difference in rendered output.
+/// The five strategies are five unbescape 1.1.6 calls
+/// (`buildDefaultStrategies`'s method references): `html` is
+/// `HtmlEscape.escapeHtml4Xml`, `js` `JavaScriptEscape.escapeJavaScript`, `css`
+/// `CssEscape.escapeCssIdentifier`, `url_param`
+/// `UriEscape.escapeUriQueryParam` and `json` `JsonEscape.escapeJson`; each is
+/// ported below from the jar ([`unbescape_js`] and its neighbours).
+///
+/// **Not modelled: `SafeString`.** Kestra's `x | escape | escape` escapes once
+/// (the second call returns its `SafeString` input untouched); egret has no
+/// safe-string kind and escapes twice. No corpus entry chains two escapes.
 fn escape(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
     strict_undefined("escape", &value)?;
     if is_java_null(&value) {
         return Ok(MjValue::from(()));
     }
     let args = Args::new(rest);
-    if let Some(strategy) = args.get("strategy", 0) {
-        let strategy = kestra_to_string(&strategy);
-        if strategy != "html" {
+    let strategy = match args.get("strategy", 0) {
+        Some(strategy) if !is_java_null(&strategy) => match strategy.as_str() {
+            Some(name) => name.to_string(),
+            None => {
+                return Err(pebble_error(format!(
+                    "class {} cannot be cast to class java.lang.String",
+                    java_class_name(&strategy)
+                )));
+            }
+        },
+        _ => "html".to_string(),
+    };
+    let text = kestra_to_string(&value);
+    let escaped = match strategy.as_str() {
+        "html" => unbescape_html4_xml(&text),
+        "js" => unbescape_js(&text),
+        "css" => unbescape_css_identifier(&text),
+        "url_param" => unbescape_uri_query_param(&text),
+        "json" => unbescape_json(&text),
+        unknown => {
             return Err(pebble_error(format!(
-                "the 'escape' filter's '{strategy}' strategy is not implemented in egret; \
-                 only 'html' is"
+                "Unknown escaping strategy [{unknown}]"
             )));
         }
+    };
+    Ok(MjValue::from(escaped))
+}
+
+// unbescape 1.1.6, the five calls `EscapeFilter` makes.
+//
+// Ported from `unbescape-1.1.6.RELEASE.jar` (`javap -c -p` of each
+// `*EscapeUtil.escape(String, type, level)`; the tables read out of the
+// loaded classes by reflection, not retyped from documentation). Every call
+// is unbescape's default: **level 2** ("all non-ASCII plus the basic escape
+// set"). The `ESCAPE_LEVELS` tables are 161 bytes, one per code point
+// U+0000..U+009F plus a last one standing for every code point above; a code
+// point is left alone when `level < ESCAPE_LEVELS[cp]`. They are spelled here
+// as digit strings, 32 to a line, exactly as the jar holds them.
+//
+// Every escape iterates code points (`Character.codePointAt`), so a
+// supplementary character is ONE unit of decision and, where it is written as
+// `\uHHHH`, two escapes (its UTF-16 surrogates). A Rust `str` cannot hold an
+// unpaired surrogate, so unbescape's branch for one is unreachable here.
+
+/// The escape level every strategy runs at (`LEVEL_2_ALL_NON_ASCII_PLUS_BASIC_ESCAPE_SET`).
+const UNBESCAPE_LEVEL: u8 = 2;
+
+/// `JavaScriptEscapeUtil.ESCAPE_LEVELS`.
+const JS_ESCAPE_LEVELS: &[u8; 161] = b"\
+11111111111111111111111111111111\
+33133311333333314444444444333333\
+34444444444444444444444444431333\
+34444444444444444444444444433331\
+11111111111111111111111111111111\
+2";
+
+/// `JsonEscapeUtil.ESCAPE_LEVELS`: `JS_ESCAPE_LEVELS` but for `'` (U+0027),
+/// which JSON leaves alone.
+const JSON_ESCAPE_LEVELS: &[u8; 161] = b"\
+11111111111111111111111111111111\
+33133313333333314444444444333333\
+34444444444444444444444444431333\
+34444444444444444444444444433331\
+11111111111111111111111111111111\
+2";
+
+/// `CssIdentifierEscapeUtil.ESCAPE_LEVELS`: only `[0-9A-Za-z]` survive level 2
+/// by the table; `-` and `_` survive by position (see [`unbescape_css_identifier`]).
+const CSS_ESCAPE_LEVELS: &[u8; 161] = b"\
+11111111111111111111111111111111\
+11111111111111114444444444111111\
+14444444444444444444444444411111\
+14444444444444444444444444411111\
+11111111111111111111111111111111\
+2";
+
+/// Whether `level < ESCAPE_LEVELS[cp]`, the table's "leave it alone".
+fn unbescape_level_keeps(table: &[u8; 161], cp: u32) -> bool {
+    let index = usize::try_from(cp.min(160)).unwrap_or(160);
+    UNBESCAPE_LEVEL < table[index] - b'0'
+}
+
+/// Appends `\uHHHH` (upper-case hex) for each UTF-16 unit of `c`.
+fn push_unbescape_uhexa(out: &mut String, c: char) {
+    let mut units = [0u16; 2];
+    for unit in c.encode_utf16(&mut units) {
+        out.push_str(&format!("\\u{unit:04X}"));
     }
-    let mut out = String::new();
-    for c in kestra_to_string(&value).chars() {
+}
+
+/// `JavaScriptEscape.escapeJavaScript(text)`: level 2,
+/// `SINGLE_ESCAPE_CHARS_DEFAULT_TO_XHEXA_AND_UHEXA`.
+///
+/// Escaped: U+0000..U+001F, `"`, `&`, `'`, `\`, U+007F and above, and `/`
+/// only right after `<` (`</script>`). Written as a single-escape character
+/// when `SEC_CHARS` has one (`\0 \b \t \n \f \r \" \' \/ \\`; no `\v`), else
+/// `\xHH` up to U+00FF, else `\uHHHH` (twice for a supplementary character).
+/// U+2028/U+2029's own exemption is from a level-1 branch and does not apply
+/// at level 2.
+fn unbescape_js(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 20);
+    let mut previous: Option<char> = None;
+    for c in text.chars() {
+        let cp = u32::from(c);
+        let keep = if cp <= 159 && unbescape_level_keeps(JS_ESCAPE_LEVELS, cp) {
+            true
+        } else if c == '/' && UNBESCAPE_LEVEL < 3 {
+            previous != Some('<')
+        } else {
+            cp > 159 && unbescape_level_keeps(JS_ESCAPE_LEVELS, 160) && cp != 0x2028 && cp != 0x2029
+        };
+        previous = Some(c);
+        if keep {
+            out.push(c);
+            continue;
+        }
+        let single = match c {
+            '\0' => Some('0'),
+            '\u{8}' => Some('b'),
+            '\t' => Some('t'),
+            '\n' => Some('n'),
+            '\u{c}' => Some('f'),
+            '\r' => Some('r'),
+            '"' => Some('"'),
+            '\'' => Some('\''),
+            '/' => Some('/'),
+            '\\' => Some('\\'),
+            _ => None,
+        };
+        if let Some(single) = single {
+            out.push('\\');
+            out.push(single);
+        } else if cp <= 0xFF {
+            out.push_str(&format!("\\x{cp:02X}"));
+        } else {
+            push_unbescape_uhexa(&mut out, c);
+        }
+    }
+    out
+}
+
+/// `JsonEscape.escapeJson(text)`: level 2, `SINGLE_ESCAPE_CHARS_DEFAULT_TO_UHEXA`.
+///
+/// Escaped: U+0000..U+001F, `"`, `&`, `\`, U+007F and above (so `é` is
+/// `é`), and `/` only right after `<`. Single escapes `\b \t \n \f \r
+/// \" \/ \\` (no `\0`, no `\'`), every other one `\uHHHH`.
+fn unbescape_json(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 20);
+    let mut previous: Option<char> = None;
+    for c in text.chars() {
+        let cp = u32::from(c);
+        let keep = if cp <= 159 && unbescape_level_keeps(JSON_ESCAPE_LEVELS, cp) {
+            true
+        } else if c == '/' && UNBESCAPE_LEVEL < 3 {
+            previous != Some('<')
+        } else {
+            cp > 159 && unbescape_level_keeps(JSON_ESCAPE_LEVELS, 160)
+        };
+        previous = Some(c);
+        if keep {
+            out.push(c);
+            continue;
+        }
+        let single = match c {
+            '\u{8}' => Some('b'),
+            '\t' => Some('t'),
+            '\n' => Some('n'),
+            '\u{c}' => Some('f'),
+            '\r' => Some('r'),
+            '"' => Some('"'),
+            '/' => Some('/'),
+            '\\' => Some('\\'),
+            _ => None,
+        };
+        if let Some(single) = single {
+            out.push('\\');
+            out.push(single);
+        } else {
+            push_unbescape_uhexa(&mut out, c);
+        }
+    }
+    out
+}
+
+/// `CssEscape.escapeCssIdentifier(text)`: level 2,
+/// `BACKSLASH_ESCAPES_DEFAULT_TO_COMPACT_HEXA`.
+///
+/// Kept: `[0-9A-Za-z]`, except a digit in first position; `-`, except in
+/// first position when the next character is `-` or a digit (a lone leading
+/// `-` is kept); `_`, except in first position. Everything else is escaped:
+/// `\` plus the character itself when `BACKSLASH_CHARS` lists it (the ASCII
+/// punctuation but `:`, and space), else `\` plus the code point in
+/// the fewest upper-case hex digits, followed by a space only when the next
+/// UTF-16 unit is a hex digit (`\E9 a`, `\E9z`, `\31 a`).
+fn unbescape_css_identifier(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 20);
+    let mut chars = text.chars().peekable();
+    let mut first = true;
+    while let Some(c) = chars.next() {
+        let cp = u32::from(c);
+        let next = chars.peek().copied();
+        let at_start = std::mem::replace(&mut first, false);
+        let keep = if cp <= 159
+            && unbescape_level_keeps(CSS_ESCAPE_LEVELS, cp)
+            && !(at_start && c.is_ascii_digit())
+        {
+            true
+        } else if c == '-' && UNBESCAPE_LEVEL < 3 {
+            !at_start || !matches!(next, Some(n) if n == '-' || n.is_ascii_digit())
+        } else if c == '_' && UNBESCAPE_LEVEL < 3 {
+            !at_start
+        } else {
+            cp > 159 && unbescape_level_keeps(CSS_ESCAPE_LEVELS, 160)
+        };
+        if keep {
+            out.push(c);
+            continue;
+        }
+        out.push('\\');
+        if css_backslash_char(c) {
+            out.push(c);
+        } else {
+            // `toCompactHexa(cp, next, level)`: the space is only needed
+            // (and, below level 4, only written) when the next unit would
+            // otherwise read as more hex.
+            out.push_str(&format!("{cp:X}"));
+            if next.is_some_and(|n| n.is_ascii_hexdigit()) {
+                out.push(' ');
+            }
+        }
+    }
+    out
+}
+
+/// `CssIdentifierEscapeUtil.BACKSLASH_CHARS`: the characters escaped as
+/// themselves: the ASCII punctuation and space, except `:` (which gets a hex
+/// escape, `\3A`).
+fn css_backslash_char(c: char) -> bool {
+    matches!(
+        c,
+        ' ' | '!'
+            | '"'
+            | '#'
+            | '$'
+            | '%'
+            | '&'
+            | '\''
+            | '('
+            | ')'
+            | '*'
+            | '+'
+            | ','
+            | '-'
+            | '.'
+            | '/'
+            | ';'
+            | '<'
+            | '='
+            | '>'
+            | '?'
+            | '@'
+            | '['
+            | '\\'
+            | ']'
+            | '^'
+            | '_'
+            | '`'
+            | '{'
+            | '|'
+            | '}'
+            | '~'
+    )
+}
+
+/// `UriEscape.escapeUriQueryParam(text)`: UTF-8, `QUERY_PARAM`.
+///
+/// Kept: the RFC 3986 `pchar`s (`[A-Za-z0-9]`, `- . _ ~`, the sub-delims
+/// `! $ ' ( ) * , ;`, `:` and `@`) and `/` `?`, minus `=`, `&`, `+` and `#`.
+/// Everything else is `%HH` per UTF-8 byte, upper-case. A space is `%20`,
+/// never `+`.
+fn unbescape_uri_query_param(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 20);
+    for c in text.chars() {
+        let keep = c.is_ascii_alphanumeric()
+            || matches!(
+                c,
+                '-' | '.'
+                    | '_'
+                    | '~'
+                    | '!'
+                    | '$'
+                    | '\''
+                    | '('
+                    | ')'
+                    | '*'
+                    | ','
+                    | ';'
+                    | ':'
+                    | '@'
+                    | '/'
+                    | '?'
+            );
+        if keep {
+            out.push(c);
+            continue;
+        }
+        let mut bytes = [0u8; 4];
+        for byte in c.encode_utf8(&mut bytes).bytes() {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+/// `HtmlEscape.escapeHtml4Xml(text)`: level 1 (markup-significant only),
+/// named references where HTML 4 and XML share one, decimal otherwise, so
+/// `'` is `&#39;` and every other character, non-ASCII included, is kept.
+fn unbescape_html4_xml(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 20);
+    for c in text.chars() {
         match c {
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
@@ -1946,7 +2315,7 @@ fn escape(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
             other => out.push(other),
         }
     }
-    Ok(MjValue::from(out))
+    out
 }
 
 /// `DistinctFilter` — `list.stream().distinct()`.
@@ -3486,10 +3855,11 @@ fn sha1(value: MjValue) -> Result<MjValue, MjError> {
 
 /// `Sha512Filter` — `ShaBaseFilter("SHA-512")`.
 ///
-/// There is no `sha256` filter, despite all three hash classes carrying a
-/// copy-pasted "implements the 'sha256' filter" javadoc:
+/// Kestra has no `sha256` filter of its own, despite all three hash classes
+/// carrying a copy-pasted "implements the 'sha256' filter" javadoc:
 /// `Extension.getFilters()` registers `md5`, `sha1` and `sha512` and nothing
-/// else.
+/// else. The `sha256` name is Pebble core's `Sha256Filter` ([`sha256`],
+/// package #5b Task B4).
 fn sha512(value: MjValue) -> Result<MjValue, MjError> {
     hash_with(&value, |bytes| {
         use sha2::Digest;
@@ -3508,6 +3878,430 @@ fn hash_with(value: &MjValue, digest: impl Fn(&[u8]) -> String) -> Result<MjValu
         return Err(pebble_error("Need a string to hash\n"));
     };
     Ok(MjValue::from(digest(input.as_bytes())))
+}
+
+// ---------------------------------------------------------------------------
+// Pebble core's ten (package #5b Task B4, spec D13)
+// ---------------------------------------------------------------------------
+//
+// `abbreviate`, `base64decode`, `base64encode`, `merge`, `nl2br`,
+// `numberformat`, `rsort`, `sha256` and `urlencode` are Pebble 4.1.2's
+// `CoreExtension` filters and `raw` its `EscaperExtension`'s; Kestra registers
+// none of them itself, so they were outside every W2 batch. Each is ported
+// from the pinned jar (`javap -c -p`), and each refuses an undefined input as
+// strict variables do (`strict_undefined`).
+
+/// `Sha256Filter` — Pebble's, not Kestra's (see [`sha512`]): the same shape
+/// as `ShaBaseFilter`, `Need a string to hash\n` for a non-string, lowercase
+/// hex of the UTF-8 bytes.
+fn sha256(value: MjValue) -> Result<MjValue, MjError> {
+    strict_undefined("sha256", &value)?;
+    hash_with(&value, |bytes| {
+        use sha2::Digest;
+        hex::encode(sha2::Sha256::digest(bytes))
+    })
+}
+
+/// `AbbreviateFilter` — `(String) input`, `(Long) length` narrowed by
+/// `intValue()`, and a cut counted in UTF-16 code units:
+///
+/// - a negative width fails (`Invalid argument to abbreviate filter; must be
+///   greater than zero`); **zero does not** (spec §2.2 item 12, measured);
+/// - shorter than the width, or three units or fewer, is the input;
+/// - a width of three or less is a plain cut (so `abbreviate(0)` of a string
+///   longer than three is empty: the measured `'abc' | abbreviate(0)` is
+///   `abc` only because `abc` is three long);
+/// - otherwise the first `width - 3` units and `...`, so a width EQUAL to the
+///   length still cuts (`'abcdef' | abbreviate(6)` is `abc...`, measured).
+fn abbreviate(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    strict_undefined("abbreviate", &value)?;
+    let Some(text) = pebble_string_cast(&value)? else {
+        return Ok(MjValue::from(()));
+    };
+    let args = Args::new(rest);
+    let width = match args.get("length", 0).filter(|v| !is_java_null(v)) {
+        None => {
+            return Err(pebble_error(
+                "Cannot invoke \"java.lang.Long.intValue()\" because the return value of \
+                 \"java.util.Map.get(Object)\" is null",
+            ))
+        }
+        Some(v) if v.kind() == ValueKind::Number && v.is_integer() => {
+            java_int_value(&v).unwrap_or_default()
+        }
+        Some(v) => {
+            return Err(pebble_error(format!(
+                "class {} cannot be cast to class java.lang.Long",
+                java_class_name(&v)
+            )))
+        }
+    };
+    if width < 0 {
+        return Err(pebble_error(
+            "Invalid argument to abbreviate filter; must be greater than zero",
+        ));
+    }
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let width = width as usize;
+    if units.len() < width || units.len() <= 3 {
+        return Ok(MjValue::from(text));
+    }
+    // A cut inside a surrogate pair: Java keeps the lone surrogate, which a
+    // Rust `String` cannot hold, so it becomes U+FFFD here (fix wave #5b,
+    // M10; recorded beside the module's other UTF-16 notes).
+    if width <= 3 {
+        return Ok(MjValue::from(String::from_utf16_lossy(&units[..width])));
+    }
+    let mut out = String::from_utf16_lossy(&units[..width - 3]);
+    out.push_str("...");
+    Ok(MjValue::from(out))
+}
+
+/// `java.util.Base64.getDecoder()`: the standard alphabet, padding optional
+/// but correct when present, no whitespace, unused trailing bits ignored.
+const JAVA_BASE64_DECODER: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
+    &base64::alphabet::STANDARD,
+    base64::engine::GeneralPurposeConfig::new()
+        .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent)
+        .with_decode_allow_trailing_bits(true),
+);
+
+/// `Base64EncoderFilter` — `Object.toString()` (so a number or a map is
+/// encoded as its Java text), UTF-8, standard alphabet with padding.
+fn base64encode(value: MjValue) -> Result<MjValue, MjError> {
+    use base64::Engine as _;
+    strict_undefined("base64encode", &value)?;
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    let text = kestra_to_string(&value);
+    Ok(MjValue::from(
+        base64::engine::general_purpose::STANDARD.encode(text.as_bytes()),
+    ))
+}
+
+/// `Base64DecoderFilter` — a String only (`This filter applies to String\n`
+/// otherwise); a string the decoder refuses is `Please provide a correctly
+/// Base64 encoded string containing an UTF-8 string\n`; the bytes become a
+/// String as UTF-8 with malformed sequences replaced, as `new String(bytes,
+/// UTF_8)` replaces them. An unpadded string decodes (measured).
+fn base64decode(value: MjValue) -> Result<MjValue, MjError> {
+    use base64::Engine as _;
+    strict_undefined("base64decode", &value)?;
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    let Some(text) = value.as_str() else {
+        return Err(pebble_error("This filter applies to String\n"));
+    };
+    // Padding is optional, but present padding must complete the last
+    // four-character unit: Java refuses `YQ=` (measured: `Input byte array
+    // has wrong 4-byte ending unit`) where the crate's indifferent mode
+    // accepts a partial pad.
+    let bad_padding = text.contains('=') && !text.len().is_multiple_of(4);
+    match JAVA_BASE64_DECODER
+        .decode(text.as_bytes())
+        .ok()
+        .filter(|_| !bad_padding)
+    {
+        Some(bytes) => Ok(MjValue::from(String::from_utf8_lossy(&bytes).into_owned())),
+        None => Err(pebble_error(
+            "Please provide a correctly Base64 encoded string containing an UTF-8 string\n",
+        )),
+    }
+}
+
+/// `Nl2brFilter` — every `\n`, `\r` and `\r\n` becomes `<br />`, with **no
+/// escaping** of the rest (`'<a>\nb'` is `<a><br />b`, measured). A
+/// non-string is an `IllegalArgumentException`.
+fn nl2br(value: MjValue) -> Result<MjValue, MjError> {
+    strict_undefined("nl2br", &value)?;
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    let Some(text) = value.as_str() else {
+        return Err(pebble_error("nl2br filters only supports String input."));
+    };
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                out.push_str("<br />");
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+            }
+            '\n' => out.push_str("<br />"),
+            c => out.push(c),
+        }
+    }
+    Ok(MjValue::from(out))
+}
+
+/// `RawFilter` — `new SafeString(input.toString())`. Kestra renders with
+/// `autoEscaping(false)`, so the safe mark changes nothing there; what is
+/// left is the `toString()`, which is Java's text (`[1, 2]`, `{a=1}`), not
+/// the JSON a bare `{{ x }}` writes.
+fn raw(value: MjValue) -> Result<MjValue, MjError> {
+    strict_undefined("raw", &value)?;
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    Ok(MjValue::from(kestra_to_string(&value)))
+}
+
+/// `UrlEncoderFilter` — `URLEncoder.encode(s, "UTF-8")`: form encoding, so a
+/// space is `+`, `a-zA-Z0-9.-*_` stay, and every other UTF-8 byte is `%XX`
+/// in upper-case hex (`~` is `%7E`, measured). `(String) input`.
+fn urlencode(value: MjValue) -> Result<MjValue, MjError> {
+    strict_undefined("urlencode", &value)?;
+    let Some(text) = pebble_string_cast(&value)? else {
+        return Ok(MjValue::from(()));
+    };
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'-' | b'*' | b'_' => {
+                out.push(char::from(byte));
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    Ok(MjValue::from(out))
+}
+
+/// `RsortFilter` — `(List) input`, then `List.sort(Collections.reverseOrder())`
+/// in place, which is [`sort`]'s comparison reversed: a mixed list fails the
+/// same way (`[1, 'a']` is a `ClassCastException`, and so is a context
+/// `[1.5, 3, 2]`, a `Double` beside two `Integer`s), and an immutable list
+/// refuses to be sorted. Unlike `sort` there is no array branch: a `String[]`
+/// (`split`) and a map's key view are not `List`s, so both are cast failures.
+fn rsort(value: MjValue) -> Result<MjValue, MjError> {
+    strict_undefined("rsort", &value)?;
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    let kind = java_seq_kind(&value);
+    let mut items = match value.kind() {
+        ValueKind::Seq | ValueKind::Iterable if kind.is_list() => value
+            .try_iter()
+            .map(Iterator::collect::<Vec<_>>)
+            .unwrap_or_default(),
+        ValueKind::Seq | ValueKind::Iterable => {
+            return Err(pebble_error(format!(
+                "{} cannot be cast to class java.util.List",
+                kind.description()
+            )))
+        }
+        _ => {
+            return Err(pebble_error(format!(
+                "class {} cannot be cast to class java.util.List",
+                java_class_name(&value)
+            )))
+        }
+    };
+    java_list_sort(&mut items, kind, true)?;
+    Ok(java_seq(kind, items))
+}
+
+/// `MergeFilter` — by the INPUT's type:
+///
+/// | input | argument | result |
+/// |---|---|---|
+/// | null | null | fails: `The two arguments to be merged are null` |
+/// | null | any | the argument |
+/// | any | null | the input (measured) |
+/// | Map | Map | a new map, the argument's values winning |
+/// | Map | List | the map plus each element as a key mapped to itself (`{"a":1,"1":1}`, measured) |
+/// | List | List | concatenated |
+/// | List | Map | the list plus one single-entry map per entry (`addAll(map.entrySet())`) |
+/// | array | array | concatenated |
+/// | other | | `The object being filtered is not a Map/List/Array` |
+///
+/// **The merged map keeps insertion order here** where Kestra's is a
+/// `java.util.HashMap`, in bucket order; the crate's standing ruling (see
+/// [`replace`]) is not to port `String.hashCode`'s layout, and every corpus
+/// entry agrees. A key here is a String, so a list element merged into a map
+/// is keyed by its Java text (`1` and `'1'` are one key here, two there).
+///
+/// **egret's bounds (fix wave #5b, I1):** every branch that builds a result
+/// is held to the list operators' bounds, as list `+` is
+/// (`arith::MAX_LIST_OPERATOR_LENGTH`, `arith::MAX_LIST_OPERATOR_WORK`): it
+/// refuses a result past a million elements, and charges the `n + m`
+/// elements it copies to the render's list work, before copying. Without it
+/// `{% set l = l | merge(l) %}` forty times from one element was 2^40
+/// values. Kestra has neither bound.
+fn merge(
+    state: &minijinja::State,
+    value: MjValue,
+    rest: Rest<MjValue>,
+) -> Result<MjValue, MjError> {
+    strict_undefined("merge", &value)?;
+    let args = Args::new(rest);
+    let items = args.get("items", 0).unwrap_or_else(|| MjValue::from(()));
+    strict_undefined("merge", &items)?;
+    if is_java_null(&value) {
+        if is_java_null(&items) {
+            return Err(pebble_error("The two arguments to be merged are null"));
+        }
+        return Ok(items);
+    }
+    if is_java_null(&items) {
+        return Ok(value);
+    }
+    let arg_class = |v: &MjValue| match v.kind() {
+        ValueKind::Seq | ValueKind::Iterable => match java_seq_kind(v) {
+            JavaSeqKind::Array => "[Ljava.lang.String;".to_string(),
+            JavaSeqKind::Collection => java_seq_kind(v).description().to_string(),
+            _ => java_class_name(v),
+        },
+        _ => java_class_name(v),
+    };
+    let arg_is_list = matches!(items.kind(), ValueKind::Seq | ValueKind::Iterable)
+        && java_seq_kind(&items).is_list();
+    // Before the copy: the result is at most `n + m` long.
+    let grow = |n: usize, m: usize| -> Result<(), MjError> {
+        super::arith::check_list_length(n.saturating_add(m))?;
+        super::arith::charge_list_work(state, (n as u64).saturating_add(m as u64))
+    };
+    let len_of = |v: &MjValue| {
+        v.len()
+            .unwrap_or_else(|| v.try_iter().map(Iterator::count).unwrap_or(0))
+    };
+    if value.kind() == ValueKind::Map && (items.kind() == ValueKind::Map || arg_is_list) {
+        grow(len_of(&value), len_of(&items))?;
+    }
+    if let Some(mut entries) = as_map(&value) {
+        if let Some(more) = as_map(&items) {
+            entries.extend(more);
+        } else if arg_is_list {
+            for item in as_list(&items).unwrap_or_default() {
+                entries.push((kestra_to_string(&item), item));
+            }
+        } else {
+            return Err(pebble_error(format!(
+                "Currently, only Maps and Lists can be merged with a Map. Arg2: {}",
+                arg_class(&items)
+            )));
+        }
+        return Ok(MjValue::from_object(OrderedMap::new(entries)));
+    }
+    let kind = java_seq_kind(&value);
+    let Some(mut list) = as_list(&value) else {
+        return Err(pebble_error(
+            "The object being filtered is not a Map/List/Array",
+        ));
+    };
+    match kind {
+        JavaSeqKind::Collection => Err(pebble_error(
+            "The object being filtered is not a Map/List/Array",
+        )),
+        JavaSeqKind::Array => {
+            if java_seq_kind(&items) == JavaSeqKind::Array {
+                grow(list.len(), len_of(&items))?;
+                list.extend(as_list(&items).unwrap_or_default());
+                Ok(java_seq(JavaSeqKind::Array, list))
+            } else {
+                Err(pebble_error(format!(
+                    "Currently, only Arrays of the same component class can be merged. \
+                     Arg1: java.lang.String, Arg2: {}",
+                    arg_class(&items)
+                )))
+            }
+        }
+        _ => {
+            if let Some(entries) = as_map(&items) {
+                grow(list.len(), entries.len())?;
+                list.extend(
+                    entries.into_iter().map(|(key, item)| {
+                        MjValue::from_object(OrderedMap::new(vec![(key, item)]))
+                    }),
+                );
+            } else if arg_is_list {
+                grow(list.len(), len_of(&items))?;
+                list.extend(as_list(&items).unwrap_or_default());
+            } else {
+                return Err(pebble_error(format!(
+                    "Currently, only Maps and Lists can be merged with a List. Arg2: {}",
+                    arg_class(&items)
+                )));
+            }
+            Ok(MjValue::from(list))
+        }
+    }
+}
+
+/// `NumberFormatFilter` — `java.text.DecimalFormat` (see
+/// [`super::decimalformat`]): with a `format` pattern, `new
+/// DecimalFormat(format, symbols)`; without one, `NumberFormat.getInstance`,
+/// whose pattern is `#,##0.###` (`1234.5678` is `1,234.568`, measured).
+///
+/// **The locale is pinned to `en`** where Kestra uses the JVM default (spec
+/// D13's recorded divergence); the corpus ran on an `en_VN` JVM, whose number
+/// symbols are `en`'s, so no golden entry shows it.
+///
+/// A non-`Number` input fails with Pebble's text; a `format` that is not a
+/// String is a cast failure; a pattern Java refuses fails with Java's
+/// `IllegalArgumentException` message.
+fn numberformat(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    use super::decimalformat::{DecimalFormat, JavaNumber};
+    strict_undefined("numberformat", &value)?;
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    let number = if let Some(class) = big_number_class(&value) {
+        let canonical = big_number_text(&value).unwrap_or_default();
+        if class == "java.math.BigInteger" {
+            let (negative, magnitude) = match canonical.strip_prefix('-') {
+                Some(rest) => (true, rest.to_string()),
+                None => (false, canonical.clone()),
+            };
+            let long_path = canonical.parse::<i64>().is_ok();
+            JavaNumber::Integer {
+                negative,
+                magnitude,
+                long_path,
+            }
+        } else {
+            JavaNumber::Decimal(canonical)
+        }
+    } else if value.kind() == ValueKind::Number {
+        if value.is_integer() {
+            let (negative, magnitude) = match i128::try_from(value.clone()) {
+                Ok(n) => (n < 0, n.unsigned_abs().to_string()),
+                Err(_) => (
+                    false,
+                    u128::try_from(value.clone())
+                        .map(|n| n.to_string())
+                        .unwrap_or_default(),
+                ),
+            };
+            let long_path = i64::try_from(value.clone()).is_ok();
+            JavaNumber::Integer {
+                negative,
+                magnitude,
+                long_path,
+            }
+        } else {
+            JavaNumber::Double(f64::try_from(value.clone()).unwrap_or(f64::NAN))
+        }
+    } else {
+        return Err(pebble_error(
+            "The input for the 'NumberFormat' filter has to be a number.",
+        ));
+    };
+    let args = Args::new(rest);
+    let format = match args.get("format", 0) {
+        Some(pattern) => pebble_string_cast(&pattern)?,
+        None => None,
+    };
+    let formatter = match format {
+        Some(pattern) => DecimalFormat::parse(&pattern).map_err(pebble_error)?,
+        None => DecimalFormat::english_default(),
+    };
+    Ok(MjValue::from(formatter.format(&number)))
 }
 
 // ---------------------------------------------------------------------------
@@ -8548,6 +9342,373 @@ mod tests {
             include_str!("../../oracle/propagation-pairs.txt"),
             include_str!("../../oracle/fixtures/propagation-pairs.answers.json"),
             8,
+        );
+    }
+
+    /// Package #5b, Task B1 (spec D13) wrote this as a placeholder in
+    /// `runners::env` while the ten filters were unknown; Task B4 ported them
+    /// and moved it here under the same name, so the seven
+    /// `oracle/error-class-pairs.txt` rows pair with it. Each row fails for
+    /// Kestra's reason, with Kestra's text, and not as an unknown filter.
+    #[test]
+    fn a_filter_input_kestra_refuses_is_refused_here_too() {
+        for (template, context, want) in [
+            (
+                "{{ 'abc' | abbreviate(-1) }}",
+                "{}",
+                "Invalid argument to abbreviate filter; must be greater than zero",
+            ),
+            (
+                "{{ n | abbreviate(3) }}",
+                r#"{"n": 123456}"#,
+                "class java.lang.Integer cannot be cast to class java.lang.String",
+            ),
+            (
+                "{{ '!!' | base64decode }}",
+                "{}",
+                "Please provide a correctly Base64 encoded string containing an UTF-8 string",
+            ),
+            (
+                "{{ 'a' | merge(['b']) }}",
+                "{}",
+                "The object being filtered is not a Map/List/Array",
+            ),
+            (
+                "{{ '12' | numberformat }}",
+                "{}",
+                "The input for the 'NumberFormat' filter has to be a number.",
+            ),
+            (
+                "{{ l | rsort }}",
+                r#"{"l": [1.5, 3, 2]}"#,
+                "class java.lang.Integer cannot be cast to class java.lang.Double",
+            ),
+            // Kestra's text ends `java.lang.Long` (a template literal is a
+            // Long); egret names a small integer `Integer`, spec D2's
+            // recorded Integer/Long divergence, so the class is not asserted.
+            (
+                "{{ [1, 'a'] | rsort }}",
+                "{}",
+                "class java.lang.String cannot be cast to class java.lang.",
+            ),
+        ] {
+            let message = err(template, context);
+            assert!(message.contains(want), "{template}: {message}");
+            assert!(!message.contains("unknown filter"), "{template}: {message}");
+        }
+    }
+
+    /// Package #5b, Task B1 (spec D12) wrote this as a placeholder in
+    /// `runners::env` while every strategy but `html` was refused with egret's
+    /// own text; Task B5 ported the other four and moved it here under the
+    /// same name, so the three `oracle/error-class-pairs.txt` rows pair with
+    /// it. `EscapeFilter` looks the name up in a `HashMap`, so `JS` is as
+    /// unknown as `nope`, and the text is Kestra's.
+    #[test]
+    fn an_escape_strategy_pebble_does_not_know_is_refused() {
+        for (template, context, want) in [
+            (
+                "{{ s | escape(strategy='html_attr') }}",
+                r#"{"s": "a b"}"#,
+                "Unknown escaping strategy [html_attr]",
+            ),
+            (
+                "{{ s | escape(strategy='nope') }}",
+                r#"{"s": "a"}"#,
+                "Unknown escaping strategy [nope]",
+            ),
+            (
+                "{{ s | escape(strategy='JS') }}",
+                r#"{"s": "a"}"#,
+                "Unknown escaping strategy [JS]",
+            ),
+            // `(String) args.get("strategy")`.
+            (
+                "{{ s | escape(strategy=1) }}",
+                r#"{"s": "a"}"#,
+                "cannot be cast to class java.lang.String",
+            ),
+        ] {
+            let message = err(template, context);
+            assert!(message.contains(want), "{template}: {message}");
+            assert!(
+                !message.contains("not implemented"),
+                "{template}: {message}"
+            );
+        }
+        // The null branch comes first: a null input never reaches the lookup,
+        // and a null strategy is the default, `html`.
+        assert_eq!(
+            ok("<{{ n | escape(strategy='nope') }}>", r#"{"n": null}"#),
+            "<>"
+        );
+        assert_eq!(
+            ok("{{ s | escape(strategy=n) }}", r#"{"s": "<", "n": null}"#),
+            "&lt;"
+        );
+        assert_eq!(ok("{{ s | escape('js') }}", r#"{"s": "'"}"#), "\\'");
+    }
+
+    /// unbescape 1.1.6's five level-2 escapes, beyond the corpus. Each value
+    /// was produced by the jar itself (a scratch Java program calling the five
+    /// methods `EscapeFilter` calls); a 623 000-row comparison of the port
+    /// against it (every code point in eight positions, above U+3000 a
+    /// sample, plus 20 000 random strings) agreed before these were picked.
+    #[test]
+    fn escape_strategies_follow_unbescape() {
+        for (strategy, input, want) in [
+            // js: single escapes, \xHH to U+00FF, \uHHHH above, a pair for
+            // a supplementary character; `/` only after `<`, so a leading `/`
+            // stays.
+            ("js", "\0\u{b}\u{7f}", r"\0\x0B\x7F"),
+            ("js", "/a</", r"/a<\/"),
+            ("js", "&\u{2029}\u{1F600}", r"\x26\u2029\uD83D\uDE00"),
+            // json: no \0 and no \', `'` kept, `&` and U+007F as \uHHHH.
+            ("json", "\0'&\u{7f}", r"\u0000'\u0026\u007F"),
+            ("json", "</\u{1F600}", r"<\/\uD83D\uDE00"),
+            // css: `*` escapes as itself, `:` in hex; position rules for a
+            // digit, `-` and `_`; the space after a hex escape only before a
+            // hex digit (end of text: none).
+            ("css", "*:", r"\*\3A"),
+            ("css", "9a", r"\39 a"),
+            ("css", "-", "-"),
+            ("css", "-a-1_", "-a-1_"),
+            ("css", "\u{1F600}f", r"\1F600 f"),
+            ("css", "a\u{0}", r"a\0"),
+            // url_param: pchar plus `/` and `?`, minus `= & + #`.
+            (
+                "url_param",
+                "a=b&c+d#e?f/g:h@i",
+                "a%3Db%26c%2Bd%23e?f/g:h@i",
+            ),
+            ("url_param", "%\u{1F600}", "%25%F0%9F%98%80"),
+            // html: level 1, so non-ASCII stays.
+            ("html", "\u{e9}<'", "\u{e9}&lt;&#39;"),
+        ] {
+            let template = format!("{{{{ s | escape(strategy='{strategy}') }}}}");
+            let context = serde_json::json!({ "s": input }).to_string();
+            assert_eq!(ok(&template, &context), want, "{strategy} {input:?}");
+        }
+    }
+
+    /// The ten answer as Pebble's classes do beyond the corpus: the branches
+    /// `javap -c` shows that no golden entry reaches.
+    #[test]
+    fn pebble_core_filters_follow_the_jar() {
+        for (template, context, want) in [
+            // A width of three or less cuts without dots; zero empties a
+            // string longer than three.
+            ("{{ 'abcdef' | abbreviate(0) }}", "{}", ""),
+            ("{{ 'abcdef' | abbreviate(2) }}", "{}", "ab"),
+            ("{{ 'abcdef' | abbreviate(7) }}", "{}", "abcdef"),
+            (
+                "{{ s | abbreviate(5) }}",
+                r#"{"s": "éééééé"}"#,
+                "\u{e9}\u{e9}...",
+            ),
+            ("{{ 12 | base64encode }}", "{}", "MTI="),
+            ("{{ [1, 2] | base64encode }}", "{}", "WzEsIDJd"),
+            ("{{ 'YQ' | base64decode }}", "{}", "a"),
+            (
+                "{{ s | nl2br }}",
+                r#"{"s": "a\rb\n\nc"}"#,
+                "a<br />b<br /><br />c",
+            ),
+            ("{{ 'abc' | nl2br }}", "{}", "abc"),
+            ("{{ [1, 2] | raw }}", "{}", "[1, 2]"),
+            ("{{ {'a': 1} | raw }}", "{}", "{a=1}"),
+            ("{{ 'a b+c' | urlencode }}", "{}", "a+b%2Bc"),
+            ("{{ n | merge(['x']) }}", r#"{"n": null}"#, "[\"x\"]"),
+            ("{{ ['a'] | merge(['b']) | length }}", "{}", "2"),
+            ("{{ {'a': 1} | merge({'a': 2}) }}", "{}", "{\"a\":2}"),
+            (
+                "{{ [1] | merge({'a': 1, 'b': 2}) }}",
+                "{}",
+                "[1,{\"a\":1},{\"b\":2}]",
+            ),
+            ("{{ ['b', 'a', 'c'] | rsort | first }}", "{}", "c"),
+            ("{{ [] | rsort }}", "{}", "[]"),
+            ("{{ [2.5, 10.0, -1.0] | rsort }}", "{}", "[10.0,2.5,-1.0]"),
+            (
+                "{{ 1234567 | numberformat(format='#,##0') }}",
+                "{}",
+                "1,234,567",
+            ),
+            ("{{ n | numberformat(n) }}", r#"{"n": null}"#, ""),
+            (
+                "{{ 1234.5 | numberformat(f) }}",
+                r#"{"f": null}"#,
+                "1,234.5",
+            ),
+            ("{{ 0.5 | numberformat('0') }}", "{}", "0"),
+            ("{{ 2.5 | numberformat('0') }}", "{}", "2"),
+            ("{{ -0.001 | numberformat('0.00') }}", "{}", "-0.00"),
+            ("{{ 0.0125 | numberformat('0.0%') }}", "{}", "1.2%"),
+            (
+                "{{ fromIon(ion='0.0025') | numberformat('0.000') }}",
+                "{}",
+                "0.002",
+            ),
+            (
+                "{{ 'ab' | sha256 }}",
+                "{}",
+                "fb8e20fc2e4c3f248c60c39bd652f3c1347298bb977b8b4d5903b85055620603",
+            ),
+        ] {
+            assert_eq!(ok(template, context), want, "{template}");
+        }
+        for (template, context, want) in [
+            (
+                "{{ 'abc' | abbreviate }}",
+                "{}",
+                "because the return value of",
+            ),
+            (
+                "{{ 'abc' | abbreviate(1.5) }}",
+                "{}",
+                "cannot be cast to class java.lang.Long",
+            ),
+            (
+                "{{ 12 | base64decode }}",
+                "{}",
+                "This filter applies to String",
+            ),
+            (
+                "{{ 'YQ=' | base64decode }}",
+                "{}",
+                "correctly Base64 encoded",
+            ),
+            (
+                "{{ 'a b' | base64decode }}",
+                "{}",
+                "correctly Base64 encoded",
+            ),
+            (
+                "{{ 12 | nl2br }}",
+                "{}",
+                "nl2br filters only supports String input.",
+            ),
+            (
+                "{{ 12 | urlencode }}",
+                "{}",
+                "cannot be cast to class java.lang.String",
+            ),
+            ("{{ 12 | sha256 }}", "{}", "Need a string to hash"),
+            (
+                "{{ n | merge(n) }}",
+                r#"{"n": null}"#,
+                "The two arguments to be merged are null",
+            ),
+            (
+                "{{ [1] | merge('x') }}",
+                "{}",
+                "only Maps and Lists can be merged with a List. Arg2: java.lang.String",
+            ),
+            (
+                "{{ {'a': 1} | merge(2) }}",
+                "{}",
+                "only Maps and Lists can be merged with a Map. Arg2: java.lang.Integer",
+            ),
+            (
+                "{{ {'a': 1} | keys | merge([1]) }}",
+                "{}",
+                "not a Map/List/Array",
+            ),
+            (
+                "{{ 'a' | rsort }}",
+                "{}",
+                "class java.lang.String cannot be cast to class java.util.List",
+            ),
+            (
+                "{{ 'a,b' | split(',') | rsort }}",
+                "{}",
+                "cannot be cast to class java.util.List",
+            ),
+            ("{{ [[2], [1]] | flatten | rsort }}", "{}", "immutable list"),
+            ("{{ true | numberformat }}", "{}", "has to be a number"),
+            (
+                "{{ 1 | numberformat(2) }}",
+                "{}",
+                "cannot be cast to class java.lang.String",
+            ),
+            (
+                "{{ 1 | numberformat('#,') }}",
+                "{}",
+                "Malformed pattern \"#,\"",
+            ),
+            (
+                "{{ 1 | numberformat('0.0E0') }}",
+                "{}",
+                "scientific notation",
+            ),
+        ] {
+            let message = err(template, context);
+            assert!(message.contains(want), "{template}: {message}");
+        }
+        // An undefined input is refused as strict variables refuse it, never
+        // treated as a null.
+        for filter in [
+            "abbreviate(3)",
+            "base64decode",
+            "base64encode",
+            "merge([1])",
+            "nl2br",
+            "numberformat",
+            "raw",
+            "rsort",
+            "sha256",
+            "urlencode",
+        ] {
+            for subject in ["nothere", "obj.missing"] {
+                let template = format!("<{{{{ {subject} | {filter} }}}}>");
+                let message = err(&template, r#"{"obj": {}}"#);
+                assert!(
+                    message.contains("an undefined value reached"),
+                    "{template}: {message}"
+                );
+            }
+        }
+        let message = err("{{ [1] | merge(nothere) }}", "{}");
+        assert!(message.contains("an undefined value reached"), "{message}");
+    }
+
+    /// Fix wave #5b, I1: `merge` is held to list `+`'s bounds. Forty
+    /// doublings from one element would be 2^40 values, an OOM kill of the
+    /// worker; the 20th (2^20 = 1 048 576 elements) is refused before it is
+    /// built. And every copy is charged to the render's list work: 501
+    /// merges of 10 000 + 10 000 elements cross the 10 M.
+    #[test]
+    fn merge_is_held_to_the_list_operator_bounds() {
+        let doubling = format!(
+            "{{% set l = [1] %}}{}{{{{ l | length }}}}",
+            "{% set l = l | merge(l) %}".repeat(40)
+        );
+        let message = err(&doubling, "{}");
+        assert!(
+            message.contains(
+                "egret refuses a list operation whose result would have more than 1000000 \
+                 elements; this one would have 1048576"
+            ),
+            "{message}"
+        );
+        let nineteen = format!(
+            "{{% set l = [1] %}}{}{{{{ l | length }}}}",
+            "{% set l = l | merge(l) %}".repeat(19)
+        );
+        assert_eq!(ok(&nineteen, "{}"), "524288");
+
+        let l: Vec<u32> = (0..10_000).collect();
+        let context = serde_json::json!({ "l": l }).to_string();
+        let looped = |n: usize| {
+            format!(
+                "{{% for i in range(1, {n}) %}}{{{{ (l | merge(l)) | length > 0 }}}}{{% endfor %}}"
+            )
+        };
+        assert_eq!(ok(&looped(500), &context).len(), 500 * 4);
+        let message = err(&looped(501), &context);
+        assert!(
+            message.contains("egret refuses list operations"),
+            "{message}"
         );
     }
 }

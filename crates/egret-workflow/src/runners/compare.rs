@@ -423,6 +423,14 @@ fn relational(left: &MjValue, right: &MjValue) -> Relational {
     if let (Some(a), Some(b)) = (left.as_str(), right.as_str()) {
         return Relational::Ordered(a.encode_utf16().cmp(b.encode_utf16()));
     }
+    numeric(left, right)
+}
+
+/// Steps 2-4 of [`relational`] without its string arm: Pebble 4.1.2's
+/// `OperatorUtils.wideningConversionBinaryComparison` itself (null first,
+/// then the `(Number)` casts, then the comparison), which is what `max`/`min`
+/// reach through `OperatorUtils.gt`/`lt` (package #5b, spec D10).
+fn numeric(left: &MjValue, right: &MjValue) -> Relational {
     let is_null = |v: &MjValue| v.is_none() || v.is_undefined();
     if is_null(left) || is_null(right) {
         return Relational::Unordered;
@@ -438,6 +446,66 @@ fn relational(left: &MjValue, right: &MjValue) -> Relational {
         return Relational::Unordered;
     }
     Relational::Ordered(values_cmp(left, right))
+}
+
+/// Which of Pebble's `OperatorUtils` comparisons a caller makes: the enum
+/// constant's name is the bracketed word of its refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MathComparison {
+    /// `OperatorUtils.gt`, which `MaxFunction` calls.
+    GreaterThan,
+    /// `OperatorUtils.lt`, which `MinFunction` calls.
+    LessThan,
+}
+
+impl MathComparison {
+    /// `OperatorUtils$Comparison.toString()`: the constant's name.
+    fn name(self) -> &'static str {
+        match self {
+            MathComparison::GreaterThan => "GREATER_THAN",
+            MathComparison::LessThan => "LESS_THAN",
+        }
+    }
+}
+
+/// Pebble 4.1.2's `OperatorUtils.gt(left, right)` / `lt(left, right)`, called
+/// directly rather than through an operator (package #5b, spec D10: what
+/// `MaxFunction` and `MinFunction` call, read with `javap -c -p`).
+///
+/// Unlike Kestra's `>`/`<` ([`relational`]), there is **no string arm**:
+/// `OperatorUtils` casts both operands to `Number`, so two strings fail too
+/// (`max('a', 'b')`). A null on either side answers `false` before the casts
+/// (`max(1, null)` is `1`); a NaN answers `false`; any non-number fails with
+/// `RuntimeException("invalid operands for mathematical comparison [%s]")`,
+/// where `%s` is the `Comparison` constant, not an operand. Numbers compare as
+/// [`relational`] compares them (exact for a `BigNumber`; Pebble rounds both
+/// to `doubleValue()`, spec §15 of W9c).
+///
+/// The undefined checks are the VM's, in argument order, as for every
+/// comparison here: a strict undefined raises, a silent one is a null.
+pub(super) fn math_comparison(
+    state: &State,
+    which: MathComparison,
+    left: &MjValue,
+    right: &MjValue,
+) -> Result<bool, MjError> {
+    assert_defined(state, left)?;
+    assert_defined(state, right)?;
+    match numeric(left, right) {
+        Relational::Ordered(ordering) => Ok(ordering
+            == match which {
+                MathComparison::GreaterThan => Ordering::Greater,
+                MathComparison::LessThan => Ordering::Less,
+            }),
+        Relational::Unordered => Ok(false),
+        Relational::Refused => Err(MjError::new(
+            ErrorKind::InvalidOperation,
+            format!(
+                "invalid operands for mathematical comparison [{}]",
+                which.name()
+            ),
+        )),
+    }
 }
 
 /// minijinja's `value::ops::contains`, line for line, with the element test

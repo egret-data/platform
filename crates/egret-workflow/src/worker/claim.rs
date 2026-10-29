@@ -1857,8 +1857,7 @@ async fn run_block_claim(
     let render = if discard_only {
         None
     } else {
-        let mut conn = pool.acquire().await.map_err(db_err)?;
-        Some(render_context(&mut conn, c).await?)
+        Some(render_context(pool, c).await?)
     };
     // The discard runs BEFORE the commit here, unlike a normal finish's: a
     // discard-only claim has nothing that a re-claim would need the snapshots
@@ -2669,8 +2668,7 @@ async fn input_for(
     reg: &dyn Registry,
     script_default: std::time::Duration,
 ) -> Result<(TaskInput, Budget)> {
-    let mut conn = pool.acquire().await.map_err(db_err)?;
-    let render = render_context(&mut conn, c).await?;
+    let render = render_context(pool, c).await?;
     c.input(render, reg.log_sink(), script_default)
 }
 
@@ -2683,10 +2681,132 @@ async fn input_for(
 /// A reader: no `settle` runs on this context. The render is LIVE
 /// (`scope_for`, which takes a POOL connection -- never a transaction): it
 /// runs after `conn` is returned, outside any transaction.
+///
+/// Package #5b Task B7 (spec D11): a worker render, so it carries what
+/// `errorLogs()` answers -- the execution's ERROR lines when the run's text
+/// calls it ([`error_logs_for`]), read after the pool connection is returned,
+/// and [`ErrorLogs::NotLoaded`](crate::runners::error_logs::ErrorLogs) when it
+/// does not.
 pub(super) async fn render_context(
-    conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+    pool: &PgPool,
     c: &Claimed,
 ) -> Result<crate::runners::RenderContext> {
+    use crate::runners::error_logs::ErrorLogs;
+    let (cx, wants, flow) = {
+        let mut conn = pool.acquire().await.map_err(db_err)?;
+        render_context_on(&mut conn, c).await?
+    };
+    if !wants {
+        return Ok(cx.with_error_logs(ErrorLogs::NotLoaded));
+    }
+    let lines = error_logs_for(pool, c, flow).await?;
+    Ok(cx.with_error_logs(ErrorLogs::Loaded(lines.into())))
+}
+
+/// How long `errorLogs()`'s read waits for a first ERROR line: egret's 1 s,
+/// where Kestra polls for at most 5 s (`ErrorLogsFunction.java:51-62`; spec
+/// D11's recorded divergence). The reads are Kestra's: 100 ms apart at first,
+/// doubling, at most 1 s apart.
+///
+/// **Measured by B7 (`tests/error_logs.rs`): the wait is not what makes an
+/// earlier task's ERROR line visible.** `run_one` writes the failed-attempt
+/// line and waits for the log writer's flush barrier (`RunLog::finish`)
+/// before it commits the outcome, so a later task -- an `errors:` branch --
+/// is created only after that line is stored, and its first read finds it.
+/// The wait serves what the barrier does not: a writer that is failing (its
+/// barrier returns at once, `logs::writer`'s breaker) and an execution with no
+/// ERROR line at all, which Kestra answers `[]` only after its wait too.
+pub const ERROR_LOGS_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Test-only: every read [`error_logs_for`] has made in this process.
+#[cfg(any(test, feature = "test-util"))]
+static ERROR_LOG_READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Test-only: how many reads [`error_logs_for`] has made in this process.
+#[cfg(any(test, feature = "test-util"))]
+pub fn error_log_reads_so_far() -> u64 {
+    ERROR_LOG_READS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The ERROR lines of `c`'s OWN execution, in its own workspace
+/// ([`LogRepo::error_lines`](crate::logs::LogRepo::error_lines): both ids in
+/// the predicate), read again while empty for at most [`ERROR_LOGS_WAIT`].
+/// No connection is held between reads. A read that fails is egret's outage
+/// (`Err`: the lease lapses and the run is re-claimed), where Kestra fails the
+/// render with `Unable to fetch error logs`.
+async fn error_logs_for(
+    pool: &PgPool,
+    c: &Claimed,
+    flow: (String, String),
+) -> Result<Vec<crate::runners::error_logs::ErrorLogEntry>> {
+    let repo = crate::logs::LogRepo::new(pool.clone());
+    let started = tokio::time::Instant::now();
+    let mut delay = std::time::Duration::from_millis(100);
+    let lines = loop {
+        #[cfg(any(test, feature = "test-util"))]
+        ERROR_LOG_READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let lines = repo.error_lines(c.workspace_id, c.execution_id).await?;
+        let left = ERROR_LOGS_WAIT.saturating_sub(started.elapsed());
+        if !lines.is_empty() || left.is_zero() {
+            break lines;
+        }
+        tokio::time::sleep(delay.min(left)).await;
+        delay = (delay * 2).min(std::time::Duration::from_secs(1));
+    };
+    let (namespace, flow_id) = flow;
+    Ok(lines
+        .into_iter()
+        .map(|l| crate::runners::error_logs::ErrorLogEntry {
+            namespace: namespace.clone(),
+            flow_id: flow_id.clone(),
+            task_id: l.task_id,
+            execution_id: c.execution_id,
+            task_run_id: l.task_run_id,
+            attempt: l.attempt,
+            ts: l.ts,
+            message: l.message,
+        })
+        .collect())
+}
+
+/// Whether the claimed run's own render can call `errorLogs` (package #5b
+/// Task B7): **this task's** properties, not the whole flow's -- a flow whose
+/// `errors:` task calls it would otherwise make every task of it wait out
+/// [`ERROR_LOGS_WAIT`] on an empty log (measured: 6 reads where 1 answered,
+/// before this narrowing) -- plus everything a `render()` could reach at run
+/// time: `vars`, the loop value, and every value [`Surface::snapshot_values`]
+/// names. A task that is not a leaf of the source (a `WorkingDirectory`
+/// block's own claim) is read as the whole source, the over-reading side.
+///
+/// Fix wave #5b, I3: one call of [`calls_error_logs`] over every text and
+/// value, which filters cheaply, caps the bytes it parses and parses off the
+/// runtime -- the values are run-time data an attacker may fill.
+fn wants_error_logs(c: &Claimed, surface: &Surface) -> bool {
+    use crate::runners::error_logs::calls_error_logs;
+    let mut json = surface.snapshot_values();
+    json.push(surface.vars());
+    let own = surface
+        .flow()
+        .and_then(|f| crate::spec::path::find_task(f, &c.task_id));
+    let mut texts: Vec<&str> = vec![c.value.as_deref().unwrap_or("")];
+    match own.map(|t| (&t.kind, t.timeout.as_ref())) {
+        Some((crate::models::TaskKind::Leaf { spec }, timeout)) => {
+            json.push(spec);
+            texts.extend(timeout.map(|t| t.source()));
+        }
+        _ => texts.push(&c.source),
+    }
+    calls_error_logs(&texts, &json)
+}
+
+/// [`render_context`]'s reads on one pool connection: the context, whether
+/// the run's text calls `errorLogs` (its source, its value, and every value
+/// of the context a `render()` could reach -- the set a `kestra://` URI is
+/// looked for in), and the flow's `(namespace, id)`.
+async fn render_context_on(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+    c: &Claimed,
+) -> Result<(crate::runners::RenderContext, bool, (String, String))> {
     let (ctx, state, _now) = load_with(conn, c.execution_id, Lock::No, Stack::Reader).await?;
     let mut surface = Surface::load(conn, &ctx).await?;
     // W9a Task 4: the claimed run's OWN execution -- an iteration's id inside
@@ -2713,6 +2833,11 @@ pub(super) async fn render_context(
         surface.flow().map(|f| f.namespace.clone()),
     )
     .await?;
+    let wants = wants_error_logs(c, &surface);
+    let flow = surface
+        .flow()
+        .map(|f| (f.namespace.clone(), f.id.clone()))
+        .unwrap_or_default();
     surface.attach_files(files);
     let run = usize::try_from(c.run_ix).map_err(|_| {
         worker_err(WorkerError::Corrupt(
@@ -2720,7 +2845,7 @@ pub(super) async fn render_context(
             format!("negative run_ix {}", c.run_ix),
         ))
     })?;
-    Ok(surface.context(&ctx.plan, &state, Some(run)))
+    Ok((surface.context(&ctx.plan, &state, Some(run)), wants, flow))
 }
 
 /// Record one handler's result, drive `advance()` to a fixed point, and write

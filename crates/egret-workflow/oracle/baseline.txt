@@ -33,8 +33,9 @@
 # (spec D5, 2026-10-29) BANKED both: each operand is wrapped in
 # `kestra_bool(..)`, `runners::operators`.)
 
-# minijinja's null test is spelled `none`; the corpus correctly keeps Kestra's name.
-coalesce-is-not-null
+# (`coalesce-is-not-null` was here: minijinja's null test is spelled `none`.
+# Package #5b's Task B2 (spec D8, 2026-10-29) BANKED it: the rewriter leaves a
+# test name alone and `runners::pebble_tests` binds `null` under its own name.)
 
 # function not ported (Task 8: the service-backed ones)
 
@@ -59,9 +60,9 @@ function-yaml-octal-looking
 # the pin.
 function-ispublicholiday
 
-# Pebble test not ported
-test-json-true
-test-json-false
+# (`test-json-true` and `test-json-false` were here, "Pebble test not ported".
+# Package #5b's Task B2 (spec D8, 2026-10-29) BANKED both: Kestra's `JsonTest`
+# is `runners::pebble_tests::json`, Jackson's `readTree` ported.)
 
 # DELIBERATE: Kestra's RAW_PATTERN has no DOTALL so Pebble rejects the tag; minijinja's own raw tag handles it. task-3-report.md S5.
 raw-multiline
@@ -561,9 +562,9 @@ filter-replace-unknown-named-argument
 # `oracle/name-surface.txt`'s `semantics` column names each of these, so the
 # record lives in the ratchet rather than in prose.
 #
-# `escape`'s three non-HTML strategies are three character tables this round
-# was not scoped to; egret refuses them, which is the safe direction.
-filter-escape-js-strategy
+# (`filter-escape-js-strategy` was here: `escape`'s non-HTML strategies were
+# refused. Package #5b's Task B5 (spec D12, 2026-10-29) BANKED it with the
+# four strategies ported from unbescape 1.1.6, `runners::filters::escape`.)
 # Java's `String.format` conversion language -- `%,d` grouping, `%N$s` argument
 # indices, `%b` -- is not ported. `minijinja::filters::format` agrees with
 # `java.util.Formatter` on `%s`, `%5s`, `%05d`, `%.2f`, `%x` and `%%` (measured,
@@ -575,13 +576,10 @@ filter-escape-js-strategy
 # both insertion order -- and `filter-replace-context-map-order` pins that half.
 filter-replace-literal-order
 filter-replace-literal-order-chained
-# Pebble's `even`/`odd` cast to Long and throw on a String; `iterable` is false
-# for a String where minijinja's is true. The `is` surface -- Kestra's `json`
-# test and Pebble's four -- was never given to a W2 task, so egret keeps
-# minijinja's four and records the difference.
-test-even
-test-odd
-test-iterable
+# (`test-even`, `test-odd` and `test-iterable` were here: Pebble's `even`/`odd`
+# cast to Long and throw on a String, and `iterable` is false for a String
+# where minijinja's is true. Package #5b's Task B2 (spec D8, 2026-10-29)
+# BANKED all three: `runners::pebble_tests` overrides minijinja's defaults.)
 
 # --- W2 Task 8, fix round 1, found by attacking the sixteen filter ports OFF
 # their own axis: which Java collection a filter RETURNS decides whether the
@@ -760,14 +758,15 @@ null-from-the-context-in-an-if-condition
 # porting them, and the measured cost was exactly these two entries and nothing
 # else: the ratchet moved 141 -> 139 with no regression. The seven siblings are
 # asserted unchanged by
-# `runners::env::tests::the_defined_test_is_pebbles_and_it_is_the_only_one_overridden`.)
+# `runners::env::tests::the_defined_test_is_pebbles_and_it_is_the_only_one_overridden`,
+# renamed `the_engine_tests_are_egrets_and_none_is_not_one` when package #5b's
+# Task B2 ported the other seven.)
 
-# The same unported `is` surface, seen from the other side: Pebble's null TEST
-# is spelled `null` and minijinja's is spelled `none`, so `{{ null is null }}`
-# is `true` there and `unknown test: test none is unknown` here. The rename W2b
-# added is what would make registering a `none`-spelled `null` test a one-liner,
-# which is why this is recorded now rather than left unwritten.
-null-literal-is-null-test
+# (`null-literal-is-null-test` was here: Pebble's null TEST is spelled `null`
+# and minijinja's `none`. Package #5b's Task B2 (spec D8, 2026-10-29) BANKED
+# it, and NOT by registering a `none`-spelled test as this note once proposed:
+# Kestra refuses `is none`, `is NONE` and `is NULL`, so the rewriter now
+# leaves a test name alone and `null` is bound under its own name.)
 
 # A BARE `null` map key is a Java null key and Jackson refuses it. egret builds
 # a key from it either way: `{"":1}` at 4498b48b, `{"None":1}` at W2b's head,
@@ -882,3 +881,58 @@ arith-operand-context-ints-add-past-2-31
 # (`kv(..)`, `secret(..)`), so a call or filter on the left keeps the eager
 # kestra_null_coalesce and `missing.y` on the right is evaluated and raises.
 coalesce-non-path-left-missing-right
+
+# === #5b red ============================================================
+#
+# Package #5b, Task B1 (2026-10-29): the probe batches of
+# docs/en/plans/2026-10-28-workflow-renderer.md B1, regenerated offline. Each
+# line below fails today; the comment above each group names the task that
+# banks it. Corpus order inside a group. No recorded divergence among them
+# when B1 wrote them; Task B3 re-attributed one (below) as D2's.
+
+# (B2 (D8)'s 49 were here: the tests `null`, `empty`, `map` and `json`, and
+# `even`/`odd`/`iterable` on a String or a Double. Task B2 (2026-10-29)
+# BANKED all 49, with the seven old lines above.)
+
+# (B3 (D10)'s 29 were here: `max`/`min`. Task B3 (2026-10-29) BANKED 28;
+# the 29th stays, re-attributed:)
+#
+# RECORDED DIVERGENCE (spec D2, Integer vs Long; the cause of
+# `filter-classname-literal-int` above), re-attributed by Task B3
+# (2026-10-29): `max`/`min` are ported and `min(fromIon('2.50'), 1)` returns
+# the literal `1` itself, as Kestra does, but egret's `className` names a
+# small integer `java.lang.Integer` while Kestra's literal is a Long. The
+# value matches (`function-min-bigdecimal-long` banked); only its class name
+# does not.
+function-min-classname-long
+
+# (B4 (D13)'s 53 were here: the ten filters `abbreviate`, `base64encode`,
+# `base64decode`, `merge`, `nl2br`, `numberformat`, `raw`, `rsort`, `sha256`
+# and `urlencode`. Task B4 (2026-10-29) BANKED 51; `numberformat` pins the
+# `en` locale (spec D13's divergence), but the golden ran on an `en_VN` JVM,
+# whose number symbols are `en`'s, so no line here records it. Two stay,
+# re-attributed:)
+#
+# RECORDED DIVERGENCE (spec D14, a string literal spanning a newline),
+# re-attributed by Task B4 (2026-10-29): `nl2br` is ported and answers both
+# from a context string (`filter-nl2br-crlf` banked, and
+# `runners::filters::tests::pebble_core_filters_follow_the_jar`), but these
+# two write the newline INSIDE a template string literal, which Pebble accepts
+# and egret's rewriter refuses (`unterminated string literal`) before the
+# filter runs. D14 records that and does not change it in package #5.
+filter-nl2br
+filter-nl2br-no-escaping
+
+# (B5 (D12)'s 91 were here: every `escape` strategy but `html` was refused.
+# Task B5 (2026-10-29) ported `js`, `css`, `url_param` and `json` from
+# unbescape 1.1.6's jar and BANKED all 91 -- the survey inputs, the position
+# rules and one entry per run of each level-2 table -- with none recorded as
+# a divergence. `runners::filters::tests::escape_strategies_follow_unbescape`
+# holds the branches beyond the corpus.)
+
+# (B6 (D9)'s 31 were never written here: Task B6 (2026-10-29) added the 47
+# `function-render-*`/`function-renderonce-*` entries, measured them red at 31
+# failing (29 new value entries, plus `function-render` and
+# `function-renderonce`, whose goldens became values when the harness wired
+# both functions), and BANKED all 31 in the same commit. None is recorded as
+# a divergence.)

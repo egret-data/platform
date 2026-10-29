@@ -104,7 +104,10 @@ an entry matches on any failure at all, so it is born matching and cannot fail
 **for the reason it was written** — a refusal that becomes a different refusal
 is invisible. It is not literally unfailable, and an earlier version of this
 sentence ("never enters `baseline.txt`, and can never fail") was wrong about
-that: **nineteen ids are in this file AND in `baseline.txt`** (twenty-five
+that: **ten ids are in this file AND in `baseline.txt`** (counted from the
+two files 2026-10-29 at package #5b's end, Task B9; this sentence read
+"nineteen" after #5a's Task A3 and was not followed after that: twelve at #5a's
+end, sixteen after #5b's Task B1, ten since its Task B2; twenty-five
 until package #5a's Task A3 banked six, thirty-eight
 until package #5a's Task A2 banked thirteen, eighteen until
 package #5a's Task A1 added twenty, thirty-one until
@@ -140,7 +143,10 @@ Verified by deliberate breakage before committing: an unpaired new entry, a
 renamed paired test, a false `baselined` claim and a quietly-added
 `unported:` all fail, each naming the id.
 
-**302** entries carry it today (271 before package #5a's Task A1 added
+**344** entries carry it today (328 before package #5b's Task B6 added
+eighteen `render()`/`renderOnce()` ones and took the marker off
+`function-render` and `function-renderonce`, which answer now; 302 before
+its Task B1 added twenty-six, 271 before package #5a's Task A1 added
 thirty-one, 251 after W2b's fix round, 245 before it, 240
 before W2b, 153 before W2 Task 8, 182 before its fix round), counted out of
 `golden.json` rather than added up (39 of them W2 Task 7's, listed at the end of `error-class.txt`): the four `*-mixed` comparisons (Pebble throws on a String/Number mix), the
@@ -168,7 +174,9 @@ whose deliverable was refusals; Task 8 added 29, which is 17% of the file for
 7% of the corpus, and every one of them is `test:`-paired — the pairing file
 now has **no `unported:` line left in it**, and `UNPORTED_ERROR_CLASS` in
 `tests/oracle.rs` is empty. Note that marking an entry error-class does **not**
-make it pass: 12 of the 302 are *also* in `baseline.txt` (17 before package
+make it pass: 10 of the 344 are *also* in `baseline.txt` (16 before package
+#5b's Task B2 banked six, its `even`/`odd` ones; 12 before package
+#5b's Task B1 added four, 17 before package
 #5a's Task A6, 19 before its Task A4, 25 before its Task A3, 38 before its
 Task A2; re-counted from the two files 2026-10-29, after Task A5, which moved
 none of them, and again after Task A6, which banked five), because egret
@@ -258,7 +266,33 @@ twenty-six operator entries, `op-equals`, `op-contains`,
 `and`/`or` operand now fails with Pebble's own text). Two stay, each
 re-attributed with its measured cause: `op-contains-boxed-int` (spec D2's
 Integer/Long divergence) and `logic-and-returns-boolean` (minijinja's `~`
-writes a boolean as `True`).
+writes a boolean as `True`) -- and **329 of 1753** after package #5b's Task B1
+(2026-10-29), which added 260 probe entries (tests, `max`/`min`, the ten
+filters, `escape` strategies) and RECORDED the 222 that fail under the `#5b red`
+heading, each group named with the task that banks it (see "What package #5b's
+Task B1 batches measured" below) -- and **273 of 1753** after package #5b's Task
+B2 (2026-10-29) banked 56: its 49 `#5b red` lines and seven old ones
+(`coalesce-is-not-null`, `test-json-true`, `test-json-false`, `test-even`,
+`test-odd`, `test-iterable`, `null-literal-is-null-test`) -- and **245 of
+1753** after package #5b's Task B3 (2026-10-29) banked 28 of its 29 `#5b red`
+lines (`max`/`min`) and re-attributed the 29th, `function-min-classname-long`,
+as spec D2's Integer/Long divergence (see "What package #5b's Task B3
+measured") -- and **194 of 1753** after package #5b's Task B4 (2026-10-29)
+banked 51 of its 53 `#5b red` lines (the ten Pebble core filters) and
+re-attributed `filter-nl2br` and `filter-nl2br-no-escaping` to spec D14 (a
+newline inside a template string literal; see "What package #5b's Task B4
+measured") -- and **102 of 1753** after package #5b's Task B5 (2026-10-29)
+banked all 91 of its `#5b red` lines and the old `filter-escape-js-strategy`
+(the four non-HTML `escape` strategies; see "What package #5b's Task B5
+measured") -- and **102 of 1800** after package #5b's Task B6 (2026-10-29)
+added 47 `render()`/`renderOnce()` entries, measured red at 31 failing (29 of
+them new, plus `function-render` and `function-renderonce`, whose goldens
+became values), and banked all 31 in the same task (see "What package #5b's
+Task B6 measured") -- and still **102 of 1800** at package #5b's end (Task B9,
+2026-10-29; Tasks B7 and B8 moved no entry): **95** old lines, the **4**
+recorded divergences of #5a's Task A1 and **3** of #5b's Task B1
+(`function-min-classname-long`, spec D2's Integer/Long; `filter-nl2br` and
+`filter-nl2br-no-escaping`, spec D14). Every other `#5b red` line banked.
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
@@ -3820,6 +3854,13 @@ the sentence `kv_without_a_scope_refuses_by_name` asserts, which is now its
 pairing. The refusals' test is now `the_refused_list_is_six_and_kv_is_not_in_it`
 (six names).
 
+**Package #5b Tasks B6–B8 (2026-10-29):** `render` and `renderOnce` (B6) and
+`errorLogs` (B7) are implemented and left the refusals. Three are left:
+`secret` (Confined), `http` (Unsupported) and `subflow`, whose owner B8 moved
+from W6 to roadmap row #12 "Subflow in full" (spec Q1). The refusals' test is
+now `the_refused_list_is_three_and_subflow_names_row_12`, and
+`function-secret`, `function-http` and `function-subflow` are paired with it.
+
 ### `fetchContext`'s key order is `HashMap`'s, and that is a recorded divergence
 
 Measured: `{"b":1,"a":2}` comes back `{"a":2,"b":1}` and
@@ -3881,7 +3922,8 @@ all?**
 
 The whole engine — Pebble's `CoreExtension`, `EscaperExtension` and
 `I18nExtension` plus Kestra's `Extension` — carries **63 filters, 37 functions
-and 8 tests**. minijinja at this workspace's feature set carries 47 filters, 4
+and 8 tests** (39 functions since package #5b's Task B6 wired `render` and
+`renderOnce` into the harness as Kestra's server carries them). minijinja at this workspace's feature set carries 47 filters, 4
 globals and 42 tests. Sixty-two of minijinja's names have **no counterpart in
 the engine at all**, and egret answered every one of them where Kestra says
 `Filter [count] does not exist.` Over-acceptance is the one divergence this
@@ -4062,6 +4104,11 @@ reproduces — it is defect **7**.
 Both are under-acceptance, which is the safe direction, and both now have a
 baselined corpus entry — `filter-format-argument-index` and
 `filter-escape-js-strategy`.
+
+(Package #5b's Task B5, 2026-10-29: the `escape` half is closed. The four
+non-HTML strategies are ported from unbescape 1.1.6 and
+`filter-escape-js-strategy` banked; see "What package #5b's Task B5
+measured".)
 
 ### `replace`'s map-literal order: the doc claimed a fidelity that does not hold
 
@@ -4751,7 +4798,9 @@ own change broke is not porting the surface, and the difference is a
 **measurement**, not a reading: overriding it moved the ratchet from
 `141 of 1288` to `139 of 1288` — the two entries it fixes, no regression,
 nothing else touched — and
-`the_defined_test_is_pebbles_and_it_is_the_only_one_overridden` asserts the
+`the_defined_test_is_pebbles_and_it_is_the_only_one_overridden` (renamed
+`the_engine_tests_are_egrets_and_none_is_not_one` by package #5b's Task B2,
+which ported the seven; see "What package #5b's Task B2 measured") asserted the
 seven siblings unchanged (`even`, `iterable`, `odd` still answer minijinja's
 way; `empty`, `json`, `map`, `null` are still unknown). "An `add_test` binds one
 name" is a property of minijinja rather than of this crate, so it is asserted
@@ -4764,7 +4813,9 @@ The same surface from the other side: Pebble's null **test** is spelled `null`
 and minijinja's is spelled `none`, so `{{ null is null }}` is `true` there and
 `unknown test: test none is unknown` here. `null-literal-is-null-test` records
 it. The rename W2b added is what would make registering a `none`-spelled `null`
-test a one-liner, which is why it is written down now.
+test a one-liner, which is why it is written down now. (Package #5b's Task B2
+banked it and did NOT do that: Kestra refuses `is none`, so the rewriter leaves
+a test name alone and `null` is bound under its own name.)
 
 ### A bare `null` map key leaks Python's spelling into a KEY
 
@@ -5658,3 +5709,314 @@ unary minus on one is Pebble's `multiply(-1, x)` (`-fromIon(ion='1.50')` is
 `-1.50`). The oracle ends #5a at **107 of 1493** baselined: 103 lines from
 before A1 and those four.
 
+## What package #5b's Task B7 measured (2026-10-29)
+
+Plan B7, spec D11. `errorLogs()` is implemented (`runners::error_logs`) and
+its `REFUSED` row is gone (3 rows: `secret`, `http`, `subflow`). Kestra's
+`ErrorLogsFunction` answers only on the worker and reads
+`DefaultExecutionLogMetaStore.errorLogs`: `findByExecutionId(tenant,
+execution, ERROR, Pageable.from(1, 25, Sort.asc("timestamp")))`, so at most
+**25** lines, oldest first; egret's `LogRepo::error_lines` is that page, with
+both the workspace and the execution id in the predicate. The worker reads it
+before the task renders (`worker::claim::render_context`), and only when the
+task's OWN properties, `vars`, the loop value or a value of the render context
+call `errorLogs` (`env::name_in_code`); the first cut read for any task of a
+flow whose source mentioned it, and B7's DB test measured 6 reads where 1
+answered (the `Fail` task waited out an empty log). A line is a map in
+`LogEntry`'s field order; what egret does not record (`tenantId`, `triggerId`,
+`thread`, `executionKind`, `progress`) reads as null and prints omitted, as
+Kestra's `NON_NULL` mapper omits it -- except `attemptNumber`, which Kestra
+prints as `null` (`@JsonInclude`) and egret omits when an execution-level line
+has none.
+
+**The wait.** Kestra polls an empty list for 5 s; egret for 1 s (recorded
+divergence). Measured (`tests/error_logs.rs`): an `errors:` task finds the
+failed task's line on its **first** read, because `run_one` writes the
+failed-attempt line and waits for the writer's flush barrier before the
+outcome commits, so the wait is not what makes the line visible. It remains
+for an execution with no ERROR line (Kestra answers `[]` after its wait too)
+and for a failing writer, whose barrier does not wait.
+
+**A message is data.** egret's top-level render is a fixpoint where Kestra's
+default is one pass, so a pass that handed out log text is the last one: a
+message holding `{{ 1 + 1 }}` prints as written. `render()` of a message
+renders it, as Kestra's `render()` does.
+
+**Off the worker** (executor-side renders, triggers, inputs, this harness) the
+refusal is Kestra's own sentence. The harness does not wire `errorLogs` (it
+needs a log store and is not a worker), so `function-errorlogs` stays
+error-class, re-paired to `outside_the_worker_it_is_kestras_refusal`. A call
+assembled at render (`'{{ error' ~ 'Logs() }}'`) on the worker meets egret's
+`NOT_LOADED` sentence, the rule a `kestra://` URI assembled at render follows.
+No corpus entry was added (each new probe would be error-class on this
+harness). The executor corpus banked `valids/errors`: 301 / 35 / 35 / 0.
+
+**Scope divergence.** A `Loop` iteration is a sub-execution in egret, so
+`errorLogs()` inside one reads that iteration's lines only, where Kestra's
+`ForEach` shares one execution.
+
+## What package #5b's Task B6 measured (2026-10-29)
+
+Plan B6, spec D9, user decision Q4. **The harness carries `render` and
+`renderOnce` now.** Both are `@Inject @Nullable` on `Extension` and
+`@Requires(property = "kestra.variables.recursive-rendering", value = "false",
+defaultValue = "false")`, so a server on the default configuration has them;
+the standalone `new Extension()` did not. `host.Oracle.wireRenderFunctions`
+sets the two fields by reflection and gives each function what it reads: an
+`ApplicationContext` (a `java.lang.reflect.Proxy` answering `getBean` with a
+`VariableRenderer` and `getBeansOfType` with the extension) and a
+`VariableConfiguration` (`maxRenderDepth` 16, template cache off). The nested
+`VariableRenderer` runs on the harness's own engine (`setPebbleEngine`).
+`host.Oracle dump` now lists **36** Kestra functions (34 + these two), so the
+engine's function count in `name-surface.txt` is **39**, not 37, and the
+`render`/`renderOnce` rows are both-bind rows. `errorLogs` and `subflow` stay
+unwired (each needs a service). Regenerated offline; the ten unstable goldens
+were put back to their committed values, so the diff is the 47 new entries
+and the two old ones whose answer became a value (`function-render` is `1`,
+`function-renderonce` is `x`).
+
+What Kestra does (the 47 entries, and a scratch harness for what the corpus
+cannot carry):
+
+- **Depth.** `RenderFunction.execute` reads `__kestra_render_depth` (absent =
+  0) and fails at `depth >= 16`: 16 nested calls answer, the 17th fails with
+  `Maximum render() nesting depth (16) exceeded at line <n> — check for
+  circular render() calls in your template.`, `<n>` the line of the refused
+  call in its own text (`3` for `"\n\n{{ render(t) }}"`). `renderOnce`
+  counts the same. The depth is a variable, so `{{ render('{{
+  __kestra_render_depth }}') }}` is `1`, and `{% set __kestra_render_depth =
+  -100 %}` lets 116 nested calls through (measured): **recorded divergence**,
+  egret publishes the variable for reading and counts in a place the template
+  cannot reach.
+- **Arguments.** `render(toRender, recursive)`, `renderOnce(toRender)`;
+  Pebble's binding sentences for a third positional, an unknown name, and
+  `renderOnce(x, recursive=true)`; a missing `toRender` is `The 'render'
+  function expects an argument 'toRender'.` (also from `renderOnce`); a
+  `recursive` that is neither a boolean nor null fails with `The 'render'
+  function expects an optional argument 'recursive' with type boolean.`
+- **Values.** A string renders as a whole template (no `{`: as it is;
+  otherwise to a fixpoint, or one pass when `recursive` is false; raw markers
+  stripped) and answers a string (`render('{{ 1 + 1 }}') + 1` is `21`). A map
+  renders its keys in one pass and its values as objects, keeping the first of
+  two keys that render alike (`{"a":1}`), and a non-string key is a
+  `ClassCastException`; a list renders each element; a number, a boolean or a
+  null is returned as it is (`render(5) + 1` is `6`).
+- **Variables.** The nested render sees the context **and** what `{% set %}`
+  and `{% for %}` bound (`getGlobalScopes()` holds both).
+- **The top-level re-render loop still runs over a `render()` answer** (this
+  harness's, and egret's), so `render(a, recursive=false)` with `a` ->
+  `{{ b }}` -> `{{ c }}` -> `z` is `z` at the top; `function-renderonce-one-pass`
+  compares the answer inside the expression (`renderOnce(a) == '{{ c }}'`), and
+  `function-render-raw` fails because the next top-level pass renders the
+  `{{ x }}` the raw region left.
+
+All 31 red entries banked in B6; none is recorded as a divergence. What the
+corpus cannot show -- the confinement of spec D9 (rules 1, 2, 4) and egret's
+bounds (the shared pass budget, the shared list-work budget, the per-pass
+output cap, the stack) -- is held by `runners::nested::tests` and
+`runners::secrets::tests`, each mutated once and seen to fail (task report).
+
+## What package #5b's Task B5 measured (2026-10-29)
+
+Plan B5, spec D12 (and §2.2 item 13). `runners::filters::escape` follows
+`EscapeFilter`'s bytecode: a null input returns null before the strategy is
+looked at (so `null | escape(strategy='nope')` renders empty), the strategy is
+`(String) args.get("strategy")` with `html` for an absent or null one, and a
+name the filter's `HashMap` does not hold throws Kestra's `Unknown escaping
+strategy [x]` (case-sensitive: `JS` is unknown). The five strategies are the
+five unbescape 1.1.6 calls B1 named, each ported from the jar: the string
+`escape` method of `JavaScriptEscapeUtil`, `JsonEscapeUtil`,
+`CssIdentifierEscapeUtil` and `UriEscapeUtil` read with `javap -c -p`, and
+their `ESCAPE_LEVELS`, `SEC_CHARS` and `BACKSLASH_CHARS` tables read out of
+the loaded classes by reflection rather than retyped. A comparison against the
+jar itself -- every code point at eight positions (alone, after `a`, before
+`a`, `z`, `-`, `1`, after `<`, before a space; above U+3000 a sample) plus
+20 000 random strings over the characters the position rules care about,
+623 000 rows -- agreed on every row before any golden was consulted. What it
+showed beyond B1's notes: `css` escapes `*` as `\*` (it is in
+`BACKSLASH_CHARS`) and `:` in hex (`\3A`); `js`'s `/` is escaped only right
+after `<`, so a leading `/` stays; U+2028/U+2029's exemption is a level-1
+branch and both are `\u2028`/`\u2029` at level 2. All 91 of B5's `#5b red`
+lines banked and so did the old `filter-escape-js-strategy` (194 -> 102); no
+entry is recorded as a divergence. B1's placeholder
+`an_escape_strategy_pebble_does_not_know_is_refused` moved from `runners::env`
+to `runners::filters` under the same name and asserts Kestra's text, so the
+three error-class pairs fail for Kestra's reason. Not modelled: Pebble's
+`SafeString`, so Kestra's `x | escape | escape` escapes once and egret's
+twice; no corpus entry chains two escapes.
+
+## What package #5b's Task B4 measured (2026-10-29)
+
+Plan B4, spec D13 (and §2.2 items 12 and 14). `runners::filters` registers
+Pebble core's `abbreviate`, `base64decode`, `base64encode`, `merge`, `nl2br`,
+`numberformat`, `rsort`, `sha256`, `urlencode` and the escaper's `raw`, each
+read from the pinned jar with `javap -c -p`; `numberformat`'s pattern language
+is a new module, `runners::decimalformat`, a port of JDK 21's
+`DecimalFormat.applyPattern` and its non-exponential `format` path
+(`DigitList`'s `HALF_EVEN`, including the tie rule that consults whether the
+double's digits are exact), with the `en` symbols pinned (D13's divergence:
+Kestra uses the JVM locale; the golden's `en_VN` JVM has `en`'s symbols, so
+nothing here shows it). Scientific (`E`) and currency (`¤`) patterns are
+refused by name. 51 of B4's 53 lines banked (245 -> 194); `filter-nl2br` and
+`filter-nl2br-no-escaping` stay as spec D14's recorded divergence: their
+newline is inside a template string literal, which egret's rewriter refuses
+before `nl2br` runs (the filter itself answers from a context string,
+`filter-nl2br-crlf`). B1's placeholder
+`a_filter_input_kestra_refuses_is_refused_here_too` moved from `runners::env`
+to `runners::filters` under the same name and asserts Kestra's text, so the
+seven error-class pairs fail for Kestra's reason. Read from the bytecode,
+beyond the corpus: `abbreviate(0)` of a string longer than three is empty
+(a width of three or less is a plain cut; `'abc' | abbreviate(0)` is `abc`
+only because `abc` is three long); `merge` of a list with a map appends one
+single-entry map per entry (`addAll(map.entrySet())`); `rsort` has no array
+branch, so `split`'s `String[]` is a cast failure where `sort` sorts it; a
+merged map keeps insertion order here where Kestra's is a `HashMap` (the
+standing bucket-order ruling).
+
+The three cross fixtures carried the ten as `error` cells ("Pebble core, and
+egret binds no filter of this name"); B4 re-rendered every row and 851 egret
+cells moved (`return-classes.txt` 71, `collection-pairs.txt` 322,
+`propagation-pairs.txt` 458). 754 now agree with the harness answer. The 97
+that do not carry an existing reason -- the `HashMap` order and class of
+`merge`'s map (66 and 7, the latter with the two `rsort`-of-a-view class
+names), its `regexReplace` re-render consequence (2), a `String[]`'s identity
+hash (14, `unstable`) -- or one new one (8): Kestra's `reverse`/`sort`/`rsort`
+reorder the context list in place, so `(l | sort) | merge(l)` appends the
+SORTED `l` there and the bound one here. No cell is an egret refusal of
+something Kestra answers.
+
+## What package #5b's Task B3 measured (2026-10-29)
+
+Plan B3, spec D10 (and §2.2 item 14). `runners::functions` registers Pebble
+core's `max` and `min` as `MaxFunction`/`MinFunction` read with `javap -c -p`:
+the result starts null, a null result takes the next argument unchecked, and
+otherwise `OperatorUtils.gt(arg, result)` (`lt` for `min`) replaces it. The
+comparison is `runners::compare::math_comparison`: A2's numeric order without
+Kestra's string arm (`OperatorUtils` casts both operands to `Number`, so
+`max('a', 'b')` fails), a null on either side `false`, and every other pair
+`invalid operands for mathematical comparison [GREATER_THAN]` (`[LESS_THAN]`
+under `min`). 28 of B1's 29 lines banked (273 -> 245). B1's placeholder
+`max_and_min_refuse_what_pebble_cannot_compare` moved from `runners::env` to
+`runners::functions` under the same name and now asserts Kestra's text, so
+the five error-class pairs fail for Kestra's reason, not as an unknown
+function. One line stays: `function-min-classname-long`, whose value (`1`,
+the literal itself) matches while egret's `className` says
+`java.lang.Integer` for Kestra's Long -- the D2 cause of
+`filter-classname-literal-int`.
+
+## What package #5b's Task B2 measured (2026-10-29)
+
+Plan B2, spec D8 (and §2.2 item 15). `runners::pebble_tests` registers `null`,
+`empty`, `map`, `json` and overrides minijinja's `even`, `odd`, `iterable`;
+56 lines left `baseline.txt` (329 -> 273), and the six `even`/`odd`
+error-class rows are paired with `even_and_odd_fail_with_pebbles_text` instead
+of `baselined`. Measured through the harness before building, from a scratch
+corpus that was not committed (the answers are pinned by unit tests instead):
+
+- **`is none`, `is NONE`, `is NULL` fail** (`Test [none] does not exist.`):
+  the null literal's spellings are not test names. So `null` is registered
+  as `null`, not as `none` as D8 read, and `rewrite::follows_a_test_operator`
+  keeps the rewriter from translating a word after `is`/`is not`.
+- Every test **ignores its arguments** (`getArgumentNames()` is `null`):
+  `'a' is json(1)` and `'a' is map(1)` are `false`.
+- `null is null` and `null is empty` are `true`, `null is map` `false`,
+  `null is json` fails (`argument "content" is null`); `x is even` on a null
+  fails with `Can not pass null value to "even" test.` (a `PebbleException`),
+  `odd` with the same words for `"odd"` (an `IllegalArgumentException`); a
+  Boolean, a Double (`2.0` too) and a `BigInteger` fail the `(Long)` cast.
+- **`json` is Jackson's `readTree`** (jackson-core 2.22.1, 63 probes): one
+  value then stop; `''` and whitespace are `true`; only space, tab, CR and LF
+  are whitespace; a root number must be followed by whitespace or the end
+  (`1x`, `1,`, `1]`, `1/` are `false`, `1 /* x */` is `true`); `truex`,
+  `true1`, `true_` are `false` while `true,`, `true$`, `true(` are `true`;
+  depth 1 000 passes and 1 001 fails; a 1 001-digit integer fails and a
+  1 000-digit fraction does not; a lone surrogate escape is accepted.
+
+## What package #5b's Task B1 batches measured (2026-10-29)
+
+Plan `docs/en/plans/2026-10-28-workflow-renderer.md` B1; spec
+`docs/en/specs/2026-10-28-workflow-renderer-design.md` D8, D10, D12, D13.
+260 entries, appended at the end of `corpus.json` in nine blank-line batches:
+`test-` (59, spec D8), `function-max-`/`function-min-` (34, D10), the ten
+filters (60, D13), `filter-escape-` with the survey's inputs, the position
+rules and the unknown strategies (23, D12), and one boundary batch per
+`escape` strategy (`filter-escape-<strategy>-boundary-`, 84 together). The
+regeneration changed only the eight `NON_DETERMINISTIC` ids and
+`function-fromion-annotation-of-a-list`/`-in-a-list`; those ten were kept at
+their committed values, so the `golden.json` diff is only the new entries.
+
+26 are Kestra exceptions (`error-class.txt`): 4 baselined (`even`/`odd` on a
+String or a Double answer here), 22 born matching for the WRONG reason (the
+name is unknown here) and paired with four `runners::env` placeholder tests
+(`a_test_kestra_refuses_is_refused_here_too`,
+`max_and_min_refuse_what_pebble_cannot_compare`,
+`a_filter_input_kestra_refuses_is_refused_here_too`,
+`an_escape_strategy_pebble_does_not_know_is_refused`). 38 pass today: those 22,
+`even`/`odd` on a Long, `iterable` on a list, the twelve `html` strategy entries (the
+default escaper is already Pebble's) and `escape(strategy='js')` of a null. The other **222** are baselined under
+`#5b red`: B2 49, B3 29, B4 53, B5 91.
+
+**How the boundary batches were chosen.** Pebble 4.1.2's `EscapeFilter` maps
+`html`, `js`, `css`, `url_param` and `json` to unbescape's
+`HtmlEscape.escapeHtml4Xml`, `JavaScriptEscape.escapeJavaScript`,
+`CssEscape.escapeCssIdentifier`, `UriEscape.escapeUriQueryParam` and
+`JsonEscape.escapeJson` (`javap -v`, bootstrap method handles). Each was called
+on every code point from U+0000 to U+10001 (after an `a`, so in the middle of
+a string) and the output classified by shape (unchanged, single-character
+escape, `\xHH`, `\uHHHH`, CSS `\H..`, `%HH` by byte count, named or numeric
+entity). Each run of one shape is one entry holding both ends of the run
+between `z`s (`z` is not a hex digit, so a CSS escape before it takes no
+space); the last run's upper end is U+10FFFF. Plus the surrogate gap, U+D7FF
+and U+E000, which is a boundary of the UTF-8 encoding on the Rust side.
+
+**Measured answers B2-B5 follow.**
+
+- **Tests.** `is null`: a null is `true`, `0` and `''` are `false`; a missing
+  root or member fails (strict). `is empty`: `''`, whitespace (`trim()`, so a
+  tab and a newline count, a no-break space U+00A0 does not), `[]`, `{}` and
+  null are empty; `0`, `false` are not; a missing root fails. `is map`: a map
+  only (null, a list, a string, a number are `false`). `is json`: a string
+  that Jackson reads as a value -- `'1'`, `'[1, 2]'`, `'"s"'`, `'true'`,
+  `'null'`, `'  1  '`, **`''`** and **`'1 x'`** (Jackson stops after the
+  first value) are `true`; `'plain'` and `'{'` are `false`; a map, list or
+  number fails (`ClassCastException` to String), a null fails (`argument
+  "content" is null`). `even`/`odd` cast to Long: a String or a Double fails.
+  `iterable` is `instanceof Iterable`: a list is `true`; a String, a map and
+  null are `false`.
+- **`max`/`min`.** One argument is returned as it is (`max([1, 2])` is
+  `[1,2]`); `max()` and `max(null)` and `max(null, null)` render empty; nulls
+  are skipped; the larger operand keeps its own type (`max(1, 2.5) |
+  className` is `java.lang.Double`, `min(fromIon(ion='2.50'), 1) | className`
+  is `java.lang.Long`); **a tie keeps the first operand** (`max(2.0, 2)` is
+  `2.0`, `max(2, 2.0)` is `2`, `max(fromIon(ion='2.50'), 2.5)` is `2.50`); a
+  string, boolean or list operand fails with `invalid operands for
+  mathematical comparison [GREATER_THAN]` (`[LESS_THAN]` under `min`).
+- **Filters.** `abbreviate`: `'abcdef' | abbreviate(6)` is `abc...` (a
+  string of exactly the width is cut too), `abbreviate(3)` of `abcdefg` is
+  `abc`, `abbreviate(4)` is `a...`, **`abbreviate(0)` is the input
+  unchanged** (only a negative width fails: `Invalid argument to abbreviate
+  filter; must be greater than zero`), a number input fails, a null renders
+  empty. `base64decode` accepts an unpadded input (`'YWI'` is `ab`); a bad one
+  fails with `Please provide a correctly Base64 encoded string ...`. `merge`:
+  list+list concatenates, map+map right wins, list+map appends the map,
+  **map+list adds each element as a key mapped to itself**
+  (`{'a': 1} | merge([1])` is `{"a":1,"1":1}`), a null argument answers the
+  input, a string input fails (`The object being filtered is not a
+  Map/List/Array`). `nl2br` turns `\r\n` into one `<br />`. `numberformat`:
+  with no argument, three fraction digits at most (`1,234.568`, `0.123`);
+  `'0.00'` rounds `0.125` to `0.12` (HALF_EVEN on the double); `'#%'`; a
+  BigDecimal formats; a string fails (`The input for the 'NumberFormat'
+  filter has to be a number.`); null renders empty. The JVM locale was
+  `en_VN`, so D13's locale divergence is not exercised. `raw` is the
+  identity (`'<b>' | escape | raw` stays escaped). `rsort` of a context list
+  mixing a Double with Integers fails (`ClassCastException`), as a String with
+  a Long does. `urlencode` is `URLEncoder` (`~` is `%7E`, `*` stays).
+- **`escape`.** `json` escapes **every** non-ASCII character as `\uHHHH`
+  (`é` is `\u00E9`; the survey's table showed it unescaped), `&` as
+  `\u0026` and `/` after `<`; `js` writes U+0000 as `\0`, U+007F-U+00FF as
+  `\xHH`, `&` as `\x26`, `/` after `<`. `css` escapes a leading digit as
+  `\31 `, a leading `-` before a digit, `--` and a leading `_`; a hex escape
+  takes a trailing space only before a hex digit (`\E9 a`, `\E9z`), and a
+  space after it is itself escaped (`\E9\ z`). An unknown strategy, an
+  upper-case name (`JS`) and `html_attr` fail with `Unknown escaping strategy
+  [x]`.

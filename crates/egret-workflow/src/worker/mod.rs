@@ -100,7 +100,13 @@ mod timeout;
 pub(crate) mod txn;
 pub(crate) mod working_dir;
 
+/// Test-only (`test-util`; package #5b Task B7): the reads `errorLogs()`'s
+/// prefetch has made, so a test can tell one read from a wait.
+#[cfg(any(test, feature = "test-util"))]
+pub use claim::error_log_reads_so_far;
 pub use claim::CREATE_BESIDE_A_CREATED_SIBLING;
+/// Package #5b Task B7: how long `errorLogs()`'s read waits for a first line.
+pub use claim::ERROR_LOGS_WAIT;
 /// Test-only (`test-util`; W9c Task 9, final review m3): an outcome or a
 /// start in the CALLER's transaction, answering `Err` when a render needed a
 /// read. Production goes through `worker::txn`.
