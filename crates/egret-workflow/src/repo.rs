@@ -1013,7 +1013,7 @@ macro_rules! execution_cols {
          execution_trigger, trigger_execution_id, trigger_run_ix, \
          parent_execution_id, parent_run_ix, loop_index, loop_value, \
          attempt_number, origin_offset_ms, replayed_from_execution_id, \
-         started_at, ended_at, created_at, updated_at, labels, backfill_id"
+         started_at, ended_at, created_at, updated_at, labels, backfill_id, outputs"
     };
 }
 
@@ -1087,6 +1087,13 @@ pub struct ExecutionRow {
     pub labels: Option<serde_json::Value>,
     /// The backfill that fired this execution (migration 0192), `NULL` otherwise.
     pub backfill_id: Option<Uuid>,
+    /// The flow-level `outputs:` the execution's terminal evaluated
+    /// (migration 0211, package #6), each SECRET value stored as `******`;
+    /// `NULL` when none were (no `outputs:`, not ended, or a failed
+    /// evaluation). **`secret_outputs`, the sealed values beside it, is not
+    /// selected by any statement here** (spec D9): no read of this type can
+    /// carry it, so no response can.
+    pub outputs: Option<serde_json::Value>,
 }
 
 /// One `workflow.task_runs` row, whole.

@@ -206,6 +206,8 @@ pub(super) async fn open_batch(
                     run: parent_run,
                     states: vec![RunState::Failed],
                     outputs: None,
+                    secret_outputs: None,
+                    outputs_failed: None,
                     message: Some(format!("loop iteration {index}: {why}")),
                     stack: claim::Stack::Nested(ctx.caller()),
                     unless_terminal: true,
@@ -333,6 +335,8 @@ async fn spawn_one(
                 run: parent_run,
                 states: vec![RunState::Failed],
                 outputs: None,
+                secret_outputs: None,
+                outputs_failed: None,
                 message: Some(format!("loop iteration {index}: {why}")),
                 stack: claim::Stack::Nested(parent.caller()),
                 unless_terminal: false,
@@ -1366,7 +1370,7 @@ pub(super) async fn log_on_execution(
 
 /// [`log_on_execution`], on one task run of `execution` when `task_run` is
 /// set (the `Loop` run's own line, Task A4).
-async fn log_line(
+pub(super) async fn log_line(
     conn: &mut PgConnection,
     workspace: Uuid,
     execution: Uuid,

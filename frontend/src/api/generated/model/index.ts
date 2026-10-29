@@ -270,6 +270,7 @@ export * from './executionGraphStates';
 export * from './executionListItemDto';
 export * from './executionListItemDtoExecutionTrigger';
 export * from './executionListItemDtoInputs';
+export * from './executionListItemDtoOutputs';
 export * from './executionPageDto';
 export * from './exemptVia';
 export * from './existingMask';

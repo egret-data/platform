@@ -7,6 +7,7 @@
  */
 import type { ExecutionListItemDtoExecutionTrigger } from './executionListItemDtoExecutionTrigger';
 import type { ExecutionListItemDtoInputs } from './executionListItemDtoInputs';
+import type { ExecutionListItemDtoOutputs } from './executionListItemDtoOutputs';
 import type { LabelDto } from './labelDto';
 
 /**
@@ -105,4 +106,16 @@ export interface ExecutionListItemDto {
      * @nullable
      */
   backfill_id?: string | null;
+  /**
+     * The flow's `outputs:` as the execution's end evaluated them, typed by
+     * each output's `type`; `null` when none were evaluated: the flow
+     * declares none, the execution has not ended, or the evaluation failed
+     * (the execution then ended `FAILED` and its logs say why). **A
+     * `SECRET` output's value is always `******`** here, in the list and
+     * the detail alike: the real value is kept encrypted on the server and
+     * no response carries it. A `FILE` output is a `kestra:///` URI of the
+     * execution's own storage, read through the execution file API.
+     * @nullable
+     */
+  outputs?: ExecutionListItemDtoOutputs;
 }

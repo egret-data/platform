@@ -394,6 +394,26 @@ pub(crate) fn reveal_flow_outputs(
     Ok((Value::Object(map), values))
 }
 
+/// A `Subflow` run's stored `outputs` (`{executionId, state, outputs: {…}}`,
+/// package #6 Task B3) with the child's sealed `{output id: value}` object,
+/// copied onto the run, put back into `outputs.outputs`, as
+/// [`reveal_flow_outputs`] does for the child itself. Only the worker's
+/// render surface calls it.
+pub(crate) fn reveal_subflow_outputs(
+    outputs: Value,
+    sealed: Option<&[u8]>,
+) -> Result<(Value, Vec<String>)> {
+    let (Some(sealed), Value::Object(mut run)) = (sealed, outputs.clone()) else {
+        return Ok((outputs, Vec::new()));
+    };
+    let Some(map) = run.remove("outputs") else {
+        return Ok((outputs, Vec::new()));
+    };
+    let (map, values) = reveal_flow_outputs(map, Some(sealed))?;
+    run.insert("outputs".to_string(), map);
+    Ok((Value::Object(run), values))
+}
+
 /// A `Loop` run's stored `outputs` (`{…, outputs: [{item, outputs}, …]}`)
 /// with its sealed SECRET values put back at their list positions, and those
 /// values as strings, for masking what the run writes (as [`reveal`] for

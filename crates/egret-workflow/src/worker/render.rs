@@ -150,6 +150,13 @@ pub(super) struct Surface {
     inherited: Map<String, Value>,
     /// This execution's own stored outputs, by `run_ix`.
     own: std::collections::BTreeMap<usize, Value>,
+    /// The stored (masked) form of every run output above that had sealed
+    /// SECRET values revealed into it -- a `Loop` run's list, a `Subflow`
+    /// run's copy (package #6 Task B3) -- for
+    /// [`Surface::hide_flow_secret_outputs`]: `own` by `run_ix`, `inherited`
+    /// by task id.
+    own_masked: std::collections::BTreeMap<usize, Value>,
+    inherited_masked: Map<String, Value>,
     /// Each run's `created_at`, by `run_ix`, as `taskrun.startDate` reads it.
     started: std::collections::BTreeMap<usize, String>,
     /// Each run's surrogate id, by `run_ix`, as `taskrun.id` reads it.
@@ -313,6 +320,7 @@ impl Surface {
             "outputs": flow_outputs,
         });
         let mut inherited = Map::new();
+        let mut inherited_masked = Map::new();
         let mut root = ctx.id;
         // Each level of the loop nesting, nearest first: this execution's own
         // iteration, then its parent's, and so on. `valids/loop-nested` is
@@ -514,11 +522,14 @@ impl Surface {
                         continue;
                     }
                     let outputs: Option<Value> = r.get("outputs");
-                    let outputs = reveal_run_outputs(
+                    let (outputs, masked) = reveal_run_outputs(
                         outputs,
                         r.get::<Option<Vec<u8>>, _>("secret_outputs").as_deref(),
                         &mut secrets,
                     )?;
+                    if let Some(masked) = masked {
+                        inherited_masked.insert(task_id.clone(), masked);
+                    }
                     inherited.insert(task_id, outputs.unwrap_or_else(|| json!({})));
                 }
             }
@@ -570,16 +581,21 @@ impl Surface {
         .await
         .map_err(db_err)?;
         let mut own = std::collections::BTreeMap::new();
+        let mut own_masked = std::collections::BTreeMap::new();
         let mut started = std::collections::BTreeMap::new();
         let mut ids = std::collections::BTreeMap::new();
         for r in &rows {
             let ix = r.get::<i32, _>("run_ix").max(0) as usize;
-            if let Some(o) = reveal_run_outputs(
+            let (revealed, masked) = reveal_run_outputs(
                 r.get::<Option<Value>, _>("outputs"),
                 r.get::<Option<Vec<u8>>, _>("secret_outputs").as_deref(),
                 &mut secrets,
-            )? {
+            )?;
+            if let Some(o) = revealed {
                 own.insert(ix, o);
+            }
+            if let Some(m) = masked {
+                own_masked.insert(ix, m);
             }
             let at: chrono::DateTime<chrono::Utc> = r.get("created_at");
             started.insert(ix, at.to_rfc3339());
@@ -601,6 +617,8 @@ impl Surface {
             loop_iteration,
             inherited,
             own,
+            own_masked,
+            inherited_masked,
             started,
             ids,
             files: None,
@@ -749,14 +767,27 @@ impl Surface {
         self.parsed.as_ref()
     }
 
-    /// Put the mask back over the SECRET values of `execution.outputs`
-    /// (package #6 Task B2, spec D9): for a render whose result leaves this
-    /// execution -- a Flow trigger's `when` and `inputs`
-    /// ([`execution_render_context`]), which become ANOTHER execution's
-    /// inputs. Only the execution's own renders see the real values.
+    /// Put the mask back over every sealed SECRET output this surface
+    /// revealed (package #6 spec D9): `execution.outputs` (Task B2), and a
+    /// `Loop` run's list and a `Subflow` run's copy of its child's outputs,
+    /// own or inherited (Task B3, controller decision 2026-10-29). For a
+    /// render whose result leaves this execution -- a Flow trigger's `when`
+    /// and `inputs` ([`execution_render_context`]), which become ANOTHER
+    /// execution's inputs. Only the execution's own renders see the real
+    /// values.
+    ///
+    /// **Not the SECRET inputs** (KI-112): `inputs` keeps the revealed
+    /// values here, a pre-existing limit recorded in the package #6 spec
+    /// (§2.2 item 12), left as it is by the controller's decision.
     pub(super) fn hide_flow_secret_outputs(&mut self) {
         if let Value::Object(m) = &mut self.execution {
             m.insert("outputs".to_string(), self.flow_outputs_masked.clone());
+        }
+        for (ix, masked) in &self.own_masked {
+            self.own.insert(*ix, masked.clone());
+        }
+        for (task, masked) in &self.inherited_masked {
+            self.inherited.insert(task.clone(), masked.clone());
         }
     }
 
@@ -1195,6 +1226,8 @@ mod tests {
             loop_iteration: false,
             inherited: Map::new(),
             own: std::collections::BTreeMap::new(),
+            own_masked: std::collections::BTreeMap::new(),
+            inherited_masked: Map::new(),
             started: std::collections::BTreeMap::new(),
             ids: std::collections::BTreeMap::new(),
             files: None,
@@ -1240,6 +1273,8 @@ mod tests {
             loop_iteration: false,
             inherited: Map::new(),
             own: std::collections::BTreeMap::new(),
+            own_masked: std::collections::BTreeMap::new(),
+            inherited_masked: Map::new(),
             started: std::collections::BTreeMap::new(),
             ids: std::collections::BTreeMap::new(),
             files: None,
@@ -2118,21 +2153,35 @@ fn renders_at(plan: &Plan, task: usize) -> RunState {
 
 /// Keeps the `sqlx::Error` as the source (see `spawn`'s).
 /// A task run's stored `outputs` with its sealed SECRET outputs put back
-/// (package #6 spec D9: a `Loop` run's list, Task A4), their values added to
-/// `secrets` so every line the run writes masks them. The render surface is
+/// (package #6 spec D9), their values added to `secrets` so every line the
+/// run writes masks them, and the stored (masked) form when anything was
+/// sealed, for [`Surface::hide_flow_secret_outputs`]. The render surface is
 /// the one reader that opens the column, as for SECRET inputs.
+///
+/// Two runs carry a sealed object, told apart by their `outputs` key, which
+/// each writer sets with the seal:
+/// - a `Loop` run (Task A4): `outputs` is the LIST, sealed `{position: {id:
+///   value}}`;
+/// - a `Subflow` run (Task B3): `outputs` is the child's MAP, sealed `{id:
+///   value}`, the child's own object copied as it is.
 fn reveal_run_outputs(
     outputs: Option<Value>,
     sealed: Option<&[u8]>,
     secrets: &mut Vec<String>,
-) -> Result<Option<Value>> {
+) -> Result<(Option<Value>, Option<Value>)> {
     match (outputs, sealed) {
         (Some(o), Some(sealed)) => {
-            let (o, values) = crate::secret_inputs::reveal_loop_outputs(o, Some(sealed))?;
+            let masked = o.clone();
+            let (o, values) = match o.get("outputs") {
+                Some(Value::Object(_)) => {
+                    crate::secret_inputs::reveal_subflow_outputs(o, Some(sealed))?
+                }
+                _ => crate::secret_inputs::reveal_loop_outputs(o, Some(sealed))?,
+            };
             secrets.extend(values);
-            Ok(Some(o))
+            Ok((Some(o), Some(masked)))
         }
-        (o, _) => Ok(o),
+        (o, _) => Ok((o, None)),
     }
 }
 

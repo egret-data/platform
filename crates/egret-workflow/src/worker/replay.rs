@@ -310,6 +310,8 @@ pub(super) async fn spawn_due(
             run,
             states: vec![RunState::Failed],
             outputs: None,
+            secret_outputs: None,
+            outputs_failed: None,
             message: Some(format!(
                 "the CREATE_NEW_EXECUTION retry cannot replay: {why}"
             )),

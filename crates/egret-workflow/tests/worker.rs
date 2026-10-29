@@ -13767,3 +13767,312 @@ async fn flow_outputs_over_the_cap_fail_the_execution(pool: sqlx::PgPool) {
         "an ERROR line with the cap's message: {lines:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Package #6 Task B3 (spec D6, D9): the `Subflow` copy of a child's flow
+// outputs, and a Flow trigger's render context hiding every sealed output.
+// Kestra: `Subflow.createSubflowExecutionResult` (`wait: true` only) and
+// `failSubflowDueToOutput`.
+// ---------------------------------------------------------------------------
+
+/// A `Subflow` parent of `target` whose `sub` waits, then `tail`.
+fn waiting_subflow_parent(id: &str, target: &str, tail: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: sub\n    \
+         type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    \
+         flowId: {target}\n    wait: true\n{tail}"
+    )
+}
+
+/// The one subflow child of `parent`.
+async fn only_child(pool: &sqlx::PgPool, parent: Uuid) -> Uuid {
+    let children = children_by_trigger(pool, parent).await;
+    assert_eq!(children.len(), 1, "one child: {children:?}");
+    children[0].0
+}
+
+/// **A parent reads its child's flow outputs as `{{ outputs.sub.outputs.x }}`
+/// (spec D6; Kestra's `Subflow.Output.outputs`).** The `Subflow` run's
+/// outputs are `{executionId, state, outputs}`, the last the child's typed
+/// map as stored on the child, and a later task of the parent renders it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_parent_reads_its_childs_flow_outputs(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let child = flow_with_outputs(
+        "b3-child",
+        &return_task("r", "hello"),
+        "  - id: x\n    type: STRING\n    value: \"{{ outputs.r.value }}\"\n\
+         \x20 - id: n\n    type: INT\n    value: \"3\"\n",
+    );
+    file_flow(&db, ws, user, &child).await;
+    let parent = waiting_subflow_parent(
+        "b3-parent",
+        "b3-child",
+        &return_task(
+            "read",
+            "{{ outputs.sub.outputs.x }}-{{ outputs.sub.outputs.n + 1 }}",
+        ),
+    );
+    let ex = start_execution(&pool, ws, None, &parent, serde_json::json!({}))
+        .await
+        .expect("start the parent");
+
+    settle_everything(&pool, &core_handlers()).await;
+
+    let kid = only_child(&pool, ex).await;
+    assert_eq!(
+        task_outputs(&pool, ex, "sub").await,
+        serde_json::json!({
+            "executionId": kid.to_string(),
+            "state": "SUCCESS",
+            "outputs": {"x": "hello", "n": 3},
+        })
+    );
+    assert_eq!(
+        task_outputs(&pool, ex, "read").await,
+        serde_json::json!({"value": "hello-4"})
+    );
+    assert_eq!(
+        execution_history(&pool, ex).await,
+        serde_json::json!(["CREATED", "RUNNING", "SUCCESS"])
+    );
+}
+
+/// **A child whose flow outputs failed fails the `Subflow` run with a fresh
+/// attempt** (Kestra's `failSubflowDueToOutput`, golden
+/// `valids/subflow-secret-output-parent`): the run takes the child's state
+/// and then `FAILED` (once: `withState` on the same state is a no-op), its
+/// one attempt is `[CREATED, FAILED]`, it carries no outputs, an ERROR line
+/// `Failed to extract outputs with the error: …` is written on it, and the
+/// successor never runs.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_whose_childs_outputs_failed_fails_with_a_fresh_attempt(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let child = flow_with_outputs(
+        "b3-bad-child",
+        &return_task("r", "hello"),
+        "  - id: x\n    type: STRING\n    value: \"{{ outputs.nope.value }}\"\n",
+    );
+    file_flow(&db, ws, user, &child).await;
+    let parent = waiting_subflow_parent(
+        "b3-bad-parent",
+        "b3-bad-child",
+        &return_task("after", "after"),
+    );
+    let ex = start_execution(&pool, ws, None, &parent, serde_json::json!({}))
+        .await
+        .expect("start the parent");
+
+    settle_everything(&pool, &core_handlers()).await;
+
+    let kid = only_child(&pool, ex).await;
+    assert_eq!(
+        execution_history(&pool, kid).await,
+        serde_json::json!(["CREATED", "RUNNING", "SUCCESS", "FAILED"])
+    );
+    assert_eq!(
+        run_history(&pool, ex, "sub").await,
+        serde_json::json!(["CREATED", "RUNNING", "FAILED"])
+    );
+    let attempts: serde_json::Value = sqlx::query_scalar(
+        "SELECT attempts FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'sub'",
+    )
+    .bind(ex)
+    .fetch_one(&pool)
+    .await
+    .expect("the attempts");
+    let histories: Vec<serde_json::Value> = attempts
+        .as_array()
+        .expect("an array")
+        .iter()
+        .map(|a| a["history"].clone())
+        .collect();
+    assert_eq!(histories, vec![serde_json::json!(["CREATED", "FAILED"])]);
+    assert_eq!(run_outputs(&pool, ex, "sub").await, None);
+    assert_eq!(run_state(&pool, ex, "after").await, None);
+    assert_eq!(
+        execution_history(&pool, ex).await,
+        serde_json::json!(["CREATED", "RUNNING", "FAILED"])
+    );
+    let sub_id = run_id_of(&pool, ex, "sub").await;
+    let lines: Vec<(i16, String)> = sqlx::query_as(
+        "SELECT level, message FROM workflow.task_logs WHERE task_run_id = $1 ORDER BY id",
+    )
+    .bind(sub_id)
+    .fetch_all(&pool)
+    .await
+    .expect("the run's lines");
+    assert!(
+        lines.iter().any(|(level, m)| *level == 4
+            && m.starts_with("Failed to extract outputs with the error: ")
+            && m.contains(&kid.to_string())),
+        "an ERROR line on the Subflow run naming the child: {lines:?}"
+    );
+}
+
+/// **A child with no `outputs:` still reports `outputs: {}`** (the control:
+/// the copy changes nothing for a flow that declares none).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_child_without_outputs_still_reports_an_empty_map(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    file_flow(&db, ws, user, &one_task("b3-plain-child")).await;
+    let parent = waiting_subflow_parent("b3-plain-parent", "b3-plain-child", "");
+    let ex = start_execution(&pool, ws, None, &parent, serde_json::json!({}))
+        .await
+        .expect("start the parent");
+
+    settle_everything(&pool, &core_handlers()).await;
+
+    let kid = only_child(&pool, ex).await;
+    assert_eq!(
+        task_outputs(&pool, ex, "sub").await,
+        serde_json::json!({"executionId": kid.to_string(), "state": "SUCCESS", "outputs": {}})
+    );
+}
+
+/// **A child's SECRET output reaches the parent as the mask, sealed beside
+/// it, and is revealed to the parent's own renders alone (spec D9).** The
+/// `Subflow` run's `outputs.outputs.s` is `******`, its `secret_outputs`
+/// holds the child's sealed object (never the plaintext) and opens to it, a
+/// later task of the parent reads the real value, every line it writes holds
+/// the mask, and a Flow trigger's context over the parent sees the mask.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_secret_subflow_output_is_sealed_on_the_parent_and_revealed_to_it_alone(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    egret_workflow::secret_inputs::install_for_tests();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    const PLAIN: &str = "hush-b3-sub-0451";
+    let child = flow_with_outputs(
+        "b3-sec-child",
+        &return_task("r", "x"),
+        &format!(
+            "  - id: s\n    type: SECRET\n    value: {PLAIN}\n\
+             \x20 - id: p\n    type: STRING\n    value: plain\n"
+        ),
+    );
+    file_flow(&db, ws, user, &child).await;
+    let parent = waiting_subflow_parent(
+        "b3-sec-parent",
+        "b3-sec-child",
+        "  - id: check\n    type: io.kestra.plugin.core.debug.Return\n    \
+         format: \"{{ outputs.sub.outputs.s | length }}\"\n  \
+         - id: say\n    type: io.kestra.plugin.core.log.Log\n    \
+         message: \"s={{ outputs.sub.outputs.s }} p={{ outputs.sub.outputs.p }}\"\n",
+    );
+    let ex = start_execution(&pool, ws, None, &parent, serde_json::json!({}))
+        .await
+        .expect("start the parent");
+
+    let sink = std::sync::Arc::new(Lines::default());
+    settle_everything(&pool, &core_handlers_logging_to(&sink)).await;
+
+    let stored = task_outputs(&pool, ex, "sub").await;
+    assert_eq!(
+        stored["outputs"],
+        serde_json::json!({"s": "******", "p": "plain"})
+    );
+    let sealed: Vec<u8> = sqlx::query_scalar(
+        "SELECT secret_outputs FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'sub'",
+    )
+    .bind(ex)
+    .fetch_one(&pool)
+    .await
+    .expect("the sealed column");
+    assert!(
+        !sealed.windows(PLAIN.len()).any(|w| w == PLAIN.as_bytes()),
+        "the sealed column never holds the plaintext"
+    );
+    assert_eq!(
+        egret_workflow::secret_inputs::open_outputs(&sealed).expect("opens"),
+        serde_json::json!({"s": PLAIN}).as_object().unwrap().clone()
+    );
+    assert_eq!(
+        task_outputs(&pool, ex, "check").await,
+        serde_json::json!({"value": PLAIN.len().to_string()}),
+        "a later task of the parent reads the real value"
+    );
+    let mut lines: Vec<String> = sink.of(ex).into_iter().map(|(_, m)| m).collect();
+    lines.extend(
+        execution_log_lines(&pool, ex)
+            .await
+            .into_iter()
+            .map(|(_, m)| m),
+    );
+    assert!(
+        lines.iter().any(|m| m == "s=****** p=plain"),
+        "the line is masked: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|m| m.contains(PLAIN)),
+        "no line holds the plaintext: {lines:?}"
+    );
+
+    let mut conn = pool.acquire().await.expect("a connection");
+    let cx = egret_workflow::worker::execution_render_context(&mut conn, ex)
+        .await
+        .expect("the Flow trigger's context");
+    assert_eq!(
+        egret_workflow::render_str("{{ outputs.sub.outputs.s }}", &cx).expect("renders"),
+        "******",
+        "a Flow trigger's context over the parent sees the mask"
+    );
+    assert_eq!(
+        egret_workflow::render_str("{{ outputs.sub.outputs.p }}", &cx).expect("renders"),
+        "plain"
+    );
+}
+
+/// **A Flow trigger's render context hides a `Loop` run's sealed SECRET
+/// outputs** (controller decision 2026-10-29, as Task B2 hid the flow
+/// outputs): what that context renders becomes ANOTHER execution's inputs,
+/// so it sees `******` where the execution's own renders see the value.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_flow_trigger_context_sees_a_loops_secret_outputs_masked(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    egret_workflow::secret_inputs::install_for_tests();
+    let (_db, ws) = seed(&pool).await;
+    const PLAIN: &str = "hush-b3-loop-0451";
+    let source = format!(
+        "id: b3-loop-sec\nnamespace: t\ntasks:\n  - id: loop\n    \
+         type: io.kestra.plugin.core.flow.Loop\n    values: '[\"a\"]'\n    tasks:\n{RETURN_BODY}    \
+         outputs:\n      - id: s\n        type: SECRET\n        value: {PLAIN}\n      \
+         - id: n\n        type: STRING\n        value: \"{{{{ item.value }}}}\"\n  \
+         - id: check\n    type: io.kestra.plugin.core.debug.Return\n    \
+         format: \"{{{{ outputs.loop.outputs[0].outputs.s | length }}}}\"\n"
+    );
+    let ex = start_execution(&pool, ws, None, &source, serde_json::json!({}))
+        .await
+        .expect("start execution");
+
+    settle_everything(&pool, &core_handlers()).await;
+
+    assert_eq!(
+        task_outputs(&pool, ex, "check").await,
+        serde_json::json!({"value": PLAIN.len().to_string()}),
+        "the control: the execution's own render sees the value"
+    );
+    let mut conn = pool.acquire().await.expect("a connection");
+    let cx = egret_workflow::worker::execution_render_context(&mut conn, ex)
+        .await
+        .expect("the Flow trigger's context");
+    assert_eq!(
+        egret_workflow::render_str("{{ outputs.loop.outputs[0].outputs.s }}", &cx)
+            .expect("renders"),
+        "******",
+        "a Flow trigger's context sees the mask"
+    );
+    assert_eq!(
+        egret_workflow::render_str("{{ outputs.loop.outputs[0].outputs.n }}", &cx)
+            .expect("renders"),
+        "a"
+    );
+}

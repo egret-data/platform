@@ -853,9 +853,21 @@ pub(crate) fn render_value(
     cx: &RenderContext,
     path: &str,
 ) -> Result<Value, InputRefusal> {
+    render_value_guarded(v, cx, path, FORBIDDEN_INPUT_ROOTS)
+}
+
+/// [`render_value`] with the roots it refuses named by the caller: a Flow
+/// trigger whose source published outputs binds `trigger` (`{outputs}`) and
+/// refuses nothing (package #6 Task B3, `flow_trigger::process`).
+pub(crate) fn render_value_guarded(
+    v: &Value,
+    cx: &RenderContext,
+    path: &str,
+    forbidden: &[&str],
+) -> Result<Value, InputRefusal> {
     match v {
         // `instanceof String` -> render.
-        Value::String(text) => match render_str_guarded(text, cx, FORBIDDEN_INPUT_ROOTS) {
+        Value::String(text) => match render_str_guarded(text, cx, forbidden) {
             Ok(GuardedRender::Rendered(out)) => Ok(Value::String(out)),
             Ok(GuardedRender::Forbidden(_)) => Err(InputRefusal::NeedsTriggerContext {
                 key: path.to_string(),
@@ -869,7 +881,12 @@ pub(crate) fn render_value(
         Value::Array(items) => {
             let mut out = Vec::with_capacity(items.len());
             for (i, item) in items.iter().enumerate() {
-                out.push(render_value(item, cx, &format!("{path}[{i}]"))?);
+                out.push(render_value_guarded(
+                    item,
+                    cx,
+                    &format!("{path}[{i}]"),
+                    forbidden,
+                )?);
             }
             Ok(Value::Array(out))
         }
@@ -887,7 +904,7 @@ pub(crate) fn render_value(
                 } else {
                     format!("{path}.{k}")
                 };
-                let rendered_key = match render_str_guarded(k, cx, FORBIDDEN_INPUT_ROOTS) {
+                let rendered_key = match render_str_guarded(k, cx, forbidden) {
                     Ok(GuardedRender::Rendered(out)) => out,
                     Ok(GuardedRender::Forbidden(_)) => {
                         return Err(InputRefusal::NeedsTriggerContext {
@@ -901,7 +918,7 @@ pub(crate) fn render_value(
                         })
                     }
                 };
-                let value = render_value(&map[k], cx, &here)?;
+                let value = render_value_guarded(&map[k], cx, &here, forbidden)?;
                 // `putIfAbsent`: the first key to render to a given string
                 // wins, and the later one is DROPPED rather than overwriting.
                 out.entry(rendered_key).or_insert(value);

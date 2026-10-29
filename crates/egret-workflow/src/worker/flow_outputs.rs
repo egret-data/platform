@@ -64,8 +64,11 @@
 //! `worker::render::Surface::load` (Task B2): `{{ execution.outputs }}` in
 //! every later render of the execution (`afterExecution:`), the sealed values
 //! revealed there alone; a Flow trigger's render context over the execution
-//! sees them masked. The `Subflow` copy, the Flow trigger's `trigger.outputs`
-//! and the API are Task B3's.
+//! sees them masked. Task B3 (2026-10-29): a waiting `Subflow` parent copies
+//! the columns onto its run (`worker::subflow::on_child_terminal`), a Flow
+//! trigger publishes the masked map as `trigger.outputs`
+//! (`flow_trigger::process`), and the execution API returns the masked map
+//! (`repo::ExecutionRow::outputs`); no API statement selects `secret_outputs`.
 
 use egret_core::Result;
 use sqlx::PgConnection;

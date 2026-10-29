@@ -1597,6 +1597,16 @@ pub struct ExecutionListItemDto {
     pub labels: Option<Vec<LabelDto>>,
     /// The backfill that fired this execution (W7f), `null` otherwise.
     pub backfill_id: Option<Uuid>,
+    /// The flow's `outputs:` as the execution's end evaluated them, typed by
+    /// each output's `type`; `null` when none were evaluated: the flow
+    /// declares none, the execution has not ended, or the evaluation failed
+    /// (the execution then ended `FAILED` and its logs say why). **A
+    /// `SECRET` output's value is always `******`** here, in the list and
+    /// the detail alike: the real value is kept encrypted on the server and
+    /// no response carries it. A `FILE` output is a `kestra:///` URI of the
+    /// execution's own storage, read through the execution file API.
+    #[schema(value_type = Option<Object>)]
+    pub outputs: Option<serde_json::Value>,
 }
 
 /// One execution label.
@@ -1646,6 +1656,7 @@ impl From<ExecutionRow> for ExecutionListItemDto {
             updated_at: r.updated_at,
             labels: (!own.is_empty()).then_some(own),
             backfill_id: r.backfill_id,
+            outputs: r.outputs,
         }
     }
 }
@@ -1732,6 +1743,8 @@ pub struct TaskRunDto {
     pub claimed_at: Option<DateTime<Utc>>,
     /// The run's outputs, `NULL` for a run that has none: a handler that
     /// returned nothing (a `Log`, a `Sleep`) and any run not yet terminal.
+    /// A `SECRET` output inside them -- a `Loop`'s `outputs` list, a
+    /// `Subflow`'s copy of its child's flow outputs -- is always `******`.
     #[schema(value_type = Option<Object>)]
     pub outputs: Option<serde_json::Value>,
     pub message: Option<String>,
