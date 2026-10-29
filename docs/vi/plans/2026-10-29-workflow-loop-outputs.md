@@ -6,6 +6,19 @@ Spec: `docs/en/specs/2026-10-29-workflow-loop-outputs-design.md` (Q1–Q5, D1–
 
 **Trạng thái, 2026-10-29:** đã thiết kế, chưa xây.
 
+**T0 đã đo, 2026-10-29.** Main (`f623f65f`, #5b, PR #780) đã được merge vào nhánh (`271b1c17`); merge không cần giải xung đột trong `OE baseline.txt`. `cargo test -p egret-workflow --test executor` trên `271b1c17`: ratchet **301 / 35 / 35 / 0** (golden / mismatching / baselined / broken), census `LIVE` **295** / `VALIDATE_REFUSED` **25** / `UNKNOWN_TYPE_REFUSED` **21** (`[publish_corpus] 351 corpus flows: 295 live, 46 draft-only (21 unported task type, 25 egret's own validate), 6 unparseable, 4 name-contested`). Cả hai đúng như dự kiến, nên phần "Accept" của mọi task sau giữ nguyên như đã viết. Migration: file cao nhất trên mọi nhánh cục bộ và ref remote-tracking (kể cả `origin/main`) là `0210_workflow_execution_is_idle.sql`, và không nhánh nào thêm file trên số đó, nên `0211` còn trống (spec D11; kiểm tra lại có mạng trước khi merge, D12). Các trường khác nhau, đọc từ trace của chính oracle (golden so với egret):
+
+| entry | khác ở | golden | egret |
+|---|---|---|---|
+| `loop-outputs` | `runs`, `execution` | `end` SUCCESS, execution SUCCESS | `end` FAILED, execution FAILED; `loop` SUCCESS và 3 sub-execution khớp |
+| `loop-outputs-store` | `runs`, `execution` | như trên | như trên |
+| `loop-outputs-auto` | `runs`, `execution` | `write`, `loop`, `end` SUCCESS | chỉ `end` FAILED; `write` và `loop` SUCCESS và 3 sub-execution (values đọc từ URI của file) khớp, nên chỉ có `{{outputs.loop.outputs}}` của `end` giữ entry này |
+| `loop-outputs-failed-render` | `spawned`, `runs`, `execution` | 1 sub-execution `CREATED RUNNING SUCCESS FAILED`; `loop` FAILED; execution FAILED | 3 sub-execution `CREATED RUNNING SUCCESS`; `loop` SUCCESS; execution SUCCESS |
+| `if-in-parallel` | `runs`, `execution` | `assert` SUCCESS | `assert` FAILED, execution FAILED; `for_each` SUCCESS |
+| `retry-flowable-parallel` | chỉ `spawned` | mỗi sub-execution trong 2 cái là `CREATED RUNNING FAILED RETRYING RUNNING FAILED RETRYING RUNNING FAILED`, `child` 3 attempt | mỗi cái `CREATED RUNNING FAILED`, `child` 1 attempt |
+| `after-execution` | chỉ `runs` | `end` (task của `afterExecution:`) SUCCESS | `end` FAILED; execution SUCCESS ở cả hai phía |
+| `flow-with-outputs-failed` | chỉ `execution` | `CREATED RUNNING SUCCESS FAILED` | `CREATED RUNNING SUCCESS`; `return` khớp |
+
 **Review không phải là một task của kế hoạch này.** Controller chạy một lần review toàn nhánh sau Z; các sửa chữa của nó được ghi vào spec §7 như một đợt sửa.
 
 ## Ràng buộc chung

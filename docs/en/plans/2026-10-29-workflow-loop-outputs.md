@@ -4,6 +4,19 @@ Spec: `docs/en/specs/2026-10-29-workflow-loop-outputs-design.md` (Q1–Q5, D1–
 
 **Status, 2026-10-29:** designed, not built.
 
+**T0 measured, 2026-10-29.** Main (`f623f65f`, #5b, PR #780) is merged into the branch (`271b1c17`); the merge needed no conflict resolution in `OE baseline.txt`. `cargo test -p egret-workflow --test executor` on `271b1c17`: ratchet **301 / 35 / 35 / 0** (golden / mismatching / baselined / broken), census `LIVE` **295** / `VALIDATE_REFUSED` **25** / `UNKNOWN_TYPE_REFUSED` **21** (`[publish_corpus] 351 corpus flows: 295 live, 46 draft-only (21 unported task type, 25 egret's own validate), 6 unparseable, 4 name-contested`). Both as predicted, so every later task's "Accept" stands as written. Migrations: the highest file on every local branch and remote-tracking ref (`origin/main` included) is `0210_workflow_execution_is_idle.sql`, and no other branch adds one above it, so `0211` is free (spec D11; re-checked with network before merge, D12). The fields that differ, read from the oracle's own traces (golden vs egret):
+
+| entry | differs on | golden | egret |
+|---|---|---|---|
+| `loop-outputs` | `runs`, `execution` | `end` SUCCESS, execution SUCCESS | `end` FAILED, execution FAILED; `loop` SUCCESS and the 3 sub-executions match |
+| `loop-outputs-store` | `runs`, `execution` | the same | the same |
+| `loop-outputs-auto` | `runs`, `execution` | `write`, `loop`, `end` SUCCESS | `end` FAILED alone; `write` and `loop` SUCCESS and the 3 sub-executions (values read from the file URI) match, so nothing but `end`'s `{{outputs.loop.outputs}}` holds it |
+| `loop-outputs-failed-render` | `spawned`, `runs`, `execution` | 1 sub-execution `CREATED RUNNING SUCCESS FAILED`; `loop` FAILED; execution FAILED | 3 sub-executions `CREATED RUNNING SUCCESS`; `loop` SUCCESS; execution SUCCESS |
+| `if-in-parallel` | `runs`, `execution` | `assert` SUCCESS | `assert` FAILED, execution FAILED; `for_each` SUCCESS |
+| `retry-flowable-parallel` | `spawned` only | each of the 2 sub-executions `CREATED RUNNING FAILED RETRYING RUNNING FAILED RETRYING RUNNING FAILED`, `child` 3 attempts | each `CREATED RUNNING FAILED`, `child` 1 attempt |
+| `after-execution` | `runs` only | `end` (the `afterExecution:` task) SUCCESS | `end` FAILED; execution SUCCESS on both sides |
+| `flow-with-outputs-failed` | `execution` only | `CREATED RUNNING SUCCESS FAILED` | `CREATED RUNNING SUCCESS`; `return` matches |
+
 **Review is not a task of this plan.** The controller runs one whole-branch review after Z; its fixes are recorded in spec §7 as a fix wave.
 
 ## Global constraints
