@@ -83,7 +83,7 @@ filter	dictsort	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_FILT
 filter	distinct	yes	yes	filter-distinct-of-values	-
 filter	e	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
 filter	endsWith	yes	yes	filter-endswith	-
-filter	escape	yes	yes	filter-escape-js-strategy	only the HTML strategy is ported; `js`, `css` and `url_param` are three character tables this round was not scoped to, and egret refuses them
+filter	escape	yes	yes	filter-escape-js-strategy	-
 filter	escapeChar	yes	yes	filter-escapechar-map-two-keys	java.util.HashMap bucket order, which this crate records rather than ports
 filter	first	yes	yes	filter-first	-
 filter	flatten	yes	yes	filter-flatten-keeps-an-inner-key-view	-

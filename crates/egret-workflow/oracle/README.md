@@ -276,6 +276,9 @@ measured") -- and **194 of 1753** after package #5b's Task B4 (2026-10-29)
 banked 51 of its 53 `#5b red` lines (the ten Pebble core filters) and
 re-attributed `filter-nl2br` and `filter-nl2br-no-escaping` to spec D14 (a
 newline inside a template string literal; see "What package #5b's Task B4
+measured") -- and **102 of 1753** after package #5b's Task B5 (2026-10-29)
+banked all 91 of its `#5b red` lines and the old `filter-escape-js-strategy`
+(the four non-HTML `escape` strategies; see "What package #5b's Task B5
 measured").
 The test fails in **both** directions:
 
@@ -4081,6 +4084,11 @@ Both are under-acceptance, which is the safe direction, and both now have a
 baselined corpus entry — `filter-format-argument-index` and
 `filter-escape-js-strategy`.
 
+(Package #5b's Task B5, 2026-10-29: the `escape` half is closed. The four
+non-HTML strategies are ported from unbescape 1.1.6 and
+`filter-escape-js-strategy` banked; see "What package #5b's Task B5
+measured".)
+
 ### `replace`'s map-literal order: the doc claimed a fidelity that does not hold
 
 The first cut's doc said pairs are applied "in the map's iteration order" and
@@ -5679,6 +5687,35 @@ A4 it is a `java.math.BigDecimal` (Q5 reverses the W9c refusal), and since A8 a
 unary minus on one is Pebble's `multiply(-1, x)` (`-fromIon(ion='1.50')` is
 `-1.50`). The oracle ends #5a at **107 of 1493** baselined: 103 lines from
 before A1 and those four.
+
+## What package #5b's Task B5 measured (2026-10-29)
+
+Plan B5, spec D12 (and §2.2 item 13). `runners::filters::escape` follows
+`EscapeFilter`'s bytecode: a null input returns null before the strategy is
+looked at (so `null | escape(strategy='nope')` renders empty), the strategy is
+`(String) args.get("strategy")` with `html` for an absent or null one, and a
+name the filter's `HashMap` does not hold throws Kestra's `Unknown escaping
+strategy [x]` (case-sensitive: `JS` is unknown). The five strategies are the
+five unbescape 1.1.6 calls B1 named, each ported from the jar: the string
+`escape` method of `JavaScriptEscapeUtil`, `JsonEscapeUtil`,
+`CssIdentifierEscapeUtil` and `UriEscapeUtil` read with `javap -c -p`, and
+their `ESCAPE_LEVELS`, `SEC_CHARS` and `BACKSLASH_CHARS` tables read out of
+the loaded classes by reflection rather than retyped. A comparison against the
+jar itself -- every code point at eight positions (alone, after `a`, before
+`a`, `z`, `-`, `1`, after `<`, before a space; above U+3000 a sample) plus
+20 000 random strings over the characters the position rules care about,
+623 000 rows -- agreed on every row before any golden was consulted. What it
+showed beyond B1's notes: `css` escapes `*` as `\*` (it is in
+`BACKSLASH_CHARS`) and `:` in hex (`\3A`); `js`'s `/` is escaped only right
+after `<`, so a leading `/` stays; U+2028/U+2029's exemption is a level-1
+branch and both are `\u2028`/`\u2029` at level 2. All 91 of B5's `#5b red`
+lines banked and so did the old `filter-escape-js-strategy` (194 -> 102); no
+entry is recorded as a divergence. B1's placeholder
+`an_escape_strategy_pebble_does_not_know_is_refused` moved from `runners::env`
+to `runners::filters` under the same name and asserts Kestra's text, so the
+three error-class pairs fail for Kestra's reason. Not modelled: Pebble's
+`SafeString`, so Kestra's `x | escape | escape` escapes once and egret's
+twice; no corpus entry chains two escapes.
 
 ## What package #5b's Task B4 measured (2026-10-29)
 

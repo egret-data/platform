@@ -965,6 +965,8 @@ fn replace(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
 // and recorded** instead — in `oracle/name-surface.txt`'s `semantics` column,
 // which names a baselined corpus id per row, so the record is in the ratchet
 // rather than in prose.
+// (Package #5b's Task B5 later ported `escape`'s other strategies; see
+// [`escape`].)
 
 /// The guard every filter W2 Task 8's fix round ported runs **first**, before
 /// its `input == null` branch.
@@ -1957,36 +1959,353 @@ fn reverse(value: MjValue) -> Result<MjValue, MjError> {
     Ok(java_seq(kind, items))
 }
 
-/// The `escape` filter's null and stringify branches.
+/// `EscapeFilter` (Pebble 4.1.2's escaper extension).
 ///
-/// `EscaperExtension`'s filter takes a `strategy` argument and Pebble's own
-/// escaper library implements `html`, `js`, `css` and `url_param`. Only the
-/// default — HTML — is ported; the other three are **recorded**, because they
-/// are three character tables this fix round was not scoped to and because
-/// refusing them is the safe direction (an author gets an error, never a
-/// wrong escape).
+/// The bytecode, in order: a null input or a `SafeString` is returned as it
+/// is (so a null renders empty, whatever the strategy names: even an unknown
+/// one); the input goes through `StringUtils.toString` (`Object::toString`,
+/// [`kestra_to_string`], never `Display`); the `strategy` argument is
+/// `(String) args.get("strategy")`, `html` when absent or null; a name the
+/// filter's map does not hold throws `Unknown escaping strategy [x]` (the
+/// names are case-sensitive, so `JS` is unknown); the strategy's result is
+/// wrapped in a `SafeString`.
 ///
-/// What is fixed is the part that was silently wrong: a null rendered `None`
-/// and a boolean rendered `True`, both `Display` rather than
-/// `Object::toString`. And `&#x27;` was `&#39;` on Kestra — the same
-/// character, a different spelling, and a byte difference in rendered output.
+/// The five strategies are five unbescape 1.1.6 calls
+/// (`buildDefaultStrategies`'s method references): `html` is
+/// `HtmlEscape.escapeHtml4Xml`, `js` `JavaScriptEscape.escapeJavaScript`, `css`
+/// `CssEscape.escapeCssIdentifier`, `url_param`
+/// `UriEscape.escapeUriQueryParam` and `json` `JsonEscape.escapeJson`; each is
+/// ported below from the jar ([`unbescape_js`] and its neighbours).
+///
+/// **Not modelled: `SafeString`.** Kestra's `x | escape | escape` escapes once
+/// (the second call returns its `SafeString` input untouched); egret has no
+/// safe-string kind and escapes twice. No corpus entry chains two escapes.
 fn escape(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
     strict_undefined("escape", &value)?;
     if is_java_null(&value) {
         return Ok(MjValue::from(()));
     }
     let args = Args::new(rest);
-    if let Some(strategy) = args.get("strategy", 0) {
-        let strategy = kestra_to_string(&strategy);
-        if strategy != "html" {
+    let strategy = match args.get("strategy", 0) {
+        Some(strategy) if !is_java_null(&strategy) => match strategy.as_str() {
+            Some(name) => name.to_string(),
+            None => {
+                return Err(pebble_error(format!(
+                    "class {} cannot be cast to class java.lang.String",
+                    java_class_name(&strategy)
+                )));
+            }
+        },
+        _ => "html".to_string(),
+    };
+    let text = kestra_to_string(&value);
+    let escaped = match strategy.as_str() {
+        "html" => unbescape_html4_xml(&text),
+        "js" => unbescape_js(&text),
+        "css" => unbescape_css_identifier(&text),
+        "url_param" => unbescape_uri_query_param(&text),
+        "json" => unbescape_json(&text),
+        unknown => {
             return Err(pebble_error(format!(
-                "the 'escape' filter's '{strategy}' strategy is not implemented in egret; \
-                 only 'html' is"
+                "Unknown escaping strategy [{unknown}]"
             )));
         }
+    };
+    Ok(MjValue::from(escaped))
+}
+
+// unbescape 1.1.6, the five calls `EscapeFilter` makes.
+//
+// Ported from `unbescape-1.1.6.RELEASE.jar` (`javap -c -p` of each
+// `*EscapeUtil.escape(String, type, level)`; the tables read out of the
+// loaded classes by reflection, not retyped from documentation). Every call
+// is unbescape's default: **level 2** ("all non-ASCII plus the basic escape
+// set"). The `ESCAPE_LEVELS` tables are 161 bytes, one per code point
+// U+0000..U+009F plus a last one standing for every code point above; a code
+// point is left alone when `level < ESCAPE_LEVELS[cp]`. They are spelled here
+// as digit strings, 32 to a line, exactly as the jar holds them.
+//
+// Every escape iterates code points (`Character.codePointAt`), so a
+// supplementary character is ONE unit of decision and, where it is written as
+// `\uHHHH`, two escapes (its UTF-16 surrogates). A Rust `str` cannot hold an
+// unpaired surrogate, so unbescape's branch for one is unreachable here.
+
+/// The escape level every strategy runs at (`LEVEL_2_ALL_NON_ASCII_PLUS_BASIC_ESCAPE_SET`).
+const UNBESCAPE_LEVEL: u8 = 2;
+
+/// `JavaScriptEscapeUtil.ESCAPE_LEVELS`.
+const JS_ESCAPE_LEVELS: &[u8; 161] = b"\
+11111111111111111111111111111111\
+33133311333333314444444444333333\
+34444444444444444444444444431333\
+34444444444444444444444444433331\
+11111111111111111111111111111111\
+2";
+
+/// `JsonEscapeUtil.ESCAPE_LEVELS`: `JS_ESCAPE_LEVELS` but for `'` (U+0027),
+/// which JSON leaves alone.
+const JSON_ESCAPE_LEVELS: &[u8; 161] = b"\
+11111111111111111111111111111111\
+33133313333333314444444444333333\
+34444444444444444444444444431333\
+34444444444444444444444444433331\
+11111111111111111111111111111111\
+2";
+
+/// `CssIdentifierEscapeUtil.ESCAPE_LEVELS`: only `[0-9A-Za-z]` survive level 2
+/// by the table; `-` and `_` survive by position (see [`unbescape_css_identifier`]).
+const CSS_ESCAPE_LEVELS: &[u8; 161] = b"\
+11111111111111111111111111111111\
+11111111111111114444444444111111\
+14444444444444444444444444411111\
+14444444444444444444444444411111\
+11111111111111111111111111111111\
+2";
+
+/// Whether `level < ESCAPE_LEVELS[cp]`, the table's "leave it alone".
+fn unbescape_level_keeps(table: &[u8; 161], cp: u32) -> bool {
+    let index = usize::try_from(cp.min(160)).unwrap_or(160);
+    UNBESCAPE_LEVEL < table[index] - b'0'
+}
+
+/// Appends `\uHHHH` (upper-case hex) for each UTF-16 unit of `c`.
+fn push_unbescape_uhexa(out: &mut String, c: char) {
+    let mut units = [0u16; 2];
+    for unit in c.encode_utf16(&mut units) {
+        out.push_str(&format!("\\u{unit:04X}"));
     }
-    let mut out = String::new();
-    for c in kestra_to_string(&value).chars() {
+}
+
+/// `JavaScriptEscape.escapeJavaScript(text)`: level 2,
+/// `SINGLE_ESCAPE_CHARS_DEFAULT_TO_XHEXA_AND_UHEXA`.
+///
+/// Escaped: U+0000..U+001F, `"`, `&`, `'`, `\`, U+007F and above, and `/`
+/// only right after `<` (`</script>`). Written as a single-escape character
+/// when `SEC_CHARS` has one (`\0 \b \t \n \f \r \" \' \/ \\`; no `\v`), else
+/// `\xHH` up to U+00FF, else `\uHHHH` (twice for a supplementary character).
+/// U+2028/U+2029's own exemption is from a level-1 branch and does not apply
+/// at level 2.
+fn unbescape_js(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 20);
+    let mut previous: Option<char> = None;
+    for c in text.chars() {
+        let cp = u32::from(c);
+        let keep = if cp <= 159 && unbescape_level_keeps(JS_ESCAPE_LEVELS, cp) {
+            true
+        } else if c == '/' && UNBESCAPE_LEVEL < 3 {
+            previous != Some('<')
+        } else {
+            cp > 159 && unbescape_level_keeps(JS_ESCAPE_LEVELS, 160) && cp != 0x2028 && cp != 0x2029
+        };
+        previous = Some(c);
+        if keep {
+            out.push(c);
+            continue;
+        }
+        let single = match c {
+            '\0' => Some('0'),
+            '\u{8}' => Some('b'),
+            '\t' => Some('t'),
+            '\n' => Some('n'),
+            '\u{c}' => Some('f'),
+            '\r' => Some('r'),
+            '"' => Some('"'),
+            '\'' => Some('\''),
+            '/' => Some('/'),
+            '\\' => Some('\\'),
+            _ => None,
+        };
+        if let Some(single) = single {
+            out.push('\\');
+            out.push(single);
+        } else if cp <= 0xFF {
+            out.push_str(&format!("\\x{cp:02X}"));
+        } else {
+            push_unbescape_uhexa(&mut out, c);
+        }
+    }
+    out
+}
+
+/// `JsonEscape.escapeJson(text)`: level 2, `SINGLE_ESCAPE_CHARS_DEFAULT_TO_UHEXA`.
+///
+/// Escaped: U+0000..U+001F, `"`, `&`, `\`, U+007F and above (so `é` is
+/// `é`), and `/` only right after `<`. Single escapes `\b \t \n \f \r
+/// \" \/ \\` (no `\0`, no `\'`), every other one `\uHHHH`.
+fn unbescape_json(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 20);
+    let mut previous: Option<char> = None;
+    for c in text.chars() {
+        let cp = u32::from(c);
+        let keep = if cp <= 159 && unbescape_level_keeps(JSON_ESCAPE_LEVELS, cp) {
+            true
+        } else if c == '/' && UNBESCAPE_LEVEL < 3 {
+            previous != Some('<')
+        } else {
+            cp > 159 && unbescape_level_keeps(JSON_ESCAPE_LEVELS, 160)
+        };
+        previous = Some(c);
+        if keep {
+            out.push(c);
+            continue;
+        }
+        let single = match c {
+            '\u{8}' => Some('b'),
+            '\t' => Some('t'),
+            '\n' => Some('n'),
+            '\u{c}' => Some('f'),
+            '\r' => Some('r'),
+            '"' => Some('"'),
+            '/' => Some('/'),
+            '\\' => Some('\\'),
+            _ => None,
+        };
+        if let Some(single) = single {
+            out.push('\\');
+            out.push(single);
+        } else {
+            push_unbescape_uhexa(&mut out, c);
+        }
+    }
+    out
+}
+
+/// `CssEscape.escapeCssIdentifier(text)`: level 2,
+/// `BACKSLASH_ESCAPES_DEFAULT_TO_COMPACT_HEXA`.
+///
+/// Kept: `[0-9A-Za-z]`, except a digit in first position; `-`, except in
+/// first position when the next character is `-` or a digit (a lone leading
+/// `-` is kept); `_`, except in first position. Everything else is escaped:
+/// `\` plus the character itself when `BACKSLASH_CHARS` lists it (the ASCII
+/// punctuation but `:`, and space), else `\` plus the code point in
+/// the fewest upper-case hex digits, followed by a space only when the next
+/// UTF-16 unit is a hex digit (`\E9 a`, `\E9z`, `\31 a`).
+fn unbescape_css_identifier(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 20);
+    let mut chars = text.chars().peekable();
+    let mut first = true;
+    while let Some(c) = chars.next() {
+        let cp = u32::from(c);
+        let next = chars.peek().copied();
+        let at_start = std::mem::replace(&mut first, false);
+        let keep = if cp <= 159
+            && unbescape_level_keeps(CSS_ESCAPE_LEVELS, cp)
+            && !(at_start && c.is_ascii_digit())
+        {
+            true
+        } else if c == '-' && UNBESCAPE_LEVEL < 3 {
+            !at_start || !matches!(next, Some(n) if n == '-' || n.is_ascii_digit())
+        } else if c == '_' && UNBESCAPE_LEVEL < 3 {
+            !at_start
+        } else {
+            cp > 159 && unbescape_level_keeps(CSS_ESCAPE_LEVELS, 160)
+        };
+        if keep {
+            out.push(c);
+            continue;
+        }
+        out.push('\\');
+        if css_backslash_char(c) {
+            out.push(c);
+        } else {
+            // `toCompactHexa(cp, next, level)`: the space is only needed
+            // (and, below level 4, only written) when the next unit would
+            // otherwise read as more hex.
+            out.push_str(&format!("{cp:X}"));
+            if next.is_some_and(|n| n.is_ascii_hexdigit()) {
+                out.push(' ');
+            }
+        }
+    }
+    out
+}
+
+/// `CssIdentifierEscapeUtil.BACKSLASH_CHARS`: the characters escaped as
+/// themselves: the ASCII punctuation and space, except `:` (which gets a hex
+/// escape, `\3A`).
+fn css_backslash_char(c: char) -> bool {
+    matches!(
+        c,
+        ' ' | '!'
+            | '"'
+            | '#'
+            | '$'
+            | '%'
+            | '&'
+            | '\''
+            | '('
+            | ')'
+            | '*'
+            | '+'
+            | ','
+            | '-'
+            | '.'
+            | '/'
+            | ';'
+            | '<'
+            | '='
+            | '>'
+            | '?'
+            | '@'
+            | '['
+            | '\\'
+            | ']'
+            | '^'
+            | '_'
+            | '`'
+            | '{'
+            | '|'
+            | '}'
+            | '~'
+    )
+}
+
+/// `UriEscape.escapeUriQueryParam(text)`: UTF-8, `QUERY_PARAM`.
+///
+/// Kept: the RFC 3986 `pchar`s (`[A-Za-z0-9]`, `- . _ ~`, the sub-delims
+/// `! $ ' ( ) * , ;`, `:` and `@`) and `/` `?`, minus `=`, `&`, `+` and `#`.
+/// Everything else is `%HH` per UTF-8 byte, upper-case. A space is `%20`,
+/// never `+`.
+fn unbescape_uri_query_param(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 20);
+    for c in text.chars() {
+        let keep = c.is_ascii_alphanumeric()
+            || matches!(
+                c,
+                '-' | '.'
+                    | '_'
+                    | '~'
+                    | '!'
+                    | '$'
+                    | '\''
+                    | '('
+                    | ')'
+                    | '*'
+                    | ','
+                    | ';'
+                    | ':'
+                    | '@'
+                    | '/'
+                    | '?'
+            );
+        if keep {
+            out.push(c);
+            continue;
+        }
+        let mut bytes = [0u8; 4];
+        for byte in c.encode_utf8(&mut bytes).bytes() {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+/// `HtmlEscape.escapeHtml4Xml(text)`: level 1 (markup-significant only),
+/// named references where HTML 4 and XML share one, decimal otherwise, so
+/// `'` is `&#39;` and every other character, non-ASCII included, is kept.
+fn unbescape_html4_xml(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 20);
+    for c in text.chars() {
         match c {
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
@@ -1996,7 +2315,7 @@ fn escape(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
             other => out.push(other),
         }
     }
-    Ok(MjValue::from(out))
+    out
 }
 
 /// `DistinctFilter` — `list.stream().distinct()`.
@@ -9046,6 +9365,99 @@ mod tests {
             let message = err(template, context);
             assert!(message.contains(want), "{template}: {message}");
             assert!(!message.contains("unknown filter"), "{template}: {message}");
+        }
+    }
+
+    /// Package #5b, Task B1 (spec D12) wrote this as a placeholder in
+    /// `runners::env` while every strategy but `html` was refused with egret's
+    /// own text; Task B5 ported the other four and moved it here under the
+    /// same name, so the three `oracle/error-class-pairs.txt` rows pair with
+    /// it. `EscapeFilter` looks the name up in a `HashMap`, so `JS` is as
+    /// unknown as `nope`, and the text is Kestra's.
+    #[test]
+    fn an_escape_strategy_pebble_does_not_know_is_refused() {
+        for (template, context, want) in [
+            (
+                "{{ s | escape(strategy='html_attr') }}",
+                r#"{"s": "a b"}"#,
+                "Unknown escaping strategy [html_attr]",
+            ),
+            (
+                "{{ s | escape(strategy='nope') }}",
+                r#"{"s": "a"}"#,
+                "Unknown escaping strategy [nope]",
+            ),
+            (
+                "{{ s | escape(strategy='JS') }}",
+                r#"{"s": "a"}"#,
+                "Unknown escaping strategy [JS]",
+            ),
+            // `(String) args.get("strategy")`.
+            (
+                "{{ s | escape(strategy=1) }}",
+                r#"{"s": "a"}"#,
+                "cannot be cast to class java.lang.String",
+            ),
+        ] {
+            let message = err(template, context);
+            assert!(message.contains(want), "{template}: {message}");
+            assert!(
+                !message.contains("not implemented"),
+                "{template}: {message}"
+            );
+        }
+        // The null branch comes first: a null input never reaches the lookup,
+        // and a null strategy is the default, `html`.
+        assert_eq!(
+            ok("<{{ n | escape(strategy='nope') }}>", r#"{"n": null}"#),
+            "<>"
+        );
+        assert_eq!(
+            ok("{{ s | escape(strategy=n) }}", r#"{"s": "<", "n": null}"#),
+            "&lt;"
+        );
+        assert_eq!(ok("{{ s | escape('js') }}", r#"{"s": "'"}"#), "\\'");
+    }
+
+    /// unbescape 1.1.6's five level-2 escapes, beyond the corpus. Each value
+    /// was produced by the jar itself (a scratch Java program calling the five
+    /// methods `EscapeFilter` calls); a 623 000-row comparison of the port
+    /// against it (every code point in eight positions, above U+3000 a
+    /// sample, plus 20 000 random strings) agreed before these were picked.
+    #[test]
+    fn escape_strategies_follow_unbescape() {
+        for (strategy, input, want) in [
+            // js: single escapes, \xHH to U+00FF, \uHHHH above, a pair for
+            // a supplementary character; `/` only after `<`, so a leading `/`
+            // stays.
+            ("js", "\0\u{b}\u{7f}", r"\0\x0B\x7F"),
+            ("js", "/a</", r"/a<\/"),
+            ("js", "&\u{2029}\u{1F600}", r"\x26\u2029\uD83D\uDE00"),
+            // json: no \0 and no \', `'` kept, `&` and U+007F as \uHHHH.
+            ("json", "\0'&\u{7f}", r"\u0000'\u0026\u007F"),
+            ("json", "</\u{1F600}", r"<\/\uD83D\uDE00"),
+            // css: `*` escapes as itself, `:` in hex; position rules for a
+            // digit, `-` and `_`; the space after a hex escape only before a
+            // hex digit (end of text: none).
+            ("css", "*:", r"\*\3A"),
+            ("css", "9a", r"\39 a"),
+            ("css", "-", "-"),
+            ("css", "-a-1_", "-a-1_"),
+            ("css", "\u{1F600}f", r"\1F600 f"),
+            ("css", "a\u{0}", r"a\0"),
+            // url_param: pchar plus `/` and `?`, minus `= & + #`.
+            (
+                "url_param",
+                "a=b&c+d#e?f/g:h@i",
+                "a%3Db%26c%2Bd%23e?f/g:h@i",
+            ),
+            ("url_param", "%\u{1F600}", "%25%F0%9F%98%80"),
+            // html: level 1, so non-ASCII stays.
+            ("html", "\u{e9}<'", "\u{e9}&lt;&#39;"),
+        ] {
+            let template = format!("{{{{ s | escape(strategy='{strategy}') }}}}");
+            let context = serde_json::json!({ "s": input }).to_string();
+            assert_eq!(ok(&template, &context), want, "{strategy} {input:?}");
         }
     }
 

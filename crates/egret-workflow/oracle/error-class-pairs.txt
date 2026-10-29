@@ -585,6 +585,9 @@ filter-merge-string                                 test:a_filter_input_kestra_r
 filter-numberformat-string                          test:a_filter_input_kestra_refuses_is_refused_here_too
 filter-rsort-context-mixed-numbers                  test:a_filter_input_kestra_refuses_is_refused_here_too
 filter-rsort-mixed                                  test:a_filter_input_kestra_refuses_is_refused_here_too
+# Task B5 (2026-10-29): the three `filter-escape-*` rows below now fail for
+# Kestra's reason (`Unknown escaping strategy [x]`) and their test, moved to
+# runners::filters under the same name, asserts that text.
 filter-escape-html-attr                             test:an_escape_strategy_pebble_does_not_know_is_refused
 filter-escape-unknown-strategy                      test:an_escape_strategy_pebble_does_not_know_is_refused
 filter-escape-uppercase-strategy                    test:an_escape_strategy_pebble_does_not_know_is_refused

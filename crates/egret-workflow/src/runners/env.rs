@@ -1661,8 +1661,9 @@ const MINIJINJA_DEFAULT_TESTS: &[&str] = &[
 ///
 /// **`escape` is deliberately not here**: Pebble's `EscaperExtension`
 /// registers that name too, so removing it would refuse a filter Kestra
-/// accepts. Its *semantics* differ (Pebble takes a `strategy` argument); that
-/// is a divergence row in the fixture, not a removal.
+/// accepts. Its *semantics* differed (Pebble takes a `strategy` argument);
+/// that was a divergence row in the fixture, not a removal, until package
+/// #5b's Task B5 ported the strategies (`runners::filters::escape`).
 const MINIJINJA_ONLY_FILTERS: &[&str] = &[
     "safe",
     "e",
@@ -4326,20 +4327,9 @@ mod tests {
     // A6 ported `contains` and its refusal is asserted with Kestra's text by
     // `runners::operators::tests::contains_on_what_pebble_cannot_search_fails_with_kestras_text`.)
 
-    /// Asserts that every `(source, context)` row fails to render. B1 wrote
-    /// four tests as the pairs of its born-matching error-class entries
-    /// (`oracle/error-class-pairs.txt`); B2 tightened its own and B3 moved
-    /// `max`/`min`'s to `runners::functions` and B4 the ten filters' to
-    /// `runners::filters`, so the one below still uses this.
-    fn assert_each_fails(rows: &[(&str, JsonValue)]) {
-        for (source, ctx) in rows {
-            let got = render(source, ctx.clone());
-            assert!(
-                got.is_err(),
-                "{source} must fail, as Kestra's does; got {got:?}"
-            );
-        }
-    }
+    // (`assert_each_fails` was here: B1's helper for its four placeholder
+    // tests. B2 tightened its own and B3, B4 and B5 moved the other three to
+    // the modules that port the names, so nothing used it any more.)
 
     /// Package #5b, Task B1 (spec D8): the tests Kestra refuses, tightened to
     /// Kestra's reason by Task B2. A missing root or member under `is null`/
@@ -4392,21 +4382,8 @@ mod tests {
     // asserted with Kestra's text by the test of that name in
     // `runners::filters::tests`.)
 
-    /// Package #5b, Task B1 (spec D12): a strategy Pebble's `EscapeFilter`
-    /// does not register fails (`Unknown escaping strategy [x]`); the names
-    /// are case-sensitive, so `JS` is unknown too. **Placeholder:** today
-    /// every strategy but `html` is refused with egret's own text. Task B5
-    /// must keep these failing when it adds the other four, then tighten
-    /// this to Kestra's text.
-    #[test]
-    fn an_escape_strategy_pebble_does_not_know_is_refused() {
-        assert_each_fails(&[
-            (
-                "{{ s | escape(strategy='html_attr') }}",
-                json!({ "s": "a b" }),
-            ),
-            ("{{ s | escape(strategy='nope') }}", json!({ "s": "a" })),
-            ("{{ s | escape(strategy='JS') }}", json!({ "s": "a" })),
-        ]);
-    }
+    // (`an_escape_strategy_pebble_does_not_know_is_refused` was here, Task
+    // B1's placeholder; Task B5 ported the four other strategies and the
+    // refusal is asserted with Kestra's text by the test of that name in
+    // `runners::filters::tests`.)
 }

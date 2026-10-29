@@ -562,9 +562,9 @@ filter-replace-unknown-named-argument
 # `oracle/name-surface.txt`'s `semantics` column names each of these, so the
 # record lives in the ratchet rather than in prose.
 #
-# `escape`'s three non-HTML strategies are three character tables this round
-# was not scoped to; egret refuses them, which is the safe direction.
-filter-escape-js-strategy
+# (`filter-escape-js-strategy` was here: `escape`'s non-HTML strategies were
+# refused. Package #5b's Task B5 (spec D12, 2026-10-29) BANKED it with the
+# four strategies ported from unbescape 1.1.6, `runners::filters::escape`.)
 # Java's `String.format` conversion language -- `%,d` grouping, `%N$s` argument
 # indices, `%b` -- is not ported. `minijinja::filters::format` agrees with
 # `java.util.Formatter` on `%s`, `%5s`, `%05d`, `%.2f`, `%x` and `%%` (measured,
@@ -923,102 +923,9 @@ function-min-classname-long
 filter-nl2br
 filter-nl2br-no-escaping
 
-# B5 (D12)'s 91: every `escape` strategy but `html` is refused here. One
-# entry per run of unbescape 1.1.6's level-2 tables (both ends of the run,
-# separated by `z`; runs measured by calling unbescape directly), the
-# surrogate gap (U+D7FF, U+E000), the survey's inputs and the position rules
-# (`css` escapes a leading digit, `-` before a digit, `--` and `_`; a hex
-# escape is followed by a space only before a hex digit). Measured: `json`
-# escapes every non-ASCII character as `\uHHHH` (the survey's table showed
-# `é` unescaped), and both `js` and `json` escape `&` and `/` after `<`.
-filter-escape-js-survey
-filter-escape-js-ascii
-filter-escape-js-number
-filter-escape-js-slash
-filter-escape-css-survey
-filter-escape-css-ascii
-filter-escape-css-leading-digit
-filter-escape-css-leading-hyphen-digit
-filter-escape-css-hyphen-alone
-filter-escape-css-two-hyphens
-filter-escape-css-leading-underscore
-filter-escape-css-hex-then-hex-digit
-filter-escape-css-hex-then-space
-filter-escape-css-hex-then-letter
-filter-escape-url-param-survey
-filter-escape-url-param-reserved
-filter-escape-json-survey
-filter-escape-json-slash
-filter-escape-js-boundary-u0000
-filter-escape-js-boundary-u0001-u0007
-filter-escape-js-boundary-u0008-u000a
-filter-escape-js-boundary-u000b
-filter-escape-js-boundary-u000c-u000d
-filter-escape-js-boundary-u000e-u001f
-filter-escape-js-boundary-u0020-u0021
-filter-escape-js-boundary-u0022
-filter-escape-js-boundary-u0023-u0025
-filter-escape-js-boundary-u0026
-filter-escape-js-boundary-u0027
-filter-escape-js-boundary-u0028-u005b
-filter-escape-js-boundary-u005c
-filter-escape-js-boundary-u005d-u007e
-filter-escape-js-boundary-u007f-u00ff
-filter-escape-js-boundary-u0100-uffff
-filter-escape-js-boundary-u10000-u10ffff
-filter-escape-js-boundary-ud7ff-ue000
-filter-escape-css-boundary-u0000-u000f
-filter-escape-css-boundary-u0010-u001f
-filter-escape-css-boundary-u0020-u002c
-filter-escape-css-boundary-u002d
-filter-escape-css-boundary-u002e-u002f
-filter-escape-css-boundary-u0030-u0039
-filter-escape-css-boundary-u003a
-filter-escape-css-boundary-u003b-u0040
-filter-escape-css-boundary-u0041-u005a
-filter-escape-css-boundary-u005b-u005e
-filter-escape-css-boundary-u005f
-filter-escape-css-boundary-u0060
-filter-escape-css-boundary-u0061-u007a
-filter-escape-css-boundary-u007b-u007e
-filter-escape-css-boundary-u007f-u00ff
-filter-escape-css-boundary-u0100-u0fff
-filter-escape-css-boundary-u1000-uffff
-filter-escape-css-boundary-u10000-u10ffff
-filter-escape-css-boundary-ud7ff-ue000
-filter-escape-url-param-boundary-u0000-u0020
-filter-escape-url-param-boundary-u0021
-filter-escape-url-param-boundary-u0022-u0023
-filter-escape-url-param-boundary-u0024
-filter-escape-url-param-boundary-u0025-u0026
-filter-escape-url-param-boundary-u0027-u002a
-filter-escape-url-param-boundary-u002b
-filter-escape-url-param-boundary-u002c-u003b
-filter-escape-url-param-boundary-u003c-u003e
-filter-escape-url-param-boundary-u003f-u005a
-filter-escape-url-param-boundary-u005b-u005e
-filter-escape-url-param-boundary-u005f
-filter-escape-url-param-boundary-u0060
-filter-escape-url-param-boundary-u0061-u007a
-filter-escape-url-param-boundary-u007b-u007d
-filter-escape-url-param-boundary-u007e
-filter-escape-url-param-boundary-u007f
-filter-escape-url-param-boundary-u0080-u07ff
-filter-escape-url-param-boundary-u0800-uffff
-filter-escape-url-param-boundary-u10000-u10ffff
-filter-escape-url-param-boundary-ud7ff-ue000
-filter-escape-json-boundary-u0000-u0007
-filter-escape-json-boundary-u0008-u000a
-filter-escape-json-boundary-u000b
-filter-escape-json-boundary-u000c-u000d
-filter-escape-json-boundary-u000e-u001f
-filter-escape-json-boundary-u0020-u0021
-filter-escape-json-boundary-u0022
-filter-escape-json-boundary-u0023-u0025
-filter-escape-json-boundary-u0026
-filter-escape-json-boundary-u0027-u005b
-filter-escape-json-boundary-u005c
-filter-escape-json-boundary-u005d-u007e
-filter-escape-json-boundary-u007f-uffff
-filter-escape-json-boundary-u10000-u10ffff
-filter-escape-json-boundary-ud7ff-ue000
+# (B5 (D12)'s 91 were here: every `escape` strategy but `html` was refused.
+# Task B5 (2026-10-29) ported `js`, `css`, `url_param` and `json` from
+# unbescape 1.1.6's jar and BANKED all 91 -- the survey inputs, the position
+# rules and one entry per run of each level-2 table -- with none recorded as
+# a divergence. `runners::filters::tests::escape_strategies_follow_unbescape`
+# holds the branches beyond the corpus.)
