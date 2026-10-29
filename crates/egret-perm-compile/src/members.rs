@@ -92,8 +92,13 @@
 //! 2. **An `expires_at` that lapses is not a write, so nothing recompiles.**
 //!    A time-boxed membership (the access-request approval path grants one)
 //!    stays in the compiled policy until the next recompile of that profile
-//!    for any other reason. Also fail-open, also recorded rather than papered
-//!    over; closing it needs a sweeper, which SP4a does not have.
+//!    for any other reason. Fail-open. **CLOSED by the expiry sweep**
+//!    ([`crate::expiry::recompile_lapsed_grants`], run hourly by `egret-bin`):
+//!    each run recompiles the profiles that a grant lapsed inside the last two
+//!    hours can change. The residual window is up to one hour after a lapse
+//!    (the next tick) plus the sweep's own compile time. Lapses during a
+//!    process downtime longer than two hours are seen only by the boot-time
+//!    role recompile, which covers role grants and not workspace memberships.
 //!
 //! **This module no longer answers the reverse question, and nothing asks it
 //! (SP4d-2a Task 5).** `workspaces_for_username` and `roles_for_username`
