@@ -29,7 +29,8 @@
 #     exactly when that entry is not in `baseline.txt`. So a divergence on a
 #     shared name is recorded where the RATCHET holds it, not in prose;
 #   - the engine-side counts must equal `host.Oracle dump`'s (63 filters,
-#     37 functions, 8 tests).
+#     39 functions, 8 tests; 37 functions until package #5b's Task B6 wired
+#     `render` and `renderOnce` into the harness, `host.Oracle.wireRenderFunctions`).
 #
 # **The `no`/`no` rows are why this file is longer than either engine's
 # inventory, and they were added because a mutant survived without them.**
@@ -160,7 +161,7 @@ function	decrypt	yes	yes	function-decrypt	-
 function	dict	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_GLOBALS` removes it -- the engine answers `Function or Macro [x] does not exist.`
 function	encrypt	yes	yes	function-encrypt	-
 function	env	yes	yes	function-env	-
-function	errorLogs	no	yes	-	egret binds it to a W2 Task 8 REFUSAL; see `render`
+function	errorLogs	no	yes	-	egret binds it to a W2 Task 8 REFUSAL. The built engine does not carry it (`@Inject @Nullable`, guarded, and the harness wires no log repository), so both sides fail and only the message differs
 function	fetchContext	yes	yes	function-fetchcontext-three-keys	java.util.HashMap bucket order again; `known_variables` returns a HashSet so egret must impose an order and sorts
 function	fileExists	yes	yes	function-fileexists	-
 function	fileSize	yes	yes	function-filesize	-
@@ -212,8 +213,8 @@ function	randomInt	yes	yes	function-randomint	-
 function	randomPort	yes	yes	function-randomport	-
 function	range	yes	yes	function-range	-
 function	read	yes	yes	function-read	-
-function	render	no	yes	-	egret binds it to a W2 Task 8 REFUSAL. The built engine does not carry it (`@Inject @Nullable`, guarded), so both sides fail and only the message differs -- egret's names the function and W3
-function	renderOnce	no	yes	-	egret binds it to a W2 Task 8 REFUSAL; see `render`
+function	render	yes	yes	function-render-depth-16	-
+function	renderOnce	yes	yes	function-renderonce-one-pass	-
 function	secret	yes	yes	function-secret	-
 function	subflow	no	yes	-	egret binds it to a W2 Task 8 REFUSAL; the owner in the message is W6, which the programme spec names
 function	tasksWithState	yes	yes	function-taskswithstate	-

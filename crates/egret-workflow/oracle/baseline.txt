@@ -929,3 +929,10 @@ filter-nl2br-no-escaping
 # rules and one entry per run of each level-2 table -- with none recorded as
 # a divergence. `runners::filters::tests::escape_strategies_follow_unbescape`
 # holds the branches beyond the corpus.)
+
+# (B6 (D9)'s 31 were never written here: Task B6 (2026-10-29) added the 47
+# `function-render-*`/`function-renderonce-*` entries, measured them red at 31
+# failing (29 new value entries, plus `function-render` and
+# `function-renderonce`, whose goldens became values when the harness wired
+# both functions), and BANKED all 31 in the same commit. None is recorded as
+# a divergence.)

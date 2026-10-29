@@ -61,6 +61,8 @@
 //! `num-bigint`. `/ 0`, `% 0` and a NaN or infinite operand (`valueOf` throws)
 //! fail with the operator's text.
 
+use std::sync::Arc;
+
 use minijinja::value::{Value as MjValue, ValueKind};
 use minijinja::{Environment, Error as MjError, ErrorKind, State};
 
@@ -414,10 +416,26 @@ pub(super) const MAX_LIST_OPERATOR_LENGTH: usize = 1_000_000;
 
 /// The per-render tally behind [`MAX_LIST_OPERATOR_WORK`], kept in the
 /// render's temps (one `State` per render, shared by every nested call).
+///
+/// Package #5b Task B6: an `Arc`, so a `render()` call can hand its own
+/// tally to the render it nests (`super::nested::inherited_list_work`); a
+/// nested `State` starts from its caller's tally rather than a fresh one, so
+/// nesting cannot multiply the budget.
 #[derive(Debug, Default)]
-struct ListOperatorWork(std::sync::atomic::AtomicU64);
+struct ListOperatorWork(Arc<std::sync::atomic::AtomicU64>);
 
 impl minijinja::value::Object for ListOperatorWork {}
+
+/// This render's list-work tally: its own, or, inside a `render()`, the
+/// caller's (package #5b Task B6).
+pub(super) fn list_work_tally(state: &State) -> Arc<std::sync::atomic::AtomicU64> {
+    state
+        .get_or_set_temp_object("egret.list_operator_work", || {
+            ListOperatorWork(super::nested::inherited_list_work().unwrap_or_default())
+        })
+        .0
+        .clone()
+}
 
 /// `n x m` comparisons, never less than the `n` the copy itself costs.
 pub(super) fn pair_work(n: usize, m: usize) -> u64 {
@@ -427,8 +445,8 @@ pub(super) fn pair_work(n: usize, m: usize) -> u64 {
 /// Charge `units` of list work to this render, or refuse BEFORE the work.
 pub(super) fn charge_list_work(state: &State, units: u64) -> Result<(), MjError> {
     use std::sync::atomic::Ordering;
-    let tally = state.get_or_set_temp_object("egret.list_operator_work", ListOperatorWork::default);
-    let mut spent = tally.0.load(Ordering::Relaxed);
+    let tally = list_work_tally(state);
+    let mut spent = tally.load(Ordering::Relaxed);
     loop {
         let after = spent.saturating_add(units);
         if after > MAX_LIST_OPERATOR_WORK {
@@ -438,10 +456,7 @@ pub(super) fn charge_list_work(state: &State, units: u64) -> Result<(), MjError>
                  total to {after}"
             )));
         }
-        match tally
-            .0
-            .compare_exchange(spent, after, Ordering::Relaxed, Ordering::Relaxed)
-        {
+        match tally.compare_exchange(spent, after, Ordering::Relaxed, Ordering::Relaxed) {
             Ok(_) => return Ok(()),
             Err(now) => spent = now,
         }

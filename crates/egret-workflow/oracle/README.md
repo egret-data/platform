@@ -140,8 +140,10 @@ Verified by deliberate breakage before committing: an unpaired new entry, a
 renamed paired test, a false `baselined` claim and a quietly-added
 `unported:` all fail, each naming the id.
 
-**328** entries carry it today (302 before package #5b's Task B1 added
-twenty-six, 271 before package #5a's Task A1 added
+**344** entries carry it today (328 before package #5b's Task B6 added
+eighteen `render()`/`renderOnce()` ones and took the marker off
+`function-render` and `function-renderonce`, which answer now; 302 before
+its Task B1 added twenty-six, 271 before package #5a's Task A1 added
 thirty-one, 251 after W2b's fix round, 245 before it, 240
 before W2b, 153 before W2 Task 8, 182 before its fix round), counted out of
 `golden.json` rather than added up (39 of them W2 Task 7's, listed at the end of `error-class.txt`): the four `*-mixed` comparisons (Pebble throws on a String/Number mix), the
@@ -169,7 +171,7 @@ whose deliverable was refusals; Task 8 added 29, which is 17% of the file for
 7% of the corpus, and every one of them is `test:`-paired — the pairing file
 now has **no `unported:` line left in it**, and `UNPORTED_ERROR_CLASS` in
 `tests/oracle.rs` is empty. Note that marking an entry error-class does **not**
-make it pass: 10 of the 328 are *also* in `baseline.txt` (16 before package
+make it pass: 10 of the 344 are *also* in `baseline.txt` (16 before package
 #5b's Task B2 banked six, its `even`/`odd` ones; 12 before package
 #5b's Task B1 added four, 17 before package
 #5a's Task A6, 19 before its Task A4, 25 before its Task A3, 38 before its
@@ -279,7 +281,11 @@ newline inside a template string literal; see "What package #5b's Task B4
 measured") -- and **102 of 1753** after package #5b's Task B5 (2026-10-29)
 banked all 91 of its `#5b red` lines and the old `filter-escape-js-strategy`
 (the four non-HTML `escape` strategies; see "What package #5b's Task B5
-measured").
+measured") -- and **102 of 1800** after package #5b's Task B6 (2026-10-29)
+added 47 `render()`/`renderOnce()` entries, measured red at 31 failing (29 of
+them new, plus `function-render` and `function-renderonce`, whose goldens
+became values), and banked all 31 in the same task (see "What package #5b's
+Task B6 measured").
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
@@ -3902,7 +3908,8 @@ all?**
 
 The whole engine — Pebble's `CoreExtension`, `EscaperExtension` and
 `I18nExtension` plus Kestra's `Extension` — carries **63 filters, 37 functions
-and 8 tests**. minijinja at this workspace's feature set carries 47 filters, 4
+and 8 tests** (39 functions since package #5b's Task B6 wired `render` and
+`renderOnce` into the harness as Kestra's server carries them). minijinja at this workspace's feature set carries 47 filters, 4
 globals and 42 tests. Sixty-two of minijinja's names have **no counterpart in
 the engine at all**, and egret answered every one of them where Kestra says
 `Filter [count] does not exist.` Over-acceptance is the one divergence this
@@ -5687,6 +5694,67 @@ A4 it is a `java.math.BigDecimal` (Q5 reverses the W9c refusal), and since A8 a
 unary minus on one is Pebble's `multiply(-1, x)` (`-fromIon(ion='1.50')` is
 `-1.50`). The oracle ends #5a at **107 of 1493** baselined: 103 lines from
 before A1 and those four.
+
+## What package #5b's Task B6 measured (2026-10-29)
+
+Plan B6, spec D9, user decision Q4. **The harness carries `render` and
+`renderOnce` now.** Both are `@Inject @Nullable` on `Extension` and
+`@Requires(property = "kestra.variables.recursive-rendering", value = "false",
+defaultValue = "false")`, so a server on the default configuration has them;
+the standalone `new Extension()` did not. `host.Oracle.wireRenderFunctions`
+sets the two fields by reflection and gives each function what it reads: an
+`ApplicationContext` (a `java.lang.reflect.Proxy` answering `getBean` with a
+`VariableRenderer` and `getBeansOfType` with the extension) and a
+`VariableConfiguration` (`maxRenderDepth` 16, template cache off). The nested
+`VariableRenderer` runs on the harness's own engine (`setPebbleEngine`).
+`host.Oracle dump` now lists **36** Kestra functions (34 + these two), so the
+engine's function count in `name-surface.txt` is **39**, not 37, and the
+`render`/`renderOnce` rows are both-bind rows. `errorLogs` and `subflow` stay
+unwired (each needs a service). Regenerated offline; the ten unstable goldens
+were put back to their committed values, so the diff is the 47 new entries
+and the two old ones whose answer became a value (`function-render` is `1`,
+`function-renderonce` is `x`).
+
+What Kestra does (the 47 entries, and a scratch harness for what the corpus
+cannot carry):
+
+- **Depth.** `RenderFunction.execute` reads `__kestra_render_depth` (absent =
+  0) and fails at `depth >= 16`: 16 nested calls answer, the 17th fails with
+  `Maximum render() nesting depth (16) exceeded at line <n> — check for
+  circular render() calls in your template.`, `<n>` the line of the refused
+  call in its own text (`3` for `"\n\n{{ render(t) }}"`). `renderOnce`
+  counts the same. The depth is a variable, so `{{ render('{{
+  __kestra_render_depth }}') }}` is `1`, and `{% set __kestra_render_depth =
+  -100 %}` lets 116 nested calls through (measured): **recorded divergence**,
+  egret publishes the variable for reading and counts in a place the template
+  cannot reach.
+- **Arguments.** `render(toRender, recursive)`, `renderOnce(toRender)`;
+  Pebble's binding sentences for a third positional, an unknown name, and
+  `renderOnce(x, recursive=true)`; a missing `toRender` is `The 'render'
+  function expects an argument 'toRender'.` (also from `renderOnce`); a
+  `recursive` that is neither a boolean nor null fails with `The 'render'
+  function expects an optional argument 'recursive' with type boolean.`
+- **Values.** A string renders as a whole template (no `{`: as it is;
+  otherwise to a fixpoint, or one pass when `recursive` is false; raw markers
+  stripped) and answers a string (`render('{{ 1 + 1 }}') + 1` is `21`). A map
+  renders its keys in one pass and its values as objects, keeping the first of
+  two keys that render alike (`{"a":1}`), and a non-string key is a
+  `ClassCastException`; a list renders each element; a number, a boolean or a
+  null is returned as it is (`render(5) + 1` is `6`).
+- **Variables.** The nested render sees the context **and** what `{% set %}`
+  and `{% for %}` bound (`getGlobalScopes()` holds both).
+- **The top-level re-render loop still runs over a `render()` answer** (this
+  harness's, and egret's), so `render(a, recursive=false)` with `a` ->
+  `{{ b }}` -> `{{ c }}` -> `z` is `z` at the top; `function-renderonce-one-pass`
+  compares the answer inside the expression (`renderOnce(a) == '{{ c }}'`), and
+  `function-render-raw` fails because the next top-level pass renders the
+  `{{ x }}` the raw region left.
+
+All 31 red entries banked in B6; none is recorded as a divergence. What the
+corpus cannot show -- the confinement of spec D9 (rules 1, 2, 4) and egret's
+bounds (the shared pass budget, the shared list-work budget, the per-pass
+output cap, the stack) -- is held by `runners::nested::tests` and
+`runners::secrets::tests`, each mutated once and seen to fail (task report).
 
 ## What package #5b's Task B5 measured (2026-10-29)
 

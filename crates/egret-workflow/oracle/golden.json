@@ -7114,18 +7114,12 @@
   "id" : "function-render",
   "expr" : "{{ render('{{ 1 }}') }}",
   "context" : { },
-  "compare" : "error-class",
-  "result" : {
-    "error" : "io.pebbletemplates.pebble.error.PebbleException: Function or Macro [render] does not exist. ({{ render('{{ 1 }}') }}:1)"
-  }
+  "result" : "1"
 }, {
   "id" : "function-renderonce",
   "expr" : "{{ renderOnce('x') }}",
   "context" : { },
-  "compare" : "error-class",
-  "result" : {
-    "error" : "io.pebbletemplates.pebble.error.PebbleException: Function or Macro [renderOnce] does not exist. ({{ renderOnce('x') }}:1)"
-  }
+  "result" : "x"
 }, {
   "id" : "function-errorlogs",
   "expr" : "{{ errorLogs() }}",
@@ -9756,7 +9750,6 @@
   "expr" : "{% if false %}a{% elseif true %}b{% else %}c{% endif %}",
   "context" : { },
   "result" : "b"
-
 }, {
   "id" : "filter-keys-of-keys",
   "expr" : "{{ (m | keys) | keys }}",
@@ -12978,4 +12971,439 @@
     "s" : "z퟿zz"
   },
   "result" : "z\\uD7FFz\\uE000z"
+}, {
+  "id" : "function-render-depth-16",
+  "expr" : "{{ render(t15) }}",
+  "context" : {
+    "t0" : "x",
+    "t1" : "{{ render(t0) }}",
+    "t2" : "{{ render(t1) }}",
+    "t3" : "{{ render(t2) }}",
+    "t4" : "{{ render(t3) }}",
+    "t5" : "{{ render(t4) }}",
+    "t6" : "{{ render(t5) }}",
+    "t7" : "{{ render(t6) }}",
+    "t8" : "{{ render(t7) }}",
+    "t9" : "{{ render(t8) }}",
+    "t10" : "{{ render(t9) }}",
+    "t11" : "{{ render(t10) }}",
+    "t12" : "{{ render(t11) }}",
+    "t13" : "{{ render(t12) }}",
+    "t14" : "{{ render(t13) }}",
+    "t15" : "{{ render(t14) }}"
+  },
+  "result" : "x"
+}, {
+  "id" : "function-render-depth-17",
+  "expr" : "{{ render(t16) }}",
+  "context" : {
+    "t0" : "x",
+    "t1" : "{{ render(t0) }}",
+    "t2" : "{{ render(t1) }}",
+    "t3" : "{{ render(t2) }}",
+    "t4" : "{{ render(t3) }}",
+    "t5" : "{{ render(t4) }}",
+    "t6" : "{{ render(t5) }}",
+    "t7" : "{{ render(t6) }}",
+    "t8" : "{{ render(t7) }}",
+    "t9" : "{{ render(t8) }}",
+    "t10" : "{{ render(t9) }}",
+    "t11" : "{{ render(t10) }}",
+    "t12" : "{{ render(t11) }}",
+    "t13" : "{{ render(t12) }}",
+    "t14" : "{{ render(t13) }}",
+    "t15" : "{{ render(t14) }}",
+    "t16" : "{{ render(t15) }}"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: Maximum render() nesting depth (16) exceeded at line 1 — check for circular render() calls in your template. ({{ render(t0) }}:1) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?)"
+  }
+}, {
+  "id" : "function-render-circular",
+  "expr" : "{{ render(t) }}",
+  "context" : {
+    "t" : "{{ render(t) }}"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: Maximum render() nesting depth (16) exceeded at line 1 — check for circular render() calls in your template. ({{ render(t) }}:1) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?)"
+  }
+}, {
+  "id" : "function-renderonce-depth-16",
+  "expr" : "{{ renderOnce(t15) }}",
+  "context" : {
+    "t0" : "x",
+    "t1" : "{{ renderOnce(t0) }}",
+    "t2" : "{{ renderOnce(t1) }}",
+    "t3" : "{{ renderOnce(t2) }}",
+    "t4" : "{{ renderOnce(t3) }}",
+    "t5" : "{{ renderOnce(t4) }}",
+    "t6" : "{{ renderOnce(t5) }}",
+    "t7" : "{{ renderOnce(t6) }}",
+    "t8" : "{{ renderOnce(t7) }}",
+    "t9" : "{{ renderOnce(t8) }}",
+    "t10" : "{{ renderOnce(t9) }}",
+    "t11" : "{{ renderOnce(t10) }}",
+    "t12" : "{{ renderOnce(t11) }}",
+    "t13" : "{{ renderOnce(t12) }}",
+    "t14" : "{{ renderOnce(t13) }}",
+    "t15" : "{{ renderOnce(t14) }}"
+  },
+  "result" : "x"
+}, {
+  "id" : "function-renderonce-depth-17",
+  "expr" : "{{ renderOnce(t16) }}",
+  "context" : {
+    "t0" : "x",
+    "t1" : "{{ renderOnce(t0) }}",
+    "t2" : "{{ renderOnce(t1) }}",
+    "t3" : "{{ renderOnce(t2) }}",
+    "t4" : "{{ renderOnce(t3) }}",
+    "t5" : "{{ renderOnce(t4) }}",
+    "t6" : "{{ renderOnce(t5) }}",
+    "t7" : "{{ renderOnce(t6) }}",
+    "t8" : "{{ renderOnce(t7) }}",
+    "t9" : "{{ renderOnce(t8) }}",
+    "t10" : "{{ renderOnce(t9) }}",
+    "t11" : "{{ renderOnce(t10) }}",
+    "t12" : "{{ renderOnce(t11) }}",
+    "t13" : "{{ renderOnce(t12) }}",
+    "t14" : "{{ renderOnce(t13) }}",
+    "t15" : "{{ renderOnce(t14) }}",
+    "t16" : "{{ renderOnce(t15) }}"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: Maximum render() nesting depth (16) exceeded at line 1 — check for circular render() calls in your template. ({{ renderOnce(t0) }}:1) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?) (?:?)"
+  }
+}, {
+  "id" : "function-render-recursive-default",
+  "expr" : "{{ render(a) }}",
+  "context" : {
+    "a" : "{{ b }}",
+    "b" : "{{ c }}",
+    "c" : "z"
+  },
+  "result" : "z"
+}, {
+  "id" : "function-render-recursive-false",
+  "expr" : "{{ render(a, recursive=false) }}",
+  "context" : {
+    "a" : "{{ b }}",
+    "b" : "{{ c }}",
+    "c" : "z"
+  },
+  "result" : "z"
+}, {
+  "id" : "function-render-recursive-false-positional",
+  "expr" : "{{ render(a, false) }}",
+  "context" : {
+    "a" : "{{ b }}",
+    "b" : "{{ c }}",
+    "c" : "z"
+  },
+  "result" : "z"
+}, {
+  "id" : "function-render-recursive-null",
+  "expr" : "{{ render(a, recursive=null) }}",
+  "context" : {
+    "a" : "{{ b }}",
+    "b" : "{{ c }}",
+    "c" : "z"
+  },
+  "result" : "z"
+}, {
+  "id" : "function-render-recursive-string",
+  "expr" : "{{ render('x', recursive='true') }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'render' function expects an optional argument 'recursive' with type boolean. ({{ render('x', recursive='true') }}:1)"
+  }
+}, {
+  "id" : "function-render-recursive-number",
+  "expr" : "{{ render('x', recursive=1) }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'render' function expects an optional argument 'recursive' with type boolean. ({{ render('x', recursive=1) }}:1)"
+  }
+}, {
+  "id" : "function-render-too-many-arguments",
+  "expr" : "{{ render('x', true, 1) }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The argument at position 3 is not allowed. Only 2 argument(s) are allowed. ({{ render('x', true, 1) }}:1)"
+  }
+}, {
+  "id" : "function-render-unknown-named-argument",
+  "expr" : "{{ render('x', depth=1) }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The following named argument does not exist: depth ({{ render('x', depth=1) }}:1)"
+  }
+}, {
+  "id" : "function-render-no-argument",
+  "expr" : "{{ render() }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'render' function expects an argument 'toRender'. ({{ render() }}:1)"
+  }
+}, {
+  "id" : "function-render-named-argument",
+  "expr" : "{{ render(toRender='{{ 1 }}') }}",
+  "context" : { },
+  "result" : "1"
+}, {
+  "id" : "function-renderonce-one-pass",
+  "expr" : "{{ renderOnce(a) == '{{ c }}' }}",
+  "context" : {
+    "a" : "{{ b }}",
+    "b" : "{{ c }}",
+    "c" : "z"
+  },
+  "result" : "true"
+}, {
+  "id" : "function-renderonce-recursive-named",
+  "expr" : "{{ renderOnce(a, recursive=true) }}",
+  "context" : {
+    "a" : "{{ b }}",
+    "b" : "{{ c }}",
+    "c" : "z"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The following named argument does not exist: recursive ({{ renderOnce(a, recursive=true) }}:1)"
+  }
+}, {
+  "id" : "function-renderonce-second-positional",
+  "expr" : "{{ renderOnce(a, true) }}",
+  "context" : {
+    "a" : "{{ b }}",
+    "b" : "{{ c }}",
+    "c" : "z"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The argument at position 2 is not allowed. Only 1 argument(s) are allowed. ({{ renderOnce(a, true) }}:1)"
+  }
+}, {
+  "id" : "function-renderonce-no-argument",
+  "expr" : "{{ renderOnce() }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'render' function expects an argument 'toRender'. ({{ renderOnce() }}:1)"
+  }
+}, {
+  "id" : "function-render-number",
+  "expr" : "{{ render(5) + 1 }}",
+  "context" : { },
+  "result" : "6"
+}, {
+  "id" : "function-render-boolean",
+  "expr" : "{{ render(true) }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "function-render-null",
+  "expr" : "{{ render(null) }}",
+  "context" : { },
+  "result" : ""
+}, {
+  "id" : "function-render-map",
+  "expr" : "{{ render(m) }}",
+  "context" : {
+    "m" : {
+      "a" : "{{ 1 + 1 }}",
+      "{{ 'k' }}" : 2,
+      "n" : {
+        "x" : "{{ 3 }}"
+      }
+    }
+  },
+  "result" : "{\"a\":\"2\",\"k\":2,\"n\":{\"x\":\"3\"}}"
+}, {
+  "id" : "function-render-map-literal",
+  "expr" : "{{ render({'a': '{{ 1 + 1 }}'}) }}",
+  "context" : { },
+  "result" : "{\"a\":\"2\"}"
+}, {
+  "id" : "function-render-map-null-value",
+  "expr" : "{{ render(m) }}",
+  "context" : {
+    "m" : {
+      "a" : null,
+      "b" : "{{ 1 }}"
+    }
+  },
+  "result" : "{\"b\":\"1\"}"
+}, {
+  "id" : "function-render-map-duplicate-key",
+  "expr" : "{{ render(m) }}",
+  "context" : {
+    "m" : {
+      "{{ 'a' }}" : 1,
+      "a" : 2
+    }
+  },
+  "result" : "{\"a\":1}"
+}, {
+  "id" : "function-render-map-integer-key",
+  "expr" : "{{ render({1: '{{ 2 }}'}) }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.ClassCastException: class java.lang.Long cannot be cast to class java.lang.String (java.lang.Long and java.lang.String are in module java.base of loader 'bootstrap')"
+  }
+}, {
+  "id" : "function-renderonce-map",
+  "expr" : "{{ renderOnce(m) }}",
+  "context" : {
+    "m" : {
+      "a" : "{{ b }}"
+    },
+    "b" : "{{ c }}",
+    "c" : "z"
+  },
+  "result" : "{\"a\":\"z\"}"
+}, {
+  "id" : "function-render-list",
+  "expr" : "{{ render(l) }}",
+  "context" : {
+    "l" : [ "{{ 1 + 1 }}", 3, [ "{{ 2 }}" ], null ]
+  },
+  "result" : "[\"2\",3,[\"2\"],null]"
+}, {
+  "id" : "function-render-string-result",
+  "expr" : "{{ render('{{ 1 + 1 }}') + 1 }}",
+  "context" : { },
+  "result" : "21"
+}, {
+  "id" : "function-render-list-template-is-a-string",
+  "expr" : "{{ render('{{ [1, 2] }}') | length }}",
+  "context" : { },
+  "result" : "5"
+}, {
+  "id" : "function-render-sees-a-set-variable",
+  "expr" : "{% set x = 1 %}{{ render('{{ x }}') }}",
+  "context" : { },
+  "result" : "1"
+}, {
+  "id" : "function-render-sees-a-loop-variable",
+  "expr" : "{% for i in [7] %}{{ render('{{ i }}') }}{% endfor %}",
+  "context" : { },
+  "result" : "7"
+}, {
+  "id" : "function-render-sees-the-context",
+  "expr" : "{{ render('{{ a.b }}') }}",
+  "context" : {
+    "a" : {
+      "b" : 5
+    }
+  },
+  "result" : "5"
+}, {
+  "id" : "function-render-depth-variable",
+  "expr" : "{{ render('{{ __kestra_render_depth }}') }}",
+  "context" : { },
+  "result" : "1"
+}, {
+  "id" : "function-render-depth-variable-nested",
+  "expr" : "{{ render(\"{{ render('{{ __kestra_render_depth }}') }}\") }}",
+  "context" : { },
+  "result" : "2"
+}, {
+  "id" : "function-render-missing-variable",
+  "expr" : "{{ render('{{ nope }}') }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to find `nope` used in the expression `{{ nope }}` at line 1 (?:?)"
+  }
+}, {
+  "id" : "function-render-missing-argument",
+  "expr" : "{{ render(nope) }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.RootAttributeNotFoundException: Root attribute [nope] does not exist or can not be accessed and strict variables is set to true. ({{ render(nope) }}:1)"
+  }
+}, {
+  "id" : "function-render-no-brace",
+  "expr" : "{{ render('abc') }}",
+  "context" : { },
+  "result" : "abc"
+}, {
+  "id" : "function-render-raw",
+  "expr" : "{{ render(a) }}",
+  "context" : {
+    "a" : "{% raw %}{{ x }}{% endraw %}"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.RootAttributeNotFoundException: Root attribute [x] does not exist or can not be accessed and strict variables is set to true. ({{ x }}:1)"
+  }
+}, {
+  "id" : "function-render-in-an-if",
+  "expr" : "{% if render('{{ 1 }}') == '1' %}y{% endif %}",
+  "context" : { },
+  "result" : "y"
+}, {
+  "id" : "function-render-nested-literal",
+  "expr" : "{{ render(\"{{ render('{{ 1 + 1 }}') }}\") }}",
+  "context" : { },
+  "result" : "2"
+}, {
+  "id" : "function-render-front-end",
+  "expr" : "{{ render(a) }}",
+  "context" : {
+    "a" : "{{ 7 / 2 }} {{ x ?? 'd' }} {{ [1, 2] contains 2 }}"
+  },
+  "result" : "3 d true"
+}, {
+  "id" : "function-render-not-converging",
+  "expr" : "{{ render(a) }}",
+  "context" : {
+    "a" : "{{ a }}x"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Too many rendering attempts (?:?)"
+  }
+}, {
+  "id" : "function-render-syntax-error",
+  "expr" : "{{ render(a) }}",
+  "context" : {
+    "a" : "{{"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.ParserException: Unexpected token \"EOF\" of value \"null\" ({{:1) (?:?)"
+  }
+}, {
+  "id" : "function-render-secret",
+  "expr" : "{{ render(a) }}",
+  "context" : {
+    "a" : "{{ secret('db') }}"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: io.pebbletemplates.pebble.error.PebbleException: Function or Macro [secret] does not exist. ({{ secret('db') }}:1) (?:?)"
+  }
+}, {
+  "id" : "function-render-variables-flow",
+  "expr" : "{{ render(vars.third) }}",
+  "context" : {
+    "vars" : {
+      "first" : "1",
+      "second" : "{{vars.first}} > 2",
+      "third" : "{{vars.second}} > 3"
+    }
+  },
+  "result" : "1 > 2 > 3"
 } ]

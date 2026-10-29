@@ -2548,7 +2548,13 @@ fn render_on_this_thread(
 
     // W2 Task 8 fix round 1: one budget for the whole render, shared by every
     // `replace` call in it. See [`super::filters::MAX_REPLACE_SCAN_BYTES`].
+    // Package #5b Task B6: a `render()` call renders on this thread and does
+    // not install another, so its nested passes draw on this one too.
     let _budget = super::filters::ReplaceBudget::install();
+    // Package #5b Task B6 (spec D9): what every `render()` in this render
+    // shares -- the nesting depth, the forbidden roots, the pass budget. See
+    // [`super::nested`].
+    let scope = super::nested::RenderScope::install(forbidden);
 
     if passes == Passes::One {
         // Nothing is forbidden on this path (`render_once_with` passes
@@ -2575,7 +2581,15 @@ fn render_on_this_thread(
                 }
             }
         }
-        let next = render_once(&env, &current, &variables)?;
+        let next = render_once(&env, &current, &variables);
+        // D9 rule 4: a `render()` in this pass met a forbidden root in the
+        // text it was about to evaluate. Asked whether or not the pass
+        // failed, so nothing between the nested render and here can turn the
+        // refusal into an answer.
+        if let Some(root) = scope.forbidden_hit() {
+            return Ok(GuardedRender::Forbidden(root));
+        }
+        let next = next?;
         if next == current {
             return Ok(GuardedRender::Rendered(strip_raw_markers(&next)));
         }
@@ -2595,11 +2609,39 @@ fn render_once(
     source: &str,
     variables: &MjValue,
 ) -> Result<String, RenderError> {
+    render_pass(env, source, variables).map_err(|e| match e {
+        PassError::Render(e) => e,
+        PassError::Engine(e) => RenderError::Template(e.to_string()),
+    })
+}
+
+/// Why [`render_pass`] failed. The engine's own error is kept as it is,
+/// rather than as its text, so [`super::nested`] can read the line it carries
+/// (Kestra's nesting-depth sentence names the line of the `render()` call).
+#[derive(Debug)]
+pub(super) enum PassError {
+    /// The rewriter refused the source, the output cap was hit, or the
+    /// output was not UTF-8.
+    Render(RenderError),
+    /// minijinja refused the source when parsing it or failed while
+    /// rendering it.
+    Engine(MjError),
+}
+
+/// [`render_once`], with the engine's error kept as a [`PassError::Engine`].
+/// Every pass of every render, nested ones included (package #5b Task B6),
+/// is this one function, so each has the same raw-region protection, the
+/// same front end ([`compile_source`]) and the same [`MAX_OUTPUT_BYTES`] cap.
+pub(super) fn render_pass(
+    env: &Environment<'static>,
+    source: &str,
+    variables: &MjValue,
+) -> Result<String, PassError> {
     let (protected, replacers) = replace_raw_tags(source);
-    let rewritten = compile_source(&protected)?;
+    let rewritten = compile_source(&protected).map_err(|e| PassError::Render(e.into()))?;
     let template = env
         .template_from_str(&rewritten)
-        .map_err(|e| RenderError::Template(e.to_string()))?;
+        .map_err(PassError::Engine)?;
     let mut sink = CappedSink::new(MAX_OUTPUT_BYTES);
     let render_result = template.render_captured_to(variables, &mut sink);
     // The sink's own flag is checked FIRST and unconditionally. minijinja
@@ -2607,13 +2649,14 @@ fn render_once(
     // or a real template error?" by inspecting that error's text would be a
     // guess; the sink knows.
     if sink.overflowed {
-        return Err(RenderError::OutputTooLarge {
+        return Err(PassError::Render(RenderError::OutputTooLarge {
             limit: MAX_OUTPUT_BYTES,
-        });
+        }));
     }
-    render_result.map_err(|e| RenderError::Template(e.to_string()))?;
+    render_result.map_err(PassError::Engine)?;
 
-    let rendered = String::from_utf8(sink.buf).map_err(|e| RenderError::Template(e.to_string()))?;
+    let rendered = String::from_utf8(sink.buf)
+        .map_err(|e| PassError::Render(RenderError::Template(e.to_string())))?;
     Ok(put_back_raw_tags(&replacers, &rendered))
 }
 
@@ -2771,6 +2814,8 @@ fn bind_on_this_thread(
     let env = env;
 
     let _budget = super::filters::ReplaceBudget::install();
+    // Package #5b Task B6: as `render_on_this_thread`; nothing is forbidden.
+    let _scope = super::nested::RenderScope::install(&[]);
     let variables = cx.to_minijinja();
     let rendered = render_once(&env, template, &variables)?;
 
@@ -2902,7 +2947,7 @@ fn put_back_raw_tags(replacers: &[(String, String)], rendered: &str) -> String {
 
 /// `RAW_PATTERN.matcher(x).replaceAll("$2")` (`VariableRenderer.java:85-87`):
 /// drop the `{% raw %}`/`{% endraw %}` markers and keep the body.
-fn strip_raw_markers(rendered: &str) -> String {
+pub(super) fn strip_raw_markers(rendered: &str) -> String {
     raw_pattern().replace_all(rendered, "${2}").into_owned()
 }
 
@@ -3314,10 +3359,14 @@ mod tests {
         // left of `??`/`???`); 193 -> 196 at package #5a Task A6
         // (2026-10-29), which added the egret-only `kestra_contains`,
         // `kestra_range` and `kestra_bool` (`contains`, `..` and `and`/`or`);
-        // the three engine counts below did not move.
+        // the three engine counts below did not move. Package #5b Task B6
+        // (2026-10-29): the function count 37 -> 39, because the harness now
+        // wires `render` and `renderOnce` as Kestra's server carries them
+        // (`host.Oracle.wireRenderFunctions`) and their rows say `yes`; the
+        // row total did not move.
         assert_eq!(rows, 196, "row count");
         assert_eq!(counts.get("filter"), Some(&63), "engine filter count");
-        assert_eq!(counts.get("function"), Some(&37), "engine function count");
+        assert_eq!(counts.get("function"), Some(&39), "engine function count");
         assert_eq!(counts.get("test"), Some(&8), "engine test count");
     }
 

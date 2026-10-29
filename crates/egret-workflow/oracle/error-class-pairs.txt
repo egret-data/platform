@@ -258,8 +258,9 @@ function-fromion-annotation-of-a-list       test:an_annotated_value_is_its_own_t
 # these is among them -- `Function or Macro [render] does not exist.` egret
 # binds all four to a refusal that names the function and its package instead,
 # so both sides fail and only the message differs.
-function-render                                     test:the_refused_list_is_six_and_kv_is_not_in_it
-function-renderonce                                 test:the_refused_list_is_six_and_kv_is_not_in_it
+# (Package #5b Task B6, 2026-10-29: `function-render` and
+# `function-renderonce` were here. Both answer now, on both sides, and are no
+# longer error-class; see the B6 block at the end of this file.)
 function-errorlogs                                  test:the_refused_list_is_six_and_kv_is_not_in_it
 function-subflow                                    test:the_refused_list_is_six_and_kv_is_not_in_it
 
@@ -591,3 +592,25 @@ filter-rsort-mixed                                  test:a_filter_input_kestra_r
 filter-escape-html-attr                             test:an_escape_strategy_pebble_does_not_know_is_refused
 filter-escape-unknown-strategy                      test:an_escape_strategy_pebble_does_not_know_is_refused
 filter-escape-uppercase-strategy                    test:an_escape_strategy_pebble_does_not_know_is_refused
+
+# --- Package #5b Task B6 (2026-10-29, spec D9): `render()` and `renderOnce()`.
+# Each test is in `runners::nested::tests` and asserts egret's own text,
+# Kestra's sentence where Kestra has one.
+function-render-depth-17                            test:render_nesting_stops_where_kestras_does
+function-render-circular                            test:render_nesting_stops_where_kestras_does
+function-renderonce-depth-17                        test:render_nesting_stops_where_kestras_does
+function-render-recursive-string                    test:a_recursive_that_is_not_a_boolean_is_refused
+function-render-recursive-number                    test:a_recursive_that_is_not_a_boolean_is_refused
+function-render-too-many-arguments                  test:render_binds_its_arguments_as_pebble_does
+function-render-unknown-named-argument              test:render_binds_its_arguments_as_pebble_does
+function-render-no-argument                         test:render_binds_its_arguments_as_pebble_does
+function-renderonce-recursive-named                 test:render_binds_its_arguments_as_pebble_does
+function-renderonce-second-positional               test:render_binds_its_arguments_as_pebble_does
+function-renderonce-no-argument                     test:render_binds_its_arguments_as_pebble_does
+function-render-map-integer-key                     test:a_map_key_that_is_not_a_string_is_refused
+function-render-missing-variable                    test:a_nested_render_fails_as_its_text_fails
+function-render-missing-argument                    test:a_nested_render_fails_as_its_text_fails
+function-render-raw                                 test:a_nested_render_fails_as_its_text_fails
+function-render-not-converging                      test:a_nested_render_fails_as_its_text_fails
+function-render-syntax-error                        test:a_nested_render_fails_as_its_text_fails
+function-render-secret                              test:secret_stays_refused_in_text_render_evaluates

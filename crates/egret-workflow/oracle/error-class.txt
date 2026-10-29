@@ -502,8 +502,10 @@ function-fromion-annotation-of-a-list
 # these is among them -- `Function or Macro [render] does not exist.` egret
 # binds all four to a refusal that names the function and its package instead,
 # so both sides fail and only the message differs.
-function-render
-function-renderonce
+# (Package #5b Task B6, 2026-10-29: `function-render` and `function-renderonce`
+# left this list. The harness now wires `render` and `renderOnce` as Kestra's
+# server does (`host.Oracle.wireRenderFunctions`), so their goldens are values,
+# `1` and `x`, and egret implements both. Two remain.)
 function-errorlogs
 function-subflow
 
@@ -853,3 +855,26 @@ filter-rsort-mixed
 filter-escape-html-attr
 filter-escape-unknown-strategy
 filter-escape-uppercase-strategy
+
+# --- Package #5b Task B6 (2026-10-29, spec D9): `render()` and
+# `renderOnce()`, measured on the harness that now wires them. Each golden
+# below is a Kestra exception; each test named in error-class-pairs.txt asserts
+# egret's own text for it.
+function-render-depth-17
+function-render-circular
+function-renderonce-depth-17
+function-render-recursive-string
+function-render-recursive-number
+function-render-too-many-arguments
+function-render-unknown-named-argument
+function-render-no-argument
+function-renderonce-recursive-named
+function-renderonce-second-positional
+function-renderonce-no-argument
+function-render-map-integer-key
+function-render-missing-variable
+function-render-missing-argument
+function-render-raw
+function-render-not-converging
+function-render-syntax-error
+function-render-secret

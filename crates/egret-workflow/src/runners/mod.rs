@@ -60,6 +60,7 @@ mod javafmt;
 mod javaformat;
 mod javare;
 mod jqsandbox;
+mod nested;
 mod operators;
 mod pebble_tests;
 pub mod rewrite;

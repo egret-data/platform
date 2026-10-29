@@ -1042,8 +1042,10 @@ def check_inputs(flows, kinds, golden, baseline):
     # 37 since package #5b Task B2 (2026-10-29) banked `valids/loop-object` and
     # `valids/loop-object-in-list` (`is json`) and
     # `valids/task-runif-taskswithstate` (`is empty`), spec D8.
-    if len(baseline) != 37:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 37; the split "
+    # 36 since package #5b Task B6 (2026-10-29) banked `valids/variables`
+    # (`render()`), spec D9.
+    if len(baseline) != 36:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 36; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1693,8 +1695,8 @@ def self_test():
          "not 273",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 37",
-         "not 37",
+    case("baseline.txt is no longer 36",
+         "not 36",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

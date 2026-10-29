@@ -201,6 +201,11 @@ pub(super) fn register(env: &mut Environment<'static>) {
     // W9c Task 4: `kv`, over the KV store, through the same scope.
     env.add_function("kv", kv_function);
 
+    // Package #5b Task B6 (spec D9): `render` and `renderOnce`, a nested
+    // render on a fresh environment. See `super::nested`.
+    env.add_function("render", super::nested::render);
+    env.add_function("renderOnce", super::nested::render_once);
+
     // Package #5b Task B3 (spec D10): Pebble core's `max`/`min`, on the
     // comparison of `super::compare`.
     env.add_function("max", |state: &State, rest: Rest<MjValue>| {
@@ -210,8 +215,9 @@ pub(super) fn register(env: &mut Environment<'static>) {
         extremum(state, rest, MathComparison::LessThan)
     });
 
-    // W2 Task 8's refusals, six since W9c Task 4. See [`not_implemented`]
-    // for the message shape and why the oracle cannot check it.
+    // W2 Task 8's refusals, six since W9c Task 4, four since package #5b
+    // Task B6. See [`not_implemented`] for the message shape and why the
+    // oracle cannot check it.
     for (name, refusal) in REFUSED {
         env.add_function(
             *name,
@@ -311,7 +317,8 @@ pub(crate) const SECRET_REFUSAL: &str = "The 'secret' function resolves only on 
      fields of the pod spec, readable by anyone with `get pods` in the task namespace, and \
      no other render (inputs, runIf, Log, triggers) resolves secrets.";
 
-/// The six names egret registers only to refuse, with what each is waiting
+/// The names egret registers only to refuse (four since package #5b Task
+/// B6), with what each is waiting
 /// for and who owns it.
 ///
 /// **Two different kinds of absence, deliberately treated the same.** The
@@ -354,19 +361,14 @@ pub(crate) const SECRET_REFUSAL: &str = "The 'secret' function resolves only on 
 /// ([`kv_function`]) over the KV store.
 ///
 /// **Updated 2026-10-17: `http` is `Unsupported`, not waiting for a package.**
+///
+/// **Updated 2026-10-29 (package #5b Task B6): four names now.** `render` and
+/// `renderOnce` are implemented (`super::nested`, spec D9).
 const REFUSED: &[(&str, Refusal)] = &[
     // Registered with a null backing on the built engine.
     ("secret", Refusal::Confined(SECRET_REFUSAL)),
     ("http", Refusal::Unsupported(HTTP_REFUSAL)),
     // Not registered at all on the built engine: `@Inject @Nullable`, guarded.
-    (
-        "render",
-        not_yet("an execution context to render against", "W3"),
-    ),
-    (
-        "renderOnce",
-        not_yet("an execution context to render against", "W3"),
-    ),
     ("errorLogs", not_yet("the running execution's logs", "W11")),
     ("subflow", not_yet("subflow execution", "W6")),
 ];
@@ -3719,19 +3721,23 @@ mod tests {
     /// **W9c Task 4** took `kv` out: it reads the KV store over the render's
     /// scope now. The test that held seven names is replaced by this one,
     /// which pins six and proves a read through a fake scope.
+    ///
+    /// **Package #5b Task B6 (2026-10-29)** took `render` and `renderOnce`
+    /// out: they render now (`super::nested`). Four names are left; the name
+    /// of this test is kept because `oracle/error-class-pairs.txt` pairs the
+    /// four's corpus entries with it.
     #[test]
     fn the_refused_list_is_six_and_kv_is_not_in_it() {
-        // W9b Task 4: `fileURI` left the list; W9c Task 4: `kv`.
-        for gone in ["fileURI", "kv"] {
+        // W9b Task 4: `fileURI` left the list; W9c Task 4: `kv`; package #5b
+        // Task B6: `render` and `renderOnce`.
+        for gone in ["fileURI", "kv", "render", "renderOnce"] {
             assert!(
                 !REFUSED.iter().any(|(name, _)| *name == gone),
                 "{gone} is implemented, not refused"
             );
         }
-        assert_eq!(REFUSED.len(), 6);
+        assert_eq!(REFUSED.len(), 4);
         let expected = [
-            ("render", "an execution context to render against", "W3"),
-            ("renderOnce", "an execution context to render against", "W3"),
             ("errorLogs", "the running execution's logs", "W11"),
             ("subflow", "subflow execution", "W6"),
         ];

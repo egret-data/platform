@@ -291,9 +291,27 @@ fn literal_keys(source: &str) -> Vec<String> {
 ///
 /// A string without the letters `secret` names no such identifier: minijinja
 /// identifiers are written out in the source, and neither the raw-tag pass
-/// nor `rewrite` builds one. `render()`/`renderOnce()`, which would render a
-/// string built at run time, are refused (`functions::REFUSED`); if either
-/// arrives, this must change with it.
+/// nor `rewrite` builds one.
+///
+/// **`render()` and `renderOnce()` evaluate a string built at run time**
+/// (package #5b Task B6, spec D9, user decision Q4), and this detector reads
+/// only the author's source, so it does not see what they evaluate. It does
+/// not need to, because neither can resolve a secret:
+///
+/// 1. the text a `render()` evaluates renders on a **fresh** environment,
+///    where `secret` is the shared refusal (`functions::SECRET_REFUSAL`), never
+///    the collecting or resolving one [`render_with_secrets`] registers on its
+///    own copy; and the collecting and the resolving `secret` themselves refuse
+///    while a nested render runs, for a `secret` handed to it as a value
+///    (`{% set s = secret %}`; [`refuse_in_nested_render`]);
+/// 2. so no secret name is ever collected from run-time text: [`literal_keys`]
+///    scans the author's source only, and pass 1's collecting render meets the
+///    same two walls inside a `render()`. A key reachable only through
+///    `render()` is never fetched and never handed out.
+///
+/// Pinned by `tests::render_never_resolves_a_secret_from_run_time_text` (the
+/// shared path and [`render_with_secrets`], with a source that records every
+/// fetch) and `tests::a_secret_handed_to_render_as_a_value_is_still_refused`.
 pub fn text_uses_secret(text: &str) -> bool {
     if !text.contains("secret") {
         return false;
@@ -436,11 +454,41 @@ struct Collected {
 
 impl Collected {
     fn call(&self, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+        refuse_in_nested_render()?;
         let call = parse_call(rest)?;
         self.names.lock().expect("collect lock").insert(call.key);
         Ok(MjValue::from(""))
     }
 }
+
+/// Spec D9 rule 1, the second wall (package #5b Task B6): the collecting
+/// and the resolving `secret` refuse inside text a `render()` evaluates, as
+/// the shared environment's `secret` does.
+///
+/// The first wall is that a nested render runs on a fresh environment, which
+/// never has these two. This one is for the function reaching the nested
+/// render as a VALUE: minijinja has function values (Pebble does not), so
+/// `{% set s = secret %}{{ render(inputs.x) }}` hands `s` to the text of
+/// `inputs.x`, and `"{{ s('db') }}"` there would otherwise be collected,
+/// fetched and resolved. Measured: without this, it was
+/// (`tests::a_secret_handed_to_render_as_a_value_is_still_refused`).
+///
+/// Its sentence is the shared refusal plus one clause, so a test can tell
+/// which wall refused (`tests::render_never_resolves_a_secret_from_run_time_text`
+/// asserts the first wall's exact text).
+fn refuse_in_nested_render() -> Result<(), MjError> {
+    if super::nested::in_nested_render() {
+        return Err(pebble_error(format!(
+            "{} {NESTED_SECRET_CLAUSE}",
+            super::functions::SECRET_REFUSAL
+        )));
+    }
+    Ok(())
+}
+
+/// What [`refuse_in_nested_render`] adds to the shared refusal.
+const NESTED_SECRET_CLAUSE: &str =
+    "Text that render() or renderOnce() evaluates never resolves one, on any task.";
 
 /// Pass 3's `secret`: answers from what pass 2 fetched.
 struct Resolver {
@@ -450,6 +498,7 @@ struct Resolver {
 
 impl Resolver {
     fn call(&self, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+        refuse_in_nested_render()?;
         let call = parse_call(rest)?;
         let name = &call.key;
         let data = match self.fetched.get(name) {
@@ -1038,6 +1087,84 @@ mod tests {
             );
             assert!(e.contains("fields of the pod spec"), "{call}: {e}");
             assert!(e.contains("`get pods`"), "{call}: {e}");
+        }
+    }
+
+    /// Spec D9 rules 1 and 2 (package #5b Task B6): `render()` on run-time
+    /// data -- an input whose value is `{{ secret('db') }}` -- never resolves
+    /// a secret, in the shared render and in [`render_with_secrets`], and the
+    /// name is never fetched. The author's own text calls `secret('p')`, so
+    /// [`render_with_secrets`] renders it on the copy with the resolving
+    /// `secret`: what refuses is that the nested render is not that copy (the
+    /// first wall), and the refusal is the shared one, word for word.
+    #[tokio::test]
+    async fn render_never_resolves_a_secret_from_run_time_text() {
+        let refusal = crate::runners::functions::SECRET_REFUSAL;
+        let mut cx = RenderContext::new();
+        cx.insert(
+            "inputs",
+            json!({"x": "{{ secret('db', subkey='password') }}", "m": {"k": "{{ secret('db') }}"}}),
+        );
+        for call in [
+            "{{ render(inputs.x) }}",
+            "{{ renderOnce(inputs.x) }}",
+            "{{ render(inputs.m) }}",
+        ] {
+            // The shared path: every other render (script tasks, inputs, Log).
+            let e = render_str(call, &cx).expect_err("must refuse").to_string();
+            assert!(e.contains(refusal), "{call}: {e}");
+            assert!(!e.contains(NESTED_SECRET_CLAUSE), "{call}: {e}");
+
+            // A plugin task, through the three passes.
+            let source = table();
+            let props = json!({ "v": format!("{{{{ secret('p') }}}}{call}") });
+            let e = render_with_secrets(props.as_object().unwrap(), &cx, WS, &source)
+                .await
+                .expect_err("must refuse");
+            assert!(e.contains(refusal), "{call}: {e}");
+            assert!(
+                !e.contains(NESTED_SECRET_CLAUSE),
+                "{call}: the nested render reached the resolving `secret`, and only the second \
+                 wall refused it -- it must run on a fresh environment: {e}"
+            );
+            assert!(
+                !e.contains("pa55word") && !e.contains("admin"),
+                "{call}: {e}"
+            );
+            let reads = source.reads.lock().unwrap().clone();
+            assert_eq!(
+                reads,
+                vec!["p".to_string()],
+                "{call}: `db` must never be fetched"
+            );
+        }
+    }
+
+    /// The second wall: minijinja has function values, so the author's text
+    /// can hand the resolving `secret` to the nested render as a variable.
+    /// Without [`refuse_in_nested_render`] the input below resolved `db`'s
+    /// password (measured with that call removed).
+    #[tokio::test]
+    async fn a_secret_handed_to_render_as_a_value_is_still_refused() {
+        let mut cx = RenderContext::new();
+        cx.insert("inputs", json!({"x": "{{ s('db', subkey='password') }}"}));
+        for template in [
+            "{% set s = secret %}{{ s('p') }}{{ render(inputs.x) }}",
+            "{% set s = secret %}{{ s('p') }}{{ render({'k': inputs.x}) }}",
+        ] {
+            let source = table();
+            let props = json!({ "v": template });
+            let e = render_with_secrets(props.as_object().unwrap(), &cx, WS, &source)
+                .await
+                .expect_err("must refuse");
+            assert!(e.contains(NESTED_SECRET_CLAUSE), "{template}: {e}");
+            assert!(!e.contains("pa55word"), "{template}: {e}");
+            let reads = source.reads.lock().unwrap().clone();
+            assert_eq!(
+                reads,
+                vec!["p".to_string()],
+                "{template}: `db` must never be fetched"
+            );
         }
     }
 }
