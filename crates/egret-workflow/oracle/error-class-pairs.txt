@@ -62,14 +62,17 @@ isin-missing-attr-left              test:an_undefined_is_in_operand_raises_rathe
 # has no file scope, so `function-kv` still fails, by the sentence
 # `kv_without_a_scope_refuses_by_name` asserts. The six refusals left are held
 # by `the_refused_list_is_six_and_kv_is_not_in_it`.
-function-secret                     test:the_refused_list_is_six_and_kv_is_not_in_it
+# Package #5b Task B8 (2026-10-29): B6 and B7 left three refusals (`secret`,
+# `http`, `subflow`, the last now owned by roadmap row #12, spec Q1), and the
+# test was renamed `the_refused_list_is_three_and_subflow_names_row_12`.
+function-secret                     test:the_refused_list_is_three_and_subflow_names_row_12
 function-kv                         test:kv_without_a_scope_refuses_by_name
 function-read                       test:without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution
 function-fileuri                    test:without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution
 function-filesize                   test:without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution
 function-fileexists                 test:without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution
 function-isfileempty                test:without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution
-function-http                       test:the_refused_list_is_six_and_kv_is_not_in_it
+function-http                       test:the_refused_list_is_three_and_subflow_names_row_12
 
 # --- W2 Task 4: wrong-typed input.
 filter-chunk-not-list               test:chunk_rejects_a_non_list
@@ -265,7 +268,7 @@ function-fromion-annotation-of-a-list       test:an_annotated_value_is_its_own_t
 # implements `errorLogs()` on the worker; the corpus render is not one, so it
 # fails with Kestra's own off-the-worker sentence, which this test pins.)
 function-errorlogs                                  test:outside_the_worker_it_is_kestras_refusal
-function-subflow                                    test:the_refused_list_is_six_and_kv_is_not_in_it
+function-subflow                                    test:the_refused_list_is_three_and_subflow_names_row_12
 
 # W2 Task 8: `env`. `containsKey`, not a null check -- an absent `name`
 # throws and an explicitly null one falls through to the default.

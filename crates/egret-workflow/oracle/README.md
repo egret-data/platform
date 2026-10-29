@@ -3847,6 +3847,13 @@ the sentence `kv_without_a_scope_refuses_by_name` asserts, which is now its
 pairing. The refusals' test is now `the_refused_list_is_six_and_kv_is_not_in_it`
 (six names).
 
+**Package #5b Tasks B6–B8 (2026-10-29):** `render` and `renderOnce` (B6) and
+`errorLogs` (B7) are implemented and left the refusals. Three are left:
+`secret` (Confined), `http` (Unsupported) and `subflow`, whose owner B8 moved
+from W6 to roadmap row #12 "Subflow in full" (spec Q1). The refusals' test is
+now `the_refused_list_is_three_and_subflow_names_row_12`, and
+`function-secret`, `function-http` and `function-subflow` are paired with it.
+
 ### `fetchContext`'s key order is `HashMap`'s, and that is a recorded divergence
 
 Measured: `{"b":1,"a":2}` comes back `{"a":2,"b":1}` and

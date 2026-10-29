@@ -69,13 +69,15 @@
 //!
 //! # A refusal is a feature
 //!
-//! The eight that are refused (twelve until W9a Task 4) say so in a sentence
-//! naming the function, what it needs and the package that will implement it
-//! (`secret`, Confined, and `http`, Unsupported, name no package). **The oracle cannot check
-//! any of that**: their corpus entries are `compare: "error-class"`, which any
-//! failure satisfies — including `unknown function: secret is unknown`, which
-//! is what egret said before this task. See [`not_implemented`] and
-//! `the_eight_refusals_name_themselves_and_their_owner`.
+//! The three that are refused (twelve until W9a Task 4, three since package
+//! #5b Task B7) say so in a sentence naming the function, what it needs and
+//! the package that will implement it (`subflow` names roadmap row #12;
+//! `secret`, Confined, and `http`, Unsupported, name no package). **The oracle
+//! cannot check any of that**: their corpus entries are
+//! `compare: "error-class"`, which any failure satisfies — including
+//! `unknown function: secret is unknown`, which is what egret said before
+//! W2 Task 8. See [`not_implemented`] and
+//! `the_refused_list_is_three_and_subflow_names_row_12`.
 //!
 //! # `range` was already bound, and it did not error
 //!
@@ -374,12 +376,19 @@ pub(crate) const SECRET_REFUSAL: &str = "The 'secret' function resolves only on 
 /// **Updated 2026-10-29 (package #5b Task B7): three names now.** `errorLogs`
 /// is implemented (`super::error_logs`, spec D11): the worker reads the list
 /// before the render, and every other render meets Kestra's own sentence.
+///
+/// **Updated 2026-10-29 (package #5b Task B8, spec Q1): `subflow` names #12.**
+/// It starts a whole child execution synchronously inside a render, so it
+/// moved out of package #5 to roadmap row #12 "Subflow in full"; the owner in
+/// its sentence is `#12`, not W6. Of the groups described above, `secret` and
+/// `http` are the registered-with-a-null-backing kind and `subflow` the
+/// not-registered kind.
 const REFUSED: &[(&str, Refusal)] = &[
     // Registered with a null backing on the built engine.
     ("secret", Refusal::Confined(SECRET_REFUSAL)),
     ("http", Refusal::Unsupported(HTTP_REFUSAL)),
     // Not registered at all on the built engine: `@Inject @Nullable`, guarded.
-    ("subflow", not_yet("subflow execution", "W6")),
+    ("subflow", not_yet("subflow execution", "#12")),
 ];
 
 const fn not_yet(needs: &'static str, package: &'static str) -> Refusal {
@@ -1946,7 +1955,7 @@ fn base62_bytes(bytes: &[u8], pad: usize) -> String {
 /// any failure satisfies — including `unknown function: secret is unknown`,
 /// which is what egret said before this task and which tells a flow author
 /// nothing. So the shape is pinned by a unit test per function instead
-/// (`runners::functions::the_eight_refusals_name_themselves_and_their_owner`),
+/// (`runners::functions::the_refused_list_is_three_and_subflow_names_row_12`),
 /// and this one function is where the shape lives so the messages cannot
 /// drift apart.
 ///
@@ -3694,8 +3703,8 @@ mod tests {
     // evidence a refusal works, and it never will be. These are.
     // -----------------------------------------------------------------
 
-    /// The eight names egret registers only to refuse, each asserted for its
-    /// **exact message**: the function's own name, what it needs, and the
+    /// The names egret registers only to refuse (three since package #5b
+    /// Task B7), each asserted for its **exact message**: the function's own name, what it needs, and the
     /// package that will implement it.
     ///
     /// Pairs `function-secret`, `-kv`, `-fileuri`, `-http` (which were
@@ -3710,7 +3719,7 @@ mod tests {
     /// The standing rule is that a paired test asserts a refused input **and**
     /// a neighbouring accepted one, because an entry pins *that* egret refuses
     /// and a test pins *what it says* — neither pins *which inputs*. There is
-    /// no boundary here: every one of the eight refuses for every argument
+    /// no boundary here: every one of them refuses for every argument
     /// list, including none. So what this asserts instead is the two things
     /// that could actually go wrong:
     ///
@@ -3721,7 +3730,7 @@ mod tests {
     ///
     /// The second of those is belt and braces rather than the discriminating
     /// assertion, and saying so is the honest version: unregistering the
-    /// eight dies on the `contains(&want)` assert first, because
+    /// three dies on the `contains(&want)` assert first, because
     /// `unknown function: secret is unknown` does not contain the sentence.
     /// It earns its place only for a *different* mutation — a refusal that
     /// forwards to minijinja's unknown-name error while still being
@@ -3740,8 +3749,14 @@ mod tests {
     /// execution's error logs on the worker (`super::error_logs`). Three are
     /// left, and `function-errorlogs` is paired with
     /// `error_logs::tests::outside_the_worker_it_is_kestras_refusal` now.
+    ///
+    /// **Package #5b Task B8 (2026-10-29, spec Q1)** renamed this test from
+    /// `the_refused_list_is_six_and_kv_is_not_in_it`, whose count had been
+    /// wrong since B6, and moved `subflow`'s owner from W6 to roadmap row #12
+    /// "Subflow in full". `oracle/error-class-pairs.txt` pairs
+    /// `function-secret`, `function-http` and `function-subflow` with it.
     #[test]
-    fn the_refused_list_is_six_and_kv_is_not_in_it() {
+    fn the_refused_list_is_three_and_subflow_names_row_12() {
         // W9b Task 4: `fileURI` left the list; W9c Task 4: `kv`; package #5b
         // Task B6: `render` and `renderOnce`.
         // Package #5b Task B7: `errorLogs`.
@@ -3752,7 +3767,8 @@ mod tests {
             );
         }
         assert_eq!(REFUSED.len(), 3);
-        let expected = [("subflow", "subflow execution", "W6")];
+        // Spec Q1: `subflow()` belongs to roadmap row #12, not W6.
+        let expected = [("subflow", "subflow execution", "#12")];
         // `secret` (Confined) and `http` (Unsupported) are checked by their sentences below.
         assert_eq!(
             expected.len() + 2,

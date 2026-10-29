@@ -216,7 +216,7 @@ function	read	yes	yes	function-read	-
 function	render	yes	yes	function-render-depth-16	-
 function	renderOnce	yes	yes	function-renderonce-one-pass	-
 function	secret	yes	yes	function-secret	-
-function	subflow	no	yes	-	egret binds it to a W2 Task 8 REFUSAL; the owner in the message is W6, which the programme spec names
+function	subflow	no	yes	-	egret binds it to a W2 Task 8 REFUSAL; the owner in the message is roadmap row #12 "Subflow in full" (package #5b spec Q1; W6 until Task B8). The built engine does not carry it (`@Inject @Nullable`, guarded)
 function	tasksWithState	yes	yes	function-taskswithstate	-
 function	uuid	yes	yes	function-uuid	-
 function	yaml	yes	yes	function-yaml-yes-is-a-boolean-or-not	the two YAML scalar resolvers disagree, and re-resolving would trade an old silent wrong answer for a new one
