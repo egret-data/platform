@@ -163,7 +163,7 @@ pub const MAX_RENDERING_AMOUNT: usize = 100;
 /// the same reason, so the two seams do not need separate reasoning.
 ///
 /// [dataapi]: ../../../egret_dataapi/render/index.html
-const FUEL: u64 = 50_000;
+pub(super) const FUEL: u64 = 50_000;
 
 /// Well under minijinja's own default of 500. The setter clamps to
 /// `min(level, MAX_RECURSION)`, so this can only ever lower the limit. Note
@@ -2514,34 +2514,75 @@ pub fn referenced_roots(template: &str) -> Result<std::collections::BTreeSet<Str
 /// `rewrite` a render applies (W5b fix round 3).
 ///
 /// **A probe, not a lexer of our own:** each occurrence of `name` that is not
-/// an attribute (`x.name`) or part of a longer identifier is followed, one at
-/// a time, by `@`, a character minijinja's lexer refuses in code and accepts
-/// everywhere else. If that copy no longer parses, the occurrence was code.
-/// Unlike [`referenced_roots`] this sees assignment targets
-/// (`{% set name = … %}`, `with`, `for`, tuple unpacking) and `{% filter %}`
-/// arguments, which `undeclared_variables` does not report. A template that
-/// does not rewrite or parse at all answers `true`.
+/// an attribute (`x.name`) or part of a longer identifier is followed by `@`,
+/// a character minijinja's lexer refuses in code and accepts everywhere else.
+/// If that copy no longer parses, an occurrence was code. Unlike
+/// [`referenced_roots`] this sees assignment targets (`{% set name = … %}`,
+/// `with`, `for`, tuple unpacking) and `{% filter %}` arguments, which
+/// `undeclared_variables` does not report.
+///
+/// **Linear (fix wave #5b, I3).** Every occurrence is probed in ONE copy:
+/// an `@` in data, a string literal or a comment changes nothing the lexer
+/// reads around it, so the copy fails to parse exactly when one of the
+/// single-occurrence copies W5b built would have. It used to be one copy and
+/// one parse per occurrence, O(occurrences x length) -- 10^11 bytes for a
+/// 1 MB value of `"errorLogs "` once `errorLogs` detection began to read
+/// run-time data (package #5b B7). Now: two parses.
+///
+/// A text with no `{` holds no code and answers `false` without a parse. A
+/// template that does not rewrite or parse answers `false`: it cannot be
+/// rendered, so it calls nothing. (`secrets::text_uses_secret` refuses an
+/// unparsable text itself, before it asks this.)
 // `let_and_return`: see the binding's comment.
 #[allow(clippy::let_and_return)]
 pub(crate) fn name_in_code(template: &str, name: &str) -> bool {
+    if !template.contains('{') {
+        return false;
+    }
     let (protected, _replacers) = replace_raw_tags(template);
     let Ok(rewritten) = compile_source(&protected) else {
-        return true;
+        return false;
     };
     let env = environment();
     if env.template_from_str(&rewritten).is_err() {
-        return true;
+        return false;
     }
     let Ok(pattern) = regex::Regex::new(&format!(r"(?:^|[^.\w]){}\b", regex::escape(name))) else {
         return true;
     };
-    let ends: Vec<usize> = pattern.find_iter(&rewritten).map(|m| m.end()).collect();
-    ends.into_iter().any(|end| {
-        let probe = format!("{}@{}", &rewritten[..end], &rewritten[end..]);
-        // Bound first: the template borrows `probe` and `env`, and must be
-        // dropped before either.
-        let refused = env.template_from_str(&probe).is_err();
-        refused
+    let mut probe = String::with_capacity(rewritten.len() + 16);
+    let mut at = 0;
+    for found in pattern.find_iter(&rewritten) {
+        probe.push_str(&rewritten[at..found.end()]);
+        probe.push('@');
+        at = found.end();
+    }
+    if at == 0 {
+        return false;
+    }
+    probe.push_str(&rewritten[at..]);
+    // Bound first: the template borrows `probe` and `env`, and must be
+    // dropped before either.
+    let refused = env.template_from_str(&probe).is_err();
+    refused
+}
+
+/// Run `f` on a thread with [`RENDER_STACK_BYTES`] of stack, off the async
+/// runtime (fix wave #5b, I3): for a caller that parses untrusted text
+/// outside a render (`worker::claim`'s `errorLogs` detection). `Err` when the
+/// thread cannot start or panics.
+pub(crate) fn on_a_parse_thread<T: Send>(f: impl FnOnce() -> T + Send) -> Result<T, String> {
+    off_the_runtime(|| {
+        std::thread::scope(|scope| {
+            let worker = std::thread::Builder::new()
+                .name("egret-parse".to_string())
+                .stack_size(RENDER_STACK_BYTES)
+                .spawn_scoped(scope, f)
+                .map_err(|e| format!("could not start a parse thread: {e}"))?;
+            worker
+                .join()
+                .map_err(|_| "the parse thread panicked".to_string())
+        })
     })
 }
 
@@ -2670,27 +2711,60 @@ pub(super) fn render_pass(
     source: &str,
     variables: &MjValue,
 ) -> Result<String, PassError> {
+    render_pass_metered(env, source, variables).0
+}
+
+/// [`render_pass`], and the fuel the pass consumed: `None` when it failed
+/// (the engine hands back no state then; a caller that meters fuel counts
+/// the whole allotment). Fix wave #5b (M2): what [`super::nested`] charges to
+/// its per-render fuel budget.
+pub(super) fn render_pass_metered(
+    env: &Environment<'static>,
+    source: &str,
+    variables: &MjValue,
+) -> (Result<String, PassError>, Option<u64>) {
     let (protected, replacers) = replace_raw_tags(source);
-    let rewritten = compile_source(&protected).map_err(|e| PassError::Render(e.into()))?;
-    let template = env
-        .template_from_str(&rewritten)
-        .map_err(PassError::Engine)?;
+    let rewritten = match compile_source(&protected) {
+        Ok(rewritten) => rewritten,
+        Err(e) => return (Err(PassError::Render(e.into())), Some(0)),
+    };
+    let template = match env.template_from_str(&rewritten) {
+        Ok(template) => template,
+        Err(e) => return (Err(PassError::Engine(e)), Some(0)),
+    };
     let mut sink = CappedSink::new(MAX_OUTPUT_BYTES);
     let render_result = template.render_captured_to(variables, &mut sink);
+    let consumed = render_result
+        .as_ref()
+        .ok()
+        .and_then(|captured| captured.state().fuel_levels())
+        .map(|(consumed, _)| consumed);
     // The sink's own flag is checked FIRST and unconditionally. minijinja
     // wraps a writer failure in its own error, and deciding "was this the cap
     // or a real template error?" by inspecting that error's text would be a
     // guess; the sink knows.
     if sink.overflowed {
-        return Err(PassError::Render(RenderError::OutputTooLarge {
-            limit: MAX_OUTPUT_BYTES,
-        }));
+        return (
+            Err(PassError::Render(RenderError::OutputTooLarge {
+                limit: MAX_OUTPUT_BYTES,
+            })),
+            consumed,
+        );
     }
-    render_result.map_err(PassError::Engine)?;
+    if let Err(e) = render_result {
+        return (Err(PassError::Engine(e)), consumed);
+    }
 
-    let rendered = String::from_utf8(sink.buf)
-        .map_err(|e| PassError::Render(RenderError::Template(e.to_string())))?;
-    Ok(put_back_raw_tags(&replacers, &rendered))
+    let rendered = match String::from_utf8(sink.buf) {
+        Ok(rendered) => rendered,
+        Err(e) => {
+            return (
+                Err(PassError::Render(RenderError::Template(e.to_string()))),
+                consumed,
+            )
+        }
+    };
+    (Ok(put_back_raw_tags(&replacers, &rendered)), consumed)
 }
 
 // ---------------------------------------------------------------------------

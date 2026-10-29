@@ -80,19 +80,31 @@
 //!   variable, so `{% set __kestra_render_depth = -100 %}` there lets 116
 //!   nested calls through (measured); here the variable is published for
 //!   reading only (recorded divergence).
-//! - **Each pass** has its own fuel ([`super::env::environment`]'s) and the
+//! - **Each pass** has at most [`super::env::environment`]'s fuel and the
 //!   1 MiB output cap ([`super::env::MAX_OUTPUT_BYTES`]).
-//! - **Passes, shared:** at most [`MAX_NESTED_PASSES`] nested passes in one
-//!   top-level render, all depths and all calls together. Depth alone is no
-//!   bound on work: a call is one VM instruction, so a template can make tens
-//!   of thousands of them at every level.
-//! - **The per-render budgets are shared, not renewed:** the `replace` scan
-//!   budget is the render thread's (the nested passes run on it and install
-//!   none), and the list operators' work tally
-//!   (`arith::MAX_LIST_OPERATOR_WORK`) is the caller's, handed down through
-//!   [`inherited_list_work`], so a nested render cannot multiply either.
+//! - **Calls and passes, shared:** at most [`MAX_NESTED_PASSES`] units in one
+//!   top-level render, all depths and all calls together: every `render()`
+//!   call costs one, whatever it renders, and every nested pass one more.
+//!   Depth alone is no bound on work: a call is one VM instruction, so a
+//!   template can make tens of thousands of them at every level.
+//! - **Fuel, shared** (fix wave #5b, M2): the nested passes of one top-level
+//!   render consume at most [`MAX_NESTED_FUEL`] instructions together.
+//! - **Output, shared** (fix wave #5b, M1): the nested passes of one
+//!   top-level render produce at most [`MAX_NESTED_OUTPUT_BYTES`] together,
+//!   so the values a template keeps from `render()` are bounded in total and
+//!   not only per pass.
+//! - **The per-render budgets are shared, not renewed, over the WHOLE
+//!   top-level render** -- its fixpoint passes and every nested pass: the
+//!   `replace` scan budget is the render thread's (the nested passes run on
+//!   it and install none), and the list operators' work tally
+//!   (`arith::MAX_LIST_OPERATOR_WORK`) is the [`Scope`]'s
+//!   ([`render_list_work`], fix wave #5b, M3; before it, each fixpoint pass
+//!   started a fresh tally). A `render()` of a map or a list charges every
+//!   element it visits to that tally (fix wave #5b, I2), since the walk
+//!   copies them and costs its caller one instruction.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
@@ -100,8 +112,8 @@ use minijinja::value::{Rest, Value as MjValue, ValueKind};
 use minijinja::{Environment, Error as MjError, State};
 
 use super::env::{
-    environment, referenced_roots, render_pass, strip_raw_markers, ContextScope, OrderedMap,
-    PassError, CONTEXT_SCOPE_NAMES, MAX_RENDERING_AMOUNT,
+    environment, referenced_roots, render_pass_metered, strip_raw_markers, ContextScope,
+    OrderedMap, PassError, CONTEXT_SCOPE_NAMES, FUEL, MAX_RENDERING_AMOUNT,
 };
 use super::filters::{java_class_name, pebble_error, Args};
 
@@ -113,7 +125,9 @@ pub(super) const MAX_RENDER_DEPTH: usize = 16;
 pub(super) const RENDER_DEPTH_VAR: &str = "__kestra_render_depth";
 
 /// The most nested passes one top-level render runs, over every `render()`
-/// call at every depth. egret's (Kestra has no such bound).
+/// call at every depth, each call itself counting as one (fix wave #5b, I2:
+/// a call whose value holds no `{` runs no pass, and used to cost nothing).
+/// egret's (Kestra has no such bound).
 ///
 /// Each pass is bounded by fuel and the 1 MiB output cap; what this bounds is
 /// their NUMBER, which nothing else does: the top-level render alone runs at
@@ -123,6 +137,33 @@ pub(super) const RENDER_DEPTH_VAR: &str = "__kestra_render_depth";
 /// the top level's own pass bound, and far more than a template that renders
 /// an input or a list of them needs.
 pub(super) const MAX_NESTED_PASSES: usize = 1_000;
+
+/// The most fuel (minijinja VM instructions) the nested passes of one
+/// top-level render consume together (fix wave #5b, M2). egret's.
+///
+/// Each nested pass used to get a fresh [`FUEL`] (50 000), so one render
+/// could run `(101 + 1 000) x 50 000` instructions, about 11 times the
+/// top level's own `101 x 50 000`. Twenty passes' worth keeps the nested
+/// share under a fifth of the top level's: the worst case is now
+/// `101 x 50 000 + 1 000 000` = 6.05 M instructions. A `render()` of an
+/// input costs a handful of instructions per pass (`{{ x }}` is 3), so a
+/// template that renders hundreds of inputs stays far below it. A pass that
+/// runs it out fails with [`NESTED_FUEL_REFUSAL`].
+pub(super) const MAX_NESTED_FUEL: u64 = 1_000_000;
+
+/// The most bytes the nested passes of one top-level render produce
+/// together (fix wave #5b, M1). egret's.
+///
+/// Each pass is capped at `MAX_OUTPUT_BYTES` (1 MiB), but a template keeps
+/// what `render()` answers (`renderOnce([t, t, …])`), so 1 000 passes could
+/// hold about 1 GiB at once. Sixteen passes at the cap: every output counts,
+/// the intermediate passes of a fixpoint included, which is also what the
+/// passes spent building them.
+pub(super) const MAX_NESTED_OUTPUT_BYTES: usize = 16 << 20;
+
+/// [`MAX_NESTED_FUEL`]'s refusal.
+const NESTED_FUEL_REFUSAL: &str = "egret refuses render() passes that run more than 1000000 \
+     instructions in one render";
 
 /// The line placeholder of the depth refusal, filled by the render that ran
 /// the refused call (only it knows the line). Not text a template can make
@@ -138,9 +179,13 @@ struct Scope {
     forbidden: Vec<String>,
     /// What is left of [`MAX_NESTED_PASSES`].
     passes_left: usize,
-    /// The list operators' work tally of the render that called the
-    /// `render()` now running, for the nested passes to charge.
-    list_work: Option<Arc<AtomicU64>>,
+    /// What is left of [`MAX_NESTED_FUEL`].
+    fuel_left: u64,
+    /// What is left of [`MAX_NESTED_OUTPUT_BYTES`].
+    output_left: usize,
+    /// The list operators' work tally of the whole top-level render: its
+    /// fixpoint passes and every nested pass (fix wave #5b, M3).
+    list_work: Arc<AtomicU64>,
     /// The forbidden root a nested pass met.
     forbidden_hit: Option<String>,
 }
@@ -167,7 +212,9 @@ impl RenderScope {
             depth: 0,
             forbidden: forbidden.iter().map(|f| (*f).to_string()).collect(),
             passes_left: MAX_NESTED_PASSES,
-            list_work: None,
+            fuel_left: MAX_NESTED_FUEL,
+            output_left: MAX_NESTED_OUTPUT_BYTES,
+            list_work: Arc::default(),
             forbidden_hit: None,
         };
         let previous = SCOPE.with(|scope| scope.borrow_mut().replace(fresh));
@@ -198,36 +245,27 @@ pub(crate) fn in_nested_render() -> bool {
     SCOPE.with(|scope| scope.borrow().as_ref().is_some_and(|scope| scope.depth > 0))
 }
 
-/// The work tally a nested render's list operators charge: its caller's.
-/// `None` at the top level, where each render keeps its own.
-pub(super) fn inherited_list_work() -> Option<Arc<AtomicU64>> {
-    SCOPE.with(|scope| {
-        scope
-            .borrow()
-            .as_ref()
-            .and_then(|scope| scope.list_work.clone())
-    })
+/// The list operators' work tally of the top-level render running on this
+/// thread, shared by its every pass, nested or not (fix wave #5b, M3).
+/// `None` outside one (an environment composed by hand), where each `State`
+/// keeps its own.
+pub(super) fn render_list_work() -> Option<Arc<AtomicU64>> {
+    SCOPE.with(|scope| scope.borrow().as_ref().map(|scope| scope.list_work.clone()))
 }
 
-/// Sets the depth and the inherited tally for the length of one `render()`
-/// call, and puts the caller's back when dropped (a failure or a panic
-/// included).
+/// Sets the depth for the length of one `render()` call, and puts the
+/// caller's back when dropped (a failure or a panic included).
 struct Descent {
     depth: usize,
-    list_work: Option<Arc<AtomicU64>>,
 }
 
 impl Descent {
-    fn enter(depth: usize, list_work: Arc<AtomicU64>) -> Self {
+    fn enter(depth: usize) -> Self {
         SCOPE.with(|scope| {
             let mut scope = scope.borrow_mut();
             let scope = scope.as_mut().expect("checked by the caller");
-            let saved = Self {
-                depth: scope.depth,
-                list_work: scope.list_work.take(),
-            };
+            let saved = Self { depth: scope.depth };
             scope.depth = depth;
-            scope.list_work = Some(list_work);
             saved
         })
     }
@@ -235,12 +273,10 @@ impl Descent {
 
 impl Drop for Descent {
     fn drop(&mut self) {
-        let list_work = self.list_work.take();
         let depth = self.depth;
         SCOPE.with(|scope| {
             if let Some(scope) = scope.borrow_mut().as_mut() {
                 scope.depth = depth;
-                scope.list_work = list_work;
             }
         });
     }
@@ -324,10 +360,12 @@ fn execute(
     // variables fail before the function runs; a silent one (a missing
     // `else`) is egret's spelling of null.
     super::compare::assert_defined(state, &value)?;
+    // Fix wave #5b, I2: the call itself is charged, whatever it renders.
+    charge_pass()?;
 
-    let mut nested = Nested::new(state, depth + 1);
     let tally = super::arith::list_work_tally(state);
-    let _descent = Descent::enter(depth + 1, tally);
+    let mut nested = Nested::new(state, depth + 1, tally);
+    let _descent = Descent::enter(depth + 1);
     nested.object(&value, recursive)
 }
 
@@ -337,26 +375,38 @@ struct Nested<'s> {
     caller: &'s State<'s, 's>,
     depth: usize,
     env: Option<(Environment<'static>, MjValue)>,
+    /// The top-level render's list-work tally, charged per element visited.
+    list_work: Arc<AtomicU64>,
 }
 
 impl<'s> Nested<'s> {
-    fn new(caller: &'s State<'s, 's>, depth: usize) -> Self {
+    fn new(caller: &'s State<'s, 's>, depth: usize, list_work: Arc<AtomicU64>) -> Self {
         Self {
             caller,
             depth,
             env: None,
+            list_work,
         }
     }
 
     /// `VariableRenderer.renderObject`.
     fn object(&mut self, value: &MjValue, recursive: bool) -> Result<MjValue, MjError> {
         match value.kind() {
-            ValueKind::String => Ok(MjValue::from(
-                self.string(value.as_str().unwrap_or(""), recursive)?,
-            )),
+            ValueKind::String => {
+                let text = value.as_str().unwrap_or("");
+                // No `{`: the value itself, not a copy (fix wave #5b, M1).
+                if !text.contains('{') && !value.is_safe() {
+                    return Ok(value.clone());
+                }
+                Ok(MjValue::from(self.string(text, recursive)?))
+            }
             ValueKind::Map => {
                 let mut entries: Vec<(String, MjValue)> = Vec::new();
+                // `putIfAbsent` is a hash lookup; a scan of `entries` made
+                // the walk quadratic in the key count (fix wave #5b, I2).
+                let mut seen: HashSet<String> = HashSet::new();
                 for key in value.try_iter()? {
+                    super::arith::charge_tally(&self.list_work, 1)?;
                     let Some(text) = key.as_str() else {
                         let class = java_class_name(&key);
                         return Err(pebble_error(format!(
@@ -369,8 +419,9 @@ impl<'s> Nested<'s> {
                     let key_text = self.string(text, false)?;
                     let item = value.get_item(&key)?;
                     let rendered = self.object(&item, recursive)?;
-                    // `putIfAbsent`: the first of two keys that render alike.
-                    if !entries.iter().any(|(k, _)| *k == key_text) {
+                    // `putIfAbsent`: the first of two keys that render alike,
+                    // in insertion order.
+                    if seen.insert(key_text.clone()) {
                         entries.push((key_text, rendered));
                     }
                 }
@@ -379,6 +430,7 @@ impl<'s> Nested<'s> {
             ValueKind::Seq | ValueKind::Iterable => {
                 let mut items = Vec::new();
                 for item in value.try_iter()? {
+                    super::arith::charge_tally(&self.list_work, 1)?;
                     items.push(self.object(&item, recursive)?);
                 }
                 Ok(MjValue::from(items))
@@ -398,7 +450,7 @@ impl<'s> Nested<'s> {
         if self.env.is_none() {
             self.env = Some(self.environment());
         }
-        let (env, variables) = self.env.as_ref().expect("built above");
+        let (env, variables) = self.env.as_mut().expect("built above");
         let mut current = text.to_string();
         let passes = if recursive {
             MAX_RENDERING_AMOUNT + 1
@@ -408,7 +460,19 @@ impl<'s> Nested<'s> {
         for _ in 0..passes {
             charge_pass()?;
             check_forbidden(&current)?;
-            let next = render_pass(env, &current, variables).map_err(nested_error)?;
+            let allotment = take_fuel()?;
+            env.set_fuel(Some(allotment));
+            let (next, consumed) = render_pass_metered(env, &current, variables);
+            spend_fuel(consumed.unwrap_or(allotment));
+            let next = match next {
+                Err(PassError::Engine(e))
+                    if e.kind() == minijinja::ErrorKind::OutOfFuel && allotment < FUEL =>
+                {
+                    return Err(pebble_error(NESTED_FUEL_REFUSAL));
+                }
+                next => next.map_err(nested_error)?,
+            };
+            charge_output(next.len())?;
             if !recursive || next == current {
                 return Ok(strip_raw_markers(&next));
             }
@@ -492,6 +556,44 @@ fn charge_pass() -> Result<(), MjError> {
             )));
         }
         scope.passes_left -= 1;
+        Ok(())
+    })
+}
+
+/// The fuel the next nested pass may consume: [`FUEL`], or what is left of
+/// [`MAX_NESTED_FUEL`] when that is less.
+fn take_fuel() -> Result<u64, MjError> {
+    SCOPE.with(|scope| {
+        let scope = scope.borrow();
+        let scope = scope.as_ref().expect("checked by check_depth");
+        if scope.fuel_left == 0 {
+            return Err(pebble_error(NESTED_FUEL_REFUSAL));
+        }
+        Ok(scope.fuel_left.min(FUEL))
+    })
+}
+
+/// Takes what a nested pass consumed off [`MAX_NESTED_FUEL`].
+fn spend_fuel(consumed: u64) {
+    SCOPE.with(|scope| {
+        if let Some(scope) = scope.borrow_mut().as_mut() {
+            scope.fuel_left = scope.fuel_left.saturating_sub(consumed);
+        }
+    });
+}
+
+/// Charges a nested pass's output to [`MAX_NESTED_OUTPUT_BYTES`].
+fn charge_output(bytes: usize) -> Result<(), MjError> {
+    SCOPE.with(|scope| {
+        let mut scope = scope.borrow_mut();
+        let scope = scope.as_mut().expect("checked by check_depth");
+        if bytes > scope.output_left {
+            return Err(pebble_error(format!(
+                "egret refuses render() passes that produce more than \
+                 {MAX_NESTED_OUTPUT_BYTES} bytes in one render"
+            )));
+        }
+        scope.output_left -= bytes;
         Ok(())
     })
 }
@@ -785,25 +887,34 @@ mod tests {
         );
     }
 
-    /// A nested failure fails the caller.
+    /// A nested failure fails the caller, for Kestra's reason: an undefined
+    /// root is egret's "undefined value" where Kestra names the
+    /// root attribute (`function-render-missing-variable`, `-missing-argument`,
+    /// `-raw`), a parse failure the parser's (`-syntax-error`).
     #[test]
     fn a_nested_render_fails_as_its_text_fails() {
-        assert!(render("{{ render('{{ nope }}') }}")
-            .unwrap_err()
-            .contains("undefined"));
-        assert!(render("{{ render(nope) }}")
-            .unwrap_err()
-            .contains("undefined"));
+        let e = render("{{ render('{{ nope }}') }}").unwrap_err();
+        assert!(e.contains("undefined value"), "{e}");
+        let e = render("{{ render(nope) }}").unwrap_err();
+        assert!(e.contains("undefined value"), "{e}");
         // The raw region is stripped by `render()`, and the outer pass then
-        // evaluates `{{ x }}` -- Kestra's harness fails the same way.
-        assert!(render_in(
+        // evaluates `{{ x }}`, an undefined `x` -- Kestra's harness fails the
+        // same way (`function-render-raw`: the root-attribute reason).
+        let e = render_in(
             "{{ render(a) }}",
-            json!({"a": "{% raw %}{{ x }}{% endraw %}"})
+            json!({"a": "{% raw %}{{ x }}{% endraw %}"}),
         )
-        .is_err());
+        .unwrap_err();
+        assert!(e.contains("undefined value"), "{e}");
         let e = render_in("{{ render(a) }}", json!({"a": "{{ a }}x"})).unwrap_err();
         assert!(e.contains("Too many rendering attempts"), "{e}");
-        assert!(render_in("{{ render(a) }}", json!({"a": "{{"})).is_err());
+        // `function-render-syntax-error`: the nested text's parser error
+        // (Kestra: `ParserException: Unexpected token "EOF"`).
+        let e = render_in("{{ render(a) }}", json!({"a": "{{"})).unwrap_err();
+        assert!(
+            e.contains("unexpected end of input, expected expression"),
+            "{e}"
+        );
     }
 
     /// D9 rule 1 on the shared environment (the plugin-task path is
@@ -864,18 +975,136 @@ mod tests {
     #[test]
     fn the_nested_passes_share_one_budget() {
         let context = json!({"t": "{{ 1 }}"});
-        // `render(t)` is two passes (`{{ 1 }}`, then `1` to see it is fixed).
+        // `render(t)` is three units: the call, and two passes (`{{ 1 }}`,
+        // then `1` to see it is fixed). `range(1, n)` is n calls (Pebble's
+        // range is inclusive).
         let loop_of =
             |n: usize| format!("{{% for i in range(1, {n}) %}}{{{{ render(t) }}}}{{% endfor %}}");
         assert_eq!(
-            render_in(&loop_of(MAX_NESTED_PASSES / 2), context.clone()).map(|s| s.len()),
-            Ok(MAX_NESTED_PASSES / 2)
+            render_in(&loop_of(MAX_NESTED_PASSES / 3), context.clone()).map(|s| s.len()),
+            Ok(MAX_NESTED_PASSES / 3)
         );
-        let e = render_in(&loop_of(MAX_NESTED_PASSES / 2 + 1), context).unwrap_err();
+        let e = render_in(&loop_of(MAX_NESTED_PASSES / 3 + 1), context).unwrap_err();
         assert!(
             e.contains("egret refuses more than 1000 render() passes in one render"),
             "{e}"
         );
+    }
+
+    /// Fix wave #5b, I2: a call is charged even when its value holds no `{`
+    /// and so runs no pass.
+    #[test]
+    fn a_call_without_a_brace_is_charged() {
+        let loop_of =
+            |n: usize| format!("{{% for i in range(1, {n}) %}}{{{{ render(5) }}}}{{% endfor %}}");
+        assert_eq!(
+            render(&loop_of(MAX_NESTED_PASSES)).map(|s| s.len()),
+            Ok(MAX_NESTED_PASSES)
+        );
+        let e = render(&loop_of(MAX_NESTED_PASSES + 1)).unwrap_err();
+        assert!(
+            e.contains("egret refuses more than 1000 render() passes in one render"),
+            "{e}"
+        );
+    }
+
+    /// Fix wave #5b, I2: the walk of a map or a list charges every element
+    /// to the render's list work, so a loop over `render(big)` meets the
+    /// shared 10 M. 3 000 x 3 000 = 9 M are spent first; the 20 000 keys of
+    /// `m` then cross it on the 51st call.
+    #[test]
+    fn a_walk_charges_the_list_work_budget() {
+        let l: Vec<u32> = (0..3_000).collect();
+        let m: serde_json::Map<String, serde_json::Value> =
+            (0..20_000).map(|i| (format!("k{i}"), json!(i))).collect();
+        let context = json!({"l": l, "m": m.clone(), "n": [m]});
+        assert_eq!(
+            render_in("{{ render(m) | length }}", context.clone()),
+            Ok("20000".into())
+        );
+        for walk in ["render(m) | length", "render(n) | length"] {
+            let template = format!(
+                "{{% set a = (l - l) | length %}}\
+                 {{% for i in range(1, 60) %}}{{{{ {walk} }}}}{{% endfor %}}"
+            );
+            let e = render_in(&template, context.clone()).unwrap_err();
+            assert!(e.contains("egret refuses list operations"), "{walk}: {e}");
+        }
+    }
+
+    /// Fix wave #5b, I2: equal keys are found by a hash lookup, not a scan
+    /// of the keys kept so far (200 000 keys were 2 x 10^10 comparisons).
+    /// First wins, in insertion order, as before.
+    #[test]
+    fn deduping_map_keys_is_linear() {
+        let m: serde_json::Map<String, serde_json::Value> =
+            (0..200_000).map(|i| (format!("k{i}"), json!(i))).collect();
+        let started = std::time::Instant::now();
+        assert_eq!(
+            render_in("{{ render(m) | length }}", json!({"m": m})),
+            Ok("200000".into())
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            render_in(
+                "{{ render(m) }}",
+                json!({"m": {"b": 0, "{{ 'a' }}": 1, "a": 2, "{{ 'b' }}": 3}})
+            ),
+            Ok(r#"{"b":0,"a":1}"#.into())
+        );
+    }
+
+    /// Fix wave #5b, M3: the list work is ONE budget for the whole
+    /// top-level render, its fixpoint passes included. Each pass here does
+    /// 6.25 M; the second pass used to start a fresh tally.
+    #[test]
+    fn the_fixpoint_passes_share_the_list_work_budget() {
+        let l: Vec<u32> = (0..2_500).collect();
+        let context = json!({"l": l, "t": "{{ (l - l) | length }}"});
+        assert_eq!(render_in("{{ t }}", context.clone()), Ok("0".into()));
+        let e = render_in("{% set a = (l - l) | length %}{{ t }}", context).unwrap_err();
+        assert!(e.contains("egret refuses list operations"), "{e}");
+    }
+
+    /// Fix wave #5b, M1: what the nested passes produce is bounded in total,
+    /// not only per pass. 17 passes of 1 000 000 bytes cross 16 MiB.
+    #[test]
+    fn the_nested_outputs_share_one_byte_budget() {
+        let context = json!({"big": "a".repeat(1_000_000), "t": "{{ big }}"});
+        let of = |n: usize| {
+            format!(
+                "{{{{ renderOnce([{}]) | length }}}}",
+                vec!["t"; n].join(", ")
+            )
+        };
+        assert_eq!(render_in(&of(16), context.clone()), Ok("16".into()));
+        let e = render_in(&of(17), context).unwrap_err();
+        assert!(
+            e.contains(&format!(
+                "egret refuses render() passes that produce more than \
+                 {MAX_NESTED_OUTPUT_BYTES} bytes in one render"
+            )),
+            "{e}"
+        );
+    }
+
+    /// Fix wave #5b, M2: the nested passes share [`MAX_NESTED_FUEL`]; each
+    /// used to get a fresh `FUEL`. `t` is a loop of 15 000 empty iterations,
+    /// under one pass's 50 000.
+    #[test]
+    fn the_nested_passes_share_one_fuel_budget() {
+        assert!(NESTED_FUEL_REFUSAL.contains(&MAX_NESTED_FUEL.to_string()));
+        let context = json!({"t": "{% for i in range(1, 15000) %}{% endfor %}x"});
+        let of = |n: usize| {
+            format!("{{% for i in range(1, {n}) %}}{{{{ renderOnce(t) }}}}{{% endfor %}}")
+        };
+        assert_eq!(render_in(&of(5), context.clone()), Ok("xxxxx".into()));
+        let e = render_in(&of(100), context).unwrap_err();
+        assert!(e.contains(NESTED_FUEL_REFUSAL), "{e}");
     }
 
     /// The list operators' work budget is the CALLER's: a nested render

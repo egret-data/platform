@@ -8,7 +8,9 @@
 //!   failed attempt's line is behind the writer's flush barrier before the
 //!   outcome commits, so the bounded wait is not what makes it visible;
 //! - an execution with no ERROR line waits the bound, about 1 s, and answers `[]`;
-//! - the list is this execution's and this workspace's only;
+//! - the list is this execution's and this workspace's only (a line under
+//!   this execution's id and another workspace's is not in it);
+//! - an input that holds `errorLogs` but does not parse reads nothing;
 //! - a SECRET input's value, masked when the line was stored, stays masked;
 //! - a call reached only through `render(vars.…)` is read for, and answers;
 //! - a call assembled at render is refused by egret's sentence, and an
@@ -199,10 +201,31 @@ async fn an_errors_task_reads_the_failed_tasks_line_on_its_first_read() {
         "the failed task's line was not visible on the first read"
     );
 
-    // The read itself, scoped by both ids.
+    // The read itself, scoped by both ids. Execution ids are unique, so an
+    // execution of another workspace cannot tell the workspace predicate
+    // apart (fix wave #5b, M8): a line stored under THIS execution's id and
+    // another workspace's id can. The table's only key on the execution is
+    // `execution_id` (`migrations/0159`), so the row is inserted directly:
+    // `insert_batch` joins the execution on both ids and would drop it.
     let repo = LogRepo::new(fx.pool().clone());
     assert!(repo.error_lines(other_ws, ex).await.unwrap().is_empty());
-    assert!(!repo.error_lines(ws, ex).await.unwrap().is_empty());
+    sqlx::query(
+        "INSERT INTO workflow.task_logs (workspace_id, execution_id, task_id, attempt, level, ts, message) \
+         VALUES ($1, $2, 'failed', 0, 4, now(), 'a cross-workspace line')",
+    )
+    .bind(other_ws)
+    .bind(ex)
+    .execute(fx.pool())
+    .await
+    .unwrap();
+    let own = repo.error_lines(ws, ex).await.unwrap();
+    assert!(!own.is_empty());
+    assert!(
+        own.iter().all(|l| l.message != "a cross-workspace line"),
+        "the workspace predicate let another workspace's line through: {own:?}"
+    );
+    let theirs = repo.error_lines(other_ws, ex).await.unwrap();
+    assert_eq!(theirs.len(), 1, "{theirs:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -241,6 +264,25 @@ async fn a_task_that_does_not_call_it_reads_nothing() {
     let ex = fx.run(ws, source, json!({})).await;
     assert_eq!(fx.run_of(ex, "say").await.0, "SUCCESS");
     assert_eq!(error_log_reads_so_far(), reads_before);
+}
+
+/// Fix wave #5b, I3: an input that holds the name beside a broken `{{`
+/// does not parse, so it calls nothing: no read and no wait. (It used to
+/// answer `true`, and every task of the execution read and waited 1 s.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_input_that_does_not_parse_reads_nothing() {
+    let Some(fx) = fx().await else { return };
+    let ws = fx.workspace().await;
+    let source = "id: broken\nnamespace: b7\ninputs:\n  - id: x\n    type: STRING\n\
+        tasks:\n  - id: say\n    type: io.kestra.plugin.core.log.Log\n    \
+        message: \"n={{ inputs.x | length }}\"\n";
+    let reads_before = error_log_reads_so_far();
+    let ex = fx.run(ws, source, json!({"x": "errorLogs {{"})).await;
+    let (state, message) = fx.run_of(ex, "say").await;
+    assert_eq!(state, "SUCCESS", "{message:?}");
+    assert_eq!(fx.lines_of(ex, "say").await, [(2, "n=12".to_string())]);
+    // The wait follows a read, so no read is no wait.
+    assert_eq!(error_log_reads_so_far(), reads_before, "the worker read");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

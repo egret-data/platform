@@ -87,7 +87,10 @@ impl ErrorLogEntry {
     /// the order Jackson writes them in). A field egret does not record
     /// (`tenantId`, `triggerId`, `thread`, `executionKind`, `progress`) is
     /// `null`, so a member read answers `null` as the Java getter does, and
-    /// printing omits it as Kestra's `NON_NULL` mapper does.
+    /// printing omits it as Kestra's `NON_NULL` mapper does -- for every field
+    /// but `attemptNumber`, which `LogEntry.java:51-53` marks
+    /// `@JsonInclude(ALWAYS)`, so Kestra prints a null one as `null` where
+    /// egret omits it (spec §6.2 recorded divergence 5).
     fn to_value(&self) -> MjValue {
         let opt = |s: Option<String>| s.map(MjValue::from).unwrap_or(MjValue::from(()));
         MjValue::from_object(OrderedMap::new(vec![
@@ -149,26 +152,72 @@ pub(super) fn take_handed_out() -> bool {
     HANDED_OUT.with(|h| h.replace(false))
 }
 
+/// The most bytes of candidate text [`calls_error_logs`] parses for one
+/// claim (fix wave #5b, I3). egret's.
+///
+/// A candidate is a string that holds both `{` and `errorLogs`; past this
+/// many bytes of them the scan stops and answers `true`, the over-reading
+/// side (one read, and at most `worker::claim::ERROR_LOGS_WAIT` on an empty
+/// log), rather than parse more run-time data. 4 MiB is four times the
+/// output cap of one render pass; the parse it bounds is linear
+/// ([`super::env::name_in_code`]).
+pub const MAX_ERROR_LOGS_SCAN_BYTES: usize = 4 << 20;
+
+/// The cheap filter: code needs a `{` (`{{`, `{%`), and the name is written
+/// out in the source.
+fn is_candidate(text: &str) -> bool {
+    text.contains('{') && text.contains("errorLogs")
+}
+
 /// Whether `text` calls `errorLogs` as code (`env::name_in_code`): what the
-/// worker reads the list for. A cheap substring test first.
+/// worker reads the list for. A cheap substring test first; a text that does
+/// not parse calls nothing (fix wave #5b, I3: it used to answer `true`, so
+/// `"errorLogs {{"` in an input made every task of the execution wait).
 pub fn text_calls_error_logs(text: &str) -> bool {
-    text.contains("errorLogs") && super::env::name_in_code(text, "errorLogs")
+    is_candidate(text) && super::env::name_in_code(text, "errorLogs")
 }
 
 /// [`text_calls_error_logs`] over every text and every string (keys too) of
 /// every JSON value -- the texts a `render()` can reach at run time.
+///
+/// **Bounded and off the runtime (fix wave #5b, I3).** The walk only
+/// collects the candidates ([`is_candidate`], linear); at most
+/// [`MAX_ERROR_LOGS_SCAN_BYTES`] of them are parsed, past which the answer
+/// is `true`; and the parsing runs on a thread of its own with a render's
+/// stack (`env::on_a_parse_thread`), never on a tokio worker. A thread that
+/// cannot start answers `true`, the over-reading side.
 pub fn calls_error_logs(texts: &[&str], json: &[&serde_json::Value]) -> bool {
-    fn walk(v: &serde_json::Value) -> bool {
+    fn walk<'v>(v: &'v serde_json::Value, out: &mut Vec<&'v str>) {
         match v {
-            serde_json::Value::String(s) => text_calls_error_logs(s),
-            serde_json::Value::Array(items) => items.iter().any(walk),
-            serde_json::Value::Object(map) => {
-                map.iter().any(|(k, v)| text_calls_error_logs(k) || walk(v))
+            serde_json::Value::String(s) => {
+                if is_candidate(s) {
+                    out.push(s);
+                }
             }
-            _ => false,
+            serde_json::Value::Array(items) => items.iter().for_each(|v| walk(v, out)),
+            serde_json::Value::Object(map) => map.iter().for_each(|(k, v)| {
+                if is_candidate(k) {
+                    out.push(k);
+                }
+                walk(v, out);
+            }),
+            _ => {}
         }
     }
-    texts.iter().any(|t| text_calls_error_logs(t)) || json.iter().any(|v| walk(v))
+    let mut candidates: Vec<&str> = texts.iter().copied().filter(|t| is_candidate(t)).collect();
+    json.iter().for_each(|v| walk(v, &mut candidates));
+    if candidates.is_empty() {
+        return false;
+    }
+    if candidates.iter().map(|t| t.len()).sum::<usize>() > MAX_ERROR_LOGS_SCAN_BYTES {
+        return true;
+    }
+    super::env::on_a_parse_thread(|| {
+        candidates
+            .iter()
+            .any(|t| super::env::name_in_code(t, "errorLogs"))
+    })
+    .unwrap_or(true)
 }
 
 /// `ErrorLogsFunction`.
@@ -377,5 +426,63 @@ mod tests {
             &["no call"],
             &[&serde_json::json!({"a": ["errorLogs"]})]
         ));
+        // One copy probes every occurrence: a call after data still counts,
+        // and so does an assignment target.
+        assert!(text_calls_error_logs(
+            "{{ 'errorLogs' }} errorLogs {# errorLogs #}{{ errorLogs() }}"
+        ));
+        assert!(text_calls_error_logs("{% set errorLogs = 1 %}"));
+    }
+
+    /// Fix wave #5b, I3: a string that does not parse cannot be rendered, so
+    /// it calls nothing. It used to answer `true`, and `"errorLogs {{"` in an
+    /// input made every task of the execution read and wait.
+    #[test]
+    fn a_text_that_does_not_parse_calls_nothing() {
+        assert!(!text_calls_error_logs("errorLogs {{"));
+        assert!(!text_calls_error_logs("{{ errorLogs( }}"));
+        assert!(!calls_error_logs(
+            &["no call"],
+            &[&serde_json::json!({"inputs": {"x": "errorLogs {{"}})]
+        ));
+    }
+
+    /// Fix wave #5b, I3: run-time data full of the word is cheap. Without a
+    /// `{` nothing is parsed; with one, every occurrence is probed in one
+    /// parse (it was one parse of the whole text per occurrence: 20 000 x
+    /// 360 KB here, minutes; the bound below is generous for a debug build).
+    #[test]
+    fn detection_is_linear_in_the_text() {
+        let started = std::time::Instant::now();
+        let plain = "errorLogs ".repeat(100_000);
+        assert_eq!(plain.len(), 1_000_000);
+        assert!(!text_calls_error_logs(&plain));
+        assert!(!calls_error_logs(&[], &[&serde_json::json!({"x": plain})]));
+        // Lines, not one line: minijinja's lexer keeps a column in a `u16`
+        // and its debug build overflows reporting an error past column
+        // 65 535 (the release build wraps; not this fix's concern).
+        let data = "{{ 1 }} errorLogs\n".repeat(20_000);
+        assert!(!text_calls_error_logs(&data));
+        assert!(text_calls_error_logs(&format!(
+            "{data}{{{{ errorLogs() }}}}"
+        )));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Fix wave #5b, I3: past [`MAX_ERROR_LOGS_SCAN_BYTES`] of candidate text
+    /// the scan stops and answers `true` (the over-reading side) without
+    /// parsing; at or under it, the same data parses and answers `false`.
+    #[test]
+    fn the_scan_is_capped() {
+        let piece = "{ errorLogs ".repeat(MAX_ERROR_LOGS_SCAN_BYTES / 12 / 4);
+        let under: Vec<serde_json::Value> = (0..4).map(|_| serde_json::json!(piece)).collect();
+        let refs: Vec<&serde_json::Value> = under.iter().collect();
+        assert!(!calls_error_logs(&[], &refs));
+        let over = serde_json::json!("{ errorLogs ".repeat(MAX_ERROR_LOGS_SCAN_BYTES / 12 + 1));
+        assert!(calls_error_logs(&[], &[&over]));
     }
 }

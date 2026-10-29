@@ -613,7 +613,7 @@ fn java_seq(kind: JavaSeqKind, items: Vec<MjValue>) -> MjValue {
 /// The [`JavaSeqKind`] of a value — [`JavaSeqKind::MutableList`] for anything
 /// untagged, which is every list that came from the context, from `fromJson`,
 /// from `range` or from a filter that builds a fresh `ArrayList`.
-fn java_seq_kind(value: &MjValue) -> JavaSeqKind {
+pub(super) fn java_seq_kind(value: &MjValue) -> JavaSeqKind {
     value
         .downcast_object_ref::<JavaSeq>()
         .map(|seq| seq.kind)
@@ -3946,6 +3946,9 @@ fn abbreviate(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
     if units.len() < width || units.len() <= 3 {
         return Ok(MjValue::from(text));
     }
+    // A cut inside a surrogate pair: Java keeps the lone surrogate, which a
+    // Rust `String` cannot hold, so it becomes U+FFFD here (fix wave #5b,
+    // M10; recorded beside the module's other UTF-16 notes).
     if width <= 3 {
         return Ok(MjValue::from(String::from_utf16_lossy(&units[..width])));
     }
@@ -4122,7 +4125,19 @@ fn rsort(value: MjValue) -> Result<MjValue, MjError> {
 /// [`replace`]) is not to port `String.hashCode`'s layout, and every corpus
 /// entry agrees. A key here is a String, so a list element merged into a map
 /// is keyed by its Java text (`1` and `'1'` are one key here, two there).
-fn merge(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+///
+/// **egret's bounds (fix wave #5b, I1):** every branch that builds a result
+/// is held to the list operators' bounds, as list `+` is
+/// (`arith::MAX_LIST_OPERATOR_LENGTH`, `arith::MAX_LIST_OPERATOR_WORK`): it
+/// refuses a result past a million elements, and charges the `n + m`
+/// elements it copies to the render's list work, before copying. Without it
+/// `{% set l = l | merge(l) %}` forty times from one element was 2^40
+/// values. Kestra has neither bound.
+fn merge(
+    state: &minijinja::State,
+    value: MjValue,
+    rest: Rest<MjValue>,
+) -> Result<MjValue, MjError> {
     strict_undefined("merge", &value)?;
     let args = Args::new(rest);
     let items = args.get("items", 0).unwrap_or_else(|| MjValue::from(()));
@@ -4146,6 +4161,18 @@ fn merge(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
     };
     let arg_is_list = matches!(items.kind(), ValueKind::Seq | ValueKind::Iterable)
         && java_seq_kind(&items).is_list();
+    // Before the copy: the result is at most `n + m` long.
+    let grow = |n: usize, m: usize| -> Result<(), MjError> {
+        super::arith::check_list_length(n.saturating_add(m))?;
+        super::arith::charge_list_work(state, (n as u64).saturating_add(m as u64))
+    };
+    let len_of = |v: &MjValue| {
+        v.len()
+            .unwrap_or_else(|| v.try_iter().map(Iterator::count).unwrap_or(0))
+    };
+    if value.kind() == ValueKind::Map && (items.kind() == ValueKind::Map || arg_is_list) {
+        grow(len_of(&value), len_of(&items))?;
+    }
     if let Some(mut entries) = as_map(&value) {
         if let Some(more) = as_map(&items) {
             entries.extend(more);
@@ -4173,6 +4200,7 @@ fn merge(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
         )),
         JavaSeqKind::Array => {
             if java_seq_kind(&items) == JavaSeqKind::Array {
+                grow(list.len(), len_of(&items))?;
                 list.extend(as_list(&items).unwrap_or_default());
                 Ok(java_seq(JavaSeqKind::Array, list))
             } else {
@@ -4185,12 +4213,14 @@ fn merge(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
         }
         _ => {
             if let Some(entries) = as_map(&items) {
+                grow(list.len(), entries.len())?;
                 list.extend(
                     entries.into_iter().map(|(key, item)| {
                         MjValue::from_object(OrderedMap::new(vec![(key, item)]))
                     }),
                 );
             } else if arg_is_list {
+                grow(list.len(), len_of(&items))?;
                 list.extend(as_list(&items).unwrap_or_default());
             } else {
                 return Err(pebble_error(format!(
@@ -9640,5 +9670,45 @@ mod tests {
         }
         let message = err("{{ [1] | merge(nothere) }}", "{}");
         assert!(message.contains("an undefined value reached"), "{message}");
+    }
+
+    /// Fix wave #5b, I1: `merge` is held to list `+`'s bounds. Forty
+    /// doublings from one element would be 2^40 values, an OOM kill of the
+    /// worker; the 20th (2^20 = 1 048 576 elements) is refused before it is
+    /// built. And every copy is charged to the render's list work: 501
+    /// merges of 10 000 + 10 000 elements cross the 10 M.
+    #[test]
+    fn merge_is_held_to_the_list_operator_bounds() {
+        let doubling = format!(
+            "{{% set l = [1] %}}{}{{{{ l | length }}}}",
+            "{% set l = l | merge(l) %}".repeat(40)
+        );
+        let message = err(&doubling, "{}");
+        assert!(
+            message.contains(
+                "egret refuses a list operation whose result would have more than 1000000 \
+                 elements; this one would have 1048576"
+            ),
+            "{message}"
+        );
+        let nineteen = format!(
+            "{{% set l = [1] %}}{}{{{{ l | length }}}}",
+            "{% set l = l | merge(l) %}".repeat(19)
+        );
+        assert_eq!(ok(&nineteen, "{}"), "524288");
+
+        let l: Vec<u32> = (0..10_000).collect();
+        let context = serde_json::json!({ "l": l }).to_string();
+        let looped = |n: usize| {
+            format!(
+                "{{% for i in range(1, {n}) %}}{{{{ (l | merge(l)) | length > 0 }}}}{{% endfor %}}"
+            )
+        };
+        assert_eq!(ok(&looped(500), &context).len(), 500 * 4);
+        let message = err(&looped(501), &context);
+        assert!(
+            message.contains("egret refuses list operations"),
+            "{message}"
+        );
     }
 }

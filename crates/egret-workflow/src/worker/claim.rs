@@ -2777,21 +2777,26 @@ async fn error_logs_for(
 /// time: `vars`, the loop value, and every value [`Surface::snapshot_values`]
 /// names. A task that is not a leaf of the source (a `WorkingDirectory`
 /// block's own claim) is read as the whole source, the over-reading side.
+///
+/// Fix wave #5b, I3: one call of [`calls_error_logs`] over every text and
+/// value, which filters cheaply, caps the bytes it parses and parses off the
+/// runtime -- the values are run-time data an attacker may fill.
 fn wants_error_logs(c: &Claimed, surface: &Surface) -> bool {
-    use crate::runners::error_logs::{calls_error_logs, text_calls_error_logs};
+    use crate::runners::error_logs::calls_error_logs;
     let mut json = surface.snapshot_values();
     json.push(surface.vars());
     let own = surface
         .flow()
         .and_then(|f| crate::spec::path::find_task(f, &c.task_id));
-    let own_text = match own.map(|t| (&t.kind, t.timeout.as_ref())) {
+    let mut texts: Vec<&str> = vec![c.value.as_deref().unwrap_or("")];
+    match own.map(|t| (&t.kind, t.timeout.as_ref())) {
         Some((crate::models::TaskKind::Leaf { spec }, timeout)) => {
             json.push(spec);
-            timeout.is_some_and(|t| text_calls_error_logs(t.source()))
+            texts.extend(timeout.map(|t| t.source()));
         }
-        _ => text_calls_error_logs(&c.source),
-    };
-    own_text || calls_error_logs(&[c.value.as_deref().unwrap_or("")], &json)
+        _ => texts.push(&c.source),
+    }
+    calls_error_logs(&texts, &json)
 }
 
 /// [`render_context`]'s reads on one pool connection: the context, whether
