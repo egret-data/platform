@@ -317,10 +317,6 @@ pub enum Via {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum NotOnEngines {
-    /// A workspace membership held by a group: the compiler expands a `group`
-    /// principal to its members, but not a group's own workspace memberships
-    /// (`members.rs` module doc, narrowing 1; measured, live doc §1.1 C3b).
-    HeldThroughGroup,
     /// Expired. The compiler reads only unexpired rows, but a lapse is not a
     /// write, so engines may apply it until the profile next recompiles
     /// (`members.rs` module doc, narrowing 2).
@@ -867,7 +863,6 @@ pub async fn read_user_via(
             .unwrap_or_default()
     };
     let expired = Some(NotOnEngines::Expired);
-    let through_group = Some(NotOnEngines::HeldThroughGroup);
 
     // Memberships.
     let group_memberships: Vec<Membership> = group_names
@@ -940,7 +935,7 @@ pub async fn read_user_via(
                     name: r.ws_name(),
                 },
                 r,
-                mark(has_username, false, through_group),
+                mark(has_username, !r.expired && member_of.contains(&ws), expired),
             ));
         }
     }
@@ -1015,7 +1010,7 @@ pub async fn read_user_via(
                     id: ws,
                     name: r.ws_name(),
                 },
-                mark(has_username, false, through_group),
+                mark(has_username, member_of.contains(&ws), None),
             );
         }
     }
@@ -1155,24 +1150,22 @@ pub async fn read_group_via(
     let members = member_refs_via(conn, &member_ids).await?;
     let held = held_rows_via(conn, "group", &[gid]).await?;
     let (gates, gate_group_names) = gates_via(conn).await?;
-    let through_group = (false, Some(NotOnEngines::HeldThroughGroup));
-
+    // The compiler expands a group's roles and workspaces to its members
+    // (`role_usernames`, `workspace_members_via`), so a lapsed row is the only
+    // thing that keeps one from applying on engines.
     let membership = |via: Via, r: &HeldRow| Membership {
         via,
         role: Some(r.role_name.clone()),
         scope: Some(r.scope()),
         expires_at: r.expires_at,
         expired: r.expired,
-        on_engines: false,
-        not_on_engines: through_group.1,
+        on_engines: !r.expired,
+        not_on_engines: r.expired.then_some(NotOnEngines::Expired),
     };
-    // The compiler expands a group's role to its members (`role_usernames`).
     let roles: Vec<Membership> = held
         .iter()
-        .map(|r| Membership {
-            on_engines: !r.expired,
-            not_on_engines: r.expired.then_some(NotOnEngines::Expired),
-            ..membership(
+        .map(|r| {
+            membership(
                 Via::Role {
                     name: r.role_name.clone(),
                 },
@@ -1228,7 +1221,7 @@ pub async fn read_group_via(
                     id: ws,
                     name: r.ws_name(),
                 },
-                through_group,
+                (true, None),
             );
         }
     }

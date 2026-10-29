@@ -88,8 +88,7 @@ const STANDS_FOR: StandsFor[] = [
     kind: "workspace_members",
     ref: WS2,
     via: { kind: "group_workspace", group: "analysts", id: WS2, name: "Finance" },
-    onEngines: false,
-    notOnEngines: "held_through_group",
+    onEngines: true,
   },
   { kind: "group", ref: "public", via: { kind: "public" }, onEngines: true },
 ];
@@ -124,7 +123,7 @@ const rule = (id: string, name: string, over: Partial<RuleView> & Pick<RuleView,
 
 // Not in the order the page lists them, on purpose; 9 rules, 5 name Ana in their exemption.
 const RULES: RuleView[] = [
-  // Ana only in an exclude engines do not apply: it changes nothing for her anywhere, so it is not listed.
+  // Ana is in Finance through analysts, and the exclude of Finance is applied on engines: Ana is excluded, so the rule concerns her.
   rule("r-excl-egret", "bob but not finance", {
     exempt: { include: [{ kind: "user", ref: "bob" }], exclude: [{ kind: "workspace_members", ref: WS2 }] },
   }),
@@ -167,7 +166,7 @@ describe("a principal's Rules tab", () => {
     open("/governance/people/users/u-ana?tab=masks");
 
     expect(await within(await screen.findByRole("tabpanel")).findByRole("table", { name: "Directly" })).toBeInTheDocument();
-    expect(sections()).toEqual(["Directly", "Through a group", "Through a workspace", "Excluded from the exemption", "Not applied anywhere"]);
+    expect(sections()).toEqual(["Directly", "Through a group", "Through a workspace", "Excluded from the exemption"]);
 
     const [direct] = rowsOf("Directly");
     expect(within(direct).getByRole("link", { name: "salary mask" })).toHaveAttribute("href", "/governance/rules/r-direct");
@@ -183,18 +182,15 @@ describe("a principal's Rules tab", () => {
     expect(within(excluded).getByRole("link", { name: "analysts but not ana" })).toBeInTheDocument();
     expect(excluded).toHaveTextContent("Excluded: directly · applied on engines");
 
-    const [ws] = rowsOf("Through a workspace");
-    expect(ws).toHaveTextContent("Through workspace Sales · applied on engines");
-
-    const [egretOnly] = rowsOf("Not applied anywhere");
-    expect(egretOnly).toHaveTextContent("Through workspace Finance, held by group analysts · not applied anywhere: held through a group");
-    // egret itself applies no mask or filter, so an exemption engines skip exempts nobody.
-    expect(within(tab()).getByText(/egret applies no mask or row filter itself/)).toBeInTheDocument();
+    const ws = rowsOf("Through a workspace");
+    expect(ws.find((r) => r.textContent?.includes("Sales"))).toHaveTextContent("Through workspace Sales · applied on engines");
+    // A workspace held through a group is applied on engines too.
+    expect(ws.find((r) => r.textContent?.includes("Finance"))).toHaveTextContent("Through workspace Finance, held by group analysts · applied on engines");
 
     expect(within(tab()).queryByRole("link", { name: "bob only" })).not.toBeInTheDocument();
     expect(within(tab()).queryByRole("link", { name: "case differs" })).not.toBeInTheDocument();
     expect(within(tab()).queryByRole("link", { name: "everyone" })).not.toBeInTheDocument();
-    expect(within(tab()).queryByRole("link", { name: "bob but not finance" })).not.toBeInTheDocument();
+    expect(within(tab()).getByRole("link", { name: "bob but not finance" })).toBeInTheDocument();
   });
 
   it("states how many other rules apply, and that each object's tab lists them", async () => {
@@ -203,7 +199,7 @@ describe("a principal's Rules tab", () => {
 
     expect(
       await within(await screen.findByRole("tabpanel")).findByText(
-        "4 other rules apply to everyone they do not exempt; each object's Rules tab lists them.",
+        "3 other rules apply to everyone they do not exempt; each object's Rules tab lists them.",
       ),
     ).toBeInTheDocument();
   });

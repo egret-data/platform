@@ -805,15 +805,17 @@ async fn a_users_stands_for_marks_each_via_and_why_engines_do_not_apply_it() {
         (json!(true), Value::Null)
     );
     let w = json!({"kind": "workspace", "id": o.ws, "name": format!("W {}", o.t)});
+    // The direct row lapsed, but `ua` is still a member through group `g1`, which
+    // holds the workspace: the membership applies on engines.
     assert_eq!(
         on(entry(&ua, "workspace_members", &o.ws.to_string(), &w)),
-        (json!(false), json!("expired")),
-        "an expired direct row is listed, marked"
+        (json!(true), Value::Null),
+        "an expired direct row is listed; the membership still comes from the group"
     );
     let gw = json!({"kind": "group_workspace", "group": o.n("g1"), "id": o.ws, "name": format!("W {}", o.t)});
     assert_eq!(
         on(entry(&ua, "workspace_members", &o.ws.to_string(), &gw)),
-        (json!(false), json!("held_through_group"))
+        (json!(true), Value::Null)
     );
 
     let uc = principal(&e, &format!("/perm/people/users/{}", o.uc)).await;
@@ -895,7 +897,8 @@ async fn a_users_memberships_carry_scope_expiry_and_engine_marks() {
         .cloned()
         .expect("group workspace");
     assert_eq!(gws["role"], json!(o.n("rw")));
-    assert_eq!(gws["notOnEngines"], json!("held_through_group"));
+    // A workspace held through a group is applied on engines, like a direct one.
+    assert_eq!(gws["notOnEngines"], Value::Null);
 }
 
 #[tokio::test]
@@ -944,10 +947,7 @@ async fn a_group_lists_members_with_and_without_a_username_and_what_it_holds() {
 
     let w = json!({"kind": "workspace", "id": o.ws, "name": format!("W {}", o.t)});
     assert_eq!(g1["workspaces"][0]["via"], w);
-    assert_eq!(
-        g1["workspaces"][0]["notOnEngines"],
-        json!("held_through_group")
-    );
+    assert_eq!(g1["workspaces"][0]["notOnEngines"], Value::Null);
     let sf = |b: &Value| -> BTreeSet<(String, String, String)> {
         stands_for(b)
             .iter()
@@ -969,7 +969,7 @@ async fn a_group_lists_members_with_and_without_a_username_and_what_it_holds() {
             (
                 "workspace_members".to_string(),
                 o.ws.to_string(),
-                "held_through_group".to_string()
+                String::new()
             ),
         ]
         .into_iter()

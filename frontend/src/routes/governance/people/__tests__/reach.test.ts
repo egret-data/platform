@@ -87,20 +87,14 @@ describe("reachGroup", () => {
     expect(reachGroup([reach({}), reach({ position: "exclude", via: { kind: "group", name: "g" } })])).toBe("excluded");
   });
 
-  const heldThroughGroup = { onEngines: false, notOnEngines: "held_through_group" as const };
-
-  it("an exclude engines do not apply excludes nobody: the includes decide", () => {
-    // `… except role r`, r held only through group g: Ranger does not exclude the user.
-    const egretExclude = reach({ position: "exclude", via: { kind: "group_role", group: "g", role: "r" }, ...heldThroughGroup });
-    expect(reachGroup([reach({}), egretExclude])).toBe("direct");
-    expect(reachGroup([reach({ via: { kind: "group", name: "g" } }), egretExclude])).toBe("group");
-    expect(reachGroup([reach({ via: { kind: "group_role", group: "g", role: "x" }, ...heldThroughGroup }), egretExclude])).toBe("egret_only");
+  it("a role held through a group applies on engines, so it is listed under the role", () => {
+    expect(reachGroup([reach({ via: { kind: "group_role", group: "g", role: "r" } })])).toBe("role");
+    expect(reachGroup([reach({ via: { kind: "group_workspace", group: "g", id: "w", name: "W" } })])).toBe("workspace");
   });
 
-  it("is egret only when no include applies on engines and one is held through a group", () => {
-    const egretOnly = reach({ via: { kind: "group_role", group: "g", role: "r" }, ...heldThroughGroup });
-    expect(reachGroup([egretOnly])).toBe("egret_only");
-    expect(reachGroup([egretOnly, reach({ via: { kind: "group", name: "g" } })])).toBe("group");
+  it("an exclude held through a group applies on engines and excludes the user", () => {
+    const groupExclude = reach({ position: "exclude", via: { kind: "group_role", group: "g", role: "r" } });
+    expect(reachGroup([reach({}), groupExclude])).toBe("excluded");
   });
 
   it.each(["expired", "no_username"] as const)("is not applied on engines when every include is %s", (why) => {
@@ -111,7 +105,7 @@ describe("reachGroup", () => {
   it("a grant concerns the principal through an include, or an exclude engines apply", () => {
     expect(reachesAtAll([reach({})])).toBe(true);
     expect(reachesAtAll([reach({ position: "exclude" })])).toBe(true);
-    expect(reachesAtAll([reach({ position: "exclude", via: { kind: "group_role", group: "g", role: "r" }, ...heldThroughGroup })])).toBe(false);
+    expect(reachesAtAll([reach({ position: "exclude", onEngines: false, notOnEngines: "expired" })])).toBe(false);
     expect(reachesAtAll([])).toBe(false);
   });
 
