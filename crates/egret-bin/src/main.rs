@@ -1588,6 +1588,31 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // The store keeps its meaning; only the SCHEDULER refuses to call it with
         // a number that would wipe. An operator who genuinely wants an empty
         // table still has `prune(0)`.
+        // a-i: an IdP group renamed or removed is seen only at a member's next login,
+        // so the OIDC memberships of a member who has not logged in for
+        // `OIDC_GROUP_MAX_AGE` are dropped (and their policies recompiled) hourly.
+        {
+            let groups = egret_auth::groups::GroupRepo::new(db.clone());
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+                loop {
+                    tick.tick().await;
+                    match groups
+                        .drop_stale_oidc_memberships(
+                            egret_auth::groups::OIDC_GROUP_MAX_AGE,
+                            &egret_perm_compile::PermGroupRecompiler,
+                        )
+                        .await
+                    {
+                        Ok(n) if n > 0 => {
+                            tracing::info!(dropped = n, "stale OIDC group memberships dropped")
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!(error = %e, "stale OIDC group sweep failed"),
+                    }
+                }
+            });
+        }
         let configured_audit_retention = config.audit.retention_days;
         if let Some(retention) =
             egret_dataapi::serving::scheduled_retention(configured_audit_retention)

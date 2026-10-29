@@ -406,6 +406,13 @@ pub struct GroupRepo {
     db: Db,
 }
 
+/// How long a member's OIDC group memberships are trusted without a fresh login
+/// (a-i). egret learns an IdP group's rename or removal only from the member's
+/// next login (`sync_user_oidc_groups`), so a member who has not logged in for
+/// this long loses those memberships until they log in again. The bound is what
+/// limits the stale window for an IdP change nobody logs in to see.
+pub const OIDC_GROUP_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+
 impl GroupRepo {
     pub fn new(db: Db) -> Self {
         Self { db }
@@ -711,6 +718,46 @@ impl GroupRepo {
         }
         tx.commit().await.map_err(db_err)?;
         Ok(())
+    }
+
+    /// Drop the OIDC group memberships of every member who has not logged in
+    /// since `max_age` ago (a-i). Each goes through `sync_user_oidc_groups` with
+    /// no claim, so the memberships are removed, the affected policies recompile,
+    /// and local memberships stay. A member whose drop fails is logged and retried
+    /// by the next sweep. Returns how many members were dropped.
+    pub async fn drop_stale_oidc_memberships(
+        &self,
+        max_age: std::time::Duration,
+        recompiler: &dyn GroupMembershipRecompiler,
+    ) -> Result<usize> {
+        let stale: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT DISTINCT ug.user_id FROM user_groups ug \
+               JOIN groups g ON g.id = ug.group_id \
+               JOIN users u ON u.id = ug.user_id \
+              WHERE g.source = 'oidc' \
+                AND (u.last_login_at IS NULL \
+                     OR u.last_login_at < now() - make_interval(secs => $1::double precision)) \
+              ORDER BY ug.user_id",
+        )
+        .bind(max_age.as_secs_f64())
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        let mut dropped = 0;
+        for user_id in stale {
+            match self
+                .sync_user_oidc_groups(UserId(user_id), &[], recompiler)
+                .await
+            {
+                Ok(()) => dropped += 1,
+                Err(e) => tracing::warn!(
+                    user_id = %user_id,
+                    error = %e,
+                    "stale OIDC group memberships could not be dropped; the next sweep retries"
+                ),
+            }
+        }
+        Ok(dropped)
     }
 
     /// Create a local (admin-managed) group; returns its id.
