@@ -19,7 +19,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 pub use prune::{spawn_pruner, PruneConfig};
-pub use repo::{InsertError, LogQuery, LogRepo, PurgeQuery, StoredLine};
+pub use repo::{InsertError, LogQuery, LogRepo, PurgeQuery, StoredLine, ERROR_LOGS_PAGE};
 pub use run_log::{mask, RunIdentity, RunLog, MASK};
 pub use writer::{spawn_writer, Barrier, Inserter, PgLogSink, WriterConfig};
 

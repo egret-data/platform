@@ -334,6 +334,9 @@ pub enum RenderError {
 pub struct RenderContext {
     bindings: Vec<(String, MjValue)>,
     files: Option<FileScope>,
+    /// Package #5b Task B7 (spec D11): what `errorLogs()` answers. `None`
+    /// off the worker, where it is Kestra's refusal.
+    error_logs: Option<super::error_logs::ErrorLogs>,
     /// Values no line a run writes may carry (KI-112): its execution's SECRET
     /// inputs. Not a binding; nothing renders them from here.
     redactions: Vec<String>,
@@ -369,6 +372,18 @@ impl RenderContext {
     pub fn with_files(mut self, files: FileScope) -> Self {
         self.files = Some(files);
         self
+    }
+
+    /// The same bindings, with what `errorLogs()` answers (the worker's
+    /// read, package #5b Task B7).
+    pub fn with_error_logs(mut self, logs: super::error_logs::ErrorLogs) -> Self {
+        self.error_logs = Some(logs);
+        self
+    }
+
+    /// What `errorLogs()` answers; `None` off the worker.
+    pub fn error_logs(&self) -> Option<&super::error_logs::ErrorLogs> {
+        self.error_logs.as_ref()
     }
 
     /// The attached file scope, `None` where the four file functions refuse.
@@ -450,6 +465,7 @@ impl RenderContext {
         Self {
             bindings,
             files: None,
+            error_logs: None,
             redactions: Vec::new(),
         }
     }
@@ -461,11 +477,20 @@ impl RenderContext {
 
     /// Binds [`FILE_SCOPE`] when a scope is attached. Called by BOTH render
     /// threads, after anything that could unbind it.
+    ///
+    /// Package #5b Task B7: and [`super::error_logs::ERROR_LOGS_SCOPE`] when
+    /// the worker attached what `errorLogs()` answers.
     fn bind_files(&self, env: &mut Environment<'static>) {
         if let Some(files) = &self.files {
             env.add_global(
                 FILE_SCOPE,
                 MjValue::from_object(FileScopeObject(files.clone())),
+            );
+        }
+        if let Some(logs) = &self.error_logs {
+            env.add_global(
+                super::error_logs::ERROR_LOGS_SCOPE,
+                MjValue::from_object(super::error_logs::ErrorLogsObject(logs.clone())),
             );
         }
     }
@@ -2555,6 +2580,9 @@ fn render_on_this_thread(
     // shares -- the nesting depth, the forbidden roots, the pass budget. See
     // [`super::nested`].
     let scope = super::nested::RenderScope::install(forbidden);
+    // Package #5b Task B7: a flag left by an earlier render on a caller-owned
+    // thread is not this one's.
+    super::error_logs::take_handed_out();
 
     if passes == Passes::One {
         // Nothing is forbidden on this path (`render_once_with` passes
@@ -2590,6 +2618,11 @@ fn render_on_this_thread(
             return Ok(GuardedRender::Forbidden(root));
         }
         let next = next?;
+        // Package #5b Task B7 (spec D11): a pass that handed out log text is
+        // the last, so a message is never evaluated as a template.
+        if super::error_logs::take_handed_out() {
+            return Ok(GuardedRender::Rendered(strip_raw_markers(&next)));
+        }
         if next == current {
             return Ok(GuardedRender::Rendered(strip_raw_markers(&next)));
         }

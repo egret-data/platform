@@ -320,18 +320,18 @@ Two rules, and they are deliberately different:
   file, with the entry named and the reason given; a ceiling that is too
   high costs nothing at all, which is why it would not be a ceiling.
 
-    265  reproduced today, and by nothing the driver removes
+    266  reproduced today, and by nothing the driver removes
       0  reproduced today ONLY because the feed supplies a terminal
          for a task type W3b has no handler for
-     21  not reproduced today, and nothing found here blocks it
+     20  not reproduced today, and nothing found here blocks it
      15  not reproduced today, and blocked -- by cause below
   -----
     301  TOTAL, the comparable entries
 
-  CEILING, feed removed  = 265 + 21 = **286**
-  CEILING, feed retained = 265 + 0 + 21 = 286
+  CEILING, feed removed  = 266 + 20 = **286**
+  CEILING, feed retained = 266 + 0 + 20 = 286
 
-  Today the ratchet matches 265. The two ceilings are the same
+  Today the ratchet matches 266. The two ceilings are the same
   quantity under the two answers Task 5 may give to `does the driver
   still feed a terminal for a task type it has no handler for?`. They are
   NOT the same set with a different name, and the composition is printed
@@ -344,9 +344,8 @@ Two rules, and they are deliberately different:
 
   The 0 at risk, with the type whose terminal is fed:
 
-  The 21 nothing here blocks:
+  The 20 nothing here blocks:
     valids/dag
-    valids/errors
     valids/full
     valids/if
     valids/if-in-parallel

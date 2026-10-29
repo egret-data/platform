@@ -52,6 +52,7 @@ mod cmp_rewrite;
 mod compare;
 mod decimalformat;
 pub mod env;
+pub mod error_logs;
 pub mod files;
 mod filters;
 mod functions;

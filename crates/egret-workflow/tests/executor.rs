@@ -861,7 +861,10 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
         // 37 -> 36 baselined, 264 -> 265 matching at package #5b Task B6
         // (2026-10-29): `valids/variables` (`render()`) banks (spec D9);
         // 36 + 265 = 301.
-        (301, 265, 36),
+        // 36 -> 35 baselined, 265 -> 266 matching at package #5b Task B7
+        // (2026-10-29): `valids/errors` (`errorLogs()`) banks (spec D11);
+        // 35 + 266 = 301.
+        (301, 266, 35),
         "301 = matching + baselined, the total beside its parts. It read \
          167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries, W8 \
          Task 4 banked `valids/waitfor-nested`, W8 Task 5 banked seven \
@@ -2650,7 +2653,9 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         // banked at package #5b Task B2 (2026-10-29, measured).
         // + the 1 top-level pair of `valids/variables`, banked at package #5b
         // Task B6 (2026-10-29, measured).
-        (652, 212, 864),
+        // + the 21 top-level pairs of `valids/errors`, banked at package #5b
+        // Task B7 (2026-10-29, measured).
+        (673, 212, 885),
         "the pairs a change to which the ratchet REPORTS: they live on entries \
          that match, so any change to one makes its entry a REGRESSION. W6 Task \
          3 moved 3 of them across the line, all top-level: the 12 `Subflow` \
@@ -2695,7 +2700,9 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         // and `valids/task-runif-taskswithstate`.
         // 253 -> 252 at package #5b Task B6 (2026-10-29, measured): the 1 top-level
         // pair of `valids/variables`, which banked.
-        (237, 15, 252),
+        // 252 -> 231 at package #5b Task B7 (2026-10-29, measured): the 21
+        // top-level pairs of `valids/errors`, which banked.
+        (216, 15, 231),
         "and the pairs a change to which it does not: they live on baselined \
          entries, which mismatch whatever the pair says. Flipping all 704 leaves \
          the ratchet green and unmoved -- at 131 when W6 Task 3 flipped them, at \
@@ -3139,7 +3146,8 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
 // 146 -> 126 at package #5b Task B2 (2026-10-29, measured): the 20 run terminals of
 // `valids/loop-object`, `valids/loop-object-in-list` and `valids/task-runif-taskswithstate`.
 // 126 -> 124 at package #5b Task B6 (2026-10-29, measured): the 2 run terminals of `valids/variables`.
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 124;
+// 124 -> 117 at package #5b Task B7 (2026-10-29, measured): the 7 run terminals of `valids/errors`.
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 117;
 /// 43 from W6 Task 4 to W9a Task 10; **40 since W9a Task 11** -- the three
 /// iterations of `valids/loop-values-from-uri`.
 // 40 -> 39 at WorkingDirectory Task 8: `working-directory-taskrun` has one
@@ -3198,7 +3206,8 @@ const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 16;
 // 61 -> 52 at package #5b Task B2 (2026-10-29, measured): the three top-level executions of
 // `valids/loop-object`, `valids/loop-object-in-list` and `valids/task-runif-taskswithstate`, and the six sub-executions under the first two.
 // 52 -> 51 at package #5b Task B6 (2026-10-29, measured): the one execution of `valids/variables`.
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 51;
+// 51 -> 50 at package #5b Task B7 (2026-10-29, measured): the one execution of `valids/errors`.
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 50;
 /// **1703 through W8 Task 2, 1647 after W8 Task 3, 1610 after W8 Task 4, 1528
 /// now** -- 56 run-history tokens on Task 3's eight, 37 on
 /// `valids/waitfor-nested` (whose seven runs include three loops reading
@@ -3243,7 +3252,8 @@ const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 51;
 // 608 -> 539 at package #5b Task B2 (2026-10-29, measured): the 69 run-history tokens of
 // `valids/loop-object`, `valids/loop-object-in-list` and `valids/task-runif-taskswithstate`.
 // 539 -> 531 at package #5b Task B6 (2026-10-29, measured): the 8 run-history tokens of `valids/variables`.
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 531;
+// 531 -> 507 at package #5b Task B7 (2026-10-29, measured): the 24 run-history tokens of `valids/errors`.
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 507;
 /// **665 through W8 Task 2, 617 after W8 Task 3, 562 after W8 Task 4, 526 after
 /// W8 Task 5, 522 now** -- 48 execution-history tokens on Task 3's eight, i.e.
 /// six apiece (every one of them reads `CREATED RUNNING PAUSED RESTARTED
@@ -3288,7 +3298,8 @@ const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 531;
 // 248 -> 221 at package #5b Task B2 (2026-10-29, measured): the 27 execution-history tokens of
 // `valids/loop-object`, `valids/loop-object-in-list` and `valids/task-runif-taskswithstate`.
 // 221 -> 218 at package #5b Task B6 (2026-10-29, measured): the 3 execution-history tokens of `valids/variables`.
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 218;
+// 218 -> 215 at package #5b Task B7 (2026-10-29, measured): the 3 execution-history tokens of `valids/errors`.
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 215;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -4723,7 +4734,8 @@ const MISMATCH_ON_EXECUTION: usize = 20;
 // 30 -> 28 at package #5a Task A7 (2026-10-29, measured): `valids/all-flowable` and `valids/disable-flowable` banked (D7).
 // 28 -> 25 at package #5b Task B2 (2026-10-29, measured): `valids/loop-object`, `valids/loop-object-in-list` (`is json`) and `valids/task-runif-taskswithstate` (`is empty`) banked (D8).
 // 25 -> 24 at package #5b Task B6 (2026-10-29, measured): `valids/variables` banked (D9).
-const MISMATCH_ON_RUNS: usize = 24;
+// 24 -> 23 at package #5b Task B7 (2026-10-29, measured): `valids/errors` banked (D11).
+const MISMATCH_ON_RUNS: usize = 23;
 /// **72 through W8 Task 2, 67 after W8 Task 3, 64 now**: five of Task 3's eight
 /// carry an ordered pair, and W8 Task 4 closed THREE on one entry --
 /// `valids/waitfor-nested`'s `loop_1_return`/`loop_2`,
@@ -4846,7 +4858,8 @@ const MISMATCH_ON_SPAWNED: usize = 3;
 // 41 -> 39 at package #5a Task A7 (2026-10-29, measured): `valids/all-flowable` and `valids/disable-flowable` banked (D7).
 // 39 -> 36 at package #5b Task B2 (2026-10-29, measured): `valids/loop-object`, `valids/loop-object-in-list` and `valids/task-runif-taskswithstate` banked (D8).
 // 36 -> 35 at package #5b Task B6 (2026-10-29, measured): `valids/variables` banked (D9).
-const MISMATCHING_RUNS_ENTRIES: usize = 35;
+// 35 -> 34 at package #5b Task B7 (2026-10-29, measured): `valids/errors` banked (D11).
+const MISMATCHING_RUNS_ENTRIES: usize = 34;
 /// **84 through W5; 63 after W6 Task 3, and 59 since W6 Task 4 corrected the
 /// classifier.**
 ///
@@ -7849,11 +7862,8 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         ),
         // The five the feed hid that Task 1's derivation could not see: a fed
         // terminal hides everything the task would have DONE.
-        (
-            "valids/errors",
-            "`errorLogs()`, which W2 refuses and assigns to W3; there is no \
-             task-log store to read",
-        ),
+        // (`valids/errors` was here: `errorLogs()`, refused by W2. It banked
+        // at package #5b Task B7, 2026-10-29, spec D11.)
         // (`valids/variables` was here: `render()`, refused by W2. It banked
         // at package #5b Task B6, 2026-10-29, spec D9.)
         // (`valids/webhook-plaintext` was here: `??` over a missing
@@ -8286,7 +8296,9 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
         // `valids/task-runif-taskswithstate`.
         // (2, 35, 37) -> (2, 34, 36) at package #5b Task B6 (2026-10-29): nor
         // does `valids/variables`.
-        (2, 34, 36),
+        // (2, 34, 36) -> (2, 33, 35) at package #5b Task B7 (2026-10-29): nor
+        // does `valids/errors`.
+        (2, 33, 35),
         "the baselined population that declares a `timeout:`, and the rest \
          ((2, 106, 108) until no-silent-stall Task 1 banked \
          `invalids/invalid-task`, which declares none). It \

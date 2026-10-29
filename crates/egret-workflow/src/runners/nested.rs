@@ -469,6 +469,14 @@ impl<'s> Nested<'s> {
         {
             env.add_global(super::files::FILE_SCOPE, files.clone());
         }
+        // Package #5b Task B7: `errorLogs()` answers inside `render()` on the
+        // worker, as Kestra's nested render on the worker does.
+        if let Some((_, logs)) = globals
+            .iter()
+            .find(|(name, _)| name == super::error_logs::ERROR_LOGS_SCOPE)
+        {
+            env.add_global(super::error_logs::ERROR_LOGS_SCOPE, logs.clone());
+        }
         (env, MjValue::from_object(OrderedMap::new(entries)))
     }
 }

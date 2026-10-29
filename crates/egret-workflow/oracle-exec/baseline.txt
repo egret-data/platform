@@ -177,6 +177,10 @@
 #   `errors` -- the `errorLogs()` function, which W2 refuses by name and
 #   assigns to W3 (`runners::functions::REFUSED`); egret has no task-log store
 #   for it to read (W3b Task 3's Concern 7).
+#   (BANKED with package #5b's Task B7, 2026-10-29, spec D11: `errorLogs()`
+#   reads the execution's ERROR lines on the worker -- the store existed
+#   since W11; the query and the prefetch were what was missing -- and `t2`
+#   logs them and SUCCEEDS.)
 #   `variables` -- the `render()` function, refused by W2 and assigned to W3 in
 #   the same table. Not implemented here; named rather than absorbed.
 #   (BANKED with package #5b's Task B6, 2026-10-29, spec D9: `render()` is a
@@ -583,7 +587,6 @@ invalids/dag-invalid-subtask
 valids/after-execution
 # `valids/all-flowable` and `valids/disable-flowable` banked 2026-10-29 (package #5a Task A7, spec D7): both render `{{ taskrun.value }}` in a `Switch` case (and `all-flowable` in its `Loop` body too); egret wrote `"value": null` and rendered it empty, Kestra's `RunVariables` omits a null value and the strict renderer FAILED the task. The key is absent now, so the case fails as in Kestra.
 valids/dag
-valids/errors
 valids/flow-concurrency-sla-fail-child
 valids/flow-concurrency-sla-fail-parent
 valids/flow-with-outputs-failed

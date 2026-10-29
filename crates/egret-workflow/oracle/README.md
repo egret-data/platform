@@ -5695,6 +5695,52 @@ unary minus on one is Pebble's `multiply(-1, x)` (`-fromIon(ion='1.50')` is
 `-1.50`). The oracle ends #5a at **107 of 1493** baselined: 103 lines from
 before A1 and those four.
 
+## What package #5b's Task B7 measured (2026-10-29)
+
+Plan B7, spec D11. `errorLogs()` is implemented (`runners::error_logs`) and
+its `REFUSED` row is gone (3 rows: `secret`, `http`, `subflow`). Kestra's
+`ErrorLogsFunction` answers only on the worker and reads
+`DefaultExecutionLogMetaStore.errorLogs`: `findByExecutionId(tenant,
+execution, ERROR, Pageable.from(1, 25, Sort.asc("timestamp")))`, so at most
+**25** lines, oldest first; egret's `LogRepo::error_lines` is that page, with
+both the workspace and the execution id in the predicate. The worker reads it
+before the task renders (`worker::claim::render_context`), and only when the
+task's OWN properties, `vars`, the loop value or a value of the render context
+call `errorLogs` (`env::name_in_code`); the first cut read for any task of a
+flow whose source mentioned it, and B7's DB test measured 6 reads where 1
+answered (the `Fail` task waited out an empty log). A line is a map in
+`LogEntry`'s field order; what egret does not record (`tenantId`, `triggerId`,
+`thread`, `executionKind`, `progress`) reads as null and prints omitted, as
+Kestra's `NON_NULL` mapper omits it -- except `attemptNumber`, which Kestra
+prints as `null` (`@JsonInclude`) and egret omits when an execution-level line
+has none.
+
+**The wait.** Kestra polls an empty list for 5 s; egret for 1 s (recorded
+divergence). Measured (`tests/error_logs.rs`): an `errors:` task finds the
+failed task's line on its **first** read, because `run_one` writes the
+failed-attempt line and waits for the writer's flush barrier before the
+outcome commits, so the wait is not what makes the line visible. It remains
+for an execution with no ERROR line (Kestra answers `[]` after its wait too)
+and for a failing writer, whose barrier does not wait.
+
+**A message is data.** egret's top-level render is a fixpoint where Kestra's
+default is one pass, so a pass that handed out log text is the last one: a
+message holding `{{ 1 + 1 }}` prints as written. `render()` of a message
+renders it, as Kestra's `render()` does.
+
+**Off the worker** (executor-side renders, triggers, inputs, this harness) the
+refusal is Kestra's own sentence. The harness does not wire `errorLogs` (it
+needs a log store and is not a worker), so `function-errorlogs` stays
+error-class, re-paired to `outside_the_worker_it_is_kestras_refusal`. A call
+assembled at render (`'{{ error' ~ 'Logs() }}'`) on the worker meets egret's
+`NOT_LOADED` sentence, the rule a `kestra://` URI assembled at render follows.
+No corpus entry was added (each new probe would be error-class on this
+harness). The executor corpus banked `valids/errors`: 301 / 35 / 35 / 0.
+
+**Scope divergence.** A `Loop` iteration is a sub-execution in egret, so
+`errorLogs()` inside one reads that iteration's lines only, where Kestra's
+`ForEach` shares one execution.
+
 ## What package #5b's Task B6 measured (2026-10-29)
 
 Plan B6, spec D9, user decision Q4. **The harness carries `render` and

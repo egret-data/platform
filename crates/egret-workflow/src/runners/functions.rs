@@ -35,6 +35,9 @@
 //! Task 8, four the built engine does not register at all -- refusals:
 //!   render renderOnce errorLogs subflow
 //!
+//! Package #5b Task B6 implemented render renderOnce, and Task B7 errorLogs
+//! (on the worker only, `super::error_logs`)
+//!
 //! W9a Task 4 implemented four of the null-backed eight over the render's
 //! file scope: read fileSize fileExists isFileEmpty
 //!
@@ -205,6 +208,9 @@ pub(super) fn register(env: &mut Environment<'static>) {
     // render on a fresh environment. See `super::nested`.
     env.add_function("render", super::nested::render);
     env.add_function("renderOnce", super::nested::render_once);
+    // Package #5b Task B7 (spec D11): `errorLogs`, over the list the worker
+    // read before the render. See `super::error_logs`.
+    env.add_function("errorLogs", super::error_logs::error_logs);
 
     // Package #5b Task B3 (spec D10): Pebble core's `max`/`min`, on the
     // comparison of `super::compare`.
@@ -216,7 +222,7 @@ pub(super) fn register(env: &mut Environment<'static>) {
     });
 
     // W2 Task 8's refusals, six since W9c Task 4, four since package #5b
-    // Task B6. See [`not_implemented`] for the message shape and why the
+    // Task B6, three since Task B7. See [`not_implemented`] for the message shape and why the
     // oracle cannot check it.
     for (name, refusal) in REFUSED {
         env.add_function(
@@ -317,8 +323,8 @@ pub(crate) const SECRET_REFUSAL: &str = "The 'secret' function resolves only on 
      fields of the pod spec, readable by anyone with `get pods` in the task namespace, and \
      no other render (inputs, runIf, Log, triggers) resolves secrets.";
 
-/// The names egret registers only to refuse (four since package #5b Task
-/// B6), with what each is waiting
+/// The names egret registers only to refuse (three since package #5b Task
+/// B7), with what each is waiting
 /// for and who owns it.
 ///
 /// **Two different kinds of absence, deliberately treated the same.** The
@@ -364,12 +370,15 @@ pub(crate) const SECRET_REFUSAL: &str = "The 'secret' function resolves only on 
 ///
 /// **Updated 2026-10-29 (package #5b Task B6): four names now.** `render` and
 /// `renderOnce` are implemented (`super::nested`, spec D9).
+///
+/// **Updated 2026-10-29 (package #5b Task B7): three names now.** `errorLogs`
+/// is implemented (`super::error_logs`, spec D11): the worker reads the list
+/// before the render, and every other render meets Kestra's own sentence.
 const REFUSED: &[(&str, Refusal)] = &[
     // Registered with a null backing on the built engine.
     ("secret", Refusal::Confined(SECRET_REFUSAL)),
     ("http", Refusal::Unsupported(HTTP_REFUSAL)),
     // Not registered at all on the built engine: `@Inject @Nullable`, guarded.
-    ("errorLogs", not_yet("the running execution's logs", "W11")),
     ("subflow", not_yet("subflow execution", "W6")),
 ];
 
@@ -3726,21 +3735,24 @@ mod tests {
     /// out: they render now (`super::nested`). Four names are left; the name
     /// of this test is kept because `oracle/error-class-pairs.txt` pairs the
     /// four's corpus entries with it.
+    ///
+    /// **Package #5b Task B7 (2026-10-29)** took `errorLogs` out: it reads the
+    /// execution's error logs on the worker (`super::error_logs`). Three are
+    /// left, and `function-errorlogs` is paired with
+    /// `error_logs::tests::outside_the_worker_it_is_kestras_refusal` now.
     #[test]
     fn the_refused_list_is_six_and_kv_is_not_in_it() {
         // W9b Task 4: `fileURI` left the list; W9c Task 4: `kv`; package #5b
         // Task B6: `render` and `renderOnce`.
-        for gone in ["fileURI", "kv", "render", "renderOnce"] {
+        // Package #5b Task B7: `errorLogs`.
+        for gone in ["fileURI", "kv", "render", "renderOnce", "errorLogs"] {
             assert!(
                 !REFUSED.iter().any(|(name, _)| *name == gone),
                 "{gone} is implemented, not refused"
             );
         }
-        assert_eq!(REFUSED.len(), 4);
-        let expected = [
-            ("errorLogs", "the running execution's logs", "W11"),
-            ("subflow", "subflow execution", "W6"),
-        ];
+        assert_eq!(REFUSED.len(), 3);
+        let expected = [("subflow", "subflow execution", "W6")];
         // `secret` (Confined) and `http` (Unsupported) are checked by their sentences below.
         assert_eq!(
             expected.len() + 2,

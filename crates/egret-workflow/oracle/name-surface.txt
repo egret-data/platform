@@ -161,7 +161,7 @@ function	decrypt	yes	yes	function-decrypt	-
 function	dict	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_GLOBALS` removes it -- the engine answers `Function or Macro [x] does not exist.`
 function	encrypt	yes	yes	function-encrypt	-
 function	env	yes	yes	function-env	-
-function	errorLogs	no	yes	-	egret binds it to a W2 Task 8 REFUSAL. The built engine does not carry it (`@Inject @Nullable`, guarded, and the harness wires no log repository), so both sides fail and only the message differs
+function	errorLogs	no	yes	-	egret binds it (package #5b Task B7, spec D11): on the worker it answers the execution's ERROR lines, read before the render; off it, Kestra's own `can only be used in the Worker` sentence. The built engine does not carry it (`@Inject @Nullable`, guarded, and the harness wires no log repository), and the harness is not a worker, so both sides fail there
 function	fetchContext	yes	yes	function-fetchcontext-three-keys	java.util.HashMap bucket order again; `known_variables` returns a HashSet so egret must impose an order and sorts
 function	fileExists	yes	yes	function-fileexists	-
 function	fileSize	yes	yes	function-filesize	-

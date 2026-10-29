@@ -519,6 +519,7 @@ fn declared_test_names() -> BTreeSet<String> {
         include_str!("../src/runners/javare.rs"),
         include_str!("../src/runners/jqsandbox.rs"),
         include_str!("../src/runners/nested.rs"),
+        include_str!("../src/runners/error_logs.rs"),
         include_str!("../src/runners/operators.rs"),
         include_str!("../src/runners/pebble_tests.rs"),
         include_str!("../src/runners/rewrite.rs"),
@@ -596,14 +597,15 @@ fn every_runners_module_is_scanned_for_declared_tests() {
              `test:` pairing naming one of its tests would be rejected as nonexistent"
         );
     }
-    // 19 since package #5b Task B6 (2026-10-29) added `nested.rs` (18 since
+    // 20 since package #5b Task B7 (2026-10-29) added `error_logs.rs`; 19
+    // since its Task B6 added `nested.rs` (18 since
     // its Task B4 added `decimalformat.rs`, 17
     // since its Task B2 added `pebble_tests.rs`, 16
     // since package #5a Task A6 added `operators.rs`, 15 since its Task A3
     // added `arith.rs`, 14 since W9c Task 4 fix round 1 added `cmp_rewrite.rs`
     // and `compare.rs`, 12 since W9a Task 4's `files.rs`, 11 since W5b Task
     // 4's `secrets.rs`).
-    assert_eq!(on_disk.len(), 19, "a module was added or removed");
+    assert_eq!(on_disk.len(), 20, "a module was added or removed");
 }
 
 #[test]

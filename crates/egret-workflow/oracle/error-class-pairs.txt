@@ -261,7 +261,10 @@ function-fromion-annotation-of-a-list       test:an_annotated_value_is_its_own_t
 # (Package #5b Task B6, 2026-10-29: `function-render` and
 # `function-renderonce` were here. Both answer now, on both sides, and are no
 # longer error-class; see the B6 block at the end of this file.)
-function-errorlogs                                  test:the_refused_list_is_six_and_kv_is_not_in_it
+# (Package #5b Task B7, 2026-10-29: `function-errorlogs` re-paired. egret
+# implements `errorLogs()` on the worker; the corpus render is not one, so it
+# fails with Kestra's own off-the-worker sentence, which this test pins.)
+function-errorlogs                                  test:outside_the_worker_it_is_kestras_refusal
 function-subflow                                    test:the_refused_list_is_six_and_kv_is_not_in_it
 
 # W2 Task 8: `env`. `containsKey`, not a null check -- an absent `name`

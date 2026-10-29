@@ -6348,7 +6348,7 @@ exactly as `loop-switch` does. Both are corrected in `baseline.txt`.
 
 ### The residual baseline, by construct and owner
 
-**36 entries** since package #5b's Task B6 (2026-10-29: `variables` banked, `render()`). **37 entries** since package #5b's Task B2 (2026-10-29: `loop-object`, `loop-object-in-list`, `task-runif-taskswithstate` banked). **40 entries** at package #5a's end (2026-10-29, `baseline.len()` printed by the test below; Task A8's sweep corrected this heading and the cells marked so in the table, which had stopped following the banks of the end-hooks package and of #5a). **108 entries** at W9a — it read `111` until W8 Task 7, two banks behind, and `109`
+**35 entries** since package #5b's Task B7 (2026-10-29: `errors` banked, `errorLogs()`). **36 entries** since package #5b's Task B6 (2026-10-29: `variables` banked, `render()`). **37 entries** since package #5b's Task B2 (2026-10-29: `loop-object`, `loop-object-in-list`, `task-runif-taskswithstate` banked). **40 entries** at package #5a's end (2026-10-29, `baseline.len()` printed by the test below; Task A8's sweep corrected this heading and the cells marked so in the table, which had stopped following the banks of the end-hooks package and of #5a). **108 entries** at W9a — it read `111` until W8 Task 7, two banks behind, and `109`
 until W9a Task 11 banked `valids/loop-values-from-uri` (a `Loop` over the ION
 file a `core.storage.Write` wrote; the `Loop` row below fell 19 → 18 with it).
 `the_residual_baseline_is_attributed_to_a_construct_or_named` derives the rows
@@ -6370,7 +6370,7 @@ found.
 | 2 | `LoopUntil` / `WaitFor` | W8 — **and not one of the two is held by the loop** (eight until group C1 Task 2); see below. **8 → 3 at group C1 Task 2**: five of the six `OutputValues` ones banked. **3 → 2 at package #5a Task A2 (2026-10-28)**: `loopuntil-failed-flowable` banked (spec D1) |
 | 3 | `sla:` | **W8 Task 6 banked two of the five**; the three that remain are `MAX_DURATION`s and **no implementation can bank them under this harness** — see the fifth blindness mechanism below |
 | **2** | `WorkingDirectory` (planned opaque) | **unclaimed**; 3 → 2 at package #5a Task A6 (`task-runif-workingdirectory`: its `contains` did not parse). This cell read 4 until Task A8's sweep |
-| **18** | **none of the above** | named individually in `UNATTRIBUTED` (36 → 30 at group C1 Task 2: six entries held by `OutputValues` alone banked; 30 → 29 at group C1 Task 3: `valids/assert` banked; **20 before package #5a Task A5, 19 since** (`webhook-plaintext`); this cell read 29 until Task A8's sweep, already stale before #5a; **18 since package #5b Task B6** (`variables`, `render()`), the count the test prints) |
+| **17** | **none of the above** | named individually in `UNATTRIBUTED` (36 → 30 at group C1 Task 2: six entries held by `OutputValues` alone banked; 30 → 29 at group C1 Task 3: `valids/assert` banked; **20 before package #5a Task A5, 19 since** (`webhook-plaintext`); this cell read 29 until Task A8's sweep, already stale before #5a; 18 since package #5b Task B6 (`variables`, `render()`); **17 since its Task B7** (`errors`, `errorLogs()`), the count the test prints) |
 
 **The `LoopUntil` / `WaitFor` row is 9 → 8 at W8 Task 4, and the eight that
 remain are held by three things, none of which is the construct.** SIX have an
