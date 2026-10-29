@@ -2694,6 +2694,12 @@ mod tests {
             ("{{ max(fromIon(ion='2.50'), 2.5) }}", "2.50"),
             ("{{ max(2.5, fromIon(ion='2.50')) }}", "2.5"),
             ("{{ max(1, 2) + 1 }}", "3"),
+            // A keyword is ignored, not refused: measured with the harness
+            // 2026-10-29 (fix wave #5b, M6), Kestra renders these the same.
+            ("<{{ max(a=1) }}>", "<>"),
+            ("{{ max(1, a=2) }}", "1"),
+            ("<{{ min(a=1) }}>", "<>"),
+            ("{{ min(1, a=2) }}", "1"),
         ] {
             assert_eq!(ok(source), want, "{source}");
         }

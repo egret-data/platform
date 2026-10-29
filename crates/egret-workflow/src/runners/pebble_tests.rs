@@ -12,7 +12,7 @@
 //! | test | Pebble/Kestra | a value it refuses |
 //! |---|---|---|
 //! | `null` | `input == null` | none |
-//! | `empty` | null; a `String` whose `trim()` is `""`; an empty `Collection` or `Map` | none |
+//! | `empty` | null; a `String` whose `trim()` is `""`; an empty `Collection` or `Map` (never an array: `split`'s empty `String[]` is not empty) | none |
 //! | `map` | `instanceof Map` | none |
 //! | `iterable` | `instanceof Iterable` or `Object[]` (a String is not) | none |
 //! | `even`, `odd` | `Integer.intValue()` or `((Long) input).longValue()`, then `% 2` | null; anything not an `Integer`/`Long` (`ClassCastException`) |
@@ -121,6 +121,15 @@ fn empty(state: &State, value: MjValue, _args: Rest<MjValue>) -> Result<bool, Mj
         ValueKind::String => value
             .as_str()
             .is_some_and(|text| text.trim_matches(|c: char| c <= ' ').is_empty()),
+        // `EmptyTest` checks `String`, `Collection` and `Map` only, never an
+        // `Object[]`: `split`'s empty `String[]` is not empty there
+        // (`'a.b.c' | split('.') is empty` is `false`, measured with the
+        // harness 2026-10-29; fix wave #5b, M10).
+        ValueKind::Seq | ValueKind::Iterable
+            if super::filters::java_seq_kind(&value) == super::filters::JavaSeqKind::Array =>
+        {
+            false
+        }
         ValueKind::Seq | ValueKind::Iterable | ValueKind::Map => {
             value.len().map(|n| n == 0).unwrap_or_else(|| {
                 value
@@ -424,6 +433,11 @@ mod tests {
     #[test]
     fn the_seven_tests_answer_as_pebble() {
         for (template, ctx, want) in [
+            // `EmptyTest` never checks an array (fix wave #5b, M10; measured
+            // with the harness 2026-10-29: `false`, and the length is 0).
+            ("{{ 'a.b.c' | split('.') is empty }}", json!({}), "false"),
+            ("{{ 'a.b.c' | split('.') | length }}", json!({}), "0"),
+            ("{{ [] is empty }}", json!({}), "true"),
             // null
             ("{{ x is null }}", json!({"x": null}), "true"),
             ("{{ x is null }}", json!({"x": 0}), "false"),

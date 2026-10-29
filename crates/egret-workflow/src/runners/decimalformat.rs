@@ -556,7 +556,13 @@ impl DigitList {
             match c {
                 '.' => decimal_at = digits.len() as i64,
                 'e' | 'E' => {
-                    exponent = text[at + 1..].parse().unwrap_or(0);
+                    // Not reachable today: every BigDecimal source caps the
+                    // scale at about 1 MiB of digits (`big_decimal_strings`),
+                    // so the exponent fits. A new source with a wider exponent
+                    // must not land on the silent `0` (fix wave #5b, M10).
+                    let parsed = text[at + 1..].parse::<i64>();
+                    debug_assert!(parsed.is_ok(), "an exponent past i64: {text}");
+                    exponent = parsed.unwrap_or(0);
                     break;
                 }
                 _ => {
