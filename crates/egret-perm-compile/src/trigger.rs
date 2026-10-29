@@ -2191,6 +2191,22 @@ pub async fn affected_services_for_group_membership(
     for role in &roles {
         ids.extend(affected_services_for_role_membership(conn, role).await?);
     }
+    // A workspace held by the group: its members are the workspace's members,
+    // so a change of who is in the group changes every workspace list it feeds.
+    let workspaces: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT ag.scope_id FROM access_grants ag \
+           JOIN groups g ON g.id = ag.principal_id \
+          WHERE ag.principal_type = 'group' AND ag.scope_type = 'workspace' \
+            AND ag.scope_id IS NOT NULL AND g.name = ANY($1) \
+          ORDER BY ag.scope_id",
+    )
+    .bind(&names)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    for ws in workspaces {
+        ids.extend(affected_services_for_workspace_members(conn, ws).await?);
+    }
     // F11: a group holding `platform_admin` makes its members platform admins,
     // whom an impersonation grant may not target; joining or leaving it
     // re-checks every impersonation grant's target.

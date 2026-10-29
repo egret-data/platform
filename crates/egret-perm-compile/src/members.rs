@@ -74,21 +74,12 @@
 //! `principal_type = 'user'`. Two deliberate narrowings, both recorded in the
 //! design spec's D3 because they are visible behaviour:
 //!
-//! 1. **A GROUP added as a workspace member is not expanded.** egret's PDP
-//!    does expand it (`egret_auth::grants::AccessGrantStore::grants_for` joins
-//!    `user_groups`), so this compiles LESS access than egret's own evaluator
-//!    would allow for such a subject. That is the fail-closed direction. It
-//!    was chosen because the writers of `user_groups` live in
-//!    `egret-auth::groups`, BELOW this crate, and could not call the
-//!    recompile. **J-F3 Task 1b removed that obstacle** — every writer now
-//!    recompiles through the `egret_auth::groups::GroupMembershipRecompiler`
-//!    port, and the per-login sync recompiles only the groups a login moved —
-//!    but it expanded only a `group` PRINCIPAL (design R8) and, since the role arm,
-//!    a role a group holds (`role_group_holders_via`). A group holding a
-//!    workspace membership is still not expanded: extending it needs
-//!    `affected_services_for_group_membership` to gain the workspace arm first,
-//!    or a membership change of such a group goes stale on REMOVAL, which fails
-//!    open; until then the narrowing stands.
+//! 1. **Group membership is expanded for groups and roles and workspaces.**
+//!    A group added as a workspace member, or holding a role, is expanded to its
+//!    members (`workspace_members_via`, `role_group_holders_via`), as the PDP
+//!    does (`egret_auth::grants::AccessGrantStore::grants_for`). The membership
+//!    writers recompile through the group-membership trigger, which covers the
+//!    role and workspace arms.
 //! 2. **An `expires_at` that lapses is not a write, so nothing recompiles.**
 //!    A time-boxed membership (the access-request approval path grants one)
 //!    stays in the compiled policy until the next recompile of that profile
@@ -606,12 +597,24 @@ pub(crate) async fn workspace_members_via(
     if ids.is_empty() {
         return Ok(Vec::new());
     }
+    // The direct members, and the members of a group that holds the workspace
+    // (the group arm: the PDP expands it, so the compiled list must too).
     sqlx::query_as(
         "SELECT ag.scope_id AS workspace_id, ag.principal_id AS user_id, \
             u.username::text AS username \
        FROM access_grants ag \
        JOIN users u ON u.id = ag.principal_id \
       WHERE ag.principal_type = 'user' \
+        AND ag.scope_type = 'workspace' \
+        AND ag.scope_id = ANY($1) \
+        AND ag.effect = 'allow' \
+        AND (ag.expires_at IS NULL OR ag.expires_at > now()) \
+     UNION \
+     SELECT ag.scope_id AS workspace_id, ug.user_id, u.username::text AS username \
+       FROM access_grants ag \
+       JOIN user_groups ug ON ug.group_id = ag.principal_id \
+       JOIN users u ON u.id = ug.user_id \
+      WHERE ag.principal_type = 'group' \
         AND ag.scope_type = 'workspace' \
         AND ag.scope_id = ANY($1) \
         AND ag.effect = 'allow' \

@@ -10,14 +10,11 @@ import { principalUrl } from "@/routes/governance/people/peopleUrl";
 /**
  * Whether engines apply a membership, in words (FE-A11Y-4, spec §3), exactly
  * as the server marks it (`onEngines`, `notOnEngines`). Nothing here works out
- * membership: a role or workspace held through a group is what the server
- * marks `held_through_group`, and that is what reads "egret only".
+ * membership.
  */
 export function appliedText(m: { onEngines: boolean; notOnEngines?: NotOnEngines | null }): string {
   if (m.onEngines) return "Yes";
   switch (m.notOnEngines) {
-    case "held_through_group":
-      return "egret only — not applied on engines: held through a group";
     case "expired":
       return "No: expired. Engines may apply it until the next recompile.";
     case "no_username":
@@ -224,7 +221,7 @@ function HolderGroupsTable({ rows }: { rows: GroupRef[] }) {
               <GroupLink name={g.name} />
             </TableCell>
             <TableCell data-label="Source">{SOURCE[g.source] ?? g.source}</TableCell>
-            <TableCell data-label="Applied on engines">egret only — not applied on engines</TableCell>
+            <TableCell data-label="Applied on engines">Yes</TableCell>
           </TableRow>
         ))}
       </TableBody>
