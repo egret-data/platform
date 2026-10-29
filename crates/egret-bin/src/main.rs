@@ -2718,6 +2718,29 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             }
         });
     }
+    // Expiry sweep (narrowing 2 of `egret_perm_compile::members`): a grant that
+    // lapses is not a write, so an hourly pass recompiles the profiles it named.
+    // Spawned here, off the boot path; the first tick runs at once in the
+    // background. Idempotent; a failure is logged and the next run retries.
+    {
+        let pool = db.pool.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                tick.tick().await;
+                match egret_perm_compile::expiry::recompile_lapsed_grants(&pool).await {
+                    Ok(s) if s.lapsed_rows > 0 => tracing::info!(
+                        lapsed_rows = s.lapsed_rows,
+                        profiles = s.services.len(),
+                        rewritten = s.rewritten,
+                        "expiry sweep ran"
+                    ),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "expiry sweep failed; retried next run"),
+                }
+            }
+        });
+    }
     // Username takeover (spec 2026-10-23 §4.2): converge every `egret-admin`
     // set to the active platform admins, repairing bodies written before the
     // fix. Best-effort; a failure is logged and never blocks boot.
