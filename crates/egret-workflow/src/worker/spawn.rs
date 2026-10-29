@@ -1053,7 +1053,14 @@ pub(super) enum IterationEnd {
 /// (Task A4):** A3 exempted an explicit `fetchType: STORE`, whose map Task A5
 /// will write to storage; A4 stores every map in the `Loop` run's list until
 /// A5 lands, so the cap now applies to every `fetchType`, and A5 puts its
-/// STORE branch before it.
+/// STORE branch before it. **Task A5 (2026-10-29):** done -- the cap applies
+/// to FETCH only (`fetchType: FETCH`, or `AUTO` resolved to it).
+///
+/// **STORE and AUTO (Task A5, spec D5).** [`fetch_mode`] resolves `AUTO`
+/// from the `Loop` run's rendered `values:`; under STORE a SECRET output is
+/// refused before anything renders, and the typed map goes to the
+/// iteration's Ion file ([`store_iteration_outputs`]), the entry holding
+/// `{uri}`.
 pub(super) async fn iteration_outputs(
     conn: &mut PgConnection,
     ctx: &claim::ExecutionCtx,
@@ -1061,7 +1068,7 @@ pub(super) async fn iteration_outputs(
     state: &ExecutionState,
 ) -> Result<IterationEnd> {
     let Some(row) = sqlx::query(
-        "SELECT p.source, tr.task_id, c.loop_index \
+        "SELECT p.source, tr.task_id, tr.rendered, c.loop_index \
            FROM workflow.executions c \
            JOIN workflow.executions p ON p.id = c.parent_execution_id \
            JOIN workflow.task_runs tr \
@@ -1078,6 +1085,7 @@ pub(super) async fn iteration_outputs(
     let parent_source: String = row.get("source");
     let task_id: String = row.get("task_id");
     let index: i32 = row.get("loop_index");
+    let loop_rendered: Option<String> = row.get("rendered");
     let flow = crate::spec::parse(&parent_source)
         .map_err(|e| worker_err(WorkerError::Unplannable(ctx.id, e.message)))?;
     let the_loop = match find_task(&flow, &task_id).map(|t| &t.kind) {
@@ -1091,6 +1099,25 @@ pub(super) async fn iteration_outputs(
     };
     if the_loop.outputs.is_empty() {
         return Ok(IterationEnd::NoOutputs);
+    }
+    let store = fetch_mode(the_loop.fetch_type(), loop_rendered.as_deref()) == FetchMode::Store;
+    // **Spec D9 at evaluation (package #6 Task A5, spec §2.2 item 8):** a
+    // SECRET output under STORE is refused at save, and a version stored
+    // before #6 (or an `AUTO` whose `values:` renders to a file only at run)
+    // is refused here, before anything is rendered: the file would hold the
+    // value in clear. The message names the outputs, never a value.
+    if store {
+        let secret: Vec<&str> = the_loop
+            .outputs
+            .iter()
+            .filter(|o| o.r#type == Some(crate::models::InputType::Secret))
+            .map(|o| o.id.as_str())
+            .collect();
+        if !secret.is_empty() {
+            let message = secret_under_store_message(&secret, the_loop.fetch_type());
+            log_on_execution(conn, ctx, LogLevel::Error, &message, &[]).await?;
+            return Ok(IterationEnd::Failed);
+        }
     }
 
     let cx = surface.context(&ctx.plan, state, None);
@@ -1139,15 +1166,157 @@ pub(super) async fn iteration_outputs(
         log_on_execution(conn, ctx, LogLevel::Error, &message, &redactions).await?;
         return Ok(IterationEnd::Failed);
     }
-    // Applied to every `fetchType` until Task A5 writes STORE maps to
-    // storage (Task A4): until then every map, STORE's included, is stored in
-    // the `Loop` run's list, so the cap that guards the list guards it too.
-    // A5 places its STORE branch before this check.
+    // **STORE (package #6 Task A5, spec D5), before the per-iteration
+    // cap:** the map goes to one Ion file under the iteration's own prefix
+    // and the entry holds `{uri}`, so the 1 MiB cap, which guards the
+    // `Loop` run's list, does not apply to it (the 16 MiB total still does,
+    // at the append, to the `{uri}` entries).
+    if store {
+        return store_iteration_outputs(conn, ctx, &flow, typed, &redactions).await;
+    }
+    // FETCH: the map itself is the entry, held to the per-iteration cap.
     if let Err(message) = iteration_cap(index, &typed) {
         log_on_execution(conn, ctx, LogLevel::Error, &message, &redactions).await?;
         return Ok(IterationEnd::Failed);
     }
     Ok(IterationEnd::Typed(typed))
+}
+
+/// How an iteration's outputs reach the `Loop` run, `fetchType` resolved
+/// (spec D5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FetchMode {
+    Fetch,
+    Store,
+}
+
+/// **`fetchType`, `AUTO` resolved** (spec D5; Kestra's `guessOutputMode`):
+/// `AUTO` is STORE when `values:` is a string that rendered to a URI
+/// (`kestra://`, `file://`, `nsfile://`, Kestra's `URIFetcher.supports`),
+/// FETCH otherwise. Decided from the `Loop` run's own `rendered` -- the
+/// values rendered once, when the run started -- so once per `Loop` run,
+/// not per iteration. A list `values:`, or a string that renders to a list,
+/// never starts with a scheme (`rendered` holds the list's JSON); a string
+/// that rendered to a URI is the only `rendered` that does, because the
+/// worker stores it as [`rendered_from_file`](crate::executor::rendered_from_file)'s
+/// `"<uri>\n<count>"`.
+fn fetch_mode(fetch_type: crate::models::LoopFetchType, loop_rendered: Option<&str>) -> FetchMode {
+    use crate::models::LoopFetchType as F;
+    match fetch_type {
+        F::Fetch => FetchMode::Fetch,
+        F::Store => FetchMode::Store,
+        F::Auto if loop_rendered.is_some_and(crate::executor::values_name_a_file) => {
+            FetchMode::Store
+        }
+        F::Auto => FetchMode::Fetch,
+    }
+}
+
+/// The refusal of a SECRET output under STORE at evaluation (spec D9, §2.2
+/// item 8), naming the outputs and how STORE was reached, never a value.
+fn secret_under_store_message(ids: &[&str], fetch_type: crate::models::LoopFetchType) -> String {
+    let why = match fetch_type {
+        crate::models::LoopFetchType::Auto => {
+            "fetchType is AUTO and the Loop's values: rendered to a file, so its outputs are stored"
+        }
+        _ => "fetchType is STORE",
+    };
+    format!(
+        "egret refuses output {}: a SECRET output cannot be written to internal storage ({why}): \
+         the iteration's outputs file would hold the value in clear. Use fetchType: FETCH",
+        ids.join(", ")
+    )
+}
+
+/// **The STORE branch** (spec D5): write `typed` as the iteration's Ion file
+/// ([`storage::loop_outputs_file`](crate::storage::loop_outputs_file)) and
+/// answer the entry's map `{uri}`.
+///
+/// **The write is never inside the transaction** (the prefetch rule,
+/// `storage::prefetch`, applied to a write): the attempt records it with
+/// the owner's cache ([`Prefetch::upload`](crate::storage::prefetch::Prefetch)),
+/// the owner rolls back, writes the object with nothing held, and runs the
+/// attempt again, which indexes the file in its own transaction -- so the
+/// index row and the `{uri}` entry commit together, and a later task's
+/// `read()` resolves it as readable (spec D5, `resolve_readable_many`) and
+/// the pruner keeps it with its loop family.
+///
+/// An author's problem (no internal storage, a namespace or flow id no URI
+/// can carry, a file over `workflow.storage.max_file_bytes`) fails the
+/// iteration with its message; a store outage answers `Err`, so nothing
+/// commits and the settle runs again, as an outage on a read does.
+async fn store_iteration_outputs(
+    conn: &mut PgConnection,
+    ctx: &claim::ExecutionCtx,
+    flow: &Flow,
+    typed: crate::outputs::Typed,
+    redactions: &[String],
+) -> Result<IterationEnd> {
+    use crate::storage::prefetch::Upload;
+    let Some(fs) = crate::storage::current() else {
+        let message = "Loop outputs with fetchType: STORE cannot be written: egret has no \
+                       internal storage configured (the `[storage]` section of its \
+                       configuration). Use fetchType: FETCH";
+        log_on_execution(conn, ctx, LogLevel::Error, message, redactions).await?;
+        return Ok(IterationEnd::Failed);
+    };
+    let (uri, bytes) = match crate::storage::loop_outputs_file(
+        &flow.namespace,
+        &flow.id,
+        ctx.id,
+        &typed.values,
+        fs.caps.max_file_bytes,
+    ) {
+        Ok(file) => file,
+        Err(reason) => {
+            let message = format!("Loop outputs with fetchType: STORE cannot be written: {reason}");
+            log_on_execution(conn, ctx, LogLevel::Error, &message, redactions).await?;
+            return Ok(IterationEnd::Failed);
+        }
+    };
+    let object = fs
+        .object_uri(ctx.workspace_id, &uri)
+        .map_err(|e| Error::Internal(anyhow::anyhow!("egret built {e}")))?;
+    let gate = ctx.gate.as_ref().ok_or_else(|| {
+        Error::Internal(anyhow::anyhow!(
+            "execution {}: a reader's context reached a Loop iteration's STORE write",
+            ctx.id
+        ))
+    })?;
+    let size = bytes.len() as u64;
+    match gate.prefetch().upload(ctx.workspace_id, &object, bytes) {
+        // `Pending`: this attempt is rolled back whatever it answers; it
+        // carries on as if written (the gather rule), and its index row and
+        // entry go with the rollback.
+        Upload::Done | Upload::Pending => {}
+        Upload::Outage(outage) => {
+            return Err(Error::Internal(anyhow::anyhow!(
+                "execution {}: {outage}",
+                ctx.id
+            )))
+        }
+        Upload::Final(message) => {
+            log_on_execution(conn, ctx, LogLevel::Error, &message, redactions).await?;
+            return Ok(IterationEnd::Failed);
+        }
+    }
+    crate::storage::index_execution_files(
+        conn,
+        ctx.workspace_id,
+        ctx.id,
+        &[crate::storage::StoredFile {
+            uri: uri.clone(),
+            size,
+        }],
+    )
+    .await?;
+    let mut values = serde_json::Map::new();
+    values.insert("uri".into(), serde_json::Value::String(uri));
+    Ok(IterationEnd::Typed(crate::outputs::Typed {
+        values,
+        secret_ids: Vec::new(),
+        warnings: Vec::new(),
+    }))
 }
 
 /// The per-iteration cap of spec D4: `Err` with the message when `typed`'s
@@ -1580,6 +1749,30 @@ mod tests {
     /// Package #6 A3 (spec D4, Q5): a map over 1 MiB fails its iteration with
     /// the message that names the iteration, its size and `fetchType: STORE`;
     /// a map exactly at the cap passes.
+    /// **`fetchType`, `AUTO` resolved (Task A5, spec D5; Kestra's
+    /// `guessOutputMode`)**: from the `Loop` run's `rendered`, which starts
+    /// with a scheme only when a string `values:` rendered to a URI.
+    #[test]
+    fn auto_is_store_only_when_the_values_rendered_to_a_uri() {
+        use crate::models::LoopFetchType as F;
+        let file = crate::executor::rendered_from_file("kestra:///a/b/executions/x/c.ion", 3);
+        for (fetch_type, rendered, want) in [
+            (F::Auto, Some(file.as_str()), FetchMode::Store),
+            (F::Auto, Some("nsfile:///a.txt\n1"), FetchMode::Store),
+            (F::Auto, Some(r#"["a","b"]"#), FetchMode::Fetch),
+            (F::Auto, Some(r#"{"k":"v"}"#), FetchMode::Fetch),
+            (F::Auto, None, FetchMode::Fetch),
+            (F::Fetch, Some(file.as_str()), FetchMode::Fetch),
+            (F::Store, Some(r#"["a"]"#), FetchMode::Store),
+        ] {
+            assert_eq!(
+                fetch_mode(fetch_type, rendered),
+                want,
+                "{fetch_type:?} {rendered:?}"
+            );
+        }
+    }
+
     #[test]
     fn an_iteration_map_over_one_mib_fails_naming_fetch_type_store() {
         use crate::runners::env::MAX_LOOP_ITERATION_OUTPUT_BYTES as CAP;

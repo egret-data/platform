@@ -287,6 +287,30 @@ struct State {
     rounds: u32,
     /// What the answers are for (`Prefetch::bind`).
     owner: Option<String>,
+    /// Package #6 Task A5: objects a `settle` asked to WRITE (a `Loop`
+    /// iteration's `fetchType: STORE` file), keyed by `(workspace, object
+    /// URI)`, with the bytes the asking attempt computed. See
+    /// [`Prefetch::upload`].
+    uploads_pending: BTreeMap<(Uuid, String), Vec<u8>>,
+    /// The uploads done with no transaction open: `Ok`, or the outage the
+    /// store answered.
+    uploaded: BTreeMap<(Uuid, String), std::result::Result<(), String>>,
+}
+
+/// What [`Prefetch::upload`] answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Upload {
+    /// The object was written, with no transaction open, by an earlier
+    /// round of this call: the attempt may index it and commit.
+    Done,
+    /// Recorded: this attempt will not commit; the owner writes the object
+    /// with the transaction rolled back and runs the attempt again.
+    Pending,
+    /// The store failed the write (an outage): the attempt must answer `Err`
+    /// so nothing commits, as an outage on a read does (spec §11).
+    Outage(String),
+    /// A limit of this call is spent ([`MAX_ROUNDS`], [`MAX_FETCHES`]).
+    Final(String),
 }
 
 /// One call's read cache. See the module doc. Cheap to clone: every clone is
@@ -328,7 +352,54 @@ impl Prefetch {
     /// Whether a render of the current attempt asked for something this
     /// cache did not hold. **An attempt with a miss pending must not commit.**
     pub fn has_pending(&self) -> bool {
-        !self.state().pending.is_empty()
+        let s = self.state();
+        !s.pending.is_empty() || !s.uploads_pending.is_empty()
+    }
+
+    /// **Write `bytes` to the object `object` of `workspace` -- never inside
+    /// the transaction** (package #6 Task A5; the rule of the module doc,
+    /// applied to a write: no pool connection, row lock or open transaction
+    /// is held while the store is talked to).
+    ///
+    /// The first attempt that asks records the write and is answered
+    /// [`Upload::Pending`]: it carries on (the gather rule) and is rolled
+    /// back by the owner, which writes the object in
+    /// [`fetch_pending`](Self::fetch_pending) and runs the attempt again; that
+    /// attempt is answered [`Upload::Done`] and may index the object in its
+    /// transaction. The object is keyed by its URI alone, not its bytes: the
+    /// file holds what the attempt that asked computed, and a later attempt
+    /// of the same call (which may compute other bytes from `now()`, say)
+    /// uses it as written. A rolled-back attempt that never commits leaves an
+    /// unindexed object, which the orphan sweep removes
+    /// (`storage::prune`).
+    ///
+    /// Counted against [`MAX_FETCHES`] and [`MAX_ROUNDS`] as a read is.
+    pub(crate) fn upload(&self, workspace: Uuid, object: &str, bytes: Vec<u8>) -> Upload {
+        let mut s = self.state();
+        let key = (workspace, object.to_string());
+        if let Some(done) = s.uploaded.get(&key) {
+            return match done {
+                Ok(()) => Upload::Done,
+                Err(outage) => Upload::Outage(outage.clone()),
+            };
+        }
+        if s.uploads_pending.contains_key(&key) {
+            return Upload::Pending;
+        }
+        if s.rounds >= MAX_ROUNDS {
+            return Upload::Final(format!(
+                "{object} could not be written: the transaction needed more than {MAX_ROUNDS} \
+                 rounds of reads and writes, and {MAX_ROUNDS} is the limit"
+            ));
+        }
+        if s.fetched + s.pending.len() + s.uploads_pending.len() >= MAX_FETCHES {
+            return Upload::Final(format!(
+                "{object} could not be written: the transaction read and wrote more than \
+                 {MAX_FETCHES} values, and {MAX_FETCHES} is the limit"
+            ));
+        }
+        s.uploads_pending.insert(key, bytes);
+        Upload::Pending
     }
 
     /// How many fetch rounds this call has made.
@@ -355,6 +426,8 @@ impl Prefetch {
             s.owner = Some(owner.to_string());
             s.answers.clear();
             s.pending.clear();
+            s.uploads_pending.clear();
+            s.uploaded.clear();
         }
     }
 
@@ -383,8 +456,14 @@ impl Prefetch {
     /// does -- and its answer cached as it came, an outage with it. Counts
     /// one round. `Err` only for egret's own failure to run the fetch.
     pub async fn fetch_pending(&self) -> Result<()> {
-        let pending = std::mem::take(&mut self.state().pending);
-        if pending.is_empty() {
+        let (pending, uploads) = {
+            let mut s = self.state();
+            (
+                std::mem::take(&mut s.pending),
+                std::mem::take(&mut s.uploads_pending),
+            )
+        };
+        if pending.is_empty() && uploads.is_empty() {
             return Ok(());
         }
         let store = super::current().ok_or_else(|| {
@@ -392,6 +471,31 @@ impl Prefetch {
                 "a render recorded a read, and this process has no internal storage to fetch it from"
             ))
         })?;
+        // Package #6 Task A5: the writes, here with no transaction open
+        // (see `upload`). An outage is cached and answered to the next
+        // attempt, which then fails without committing.
+        if !uploads.is_empty() {
+            let mut done = Vec::with_capacity(uploads.len());
+            for ((workspace, object), bytes) in uploads {
+                let answer = store
+                    .store
+                    .put(&object, bytes)
+                    .await
+                    .map_err(|e| format!("{object} could not be written: {e}"));
+                done.push(((workspace, object), answer));
+            }
+            let mut s = self.state();
+            for (key, answer) in done {
+                s.fetched += 1;
+                s.uploaded.insert(key, answer);
+            }
+            if pending.is_empty() {
+                s.rounds += 1;
+                #[cfg(any(test, feature = "test-util"))]
+                FETCH_ROUNDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Ok(());
+            }
+        }
         let cap = store.caps.max_read_bytes.saturating_mul(CACHE_CAP_FACTOR);
         let ns_db = super::nsfiles::db_options();
         // One live snapshot per (workspace, running flow); built here, on the
@@ -788,6 +892,45 @@ mod tests {
                 limit: false,
             }),
         );
+    }
+
+    /// **Package #6 Task A5: a write is recorded, not done, inside the
+    /// attempt.** The first ask is `Pending` and makes the attempt
+    /// uncommittable; [`Prefetch::fetch_pending`] writes the object (no
+    /// transaction open there) and counts one round; the next attempt's ask
+    /// is `Done`, whatever bytes it computed (the object is keyed by its URI);
+    /// `bind` to another owner starts the writes over.
+    #[tokio::test]
+    async fn an_upload_is_pending_in_the_attempt_and_written_by_the_fetch() {
+        let fs = crate::storage::install_mem_for_tests();
+        let object = fs
+            .object_uri(
+                WS,
+                &format!(
+                    "kestra:///w9c/t9/f/executions/{}/outputs.ion",
+                    Uuid::from_u128(3)
+                ),
+            )
+            .unwrap();
+        let pf = Prefetch::new();
+        pf.bind("owner-a");
+        assert!(!pf.has_pending());
+        assert_eq!(pf.upload(WS, &object, b"{v:1}".to_vec()), Upload::Pending);
+        assert!(pf.has_pending(), "the attempt must not commit");
+        assert_eq!(pf.upload(WS, &object, b"{v:1}".to_vec()), Upload::Pending);
+        assert!(
+            fs.store.get(&object).await.is_err(),
+            "nothing is written inside the attempt"
+        );
+        let rounds = pf.rounds();
+        pf.fetch_pending().await.unwrap();
+        assert!(!pf.has_pending());
+        assert_eq!(pf.rounds(), rounds + 1);
+        assert_eq!(fs.store.get(&object).await.unwrap(), b"{v:1}");
+        assert_eq!(pf.upload(WS, &object, b"{v:2}".to_vec()), Upload::Done);
+        assert!(!pf.has_pending());
+        pf.bind("owner-b");
+        assert_eq!(pf.upload(WS, &object, b"{v:1}".to_vec()), Upload::Pending);
     }
 
     #[test]

@@ -451,6 +451,71 @@ pub async fn index_input_files(
     insert_rows(conn, workspace, execution, None, files).await
 }
 
+/// The name of a `Loop` iteration's `fetchType: STORE` file under its
+/// sub-execution's prefix (package #6 Task A5, spec D5): one file per
+/// iteration, so a fixed name, and a settle that runs again overwrites its
+/// own object. Kestra names it randomly (`{n}.ion`, `w9a-storage.json`
+/// `findings` `loop_outputs_store_uri`), as it does a SQL task's STORE file,
+/// which egret also names fixed (`result.ion`).
+pub const LOOP_OUTPUTS_FILE: &str = "outputs.ion";
+
+/// **A `Loop` iteration's STORE file** (package #6 Task A5, spec D5;
+/// Kestra's `Loop.computeIterationOutput`, `ION_MAPPER.writeValueAsBytes`
+/// then `runContext.storage().putFile`): the URI
+/// `kestra:///{ns}/{flow}/executions/{execution}/outputs.ion` -- the
+/// ITERATION's own prefix, a [`uri::Tail::Execution`] file, so it is in the
+/// execution's loop family by construction (spec D10) -- and the typed map
+/// `values` as one Ion struct (`{value:"some output"}`, as the artifact's
+/// file holds, `w9a-storage.json` `egret_expected.loop_over_ion`).
+///
+/// `Err` is the author's message: a namespace or flow id no URI can carry,
+/// or a file over `max_file_bytes` (`workflow.storage.max_file_bytes`, the
+/// cap every file egret writes is held to).
+pub fn loop_outputs_file(
+    namespace: &str,
+    flow_id: &str,
+    execution: Uuid,
+    values: &serde_json::Map<String, serde_json::Value>,
+    max_file_bytes: u64,
+) -> std::result::Result<(String, Vec<u8>), String> {
+    let uri = uri::execution_file_uri(namespace, flow_id, execution, LOOP_OUTPUTS_FILE)?;
+    let mut text = String::new();
+    crate::runners::write_ion_json(&mut text, &serde_json::Value::Object(values.clone()));
+    let bytes = text.into_bytes();
+    if bytes.len() as u64 > max_file_bytes {
+        return Err(format!(
+            "{uri} would be {} bytes; egret writes files of at most {max_file_bytes} bytes \
+             (workflow.storage.max_file_bytes)",
+            bytes.len()
+        ));
+    }
+    Ok((uri, bytes))
+}
+
+/// Index `execution`'s own files (no task run, a [`uri::Tail::Execution`]
+/// tail: a `Loop` iteration's STORE file, package #6 Task A5), in the
+/// transaction that records them. Each URI must be such a file of
+/// `execution`; anything else is `Error::Internal`: egret built a wrong URI.
+pub async fn index_execution_files(
+    conn: &mut PgConnection,
+    workspace: Uuid,
+    execution: Uuid,
+    files: &[StoredFile],
+) -> Result<()> {
+    for f in files {
+        let parsed = uri::parse(&f.uri)
+            .map_err(|r| Error::Internal(anyhow::anyhow!("egret built {}: {r}", f.uri)))?;
+        if parsed.execution != execution || !matches!(parsed.tail, uri::Tail::Execution { .. }) {
+            return Err(Error::Internal(anyhow::anyhow!(
+                "egret built {} as a file of execution {execution}: \
+                 the URI names another execution or is not an execution file",
+                f.uri
+            )));
+        }
+    }
+    insert_rows(conn, workspace, execution, None, files).await
+}
+
 async fn insert_rows(
     conn: &mut PgConnection,
     workspace: Uuid,

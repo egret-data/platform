@@ -1478,3 +1478,407 @@ async fn a_secret_loop_output_without_a_master_key_fails_the_iteration() {
         "nothing stored in clear: {stored}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Package #6 Task A5: `fetchType: STORE` and `AUTO` (spec D5)
+// ---------------------------------------------------------------------------
+
+/// A corpus flow's source, verbatim.
+fn corpus(name: &str) -> String {
+    let path = format!(
+        "{}/oracle-exec/corpus/valids/{name}.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
+}
+
+/// The artifact's measured `Loop` run of `entry` (`w9a-storage.json`
+/// `egret_expected.loop_over_ion`).
+fn loop_over_ion(entry: &str) -> serde_json::Value {
+    let path = format!(
+        "{}/oracle-exec/w9a-storage.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let all: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    all["egret_expected"]["loop_over_ion"][entry].clone()
+}
+
+/// The `Loop` run `task`'s stored outputs in `execution`.
+async fn loop_run_outputs(pool: &sqlx::PgPool, execution: Uuid, task: &str) -> serde_json::Value {
+    sqlx::query_scalar(
+        "SELECT outputs FROM workflow.task_runs WHERE execution_id = $1 AND task_id = $2",
+    )
+    .bind(execution)
+    .bind(task)
+    .fetch_one(pool)
+    .await
+    .expect("the loop run")
+}
+
+/// The iteration `index` of `root`.
+async fn iteration_of(pool: &sqlx::PgPool, root: Uuid, index: i32) -> Uuid {
+    sqlx::query_scalar(
+        "SELECT id FROM workflow.executions WHERE parent_execution_id = $1 AND loop_index = $2",
+    )
+    .bind(root)
+    .bind(index)
+    .fetch_one(pool)
+    .await
+    .expect("the iteration")
+}
+
+/// A stored object's text.
+async fn object_text(fs: &FileStore, ws: Uuid, uri: &str) -> String {
+    String::from_utf8(
+        fs.store
+            .get(&fs.object_uri(ws, uri).unwrap())
+            .await
+            .expect("the object"),
+    )
+    .expect("utf-8")
+}
+
+/// The `value` output of the one run of `task` in `execution`.
+async fn value_of(
+    pool: &sqlx::PgPool,
+    execution: Uuid,
+    task: &str,
+) -> (String, Option<serde_json::Value>) {
+    sqlx::query_as("SELECT state, outputs->'value' FROM workflow.task_runs WHERE execution_id = $1 AND task_id = $2")
+        .bind(execution)
+        .bind(task)
+        .fetch_one(pool)
+        .await
+        .expect("the run")
+}
+
+/// **`valids/loop-outputs-auto`, field by field against the artifact's
+/// measured run** (`w9a-storage.json` `egret_expected.loop_over_ion`): the
+/// executor oracle compares states only, so A4's state bank of this entry
+/// did not see that its list held FETCH maps where Kestra's AUTO over a URI
+/// writes `{uri}`. Every field the artifact recorded is compared:
+///
+/// - `iterationCount`, `runningIterations`, `terminatedIterations` equal;
+/// - `nextOffset` absent -- spec D4, egret reads file values by index
+///   (recorded divergence, §5 follow-up);
+/// - each entry's `item` equal to the artifact's (the record as JSON text,
+///   the index, no `key`), in the same order;
+/// - each entry's `outputs` is `{uri}` and nothing else, the URI the
+///   artifact's layout `kestra:///{ns}/{flow}/executions/{ITERATION id}/…ion`
+///   with the iteration's own id (Kestra's file name is random, egret's is
+///   `outputs.ion`: the one recorded difference);
+/// - the file's text is the artifact's, `{value:"some output"}`;
+/// - `end`'s value is the artifact's `end_value` with those URIs.
+#[tokio::test(flavor = "multi_thread")]
+async fn loop_outputs_auto_matches_the_artifacts_run_field_by_field() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let golden = loop_over_ion("valids/loop-outputs-auto");
+    assert_eq!(golden["state"], "SUCCESS", "the artifact's entry is there");
+    let root = start_execution(&db.pool, ws, None, &corpus("loop-outputs-auto"), json!({}))
+        .await
+        .unwrap();
+    drain(&db.pool).await;
+    let state: String = sqlx::query_scalar("SELECT state FROM workflow.executions WHERE id = $1")
+        .bind(root)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(state, golden["state"]);
+
+    let ours = loop_run_outputs(&db.pool, root, "loop").await;
+    let want = &golden["loop_outputs"];
+    for counter in [
+        "iterationCount",
+        "runningIterations",
+        "terminatedIterations",
+    ] {
+        assert_eq!(ours[counter], want[counter], "{counter}");
+    }
+    assert!(
+        want.get("nextOffset").is_some() && ours.get("nextOffset").is_none(),
+        "spec D4"
+    );
+    let (ours_list, want_list) = (
+        ours["outputs"].as_array().expect("a list"),
+        want["outputs"].as_array().unwrap(),
+    );
+    assert_eq!(ours_list.len(), want_list.len());
+    let files = &golden["iteration_output_files"];
+    let mut end = want_list.clone();
+    for (i, (o, w)) in ours_list.iter().zip(want_list).enumerate() {
+        assert_eq!(o["item"], w["item"], "entry {i}'s item");
+        let keys: Vec<&String> = o["outputs"].as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["uri"], "entry {i}: {{uri}} only, as the artifact's");
+        let uri = o["outputs"]["uri"].as_str().unwrap();
+        let theirs = w["outputs"]["uri"].as_str().unwrap();
+        let iteration = iteration_of(&db.pool, root, i as i32).await;
+        let layout = |u: &str| u.rsplitn(3, '/').nth(2).unwrap().to_string();
+        assert_eq!(layout(uri), layout(theirs), "entry {i}: the same prefix");
+        assert_eq!(
+            uri,
+            format!(
+                "kestra:///io/kestra/tests/loop-outputs-auto/executions/{}/outputs.ion",
+                iteration.hyphenated()
+            ),
+            "entry {i}: under the ITERATION's own prefix"
+        );
+        assert_eq!(
+            object_text(&fs, ws, uri).await,
+            files[theirs]["text"].as_str().unwrap(),
+            "entry {i}: the file's text"
+        );
+        end[i]["outputs"]["uri"] = json!(uri);
+    }
+    let (end_state, end_value) = value_of(&db.pool, root, "end").await;
+    assert_eq!(end_state, "SUCCESS");
+    let end_value: serde_json::Value =
+        serde_json::from_str(end_value.unwrap().as_str().unwrap()).unwrap();
+    let golden_end: serde_json::Value =
+        serde_json::from_str(golden["end_value"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        golden_end,
+        json!(want_list),
+        "the artifact's end renders its list"
+    );
+    assert_eq!(end_value, json!(end));
+}
+
+/// **`valids/loop-outputs-store`, verbatim**, field by field against what
+/// survey §2 item 7 says Kestra writes (the artifact recorded this entry's
+/// states only): three entries in index order, each `{item: {value,
+/// iteration}, outputs: {uri}}`, the URI under that iteration's prefix, the
+/// file `{value:"some output"}`, the counters, and `end` rendering the list.
+#[tokio::test(flavor = "multi_thread")]
+async fn loop_outputs_store_writes_one_file_per_iteration_and_lists_its_uri() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let root = start_execution(&db.pool, ws, None, &corpus("loop-outputs-store"), json!({}))
+        .await
+        .unwrap();
+    drain(&db.pool).await;
+    let mut want = Vec::new();
+    for (i, value) in ["value 1", "value 2", "value 3"].into_iter().enumerate() {
+        let iteration = iteration_of(&db.pool, root, i as i32).await;
+        let uri = uri::execution_file_uri(
+            "io.kestra.tests",
+            "loop-outputs-store",
+            iteration,
+            "outputs.ion",
+        )
+        .unwrap();
+        assert_eq!(object_text(&fs, ws, &uri).await, r#"{value:"some output"}"#);
+        want.push(json!({"item": {"value": value, "iteration": i}, "outputs": {"uri": uri}}));
+    }
+    assert_eq!(
+        loop_run_outputs(&db.pool, root, "loop").await,
+        json!({
+            "iterationCount": 3,
+            "runningIterations": 0,
+            "terminatedIterations": {"SUCCESS": 3},
+            "outputs": want,
+        })
+    );
+    let (end_state, end_value) = value_of(&db.pool, root, "end").await;
+    assert_eq!(end_state, "SUCCESS");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(end_value.unwrap().as_str().unwrap()).unwrap(),
+        json!(want)
+    );
+}
+
+/// **A later task's `read()` of a STORE URI returns the typed map as Ion**
+/// (spec D5): each output coerced by its `type` (an INT from text, a JSON
+/// object, a BOOLEAN), in declared order; the file is indexed in the
+/// iteration's loop family, so the ROOT reads it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_later_task_reads_a_store_file_as_the_typed_map_in_ion() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, _fs)) = setup().await else {
+        return;
+    };
+    let source = format!(
+        "id: store_read\nnamespace: {NS}\ntasks:\n  - id: each\n    type: io.kestra.plugin.core.flow.Loop\n    \
+         values: [a]\n    fetchType: STORE\n    outputs:\n      - id: s\n        type: STRING\n        \
+         value: \"{{{{ outputs.r.value }}}}\"\n      - id: n\n        type: INT\n        value: \"3\"\n      \
+         - id: j\n        type: JSON\n        value: '{{\"k\": [1, 2]}}'\n      - id: b\n        type: BOOL\n        \
+         value: \"true\"\n    tasks:\n      - id: r\n        type: io.kestra.plugin.core.debug.Return\n        \
+         format: \"{{{{ item.value }}}}-out\"\n  - id: later\n    type: io.kestra.plugin.core.debug.Return\n    \
+         format: \"{{{{ read(outputs.each.outputs[0].outputs.uri) }}}}\"\n"
+    );
+    let root = start_execution(&db.pool, ws, None, &source, json!({}))
+        .await
+        .unwrap();
+    drain(&db.pool).await;
+    let (history, lines) = the_iteration(&db.pool, root).await;
+    assert_eq!(
+        history,
+        json!(["CREATED", "RUNNING", "SUCCESS"]),
+        "{lines:?}"
+    );
+    let (state, value) = value_of(&db.pool, root, "later").await;
+    assert_eq!(
+        (state.as_str(), value),
+        (
+            "SUCCESS",
+            Some(json!(r#"{s:"a-out",n:3,j:{k:[1,2]},b:true}"#))
+        )
+    );
+}
+
+/// **`AUTO` resolves to FETCH for a list `values:` and for a string that is
+/// not a URI** (Kestra's `guessOutputMode`): the entry holds the map itself
+/// and no file is indexed. (`AUTO` over a URI is STORE: the corpus test above.)
+#[tokio::test(flavor = "multi_thread")]
+async fn auto_is_fetch_for_a_list_and_for_a_string_that_is_not_a_uri() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, _fs)) = setup().await else {
+        return;
+    };
+    for (flow, values) in [("auto_list", "[x]"), ("auto_text", "'[\"x\"]'")] {
+        let source = format!(
+            "id: {flow}\nnamespace: {NS}\ntasks:\n  - id: each\n    type: io.kestra.plugin.core.flow.Loop\n    \
+             values: {values}\n    outputs:\n      - id: v\n        type: STRING\n        value: got\n    \
+             tasks:\n      - id: r\n        type: io.kestra.plugin.core.log.Log\n        message: r\n"
+        );
+        let root = start_execution(&db.pool, ws, None, &source, json!({}))
+            .await
+            .unwrap();
+        drain(&db.pool).await;
+        assert_eq!(
+            each_outputs(&db.pool, root)
+                .await
+                .map(|o| o["outputs"].clone()),
+            Some(json!([{"item": {"value": "x", "iteration": 0}, "outputs": {"v": "got"}}])),
+            "{flow}"
+        );
+        let iteration = iteration_of(&db.pool, root, 0).await;
+        assert!(
+            indexed_uris(&db.pool, iteration).await.is_empty(),
+            "{flow}: no file"
+        );
+    }
+}
+
+/// **The 1 MiB per-iteration cap is FETCH's** (spec D4, D5): a map of about
+/// 1.2 MB (two optional outputs, each rendered alone under the 1 MiB render
+/// budget) fails its iteration under `FETCH`, naming `fetchType: STORE`, and
+/// is written under `STORE`.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_per_iteration_cap_does_not_apply_to_store() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let big = |flow: &str, fetch: &str| {
+        format!(
+            "id: {flow}\nnamespace: {NS}\ntasks:\n  - id: each\n    type: io.kestra.plugin.core.flow.Loop\n    \
+             values: [x]\n    fetchType: {fetch}\n    outputs:\n      - id: a\n        type: STRING\n        \
+             required: false\n        value: \"{{{{ range(0, 50000) | join('aaaaaaaaaaaa') }}}}\"\n      - id: b\n        type: STRING\n        \
+             required: false\n        value: \"{{{{ range(0, 50000) | join('bbbbbbbbbbbb') }}}}\"\n    tasks:\n      - id: r\n        \
+             type: io.kestra.plugin.core.log.Log\n        message: r\n"
+        )
+    };
+    let fetched = start_execution(&db.pool, ws, None, &big("cap_fetch", "FETCH"), json!({}))
+        .await
+        .unwrap();
+    let stored = start_execution(&db.pool, ws, None, &big("cap_store", "STORE"), json!({}))
+        .await
+        .unwrap();
+    drain(&db.pool).await;
+
+    let (history, lines) = the_iteration(&db.pool, fetched).await;
+    assert_eq!(
+        history,
+        json!(["CREATED", "RUNNING", "SUCCESS", "FAILED"]),
+        "{lines:?} {:?}",
+        each_outputs(&db.pool, fetched)
+            .await
+            .map(|o| o.to_string().len())
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("Loop outputs of iteration 0 are ")
+                && l.contains("Use fetchType: STORE")),
+        "{lines:?}"
+    );
+
+    let (history, lines) = the_iteration(&db.pool, stored).await;
+    assert_eq!(
+        history,
+        json!(["CREATED", "RUNNING", "SUCCESS"]),
+        "{lines:?}"
+    );
+    let iteration = iteration_of(&db.pool, stored, 0).await;
+    let uri = uri::execution_file_uri(NS, "cap_store", iteration, "outputs.ion").unwrap();
+    assert_eq!(
+        each_outputs(&db.pool, stored)
+            .await
+            .map(|o| o["outputs"].clone()),
+        Some(json!([{"item": {"value": "x", "iteration": 0}, "outputs": {"uri": uri}}]))
+    );
+    assert_eq!(
+        indexed_uris(&db.pool, iteration).await,
+        std::slice::from_ref(&uri)
+    );
+    let text = object_text(&fs, ws, &uri).await;
+    assert!(
+        text.len() > 1_200_000 && text.starts_with("{a:\"0aaaaaaaaaaaa1aaa"),
+        "{}",
+        text.len()
+    );
+}
+
+/// **A SECRET output under `AUTO` resolved to STORE is refused at
+/// evaluation** (spec D9, §2.2 item 8): save refuses `AUTO` with a string
+/// `values:`; a stored version that bypassed it (here: `start_execution`
+/// takes the source as stored) fails its iteration before anything is
+/// rendered, with a message naming the output and how STORE was reached,
+/// and never the value. Checked BEFORE the no-master-key refusal this binary
+/// would otherwise give.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_secret_output_under_auto_over_a_file_is_refused_at_evaluation() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, _fs)) = setup().await else {
+        return;
+    };
+    let source = format!(
+        "id: secret_auto\nnamespace: {NS}\ntasks:\n  - id: write\n    type: io.kestra.plugin.core.storage.Write\n    \
+         content: \"1\"\n  - id: each\n    type: io.kestra.plugin.core.flow.Loop\n    values: \"{{{{ outputs.write.uri }}}}\"\n    \
+         outputs:\n      - id: s\n        type: SECRET\n        value: hush-a5\n    tasks:\n      - id: r\n        \
+         type: io.kestra.plugin.core.log.Log\n        message: r\n"
+    );
+    let root = start_execution(&db.pool, ws, None, &source, json!({}))
+        .await
+        .unwrap();
+    drain(&db.pool).await;
+    let (history, lines) = the_iteration(&db.pool, root).await;
+    assert_eq!(
+        history,
+        json!(["CREATED", "RUNNING", "SUCCESS", "FAILED"]),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(
+            &"egret refuses output s: a SECRET output cannot be written to internal \
+             storage (fetchType is AUTO and the Loop's values: rendered to a file, so its outputs \
+             are stored): the iteration's outputs file would hold the value in clear. Use \
+             fetchType: FETCH"
+                .to_string()
+        ),
+        "{lines:?}"
+    );
+    assert!(lines.iter().all(|l| !l.contains("hush-a5")));
+    assert_eq!(run_of(&db.pool, root, "each").await.1, "FAILED");
+    let iteration = iteration_of(&db.pool, root, 0).await;
+    assert!(
+        indexed_uris(&db.pool, iteration).await.is_empty(),
+        "no file written"
+    );
+}

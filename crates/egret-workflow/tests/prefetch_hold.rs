@@ -95,7 +95,26 @@ struct GateStore(egret_storage::MemStore);
 
 #[async_trait::async_trait]
 impl ObjectStore for GateStore {
+    /// Package #6 Task A5: a `put` of an object whose key holds the armed
+    /// needle is held as a download is (says so on `started`, waits for
+    /// `release`), so [`while_downloading`] probes an UPLOAD too -- a `Loop`
+    /// iteration's `fetchType: STORE` file.
     async fn put(&self, uri: &str, bytes: Vec<u8>) -> Result<(), StorageError> {
+        let gate = {
+            let mut armed = GATE.lock().unwrap();
+            match armed.as_ref() {
+                Some(g) if uri.contains(&g.needle) => armed.take(),
+                _ => None,
+            }
+        };
+        if let Some(mut gate) = gate {
+            if let Some(tx) = gate.started.take() {
+                let _ = tx.send(());
+            }
+            if let Some(rx) = gate.release.take() {
+                let _ = rx.await;
+            }
+        }
         self.0.put(uri, bytes).await
     }
     async fn get(&self, uri: &str) -> Result<Vec<u8>, StorageError> {
@@ -945,6 +964,77 @@ async fn a_loop_over_a_file_holds_nothing_while_the_file_downloads() {
     assert_eq!(values, ["1", "2", "3"]);
     drain(&fx.db.pool).await;
     assert_eq!(state_of(&fx.db, ex).await, "SUCCESS");
+}
+
+/// **Package #6 Task A5: a `Loop` iteration's `fetchType: STORE` file is
+/// written with nothing held** -- the same rule as a read, applied to the
+/// write (`Prefetch::upload`): while the object is being put, the worker's
+/// one connection is free, and neither the iteration nor its loop root nor
+/// the finished run is locked. The file is then indexed and its `{uri}`
+/// entry appended by the attempt that commits.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_loop_store_file_is_written_holding_nothing() {
+    let Some(fx) = setup().await else {
+        return;
+    };
+    let src = flow(
+        "loop_store",
+        "",
+        "  - id: l\n    type: io.kestra.plugin.core.flow.Loop\n    values: [\"a\"]\n    \
+         fetchType: STORE\n    outputs:\n      - id: v\n        type: STRING\n        value: x\n    \
+         tasks:\n      - id: each\n        type: io.kestra.plugin.core.log.Log\n        message: each\n",
+    );
+    let root = start_execution(&fx.db.pool, fx.ws, None, &src, json!({}))
+        .await
+        .unwrap();
+    let iteration: Uuid =
+        sqlx::query_scalar("SELECT id FROM workflow.executions WHERE parent_execution_id = $1")
+            .bind(root)
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    let (each, _, _) = run_of(&fx.db, iteration, "each").await.unwrap();
+    let worker = fx.worker.clone();
+    let ticked = while_downloading(
+        &fx.db,
+        &fx.worker,
+        "/outputs.ion",
+        vec![
+            Row::Execution(root),
+            Row::Execution(iteration),
+            Row::TaskRun(each),
+        ],
+        async move { tick(&worker, 4, &handlers()).await },
+    )
+    .await;
+    assert_eq!(ticked.expect("the tick"), 1, "each's outcome committed");
+    drain(&fx.db.pool).await;
+    assert_eq!(state_of(&fx.db, root).await, "SUCCESS");
+    let want = uri::execution_file_uri(NS, "loop_store", iteration, "outputs.ion").unwrap();
+    let outputs: serde_json::Value = sqlx::query_scalar(
+        "SELECT outputs FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'l'",
+    )
+    .bind(root)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(outputs["outputs"][0]["outputs"], json!({ "uri": want }));
+    let indexed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.execution_files WHERE execution_id = $1 AND uri = $2",
+    )
+    .bind(iteration)
+    .bind(&want)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(indexed, 1, "indexed once, by the attempt that committed");
+    let bytes = fx
+        .fs
+        .store
+        .get(&fx.fs.object_uri(fx.ws, &want).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(bytes, b"{v:\"x\"}");
 }
 
 /// A namespace file's `read()` in an `If`, after a task.

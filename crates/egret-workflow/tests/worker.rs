@@ -12811,3 +12811,100 @@ async fn a_secret_loop_output_is_masked_sealed_and_revealed_to_a_later_render(po
         "a failure message that prints the SECRET output stores the mask: {message:?}"
     );
 }
+
+/// **Package #6 Task A5 (spec D9, §2.2 item 8): a SECRET output under
+/// `fetchType: STORE` is refused at evaluation, even with a master key.**
+/// Save refuses it; a version stored before #6 (here `start_execution`, which
+/// takes the source as stored) reaches the run, and its iteration fails
+/// after its terminal, before the output is rendered, with a message naming
+/// the output and `fetchType`, and never the value. Nothing is appended.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_secret_output_under_store_is_refused_at_evaluation_even_with_a_key(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    egret_workflow::secret_inputs::install_for_tests();
+    let (_db, ws) = seed(&pool).await;
+    let source = "id: lo-sec-store\nnamespace: t\ntasks:\n  - id: loop\n    \
+         type: io.kestra.plugin.core.flow.Loop\n    values: '[\"a\"]'\n    fetchType: STORE\n    \
+         tasks:\n      - id: r\n        type: io.kestra.plugin.core.debug.Return\n        \
+         format: hush-a5-store\n    outputs:\n      - id: s\n        type: SECRET\n        \
+         value: \"{{ outputs.r.value }}\"\n      - id: n\n        type: STRING\n        value: n\n";
+    let ex = start_execution(&pool, ws, None, source, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
+
+    assert_eq!(
+        iteration_histories(&pool, ex).await,
+        [serde_json::json!([
+            "CREATED", "RUNNING", "SUCCESS", "FAILED"
+        ])]
+    );
+    let iteration: Uuid =
+        sqlx::query_scalar("SELECT id FROM workflow.executions WHERE parent_execution_id = $1")
+            .bind(ex)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let lines = execution_log_lines(&pool, iteration).await;
+    assert!(
+        lines.iter().any(|(_, l)| l
+            == "egret refuses output s: a SECRET output cannot be written to internal storage \
+                (fetchType is STORE): the iteration's outputs file would hold the value in clear. \
+                Use fetchType: FETCH"),
+        "{lines:?}"
+    );
+    assert!(lines.iter().all(|(_, l)| !l.contains("hush-a5-store")));
+    assert_eq!(
+        run_state(&pool, ex, "loop").await.as_deref(),
+        Some("FAILED")
+    );
+    assert!(loop_run_outputs(&pool, ex).await.get("outputs").is_none());
+}
+
+/// **STORE with no internal storage fails the iteration, naming the
+/// setting** (Task A5): this binary installs no store; the first assertion
+/// says so if that changes.
+#[sqlx::test(migrations = "../../migrations")]
+async fn store_without_internal_storage_fails_the_iteration_naming_the_setting(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    assert!(
+        egret_workflow::storage::current().is_none(),
+        "this binary must run without a store for this test to mean anything"
+    );
+    let (_db, ws) = seed(&pool).await;
+    let source = "id: lo-store-none\nnamespace: t\ntasks:\n  - id: loop\n    \
+         type: io.kestra.plugin.core.flow.Loop\n    values: '[\"a\"]'\n    fetchType: STORE\n    \
+         tasks:\n      - id: r\n        type: io.kestra.plugin.core.log.Log\n        message: r\n    \
+         outputs:\n      - id: n\n        type: STRING\n        value: n\n";
+    let ex = start_execution(&pool, ws, None, source, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks(None)).await;
+    assert_eq!(
+        iteration_histories(&pool, ex).await,
+        [serde_json::json!([
+            "CREATED", "RUNNING", "SUCCESS", "FAILED"
+        ])]
+    );
+    let iteration: Uuid =
+        sqlx::query_scalar("SELECT id FROM workflow.executions WHERE parent_execution_id = $1")
+            .bind(ex)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let lines = execution_log_lines(&pool, iteration).await;
+    assert!(
+        lines.iter().any(|(_, l)| l
+            .starts_with("Loop outputs with fetchType: STORE cannot be written")
+            && l.contains("[storage]")),
+        "{lines:?}"
+    );
+    assert_eq!(
+        run_state(&pool, ex, "loop").await.as_deref(),
+        Some("FAILED")
+    );
+}
