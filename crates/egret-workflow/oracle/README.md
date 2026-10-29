@@ -104,7 +104,10 @@ an entry matches on any failure at all, so it is born matching and cannot fail
 **for the reason it was written** — a refusal that becomes a different refusal
 is invisible. It is not literally unfailable, and an earlier version of this
 sentence ("never enters `baseline.txt`, and can never fail") was wrong about
-that: **nineteen ids are in this file AND in `baseline.txt`** (twenty-five
+that: **ten ids are in this file AND in `baseline.txt`** (counted from the
+two files 2026-10-29 at package #5b's end, Task B9; this sentence read
+"nineteen" after #5a's Task A3 and was not followed after that: twelve at #5a's
+end, sixteen after #5b's Task B1, ten since its Task B2; twenty-five
 until package #5a's Task A3 banked six, thirty-eight
 until package #5a's Task A2 banked thirteen, eighteen until
 package #5a's Task A1 added twenty, thirty-one until
@@ -285,7 +288,11 @@ measured") -- and **102 of 1800** after package #5b's Task B6 (2026-10-29)
 added 47 `render()`/`renderOnce()` entries, measured red at 31 failing (29 of
 them new, plus `function-render` and `function-renderonce`, whose goldens
 became values), and banked all 31 in the same task (see "What package #5b's
-Task B6 measured").
+Task B6 measured") -- and still **102 of 1800** at package #5b's end (Task B9,
+2026-10-29; Tasks B7 and B8 moved no entry): **95** old lines, the **4**
+recorded divergences of #5a's Task A1 and **3** of #5b's Task B1
+(`function-min-classname-long`, spec D2's Integer/Long; `filter-nl2br` and
+`filter-nl2br-no-escaping`, spec D14). Every other `#5b red` line banked.
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;

@@ -6194,6 +6194,11 @@ ones it does not **267** (246 + 21), asserted by
 `kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line`; the 1104-row table above is
 W3b's moment. Task A8's sweep added this note rather than re-deriving every figure in the section.)*
 
+*(**21 across 6 over 1120 at package #5b's end, 2026-10-29** (Task B9's sweep): `EGRET_PAIRS_BEFORE_RESTRICTION`
+1111 → 1119 at Task B2 (`loop-object`, `loop-object-in-list`) → 1120 at Task B6 (`variables`); the
+removal itself did not move. Kept pairs asserted **885** (673 + 212), not asserted **231** (216 + 15),
+after B2, B6 and B7 banked five entries.)*
+
 *(**80 across 6 over 771 through W5; 85 across 9 over 791 at W6 Task 3.** The
 three entries added are `valids/restart-parent`, `valids/restart-parent-loop`
 and `valids/subflow-secret-output-parent` — `Subflow` parents that used to stall
@@ -6291,6 +6296,10 @@ have made the control vacuous in its turn.
 sweep, behind the banks of the end-hooks package and of #5a: A3's `restart-loop` and
 `restart-parent-loop`, A6's `if-in-flowable`, A7's `all-flowable` and `disable-flowable` among
 them. The parentheticals below are the record of the earlier moments.)*
+
+*(**34 / 1 / 6 at package #5b's end, 2026-10-29** (Task B9's sweep): Task B2 banked
+`loop-object` and `loop-object-in-list`, both spawners, so `SPAWNED_ENTRIES_THAT_MATCH` went 32 → 34
+and the rest 8 → 6; B6 and B7 moved none of the three.)*
 
 *(**17/8/16 through W5; 18/8/15 at W6 Task 3; 22/4/15 since W6 Task 4** — the
 four `valids/retry-new-execution-*` entries moved from the middle row to the
