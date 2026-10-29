@@ -174,9 +174,11 @@ regex-syntax.workspace = true
 # the same RustCrypto generation (`digest` 0.10) as `sha2` 0.10, so all four
 # share one `digest` rather than dragging in the 0.11 line beside it.
 #
-# There is deliberately no `sha256` filter: Kestra's `Md5Filter`/`Sha1Filter`/
-# `Sha512Filter` all carry a copy-pasted "implements the 'sha256' filter"
-# javadoc, but `Extension.getFilters()` registers only those three names.
+# Kestra's `Md5Filter`/`Sha1Filter`/`Sha512Filter` all carry a copy-pasted
+# "implements the 'sha256' filter" javadoc, but `Extension.getFilters()`
+# registers only those three names; the `sha256` filter is Pebble core's own
+# `Sha256Filter`, ported with the other nine core filters by package #5b Task
+# B4 on the same `sha2` dependency.
 sha2.workspace = true
 sha1 = "0.10"
 md-5 = "0.10"

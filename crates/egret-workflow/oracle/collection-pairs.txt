@@ -90,7 +90,7 @@
 chunk	l	abbreviate	{{ (l | chunk(size=2)) | abbreviate(5) }}	error	error	-
 chunk	l	abs	{{ (l | chunk(size=2)) | abs }}	error	error	-
 chunk	l	base64decode	{{ (l | chunk(size=2)) | base64decode }}	error	error	-
-chunk	l	base64encode	{{ (l | chunk(size=2)) | base64encode }}	W1tiLCBhXSwgW2NdXQ==	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+chunk	l	base64encode	{{ (l | chunk(size=2)) | base64encode }}	W1tiLCBhXSwgW2NdXQ==	W1tiLCBhXSwgW2NdXQ==	-
 chunk	l	capitalize	{{ (l | chunk(size=2)) | capitalize }}	error	error	-
 chunk	l	chunk	{{ (l | chunk(size=2)) | chunk(size=2) }}	[[[\"b\",\"a\"],[\"c\"]]]	[[[\"b\",\"a\"],[\"c\"]]]	-
 chunk	l	className	{{ (l | chunk(size=2)) | className }}	com.google.common.collect.Lists$RandomAccessPartition	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
@@ -112,12 +112,12 @@ chunk	l	last	{{ (l | chunk(size=2)) | last }}	[\"c\"]	[\"c\"]	-
 chunk	l	length	{{ (l | chunk(size=2)) | length }}	2	2	-
 chunk	l	lower	{{ (l | chunk(size=2)) | lower }}	[[b, a], [c]]	[[b, a], [c]]	-
 chunk	l	md5	{{ (l | chunk(size=2)) | md5 }}	error	error	-
-chunk	l	merge	{{ (l | chunk(size=2)) | merge(l) }}	[[\"b\",\"a\"],[\"c\"],\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+chunk	l	merge	{{ (l | chunk(size=2)) | merge(l) }}	[[\"b\",\"a\"],[\"c\"],\"b\",\"a\",\"c\"]	[[\"b\",\"a\"],[\"c\"],\"b\",\"a\",\"c\"]	-
 chunk	l	nindent	{{ (l | chunk(size=2)) | nindent(amount=2) }}	\n  [[b, a], [c]]	\n  [[b, a], [c]]	-
 chunk	l	nl2br	{{ (l | chunk(size=2)) | nl2br }}	error	error	-
 chunk	l	number	{{ (l | chunk(size=2)) | number }}	error	error	-
 chunk	l	numberformat	{{ (l | chunk(size=2)) | numberformat('#') }}	error	error	-
-chunk	l	raw	{{ (l | chunk(size=2)) | raw }}	[[b, a], [c]]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+chunk	l	raw	{{ (l | chunk(size=2)) | raw }}	[[b, a], [c]]	[[b, a], [c]]	-
 chunk	l	regexExtract	{{ (l | chunk(size=2)) | regexExtract(regex='a') }}	a	a	-
 chunk	l	regexMatch	{{ (l | chunk(size=2)) | regexMatch(regex='a') }}	true	true	-
 chunk	l	regexReplace	{{ (l | chunk(size=2)) | regexReplace(regex='a', replacement='#') }}	[[b, #], [c]]	[[b, #], [c]]	-
@@ -153,7 +153,7 @@ chunk	l	yaml	{{ (l | chunk(size=2)) | yaml }}	 -\n   - b\n   - a\n -\n   - c\n	 
 chunk	l1	abbreviate	{{ (l1 | chunk(size=2)) | abbreviate(5) }}	error	error	-
 chunk	l1	abs	{{ (l1 | chunk(size=2)) | abs }}	error	error	-
 chunk	l1	base64decode	{{ (l1 | chunk(size=2)) | base64decode }}	error	error	-
-chunk	l1	base64encode	{{ (l1 | chunk(size=2)) | base64encode }}	W1tiXV0=	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+chunk	l1	base64encode	{{ (l1 | chunk(size=2)) | base64encode }}	W1tiXV0=	W1tiXV0=	-
 chunk	l1	capitalize	{{ (l1 | chunk(size=2)) | capitalize }}	error	error	-
 chunk	l1	chunk	{{ (l1 | chunk(size=2)) | chunk(size=2) }}	[[[\"b\"]]]	[[[\"b\"]]]	-
 chunk	l1	className	{{ (l1 | chunk(size=2)) | className }}	com.google.common.collect.Lists$RandomAccessPartition	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
@@ -175,12 +175,12 @@ chunk	l1	last	{{ (l1 | chunk(size=2)) | last }}	[\"b\"]	[\"b\"]	-
 chunk	l1	length	{{ (l1 | chunk(size=2)) | length }}	1	1	-
 chunk	l1	lower	{{ (l1 | chunk(size=2)) | lower }}	[[b]]	[[b]]	-
 chunk	l1	md5	{{ (l1 | chunk(size=2)) | md5 }}	error	error	-
-chunk	l1	merge	{{ (l1 | chunk(size=2)) | merge(l) }}	[[\"b\"],\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+chunk	l1	merge	{{ (l1 | chunk(size=2)) | merge(l) }}	[[\"b\"],\"b\",\"a\",\"c\"]	[[\"b\"],\"b\",\"a\",\"c\"]	-
 chunk	l1	nindent	{{ (l1 | chunk(size=2)) | nindent(amount=2) }}	\n  [[b]]	\n  [[b]]	-
 chunk	l1	nl2br	{{ (l1 | chunk(size=2)) | nl2br }}	error	error	-
 chunk	l1	number	{{ (l1 | chunk(size=2)) | number }}	error	error	-
 chunk	l1	numberformat	{{ (l1 | chunk(size=2)) | numberformat('#') }}	error	error	-
-chunk	l1	raw	{{ (l1 | chunk(size=2)) | raw }}	[[b]]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+chunk	l1	raw	{{ (l1 | chunk(size=2)) | raw }}	[[b]]	[[b]]	-
 chunk	l1	regexExtract	{{ (l1 | chunk(size=2)) | regexExtract(regex='a') }}			-
 chunk	l1	regexMatch	{{ (l1 | chunk(size=2)) | regexMatch(regex='a') }}	false	false	-
 chunk	l1	regexReplace	{{ (l1 | chunk(size=2)) | regexReplace(regex='a', replacement='#') }}	[[b]]	[[b]]	-
@@ -216,7 +216,7 @@ chunk	l1	yaml	{{ (l1 | chunk(size=2)) | yaml }}	 -\n   - b\n	 -\n   - b\n	-
 chunk	el	abbreviate	{{ (el | chunk(size=2)) | abbreviate(5) }}	error	error	-
 chunk	el	abs	{{ (el | chunk(size=2)) | abs }}	error	error	-
 chunk	el	base64decode	{{ (el | chunk(size=2)) | base64decode }}	error	error	-
-chunk	el	base64encode	{{ (el | chunk(size=2)) | base64encode }}	W10=	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+chunk	el	base64encode	{{ (el | chunk(size=2)) | base64encode }}	W10=	W10=	-
 chunk	el	capitalize	{{ (el | chunk(size=2)) | capitalize }}	error	error	-
 chunk	el	chunk	{{ (el | chunk(size=2)) | chunk(size=2) }}	[]	[]	-
 chunk	el	className	{{ (el | chunk(size=2)) | className }}	com.google.common.collect.Lists$RandomAccessPartition	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
@@ -238,18 +238,18 @@ chunk	el	last	{{ (el | chunk(size=2)) | last }}			-
 chunk	el	length	{{ (el | chunk(size=2)) | length }}	0	0	-
 chunk	el	lower	{{ (el | chunk(size=2)) | lower }}	[]	[]	-
 chunk	el	md5	{{ (el | chunk(size=2)) | md5 }}	error	error	-
-chunk	el	merge	{{ (el | chunk(size=2)) | merge(l) }}	[\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+chunk	el	merge	{{ (el | chunk(size=2)) | merge(l) }}	[\"b\",\"a\",\"c\"]	[\"b\",\"a\",\"c\"]	-
 chunk	el	nindent	{{ (el | chunk(size=2)) | nindent(amount=2) }}	\n  []	\n  []	-
 chunk	el	nl2br	{{ (el | chunk(size=2)) | nl2br }}	error	error	-
 chunk	el	number	{{ (el | chunk(size=2)) | number }}	error	error	-
 chunk	el	numberformat	{{ (el | chunk(size=2)) | numberformat('#') }}	error	error	-
-chunk	el	raw	{{ (el | chunk(size=2)) | raw }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+chunk	el	raw	{{ (el | chunk(size=2)) | raw }}	[]	[]	-
 chunk	el	regexExtract	{{ (el | chunk(size=2)) | regexExtract(regex='a') }}			-
 chunk	el	regexMatch	{{ (el | chunk(size=2)) | regexMatch(regex='a') }}	false	false	-
 chunk	el	regexReplace	{{ (el | chunk(size=2)) | regexReplace(regex='a', replacement='#') }}	[]	[]	-
 chunk	el	replace	{{ (el | chunk(size=2)) | replace({'a': 'b'}) }}	[]	[]	-
 chunk	el	reverse	{{ (el | chunk(size=2)) | reverse }}	[]	[]	-
-chunk	el	rsort	{{ (el | chunk(size=2)) | rsort }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+chunk	el	rsort	{{ (el | chunk(size=2)) | rsort }}	[]	[]	-
 chunk	el	sha1	{{ (el | chunk(size=2)) | sha1 }}	error	error	-
 chunk	el	sha256	{{ (el | chunk(size=2)) | sha256 }}	error	error	-
 chunk	el	sha512	{{ (el | chunk(size=2)) | sha512 }}	error	error	-
@@ -279,7 +279,7 @@ chunk	el	yaml	{{ (el | chunk(size=2)) | yaml }}	[]\n	[]\n	-
 default	l	abbreviate	{{ (l | default('D')) | abbreviate(5) }}	error	error	-
 default	l	abs	{{ (l | default('D')) | abs }}	error	error	-
 default	l	base64decode	{{ (l | default('D')) | base64decode }}	error	error	-
-default	l	base64encode	{{ (l | default('D')) | base64encode }}	W2IsIGEsIGNd	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+default	l	base64encode	{{ (l | default('D')) | base64encode }}	W2IsIGEsIGNd	W2IsIGEsIGNd	-
 default	l	capitalize	{{ (l | default('D')) | capitalize }}	error	error	-
 default	l	chunk	{{ (l | default('D')) | chunk(size=2) }}	[[\"b\",\"a\"],[\"c\"]]	[[\"b\",\"a\"],[\"c\"]]	-
 default	l	className	{{ (l | default('D')) | className }}	java.util.ArrayList	java.util.ArrayList	-
@@ -301,18 +301,18 @@ default	l	last	{{ (l | default('D')) | last }}	c	c	-
 default	l	length	{{ (l | default('D')) | length }}	3	3	-
 default	l	lower	{{ (l | default('D')) | lower }}	[b, a, c]	[b, a, c]	-
 default	l	md5	{{ (l | default('D')) | md5 }}	error	error	-
-default	l	merge	{{ (l | default('D')) | merge(l) }}	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+default	l	merge	{{ (l | default('D')) | merge(l) }}	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	-
 default	l	nindent	{{ (l | default('D')) | nindent(amount=2) }}	\n  [b, a, c]	\n  [b, a, c]	-
 default	l	nl2br	{{ (l | default('D')) | nl2br }}	error	error	-
 default	l	number	{{ (l | default('D')) | number }}	error	error	-
 default	l	numberformat	{{ (l | default('D')) | numberformat('#') }}	error	error	-
-default	l	raw	{{ (l | default('D')) | raw }}	[b, a, c]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+default	l	raw	{{ (l | default('D')) | raw }}	[b, a, c]	[b, a, c]	-
 default	l	regexExtract	{{ (l | default('D')) | regexExtract(regex='a') }}	a	a	-
 default	l	regexMatch	{{ (l | default('D')) | regexMatch(regex='a') }}	true	true	-
 default	l	regexReplace	{{ (l | default('D')) | regexReplace(regex='a', replacement='#') }}	[b, #, c]	[b, #, c]	-
 default	l	replace	{{ (l | default('D')) | replace({'a': 'b'}) }}	[b, b, c]	[b, b, c]	-
 default	l	reverse	{{ (l | default('D')) | reverse }}	[\"c\",\"a\",\"b\"]	[\"c\",\"a\",\"b\"]	-
-default	l	rsort	{{ (l | default('D')) | rsort }}	[\"c\",\"b\",\"a\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+default	l	rsort	{{ (l | default('D')) | rsort }}	[\"c\",\"b\",\"a\"]	[\"c\",\"b\",\"a\"]	-
 default	l	sha1	{{ (l | default('D')) | sha1 }}	error	error	-
 default	l	sha256	{{ (l | default('D')) | sha256 }}	error	error	-
 default	l	sha512	{{ (l | default('D')) | sha512 }}	error	error	-
@@ -342,7 +342,7 @@ default	l	yaml	{{ (l | default('D')) | yaml }}	 - b\n - a\n - c\n	 - b\n - a\n -
 default	l1	abbreviate	{{ (l1 | default('D')) | abbreviate(5) }}	error	error	-
 default	l1	abs	{{ (l1 | default('D')) | abs }}	error	error	-
 default	l1	base64decode	{{ (l1 | default('D')) | base64decode }}	error	error	-
-default	l1	base64encode	{{ (l1 | default('D')) | base64encode }}	W2Jd	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+default	l1	base64encode	{{ (l1 | default('D')) | base64encode }}	W2Jd	W2Jd	-
 default	l1	capitalize	{{ (l1 | default('D')) | capitalize }}	error	error	-
 default	l1	chunk	{{ (l1 | default('D')) | chunk(size=2) }}	[[\"b\"]]	[[\"b\"]]	-
 default	l1	className	{{ (l1 | default('D')) | className }}	java.util.ArrayList	java.util.ArrayList	-
@@ -364,18 +364,18 @@ default	l1	last	{{ (l1 | default('D')) | last }}	b	b	-
 default	l1	length	{{ (l1 | default('D')) | length }}	1	1	-
 default	l1	lower	{{ (l1 | default('D')) | lower }}	[b]	[b]	-
 default	l1	md5	{{ (l1 | default('D')) | md5 }}	error	error	-
-default	l1	merge	{{ (l1 | default('D')) | merge(l) }}	[\"b\",\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+default	l1	merge	{{ (l1 | default('D')) | merge(l) }}	[\"b\",\"b\",\"a\",\"c\"]	[\"b\",\"b\",\"a\",\"c\"]	-
 default	l1	nindent	{{ (l1 | default('D')) | nindent(amount=2) }}	\n  [b]	\n  [b]	-
 default	l1	nl2br	{{ (l1 | default('D')) | nl2br }}	error	error	-
 default	l1	number	{{ (l1 | default('D')) | number }}	error	error	-
 default	l1	numberformat	{{ (l1 | default('D')) | numberformat('#') }}	error	error	-
-default	l1	raw	{{ (l1 | default('D')) | raw }}	[b]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+default	l1	raw	{{ (l1 | default('D')) | raw }}	[b]	[b]	-
 default	l1	regexExtract	{{ (l1 | default('D')) | regexExtract(regex='a') }}			-
 default	l1	regexMatch	{{ (l1 | default('D')) | regexMatch(regex='a') }}	false	false	-
 default	l1	regexReplace	{{ (l1 | default('D')) | regexReplace(regex='a', replacement='#') }}	[b]	[b]	-
 default	l1	replace	{{ (l1 | default('D')) | replace({'a': 'b'}) }}	[b]	[b]	-
 default	l1	reverse	{{ (l1 | default('D')) | reverse }}	[\"b\"]	[\"b\"]	-
-default	l1	rsort	{{ (l1 | default('D')) | rsort }}	[\"b\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+default	l1	rsort	{{ (l1 | default('D')) | rsort }}	[\"b\"]	[\"b\"]	-
 default	l1	sha1	{{ (l1 | default('D')) | sha1 }}	error	error	-
 default	l1	sha256	{{ (l1 | default('D')) | sha256 }}	error	error	-
 default	l1	sha512	{{ (l1 | default('D')) | sha512 }}	error	error	-
@@ -405,7 +405,7 @@ default	l1	yaml	{{ (l1 | default('D')) | yaml }}	 - b\n	 - b\n	-
 default	m	abbreviate	{{ (m | default('D')) | abbreviate(5) }}	error	error	-
 default	m	abs	{{ (m | default('D')) | abs }}	error	error	-
 default	m	base64decode	{{ (m | default('D')) | base64decode }}	error	error	-
-default	m	base64encode	{{ (m | default('D')) | base64encode }}	e2I9MSwgYT0yfQ==	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+default	m	base64encode	{{ (m | default('D')) | base64encode }}	e2I9MSwgYT0yfQ==	e2I9MSwgYT0yfQ==	-
 default	m	capitalize	{{ (m | default('D')) | capitalize }}	error	error	-
 default	m	chunk	{{ (m | default('D')) | chunk(size=2) }}	error	error	-
 default	m	className	{{ (m | default('D')) | className }}	java.util.LinkedHashMap	java.util.LinkedHashMap	-
@@ -427,12 +427,12 @@ default	m	last	{{ (m | default('D')) | last }}	error	error	-
 default	m	length	{{ (m | default('D')) | length }}	2	2	-
 default	m	lower	{{ (m | default('D')) | lower }}	{b=1, a=2}	{b=1, a=2}	-
 default	m	md5	{{ (m | default('D')) | md5 }}	error	error	-
-default	m	merge	{{ (m | default('D')) | merge(l) }}	{\"a\":\"a\",\"b\":\"b\",\"c\":\"c\"}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+default	m	merge	{{ (m | default('D')) | merge(l) }}	{\"a\":\"a\",\"b\":\"b\",\"c\":\"c\"}	{\"b\":\"b\",\"a\":\"a\",\"c\":\"c\"}	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
 default	m	nindent	{{ (m | default('D')) | nindent(amount=2) }}	\n  {b=1, a=2}	\n  {b=1, a=2}	-
 default	m	nl2br	{{ (m | default('D')) | nl2br }}	error	error	-
 default	m	number	{{ (m | default('D')) | number }}	error	error	-
 default	m	numberformat	{{ (m | default('D')) | numberformat('#') }}	error	error	-
-default	m	raw	{{ (m | default('D')) | raw }}	{b=1, a=2}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+default	m	raw	{{ (m | default('D')) | raw }}	{b=1, a=2}	{b=1, a=2}	-
 default	m	regexExtract	{{ (m | default('D')) | regexExtract(regex='a') }}	a	a	-
 default	m	regexMatch	{{ (m | default('D')) | regexMatch(regex='a') }}	true	true	-
 default	m	regexReplace	{{ (m | default('D')) | regexReplace(regex='a', replacement='#') }}	{b=1, #=2}	{b=1, #=2}	-
@@ -468,7 +468,7 @@ default	m	yaml	{{ (m | default('D')) | yaml }}	b: 1\na: 2\n	b: 1\na: 2\n	-
 default	m1	abbreviate	{{ (m1 | default('D')) | abbreviate(5) }}	error	error	-
 default	m1	abs	{{ (m1 | default('D')) | abs }}	error	error	-
 default	m1	base64decode	{{ (m1 | default('D')) | base64decode }}	error	error	-
-default	m1	base64encode	{{ (m1 | default('D')) | base64encode }}	e2I9MX0=	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+default	m1	base64encode	{{ (m1 | default('D')) | base64encode }}	e2I9MX0=	e2I9MX0=	-
 default	m1	capitalize	{{ (m1 | default('D')) | capitalize }}	error	error	-
 default	m1	chunk	{{ (m1 | default('D')) | chunk(size=2) }}	error	error	-
 default	m1	className	{{ (m1 | default('D')) | className }}	java.util.LinkedHashMap	java.util.LinkedHashMap	-
@@ -490,12 +490,12 @@ default	m1	last	{{ (m1 | default('D')) | last }}	error	error	-
 default	m1	length	{{ (m1 | default('D')) | length }}	1	1	-
 default	m1	lower	{{ (m1 | default('D')) | lower }}	{b=1}	{b=1}	-
 default	m1	md5	{{ (m1 | default('D')) | md5 }}	error	error	-
-default	m1	merge	{{ (m1 | default('D')) | merge(l) }}	{\"a\":\"a\",\"b\":\"b\",\"c\":\"c\"}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+default	m1	merge	{{ (m1 | default('D')) | merge(l) }}	{\"a\":\"a\",\"b\":\"b\",\"c\":\"c\"}	{\"b\":\"b\",\"a\":\"a\",\"c\":\"c\"}	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
 default	m1	nindent	{{ (m1 | default('D')) | nindent(amount=2) }}	\n  {b=1}	\n  {b=1}	-
 default	m1	nl2br	{{ (m1 | default('D')) | nl2br }}	error	error	-
 default	m1	number	{{ (m1 | default('D')) | number }}	error	error	-
 default	m1	numberformat	{{ (m1 | default('D')) | numberformat('#') }}	error	error	-
-default	m1	raw	{{ (m1 | default('D')) | raw }}	{b=1}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+default	m1	raw	{{ (m1 | default('D')) | raw }}	{b=1}	{b=1}	-
 default	m1	regexExtract	{{ (m1 | default('D')) | regexExtract(regex='a') }}			-
 default	m1	regexMatch	{{ (m1 | default('D')) | regexMatch(regex='a') }}	false	false	-
 default	m1	regexReplace	{{ (m1 | default('D')) | regexReplace(regex='a', replacement='#') }}	{b=1}	{b=1}	-
@@ -531,7 +531,7 @@ default	m1	yaml	{{ (m1 | default('D')) | yaml }}	b: 1\n	b: 1\n	-
 distinct	l	abbreviate	{{ (l | distinct) | abbreviate(5) }}	error	error	-
 distinct	l	abs	{{ (l | distinct) | abs }}	error	error	-
 distinct	l	base64decode	{{ (l | distinct) | base64decode }}	error	error	-
-distinct	l	base64encode	{{ (l | distinct) | base64encode }}	W2IsIGEsIGNd	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+distinct	l	base64encode	{{ (l | distinct) | base64encode }}	W2IsIGEsIGNd	W2IsIGEsIGNd	-
 distinct	l	capitalize	{{ (l | distinct) | capitalize }}	error	error	-
 distinct	l	chunk	{{ (l | distinct) | chunk(size=2) }}	[[\"b\",\"a\"],[\"c\"]]	[[\"b\",\"a\"],[\"c\"]]	-
 distinct	l	className	{{ (l | distinct) | className }}	java.util.ArrayList	java.util.ArrayList	-
@@ -553,18 +553,18 @@ distinct	l	last	{{ (l | distinct) | last }}	c	c	-
 distinct	l	length	{{ (l | distinct) | length }}	3	3	-
 distinct	l	lower	{{ (l | distinct) | lower }}	[b, a, c]	[b, a, c]	-
 distinct	l	md5	{{ (l | distinct) | md5 }}	error	error	-
-distinct	l	merge	{{ (l | distinct) | merge(l) }}	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+distinct	l	merge	{{ (l | distinct) | merge(l) }}	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	-
 distinct	l	nindent	{{ (l | distinct) | nindent(amount=2) }}	\n  [b, a, c]	\n  [b, a, c]	-
 distinct	l	nl2br	{{ (l | distinct) | nl2br }}	error	error	-
 distinct	l	number	{{ (l | distinct) | number }}	error	error	-
 distinct	l	numberformat	{{ (l | distinct) | numberformat('#') }}	error	error	-
-distinct	l	raw	{{ (l | distinct) | raw }}	[b, a, c]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+distinct	l	raw	{{ (l | distinct) | raw }}	[b, a, c]	[b, a, c]	-
 distinct	l	regexExtract	{{ (l | distinct) | regexExtract(regex='a') }}	a	a	-
 distinct	l	regexMatch	{{ (l | distinct) | regexMatch(regex='a') }}	true	true	-
 distinct	l	regexReplace	{{ (l | distinct) | regexReplace(regex='a', replacement='#') }}	[b, #, c]	[b, #, c]	-
 distinct	l	replace	{{ (l | distinct) | replace({'a': 'b'}) }}	[b, b, c]	[b, b, c]	-
 distinct	l	reverse	{{ (l | distinct) | reverse }}	[\"c\",\"a\",\"b\"]	[\"c\",\"a\",\"b\"]	-
-distinct	l	rsort	{{ (l | distinct) | rsort }}	[\"c\",\"b\",\"a\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+distinct	l	rsort	{{ (l | distinct) | rsort }}	[\"c\",\"b\",\"a\"]	[\"c\",\"b\",\"a\"]	-
 distinct	l	sha1	{{ (l | distinct) | sha1 }}	error	error	-
 distinct	l	sha256	{{ (l | distinct) | sha256 }}	error	error	-
 distinct	l	sha512	{{ (l | distinct) | sha512 }}	error	error	-
@@ -594,7 +594,7 @@ distinct	l	yaml	{{ (l | distinct) | yaml }}	 - b\n - a\n - c\n	 - b\n - a\n - c\
 distinct	l1	abbreviate	{{ (l1 | distinct) | abbreviate(5) }}	error	error	-
 distinct	l1	abs	{{ (l1 | distinct) | abs }}	error	error	-
 distinct	l1	base64decode	{{ (l1 | distinct) | base64decode }}	error	error	-
-distinct	l1	base64encode	{{ (l1 | distinct) | base64encode }}	W2Jd	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+distinct	l1	base64encode	{{ (l1 | distinct) | base64encode }}	W2Jd	W2Jd	-
 distinct	l1	capitalize	{{ (l1 | distinct) | capitalize }}	error	error	-
 distinct	l1	chunk	{{ (l1 | distinct) | chunk(size=2) }}	[[\"b\"]]	[[\"b\"]]	-
 distinct	l1	className	{{ (l1 | distinct) | className }}	java.util.ArrayList	java.util.ArrayList	-
@@ -616,18 +616,18 @@ distinct	l1	last	{{ (l1 | distinct) | last }}	b	b	-
 distinct	l1	length	{{ (l1 | distinct) | length }}	1	1	-
 distinct	l1	lower	{{ (l1 | distinct) | lower }}	[b]	[b]	-
 distinct	l1	md5	{{ (l1 | distinct) | md5 }}	error	error	-
-distinct	l1	merge	{{ (l1 | distinct) | merge(l) }}	[\"b\",\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+distinct	l1	merge	{{ (l1 | distinct) | merge(l) }}	[\"b\",\"b\",\"a\",\"c\"]	[\"b\",\"b\",\"a\",\"c\"]	-
 distinct	l1	nindent	{{ (l1 | distinct) | nindent(amount=2) }}	\n  [b]	\n  [b]	-
 distinct	l1	nl2br	{{ (l1 | distinct) | nl2br }}	error	error	-
 distinct	l1	number	{{ (l1 | distinct) | number }}	error	error	-
 distinct	l1	numberformat	{{ (l1 | distinct) | numberformat('#') }}	error	error	-
-distinct	l1	raw	{{ (l1 | distinct) | raw }}	[b]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+distinct	l1	raw	{{ (l1 | distinct) | raw }}	[b]	[b]	-
 distinct	l1	regexExtract	{{ (l1 | distinct) | regexExtract(regex='a') }}			-
 distinct	l1	regexMatch	{{ (l1 | distinct) | regexMatch(regex='a') }}	false	false	-
 distinct	l1	regexReplace	{{ (l1 | distinct) | regexReplace(regex='a', replacement='#') }}	[b]	[b]	-
 distinct	l1	replace	{{ (l1 | distinct) | replace({'a': 'b'}) }}	[b]	[b]	-
 distinct	l1	reverse	{{ (l1 | distinct) | reverse }}	[\"b\"]	[\"b\"]	-
-distinct	l1	rsort	{{ (l1 | distinct) | rsort }}	[\"b\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+distinct	l1	rsort	{{ (l1 | distinct) | rsort }}	[\"b\"]	[\"b\"]	-
 distinct	l1	sha1	{{ (l1 | distinct) | sha1 }}	error	error	-
 distinct	l1	sha256	{{ (l1 | distinct) | sha256 }}	error	error	-
 distinct	l1	sha512	{{ (l1 | distinct) | sha512 }}	error	error	-
@@ -657,7 +657,7 @@ distinct	l1	yaml	{{ (l1 | distinct) | yaml }}	 - b\n	 - b\n	-
 distinct	el	abbreviate	{{ (el | distinct) | abbreviate(5) }}	error	error	-
 distinct	el	abs	{{ (el | distinct) | abs }}	error	error	-
 distinct	el	base64decode	{{ (el | distinct) | base64decode }}	error	error	-
-distinct	el	base64encode	{{ (el | distinct) | base64encode }}	W10=	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+distinct	el	base64encode	{{ (el | distinct) | base64encode }}	W10=	W10=	-
 distinct	el	capitalize	{{ (el | distinct) | capitalize }}	error	error	-
 distinct	el	chunk	{{ (el | distinct) | chunk(size=2) }}	[]	[]	-
 distinct	el	className	{{ (el | distinct) | className }}	java.util.ArrayList	java.util.ArrayList	-
@@ -679,18 +679,18 @@ distinct	el	last	{{ (el | distinct) | last }}			-
 distinct	el	length	{{ (el | distinct) | length }}	0	0	-
 distinct	el	lower	{{ (el | distinct) | lower }}	[]	[]	-
 distinct	el	md5	{{ (el | distinct) | md5 }}	error	error	-
-distinct	el	merge	{{ (el | distinct) | merge(l) }}	[\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+distinct	el	merge	{{ (el | distinct) | merge(l) }}	[\"b\",\"a\",\"c\"]	[\"b\",\"a\",\"c\"]	-
 distinct	el	nindent	{{ (el | distinct) | nindent(amount=2) }}	\n  []	\n  []	-
 distinct	el	nl2br	{{ (el | distinct) | nl2br }}	error	error	-
 distinct	el	number	{{ (el | distinct) | number }}	error	error	-
 distinct	el	numberformat	{{ (el | distinct) | numberformat('#') }}	error	error	-
-distinct	el	raw	{{ (el | distinct) | raw }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+distinct	el	raw	{{ (el | distinct) | raw }}	[]	[]	-
 distinct	el	regexExtract	{{ (el | distinct) | regexExtract(regex='a') }}			-
 distinct	el	regexMatch	{{ (el | distinct) | regexMatch(regex='a') }}	false	false	-
 distinct	el	regexReplace	{{ (el | distinct) | regexReplace(regex='a', replacement='#') }}	[]	[]	-
 distinct	el	replace	{{ (el | distinct) | replace({'a': 'b'}) }}	[]	[]	-
 distinct	el	reverse	{{ (el | distinct) | reverse }}	[]	[]	-
-distinct	el	rsort	{{ (el | distinct) | rsort }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+distinct	el	rsort	{{ (el | distinct) | rsort }}	[]	[]	-
 distinct	el	sha1	{{ (el | distinct) | sha1 }}	error	error	-
 distinct	el	sha256	{{ (el | distinct) | sha256 }}	error	error	-
 distinct	el	sha512	{{ (el | distinct) | sha512 }}	error	error	-
@@ -720,7 +720,7 @@ distinct	el	yaml	{{ (el | distinct) | yaml }}	[]\n	[]\n	-
 escapeChar	l	abbreviate	{{ (l | escapeChar(type='single')) | abbreviate(5) }}	error	error	-
 escapeChar	l	abs	{{ (l | escapeChar(type='single')) | abs }}	error	error	-
 escapeChar	l	base64decode	{{ (l | escapeChar(type='single')) | base64decode }}	error	error	-
-escapeChar	l	base64encode	{{ (l | escapeChar(type='single')) | base64encode }}	W2IsIGEsIGNd	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+escapeChar	l	base64encode	{{ (l | escapeChar(type='single')) | base64encode }}	W2IsIGEsIGNd	W2IsIGEsIGNd	-
 escapeChar	l	capitalize	{{ (l | escapeChar(type='single')) | capitalize }}	error	error	-
 escapeChar	l	chunk	{{ (l | escapeChar(type='single')) | chunk(size=2) }}	[[\"b\",\"a\"],[\"c\"]]	[[\"b\",\"a\"],[\"c\"]]	-
 escapeChar	l	className	{{ (l | escapeChar(type='single')) | className }}	java.util.ArrayList	java.util.ArrayList	-
@@ -742,18 +742,18 @@ escapeChar	l	last	{{ (l | escapeChar(type='single')) | last }}	c	c	-
 escapeChar	l	length	{{ (l | escapeChar(type='single')) | length }}	3	3	-
 escapeChar	l	lower	{{ (l | escapeChar(type='single')) | lower }}	[b, a, c]	[b, a, c]	-
 escapeChar	l	md5	{{ (l | escapeChar(type='single')) | md5 }}	error	error	-
-escapeChar	l	merge	{{ (l | escapeChar(type='single')) | merge(l) }}	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+escapeChar	l	merge	{{ (l | escapeChar(type='single')) | merge(l) }}	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	-
 escapeChar	l	nindent	{{ (l | escapeChar(type='single')) | nindent(amount=2) }}	\n  [b, a, c]	\n  [b, a, c]	-
 escapeChar	l	nl2br	{{ (l | escapeChar(type='single')) | nl2br }}	error	error	-
 escapeChar	l	number	{{ (l | escapeChar(type='single')) | number }}	error	error	-
 escapeChar	l	numberformat	{{ (l | escapeChar(type='single')) | numberformat('#') }}	error	error	-
-escapeChar	l	raw	{{ (l | escapeChar(type='single')) | raw }}	[b, a, c]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+escapeChar	l	raw	{{ (l | escapeChar(type='single')) | raw }}	[b, a, c]	[b, a, c]	-
 escapeChar	l	regexExtract	{{ (l | escapeChar(type='single')) | regexExtract(regex='a') }}	a	a	-
 escapeChar	l	regexMatch	{{ (l | escapeChar(type='single')) | regexMatch(regex='a') }}	true	true	-
 escapeChar	l	regexReplace	{{ (l | escapeChar(type='single')) | regexReplace(regex='a', replacement='#') }}	[b, #, c]	[b, #, c]	-
 escapeChar	l	replace	{{ (l | escapeChar(type='single')) | replace({'a': 'b'}) }}	[b, b, c]	[b, b, c]	-
 escapeChar	l	reverse	{{ (l | escapeChar(type='single')) | reverse }}	[\"c\",\"a\",\"b\"]	[\"c\",\"a\",\"b\"]	-
-escapeChar	l	rsort	{{ (l | escapeChar(type='single')) | rsort }}	[\"c\",\"b\",\"a\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+escapeChar	l	rsort	{{ (l | escapeChar(type='single')) | rsort }}	[\"c\",\"b\",\"a\"]	[\"c\",\"b\",\"a\"]	-
 escapeChar	l	sha1	{{ (l | escapeChar(type='single')) | sha1 }}	error	error	-
 escapeChar	l	sha256	{{ (l | escapeChar(type='single')) | sha256 }}	error	error	-
 escapeChar	l	sha512	{{ (l | escapeChar(type='single')) | sha512 }}	error	error	-
@@ -783,7 +783,7 @@ escapeChar	l	yaml	{{ (l | escapeChar(type='single')) | yaml }}	 - b\n - a\n - c\
 escapeChar	l1	abbreviate	{{ (l1 | escapeChar(type='single')) | abbreviate(5) }}	error	error	-
 escapeChar	l1	abs	{{ (l1 | escapeChar(type='single')) | abs }}	error	error	-
 escapeChar	l1	base64decode	{{ (l1 | escapeChar(type='single')) | base64decode }}	error	error	-
-escapeChar	l1	base64encode	{{ (l1 | escapeChar(type='single')) | base64encode }}	W2Jd	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+escapeChar	l1	base64encode	{{ (l1 | escapeChar(type='single')) | base64encode }}	W2Jd	W2Jd	-
 escapeChar	l1	capitalize	{{ (l1 | escapeChar(type='single')) | capitalize }}	error	error	-
 escapeChar	l1	chunk	{{ (l1 | escapeChar(type='single')) | chunk(size=2) }}	[[\"b\"]]	[[\"b\"]]	-
 escapeChar	l1	className	{{ (l1 | escapeChar(type='single')) | className }}	java.util.ArrayList	java.util.ArrayList	-
@@ -805,18 +805,18 @@ escapeChar	l1	last	{{ (l1 | escapeChar(type='single')) | last }}	b	b	-
 escapeChar	l1	length	{{ (l1 | escapeChar(type='single')) | length }}	1	1	-
 escapeChar	l1	lower	{{ (l1 | escapeChar(type='single')) | lower }}	[b]	[b]	-
 escapeChar	l1	md5	{{ (l1 | escapeChar(type='single')) | md5 }}	error	error	-
-escapeChar	l1	merge	{{ (l1 | escapeChar(type='single')) | merge(l) }}	[\"b\",\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+escapeChar	l1	merge	{{ (l1 | escapeChar(type='single')) | merge(l) }}	[\"b\",\"b\",\"a\",\"c\"]	[\"b\",\"b\",\"a\",\"c\"]	-
 escapeChar	l1	nindent	{{ (l1 | escapeChar(type='single')) | nindent(amount=2) }}	\n  [b]	\n  [b]	-
 escapeChar	l1	nl2br	{{ (l1 | escapeChar(type='single')) | nl2br }}	error	error	-
 escapeChar	l1	number	{{ (l1 | escapeChar(type='single')) | number }}	error	error	-
 escapeChar	l1	numberformat	{{ (l1 | escapeChar(type='single')) | numberformat('#') }}	error	error	-
-escapeChar	l1	raw	{{ (l1 | escapeChar(type='single')) | raw }}	[b]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+escapeChar	l1	raw	{{ (l1 | escapeChar(type='single')) | raw }}	[b]	[b]	-
 escapeChar	l1	regexExtract	{{ (l1 | escapeChar(type='single')) | regexExtract(regex='a') }}			-
 escapeChar	l1	regexMatch	{{ (l1 | escapeChar(type='single')) | regexMatch(regex='a') }}	false	false	-
 escapeChar	l1	regexReplace	{{ (l1 | escapeChar(type='single')) | regexReplace(regex='a', replacement='#') }}	[b]	[b]	-
 escapeChar	l1	replace	{{ (l1 | escapeChar(type='single')) | replace({'a': 'b'}) }}	[b]	[b]	-
 escapeChar	l1	reverse	{{ (l1 | escapeChar(type='single')) | reverse }}	[\"b\"]	[\"b\"]	-
-escapeChar	l1	rsort	{{ (l1 | escapeChar(type='single')) | rsort }}	[\"b\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+escapeChar	l1	rsort	{{ (l1 | escapeChar(type='single')) | rsort }}	[\"b\"]	[\"b\"]	-
 escapeChar	l1	sha1	{{ (l1 | escapeChar(type='single')) | sha1 }}	error	error	-
 escapeChar	l1	sha256	{{ (l1 | escapeChar(type='single')) | sha256 }}	error	error	-
 escapeChar	l1	sha512	{{ (l1 | escapeChar(type='single')) | sha512 }}	error	error	-
@@ -846,7 +846,7 @@ escapeChar	l1	yaml	{{ (l1 | escapeChar(type='single')) | yaml }}	 - b\n	 - b\n	-
 escapeChar	m	abbreviate	{{ (m | escapeChar(type='single')) | abbreviate(5) }}	error	error	-
 escapeChar	m	abs	{{ (m | escapeChar(type='single')) | abs }}	error	error	-
 escapeChar	m	base64decode	{{ (m | escapeChar(type='single')) | base64decode }}	error	error	-
-escapeChar	m	base64encode	{{ (m | escapeChar(type='single')) | base64encode }}	e2E9MiwgYj0xfQ==	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+escapeChar	m	base64encode	{{ (m | escapeChar(type='single')) | base64encode }}	e2E9MiwgYj0xfQ==	e2I9MSwgYT0yfQ==	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
 escapeChar	m	capitalize	{{ (m | escapeChar(type='single')) | capitalize }}	error	error	-
 escapeChar	m	chunk	{{ (m | escapeChar(type='single')) | chunk(size=2) }}	error	error	-
 escapeChar	m	className	{{ (m | escapeChar(type='single')) | className }}	java.util.HashMap	java.util.LinkedHashMap	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
@@ -868,12 +868,12 @@ escapeChar	m	last	{{ (m | escapeChar(type='single')) | last }}	error	error	-
 escapeChar	m	length	{{ (m | escapeChar(type='single')) | length }}	2	2	-
 escapeChar	m	lower	{{ (m | escapeChar(type='single')) | lower }}	{a=2, b=1}	{b=1, a=2}	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
 escapeChar	m	md5	{{ (m | escapeChar(type='single')) | md5 }}	error	error	-
-escapeChar	m	merge	{{ (m | escapeChar(type='single')) | merge(l) }}	{\"a\":\"a\",\"b\":\"b\",\"c\":\"c\"}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+escapeChar	m	merge	{{ (m | escapeChar(type='single')) | merge(l) }}	{\"a\":\"a\",\"b\":\"b\",\"c\":\"c\"}	{\"b\":\"b\",\"a\":\"a\",\"c\":\"c\"}	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
 escapeChar	m	nindent	{{ (m | escapeChar(type='single')) | nindent(amount=2) }}	\n  {a=2, b=1}	\n  {b=1, a=2}	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
 escapeChar	m	nl2br	{{ (m | escapeChar(type='single')) | nl2br }}	error	error	-
 escapeChar	m	number	{{ (m | escapeChar(type='single')) | number }}	error	error	-
 escapeChar	m	numberformat	{{ (m | escapeChar(type='single')) | numberformat('#') }}	error	error	-
-escapeChar	m	raw	{{ (m | escapeChar(type='single')) | raw }}	{a=2, b=1}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+escapeChar	m	raw	{{ (m | escapeChar(type='single')) | raw }}	{a=2, b=1}	{b=1, a=2}	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
 escapeChar	m	regexExtract	{{ (m | escapeChar(type='single')) | regexExtract(regex='a') }}	a	a	-
 escapeChar	m	regexMatch	{{ (m | escapeChar(type='single')) | regexMatch(regex='a') }}	true	true	-
 escapeChar	m	regexReplace	{{ (m | escapeChar(type='single')) | regexReplace(regex='a', replacement='#') }}	error	{b=1, #=2}	downstream of the HashMap order above: it puts `{#` at the front of the rendered map and Kestra's re-render loop reads that as an unclosed Pebble comment
@@ -909,7 +909,7 @@ escapeChar	m	yaml	{{ (m | escapeChar(type='single')) | yaml }}	a: 2\nb: 1\n	b: 1
 escapeChar	m1	abbreviate	{{ (m1 | escapeChar(type='single')) | abbreviate(5) }}	error	error	-
 escapeChar	m1	abs	{{ (m1 | escapeChar(type='single')) | abs }}	error	error	-
 escapeChar	m1	base64decode	{{ (m1 | escapeChar(type='single')) | base64decode }}	error	error	-
-escapeChar	m1	base64encode	{{ (m1 | escapeChar(type='single')) | base64encode }}	e2I9MX0=	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+escapeChar	m1	base64encode	{{ (m1 | escapeChar(type='single')) | base64encode }}	e2I9MX0=	e2I9MX0=	-
 escapeChar	m1	capitalize	{{ (m1 | escapeChar(type='single')) | capitalize }}	error	error	-
 escapeChar	m1	chunk	{{ (m1 | escapeChar(type='single')) | chunk(size=2) }}	error	error	-
 escapeChar	m1	className	{{ (m1 | escapeChar(type='single')) | className }}	java.util.HashMap	java.util.LinkedHashMap	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
@@ -931,12 +931,12 @@ escapeChar	m1	last	{{ (m1 | escapeChar(type='single')) | last }}	error	error	-
 escapeChar	m1	length	{{ (m1 | escapeChar(type='single')) | length }}	1	1	-
 escapeChar	m1	lower	{{ (m1 | escapeChar(type='single')) | lower }}	{b=1}	{b=1}	-
 escapeChar	m1	md5	{{ (m1 | escapeChar(type='single')) | md5 }}	error	error	-
-escapeChar	m1	merge	{{ (m1 | escapeChar(type='single')) | merge(l) }}	{\"a\":\"a\",\"b\":\"b\",\"c\":\"c\"}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+escapeChar	m1	merge	{{ (m1 | escapeChar(type='single')) | merge(l) }}	{\"a\":\"a\",\"b\":\"b\",\"c\":\"c\"}	{\"b\":\"b\",\"a\":\"a\",\"c\":\"c\"}	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
 escapeChar	m1	nindent	{{ (m1 | escapeChar(type='single')) | nindent(amount=2) }}	\n  {b=1}	\n  {b=1}	-
 escapeChar	m1	nl2br	{{ (m1 | escapeChar(type='single')) | nl2br }}	error	error	-
 escapeChar	m1	number	{{ (m1 | escapeChar(type='single')) | number }}	error	error	-
 escapeChar	m1	numberformat	{{ (m1 | escapeChar(type='single')) | numberformat('#') }}	error	error	-
-escapeChar	m1	raw	{{ (m1 | escapeChar(type='single')) | raw }}	{b=1}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+escapeChar	m1	raw	{{ (m1 | escapeChar(type='single')) | raw }}	{b=1}	{b=1}	-
 escapeChar	m1	regexExtract	{{ (m1 | escapeChar(type='single')) | regexExtract(regex='a') }}			-
 escapeChar	m1	regexMatch	{{ (m1 | escapeChar(type='single')) | regexMatch(regex='a') }}	false	false	-
 escapeChar	m1	regexReplace	{{ (m1 | escapeChar(type='single')) | regexReplace(regex='a', replacement='#') }}	{b=1}	{b=1}	-
@@ -972,7 +972,7 @@ escapeChar	m1	yaml	{{ (m1 | escapeChar(type='single')) | yaml }}	b: 1\n	b: 1\n	-
 escapeChar	el	abbreviate	{{ (el | escapeChar(type='single')) | abbreviate(5) }}	error	error	-
 escapeChar	el	abs	{{ (el | escapeChar(type='single')) | abs }}	error	error	-
 escapeChar	el	base64decode	{{ (el | escapeChar(type='single')) | base64decode }}	error	error	-
-escapeChar	el	base64encode	{{ (el | escapeChar(type='single')) | base64encode }}	W10=	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+escapeChar	el	base64encode	{{ (el | escapeChar(type='single')) | base64encode }}	W10=	W10=	-
 escapeChar	el	capitalize	{{ (el | escapeChar(type='single')) | capitalize }}	error	error	-
 escapeChar	el	chunk	{{ (el | escapeChar(type='single')) | chunk(size=2) }}	[]	[]	-
 escapeChar	el	className	{{ (el | escapeChar(type='single')) | className }}	java.util.ArrayList	java.util.ArrayList	-
@@ -994,18 +994,18 @@ escapeChar	el	last	{{ (el | escapeChar(type='single')) | last }}			-
 escapeChar	el	length	{{ (el | escapeChar(type='single')) | length }}	0	0	-
 escapeChar	el	lower	{{ (el | escapeChar(type='single')) | lower }}	[]	[]	-
 escapeChar	el	md5	{{ (el | escapeChar(type='single')) | md5 }}	error	error	-
-escapeChar	el	merge	{{ (el | escapeChar(type='single')) | merge(l) }}	[\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+escapeChar	el	merge	{{ (el | escapeChar(type='single')) | merge(l) }}	[\"b\",\"a\",\"c\"]	[\"b\",\"a\",\"c\"]	-
 escapeChar	el	nindent	{{ (el | escapeChar(type='single')) | nindent(amount=2) }}	\n  []	\n  []	-
 escapeChar	el	nl2br	{{ (el | escapeChar(type='single')) | nl2br }}	error	error	-
 escapeChar	el	number	{{ (el | escapeChar(type='single')) | number }}	error	error	-
 escapeChar	el	numberformat	{{ (el | escapeChar(type='single')) | numberformat('#') }}	error	error	-
-escapeChar	el	raw	{{ (el | escapeChar(type='single')) | raw }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+escapeChar	el	raw	{{ (el | escapeChar(type='single')) | raw }}	[]	[]	-
 escapeChar	el	regexExtract	{{ (el | escapeChar(type='single')) | regexExtract(regex='a') }}			-
 escapeChar	el	regexMatch	{{ (el | escapeChar(type='single')) | regexMatch(regex='a') }}	false	false	-
 escapeChar	el	regexReplace	{{ (el | escapeChar(type='single')) | regexReplace(regex='a', replacement='#') }}	[]	[]	-
 escapeChar	el	replace	{{ (el | escapeChar(type='single')) | replace({'a': 'b'}) }}	[]	[]	-
 escapeChar	el	reverse	{{ (el | escapeChar(type='single')) | reverse }}	[]	[]	-
-escapeChar	el	rsort	{{ (el | escapeChar(type='single')) | rsort }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+escapeChar	el	rsort	{{ (el | escapeChar(type='single')) | rsort }}	[]	[]	-
 escapeChar	el	sha1	{{ (el | escapeChar(type='single')) | sha1 }}	error	error	-
 escapeChar	el	sha256	{{ (el | escapeChar(type='single')) | sha256 }}	error	error	-
 escapeChar	el	sha512	{{ (el | escapeChar(type='single')) | sha512 }}	error	error	-
@@ -1035,7 +1035,7 @@ escapeChar	el	yaml	{{ (el | escapeChar(type='single')) | yaml }}	[]\n	[]\n	-
 escapeChar	em	abbreviate	{{ (em | escapeChar(type='single')) | abbreviate(5) }}	error	error	-
 escapeChar	em	abs	{{ (em | escapeChar(type='single')) | abs }}	error	error	-
 escapeChar	em	base64decode	{{ (em | escapeChar(type='single')) | base64decode }}	error	error	-
-escapeChar	em	base64encode	{{ (em | escapeChar(type='single')) | base64encode }}	e30=	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+escapeChar	em	base64encode	{{ (em | escapeChar(type='single')) | base64encode }}	e30=	e30=	-
 escapeChar	em	capitalize	{{ (em | escapeChar(type='single')) | capitalize }}	error	error	-
 escapeChar	em	chunk	{{ (em | escapeChar(type='single')) | chunk(size=2) }}	error	error	-
 escapeChar	em	className	{{ (em | escapeChar(type='single')) | className }}	java.util.HashMap	java.util.LinkedHashMap	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
@@ -1057,12 +1057,12 @@ escapeChar	em	last	{{ (em | escapeChar(type='single')) | last }}	error	error	-
 escapeChar	em	length	{{ (em | escapeChar(type='single')) | length }}	0	0	-
 escapeChar	em	lower	{{ (em | escapeChar(type='single')) | lower }}	{}	{}	-
 escapeChar	em	md5	{{ (em | escapeChar(type='single')) | md5 }}	error	error	-
-escapeChar	em	merge	{{ (em | escapeChar(type='single')) | merge(l) }}	{\"a\":\"a\",\"b\":\"b\",\"c\":\"c\"}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+escapeChar	em	merge	{{ (em | escapeChar(type='single')) | merge(l) }}	{\"a\":\"a\",\"b\":\"b\",\"c\":\"c\"}	{\"b\":\"b\",\"a\":\"a\",\"c\":\"c\"}	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
 escapeChar	em	nindent	{{ (em | escapeChar(type='single')) | nindent(amount=2) }}	\n  {}	\n  {}	-
 escapeChar	em	nl2br	{{ (em | escapeChar(type='single')) | nl2br }}	error	error	-
 escapeChar	em	number	{{ (em | escapeChar(type='single')) | number }}	error	error	-
 escapeChar	em	numberformat	{{ (em | escapeChar(type='single')) | numberformat('#') }}	error	error	-
-escapeChar	em	raw	{{ (em | escapeChar(type='single')) | raw }}	{}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+escapeChar	em	raw	{{ (em | escapeChar(type='single')) | raw }}	{}	{}	-
 escapeChar	em	regexExtract	{{ (em | escapeChar(type='single')) | regexExtract(regex='a') }}			-
 escapeChar	em	regexMatch	{{ (em | escapeChar(type='single')) | regexMatch(regex='a') }}	false	false	-
 escapeChar	em	regexReplace	{{ (em | escapeChar(type='single')) | regexReplace(regex='a', replacement='#') }}	{}	{}	-
@@ -1098,7 +1098,7 @@ escapeChar	em	yaml	{{ (em | escapeChar(type='single')) | yaml }}	{}\n	{}\n	-
 first	ll	abbreviate	{{ (ll | first) | abbreviate(5) }}	error	error	-
 first	ll	abs	{{ (ll | first) | abs }}	error	error	-
 first	ll	base64decode	{{ (ll | first) | base64decode }}	error	error	-
-first	ll	base64encode	{{ (ll | first) | base64encode }}	W2IsIGFd	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+first	ll	base64encode	{{ (ll | first) | base64encode }}	W2IsIGFd	W2IsIGFd	-
 first	ll	capitalize	{{ (ll | first) | capitalize }}	error	error	-
 first	ll	chunk	{{ (ll | first) | chunk(size=2) }}	[[\"b\",\"a\"]]	[[\"b\",\"a\"]]	-
 first	ll	className	{{ (ll | first) | className }}	java.util.ArrayList	java.util.ArrayList	-
@@ -1120,18 +1120,18 @@ first	ll	last	{{ (ll | first) | last }}	a	a	-
 first	ll	length	{{ (ll | first) | length }}	2	2	-
 first	ll	lower	{{ (ll | first) | lower }}	[b, a]	[b, a]	-
 first	ll	md5	{{ (ll | first) | md5 }}	error	error	-
-first	ll	merge	{{ (ll | first) | merge(l) }}	[\"b\",\"a\",\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+first	ll	merge	{{ (ll | first) | merge(l) }}	[\"b\",\"a\",\"b\",\"a\",\"c\"]	[\"b\",\"a\",\"b\",\"a\",\"c\"]	-
 first	ll	nindent	{{ (ll | first) | nindent(amount=2) }}	\n  [b, a]	\n  [b, a]	-
 first	ll	nl2br	{{ (ll | first) | nl2br }}	error	error	-
 first	ll	number	{{ (ll | first) | number }}	error	error	-
 first	ll	numberformat	{{ (ll | first) | numberformat('#') }}	error	error	-
-first	ll	raw	{{ (ll | first) | raw }}	[b, a]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+first	ll	raw	{{ (ll | first) | raw }}	[b, a]	[b, a]	-
 first	ll	regexExtract	{{ (ll | first) | regexExtract(regex='a') }}	a	a	-
 first	ll	regexMatch	{{ (ll | first) | regexMatch(regex='a') }}	true	true	-
 first	ll	regexReplace	{{ (ll | first) | regexReplace(regex='a', replacement='#') }}	[b, #]	[b, #]	-
 first	ll	replace	{{ (ll | first) | replace({'a': 'b'}) }}	[b, b]	[b, b]	-
 first	ll	reverse	{{ (ll | first) | reverse }}	[\"a\",\"b\"]	[\"a\",\"b\"]	-
-first	ll	rsort	{{ (ll | first) | rsort }}	[\"b\",\"a\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+first	ll	rsort	{{ (ll | first) | rsort }}	[\"b\",\"a\"]	[\"b\",\"a\"]	-
 first	ll	sha1	{{ (ll | first) | sha1 }}	error	error	-
 first	ll	sha256	{{ (ll | first) | sha256 }}	error	error	-
 first	ll	sha512	{{ (ll | first) | sha512 }}	error	error	-
@@ -1161,7 +1161,7 @@ first	ll	yaml	{{ (ll | first) | yaml }}	 - b\n - a\n	 - b\n - a\n	-
 flatten	l	abbreviate	{{ (l | flatten) | abbreviate(5) }}	error	error	-
 flatten	l	abs	{{ (l | flatten) | abs }}	error	error	-
 flatten	l	base64decode	{{ (l | flatten) | base64decode }}	error	error	-
-flatten	l	base64encode	{{ (l | flatten) | base64encode }}	W2IsIGEsIGNd	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+flatten	l	base64encode	{{ (l | flatten) | base64encode }}	W2IsIGEsIGNd	W2IsIGEsIGNd	-
 flatten	l	capitalize	{{ (l | flatten) | capitalize }}	error	error	-
 flatten	l	chunk	{{ (l | flatten) | chunk(size=2) }}	[[\"b\",\"a\"],[\"c\"]]	[[\"b\",\"a\"],[\"c\"]]	-
 flatten	l	className	{{ (l | flatten) | className }}	java.util.ImmutableCollections$ListN	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
@@ -1183,12 +1183,12 @@ flatten	l	last	{{ (l | flatten) | last }}	c	c	-
 flatten	l	length	{{ (l | flatten) | length }}	3	3	-
 flatten	l	lower	{{ (l | flatten) | lower }}	[b, a, c]	[b, a, c]	-
 flatten	l	md5	{{ (l | flatten) | md5 }}	error	error	-
-flatten	l	merge	{{ (l | flatten) | merge(l) }}	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+flatten	l	merge	{{ (l | flatten) | merge(l) }}	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	-
 flatten	l	nindent	{{ (l | flatten) | nindent(amount=2) }}	\n  [b, a, c]	\n  [b, a, c]	-
 flatten	l	nl2br	{{ (l | flatten) | nl2br }}	error	error	-
 flatten	l	number	{{ (l | flatten) | number }}	error	error	-
 flatten	l	numberformat	{{ (l | flatten) | numberformat('#') }}	error	error	-
-flatten	l	raw	{{ (l | flatten) | raw }}	[b, a, c]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+flatten	l	raw	{{ (l | flatten) | raw }}	[b, a, c]	[b, a, c]	-
 flatten	l	regexExtract	{{ (l | flatten) | regexExtract(regex='a') }}	a	a	-
 flatten	l	regexMatch	{{ (l | flatten) | regexMatch(regex='a') }}	true	true	-
 flatten	l	regexReplace	{{ (l | flatten) | regexReplace(regex='a', replacement='#') }}	[b, #, c]	[b, #, c]	-
@@ -1224,7 +1224,7 @@ flatten	l	yaml	{{ (l | flatten) | yaml }}	 - b\n - a\n - c\n	 - b\n - a\n - c\n	
 flatten	l1	abbreviate	{{ (l1 | flatten) | abbreviate(5) }}	error	error	-
 flatten	l1	abs	{{ (l1 | flatten) | abs }}	error	error	-
 flatten	l1	base64decode	{{ (l1 | flatten) | base64decode }}	error	error	-
-flatten	l1	base64encode	{{ (l1 | flatten) | base64encode }}	W2Jd	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+flatten	l1	base64encode	{{ (l1 | flatten) | base64encode }}	W2Jd	W2Jd	-
 flatten	l1	capitalize	{{ (l1 | flatten) | capitalize }}	error	error	-
 flatten	l1	chunk	{{ (l1 | flatten) | chunk(size=2) }}	[[\"b\"]]	[[\"b\"]]	-
 flatten	l1	className	{{ (l1 | flatten) | className }}	java.util.ImmutableCollections$ListN	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
@@ -1246,12 +1246,12 @@ flatten	l1	last	{{ (l1 | flatten) | last }}	b	b	-
 flatten	l1	length	{{ (l1 | flatten) | length }}	1	1	-
 flatten	l1	lower	{{ (l1 | flatten) | lower }}	[b]	[b]	-
 flatten	l1	md5	{{ (l1 | flatten) | md5 }}	error	error	-
-flatten	l1	merge	{{ (l1 | flatten) | merge(l) }}	[\"b\",\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+flatten	l1	merge	{{ (l1 | flatten) | merge(l) }}	[\"b\",\"b\",\"a\",\"c\"]	[\"b\",\"b\",\"a\",\"c\"]	-
 flatten	l1	nindent	{{ (l1 | flatten) | nindent(amount=2) }}	\n  [b]	\n  [b]	-
 flatten	l1	nl2br	{{ (l1 | flatten) | nl2br }}	error	error	-
 flatten	l1	number	{{ (l1 | flatten) | number }}	error	error	-
 flatten	l1	numberformat	{{ (l1 | flatten) | numberformat('#') }}	error	error	-
-flatten	l1	raw	{{ (l1 | flatten) | raw }}	[b]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+flatten	l1	raw	{{ (l1 | flatten) | raw }}	[b]	[b]	-
 flatten	l1	regexExtract	{{ (l1 | flatten) | regexExtract(regex='a') }}			-
 flatten	l1	regexMatch	{{ (l1 | flatten) | regexMatch(regex='a') }}	false	false	-
 flatten	l1	regexReplace	{{ (l1 | flatten) | regexReplace(regex='a', replacement='#') }}	[b]	[b]	-
@@ -1287,7 +1287,7 @@ flatten	l1	yaml	{{ (l1 | flatten) | yaml }}	 - b\n	 - b\n	-
 flatten	el	abbreviate	{{ (el | flatten) | abbreviate(5) }}	error	error	-
 flatten	el	abs	{{ (el | flatten) | abs }}	error	error	-
 flatten	el	base64decode	{{ (el | flatten) | base64decode }}	error	error	-
-flatten	el	base64encode	{{ (el | flatten) | base64encode }}	W10=	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+flatten	el	base64encode	{{ (el | flatten) | base64encode }}	W10=	W10=	-
 flatten	el	capitalize	{{ (el | flatten) | capitalize }}	error	error	-
 flatten	el	chunk	{{ (el | flatten) | chunk(size=2) }}	[]	[]	-
 flatten	el	className	{{ (el | flatten) | className }}	java.util.ImmutableCollections$ListN	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
@@ -1309,12 +1309,12 @@ flatten	el	last	{{ (el | flatten) | last }}			-
 flatten	el	length	{{ (el | flatten) | length }}	0	0	-
 flatten	el	lower	{{ (el | flatten) | lower }}	[]	[]	-
 flatten	el	md5	{{ (el | flatten) | md5 }}	error	error	-
-flatten	el	merge	{{ (el | flatten) | merge(l) }}	[\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+flatten	el	merge	{{ (el | flatten) | merge(l) }}	[\"b\",\"a\",\"c\"]	[\"b\",\"a\",\"c\"]	-
 flatten	el	nindent	{{ (el | flatten) | nindent(amount=2) }}	\n  []	\n  []	-
 flatten	el	nl2br	{{ (el | flatten) | nl2br }}	error	error	-
 flatten	el	number	{{ (el | flatten) | number }}	error	error	-
 flatten	el	numberformat	{{ (el | flatten) | numberformat('#') }}	error	error	-
-flatten	el	raw	{{ (el | flatten) | raw }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+flatten	el	raw	{{ (el | flatten) | raw }}	[]	[]	-
 flatten	el	regexExtract	{{ (el | flatten) | regexExtract(regex='a') }}			-
 flatten	el	regexMatch	{{ (el | flatten) | regexMatch(regex='a') }}	false	false	-
 flatten	el	regexReplace	{{ (el | flatten) | regexReplace(regex='a', replacement='#') }}	[]	[]	-
@@ -1350,7 +1350,7 @@ flatten	el	yaml	{{ (el | flatten) | yaml }}	[]\n	[]\n	-
 jq	l	abbreviate	{{ (l | jq('.')) | abbreviate(5) }}	error	error	-
 jq	l	abs	{{ (l | jq('.')) | abs }}	error	error	-
 jq	l	base64decode	{{ (l | jq('.')) | base64decode }}	error	error	-
-jq	l	base64encode	{{ (l | jq('.')) | base64encode }}	W1tiLCBhLCBjXV0=	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+jq	l	base64encode	{{ (l | jq('.')) | base64encode }}	W1tiLCBhLCBjXV0=	W1tiLCBhLCBjXV0=	-
 jq	l	capitalize	{{ (l | jq('.')) | capitalize }}	error	error	-
 jq	l	chunk	{{ (l | jq('.')) | chunk(size=2) }}	[[[\"b\",\"a\",\"c\"]]]	[[[\"b\",\"a\",\"c\"]]]	-
 jq	l	className	{{ (l | jq('.')) | className }}	java.util.ArrayList	java.util.ArrayList	-
@@ -1372,18 +1372,18 @@ jq	l	last	{{ (l | jq('.')) | last }}	[\"b\",\"a\",\"c\"]	[\"b\",\"a\",\"c\"]	-
 jq	l	length	{{ (l | jq('.')) | length }}	1	1	-
 jq	l	lower	{{ (l | jq('.')) | lower }}	[[b, a, c]]	[[b, a, c]]	-
 jq	l	md5	{{ (l | jq('.')) | md5 }}	error	error	-
-jq	l	merge	{{ (l | jq('.')) | merge(l) }}	[[\"b\",\"a\",\"c\"],\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+jq	l	merge	{{ (l | jq('.')) | merge(l) }}	[[\"b\",\"a\",\"c\"],\"b\",\"a\",\"c\"]	[[\"b\",\"a\",\"c\"],\"b\",\"a\",\"c\"]	-
 jq	l	nindent	{{ (l | jq('.')) | nindent(amount=2) }}	\n  [[b, a, c]]	\n  [[b, a, c]]	-
 jq	l	nl2br	{{ (l | jq('.')) | nl2br }}	error	error	-
 jq	l	number	{{ (l | jq('.')) | number }}	error	error	-
 jq	l	numberformat	{{ (l | jq('.')) | numberformat('#') }}	error	error	-
-jq	l	raw	{{ (l | jq('.')) | raw }}	[[b, a, c]]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+jq	l	raw	{{ (l | jq('.')) | raw }}	[[b, a, c]]	[[b, a, c]]	-
 jq	l	regexExtract	{{ (l | jq('.')) | regexExtract(regex='a') }}	a	a	-
 jq	l	regexMatch	{{ (l | jq('.')) | regexMatch(regex='a') }}	true	true	-
 jq	l	regexReplace	{{ (l | jq('.')) | regexReplace(regex='a', replacement='#') }}	[[b, #, c]]	[[b, #, c]]	-
 jq	l	replace	{{ (l | jq('.')) | replace({'a': 'b'}) }}	[[b, b, c]]	[[b, b, c]]	-
 jq	l	reverse	{{ (l | jq('.')) | reverse }}	[[\"b\",\"a\",\"c\"]]	[[\"b\",\"a\",\"c\"]]	-
-jq	l	rsort	{{ (l | jq('.')) | rsort }}	[[\"b\",\"a\",\"c\"]]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+jq	l	rsort	{{ (l | jq('.')) | rsort }}	[[\"b\",\"a\",\"c\"]]	[[\"b\",\"a\",\"c\"]]	-
 jq	l	sha1	{{ (l | jq('.')) | sha1 }}	error	error	-
 jq	l	sha256	{{ (l | jq('.')) | sha256 }}	error	error	-
 jq	l	sha512	{{ (l | jq('.')) | sha512 }}	error	error	-
@@ -1413,7 +1413,7 @@ jq	l	yaml	{{ (l | jq('.')) | yaml }}	 -\n   - b\n   - a\n   - c\n	 -\n   - b\n  
 keys	l	abbreviate	{{ (l | keys) | abbreviate(5) }}	error	error	-
 keys	l	abs	{{ (l | keys) | abs }}	error	error	-
 keys	l	base64decode	{{ (l | keys) | base64decode }}	error	error	-
-keys	l	base64encode	{{ (l | keys) | base64encode }}	WzAsIDEsIDJd	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+keys	l	base64encode	{{ (l | keys) | base64encode }}	WzAsIDEsIDJd	WzAsIDEsIDJd	-
 keys	l	capitalize	{{ (l | keys) | capitalize }}	error	error	-
 keys	l	chunk	{{ (l | keys) | chunk(size=2) }}	[[0,1],[2]]	[[0,1],[2]]	-
 keys	l	className	{{ (l | keys) | className }}	java.util.ImmutableCollections$ListN	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
@@ -1435,12 +1435,12 @@ keys	l	last	{{ (l | keys) | last }}	2	2	-
 keys	l	length	{{ (l | keys) | length }}	3	3	-
 keys	l	lower	{{ (l | keys) | lower }}	[0, 1, 2]	[0, 1, 2]	-
 keys	l	md5	{{ (l | keys) | md5 }}	error	error	-
-keys	l	merge	{{ (l | keys) | merge(l) }}	[0,1,2,\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+keys	l	merge	{{ (l | keys) | merge(l) }}	[0,1,2,\"b\",\"a\",\"c\"]	[0,1,2,\"b\",\"a\",\"c\"]	-
 keys	l	nindent	{{ (l | keys) | nindent(amount=2) }}	\n  [0, 1, 2]	\n  [0, 1, 2]	-
 keys	l	nl2br	{{ (l | keys) | nl2br }}	error	error	-
 keys	l	number	{{ (l | keys) | number }}	error	error	-
 keys	l	numberformat	{{ (l | keys) | numberformat('#') }}	error	error	-
-keys	l	raw	{{ (l | keys) | raw }}	[0, 1, 2]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+keys	l	raw	{{ (l | keys) | raw }}	[0, 1, 2]	[0, 1, 2]	-
 keys	l	regexExtract	{{ (l | keys) | regexExtract(regex='a') }}			-
 keys	l	regexMatch	{{ (l | keys) | regexMatch(regex='a') }}	false	false	-
 keys	l	regexReplace	{{ (l | keys) | regexReplace(regex='a', replacement='#') }}	[0, 1, 2]	[0, 1, 2]	-
@@ -1476,7 +1476,7 @@ keys	l	yaml	{{ (l | keys) | yaml }}	 - 0\n - 1\n - 2\n	 - 0\n - 1\n - 2\n	-
 keys	l1	abbreviate	{{ (l1 | keys) | abbreviate(5) }}	error	error	-
 keys	l1	abs	{{ (l1 | keys) | abs }}	error	error	-
 keys	l1	base64decode	{{ (l1 | keys) | base64decode }}	error	error	-
-keys	l1	base64encode	{{ (l1 | keys) | base64encode }}	WzBd	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+keys	l1	base64encode	{{ (l1 | keys) | base64encode }}	WzBd	WzBd	-
 keys	l1	capitalize	{{ (l1 | keys) | capitalize }}	error	error	-
 keys	l1	chunk	{{ (l1 | keys) | chunk(size=2) }}	[[0]]	[[0]]	-
 keys	l1	className	{{ (l1 | keys) | className }}	java.util.ImmutableCollections$ListN	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
@@ -1498,12 +1498,12 @@ keys	l1	last	{{ (l1 | keys) | last }}	0	0	-
 keys	l1	length	{{ (l1 | keys) | length }}	1	1	-
 keys	l1	lower	{{ (l1 | keys) | lower }}	[0]	[0]	-
 keys	l1	md5	{{ (l1 | keys) | md5 }}	error	error	-
-keys	l1	merge	{{ (l1 | keys) | merge(l) }}	[0,\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+keys	l1	merge	{{ (l1 | keys) | merge(l) }}	[0,\"b\",\"a\",\"c\"]	[0,\"b\",\"a\",\"c\"]	-
 keys	l1	nindent	{{ (l1 | keys) | nindent(amount=2) }}	\n  [0]	\n  [0]	-
 keys	l1	nl2br	{{ (l1 | keys) | nl2br }}	error	error	-
 keys	l1	number	{{ (l1 | keys) | number }}	error	error	-
 keys	l1	numberformat	{{ (l1 | keys) | numberformat('#') }}	error	error	-
-keys	l1	raw	{{ (l1 | keys) | raw }}	[0]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+keys	l1	raw	{{ (l1 | keys) | raw }}	[0]	[0]	-
 keys	l1	regexExtract	{{ (l1 | keys) | regexExtract(regex='a') }}			-
 keys	l1	regexMatch	{{ (l1 | keys) | regexMatch(regex='a') }}	false	false	-
 keys	l1	regexReplace	{{ (l1 | keys) | regexReplace(regex='a', replacement='#') }}	[0]	[0]	-
@@ -1539,7 +1539,7 @@ keys	l1	yaml	{{ (l1 | keys) | yaml }}	 - 0\n	 - 0\n	-
 keys	m	abbreviate	{{ (m | keys) | abbreviate(5) }}	error	error	-
 keys	m	abs	{{ (m | keys) | abs }}	error	error	-
 keys	m	base64decode	{{ (m | keys) | base64decode }}	error	error	-
-keys	m	base64encode	{{ (m | keys) | base64encode }}	W2IsIGFd	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+keys	m	base64encode	{{ (m | keys) | base64encode }}	W2IsIGFd	W2IsIGFd	-
 keys	m	capitalize	{{ (m | keys) | capitalize }}	error	error	-
 keys	m	chunk	{{ (m | keys) | chunk(size=2) }}	error	error	-
 keys	m	className	{{ (m | keys) | className }}	java.util.LinkedHashMap$LinkedKeySet	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
@@ -1566,7 +1566,7 @@ keys	m	nindent	{{ (m | keys) | nindent(amount=2) }}	\n  [b, a]	\n  [b, a]	-
 keys	m	nl2br	{{ (m | keys) | nl2br }}	error	error	-
 keys	m	number	{{ (m | keys) | number }}	error	error	-
 keys	m	numberformat	{{ (m | keys) | numberformat('#') }}	error	error	-
-keys	m	raw	{{ (m | keys) | raw }}	[b, a]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+keys	m	raw	{{ (m | keys) | raw }}	[b, a]	[b, a]	-
 keys	m	regexExtract	{{ (m | keys) | regexExtract(regex='a') }}	a	a	-
 keys	m	regexMatch	{{ (m | keys) | regexMatch(regex='a') }}	true	true	-
 keys	m	regexReplace	{{ (m | keys) | regexReplace(regex='a', replacement='#') }}	[b, #]	[b, #]	-
@@ -1602,7 +1602,7 @@ keys	m	yaml	{{ (m | keys) | yaml }}	 - b\n - a\n	 - b\n - a\n	-
 keys	m1	abbreviate	{{ (m1 | keys) | abbreviate(5) }}	error	error	-
 keys	m1	abs	{{ (m1 | keys) | abs }}	error	error	-
 keys	m1	base64decode	{{ (m1 | keys) | base64decode }}	error	error	-
-keys	m1	base64encode	{{ (m1 | keys) | base64encode }}	W2Jd	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+keys	m1	base64encode	{{ (m1 | keys) | base64encode }}	W2Jd	W2Jd	-
 keys	m1	capitalize	{{ (m1 | keys) | capitalize }}	error	error	-
 keys	m1	chunk	{{ (m1 | keys) | chunk(size=2) }}	error	error	-
 keys	m1	className	{{ (m1 | keys) | className }}	java.util.LinkedHashMap$LinkedKeySet	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
@@ -1629,7 +1629,7 @@ keys	m1	nindent	{{ (m1 | keys) | nindent(amount=2) }}	\n  [b]	\n  [b]	-
 keys	m1	nl2br	{{ (m1 | keys) | nl2br }}	error	error	-
 keys	m1	number	{{ (m1 | keys) | number }}	error	error	-
 keys	m1	numberformat	{{ (m1 | keys) | numberformat('#') }}	error	error	-
-keys	m1	raw	{{ (m1 | keys) | raw }}	[b]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+keys	m1	raw	{{ (m1 | keys) | raw }}	[b]	[b]	-
 keys	m1	regexExtract	{{ (m1 | keys) | regexExtract(regex='a') }}			-
 keys	m1	regexMatch	{{ (m1 | keys) | regexMatch(regex='a') }}	false	false	-
 keys	m1	regexReplace	{{ (m1 | keys) | regexReplace(regex='a', replacement='#') }}	[b]	[b]	-
@@ -1665,7 +1665,7 @@ keys	m1	yaml	{{ (m1 | keys) | yaml }}	 - b\n	 - b\n	-
 keys	el	abbreviate	{{ (el | keys) | abbreviate(5) }}	error	error	-
 keys	el	abs	{{ (el | keys) | abs }}	error	error	-
 keys	el	base64decode	{{ (el | keys) | base64decode }}	error	error	-
-keys	el	base64encode	{{ (el | keys) | base64encode }}	W10=	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+keys	el	base64encode	{{ (el | keys) | base64encode }}	W10=	W10=	-
 keys	el	capitalize	{{ (el | keys) | capitalize }}	error	error	-
 keys	el	chunk	{{ (el | keys) | chunk(size=2) }}	[]	[]	-
 keys	el	className	{{ (el | keys) | className }}	java.util.ImmutableCollections$ListN	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
@@ -1687,12 +1687,12 @@ keys	el	last	{{ (el | keys) | last }}			-
 keys	el	length	{{ (el | keys) | length }}	0	0	-
 keys	el	lower	{{ (el | keys) | lower }}	[]	[]	-
 keys	el	md5	{{ (el | keys) | md5 }}	error	error	-
-keys	el	merge	{{ (el | keys) | merge(l) }}	[\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+keys	el	merge	{{ (el | keys) | merge(l) }}	[\"b\",\"a\",\"c\"]	[\"b\",\"a\",\"c\"]	-
 keys	el	nindent	{{ (el | keys) | nindent(amount=2) }}	\n  []	\n  []	-
 keys	el	nl2br	{{ (el | keys) | nl2br }}	error	error	-
 keys	el	number	{{ (el | keys) | number }}	error	error	-
 keys	el	numberformat	{{ (el | keys) | numberformat('#') }}	error	error	-
-keys	el	raw	{{ (el | keys) | raw }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+keys	el	raw	{{ (el | keys) | raw }}	[]	[]	-
 keys	el	regexExtract	{{ (el | keys) | regexExtract(regex='a') }}			-
 keys	el	regexMatch	{{ (el | keys) | regexMatch(regex='a') }}	false	false	-
 keys	el	regexReplace	{{ (el | keys) | regexReplace(regex='a', replacement='#') }}	[]	[]	-
@@ -1728,7 +1728,7 @@ keys	el	yaml	{{ (el | keys) | yaml }}	[]\n	[]\n	-
 keys	em	abbreviate	{{ (em | keys) | abbreviate(5) }}	error	error	-
 keys	em	abs	{{ (em | keys) | abs }}	error	error	-
 keys	em	base64decode	{{ (em | keys) | base64decode }}	error	error	-
-keys	em	base64encode	{{ (em | keys) | base64encode }}	W10=	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+keys	em	base64encode	{{ (em | keys) | base64encode }}	W10=	W10=	-
 keys	em	capitalize	{{ (em | keys) | capitalize }}	error	error	-
 keys	em	chunk	{{ (em | keys) | chunk(size=2) }}	error	error	-
 keys	em	className	{{ (em | keys) | className }}	java.util.LinkedHashMap$LinkedKeySet	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
@@ -1755,7 +1755,7 @@ keys	em	nindent	{{ (em | keys) | nindent(amount=2) }}	\n  []	\n  []	-
 keys	em	nl2br	{{ (em | keys) | nl2br }}	error	error	-
 keys	em	number	{{ (em | keys) | number }}	error	error	-
 keys	em	numberformat	{{ (em | keys) | numberformat('#') }}	error	error	-
-keys	em	raw	{{ (em | keys) | raw }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+keys	em	raw	{{ (em | keys) | raw }}	[]	[]	-
 keys	em	regexExtract	{{ (em | keys) | regexExtract(regex='a') }}			-
 keys	em	regexMatch	{{ (em | keys) | regexMatch(regex='a') }}	false	false	-
 keys	em	regexReplace	{{ (em | keys) | regexReplace(regex='a', replacement='#') }}	[]	[]	-
@@ -1791,7 +1791,7 @@ keys	em	yaml	{{ (em | keys) | yaml }}	[]\n	[]\n	-
 last	ll	abbreviate	{{ (ll | last) | abbreviate(5) }}	error	error	-
 last	ll	abs	{{ (ll | last) | abs }}	error	error	-
 last	ll	base64decode	{{ (ll | last) | base64decode }}	error	error	-
-last	ll	base64encode	{{ (ll | last) | base64encode }}	W2Nd	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+last	ll	base64encode	{{ (ll | last) | base64encode }}	W2Nd	W2Nd	-
 last	ll	capitalize	{{ (ll | last) | capitalize }}	error	error	-
 last	ll	chunk	{{ (ll | last) | chunk(size=2) }}	[[\"c\"]]	[[\"c\"]]	-
 last	ll	className	{{ (ll | last) | className }}	java.util.ArrayList	java.util.ArrayList	-
@@ -1813,18 +1813,18 @@ last	ll	last	{{ (ll | last) | last }}	c	c	-
 last	ll	length	{{ (ll | last) | length }}	1	1	-
 last	ll	lower	{{ (ll | last) | lower }}	[c]	[c]	-
 last	ll	md5	{{ (ll | last) | md5 }}	error	error	-
-last	ll	merge	{{ (ll | last) | merge(l) }}	[\"c\",\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+last	ll	merge	{{ (ll | last) | merge(l) }}	[\"c\",\"b\",\"a\",\"c\"]	[\"c\",\"b\",\"a\",\"c\"]	-
 last	ll	nindent	{{ (ll | last) | nindent(amount=2) }}	\n  [c]	\n  [c]	-
 last	ll	nl2br	{{ (ll | last) | nl2br }}	error	error	-
 last	ll	number	{{ (ll | last) | number }}	error	error	-
 last	ll	numberformat	{{ (ll | last) | numberformat('#') }}	error	error	-
-last	ll	raw	{{ (ll | last) | raw }}	[c]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+last	ll	raw	{{ (ll | last) | raw }}	[c]	[c]	-
 last	ll	regexExtract	{{ (ll | last) | regexExtract(regex='a') }}			-
 last	ll	regexMatch	{{ (ll | last) | regexMatch(regex='a') }}	false	false	-
 last	ll	regexReplace	{{ (ll | last) | regexReplace(regex='a', replacement='#') }}	[c]	[c]	-
 last	ll	replace	{{ (ll | last) | replace({'a': 'b'}) }}	[c]	[c]	-
 last	ll	reverse	{{ (ll | last) | reverse }}	[\"c\"]	[\"c\"]	-
-last	ll	rsort	{{ (ll | last) | rsort }}	[\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+last	ll	rsort	{{ (ll | last) | rsort }}	[\"c\"]	[\"c\"]	-
 last	ll	sha1	{{ (ll | last) | sha1 }}	error	error	-
 last	ll	sha256	{{ (ll | last) | sha256 }}	error	error	-
 last	ll	sha512	{{ (ll | last) | sha512 }}	error	error	-
@@ -1854,133 +1854,133 @@ last	ll	yaml	{{ (ll | last) | yaml }}	 - c\n	 - c\n	-
 merge	l	abbreviate	{{ (l | merge(l)) | abbreviate(5) }}	error	error	-
 merge	l	abs	{{ (l | merge(l)) | abs }}	error	error	-
 merge	l	base64decode	{{ (l | merge(l)) | base64decode }}	error	error	-
-merge	l	base64encode	{{ (l | merge(l)) | base64encode }}	W2IsIGEsIGMsIGIsIGEsIGNd	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	l	base64encode	{{ (l | merge(l)) | base64encode }}	W2IsIGEsIGMsIGIsIGEsIGNd	W2IsIGEsIGMsIGIsIGEsIGNd	-
 merge	l	capitalize	{{ (l | merge(l)) | capitalize }}	error	error	-
-merge	l	chunk	{{ (l | merge(l)) | chunk(size=2) }}	[[\"b\",\"a\"],[\"c\",\"b\"],[\"a\",\"c\"]]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	className	{{ (l | merge(l)) | className }}	java.util.ArrayList	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	l	chunk	{{ (l | merge(l)) | chunk(size=2) }}	[[\"b\",\"a\"],[\"c\",\"b\"],[\"a\",\"c\"]]	[[\"b\",\"a\"],[\"c\",\"b\"],[\"a\",\"c\"]]	-
+merge	l	className	{{ (l | merge(l)) | className }}	java.util.ArrayList	java.util.ArrayList	-
 merge	l	date	{{ (l | merge(l)) | date('yyyy-MM-dd', timeZone='UTC') }}	error	error	-
 merge	l	dateAdd	{{ (l | merge(l)) | dateAdd(1, 'DAYS', 'iso', 'UTC') }}	error	error	-
-merge	l	default	{{ (l | merge(l)) | default('D') }}	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	distinct	{{ (l | merge(l)) | distinct }}	[\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	endsWith	{{ (l | merge(l)) | endsWith(value='c') }}	false	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	escape	{{ (l | merge(l)) | escape }}	[b, a, c, b, a, c]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	escapeChar	{{ (l | merge(l)) | escapeChar(type='single') }}	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	first	{{ (l | merge(l)) | first }}	b	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	flatten	{{ (l | merge(l)) | flatten }}	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	format	{{ (l | merge(l)) | format('x') }}	[b, a, c, b, a, c]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	indent	{{ (l | merge(l)) | indent(amount=2) }}	[b, a, c, b, a, c]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	join	{{ (l | merge(l)) | join('-') }}	b-a-c-b-a-c	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	jq	{{ (l | merge(l)) | jq('.') }}	[[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	keys	{{ (l | merge(l)) | keys }}	[0,1,2,3,4,5]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	last	{{ (l | merge(l)) | last }}	c	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	length	{{ (l | merge(l)) | length }}	6	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	lower	{{ (l | merge(l)) | lower }}	[b, a, c, b, a, c]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	l	default	{{ (l | merge(l)) | default('D') }}	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	-
+merge	l	distinct	{{ (l | merge(l)) | distinct }}	[\"b\",\"a\",\"c\"]	[\"b\",\"a\",\"c\"]	-
+merge	l	endsWith	{{ (l | merge(l)) | endsWith(value='c') }}	false	false	-
+merge	l	escape	{{ (l | merge(l)) | escape }}	[b, a, c, b, a, c]	[b, a, c, b, a, c]	-
+merge	l	escapeChar	{{ (l | merge(l)) | escapeChar(type='single') }}	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	-
+merge	l	first	{{ (l | merge(l)) | first }}	b	b	-
+merge	l	flatten	{{ (l | merge(l)) | flatten }}	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	-
+merge	l	format	{{ (l | merge(l)) | format('x') }}	[b, a, c, b, a, c]	[b, a, c, b, a, c]	-
+merge	l	indent	{{ (l | merge(l)) | indent(amount=2) }}	[b, a, c, b, a, c]	[b, a, c, b, a, c]	-
+merge	l	join	{{ (l | merge(l)) | join('-') }}	b-a-c-b-a-c	b-a-c-b-a-c	-
+merge	l	jq	{{ (l | merge(l)) | jq('.') }}	[[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]]	[[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]]	-
+merge	l	keys	{{ (l | merge(l)) | keys }}	[0,1,2,3,4,5]	[0,1,2,3,4,5]	-
+merge	l	last	{{ (l | merge(l)) | last }}	c	c	-
+merge	l	length	{{ (l | merge(l)) | length }}	6	6	-
+merge	l	lower	{{ (l | merge(l)) | lower }}	[b, a, c, b, a, c]	[b, a, c, b, a, c]	-
 merge	l	md5	{{ (l | merge(l)) | md5 }}	error	error	-
-merge	l	merge	{{ (l | merge(l)) | merge(l) }}	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	nindent	{{ (l | merge(l)) | nindent(amount=2) }}	\n  [b, a, c, b, a, c]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	l	merge	{{ (l | merge(l)) | merge(l) }}	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	-
+merge	l	nindent	{{ (l | merge(l)) | nindent(amount=2) }}	\n  [b, a, c, b, a, c]	\n  [b, a, c, b, a, c]	-
 merge	l	nl2br	{{ (l | merge(l)) | nl2br }}	error	error	-
 merge	l	number	{{ (l | merge(l)) | number }}	error	error	-
 merge	l	numberformat	{{ (l | merge(l)) | numberformat('#') }}	error	error	-
-merge	l	raw	{{ (l | merge(l)) | raw }}	[b, a, c, b, a, c]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	regexExtract	{{ (l | merge(l)) | regexExtract(regex='a') }}	a	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	regexMatch	{{ (l | merge(l)) | regexMatch(regex='a') }}	true	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	regexReplace	{{ (l | merge(l)) | regexReplace(regex='a', replacement='#') }}	[b, #, c, b, #, c]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	replace	{{ (l | merge(l)) | replace({'a': 'b'}) }}	[b, b, c, b, b, c]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	reverse	{{ (l | merge(l)) | reverse }}	[\"c\",\"a\",\"b\",\"c\",\"a\",\"b\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	rsort	{{ (l | merge(l)) | rsort }}	[\"c\",\"c\",\"b\",\"b\",\"a\",\"a\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	l	raw	{{ (l | merge(l)) | raw }}	[b, a, c, b, a, c]	[b, a, c, b, a, c]	-
+merge	l	regexExtract	{{ (l | merge(l)) | regexExtract(regex='a') }}	a	a	-
+merge	l	regexMatch	{{ (l | merge(l)) | regexMatch(regex='a') }}	true	true	-
+merge	l	regexReplace	{{ (l | merge(l)) | regexReplace(regex='a', replacement='#') }}	[b, #, c, b, #, c]	[b, #, c, b, #, c]	-
+merge	l	replace	{{ (l | merge(l)) | replace({'a': 'b'}) }}	[b, b, c, b, b, c]	[b, b, c, b, b, c]	-
+merge	l	reverse	{{ (l | merge(l)) | reverse }}	[\"c\",\"a\",\"b\",\"c\",\"a\",\"b\"]	[\"c\",\"a\",\"b\",\"c\",\"a\",\"b\"]	-
+merge	l	rsort	{{ (l | merge(l)) | rsort }}	[\"c\",\"c\",\"b\",\"b\",\"a\",\"a\"]	[\"c\",\"c\",\"b\",\"b\",\"a\",\"a\"]	-
 merge	l	sha1	{{ (l | merge(l)) | sha1 }}	error	error	-
 merge	l	sha256	{{ (l | merge(l)) | sha256 }}	error	error	-
 merge	l	sha512	{{ (l | merge(l)) | sha512 }}	error	error	-
-merge	l	slice	{{ (l | merge(l)) | slice(0,2) }}	[\"b\",\"a\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	slugify	{{ (l | merge(l)) | slugify }}	b-a-c-b-a-c	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	sort	{{ (l | merge(l)) | sort }}	[\"a\",\"a\",\"b\",\"b\",\"c\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	l	slice	{{ (l | merge(l)) | slice(0,2) }}	[\"b\",\"a\"]	[\"b\",\"a\"]	-
+merge	l	slugify	{{ (l | merge(l)) | slugify }}	b-a-c-b-a-c	b-a-c-b-a-c	-
+merge	l	sort	{{ (l | merge(l)) | sort }}	[\"a\",\"a\",\"b\",\"b\",\"c\",\"c\"]	[\"a\",\"a\",\"b\",\"b\",\"c\",\"c\"]	-
 merge	l	split	{{ (l | merge(l)) | split(',') }}	error	error	-
-merge	l	startsWith	{{ (l | merge(l)) | startsWith(value='a') }}	false	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	string	{{ (l | merge(l)) | string }}	[b, a, c, b, a, c]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	substringAfter	{{ (l | merge(l)) | substringAfter(separator=',') }}	 a, c, b, a, c]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	substringAfterLast	{{ (l | merge(l)) | substringAfterLast(separator=',') }}	 c]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	substringBefore	{{ (l | merge(l)) | substringBefore(separator=',') }}	[b	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	substringBeforeLast	{{ (l | merge(l)) | substringBeforeLast(separator=',') }}	[b, a, c, b, a	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	l	startsWith	{{ (l | merge(l)) | startsWith(value='a') }}	false	false	-
+merge	l	string	{{ (l | merge(l)) | string }}	[b, a, c, b, a, c]	[b, a, c, b, a, c]	-
+merge	l	substringAfter	{{ (l | merge(l)) | substringAfter(separator=',') }}	 a, c, b, a, c]	 a, c, b, a, c]	-
+merge	l	substringAfterLast	{{ (l | merge(l)) | substringAfterLast(separator=',') }}	 c]	 c]	-
+merge	l	substringBefore	{{ (l | merge(l)) | substringBefore(separator=',') }}	[b	[b	-
+merge	l	substringBeforeLast	{{ (l | merge(l)) | substringBeforeLast(separator=',') }}	[b, a, c, b, a	[b, a, c, b, a	-
 merge	l	timestamp	{{ (l | merge(l)) | timestamp }}	error	error	-
 merge	l	timestampMicro	{{ (l | merge(l)) | timestampMicro }}	error	error	-
 merge	l	timestampMilli	{{ (l | merge(l)) | timestampMilli }}	error	error	-
 merge	l	timestampNano	{{ (l | merge(l)) | timestampNano }}	error	error	-
 merge	l	title	{{ (l | merge(l)) | title }}	error	error	-
-merge	l	toIon	{{ (l | merge(l)) | toIon }}	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l	toJson	{{ (l | merge(l)) | toJson }}	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	l	toIon	{{ (l | merge(l)) | toIon }}	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	-
+merge	l	toJson	{{ (l | merge(l)) | toJson }}	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	[\"b\",\"a\",\"c\",\"b\",\"a\",\"c\"]	-
 merge	l	trim	{{ (l | merge(l)) | trim }}	error	error	-
-merge	l	upper	{{ (l | merge(l)) | upper }}	[B, A, C, B, A, C]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	l	upper	{{ (l | merge(l)) | upper }}	[B, A, C, B, A, C]	[B, A, C, B, A, C]	-
 merge	l	urldecode	{{ (l | merge(l)) | urldecode }}	error	error	-
 merge	l	urlencode	{{ (l | merge(l)) | urlencode }}	error	error	-
 merge	l	values	{{ (l | merge(l)) | values }}	error	error	-
-merge	l	yaml	{{ (l | merge(l)) | yaml }}	 - b\n - a\n - c\n - b\n - a\n - c\n	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	l	yaml	{{ (l | merge(l)) | yaml }}	 - b\n - a\n - c\n - b\n - a\n - c\n	 - b\n - a\n - c\n - b\n - a\n - c\n	-
 merge	m	abbreviate	{{ (m | merge(l)) | abbreviate(5) }}	error	error	-
 merge	m	abs	{{ (m | merge(l)) | abs }}	error	error	-
 merge	m	base64decode	{{ (m | merge(l)) | base64decode }}	error	error	-
-merge	m	base64encode	{{ (m | merge(l)) | base64encode }}	e2E9YSwgYj1iLCBjPWN9	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	m	base64encode	{{ (m | merge(l)) | base64encode }}	e2E9YSwgYj1iLCBjPWN9	e2I9YiwgYT1hLCBjPWN9	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
 merge	m	capitalize	{{ (m | merge(l)) | capitalize }}	error	error	-
 merge	m	chunk	{{ (m | merge(l)) | chunk(size=2) }}	error	error	-
-merge	m	className	{{ (m | merge(l)) | className }}	java.util.HashMap	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	m	className	{{ (m | merge(l)) | className }}	java.util.HashMap	java.util.LinkedHashMap	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
 merge	m	date	{{ (m | merge(l)) | date('yyyy-MM-dd', timeZone='UTC') }}	error	error	-
 merge	m	dateAdd	{{ (m | merge(l)) | dateAdd(1, 'DAYS', 'iso', 'UTC') }}	error	error	-
-merge	m	default	{{ (m | merge(l)) | default('D') }}	{\"a\":\"a\",\"b\":\"b\",\"c\":\"c\"}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	m	default	{{ (m | merge(l)) | default('D') }}	{\"a\":\"a\",\"b\":\"b\",\"c\":\"c\"}	{\"b\":\"b\",\"a\":\"a\",\"c\":\"c\"}	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
 merge	m	distinct	{{ (m | merge(l)) | distinct }}	error	error	-
-merge	m	endsWith	{{ (m | merge(l)) | endsWith(value='c') }}	false	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	m	escape	{{ (m | merge(l)) | escape }}	{a=a, b=b, c=c}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	m	escapeChar	{{ (m | merge(l)) | escapeChar(type='single') }}	{\"a\":\"a\",\"b\":\"b\",\"c\":\"c\"}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	m	endsWith	{{ (m | merge(l)) | endsWith(value='c') }}	false	false	-
+merge	m	escape	{{ (m | merge(l)) | escape }}	{a=a, b=b, c=c}	{b=b, a=a, c=c}	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
+merge	m	escapeChar	{{ (m | merge(l)) | escapeChar(type='single') }}	{\"a\":\"a\",\"b\":\"b\",\"c\":\"c\"}	{\"b\":\"b\",\"a\":\"a\",\"c\":\"c\"}	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
 merge	m	first	{{ (m | merge(l)) | first }}	error	error	-
 merge	m	flatten	{{ (m | merge(l)) | flatten }}	error	error	-
-merge	m	format	{{ (m | merge(l)) | format('x') }}	{a=a, b=b, c=c}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	m	indent	{{ (m | merge(l)) | indent(amount=2) }}	{a=a, b=b, c=c}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	m	format	{{ (m | merge(l)) | format('x') }}	{a=a, b=b, c=c}	{b=b, a=a, c=c}	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
+merge	m	indent	{{ (m | merge(l)) | indent(amount=2) }}	{a=a, b=b, c=c}	{b=b, a=a, c=c}	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
 merge	m	join	{{ (m | merge(l)) | join('-') }}	error	error	-
-merge	m	jq	{{ (m | merge(l)) | jq('.') }}	[{\"a\":\"a\",\"b\":\"b\",\"c\":\"c\"}]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	m	keys	{{ (m | merge(l)) | keys }}	[\"a\",\"b\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	m	jq	{{ (m | merge(l)) | jq('.') }}	[{\"a\":\"a\",\"b\":\"b\",\"c\":\"c\"}]	[{\"b\":\"b\",\"a\":\"a\",\"c\":\"c\"}]	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
+merge	m	keys	{{ (m | merge(l)) | keys }}	[\"a\",\"b\",\"c\"]	[\"b\",\"a\",\"c\"]	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
 merge	m	last	{{ (m | merge(l)) | last }}	error	error	-
-merge	m	length	{{ (m | merge(l)) | length }}	3	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	m	lower	{{ (m | merge(l)) | lower }}	{a=a, b=b, c=c}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	m	length	{{ (m | merge(l)) | length }}	3	3	-
+merge	m	lower	{{ (m | merge(l)) | lower }}	{a=a, b=b, c=c}	{b=b, a=a, c=c}	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
 merge	m	md5	{{ (m | merge(l)) | md5 }}	error	error	-
-merge	m	merge	{{ (m | merge(l)) | merge(l) }}	{\"a\":\"a\",\"b\":\"b\",\"c\":\"c\"}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	m	nindent	{{ (m | merge(l)) | nindent(amount=2) }}	\n  {a=a, b=b, c=c}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	m	merge	{{ (m | merge(l)) | merge(l) }}	{\"a\":\"a\",\"b\":\"b\",\"c\":\"c\"}	{\"b\":\"b\",\"a\":\"a\",\"c\":\"c\"}	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
+merge	m	nindent	{{ (m | merge(l)) | nindent(amount=2) }}	\n  {a=a, b=b, c=c}	\n  {b=b, a=a, c=c}	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
 merge	m	nl2br	{{ (m | merge(l)) | nl2br }}	error	error	-
 merge	m	number	{{ (m | merge(l)) | number }}	error	error	-
 merge	m	numberformat	{{ (m | merge(l)) | numberformat('#') }}	error	error	-
-merge	m	raw	{{ (m | merge(l)) | raw }}	{a=a, b=b, c=c}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	m	regexExtract	{{ (m | merge(l)) | regexExtract(regex='a') }}	a	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	m	regexMatch	{{ (m | merge(l)) | regexMatch(regex='a') }}	true	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	m	regexReplace	{{ (m | merge(l)) | regexReplace(regex='a', replacement='#') }}	error	error	-
-merge	m	replace	{{ (m | merge(l)) | replace({'a': 'b'}) }}	{b=b, b=b, c=c}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	m	raw	{{ (m | merge(l)) | raw }}	{a=a, b=b, c=c}	{b=b, a=a, c=c}	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
+merge	m	regexExtract	{{ (m | merge(l)) | regexExtract(regex='a') }}	a	a	-
+merge	m	regexMatch	{{ (m | merge(l)) | regexMatch(regex='a') }}	true	true	-
+merge	m	regexReplace	{{ (m | merge(l)) | regexReplace(regex='a', replacement='#') }}	error	{b=b, #=#, c=c}	downstream of the HashMap order above: it puts `{#` at the front of the rendered map and Kestra's re-render loop reads that as an unclosed Pebble comment
+merge	m	replace	{{ (m | merge(l)) | replace({'a': 'b'}) }}	{b=b, b=b, c=c}	{b=b, b=b, c=c}	-
 merge	m	reverse	{{ (m | merge(l)) | reverse }}	error	error	-
 merge	m	rsort	{{ (m | merge(l)) | rsort }}	error	error	-
 merge	m	sha1	{{ (m | merge(l)) | sha1 }}	error	error	-
 merge	m	sha256	{{ (m | merge(l)) | sha256 }}	error	error	-
 merge	m	sha512	{{ (m | merge(l)) | sha512 }}	error	error	-
 merge	m	slice	{{ (m | merge(l)) | slice(0,2) }}	error	error	-
-merge	m	slugify	{{ (m | merge(l)) | slugify }}	aa-bb-cc	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	m	slugify	{{ (m | merge(l)) | slugify }}	aa-bb-cc	bb-aa-cc	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
 merge	m	sort	{{ (m | merge(l)) | sort }}	error	error	-
 merge	m	split	{{ (m | merge(l)) | split(',') }}	error	error	-
-merge	m	startsWith	{{ (m | merge(l)) | startsWith(value='a') }}	false	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	m	string	{{ (m | merge(l)) | string }}	{a=a, b=b, c=c}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	m	substringAfter	{{ (m | merge(l)) | substringAfter(separator=',') }}	 b=b, c=c}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	m	substringAfterLast	{{ (m | merge(l)) | substringAfterLast(separator=',') }}	 c=c}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	m	substringBefore	{{ (m | merge(l)) | substringBefore(separator=',') }}	{a=a	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	m	substringBeforeLast	{{ (m | merge(l)) | substringBeforeLast(separator=',') }}	{a=a, b=b	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	m	startsWith	{{ (m | merge(l)) | startsWith(value='a') }}	false	false	-
+merge	m	string	{{ (m | merge(l)) | string }}	{a=a, b=b, c=c}	{b=b, a=a, c=c}	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
+merge	m	substringAfter	{{ (m | merge(l)) | substringAfter(separator=',') }}	 b=b, c=c}	 a=a, c=c}	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
+merge	m	substringAfterLast	{{ (m | merge(l)) | substringAfterLast(separator=',') }}	 c=c}	 c=c}	-
+merge	m	substringBefore	{{ (m | merge(l)) | substringBefore(separator=',') }}	{a=a	{b=b	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
+merge	m	substringBeforeLast	{{ (m | merge(l)) | substringBeforeLast(separator=',') }}	{a=a, b=b	{b=b, a=a	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
 merge	m	timestamp	{{ (m | merge(l)) | timestamp }}	error	error	-
 merge	m	timestampMicro	{{ (m | merge(l)) | timestampMicro }}	error	error	-
 merge	m	timestampMilli	{{ (m | merge(l)) | timestampMilli }}	error	error	-
 merge	m	timestampNano	{{ (m | merge(l)) | timestampNano }}	error	error	-
 merge	m	title	{{ (m | merge(l)) | title }}	error	error	-
-merge	m	toIon	{{ (m | merge(l)) | toIon }}	{a:\"a\",b:\"b\",c:\"c\"}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	m	toJson	{{ (m | merge(l)) | toJson }}	{\"a\":\"a\",\"b\":\"b\",\"c\":\"c\"}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	m	toIon	{{ (m | merge(l)) | toIon }}	{a:\"a\",b:\"b\",c:\"c\"}	{b:\"b\",a:\"a\",c:\"c\"}	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
+merge	m	toJson	{{ (m | merge(l)) | toJson }}	{\"a\":\"a\",\"b\":\"b\",\"c\":\"c\"}	{\"b\":\"b\",\"a\":\"a\",\"c\":\"c\"}	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
 merge	m	trim	{{ (m | merge(l)) | trim }}	error	error	-
-merge	m	upper	{{ (m | merge(l)) | upper }}	{A=A, B=B, C=C}	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	m	upper	{{ (m | merge(l)) | upper }}	{A=A, B=B, C=C}	{B=B, A=A, C=C}	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
 merge	m	urldecode	{{ (m | merge(l)) | urldecode }}	error	error	-
 merge	m	urlencode	{{ (m | merge(l)) | urlencode }}	error	error	-
-merge	m	values	{{ (m | merge(l)) | values }}	[\"a\",\"b\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	m	yaml	{{ (m | merge(l)) | yaml }}	a: a\nb: b\nc: c\n	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	m	values	{{ (m | merge(l)) | values }}	[\"a\",\"b\",\"c\"]	[\"b\",\"a\",\"c\"]	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
+merge	m	yaml	{{ (m | merge(l)) | yaml }}	a: a\nb: b\nc: c\n	b: b\na: a\nc: c\n	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
 reverse	l	abbreviate	{{ (l | reverse) | abbreviate(5) }}	error	error	-
 reverse	l	abs	{{ (l | reverse) | abs }}	error	error	-
 reverse	l	base64decode	{{ (l | reverse) | base64decode }}	error	error	-
-reverse	l	base64encode	{{ (l | reverse) | base64encode }}	W2MsIGEsIGJd	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+reverse	l	base64encode	{{ (l | reverse) | base64encode }}	W2MsIGEsIGJd	W2MsIGEsIGJd	-
 reverse	l	capitalize	{{ (l | reverse) | capitalize }}	error	error	-
 reverse	l	chunk	{{ (l | reverse) | chunk(size=2) }}	[[\"c\",\"a\"],[\"b\"]]	[[\"c\",\"a\"],[\"b\"]]	-
 reverse	l	className	{{ (l | reverse) | className }}	java.util.ArrayList	java.util.ArrayList	-
@@ -2002,18 +2002,18 @@ reverse	l	last	{{ (l | reverse) | last }}	b	b	-
 reverse	l	length	{{ (l | reverse) | length }}	3	3	-
 reverse	l	lower	{{ (l | reverse) | lower }}	[c, a, b]	[c, a, b]	-
 reverse	l	md5	{{ (l | reverse) | md5 }}	error	error	-
-reverse	l	merge	{{ (l | reverse) | merge(l) }}	[\"c\",\"a\",\"b\",\"c\",\"a\",\"b\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+reverse	l	merge	{{ (l | reverse) | merge(l) }}	[\"c\",\"a\",\"b\",\"c\",\"a\",\"b\"]	[\"c\",\"a\",\"b\",\"b\",\"a\",\"c\"]	Kestra's `reverse`, `sort` and `rsort` reorder the context list IN PLACE (`Collections.reverse`, `List.sort`), so the second `l` -- `merge`'s argument -- is the reordered list; egret's values are immutable and the argument is still the list as bound (package #5b Task B4)
 reverse	l	nindent	{{ (l | reverse) | nindent(amount=2) }}	\n  [c, a, b]	\n  [c, a, b]	-
 reverse	l	nl2br	{{ (l | reverse) | nl2br }}	error	error	-
 reverse	l	number	{{ (l | reverse) | number }}	error	error	-
 reverse	l	numberformat	{{ (l | reverse) | numberformat('#') }}	error	error	-
-reverse	l	raw	{{ (l | reverse) | raw }}	[c, a, b]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+reverse	l	raw	{{ (l | reverse) | raw }}	[c, a, b]	[c, a, b]	-
 reverse	l	regexExtract	{{ (l | reverse) | regexExtract(regex='a') }}	a	a	-
 reverse	l	regexMatch	{{ (l | reverse) | regexMatch(regex='a') }}	true	true	-
 reverse	l	regexReplace	{{ (l | reverse) | regexReplace(regex='a', replacement='#') }}	[c, #, b]	[c, #, b]	-
 reverse	l	replace	{{ (l | reverse) | replace({'a': 'b'}) }}	[c, b, b]	[c, b, b]	-
 reverse	l	reverse	{{ (l | reverse) | reverse }}	[\"b\",\"a\",\"c\"]	[\"b\",\"a\",\"c\"]	-
-reverse	l	rsort	{{ (l | reverse) | rsort }}	[\"c\",\"b\",\"a\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+reverse	l	rsort	{{ (l | reverse) | rsort }}	[\"c\",\"b\",\"a\"]	[\"c\",\"b\",\"a\"]	-
 reverse	l	sha1	{{ (l | reverse) | sha1 }}	error	error	-
 reverse	l	sha256	{{ (l | reverse) | sha256 }}	error	error	-
 reverse	l	sha512	{{ (l | reverse) | sha512 }}	error	error	-
@@ -2043,7 +2043,7 @@ reverse	l	yaml	{{ (l | reverse) | yaml }}	 - c\n - a\n - b\n	 - c\n - a\n - b\n	
 reverse	l1	abbreviate	{{ (l1 | reverse) | abbreviate(5) }}	error	error	-
 reverse	l1	abs	{{ (l1 | reverse) | abs }}	error	error	-
 reverse	l1	base64decode	{{ (l1 | reverse) | base64decode }}	error	error	-
-reverse	l1	base64encode	{{ (l1 | reverse) | base64encode }}	W2Jd	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+reverse	l1	base64encode	{{ (l1 | reverse) | base64encode }}	W2Jd	W2Jd	-
 reverse	l1	capitalize	{{ (l1 | reverse) | capitalize }}	error	error	-
 reverse	l1	chunk	{{ (l1 | reverse) | chunk(size=2) }}	[[\"b\"]]	[[\"b\"]]	-
 reverse	l1	className	{{ (l1 | reverse) | className }}	java.util.ArrayList	java.util.ArrayList	-
@@ -2065,18 +2065,18 @@ reverse	l1	last	{{ (l1 | reverse) | last }}	b	b	-
 reverse	l1	length	{{ (l1 | reverse) | length }}	1	1	-
 reverse	l1	lower	{{ (l1 | reverse) | lower }}	[b]	[b]	-
 reverse	l1	md5	{{ (l1 | reverse) | md5 }}	error	error	-
-reverse	l1	merge	{{ (l1 | reverse) | merge(l) }}	[\"b\",\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+reverse	l1	merge	{{ (l1 | reverse) | merge(l) }}	[\"b\",\"b\",\"a\",\"c\"]	[\"b\",\"b\",\"a\",\"c\"]	-
 reverse	l1	nindent	{{ (l1 | reverse) | nindent(amount=2) }}	\n  [b]	\n  [b]	-
 reverse	l1	nl2br	{{ (l1 | reverse) | nl2br }}	error	error	-
 reverse	l1	number	{{ (l1 | reverse) | number }}	error	error	-
 reverse	l1	numberformat	{{ (l1 | reverse) | numberformat('#') }}	error	error	-
-reverse	l1	raw	{{ (l1 | reverse) | raw }}	[b]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+reverse	l1	raw	{{ (l1 | reverse) | raw }}	[b]	[b]	-
 reverse	l1	regexExtract	{{ (l1 | reverse) | regexExtract(regex='a') }}			-
 reverse	l1	regexMatch	{{ (l1 | reverse) | regexMatch(regex='a') }}	false	false	-
 reverse	l1	regexReplace	{{ (l1 | reverse) | regexReplace(regex='a', replacement='#') }}	[b]	[b]	-
 reverse	l1	replace	{{ (l1 | reverse) | replace({'a': 'b'}) }}	[b]	[b]	-
 reverse	l1	reverse	{{ (l1 | reverse) | reverse }}	[\"b\"]	[\"b\"]	-
-reverse	l1	rsort	{{ (l1 | reverse) | rsort }}	[\"b\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+reverse	l1	rsort	{{ (l1 | reverse) | rsort }}	[\"b\"]	[\"b\"]	-
 reverse	l1	sha1	{{ (l1 | reverse) | sha1 }}	error	error	-
 reverse	l1	sha256	{{ (l1 | reverse) | sha256 }}	error	error	-
 reverse	l1	sha512	{{ (l1 | reverse) | sha512 }}	error	error	-
@@ -2106,7 +2106,7 @@ reverse	l1	yaml	{{ (l1 | reverse) | yaml }}	 - b\n	 - b\n	-
 reverse	el	abbreviate	{{ (el | reverse) | abbreviate(5) }}	error	error	-
 reverse	el	abs	{{ (el | reverse) | abs }}	error	error	-
 reverse	el	base64decode	{{ (el | reverse) | base64decode }}	error	error	-
-reverse	el	base64encode	{{ (el | reverse) | base64encode }}	W10=	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+reverse	el	base64encode	{{ (el | reverse) | base64encode }}	W10=	W10=	-
 reverse	el	capitalize	{{ (el | reverse) | capitalize }}	error	error	-
 reverse	el	chunk	{{ (el | reverse) | chunk(size=2) }}	[]	[]	-
 reverse	el	className	{{ (el | reverse) | className }}	java.util.ArrayList	java.util.ArrayList	-
@@ -2128,18 +2128,18 @@ reverse	el	last	{{ (el | reverse) | last }}			-
 reverse	el	length	{{ (el | reverse) | length }}	0	0	-
 reverse	el	lower	{{ (el | reverse) | lower }}	[]	[]	-
 reverse	el	md5	{{ (el | reverse) | md5 }}	error	error	-
-reverse	el	merge	{{ (el | reverse) | merge(l) }}	[\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+reverse	el	merge	{{ (el | reverse) | merge(l) }}	[\"b\",\"a\",\"c\"]	[\"b\",\"a\",\"c\"]	-
 reverse	el	nindent	{{ (el | reverse) | nindent(amount=2) }}	\n  []	\n  []	-
 reverse	el	nl2br	{{ (el | reverse) | nl2br }}	error	error	-
 reverse	el	number	{{ (el | reverse) | number }}	error	error	-
 reverse	el	numberformat	{{ (el | reverse) | numberformat('#') }}	error	error	-
-reverse	el	raw	{{ (el | reverse) | raw }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+reverse	el	raw	{{ (el | reverse) | raw }}	[]	[]	-
 reverse	el	regexExtract	{{ (el | reverse) | regexExtract(regex='a') }}			-
 reverse	el	regexMatch	{{ (el | reverse) | regexMatch(regex='a') }}	false	false	-
 reverse	el	regexReplace	{{ (el | reverse) | regexReplace(regex='a', replacement='#') }}	[]	[]	-
 reverse	el	replace	{{ (el | reverse) | replace({'a': 'b'}) }}	[]	[]	-
 reverse	el	reverse	{{ (el | reverse) | reverse }}	[]	[]	-
-reverse	el	rsort	{{ (el | reverse) | rsort }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+reverse	el	rsort	{{ (el | reverse) | rsort }}	[]	[]	-
 reverse	el	sha1	{{ (el | reverse) | sha1 }}	error	error	-
 reverse	el	sha256	{{ (el | reverse) | sha256 }}	error	error	-
 reverse	el	sha512	{{ (el | reverse) | sha512 }}	error	error	-
@@ -2169,196 +2169,196 @@ reverse	el	yaml	{{ (el | reverse) | yaml }}	[]\n	[]\n	-
 rsort	l	abbreviate	{{ (l | rsort) | abbreviate(5) }}	error	error	-
 rsort	l	abs	{{ (l | rsort) | abs }}	error	error	-
 rsort	l	base64decode	{{ (l | rsort) | base64decode }}	error	error	-
-rsort	l	base64encode	{{ (l | rsort) | base64encode }}	W2MsIGIsIGFd	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	l	base64encode	{{ (l | rsort) | base64encode }}	W2MsIGIsIGFd	W2MsIGIsIGFd	-
 rsort	l	capitalize	{{ (l | rsort) | capitalize }}	error	error	-
-rsort	l	chunk	{{ (l | rsort) | chunk(size=2) }}	[[\"c\",\"b\"],[\"a\"]]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	className	{{ (l | rsort) | className }}	java.util.ArrayList	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	l	chunk	{{ (l | rsort) | chunk(size=2) }}	[[\"c\",\"b\"],[\"a\"]]	[[\"c\",\"b\"],[\"a\"]]	-
+rsort	l	className	{{ (l | rsort) | className }}	java.util.ArrayList	java.util.ArrayList	-
 rsort	l	date	{{ (l | rsort) | date('yyyy-MM-dd', timeZone='UTC') }}	error	error	-
 rsort	l	dateAdd	{{ (l | rsort) | dateAdd(1, 'DAYS', 'iso', 'UTC') }}	error	error	-
-rsort	l	default	{{ (l | rsort) | default('D') }}	[\"c\",\"b\",\"a\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	distinct	{{ (l | rsort) | distinct }}	[\"c\",\"b\",\"a\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	endsWith	{{ (l | rsort) | endsWith(value='c') }}	false	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	escape	{{ (l | rsort) | escape }}	[c, b, a]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	escapeChar	{{ (l | rsort) | escapeChar(type='single') }}	[\"c\",\"b\",\"a\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	first	{{ (l | rsort) | first }}	c	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	flatten	{{ (l | rsort) | flatten }}	[\"c\",\"b\",\"a\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	format	{{ (l | rsort) | format('x') }}	[c, b, a]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	indent	{{ (l | rsort) | indent(amount=2) }}	[c, b, a]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	join	{{ (l | rsort) | join('-') }}	c-b-a	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	jq	{{ (l | rsort) | jq('.') }}	[[\"c\",\"b\",\"a\"]]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	keys	{{ (l | rsort) | keys }}	[0,1,2]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	last	{{ (l | rsort) | last }}	a	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	length	{{ (l | rsort) | length }}	3	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	lower	{{ (l | rsort) | lower }}	[c, b, a]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	l	default	{{ (l | rsort) | default('D') }}	[\"c\",\"b\",\"a\"]	[\"c\",\"b\",\"a\"]	-
+rsort	l	distinct	{{ (l | rsort) | distinct }}	[\"c\",\"b\",\"a\"]	[\"c\",\"b\",\"a\"]	-
+rsort	l	endsWith	{{ (l | rsort) | endsWith(value='c') }}	false	false	-
+rsort	l	escape	{{ (l | rsort) | escape }}	[c, b, a]	[c, b, a]	-
+rsort	l	escapeChar	{{ (l | rsort) | escapeChar(type='single') }}	[\"c\",\"b\",\"a\"]	[\"c\",\"b\",\"a\"]	-
+rsort	l	first	{{ (l | rsort) | first }}	c	c	-
+rsort	l	flatten	{{ (l | rsort) | flatten }}	[\"c\",\"b\",\"a\"]	[\"c\",\"b\",\"a\"]	-
+rsort	l	format	{{ (l | rsort) | format('x') }}	[c, b, a]	[c, b, a]	-
+rsort	l	indent	{{ (l | rsort) | indent(amount=2) }}	[c, b, a]	[c, b, a]	-
+rsort	l	join	{{ (l | rsort) | join('-') }}	c-b-a	c-b-a	-
+rsort	l	jq	{{ (l | rsort) | jq('.') }}	[[\"c\",\"b\",\"a\"]]	[[\"c\",\"b\",\"a\"]]	-
+rsort	l	keys	{{ (l | rsort) | keys }}	[0,1,2]	[0,1,2]	-
+rsort	l	last	{{ (l | rsort) | last }}	a	a	-
+rsort	l	length	{{ (l | rsort) | length }}	3	3	-
+rsort	l	lower	{{ (l | rsort) | lower }}	[c, b, a]	[c, b, a]	-
 rsort	l	md5	{{ (l | rsort) | md5 }}	error	error	-
-rsort	l	merge	{{ (l | rsort) | merge(l) }}	[\"c\",\"b\",\"a\",\"c\",\"b\",\"a\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	nindent	{{ (l | rsort) | nindent(amount=2) }}	\n  [c, b, a]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	l	merge	{{ (l | rsort) | merge(l) }}	[\"c\",\"b\",\"a\",\"c\",\"b\",\"a\"]	[\"c\",\"b\",\"a\",\"b\",\"a\",\"c\"]	Kestra's `reverse`, `sort` and `rsort` reorder the context list IN PLACE (`Collections.reverse`, `List.sort`), so the second `l` -- `merge`'s argument -- is the reordered list; egret's values are immutable and the argument is still the list as bound (package #5b Task B4)
+rsort	l	nindent	{{ (l | rsort) | nindent(amount=2) }}	\n  [c, b, a]	\n  [c, b, a]	-
 rsort	l	nl2br	{{ (l | rsort) | nl2br }}	error	error	-
 rsort	l	number	{{ (l | rsort) | number }}	error	error	-
 rsort	l	numberformat	{{ (l | rsort) | numberformat('#') }}	error	error	-
-rsort	l	raw	{{ (l | rsort) | raw }}	[c, b, a]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	regexExtract	{{ (l | rsort) | regexExtract(regex='a') }}	a	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	regexMatch	{{ (l | rsort) | regexMatch(regex='a') }}	true	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	regexReplace	{{ (l | rsort) | regexReplace(regex='a', replacement='#') }}	[c, b, #]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	replace	{{ (l | rsort) | replace({'a': 'b'}) }}	[c, b, b]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	reverse	{{ (l | rsort) | reverse }}	[\"a\",\"b\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	rsort	{{ (l | rsort) | rsort }}	[\"c\",\"b\",\"a\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	l	raw	{{ (l | rsort) | raw }}	[c, b, a]	[c, b, a]	-
+rsort	l	regexExtract	{{ (l | rsort) | regexExtract(regex='a') }}	a	a	-
+rsort	l	regexMatch	{{ (l | rsort) | regexMatch(regex='a') }}	true	true	-
+rsort	l	regexReplace	{{ (l | rsort) | regexReplace(regex='a', replacement='#') }}	[c, b, #]	[c, b, #]	-
+rsort	l	replace	{{ (l | rsort) | replace({'a': 'b'}) }}	[c, b, b]	[c, b, b]	-
+rsort	l	reverse	{{ (l | rsort) | reverse }}	[\"a\",\"b\",\"c\"]	[\"a\",\"b\",\"c\"]	-
+rsort	l	rsort	{{ (l | rsort) | rsort }}	[\"c\",\"b\",\"a\"]	[\"c\",\"b\",\"a\"]	-
 rsort	l	sha1	{{ (l | rsort) | sha1 }}	error	error	-
 rsort	l	sha256	{{ (l | rsort) | sha256 }}	error	error	-
 rsort	l	sha512	{{ (l | rsort) | sha512 }}	error	error	-
-rsort	l	slice	{{ (l | rsort) | slice(0,2) }}	[\"c\",\"b\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	slugify	{{ (l | rsort) | slugify }}	c-b-a	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	sort	{{ (l | rsort) | sort }}	[\"a\",\"b\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	l	slice	{{ (l | rsort) | slice(0,2) }}	[\"c\",\"b\"]	[\"c\",\"b\"]	-
+rsort	l	slugify	{{ (l | rsort) | slugify }}	c-b-a	c-b-a	-
+rsort	l	sort	{{ (l | rsort) | sort }}	[\"a\",\"b\",\"c\"]	[\"a\",\"b\",\"c\"]	-
 rsort	l	split	{{ (l | rsort) | split(',') }}	error	error	-
-rsort	l	startsWith	{{ (l | rsort) | startsWith(value='a') }}	false	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	string	{{ (l | rsort) | string }}	[c, b, a]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	substringAfter	{{ (l | rsort) | substringAfter(separator=',') }}	 b, a]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	substringAfterLast	{{ (l | rsort) | substringAfterLast(separator=',') }}	 a]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	substringBefore	{{ (l | rsort) | substringBefore(separator=',') }}	[c	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	substringBeforeLast	{{ (l | rsort) | substringBeforeLast(separator=',') }}	[c, b	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	l	startsWith	{{ (l | rsort) | startsWith(value='a') }}	false	false	-
+rsort	l	string	{{ (l | rsort) | string }}	[c, b, a]	[c, b, a]	-
+rsort	l	substringAfter	{{ (l | rsort) | substringAfter(separator=',') }}	 b, a]	 b, a]	-
+rsort	l	substringAfterLast	{{ (l | rsort) | substringAfterLast(separator=',') }}	 a]	 a]	-
+rsort	l	substringBefore	{{ (l | rsort) | substringBefore(separator=',') }}	[c	[c	-
+rsort	l	substringBeforeLast	{{ (l | rsort) | substringBeforeLast(separator=',') }}	[c, b	[c, b	-
 rsort	l	timestamp	{{ (l | rsort) | timestamp }}	error	error	-
 rsort	l	timestampMicro	{{ (l | rsort) | timestampMicro }}	error	error	-
 rsort	l	timestampMilli	{{ (l | rsort) | timestampMilli }}	error	error	-
 rsort	l	timestampNano	{{ (l | rsort) | timestampNano }}	error	error	-
 rsort	l	title	{{ (l | rsort) | title }}	error	error	-
-rsort	l	toIon	{{ (l | rsort) | toIon }}	[\"c\",\"b\",\"a\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l	toJson	{{ (l | rsort) | toJson }}	[\"c\",\"b\",\"a\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	l	toIon	{{ (l | rsort) | toIon }}	[\"c\",\"b\",\"a\"]	[\"c\",\"b\",\"a\"]	-
+rsort	l	toJson	{{ (l | rsort) | toJson }}	[\"c\",\"b\",\"a\"]	[\"c\",\"b\",\"a\"]	-
 rsort	l	trim	{{ (l | rsort) | trim }}	error	error	-
-rsort	l	upper	{{ (l | rsort) | upper }}	[C, B, A]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	l	upper	{{ (l | rsort) | upper }}	[C, B, A]	[C, B, A]	-
 rsort	l	urldecode	{{ (l | rsort) | urldecode }}	error	error	-
 rsort	l	urlencode	{{ (l | rsort) | urlencode }}	error	error	-
 rsort	l	values	{{ (l | rsort) | values }}	error	error	-
-rsort	l	yaml	{{ (l | rsort) | yaml }}	 - c\n - b\n - a\n	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	l	yaml	{{ (l | rsort) | yaml }}	 - c\n - b\n - a\n	 - c\n - b\n - a\n	-
 rsort	l1	abbreviate	{{ (l1 | rsort) | abbreviate(5) }}	error	error	-
 rsort	l1	abs	{{ (l1 | rsort) | abs }}	error	error	-
 rsort	l1	base64decode	{{ (l1 | rsort) | base64decode }}	error	error	-
-rsort	l1	base64encode	{{ (l1 | rsort) | base64encode }}	W2Jd	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	l1	base64encode	{{ (l1 | rsort) | base64encode }}	W2Jd	W2Jd	-
 rsort	l1	capitalize	{{ (l1 | rsort) | capitalize }}	error	error	-
-rsort	l1	chunk	{{ (l1 | rsort) | chunk(size=2) }}	[[\"b\"]]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	className	{{ (l1 | rsort) | className }}	java.util.ArrayList	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	l1	chunk	{{ (l1 | rsort) | chunk(size=2) }}	[[\"b\"]]	[[\"b\"]]	-
+rsort	l1	className	{{ (l1 | rsort) | className }}	java.util.ArrayList	java.util.ArrayList	-
 rsort	l1	date	{{ (l1 | rsort) | date('yyyy-MM-dd', timeZone='UTC') }}	error	error	-
 rsort	l1	dateAdd	{{ (l1 | rsort) | dateAdd(1, 'DAYS', 'iso', 'UTC') }}	error	error	-
-rsort	l1	default	{{ (l1 | rsort) | default('D') }}	[\"b\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	distinct	{{ (l1 | rsort) | distinct }}	[\"b\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	endsWith	{{ (l1 | rsort) | endsWith(value='c') }}	false	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	escape	{{ (l1 | rsort) | escape }}	[b]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	escapeChar	{{ (l1 | rsort) | escapeChar(type='single') }}	[\"b\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	first	{{ (l1 | rsort) | first }}	b	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	flatten	{{ (l1 | rsort) | flatten }}	[\"b\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	format	{{ (l1 | rsort) | format('x') }}	[b]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	indent	{{ (l1 | rsort) | indent(amount=2) }}	[b]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	join	{{ (l1 | rsort) | join('-') }}	b	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	jq	{{ (l1 | rsort) | jq('.') }}	[[\"b\"]]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	keys	{{ (l1 | rsort) | keys }}	[0]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	last	{{ (l1 | rsort) | last }}	b	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	length	{{ (l1 | rsort) | length }}	1	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	lower	{{ (l1 | rsort) | lower }}	[b]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	l1	default	{{ (l1 | rsort) | default('D') }}	[\"b\"]	[\"b\"]	-
+rsort	l1	distinct	{{ (l1 | rsort) | distinct }}	[\"b\"]	[\"b\"]	-
+rsort	l1	endsWith	{{ (l1 | rsort) | endsWith(value='c') }}	false	false	-
+rsort	l1	escape	{{ (l1 | rsort) | escape }}	[b]	[b]	-
+rsort	l1	escapeChar	{{ (l1 | rsort) | escapeChar(type='single') }}	[\"b\"]	[\"b\"]	-
+rsort	l1	first	{{ (l1 | rsort) | first }}	b	b	-
+rsort	l1	flatten	{{ (l1 | rsort) | flatten }}	[\"b\"]	[\"b\"]	-
+rsort	l1	format	{{ (l1 | rsort) | format('x') }}	[b]	[b]	-
+rsort	l1	indent	{{ (l1 | rsort) | indent(amount=2) }}	[b]	[b]	-
+rsort	l1	join	{{ (l1 | rsort) | join('-') }}	b	b	-
+rsort	l1	jq	{{ (l1 | rsort) | jq('.') }}	[[\"b\"]]	[[\"b\"]]	-
+rsort	l1	keys	{{ (l1 | rsort) | keys }}	[0]	[0]	-
+rsort	l1	last	{{ (l1 | rsort) | last }}	b	b	-
+rsort	l1	length	{{ (l1 | rsort) | length }}	1	1	-
+rsort	l1	lower	{{ (l1 | rsort) | lower }}	[b]	[b]	-
 rsort	l1	md5	{{ (l1 | rsort) | md5 }}	error	error	-
-rsort	l1	merge	{{ (l1 | rsort) | merge(l) }}	[\"b\",\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	nindent	{{ (l1 | rsort) | nindent(amount=2) }}	\n  [b]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	l1	merge	{{ (l1 | rsort) | merge(l) }}	[\"b\",\"b\",\"a\",\"c\"]	[\"b\",\"b\",\"a\",\"c\"]	-
+rsort	l1	nindent	{{ (l1 | rsort) | nindent(amount=2) }}	\n  [b]	\n  [b]	-
 rsort	l1	nl2br	{{ (l1 | rsort) | nl2br }}	error	error	-
 rsort	l1	number	{{ (l1 | rsort) | number }}	error	error	-
 rsort	l1	numberformat	{{ (l1 | rsort) | numberformat('#') }}	error	error	-
-rsort	l1	raw	{{ (l1 | rsort) | raw }}	[b]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	regexExtract	{{ (l1 | rsort) | regexExtract(regex='a') }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	regexMatch	{{ (l1 | rsort) | regexMatch(regex='a') }}	false	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	regexReplace	{{ (l1 | rsort) | regexReplace(regex='a', replacement='#') }}	[b]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	replace	{{ (l1 | rsort) | replace({'a': 'b'}) }}	[b]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	reverse	{{ (l1 | rsort) | reverse }}	[\"b\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	rsort	{{ (l1 | rsort) | rsort }}	[\"b\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	l1	raw	{{ (l1 | rsort) | raw }}	[b]	[b]	-
+rsort	l1	regexExtract	{{ (l1 | rsort) | regexExtract(regex='a') }}			-
+rsort	l1	regexMatch	{{ (l1 | rsort) | regexMatch(regex='a') }}	false	false	-
+rsort	l1	regexReplace	{{ (l1 | rsort) | regexReplace(regex='a', replacement='#') }}	[b]	[b]	-
+rsort	l1	replace	{{ (l1 | rsort) | replace({'a': 'b'}) }}	[b]	[b]	-
+rsort	l1	reverse	{{ (l1 | rsort) | reverse }}	[\"b\"]	[\"b\"]	-
+rsort	l1	rsort	{{ (l1 | rsort) | rsort }}	[\"b\"]	[\"b\"]	-
 rsort	l1	sha1	{{ (l1 | rsort) | sha1 }}	error	error	-
 rsort	l1	sha256	{{ (l1 | rsort) | sha256 }}	error	error	-
 rsort	l1	sha512	{{ (l1 | rsort) | sha512 }}	error	error	-
 rsort	l1	slice	{{ (l1 | rsort) | slice(0,2) }}	error	error	-
-rsort	l1	slugify	{{ (l1 | rsort) | slugify }}	b	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	sort	{{ (l1 | rsort) | sort }}	[\"b\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	l1	slugify	{{ (l1 | rsort) | slugify }}	b	b	-
+rsort	l1	sort	{{ (l1 | rsort) | sort }}	[\"b\"]	[\"b\"]	-
 rsort	l1	split	{{ (l1 | rsort) | split(',') }}	error	error	-
-rsort	l1	startsWith	{{ (l1 | rsort) | startsWith(value='a') }}	false	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	string	{{ (l1 | rsort) | string }}	[b]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	substringAfter	{{ (l1 | rsort) | substringAfter(separator=',') }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	substringAfterLast	{{ (l1 | rsort) | substringAfterLast(separator=',') }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	substringBefore	{{ (l1 | rsort) | substringBefore(separator=',') }}	[b]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	substringBeforeLast	{{ (l1 | rsort) | substringBeforeLast(separator=',') }}	[b]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	l1	startsWith	{{ (l1 | rsort) | startsWith(value='a') }}	false	false	-
+rsort	l1	string	{{ (l1 | rsort) | string }}	[b]	[b]	-
+rsort	l1	substringAfter	{{ (l1 | rsort) | substringAfter(separator=',') }}			-
+rsort	l1	substringAfterLast	{{ (l1 | rsort) | substringAfterLast(separator=',') }}			-
+rsort	l1	substringBefore	{{ (l1 | rsort) | substringBefore(separator=',') }}	[b]	[b]	-
+rsort	l1	substringBeforeLast	{{ (l1 | rsort) | substringBeforeLast(separator=',') }}	[b]	[b]	-
 rsort	l1	timestamp	{{ (l1 | rsort) | timestamp }}	error	error	-
 rsort	l1	timestampMicro	{{ (l1 | rsort) | timestampMicro }}	error	error	-
 rsort	l1	timestampMilli	{{ (l1 | rsort) | timestampMilli }}	error	error	-
 rsort	l1	timestampNano	{{ (l1 | rsort) | timestampNano }}	error	error	-
 rsort	l1	title	{{ (l1 | rsort) | title }}	error	error	-
-rsort	l1	toIon	{{ (l1 | rsort) | toIon }}	[\"b\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	toJson	{{ (l1 | rsort) | toJson }}	[\"b\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	l1	toIon	{{ (l1 | rsort) | toIon }}	[\"b\"]	[\"b\"]	-
+rsort	l1	toJson	{{ (l1 | rsort) | toJson }}	[\"b\"]	[\"b\"]	-
 rsort	l1	trim	{{ (l1 | rsort) | trim }}	error	error	-
-rsort	l1	upper	{{ (l1 | rsort) | upper }}	[B]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	l1	upper	{{ (l1 | rsort) | upper }}	[B]	[B]	-
 rsort	l1	urldecode	{{ (l1 | rsort) | urldecode }}	error	error	-
 rsort	l1	urlencode	{{ (l1 | rsort) | urlencode }}	error	error	-
 rsort	l1	values	{{ (l1 | rsort) | values }}	error	error	-
-rsort	l1	yaml	{{ (l1 | rsort) | yaml }}	 - b\n	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	l1	yaml	{{ (l1 | rsort) | yaml }}	 - b\n	 - b\n	-
 rsort	el	abbreviate	{{ (el | rsort) | abbreviate(5) }}	error	error	-
 rsort	el	abs	{{ (el | rsort) | abs }}	error	error	-
 rsort	el	base64decode	{{ (el | rsort) | base64decode }}	error	error	-
-rsort	el	base64encode	{{ (el | rsort) | base64encode }}	W10=	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	el	base64encode	{{ (el | rsort) | base64encode }}	W10=	W10=	-
 rsort	el	capitalize	{{ (el | rsort) | capitalize }}	error	error	-
-rsort	el	chunk	{{ (el | rsort) | chunk(size=2) }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	className	{{ (el | rsort) | className }}	java.util.ArrayList	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	el	chunk	{{ (el | rsort) | chunk(size=2) }}	[]	[]	-
+rsort	el	className	{{ (el | rsort) | className }}	java.util.ArrayList	java.util.ArrayList	-
 rsort	el	date	{{ (el | rsort) | date('yyyy-MM-dd', timeZone='UTC') }}	error	error	-
 rsort	el	dateAdd	{{ (el | rsort) | dateAdd(1, 'DAYS', 'iso', 'UTC') }}	error	error	-
-rsort	el	default	{{ (el | rsort) | default('D') }}	D	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	distinct	{{ (el | rsort) | distinct }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	endsWith	{{ (el | rsort) | endsWith(value='c') }}	false	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	escape	{{ (el | rsort) | escape }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	escapeChar	{{ (el | rsort) | escapeChar(type='single') }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	first	{{ (el | rsort) | first }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	flatten	{{ (el | rsort) | flatten }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	format	{{ (el | rsort) | format('x') }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	indent	{{ (el | rsort) | indent(amount=2) }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	join	{{ (el | rsort) | join('-') }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	jq	{{ (el | rsort) | jq('.') }}	[[]]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	keys	{{ (el | rsort) | keys }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	last	{{ (el | rsort) | last }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	length	{{ (el | rsort) | length }}	0	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	lower	{{ (el | rsort) | lower }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	el	default	{{ (el | rsort) | default('D') }}	D	D	-
+rsort	el	distinct	{{ (el | rsort) | distinct }}	[]	[]	-
+rsort	el	endsWith	{{ (el | rsort) | endsWith(value='c') }}	false	false	-
+rsort	el	escape	{{ (el | rsort) | escape }}	[]	[]	-
+rsort	el	escapeChar	{{ (el | rsort) | escapeChar(type='single') }}	[]	[]	-
+rsort	el	first	{{ (el | rsort) | first }}			-
+rsort	el	flatten	{{ (el | rsort) | flatten }}	[]	[]	-
+rsort	el	format	{{ (el | rsort) | format('x') }}	[]	[]	-
+rsort	el	indent	{{ (el | rsort) | indent(amount=2) }}	[]	[]	-
+rsort	el	join	{{ (el | rsort) | join('-') }}			-
+rsort	el	jq	{{ (el | rsort) | jq('.') }}	[[]]	[[]]	-
+rsort	el	keys	{{ (el | rsort) | keys }}	[]	[]	-
+rsort	el	last	{{ (el | rsort) | last }}			-
+rsort	el	length	{{ (el | rsort) | length }}	0	0	-
+rsort	el	lower	{{ (el | rsort) | lower }}	[]	[]	-
 rsort	el	md5	{{ (el | rsort) | md5 }}	error	error	-
-rsort	el	merge	{{ (el | rsort) | merge(l) }}	[\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	nindent	{{ (el | rsort) | nindent(amount=2) }}	\n  []	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	el	merge	{{ (el | rsort) | merge(l) }}	[\"b\",\"a\",\"c\"]	[\"b\",\"a\",\"c\"]	-
+rsort	el	nindent	{{ (el | rsort) | nindent(amount=2) }}	\n  []	\n  []	-
 rsort	el	nl2br	{{ (el | rsort) | nl2br }}	error	error	-
 rsort	el	number	{{ (el | rsort) | number }}	error	error	-
 rsort	el	numberformat	{{ (el | rsort) | numberformat('#') }}	error	error	-
-rsort	el	raw	{{ (el | rsort) | raw }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	regexExtract	{{ (el | rsort) | regexExtract(regex='a') }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	regexMatch	{{ (el | rsort) | regexMatch(regex='a') }}	false	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	regexReplace	{{ (el | rsort) | regexReplace(regex='a', replacement='#') }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	replace	{{ (el | rsort) | replace({'a': 'b'}) }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	reverse	{{ (el | rsort) | reverse }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	rsort	{{ (el | rsort) | rsort }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	el	raw	{{ (el | rsort) | raw }}	[]	[]	-
+rsort	el	regexExtract	{{ (el | rsort) | regexExtract(regex='a') }}			-
+rsort	el	regexMatch	{{ (el | rsort) | regexMatch(regex='a') }}	false	false	-
+rsort	el	regexReplace	{{ (el | rsort) | regexReplace(regex='a', replacement='#') }}	[]	[]	-
+rsort	el	replace	{{ (el | rsort) | replace({'a': 'b'}) }}	[]	[]	-
+rsort	el	reverse	{{ (el | rsort) | reverse }}	[]	[]	-
+rsort	el	rsort	{{ (el | rsort) | rsort }}	[]	[]	-
 rsort	el	sha1	{{ (el | rsort) | sha1 }}	error	error	-
 rsort	el	sha256	{{ (el | rsort) | sha256 }}	error	error	-
 rsort	el	sha512	{{ (el | rsort) | sha512 }}	error	error	-
 rsort	el	slice	{{ (el | rsort) | slice(0,2) }}	error	error	-
-rsort	el	slugify	{{ (el | rsort) | slugify }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	sort	{{ (el | rsort) | sort }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	el	slugify	{{ (el | rsort) | slugify }}			-
+rsort	el	sort	{{ (el | rsort) | sort }}	[]	[]	-
 rsort	el	split	{{ (el | rsort) | split(',') }}	error	error	-
-rsort	el	startsWith	{{ (el | rsort) | startsWith(value='a') }}	false	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	string	{{ (el | rsort) | string }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	substringAfter	{{ (el | rsort) | substringAfter(separator=',') }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	substringAfterLast	{{ (el | rsort) | substringAfterLast(separator=',') }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	substringBefore	{{ (el | rsort) | substringBefore(separator=',') }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	substringBeforeLast	{{ (el | rsort) | substringBeforeLast(separator=',') }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	el	startsWith	{{ (el | rsort) | startsWith(value='a') }}	false	false	-
+rsort	el	string	{{ (el | rsort) | string }}	[]	[]	-
+rsort	el	substringAfter	{{ (el | rsort) | substringAfter(separator=',') }}			-
+rsort	el	substringAfterLast	{{ (el | rsort) | substringAfterLast(separator=',') }}			-
+rsort	el	substringBefore	{{ (el | rsort) | substringBefore(separator=',') }}	[]	[]	-
+rsort	el	substringBeforeLast	{{ (el | rsort) | substringBeforeLast(separator=',') }}	[]	[]	-
 rsort	el	timestamp	{{ (el | rsort) | timestamp }}	error	error	-
 rsort	el	timestampMicro	{{ (el | rsort) | timestampMicro }}	error	error	-
 rsort	el	timestampMilli	{{ (el | rsort) | timestampMilli }}	error	error	-
 rsort	el	timestampNano	{{ (el | rsort) | timestampNano }}	error	error	-
 rsort	el	title	{{ (el | rsort) | title }}	error	error	-
-rsort	el	toIon	{{ (el | rsort) | toIon }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	toJson	{{ (el | rsort) | toJson }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	el	toIon	{{ (el | rsort) | toIon }}	[]	[]	-
+rsort	el	toJson	{{ (el | rsort) | toJson }}	[]	[]	-
 rsort	el	trim	{{ (el | rsort) | trim }}	error	error	-
-rsort	el	upper	{{ (el | rsort) | upper }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	el	upper	{{ (el | rsort) | upper }}	[]	[]	-
 rsort	el	urldecode	{{ (el | rsort) | urldecode }}	error	error	-
 rsort	el	urlencode	{{ (el | rsort) | urlencode }}	error	error	-
 rsort	el	values	{{ (el | rsort) | values }}	error	error	-
-rsort	el	yaml	{{ (el | rsort) | yaml }}	[]\n	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	el	yaml	{{ (el | rsort) | yaml }}	[]\n	[]\n	-
 slice	l	abbreviate	{{ (l | slice(0,2)) | abbreviate(5) }}	error	error	-
 slice	l	abs	{{ (l | slice(0,2)) | abs }}	error	error	-
 slice	l	base64decode	{{ (l | slice(0,2)) | base64decode }}	error	error	-
-slice	l	base64encode	{{ (l | slice(0,2)) | base64encode }}	W2IsIGFd	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+slice	l	base64encode	{{ (l | slice(0,2)) | base64encode }}	W2IsIGFd	W2IsIGFd	-
 slice	l	capitalize	{{ (l | slice(0,2)) | capitalize }}	error	error	-
 slice	l	chunk	{{ (l | slice(0,2)) | chunk(size=2) }}	[[\"b\",\"a\"]]	[[\"b\",\"a\"]]	-
 slice	l	className	{{ (l | slice(0,2)) | className }}	java.util.ArrayList$SubList	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
@@ -2380,18 +2380,18 @@ slice	l	last	{{ (l | slice(0,2)) | last }}	a	a	-
 slice	l	length	{{ (l | slice(0,2)) | length }}	2	2	-
 slice	l	lower	{{ (l | slice(0,2)) | lower }}	[b, a]	[b, a]	-
 slice	l	md5	{{ (l | slice(0,2)) | md5 }}	error	error	-
-slice	l	merge	{{ (l | slice(0,2)) | merge(l) }}	[\"b\",\"a\",\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+slice	l	merge	{{ (l | slice(0,2)) | merge(l) }}	[\"b\",\"a\",\"b\",\"a\",\"c\"]	[\"b\",\"a\",\"b\",\"a\",\"c\"]	-
 slice	l	nindent	{{ (l | slice(0,2)) | nindent(amount=2) }}	\n  [b, a]	\n  [b, a]	-
 slice	l	nl2br	{{ (l | slice(0,2)) | nl2br }}	error	error	-
 slice	l	number	{{ (l | slice(0,2)) | number }}	error	error	-
 slice	l	numberformat	{{ (l | slice(0,2)) | numberformat('#') }}	error	error	-
-slice	l	raw	{{ (l | slice(0,2)) | raw }}	[b, a]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+slice	l	raw	{{ (l | slice(0,2)) | raw }}	[b, a]	[b, a]	-
 slice	l	regexExtract	{{ (l | slice(0,2)) | regexExtract(regex='a') }}	a	a	-
 slice	l	regexMatch	{{ (l | slice(0,2)) | regexMatch(regex='a') }}	true	true	-
 slice	l	regexReplace	{{ (l | slice(0,2)) | regexReplace(regex='a', replacement='#') }}	[b, #]	[b, #]	-
 slice	l	replace	{{ (l | slice(0,2)) | replace({'a': 'b'}) }}	[b, b]	[b, b]	-
 slice	l	reverse	{{ (l | slice(0,2)) | reverse }}	[\"a\",\"b\"]	[\"a\",\"b\"]	-
-slice	l	rsort	{{ (l | slice(0,2)) | rsort }}	[\"b\",\"a\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+slice	l	rsort	{{ (l | slice(0,2)) | rsort }}	[\"b\",\"a\"]	[\"b\",\"a\"]	-
 slice	l	sha1	{{ (l | slice(0,2)) | sha1 }}	error	error	-
 slice	l	sha256	{{ (l | slice(0,2)) | sha256 }}	error	error	-
 slice	l	sha512	{{ (l | slice(0,2)) | sha512 }}	error	error	-
@@ -2421,7 +2421,7 @@ slice	l	yaml	{{ (l | slice(0,2)) | yaml }}	 - b\n - a\n	 - b\n - a\n	-
 sort	l	abbreviate	{{ (l | sort) | abbreviate(5) }}	error	error	-
 sort	l	abs	{{ (l | sort) | abs }}	error	error	-
 sort	l	base64decode	{{ (l | sort) | base64decode }}	error	error	-
-sort	l	base64encode	{{ (l | sort) | base64encode }}	W2EsIGIsIGNd	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+sort	l	base64encode	{{ (l | sort) | base64encode }}	W2EsIGIsIGNd	W2EsIGIsIGNd	-
 sort	l	capitalize	{{ (l | sort) | capitalize }}	error	error	-
 sort	l	chunk	{{ (l | sort) | chunk(size=2) }}	[[\"a\",\"b\"],[\"c\"]]	[[\"a\",\"b\"],[\"c\"]]	-
 sort	l	className	{{ (l | sort) | className }}	java.util.ArrayList	java.util.ArrayList	-
@@ -2443,18 +2443,18 @@ sort	l	last	{{ (l | sort) | last }}	c	c	-
 sort	l	length	{{ (l | sort) | length }}	3	3	-
 sort	l	lower	{{ (l | sort) | lower }}	[a, b, c]	[a, b, c]	-
 sort	l	md5	{{ (l | sort) | md5 }}	error	error	-
-sort	l	merge	{{ (l | sort) | merge(l) }}	[\"a\",\"b\",\"c\",\"a\",\"b\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+sort	l	merge	{{ (l | sort) | merge(l) }}	[\"a\",\"b\",\"c\",\"a\",\"b\",\"c\"]	[\"a\",\"b\",\"c\",\"b\",\"a\",\"c\"]	Kestra's `reverse`, `sort` and `rsort` reorder the context list IN PLACE (`Collections.reverse`, `List.sort`), so the second `l` -- `merge`'s argument -- is the reordered list; egret's values are immutable and the argument is still the list as bound (package #5b Task B4)
 sort	l	nindent	{{ (l | sort) | nindent(amount=2) }}	\n  [a, b, c]	\n  [a, b, c]	-
 sort	l	nl2br	{{ (l | sort) | nl2br }}	error	error	-
 sort	l	number	{{ (l | sort) | number }}	error	error	-
 sort	l	numberformat	{{ (l | sort) | numberformat('#') }}	error	error	-
-sort	l	raw	{{ (l | sort) | raw }}	[a, b, c]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+sort	l	raw	{{ (l | sort) | raw }}	[a, b, c]	[a, b, c]	-
 sort	l	regexExtract	{{ (l | sort) | regexExtract(regex='a') }}	a	a	-
 sort	l	regexMatch	{{ (l | sort) | regexMatch(regex='a') }}	true	true	-
 sort	l	regexReplace	{{ (l | sort) | regexReplace(regex='a', replacement='#') }}	[#, b, c]	[#, b, c]	-
 sort	l	replace	{{ (l | sort) | replace({'a': 'b'}) }}	[b, b, c]	[b, b, c]	-
 sort	l	reverse	{{ (l | sort) | reverse }}	[\"c\",\"b\",\"a\"]	[\"c\",\"b\",\"a\"]	-
-sort	l	rsort	{{ (l | sort) | rsort }}	[\"c\",\"b\",\"a\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+sort	l	rsort	{{ (l | sort) | rsort }}	[\"c\",\"b\",\"a\"]	[\"c\",\"b\",\"a\"]	-
 sort	l	sha1	{{ (l | sort) | sha1 }}	error	error	-
 sort	l	sha256	{{ (l | sort) | sha256 }}	error	error	-
 sort	l	sha512	{{ (l | sort) | sha512 }}	error	error	-
@@ -2484,7 +2484,7 @@ sort	l	yaml	{{ (l | sort) | yaml }}	 - a\n - b\n - c\n	 - a\n - b\n - c\n	-
 sort	l1	abbreviate	{{ (l1 | sort) | abbreviate(5) }}	error	error	-
 sort	l1	abs	{{ (l1 | sort) | abs }}	error	error	-
 sort	l1	base64decode	{{ (l1 | sort) | base64decode }}	error	error	-
-sort	l1	base64encode	{{ (l1 | sort) | base64encode }}	W2Jd	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+sort	l1	base64encode	{{ (l1 | sort) | base64encode }}	W2Jd	W2Jd	-
 sort	l1	capitalize	{{ (l1 | sort) | capitalize }}	error	error	-
 sort	l1	chunk	{{ (l1 | sort) | chunk(size=2) }}	[[\"b\"]]	[[\"b\"]]	-
 sort	l1	className	{{ (l1 | sort) | className }}	java.util.ArrayList	java.util.ArrayList	-
@@ -2506,18 +2506,18 @@ sort	l1	last	{{ (l1 | sort) | last }}	b	b	-
 sort	l1	length	{{ (l1 | sort) | length }}	1	1	-
 sort	l1	lower	{{ (l1 | sort) | lower }}	[b]	[b]	-
 sort	l1	md5	{{ (l1 | sort) | md5 }}	error	error	-
-sort	l1	merge	{{ (l1 | sort) | merge(l) }}	[\"b\",\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+sort	l1	merge	{{ (l1 | sort) | merge(l) }}	[\"b\",\"b\",\"a\",\"c\"]	[\"b\",\"b\",\"a\",\"c\"]	-
 sort	l1	nindent	{{ (l1 | sort) | nindent(amount=2) }}	\n  [b]	\n  [b]	-
 sort	l1	nl2br	{{ (l1 | sort) | nl2br }}	error	error	-
 sort	l1	number	{{ (l1 | sort) | number }}	error	error	-
 sort	l1	numberformat	{{ (l1 | sort) | numberformat('#') }}	error	error	-
-sort	l1	raw	{{ (l1 | sort) | raw }}	[b]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+sort	l1	raw	{{ (l1 | sort) | raw }}	[b]	[b]	-
 sort	l1	regexExtract	{{ (l1 | sort) | regexExtract(regex='a') }}			-
 sort	l1	regexMatch	{{ (l1 | sort) | regexMatch(regex='a') }}	false	false	-
 sort	l1	regexReplace	{{ (l1 | sort) | regexReplace(regex='a', replacement='#') }}	[b]	[b]	-
 sort	l1	replace	{{ (l1 | sort) | replace({'a': 'b'}) }}	[b]	[b]	-
 sort	l1	reverse	{{ (l1 | sort) | reverse }}	[\"b\"]	[\"b\"]	-
-sort	l1	rsort	{{ (l1 | sort) | rsort }}	[\"b\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+sort	l1	rsort	{{ (l1 | sort) | rsort }}	[\"b\"]	[\"b\"]	-
 sort	l1	sha1	{{ (l1 | sort) | sha1 }}	error	error	-
 sort	l1	sha256	{{ (l1 | sort) | sha256 }}	error	error	-
 sort	l1	sha512	{{ (l1 | sort) | sha512 }}	error	error	-
@@ -2547,7 +2547,7 @@ sort	l1	yaml	{{ (l1 | sort) | yaml }}	 - b\n	 - b\n	-
 sort	el	abbreviate	{{ (el | sort) | abbreviate(5) }}	error	error	-
 sort	el	abs	{{ (el | sort) | abs }}	error	error	-
 sort	el	base64decode	{{ (el | sort) | base64decode }}	error	error	-
-sort	el	base64encode	{{ (el | sort) | base64encode }}	W10=	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+sort	el	base64encode	{{ (el | sort) | base64encode }}	W10=	W10=	-
 sort	el	capitalize	{{ (el | sort) | capitalize }}	error	error	-
 sort	el	chunk	{{ (el | sort) | chunk(size=2) }}	[]	[]	-
 sort	el	className	{{ (el | sort) | className }}	java.util.ArrayList	java.util.ArrayList	-
@@ -2569,18 +2569,18 @@ sort	el	last	{{ (el | sort) | last }}			-
 sort	el	length	{{ (el | sort) | length }}	0	0	-
 sort	el	lower	{{ (el | sort) | lower }}	[]	[]	-
 sort	el	md5	{{ (el | sort) | md5 }}	error	error	-
-sort	el	merge	{{ (el | sort) | merge(l) }}	[\"b\",\"a\",\"c\"]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+sort	el	merge	{{ (el | sort) | merge(l) }}	[\"b\",\"a\",\"c\"]	[\"b\",\"a\",\"c\"]	-
 sort	el	nindent	{{ (el | sort) | nindent(amount=2) }}	\n  []	\n  []	-
 sort	el	nl2br	{{ (el | sort) | nl2br }}	error	error	-
 sort	el	number	{{ (el | sort) | number }}	error	error	-
 sort	el	numberformat	{{ (el | sort) | numberformat('#') }}	error	error	-
-sort	el	raw	{{ (el | sort) | raw }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+sort	el	raw	{{ (el | sort) | raw }}	[]	[]	-
 sort	el	regexExtract	{{ (el | sort) | regexExtract(regex='a') }}			-
 sort	el	regexMatch	{{ (el | sort) | regexMatch(regex='a') }}	false	false	-
 sort	el	regexReplace	{{ (el | sort) | regexReplace(regex='a', replacement='#') }}	[]	[]	-
 sort	el	replace	{{ (el | sort) | replace({'a': 'b'}) }}	[]	[]	-
 sort	el	reverse	{{ (el | sort) | reverse }}	[]	[]	-
-sort	el	rsort	{{ (el | sort) | rsort }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+sort	el	rsort	{{ (el | sort) | rsort }}	[]	[]	-
 sort	el	sha1	{{ (el | sort) | sha1 }}	error	error	-
 sort	el	sha256	{{ (el | sort) | sha256 }}	error	error	-
 sort	el	sha512	{{ (el | sort) | sha512 }}	error	error	-
@@ -2610,7 +2610,7 @@ sort	el	yaml	{{ (el | sort) | yaml }}	[]\n	[]\n	-
 split	s	abbreviate	{{ (s | split(',')) | abbreviate(5) }}	error	error	-
 split	s	abs	{{ (s | split(',')) | abs }}	error	error	-
 split	s	base64decode	{{ (s | split(',')) | base64decode }}	error	error	-
-split	s	base64encode	{{ (s | split(',')) | base64encode }}	unstable	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+split	s	base64encode	{{ (s | split(',')) | base64encode }}	unstable	W2EsIGIsIGNd	a Java array's `toString` is its class name and IDENTITY HASH, so every consumer that stringifies its input reads that and not the elements, where egret's sequence stringifies as a list; a cell that MOVES when the probe corpus is merely REORDERED carries `unstable` in place of a value, and the ones that do not move are the ones whose answer discards the hash
 split	s	capitalize	{{ (s | split(',')) | capitalize }}	error	error	-
 split	s	chunk	{{ (s | split(',')) | chunk(size=2) }}	error	error	-
 split	s	className	{{ (s | split(',')) | className }}	[Ljava.lang.String;	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
@@ -2637,7 +2637,7 @@ split	s	nindent	{{ (s | split(',')) | nindent(amount=2) }}	unstable	\n  [a, b, c
 split	s	nl2br	{{ (s | split(',')) | nl2br }}	error	error	-
 split	s	number	{{ (s | split(',')) | number }}	error	error	-
 split	s	numberformat	{{ (s | split(',')) | numberformat('#') }}	error	error	-
-split	s	raw	{{ (s | split(',')) | raw }}	unstable	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+split	s	raw	{{ (s | split(',')) | raw }}	unstable	[a, b, c]	a Java array's `toString` is its class name and IDENTITY HASH, so every consumer that stringifies its input reads that and not the elements, where egret's sequence stringifies as a list; a cell that MOVES when the probe corpus is merely REORDERED carries `unstable` in place of a value, and the ones that do not move are the ones whose answer discards the hash
 split	s	regexExtract	{{ (s | split(',')) | regexExtract(regex='a') }}	a	a	-
 split	s	regexMatch	{{ (s | split(',')) | regexMatch(regex='a') }}	true	true	-
 split	s	regexReplace	{{ (s | split(',')) | regexReplace(regex='a', replacement='#') }}	unstable	[#, b, c]	a Java array's `toString` is its class name and IDENTITY HASH, so every consumer that stringifies its input reads that and not the elements, where egret's sequence stringifies as a list; a cell that MOVES when the probe corpus is merely REORDERED carries `unstable` in place of a value, and the ones that do not move are the ones whose answer discards the hash
@@ -2673,7 +2673,7 @@ split	s	yaml	{{ (s | split(',')) | yaml }}	 - a\n - b\n - c\n	 - a\n - b\n - c\n
 split	sc	abbreviate	{{ (sc | split(',')) | abbreviate(5) }}	error	error	-
 split	sc	abs	{{ (sc | split(',')) | abs }}	error	error	-
 split	sc	base64decode	{{ (sc | split(',')) | base64decode }}	error	error	-
-split	sc	base64encode	{{ (sc | split(',')) | base64encode }}	unstable	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+split	sc	base64encode	{{ (sc | split(',')) | base64encode }}	unstable	W10=	a Java array's `toString` is its class name and IDENTITY HASH, so every consumer that stringifies its input reads that and not the elements, where egret's sequence stringifies as a list; a cell that MOVES when the probe corpus is merely REORDERED carries `unstable` in place of a value, and the ones that do not move are the ones whose answer discards the hash
 split	sc	capitalize	{{ (sc | split(',')) | capitalize }}	error	error	-
 split	sc	chunk	{{ (sc | split(',')) | chunk(size=2) }}	error	error	-
 split	sc	className	{{ (sc | split(',')) | className }}	[Ljava.lang.String;	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
@@ -2700,7 +2700,7 @@ split	sc	nindent	{{ (sc | split(',')) | nindent(amount=2) }}	unstable	\n  []	a J
 split	sc	nl2br	{{ (sc | split(',')) | nl2br }}	error	error	-
 split	sc	number	{{ (sc | split(',')) | number }}	error	error	-
 split	sc	numberformat	{{ (sc | split(',')) | numberformat('#') }}	error	error	-
-split	sc	raw	{{ (sc | split(',')) | raw }}	unstable	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+split	sc	raw	{{ (sc | split(',')) | raw }}	unstable	[]	a Java array's `toString` is its class name and IDENTITY HASH, so every consumer that stringifies its input reads that and not the elements, where egret's sequence stringifies as a list; a cell that MOVES when the probe corpus is merely REORDERED carries `unstable` in place of a value, and the ones that do not move are the ones whose answer discards the hash
 split	sc	regexExtract	{{ (sc | split(',')) | regexExtract(regex='a') }}	a		a Java array's `toString` is its class name and IDENTITY HASH, so every consumer that stringifies its input reads that and not the elements, where egret's sequence stringifies as a list; a cell that MOVES when the probe corpus is merely REORDERED carries `unstable` in place of a value, and the ones that do not move are the ones whose answer discards the hash
 split	sc	regexMatch	{{ (sc | split(',')) | regexMatch(regex='a') }}	true	false	a Java array's `toString` is its class name and IDENTITY HASH, so every consumer that stringifies its input reads that and not the elements, where egret's sequence stringifies as a list; a cell that MOVES when the probe corpus is merely REORDERED carries `unstable` in place of a value, and the ones that do not move are the ones whose answer discards the hash
 split	sc	regexReplace	{{ (sc | split(',')) | regexReplace(regex='a', replacement='#') }}	unstable	[]	a Java array's `toString` is its class name and IDENTITY HASH, so every consumer that stringifies its input reads that and not the elements, where egret's sequence stringifies as a list; a cell that MOVES when the probe corpus is merely REORDERED carries `unstable` in place of a value, and the ones that do not move are the ones whose answer discards the hash
@@ -2736,7 +2736,7 @@ split	sc	yaml	{{ (sc | split(',')) | yaml }}	[]\n	[]\n	-
 split	dt	abbreviate	{{ (dt | split(',')) | abbreviate(5) }}	error	error	-
 split	dt	abs	{{ (dt | split(',')) | abs }}	error	error	-
 split	dt	base64decode	{{ (dt | split(',')) | base64decode }}	error	error	-
-split	dt	base64encode	{{ (dt | split(',')) | base64encode }}	unstable	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+split	dt	base64encode	{{ (dt | split(',')) | base64encode }}	unstable	WzIwMjQtMDEtMTVUMTA6MzA6MDBaXQ==	a Java array's `toString` is its class name and IDENTITY HASH, so every consumer that stringifies its input reads that and not the elements, where egret's sequence stringifies as a list; a cell that MOVES when the probe corpus is merely REORDERED carries `unstable` in place of a value, and the ones that do not move are the ones whose answer discards the hash
 split	dt	capitalize	{{ (dt | split(',')) | capitalize }}	error	error	-
 split	dt	chunk	{{ (dt | split(',')) | chunk(size=2) }}	error	error	-
 split	dt	className	{{ (dt | split(',')) | className }}	[Ljava.lang.String;	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
@@ -2763,7 +2763,7 @@ split	dt	nindent	{{ (dt | split(',')) | nindent(amount=2) }}	unstable	\n  [2024-
 split	dt	nl2br	{{ (dt | split(',')) | nl2br }}	error	error	-
 split	dt	number	{{ (dt | split(',')) | number }}	error	error	-
 split	dt	numberformat	{{ (dt | split(',')) | numberformat('#') }}	error	error	-
-split	dt	raw	{{ (dt | split(',')) | raw }}	unstable	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+split	dt	raw	{{ (dt | split(',')) | raw }}	unstable	[2024-01-15T10:30:00Z]	a Java array's `toString` is its class name and IDENTITY HASH, so every consumer that stringifies its input reads that and not the elements, where egret's sequence stringifies as a list; a cell that MOVES when the probe corpus is merely REORDERED carries `unstable` in place of a value, and the ones that do not move are the ones whose answer discards the hash
 split	dt	regexExtract	{{ (dt | split(',')) | regexExtract(regex='a') }}	a		a Java array's `toString` is its class name and IDENTITY HASH, so every consumer that stringifies its input reads that and not the elements, where egret's sequence stringifies as a list; a cell that MOVES when the probe corpus is merely REORDERED carries `unstable` in place of a value, and the ones that do not move are the ones whose answer discards the hash
 split	dt	regexMatch	{{ (dt | split(',')) | regexMatch(regex='a') }}	true	false	a Java array's `toString` is its class name and IDENTITY HASH, so every consumer that stringifies its input reads that and not the elements, where egret's sequence stringifies as a list; a cell that MOVES when the probe corpus is merely REORDERED carries `unstable` in place of a value, and the ones that do not move are the ones whose answer discards the hash
 split	dt	regexReplace	{{ (dt | split(',')) | regexReplace(regex='a', replacement='#') }}	unstable	[2024-01-15T10:30:00Z]	a Java array's `toString` is its class name and IDENTITY HASH, so every consumer that stringifies its input reads that and not the elements, where egret's sequence stringifies as a list; a cell that MOVES when the probe corpus is merely REORDERED carries `unstable` in place of a value, and the ones that do not move are the ones whose answer discards the hash
@@ -2799,7 +2799,7 @@ split	dt	yaml	{{ (dt | split(',')) | yaml }}	 - 2024-01-15T10:30:00Z\n	 - 2024-0
 values	m	abbreviate	{{ (m | values) | abbreviate(5) }}	error	error	-
 values	m	abs	{{ (m | values) | abs }}	error	error	-
 values	m	base64decode	{{ (m | values) | base64decode }}	error	error	-
-values	m	base64encode	{{ (m | values) | base64encode }}	WzEsIDJd	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+values	m	base64encode	{{ (m | values) | base64encode }}	WzEsIDJd	WzEsIDJd	-
 values	m	capitalize	{{ (m | values) | capitalize }}	error	error	-
 values	m	chunk	{{ (m | values) | chunk(size=2) }}	error	error	-
 values	m	className	{{ (m | values) | className }}	java.util.LinkedHashMap$LinkedValues	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
@@ -2826,7 +2826,7 @@ values	m	nindent	{{ (m | values) | nindent(amount=2) }}	\n  [1, 2]	\n  [1, 2]	-
 values	m	nl2br	{{ (m | values) | nl2br }}	error	error	-
 values	m	number	{{ (m | values) | number }}	error	error	-
 values	m	numberformat	{{ (m | values) | numberformat('#') }}	error	error	-
-values	m	raw	{{ (m | values) | raw }}	[1, 2]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+values	m	raw	{{ (m | values) | raw }}	[1, 2]	[1, 2]	-
 values	m	regexExtract	{{ (m | values) | regexExtract(regex='a') }}			-
 values	m	regexMatch	{{ (m | values) | regexMatch(regex='a') }}	false	false	-
 values	m	regexReplace	{{ (m | values) | regexReplace(regex='a', replacement='#') }}	[1, 2]	[1, 2]	-
@@ -2862,7 +2862,7 @@ values	m	yaml	{{ (m | values) | yaml }}	 - 1\n - 2\n	 - 1\n - 2\n	-
 values	m1	abbreviate	{{ (m1 | values) | abbreviate(5) }}	error	error	-
 values	m1	abs	{{ (m1 | values) | abs }}	error	error	-
 values	m1	base64decode	{{ (m1 | values) | base64decode }}	error	error	-
-values	m1	base64encode	{{ (m1 | values) | base64encode }}	WzFd	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+values	m1	base64encode	{{ (m1 | values) | base64encode }}	WzFd	WzFd	-
 values	m1	capitalize	{{ (m1 | values) | capitalize }}	error	error	-
 values	m1	chunk	{{ (m1 | values) | chunk(size=2) }}	error	error	-
 values	m1	className	{{ (m1 | values) | className }}	java.util.LinkedHashMap$LinkedValues	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
@@ -2889,7 +2889,7 @@ values	m1	nindent	{{ (m1 | values) | nindent(amount=2) }}	\n  [1]	\n  [1]	-
 values	m1	nl2br	{{ (m1 | values) | nl2br }}	error	error	-
 values	m1	number	{{ (m1 | values) | number }}	error	error	-
 values	m1	numberformat	{{ (m1 | values) | numberformat('#') }}	error	error	-
-values	m1	raw	{{ (m1 | values) | raw }}	[1]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+values	m1	raw	{{ (m1 | values) | raw }}	[1]	[1]	-
 values	m1	regexExtract	{{ (m1 | values) | regexExtract(regex='a') }}			-
 values	m1	regexMatch	{{ (m1 | values) | regexMatch(regex='a') }}	false	false	-
 values	m1	regexReplace	{{ (m1 | values) | regexReplace(regex='a', replacement='#') }}	[1]	[1]	-
@@ -2925,7 +2925,7 @@ values	m1	yaml	{{ (m1 | values) | yaml }}	 - 1\n	 - 1\n	-
 values	em	abbreviate	{{ (em | values) | abbreviate(5) }}	error	error	-
 values	em	abs	{{ (em | values) | abs }}	error	error	-
 values	em	base64decode	{{ (em | values) | base64decode }}	error	error	-
-values	em	base64encode	{{ (em | values) | base64encode }}	W10=	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+values	em	base64encode	{{ (em | values) | base64encode }}	W10=	W10=	-
 values	em	capitalize	{{ (em | values) | capitalize }}	error	error	-
 values	em	chunk	{{ (em | values) | chunk(size=2) }}	error	error	-
 values	em	className	{{ (em | values) | className }}	java.util.LinkedHashMap$LinkedValues	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
@@ -2952,7 +2952,7 @@ values	em	nindent	{{ (em | values) | nindent(amount=2) }}	\n  []	\n  []	-
 values	em	nl2br	{{ (em | values) | nl2br }}	error	error	-
 values	em	number	{{ (em | values) | number }}	error	error	-
 values	em	numberformat	{{ (em | values) | numberformat('#') }}	error	error	-
-values	em	raw	{{ (em | values) | raw }}	[]	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+values	em	raw	{{ (em | values) | raw }}	[]	[]	-
 values	em	regexExtract	{{ (em | values) | regexExtract(regex='a') }}			-
 values	em	regexMatch	{{ (em | values) | regexMatch(regex='a') }}	false	false	-
 values	em	regexReplace	{{ (em | values) | regexReplace(regex='a', replacement='#') }}	[]	[]	-

@@ -30,6 +30,9 @@
 //!   own `format` on the premise that the two agreed; its round 2 measured
 //!   five silently different values, two of them in the specifiers the premise
 //!   named, and ported the grammar instead.
+//! - `decimalformat` is `java.text.DecimalFormat` under the `en` symbols,
+//!   which Pebble core's `numberformat` filter is written against (package
+//!   #5b Task B4).
 //! - `ionfmt`, `yamlfmt` and `javare` are the same shape of thing for W2
 //!   Task 6's filters: Amazon Ion text as `JacksonMapper.ofIon()` writes it,
 //!   YAML as Jackson's `YAMLGenerator` over SnakeYAML's emitter writes it,
@@ -47,6 +50,7 @@
 mod arith;
 mod cmp_rewrite;
 mod compare;
+mod decimalformat;
 pub mod env;
 pub mod files;
 mod filters;

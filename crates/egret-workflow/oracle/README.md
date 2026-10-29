@@ -272,6 +272,10 @@ B2 (2026-10-29) banked 56: its 49 `#5b red` lines and seven old ones
 1753** after package #5b's Task B3 (2026-10-29) banked 28 of its 29 `#5b red`
 lines (`max`/`min`) and re-attributed the 29th, `function-min-classname-long`,
 as spec D2's Integer/Long divergence (see "What package #5b's Task B3
+measured") -- and **194 of 1753** after package #5b's Task B4 (2026-10-29)
+banked 51 of its 53 `#5b red` lines (the ten Pebble core filters) and
+re-attributed `filter-nl2br` and `filter-nl2br-no-escaping` to spec D14 (a
+newline inside a template string literal; see "What package #5b's Task B4
 measured").
 The test fails in **both** directions:
 
@@ -5675,6 +5679,46 @@ A4 it is a `java.math.BigDecimal` (Q5 reverses the W9c refusal), and since A8 a
 unary minus on one is Pebble's `multiply(-1, x)` (`-fromIon(ion='1.50')` is
 `-1.50`). The oracle ends #5a at **107 of 1493** baselined: 103 lines from
 before A1 and those four.
+
+## What package #5b's Task B4 measured (2026-10-29)
+
+Plan B4, spec D13 (and §2.2 items 12 and 14). `runners::filters` registers
+Pebble core's `abbreviate`, `base64decode`, `base64encode`, `merge`, `nl2br`,
+`numberformat`, `rsort`, `sha256`, `urlencode` and the escaper's `raw`, each
+read from the pinned jar with `javap -c -p`; `numberformat`'s pattern language
+is a new module, `runners::decimalformat`, a port of JDK 21's
+`DecimalFormat.applyPattern` and its non-exponential `format` path
+(`DigitList`'s `HALF_EVEN`, including the tie rule that consults whether the
+double's digits are exact), with the `en` symbols pinned (D13's divergence:
+Kestra uses the JVM locale; the golden's `en_VN` JVM has `en`'s symbols, so
+nothing here shows it). Scientific (`E`) and currency (`¤`) patterns are
+refused by name. 51 of B4's 53 lines banked (245 -> 194); `filter-nl2br` and
+`filter-nl2br-no-escaping` stay as spec D14's recorded divergence: their
+newline is inside a template string literal, which egret's rewriter refuses
+before `nl2br` runs (the filter itself answers from a context string,
+`filter-nl2br-crlf`). B1's placeholder
+`a_filter_input_kestra_refuses_is_refused_here_too` moved from `runners::env`
+to `runners::filters` under the same name and asserts Kestra's text, so the
+seven error-class pairs fail for Kestra's reason. Read from the bytecode,
+beyond the corpus: `abbreviate(0)` of a string longer than three is empty
+(a width of three or less is a plain cut; `'abc' | abbreviate(0)` is `abc`
+only because `abc` is three long); `merge` of a list with a map appends one
+single-entry map per entry (`addAll(map.entrySet())`); `rsort` has no array
+branch, so `split`'s `String[]` is a cast failure where `sort` sorts it; a
+merged map keeps insertion order here where Kestra's is a `HashMap` (the
+standing bucket-order ruling).
+
+The three cross fixtures carried the ten as `error` cells ("Pebble core, and
+egret binds no filter of this name"); B4 re-rendered every row and 851 egret
+cells moved (`return-classes.txt` 71, `collection-pairs.txt` 322,
+`propagation-pairs.txt` 458). 754 now agree with the harness answer. The 97
+that do not carry an existing reason -- the `HashMap` order and class of
+`merge`'s map (66 and 7, the latter with the two `rsort`-of-a-view class
+names), its `regexReplace` re-render consequence (2), a `String[]`'s identity
+hash (14, `unstable`) -- or one new one (8): Kestra's `reverse`/`sort`/`rsort`
+reorder the context list in place, so `(l | sort) | merge(l)` appends the
+SORTED `l` there and the bound one here. No cell is an egret refusal of
+something Kestra answers.
 
 ## What package #5b's Task B3 measured (2026-10-29)
 

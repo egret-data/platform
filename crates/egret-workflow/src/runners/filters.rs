@@ -39,6 +39,11 @@
 //! Read `javare`'s module doc before touching any pattern: nine of Java's
 //! commonest constructs answer a DIFFERENT question in the crate, silently.
 //!
+//! Package #5b Task B4 added Pebble core's ten that Kestra does not register
+//! itself but its engine binds (`abbreviate`, `base64decode`, `base64encode`,
+//! `merge`, `nl2br`, `numberformat`, `raw`, `rsort`, `sha256`, `urlencode`);
+//! `numberformat`'s `DecimalFormat` is [`super::decimalformat`].
+//!
 //! # The null-input branch is not the same in all seven
 //!
 //! `toJson`, `toIon` and `yaml` return the four-character *string* `"null"`
@@ -184,6 +189,19 @@ pub(super) fn register(env: &mut Environment<'static>) {
     env.add_filter("urldecode", urldecode);
     env.add_filter("values", values);
     env.add_filter("yaml", yaml);
+    // Package #5b Task B4 (spec D13): Pebble core's ten, which Kestra does
+    // not register itself and which minijinja does not bind under this
+    // workspace's features (its `urlencode` is off).
+    env.add_filter("abbreviate", abbreviate);
+    env.add_filter("base64decode", base64decode);
+    env.add_filter("base64encode", base64encode);
+    env.add_filter("merge", merge);
+    env.add_filter("nl2br", nl2br);
+    env.add_filter("numberformat", numberformat);
+    env.add_filter("raw", raw);
+    env.add_filter("rsort", rsort);
+    env.add_filter("sha256", sha256);
+    env.add_filter("urlencode", urlencode);
 }
 
 // ---------------------------------------------------------------------------
@@ -1760,6 +1778,32 @@ fn sort(value: MjValue) -> Result<MjValue, MjError> {
     if input_kind == JavaSeqKind::Collection {
         return Err(pebble_error("Unsupported input type for sort filter"));
     }
+    java_list_sort(&mut items, input_kind, false)?;
+    // **`SortFilter` `areturn`s the list it sorted**, so the kind SURVIVES it
+    // — `{{ [] | chunk(size=2) | sort | className }}` is still
+    // `Lists$RandomAccessPartition`, measured. The one input that does not
+    // come back as itself is an array: that branch is `Arrays.asList(array)`,
+    // a mutable `Arrays$ArrayList`, which is why
+    // `{{ 'a,b,c' | split(',') | sort | reverse }}` answers where
+    // `{{ 'a,b,c' | split(',') | reverse }}` throws.
+    let out_kind = match input_kind {
+        JavaSeqKind::Array => JavaSeqKind::MutableList,
+        kind => kind,
+    };
+    Ok(java_seq(out_kind, items))
+}
+
+/// `List.sort` with `Comparable`'s natural order (`sort`) or
+/// `Collections.reverseOrder()` (`rsort`, package #5b Task B4): the
+/// in-place refusal of an immutable list, the class check, then one
+/// comparator for the one class. `reverse` flips the comparator, not the
+/// result, so equal elements keep their input order as Java's stable sort
+/// keeps them under `reverseOrder()`.
+fn java_list_sort(
+    items: &mut [MjValue],
+    input_kind: JavaSeqKind,
+    reverse: bool,
+) -> Result<(), MjError> {
     if input_kind.sort_in_place_throws(items.len()) {
         return Err(pebble_error(
             "'sort' filter cannot sort an immutable list in place: 'flatten', 'chunk' \
@@ -1813,6 +1857,24 @@ fn sort(value: MjValue) -> Result<MjValue, MjError> {
         "java.lang.Integer" | "java.lang.Long" | "java.math.BigInteger"
     );
     items.sort_by(|a, b| {
+        let order = natural_order(a, b, integers, &first_class);
+        if reverse {
+            order.reverse()
+        } else {
+            order
+        }
+    });
+    Ok(())
+}
+
+/// `compareTo` between two elements of one `Comparable` class (`first_class`).
+fn natural_order(
+    a: &MjValue,
+    b: &MjValue,
+    integers: bool,
+    first_class: &str,
+) -> std::cmp::Ordering {
+    {
         // W9c Task 4 fix round 1: `BigDecimal.compareTo` and
         // `BigInteger.compareTo` are exact. A `BigDecimal` list used to be
         // refused as not `Comparable` (it is), and a `BigInteger` past `i128`
@@ -1846,19 +1908,7 @@ fn sort(value: MjValue) -> Result<MjValue, MjError> {
         // with Java only for a supplementary character against U+E000..U+FFFF,
         // which `oracle/name-surface.txt` records.
         kestra_to_string(a).cmp(&kestra_to_string(b))
-    });
-    // **`SortFilter` `areturn`s the list it sorted**, so the kind SURVIVES it
-    // — `{{ [] | chunk(size=2) | sort | className }}` is still
-    // `Lists$RandomAccessPartition`, measured. The one input that does not
-    // come back as itself is an array: that branch is `Arrays.asList(array)`,
-    // a mutable `Arrays$ArrayList`, which is why
-    // `{{ 'a,b,c' | split(',') | sort | reverse }}` answers where
-    // `{{ 'a,b,c' | split(',') | reverse }}` throws.
-    let out_kind = match input_kind {
-        JavaSeqKind::Array => JavaSeqKind::MutableList,
-        kind => kind,
-    };
-    Ok(java_seq(out_kind, items))
+    }
 }
 
 /// `ReverseFilter` — `(List) input`, so a String or a Map is a
@@ -3486,10 +3536,11 @@ fn sha1(value: MjValue) -> Result<MjValue, MjError> {
 
 /// `Sha512Filter` — `ShaBaseFilter("SHA-512")`.
 ///
-/// There is no `sha256` filter, despite all three hash classes carrying a
-/// copy-pasted "implements the 'sha256' filter" javadoc:
+/// Kestra has no `sha256` filter of its own, despite all three hash classes
+/// carrying a copy-pasted "implements the 'sha256' filter" javadoc:
 /// `Extension.getFilters()` registers `md5`, `sha1` and `sha512` and nothing
-/// else.
+/// else. The `sha256` name is Pebble core's `Sha256Filter` ([`sha256`],
+/// package #5b Task B4).
 fn sha512(value: MjValue) -> Result<MjValue, MjError> {
     hash_with(&value, |bytes| {
         use sha2::Digest;
@@ -3508,6 +3559,400 @@ fn hash_with(value: &MjValue, digest: impl Fn(&[u8]) -> String) -> Result<MjValu
         return Err(pebble_error("Need a string to hash\n"));
     };
     Ok(MjValue::from(digest(input.as_bytes())))
+}
+
+// ---------------------------------------------------------------------------
+// Pebble core's ten (package #5b Task B4, spec D13)
+// ---------------------------------------------------------------------------
+//
+// `abbreviate`, `base64decode`, `base64encode`, `merge`, `nl2br`,
+// `numberformat`, `rsort`, `sha256` and `urlencode` are Pebble 4.1.2's
+// `CoreExtension` filters and `raw` its `EscaperExtension`'s; Kestra registers
+// none of them itself, so they were outside every W2 batch. Each is ported
+// from the pinned jar (`javap -c -p`), and each refuses an undefined input as
+// strict variables do (`strict_undefined`).
+
+/// `Sha256Filter` — Pebble's, not Kestra's (see [`sha512`]): the same shape
+/// as `ShaBaseFilter`, `Need a string to hash\n` for a non-string, lowercase
+/// hex of the UTF-8 bytes.
+fn sha256(value: MjValue) -> Result<MjValue, MjError> {
+    strict_undefined("sha256", &value)?;
+    hash_with(&value, |bytes| {
+        use sha2::Digest;
+        hex::encode(sha2::Sha256::digest(bytes))
+    })
+}
+
+/// `AbbreviateFilter` — `(String) input`, `(Long) length` narrowed by
+/// `intValue()`, and a cut counted in UTF-16 code units:
+///
+/// - a negative width fails (`Invalid argument to abbreviate filter; must be
+///   greater than zero`); **zero does not** (spec §2.2 item 12, measured);
+/// - shorter than the width, or three units or fewer, is the input;
+/// - a width of three or less is a plain cut (so `abbreviate(0)` of a string
+///   longer than three is empty: the measured `'abc' | abbreviate(0)` is
+///   `abc` only because `abc` is three long);
+/// - otherwise the first `width - 3` units and `...`, so a width EQUAL to the
+///   length still cuts (`'abcdef' | abbreviate(6)` is `abc...`, measured).
+fn abbreviate(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    strict_undefined("abbreviate", &value)?;
+    let Some(text) = pebble_string_cast(&value)? else {
+        return Ok(MjValue::from(()));
+    };
+    let args = Args::new(rest);
+    let width = match args.get("length", 0).filter(|v| !is_java_null(v)) {
+        None => {
+            return Err(pebble_error(
+                "Cannot invoke \"java.lang.Long.intValue()\" because the return value of \
+                 \"java.util.Map.get(Object)\" is null",
+            ))
+        }
+        Some(v) if v.kind() == ValueKind::Number && v.is_integer() => {
+            java_int_value(&v).unwrap_or_default()
+        }
+        Some(v) => {
+            return Err(pebble_error(format!(
+                "class {} cannot be cast to class java.lang.Long",
+                java_class_name(&v)
+            )))
+        }
+    };
+    if width < 0 {
+        return Err(pebble_error(
+            "Invalid argument to abbreviate filter; must be greater than zero",
+        ));
+    }
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let width = width as usize;
+    if units.len() < width || units.len() <= 3 {
+        return Ok(MjValue::from(text));
+    }
+    if width <= 3 {
+        return Ok(MjValue::from(String::from_utf16_lossy(&units[..width])));
+    }
+    let mut out = String::from_utf16_lossy(&units[..width - 3]);
+    out.push_str("...");
+    Ok(MjValue::from(out))
+}
+
+/// `java.util.Base64.getDecoder()`: the standard alphabet, padding optional
+/// but correct when present, no whitespace, unused trailing bits ignored.
+const JAVA_BASE64_DECODER: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
+    &base64::alphabet::STANDARD,
+    base64::engine::GeneralPurposeConfig::new()
+        .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent)
+        .with_decode_allow_trailing_bits(true),
+);
+
+/// `Base64EncoderFilter` — `Object.toString()` (so a number or a map is
+/// encoded as its Java text), UTF-8, standard alphabet with padding.
+fn base64encode(value: MjValue) -> Result<MjValue, MjError> {
+    use base64::Engine as _;
+    strict_undefined("base64encode", &value)?;
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    let text = kestra_to_string(&value);
+    Ok(MjValue::from(
+        base64::engine::general_purpose::STANDARD.encode(text.as_bytes()),
+    ))
+}
+
+/// `Base64DecoderFilter` — a String only (`This filter applies to String\n`
+/// otherwise); a string the decoder refuses is `Please provide a correctly
+/// Base64 encoded string containing an UTF-8 string\n`; the bytes become a
+/// String as UTF-8 with malformed sequences replaced, as `new String(bytes,
+/// UTF_8)` replaces them. An unpadded string decodes (measured).
+fn base64decode(value: MjValue) -> Result<MjValue, MjError> {
+    use base64::Engine as _;
+    strict_undefined("base64decode", &value)?;
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    let Some(text) = value.as_str() else {
+        return Err(pebble_error("This filter applies to String\n"));
+    };
+    // Padding is optional, but present padding must complete the last
+    // four-character unit: Java refuses `YQ=` (measured: `Input byte array
+    // has wrong 4-byte ending unit`) where the crate's indifferent mode
+    // accepts a partial pad.
+    let bad_padding = text.contains('=') && !text.len().is_multiple_of(4);
+    match JAVA_BASE64_DECODER
+        .decode(text.as_bytes())
+        .ok()
+        .filter(|_| !bad_padding)
+    {
+        Some(bytes) => Ok(MjValue::from(String::from_utf8_lossy(&bytes).into_owned())),
+        None => Err(pebble_error(
+            "Please provide a correctly Base64 encoded string containing an UTF-8 string\n",
+        )),
+    }
+}
+
+/// `Nl2brFilter` — every `\n`, `\r` and `\r\n` becomes `<br />`, with **no
+/// escaping** of the rest (`'<a>\nb'` is `<a><br />b`, measured). A
+/// non-string is an `IllegalArgumentException`.
+fn nl2br(value: MjValue) -> Result<MjValue, MjError> {
+    strict_undefined("nl2br", &value)?;
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    let Some(text) = value.as_str() else {
+        return Err(pebble_error("nl2br filters only supports String input."));
+    };
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                out.push_str("<br />");
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+            }
+            '\n' => out.push_str("<br />"),
+            c => out.push(c),
+        }
+    }
+    Ok(MjValue::from(out))
+}
+
+/// `RawFilter` — `new SafeString(input.toString())`. Kestra renders with
+/// `autoEscaping(false)`, so the safe mark changes nothing there; what is
+/// left is the `toString()`, which is Java's text (`[1, 2]`, `{a=1}`), not
+/// the JSON a bare `{{ x }}` writes.
+fn raw(value: MjValue) -> Result<MjValue, MjError> {
+    strict_undefined("raw", &value)?;
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    Ok(MjValue::from(kestra_to_string(&value)))
+}
+
+/// `UrlEncoderFilter` — `URLEncoder.encode(s, "UTF-8")`: form encoding, so a
+/// space is `+`, `a-zA-Z0-9.-*_` stay, and every other UTF-8 byte is `%XX`
+/// in upper-case hex (`~` is `%7E`, measured). `(String) input`.
+fn urlencode(value: MjValue) -> Result<MjValue, MjError> {
+    strict_undefined("urlencode", &value)?;
+    let Some(text) = pebble_string_cast(&value)? else {
+        return Ok(MjValue::from(()));
+    };
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'-' | b'*' | b'_' => {
+                out.push(char::from(byte));
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    Ok(MjValue::from(out))
+}
+
+/// `RsortFilter` — `(List) input`, then `List.sort(Collections.reverseOrder())`
+/// in place, which is [`sort`]'s comparison reversed: a mixed list fails the
+/// same way (`[1, 'a']` is a `ClassCastException`, and so is a context
+/// `[1.5, 3, 2]`, a `Double` beside two `Integer`s), and an immutable list
+/// refuses to be sorted. Unlike `sort` there is no array branch: a `String[]`
+/// (`split`) and a map's key view are not `List`s, so both are cast failures.
+fn rsort(value: MjValue) -> Result<MjValue, MjError> {
+    strict_undefined("rsort", &value)?;
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    let kind = java_seq_kind(&value);
+    let mut items = match value.kind() {
+        ValueKind::Seq | ValueKind::Iterable if kind.is_list() => value
+            .try_iter()
+            .map(Iterator::collect::<Vec<_>>)
+            .unwrap_or_default(),
+        ValueKind::Seq | ValueKind::Iterable => {
+            return Err(pebble_error(format!(
+                "{} cannot be cast to class java.util.List",
+                kind.description()
+            )))
+        }
+        _ => {
+            return Err(pebble_error(format!(
+                "class {} cannot be cast to class java.util.List",
+                java_class_name(&value)
+            )))
+        }
+    };
+    java_list_sort(&mut items, kind, true)?;
+    Ok(java_seq(kind, items))
+}
+
+/// `MergeFilter` — by the INPUT's type:
+///
+/// | input | argument | result |
+/// |---|---|---|
+/// | null | null | fails: `The two arguments to be merged are null` |
+/// | null | any | the argument |
+/// | any | null | the input (measured) |
+/// | Map | Map | a new map, the argument's values winning |
+/// | Map | List | the map plus each element as a key mapped to itself (`{"a":1,"1":1}`, measured) |
+/// | List | List | concatenated |
+/// | List | Map | the list plus one single-entry map per entry (`addAll(map.entrySet())`) |
+/// | array | array | concatenated |
+/// | other | | `The object being filtered is not a Map/List/Array` |
+///
+/// **The merged map keeps insertion order here** where Kestra's is a
+/// `java.util.HashMap`, in bucket order; the crate's standing ruling (see
+/// [`replace`]) is not to port `String.hashCode`'s layout, and every corpus
+/// entry agrees. A key here is a String, so a list element merged into a map
+/// is keyed by its Java text (`1` and `'1'` are one key here, two there).
+fn merge(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    strict_undefined("merge", &value)?;
+    let args = Args::new(rest);
+    let items = args.get("items", 0).unwrap_or_else(|| MjValue::from(()));
+    strict_undefined("merge", &items)?;
+    if is_java_null(&value) {
+        if is_java_null(&items) {
+            return Err(pebble_error("The two arguments to be merged are null"));
+        }
+        return Ok(items);
+    }
+    if is_java_null(&items) {
+        return Ok(value);
+    }
+    let arg_class = |v: &MjValue| match v.kind() {
+        ValueKind::Seq | ValueKind::Iterable => match java_seq_kind(v) {
+            JavaSeqKind::Array => "[Ljava.lang.String;".to_string(),
+            JavaSeqKind::Collection => java_seq_kind(v).description().to_string(),
+            _ => java_class_name(v),
+        },
+        _ => java_class_name(v),
+    };
+    let arg_is_list = matches!(items.kind(), ValueKind::Seq | ValueKind::Iterable)
+        && java_seq_kind(&items).is_list();
+    if let Some(mut entries) = as_map(&value) {
+        if let Some(more) = as_map(&items) {
+            entries.extend(more);
+        } else if arg_is_list {
+            for item in as_list(&items).unwrap_or_default() {
+                entries.push((kestra_to_string(&item), item));
+            }
+        } else {
+            return Err(pebble_error(format!(
+                "Currently, only Maps and Lists can be merged with a Map. Arg2: {}",
+                arg_class(&items)
+            )));
+        }
+        return Ok(MjValue::from_object(OrderedMap::new(entries)));
+    }
+    let kind = java_seq_kind(&value);
+    let Some(mut list) = as_list(&value) else {
+        return Err(pebble_error(
+            "The object being filtered is not a Map/List/Array",
+        ));
+    };
+    match kind {
+        JavaSeqKind::Collection => Err(pebble_error(
+            "The object being filtered is not a Map/List/Array",
+        )),
+        JavaSeqKind::Array => {
+            if java_seq_kind(&items) == JavaSeqKind::Array {
+                list.extend(as_list(&items).unwrap_or_default());
+                Ok(java_seq(JavaSeqKind::Array, list))
+            } else {
+                Err(pebble_error(format!(
+                    "Currently, only Arrays of the same component class can be merged. \
+                     Arg1: java.lang.String, Arg2: {}",
+                    arg_class(&items)
+                )))
+            }
+        }
+        _ => {
+            if let Some(entries) = as_map(&items) {
+                list.extend(
+                    entries.into_iter().map(|(key, item)| {
+                        MjValue::from_object(OrderedMap::new(vec![(key, item)]))
+                    }),
+                );
+            } else if arg_is_list {
+                list.extend(as_list(&items).unwrap_or_default());
+            } else {
+                return Err(pebble_error(format!(
+                    "Currently, only Maps and Lists can be merged with a List. Arg2: {}",
+                    arg_class(&items)
+                )));
+            }
+            Ok(MjValue::from(list))
+        }
+    }
+}
+
+/// `NumberFormatFilter` — `java.text.DecimalFormat` (see
+/// [`super::decimalformat`]): with a `format` pattern, `new
+/// DecimalFormat(format, symbols)`; without one, `NumberFormat.getInstance`,
+/// whose pattern is `#,##0.###` (`1234.5678` is `1,234.568`, measured).
+///
+/// **The locale is pinned to `en`** where Kestra uses the JVM default (spec
+/// D13's recorded divergence); the corpus ran on an `en_VN` JVM, whose number
+/// symbols are `en`'s, so no golden entry shows it.
+///
+/// A non-`Number` input fails with Pebble's text; a `format` that is not a
+/// String is a cast failure; a pattern Java refuses fails with Java's
+/// `IllegalArgumentException` message.
+fn numberformat(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    use super::decimalformat::{DecimalFormat, JavaNumber};
+    strict_undefined("numberformat", &value)?;
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    let number = if let Some(class) = big_number_class(&value) {
+        let canonical = big_number_text(&value).unwrap_or_default();
+        if class == "java.math.BigInteger" {
+            let (negative, magnitude) = match canonical.strip_prefix('-') {
+                Some(rest) => (true, rest.to_string()),
+                None => (false, canonical.clone()),
+            };
+            let long_path = canonical.parse::<i64>().is_ok();
+            JavaNumber::Integer {
+                negative,
+                magnitude,
+                long_path,
+            }
+        } else {
+            JavaNumber::Decimal(canonical)
+        }
+    } else if value.kind() == ValueKind::Number {
+        if value.is_integer() {
+            let (negative, magnitude) = match i128::try_from(value.clone()) {
+                Ok(n) => (n < 0, n.unsigned_abs().to_string()),
+                Err(_) => (
+                    false,
+                    u128::try_from(value.clone())
+                        .map(|n| n.to_string())
+                        .unwrap_or_default(),
+                ),
+            };
+            let long_path = i64::try_from(value.clone()).is_ok();
+            JavaNumber::Integer {
+                negative,
+                magnitude,
+                long_path,
+            }
+        } else {
+            JavaNumber::Double(f64::try_from(value.clone()).unwrap_or(f64::NAN))
+        }
+    } else {
+        return Err(pebble_error(
+            "The input for the 'NumberFormat' filter has to be a number.",
+        ));
+    };
+    let args = Args::new(rest);
+    let format = match args.get("format", 0) {
+        Some(pattern) => pebble_string_cast(&pattern)?,
+        None => None,
+    };
+    let formatter = match format {
+        Some(pattern) => DecimalFormat::parse(&pattern).map_err(pebble_error)?,
+        None => DecimalFormat::english_default(),
+    };
+    Ok(MjValue::from(formatter.format(&number)))
 }
 
 // ---------------------------------------------------------------------------
@@ -8549,5 +8994,239 @@ mod tests {
             include_str!("../../oracle/fixtures/propagation-pairs.answers.json"),
             8,
         );
+    }
+
+    /// Package #5b, Task B1 (spec D13) wrote this as a placeholder in
+    /// `runners::env` while the ten filters were unknown; Task B4 ported them
+    /// and moved it here under the same name, so the seven
+    /// `oracle/error-class-pairs.txt` rows pair with it. Each row fails for
+    /// Kestra's reason, with Kestra's text, and not as an unknown filter.
+    #[test]
+    fn a_filter_input_kestra_refuses_is_refused_here_too() {
+        for (template, context, want) in [
+            (
+                "{{ 'abc' | abbreviate(-1) }}",
+                "{}",
+                "Invalid argument to abbreviate filter; must be greater than zero",
+            ),
+            (
+                "{{ n | abbreviate(3) }}",
+                r#"{"n": 123456}"#,
+                "class java.lang.Integer cannot be cast to class java.lang.String",
+            ),
+            (
+                "{{ '!!' | base64decode }}",
+                "{}",
+                "Please provide a correctly Base64 encoded string containing an UTF-8 string",
+            ),
+            (
+                "{{ 'a' | merge(['b']) }}",
+                "{}",
+                "The object being filtered is not a Map/List/Array",
+            ),
+            (
+                "{{ '12' | numberformat }}",
+                "{}",
+                "The input for the 'NumberFormat' filter has to be a number.",
+            ),
+            (
+                "{{ l | rsort }}",
+                r#"{"l": [1.5, 3, 2]}"#,
+                "class java.lang.Integer cannot be cast to class java.lang.Double",
+            ),
+            // Kestra's text ends `java.lang.Long` (a template literal is a
+            // Long); egret names a small integer `Integer`, spec D2's
+            // recorded Integer/Long divergence, so the class is not asserted.
+            (
+                "{{ [1, 'a'] | rsort }}",
+                "{}",
+                "class java.lang.String cannot be cast to class java.lang.",
+            ),
+        ] {
+            let message = err(template, context);
+            assert!(message.contains(want), "{template}: {message}");
+            assert!(!message.contains("unknown filter"), "{template}: {message}");
+        }
+    }
+
+    /// The ten answer as Pebble's classes do beyond the corpus: the branches
+    /// `javap -c` shows that no golden entry reaches.
+    #[test]
+    fn pebble_core_filters_follow_the_jar() {
+        for (template, context, want) in [
+            // A width of three or less cuts without dots; zero empties a
+            // string longer than three.
+            ("{{ 'abcdef' | abbreviate(0) }}", "{}", ""),
+            ("{{ 'abcdef' | abbreviate(2) }}", "{}", "ab"),
+            ("{{ 'abcdef' | abbreviate(7) }}", "{}", "abcdef"),
+            (
+                "{{ s | abbreviate(5) }}",
+                r#"{"s": "éééééé"}"#,
+                "\u{e9}\u{e9}...",
+            ),
+            ("{{ 12 | base64encode }}", "{}", "MTI="),
+            ("{{ [1, 2] | base64encode }}", "{}", "WzEsIDJd"),
+            ("{{ 'YQ' | base64decode }}", "{}", "a"),
+            (
+                "{{ s | nl2br }}",
+                r#"{"s": "a\rb\n\nc"}"#,
+                "a<br />b<br /><br />c",
+            ),
+            ("{{ 'abc' | nl2br }}", "{}", "abc"),
+            ("{{ [1, 2] | raw }}", "{}", "[1, 2]"),
+            ("{{ {'a': 1} | raw }}", "{}", "{a=1}"),
+            ("{{ 'a b+c' | urlencode }}", "{}", "a+b%2Bc"),
+            ("{{ n | merge(['x']) }}", r#"{"n": null}"#, "[\"x\"]"),
+            ("{{ ['a'] | merge(['b']) | length }}", "{}", "2"),
+            ("{{ {'a': 1} | merge({'a': 2}) }}", "{}", "{\"a\":2}"),
+            (
+                "{{ [1] | merge({'a': 1, 'b': 2}) }}",
+                "{}",
+                "[1,{\"a\":1},{\"b\":2}]",
+            ),
+            ("{{ ['b', 'a', 'c'] | rsort | first }}", "{}", "c"),
+            ("{{ [] | rsort }}", "{}", "[]"),
+            ("{{ [2.5, 10.0, -1.0] | rsort }}", "{}", "[10.0,2.5,-1.0]"),
+            (
+                "{{ 1234567 | numberformat(format='#,##0') }}",
+                "{}",
+                "1,234,567",
+            ),
+            ("{{ n | numberformat(n) }}", r#"{"n": null}"#, ""),
+            (
+                "{{ 1234.5 | numberformat(f) }}",
+                r#"{"f": null}"#,
+                "1,234.5",
+            ),
+            ("{{ 0.5 | numberformat('0') }}", "{}", "0"),
+            ("{{ 2.5 | numberformat('0') }}", "{}", "2"),
+            ("{{ -0.001 | numberformat('0.00') }}", "{}", "-0.00"),
+            ("{{ 0.0125 | numberformat('0.0%') }}", "{}", "1.2%"),
+            (
+                "{{ fromIon(ion='0.0025') | numberformat('0.000') }}",
+                "{}",
+                "0.002",
+            ),
+            (
+                "{{ 'ab' | sha256 }}",
+                "{}",
+                "fb8e20fc2e4c3f248c60c39bd652f3c1347298bb977b8b4d5903b85055620603",
+            ),
+        ] {
+            assert_eq!(ok(template, context), want, "{template}");
+        }
+        for (template, context, want) in [
+            (
+                "{{ 'abc' | abbreviate }}",
+                "{}",
+                "because the return value of",
+            ),
+            (
+                "{{ 'abc' | abbreviate(1.5) }}",
+                "{}",
+                "cannot be cast to class java.lang.Long",
+            ),
+            (
+                "{{ 12 | base64decode }}",
+                "{}",
+                "This filter applies to String",
+            ),
+            (
+                "{{ 'YQ=' | base64decode }}",
+                "{}",
+                "correctly Base64 encoded",
+            ),
+            (
+                "{{ 'a b' | base64decode }}",
+                "{}",
+                "correctly Base64 encoded",
+            ),
+            (
+                "{{ 12 | nl2br }}",
+                "{}",
+                "nl2br filters only supports String input.",
+            ),
+            (
+                "{{ 12 | urlencode }}",
+                "{}",
+                "cannot be cast to class java.lang.String",
+            ),
+            ("{{ 12 | sha256 }}", "{}", "Need a string to hash"),
+            (
+                "{{ n | merge(n) }}",
+                r#"{"n": null}"#,
+                "The two arguments to be merged are null",
+            ),
+            (
+                "{{ [1] | merge('x') }}",
+                "{}",
+                "only Maps and Lists can be merged with a List. Arg2: java.lang.String",
+            ),
+            (
+                "{{ {'a': 1} | merge(2) }}",
+                "{}",
+                "only Maps and Lists can be merged with a Map. Arg2: java.lang.Integer",
+            ),
+            (
+                "{{ {'a': 1} | keys | merge([1]) }}",
+                "{}",
+                "not a Map/List/Array",
+            ),
+            (
+                "{{ 'a' | rsort }}",
+                "{}",
+                "class java.lang.String cannot be cast to class java.util.List",
+            ),
+            (
+                "{{ 'a,b' | split(',') | rsort }}",
+                "{}",
+                "cannot be cast to class java.util.List",
+            ),
+            ("{{ [[2], [1]] | flatten | rsort }}", "{}", "immutable list"),
+            ("{{ true | numberformat }}", "{}", "has to be a number"),
+            (
+                "{{ 1 | numberformat(2) }}",
+                "{}",
+                "cannot be cast to class java.lang.String",
+            ),
+            (
+                "{{ 1 | numberformat('#,') }}",
+                "{}",
+                "Malformed pattern \"#,\"",
+            ),
+            (
+                "{{ 1 | numberformat('0.0E0') }}",
+                "{}",
+                "scientific notation",
+            ),
+        ] {
+            let message = err(template, context);
+            assert!(message.contains(want), "{template}: {message}");
+        }
+        // An undefined input is refused as strict variables refuse it, never
+        // treated as a null.
+        for filter in [
+            "abbreviate(3)",
+            "base64decode",
+            "base64encode",
+            "merge([1])",
+            "nl2br",
+            "numberformat",
+            "raw",
+            "rsort",
+            "sha256",
+            "urlencode",
+        ] {
+            for subject in ["nothere", "obj.missing"] {
+                let template = format!("<{{{{ {subject} | {filter} }}}}>");
+                let message = err(&template, r#"{"obj": {}}"#);
+                assert!(
+                    message.contains("an undefined value reached"),
+                    "{template}: {message}"
+                );
+            }
+        }
+        let message = err("{{ [1] | merge(nothere) }}", "{}");
+        assert!(message.contains("an undefined value reached"), "{message}");
     }
 }

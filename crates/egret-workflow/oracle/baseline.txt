@@ -906,66 +906,22 @@ coalesce-non-path-left-missing-right
 # does not.
 function-min-classname-long
 
-# B4 (D13)'s 53: the ten filters (`abbreviate`, `base64encode`,
-# `base64decode`, `merge`, `nl2br`, `numberformat`, `raw`, `rsort`, `sha256`,
-# `urlencode`) are unknown here. Measured against D13: `abbreviate(0)` is the
-# input unchanged (only a negative width fails), an unpadded base64 decodes,
-# `merge` of a map with a list adds each element as a key of itself, and a
-# null `merge` argument is the input. `numberformat` ran on an `en_VN` JVM, so
-# the D13 locale divergence is not exercised.
-filter-abbreviate
-filter-abbreviate-short
-filter-abbreviate-exact-length
-filter-abbreviate-one-over
-filter-abbreviate-three
-filter-abbreviate-four
-filter-abbreviate-zero
-filter-abbreviate-null
-filter-base64encode
-filter-base64encode-empty
-filter-base64encode-null
-filter-base64encode-padding
-filter-base64decode
-filter-base64decode-padded
-filter-base64decode-unpadded
-filter-base64decode-null
-filter-merge-list-list
-filter-merge-map-map
-filter-merge-list-map
-filter-merge-map-list
-filter-merge-context-lists
-filter-merge-context-maps
-filter-merge-null-argument
+# (B4 (D13)'s 53 were here: the ten filters `abbreviate`, `base64encode`,
+# `base64decode`, `merge`, `nl2br`, `numberformat`, `raw`, `rsort`, `sha256`
+# and `urlencode`. Task B4 (2026-10-29) BANKED 51; `numberformat` pins the
+# `en` locale (spec D13's divergence), but the golden ran on an `en_VN` JVM,
+# whose number symbols are `en`'s, so no line here records it. Two stay,
+# re-attributed:)
+#
+# RECORDED DIVERGENCE (spec D14, a string literal spanning a newline),
+# re-attributed by Task B4 (2026-10-29): `nl2br` is ported and answers both
+# from a context string (`filter-nl2br-crlf` banked, and
+# `runners::filters::tests::pebble_core_filters_follow_the_jar`), but these
+# two write the newline INSIDE a template string literal, which Pebble accepts
+# and egret's rewriter refuses (`unterminated string literal`) before the
+# filter runs. D14 records that and does not change it in package #5.
 filter-nl2br
 filter-nl2br-no-escaping
-filter-nl2br-crlf
-filter-nl2br-null
-filter-numberformat
-filter-numberformat-no-argument
-filter-numberformat-long
-filter-numberformat-long-pattern
-filter-numberformat-negative
-filter-numberformat-half-even
-filter-numberformat-percent
-filter-numberformat-optional-digits
-filter-numberformat-bigdecimal
-filter-numberformat-no-argument-many-digits
-filter-numberformat-null
-filter-raw
-filter-raw-after-escape
-filter-raw-number
-filter-raw-null
-filter-rsort-longs
-filter-rsort-strings
-filter-rsort-context
-filter-rsort-null
-filter-sha256
-filter-sha256-empty
-filter-sha256-utf8
-filter-sha256-null
-filter-urlencode
-filter-urlencode-unreserved
-filter-urlencode-null
 
 # B5 (D12)'s 91: every `escape` strategy but `html` is refused here. One
 # entry per run of unbescape 1.1.6's level-2 tables (both ends of the run,

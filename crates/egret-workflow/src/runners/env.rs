@@ -4329,7 +4329,8 @@ mod tests {
     /// Asserts that every `(source, context)` row fails to render. B1 wrote
     /// four tests as the pairs of its born-matching error-class entries
     /// (`oracle/error-class-pairs.txt`); B2 tightened its own and B3 moved
-    /// `max`/`min`'s to `runners::functions`, so the two below still use this.
+    /// `max`/`min`'s to `runners::functions` and B4 the ten filters' to
+    /// `runners::filters`, so the one below still uses this.
     fn assert_each_fails(rows: &[(&str, JsonValue)]) {
         for (source, ctx) in rows {
             let got = render(source, ctx.clone());
@@ -4386,25 +4387,10 @@ mod tests {
     // placeholder; Task B3 ported `max`/`min` and its refusal is asserted with
     // Kestra's text by the test of that name in `runners::functions::tests`.)
 
-    /// Package #5b, Task B1 (spec D13): inputs the ten filters refuse in
-    /// Kestra: a negative `abbreviate` width, a non-string `abbreviate` input,
-    /// a bad base64 string, `merge` on a string, `numberformat` on a string,
-    /// and `rsort` of mixed classes (a context list of a Double and two
-    /// Integers fails too). **Placeholder:** today they fail because the
-    /// filters are unknown here. Task B4 must keep every row failing for
-    /// Kestra's reason, then tighten this to Kestra's text.
-    #[test]
-    fn a_filter_input_kestra_refuses_is_refused_here_too() {
-        assert_each_fails(&[
-            ("{{ 'abc' | abbreviate(-1) }}", json!({})),
-            ("{{ n | abbreviate(3) }}", json!({ "n": 123456 })),
-            ("{{ '!!' | base64decode }}", json!({})),
-            ("{{ 'a' | merge(['b']) }}", json!({})),
-            ("{{ '12' | numberformat }}", json!({})),
-            ("{{ l | rsort }}", json!({ "l": [1.5, 3, 2] })),
-            ("{{ [1, 'a'] | rsort }}", json!({})),
-        ]);
-    }
+    // (`a_filter_input_kestra_refuses_is_refused_here_too` was here, Task
+    // B1's placeholder; Task B4 ported the ten filters and the refusals are
+    // asserted with Kestra's text by the test of that name in
+    // `runners::filters::tests`.)
 
     /// Package #5b, Task B1 (spec D12): a strategy Pebble's `EscapeFilter`
     /// does not register fails (`Unknown escaping strategy [x]`); the names
