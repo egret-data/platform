@@ -1819,10 +1819,12 @@ mod tests {
     #[test]
     fn every_honoured_flow_and_loop_key_is_run_or_warned() {
         const LOOP: &str = "io.kestra.plugin.core.flow.Loop";
-        // Package #6 makes these run (spec D1, D5, D6, D7): `Loop.outputs`
+        // Package #6 made four keys run (spec D1, D5, D6, D7): `Loop.outputs`
         // and `Loop.fetchType` (Tasks A3-A5), `Loop.retry` (A6, inherited by
-        // the iteration's tasks) and `Flow.outputs` (B1, B2).
-        const PACKAGE_6: &[(&str, &str)] = &[
+        // the iteration's tasks) and `Flow.outputs` (B1, B2). Task Z,
+        // 2026-10-29: moved from a separate PACKAGE_6 list into RUN once all
+        // four ran; they are still checked below to be honoured in the file.
+        const RUN_SINCE_PACKAGE_6: &[(&str, &str)] = &[
             (LOOP, "outputs"),
             (LOOP, "fetchType"),
             (LOOP, "retry"),
@@ -1838,6 +1840,7 @@ mod tests {
             (FLOW_ROW, "inputs"),
             (FLOW_ROW, "labels"),
             (FLOW_ROW, "namespace"),
+            (FLOW_ROW, "outputs"),
             (FLOW_ROW, "retry"),
             (FLOW_ROW, "tasks"),
             (FLOW_ROW, "triggers"),
@@ -1848,8 +1851,11 @@ mod tests {
             (LOOP, "description"),
             (LOOP, "disabled"),
             (LOOP, "errors"),
+            (LOOP, "fetchType"),
             (LOOP, "finally"),
             (LOOP, "id"),
+            (LOOP, "outputs"),
+            (LOOP, "retry"),
             (LOOP, "runIf"),
             (LOOP, "tasks"),
             (LOOP, "timeout"),
@@ -1861,8 +1867,7 @@ mod tests {
         for (row, site) in [(FLOW_ROW, Site::Flow), (LOOP, Site::Task(LOOP))] {
             for (key, treatment) in &property_treatment()[row] {
                 let honoured = matches!(treatment, Treatment::Honoured);
-                let named =
-                    RUN.contains(&(row, key.as_str())) || PACKAGE_6.contains(&(row, key.as_str()));
+                let named = RUN.contains(&(row, key.as_str()));
                 if honoured && !named && lift_of(site, key).is_none() {
                     unaccounted.push(format!("{row}.{key}"));
                 }
@@ -1872,9 +1877,10 @@ mod tests {
             unaccounted.is_empty(),
             "honoured but neither run by egret nor warned: {unaccounted:?}"
         );
-        // The three keys of this package are honoured in the measured file
-        // (A1 regenerated it), not merely listed.
-        for (row, key) in PACKAGE_6 {
+        // The four keys package #6 made run are in RUN and honoured in the
+        // measured file (A1 regenerated it), not merely listed.
+        for (row, key) in RUN_SINCE_PACKAGE_6 {
+            assert!(RUN.contains(&(*row, *key)), "{row}.{key} is not in RUN");
             assert!(
                 matches!(
                     property_treatment()[*row].get(*key),

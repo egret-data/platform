@@ -2,7 +2,7 @@
 
 # Gói workflow #6 "`outputs` của `Loop`, `retry` của `Loop` và outputs cấp flow"
 
-**Trạng thái:** thiết kế ngày 2026-10-29; chưa xây. **Một PR** (quyết định Q1 của người dùng), nhánh `feat/workflow-loop-outputs`, các Task T0, A1–A6, B1–B4 và task tài liệu Z của kế hoạch. Trạng thái như-đã-xây được ghi vào §7 khi PR vào main. Dòng #6 và ghi chú 6 của lộ trình `docs/en/plans/2026-10-18-workflow-kestra-parity-roadmap.md`. Kế hoạch: `docs/en/plans/2026-10-29-workflow-loop-outputs.md`. Khảo sát (file:line cho mọi khẳng định, các tiền đề đã đo): `docs/en/specs/2026-10-29-workflow-loop-outputs-survey.md`. Kestra là bản checkout `data-portal/kestra`, `96893b58`; engine của oracle executor là image ghim ở `oracle-exec/docker-compose.yml:31` (`v2.0.0-rc13`), mà `javap` cho thấy có cùng API `Loop`.
+**Trạng thái:** thiết kế ngày 2026-10-29; **xây xong 2026-10-29** (Task T0, A1–A6, B1–B4, Z; §7 "Như đã xây"), PR đang review. Số migration `0211` chỉ được kiểm tra lại trên các ref cục bộ (không có mạng); việc kiểm tra lại có mạng của D12 với `origin/main` và mọi PR đang mở **vẫn còn nợ trước khi merge**. **Một PR** (quyết định Q1 của người dùng), nhánh `feat/workflow-loop-outputs`, các Task T0, A1–A6, B1–B4 và task tài liệu Z của kế hoạch. Trạng thái như-đã-xây được ghi vào §7 khi PR vào main. Dòng #6 và ghi chú 6 của lộ trình `docs/en/plans/2026-10-18-workflow-kestra-parity-roadmap.md`. Kế hoạch: `docs/en/plans/2026-10-29-workflow-loop-outputs.md`. Khảo sát (file:line cho mọi khẳng định, các tiền đề đã đo): `docs/en/specs/2026-10-29-workflow-loop-outputs-survey.md`. Kestra là bản checkout `data-portal/kestra`, `96893b58`; engine của oracle executor là image ghim ở `oracle-exec/docker-compose.yml:31` (`v2.0.0-rc13`), mà `javap` cho thấy có cùng API `Loop`.
 
 Viết tắt như trong khảo sát: `EW` = `crates/egret-workflow/`, `OE` = `EW oracle-exec/`, `KX` = `kestra/executor/src/main/java/io/kestra/executor/`, `KL` = `kestra/core/src/main/java/io/kestra/plugin/core/flow/Loop.java`.
 
@@ -14,7 +14,7 @@ Ba thứ một flow đã lưu khai báo được parse, được lưu và không
 2. **`retry:` của một `Loop`.** Kestra cho một task thất bại bên trong vòng lặp dùng `retry:` của tổ tiên gần nhất, đi ngược cây task của flow cha lên qua `Loop` (`KX ExecutorService.java:576-599`, `:841-856`). `spawn::sub_flow_source` của egret (`EW src/worker/spawn.rs:830-899`) bỏ `retry:` của `Loop` khi dựng flow của vòng lặp, và `retry::policy_for` (`EW src/executor/retry.rs:156-190`) dừng ở gốc của sub-execution. Không có cảnh báo nào nói điều đó.
 3. **`outputs:` cấp flow.** Kestra tính chúng khi execution kết thúc (`KX ExecutorService.java:441-477`), trước khi `afterExecution:` chạy, và một lỗi biến execution thành `FAILED`. egret kiểm tra chúng (`EW src/spec/validate.rs:1088-1096`) và không bao giờ tính: `execution.outputs` là hằng `{}` (`EW src/worker/render.rs:279-284`), `outputs.<sub>.outputs` của một `Subflow` cũng vậy (`EW src/worker/subflow.rs:774-779`), và `workflow.executions` không có cột `outputs`. Không có cảnh báo nào nói điều đó.
 
-Số bank (quy nguyên nhân, đo bởi T0 và từng task): **8** entry executor là cận trên, 6 chắc chắn, từ **301 / 35 / 35 / 0** sau merge xuống **301 / 27 / 27 / 0** (chắc chắn **29 / 29**). Trong các entry gói này chạm tới, chỉ `subflow-secret-output-child` và `-parent` ở lại.
+Số bank (quy nguyên nhân, đo bởi T0 và từng task): **8** entry executor là cận trên, 6 chắc chắn, từ **301 / 35 / 35 / 0** sau merge xuống **301 / 27 / 27 / 0** (chắc chắn **29 / 29**). Trong các entry gói này chạm tới, chỉ `subflow-secret-output-child` và `-parent` ở lại. *Đo được, 2026-10-29 (Task Z): bank **10**, **301 / 35 / 35 / 0 → 301 / 25 / 25 / 0**; hai entry `subflow-secret-output-*` cũng được bank (xem phần sửa Q3 bên dưới; §4, §7).*
 
 ## 2. Quyết định
 
@@ -22,7 +22,7 @@ Số bank (quy nguyên nhân, đo bởi T0 và từng task): **8** entry executo
 
 - **Q1. `outputs:` cấp flow thuộc #6, trong cùng PR.** Không tách thành #6a/#6b. PR mang theo migration (D11). Các chữ cái task #6a/#6b của khảo sát trở thành A (Loop) và B (flow) trong một kế hoạch.
 - **Q2. `retry-flowable-parallel` thuộc #6.** `retry:` của chính một `Loop` (và của một tổ tiên) được các task của mỗi vòng lặp thừa kế (D7).
-- **Q3. Outputs SECRET được mã hoá bằng khoá của egret và bị che ở mọi nơi**, như input SECRET (KI-112, `EW src/secret_inputs.rs`; D9). `subflow-secret-output-child` và `-parent` vẫn nằm trong baseline: Kestra làm chúng thất bại chỉ vì harness oracle của nó không có khoá mã hoá, một khác biệt của harness, không phải lỗ hổng của egret.
+- **Q3. Outputs SECRET được mã hoá bằng khoá của egret và bị che ở mọi nơi**, như input SECRET (KI-112, `EW src/secret_inputs.rs`; D9). `subflow-secret-output-child` và `-parent` vẫn nằm trong baseline: Kestra làm chúng thất bại chỉ vì harness oracle của nó không có khoá mã hoá, một khác biệt của harness, không phải lỗ hổng của egret. *Sửa ngày 2026-10-29 (Task B1, B3, Task Z ghi lại): cả hai đã được bank. egret của oracle cũng không có master key, giống hệt harness của Kestra, nên egret từ chối lưu output SECRET và con kết thúc `CREATED RUNNING SUCCESS FAILED` như Kestra (B1), rồi run `Subflow` của cha thất bại như `failSubflowDueToOutput` của Kestra (B3). Bản thân quyết định vẫn giữ: có khoá thì egret niêm phong và che giá trị (ghim bằng `tests/worker.rs`).*
 - **Q4. Một output kiểu FILE, hoặc một URI STORE, trỏ ra ngoài bộ lưu trữ của chính execution thì bị từ chối**, ghi nhận là một khác biệt bảo mật (Kestra OSS không kiểm tra gì; D10, §6).
 - **Q5. Outputs tích luỹ của `Loop` có trần:** 1 MiB cho map của mỗi vòng lặp và 16 MiB cho cả danh sách. Vượt một trong hai, vòng lặp thất bại với thông báo chỉ tới `fetchType: STORE` (D4). Kestra không có trần; ghi nhận là giới hạn riêng của egret (§6).
 
@@ -84,7 +84,7 @@ Quyết định của controller theo các quy tắc tự chủ. Mỗi mục nê
   - không projection API nào chọn các cột niêm phong; `trigger.outputs` của một Flow trigger và flow cha của `Subflow` thấy mặt nạ trừ khi chúng cùng họ execution (cha của `Subflow` chép object niêm phong của con vào `secret_outputs` của task run `Subflow`, như input của con `Subflow` đi qua `split` hôm nay);
   - một triển khai không có master key từ chối lúc tính, nêu tên output và setting, như việc khởi chạy với input SECRET bị từ chối; vòng lặp hoặc execution thất bại;
   - một output SECRET dưới STORE bị từ chối lúc lưu (D8): file ION sẽ giữ giá trị dạng rõ trong bộ lưu trữ mà `read()` trả về dạng văn bản. Khác biệt được ghi nhận (§6): Kestra ghi dạng đã mã hoá vào file;
-  - `subflow-secret-output-child` và `-parent` vẫn trong baseline, quy lại nguyên nhân trong `OE baseline.txt` là khác biệt harness (oracle của Kestra không có khoá nên Kestra FAILED; egret có khoá thì thành công).
+  - `subflow-secret-output-child` và `-parent` vẫn trong baseline, quy lại nguyên nhân trong `OE baseline.txt` là khác biệt harness (oracle của Kestra không có khoá nên Kestra FAILED; egret có khoá thì thành công). *Sửa ngày 2026-10-29 (Task Z): cả hai đã được bank (B1, B3), vì egret của oracle không có master key, như harness của Kestra; xem Q3.*
 - **D10. Output FILE và URI STORE ở trong bộ lưu trữ của chính execution (Q4).** Giá trị của một output `type: FILE` (flow hoặc `Loop`), sau khi render, phải là một URI `kestra:///` có `{exec}` là **chính execution đó hoặc một execution khác trong họ loop của nó** (gốc loop và các vòng lặp của nó, `loop_family` của `storage::index`), và phân giải là đọc được (`resolve_readable_many`). Mọi thứ khác (một execution khác của chuỗi replay hoặc tập trigger, namespace khác, URI sai dạng, đường dẫn không phải `kestra://`) làm output thất bại với `egret refuses output <id>: <uri> is not a file of this execution`. URI STORE do chính egret ghi (D5) theo cấu tạo nằm trong prefix của sub-execution. Một URI đọc lại từ danh sách STORE của `Loop` đi qua quyết định đọc được hiện có, không đổi. Quy tắc này hẹp hơn quy tắc đọc được, vốn cũng cho phép chuỗi replay và họ trigger: một output công bố một file, còn một lần đọc chỉ tiêu thụ nó.
 - **D11. Một migration.** `workflow.executions` thêm `outputs jsonb` (NULL = chưa tính outputs) và `secret_outputs bytea`; `workflow.task_runs` thêm `secret_outputs bytea`. Comment như trong `0203`. Không backfill: các execution kết thúc trước migration chưa từng được tính outputs. **Số:** số trống tiếp theo trên số cao nhất của main **và** trên migration của mọi PR đang mở. Đo ngày 2026-10-29 trên ref cục bộ (không có mạng): số cao nhất trên `origin/main` và trên mọi nhánh cục bộ và remote-tracking là `0210_workflow_execution_is_idle.sql`, nên file là `migrations/0211_workflow_execution_outputs.sql`. Số này là tạm thời (D12). T0 kiểm tra lại sau khi merge main (2026-10-29, ref cục bộ, không có mạng): vẫn là `0210` ở mọi nơi, `0211` còn trống.
 - **D12. Kiểm tra lại số migration lúc merge.** Không gian số dùng chung với mọi nhánh đang mở (`no_two_migration_files_share_a_version` chỉ bắt được va chạm khi cả hai file nằm trên một nhánh, và một va chạm trên database đã từng thấy main làm `migrate()` dừng với `VersionMismatch`, nên không cột nào của PR này tồn tại). Ngay trước khi merge PR (có mạng): `git fetch origin`, `git ls-tree --name-only origin/main migrations/ | tail -1`, và với mỗi PR đang mở (`gh pr list --state open --json number,headRefName`), `git ls-tree --name-only origin/<head> migrations/ | tail -1`. Nếu có số `0211` trở lên, đổi số bằng `git mv` thành một số trên số cao nhất, rồi quét ba quần thể: tên file, số trần (comment, tài liệu, spec này) và mọi identifier đặt theo số. Merge main vào nhánh sau khi đổi số và chạy lại các test migration.
@@ -114,6 +114,22 @@ Quyết định của controller theo các quy tắc tự chủ. Mỗi mục nê
 | B2 | `after-execution` | **27 / 29** |
 | B3, B4 | không | 27 / 29 |
 
+**Đo được, 2026-10-29 (Task Z sửa; bảng trên là dự đoán của thiết kế).** Bắt đầu **301 / 35 / 35 / 0** sau #5b (T0); census 295 / 25 / 21 ở mọi task và ở cuối.
+
+| Task | Entry được bank (đo được) | Ratchet sau |
+|---|---|---|
+| T0, A1, A2 | không | 301 / 35 / 35 / 0 |
+| A3 | `loop-outputs-failed-render` | 301 / 34 / 34 / 0 |
+| A4 | `loop-outputs`, `if-in-parallel`, và bank sớm (kế hoạch đặt ở A5) `loop-outputs-auto`, `loop-outputs-store`: danh sách có với mọi `fetchType`, nên `end` render được; chỉ theo trạng thái, A5 ghi nội dung | 301 / 30 / 30 / 0 |
+| A5 | không (nội dung STORE/AUTO ghim bằng test) | 301 / 30 / 30 / 0 |
+| A6 | `retry-flowable-parallel` | 301 / 29 / 29 / 0 |
+| B1 | `flow-with-outputs-failed`, và ngoài dự đoán `subflow-secret-output-child` (egret của oracle không có master key, Q3) | 301 / 27 / 27 / 0 |
+| B2 | `after-execution` | 301 / 26 / 26 / 0 |
+| B3 | `subflow-secret-output-parent` (B1 quy lại cho B3) | 301 / 25 / 25 / 0 |
+| B4 | không | **301 / 25 / 25 / 0** |
+
+Mọi entry "có thể" đều dịch chuyển, nên "cận trên" và "chắc chắn" không còn khác nhau: bank 10 so với 8 cận trên / 6 chắc chắn của thiết kế.
+
 "Chắc chắn" chỉ đếm các entry có độ tin cậy cao trong khảo sát; một entry "có thể" không dịch chuyển giữ dòng baseline của nó, quy lại theo nguyên nhân task của nó đo được. Một lần bank gỡ dòng của nó trong `OE baseline.txt` trong cùng commit (test thất bại nếu còn dòng chưa gỡ).
 
 **Không oracle nào thấy outputs** (khảo sát R1): `golden.json` và `traces.json` chỉ ghi trạng thái. Mọi khẳng định về nội dung (hình dạng item, thứ tự, kiểu, URI STORE, bộ đếm, che) được ghim bằng unit test và integration test viết theo khảo sát §2, liệt kê theo task trong kế hoạch. `working-directory-loop` (ba `outputs:` `Loop` lồng nhau, không có golden) được dùng làm fixture integration.
@@ -125,6 +141,10 @@ Quyết định của controller theo các quy tắc tự chủ. Mỗi mục nê
 - Output SECRET dưới STORE (ION mã hoá), nếu được yêu cầu (D9).
 - `subflow-secret-output-*`: một harness có khoá phía Kestra sẽ bank chúng.
 - Kestra tính `outputs:` của flow cha trong mọi vòng lặp `Loop` (D6): xem lại nếu Kestra thay đổi.
+- *Task Z thêm, 2026-10-29:* `subflow-secret-output-*` đã được bank (phần sửa Q3), nên mục thứ tư không còn ý nghĩa với ratchet; một harness có khoá vẫn là cách để oracle thấy đường có khoá.
+- *Task Z thêm, 2026-10-29:* gắn `trigger` trong render của chính các task của flow được kích hoạt (`{{ trigger.outputs.x }}` trong một task; hiện chỉ `inputs:` của Flow trigger thấy nó, §2.2 mục 13). Một thay đổi chung của bề mặt render, ghi trên lộ trình dưới dòng #11.
+- *Task Z thêm, 2026-10-29:* tập được bảo vệ của pruner không gồm các file mà con `Subflow` đã công bố trong lúc cha còn chạy (§2.2 mục 14).
+- *Task Z thêm, 2026-10-29:* input SECRET vẫn bị lộ trong ngữ cảnh render của Flow trigger (việc tiếp theo của KI-112, §2.2 mục 12).
 
 ## 6. Khác biệt được ghi nhận
 
@@ -132,10 +152,73 @@ Quyết định của controller theo các quy tắc tự chủ. Mỗi mục nê
 2. **Output FILE và URI STORE ngoài họ loop của execution bị từ chối** (D10, Q4, bảo mật). Kestra OSS chấp nhận mọi URI. Điều này bao gồm việc cha công bố lại file của con `Subflow` thành output FILE của mình; cha vẫn có thể ĐỌC nó (Task B4, §2.2 mục 14), như trong Kestra.
 3. **Outputs của `Loop` có trần** 1 MiB mỗi vòng lặp và 16 MiB mỗi `Loop` (D4, Q5). Kestra không có trần. **Outputs cấp flow có trần 16 MiB mỗi execution** (quyết định của controller 2026-10-29, §2.2 mục 10).
 4. **Một output SECRET dưới STORE bị từ chối lúc lưu** (D9). Kestra ghi dạng đã mã hoá.
-5. **Một triển khai không có master key làm output SECRET thất bại** (D9), như nó từ chối khởi chạy với input SECRET. Kestra cũng thất bại (lý do `subflow-secret-output-*` vẫn trong baseline).
+5. **Một triển khai không có master key làm output SECRET thất bại** (D9), như nó từ chối khởi chạy với input SECRET. Kestra cũng thất bại (lý do `subflow-secret-output-*` vẫn trong baseline). *Sửa ngày 2026-10-29 (Task Z): vì cả hai harness oracle đều chạy không có khoá, hai entry này đã được bank (Q3).*
 6. **Thứ tự của các vòng lặp đồng thời** là thứ tự kết thúc của egret; của Kestra cũng không tất định (khảo sát R5). Không phải khác biệt ai đo được; ghi lại để người đọc không ghim nó.
 7. **Một execution con của `Subflow` kết thúc trước `RUNNING` và chỉ khai báo outputs literal làm lần chạy `Subflow` thất bại trong egret** (Task B3, §2.2 mục 13): egret chỉ tính outputs của flow cho một execution đã chạy và chép những gì đã lưu; Kestra render lại chúng trong cha và sẽ công bố các literal. Không có mục corpus nào.
+8. **Id output trùng trong một `Loop` bị từ chối lúc lưu** (`duplicate_output_id`, Task A1, §2.2 mục 8). Riêng của egret: Kestra từ chối id trùng trong `outputs:` của flow (`FlowValidator.java:107-111`), điều mà egret nay cũng làm, nhưng không bao giờ nhìn vào `outputs:` của một `Loop`; egret từ chối cả ở đó, vì một id trùng sẽ âm thầm ghi đè output kia trong map của vòng lặp. Tiền đề của D8 rằng kiểm tra này đã có là sai một nửa.
+9. **File STORE tên là `outputs.ion`** (`kestra:///{ns}/{flow}/executions/{vòng lặp}/outputs.ion`, Task A5), trong khi của Kestra là một `{n}.ion` ngẫu nhiên; một lần settle chạy lại ghi đè chính object của nó (tiền lệ `result.ion` của SQL STORE). Đo với lần chạy `loop-outputs-auto` của artifact: trường duy nhất khác ngoài `nextOffset` (mục 10).
+10. **`nextOffset` không được ghi** trên run `Loop` (D4): egret đọc `values:` từ file theo chỉ số.
 
 ## 7. Như đã xây
 
-Do task tài liệu Z viết khi PR sẵn sàng: số bank đo được, gốc của T0, số migration thực dùng và thời điểm kiểm tra lại, và mọi quyết định mà một task đã sửa.
+Task Z viết ngày 2026-10-29, từ báo cáo của các task (`.superpowers/sdd/2026-10-29-workflow-loop-outputs/`, không nằm trong git) và đo lại ở cuối.
+
+**Commit** trên `feat/workflow-loop-outputs`: T0 `1f386ef0` (trên commit merge #5b, `271b1c17`), A1 `4aed4902`, A2 `a66c038d`, A3 `37497daa`, A4 `4d72dd84`, A5 `8356d7de`, A6 `3b340428`, B1 `5bb5684a`, B2 `c8db713c`, B3 `4140f48e`, B4 `6170c8e4`, rồi Task Z (tài liệu và việc dọn fence test).
+
+**Đo được.** Ratchet executor **301 / 35 / 35 / 0** ở T0 → **301 / 25 / 25 / 0** ở cuối, `(301, 276, 25)`; census **295 / 25 / 21** không đổi ở mọi task. **Bank 10** (thiết kế nói 8 cận trên, 6 chắc chắn): `loop-outputs-failed-render` (A3); `loop-outputs`, `if-in-parallel`, `loop-outputs-auto`, `loop-outputs-store` (A4; hai entry sau sớm hơn kế hoạch, theo trạng thái, A5 ghi nội dung của chúng); `retry-flowable-parallel` (A6); `flow-with-outputs-failed`, `subflow-secret-output-child` (B1); `after-execution` (B2); `subflow-secret-output-parent` (B3). Chuỗi theo từng task nằm ở §4. `handler_surface.py`: baseline 25, trần 286 → 290. Không oracle nào thấy outputs; nội dung được ghim bằng integration test (`tests/worker.rs`, `storage_render.rs`, `storage_prune.rs`, `prefetch_hold.rs`, `flow_trigger_fire.rs`, `flow_trigger_windows.rs`, `executions_routes.rs`), và `loop-outputs-auto` được so từng trường với lần chạy mà artifact W9a đã đo (`w9a-storage.json`).
+
+**Migration:** `migrations/0211_workflow_execution_outputs.sql` (`workflow.executions.outputs jsonb`, `workflow.executions.secret_outputs bytea`, `workflow.task_runs.secret_outputs bytea`). Nó được thêm bởi **Task A4**, không phải B1 như kế hoạch, vì A4 là task đầu tiên lưu map của một `Loop` và phải niêm phong các giá trị SECRET; B1 dùng lại nó, nên PR vẫn chỉ có một migration. Số này được kiểm tra trên mọi ref cục bộ và remote-tracking (không có mạng) ngày 2026-10-29 bởi T0 và lại bởi A4: số cao nhất ở mọi nơi là `0210`. **Việc kiểm tra lại có mạng của D12 (`origin/main` và mọi PR đang mở) chưa làm; nó là một mục checklist trước khi merge trong mô tả PR.**
+
+**Các quyết định mà một task đã sửa hoặc đưa ra (ngoài §2.2 mục 8–14):**
+- **A2.** Bộ tính nhận một `&RenderContext` (`Surface` của worker là private trong `worker`) và trả thêm trường thứ ba, `warnings`, mà bên gọi ghi log: một hàm thuần không thể ghi log. Mọi lỗi đều nêu id của output (lỗi render của Kestra thì không).
+- **A3.** Outputs của `Loop` được tính ở **mọi** trạng thái kết thúc của vòng lặp (kể cả FAILED và KILLED), như `DefaultExecutor` của Kestra. **B1 sửa:** không nối thêm `FAILED` thứ hai vào một execution hay vòng lặp đã `FAILED` (`State.withState` của Kestra không làm gì trong trường hợp đó).
+- **A4.** Migration, việc niêm phong và che SECRET, việc từ chối khi không có master key và kiểm tra họ loop của FILE được kéo lên từ B1/B4, để không task nào lưu một giá trị SECRET ở dạng rõ hay một URI chưa kiểm tra. Bộ đếm có trên mọi run `Loop`, có hay không có `outputs:` (`{0, 0, {}}` cho một `Loop` không có giá trị).
+- **A5.** STORE: map đã định kiểu là một file Ion mỗi vòng lặp, tên cố định `outputs.ion`, tại `kestra:///{ns}/{flow}/executions/{id vòng lặp}/outputs.ion`, ghi bằng `runners::write_ion_json` (kế hoạch nêu `write_ion_element`, vốn nhận một phần tử Ion chứ không phải map JSON; đầu ra trùng từng byte với file của artifact), được đánh chỉ mục cho quy tắc đọc và pruner, giới hạn bởi `workflow.storage.max_file_bytes`; một `Loop` dùng STORE trên triển khai không có `[storage]` làm vòng lặp thất bại và nêu tên thiết lập. **Việc ghi object không bao giờ chạy trong transaction:** nó đi qua `Prefetch::upload` (lần thử đầu ghi nhận việc ghi và rollback, việc ghi chạy khi không giữ gì, lần thử sau đánh chỉ mục và commit), tức quy tắc prefetch của W9c áp cho việc ghi. **AUTO** là STORE khi `values:` đã render của run `Loop` bắt đầu bằng `kestra://`, `file://` hoặc `nsfile://` (`URIFetcher.supports` của Kestra, `values_name_a_file` của egret), quyết định một lần cho mỗi run `Loop`. Trần 1 MiB mỗi vòng lặp chỉ áp cho FETCH; trần 16 MiB của danh sách tính cả các entry `{uri}`. Một output SECRET dưới STORE (hoặc AUTO trên file) bị từ chối lúc tính cũng như lúc lưu, cho phiên bản đã lưu trước #6.
+- **A6.** Policy được thừa kế nằm trong source flow đã lưu của vòng lặp dưới khoá **`x-egret-inherited-retry`**, nên nó hiện ra ở mọi nơi hiển thị source của một vòng lặp (API, trang execution). Không class Kestra nào có khoá này; một flow tự viết nó bị từ chối lúc lưu là `unknown_property`. **Sửa thêm, ngoài kế hoạch:** một task **flowable** thất bại dưới `retry:` của tổ tiên hoặc của flow làm danh sách cha của nó `RUNNING` mãi mãi (danh sách chờ một lần retry mà `retry::scan` không bao giờ lên lịch, vì chỉ task chạy được và `Subflow` mới retry). `retry::is_retried_kind` nay gác cả hai; cha kết thúc `FAILED`, như Kestra (`hasFailedNoRetry` của nó hỏi loại của chính task). Lỗi này có trước #6; #6 làm nó dễ gặp hơn.
+- **B1.** Outputs của flow được tính trong lần settle làm execution kết thúc (trước khi `afterExecution:` được phát), ở mọi trạng thái kết thúc kể cả `KILLED` (`handleEnd` của Kestra chạy trước `handleKilling`), và chỉ cho execution mà lịch sử có `RUNNING`. Một restart đi tới trạng thái kết thúc mới sẽ tính lại và ghi đè.
+- **B3.** `trigger.outputs` chỉ được gắn trong `inputs:` của một Flow trigger (đường Kestra ghi trong tài liệu); **`trigger` không được gắn trong render của chính các task của flow được kích hoạt** (`worker::render` không gắn root `trigger` cho loại trigger nào). Ghi trên lộ trình dưới dòng #11. Với listener `dependsOn`, outputs của sự kiện được deep-merge với outputs của bên tạo cửa sổ (`flow_trigger_windows.outputs`, migration 0158, lần đầu được ghi).
+- **B4.** Cha có thể `read()` các file mà con `Subflow` của nó công bố làm outputs (`storage::resolve_readable_for_read`), nhưng không thể công bố lại một file đó làm output FILE của chính mình (§6 mục 2).
+- **Z.** Fence test `every_honoured_flow_and_loop_key_is_run_or_warned` liệt kê `Loop.outputs`, `Loop.fetchType`, `Loop.retry` và `Flow.outputs` trong một danh sách `PACKAGE_6` riêng; nay cả bốn đã chạy, chúng nằm trong danh sách run của test, và test vẫn assert mỗi khoá là `honoured` trong `property-treatment.json`.
+
+**Giới hạn đã biết, chưa sửa:**
+- Outputs của chính một task render một output SECRET đã lộ (một `Return` của `{{ outputs.sub.outputs.s }}`) được lưu ở dạng rõ, như với input SECRET (KI-112): tác giả đã chọn công bố nó.
+- Input SECRET vẫn bị lộ trong ngữ cảnh render của Flow trigger (việc tiếp theo của KI-112, §2.2 mục 12).
+- Pruner không bảo vệ các file mà con `Subflow` đã công bố trong lúc cha còn chạy; một lần đọc sau thời hạn lưu giữ nhận `Pruned`.
+- `outputs` trong bản ghi trigger `dependsOn` có thể tới 2 × 16 MiB (hai map được merge); không từ chối (Kestra không có).
+- Một `subflow::Completion` làm một `Loop` thất bại vì một input FILE đã chép không còn đọc được sẽ ghi `outputs` (và bộ đếm) của run `Loop` thành `NULL` (một đường có từ trước #6).
+
+### Ghi chú phát hành (#6)
+
+Được chép vào mô tả PR và, cho repo tài liệu, vào ghi chú phát hành giữ cho `egret-data/docs` (mục Platform).
+
+**Thay đổi hành vi với flow đã lưu (D13).** Một flow lưu trước bản phát hành này có thể cho câu trả lời khác. Mỗi thay đổi làm egret làm điều Kestra làm, trừ các dòng ghi là riêng của egret.
+
+| Flow | Trước | Nay |
+|---|---|---|
+| Một `Loop` có `outputs:` | các khoá được nhận kèm cảnh báo `not_honoured`; không gì tính chúng; `{{ outputs.loop.outputs }}` render thất bại | outputs được tính ở cuối mỗi vòng lặp và nối thành `{item: {value, iteration, key?}, outputs}` vào danh sách `outputs` của run `Loop` (thứ tự kết thúc; thứ tự chỉ số với `concurrencyLimit: 1`) |
+| Mọi run `Loop` | không có bộ đếm | `iterationCount`, `runningIterations`, `terminatedIterations` trên mọi run `Loop` |
+| Một output của `Loop` render hoặc ép kiểu thất bại | bị bỏ qua | vòng lặp nhận `FAILED` sau trạng thái kết thúc của nó; với `transmitFailed: true` (mặc định) `Loop` thất bại. Một output tuỳ chọn thất bại thành `null` kèm một dòng WARN |
+| `fetchType: STORE` (hoặc `AUTO` trên `values:` là `kestra://`, `file://` hoặc `nsfile://`) | bị bỏ qua | outputs của mỗi vòng lặp được ghi vào file Ion `outputs.ion` trong bộ lưu trữ của vòng lặp; danh sách giữ `{uri}` |
+| Một `retry:` trên `Loop` (hoặc trên một tổ tiên của nó) | bị bỏ với các task bên trong mỗi vòng lặp | được mọi task và `Subflow` của mỗi vòng lặp thừa kế (`retry:` của chính task > tổ tiên bên trong vòng lặp > của `Loop` hoặc tổ tiên của nó > của flow) |
+| `outputs:` cấp flow | được kiểm tra, không bao giờ được tính | được tính khi execution kết thúc (trước `afterExecution:`); thất bại thì nối `FAILED` (`CREATED RUNNING SUCCESS FAILED`) |
+| `{{ execution.outputs }}` | luôn là `{}` | outputs đã tính của flow (trong `afterExecution:` và các lần render sau) |
+| `{{ outputs.<sub>.outputs }}` của cha `Subflow` (`wait: true`) | luôn là `{}` | outputs của con; một con mà outputs đã khai báo không được lưu làm run `Subflow` thất bại (`Failed to extract outputs with the error: …`) |
+| `inputs:` của một Flow trigger | `{{ trigger.outputs }}` thất bại (`trigger` không xác định) | render outputs của execution kích hoạt (merge với của cửa sổ cho `dependsOn`) |
+| API execution (`GET` một execution, danh sách) | không có outputs | trường mới `outputs` (map đã lưu; giá trị SECRET là `******`) |
+| Cha đọc output FILE của con `Subflow` bằng `read()` | bị từ chối | được phép (chỉ các URI mà con đã công bố) |
+| Một task flowable (`Sequential`, `Loop`, …) thất bại dưới `retry:` của tổ tiên hoặc của flow | cha của nó `RUNNING` mãi mãi | cha kết thúc `FAILED` (sửa lỗi) |
+
+**Giới hạn riêng của egret (Kestra không có):**
+- Outputs của một vòng lặp `Loop` (FETCH) được tuần tự hoá tối đa **1 MiB**, và cả danh sách của một `Loop` tối đa **16 MiB**; vượt một trong hai thì vòng lặp thất bại với thông báo chỉ tới `fetchType: STORE`. Outputs của một flow tối đa **16 MiB** mỗi execution; vượt thì execution thất bại với thông báo chỉ tới output FILE.
+- Một output `type: FILE` (flow hoặc `Loop`) phải trỏ tới file của chính execution hoặc của họ `Loop` của nó (`egret refuses output <id>: <uri> is not a file of this execution`): file của execution khác, của trigger hay của nguồn replay, `nsfile://`, `file://`, file namespace hoặc giá trị sai dạng đều bị từ chối. Cha không thể công bố lại file của con `Subflow` làm output FILE của mình.
+- Một output SECRET dưới `fetchType: STORE` (hoặc `AUTO` trên file) bị từ chối lúc lưu và lúc chạy (file sẽ chứa giá trị ở dạng rõ). Output SECRET ở chỗ khác được niêm phong bằng `secrets.master_key` và hiển thị `******` trong API và log; một triển khai không có master key làm output thất bại và nêu tên thiết lập.
+- Id output trùng trong `outputs:` của một `Loop` bị từ chối lúc lưu (`duplicate_output_id`); Kestra chỉ kiểm tra danh sách của flow.
+- `secret()` trong `value:` của output bị từ chối (lúc lưu và lúc chạy).
+
+**Khác biệt đã biết so với Kestra:**
+- `outputs:` của flow cha không được tính bên trong mỗi vòng lặp `Loop` (mã nguồn Kestra có tính; coi là lỗi của Kestra).
+- File STORE tên là `outputs.ion` (Kestra: một `{n}.ion` ngẫu nhiên); `nextOffset` không được ghi.
+- Một con `Subflow` kết thúc trước `RUNNING` và chỉ khai báo outputs literal làm run `Subflow` thất bại (Kestra sẽ công bố các literal).
+- `{{ trigger.outputs.x }}` chạy trong `inputs:` của Flow trigger, chưa chạy trong các task của flow được kích hoạt (dòng #11 của lộ trình).
+- Source flow đã lưu của một vòng lặp mang khoá riêng của egret `x-egret-inherited-retry` (policy được thừa kế); một flow tự viết khoá này bị từ chối lúc lưu.
+- Một `retry:` với `behavior: CREATE_NEW_EXECUTION` chạm tới một task bên trong `Loop` được lưu kèm cảnh báo `not_honoured` và bị từ chối lúc chạy, vì Kestra cũng ném lỗi ở đó.

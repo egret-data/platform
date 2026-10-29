@@ -87,6 +87,10 @@
 #   not now. `ExecutionState` has the field -- `metadata`, migration 0139 --
 #   and the replay is asked for by the `ScheduleRetry` this arm was missing.
 #   Four of those five entries left the hole; see the W6 Task 4 block below.]
+#   [Package #6 Task Z, 2026-10-29: the property that held the fifth is named
+#   now -- a `Loop`'s own `retry:` was dropped when each iteration's flow was
+#   built, so the iteration's `child` ran once. Task A6 attaches it as the
+#   iteration's inherited policy (spec D7) and banked the entry.]
 #
 # `timeout:` is NOT among the lines this task deleted and never could have been:
 # in this artifact the WORKER enforces it
@@ -356,6 +360,9 @@
 # `CREATE_NEW_EXECUTION` and all four are banked here, so the residual
 # baseline's row for the construct is REMOVED rather than lowered -- the rule
 # `disabled: true` and `runIf:` were removed under.
+#   [Package #6 Task Z, 2026-10-29: "what holds it is the `Loop`" is, measured,
+#   the `Loop`'s `retry:` that `spawn::sub_flow_source` dropped from each
+#   iteration's flow; banked by package #6 Task A6 (see its line).]
 #
 # Nothing in the corpus puts a `CREATE_NEW_EXECUTION` retry inside a `Loop`,
 # and `worker::replay` refuses that combination anyway: measured on the pinned

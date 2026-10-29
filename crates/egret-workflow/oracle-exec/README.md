@@ -6199,6 +6199,12 @@ W3b's moment. Task A8's sweep added this note rather than re-deriving every figu
 removal itself did not move. Kept pairs asserted **885** (673 + 212), not asserted **231** (216 + 15),
 after B2, B6 and B7 banked five entries.)*
 
+*(**20 across 5 over 1119 at package #6's end, 2026-10-29** (Task Z's sweep): Task B1's banks took
+`subflow-secret-output-parent` out of the removal (its `subflow` run fails now, so `log` no longer runs
+past it), so `RESTRICTION_REMOVES` 21 → 20, `RESTRICTION_REMOVES_ENTRIES` 6 → 5 and
+`EGRET_PAIRS_BEFORE_RESTRICTION` 1120 → 1119. Kept pairs asserted **897** (680 + 217), not asserted
+**219** (209 + 10), after A4 (`if-in-parallel`'s nested pairs) and B2 (`after-execution`).)*
+
 *(**80 across 6 over 771 through W5; 85 across 9 over 791 at W6 Task 3.** The
 three entries added are `valids/restart-parent`, `valids/restart-parent-loop`
 and `valids/subflow-secret-output-parent` — `Subflow` parents that used to stall
@@ -6300,6 +6306,12 @@ them. The parentheticals below are the record of the earlier moments.)*
 *(**34 / 1 / 6 at package #5b's end, 2026-10-29** (Task B9's sweep): Task B2 banked
 `loop-object` and `loop-object-in-list`, both spawners, so `SPAWNED_ENTRIES_THAT_MATCH` went 32 → 34
 and the rest 8 → 6; B6 and B7 moved none of the three.)*
+
+*(**40 / 0 / 1 at package #6's end, 2026-10-29** (Task Z's sweep): Task A3 banked
+`loop-outputs-failed-render` (34 → 35, rest 6 → 5), A4 `if-in-parallel`, `loop-outputs`,
+`loop-outputs-auto`, `loop-outputs-store` (35 → 39, rest 5 → 1), A6 `retry-flowable-parallel`, the
+last entry that differed only inside `spawned` (39 → 40, that bucket 1 → 0). B1–B4 moved none of the
+three; the total is still 41.)*
 
 *(**17/8/16 through W5; 18/8/15 at W6 Task 3; 22/4/15 since W6 Task 4** — the
 four `valids/retry-new-execution-*` entries moved from the middle row to the
@@ -9432,10 +9444,10 @@ over `oracle-exec/corpus/`; each classified against `harvest-run.txt`,
 | FILE input (5) | `valids/inputs`, `valids/inputs-small-files`, `valids/restart_with_inputs`, `valids/pause_on_resume` | no | -- | not-standalone at harvest: Kestra's own test supplies the file from the JVM classpath (or stays PAUSED), so there is no golden trace to compare |
 | | `invalids/inputs-validation` | yes (refused) | no → no | Kestra refuses it at publish for a `multiselect` input, not for its FILE input; it matched before W9a and still does |
 | `outputFiles` (1) | `valids/working-directory-outputs` | no | -- | rejected at harvest: `WorkingDirectoryTest$LocalFiles` is a test-only task type |
-| STORE (2) | `valids/loop-outputs-store` | yes | yes → yes | a `Loop`'s own `outputs:` in STORE mode, which W9a does not produce (the user's ruling of 2026-10-03; W9a spec §15) |
+| STORE (2) | `valids/loop-outputs-store` | yes | yes → yes | a `Loop`'s own `outputs:` in STORE mode, which W9a does not produce (the user's ruling of 2026-10-03; W9a spec §15). *(Reopened 2026-10-19; banked 2026-10-29 by package #6 Task A4 on states, and its STORE files written by Task A5: one `outputs.ion` per iteration.)* |
 | | `valids/webhook-store-body` | yes (FAILED) | no → no | a webhook trigger's STORE body; W9a does not implement it, and egret already matched Kestra's FAILED |
 | `core.storage` (2) | `valids/loop-values-from-uri` | yes | **yes → no** | `Write` an Ion file, `Loop` over its URI: banked at Task 11, measured |
-| | `valids/loop-outputs-auto` | yes | yes → yes | `fetchType: AUTO` over a file writes the `Loop`'s outputs as STORE files: same ruling as `loop-outputs-store` |
+| | `valids/loop-outputs-auto` | yes | yes → yes | `fetchType: AUTO` over a file writes the `Loop`'s outputs as STORE files: same ruling as `loop-outputs-store`. *(Banked 2026-10-29 by package #6 Task A4 on states; Task A5 resolves AUTO to STORE and its content matches the artifact's run field by field, file name aside.)* |
 
 What the ratchet can see of W9a: the driver registers the nine core storage
 tasks over the test `MemStore` (`oracle-exec/driver.rs:131-159`; `storage::`
@@ -13906,3 +13918,50 @@ removed types, so `UNKNOWN_TYPE_REFUSED` did not move.
   `io.kestra.plugin.core.execution.PurgeExecutions`; the unserved probe moved
   from `egret.sql` to `egret.report.send`.
 
+
+## Package #6 as built (Task Z, 2026-10-29): `Loop` outputs, `Loop` retry and flow outputs, ten entries bank
+
+Measured on `feat/workflow-loop-outputs` (`cargo test -p egret-workflow --test
+executor`): ratchet **301 / 25 / 25 / 0**, `(301, 276, 25)`, from T0's
+**301 / 35 / 35 / 0** (the merge of #5b, `271b1c17`); census 295 live, 25
+validate-refused, 21 unknown type, unchanged. Spec
+`docs/en/specs/2026-10-29-workflow-loop-outputs-design.md` §7.
+
+**Banked (10), by task, measured:**
+
+| Task | Entries | Ratchet after |
+|---|---|---|
+| A3 | `loop-outputs-failed-render` | 34 |
+| A4 | `loop-outputs`, `if-in-parallel`, and ahead of the plan `loop-outputs-auto`, `loop-outputs-store` (the list exists for every `fetchType`, so `end` renders; A5 wrote their STORE content) | 30 |
+| A5 | none (content only: one `outputs.ion` per iteration, AUTO resolved) | 30 |
+| A6 | `retry-flowable-parallel` | 29 |
+| B1 | `flow-with-outputs-failed`, and not predicted `subflow-secret-output-child` | 27 |
+| B2 | `after-execution` | 26 |
+| B3 | `subflow-secret-output-parent` | 25 |
+| B4 | none | 25 |
+
+The plan expected 8 upper / 6 strict and a final 27 / 27. The two extra are
+the `subflow-secret-output-*` pair, which the spec's Q3 expected to stay
+baselined: the oracle's egret runs, like Kestra's harness, with **no master
+key**, so egret refuses to store the SECRET output and fails the child as
+Kestra does, and the parent then fails as Kestra's
+`Subflow.failSubflowDueToOutput` does. With a key, egret stores the value
+sealed (pinned by `tests/worker.rs`, not by this oracle).
+
+**No oracle sees outputs.** `golden.json` and `traces.json` record states
+only, so every bank above is a state bank; the content (list shape, counters,
+typing, STORE URIs and file text, masking, the `Subflow` copy,
+`trigger.outputs`, the API field) is pinned by `tests/worker.rs`,
+`tests/storage_render.rs`, `tests/storage_prune.rs`,
+`tests/flow_trigger_fire.rs`, `tests/flow_trigger_windows.rs` and
+`tests/executions_routes.rs`. `loop-outputs-auto` is the one entry whose
+content an artifact measured (`w9a-storage.json`): it matches field by field
+except the file name (Kestra a random `{n}.ion`, egret `outputs.ion`) and
+`nextOffset` (not written, spec D4).
+
+`handler_surface.py`: baseline size 25; `handler-surface.txt` reproduced 266
+→ 276, the "flow-level `outputs:`" construct row gone, ceiling 286 → 290.
+Earlier sections of this file that call `loop-outputs*`, `if-in-parallel`,
+`after-execution`, `flow-with-outputs-failed`, `retry-flowable-parallel` or
+`subflow-secret-output-*` baselined, or say egret never evaluates flow
+`outputs:`, are dated records of their day.

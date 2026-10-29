@@ -172,8 +172,10 @@ cannot see the run, the fence test
 `spec::keys::tests::every_honoured_flow_and_loop_key_is_run_or_warned`
 holds the `Flow` and `Loop` rows to it by hand: every key either row
 calls `honoured` must be named there as run by egret, or carry a
-`not_honoured` lift (`keys::lift_of`); the four package #6 keys are named
-in their own list.
+`not_honoured` lift (`keys::lift_of`). The four package #6 keys were first
+named in their own list; once all four ran, Task Z (2026-10-29) moved them
+into the test's run list, and the test still checks that each is
+`honoured` in the measured file.
 
 A `not_honoured` warning does **not** make a key `warned` (2026-10-26,
 package #1, D3). `warned` means a new `not_yet_enforced` warning appeared, and
