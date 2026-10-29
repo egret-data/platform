@@ -303,9 +303,9 @@ pub enum Via {
     Workspace { id: Uuid, name: String },
     /// `group:public`: everyone.
     Public,
-    /// A role held by one of the user's groups (egret only).
+    /// A role held by one of the user's groups; engines enforce it for the user too.
     GroupRole { group: String, role: String },
-    /// A workspace held by one of the user's groups (egret only).
+    /// A workspace held by one of the user's groups; engines enforce it for the user too.
     GroupWorkspace {
         group: String,
         id: Uuid,
@@ -388,7 +388,7 @@ pub struct MemberRef {
     pub not_on_engines: Option<NotOnEngines>,
 }
 
-/// A group holding a role (egret only).
+/// A group holding a role. Its members get the role on engines too.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupRef {
@@ -508,7 +508,7 @@ pub struct RolePrincipal {
     pub holders: Vec<MemberRef>,
     /// How many of `holders` are service accounts.
     pub service_accounts: i64,
-    /// Groups holding the role, unexpired (egret only).
+    /// Groups holding the role, unexpired. Their members get it on engines too.
     pub holder_groups: Vec<GroupRef>,
     pub stands_for: Vec<StandsFor>,
     pub clearances: Vec<ClearanceFact>,

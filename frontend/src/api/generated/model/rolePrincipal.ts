@@ -18,7 +18,7 @@ export interface RolePrincipal {
   holders: MemberRef[];
   /** How many of `holders` are service accounts. */
   serviceAccounts: number;
-  /** Groups holding the role, unexpired (egret only). */
+  /** Groups holding the role, unexpired. Their members get it on engines too. */
   holderGroups: GroupRef[];
   standsFor: StandsFor[];
   clearances: ClearanceFact[];
