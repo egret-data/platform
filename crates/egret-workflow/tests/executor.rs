@@ -874,7 +874,13 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
         // 30 -> 29 baselined, 271 -> 272 matching at package #6 Task A6
         // (2026-10-29): `valids/retry-flowable-parallel` banks (a `Loop`'s
         // `retry:` is inherited by each iteration's tasks, spec D7); 29 + 272 = 301.
-        (301, 272, 29),
+        // 29 -> 27 baselined, 272 -> 274 matching at package #6 Task B1
+        // (2026-10-29): `valids/flow-with-outputs-failed` (flow `outputs:`
+        // evaluated at the terminal, spec D6) and
+        // `valids/subflow-secret-output-child` (its SECRET output refused with
+        // no master key, as Kestra's harness fails it, spec D9) bank;
+        // 27 + 274 = 301.
+        (301, 274, 27),
         "301 = matching + baselined, the total beside its parts. It read \
          167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries, W8 \
          Task 4 banked `valids/waitfor-nested`, W8 Task 5 banked seven \
@@ -3167,7 +3173,9 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
 // `valids/if-in-parallel`, `valids/loop-outputs`, `valids/loop-outputs-auto` and `valids/loop-outputs-store`, sub-executions included.
 // 90 -> 87 at package #6 Task A6 (2026-10-29, measured): the 3 run terminals (1 + 1 + 1) of
 // `valids/retry-flowable-parallel`, sub-executions included.
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 87;
+// 87 -> 85 at package #6 Task B1 (2026-10-29, measured): the 1 + 1 run terminals of
+// `valids/flow-with-outputs-failed` and `valids/subflow-secret-output-child`.
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 85;
 /// 43 from W6 Task 4 to W9a Task 10; **40 since W9a Task 11** -- the three
 /// iterations of `valids/loop-values-from-uri`.
 // 40 -> 39 at WorkingDirectory Task 8: `working-directory-taskrun` has one
@@ -3237,7 +3245,10 @@ const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 1;
 // `valids/if-in-parallel`, `valids/loop-outputs`, `valids/loop-outputs-auto` and `valids/loop-outputs-store` and their twelve sub-executions.
 // 32 -> 29 at package #6 Task A6 (2026-10-29, measured): the top-level execution of
 // `valids/retry-flowable-parallel` and its two sub-executions.
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 29;
+// 29 -> 27 at package #6 Task B1 (2026-10-29, measured): the top-level executions of
+// `valids/flow-with-outputs-failed` and `valids/subflow-secret-output-child` (neither has a
+// sub-execution, so `SUB_EXECUTIONS_ON_BASELINED_ENTRIES` stays 1).
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 27;
 /// **1703 through W8 Task 2, 1647 after W8 Task 3, 1610 after W8 Task 4, 1528
 /// now** -- 56 run-history tokens on Task 3's eight, 37 on
 /// `valids/waitfor-nested` (whose seven runs include three loops reading
@@ -3288,7 +3299,9 @@ const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 29;
 // `valids/if-in-parallel`, `valids/loop-outputs`, `valids/loop-outputs-auto` and `valids/loop-outputs-store`.
 // 407 -> 376 at package #6 Task A6 (2026-10-29, measured): the 31 run-history tokens (3 + 14 + 14) of
 // `valids/retry-flowable-parallel`.
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 376;
+// 376 -> 368 at package #6 Task B1 (2026-10-29, measured): the 4 + 4 run-history tokens of
+// `valids/flow-with-outputs-failed` and `valids/subflow-secret-output-child`.
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 368;
 /// **665 through W8 Task 2, 617 after W8 Task 3, 562 after W8 Task 4, 526 after
 /// W8 Task 5, 522 now** -- 48 execution-history tokens on Task 3's eight, i.e.
 /// six apiece (every one of them reads `CREATED RUNNING PAUSED RESTARTED
@@ -3339,7 +3352,10 @@ const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 376;
 // `valids/if-in-parallel`, `valids/loop-outputs`, `valids/loop-outputs-auto` and `valids/loop-outputs-store` (3 on each execution, 9 on each one's three sub-executions).
 // 160 -> 139 at package #6 Task A6 (2026-10-29, measured): the 21 execution-history tokens of
 // `valids/retry-flowable-parallel` (3 on the execution, 9 on each of its two sub-executions).
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 139;
+// 139 -> 131 at package #6 Task B1 (2026-10-29, measured): the 4 + 4 execution-history tokens
+// (`CREATED RUNNING SUCCESS FAILED` each) of `valids/flow-with-outputs-failed` and
+// `valids/subflow-secret-output-child`.
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 131;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -3421,8 +3437,10 @@ async fn what_the_order_restriction_removes_is_derived_and_egret_never_says_afte
                 // lives; this list is where it is visible. (`restart-parent`
                 // and `restart-parent-loop` left with `restart-child` and
                 // `restart-loop` at package #5a Task A3, 2026-10-28: all four
-                // match the golden now.)
-                "valids/subflow-secret-output-parent".to_string(),
+                // match the golden now.) (`subflow-secret-output-parent` left
+                // at package #6 Task B1, 2026-10-29: its child FAILS on its
+                // SECRET output now, so the parent stops at its `subflow` run
+                // as Kestra's does.)
                 // WorkingDirectory Task 8, from the re-harvested golden:
                 // `working-directory-invalid-runif`, egret's extra FAILED run for
                 // `s2`, has no counterpart in Kestra's list.
@@ -3458,7 +3476,11 @@ async fn what_the_order_restriction_removes_is_derived_and_egret_never_says_afte
 // 84 -> 21 at package #5a Task A7 (2026-10-29, measured): the 63 pairs of
 // `valids/all-flowable`, whose extra iterations and runs Kestra never reached
 // (it matches the golden now).
-const RESTRICTION_REMOVES: usize = 21;
+// 21 -> 20 at package #6 Task B1 (2026-10-29, measured): the 1 pair of
+// `valids/subflow-secret-output-parent`, whose child now FAILS on its SECRET
+// output (no master key in this harness, as on Kestra's side), so the parent's
+// `subflow` run FAILS and its `log` successor no longer runs.
+const RESTRICTION_REMOVES: usize = 20;
 /// How many entries those pairs come from — the other half of the coverage
 /// statement's *"80 pairs across 6 entries"*, which was printed and not
 /// asserted until W4 Task 6. It is 85 across 9 since W6 Task 3.
@@ -3468,7 +3490,9 @@ const RESTRICTION_REMOVES: usize = 21;
 // entries match the golden now.
 // 7 -> 6 at package #5a Task A7 (2026-10-29, measured): `valids/all-flowable` matches the
 // golden now.
-const RESTRICTION_REMOVES_ENTRIES: usize = 6;
+// 6 -> 5 at package #6 Task B1 (2026-10-29, measured):
+// `valids/subflow-secret-output-parent` produces no pair Kestra lacks now.
+const RESTRICTION_REMOVES_ENTRIES: usize = 5;
 /// 771 through W5; 791 at W6 Task 3; **798 since W8 Task 3**, whose eight
 /// banked `Pause` entries carry seven ordered pairs between them — the same
 /// seven `EGRET_TOP_LEVEL_PAIRS` gained, counted before the restriction rather
@@ -3515,7 +3539,10 @@ const RESTRICTION_REMOVES_ENTRIES: usize = 6;
 // `is empty` render).
 // 1119 -> 1120 at package #5b Task B6 (2026-10-29, measured): the 1 top-level
 // pair `EGRET_TOP_LEVEL_PAIRS` gained (`valids/variables`, `render()`).
-const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 1120;
+// 1120 -> 1119 at package #6 Task B1 (2026-10-29, measured): the one pair
+// `RESTRICTION_REMOVES` lost (`valids/subflow-secret-output-parent`'s `log`
+// no longer runs).
+const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 1119;
 
 /// Test names `oracle-exec/README.md` cites that **no longer exist**, each with
 /// its successor or an empty string where there is none — W3b Task 7.
@@ -4736,7 +4763,11 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
 // its `Loop`'s failing `outputs:` fail the iteration after its terminal (spec D1).
 // 19 -> 15 at package #6 Task A4 (2026-10-29, measured): `valids/if-in-parallel`, `valids/loop-outputs`, `valids/loop-outputs-auto` and `valids/loop-outputs-store` banked --
 // each differed on `execution` (its `end`/`assert` FAILED on `outputs.<loop>.outputs`, spec D3).
-const MISMATCH_ON_EXECUTION: usize = 15;
+// 15 -> 13 at package #6 Task B1 (2026-10-29, measured): `valids/flow-with-outputs-failed` and
+// `valids/subflow-secret-output-child` banked -- both differed on `execution` alone (the flow's
+// `outputs:` now evaluated at the terminal append `FAILED`, spec D6; the child's SECRET output
+// fails on this harness's missing master key, as on Kestra's, spec D9).
+const MISMATCH_ON_EXECUTION: usize = 13;
 /// **112 through W8 Task 2, 104 after W8 Task 3, 103 after W8 Task 4, 96 after
 /// W8 Task 5, 94 now** -- the same eight, then `valids/waitfor-nested`, then
 /// the seven `allow*` entries, then W8 Task 6's two. The last pair differ on
@@ -4912,7 +4943,8 @@ const MISMATCH_ON_SPAWNED: usize = 1;
 // 34 -> 33 at package #6 Task A3 (2026-10-29, measured): `valids/loop-outputs-failed-render` banked (D1).
 // 33 -> 29 at package #6 Task A4 (2026-10-29, measured): `valids/if-in-parallel`, `valids/loop-outputs`, `valids/loop-outputs-auto` and `valids/loop-outputs-store` banked (D3).
 // 29 -> 28 at package #6 Task A6 (2026-10-29, measured): `valids/retry-flowable-parallel` banked (D7).
-const MISMATCHING_RUNS_ENTRIES: usize = 28;
+// 28 -> 26 at package #6 Task B1 (2026-10-29, measured): `valids/flow-with-outputs-failed` and `valids/subflow-secret-output-child` banked (D6, D9).
+const MISMATCHING_RUNS_ENTRIES: usize = 26;
 /// **84 through W5; 63 after W6 Task 3, and 59 since W6 Task 4 corrected the
 /// classifier.**
 ///
@@ -5670,22 +5702,12 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
         "W8, through a subflow: its child `valids/sla-subflow` is over-accepted above, so the \
          parent's `subflow` run SUCCEEDS where Kestra FAILED it",
     ),
-    // **The only one of the five that is a new INSTANCE and not only a newly
-    // visible one**, which fix round 1's review separated: the other four are
-    // owned by a row already in this list, so the child was over-accepted
-    // before and the parent merely could not reach it. This one has no
-    // pre-existing row -- its cause is a construct nothing in egret evaluates,
-    // and the run that now SUCCEEDs where Kestra FAILED it did not exist while
-    // the parent stalled. No capability was added that fires where Kestra would
-    // not; a run was.
-    (
-        "valids/subflow-secret-output-parent",
-        "unclaimed: the flow-level `outputs:` block is not evaluated anywhere in egret, so a child \
-         declaring `type: SECRET` outputs simply SUCCEEDS. On the artifact the PARENT fails inside \
-         `ExecutableUtils.subflowExecutionResultFromChildExecution`'s catch block while extracting \
-         them -- which is what gives its golden run `[CREATED, RUNNING, FAILED]` beside an attempt \
-         of `[CREATED, FAILED]` -- so egret's `subflow` run SUCCEEDS and its `hello` successor runs",
-    ),
+    // (`valids/subflow-secret-output-parent` left this register at package #6
+    // Task B1, 2026-10-29, measured: its child now evaluates its flow-level
+    // `outputs:` and, with no master key in this harness, FAILS on the SECRET
+    // one as Kestra's does (spec D9), so the parent's `subflow` run FAILS and
+    // its successor no longer runs. It is still baselined, on the run's attempt
+    // shape: see `baseline.txt`.)
 ];
 
 // W6 Task 4: +4 identical / -4 differing, and they are the four
@@ -7880,14 +7902,18 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         ),
         (
             "valids/subflow-secret-output-parent",
-            "the flow-level `outputs:` block, which nothing in egret evaluates;              on the artifact the PARENT fails while extracting the child's              SECRET output",
+            "its `subflow` run's attempt: Kestra re-renders the child's outputs \
+             in the parent and fails there (`Subflow.createSubflowExecutionResult` \
+             -> `failSubflowDueToOutput`, attempt `[CREATED, FAILED]`); the \
+             `Subflow` copy of a child's outputs is package #6 Task B3's \
+             (re-attributed 2026-10-29, Task B1: it was the flow-level `outputs:` \
+             nothing evaluated)",
         ),
         // `valids/task-runif` was here, held by `OutputValues` having no
         // handler; group C1 Task 2 (2026-10-18) gave it one and it banked.
-        (
-            "valids/flow-with-outputs-failed",
-            "flow-level `outputs:`, which nothing in W3a evaluates",
-        ),
+        // (`valids/flow-with-outputs-failed` was here, held by the flow-level
+        // `outputs:` nothing evaluated. It banked at package #6 Task B1,
+        // 2026-10-29, spec D6.)
         // **W3b Task 1's Concern 3 was right: this attribution was wrong.**
         // `valids/full`'s top-level keys are `id`, `labels`, `namespace`,
         // `tasks` -- it has neither `outputs:` nor `variables:`. Re-pointing
@@ -7967,10 +7993,10 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
             "valids/retry-success",
             "WARNING, which RunState cannot hold",
         ),
-        (
-            "valids/subflow-secret-output-child",
-            "a SECRET output; the harness has no encryption key",
-        ),
+        // (`valids/subflow-secret-output-child` was here: a SECRET output on a
+        // harness with no encryption key. It banked at package #6 Task B1,
+        // 2026-10-29: egret evaluates it now and, with no master key either,
+        // fails it as Kestra does, spec D9.)
     ];
 
     let baseline = baseline();
@@ -8391,7 +8417,9 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
         // `valids/loop-outputs-auto` and `valids/loop-outputs-store`.
         // (2, 28, 30) -> (2, 27, 29) at package #6 Task A6 (2026-10-29): nor
         // does `valids/retry-flowable-parallel`.
-        (2, 27, 29),
+        // (2, 27, 29) -> (2, 25, 27) at package #6 Task B1 (2026-10-29): nor do
+        // `valids/flow-with-outputs-failed` and `valids/subflow-secret-output-child`.
+        (2, 25, 27),
         "the baselined population that declares a `timeout:`, and the rest \
          ((2, 106, 108) until no-silent-stall Task 1 banked \
          `invalids/invalid-task`, which declares none). It \

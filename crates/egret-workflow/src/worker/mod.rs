@@ -80,6 +80,7 @@
 mod cancel;
 mod claim;
 pub mod commands;
+mod flow_outputs;
 mod force_close;
 pub mod handlers;
 pub mod k8s;

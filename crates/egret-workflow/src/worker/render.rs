@@ -125,6 +125,9 @@ pub(super) struct Surface {
     execution: Value,
     /// `item`, for a loop sub-execution. `None` at the top level.
     item: Option<Value>,
+    /// Whether this execution's row has a `loop_index`: a `Loop` iteration
+    /// (package #6 Task B1, [`Surface::is_loop_iteration`]).
+    loop_iteration: bool,
     /// The outputs of every LOOP ancestor's terminated runs, by task id.
     ///
     /// A loop body renders in its own sub-execution and reads the parent's
@@ -295,6 +298,7 @@ impl Surface {
         // iteration, then its parent's, and so on. `valids/loop-nested` is
         // three deep and reads `{{ item.parents[1].value }}`.
         let mut levels: Vec<Value> = Vec::new();
+        let loop_iteration = row.get::<Option<i32>, _>("loop_index").is_some();
         let mut here = Link {
             loop_index: row.get("loop_index"),
             loop_value: row.get("loop_value"),
@@ -573,6 +577,7 @@ impl Surface {
             system_label,
             execution,
             item,
+            loop_iteration,
             inherited,
             own,
             started,
@@ -721,6 +726,12 @@ impl Surface {
     /// See [`Surface::parsed`] for why it is kept rather than re-parsed.
     pub(super) fn flow(&self) -> Option<&Flow> {
         self.parsed.as_ref()
+    }
+
+    /// Whether this execution is a `Loop` iteration (its row has a
+    /// `loop_index`).
+    pub(super) fn is_loop_iteration(&self) -> bool {
+        self.loop_iteration
     }
 
     /// The context one expression renders against.
@@ -1147,6 +1158,7 @@ mod tests {
             system_label: Value::Null,
             execution: json!({}),
             item: None,
+            loop_iteration: false,
             inherited: Map::new(),
             own: std::collections::BTreeMap::new(),
             started: std::collections::BTreeMap::new(),
@@ -1190,6 +1202,7 @@ mod tests {
             system_label: json!({"correlationId": "root"}),
             execution: json!({}),
             item: None,
+            loop_iteration: false,
             inherited: Map::new(),
             own: std::collections::BTreeMap::new(),
             started: std::collections::BTreeMap::new(),

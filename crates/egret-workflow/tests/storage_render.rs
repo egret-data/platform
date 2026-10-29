@@ -1882,3 +1882,177 @@ async fn a_secret_output_under_auto_over_a_file_is_refused_at_evaluation() {
         "no file written"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Package #6 Task B1: the flow-level `outputs:` (spec D6). SECRET (D9) and
+// FILE (D10) rules brought forward from Task B4, so that B1 never stores a
+// SECRET value in clear or publishes another execution's file.
+// ---------------------------------------------------------------------------
+
+/// The execution's history, stored `outputs`, and its log lines.
+async fn execution_end(
+    pool: &sqlx::PgPool,
+    ex: Uuid,
+) -> (serde_json::Value, Option<serde_json::Value>, Vec<String>) {
+    let (history, outputs): (serde_json::Value, Option<serde_json::Value>) =
+        sqlx::query_as("SELECT history, outputs FROM workflow.executions WHERE id = $1")
+            .bind(ex)
+            .fetch_one(pool)
+            .await
+            .expect("the execution");
+    let lines = sqlx::query_scalar(
+        "SELECT message FROM workflow.task_logs WHERE execution_id = $1 ORDER BY id",
+    )
+    .bind(ex)
+    .fetch_all(pool)
+    .await
+    .expect("lines");
+    (history, outputs, lines)
+}
+
+/// **Accepted: a FILE flow output naming a file of the execution's own task.**
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flow_file_output_of_its_own_execution_is_kept() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let source = format!(
+        "id: flow_file_own\nnamespace: {NS}\ntasks:\n  - id: w\n    \
+         type: io.kestra.plugin.core.log.Log\n    message: w\noutputs:\n  - id: f\n    \
+         type: FILE\n    value: \"{{{{ outputs.w.uri }}}}\"\n"
+    );
+    let ex = start_execution(&db.pool, ws, None, &source, json!({}))
+        .await
+        .unwrap();
+    let file = finish_writing(&db.pool, &fs, ws, "flow_file_own", "w", "o.txt", b"o").await;
+    drain(&db.pool).await;
+
+    let (history, outputs, lines) = execution_end(&db.pool, ex).await;
+    assert_eq!(
+        history,
+        json!(["CREATED", "RUNNING", "SUCCESS"]),
+        "{lines:?}"
+    );
+    assert_eq!(outputs, Some(json!({ "f": file })));
+}
+
+/// **Refused: a FILE flow output naming anything else** -- a file of an
+/// unrelated execution, a `file://` path, a file of the execution's TRIGGER
+/// execution (readable by `read()`, not publishable) -- fails the execution
+/// after its terminal with `egret refuses output f: <uri> is not a file of
+/// this execution`, and nothing is stored.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flow_file_output_outside_its_execution_fails_it() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let other = format!(
+        "id: flow_file_src\nnamespace: {NS}\ntasks:\n  - id: w\n    type: io.kestra.plugin.core.log.Log\n    message: w\n"
+    );
+    let src = start_execution(&db.pool, ws, None, &other, json!({}))
+        .await
+        .unwrap();
+    let foreign = finish_writing(&db.pool, &fs, ws, "flow_file_src", "w", "u.txt", b"u").await;
+    drain(&db.pool).await;
+
+    let publishing = |flow: &str, uri: &str| {
+        format!(
+            "id: {flow}\nnamespace: {NS}\ntasks:\n  - id: r\n    \
+             type: io.kestra.plugin.core.debug.Return\n    format: x\noutputs:\n  - id: f\n    \
+             type: FILE\n    value: \"{uri}\"\n"
+        )
+    };
+    let mut roots = Vec::new();
+    for (flow, uri) in [
+        ("flow_file_foreign", foreign.as_str()),
+        ("flow_file_path", "file:///etc/passwd"),
+    ] {
+        let ex = start_execution(&db.pool, ws, None, &publishing(flow, uri), json!({}))
+            .await
+            .unwrap();
+        roots.push((ex, uri.to_string()));
+    }
+    let listener = publishing("flow_file_trigger", &foreign);
+    let mut conn = db.pool.acquire().await.unwrap();
+    let triggered = start_execution_in(
+        &mut conn,
+        NewExecution {
+            workspace_id: ws,
+            flow_id: None,
+            source: &listener,
+            inputs: json!({}),
+            trigger: None,
+            scheduled_date: None,
+            trigger_execution_id: Some(src),
+            execution_depth: 0,
+            flow_trigger_event_id: None,
+            born_failed: false,
+            replayed_from_execution_id: None,
+            id: None,
+            input_files: Vec::new(),
+            labels: None,
+            backfill_id: None,
+            variables: None,
+            started_by: None,
+        },
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    roots.push((triggered, foreign.clone()));
+    drain(&db.pool).await;
+
+    for (ex, uri) in roots {
+        let (history, outputs, lines) = execution_end(&db.pool, ex).await;
+        assert_eq!(
+            history,
+            json!(["CREATED", "RUNNING", "SUCCESS", "FAILED"]),
+            "{uri}: {lines:?}"
+        );
+        let want = format!("egret refuses output f: {uri} is not a file of this execution");
+        assert!(lines.iter().any(|l| l == &want), "{want}: {lines:?}");
+        assert_eq!(outputs, None, "{uri}: nothing stored");
+    }
+}
+
+/// **A SECRET flow output on a deployment with no master key fails the
+/// execution**, naming the output and the setting and never the value, and
+/// nothing is stored (spec D9).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_secret_flow_output_without_a_master_key_fails_the_execution() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, _fs)) = setup().await else {
+        return;
+    };
+    assert!(
+        !egret_workflow::secret_inputs::can_seal(),
+        "this binary must run without a master key for this test to mean anything"
+    );
+    let source = format!(
+        "id: flow_secret_nokey\nnamespace: {NS}\ntasks:\n  - id: r\n    \
+         type: io.kestra.plugin.core.debug.Return\n    format: hush-b1\noutputs:\n  - id: s\n    \
+         type: SECRET\n    value: \"{{{{ outputs.r.value }}}}\"\n"
+    );
+    let ex = start_execution(&db.pool, ws, None, &source, json!({}))
+        .await
+        .unwrap();
+    drain(&db.pool).await;
+
+    let (history, outputs, lines) = execution_end(&db.pool, ex).await;
+    assert_eq!(
+        history,
+        json!(["CREATED", "RUNNING", "SUCCESS", "FAILED"]),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("egret refuses output s:")
+                && l.contains("secrets.master_key")
+                && !l.contains("hush-b1")),
+        "{lines:?}"
+    );
+    assert_eq!(outputs, None, "nothing stored");
+}

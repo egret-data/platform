@@ -1345,7 +1345,7 @@ fn iteration_cap(index: i32, typed: &crate::outputs::Typed) -> std::result::Resu
 /// (`logs::mask`) and split into [`LOG_PIECE_CHARS`](crate::logs::LOG_PIECE_CHARS)
 /// pieces as every stored line is. Also traced, as a handler's line is not:
 /// this one has no `RunLog`.
-async fn log_on_execution(
+pub(super) async fn log_on_execution(
     conn: &mut PgConnection,
     ctx: &claim::ExecutionCtx,
     level: LogLevel,
@@ -1598,6 +1598,15 @@ fn sub_flow_source(source: &str, loop_task_id: &str, owner: Uuid) -> Result<Stri
     flow.errors = errors;
     flow.finally_ = finally;
     flow.after_execution = Vec::new();
+    // Package #6 Task B1 (spec D6): the parent flow's `outputs:` are the
+    // PARENT execution's, evaluated once at its own terminal
+    // (`worker::flow_outputs`). Kestra's `onEnd` evaluates them in every
+    // iteration too, against a context where the parent's later tasks do not
+    // exist -- treated as a Kestra bug and recorded (spec §6 item 1). Cleared
+    // rather than guarded, for the reason `triggers:` and `sla:` are below;
+    // `flow_outputs` also skips an iteration, for an iteration stored before
+    // this line.
+    flow.outputs = Vec::new();
     // A sub-execution is spawned, never triggered. Carrying the parent's
     // `triggers:` into it would put a schedule on a row that is one iteration
     // of one run.
@@ -2275,6 +2284,24 @@ mod tests {
              `sla:` being cleared from the synthesis being broken"
         );
         assert_eq!(reparsed.tasks[0].id, "body");
+    }
+
+    /// Package #6 Task B1 (spec D6): the parent flow's `outputs:` are not
+    /// carried into an iteration's flow, so no iteration evaluates them.
+    #[test]
+    fn no_flow_level_outputs_are_inherited_by_a_loop_sub_execution() {
+        let source = "id: f\nnamespace: a.b\noutputs:\n  - id: o\n    type: STRING\n    \
+                      value: x\ntasks:\n  - id: lp\n    \
+                      type: io.kestra.plugin.core.flow.Loop\n    values: [1]\n    \
+                      tasks:\n      - id: body\n        \
+                      type: io.kestra.plugin.core.log.Log\n        message: x\n";
+        let parent = crate::spec::parse(source).expect("the fixture parses");
+        assert_eq!(parent.outputs.len(), 1, "the fixture carries `outputs:`");
+
+        let sub = sub_flow_source(source, "lp", Uuid::nil()).expect("the body synthesises");
+        let reparsed = crate::spec::parse(&sub).expect("the sub-flow re-parses");
+        assert!(reparsed.outputs.is_empty(), "{:?}", reparsed.outputs);
+        assert_eq!(reparsed.tasks[0].id, "body", "and the body still arrives");
     }
 
     /// Every corpus flow that holds a `Loop` — the sub-flow this module

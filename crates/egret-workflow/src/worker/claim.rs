@@ -3631,6 +3631,23 @@ async fn advance_frame(conn: &mut PgConnection, frame: &mut Frame<'_>) -> Result
             // below carries `FAILED`; the error is already logged on the
             // sub-execution. Kestra persists the same (`DefaultExecutor`,
             // `executionStateStore.lock(... withState(FAILED))`).
+            //
+            // Package #6 Task B1 (spec D6): the flow's own `outputs:` are
+            // evaluated in the settle that made the execution TERMINAL --
+            // not "terminated": before `afterExecution:` has run anything,
+            // as Kestra's `onEnd` precedes `handleAfterExecution` -- and a
+            // failure appends `FAILED` the same way
+            // (`worker::flow_outputs`). An iteration evaluates nothing here
+            // (D6), so at most one of the two below acts.
+            if became_terminal(before, state) {
+                match super::flow_outputs::at_terminal(conn, ctx, &surface, state).await? {
+                    super::flow_outputs::FlowEnd::NoOutputs
+                    | super::flow_outputs::FlowEnd::Stored => {}
+                    super::flow_outputs::FlowEnd::Failed => {
+                        fail_after_terminal(conn, ctx, state).await?
+                    }
+                }
+            }
             let mut outputs = None;
             if terminated_now(ctx, before, state).is_some() {
                 match spawn::iteration_outputs(conn, ctx, &surface, state).await? {
@@ -3686,17 +3703,45 @@ fn terminated_now(
     is.filter(|s| now_terminated && notifies_parent(*s))
 }
 
+/// Package #6 Task B1: this settle moved the execution INTO a terminal state
+/// -- its last state is terminal and either it was not at the settle's start
+/// or a non-terminal state was appended since (a restart that ended again in
+/// one settle). A terminal-to-terminal append (Task A3's FAILED) is not a new
+/// terminal. Reads `state`, this settle's in-memory copy, for the reason
+/// [`terminated_now`] does: a nested settle that made the execution terminal
+/// has already evaluated what this one would.
+fn became_terminal(before: &ExecutionState, state: &ExecutionState) -> bool {
+    if !state.history.last().is_some_and(|s| s.is_terminal()) {
+        return false;
+    }
+    !before.history.last().is_some_and(|s| s.is_terminal())
+        || state
+            .history
+            .get(before.history.len()..)
+            .is_some_and(|added| added.iter().any(|s| !s.is_terminal()))
+}
+
 /// Package #6 Task A3 (spec D1): append `FAILED` after the terminal a LOOP
-/// iteration reached, because its `Loop`'s `outputs:` failed, and write the
-/// execution's state and history. A terminal-to-terminal move, so
-/// `stamps::Entered` keeps the `ended_at` the terminal set (Kestra's
-/// `withState(FAILED)` likewise appends to the history whatever the state
-/// before it was).
+/// iteration reached, because its `Loop`'s `outputs:` failed -- and, since
+/// Task B1, after the terminal an execution reached because its flow's
+/// `outputs:` failed -- and write the execution's state and history. A
+/// terminal-to-terminal move, so `stamps::Entered` keeps the `ended_at` the
+/// terminal set. Kestra's `withState(FAILED)` appends after any other
+/// terminal and is a no-op on `FAILED` (corrected 2026-10-29, Task B1: A3's
+/// text said it appended whatever the state before it was).
 async fn fail_after_terminal(
     conn: &mut PgConnection,
     ctx: &ExecutionCtx,
     state: &mut ExecutionState,
 ) -> Result<()> {
+    // Kestra's `State.withState` returns the state unchanged when it is
+    // already the one asked for (`State.java:73-77`): an execution that
+    // ended FAILED stays `… FAILED`, never `… FAILED FAILED`. **Corrected
+    // 2026-10-29 (Task B1):** Task A3 appended unconditionally and its report
+    // read Kestra as appending; it does not.
+    if state.history.last() == Some(&RunState::Failed) {
+        return Ok(());
+    }
     let prior = state.history.clone();
     apply(
         state,

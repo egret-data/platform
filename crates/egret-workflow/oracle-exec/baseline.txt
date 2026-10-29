@@ -309,7 +309,8 @@
 # TEN Subflow declarers still hold, and NONE of them is held by `Subflow`:
 # `retry-subflow` and `subflow-parent-retry` on `state::apply` rule 1 (Kestra
 # accumulates a sub-execution's retries INSIDE the parent's attempt);
-# `subflow-secret-output-parent` on the unevaluated flow-level `outputs:`;
+# `subflow-secret-output-parent` on the unevaluated flow-level `outputs:` (since
+# package #6 Task B1, 2026-10-29: on its `subflow` run's attempt shape, see its line);
 # `task-runif` on `OutputValues` having no handler; `restart-parent` and
 # `restart-parent-loop` on W2's `Infinity` render inside `restart-child`
 # (both banked with `restart-child` at package #5a Task A3, 2026-10-28);
@@ -589,7 +590,7 @@ valids/after-execution
 valids/dag
 valids/flow-concurrency-sla-fail-child
 valids/flow-concurrency-sla-fail-parent
-valids/flow-with-outputs-failed
+# `valids/flow-with-outputs-failed` banked 2026-10-29 (package #6 Task B1, spec D6), as the plan predicted: the flow-level `outputs:` are evaluated in the settle that makes the execution terminal; `{{ invalid }}` fails, so `FAILED` is appended after the terminal (`CREATED RUNNING SUCCESS FAILED`) as in Kestra's `ExecutorService.onEnd`.
 valids/full
 valids/if
 # `valids/if-in-flowable` banked 2026-10-29 (package #5a Task A6, spec D5): its `If` condition is `{{ item.value equals 'value 2' }}`; `equals` did not parse here, so the condition failed to render and the `If` FAILED. `equals` is `==` now.
@@ -625,7 +626,8 @@ valids/sla-max-duration-fail
 valids/sla-parent-flow
 valids/sla-subflow
 valids/subflow-parent-retry
-valids/subflow-secret-output-child
+# `valids/subflow-secret-output-child` banked 2026-10-29 (package #6 Task B1, spec D6, D9), NOT predicted (spec Q3 kept it baselined): its flow-level SECRET output is evaluated at the terminal now, and the oracle's egret, like Kestra's harness, runs with no master key, so egret refuses to store the value (`egret refuses output secret: ... set secrets.master_key`) and appends `FAILED` after the terminal, as Kestra fails it on its missing encryption key. Q3's "egret with a key succeeds" still holds and is pinned by `tests/worker.rs` `a_secret_flow_output_is_masked_and_sealed`; this entry banks on the no-key path the two harnesses share.
+# `valids/subflow-secret-output-parent`: re-attributed 2026-10-29 (package #6 Task B1, measured). Its child FAILS now (above), so the parent's `subflow` run FAILS and the execution FAILS as in the golden, and `log` no longer runs; the one field left is the `subflow` run's ATTEMPT: Kestra's `[CREATED, FAILED]` comes from `Subflow.createSubflowExecutionResult` re-rendering the child's outputs in the parent and failing in `failSubflowDueToOutput`, where egret's attempt is the ordinary `[CREATED, RUNNING, FAILED]`. The `Subflow` copy of a child's outputs is Task B3's.
 valids/subflow-secret-output-parent
 # `valids/task-runif-taskswithstate` banked 2026-10-29 (package #5b Task B2, spec D8), as the plan expected: its `runIf` (`tasksWithState(state='FAILED') is [not] empty`) renders now that Pebble's `empty` test is registered (end hooks A8 had measured that as the last cause).
 # `valids/task-runif-workingdirectory` banked 2026-10-29 (package #5a Task A6, spec D5): both children's `runIf` and `message` are `{{ inputs.scripts_to_run contains '...' }}`; `contains` did not parse here, so `log_orders` FAILED at creation (the cause the 2026-10 WorkingDirectory note in README.md left "not isolated further"). `contains` is Pebble's `ContainsExpression` now.

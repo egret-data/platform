@@ -1055,8 +1055,13 @@ def check_inputs(flows, kinds, golden, baseline):
     # 29 since package #6 Task A6 (2026-10-29) banked
     # `valids/retry-flowable-parallel` (a `Loop`'s `retry:` is inherited by
     # each iteration's tasks), spec D7.
-    if len(baseline) != 29:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 29; the split "
+    # 27 since package #6 Task B1 (2026-10-29) banked
+    # `valids/flow-with-outputs-failed` (the flow-level `outputs:` evaluated at
+    # the terminal), spec D6, and `valids/subflow-secret-output-child` (its
+    # SECRET output refused with no master key, as Kestra's harness fails it),
+    # spec D9.
+    if len(baseline) != 27:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 27; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1706,8 +1711,8 @@ def self_test():
          "not 273",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 29",
-         "not 29",
+    case("baseline.txt is no longer 27",
+         "not 27",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

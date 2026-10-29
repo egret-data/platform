@@ -327,6 +327,41 @@ fn seal_object_with(object: &Map<String, Value>, cipher: Option<&Crypto>) -> Res
     Ok(sealed)
 }
 
+/// [`split_outputs`]'s answer: the masked map and the sealed SECRET values.
+pub(crate) type SplitOutputs = (Map<String, Value>, Option<Vec<u8>>);
+
+/// A flow's typed `outputs:` (package #6 Task B1, spec D9) split for
+/// `workflow.executions`: `values` with each of `secret_ids` replaced by
+/// [`MASK`], and those values sealed as one `{output id: value}` object for
+/// `secret_outputs` (`None` when no SECRET output has a value). `Err` with no
+/// cipher installed: the caller refuses first with [`can_seal`].
+pub(crate) fn split_outputs(
+    values: &Map<String, Value>,
+    secret_ids: &[String],
+) -> Result<SplitOutputs> {
+    split_outputs_with(values, secret_ids, CIPHER.get())
+}
+
+fn split_outputs_with(
+    values: &Map<String, Value>,
+    secret_ids: &[String],
+    cipher: Option<&Crypto>,
+) -> Result<SplitOutputs> {
+    let mut masked = values.clone();
+    let mut secret = Map::new();
+    for id in secret_ids {
+        if let Some(v) = masked.get_mut(id) {
+            if !v.is_null() {
+                secret.insert(id.clone(), std::mem::replace(v, Value::from(MASK)));
+            }
+        }
+    }
+    if secret.is_empty() {
+        return Ok((masked, None));
+    }
+    Ok((masked, Some(seal_object_with(&secret, cipher)?)))
+}
+
 /// Open a `Loop` run's sealed SECRET outputs: `{list position: {output id:
 /// value}}`.
 pub fn open_outputs(sealed: &[u8]) -> Result<Map<String, Value>> {
@@ -443,6 +478,33 @@ mod tests {
                 && refusal.contains("secrets.master_key"),
             "{refusal}"
         );
+    }
+
+    /// Package #6 Task B1: a flow's outputs keep their order and non-SECRET
+    /// values, a SECRET one reads [`MASK`] and opens from the seal, a `null`
+    /// SECRET one stays `null` and seals nothing, and no cipher is an error.
+    #[test]
+    fn flow_outputs_mask_and_seal_their_secret_values() {
+        install_for_tests();
+        let mut values = Map::new();
+        values.insert("p".into(), json!("plain"));
+        values.insert("s".into(), json!("hush-b1-unit"));
+        values.insert("n".into(), Value::Null);
+        let ids = vec!["s".to_string(), "n".to_string()];
+        let (masked, sealed) = split_outputs(&values, &ids).unwrap();
+        assert_eq!(
+            Value::Object(masked),
+            json!({"p": "plain", "s": MASK, "n": null})
+        );
+        let sealed = sealed.expect("one value sealed");
+        assert!(!sealed.windows(12).any(|w| w == b"hush-b1-unit"));
+        assert_eq!(
+            Value::Object(open_outputs(&sealed).unwrap()),
+            json!({"s": "hush-b1-unit"})
+        );
+        let (_, none) = split_outputs(&values, &["n".to_string()]).unwrap();
+        assert_eq!(none, None);
+        assert!(split_outputs_with(&values, &ids, None).is_err());
     }
 
     #[test]
