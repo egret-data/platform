@@ -9065,7 +9065,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The group: source, direct members (as the compiler reads them; service accounts included), the roles and workspaces it holds (egret only), `standsFor` and clearances. `public` answers `isPublic: true` with no members",
+            "description": "The group: source, direct members (as the compiler reads them; service accounts included), the roles and workspaces it holds (its members get them on engines too), `standsFor` and clearances. `public` answers `isPublic: true` with no members",
             "content": {
               "application/json": {
                 "schema": {
@@ -9136,7 +9136,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The role: scopes, live holders that are users (as the compiler reads them; service accounts included), groups holding it (egret only), `standsFor` and clearances",
+            "description": "The role: scopes, live holders that are users (as the compiler reads them; service accounts included), groups holding it (their members get it on engines too), `standsFor` and clearances",
             "content": {
               "application/json": {
                 "schema": {
@@ -47293,7 +47293,7 @@
       },
       "GroupRef": {
         "type": "object",
-        "description": "A group holding a role (egret only).",
+        "description": "A group holding a role. Its members get the role on engines too.",
         "required": [
           "name",
           "source"
@@ -53215,7 +53215,7 @@
             "items": {
               "$ref": "#/components/schemas/GroupRef"
             },
-            "description": "Groups holding the role, unexpired (egret only)."
+            "description": "Groups holding the role, unexpired. Their members get it on engines too."
           },
           "standsFor": {
             "type": "array",
@@ -58152,7 +58152,7 @@
           },
           {
             "type": "object",
-            "description": "A role held by one of the user's groups (egret only).",
+            "description": "A role held by one of the user's groups; engines enforce it for the user too.",
             "required": [
               "group",
               "role",
@@ -58175,7 +58175,7 @@
           },
           {
             "type": "object",
-            "description": "A workspace held by one of the user's groups (egret only).",
+            "description": "A workspace held by one of the user's groups; engines enforce it for the user too.",
             "required": [
               "group",
               "id",
