@@ -93,16 +93,16 @@ abbreviate	l1	{{ (l1 | abbreviate(5)) | className }}	error	error	-
 abbreviate	ll	{{ (ll | abbreviate(5)) | className }}	error	error	-
 abbreviate	m	{{ (m | abbreviate(5)) | className }}	error	error	-
 abbreviate	m1	{{ (m1 | abbreviate(5)) | className }}	error	error	-
-abbreviate	s	{{ (s | abbreviate(5)) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-abbreviate	sc	{{ (sc | abbreviate(5)) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+abbreviate	s	{{ (s | abbreviate(5)) | className }}	java.lang.String	java.lang.String	-
+abbreviate	sc	{{ (sc | abbreviate(5)) | className }}	java.lang.String	java.lang.String	-
 abbreviate	n	{{ (n | abbreviate(5)) | className }}	error	error	-
-abbreviate	nul	{{ (nul | abbreviate(5)) | className }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+abbreviate	nul	{{ (nul | abbreviate(5)) | className }}			-
 abbreviate	el	{{ (el | abbreviate(5)) | className }}	error	error	-
 abbreviate	em	{{ (em | abbreviate(5)) | className }}	error	error	-
-abbreviate	dt	{{ (dt | abbreviate(5)) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-abbreviate	ns	{{ (ns | abbreviate(5)) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+abbreviate	dt	{{ (dt | abbreviate(5)) | className }}	java.lang.String	java.lang.String	-
+abbreviate	ns	{{ (ns | abbreviate(5)) | className }}	java.lang.String	java.lang.String	-
 abbreviate	b	{{ (b | abbreviate(5)) | className }}	error	error	-
-abbreviate	b64	{{ (b64 | abbreviate(5)) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+abbreviate	b64	{{ (b64 | abbreviate(5)) | className }}	java.lang.String	java.lang.String	-
 abs	l	{{ (l | abs) | className }}	error	error	-
 abs	l1	{{ (l1 | abs) | className }}	error	error	-
 abs	ll	{{ (ll | abs) | className }}	error	error	-
@@ -126,28 +126,28 @@ base64decode	m1	{{ (m1 | base64decode) | className }}	error	error	-
 base64decode	s	{{ (s | base64decode) | className }}	error	error	-
 base64decode	sc	{{ (sc | base64decode) | className }}	error	error	-
 base64decode	n	{{ (n | base64decode) | className }}	error	error	-
-base64decode	nul	{{ (nul | base64decode) | className }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+base64decode	nul	{{ (nul | base64decode) | className }}			-
 base64decode	el	{{ (el | base64decode) | className }}	error	error	-
 base64decode	em	{{ (em | base64decode) | className }}	error	error	-
 base64decode	dt	{{ (dt | base64decode) | className }}	error	error	-
-base64decode	ns	{{ (ns | base64decode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+base64decode	ns	{{ (ns | base64decode) | className }}	java.lang.String	java.lang.String	-
 base64decode	b	{{ (b | base64decode) | className }}	error	error	-
-base64decode	b64	{{ (b64 | base64decode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-base64encode	l	{{ (l | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-base64encode	l1	{{ (l1 | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-base64encode	ll	{{ (ll | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-base64encode	m	{{ (m | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-base64encode	m1	{{ (m1 | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-base64encode	s	{{ (s | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-base64encode	sc	{{ (sc | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-base64encode	n	{{ (n | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-base64encode	nul	{{ (nul | base64encode) | className }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-base64encode	el	{{ (el | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-base64encode	em	{{ (em | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-base64encode	dt	{{ (dt | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-base64encode	ns	{{ (ns | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-base64encode	b	{{ (b | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-base64encode	b64	{{ (b64 | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+base64decode	b64	{{ (b64 | base64decode) | className }}	java.lang.String	java.lang.String	-
+base64encode	l	{{ (l | base64encode) | className }}	java.lang.String	java.lang.String	-
+base64encode	l1	{{ (l1 | base64encode) | className }}	java.lang.String	java.lang.String	-
+base64encode	ll	{{ (ll | base64encode) | className }}	java.lang.String	java.lang.String	-
+base64encode	m	{{ (m | base64encode) | className }}	java.lang.String	java.lang.String	-
+base64encode	m1	{{ (m1 | base64encode) | className }}	java.lang.String	java.lang.String	-
+base64encode	s	{{ (s | base64encode) | className }}	java.lang.String	java.lang.String	-
+base64encode	sc	{{ (sc | base64encode) | className }}	java.lang.String	java.lang.String	-
+base64encode	n	{{ (n | base64encode) | className }}	java.lang.String	java.lang.String	-
+base64encode	nul	{{ (nul | base64encode) | className }}			-
+base64encode	el	{{ (el | base64encode) | className }}	java.lang.String	java.lang.String	-
+base64encode	em	{{ (em | base64encode) | className }}	java.lang.String	java.lang.String	-
+base64encode	dt	{{ (dt | base64encode) | className }}	java.lang.String	java.lang.String	-
+base64encode	ns	{{ (ns | base64encode) | className }}	java.lang.String	java.lang.String	-
+base64encode	b	{{ (b | base64encode) | className }}	java.lang.String	java.lang.String	-
+base64encode	b64	{{ (b64 | base64encode) | className }}	java.lang.String	java.lang.String	-
 capitalize	l	{{ (l | capitalize) | className }}	error	error	-
 capitalize	l1	{{ (l1 | capitalize) | className }}	error	error	-
 capitalize	ll	{{ (ll | capitalize) | className }}	error	error	-
@@ -463,17 +463,17 @@ md5	dt	{{ (dt | md5) | className }}	java.lang.String	java.lang.String	-
 md5	ns	{{ (ns | md5) | className }}	java.lang.String	java.lang.String	-
 md5	b	{{ (b | md5) | className }}	error	error	-
 md5	b64	{{ (b64 | md5) | className }}	java.lang.String	java.lang.String	-
-merge	l	{{ (l | merge(l)) | className }}	java.util.ArrayList	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	l1	{{ (l1 | merge(l)) | className }}	java.util.ArrayList	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	ll	{{ (ll | merge(l)) | className }}	java.util.ArrayList	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	m	{{ (m | merge(l)) | className }}	java.util.HashMap	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	m1	{{ (m1 | merge(l)) | className }}	java.util.HashMap	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	l	{{ (l | merge(l)) | className }}	java.util.ArrayList	java.util.ArrayList	-
+merge	l1	{{ (l1 | merge(l)) | className }}	java.util.ArrayList	java.util.ArrayList	-
+merge	ll	{{ (ll | merge(l)) | className }}	java.util.ArrayList	java.util.ArrayList	-
+merge	m	{{ (m | merge(l)) | className }}	java.util.HashMap	java.util.LinkedHashMap	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
+merge	m1	{{ (m1 | merge(l)) | className }}	java.util.HashMap	java.util.LinkedHashMap	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
 merge	s	{{ (s | merge(l)) | className }}	error	error	-
 merge	sc	{{ (sc | merge(l)) | className }}	error	error	-
 merge	n	{{ (n | merge(l)) | className }}	error	error	-
-merge	nul	{{ (nul | merge(l)) | className }}	java.util.ArrayList	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	el	{{ (el | merge(l)) | className }}	java.util.ArrayList	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-merge	em	{{ (em | merge(l)) | className }}	java.util.HashMap	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	nul	{{ (nul | merge(l)) | className }}	java.util.ArrayList	java.util.ArrayList	-
+merge	el	{{ (el | merge(l)) | className }}	java.util.ArrayList	java.util.ArrayList	-
+merge	em	{{ (em | merge(l)) | className }}	java.util.HashMap	java.util.LinkedHashMap	`escapeChar` and `merge` return a `java.util.HashMap`, so the MAP's iteration order is `String.hashCode`'s buckets -- the recorded class of `filter-escapechar-map-two-keys`. This reason is for an ORDER that really differs; W2a's first cut also filed two rows here whose orders were identical, which hid a consumer
 merge	dt	{{ (dt | merge(l)) | className }}	error	error	-
 merge	ns	{{ (ns | merge(l)) | className }}	error	error	-
 merge	b	{{ (b | merge(l)) | className }}	error	error	-
@@ -498,16 +498,16 @@ nl2br	l1	{{ (l1 | nl2br) | className }}	error	error	-
 nl2br	ll	{{ (ll | nl2br) | className }}	error	error	-
 nl2br	m	{{ (m | nl2br) | className }}	error	error	-
 nl2br	m1	{{ (m1 | nl2br) | className }}	error	error	-
-nl2br	s	{{ (s | nl2br) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-nl2br	sc	{{ (sc | nl2br) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+nl2br	s	{{ (s | nl2br) | className }}	java.lang.String	java.lang.String	-
+nl2br	sc	{{ (sc | nl2br) | className }}	java.lang.String	java.lang.String	-
 nl2br	n	{{ (n | nl2br) | className }}	error	error	-
-nl2br	nul	{{ (nul | nl2br) | className }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+nl2br	nul	{{ (nul | nl2br) | className }}			-
 nl2br	el	{{ (el | nl2br) | className }}	error	error	-
 nl2br	em	{{ (em | nl2br) | className }}	error	error	-
-nl2br	dt	{{ (dt | nl2br) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-nl2br	ns	{{ (ns | nl2br) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+nl2br	dt	{{ (dt | nl2br) | className }}	java.lang.String	java.lang.String	-
+nl2br	ns	{{ (ns | nl2br) | className }}	java.lang.String	java.lang.String	-
 nl2br	b	{{ (b | nl2br) | className }}	error	error	-
-nl2br	b64	{{ (b64 | nl2br) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+nl2br	b64	{{ (b64 | nl2br) | className }}	java.lang.String	java.lang.String	-
 number	l	{{ (l | number) | className }}	error	error	-
 number	l1	{{ (l1 | number) | className }}	error	error	-
 number	ll	{{ (ll | number) | className }}	error	error	-
@@ -530,29 +530,29 @@ numberformat	m	{{ (m | numberformat('#')) | className }}	error	error	-
 numberformat	m1	{{ (m1 | numberformat('#')) | className }}	error	error	-
 numberformat	s	{{ (s | numberformat('#')) | className }}	error	error	-
 numberformat	sc	{{ (sc | numberformat('#')) | className }}	error	error	-
-numberformat	n	{{ (n | numberformat('#')) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-numberformat	nul	{{ (nul | numberformat('#')) | className }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+numberformat	n	{{ (n | numberformat('#')) | className }}	java.lang.String	java.lang.String	-
+numberformat	nul	{{ (nul | numberformat('#')) | className }}			-
 numberformat	el	{{ (el | numberformat('#')) | className }}	error	error	-
 numberformat	em	{{ (em | numberformat('#')) | className }}	error	error	-
 numberformat	dt	{{ (dt | numberformat('#')) | className }}	error	error	-
 numberformat	ns	{{ (ns | numberformat('#')) | className }}	error	error	-
 numberformat	b	{{ (b | numberformat('#')) | className }}	error	error	-
 numberformat	b64	{{ (b64 | numberformat('#')) | className }}	error	error	-
-raw	l	{{ (l | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-raw	l1	{{ (l1 | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-raw	ll	{{ (ll | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-raw	m	{{ (m | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-raw	m1	{{ (m1 | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-raw	s	{{ (s | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-raw	sc	{{ (sc | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-raw	n	{{ (n | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-raw	nul	{{ (nul | raw) | className }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-raw	el	{{ (el | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-raw	em	{{ (em | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-raw	dt	{{ (dt | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-raw	ns	{{ (ns | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-raw	b	{{ (b | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-raw	b64	{{ (b64 | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+raw	l	{{ (l | raw) | className }}	java.lang.String	java.lang.String	-
+raw	l1	{{ (l1 | raw) | className }}	java.lang.String	java.lang.String	-
+raw	ll	{{ (ll | raw) | className }}	java.lang.String	java.lang.String	-
+raw	m	{{ (m | raw) | className }}	java.lang.String	java.lang.String	-
+raw	m1	{{ (m1 | raw) | className }}	java.lang.String	java.lang.String	-
+raw	s	{{ (s | raw) | className }}	java.lang.String	java.lang.String	-
+raw	sc	{{ (sc | raw) | className }}	java.lang.String	java.lang.String	-
+raw	n	{{ (n | raw) | className }}	java.lang.String	java.lang.String	-
+raw	nul	{{ (nul | raw) | className }}			-
+raw	el	{{ (el | raw) | className }}	java.lang.String	java.lang.String	-
+raw	em	{{ (em | raw) | className }}	java.lang.String	java.lang.String	-
+raw	dt	{{ (dt | raw) | className }}	java.lang.String	java.lang.String	-
+raw	ns	{{ (ns | raw) | className }}	java.lang.String	java.lang.String	-
+raw	b	{{ (b | raw) | className }}	java.lang.String	java.lang.String	-
+raw	b64	{{ (b64 | raw) | className }}	java.lang.String	java.lang.String	-
 regexExtract	l	{{ (l | regexExtract(regex='a')) | className }}	java.lang.String	java.lang.String	-
 regexExtract	l1	{{ (l1 | regexExtract(regex='a')) | className }}			-
 regexExtract	ll	{{ (ll | regexExtract(regex='a')) | className }}	java.lang.String	java.lang.String	-
@@ -628,16 +628,16 @@ reverse	dt	{{ (dt | reverse) | className }}	error	error	-
 reverse	ns	{{ (ns | reverse) | className }}	error	error	-
 reverse	b	{{ (b | reverse) | className }}	error	error	-
 reverse	b64	{{ (b64 | reverse) | className }}	error	error	-
-rsort	l	{{ (l | rsort) | className }}	java.util.ArrayList	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	l1	{{ (l1 | rsort) | className }}	java.util.ArrayList	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	l	{{ (l | rsort) | className }}	java.util.ArrayList	java.util.ArrayList	-
+rsort	l1	{{ (l1 | rsort) | className }}	java.util.ArrayList	java.util.ArrayList	-
 rsort	ll	{{ (ll | rsort) | className }}	error	error	-
 rsort	m	{{ (m | rsort) | className }}	error	error	-
 rsort	m1	{{ (m1 | rsort) | className }}	error	error	-
 rsort	s	{{ (s | rsort) | className }}	error	error	-
 rsort	sc	{{ (sc | rsort) | className }}	error	error	-
 rsort	n	{{ (n | rsort) | className }}	error	error	-
-rsort	nul	{{ (nul | rsort) | className }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-rsort	el	{{ (el | rsort) | className }}	java.util.ArrayList	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	nul	{{ (nul | rsort) | className }}			-
+rsort	el	{{ (el | rsort) | className }}	java.util.ArrayList	java.util.ArrayList	-
 rsort	em	{{ (em | rsort) | className }}	error	error	-
 rsort	dt	{{ (dt | rsort) | className }}	error	error	-
 rsort	ns	{{ (ns | rsort) | className }}	error	error	-
@@ -663,16 +663,16 @@ sha256	l1	{{ (l1 | sha256) | className }}	error	error	-
 sha256	ll	{{ (ll | sha256) | className }}	error	error	-
 sha256	m	{{ (m | sha256) | className }}	error	error	-
 sha256	m1	{{ (m1 | sha256) | className }}	error	error	-
-sha256	s	{{ (s | sha256) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-sha256	sc	{{ (sc | sha256) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+sha256	s	{{ (s | sha256) | className }}	java.lang.String	java.lang.String	-
+sha256	sc	{{ (sc | sha256) | className }}	java.lang.String	java.lang.String	-
 sha256	n	{{ (n | sha256) | className }}	error	error	-
-sha256	nul	{{ (nul | sha256) | className }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+sha256	nul	{{ (nul | sha256) | className }}			-
 sha256	el	{{ (el | sha256) | className }}	error	error	-
 sha256	em	{{ (em | sha256) | className }}	error	error	-
-sha256	dt	{{ (dt | sha256) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-sha256	ns	{{ (ns | sha256) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+sha256	dt	{{ (dt | sha256) | className }}	java.lang.String	java.lang.String	-
+sha256	ns	{{ (ns | sha256) | className }}	java.lang.String	java.lang.String	-
 sha256	b	{{ (b | sha256) | className }}	error	error	-
-sha256	b64	{{ (b64 | sha256) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+sha256	b64	{{ (b64 | sha256) | className }}	java.lang.String	java.lang.String	-
 sha512	l	{{ (l | sha512) | className }}	error	error	-
 sha512	l1	{{ (l1 | sha512) | className }}	error	error	-
 sha512	ll	{{ (ll | sha512) | className }}	error	error	-
@@ -993,16 +993,16 @@ urlencode	l1	{{ (l1 | urlencode) | className }}	error	error	-
 urlencode	ll	{{ (ll | urlencode) | className }}	error	error	-
 urlencode	m	{{ (m | urlencode) | className }}	error	error	-
 urlencode	m1	{{ (m1 | urlencode) | className }}	error	error	-
-urlencode	s	{{ (s | urlencode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-urlencode	sc	{{ (sc | urlencode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+urlencode	s	{{ (s | urlencode) | className }}	java.lang.String	java.lang.String	-
+urlencode	sc	{{ (sc | urlencode) | className }}	java.lang.String	java.lang.String	-
 urlencode	n	{{ (n | urlencode) | className }}	error	error	-
-urlencode	nul	{{ (nul | urlencode) | className }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+urlencode	nul	{{ (nul | urlencode) | className }}			-
 urlencode	el	{{ (el | urlencode) | className }}	error	error	-
 urlencode	em	{{ (em | urlencode) | className }}	error	error	-
-urlencode	dt	{{ (dt | urlencode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
-urlencode	ns	{{ (ns | urlencode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+urlencode	dt	{{ (dt | urlencode) | className }}	java.lang.String	java.lang.String	-
+urlencode	ns	{{ (ns | urlencode) | className }}	java.lang.String	java.lang.String	-
 urlencode	b	{{ (b | urlencode) | className }}	error	error	-
-urlencode	b64	{{ (b64 | urlencode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+urlencode	b64	{{ (b64 | urlencode) | className }}	java.lang.String	java.lang.String	-
 values	l	{{ (l | values) | className }}	error	error	-
 values	l1	{{ (l1 | values) | className }}	error	error	-
 values	ll	{{ (ll | values) | className }}	error	error	-

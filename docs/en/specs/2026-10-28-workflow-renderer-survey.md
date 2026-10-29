@@ -154,7 +154,7 @@ The same scan lists **`null`, `empty`, `map`, `json`**. egret answers `unknown t
 | `x is map` | `{}` gives `true`, `[]` gives `false` |
 | `x is json` | `"1"` and `'{"key":1}'` give `true`, `"plain"` gives `false`; **a map throws** `ClassCastException` |
 
-Also divergent and named nowhere in the row: `even`, `odd` and `iterable` (`oracle/baseline.txt` `test-even`, `test-odd`, `test-iterable`). Pebble throws on a String for even/odd, and `iterable` is false for a String. The pinned fence test is `env.rs:2962` `the_defined_test_is_pebbles_and_it_is_the_only_one_overridden`, which asserts the four are still unknown (`:3005`). It must be rewritten.
+Also divergent and named nowhere in the row: `even`, `odd` and `iterable` (`oracle/baseline.txt` `test-even`, `test-odd`, `test-iterable`). Pebble throws on a String for even/odd, and `iterable` is false for a String. The pinned fence test is `env.rs:2962` `the_defined_test_is_pebbles_and_it_is_the_only_one_overridden`, which asserts the four are still unknown (`:3005`). It must be rewritten. *(2026-10-29, package #5b Task B2: rewritten and renamed `the_engine_tests_are_egrets_and_none_is_not_one`, now `env.rs:3117`; `null` is bound as `null`, not through `none`, design spec §2.2 item 15.)*
 
 **Corpus:**
 - Expression: `test-json-true`, `test-json-false`, `null-literal-is-null-test`, likely `coalesce-is-not-null` (**3–4**), plus `test-even`/`odd`/`iterable` (**3**).
@@ -249,7 +249,7 @@ Not renderer work (left out): `working-directory-taskrun-nested` (`{{ workerTask
 **Fixtures that must change with the code:**
 - `oracle/name-surface.txt`: 10 filter rows, 2 function rows, 4 test rows, the `escape` row's reason, and the `render`/`renderOnce`/`errorLogs`/`subflow` reasons.
 - `functions.rs` `REFUSED` (its test asserts `len() == 6`, `:3586`).
-- The tripwires `executor/mod.rs:9708`, `env.rs:2962`/`:3005` and `compare.rs:825`.
+- The tripwires `executor/mod.rs:9708`, `env.rs:2962`/`:3005` and `compare.rs:825`. *(2026-10-29: the `env.rs` one is now `the_engine_tests_are_egrets_and_none_is_not_one`, `env.rs:3117`.)*
 - Both `baseline.txt` files and the executor ratchet tuple.
 
 ## 4. Size and slicing
@@ -324,7 +324,7 @@ Decisions: **D1** = Q1 (subflow out), **D2** = Q2 (integer arithmetic), **D3** =
 
 **#5b, Names**
 1. T8. Corpus batches for the tests, `max`/`min`, the ten filters and the five escape strategies.
-2. T9. The tests `null` (through the `none` spelling), `empty`, `map`, `json`, and fix `even`/`odd`/`iterable`. Rewrite the fence at `env.rs:2962`.
+2. T9. The tests `null` (through the `none` spelling), `empty`, `map`, `json`, and fix `even`/`odd`/`iterable`. Rewrite the fence at `env.rs:2962`. *(As built, 2026-10-29: `null` is bound under its own name, not through `none`; the fence is `the_engine_tests_are_egrets_and_none_is_not_one`, `env.rs:3117`.)*
 3. T10. `max`/`min` on T2's comparison.
 4. T11. The ten filters.
 5. T12. `escape` js/css/url_param/json, with unbescape's tables.

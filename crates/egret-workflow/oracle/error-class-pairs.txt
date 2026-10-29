@@ -62,14 +62,17 @@ isin-missing-attr-left              test:an_undefined_is_in_operand_raises_rathe
 # has no file scope, so `function-kv` still fails, by the sentence
 # `kv_without_a_scope_refuses_by_name` asserts. The six refusals left are held
 # by `the_refused_list_is_six_and_kv_is_not_in_it`.
-function-secret                     test:the_refused_list_is_six_and_kv_is_not_in_it
+# Package #5b Task B8 (2026-10-29): B6 and B7 left three refusals (`secret`,
+# `http`, `subflow`, the last now owned by roadmap row #12, spec Q1), and the
+# test was renamed `the_refused_list_is_three_and_subflow_names_row_12`.
+function-secret                     test:the_refused_list_is_three_and_subflow_names_row_12
 function-kv                         test:kv_without_a_scope_refuses_by_name
 function-read                       test:without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution
 function-fileuri                    test:without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution
 function-filesize                   test:without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution
 function-fileexists                 test:without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution
 function-isfileempty                test:without_a_scope_the_four_are_refused_by_name_saying_they_need_an_execution
-function-http                       test:the_refused_list_is_six_and_kv_is_not_in_it
+function-http                       test:the_refused_list_is_three_and_subflow_names_row_12
 
 # --- W2 Task 4: wrong-typed input.
 filter-chunk-not-list               test:chunk_rejects_a_non_list
@@ -258,10 +261,14 @@ function-fromion-annotation-of-a-list       test:an_annotated_value_is_its_own_t
 # these is among them -- `Function or Macro [render] does not exist.` egret
 # binds all four to a refusal that names the function and its package instead,
 # so both sides fail and only the message differs.
-function-render                                     test:the_refused_list_is_six_and_kv_is_not_in_it
-function-renderonce                                 test:the_refused_list_is_six_and_kv_is_not_in_it
-function-errorlogs                                  test:the_refused_list_is_six_and_kv_is_not_in_it
-function-subflow                                    test:the_refused_list_is_six_and_kv_is_not_in_it
+# (Package #5b Task B6, 2026-10-29: `function-render` and
+# `function-renderonce` were here. Both answer now, on both sides, and are no
+# longer error-class; see the B6 block at the end of this file.)
+# (Package #5b Task B7, 2026-10-29: `function-errorlogs` re-paired. egret
+# implements `errorLogs()` on the worker; the corpus render is not one, so it
+# fails with Kestra's own off-the-worker sentence, which this test pins.)
+function-errorlogs                                  test:outside_the_worker_it_is_kestras_refusal
+function-subflow                                    test:the_refused_list_is_three_and_subflow_names_row_12
 
 # W2 Task 8: `env`. `containsKey`, not a null check -- an absent `name`
 # throws and an explicitly null one falls through to the default.
@@ -326,10 +333,11 @@ filter-split-missing-delimiter                      test:split_and_slice_refuse_
 filter-slice-to-index-past-the-end                  test:split_and_slice_refuse_what_java_refuses
 
 # Pebble's `even`/`odd` cast to Long and throw on a String; minijinja's answer
-# `false`. egret keeps minijinja's -- the `is` surface was never given to a W2
-# task -- so these are ALSO baselined and the ratchet is what holds them.
-test-even                                           baselined
-test-odd                                            baselined
+# `false`. These were baselined until package #5b's Task B2 (spec D8,
+# 2026-10-29) ported both tests (`runners::pebble_tests`); the unit test
+# asserts the `ClassCastException` text.
+test-even                                           test:even_and_odd_fail_with_pebbles_text
+test-odd                                            test:even_and_odd_fail_with_pebbles_text
 
 # W2 Task 8, fix round 1: the Java COLLECTION INTERFACE is observable and
 # egret had one sequence type. `keys` and `values` return a Set/Collection and
@@ -551,3 +559,64 @@ operator-contains-number-left                       test:contains_on_what_pebble
 logic-and-list-left                                 test:an_operand_kestra_cannot_cast_fails_with_kestras_text
 logic-or-null-context                               test:an_operand_kestra_cannot_cast_fails_with_kestras_text
 logic-and-map-left                                  test:an_operand_kestra_cannot_cast_fails_with_kestras_text
+# Package #5b, Task B1 (2026-10-29): 26 entries. Four are baselined (egret
+# answers today: `even`/`odd` on a string or a Double). The other 22 are born
+# matching for the WRONG reason (the test, function or filter is unknown here,
+# or the escape strategy is refused with egret's own text), so each is paired
+# with a runners::env placeholder test that asserts the failure; the B-task
+# that ports the name keeps it failing for Kestra's reason and tightens the
+# test to Kestra's text.
+# Task B2 (2026-10-29): the seven `test-*` rows below now fail for Kestra's
+# reason and their test asserts it; the four `even`/`odd` rows banked and are
+# held by `even_and_odd_fail_with_pebbles_text`, not the baseline.
+test-null-missing-root                              test:a_test_kestra_refuses_is_refused_here_too
+test-null-missing-member                            test:a_test_kestra_refuses_is_refused_here_too
+test-empty-missing-root                             test:a_test_kestra_refuses_is_refused_here_too
+test-json-map                                       test:a_test_kestra_refuses_is_refused_here_too
+test-json-list                                      test:a_test_kestra_refuses_is_refused_here_too
+test-json-number                                    test:a_test_kestra_refuses_is_refused_here_too
+test-json-null                                      test:a_test_kestra_refuses_is_refused_here_too
+test-even-numeric-string                            test:even_and_odd_fail_with_pebbles_text
+test-odd-numeric-string                             test:even_and_odd_fail_with_pebbles_text
+test-even-string-literal                            test:even_and_odd_fail_with_pebbles_text
+test-even-double                                    test:even_and_odd_fail_with_pebbles_text
+function-max-strings                                test:max_and_min_refuse_what_pebble_cannot_compare
+function-min-string-long                            test:max_and_min_refuse_what_pebble_cannot_compare
+function-max-numeric-string                         test:max_and_min_refuse_what_pebble_cannot_compare
+function-max-boolean                                test:max_and_min_refuse_what_pebble_cannot_compare
+function-max-list-long                              test:max_and_min_refuse_what_pebble_cannot_compare
+filter-abbreviate-negative                          test:a_filter_input_kestra_refuses_is_refused_here_too
+filter-abbreviate-number                            test:a_filter_input_kestra_refuses_is_refused_here_too
+filter-base64decode-bad                             test:a_filter_input_kestra_refuses_is_refused_here_too
+filter-merge-string                                 test:a_filter_input_kestra_refuses_is_refused_here_too
+filter-numberformat-string                          test:a_filter_input_kestra_refuses_is_refused_here_too
+filter-rsort-context-mixed-numbers                  test:a_filter_input_kestra_refuses_is_refused_here_too
+filter-rsort-mixed                                  test:a_filter_input_kestra_refuses_is_refused_here_too
+# Task B5 (2026-10-29): the three `filter-escape-*` rows below now fail for
+# Kestra's reason (`Unknown escaping strategy [x]`) and their test, moved to
+# runners::filters under the same name, asserts that text.
+filter-escape-html-attr                             test:an_escape_strategy_pebble_does_not_know_is_refused
+filter-escape-unknown-strategy                      test:an_escape_strategy_pebble_does_not_know_is_refused
+filter-escape-uppercase-strategy                    test:an_escape_strategy_pebble_does_not_know_is_refused
+
+# --- Package #5b Task B6 (2026-10-29, spec D9): `render()` and `renderOnce()`.
+# Each test is in `runners::nested::tests` and asserts egret's own text,
+# Kestra's sentence where Kestra has one.
+function-render-depth-17                            test:render_nesting_stops_where_kestras_does
+function-render-circular                            test:render_nesting_stops_where_kestras_does
+function-renderonce-depth-17                        test:render_nesting_stops_where_kestras_does
+function-render-recursive-string                    test:a_recursive_that_is_not_a_boolean_is_refused
+function-render-recursive-number                    test:a_recursive_that_is_not_a_boolean_is_refused
+function-render-too-many-arguments                  test:render_binds_its_arguments_as_pebble_does
+function-render-unknown-named-argument              test:render_binds_its_arguments_as_pebble_does
+function-render-no-argument                         test:render_binds_its_arguments_as_pebble_does
+function-renderonce-recursive-named                 test:render_binds_its_arguments_as_pebble_does
+function-renderonce-second-positional               test:render_binds_its_arguments_as_pebble_does
+function-renderonce-no-argument                     test:render_binds_its_arguments_as_pebble_does
+function-render-map-integer-key                     test:a_map_key_that_is_not_a_string_is_refused
+function-render-missing-variable                    test:a_nested_render_fails_as_its_text_fails
+function-render-missing-argument                    test:a_nested_render_fails_as_its_text_fails
+function-render-raw                                 test:a_nested_render_fails_as_its_text_fails
+function-render-not-converging                      test:a_nested_render_fails_as_its_text_fails
+function-render-syntax-error                        test:a_nested_render_fails_as_its_text_fails
+function-render-secret                              test:secret_stays_refused_in_text_render_evaluates

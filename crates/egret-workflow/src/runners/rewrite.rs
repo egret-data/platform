@@ -908,7 +908,10 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, RewriteError> {
                     // `==` hands it to the comparison pass, which makes it
                     // `kestra_eq` (package #5a Task A6, spec D5).
                     toks.push(Tok::Text("==".to_string()));
-                } else if is_null_literal_spelling(word) && !follows_an_attribute_dot(&toks) {
+                } else if is_null_literal_spelling(word)
+                    && !follows_an_attribute_dot(&toks)
+                    && !follows_a_test_operator(&toks)
+                {
                     toks.push(Tok::Text(NULL_LITERAL_IN_MINIJINJA.to_string()));
                 } else {
                     toks.push(Tok::Text(word.to_string()));
@@ -976,6 +979,26 @@ fn follows_an_attribute_dot(toks: &[Tok]) -> bool {
         .rev()
         .find(|t| !is_whitespace_tok(t))
         .is_some_and(|t| t.text() == ".")
+}
+
+/// Is the token about to be pushed in **test-name position** — after `is`
+/// or `is not`?
+///
+/// A test name is a bare identifier in Pebble, not an expression, so the
+/// null literal's spellings are not translated there (package #5b, Task B2,
+/// spec D8). Measured: `{{ x is null }}` is Pebble's `NullTest`, and
+/// `{{ x is none }}`, `{{ x is NONE }}` and `{{ x is NULL }}` are each
+/// `Test [..] does not exist.`. Translating `null` to `none` here would bind
+/// all four to one test and over-accept the three Kestra refuses; leaving the
+/// word alone lets `runners::pebble_tests` register `null` under its own name
+/// while `none` stays removed.
+fn follows_a_test_operator(toks: &[Tok]) -> bool {
+    let mut significant = toks.iter().rev().filter(|t| !is_whitespace_tok(t));
+    match significant.next().map(Tok::text) {
+        Some("is") => true,
+        Some("not") => significant.next().is_some_and(|t| t.text() == "is"),
+        _ => false,
+    }
 }
 
 /// A flattened unit at one nesting level: either verbatim text (including a
@@ -3052,6 +3075,29 @@ but there is one on the next: '";
     /// is what an unguarded rename would emit for `{{ o.null }}` -- fails as a
     /// parse error rather than as a wrong string, which is the shape a reader
     /// of this test should expect from breaking the dot guard.
+    #[test]
+    fn a_test_name_is_never_the_null_literal() {
+        // Package #5b, Task B2 (spec D8, §2.2 item 15): after `is` or
+        // `is not`, the word is a test name, so `null` stays `null` (the
+        // registered test) and `NULL`/`NONE` stay themselves (unknown, as in
+        // Kestra). The subject is still the literal.
+        assert_eq!(
+            rewrite_and_parse("{{ null is null }}"),
+            "{{ none is null }}"
+        );
+        assert_eq!(
+            rewrite_and_parse("{{ x is not null }}"),
+            "{{ x is not null }}"
+        );
+        assert_eq!(rewrite_and_parse("{{ x is  NULL }}"), "{{ x is  NULL }}");
+        assert_eq!(
+            rewrite_and_parse("{{ x is not NONE }}"),
+            "{{ x is not NONE }}"
+        );
+        // `not` alone is not a test operator: the literal after it is a value.
+        assert_eq!(rewrite_and_parse("{{ not null }}"), "{{ not none }}");
+    }
+
     #[test]
     fn the_null_literal_becomes_minijinjas_none() {
         for spelling in ["null", "NULL", "none", "NONE"] {

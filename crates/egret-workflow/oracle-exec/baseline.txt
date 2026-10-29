@@ -177,8 +177,14 @@
 #   `errors` -- the `errorLogs()` function, which W2 refuses by name and
 #   assigns to W3 (`runners::functions::REFUSED`); egret has no task-log store
 #   for it to read (W3b Task 3's Concern 7).
+#   (BANKED with package #5b's Task B7, 2026-10-29, spec D11: `errorLogs()`
+#   reads the execution's ERROR lines on the worker -- the store existed
+#   since W11; the query and the prefetch were what was missing -- and `t2`
+#   logs them and SUCCEEDS.)
 #   `variables` -- the `render()` function, refused by W2 and assigned to W3 in
 #   the same table. Not implemented here; named rather than absorbed.
+#   (BANKED with package #5b's Task B6, 2026-10-29, spec D9: `render()` is a
+#   nested render now, and `{{render(vars.third)}}` renders `1 > 2 > 3`.)
 #   `webhook-plaintext` -- `{{ trigger.parameters… ?? 'hello-world' }}`. egret's
 #   `??` resolves a missing MEMBER (`outputs.not_existing ?? ''` renders) and
 #   not a missing ROOT, so the fallback is never reached. A W2 divergence the
@@ -581,7 +587,6 @@ invalids/dag-invalid-subtask
 valids/after-execution
 # `valids/all-flowable` and `valids/disable-flowable` banked 2026-10-29 (package #5a Task A7, spec D7): both render `{{ taskrun.value }}` in a `Switch` case (and `all-flowable` in its `Loop` body too); egret wrote `"value": null` and rendered it empty, Kestra's `RunVariables` omits a null value and the strict renderer FAILED the task. The key is absent now, so the case fails as in Kestra.
 valids/dag
-valids/errors
 valids/flow-concurrency-sla-fail-child
 valids/flow-concurrency-sla-fail-parent
 valids/flow-with-outputs-failed
@@ -590,8 +595,7 @@ valids/if
 # `valids/if-in-flowable` banked 2026-10-29 (package #5a Task A6, spec D5): its `If` condition is `{{ item.value equals 'value 2' }}`; `equals` did not parse here, so the condition failed to render and the `If` FAILED. `equals` is `==` now.
 # group C1 Task 3 (2026-10-18): `Assert` runs now; held by the `Loop`'s own `outputs:`, which egret does not produce: all three conditions read `outputs.for_each.outputs[i].outputs.*` and fail to render (`undefined value`), so `assert` FAILS where Kestra SUCCEEDED (measured).
 valids/if-in-parallel
-valids/loop-object
-valids/loop-object-in-list
+# `valids/loop-object` and `valids/loop-object-in-list` banked 2026-10-29 (package #5b Task B2, spec D8): a `Switch` inside the `Loop` renders `{{ item.value is json }}`; `json` was an unknown test here, so every iteration's `Switch` FAILED, where Kestra's `JsonTest` answers for a String and fails its `(String)` cast on a map. Both now fail and answer as Kestra. Not predicted by the plan.
 valids/loop-outputs
 valids/loop-outputs-auto
 valids/loop-outputs-failed-render
@@ -624,10 +628,9 @@ valids/sla-subflow
 valids/subflow-parent-retry
 valids/subflow-secret-output-child
 valids/subflow-secret-output-parent
-# end hooks A8 (2026-10-27): the flow-level `finally:` runs now (A4), but this entry did not bank: `write_execution_context` and `skipped_when_failures_exist` are created and end `CREATED FAILED` with no message, because their `runIf` (`tasksWithState(state='FAILED') is [not] empty`) fails to render -- Pebble's `empty` test, a renderer cause owned by package #5 (measured at A4; the 2026-10-18 cause, "egret does not run `finally:`", is history).
-valids/task-runif-taskswithstate
+# `valids/task-runif-taskswithstate` banked 2026-10-29 (package #5b Task B2, spec D8), as the plan expected: its `runIf` (`tasksWithState(state='FAILED') is [not] empty`) renders now that Pebble's `empty` test is registered (end hooks A8 had measured that as the last cause).
 # `valids/task-runif-workingdirectory` banked 2026-10-29 (package #5a Task A6, spec D5): both children's `runIf` and `message` are `{{ inputs.scripts_to_run contains '...' }}`; `contains` did not parse here, so `log_orders` FAILED at creation (the cause the 2026-10 WorkingDirectory note in README.md left "not isolated further"). `contains` is Pebble's `ContainsExpression` now.
-valids/variables
+# `valids/variables` banked 2026-10-29 (package #5b Task B6, spec D9), as the plan expected: `{{render(vars.third)}}` renders through `render()`, which W2 refused.
 # group C1 Task 2 (2026-10-18): `OutputValues` runs now; held by one more `WaitFor` iteration (3 PAUSED, golden 2) under `maxDuration: PT3S`/`PT1S`, the poller-latency shape `loop-until-restart` is held by (measured).
 # Debt D14 (2026-10-19): this entry can MATCH by accident under CPU load, and the ratchet then fails "PROGRESS NOT BANKED". The driver's Tick clock is real time since `executions.created_at` plus what `pass_time` adds, so a slow machine leaks wall time into it and `reached_maximums` (`src/executor/flowable/loop_until.rs`) fires `maxDuration` one iteration early -- golden's 2 PAUSED. Not progress: it needs a virtual clock in the driver. Do not bank it on such a run.
 valids/waitfor-child-task-warning

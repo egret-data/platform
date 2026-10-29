@@ -8,6 +8,10 @@ use uuid::Uuid;
 
 use super::{LogLevel, LogLine, SETTLE_LAG};
 
+/// How many lines `errorLogs()` returns at most: Kestra's
+/// `Pageable.from(1, 25, …)` in `DefaultExecutionLogMetaStore.errorLogs`.
+pub const ERROR_LOGS_PAGE: i64 = 25;
+
 fn db_err(e: sqlx::Error) -> Error {
     Error::Internal(anyhow::anyhow!("{e}"))
 }
@@ -267,6 +271,38 @@ impl LogRepo {
         .bind(q.task_run_id)
         .bind(q.min_level.map(LogLevel::as_i16))
         .bind(q.limit.max(0))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?;
+        rows.iter().map(stored).collect()
+    }
+
+    /// `errorLogs()`'s read (package #5b Task B7, spec D11): the ERROR lines of
+    /// `execution` in workspace `ws`, oldest first, at most
+    /// [`ERROR_LOGS_PAGE`] of them.
+    ///
+    /// Kestra's `DefaultExecutionLogMetaStore.errorLogs` is
+    /// `findByExecutionId(tenant, execution, Level.ERROR, Pageable.from(1, 25,
+    /// Sort.asc("timestamp")))`: the first page of 25, by the line's own
+    /// timestamp. `id` breaks a tie, so two lines of one batch with the same
+    /// `ts` keep the order they were written in.
+    ///
+    /// **Both ids are in the predicate**, as [`Self::page`]'s are: an
+    /// execution id read under another workspace returns nothing, and no
+    /// other execution's line can be returned. No settle watermark: this is
+    /// one read, not a cursor that could move past a late commit.
+    pub async fn error_lines(&self, ws: Uuid, execution: Uuid) -> Result<Vec<StoredLine>> {
+        let rows = sqlx::query(
+            "SELECT id, task_run_id, task_id, attempt, level, ts, message \
+               FROM workflow.task_logs \
+              WHERE workspace_id = $1 AND execution_id = $2 AND level = $3 \
+              ORDER BY ts, id \
+              LIMIT $4",
+        )
+        .bind(ws)
+        .bind(execution)
+        .bind(LogLevel::Error.as_i16())
+        .bind(ERROR_LOGS_PAGE)
         .fetch_all(&self.pool)
         .await
         .map_err(db_err)?;

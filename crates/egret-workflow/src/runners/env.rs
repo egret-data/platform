@@ -163,7 +163,7 @@ pub const MAX_RENDERING_AMOUNT: usize = 100;
 /// the same reason, so the two seams do not need separate reasoning.
 ///
 /// [dataapi]: ../../../egret_dataapi/render/index.html
-const FUEL: u64 = 50_000;
+pub(super) const FUEL: u64 = 50_000;
 
 /// Well under minijinja's own default of 500. The setter clamps to
 /// `min(level, MAX_RECURSION)`, so this can only ever lower the limit. Note
@@ -334,6 +334,9 @@ pub enum RenderError {
 pub struct RenderContext {
     bindings: Vec<(String, MjValue)>,
     files: Option<FileScope>,
+    /// Package #5b Task B7 (spec D11): what `errorLogs()` answers. `None`
+    /// off the worker, where it is Kestra's refusal.
+    error_logs: Option<super::error_logs::ErrorLogs>,
     /// Values no line a run writes may carry (KI-112): its execution's SECRET
     /// inputs. Not a binding; nothing renders them from here.
     redactions: Vec<String>,
@@ -369,6 +372,18 @@ impl RenderContext {
     pub fn with_files(mut self, files: FileScope) -> Self {
         self.files = Some(files);
         self
+    }
+
+    /// The same bindings, with what `errorLogs()` answers (the worker's
+    /// read, package #5b Task B7).
+    pub fn with_error_logs(mut self, logs: super::error_logs::ErrorLogs) -> Self {
+        self.error_logs = Some(logs);
+        self
+    }
+
+    /// What `errorLogs()` answers; `None` off the worker.
+    pub fn error_logs(&self) -> Option<&super::error_logs::ErrorLogs> {
+        self.error_logs.as_ref()
     }
 
     /// The attached file scope, `None` where the four file functions refuse.
@@ -450,6 +465,7 @@ impl RenderContext {
         Self {
             bindings,
             files: None,
+            error_logs: None,
             redactions: Vec::new(),
         }
     }
@@ -461,11 +477,20 @@ impl RenderContext {
 
     /// Binds [`FILE_SCOPE`] when a scope is attached. Called by BOTH render
     /// threads, after anything that could unbind it.
+    ///
+    /// Package #5b Task B7: and [`super::error_logs::ERROR_LOGS_SCOPE`] when
+    /// the worker attached what `errorLogs()` answers.
     fn bind_files(&self, env: &mut Environment<'static>) {
         if let Some(files) = &self.files {
             env.add_global(
                 FILE_SCOPE,
                 MjValue::from_object(FileScopeObject(files.clone())),
+            );
+        }
+        if let Some(logs) = &self.error_logs {
+            env.add_global(
+                super::error_logs::ERROR_LOGS_SCOPE,
+                MjValue::from_object(super::error_logs::ErrorLogsObject(logs.clone())),
             );
         }
     }
@@ -1661,8 +1686,9 @@ const MINIJINJA_DEFAULT_TESTS: &[&str] = &[
 ///
 /// **`escape` is deliberately not here**: Pebble's `EscaperExtension`
 /// registers that name too, so removing it would refuse a filter Kestra
-/// accepts. Its *semantics* differ (Pebble takes a `strategy` argument); that
-/// is a divergence row in the fixture, not a removal.
+/// accepts. Its *semantics* differed (Pebble takes a `strategy` argument);
+/// that was a divergence row in the fixture, not a removal, until package
+/// #5b's Task B5 ported the strategies (`runners::filters::escape`).
 const MINIJINJA_ONLY_FILTERS: &[&str] = &[
     "safe",
     "e",
@@ -1720,11 +1746,17 @@ const MINIJINJA_ONLY_GLOBALS: &[&str] = &["dict", "debug", "namespace"];
 /// in `oracle/name-surface.txt` probeable through `render_str`, which is what
 /// makes the fixture an assertion rather than a claim.
 ///
-/// The four that stay are **not** semantically identical, and the fixture says
-/// so: Pebble's `even`/`odd` throw a `ClassCastException` on a non-number
-/// where minijinja answers `false`, and Pebble's `iterable` is `false` for a
-/// String where minijinja's is `true`. Porting the `is` surface is not W2's —
-/// no task was given the eight — and those rows carry the reason.
+/// The four that stay were **not** semantically identical: Pebble's
+/// `even`/`odd` throw a `ClassCastException` on a non-number where
+/// minijinja answered `false`, and Pebble's `iterable` is `false` for a
+/// String where minijinja's is `true`. Package #5b's Task B2 (spec D8)
+/// overrides all three and registers the other four engine tests
+/// (`super::pebble_tests`).
+///
+/// **`none` stays in this list.** Pebble's null test is spelled `null`, and
+/// `{{ x is none }}` is `Test [none] does not exist.` there (measured, B2);
+/// the rewriter leaves a test name alone, so `null` is bound under its own
+/// name rather than by putting minijinja's `none` back.
 const MINIJINJA_ONLY_TESTS: &[&str] = &[
     "undefined",
     "none",
@@ -1938,10 +1970,9 @@ pub(crate) fn environment() -> Environment<'static> {
     // one layer up. See `super::functions`' module doc.
     functions::register(&mut env);
 
-    // **`defined` is the ONE test this crate overrides, and it is not a step
-    // into the `is` surface [`MINIJINJA_ONLY_TESTS`] fences off.** That fence
-    // says PORTING the eight is not W2's work; this is one name W2b's own
-    // change broke, put back.
+    // **`defined` was the first test this crate overrode** (W2b), as one name
+    // W2b's own change broke, put back; porting the other seven was left to
+    // package #5b's Task B2, which registers them just below.
     //
     // Pebble's `DefinedTest` is "present **and not null**". Measured against
     // the artifact, one probe per kind: `0`, `false`, `""`, `[]` and `{}` are
@@ -1958,12 +1989,16 @@ pub(crate) fn environment() -> Environment<'static> {
     // present String) agrees either way and could never have separated them.
     //
     // Overriding one name costs one name: `add_test` replaces that binding and
-    // nothing else, and the seven siblings (`empty even iterable json map null
-    // odd`) keep whatever they had. Measured, not assumed -- see
-    // `the_defined_test_is_pebbles_and_it_is_the_only_one_overridden`.
+    // nothing else. Package #5b's Task B2 (spec D8) registers the other seven
+    // engine tests below; which names egret binds itself, and that `none` is
+    // still not one of them, is asserted by
+    // `the_engine_tests_are_egrets_and_none_is_not_one`.
     env.add_test("defined", |value: MjValue| {
         value.kind() != ValueKind::Undefined && !value.is_none()
     });
+    // Package #5b, Task B2 (spec D8): `null`, `empty`, `map`, `json`, and
+    // Pebble's `even`, `odd` and `iterable` over minijinja's defaults.
+    super::pebble_tests::register(&mut env);
 
     env.add_function("kestra_null_coalesce", kestra_null_coalesce);
     env.add_function("kestra_undefined_coalesce", kestra_undefined_coalesce);
@@ -2479,34 +2514,75 @@ pub fn referenced_roots(template: &str) -> Result<std::collections::BTreeSet<Str
 /// `rewrite` a render applies (W5b fix round 3).
 ///
 /// **A probe, not a lexer of our own:** each occurrence of `name` that is not
-/// an attribute (`x.name`) or part of a longer identifier is followed, one at
-/// a time, by `@`, a character minijinja's lexer refuses in code and accepts
-/// everywhere else. If that copy no longer parses, the occurrence was code.
-/// Unlike [`referenced_roots`] this sees assignment targets
-/// (`{% set name = … %}`, `with`, `for`, tuple unpacking) and `{% filter %}`
-/// arguments, which `undeclared_variables` does not report. A template that
-/// does not rewrite or parse at all answers `true`.
+/// an attribute (`x.name`) or part of a longer identifier is followed by `@`,
+/// a character minijinja's lexer refuses in code and accepts everywhere else.
+/// If that copy no longer parses, an occurrence was code. Unlike
+/// [`referenced_roots`] this sees assignment targets (`{% set name = … %}`,
+/// `with`, `for`, tuple unpacking) and `{% filter %}` arguments, which
+/// `undeclared_variables` does not report.
+///
+/// **Linear (fix wave #5b, I3).** Every occurrence is probed in ONE copy:
+/// an `@` in data, a string literal or a comment changes nothing the lexer
+/// reads around it, so the copy fails to parse exactly when one of the
+/// single-occurrence copies W5b built would have. It used to be one copy and
+/// one parse per occurrence, O(occurrences x length) -- 10^11 bytes for a
+/// 1 MB value of `"errorLogs "` once `errorLogs` detection began to read
+/// run-time data (package #5b B7). Now: two parses.
+///
+/// A text with no `{` holds no code and answers `false` without a parse. A
+/// template that does not rewrite or parse answers `false`: it cannot be
+/// rendered, so it calls nothing. (`secrets::text_uses_secret` refuses an
+/// unparsable text itself, before it asks this.)
 // `let_and_return`: see the binding's comment.
 #[allow(clippy::let_and_return)]
 pub(crate) fn name_in_code(template: &str, name: &str) -> bool {
+    if !template.contains('{') {
+        return false;
+    }
     let (protected, _replacers) = replace_raw_tags(template);
     let Ok(rewritten) = compile_source(&protected) else {
-        return true;
+        return false;
     };
     let env = environment();
     if env.template_from_str(&rewritten).is_err() {
-        return true;
+        return false;
     }
     let Ok(pattern) = regex::Regex::new(&format!(r"(?:^|[^.\w]){}\b", regex::escape(name))) else {
         return true;
     };
-    let ends: Vec<usize> = pattern.find_iter(&rewritten).map(|m| m.end()).collect();
-    ends.into_iter().any(|end| {
-        let probe = format!("{}@{}", &rewritten[..end], &rewritten[end..]);
-        // Bound first: the template borrows `probe` and `env`, and must be
-        // dropped before either.
-        let refused = env.template_from_str(&probe).is_err();
-        refused
+    let mut probe = String::with_capacity(rewritten.len() + 16);
+    let mut at = 0;
+    for found in pattern.find_iter(&rewritten) {
+        probe.push_str(&rewritten[at..found.end()]);
+        probe.push('@');
+        at = found.end();
+    }
+    if at == 0 {
+        return false;
+    }
+    probe.push_str(&rewritten[at..]);
+    // Bound first: the template borrows `probe` and `env`, and must be
+    // dropped before either.
+    let refused = env.template_from_str(&probe).is_err();
+    refused
+}
+
+/// Run `f` on a thread with [`RENDER_STACK_BYTES`] of stack, off the async
+/// runtime (fix wave #5b, I3): for a caller that parses untrusted text
+/// outside a render (`worker::claim`'s `errorLogs` detection). `Err` when the
+/// thread cannot start or panics.
+pub(crate) fn on_a_parse_thread<T: Send>(f: impl FnOnce() -> T + Send) -> Result<T, String> {
+    off_the_runtime(|| {
+        std::thread::scope(|scope| {
+            let worker = std::thread::Builder::new()
+                .name("egret-parse".to_string())
+                .stack_size(RENDER_STACK_BYTES)
+                .spawn_scoped(scope, f)
+                .map_err(|e| format!("could not start a parse thread: {e}"))?;
+            worker
+                .join()
+                .map_err(|_| "the parse thread panicked".to_string())
+        })
     })
 }
 
@@ -2538,7 +2614,16 @@ fn render_on_this_thread(
 
     // W2 Task 8 fix round 1: one budget for the whole render, shared by every
     // `replace` call in it. See [`super::filters::MAX_REPLACE_SCAN_BYTES`].
+    // Package #5b Task B6: a `render()` call renders on this thread and does
+    // not install another, so its nested passes draw on this one too.
     let _budget = super::filters::ReplaceBudget::install();
+    // Package #5b Task B6 (spec D9): what every `render()` in this render
+    // shares -- the nesting depth, the forbidden roots, the pass budget. See
+    // [`super::nested`].
+    let scope = super::nested::RenderScope::install(forbidden);
+    // Package #5b Task B7: a flag left by an earlier render on a caller-owned
+    // thread is not this one's.
+    super::error_logs::take_handed_out();
 
     if passes == Passes::One {
         // Nothing is forbidden on this path (`render_once_with` passes
@@ -2565,7 +2650,20 @@ fn render_on_this_thread(
                 }
             }
         }
-        let next = render_once(&env, &current, &variables)?;
+        let next = render_once(&env, &current, &variables);
+        // D9 rule 4: a `render()` in this pass met a forbidden root in the
+        // text it was about to evaluate. Asked whether or not the pass
+        // failed, so nothing between the nested render and here can turn the
+        // refusal into an answer.
+        if let Some(root) = scope.forbidden_hit() {
+            return Ok(GuardedRender::Forbidden(root));
+        }
+        let next = next?;
+        // Package #5b Task B7 (spec D11): a pass that handed out log text is
+        // the last, so a message is never evaluated as a template.
+        if super::error_logs::take_handed_out() {
+            return Ok(GuardedRender::Rendered(strip_raw_markers(&next)));
+        }
         if next == current {
             return Ok(GuardedRender::Rendered(strip_raw_markers(&next)));
         }
@@ -2585,26 +2683,88 @@ fn render_once(
     source: &str,
     variables: &MjValue,
 ) -> Result<String, RenderError> {
+    render_pass(env, source, variables).map_err(|e| match e {
+        PassError::Render(e) => e,
+        PassError::Engine(e) => RenderError::Template(e.to_string()),
+    })
+}
+
+/// Why [`render_pass`] failed. The engine's own error is kept as it is,
+/// rather than as its text, so [`super::nested`] can read the line it carries
+/// (Kestra's nesting-depth sentence names the line of the `render()` call).
+#[derive(Debug)]
+pub(super) enum PassError {
+    /// The rewriter refused the source, the output cap was hit, or the
+    /// output was not UTF-8.
+    Render(RenderError),
+    /// minijinja refused the source when parsing it or failed while
+    /// rendering it.
+    Engine(MjError),
+}
+
+/// [`render_once`], with the engine's error kept as a [`PassError::Engine`].
+/// Every pass of every render, nested ones included (package #5b Task B6),
+/// is this one function, so each has the same raw-region protection, the
+/// same front end ([`compile_source`]) and the same [`MAX_OUTPUT_BYTES`] cap.
+pub(super) fn render_pass(
+    env: &Environment<'static>,
+    source: &str,
+    variables: &MjValue,
+) -> Result<String, PassError> {
+    render_pass_metered(env, source, variables).0
+}
+
+/// [`render_pass`], and the fuel the pass consumed: `None` when it failed
+/// (the engine hands back no state then; a caller that meters fuel counts
+/// the whole allotment). Fix wave #5b (M2): what [`super::nested`] charges to
+/// its per-render fuel budget.
+pub(super) fn render_pass_metered(
+    env: &Environment<'static>,
+    source: &str,
+    variables: &MjValue,
+) -> (Result<String, PassError>, Option<u64>) {
     let (protected, replacers) = replace_raw_tags(source);
-    let rewritten = compile_source(&protected)?;
-    let template = env
-        .template_from_str(&rewritten)
-        .map_err(|e| RenderError::Template(e.to_string()))?;
+    let rewritten = match compile_source(&protected) {
+        Ok(rewritten) => rewritten,
+        Err(e) => return (Err(PassError::Render(e.into())), Some(0)),
+    };
+    let template = match env.template_from_str(&rewritten) {
+        Ok(template) => template,
+        Err(e) => return (Err(PassError::Engine(e)), Some(0)),
+    };
     let mut sink = CappedSink::new(MAX_OUTPUT_BYTES);
     let render_result = template.render_captured_to(variables, &mut sink);
+    let consumed = render_result
+        .as_ref()
+        .ok()
+        .and_then(|captured| captured.state().fuel_levels())
+        .map(|(consumed, _)| consumed);
     // The sink's own flag is checked FIRST and unconditionally. minijinja
     // wraps a writer failure in its own error, and deciding "was this the cap
     // or a real template error?" by inspecting that error's text would be a
     // guess; the sink knows.
     if sink.overflowed {
-        return Err(RenderError::OutputTooLarge {
-            limit: MAX_OUTPUT_BYTES,
-        });
+        return (
+            Err(PassError::Render(RenderError::OutputTooLarge {
+                limit: MAX_OUTPUT_BYTES,
+            })),
+            consumed,
+        );
     }
-    render_result.map_err(|e| RenderError::Template(e.to_string()))?;
+    if let Err(e) = render_result {
+        return (Err(PassError::Engine(e)), consumed);
+    }
 
-    let rendered = String::from_utf8(sink.buf).map_err(|e| RenderError::Template(e.to_string()))?;
-    Ok(put_back_raw_tags(&replacers, &rendered))
+    let rendered = match String::from_utf8(sink.buf) {
+        Ok(rendered) => rendered,
+        Err(e) => {
+            return (
+                Err(PassError::Render(RenderError::Template(e.to_string()))),
+                consumed,
+            )
+        }
+    };
+    (Ok(put_back_raw_tags(&replacers, &rendered)), consumed)
 }
 
 // ---------------------------------------------------------------------------
@@ -2761,6 +2921,8 @@ fn bind_on_this_thread(
     let env = env;
 
     let _budget = super::filters::ReplaceBudget::install();
+    // Package #5b Task B6: as `render_on_this_thread`; nothing is forbidden.
+    let _scope = super::nested::RenderScope::install(&[]);
     let variables = cx.to_minijinja();
     let rendered = render_once(&env, template, &variables)?;
 
@@ -2892,7 +3054,7 @@ fn put_back_raw_tags(replacers: &[(String, String)], rendered: &str) -> String {
 
 /// `RAW_PATTERN.matcher(x).replaceAll("$2")` (`VariableRenderer.java:85-87`):
 /// drop the `{% raw %}`/`{% endraw %}` markers and keep the body.
-fn strip_raw_markers(rendered: &str) -> String {
+pub(super) fn strip_raw_markers(rendered: &str) -> String {
     raw_pattern().replace_all(rendered, "${2}").into_owned()
 }
 
@@ -3008,30 +3170,25 @@ mod tests {
     /// binds what the file says it does not), adding one (egret refuses what
     /// the file says it binds), flipping an `engine` column without a reason,
     /// adding a reason to an agreeing row, and deleting a row.
-    /// `defined` is Pebble's — "present **and not null**" — and it is the only
-    /// test this crate overrides.
+    /// `defined` is Pebble's — "present **and not null**".
     ///
     /// Pairs `null-literal-is-defined` and `null-from-the-context-is-defined`,
     /// both banked by the override. Every expected value below was measured on
     /// `io.kestra:core:2.0.0-rc13`, one probe per kind.
     ///
-    /// # Why the second half is here
+    /// # The second half: which tests egret binds itself
     ///
-    /// [`MINIJINJA_ONLY_TESTS`]' doc fences off the `is` surface: porting the
-    /// engine's eight tests was never given to a W2 task. Overriding one name
-    /// that W2b's own change broke is not porting that surface — but the only
-    /// thing that keeps those two claims apart is that the **other seven stay
-    /// exactly as they were**, and "an `add_test` binds one name" is a
-    /// property of minijinja, not of this crate. So it is asserted rather than
-    /// reasoned about: `even`, `iterable` and `odd` still answer minijinja's
-    /// way (the divergences `name-surface.txt` records for them are unchanged),
-    /// and `empty`, `json`, `map` and `null` are still **unknown** here.
-    ///
-    /// Measured cost of the override, for the record: the ratchet moved from
-    /// `141 of 1288` to `139 of 1288`, both moves being the two entries above,
-    /// with no regression and nothing else touched.
+    /// This test used to be the fence for "`defined` is the only test this
+    /// crate overrides": `even`, `iterable` and `odd` answered minijinja's way
+    /// and `empty`, `json`, `map` and `null` were unknown. Package #5b's Task
+    /// B2 (spec D8, 2026-10-29) ported the `is` surface, so the fence now lists
+    /// what egret overrides or adds — all eight engine tests answer the
+    /// engine's way, three of them where minijinja's default used to — and
+    /// asserts that the null literal's other spellings did NOT become test
+    /// names along the way: Kestra refuses `is none`, `is NONE` and `is NULL`
+    /// (`Test [none] does not exist.`, measured), and so does egret.
     #[test]
-    fn the_defined_test_is_pebbles_and_it_is_the_only_one_overridden() {
+    fn the_engine_tests_are_egrets_and_none_is_not_one() {
         // "Present and not null." A falsy-but-present value is DEFINED, which
         // is the half a `!value.is_true()`-shaped mistake would get wrong.
         for (expr, expected) in [
@@ -3066,23 +3223,50 @@ mod tests {
             );
         }
 
-        // **The fence, asserted.** Three siblings still bind and still answer
-        // minijinja's way; four are still unknown. An `add_test` that reached
-        // further than one name would move one of these.
-        let ctx = json!({"s": "x", "two": 2, "lst": [1]});
+        // **The overrides, asserted.** The three names minijinja binds by
+        // default answer Pebble's way now (each row is one minijinja
+        // answered differently), and the four it never had are bound.
+        let ctx = json!({"s": "x", "two": 2, "lst": [1], "m": {}, "n": null});
         assert_eq!(render("{{ two is even }}", ctx.clone()).unwrap(), "true");
-        assert_eq!(render("{{ s is even }}", ctx.clone()).unwrap(), "false");
         assert_eq!(render("{{ two is odd }}", ctx.clone()).unwrap(), "false");
-        assert_eq!(render("{{ s is iterable }}", ctx.clone()).unwrap(), "true");
-        for unknown in ["empty", "json", "map", "null"] {
-            let expr = format!("{{{{ s is {unknown} }}}}");
-            let message = render(&expr, ctx.clone())
-                .expect_err(&format!("{expr} must still be an unknown test"))
-                .to_string();
-            assert!(
-                message.contains("unknown test"),
-                "{expr} must still be UNKNOWN, not answered: {message}"
-            );
+        assert!(
+            render("{{ s is even }}", ctx.clone()).is_err(),
+            "minijinja's `even` answered false"
+        );
+        assert!(
+            render("{{ s is odd }}", ctx.clone()).is_err(),
+            "minijinja's `odd` answered false"
+        );
+        assert_eq!(render("{{ s is iterable }}", ctx.clone()).unwrap(), "false");
+        assert_eq!(render("{{ m is iterable }}", ctx.clone()).unwrap(), "false");
+        assert_eq!(
+            render("{{ lst is iterable }}", ctx.clone()).unwrap(),
+            "true"
+        );
+        for (expr, expected) in [
+            ("{{ n is null }}", "true"),
+            ("{{ m is empty }}", "true"),
+            ("{{ m is map }}", "true"),
+            ("{{ s is json }}", "false"),
+        ] {
+            assert_eq!(render(expr, ctx.clone()).unwrap(), expected, "{expr}");
+        }
+
+        // **The fence.** The null literal's other spellings are not test
+        // names, in Kestra or here.
+        for spelling in ["none", "NONE", "NULL"] {
+            for expr in [
+                format!("{{{{ n is {spelling} }}}}"),
+                format!("{{{{ n is not {spelling} }}}}"),
+            ] {
+                let message = render(&expr, ctx.clone())
+                    .expect_err(&format!("{expr} must be an unknown test"))
+                    .to_string();
+                assert!(
+                    message.contains("unknown test"),
+                    "{expr} must be UNKNOWN, not answered: {message}"
+                );
+            }
         }
     }
 
@@ -3282,10 +3466,14 @@ mod tests {
         // left of `??`/`???`); 193 -> 196 at package #5a Task A6
         // (2026-10-29), which added the egret-only `kestra_contains`,
         // `kestra_range` and `kestra_bool` (`contains`, `..` and `and`/`or`);
-        // the three engine counts below did not move.
+        // the three engine counts below did not move. Package #5b Task B6
+        // (2026-10-29): the function count 37 -> 39, because the harness now
+        // wires `render` and `renderOnce` as Kestra's server carries them
+        // (`host.Oracle.wireRenderFunctions`) and their rows say `yes`; the
+        // row total did not move.
         assert_eq!(rows, 196, "row count");
         assert_eq!(counts.get("filter"), Some(&63), "engine filter count");
-        assert_eq!(counts.get("function"), Some(&37), "engine function count");
+        assert_eq!(counts.get("function"), Some(&39), "engine function count");
         assert_eq!(counts.get("test"), Some(&8), "engine test count");
     }
 
@@ -3329,6 +3517,7 @@ mod tests {
             ("filters", include_str!("filters.rs")),
             ("functions", include_str!("functions.rs")),
             ("javaformat", include_str!("javaformat.rs")),
+            ("pebble_tests", include_str!("pebble_tests.rs")),
         ];
 
         let mut rows: std::collections::BTreeSet<(String, String)> = Default::default();
@@ -4293,4 +4482,64 @@ mod tests {
     // (`contains_on_a_number_is_refused` was here, Task A1's placeholder; Task
     // A6 ported `contains` and its refusal is asserted with Kestra's text by
     // `runners::operators::tests::contains_on_what_pebble_cannot_search_fails_with_kestras_text`.)
+
+    // (`assert_each_fails` was here: B1's helper for its four placeholder
+    // tests. B2 tightened its own and B3, B4 and B5 moved the other three to
+    // the modules that port the names, so nothing used it any more.)
+
+    /// Package #5b, Task B1 (spec D8): the tests Kestra refuses, tightened to
+    /// Kestra's reason by Task B2. A missing root or member under `is null`/
+    /// `is empty` fails as an undefined value (Kestra's
+    /// `RootAttributeNotFoundException`/`AttributeNotFoundException` under
+    /// strict variables; egret raises the VM's own `UndefinedError`), and
+    /// `is json` on anything but a string fails with `JsonTest`'s
+    /// `(String)` cast (`ClassCastException`) or, for a null, Jackson's
+    /// `argument "content" is null`.
+    #[test]
+    fn a_test_kestra_refuses_is_refused_here_too() {
+        for (source, ctx, want) in [
+            ("{{ x is null }}", json!({}), "undefined"),
+            ("{{ o.x is null }}", json!({ "o": {} }), "undefined"),
+            ("{{ x is empty }}", json!({}), "undefined"),
+            (
+                "{{ x is json }}",
+                json!({ "x": { "a": 1 } }),
+                "class java.util.LinkedHashMap cannot be cast to class java.lang.String",
+            ),
+            (
+                "{{ x is json }}",
+                json!({ "x": [1] }),
+                "class java.util.ArrayList cannot be cast to class java.lang.String",
+            ),
+            (
+                "{{ x is json }}",
+                json!({ "x": 1 }),
+                "class java.lang.Integer cannot be cast to class java.lang.String",
+            ),
+            (
+                "{{ x is json }}",
+                json!({ "x": null }),
+                "argument \"content\" is null",
+            ),
+        ] {
+            let error = render(source, ctx)
+                .expect_err(&format!("{source} must fail, as Kestra's does"))
+                .to_string();
+            assert!(error.contains(want), "{source}: {error}");
+        }
+    }
+
+    // (`max_and_min_refuse_what_pebble_cannot_compare` was here, Task B1's
+    // placeholder; Task B3 ported `max`/`min` and its refusal is asserted with
+    // Kestra's text by the test of that name in `runners::functions::tests`.)
+
+    // (`a_filter_input_kestra_refuses_is_refused_here_too` was here, Task
+    // B1's placeholder; Task B4 ported the ten filters and the refusals are
+    // asserted with Kestra's text by the test of that name in
+    // `runners::filters::tests`.)
+
+    // (`an_escape_strategy_pebble_does_not_know_is_refused` was here, Task
+    // B1's placeholder; Task B5 ported the four other strategies and the
+    // refusal is asserted with Kestra's text by the test of that name in
+    // `runners::filters::tests`.)
 }

@@ -1,6 +1,8 @@
 package host;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.Proxy;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -17,7 +19,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import io.kestra.core.runners.VariableRenderer;
+import io.kestra.core.runners.configuration.VariableConfiguration;
 import io.kestra.core.runners.pebble.Extension;
+import io.kestra.core.runners.pebble.PebbleEngineFactory;
+import io.kestra.core.runners.pebble.functions.RenderFunction;
+import io.kestra.core.runners.pebble.functions.RenderOnceFunction;
+import io.micronaut.context.ApplicationContext;
 import io.kestra.core.runners.pebble.JsonWriter;
 import io.pebbletemplates.pebble.PebbleEngine;
 import io.pebbletemplates.pebble.extension.Filter;
@@ -102,6 +110,65 @@ public final class Oracle {
     }
 
     /**
+     * Package #5b, Task B6 (2026-10-29): wires {@code render} and
+     * {@code renderOnce} into {@code extension} as Kestra's server does.
+     *
+     * <p>Both are {@code @Inject @Nullable} on {@code Extension} and
+     * {@code @Requires(property = "kestra.variables.recursive-rendering", value =
+     * "false", defaultValue = "false")}, so a server on the default
+     * configuration carries them; only this standalone build left them out.
+     * Each needs an {@code ApplicationContext} (to fetch the
+     * {@code VariableRenderer} it renders through) and a
+     * {@code VariableConfiguration} (for {@code maxRenderDepth}, 16 by default).
+     * A {@link Proxy} answers the two calls they make, {@code getBean} and the
+     * factory's {@code getBeansOfType}; nothing else is called. The nested
+     * renderer is given {@code engine} itself, so a nested render runs on the
+     * same engine as the entry around it: the caller hands it over with
+     * {@code setPebbleEngine} once the engine is built (Pebble copies an
+     * extension's functions when {@code build()} registers it, so these must be
+     * wired first).
+     *
+     * <p>{@code errorLogs} and {@code subflow} stay unwired: each needs a
+     * service (a log repository, an execution) this harness does not have.
+     */
+    private static VariableRenderer wireRenderFunctions(Extension extension) throws Exception {
+        VariableConfiguration configuration = new VariableConfiguration();
+        setField(configuration, VariableConfiguration.class, "cacheEnabled", false);
+        VariableRenderer[] renderer = new VariableRenderer[1];
+        ApplicationContext context = (ApplicationContext) Proxy.newProxyInstance(
+            Oracle.class.getClassLoader(), new Class<?>[] {ApplicationContext.class},
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getBean" -> renderer[0];
+                case "getBeansOfType" -> List.of(extension);
+                case "hashCode" -> System.identityHashCode(proxy);
+                case "equals" -> proxy == args[0];
+                case "toString" -> "harness ApplicationContext";
+                default -> throw new UnsupportedOperationException(method.getName());
+            });
+        RenderFunction render = new RenderFunction();
+        RenderOnceFunction renderOnce = new RenderOnceFunction();
+        for (RenderFunction f : List.of(render, renderOnce)) {
+            setField(f, RenderFunction.class, "applicationContext", context);
+            setField(f, RenderFunction.class, "variableConfiguration", configuration);
+        }
+        setField(extension, Extension.class, "renderFunction", render);
+        setField(extension, Extension.class, "renderOnceFunction", renderOnce);
+        // Reflectively: its third parameter is a micrometer `MeterRegistry`, which
+        // is not on this module's compile classpath. It is read only when the
+        // template cache is on, and it is off above.
+        PebbleEngineFactory factory = (PebbleEngineFactory) PebbleEngineFactory.class
+            .getConstructors()[0].newInstance(context, configuration, null);
+        renderer[0] = new VariableRenderer(factory, configuration);
+        return renderer[0];
+    }
+
+    private static void setField(Object target, Class<?> owner, String name, Object value) throws Exception {
+        Field field = owner.getDeclaredField(name);
+        field.setAccessible(true);
+        field.set(target, value);
+    }
+
+    /**
      * newPebbleEngineBuilder()'s settings, from PebbleEngineFactory (the real,
      * Micronaut-driven builder Kestra uses in production), reproduced here by hand
      * since that factory itself needs an ApplicationContext this harness doesn't
@@ -134,8 +201,9 @@ public final class Oracle {
             .build();
     }
 
-    private static void dump() {
+    private static void dump() throws Exception {
         Extension extension = buildExtension();
+        wireRenderFunctions(extension);
 
         Map<String, Filter> filters = extension.getFilters();
         Map<String, Function> functions = extension.getFunctions();
@@ -171,7 +239,7 @@ public final class Oracle {
         System.out.println("null-valued functions=" + nullFunctions.size() + " " + nullFunctions);
     }
 
-    private static void generate(Path corpusPath, Path goldenPath) throws IOException {
+    private static void generate(Path corpusPath, Path goldenPath) throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         JsonNode corpus = mapper.readTree(corpusPath.toFile());
         if (!corpus.isArray()) {
@@ -179,7 +247,11 @@ public final class Oracle {
         }
 
         Extension extension = buildExtension();
+        // Wired BEFORE the engine is built: Pebble copies an extension's
+        // functions when `build()` registers it.
+        VariableRenderer nested = wireRenderFunctions(extension);
         PebbleEngine engine = buildEngine(extension);
+        nested.setPebbleEngine(engine);
 
         ArrayNode golden = mapper.createArrayNode();
         int errors = 0;

@@ -35,11 +35,17 @@
 //! Task 8, four the built engine does not register at all -- refusals:
 //!   render renderOnce errorLogs subflow
 //!
+//! Package #5b Task B6 implemented render renderOnce, and Task B7 errorLogs
+//! (on the worker only, `super::error_logs`)
+//!
 //! W9a Task 4 implemented four of the null-backed eight over the render's
 //! file scope: read fileSize fileExists isFileEmpty
 //!
 //! W9b Task 4 implemented fileURI over namespace files, and W9c Task 4 kv
 //! over the KV store, both through the same scope
+//!
+//! Package #5b Task B3 added two of Pebble core's own (not Kestra's), which
+//! the built engine also binds: max min
 //! ```
 //!
 //! # Seven of Task 8's "service-backed" functions reach no service
@@ -63,13 +69,15 @@
 //!
 //! # A refusal is a feature
 //!
-//! The eight that are refused (twelve until W9a Task 4) say so in a sentence
-//! naming the function, what it needs and the package that will implement it
-//! (`secret`, Confined, and `http`, Unsupported, name no package). **The oracle cannot check
-//! any of that**: their corpus entries are `compare: "error-class"`, which any
-//! failure satisfies — including `unknown function: secret is unknown`, which
-//! is what egret said before this task. See [`not_implemented`] and
-//! `the_eight_refusals_name_themselves_and_their_owner`.
+//! The three that are refused (twelve until W9a Task 4, three since package
+//! #5b Task B7) say so in a sentence naming the function, what it needs and
+//! the package that will implement it (`subflow` names roadmap row #12;
+//! `secret`, Confined, and `http`, Unsupported, name no package). **The oracle
+//! cannot check any of that**: their corpus entries are
+//! `compare: "error-class"`, which any failure satisfies — including
+//! `unknown function: secret is unknown`, which is what egret said before
+//! W2 Task 8. See [`not_implemented`] and
+//! `the_refused_list_is_three_and_subflow_names_row_12`.
 //!
 //! # `range` was already bound, and it did not error
 //!
@@ -132,6 +140,7 @@ use rand::RngCore;
 
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 
+use super::compare::{self, MathComparison};
 use super::env::{self, OrderedMap};
 use super::filters::{is_java_null, java_class_name, pebble_error, Args, DateArgs};
 use super::ionfmt::read_ion;
@@ -139,7 +148,8 @@ use super::javafmt::{parse_iso, Zdt, Zone};
 use super::jqsandbox::MAX_VALUE_DEPTH;
 use crate::storage::kv::value::{KvData, KvNumber};
 
-/// Registers the 19 pure functions onto `env`.
+/// Registers the 19 pure functions onto `env`, and the rest of this module's
+/// names (package #5b Task B3 added Pebble core's `max` and `min`).
 ///
 /// **`range` is an override, not an addition** — see this module's doc.
 pub(super) fn register(env: &mut Environment<'static>) {
@@ -196,8 +206,26 @@ pub(super) fn register(env: &mut Environment<'static>) {
     // W9c Task 4: `kv`, over the KV store, through the same scope.
     env.add_function("kv", kv_function);
 
-    // W2 Task 8's refusals, six since W9c Task 4. See [`not_implemented`]
-    // for the message shape and why the oracle cannot check it.
+    // Package #5b Task B6 (spec D9): `render` and `renderOnce`, a nested
+    // render on a fresh environment. See `super::nested`.
+    env.add_function("render", super::nested::render);
+    env.add_function("renderOnce", super::nested::render_once);
+    // Package #5b Task B7 (spec D11): `errorLogs`, over the list the worker
+    // read before the render. See `super::error_logs`.
+    env.add_function("errorLogs", super::error_logs::error_logs);
+
+    // Package #5b Task B3 (spec D10): Pebble core's `max`/`min`, on the
+    // comparison of `super::compare`.
+    env.add_function("max", |state: &State, rest: Rest<MjValue>| {
+        extremum(state, rest, MathComparison::GreaterThan)
+    });
+    env.add_function("min", |state: &State, rest: Rest<MjValue>| {
+        extremum(state, rest, MathComparison::LessThan)
+    });
+
+    // W2 Task 8's refusals, six since W9c Task 4, four since package #5b
+    // Task B6, three since Task B7. See [`not_implemented`] for the message shape and why the
+    // oracle cannot check it.
     for (name, refusal) in REFUSED {
         env.add_function(
             *name,
@@ -211,6 +239,50 @@ pub(super) fn register(env: &mut Environment<'static>) {
             },
         );
     }
+}
+
+/// Pebble 4.1.2's `MaxFunction` / `MinFunction` (package #5b Task B3, spec
+/// D10), read with `javap -c -p` from the pinned jar:
+///
+/// ```text
+/// result = null
+/// for i in 0.. while args.containsKey(String.valueOf(i)):
+///     arg = args.get(i)
+///     if result == null: result = arg          // taken unchecked
+///     else if OperatorUtils.gt(arg, result): result = arg   // `lt` for min
+/// return result
+/// ```
+///
+/// So a tie keeps the FIRST operand with its own type (`max(2.0, 2)` is
+/// `2.0`), nulls are skipped (`gt` answers `false` on a null before it casts),
+/// one argument is returned as it is (`max([1, 2])`, `max('a')`), and no
+/// argument or only nulls is null. The comparison and its refusal are
+/// [`compare::math_comparison`]'s.
+///
+/// `getArgumentNames()` is `null`, so Pebble reads only the positional keys
+/// `"0"`, `"1"`, …; a keyword argument is ignored here, the class the
+/// `dayOfWeek` row of `oracle/name-surface.txt` records. Every argument is
+/// evaluated before the loop (Pebble evaluates the argument list first), so a
+/// strict undefined anywhere fails as the VM's own undefined, ahead of any
+/// comparison.
+fn extremum(state: &State, rest: Rest<MjValue>, which: MathComparison) -> Result<MjValue, MjError> {
+    let args = Args::new(rest).positional_only();
+    for arg in &args {
+        compare::assert_defined(state, arg)?;
+    }
+    let mut result = MjValue::from(());
+    for arg in args {
+        if result.is_none() {
+            // A silent undefined (a missing `else`) is egret's spelling of
+            // Java null; keep the result a real null.
+            if !arg.is_undefined() {
+                result = arg;
+            }
+        } else if compare::math_comparison(state, which, &arg, &result)? {
+            result = arg;
+        }
+    }
+    Ok(result)
 }
 
 /// Why a [`REFUSED`] name refuses.
@@ -253,7 +325,8 @@ pub(crate) const SECRET_REFUSAL: &str = "The 'secret' function resolves only on 
      fields of the pod spec, readable by anyone with `get pods` in the task namespace, and \
      no other render (inputs, runIf, Log, triggers) resolves secrets.";
 
-/// The six names egret registers only to refuse, with what each is waiting
+/// The names egret registers only to refuse (three since package #5b Task
+/// B7), with what each is waiting
 /// for and who owns it.
 ///
 /// **Two different kinds of absence, deliberately treated the same.** The
@@ -296,21 +369,26 @@ pub(crate) const SECRET_REFUSAL: &str = "The 'secret' function resolves only on 
 /// ([`kv_function`]) over the KV store.
 ///
 /// **Updated 2026-10-17: `http` is `Unsupported`, not waiting for a package.**
+///
+/// **Updated 2026-10-29 (package #5b Task B6): four names now.** `render` and
+/// `renderOnce` are implemented (`super::nested`, spec D9).
+///
+/// **Updated 2026-10-29 (package #5b Task B7): three names now.** `errorLogs`
+/// is implemented (`super::error_logs`, spec D11): the worker reads the list
+/// before the render, and every other render meets Kestra's own sentence.
+///
+/// **Updated 2026-10-29 (package #5b Task B8, spec Q1): `subflow` names #12.**
+/// It starts a whole child execution synchronously inside a render, so it
+/// moved out of package #5 to roadmap row #12 "Subflow in full"; the owner in
+/// its sentence is `#12`, not W6. Of the groups described above, `secret` and
+/// `http` are the registered-with-a-null-backing kind and `subflow` the
+/// not-registered kind.
 const REFUSED: &[(&str, Refusal)] = &[
     // Registered with a null backing on the built engine.
     ("secret", Refusal::Confined(SECRET_REFUSAL)),
     ("http", Refusal::Unsupported(HTTP_REFUSAL)),
     // Not registered at all on the built engine: `@Inject @Nullable`, guarded.
-    (
-        "render",
-        not_yet("an execution context to render against", "W3"),
-    ),
-    (
-        "renderOnce",
-        not_yet("an execution context to render against", "W3"),
-    ),
-    ("errorLogs", not_yet("the running execution's logs", "W11")),
-    ("subflow", not_yet("subflow execution", "W6")),
+    ("subflow", not_yet("subflow execution", "#12")),
 ];
 
 const fn not_yet(needs: &'static str, package: &'static str) -> Refusal {
@@ -1877,7 +1955,7 @@ fn base62_bytes(bytes: &[u8], pad: usize) -> String {
 /// any failure satisfies — including `unknown function: secret is unknown`,
 /// which is what egret said before this task and which tells a flow author
 /// nothing. So the shape is pinned by a unit test per function instead
-/// (`runners::functions::the_eight_refusals_name_themselves_and_their_owner`),
+/// (`runners::functions::the_refused_list_is_three_and_subflow_names_row_12`),
 /// and this one function is where the shape lives so the messages cannot
 /// drift apart.
 ///
@@ -2545,6 +2623,92 @@ mod tests {
     // so the corpus entry is not what carries them. See
     // `oracle/error-class.txt` and `oracle/error-class-pairs.txt`.
     // -----------------------------------------------------------------
+
+    /// Package #5b, Task B3 (spec D10): `max`/`min` refuse an operand that is
+    /// not a number with `OperatorUtils`' own text, whose bracketed word is
+    /// the `Comparison` constant (`GREATER_THAN` under `max`, `LESS_THAN`
+    /// under `min`), not the operand. Two strings fail too: `OperatorUtils`
+    /// has no string arm. The pair of B1's five error-class entries
+    /// (`oracle/error-class-pairs.txt`); before this task they failed as an
+    /// unknown function.
+    #[test]
+    fn max_and_min_refuse_what_pebble_cannot_compare() {
+        for (source, want) in [
+            ("{{ max('a', 'b') }}", "[GREATER_THAN]"),
+            ("{{ min('a', 1) }}", "[LESS_THAN]"),
+            ("{{ max('5', 1) }}", "[GREATER_THAN]"),
+            ("{{ max(1, true) }}", "[GREATER_THAN]"),
+            ("{{ max([1, 2], 3) }}", "[GREATER_THAN]"),
+            ("{{ min(1, {'a': 1}) }}", "[LESS_THAN]"),
+        ] {
+            let message = err(source);
+            assert!(
+                message.contains(&format!(
+                    "invalid operands for mathematical comparison {want}"
+                )),
+                "{source}: {message}"
+            );
+            assert!(!message.contains("unknown function"), "{source}: {message}");
+        }
+    }
+
+    /// Package #5b, Task B3 (spec D10, §2.2 item 14): `MaxFunction` and
+    /// `MinFunction`, read with `javap -c -p`. The result starts as Java
+    /// `null`; a null result takes the next argument as it is; otherwise
+    /// `gt(arg, result)` (`lt` for `min`) replaces it. So a tie keeps the
+    /// FIRST operand with its own type, nulls are skipped, one argument is
+    /// returned unchecked, and no argument (or only nulls) is null.
+    #[test]
+    fn max_and_min_follow_pebbles_loop() {
+        for (source, want) in [
+            ("{{ max(1, 5, 3) }}", "5"),
+            ("{{ min(3, 1, 2) }}", "1"),
+            ("{{ max(1, 2.5) }}", "2.5"),
+            ("{{ min(1, 2.5) }}", "1"),
+            ("{{ max(2.0, 2) }}", "2.0"),
+            ("{{ max(2, 2.0) }}", "2"),
+            ("{{ min(2.0, 2) }}", "2.0"),
+            ("{{ max(-1, -5) }}", "-1"),
+            ("{{ max('a') }}", "a"),
+            ("{{ max([1, 2]) }}", "[1,2]"),
+            ("<{{ max() }}>", "<>"),
+            ("<{{ min(null) }}>", "<>"),
+            ("<{{ max(null, null) }}>", "<>"),
+            ("{{ min(null, 1) }}", "1"),
+            ("{{ max(1, null) }}", "1"),
+            ("{{ max(1, null, 3) }}", "3"),
+            // A null is skipped before the `(Number)` cast, so a string
+            // beside only nulls is never compared.
+            ("{{ max('a', null) }}", "a"),
+            ("{{ max(1, 2.5) | className }}", "java.lang.Double"),
+            // Kestra answers `java.lang.Long` (a literal is a Long); egret's
+            // `className` cannot tell a literal from a context Integer, the
+            // recorded D2 divergence `function-min-classname-long` stays
+            // baselined under. The VALUE is the Long's own.
+            ("{{ min(fromIon(ion='2.50'), 1) }}", "1"),
+            (
+                "{{ max(fromIon(ion='2.50'), 1) | className }}",
+                "java.math.BigDecimal",
+            ),
+            ("{{ max(fromIon(ion='2.50'), 1) }}", "2.50"),
+            ("{{ max(fromIon(ion='2.50'), 2.5) }}", "2.50"),
+            ("{{ max(2.5, fromIon(ion='2.50')) }}", "2.5"),
+            ("{{ max(1, 2) + 1 }}", "3"),
+            // A keyword is ignored, not refused: measured with the harness
+            // 2026-10-29 (fix wave #5b, M6), Kestra renders these the same.
+            ("<{{ max(a=1) }}>", "<>"),
+            ("{{ max(1, a=2) }}", "1"),
+            ("<{{ min(a=1) }}>", "<>"),
+            ("{{ min(1, a=2) }}", "1"),
+        ] {
+            assert_eq!(ok(source), want, "{source}");
+        }
+        // A silent undefined (a missing `else`) is a null; a strict one
+        // fails as the VM's own undefined, as Kestra's strict variables do.
+        assert_eq!(ok("{{ max((1 if false), 4) }}"), "4");
+        let message = err("{{ max(1, missing) }}");
+        assert!(message.contains("undefined"), "{message}");
+    }
 
     #[test]
     fn range_refuses_an_increment_that_cannot_advance_it() {
@@ -3545,8 +3709,8 @@ mod tests {
     // evidence a refusal works, and it never will be. These are.
     // -----------------------------------------------------------------
 
-    /// The eight names egret registers only to refuse, each asserted for its
-    /// **exact message**: the function's own name, what it needs, and the
+    /// The names egret registers only to refuse (three since package #5b
+    /// Task B7), each asserted for its **exact message**: the function's own name, what it needs, and the
     /// package that will implement it.
     ///
     /// Pairs `function-secret`, `-kv`, `-fileuri`, `-http` (which were
@@ -3561,7 +3725,7 @@ mod tests {
     /// The standing rule is that a paired test asserts a refused input **and**
     /// a neighbouring accepted one, because an entry pins *that* egret refuses
     /// and a test pins *what it says* — neither pins *which inputs*. There is
-    /// no boundary here: every one of the eight refuses for every argument
+    /// no boundary here: every one of them refuses for every argument
     /// list, including none. So what this asserts instead is the two things
     /// that could actually go wrong:
     ///
@@ -3572,7 +3736,7 @@ mod tests {
     ///
     /// The second of those is belt and braces rather than the discriminating
     /// assertion, and saying so is the honest version: unregistering the
-    /// eight dies on the `contains(&want)` assert first, because
+    /// three dies on the `contains(&want)` assert first, because
     /// `unknown function: secret is unknown` does not contain the sentence.
     /// It earns its place only for a *different* mutation — a refusal that
     /// forwards to minijinja's unknown-name error while still being
@@ -3581,22 +3745,36 @@ mod tests {
     /// **W9c Task 4** took `kv` out: it reads the KV store over the render's
     /// scope now. The test that held seven names is replaced by this one,
     /// which pins six and proves a read through a fake scope.
+    ///
+    /// **Package #5b Task B6 (2026-10-29)** took `render` and `renderOnce`
+    /// out: they render now (`super::nested`). Four names are left; the name
+    /// of this test is kept because `oracle/error-class-pairs.txt` pairs the
+    /// four's corpus entries with it.
+    ///
+    /// **Package #5b Task B7 (2026-10-29)** took `errorLogs` out: it reads the
+    /// execution's error logs on the worker (`super::error_logs`). Three are
+    /// left, and `function-errorlogs` is paired with
+    /// `error_logs::tests::outside_the_worker_it_is_kestras_refusal` now.
+    ///
+    /// **Package #5b Task B8 (2026-10-29, spec Q1)** renamed this test from
+    /// `the_refused_list_is_six_and_kv_is_not_in_it`, whose count had been
+    /// wrong since B6, and moved `subflow`'s owner from W6 to roadmap row #12
+    /// "Subflow in full". `oracle/error-class-pairs.txt` pairs
+    /// `function-secret`, `function-http` and `function-subflow` with it.
     #[test]
-    fn the_refused_list_is_six_and_kv_is_not_in_it() {
-        // W9b Task 4: `fileURI` left the list; W9c Task 4: `kv`.
-        for gone in ["fileURI", "kv"] {
+    fn the_refused_list_is_three_and_subflow_names_row_12() {
+        // W9b Task 4: `fileURI` left the list; W9c Task 4: `kv`; package #5b
+        // Task B6: `render` and `renderOnce`.
+        // Package #5b Task B7: `errorLogs`.
+        for gone in ["fileURI", "kv", "render", "renderOnce", "errorLogs"] {
             assert!(
                 !REFUSED.iter().any(|(name, _)| *name == gone),
                 "{gone} is implemented, not refused"
             );
         }
-        assert_eq!(REFUSED.len(), 6);
-        let expected = [
-            ("render", "an execution context to render against", "W3"),
-            ("renderOnce", "an execution context to render against", "W3"),
-            ("errorLogs", "the running execution's logs", "W11"),
-            ("subflow", "subflow execution", "W6"),
-        ];
+        assert_eq!(REFUSED.len(), 3);
+        // Spec Q1: `subflow()` belongs to roadmap row #12, not W6.
+        let expected = [("subflow", "subflow execution", "#12")];
         // `secret` (Confined) and `http` (Unsupported) are checked by their sentences below.
         assert_eq!(
             expected.len() + 2,
