@@ -1,0 +1,123 @@
+# Workflow package #6 "`Loop` outputs, `Loop` retry and flow outputs"
+
+**Status:** designed 2026-10-29; not built. **One PR** (user decision Q1), branch `feat/workflow-loop-outputs`, Tasks T0, A1–A6, B1–B4 and the docs task Z of the plan. The as-built state goes in §7 when the PR lands. Roadmap row #6 and note 6 of `docs/en/plans/2026-10-18-workflow-kestra-parity-roadmap.md`. Plan: `docs/en/plans/2026-10-29-workflow-loop-outputs.md`. Survey (file:line for every claim, the premises measured): `docs/en/specs/2026-10-29-workflow-loop-outputs-survey.md`. Kestra is the checkout at `data-portal/kestra`, `96893b58`; the executor oracle's engine is the image pinned in `oracle-exec/docker-compose.yml:31` (`v2.0.0-rc13`), whose `Loop` API `javap` shows to be the same.
+
+Abbreviations as in the survey: `EW` = `crates/egret-workflow/`, `OE` = `EW oracle-exec/`, `KX` = `kestra/executor/src/main/java/io/kestra/executor/`, `KL` = `kestra/core/src/main/java/io/kestra/plugin/core/flow/Loop.java`.
+
+## 1. Problem
+
+Three things a stored flow declares are parsed, saved and never run:
+
+1. **A `Loop`'s `outputs:` and `fetchType:`.** Kestra evaluates the outputs once per iteration, at the end of that iteration's sub-execution, and collects them into a list on the `Loop` run (`{{ outputs.loop.outputs }}`). egret models neither key (`EW src/models/task.rs:534-559`), warns `not_honoured` naming #6 (`EW src/spec/keys.rs:167`), and writes no outputs at all on a `Loop` run, so `{{ outputs.loop.outputs }}` is undefined and fails under the strict renderer.
+2. **A `Loop`'s `retry:`.** Kestra gives a failed task inside an iteration the nearest ancestor's `retry:`, walking the parent flow's task tree up through the `Loop` (`KX ExecutorService.java:576-599`, `:841-856`). egret's `spawn::sub_flow_source` (`EW src/worker/spawn.rs:830-899`) drops the `Loop`'s `retry:` when it builds the iteration's flow, and `retry::policy_for` (`EW src/executor/retry.rs:156-190`) stops at the sub-execution's root. No warning says so.
+3. **The flow-level `outputs:`.** Kestra evaluates them when the execution ends (`KX ExecutorService.java:441-477`), before `afterExecution:` runs, and a failure turns the execution `FAILED`. egret validates them (`EW src/spec/validate.rs:1088-1096`) and never evaluates them: `execution.outputs` is a constant `{}` (`EW src/worker/render.rs:279-284`), so is a `Subflow`'s `outputs.<sub>.outputs` (`EW src/worker/subflow.rs:774-779`), and `workflow.executions` has no `outputs` column. No warning says so.
+
+Banks (attributions, measured by T0 and each task): **8** executor entries upper bound, 6 strict, from the post-merge **301 / 35 / 35 / 0** to **301 / 27 / 27 / 0** (strict **29 / 29**). Only `subflow-secret-output-child` and `-parent` stay among the entries this package touches.
+
+## 2. Decisions
+
+### 2.1 User decisions, 2026-10-29 (asked, answered)
+
+- **Q1. Flow-level `outputs:` is in #6, in the same PR.** Not split into #6a/#6b. The PR carries the migration (D11). The survey's #6a/#6b task letters become A (Loop) and B (flow) inside one plan.
+- **Q2. `retry-flowable-parallel` is in #6.** A `Loop`'s own `retry:` (and an ancestor's) is inherited by the tasks of each iteration (D7).
+- **Q3. SECRET outputs are encrypted with egret's key and masked everywhere**, as SECRET inputs are (KI-112, `EW src/secret_inputs.rs`; D9). `subflow-secret-output-child` and `-parent` stay baselined: Kestra fails them only because its oracle harness has no encryption key, a harness difference, not an egret gap.
+- **Q4. A FILE-typed output, or a STORE URI, that names storage outside the execution's own storage is refused**, recorded as a security divergence (Kestra OSS checks nothing; D10, §6).
+- **Q5. Accumulated `Loop` outputs are capped:** 1 MiB per iteration's map and 16 MiB for the whole list. Beyond either, the iteration fails with a message that points to `fetchType: STORE` (D4). Kestra has no cap; recorded as an egret-only limit (§6).
+
+### 2.2 Corrections to the roadmap's premises
+
+Measured in the survey (§1, §2, §7) and binding on this design:
+
+1. **"A `Loop`'s `outputs:` evaluated at its end" is wrong.** They are evaluated **per iteration**, when each iteration's sub-execution ends (after its `errors:`/`finally:`), in that sub-execution's render context, and each result is appended to a list on the `Loop` run (survey §2 items 1, 5). There is no evaluation "at the end of the `Loop`".
+2. **"STORE needs the W9a store" is stale.** W9a's internal storage and ION files exist; `loop-values-from-uri` already matches (a `Loop`'s `values:` read from a URI works). STORE needs only a write of one ION file per iteration (D5).
+3. **"Banks: 3 (+ up to 4)" is wrong. The banks are 8:** 5 `Loop`-output entries (`loop-outputs`, `loop-outputs-failed-render`, `loop-outputs-store`, `loop-outputs-auto`, `if-in-parallel`; STORE and AUTO were reopened 2026-10-19), 1 retry entry (`retry-flowable-parallel`) and 2 flow-output entries (`after-execution`, `flow-with-outputs-failed`).
+4. **The "4 unattributed `Loop` entries" are named, and none is a `Loop`-outputs cause:**
+   - `if-in-flowable`: the `equals` operator, banked by #5a (Task A6);
+   - `loop-object` and `loop-object-in-list`: the `json` test, banked by #5b (Task B2, PR #780);
+   - `retry-flowable-parallel`: a `Loop`'s `retry:` not inherited by its iterations, **this package** (Q2, D7).
+5. **Package #1 missed two silent drops.** Its "every parsed-but-ignored key warns" left no `not_honoured` warning for the flow-level `outputs:` or for a `Loop`'s `retry:`. `EW src/spec/schema/property-treatment.json` marks both "honoured" (`Flow.outputs` at `:17`, `Loop.retry` in the `Loop` row at `:557-575`) because that file measures the **save** path only (D8 fixes the honesty).
+6. **The cause list's "flow `outputs:` … may be partly stale (inferred)" (roadmap `:296`) is not stale.** Nothing evaluates flow outputs anywhere.
+7. **Stale code comments:** `EW src/worker/render.rs:8-11` (the surface gap is no longer why `loop-outputs-auto` cannot resolve its `values:`; W9a Task 11 closed that) and `EW src/models/task.rs:518-521` ("deliberately out … unused before W3").
+
+### 2.3 Design decisions
+
+Controller decisions under the autonomy rules. Each names the survey section it comes from.
+
+- **D1. Where a `Loop`'s outputs are evaluated (survey §2 items 1–4).** In the settle that ends an iteration's sub-execution, after its `errors:`/`finally:` have run, on the sub-execution's own render surface (its task outputs, `item`, the inherited parent outputs; the surface `claim::settle`'s outbox phase already loads), and only when the `Loop` declares a non-empty `outputs:`. A render or coercion failure appends `FAILED` to the sub-execution's state history **after** the terminal it reached (`CREATED RUNNING SUCCESS FAILED`, as golden `loop-outputs-failed-render`), persists it, logs the error on the sub-execution, and the report to the parent `Loop` is `FAILED`. The computed outputs travel with the terminal report into `spawn::on_execution_terminal` (`EW src/worker/spawn.rs:519-657`), which today receives only the state.
+- **D2. One outputs evaluator for both kinds (survey §2 item 3).** A shared function, used by D1 and by D6, ports `renderOutputs` + `typedOutputs`: the **required** outputs (`required` absent or `true`) render together and one failure fails them all; each **optional** output renders alone, and a failure is logged and becomes `null`; then every value is coerced by its `type` with the input coercer of package #3 (`EW src/inputs_check.rs`, Kestra's `parseData`); a coercion error fails. The error text names the output id. The function is pure over a render surface and a list of `FlowOutput`s, and returns the typed map plus the SECRET ids (D9).
+- **D3. The `Loop` run's list (survey §2 item 5, §6 D2).** When an iteration ends: if it failed and `transmitFailed` (default `true`) holds, the `Loop` ends `FAILED` at once and that iteration's outputs are **not** appended; otherwise, if its map is non-empty, `{item: {value, iteration, key?}, outputs: {…}}` is appended to the `Loop` run's `outputs` list. `item.value` is the iteration's value as a string, `iteration` the 0-based index, `key` present only for a map value. Order is **termination order** (index order when `concurrencyLimit: 1`). The append happens under the parent row lock `on_execution_terminal` already takes (`claim::load(… Stack::Nested)`), so concurrent iterations never lose an entry.
+- **D4. Counters and the cap (survey §2 item 6, Q5).** Every `Loop` run, with or without `outputs:`, carries `iterationCount`, `runningIterations` and `terminatedIterations` (a map from state name to count) in its `task_runs.outputs`, updated under the same lock; `outputs` is present only once an entry was appended, as Kestra. `nextOffset` is not written (egret reads file `values:` by index). **Cap:** an iteration whose FETCH map serialises to more than 1 MiB (`env::MAX_OUTPUT_BYTES`), fails in its own settle: the sub-execution gets `FAILED` as in D1. An iteration whose append would take the list past 16 MiB is decided at the append, under the parent lock (only the parent sees the total): the iteration is treated as a failed iteration (under `transmitFailed` the `Loop` ends `FAILED`; otherwise it is not appended and counts under `FAILED` in `terminatedIterations`), and the message is logged on the `Loop` run; the sub-execution's own history is not rewritten after it ended. The message reads `Loop outputs of iteration <i> are <n> bytes; egret keeps at most 1 MiB per iteration and 16 MiB per Loop in the execution. Use fetchType: STORE to keep them in internal storage.` (the 16 MiB variant names the total). The limits are constants beside `MAX_OUTPUT_BYTES`.
+- **D5. `fetchType` (survey §2 item 7).** `FETCH` keeps the map. `STORE` writes the typed map as **one ION file per iteration** with `runners::ionfmt::write_ion_element`, under the **sub-execution's** storage prefix (as Kestra's `runContext.storage().putFile`), indexed like a task's output file so the readability rule (`storage::index::resolve_readable_many`) and the pruner know it, and replaces the map by `{uri: "kestra:///…"}`. `AUTO` (the default) is STORE when `values:` is a **string** that renders to a `kestra://` URI egret's storage reads (Kestra's `guessOutputMode`), FETCH otherwise; the decision is taken once per `Loop` run from the rendered `values:`, not per iteration. The 1 MiB / 16 MiB cap of D4 applies to the list of `{uri}` entries too (it is far away). A SECRET output under STORE: see D9.
+- **D6. Flow-level `outputs:` (survey §2 item 8, note 6).** Evaluated with D2 when an execution reaches its terminal state, **before** `afterExecution:` is scheduled (so `{{ execution.outputs.x }}` renders in `afterExecution:`), and only when the flow declares `outputs:`. Stored in the new `workflow.executions.outputs` (D11). A failure appends `FAILED` after the computed terminal (`CREATED RUNNING SUCCESS FAILED`, as golden `flow-with-outputs-failed`) and the error is logged on the execution. Where the value appears:
+  - `{{ execution.outputs }}` in every later render of the execution (`afterExecution:`; `worker/render.rs:279-284` reads the column);
+  - a parent's `{{ outputs.<subflow>.outputs }}` (`worker/subflow.rs:774-779` copies the child's outputs onto the `Subflow` task run when the child ends, `wait: true` only, as Kestra);
+  - a Flow trigger's `{{ trigger.outputs }}` (the triggering execution's outputs, as Kestra);
+  - the execution API (`GET` of an execution and the list carry `outputs`; OpenAPI updated).
+  **Inside a `Loop` iteration the parent flow's `outputs:` are not evaluated:** `sub_flow_source` clears `outputs` on the iteration's flow. Kestra's source evaluates the parent's outputs in every iteration (`onEnd` uses the parent flow); egret treats that as a Kestra bug (roadmap #20 rule, the `WorkingDirectory` `finally:` precedent) and records it (§6). No corpus flow has both, so no bank moves either way.
+- **D7. `Loop` retry inheritance (survey §1, Q2).** When `sub_flow_source` builds an iteration's flow, it finds the nearest `retry:` on the `Loop` or on one of its ancestors in the **parent** flow's task tree (Kestra's `searchForParentTaskWithRetry` over `Flow.findParentTasksByTaskId`) and attaches it to the iteration as an **inherited policy**, a new field distinct from the flow-level `retry` so the two keep their meanings. `retry::policy_for` consults it after the run-parent chain and before `plan.retry`: own `retry:` > ancestor inside the iteration > inherited from the parent flow > the flow's own `retry:`, which is Kestra's precedence. It applies to runnable tasks and `Subflow`, as Kestra (`Loop`'s own run never retries). A `CREATE_NEW_EXECUTION` policy reached this way stays refused at run by `worker::replay`, because Kestra throws there too (`OE baseline.txt:352-356`). **The terminal report (survey R3):** a `FAILED` immediately followed by `RETRYING` in the same settle must not report a terminal state to the parent `Loop`; only the state a settle ends in is reported today (`EW src/worker/claim.rs:3509-3516`), and A6 pins it with a test before relying on it.
+- **D8. Save-time warnings and property-treatment honesty (survey §1, §3; Q1, Q2).** Because Q1 puts everything in one PR, nothing ships a warning that the same PR removes:
+  - the `not_honoured` warning for `Loop` `outputs`/`fetchType` (`keys.rs:167`, its test at `:1769`) is removed;
+  - no warning is added for the flow-level `outputs:` or `Loop` `retry:`; both run once this PR lands;
+  - a `Loop` declaring `outputs:` gets the save-time check flow outputs already have (each output has a `type`; ids unique; `validate.rs:1088-1096` reused);
+  - a SECRET output on a `Loop` whose `fetchType` is `STORE`, or `AUTO` with a string `values:`, is refused at save (D9);
+  - `property-treatment.json`: `Loop.outputs` and `Loop.fetchType` go from "ignored" to "honoured"; the schema `README.md` states that "honoured" there means *saved and passed to the run*, that package #1 measured only the save path, and that `Flow.outputs` and `Loop.retry` were recorded "honoured" before anything ran them (fixed by #6). A fence test asserts that every key the treatment file calls "honoured" on the `Loop` row and on `Flow` is either run by egret or listed in `keys.rs`'s `not_honoured` table, with the three keys of this package named in it.
+- **D9. SECRET outputs (Q3).** The `secret_inputs` mechanism is reused, not copied:
+  - the stored value (the `Loop` run's list, `workflow.executions.outputs`, a `Subflow` run's copy) holds `MASK` (`logs::MASK`) for each SECRET output, and the real values are sealed, one JSON object per row, with `egret_secrets::Crypto` under `secrets.master_key` (`secret_inputs::CIPHER`) into a `bytea` column beside it: `workflow.executions.secret_outputs` and `workflow.task_runs.secret_outputs` (D11). For the `Loop` list, the sealed object is keyed by list position;
+  - only the worker's render surface (`worker::render::Surface::load`) opens them, so a later `{{ outputs.loop.outputs[0].outputs.s }}` or `{{ execution.outputs.s }}` renders the real value; every log line and failure message of the run masks them (`RenderContext::redactions`);
+  - no API projection selects the sealed columns; a Flow trigger's `trigger.outputs` and a `Subflow` parent see the mask unless they are the same execution family (the `Subflow` parent copies the child's sealed object into its `Subflow` task run's `secret_outputs`, as a `Subflow` child's inputs go through `split` today);
+  - a deployment with no master key refuses at evaluation, naming the output and the setting, as a SECRET input start is refused; the iteration or execution fails;
+  - a SECRET output under STORE is refused at save (D8): the ION file would hold the value in clear in storage that `read()` returns as text. Recorded divergence (§6): Kestra writes the encrypted form into the file;
+  - `subflow-secret-output-child` and `-parent` stay baselined, re-attributed in `OE baseline.txt` to the harness difference (Kestra's oracle has no key, so Kestra FAILS; egret with a key succeeds).
+- **D10. FILE outputs and STORE URIs stay in the execution's own storage (Q4).** A value of a `type: FILE` output (flow or `Loop`), after rendering, must be a `kestra:///` URI whose `{exec}` is **the execution itself or another execution of its loop family** (the loop root and its iterations, `storage::index` `loop_family`), and which resolves as readable (`resolve_readable_many`). Anything else (another execution of the replay chain or the trigger set, another namespace, a malformed URI, a path that is not `kestra://`) fails the output with `egret refuses output <id>: <uri> is not a file of this execution`. A STORE URI egret wrote itself (D5) is by construction in the sub-execution's prefix. A URI read back from a `Loop`'s STORE list goes through the existing readability decision, unchanged. This is narrower than the readability rule, which also admits the replay chain and the trigger family: an output publishes a file, a read only consumes one.
+- **D11. One migration.** `workflow.executions` gains `outputs jsonb` (NULL = no outputs evaluated) and `secret_outputs bytea`; `workflow.task_runs` gains `secret_outputs bytea`. Comments as in `0203`. No backfill: executions that ended before the migration had no outputs evaluated. **Number:** the next free number above main's highest **and** above every open PR's migrations. Measured 2026-10-29 on local refs (no network): the highest on `origin/main` and on every local and remote-tracking branch is `0210_workflow_execution_is_idle.sql`, so the file is `migrations/0211_workflow_execution_outputs.sql`. This is provisional (D12).
+- **D12. Re-checking the migration number at merge time.** The namespace is shared with every open branch (`no_two_migration_files_share_a_version` only catches a collision once both files are on one branch, and a collision on a database that has seen main stops `migrate()` with `VersionMismatch`, so no column of this PR would exist). Immediately before the PR is merged (with network): `git fetch origin`, `git ls-tree --name-only origin/main migrations/ | tail -1`, and, for each open PR (`gh pr list --state open --json number,headRefName`), `git ls-tree --name-only origin/<head> migrations/ | tail -1`. If any shows `0211` or above, renumber with `git mv` to one above the highest, then sweep the three populations: the file name, the bare number (comments, docs, this spec), and any identifier named after it. Merge main into the branch after a renumber and re-run the migration tests.
+- **D13. Behaviour change for stored flows (release note).** These answers change: `{{ outputs.<loop>.outputs }}` and the counters exist on a `Loop` run; a `Loop` with a failing output expression now fails its iteration (and the `Loop`, under `transmitFailed`); a `Loop`'s `retry:` (or an ancestor's) now retries the tasks of each iteration; a flow with a failing flow-level output now ends `FAILED`; `{{ execution.outputs }}` and a `Subflow`'s `outputs.<id>.outputs` carry values instead of `{}`; the execution API carries `outputs`; FILE outputs outside the execution's storage, SECRET outputs under STORE, and `Loop` outputs past the cap are refused (egret-only). The text goes to the docs repo and the PR description (plan Z).
+
+## 3. Shape of the change
+
+- **Model and save:** `models/task.rs` (`Loop.outputs: Vec<FlowOutput>`, `fetch_type: FetchType`), `spec/keys.rs`, `spec/validate.rs`, `spec/schema/property-treatment.json` and its README.
+- **Evaluator:** a new module `outputs.rs` (D2), on `inputs_check`'s coercer and `secret_inputs`'s seal.
+- **Loop path:** `worker/claim.rs` (settle's outbox phase: D1), `worker/spawn.rs` (`sub_flow_source`: D6 clear, D7 inherited retry; `on_execution_terminal`: D3, D4), `executor/retry.rs` (D7), storage write for D5.
+- **Flow path:** the terminal transition in the executor/worker (D6), `worker/render.rs` (`execution.outputs`, Surface reveal), `worker/subflow.rs`, the Flow trigger's render context, `repo.rs` and `routes.rs` (API), OpenAPI and the frontend's generated client (`npm run gen:api`, never bare orval) if the field is exposed there.
+- **Migration** `0211` (provisional, D12).
+
+## 4. Ratchet and tests
+
+Measured with `cargo test -p egret-workflow --test executor` (golden / mismatching / baselined / broken). On this branch's base (`6dc1dcf9`, #5a) it is **301 / 40 / 40 / 0**; after T0 merges main with #5b (#780) it is expected to be **301 / 35 / 35 / 0** (T0 measures it). Census `LIVE` 295 / `VALIDATE_REFUSED` 25 / `UNKNOWN_TYPE_REFUSED` 21, expected unchanged (no task changes validation of a corpus flow; T0 and Z re-measure).
+
+| Task | Entries banked | Ratchet after (upper / strict) |
+|---|---|---|
+| T0 | none (merge, measure) | 35 / 35 |
+| A1, A2 | none | 35 / 35 |
+| A3 | `loop-outputs-failed-render` | 34 / 34 |
+| A4 | `loop-outputs`, `if-in-parallel` | 32 / 32 |
+| A5 | `loop-outputs-store`; `loop-outputs-auto` possible | 30 / 31 |
+| A6 | `retry-flowable-parallel` possible | 29 / 31 |
+| B1 | `flow-with-outputs-failed` | 28 / 30 |
+| B2 | `after-execution` | **27 / 29** |
+| B3, B4 | none | 27 / 29 |
+
+"Strict" counts only the survey's high-confidence entries; a "possible" entry that does not move keeps its baseline line, re-attributed to the cause its task measured. A bank removes its `OE baseline.txt` line in the same commit (the test fails on an unremoved line).
+
+**Outputs are not visible to any oracle** (survey R1): `golden.json` and `traces.json` record states only. Every claim about content (item shape, order, typing, STORE URIs, counters, masking) is pinned by unit and integration tests written against survey §2, listed per task in the plan. `working-directory-loop` (three nested `Loop` `outputs:`, no golden) is used as an integration fixture.
+
+## 5. Follow-ups recorded
+
+- `nextOffset` if egret ever reads file `values:` in pages (D4).
+- Showing outputs in the execution UI (the API carries them after B3; no screen in this PR).
+- SECRET outputs under STORE (encrypted ION), if asked (D9).
+- `subflow-secret-output-*`: a harness with a key on Kestra's side would bank them.
+- Kestra evaluating the parent flow's `outputs:` in every `Loop` iteration (D6): revisit if Kestra changes it.
+
+## 6. Recorded divergences
+
+1. **The parent flow's `outputs:` are not evaluated inside a `Loop` iteration** (D6). Kestra's source does. No corpus entry.
+2. **FILE outputs and STORE URIs outside the execution's loop family are refused** (D10, Q4, security). Kestra OSS accepts any URI.
+3. **`Loop` outputs are capped** at 1 MiB per iteration and 16 MiB per `Loop` (D4, Q5). Kestra has no cap.
+4. **A SECRET output under STORE is refused at save** (D9). Kestra writes the encrypted form.
+5. **A deployment without a master key fails a SECRET output** (D9), as it refuses a SECRET input start. Kestra fails too (the reason `subflow-secret-output-*` stay baselined).
+6. **Concurrent iterations' order** is egret's termination order; Kestra's is non-deterministic as well (survey R5). Not a divergence anyone can measure; recorded so a reader does not pin it.
+
+## 7. As built
+
+To be written by the docs task Z when the PR is ready: banks measured, the T0 baseline, the migration number actually used and when it was re-checked, and any decision a task revised.
