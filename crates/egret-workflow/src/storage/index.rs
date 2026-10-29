@@ -316,6 +316,93 @@ pub async fn resolve_readable_many(
     Ok(out)
 }
 
+/// **The readability decision of a READ** (`read()` and the other render
+/// functions through the render snapshot, a task staging a URI, a FILE input
+/// given as a string): [`resolve_readable_many`] over `readable`, plus the
+/// files a waited-for `Subflow` child **published** to an execution of
+/// `readable` (package #6 Task B4, spec D10).
+///
+/// Kestra lets a parent read its child's file outputs
+/// (`{{ read(outputs.sub.outputs.f) }}`; OSS's `checkAllowedNamespace`
+/// allows every namespace), and egret's readable set does not reach down to a
+/// `Subflow` child. So a URI [`resolve_readable_many`] answers
+/// [`Unreadable::NotReadable`] is admitted when, and only when, all of these
+/// hold:
+///
+/// 1. it is the string value of one of the child's flow outputs, as copied
+///    onto a `Subflow` run of an execution in `readable`
+///    (`task_runs.outputs.outputs`, written by `worker::subflow`'s copy alone);
+/// 2. that run really started that child: the child row's
+///    `trigger_execution_id` and `trigger_run_ix` name the run, and its id is
+///    the run's `outputs.executionId` (a task that merely WROTE such a map,
+///    a script's outputs, names no child of its own);
+/// 3. the URI's `{exec}` is in the child's own loop family (the child and its
+///    iterations): the same family rule a FILE output is held to, so a
+///    child cannot hand its parent a third execution's file through a STRING
+///    output.
+///
+/// Only the URI is admitted, never the child's other files. An admitted URI
+/// then resolves exactly as a readable one does (`Missing`, `Pruned`). Not
+/// used by [`super::inputs::check_file_outputs`] (an output publishes only
+/// a file of its own loop family, D10) nor by the files API (whose caller's
+/// authority is over the execution the route names).
+pub async fn resolve_readable_for_read(
+    conn: &mut PgConnection,
+    workspace: Uuid,
+    readable: &[Uuid],
+    uris: &[String],
+) -> Result<BTreeMap<String, std::result::Result<IndexedFile, Unreadable>>> {
+    let mut out = resolve_readable_many(conn, workspace, readable, uris).await?;
+    let refused: Vec<&str> = out
+        .iter()
+        .filter(|(_, v)| matches!(v, Err(Unreadable::NotReadable { .. })))
+        .map(|(u, _)| u.as_str())
+        .collect();
+    if refused.is_empty() || readable.is_empty() {
+        return Ok(out);
+    }
+    let published: Vec<(String, Uuid)> = sqlx::query_as(
+        "SELECT DISTINCT o.value #>> '{}', c.id \
+           FROM workflow.task_runs tr \
+           JOIN workflow.executions c \
+             ON c.workspace_id = $1 \
+            AND c.trigger_execution_id = tr.execution_id \
+            AND c.trigger_run_ix = tr.run_ix \
+            AND c.id::text = tr.outputs ->> 'executionId' \
+          CROSS JOIN LATERAL jsonb_each( \
+                CASE WHEN jsonb_typeof(tr.outputs -> 'outputs') = 'object' \
+                     THEN tr.outputs -> 'outputs' ELSE '{}'::jsonb END) o \
+          WHERE tr.execution_id = ANY($2) \
+            AND jsonb_typeof(o.value) = 'string' \
+            AND o.value #>> '{}' = ANY($3)",
+    )
+    .bind(workspace)
+    .bind(readable)
+    .bind(&refused)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    let mut admitted: BTreeMap<Uuid, Vec<String>> = BTreeMap::new();
+    for (u, child) in published {
+        // Parsed already: only a URI that parsed can be `NotReadable`.
+        let Ok(p) = uri::parse(&u) else { continue };
+        let in_family = p.execution == child
+            || match loop_root(conn, workspace, p.execution).await {
+                Ok(root) => root == child,
+                // Not an execution of this workspace: not the child's.
+                Err(Error::NotFound(_)) => false,
+                Err(e) => return Err(e),
+            };
+        if in_family {
+            admitted.entry(p.execution).or_default().push(u);
+        }
+    }
+    for (exec, uris) in admitted {
+        out.extend(resolve_readable_many(conn, workspace, &[exec], &uris).await?);
+    }
+    Ok(out)
+}
+
 /// `workflow.storage_retention_days`'s default, named by
 /// [`Unreadable::Pruned`] when no store is installed in this process.
 const DEFAULT_RETENTION_DAYS: u32 = 30;

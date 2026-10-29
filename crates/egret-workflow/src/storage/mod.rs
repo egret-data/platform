@@ -57,7 +57,7 @@ use uuid::Uuid;
 
 pub use index::{
     loop_family, loop_root, readable_executions, readable_from_any, resolve_readable,
-    resolve_readable_many,
+    resolve_readable_for_read, resolve_readable_many,
 };
 
 /// The size caps (spec §4.5, §7.2). Defaults are `egret-config`'s
@@ -315,13 +315,16 @@ pub struct IndexedFile {
 pub enum Unreadable {
     #[error("{uri} is not a storage URI egret can read: {reason}")]
     Malformed { uri: String, reason: String },
-    /// Its execution is not in this execution's readable set (loop family, trigger execution, replay chain).
+    /// Its execution is not in this execution's readable set (loop family, trigger execution, replay chain),
+    /// and, for a read, it is not a file a waited-for `Subflow` child published
+    /// ([`index::resolve_readable_for_read`], package #6 Task B4).
     /// Deliberately one variant: the message never says whether the file exists.
     #[error(
         "{uri} belongs to an execution this flow may not read: a flow reads only its own \
          execution's files, its loop family's (its loop root and every iteration under it), \
          its trigger execution's and that trigger's loop family (its loop root and every \
-         iteration under it), and, for a replay, its source's"
+         iteration under it), for a replay, its source's, and the files a Subflow child it \
+         waited for published as its outputs"
     )]
     NotReadable { uri: String },
     /// Its execution is readable and no such file was ever committed.

@@ -7,7 +7,9 @@
 //! and out of every **JSON value** of the render context (inputs, the outputs
 //! of every terminated task, `execution`, `item`) and resolves all of them at
 //! once through [`super::resolve_readable_many`] -- the one readability
-//! decision -- on the caller's POOL connection: a [`Snapshot`] reads, so it is
+//! decision (since package #6 Task B4 through
+//! [`super::resolve_readable_for_read`], which also admits the files a
+//! waited-for `Subflow` child published) -- on the caller's POOL connection: a [`Snapshot`] reads, so it is
 //! never built inside a transaction (below). Inside `settle` the same
 //! resolution is taken by [`scope_in_transaction`] on the transaction that
 //! has just indexed the finished task's files, which a pool would not see.
@@ -71,7 +73,7 @@ use super::nsfiles::access::{authorize, Access, Actor, Grant, Resource};
 use super::nsfiles::path::NsPath;
 use super::nsfiles::store::{self as ns_store, NsEntry, Want};
 use super::nsfiles::NsError;
-use super::{decode_utf8, readable_executions, resolve_readable_many, uri};
+use super::{decode_utf8, readable_executions, resolve_readable_for_read, uri};
 use super::{FileStore, IndexedFile, Unreadable};
 use crate::runners::files::{
     FileMeta, FileScope, FileUnavailable, KvAnswer, KvArgs, NsFileArgs, NsFileMeta, RenderFiles,
@@ -1064,7 +1066,9 @@ pub(crate) async fn scope_in_transaction(
 }
 
 /// Every `kestra:///…` string in `texts` and `json` (see [`Snapshot::take`]),
-/// resolved at once through `resolve_readable_many` on `conn`. With no URI
+/// resolved at once through `resolve_readable_for_read` on `conn` (the one
+/// readability decision, plus a waited-for `Subflow` child's published
+/// files, package #6 Task B4). With no URI
 /// anywhere the database is not touched.
 async fn reachable(
     conn: &mut PgConnection,
@@ -1085,7 +1089,9 @@ async fn reachable(
     }
     let readable = readable_executions(conn, workspace, execution).await?;
     let uris: Vec<String> = found.into_iter().collect();
-    resolve_readable_many(conn, workspace, &readable, &uris).await
+    // A read: the files a waited-for `Subflow` child published are readable
+    // too (package #6 Task B4, `index::resolve_readable_for_read`).
+    resolve_readable_for_read(conn, workspace, &readable, &uris).await
 }
 
 fn collect(text: &str, found: &mut BTreeSet<String>) {

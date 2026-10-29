@@ -512,4 +512,26 @@ mod tests {
             err.message
         );
     }
+
+    /// **`secret()` never resolves in an output's `value:`** (package #6
+    /// Task B4): the outputs render with the plain environment, where
+    /// `secret` is the confined refusal, so a workspace secret cannot be
+    /// copied into a STRING output (which the API returns in clear). Save
+    /// refuses it first (`spec::validate`'s `secret_findings`); this is the
+    /// run's own refusal, for a version stored before that check saw outputs.
+    #[test]
+    fn secret_never_resolves_in_an_output_value() {
+        for t in ["STRING", "SECRET"] {
+            let err = eval(&format!(
+                "- id: leak\n  type: {t}\n  value: \"{{{{ secret('DB_PASSWORD') }}}}\"\n"
+            ))
+            .unwrap_err();
+            assert_eq!(err.output_id, "leak");
+            assert!(
+                err.message.contains(crate::runners::SECRET_REFUSAL),
+                "{t}: {}",
+                err.message
+            );
+        }
+    }
 }

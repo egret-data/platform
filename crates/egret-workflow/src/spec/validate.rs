@@ -6760,4 +6760,30 @@ mod loop_output_tests {
         let src = a_loop("    retry: {type: constant, interval: PT1S, maxAttempts: 2}\n");
         assert!(new_execution_warnings(&src).is_empty());
     }
+
+    /// **`secret()` in a flow's or a `Loop`'s `outputs:` is refused at save**
+    /// (package #6 Task B4; A1 recorded that the walk reaches a `Loop`'s
+    /// outputs, untested): an output value is no plugin task's property, and
+    /// a STRING output would carry the secret to the API in clear.
+    #[test]
+    fn secret_in_an_output_value_is_refused_at_save() {
+        let flow_level = format!(
+            "{HEAD}tasks: [{{id: t, type: core.log, message: m}}]\noutputs:\n  - id: o\n    type: STRING\n    value: \"{{{{ secret('DB_PASSWORD') }}}}\"\n"
+        );
+        let in_loop = a_loop(
+            "    outputs:\n      - id: o\n        type: STRING\n        value: \"{{ secret('DB_PASSWORD') }}\"\n",
+        );
+        for (src, want) in [
+            (flow_level, "outputs.o.value"),
+            (in_loop, "tasks.l.outputs.o.value"),
+        ] {
+            let found = codes(&src);
+            assert!(
+                found.iter().any(
+                    |(c, p)| *c == crate::plugins::CODE_SECRET_OUTSIDE_PLUGIN_TASK && p == want
+                ),
+                "{want}: {found:?}"
+            );
+        }
+    }
 }
