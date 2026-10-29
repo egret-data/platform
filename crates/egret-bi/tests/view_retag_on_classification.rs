@@ -120,8 +120,12 @@ async fn setup() -> Option<Fx> {
     // and a Trino profile of its own type with a tag service. An engine bound to a
     // profile of another type is refused at compile (d-i), so a fake type would not compile.
     let store = egret_policy::PolicyStore::new(db.clone());
-    egret_policy::seed_trino(&store).await.expect("seed trino service-def");
-    egret_policy::seed_tag(&store).await.expect("seed tag service-def");
+    egret_policy::seed_trino(&store)
+        .await
+        .expect("seed trino service-def");
+    egret_policy::seed_tag(&store)
+        .await
+        .expect("seed tag service-def");
     let tag_service = unique("vr_tag");
     store
         .create_service(&tag_service, "tag", &serde_json::json!({}))
