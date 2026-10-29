@@ -292,11 +292,11 @@ RuleEffect {
   kind: "mask" | "row_filter",
   catalogs: [ { catalogId, catalogName,
                 engines: [ { id, name, engineType } ],      // engine gắn vào catalog VÀ gắn với một profile
-                notEnforced: null | "no_engine" | "no_profile" } ],
+                notEnforced: null | "no_engine" | "no_profile" | "no_tag_service" } ],
   tableCount: number | null,     // null khi một cấp đường dẫn là mẫu
   columnCount: number | null,    // chỉ cho mask; null với mẫu hoặc lọc dòng
   enforcedBy: number,            // số engine khác nhau trên các catalog
-  notEnforced: null | "no_assignment" | "no_engine" | "no_profile",   // cho cả rule; null khi enforcedBy > 0
+  notEnforced: null | "no_assignment" | "no_engine" | "no_profile" | "no_tag_service",   // cho cả rule; null khi enforcedBy > 0
   exemptMembers: number,         // số người khác nhau trong exempt.include (đã khai triển nhóm, role, workspace; `public` tính 0 và bật exemptEveryone)
   exemptEveryone: boolean,
   alreadyMasked: [ { ruleId, ruleName, maskType, coordinate, exempt: PrincipalSet } ]   // C6, chỉ mask, ≤ 20
@@ -306,7 +306,7 @@ RuleEffect {
 
 - **Phạm vi của rule theo tag.** Các dòng `catalog_tag_assignments` của key classification, join với `registry.catalogs` theo `warehouse_id`. Dòng nào có warehouse không catalog nào nêu tên thì bỏ qua ở đây; Where used đã đếm chúng là `orphaned`.
 - **Phạm vi của rule theo path.** Catalog của scope. `tableCount` là 1 khi `schema` và `table` được nêu không có ký tự glob (`*`, `?`), ngược lại là `null`. `columnCount` theo cùng quy tắc cho `column`. Một mask không có cột nghĩa là "mọi cột": `columnCount` là `null`, và UI nói "every column of <bảng>" (xem C8).
-- **`notEnforced`.** Theo catalog: `"no_engine"` khi catalog không gắn engine nào, `"no_profile"` khi có engine gắn nhưng không engine nào gắn với profile, `null` khi có engine thực thi rule ở đó. Cho cả rule: `"no_assignment"` khi rule không chạm tới catalog nào (classification không được gán ở nơi nào có registry catalog), ngược lại `null` khi `enforcedBy > 0`, ngược lại `"no_profile"` nếu có catalog chạm tới mang lý do đó, còn lại `"no_engine"`.
+- **`notEnforced`.** Theo catalog: `"no_engine"` khi catalog không gắn engine nào, `"no_profile"` khi có engine gắn nhưng không engine nào gắn với profile, `"no_tag_service"` khi profile không có tag service, nên rule phân loại không compile được ở đó, `null` khi có engine thực thi rule ở đó. Cho cả rule: `"no_assignment"` khi rule không chạm tới catalog nào (classification không được gán ở nơi nào có registry catalog), ngược lại `null` khi `enforcedBy > 0`, ngược lại `"no_profile"` nếu có catalog chạm tới mang lý do đó, còn lại `"no_engine"`.
 - **Phạm vi của `alreadyMasked`.** Xét cả cột chính xác, mẫu cột và cả bảng (mask theo path không có cột, trên một bảng nêu đích danh). Với mask theo path đã lưu, các cấp phải khớp; hai mẫu cột được coi là chồng nhau khi một mẫu khớp mẫu kia. Với mask theo tag đã lưu, các classification gán cho các cột chạm tới, và cho cả bảng, được so theo tên, phân biệt hoa thường. Một rule theo tag xét 50 cột đầu; `truncated` cho biết khi một giới hạn đã áp dụng.
 
 **Mới, frontend.**
