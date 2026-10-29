@@ -389,6 +389,21 @@ pub enum CompileError {
     /// here would be the one path that panics instead.
     #[error("{engine:?}'s embedded service-def failed to parse: {detail}")]
     ServiceDefUnreadable { engine: EngineType, detail: String },
+    /// An engine is bound to a policy profile of another type. The plugin
+    /// downloads the service-def of the profile's own type, so compiling would
+    /// write policy for the wrong engine: a fail-open, not a cosmetic mismatch
+    /// (the bind route refuses it, `check_profile_bindable`). Refused before any
+    /// write, so a legacy binding stops every write to its profile (d-i).
+    #[error(
+        "policy profile {profile} has type {profile_type}, but engine {engine} is a {engine_type} engine; \
+         bind a profile of the same type"
+    )]
+    EngineTypeMismatch {
+        profile: String,
+        profile_type: String,
+        engine: String,
+        engine_type: String,
+    },
     /// A path-selected ROW-FILTER rule whose scope is not exactly
     /// catalog + schema + table (SP4a whole-branch review, Critical 1). Both
     /// engines' `rowFilterDef.resources` declares those three levels, every
