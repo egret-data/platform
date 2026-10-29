@@ -12908,3 +12908,254 @@ async fn store_without_internal_storage_fails_the_iteration_naming_the_setting(p
         Some("FAILED")
     );
 }
+
+// ---------------------------------------------------------------------------
+// Package #6 Task A6 (spec D7, Q2): a `Loop`'s `retry:` (or an ancestor's)
+// is inherited by the tasks of each iteration.
+// ---------------------------------------------------------------------------
+
+/// Settle, wake every due retry, and settle again, until `execution` is
+/// terminal. A `retry:` with `interval: PT0S` is due the moment it is written,
+/// and only the waker reopens a `RETRYING` run with no live sibling.
+async fn settle_through_retries(pool: &sqlx::PgPool, reg: &Handlers, execution: Uuid) {
+    for _ in 0..32 {
+        settle_everything(pool, reg).await;
+        let last = execution_history(pool, execution)
+            .await
+            .as_array()
+            .and_then(|h| h.last().cloned());
+        if matches!(
+            last.as_ref().and_then(|s| s.as_str()),
+            Some("SUCCESS" | "FAILED" | "WARNING" | "KILLED")
+        ) {
+            return;
+        }
+        let woken = wake(pool, 16).await.expect("wake");
+        if woken.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+    let mut below = Vec::new();
+    for it in iterations_of(pool, execution).await {
+        below.push(format!("{it}: {}", execution_history(pool, it).await));
+    }
+    let runs: Vec<(String, serde_json::Value, serde_json::Value, Option<i64>)> = sqlx::query_as(
+        "SELECT task_id, history, attempts, not_before_ms FROM workflow.task_runs WHERE execution_id = $1 ORDER BY run_ix",
+    )
+    .bind(execution)
+    .fetch_all(pool)
+    .await
+    .expect("runs");
+    panic!(
+        "{execution} never reached a terminal: {}; runs {runs:?}; iterations: {below:?}",
+        execution_history(pool, execution).await
+    );
+}
+
+/// The iteration executions of `parent`, by `loop_index`.
+async fn iterations_of(pool: &sqlx::PgPool, parent: Uuid) -> Vec<Uuid> {
+    sqlx::query_scalar(
+        "SELECT id FROM workflow.executions \
+          WHERE parent_execution_id = $1 AND parent_run_ix IS NOT NULL ORDER BY loop_index",
+    )
+    .bind(parent)
+    .fetch_all(pool)
+    .await
+    .expect("read the iterations")
+}
+
+/// **Survey R3: an iteration whose task goes `FAILED` then `RETRYING` in one
+/// settle reports nothing to its `Loop`.** Only the state a settle ENDS in is
+/// reported (`claim::terminated_now`), and that is `RETRYING`, which is not a
+/// terminal. Kestra's parent `Loop` ends only after the last attempt
+/// (`traces.json` of `valids/retry-flowable-parallel`); a report at the first
+/// `FAILED` would end the `Loop` (and, under `transmitFailed`, the flow)
+/// before the retry ran. A6 relies on this, so it is pinned before the
+/// inheritance: the retry here is the body task's own, which egret honours
+/// without A6, and the `PT30S` interval holds the iteration in `RETRYING`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_iteration_failed_then_retrying_in_one_settle_reports_nothing_to_its_loop(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let body = "      - id: child\n        type: io.kestra.plugin.core.execution.Fail\n        \
+                retry:\n          type: constant\n          interval: PT30S\n          \
+                maxAttempts: 2\n";
+    let source = loop_with("r3", "[\"a\"]", body, "");
+    let ex = start_execution(&pool, ws, None, &source, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks(None)).await;
+
+    let iterations = iterations_of(&pool, ex).await;
+    assert_eq!(iterations.len(), 1, "one value, one iteration");
+    assert_eq!(
+        execution_history(&pool, iterations[0]).await,
+        serde_json::json!(["CREATED", "RUNNING", "FAILED", "RETRYING"]),
+        "the iteration went FAILED then RETRYING and rests there: {}",
+        stuck(&pool, iterations[0], "child").await
+    );
+    assert_eq!(
+        run_state(&pool, ex, "loop").await.as_deref(),
+        Some("RUNNING"),
+        "the Loop heard no terminal: the iteration's FAILED was not reported"
+    );
+    assert_eq!(
+        execution_history(&pool, ex).await,
+        serde_json::json!(["CREATED", "RUNNING"])
+    );
+    let outputs = loop_run_outputs(&pool, ex).await;
+    assert_eq!(
+        outputs
+            .get("terminatedIterations")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0),
+        0,
+        "no iteration counted as terminated: {outputs}"
+    );
+}
+
+/// The corpus flow `valids/retry-flowable-parallel`, with `interval: PT0S` so
+/// the retries come due at once (the oracle's driver passes the clock).
+const RETRY_FLOWABLE_PARALLEL: &str = "id: retry-flowable-parallel\nnamespace: t\ntasks:\n  \
+    - id: flowable\n    type: io.kestra.plugin.core.flow.Loop\n    concurrencyLimit: 0\n    \
+    values: [0, 1]\n    retry:\n      type: constant\n      interval: PT0S\n      \
+    maxAttempts: 3\n    tasks:\n      - id: child\n        \
+    type: io.kestra.plugin.core.execution.Fail\n";
+
+/// **A `Loop`'s `retry:` retries the tasks of each iteration** (spec D7,
+/// golden `valids/retry-flowable-parallel`): each of the two sub-executions
+/// runs `child` three times, with the history `CREATED RUNNING FAILED
+/// RETRYING RUNNING FAILED RETRYING RUNNING FAILED`, and the `Loop` and the
+/// execution FAIL after the last attempt. Before A6 the iteration's flow
+/// dropped the `Loop`'s `retry:` and `child` ran once.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_loops_retry_retries_the_tasks_of_each_iteration(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let ex = start_execution(
+        &pool,
+        ws,
+        None,
+        RETRY_FLOWABLE_PARALLEL,
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+    settle_through_retries(&pool, &Handlers::with_core_tasks(None), ex).await;
+
+    let iterations = iterations_of(&pool, ex).await;
+    assert_eq!(iterations.len(), 2);
+    for it in iterations {
+        assert_eq!(
+            execution_history(&pool, it).await,
+            serde_json::json!([
+                "CREATED", "RUNNING", "FAILED", "RETRYING", "RUNNING", "FAILED", "RETRYING",
+                "RUNNING", "FAILED"
+            ]),
+            "iteration {it}: {}",
+            stuck(&pool, it, "child").await
+        );
+        assert_eq!(attempts_of(&pool, it, "child").await, 3, "iteration {it}");
+    }
+    assert_eq!(
+        run_state(&pool, ex, "flowable").await.as_deref(),
+        Some("FAILED")
+    );
+    assert_eq!(
+        execution_history(&pool, ex).await,
+        serde_json::json!(["CREATED", "RUNNING", "FAILED"])
+    );
+}
+
+/// **A `Loop` with no `retry:` inside a `Sequential` with one inherits the
+/// `Sequential`'s, and it wins over the flow's** (Kestra's
+/// `searchForParentTaskWithRetry` walks the parent flow's tree up through the
+/// `Loop`; the flow's `retry:` is consulted only when no ancestor has one).
+/// The control is the same flow with the `Sequential`'s `retry:` removed: the
+/// flow's applies.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_loop_inside_a_sequential_inherits_the_sequentials_retry_over_the_flows(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let flow = |id: &str, seq_retry: &str| {
+        format!(
+            "id: {id}\nnamespace: t\nretry:\n  type: constant\n  interval: PT0S\n  \
+             maxAttempts: 4\ntasks:\n  - id: s\n    type: io.kestra.plugin.core.flow.Sequential\n\
+             {seq_retry}    tasks:\n      - id: l\n        type: io.kestra.plugin.core.flow.Loop\n        \
+             values: [0]\n        tasks:\n          - id: child\n            \
+             type: io.kestra.plugin.core.execution.Fail\n"
+        )
+    };
+    let seq_retry =
+        "    retry:\n      type: constant\n      interval: PT0S\n      maxAttempts: 2\n";
+    let reg = Handlers::with_core_tasks(None);
+    for (id, retry, want) in [("seq", seq_retry, 2), ("flow-only", "", 4)] {
+        let ex = start_execution(&pool, ws, None, &flow(id, retry), serde_json::json!({}))
+            .await
+            .expect("start execution");
+        settle_through_retries(&pool, &reg, ex).await;
+        let iterations = iterations_of(&pool, ex).await;
+        assert_eq!(iterations.len(), 1, "{id}");
+        assert_eq!(
+            attempts_of(&pool, iterations[0], "child").await,
+            want,
+            "{id}: {}",
+            stuck(&pool, iterations[0], "child").await
+        );
+        assert_eq!(
+            run_state(&pool, ex, "l").await.as_deref(),
+            Some("FAILED"),
+            "{id}"
+        );
+    }
+}
+
+/// **An inherited `CREATE_NEW_EXECUTION` is still refused by
+/// `worker::replay`** (spec D7, §2.2 item 9): the `Loop`'s own `retry:` now
+/// reaches the body task, which is marked `RETRIED`, and no replay of the
+/// iteration is ever created -- Kestra throws there too. The iteration's run
+/// is `RETRIED` only because the policy reached it; before A6 it was `FAILED`
+/// with no retry at all.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_inherited_create_new_execution_retry_is_still_refused_in_a_loop(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let reg = AlwaysFails::default();
+    let source = "id: looped\nnamespace: t\ntasks:\n  - id: l\n    \
+                  type: io.kestra.plugin.core.flow.Loop\n    values: [\"v1\"]\n    retry:\n      \
+                  behavior: CREATE_NEW_EXECUTION\n      type: constant\n      interval: PT0S\n      \
+                  maxAttempts: 3\n    tasks:\n      - id: a\n        \
+                  type: io.kestra.plugin.core.log.Log\n        message: hi\n";
+    let ex = start_execution(&pool, ws, None, source, serde_json::json!({}))
+        .await
+        .expect("start the loop flow");
+    drain_with(&pool, &reg).await;
+
+    let iterations = iterations_of(&pool, ex).await;
+    assert_eq!(iterations.len(), 1);
+    let iteration = iterations[0];
+    assert_eq!(
+        run_state(&pool, iteration, "a").await.as_deref(),
+        Some("RETRIED"),
+        "the Loop's CREATE_NEW_EXECUTION policy reached the body task: {}",
+        stuck(&pool, iteration, "a").await
+    );
+    egret_workflow::worker::resume(&pool, iteration)
+        .await
+        .expect("resume the iteration");
+    let _ = wake(&pool, 8).await.expect("wake");
+    assert_eq!(
+        replay_of(&pool, iteration).await,
+        None,
+        "no replay of a Loop iteration, inherited policy or not"
+    );
+    assert_eq!(run_state(&pool, ex, "l").await.as_deref(), Some("FAILED"));
+    assert_eq!(
+        execution_history(&pool, ex).await,
+        serde_json::json!(["CREATED", "RUNNING", "FAILED"])
+    );
+}

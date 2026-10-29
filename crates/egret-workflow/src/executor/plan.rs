@@ -57,6 +57,13 @@ pub struct Plan {
     /// [`retry::policy_for`](super::retry::policy_for), which is that
     /// precedence in one place.
     pub retry: Option<RetryPolicy>,
+    /// The `retry:` a `Loop` iteration inherits from the parent flow
+    /// ([`crate::models::Flow::inherited_retry`], package #6 Task A6, spec
+    /// D7). `None` for every execution that is not a `Loop` iteration, and for
+    /// an iteration whose `Loop` and ancestors carry none.
+    /// [`retry::policy_for`](super::retry::policy_for) consults it after the
+    /// run chain and before [`Plan::retry`].
+    pub inherited_retry: Option<RetryPolicy>,
 }
 
 impl Plan {
@@ -1257,6 +1264,7 @@ pub(crate) fn flatten_flow(flow: &crate::models::Flow) -> Result<Plan, PlanError
         after_execution,
         after_execution_refused,
         retry: super::retry::policy_of(flow.retry.as_ref()),
+        inherited_retry: super::retry::policy_of(flow.inherited_retry.as_ref()),
     })
 }
 

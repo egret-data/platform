@@ -614,7 +614,7 @@ valids/retry-failed-flow-duration
 # fourth attempt falls outside maxDuration and egret's does not. Same class as
 # retry-failed-flow-duration above. Measured: Kestra 3 attempts in 5/5 rounds, egret 4.
 valids/retry-failed-task-duration
-valids/retry-flowable-parallel
+# `valids/retry-flowable-parallel` banked 2026-10-29 (package #6 Task A6, spec D7), as the plan predicted: an iteration's flow now carries the `Loop`'s `retry:` (or its nearest ancestor's) as the policy its tasks inherit, consulted after the run chain and before the flow's, so each of the two sub-executions runs `child` three times (`CREATED RUNNING FAILED RETRYING RUNNING FAILED RETRYING RUNNING FAILED`) as in Kestra.
 valids/retry-subflow
 valids/retry-success
 # valids/retry-with-flowable-errors: a retry on the BLOCK itself, the non-goal of the

@@ -149,6 +149,11 @@ pub(super) fn policy_of(retry: Option<&ModelRetry>) -> Option<RetryPolicy> {
 ///   consulted — Java's `else if (executor.getFlow().getRetry() != null)`
 ///   hangs off `if (retry != null)`, not off the search.
 ///
+/// In a `Loop` iteration the ancestor arm goes on above the iteration's root:
+/// [`Plan::inherited_retry`] (the `Loop`'s `retry:` or its nearest ancestor's
+/// in the parent flow, package #6 Task A6) comes after the run chain and
+/// before the flow's.
+///
 /// Kestra walks the *flow's* task tree (`findParentTasksByTaskId`); this walks
 /// the *run's* parent chain, which is the same chain because a run's parent is
 /// fixed at creation to the run of its task's parent. Using the runs is what
@@ -185,8 +190,30 @@ pub(super) fn policy_for<'a>(
         }
         parent = state.runs[ix].parent;
     }
+    // Package #6 Task A6 (spec D7): in a `Loop` iteration, Kestra's walk goes
+    // on above the iteration's root, through the `Loop` and its ancestors in
+    // the PARENT flow. The run chain stops at the root, so what that walk
+    // would find is carried on the plan. Every run of an iteration has a
+    // parent task run in Kestra (the `Loop`'s), so the `parentTaskRunId`
+    // gate never stops it there.
+    if let Some(inherited) = plan.inherited_retry.as_ref() {
+        return Some(inherited);
+    }
     // Only a run with no ancestor carrying a retry reaches the flow's.
     plan.retry.as_ref()
+}
+
+/// `task instanceof RunnableTask<?> || task instanceof Subflow`
+/// (`ExecutorService.java:572`): the only runs Kestra ever retries, whatever
+/// policy [`policy_for`] finds for them. [`scan`] and
+/// `flowable::current_list`'s "will be retried" both ask it, so a flowable
+/// that failed under an ancestor's (or an inherited, or the flow's) `retry:`
+/// is never awaited as a retry nobody schedules.
+pub(crate) fn is_retried_kind(plan: &Plan, state: &ExecutionState, run: RunIx) -> bool {
+    matches!(
+        plan.tasks.get(state.runs[run].task).map(|t| &t.kind),
+        Some(TaskKind::Runnable { .. } | TaskKind::Executable { .. })
+    )
 }
 
 /// Kestra's `TaskRun.nextRetryDate(retry)` and `nextRetryDate(retry,
@@ -340,11 +367,7 @@ pub(super) fn scan(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Comman
         if state.runs[run].history.last() != Some(&RunState::Failed) {
             continue;
         }
-        let task = state.runs[run].task;
-        if !matches!(
-            plan.tasks.get(task).map(|t| &t.kind),
-            Some(TaskKind::Runnable { .. } | TaskKind::Executable { .. })
-        ) {
+        if !is_retried_kind(plan, state, run) {
             continue;
         }
         let Some(policy) = policy_for(plan, state, run) else {

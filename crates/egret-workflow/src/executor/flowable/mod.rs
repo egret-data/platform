@@ -261,10 +261,18 @@ pub(crate) fn current_list<'a>(
         .filter_map(|&task| run_of(state, parent, task))
         .filter(|&ix| latest(state, ix) == Some(RunState::Failed))
         .collect();
+    // Package #6 Task A6: only a run Kestra retries at all (`retry::scan`'s
+    // own gate). A failed flowable -- a `Loop` under a `Sequential` with a
+    // `retry:`, say -- found its ancestor's policy here and held the list in
+    // `RetryPending` for a retry `scan` never schedules: Kestra's
+    // `hasFailedNoRetry` asks the task's own `retry:`, and its filter of the
+    // parent's result (`ExecutorService.java:615-618`) applies only while a
+    // child is being retried.
     let will_retry = |&ix: &RunIx| {
-        crate::executor::retry::policy_for(plan, state, ix)
-            .and_then(|p| crate::executor::retry::next_retry_at(p, state, ix, now))
-            .is_some()
+        crate::executor::retry::is_retried_kind(plan, state, ix)
+            && crate::executor::retry::policy_for(plan, state, ix)
+                .and_then(|p| crate::executor::retry::next_retry_at(p, state, ix, now))
+                .is_some()
     };
 
     // `Execution.java:601-613`: `errors` has started, or a task failed.

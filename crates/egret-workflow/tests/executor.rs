@@ -871,7 +871,10 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
         // 34 -> 30 baselined, 267 -> 271 matching at package #6 Task A4
         // (2026-10-29): `valids/if-in-parallel`, `valids/loop-outputs`, `valids/loop-outputs-auto` and `valids/loop-outputs-store` bank (the `Loop` run's `outputs` list,
         // spec D3); 30 + 271 = 301.
-        (301, 271, 30),
+        // 30 -> 29 baselined, 271 -> 272 matching at package #6 Task A6
+        // (2026-10-29): `valids/retry-flowable-parallel` banks (a `Loop`'s
+        // `retry:` is inherited by each iteration's tasks, spec D7); 29 + 272 = 301.
+        (301, 272, 29),
         "301 = matching + baselined, the total beside its parts. It read \
          167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries, W8 \
          Task 4 banked `valids/waitfor-nested`, W8 Task 5 banked seven \
@@ -3162,7 +3165,9 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
 // 117 -> 115 at package #6 Task A3 (2026-10-29, measured): the 2 run terminals of `valids/loop-outputs-failed-render`.
 // 115 -> 90 at package #6 Task A4 (2026-10-29, measured): the 25 run terminals (9 + 5 + 6 + 5) of
 // `valids/if-in-parallel`, `valids/loop-outputs`, `valids/loop-outputs-auto` and `valids/loop-outputs-store`, sub-executions included.
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 90;
+// 90 -> 87 at package #6 Task A6 (2026-10-29, measured): the 3 run terminals (1 + 1 + 1) of
+// `valids/retry-flowable-parallel`, sub-executions included.
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 87;
 /// 43 from W6 Task 4 to W9a Task 10; **40 since W9a Task 11** -- the three
 /// iterations of `valids/loop-values-from-uri`.
 // 40 -> 39 at WorkingDirectory Task 8: `working-directory-taskrun` has one
@@ -3179,7 +3184,9 @@ const TERMINALS_ON_BASELINED_ENTRIES: usize = 90;
 // 16 -> 15 at package #6 Task A3 (2026-10-29, measured): the one sub-execution of `valids/loop-outputs-failed-render`.
 // 15 -> 3 at package #6 Task A4 (2026-10-29, measured): the three sub-executions each of
 // `valids/if-in-parallel`, `valids/loop-outputs`, `valids/loop-outputs-auto` and `valids/loop-outputs-store`.
-const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 3;
+// 3 -> 1 at package #6 Task A6 (2026-10-29, measured): the two sub-executions of
+// `valids/retry-flowable-parallel`.
+const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 1;
 /// **165 through W8 Task 2, 157 after W8 Task 3, 156 after W8 Task 4, 149 after
 /// W8 Task 5, 147 now** -- the eight `Pause` entries W8 Task 3 banked, the one
 /// `LoopUntil` entry W8 Task 4 banked, W8 Task 5's seven and W8 Task 6's two.
@@ -3228,7 +3235,9 @@ const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 3;
 // 50 -> 48 at package #6 Task A3 (2026-10-29, measured): the top-level execution of `valids/loop-outputs-failed-render` and its one sub-execution.
 // 48 -> 32 at package #6 Task A4 (2026-10-29, measured): the four top-level executions of
 // `valids/if-in-parallel`, `valids/loop-outputs`, `valids/loop-outputs-auto` and `valids/loop-outputs-store` and their twelve sub-executions.
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 32;
+// 32 -> 29 at package #6 Task A6 (2026-10-29, measured): the top-level execution of
+// `valids/retry-flowable-parallel` and its two sub-executions.
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 29;
 /// **1703 through W8 Task 2, 1647 after W8 Task 3, 1610 after W8 Task 4, 1528
 /// now** -- 56 run-history tokens on Task 3's eight, 37 on
 /// `valids/waitfor-nested` (whose seven runs include three loops reading
@@ -3277,7 +3286,9 @@ const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 32;
 // 507 -> 500 at package #6 Task A3 (2026-10-29, measured): the 7 run-history tokens of `valids/loop-outputs-failed-render`.
 // 500 -> 407 at package #6 Task A4 (2026-10-29, measured): the 93 run-history tokens (32 + 19 + 23 + 19) of
 // `valids/if-in-parallel`, `valids/loop-outputs`, `valids/loop-outputs-auto` and `valids/loop-outputs-store`.
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 407;
+// 407 -> 376 at package #6 Task A6 (2026-10-29, measured): the 31 run-history tokens (3 + 14 + 14) of
+// `valids/retry-flowable-parallel`.
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 376;
 /// **665 through W8 Task 2, 617 after W8 Task 3, 562 after W8 Task 4, 526 after
 /// W8 Task 5, 522 now** -- 48 execution-history tokens on Task 3's eight, i.e.
 /// six apiece (every one of them reads `CREATED RUNNING PAUSED RESTARTED
@@ -3326,7 +3337,9 @@ const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 407;
 // 215 -> 208 at package #6 Task A3 (2026-10-29, measured): the 7 execution-history tokens of `valids/loop-outputs-failed-render` (3 on the execution, 4 on its sub-execution).
 // 208 -> 160 at package #6 Task A4 (2026-10-29, measured): the 48 execution-history tokens of
 // `valids/if-in-parallel`, `valids/loop-outputs`, `valids/loop-outputs-auto` and `valids/loop-outputs-store` (3 on each execution, 9 on each one's three sub-executions).
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 160;
+// 160 -> 139 at package #6 Task A6 (2026-10-29, measured): the 21 execution-history tokens of
+// `valids/retry-flowable-parallel` (3 on the execution, 9 on each of its two sub-executions).
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 139;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -4859,7 +4872,9 @@ const RUNS_REFUSED: [&str; 4] = [
 // their sub-executions match now (each iteration's `Switch` answers `is json`).
 // 3 -> 2 at package #6 Task A3 (2026-10-29, measured): `valids/loop-outputs-failed-render` banked; its
 // one sub-execution reads `CREATED RUNNING SUCCESS FAILED` and no second starts.
-const MISMATCH_ON_SPAWNED: usize = 2;
+// 2 -> 1 at package #6 Task A6 (2026-10-29, measured): `valids/retry-flowable-parallel` banked (D7); each
+// of its two sub-executions runs `child` three times under the `Loop`'s inherited `retry:`.
+const MISMATCH_ON_SPAWNED: usize = 1;
 /// **122 through W8 Task 2, 114 after W8 Task 3, 113 now** -- the eight `Pause`
 /// entries Task 3 banked and the one `LoopUntil` entry Task 4 did. The
 /// `refused` half of the golden is untouched by either: no `Pause` or
@@ -4896,7 +4911,8 @@ const MISMATCH_ON_SPAWNED: usize = 2;
 // 35 -> 34 at package #5b Task B7 (2026-10-29, measured): `valids/errors` banked (D11).
 // 34 -> 33 at package #6 Task A3 (2026-10-29, measured): `valids/loop-outputs-failed-render` banked (D1).
 // 33 -> 29 at package #6 Task A4 (2026-10-29, measured): `valids/if-in-parallel`, `valids/loop-outputs`, `valids/loop-outputs-auto` and `valids/loop-outputs-store` banked (D3).
-const MISMATCHING_RUNS_ENTRIES: usize = 29;
+// 29 -> 28 at package #6 Task A6 (2026-10-29, measured): `valids/retry-flowable-parallel` banked (D7).
+const MISMATCHING_RUNS_ENTRIES: usize = 28;
 /// **84 through W5; 63 after W6 Task 3, and 59 since W6 Task 4 corrected the
 /// classifier.**
 ///
@@ -5188,7 +5204,8 @@ async fn the_sub_executions_are_compared_and_this_is_what_they_cost() {
 // 32 -> 34 at package #5b Task B2 (2026-10-29): `valids/loop-object` and `valids/loop-object-in-list` banked.
 // 34 -> 35 at package #6 Task A3 (2026-10-29): `valids/loop-outputs-failed-render` banked.
 // 35 -> 39 at package #6 Task A4 (2026-10-29): `valids/if-in-parallel`, `valids/loop-outputs`, `valids/loop-outputs-auto` and `valids/loop-outputs-store` banked.
-const SPAWNED_ENTRIES_THAT_MATCH: usize = 39;
+// 39 -> 40 at package #6 Task A6 (2026-10-29, measured): `valids/retry-flowable-parallel` banked.
+const SPAWNED_ENTRIES_THAT_MATCH: usize = 40;
 
 /// And the names, which is what `baseline.txt`'s header attributes one by one.
 /// Sixteen banked at W3b Task 5, `valids/replay-loop` at the whole-branch
@@ -5253,6 +5270,9 @@ const SPAWNED_ENTRIES_THAT_MATCH_BY_NAME: &[&str] = &[
     // runs the one sub-execution Kestra did.
     "valids/restart-loop",
     "valids/restart-parent-loop",
+    // Package #6 Task A6 (2026-10-29): the `Loop`'s `retry:` is inherited by
+    // each iteration's `child`, which runs three attempts as in Kestra.
+    "valids/retry-flowable-parallel",
     // W6 Task 4, and they are the only four names here that are NOT a `Loop`.
     // Their sub-execution is the replacement a `CREATE_NEW_EXECUTION` retry
     // starts -- a third kind of child, linked by `parent_execution_id` with no
@@ -5288,7 +5308,9 @@ const SPAWNED_ENTRIES_THAT_MATCH_BY_NAME: &[&str] = &[
 /// `Loop`s, none a replay -- and the test prints the list on every run.
 // 4 -> 1 at end hooks A6 (2026-10-27): the three `Loop` entries banked; only
 // `valids/retry-flowable-parallel` is left.
-const SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED: usize = 1;
+// 1 -> 0 at package #6 Task A6 (2026-10-29, measured): `valids/retry-flowable-parallel`
+// banked; the bucket is empty.
+const SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED: usize = 0;
 
 /// **No run is ever created for a task inside a `Loop`, over the whole
 /// corpus.**
@@ -7577,7 +7599,10 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
             // 6 -> 2 at package #6 Task A4 (2026-10-29): `valids/if-in-parallel`,
             // `valids/loop-outputs`, `valids/loop-outputs-auto` and
             // `valids/loop-outputs-store` banked (the `Loop` run's list, spec D3).
-            2,
+            // 2 -> 1 at package #6 Task A6 (2026-10-29):
+            // `valids/retry-flowable-parallel` banked (the `Loop`'s `retry:`
+            // inherited by each iteration, spec D7).
+            1,
             &["io.kestra.plugin.core.flow.Loop\n", "core.loop\n"],
         ),
         // **`Subflow` was a row here with 22 through W5, and W6 Task 3 removed
@@ -8364,7 +8389,9 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
         // (2, 32, 34) -> (2, 28, 30) at package #6 Task A4 (2026-10-29): nor
         // do `valids/if-in-parallel`, `valids/loop-outputs`,
         // `valids/loop-outputs-auto` and `valids/loop-outputs-store`.
-        (2, 28, 30),
+        // (2, 28, 30) -> (2, 27, 29) at package #6 Task A6 (2026-10-29): nor
+        // does `valids/retry-flowable-parallel`.
+        (2, 27, 29),
         "the baselined population that declares a `timeout:`, and the rest \
          ((2, 106, 108) until no-silent-stall Task 1 banked \
          `invalids/invalid-task`, which declares none). It \
@@ -8575,7 +8602,10 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
         // 25 -> 26 declaring a `retry:` at WorkingDirectory Task 8: the harvested
         // `retry-failed-task-duration`. Baselined at WorkingDirectory Task 9, so
         // it moves from the matching side to the baselined side: 7 -> 8, 19 -> 18.
-        (8, 18, 26),
+        // 8 -> 7, 18 -> 19 at package #6 Task A6 (2026-10-29, measured):
+        // `valids/retry-flowable-parallel` banked (the `Loop`'s `retry:` is
+        // inherited by each iteration, spec D7).
+        (7, 19, 26),
         "the split the coverage question turns on: a `retry:` on a MATCHING \
          entry is one the ratchet would report a change to, and a `retry:` on \
          a baselined entry is one it would not. matching: {matching:?}"
@@ -8586,13 +8616,14 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
             "valids/full",
             "valids/retry-failed-flow-duration",
             "valids/retry-failed-task-duration",
-            "valids/retry-flowable-parallel",
             "valids/retry-subflow",
             "valids/retry-success",
             "valids/retry-with-flowable-errors",
             "valids/subflow-parent-retry",
         ],
-        "the SEVEN, by name (EIGHT until the AllowFailure flowable banked\n         `valids/allow-failure-with-retry`). W4's spec said twelve, W4 Task 1 derived fourteen, \
+        "the SEVEN, by name (this word read SEVEN above EIGHT names until \
+         package #6 Task A6 banked `valids/retry-flowable-parallel`, 2026-10-29; \
+         EIGHT until the AllowFailure flowable banked\n         `valids/allow-failure-with-retry`). W4's spec said twelve, W4 Task 1 derived fourteen, \
          W6 Task 4 banked the four `retry-new-execution-*` entries out of the \
          list -- which is the whole of the difference between fourteen and ten \
          -- and W8 Task 5 took BOTH `valids/task-allow-{{warning,failure}}-runnable` \
@@ -8618,7 +8649,9 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
         (new_execution.len(), failed_task.len(), baselined.len()),
         // (0, 7, 7) -> (0, 8, 8) at WorkingDirectory Task 9: the baselined
         // `retry-failed-task-duration` is a `RETRY_FAILED_TASK` one.
-        (0, 8, 8),
+        // (0, 8, 8) -> (0, 7, 7) at package #6 Task A6 (2026-10-29, measured):
+        // `valids/retry-flowable-parallel` (a `RETRY_FAILED_TASK` one) banked.
+        (0, 7, 7),
         "**every remaining baselined `retry:` is a `RETRY_FAILED_TASK` one**, \
          because W6 Task 4 banked all four `CREATE_NEW_EXECUTION` entries. The \
          assertion under this used to name them; the successor is the matching \
@@ -8649,7 +8682,10 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
         // `retry-failed-task-duration` is a non-baselined `RETRY_FAILED_TASK` entry.
         // (15, 4, 19) -> (14, 4, 18) at WorkingDirectory Task 9: baselining it moves
         // it back to the baselined side.
-        (14, 4, 18),
+        // (14, 4, 18) -> (15, 4, 19) at package #6 Task A6 (2026-10-29,
+        // measured): `valids/retry-flowable-parallel` banked, a
+        // `RETRY_FAILED_TASK` one.
+        (15, 4, 19),
         "the matching half, split the same way. It was (11, 0, 11): every \
          matching entry declared the behaviour that writes a `not_before`, and \
          W6 Task 4 moved the four `CREATE_NEW_EXECUTION` entries across, which \

@@ -1588,6 +1588,9 @@ fn sub_flow_source(source: &str, loop_task_id: &str, owner: Uuid) -> Result<Stri
             )))
         }
     };
+    // Package #6 Task A6 (spec D7): the `retry:` the iteration's tasks
+    // inherit, found BEFORE the tree is cut down to the body.
+    flow.inherited_retry = retry_above_body(&flow, loop_task_id);
     flow.tasks = body;
     // End hooks A6 (D5): the iteration's `errors:`/`finally:` are the `Loop`'s
     // own, not the parent flow's (Kestra `ES:1037-1043`). `afterExecution`
@@ -1640,6 +1643,42 @@ fn sub_flow_source(source: &str, loop_task_id: &str, owner: Uuid) -> Result<Stri
             format!("the loop body of {loop_task_id:?} does not serialise: {e}"),
         ))
     })
+}
+
+/// The `retry:` a `Loop` iteration's tasks inherit (package #6 Task A6,
+/// spec D7): the `Loop`'s own, else its nearest ancestor's in `flow`, else
+/// what `flow` itself inherited -- `flow` is then an iteration of an outer
+/// `Loop`, and Kestra's walk would go on through that `Loop` too.
+///
+/// Kestra's `searchForParentTaskWithRetry` (`ExecutorService.java:841-856`)
+/// climbs `Flow.findParentTasksByTaskId`, the flowable whose DIRECT children
+/// (`tasks`, `errors`, `finally`) hold the task, so the first `retry:` met on
+/// the way up is the nearest one. A `CREATE_NEW_EXECUTION` policy found here is
+/// carried like any other and refused at run by `worker::replay`, as Kestra
+/// throws there (spec D7; A1 warns at save).
+fn retry_above_body(flow: &Flow, loop_task_id: &str) -> Option<crate::models::Retry> {
+    /// `Some(nearest)` when `want` is `task` or below it, with the nearest
+    /// `retry:` on the way down to it (`want`'s own included).
+    fn walk<'a>(
+        task: &'a Task,
+        want: &str,
+        above: Option<&'a crate::models::Retry>,
+    ) -> Option<Option<&'a crate::models::Retry>> {
+        let nearest = task.retry.as_ref().or(above);
+        if task.id == want {
+            return Some(nearest);
+        }
+        task.children()
+            .into_iter()
+            .chain(task.error_children())
+            .find_map(|c| walk(c, want, nearest))
+    }
+    let found = crate::spec::path::root_lists(flow)
+        .into_iter()
+        .flat_map(|(_, list)| list.iter())
+        .find_map(|t| walk(t, loop_task_id, None))
+        .flatten();
+    found.cloned().or_else(|| flow.inherited_retry.clone())
 }
 
 /// One task by id, from anywhere in the flow.
@@ -1794,6 +1833,90 @@ mod tests {
                  them in internal storage.",
                 CAP + 1
             ))
+        );
+    }
+
+    /// Package #6 Task A6 (spec D7): the `retry:` an iteration inherits is
+    /// the `Loop`'s own, else its nearest ancestor's in the parent flow, else
+    /// what an enclosing iteration inherited; the flow's own `retry:` stays
+    /// where it was and is not copied into the inherited one.
+    #[test]
+    fn an_iteration_inherits_the_nearest_retry_above_its_body() {
+        let retry = |n: u32| format!("retry: {{type: constant, interval: PT1S, maxAttempts: {n}}}");
+        let max = |r: &Option<crate::models::Retry>| match r {
+            Some(crate::models::Retry::Constant { common, .. }) => common.max_attempts,
+            Some(_) => panic!("not a constant retry: {r:?}"),
+            None => None,
+        };
+        let body = "tasks: [{id: c, type: core.log, message: m}]";
+        let iteration = |src: &str, id: &str| {
+            crate::spec::parse(&sub_flow_source(src, id, uuid::Uuid::nil()).unwrap()).unwrap()
+        };
+
+        // The `Loop`'s own, over an ancestor's and the flow's.
+        let src = format!(
+            "id: f\nnamespace: a.b\n{}\ntasks:\n  - id: s\n    type: io.kestra.plugin.core.flow.Sequential\n    {}\n    tasks:\n      - id: l\n        type: io.kestra.plugin.core.flow.Loop\n        values: [1]\n        {}\n        {body}\n",
+            retry(5),
+            retry(4),
+            retry(3)
+        );
+        let it = iteration(&src, "l");
+        assert_eq!(max(&it.inherited_retry), Some(3));
+        assert_eq!(max(&it.retry), Some(5), "the flow's own stays the flow's");
+
+        // No `retry:` on the `Loop`: the `Sequential`'s, over the flow's.
+        let src = format!(
+            "id: f\nnamespace: a.b\n{}\ntasks:\n  - id: s\n    type: io.kestra.plugin.core.flow.Sequential\n    {}\n    tasks:\n      - id: l\n        type: io.kestra.plugin.core.flow.Loop\n        values: [1]\n        {body}\n",
+            retry(5),
+            retry(4)
+        );
+        assert_eq!(max(&iteration(&src, "l").inherited_retry), Some(4));
+
+        // In an `errors:` list too: the flowable that holds it is the parent.
+        let src = format!(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: io.kestra.plugin.core.flow.Sequential\n    {}\n    tasks: [{{id: x, type: core.log, message: m}}]\n    errors:\n      - id: l\n        type: io.kestra.plugin.core.flow.Loop\n        values: [1]\n        {body}\n",
+            retry(2)
+        );
+        assert_eq!(max(&iteration(&src, "l").inherited_retry), Some(2));
+
+        // Nothing above the body: nothing inherited, the flow's still there.
+        let src = format!(
+            "id: f\nnamespace: a.b\n{}\ntasks:\n  - id: l\n    type: io.kestra.plugin.core.flow.Loop\n    values: [1]\n    {body}\n",
+            retry(5)
+        );
+        let it = iteration(&src, "l");
+        assert_eq!(it.inherited_retry, None);
+        assert_eq!(max(&it.retry), Some(5));
+
+        // A nested `Loop` with nothing between it and the outer `Loop`
+        // inherits what the outer iteration inherited; one with a `retry:`
+        // of its own does not.
+        let src = format!(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Loop\n    values: [1]\n    {}\n    tasks:\n      - id: plain\n        type: io.kestra.plugin.core.flow.Loop\n        values: [1]\n        {body}\n      - id: own\n        type: io.kestra.plugin.core.flow.Loop\n        values: [1]\n        {}\n        {body}\n",
+            retry(3),
+            retry(2)
+        );
+        let outer = sub_flow_source(&src, "outer", uuid::Uuid::nil()).unwrap();
+        assert_eq!(max(&iteration(&outer, "plain").inherited_retry), Some(3));
+        assert_eq!(max(&iteration(&outer, "own").inherited_retry), Some(2));
+    }
+
+    /// Package #6 Task A6: the inherited `retry:` is not a key a flow may
+    /// write. No Kestra class has it, so saving a flow that writes it is
+    /// refused (`unknown_property`), while the run path, which parses an
+    /// iteration's stored source with no save check, reads it.
+    #[test]
+    fn the_inherited_retry_key_is_refused_at_save_and_read_at_run() {
+        let src = "id: f\nnamespace: a.b\nx-egret-inherited-retry: {type: constant, interval: PT1S, maxAttempts: 3}\ntasks: [{id: c, type: core.log, message: m}]\n";
+        let flow = crate::spec::parse(src).unwrap();
+        assert!(flow.inherited_retry.is_some(), "the run path reads it");
+        let report = crate::spec::validate_source(src, &flow);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|f| f.code == "unknown_property" && f.path.contains("x-egret-inherited-retry")),
+            "{report:?}"
         );
     }
 
