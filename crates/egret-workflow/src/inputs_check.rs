@@ -509,6 +509,28 @@ fn item_type_of(input: &Input) -> Option<InputType> {
     }
 }
 
+/// `FlowInputOutput.parseType` for an **output** (package #6, spec D2):
+/// Kestra's `typedOutputs` coerces each rendered output with the same
+/// `parseType` the inputs use, with no element type (`Output` has no
+/// `itemType`) and none of `Input.validate` (an `Output` has no validator,
+/// bounds or options). `Err` is the coercer's cause, unprefixed; the caller
+/// names the output (`crate::outputs`).
+///
+/// DATETIME, DATE, TIME and DURATION come back as their text, as an input's
+/// do (this module's "What is stored"); JSON, YAML and ION as the parsed
+/// value (a JSON string is NOT re-stringified: that is an input's stored
+/// form for the render's sake, and an output is read by no such render).
+/// FILE, FORM and REUSABLE_INPUTS pass through unchanged, as here.
+pub(crate) fn coerce_output(t: InputType, value: &Value) -> Result<Value, String> {
+    parse_type(t, None, value, None)
+}
+
+/// `Object.toString()` of a value, as Kestra's `parseType` reads it
+/// (`current.toString()`). `pub(crate)` for `crate::outputs`.
+pub(crate) fn java_text(value: &Value) -> String {
+    java_to_string(value)
+}
+
 /// `parseType` then `Input.validate`: the value to store, or the causes.
 fn check_value(input: &Input, value: &Value) -> Result<Value, Vec<String>> {
     let parsed = parse_type(input.r#type, item_type_of(input), value, Some(input))

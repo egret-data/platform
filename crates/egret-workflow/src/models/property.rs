@@ -213,8 +213,9 @@ fn render_object(
 }
 
 /// `VariableRenderer.renderObject`: strings rendered, arrays and objects
-/// walked, every other scalar kept.
-fn render_value(
+/// walked, every other scalar kept. `pub(crate)` for `crate::outputs`
+/// (package #6), whose output `value:` may be a map or a list.
+pub(crate) fn render_value(
     value: &serde_json::Value,
     path: &str,
     cx: &RenderContext,
