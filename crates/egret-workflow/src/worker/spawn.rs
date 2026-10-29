@@ -929,7 +929,7 @@ fn total_cap_message(iteration: i64, total: usize, cap: usize) -> String {
 }
 
 /// `n` as `<k> MiB` when it is a whole number of MiB, else `<n> bytes`.
-fn bytes_text(n: usize) -> String {
+pub(super) fn bytes_text(n: usize) -> String {
     if n > 0 && n.is_multiple_of(1 << 20) {
         format!("{} MiB", n >> 20)
     } else {

@@ -214,6 +214,13 @@ pub(crate) const MAX_LOOP_ITERATION_OUTPUT_BYTES: usize = MAX_OUTPUT_BYTES;
 /// lock (Task A4); named in the per-iteration message too.
 pub(crate) const MAX_LOOP_OUTPUTS_BYTES: usize = 16 << 20;
 
+/// Package #6, the controller's decision of 2026-10-29 (spec §2.2): the most
+/// a flow's evaluated `outputs:` may serialise to, in bytes, per execution --
+/// the same 16 MiB as [`MAX_LOOP_OUTPUTS_BYTES`]. Beyond it the evaluation
+/// fails at the terminal (`worker::flow_outputs`), pointing to a FILE output.
+/// Kestra has no cap; an egret-only limit, recorded in the spec's §6.
+pub(crate) const MAX_FLOW_OUTPUTS_BYTES: usize = 16 << 20;
+
 /// The stack every render gets, whoever called it.
 ///
 /// # Why the render owns a thread

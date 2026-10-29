@@ -34,7 +34,7 @@
 //! | `outputs` | `task id -> the handler's output map`, `{}` when it produced none | 14 comparable entries |
 //! | `task` | `{id, type}` of the task being rendered | `id` 177, `type` 2 |
 //! | `taskrun` | `{id, startDate, value, attemptsCount, parentId}` of the run being rendered | `startDate` 52, `id` 17, `attemptsCount` 9, `value` 8 |
-//! | `execution` | `{id, startDate, state, outputs}` | `id` 30, `state` 4, `startDate` 1 |
+//! | `execution` | `{id, startDate, state, outputs}`; `outputs` is the stored flow outputs (package #6 Task B2), `{}` when none | `id` 30, `state` 4, `startDate` 1, `outputs` 1 (`valids/after-execution`) |
 //! | `flow` | `{id, namespace}` | `id` 10, `namespace` 2 |
 //! | `labels` | the flow's own `labels:`, plus `labels.system.correlationId` | 2 |
 //! | `item` | `{index, value, key, parent, parents}` inside a loop sub-execution | `valids/loop-serial` writes `{{item.index}} - {{item.value}}`; `loop-map` `{{item.key}}`; `loop-nested` `{{item.parent.index}}` and `{{item.parents[0].value}}` |
@@ -62,8 +62,11 @@
 //!
 //! # What is NOT supplied, and stays a refusal
 //!
-//! `trigger`, `kv`, `secret`, `envs`, `globals` and the flow-level `outputs:`
-//! block. Each is a name a corpus flow writes and this worker cannot resolve;
+//! `trigger`, `kv`, `secret`, `envs` and `globals`. (The flow-level
+//! `outputs:` block was in this list until package #6: Task B1 evaluates it
+//! at the terminal and Task B2, 2026-10-29, supplies it as
+//! `execution.outputs`.) Each is a name a corpus flow writes and this worker
+//! cannot resolve;
 //! an expression over one of them FAILS the run rather than rendering to
 //! nothing, which is a divergence in the safe direction and is visible in the
 //! trace instead of silently choosing a branch.
@@ -123,6 +126,9 @@ pub(super) struct Surface {
     system_label: Value,
     /// `execution`.
     execution: Value,
+    /// `execution.outputs` as stored, its SECRET values masked (package #6
+    /// Task B2), for [`Surface::hide_flow_secret_outputs`].
+    flow_outputs_masked: Value,
     /// `item`, for a loop sub-execution. `None` at the top level.
     item: Option<Value>,
     /// Whether this execution's row has a `loop_index`: a `Loop` iteration
@@ -190,7 +196,7 @@ impl Surface {
         let row = sqlx::query(
             "SELECT inputs, state, created_at, loop_index, loop_value, \
                     parent_execution_id, parent_run_ix, trigger_execution_id, labels, variables, \
-                    secret_inputs \
+                    secret_inputs, outputs, secret_outputs \
                FROM workflow.executions WHERE id = $1",
         )
         .bind(ctx.id)
@@ -281,16 +287,30 @@ impl Surface {
         let flow_labels = flow.as_ref().map(|f| f.labels.as_slice()).unwrap_or(&[]);
         let labels_list = crate::labels::execution_labels(flow_labels, &own);
         let started_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
+        // **`execution.outputs` (package #6 Task B2, spec D6, D9).** The
+        // flow-level `outputs:` the execution's terminal stored (Task B1,
+        // `worker::flow_outputs`), with its sealed SECRET values put back:
+        // this surface is the one reader that opens `secret_outputs`, as for
+        // SECRET inputs, and the values join `secrets` so every line the run
+        // writes masks them. `NULL` (nothing evaluated yet, no `outputs:`, or
+        // an evaluation that failed) is the empty map rather than an absent
+        // key, as before B2: `{{ execution.outputs }}` renders `{}` and
+        // `{{ execution.outputs.x }}` fails, the shape the `outputs` rule
+        // above has. The masked form is kept for
+        // [`Surface::hide_flow_secret_outputs`].
+        let flow_outputs_masked = row
+            .get::<Option<Value>, _>("outputs")
+            .unwrap_or_else(|| json!({}));
+        let (flow_outputs, values) = crate::secret_inputs::reveal_flow_outputs(
+            flow_outputs_masked.clone(),
+            row.get::<Option<Vec<u8>>, _>("secret_outputs").as_deref(),
+        )?;
+        secrets.extend(values);
         let execution = json!({
             "id": ctx.id.to_string(),
             "startDate": started_at.to_rfc3339(),
             "state": row.get::<String, _>("state"),
-            // The flow-level `outputs:` block is not evaluated by anything in
-            // W3b, so this is the empty map rather than an absent key: an
-            // author's `{{ execution.outputs }}` renders, and
-            // `{{ execution.outputs.x }}` fails, which is the same shape the
-            // `outputs` rule above has.
-            "outputs": {},
+            "outputs": flow_outputs,
         });
         let mut inherited = Map::new();
         let mut root = ctx.id;
@@ -576,6 +596,7 @@ impl Surface {
             labels_list,
             system_label,
             execution,
+            flow_outputs_masked,
             item,
             loop_iteration,
             inherited,
@@ -726,6 +747,17 @@ impl Surface {
     /// See [`Surface::parsed`] for why it is kept rather than re-parsed.
     pub(super) fn flow(&self) -> Option<&Flow> {
         self.parsed.as_ref()
+    }
+
+    /// Put the mask back over the SECRET values of `execution.outputs`
+    /// (package #6 Task B2, spec D9): for a render whose result leaves this
+    /// execution -- a Flow trigger's `when` and `inputs`
+    /// ([`execution_render_context`]), which become ANOTHER execution's
+    /// inputs. Only the execution's own renders see the real values.
+    pub(super) fn hide_flow_secret_outputs(&mut self) {
+        if let Value::Object(m) = &mut self.execution {
+            m.insert("outputs".to_string(), self.flow_outputs_masked.clone());
+        }
     }
 
     /// Whether this execution is a `Loop` iteration (its row has a
@@ -1058,7 +1090,8 @@ pub async fn execution_render_context(
         super::claim::Stack::Reader,
     )
     .await?;
-    let surface = Surface::load(conn, &ctx).await?;
+    let mut surface = Surface::load(conn, &ctx).await?;
+    surface.hide_flow_secret_outputs();
     Ok(surface.context(&ctx.plan, &state, None))
 }
 
@@ -1157,6 +1190,7 @@ mod tests {
             labels_list: Vec::new(),
             system_label: Value::Null,
             execution: json!({}),
+            flow_outputs_masked: json!({}),
             item: None,
             loop_iteration: false,
             inherited: Map::new(),
@@ -1201,6 +1235,7 @@ mod tests {
             labels_list: Vec::new(),
             system_label: json!({"correlationId": "root"}),
             execution: json!({}),
+            flow_outputs_masked: json!({}),
             item: None,
             loop_iteration: false,
             inherited: Map::new(),

@@ -199,32 +199,70 @@ fn typed_value(output: &FlowOutput, current: Value) -> Result<Value, OutputError
 ///
 /// [`MAX_LOOP_OUTPUTS_BYTES`]: crate::runners::env::MAX_LOOP_OUTPUTS_BYTES
 pub(crate) fn loop_list_cap(workspace: uuid::Uuid) -> usize {
+    lowered(Cap::LoopList, workspace).unwrap_or(crate::runners::env::MAX_LOOP_OUTPUTS_BYTES)
+}
+
+/// The most a flow's evaluated `outputs:` may serialise to in `workspace`,
+/// in bytes: [`MAX_FLOW_OUTPUTS_BYTES`] (16 MiB, the controller's decision
+/// of 2026-10-29, recorded in spec §2.2), unless a test lowered it for its
+/// own workspace ([`lower_flow_outputs_cap_for_tests`]).
+///
+/// [`MAX_FLOW_OUTPUTS_BYTES`]: crate::runners::env::MAX_FLOW_OUTPUTS_BYTES
+pub(crate) fn flow_outputs_cap(workspace: uuid::Uuid) -> usize {
+    lowered(Cap::Flow, workspace).unwrap_or(crate::runners::env::MAX_FLOW_OUTPUTS_BYTES)
+}
+
+/// Which cap a test lowered.
+#[cfg_attr(not(any(test, feature = "test-util")), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Cap {
+    LoopList,
+    Flow,
+}
+
+/// The value a test lowered `cap` to for `workspace`; `None` in a build
+/// without the test knobs.
+fn lowered(cap: Cap, workspace: uuid::Uuid) -> Option<usize> {
     #[cfg(any(test, feature = "test-util"))]
-    if let Some(n) = lowered_caps()
-        .lock()
-        .ok()
-        .and_then(|m| m.get(&workspace).copied())
     {
-        return n;
+        lowered_caps()
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&(cap, workspace)).copied())
     }
-    let _ = workspace;
-    crate::runners::env::MAX_LOOP_OUTPUTS_BYTES
+    #[cfg(not(any(test, feature = "test-util")))]
+    {
+        let _ = (cap, workspace);
+        None
+    }
 }
 
 #[cfg(any(test, feature = "test-util"))]
-fn lowered_caps() -> &'static std::sync::Mutex<std::collections::HashMap<uuid::Uuid, usize>> {
-    static CAPS: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<uuid::Uuid, usize>>,
-    > = std::sync::OnceLock::new();
+type LoweredCaps = std::sync::Mutex<std::collections::HashMap<(Cap, uuid::Uuid), usize>>;
+
+#[cfg(any(test, feature = "test-util"))]
+fn lowered_caps() -> &'static LoweredCaps {
+    static CAPS: std::sync::OnceLock<LoweredCaps> = std::sync::OnceLock::new();
     CAPS.get_or_init(Default::default)
+}
+
+#[cfg(any(test, feature = "test-util"))]
+fn lower(cap: Cap, workspace: uuid::Uuid, bytes: usize) {
+    if let Ok(mut m) = lowered_caps().lock() {
+        m.insert((cap, workspace), bytes);
+    }
 }
 
 /// Test-only: lower [`loop_list_cap`] to `bytes` for `workspace` alone.
 #[cfg(any(test, feature = "test-util"))]
 pub fn lower_loop_list_cap_for_tests(workspace: uuid::Uuid, bytes: usize) {
-    if let Ok(mut m) = lowered_caps().lock() {
-        m.insert(workspace, bytes);
-    }
+    lower(Cap::LoopList, workspace, bytes);
+}
+
+/// Test-only: lower [`flow_outputs_cap`] to `bytes` for `workspace` alone.
+#[cfg(any(test, feature = "test-util"))]
+pub fn lower_flow_outputs_cap_for_tests(workspace: uuid::Uuid, bytes: usize) {
+    lower(Cap::Flow, workspace, bytes);
 }
 
 #[cfg(test)]

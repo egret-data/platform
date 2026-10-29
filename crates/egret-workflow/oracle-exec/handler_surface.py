@@ -1060,8 +1060,10 @@ def check_inputs(flows, kinds, golden, baseline):
     # the terminal), spec D6, and `valids/subflow-secret-output-child` (its
     # SECRET output refused with no master key, as Kestra's harness fails it),
     # spec D9.
-    if len(baseline) != 27:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 27; the split "
+    # 26 since package #6 Task B2 (2026-10-29) banked `valids/after-execution`
+    # (`execution.outputs` reads the stored flow outputs in render), spec D6.
+    if len(baseline) != 26:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 26; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1711,8 +1713,8 @@ def self_test():
          "not 273",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 27",
-         "not 27",
+    case("baseline.txt is no longer 26",
+         "not 26",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

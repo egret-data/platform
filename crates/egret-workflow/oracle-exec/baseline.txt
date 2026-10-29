@@ -584,8 +584,7 @@
 invalids/dag-invalid-subtask
 # `invalids/inputs-bad-validator-syntax` and `invalids/inputs-with-multiple-constraint-violations` banked 2026-10-28 (workflow-inputs Task A6): the first is refused at save (`input_validator_invalid`, a `Seam::Save` group; `fancy-regex` rejects `\` as `java.util.regex.Pattern` does), the second at START (`Error::InvalidInput`, the new `Seam::Start` group: its lines equal Kestra's recorded 422 as a multiset, since Kestra's order is `HashSet` order).
 # `invalids/invalid-property` banked 2026-10-26 (no-silent-drops Task 8b): Kestra refuses it (`Unrecognized field "invalid"`) and egret refuses it at save (`spec::validate_source`, `unknown_property`); the oracle counts a save-time refusal of an id in a `Seam::Save` refusal group.
-# end hooks #2b Task B1 (2026-10-27): `afterExecution:` runs now; held by flow `outputs:`, which egret never evaluates: `end` renders `{{ execution.outputs.final }}` (worker/render.rs; package #6, roadmap note 6). Re-checked at #2b Task B7 (2026-10-28): it differs on `runs` only, no longer on `order`.
-valids/after-execution
+# `valids/after-execution` banked 2026-10-29 (package #6 Task B2, spec D6), as the plan predicted: `worker/render.rs` reads `workflow.executions.outputs` (stored at the terminal by Task B1, before `afterExecution:` runs), so `end` renders `{{execution.outputs.final}}` and SUCCEEDS as in Kestra; the value is pinned by `tests/worker.rs` `after_execution_renders_the_flow_outputs` (no oracle sees outputs).
 # `valids/all-flowable` and `valids/disable-flowable` banked 2026-10-29 (package #5a Task A7, spec D7): both render `{{ taskrun.value }}` in a `Switch` case (and `all-flowable` in its `Loop` body too); egret wrote `"value": null` and rendered it empty, Kestra's `RunVariables` omits a null value and the strict renderer FAILED the task. The key is absent now, so the case fails as in Kestra.
 valids/dag
 valids/flow-concurrency-sla-fail-child

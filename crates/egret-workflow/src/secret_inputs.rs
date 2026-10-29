@@ -368,6 +368,32 @@ pub fn open_outputs(sealed: &[u8]) -> Result<Map<String, Value>> {
     open_named(sealed, "outputs")
 }
 
+/// An execution's stored flow `outputs` (`workflow.executions.outputs`, the
+/// SECRET values masked; package #6 Task B1) with its sealed `{output id:
+/// value}` object (`secret_outputs`) put back, and those values as strings,
+/// for masking what the execution writes (as [`reveal`] for inputs). Only the
+/// worker's render surface calls it (Task B2, spec D9). An id the stored map
+/// does not hold is skipped: only a value the evaluation stored is revealed.
+pub(crate) fn reveal_flow_outputs(
+    outputs: Value,
+    sealed: Option<&[u8]>,
+) -> Result<(Value, Vec<String>)> {
+    let (Some(sealed), Value::Object(mut map)) = (sealed, outputs.clone()) else {
+        return Ok((outputs, Vec::new()));
+    };
+    let mut values = Vec::new();
+    for (id, v) in open_outputs(sealed)? {
+        if let Some(slot) = map.get_mut(&id) {
+            values.push(match &v {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            });
+            *slot = v;
+        }
+    }
+    Ok((Value::Object(map), values))
+}
+
 /// A `Loop` run's stored `outputs` (`{…, outputs: [{item, outputs}, …]}`)
 /// with its sealed SECRET values put back at their list positions, and those
 /// values as strings, for masking what the run writes (as [`reveal`] for
@@ -505,6 +531,38 @@ mod tests {
         let (_, none) = split_outputs(&values, &["n".to_string()]).unwrap();
         assert_eq!(none, None);
         assert!(split_outputs_with(&values, &ids, None).is_err());
+    }
+
+    /// Package #6 Task B2: a flow's stored outputs get their sealed values
+    /// back (and the values are returned for masking); an id the stored map
+    /// does not hold is not added; no seal leaves the map as stored; a
+    /// tampered seal is an error, never a silently masked render.
+    #[test]
+    fn flow_outputs_are_revealed_from_their_seal() {
+        install_for_tests();
+        let mut values = Map::new();
+        values.insert("p".into(), json!("plain"));
+        values.insert("s".into(), json!("hush-b2-unit"));
+        let (masked, sealed) = split_outputs(&values, &["s".to_string()]).unwrap();
+        let sealed = sealed.expect("one value sealed");
+        let (revealed, secrets) =
+            reveal_flow_outputs(Value::Object(masked.clone()), Some(&sealed)).unwrap();
+        assert_eq!(revealed, json!({"p": "plain", "s": "hush-b2-unit"}));
+        assert_eq!(secrets, vec!["hush-b2-unit".to_string()]);
+
+        let (only_p, secrets) = reveal_flow_outputs(json!({"p": "plain"}), Some(&sealed)).unwrap();
+        assert_eq!(only_p, json!({"p": "plain"}), "nothing added");
+        assert!(secrets.is_empty());
+
+        let stored = Value::Object(masked);
+        assert_eq!(
+            reveal_flow_outputs(stored.clone(), None).unwrap(),
+            (stored.clone(), Vec::new())
+        );
+        let mut tampered = sealed.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0xFF;
+        assert!(reveal_flow_outputs(stored, Some(&tampered)).is_err());
     }
 
     #[test]

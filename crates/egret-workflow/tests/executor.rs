@@ -880,7 +880,10 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
         // `valids/subflow-secret-output-child` (its SECRET output refused with
         // no master key, as Kestra's harness fails it, spec D9) bank;
         // 27 + 274 = 301.
-        (301, 274, 27),
+        // 27 -> 26 baselined, 274 -> 275 matching at package #6 Task B2
+        // (2026-10-29): `valids/after-execution` banks (`execution.outputs`
+        // read from the column in render, spec D6); 26 + 275 = 301.
+        (301, 275, 26),
         "301 = matching + baselined, the total beside its parts. It read \
          167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries, W8 \
          Task 4 banked `valids/waitfor-nested`, W8 Task 5 banked seven \
@@ -2674,7 +2677,10 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         // + the 6 top-level (1 + 1 + 3 + 1) and 5 nested pairs (all
         // `if-in-parallel`'s) of `valids/if-in-parallel`, `valids/loop-outputs`, `valids/loop-outputs-auto` and `valids/loop-outputs-store`,
         // banked at package #6 Task A4 (2026-10-29, measured).
-        (679, 217, 896),
+        // + the 1 top-level pair (`mytask` before `end`) of
+        // `valids/after-execution`, banked at package #6 Task B2 (2026-10-29,
+        // measured).
+        (680, 217, 897),
         "the pairs a change to which the ratchet REPORTS: they live on entries \
          that match, so any change to one makes its entry a REGRESSION. W6 Task \
          3 moved 3 of them across the line, all top-level: the 12 `Subflow` \
@@ -2723,7 +2729,9 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         // top-level pairs of `valids/errors`, which banked.
         // 231 -> 220 at package #6 Task A4 (2026-10-29, measured): the 6 top-level
         // and 5 nested pairs of `valids/if-in-parallel`, `valids/loop-outputs`, `valids/loop-outputs-auto` and `valids/loop-outputs-store`.
-        (210, 10, 220),
+        // 220 -> 219 at package #6 Task B2 (2026-10-29, measured): the 1 top-level
+        // pair of `valids/after-execution`, which banked.
+        (209, 10, 219),
         "and the pairs a change to which it does not: they live on baselined \
          entries, which mismatch whatever the pair says. Flipping all 704 leaves \
          the ratchet green and unmoved -- at 131 when W6 Task 3 flipped them, at \
@@ -3175,7 +3183,9 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
 // `valids/retry-flowable-parallel`, sub-executions included.
 // 87 -> 85 at package #6 Task B1 (2026-10-29, measured): the 1 + 1 run terminals of
 // `valids/flow-with-outputs-failed` and `valids/subflow-secret-output-child`.
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 85;
+// 85 -> 83 at package #6 Task B2 (2026-10-29, measured): the 2 run terminals (`mytask`, `end`)
+// of `valids/after-execution`.
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 83;
 /// 43 from W6 Task 4 to W9a Task 10; **40 since W9a Task 11** -- the three
 /// iterations of `valids/loop-values-from-uri`.
 // 40 -> 39 at WorkingDirectory Task 8: `working-directory-taskrun` has one
@@ -3248,7 +3258,9 @@ const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 1;
 // 29 -> 27 at package #6 Task B1 (2026-10-29, measured): the top-level executions of
 // `valids/flow-with-outputs-failed` and `valids/subflow-secret-output-child` (neither has a
 // sub-execution, so `SUB_EXECUTIONS_ON_BASELINED_ENTRIES` stays 1).
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 27;
+// 27 -> 26 at package #6 Task B2 (2026-10-29, measured): the top-level execution of
+// `valids/after-execution` (it has no sub-execution).
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 26;
 /// **1703 through W8 Task 2, 1647 after W8 Task 3, 1610 after W8 Task 4, 1528
 /// now** -- 56 run-history tokens on Task 3's eight, 37 on
 /// `valids/waitfor-nested` (whose seven runs include three loops reading
@@ -3301,7 +3313,9 @@ const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 27;
 // `valids/retry-flowable-parallel`.
 // 376 -> 368 at package #6 Task B1 (2026-10-29, measured): the 4 + 4 run-history tokens of
 // `valids/flow-with-outputs-failed` and `valids/subflow-secret-output-child`.
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 368;
+// 368 -> 360 at package #6 Task B2 (2026-10-29, measured): the 8 run-history tokens of
+// `valids/after-execution`.
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 360;
 /// **665 through W8 Task 2, 617 after W8 Task 3, 562 after W8 Task 4, 526 after
 /// W8 Task 5, 522 now** -- 48 execution-history tokens on Task 3's eight, i.e.
 /// six apiece (every one of them reads `CREATED RUNNING PAUSED RESTARTED
@@ -3355,7 +3369,9 @@ const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 368;
 // 139 -> 131 at package #6 Task B1 (2026-10-29, measured): the 4 + 4 execution-history tokens
 // (`CREATED RUNNING SUCCESS FAILED` each) of `valids/flow-with-outputs-failed` and
 // `valids/subflow-secret-output-child`.
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 131;
+// 131 -> 128 at package #6 Task B2 (2026-10-29, measured): the 3 execution-history tokens
+// (`CREATED RUNNING SUCCESS`) of `valids/after-execution`.
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 128;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -4812,7 +4828,9 @@ const MISMATCH_ON_EXECUTION: usize = 13;
 // 24 -> 23 at package #5b Task B7 (2026-10-29, measured): `valids/errors` banked (D11).
 // 23 -> 22 at package #6 Task A3 (2026-10-29, measured): `valids/loop-outputs-failed-render` banked (D1).
 // 22 -> 18 at package #6 Task A4 (2026-10-29, measured): `valids/if-in-parallel`, `valids/loop-outputs`, `valids/loop-outputs-auto` and `valids/loop-outputs-store` banked (D3).
-const MISMATCH_ON_RUNS: usize = 18;
+// 18 -> 17 at package #6 Task B2 (2026-10-29, measured): `valids/after-execution` banked -- it differed on `runs`
+// alone (`end` FAILED on `{{execution.outputs.final}}`), spec D6.
+const MISMATCH_ON_RUNS: usize = 17;
 /// **72 through W8 Task 2, 67 after W8 Task 3, 64 now**: five of Task 3's eight
 /// carry an ordered pair, and W8 Task 4 closed THREE on one entry --
 /// `valids/waitfor-nested`'s `loop_1_return`/`loop_2`,
@@ -4944,7 +4962,8 @@ const MISMATCH_ON_SPAWNED: usize = 1;
 // 33 -> 29 at package #6 Task A4 (2026-10-29, measured): `valids/if-in-parallel`, `valids/loop-outputs`, `valids/loop-outputs-auto` and `valids/loop-outputs-store` banked (D3).
 // 29 -> 28 at package #6 Task A6 (2026-10-29, measured): `valids/retry-flowable-parallel` banked (D7).
 // 28 -> 26 at package #6 Task B1 (2026-10-29, measured): `valids/flow-with-outputs-failed` and `valids/subflow-secret-output-child` banked (D6, D9).
-const MISMATCHING_RUNS_ENTRIES: usize = 26;
+// 26 -> 25 at package #6 Task B2 (2026-10-29, measured): `valids/after-execution` banked (D6).
+const MISMATCHING_RUNS_ENTRIES: usize = 25;
 /// **84 through W5; 63 after W6 Task 3, and 59 since W6 Task 4 corrected the
 /// classifier.**
 ///
@@ -7703,7 +7722,10 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         // are not held by the construct: `valids/after-execution` by flow
         // `outputs:` (egret never evaluates them; #6) and
         // `pause-errors-finally-after-execution` by its `Pause` `errors:` (#9).
-        ("afterExecution:", 2, &["afterExecution:"]),
+        // 2 -> 1 at package #6 Task B2 (2026-10-29): `valids/after-execution`
+        // banked (`execution.outputs` reads the stored flow outputs, spec D6).
+        // The one left is `pause-errors-finally-after-execution` (#9).
+        ("afterExecution:", 1, &["afterExecution:"]),
         // **9 through W8 Task 3; 8 since W8 Task 4 banked
         // `valids/waitfor-nested`.** The eight that remain are not held by the
         // construct, and `oracle-exec/baseline.txt` names what holds each: six
@@ -8419,7 +8441,9 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
         // does `valids/retry-flowable-parallel`.
         // (2, 27, 29) -> (2, 25, 27) at package #6 Task B1 (2026-10-29): nor do
         // `valids/flow-with-outputs-failed` and `valids/subflow-secret-output-child`.
-        (2, 25, 27),
+        // (2, 25, 27) -> (2, 24, 26) at package #6 Task B2 (2026-10-29): nor
+        // does `valids/after-execution`.
+        (2, 24, 26),
         "the baselined population that declares a `timeout:`, and the rest \
          ((2, 106, 108) until no-silent-stall Task 1 banked \
          `invalids/invalid-task`, which declares none). It \

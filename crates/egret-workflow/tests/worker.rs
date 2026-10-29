@@ -13525,3 +13525,245 @@ async fn a_secret_flow_output_is_masked_and_sealed(pool: sqlx::PgPool) {
         serde_json::json!({"s": PLAIN})
     );
 }
+
+/// **Package #6 Task B2 (spec D6): `afterExecution:` renders the flow's
+/// outputs** -- golden `valids/after-execution`'s shape, its `end` reading
+/// `{{ execution.outputs.final }}`. The values are the typed ones stored at
+/// the terminal: a STRING from a task output and an INT that arithmetic
+/// reads as a number.
+#[sqlx::test(migrations = "../../migrations")]
+async fn after_execution_renders_the_flow_outputs(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let source = format!(
+        "{}afterExecution:\n  - id: end\n    type: io.kestra.plugin.core.log.Log\n    \
+         message: \"final={{{{ execution.outputs.final }}}} n={{{{ execution.outputs.n + 1 }}}}\"\n",
+        flow_with_outputs(
+            "fo-b2-after",
+            &return_task("r", "hello"),
+            "  - id: final\n    type: STRING\n    value: \"{{ outputs.r.value }}\"\n\
+             \x20 - id: n\n    type: INT\n    value: \"3\"\n",
+        )
+    );
+    let ex = start_execution(&pool, ws, None, &source, serde_json::json!({}))
+        .await
+        .expect("start execution");
+
+    let sink = std::sync::Arc::new(Lines::default());
+    settle_everything(&pool, &core_handlers_logging_to(&sink)).await;
+
+    assert_eq!(
+        execution_history(&pool, ex).await,
+        serde_json::json!(["CREATED", "RUNNING", "SUCCESS"])
+    );
+    assert_eq!(
+        run_state(&pool, ex, "end").await.as_deref(),
+        Some("SUCCESS")
+    );
+    let lines = sink.of(ex);
+    assert!(
+        lines.iter().any(|(_, m)| m == "final=hello n=4"),
+        "the after-task read the stored, typed outputs: {lines:?}"
+    );
+}
+
+/// **Package #6 Task B2: an execution with no stored outputs renders
+/// `execution.outputs` as `{}`, as before B2** -- a flow with no `outputs:`,
+/// and a flow whose output failed (the column is `NULL`, Task B1).
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_execution_without_stored_outputs_renders_execution_outputs_as_empty(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let after = "afterExecution:\n  - id: end\n    type: io.kestra.plugin.core.log.Log\n    \
+                 message: \"o={{ execution.outputs }}\"\n";
+    let none = format!(
+        "id: fo-b2-none\nnamespace: t\ntasks:\n{}{after}",
+        return_task("r", "x")
+    );
+    let failed = format!(
+        "{}{after}",
+        flow_with_outputs(
+            "fo-b2-failed",
+            &return_task("r", "x"),
+            "  - id: o\n    type: STRING\n    value: \"{{ outputs.nope.value }}\"\n",
+        )
+    );
+    let none = start_execution(&pool, ws, None, &none, serde_json::json!({}))
+        .await
+        .expect("start");
+    let failed = start_execution(&pool, ws, None, &failed, serde_json::json!({}))
+        .await
+        .expect("start");
+
+    let sink = std::sync::Arc::new(Lines::default());
+    settle_everything(&pool, &core_handlers_logging_to(&sink)).await;
+
+    for ex in [none, failed] {
+        assert_eq!(flow_outputs_of(&pool, ex).await, (None, None));
+        assert_eq!(
+            run_state(&pool, ex, "end").await.as_deref(),
+            Some("SUCCESS")
+        );
+        let lines = sink.of(ex);
+        assert!(
+            lines.iter().any(|(_, m)| m == "o={}"),
+            "`execution.outputs` is the empty map: {lines:?}"
+        );
+    }
+}
+
+/// **Package #6 Task B2 (spec D9): a SECRET flow output is revealed to the
+/// execution's own render surface and nowhere else.** The after-task sees the
+/// real value (its length is right) and every line it writes shows the mask,
+/// a failure message included; no stored line holds the plaintext. A Flow
+/// trigger's render context over the same execution
+/// (`execution_render_context`, whose rendered `inputs:` become ANOTHER
+/// execution's) sees the mask, while a plain output reads through.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_secret_flow_output_is_revealed_to_the_execution_alone_and_masked_in_its_lines(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    egret_workflow::secret_inputs::install_for_tests();
+    let (_db, ws) = seed(&pool).await;
+    const PLAIN: &str = "hush-b2-0123456";
+    let source = format!(
+        "{}afterExecution:\n  - id: say\n    type: io.kestra.plugin.core.log.Log\n    \
+         message: \"s={{{{ execution.outputs.s }}}} len={{{{ execution.outputs.s | length }}}} \
+         p={{{{ execution.outputs.p }}}}\"\n  - id: boom\n    \
+         type: io.kestra.plugin.core.execution.Fail\n    \
+         errorMessage: \"boom {{{{ execution.outputs.s }}}}\"\n",
+        flow_with_outputs(
+            "fo-b2-secret",
+            &return_task("r", "x"),
+            &format!(
+                "  - id: s\n    type: SECRET\n    value: {PLAIN}\n\
+                 \x20 - id: p\n    type: STRING\n    value: plain\n"
+            ),
+        )
+    );
+    let ex = start_execution(&pool, ws, None, &source, serde_json::json!({}))
+        .await
+        .expect("start execution");
+
+    let sink = std::sync::Arc::new(Lines::default());
+    settle_everything(&pool, &core_handlers_logging_to(&sink)).await;
+
+    assert_eq!(
+        run_state(&pool, ex, "say").await.as_deref(),
+        Some("SUCCESS")
+    );
+    // The handler's lines (the sink) and the lines the worker stores (a
+    // failure message among them), together.
+    let mut lines: Vec<String> = sink.of(ex).into_iter().map(|(_, m)| m).collect();
+    lines.extend(
+        execution_log_lines(&pool, ex)
+            .await
+            .into_iter()
+            .map(|(_, m)| m),
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|m| *m == format!("s=****** len={} p=plain", PLAIN.len())),
+        "the after-task saw the real value and its line is masked: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|m| m.contains("boom ******")),
+        "the failure message is masked: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|m| m.contains(PLAIN)),
+        "no line holds the plaintext: {lines:?}"
+    );
+    let rows: Vec<String> =
+        sqlx::query_scalar("SELECT tr::text FROM workflow.task_runs tr WHERE execution_id = $1")
+            .bind(ex)
+            .fetch_all(&pool)
+            .await
+            .expect("the runs as text");
+    assert!(
+        !rows.iter().any(|r| r.contains(PLAIN)),
+        "no run row (outputs, attempts, errors) holds the plaintext: {rows:?}"
+    );
+
+    let mut conn = pool.acquire().await.expect("a connection");
+    let cx = egret_workflow::worker::execution_render_context(&mut conn, ex)
+        .await
+        .expect("the Flow trigger's context");
+    assert_eq!(
+        egret_workflow::render_str("{{ execution.outputs.s }}", &cx).expect("renders"),
+        "******",
+        "a Flow trigger's context sees the mask"
+    );
+    assert_eq!(
+        egret_workflow::render_str("{{ execution.outputs.p }}", &cx).expect("renders"),
+        "plain",
+        "and the plain outputs"
+    );
+}
+
+/// **The controller's cap of 2026-10-29: a flow's outputs are capped at
+/// 16 MiB serialised per execution** (lowered for this workspace alone with
+/// `outputs::lower_flow_outputs_cap_for_tests`, so no test needs 16 MiB of
+/// data). At the cap they are stored; one byte over, the evaluation fails as
+/// a failing output does (`… SUCCESS FAILED`, nothing stored) with a message
+/// naming the size, the cap and a FILE output as the way out.
+#[sqlx::test(migrations = "../../migrations")]
+async fn flow_outputs_over_the_cap_fail_the_execution(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    // `{"s":"<v>"}` is `v.len() + 8` bytes.
+    egret_workflow::outputs::lower_flow_outputs_cap_for_tests(ws, 18);
+    let flow = |id: &str, v: &str| {
+        flow_with_outputs(
+            id,
+            &return_task("r", "x"),
+            &format!("  - id: s\n    type: STRING\n    value: \"{v}\"\n"),
+        )
+    };
+    let at = start_execution(
+        &pool,
+        ws,
+        None,
+        &flow("fo-cap-at", "0123456789"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+    let over = start_execution(
+        &pool,
+        ws,
+        None,
+        &flow("fo-cap-over", "01234567890"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+
+    settle_everything(&pool, &core_handlers()).await;
+
+    assert_eq!(
+        execution_history(&pool, at).await,
+        serde_json::json!(["CREATED", "RUNNING", "SUCCESS"])
+    );
+    assert_eq!(
+        flow_outputs_of(&pool, at).await.0,
+        Some(serde_json::json!({"s": "0123456789"}))
+    );
+    assert_eq!(
+        execution_history(&pool, over).await,
+        serde_json::json!(["CREATED", "RUNNING", "SUCCESS", "FAILED"])
+    );
+    assert_eq!(flow_outputs_of(&pool, over).await, (None, None));
+    let lines = execution_log_lines(&pool, over).await;
+    assert!(
+        lines.iter().any(|(level, m)| *level == 4
+            && m == "Flow outputs are 19 bytes; egret keeps at most 18 bytes of flow outputs \
+                     per execution. Write a large value to internal storage and declare it as \
+                     a type: FILE output instead."),
+        "an ERROR line with the cap's message: {lines:?}"
+    );
+}

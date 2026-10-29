@@ -51,10 +51,21 @@
 //!   (`storage::inputs::check_file_outputs`), or the output fails with
 //!   `egret refuses output <id>: <uri> is not a file of this execution`.
 //!
-//! What B1 does NOT do (Tasks B2-B4): nothing reads the column yet --
-//! `{{ execution.outputs }}` is still `{}` (B2), the `Subflow` copy, the Flow
-//! trigger's `trigger.outputs` and the API are B3's, and only B2/B4 reveal the
-//! sealed values to a render.
+//! # The cap (the controller's decision of 2026-10-29, spec §2.2)
+//!
+//! The typed map may serialise to at most 16 MiB
+//! ([`MAX_FLOW_OUTPUTS_BYTES`](crate::runners::env::MAX_FLOW_OUTPUTS_BYTES),
+//! the `Loop` list's total); beyond it the evaluation fails as a failing
+//! output does, with a message that points to a FILE output. Kestra has no
+//! cap; an egret-only limit (spec §6).
+//!
+//! # Who reads the column
+//!
+//! `worker::render::Surface::load` (Task B2): `{{ execution.outputs }}` in
+//! every later render of the execution (`afterExecution:`), the sealed values
+//! revealed there alone; a Flow trigger's render context over the execution
+//! sees them masked. The `Subflow` copy, the Flow trigger's `trigger.outputs`
+//! and the API are Task B3's.
 
 use egret_core::Result;
 use sqlx::PgConnection;
@@ -105,6 +116,9 @@ pub(super) async fn at_terminal(
             return fail(conn, ctx, &message, &redactions).await;
         }
     };
+    if let Err(message) = cap(&typed, crate::outputs::flow_outputs_cap(ctx.workspace_id)) {
+        return fail(conn, ctx, &message, &redactions).await;
+    }
     redactions.extend(typed.secret_ids.iter().filter_map(|id| {
         typed.values.get(id).map(|v| match v {
             serde_json::Value::String(s) => s.clone(),
@@ -132,6 +146,27 @@ pub(super) async fn at_terminal(
     let (masked, sealed) = crate::secret_inputs::split_outputs(&typed.values, &typed.secret_ids)?;
     write(conn, ctx, Some(serde_json::Value::Object(masked)), sealed).await?;
     Ok(FlowEnd::Stored)
+}
+
+/// The cap of the controller's decision of 2026-10-29 (spec §2.2): `Err`
+/// with the message when `typed`'s map serialises to more than `limit` bytes
+/// ([`flow_outputs_cap`](crate::outputs::flow_outputs_cap), 16 MiB). The
+/// size is the typed map's, SECRET values in clear; the message names sizes
+/// only, never a value. A flow output has no `fetchType`, so the way out it
+/// names is a FILE output (a value written to internal storage, its URI
+/// published), which the cap does not read.
+fn cap(typed: &crate::outputs::Typed, limit: usize) -> std::result::Result<(), String> {
+    // `Map` serialises infallibly to a `Vec`; an impossible error reads as
+    // "no bytes", which a positive cap passes.
+    let bytes = serde_json::to_vec(&typed.values).map_or(0, |v| v.len());
+    if bytes <= limit {
+        return Ok(());
+    }
+    Err(format!(
+        "Flow outputs are {bytes} bytes; egret keeps at most {} of flow outputs per execution. \
+         Write a large value to internal storage and declare it as a type: FILE output instead.",
+        super::spawn::bytes_text(limit),
+    ))
 }
 
 /// Log `message` at ERROR on the execution, clear the columns, answer
@@ -168,4 +203,38 @@ async fn write(
             ))
         })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cap;
+    use crate::runners::env::MAX_FLOW_OUTPUTS_BYTES as CAP;
+
+    fn typed(v: &str) -> crate::outputs::Typed {
+        let mut values = serde_json::Map::new();
+        values.insert("big".into(), serde_json::Value::String(v.into()));
+        crate::outputs::Typed {
+            values,
+            secret_ids: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    /// The controller's cap of 2026-10-29 at its real value: 16 MiB is kept,
+    /// one byte more fails with the message naming the size, `16 MiB` and a
+    /// FILE output (`{"big":"<s>"}` is `s.len() + 10` bytes).
+    #[test]
+    fn flow_outputs_over_sixteen_mib_fail_naming_a_file_output() {
+        assert_eq!(CAP, 16 << 20);
+        assert_eq!(cap(&typed(&"x".repeat(CAP - 10)), CAP), Ok(()));
+        assert_eq!(
+            cap(&typed(&"x".repeat(CAP - 9)), CAP),
+            Err(format!(
+                "Flow outputs are {} bytes; egret keeps at most 16 MiB of flow outputs per \
+                 execution. Write a large value to internal storage and declare it as a type: \
+                 FILE output instead.",
+                CAP + 1
+            ))
+        );
+    }
 }
