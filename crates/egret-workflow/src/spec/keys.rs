@@ -164,7 +164,6 @@ pub(crate) fn lift_of(site: Site<'_>, key: &str) -> Option<Lift> {
                 return Some(Package(18));
             }
             match (t, key) {
-                ("io.kestra.plugin.core.flow.Loop", "outputs" | "fetchType") => Some(Package(6)),
                 (
                     "io.kestra.plugin.core.flow.Subflow",
                     "revision" | "labels" | "inheritLabels" | "scheduleDate" | "restartBehavior",
@@ -699,7 +698,7 @@ impl Walk<'_> {
                         }
                         Kind::Output => {
                             self.seen.outputs += 1;
-                            self.output(id, o);
+                            self.output(id, o, "outputs");
                         }
                     }
                 }
@@ -937,8 +936,10 @@ impl Walk<'_> {
     }
 
     /// A flow output's keys: `FlowOutput` has all six Kestra fields
-    /// (`Output.java`); any other key is `unknown_property`.
-    fn output(&mut self, id: &str, output: &serde_json::Map<String, Value>) {
+    /// (`Output.java`); any other key is `unknown_property`. A `Loop`'s
+    /// `outputs:` holds the same bean (package #6 Task A1), checked here with
+    /// the `Loop`'s `{path}.outputs` as `list`.
+    fn output(&mut self, id: &str, output: &serde_json::Map<String, Value>, list: &str) {
         let read = wire_fields_of::<models::FlowOutput>();
         for key in output.keys().map(String::as_str) {
             if !read.contains(&key) {
@@ -947,7 +948,7 @@ impl Walk<'_> {
                     message: format!(
                         "output '{id}': unknown property '{key}': neither Kestra nor egret accepts it"
                     ),
-                    path: format!("outputs.{id}.{key}"),
+                    path: format!("{list}.{id}.{key}"),
                 });
             }
         }
@@ -981,6 +982,20 @@ impl Walk<'_> {
         }
         self.reached.push(path.clone());
         let Some(row) = row else { return };
+        // `Loop.outputs` is a list of the flow's `Output` bean (package #6).
+        if row == "io.kestra.plugin.core.flow.Loop" {
+            if let Some(Value::Array(items)) = t.get("outputs") {
+                let list = format!("{path}.outputs");
+                for item in items {
+                    let Some(o) = item.as_object() else { continue };
+                    let Some(oid) = o.get("id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    self.seen.outputs += 1;
+                    self.output(oid, o, &list);
+                }
+            }
+        }
         // `LoopUntil.CheckFrequency` (`LoopUntil.java:245-264`).
         if row == "io.kestra.plugin.core.flow.LoopUntil" {
             if let Some(Value::Object(freq)) = t.get("checkFrequency") {
@@ -1320,9 +1335,10 @@ mod tests {
         assert_eq!(lift_of(Site::Task(log), "logLevel"), Some(Package(13)));
         assert_eq!(lift_of(Site::Task(log), "workerSelector"), Some(Enterprise));
         assert_eq!(lift_of(Site::Task(sub), "inheritLabels"), Some(Package(12)));
+        // Package #6 Task A1 runs `Loop` `outputs`/`fetchType`: no lift.
         assert_eq!(
             lift_of(Site::Task("io.kestra.plugin.core.flow.Loop"), "outputs"),
-            Some(Package(6))
+            None
         );
         assert_eq!(
             lift_of(Site::Task("io.kestra.plugin.core.flow.Pause"), "onResume"),
@@ -1763,11 +1779,13 @@ mod tests {
         assert_eq!(r.errors.len(), 2, "one finding per key: {r:?}");
     }
 
-    /// Loop `outputs`/`fetchType` are #6's; every flowable shares the
-    /// `Task.java` keys (spec 3.3).
+    /// Package #6 Task A1: a `Loop`'s `outputs`/`fetchType` run, so neither
+    /// warns; every flowable still shares the `Task.java` keys (spec 3.3), so
+    /// `logLevel` does. An unknown key inside a `Loop` output is refused like
+    /// one inside a flow output.
     #[test]
-    fn loop_outputs_and_a_task_java_key_on_a_flowable_warn() {
-        let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: io.kestra.plugin.core.flow.Loop\n    values: [1]\n    outputs: {x: y}\n    fetchType: STORE\n    logLevel: INFO\n    tasks:\n      - id: c\n        type: core.log\n        message: c\n");
+    fn loop_outputs_and_fetch_type_do_not_warn_and_a_task_java_key_does() {
+        let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: io.kestra.plugin.core.flow.Loop\n    values: [1]\n    outputs:\n      - id: x\n        type: STRING\n        value: y\n    fetchType: FETCH\n    logLevel: INFO\n    tasks:\n      - id: c\n        type: core.log\n        message: c\n");
         assert!(r.errors.is_empty(), "{r:?}");
         let got: std::collections::BTreeMap<_, _> = r
             .warnings
@@ -1776,18 +1794,95 @@ mod tests {
             .map(|w| (w.path.as_str(), w.message.as_str()))
             .collect();
         assert!(
-            got["tasks.l.outputs"].ends_with("roadmap package #6 lifts it"),
-            "{got:?}"
-        );
-        assert!(
-            got["tasks.l.fetchType"].ends_with("roadmap package #6 lifts it"),
-            "{got:?}"
-        );
-        assert!(
             got["tasks.l.logLevel"].ends_with("roadmap package #13 lifts it"),
             "{got:?}"
         );
-        assert_eq!(got.len(), 3, "{got:?}");
+        assert_eq!(got.len(), 1, "{got:?}");
+
+        let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: io.kestra.plugin.core.flow.Loop\n    values: [1]\n    outputs:\n      - id: x\n        type: STRING\n        value: y\n        valeu: z\n    tasks:\n      - id: c\n        type: core.log\n        message: c\n");
+        let unknown: Vec<_> = r
+            .errors
+            .iter()
+            .filter(|e| e.code == "unknown_property")
+            .map(|e| e.path.as_str())
+            .collect();
+        assert_eq!(unknown, vec!["tasks.l.outputs.x.valeu"], "{r:?}");
+    }
+
+    /// Spec D8's fence: `property-treatment.json` measures the SAVE path, so
+    /// "honoured" there says a key is kept, not that anything runs it. Package
+    /// #1 recorded `Flow.outputs` and `Loop.retry` "honoured" while nothing
+    /// ran them. Every key the file calls "honoured" on the `Flow` row and the
+    /// `Loop` row must therefore be named here as run by egret, or carry a
+    /// `not_honoured` lift (`lift_of`). A new honoured key, or one taken off
+    /// this list, fails until someone says which it is.
+    #[test]
+    fn every_honoured_flow_and_loop_key_is_run_or_warned() {
+        const LOOP: &str = "io.kestra.plugin.core.flow.Loop";
+        // Package #6 makes these run (spec D1, D5, D6, D7): `Loop.outputs`
+        // and `Loop.fetchType` (Tasks A3-A5), `Loop.retry` (A6, inherited by
+        // the iteration's tasks) and `Flow.outputs` (B1, B2).
+        const PACKAGE_6: &[(&str, &str)] = &[
+            (LOOP, "outputs"),
+            (LOOP, "fetchType"),
+            (LOOP, "retry"),
+            (FLOW_ROW, "outputs"),
+        ];
+        const RUN: &[(&str, &str)] = &[
+            (FLOW_ROW, "afterExecution"),
+            (FLOW_ROW, "description"),
+            (FLOW_ROW, "disabled"),
+            (FLOW_ROW, "errors"),
+            (FLOW_ROW, "finally"),
+            (FLOW_ROW, "id"),
+            (FLOW_ROW, "inputs"),
+            (FLOW_ROW, "labels"),
+            (FLOW_ROW, "namespace"),
+            (FLOW_ROW, "retry"),
+            (FLOW_ROW, "tasks"),
+            (FLOW_ROW, "triggers"),
+            (FLOW_ROW, "variables"),
+            (LOOP, "allowFailure"),
+            (LOOP, "allowWarning"),
+            (LOOP, "concurrencyLimit"),
+            (LOOP, "description"),
+            (LOOP, "disabled"),
+            (LOOP, "errors"),
+            (LOOP, "finally"),
+            (LOOP, "id"),
+            (LOOP, "runIf"),
+            (LOOP, "tasks"),
+            (LOOP, "timeout"),
+            (LOOP, "transmitFailed"),
+            (LOOP, "type"),
+            (LOOP, "values"),
+        ];
+        let mut unaccounted = Vec::new();
+        for (row, site) in [(FLOW_ROW, Site::Flow), (LOOP, Site::Task(LOOP))] {
+            for (key, treatment) in &property_treatment()[row] {
+                let honoured = matches!(treatment, Treatment::Honoured);
+                let named =
+                    RUN.contains(&(row, key.as_str())) || PACKAGE_6.contains(&(row, key.as_str()));
+                if honoured && !named && lift_of(site, key).is_none() {
+                    unaccounted.push(format!("{row}.{key}"));
+                }
+            }
+        }
+        assert!(
+            unaccounted.is_empty(),
+            "honoured but neither run by egret nor warned: {unaccounted:?}"
+        );
+        // The three keys of this package are honoured in the measured file
+        // (A1 regenerated it), not merely listed.
+        for (row, key) in PACKAGE_6 {
+            assert!(
+                matches!(
+                    property_treatment()[*row].get(*key),
+                    Some(Treatment::Honoured)
+                ),
+                "{row}.{key} is not honoured in property-treatment.json"
+            );
+        }
     }
 
     #[test]

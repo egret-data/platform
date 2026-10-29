@@ -159,6 +159,22 @@ second as an `unknown_property` error (KI-121 warned `ignored_property` /
 `ignored_property` and `unknown_property`-as-warning no longer exist, and
 `spec/properties.rs` is deleted.
 
+**What `honoured` measures (2026-10-29, package #6, spec D8).** The three
+stages above are all on the **save** path: `honoured` means the key is
+*saved and passed to the run* (it parses, validates clean and survives in
+the model egret keeps), not that the run acts on it. Package #1 measured
+only this path, so two keys were recorded `honoured` before anything ran
+them: the flow-level `outputs` (`Flow.outputs`, never evaluated) and a
+`Loop`'s `retry` (dropped when the iteration's flow is built). Package #6
+runs both, and `Loop.outputs`/`Loop.fetchType`, which it moved from
+`ignored` to `honoured` (Task A1) when it modelled them. Because the table
+cannot see the run, the fence test
+`spec::keys::tests::every_honoured_flow_and_loop_key_is_run_or_warned`
+holds the `Flow` and `Loop` rows to it by hand: every key either row
+calls `honoured` must be named there as run by egret, or carry a
+`not_honoured` lift (`keys::lift_of`); the four package #6 keys are named
+in their own list.
+
 A `not_honoured` warning does **not** make a key `warned` (2026-10-26,
 package #1, D3). `warned` means a new `not_yet_enforced` warning appeared, and
 only a `warned` key is served to the editor; `not_honoured` is a different code
@@ -193,7 +209,7 @@ class needs `plugins::gate::check` (both features, a runner, its FQCN in
 
 ### Result
 
-1702 properties over 100 rows: 1208 honoured, 4 warned, 364 ignored, 126 refused (counted from `property-treatment.json`, 2026-10-28, after package #4 Task C4 added the `io.kestra.plugin.core.http.Download` and `io.kestra.plugin.core.http.SseRequest` rows: 19 honoured each, the *base 7* ignored; before that, 1650 properties over 98 rows: 1170 honoured, 4 warned, 350 ignored, 126 refused, 2026-10-28, after package #4 Task C3 added the `io.kestra.plugin.core.http.Request` row: 17 honoured, the *base 7* ignored, and `encryptBody` refused, which egret refuses unless it is false (spec D4); before that, 1625 properties over 97 rows: 1153 honoured, 4 warned, 343 ignored, 125 refused, 2026-10-28, after inputs package A3 moved `JsonInput.jsonSchema` back to `ignored`, because no JSON Schema validator is in the dependency tree (spec D12); A5 then took `jsonSchema` out of `models::Input` so the served inputs stay exactly the keys `models::Input` keeps, which leaves every count unchanged; before that, 1154 honoured, 4 warned, 342 ignored, 125 refused, 2026-10-28, after inputs package A1 modelled the 24 input validation keys `validator`, `min`, `max`, `after`, `before`, `values`, `expression`, `allowCustomValue`, `isRadio`, `autoSelectFirst`, `jsonSchema` and moved them from `ignored` to `honoured`; before that, 1130 honoured, 4 warned, 366 ignored, 125 refused, 2026-10-27, after end hooks A2 moved `finally` on the flowables and `errors` on the three loop-like ones from `ignored` to `honoured` and `Pause.finally` to `refused`; before that, 1119 honoured, 4 warned, 378 ignored, 124 refused, 2026-10-26, after package #1 moved the two `onChildFailure` rows from `ignored` to `refused`; before that, 380 ignored and 122 refused, counted from `property-treatment.json`, 2026-10-25, after KI-121 measured the three retry rows' `warningOnRetry` `ignored`; the line said 1512 / 1051 / 335 before, counted 2026-10-17, while the committed file already held 1625 / 1122 / 377).
+1702 properties over 100 rows: 1210 honoured, 4 warned, 362 ignored, 126 refused (counted from `property-treatment.json`, 2026-10-29, after package #6 Task A1 modelled `Loop.outputs` and `Loop.fetchType` and moved both from `ignored` to `honoured`; before that, 1208 honoured, 4 warned, 364 ignored, 126 refused, 2026-10-28, after package #4 Task C4 added the `io.kestra.plugin.core.http.Download` and `io.kestra.plugin.core.http.SseRequest` rows: 19 honoured each, the *base 7* ignored; before that, 1650 properties over 98 rows: 1170 honoured, 4 warned, 350 ignored, 126 refused, 2026-10-28, after package #4 Task C3 added the `io.kestra.plugin.core.http.Request` row: 17 honoured, the *base 7* ignored, and `encryptBody` refused, which egret refuses unless it is false (spec D4); before that, 1625 properties over 97 rows: 1153 honoured, 4 warned, 343 ignored, 125 refused, 2026-10-28, after inputs package A3 moved `JsonInput.jsonSchema` back to `ignored`, because no JSON Schema validator is in the dependency tree (spec D12); A5 then took `jsonSchema` out of `models::Input` so the served inputs stay exactly the keys `models::Input` keeps, which leaves every count unchanged; before that, 1154 honoured, 4 warned, 342 ignored, 125 refused, 2026-10-28, after inputs package A1 modelled the 24 input validation keys `validator`, `min`, `max`, `after`, `before`, `values`, `expression`, `allowCustomValue`, `isRadio`, `autoSelectFirst`, `jsonSchema` and moved them from `ignored` to `honoured`; before that, 1130 honoured, 4 warned, 366 ignored, 125 refused, 2026-10-27, after end hooks A2 moved `finally` on the flowables and `errors` on the three loop-like ones from `ignored` to `honoured` and `Pause.finally` to `refused`; before that, 1119 honoured, 4 warned, 378 ignored, 124 refused, 2026-10-26, after package #1 moved the two `onChildFailure` rows from `ignored` to `refused`; before that, 380 ignored and 122 refused, counted from `property-treatment.json`, 2026-10-25, after KI-121 measured the three retry rows' `warningOnRetry` `ignored`; the line said 1512 / 1051 / 335 before, counted 2026-10-17, while the committed file already held 1625 / 1122 / 377).
 
 *base 7* = `assets`, `logLevel`, `logToFile`, `policyRefs`, `taskCache`, `version`, `workerSelector`: `ignored` on core tasks and flowables, `refused` on script and plugin tasks.
 
@@ -206,7 +222,7 @@ class needs `plugins::gate::check` (both features, a runner, its FQCN in
 | `io.kestra.plugin.core.flow.AllowFailure` | 10 | — | *base 7*, `errors`, `finally` | — |
 | `io.kestra.plugin.core.flow.Dag` | 12 | — | *base 7*, `finally` | `onChildFailure` |
 | `io.kestra.plugin.core.flow.If` | 13 | — | *base 7*, `finally` | — |
-| `io.kestra.plugin.core.flow.Loop` | 13 | — | *base 7*, `errors`, `fetchType`, `finally`, `outputs` | — |
+| `io.kestra.plugin.core.flow.Loop` | 17 | — | *base 7* | — |
 | `io.kestra.plugin.core.flow.LoopUntil` | 13 | — | *base 7*, `errors`, `finally` | — |
 | `io.kestra.plugin.core.flow.Parallel` | 12 | — | *base 7*, `finally` | `onChildFailure` |
 | `io.kestra.plugin.core.flow.Pause` | 10 | — | *base 7*, `finally`, `onResume` | `behavior`, `errors`, `onPause` |

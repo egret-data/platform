@@ -75,8 +75,8 @@ use regex::Regex;
 use serde::Serialize;
 
 use crate::models::{
-    canonical_flow_type, Flow, Input, InputType, Property, Retry, Sla, SlaCommon, Task, TaskKind,
-    Trigger, TriggerKind,
+    canonical_flow_type, Flow, FlowOutput, Input, InputType, LoopFetchType, Property, Retry, Sla,
+    SlaCommon, Task, TaskKind, Trigger, TriggerKind,
 };
 use crate::spec::registry;
 use crate::trigger::depends_on::{depends_on_refusals, RefusalAt};
@@ -396,6 +396,8 @@ fn save_only_findings(flow: &Flow, report: &mut ValidationReport) {
     http_findings(flow, report);
     schedule_findings(flow, report);
     input_save_findings(&flow.inputs, report);
+    output_save_findings(flow, report);
+    retry_new_execution_in_loop_findings(flow, report);
 }
 
 /// The warning for a Schedule `when` or `lateMaximumDelay`: Kestra accepts and
@@ -1085,15 +1087,12 @@ fn validate_flow_level_fields(flow: &Flow, report: &mut ValidationReport) {
         }
     }
 
-    for (i, output) in flow.outputs.iter().enumerate() {
-        if output.r#type.is_none() {
-            report.errors.push(Finding {
-                code: "flow_output_type_required",
-                message: format!("output '{}' is missing a required type", output.id),
-                path: format!("outputs[{i}].type"),
-            });
-        }
-    }
+    output_type_findings(
+        &flow.outputs,
+        "outputs",
+        "flow_output_type_required",
+        report,
+    );
 
     for (i, sla) in flow.sla.iter().enumerate() {
         let common = sla_common(sla);
@@ -1161,6 +1160,208 @@ fn validate_flow_level_fields(flow: &Flow, report: &mut ValidationReport) {
                 path: format!("checks[{i}].when"),
             });
         }
+    }
+}
+
+/// `Output.java`'s `@NotNull Type type` (no Java default), for a flow's
+/// `outputs:` and for a `Loop`'s (package #6 Task A1, spec D8: the same bean,
+/// so the same check). `prefix` is the list's path (`outputs`, or the
+/// `Loop`'s `{path}.outputs`); `code` keeps the flow's existing
+/// `flow_output_type_required` and gives the `Loop` its own.
+fn output_type_findings(
+    outputs: &[FlowOutput],
+    prefix: &str,
+    code: &'static str,
+    report: &mut ValidationReport,
+) {
+    for (i, output) in outputs.iter().enumerate() {
+        if output.r#type.is_none() {
+            report.errors.push(Finding {
+                code,
+                message: format!("output '{}' is missing a required type", output.id),
+                path: format!("{prefix}[{i}].type"),
+            });
+        }
+    }
+}
+
+/// The save-time checks of declared outputs (package #6 Task A1, spec D8, D9),
+/// on the flow's `outputs:` and on every `Loop`'s:
+///
+/// * **ids are unique** in one list. Kestra's `FlowValidator` refuses a flow's
+///   duplicates with this text (`FlowValidator.java:107-111`); it does not
+///   look at a `Loop`'s list, where a duplicate would make one output silently
+///   overwrite the other in the iteration's map, so egret refuses both
+///   (an egret-only refusal on the `Loop`).
+/// * **a SECRET `Loop` output may not land in storage**: under `fetchType:
+///   STORE`, or under `AUTO` when `values:` may render to a storage URI
+///   ([`loop_values_may_be_a_uri`]), the iteration's typed map is written to
+///   an ION file that `read()` returns as text (spec D9).
+///
+/// Save-only for [`save_only_findings`]' reason: before package #6 a stored
+/// version's `Loop` outputs were never evaluated, and these rules must not
+/// stop such a version from running.
+fn output_save_findings(flow: &Flow, report: &mut ValidationReport) {
+    duplicate_output_ids(&flow.outputs, "outputs", "", report);
+    for (path, task) in super::path::every_task(flow) {
+        let TaskKind::Loop(l) = &task.kind else {
+            continue;
+        };
+        duplicate_output_ids(
+            &l.outputs,
+            &format!("{path}.outputs"),
+            &format!("task '{}': ", task.id),
+            report,
+        );
+        let fetch = l.fetch_type();
+        let stored = match fetch {
+            LoopFetchType::Store => true,
+            LoopFetchType::Auto => loop_values_may_be_a_uri(l.values.as_ref()),
+            LoopFetchType::Fetch => false,
+        };
+        if !stored {
+            continue;
+        }
+        let why = match fetch {
+            LoopFetchType::Store => "fetchType is STORE",
+            _ => "fetchType is AUTO and `values:` is a string that may render to a storage URI, which makes it STORE",
+        };
+        for (i, output) in l.outputs.iter().enumerate() {
+            if output.r#type == Some(InputType::Secret) {
+                report.errors.push(Finding {
+                    code: "loop_secret_output_stored",
+                    message: format!(
+                        "task '{}': output '{}' is SECRET and {why}: egret refuses it, because the iteration's outputs file would hold the value in clear. Use fetchType: FETCH",
+                        task.id, output.id
+                    ),
+                    path: format!("{path}.outputs[{i}].type"),
+                });
+            }
+        }
+    }
+}
+
+/// Kestra's `"Duplicate output with name [a, b]"` (`FlowValidator.java:109`),
+/// the duplicated ids in first-seen order, at the list's path.
+fn duplicate_output_ids(
+    outputs: &[FlowOutput],
+    path: &str,
+    owner: &str,
+    report: &mut ValidationReport,
+) {
+    let mut seen = HashSet::new();
+    let mut duplicated: Vec<&str> = Vec::new();
+    for output in outputs {
+        if !seen.insert(output.id.as_str()) && !duplicated.contains(&output.id.as_str()) {
+            duplicated.push(&output.id);
+        }
+    }
+    if !duplicated.is_empty() {
+        report.errors.push(Finding {
+            code: "duplicate_output_id",
+            message: format!(
+                "{owner}Duplicate output with name [{}]",
+                duplicated.join(", ")
+            ),
+            path: path.to_string(),
+        });
+    }
+}
+
+/// Whether a `Loop`'s `values:` could make `fetchType: AUTO` resolve to STORE,
+/// decided from the source alone (spec D5, Kestra's `guessOutputMode`: STORE
+/// only when `values` is a **string** that renders to a storage URI). A list
+/// or map written in YAML is stored as its JSON text (`Property`'s
+/// deserializer) and so is a string holding a JSON list; both render to a
+/// list and are FETCH. Any other string (an expression, a literal URI) may
+/// render to a URI. Absent `values:` is refused on its own
+/// (`loop_values_required`).
+pub(crate) fn loop_values_may_be_a_uri(values: Option<&Property<serde_json::Value>>) -> bool {
+    let Some(values) = values else {
+        return false;
+    };
+    !matches!(
+        serde_json::from_str::<serde_json::Value>(values.source()),
+        Ok(serde_json::Value::Array(_)
+            | serde_json::Value::Object(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Null)
+    )
+}
+
+/// A `retry:` with `behavior: CREATE_NEW_EXECUTION` that reaches a task run
+/// inside a `Loop` iteration saves silently today and never does what it says
+/// (package #6 Task A1, spec D7): `worker::replay` refuses to replay a `Loop`
+/// sub-execution, because Kestra cannot either (it throws `Can't find taskrun
+/// with taskrunId …`, measured on the pinned artifact, `OE baseline.txt`), so
+/// the iteration ends FAILED and no new execution starts.
+///
+/// "Reaches" is the precedence package #6 gives an iteration's tasks
+/// (spec D7, Kestra's `searchForParentTaskWithRetry`): a runnable task's own
+/// `retry:`, else the nearest ancestor's (through the `Loop` and above it,
+/// into the parent flow's tree), else the flow's. One warning per `retry:`
+/// that reaches at least one such task, at its `behavior`.
+fn retry_new_execution_in_loop_findings(flow: &Flow, report: &mut ValidationReport) {
+    fn is_new_execution(retry: &Retry) -> bool {
+        let common = match retry {
+            Retry::Constant { common, .. }
+            | Retry::Exponential { common, .. }
+            | Retry::Random { common, .. } => common,
+        };
+        common.behavior == crate::models::RetryBehavior::CreateNewExecution
+    }
+    fn walk<'a>(
+        task: &'a Task,
+        path: String,
+        nearest: Option<(String, &'a Retry)>,
+        in_loop: bool,
+        reached: &mut Vec<String>,
+    ) {
+        let nearest = match &task.retry {
+            Some(r) => Some((format!("{path}.retry"), r)),
+            None => nearest,
+        };
+        let runnable = is_runnable_child(task) || matches!(task.kind, TaskKind::Subflow(_));
+        if in_loop && runnable {
+            if let Some((at, retry)) = &nearest {
+                if is_new_execution(retry) && !reached.contains(at) {
+                    reached.push(at.clone());
+                }
+            }
+        }
+        let in_loop = in_loop || matches!(task.kind, TaskKind::Loop(_));
+        for child in task.children().into_iter().chain(task.error_children()) {
+            walk(
+                child,
+                super::path::task_path(&path, &child.id),
+                nearest.clone(),
+                in_loop,
+                reached,
+            );
+        }
+    }
+    let flow_retry = flow.retry.as_ref().map(|r| ("retry".to_string(), r));
+    let mut reached = Vec::new();
+    for (list, tasks) in super::path::root_lists(flow) {
+        for task in tasks {
+            walk(
+                task,
+                super::path::task_path(list, &task.id),
+                flow_retry.clone(),
+                false,
+                &mut reached,
+            );
+        }
+    }
+    for at in reached {
+        report.warnings.push(Finding {
+            code: "not_honoured",
+            message: format!(
+                "{at}: `behavior: CREATE_NEW_EXECUTION` reaches tasks inside a Loop iteration, and egret does not start a new execution for a Loop iteration (Kestra cannot replay one either): the iteration ends FAILED"
+            ),
+            path: format!("{at}.behavior"),
+        });
     }
 }
 
@@ -1932,6 +2133,15 @@ fn walk_task(
                     path: format!("{path}.concurrencyLimit"),
                 });
             }
+            // Package #6 Task A1 (spec D8): a `Loop`'s `outputs:` is the same
+            // `Output` bean as the flow's, so it gets the flow's `type` check,
+            // in the same (run-time) gate.
+            output_type_findings(
+                &l.outputs,
+                &format!("{path}.outputs"),
+                "loop_output_type_required",
+                report,
+            );
         }
         TaskKind::LoopUntil(l) => {
             if l.condition.is_none() {
@@ -6364,5 +6574,190 @@ mod tests {
         let body = format!("  - id: p\n    type: {PAUSE}\n  - id: x\n    type: {EXIT}\n");
         assert!(refusals(&after_exec("tasks", &body)).is_empty());
         assert!(refusals(&after_exec("errors", &body)).is_empty());
+    }
+}
+
+/// Package #6 Task A1 (spec D7, D8, D9): the save-time checks of a `Loop`'s
+/// `outputs:` and `fetchType:`, and of a `CREATE_NEW_EXECUTION` retry that
+/// reaches a `Loop` iteration.
+#[cfg(test)]
+mod loop_output_tests {
+    use crate::spec::{parse, validate, validate_for_run};
+
+    const HEAD: &str = "id: f\nnamespace: a.b\n";
+
+    /// A one-`Loop` flow with `extra` written under the `Loop`.
+    fn a_loop(extra: &str) -> String {
+        format!(
+            "{HEAD}tasks:\n  - id: l\n    type: io.kestra.plugin.core.flow.Loop\n    values: [a, b]\n{extra}    tasks: [{{id: t, type: core.log, message: m}}]\n"
+        )
+    }
+
+    fn codes(src: &str) -> Vec<(&'static str, String)> {
+        let r = validate(&parse(src).unwrap());
+        r.errors.into_iter().map(|e| (e.code, e.path)).collect()
+    }
+
+    #[test]
+    fn a_loop_with_typed_outputs_is_clean() {
+        let src = a_loop(
+            "    outputs:\n      - id: v\n        type: STRING\n        value: x\n      - id: s\n        type: SECRET\n        value: y\n    fetchType: FETCH\n",
+        );
+        let r = validate(&parse(&src).unwrap());
+        assert!(r.errors.is_empty(), "{r:?}");
+    }
+
+    #[test]
+    fn a_loop_output_without_a_type_is_refused_in_the_run_gate_too() {
+        let src = a_loop("    outputs:\n      - id: v\n        value: x\n");
+        let flow = parse(&src).unwrap();
+        for r in [validate(&flow), validate_for_run(&flow)] {
+            let e = r
+                .errors
+                .iter()
+                .find(|e| e.code == "loop_output_type_required")
+                .unwrap_or_else(|| panic!("{r:?}"));
+            assert_eq!(e.path, "tasks.l.outputs[0].type");
+            assert_eq!(e.message, "output 'v' is missing a required type");
+        }
+    }
+
+    /// The flow's own check is unchanged by the shared function.
+    #[test]
+    fn a_flow_output_without_a_type_keeps_its_code_and_path() {
+        let src = format!(
+            "{HEAD}outputs:\n  - id: o\n    value: x\ntasks: [{{id: t, type: core.log, message: m}}]\n"
+        );
+        assert_eq!(
+            codes(&src),
+            vec![("flow_output_type_required", "outputs[0].type".to_string())]
+        );
+    }
+
+    #[test]
+    fn duplicate_output_ids_are_refused_on_a_loop_and_on_the_flow() {
+        let src = a_loop(
+            "    outputs:\n      - id: v\n        type: STRING\n        value: x\n      - id: v\n        type: INT\n        value: 1\n",
+        );
+        let r = validate(&parse(&src).unwrap());
+        let e = r
+            .errors
+            .iter()
+            .find(|e| e.code == "duplicate_output_id")
+            .unwrap_or_else(|| panic!("{r:?}"));
+        assert_eq!(e.path, "tasks.l.outputs");
+        assert_eq!(e.message, "task 'l': Duplicate output with name [v]");
+        assert!(
+            validate_for_run(&parse(&src).unwrap()).errors.is_empty(),
+            "save-only"
+        );
+
+        let src = format!(
+            "{HEAD}outputs:\n  - id: o\n    type: STRING\n    value: x\n  - id: o\n    type: STRING\n    value: y\ntasks: [{{id: t, type: core.log, message: m}}]\n"
+        );
+        assert_eq!(
+            codes(&src),
+            vec![("duplicate_output_id", "outputs".to_string())]
+        );
+    }
+
+    const SECRET: &str = "    outputs:\n      - id: s\n        type: SECRET\n        value: x\n";
+
+    #[test]
+    fn a_secret_output_under_store_is_refused_naming_the_output_and_fetch_type() {
+        let src = a_loop(&format!("{SECRET}    fetchType: STORE\n"));
+        let r = validate(&parse(&src).unwrap());
+        let e = r
+            .errors
+            .iter()
+            .find(|e| e.code == "loop_secret_output_stored")
+            .unwrap_or_else(|| panic!("{r:?}"));
+        assert_eq!(e.path, "tasks.l.outputs[0].type");
+        assert!(e.message.contains("output 's'"), "{}", e.message);
+        assert!(e.message.contains("fetchType is STORE"), "{}", e.message);
+        assert!(
+            validate_for_run(&parse(&src).unwrap()).errors.is_empty(),
+            "save-only"
+        );
+    }
+
+    #[test]
+    fn a_secret_output_under_fetch_is_accepted() {
+        let src = a_loop(&format!("{SECRET}    fetchType: FETCH\n"));
+        let r = validate(&parse(&src).unwrap());
+        assert!(r.errors.is_empty(), "{r:?}");
+    }
+
+    /// `AUTO` is STORE only for a string `values:` that renders to a URI
+    /// (Kestra's `guessOutputMode`): a list is FETCH, an expression may be a URI.
+    #[test]
+    fn a_secret_output_under_auto_is_refused_only_with_a_string_values() {
+        let with_values = |values: &str| {
+            format!(
+                "{HEAD}tasks:\n  - id: w\n    type: io.kestra.plugin.core.storage.Write\n    content: x\n  - id: l\n    type: io.kestra.plugin.core.flow.Loop\n    values: {values}\n{SECRET}    tasks: [{{id: t, type: core.log, message: m}}]\n"
+            )
+        };
+        let refused = |src: &str| {
+            validate(&parse(src).unwrap()).errors.iter().any(|e| {
+                e.code == "loop_secret_output_stored" && e.message.contains("fetchType is AUTO")
+            })
+        };
+        assert!(refused(&with_values("\"{{ outputs.w.uri }}\"")));
+        assert!(refused(&with_values("\"kestra:///a/b/c.ion\"")));
+        assert!(!refused(&with_values("[a, b]")));
+        assert!(!refused(&with_values("'[\"a\", \"b\"]'")));
+        assert!(!refused(&with_values("{k: v}")));
+    }
+
+    fn new_execution_warnings(src: &str) -> Vec<String> {
+        validate(&parse(src).unwrap())
+            .warnings
+            .into_iter()
+            .filter(|w| w.code == "not_honoured" && w.message.contains("CREATE_NEW_EXECUTION"))
+            .map(|w| w.path)
+            .collect()
+    }
+
+    const CNE: &str =
+        "{type: constant, interval: PT1S, maxAttempts: 2, behavior: CREATE_NEW_EXECUTION}";
+
+    #[test]
+    fn a_new_execution_retry_reaching_a_loop_iteration_warns_at_its_behavior() {
+        // On the `Loop` itself.
+        let src = a_loop(&format!("    retry: {CNE}\n"));
+        assert_eq!(new_execution_warnings(&src), ["tasks.l.retry.behavior"]);
+        // On an ancestor of the `Loop`.
+        let src = format!(
+            "{HEAD}tasks:\n  - id: s\n    type: io.kestra.plugin.core.flow.Sequential\n    retry: {CNE}\n    tasks:\n      - id: l\n        type: io.kestra.plugin.core.flow.Loop\n        values: [a]\n        tasks: [{{id: t, type: core.log, message: m}}]\n"
+        );
+        assert_eq!(new_execution_warnings(&src), ["tasks.s.retry.behavior"]);
+        // On a task inside the body.
+        let src = format!(
+            "{HEAD}tasks:\n  - id: l\n    type: io.kestra.plugin.core.flow.Loop\n    values: [a]\n    tasks:\n      - id: t\n        type: core.log\n        message: m\n        retry: {CNE}\n"
+        );
+        assert_eq!(new_execution_warnings(&src), ["tasks.l.t.retry.behavior"]);
+        // On the flow, with a `Loop` in it.
+        let src = format!(
+            "{HEAD}retry: {CNE}\n{}",
+            a_loop("").trim_start_matches(HEAD)
+        );
+        assert_eq!(new_execution_warnings(&src), ["retry.behavior"]);
+    }
+
+    #[test]
+    fn a_new_execution_retry_that_reaches_no_loop_iteration_is_silent() {
+        // No `Loop` at all.
+        let src = format!(
+            "{HEAD}retry: {CNE}\ntasks:\n  - id: t\n    type: core.log\n    message: m\n    retry: {CNE}\n"
+        );
+        assert!(new_execution_warnings(&src).is_empty());
+        // The body task's own `RETRY_FAILED_TASK` retry shadows the `Loop`'s.
+        let src = format!(
+            "{HEAD}tasks:\n  - id: l\n    type: io.kestra.plugin.core.flow.Loop\n    values: [a]\n    retry: {CNE}\n    tasks:\n      - id: t\n        type: core.log\n        message: m\n        retry: {{type: constant, interval: PT1S, maxAttempts: 2}}\n"
+        );
+        assert!(new_execution_warnings(&src).is_empty());
+        // A `RETRY_FAILED_TASK` retry on the `Loop` is what package #6 runs.
+        let src = a_loop("    retry: {type: constant, interval: PT1S, maxAttempts: 2}\n");
+        assert!(new_execution_warnings(&src).is_empty());
     }
 }
