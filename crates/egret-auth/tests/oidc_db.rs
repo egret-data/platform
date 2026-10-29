@@ -648,3 +648,80 @@ async fn a_login_does_not_create_a_group_the_model_still_names() {
     expected.sort();
     assert_eq!(names_of(&db, user_id).await, expected);
 }
+
+/// a-i: a member who has not logged in for the window loses their OIDC group
+/// memberships, the drop recompiles what it moved, and a local membership and a
+/// recent member are untouched. The IdP change is only seen at login, so this is the
+/// only way a removed or renamed IdP group stops reaching a member who never returns.
+#[tokio::test]
+async fn a_member_who_has_not_logged_in_for_the_window_loses_only_their_oidc_groups() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let users = UserRepo::new(db.clone());
+    let groups = GroupRepo::new(db.clone());
+    let rc = Recorder::default();
+    let oidc_group = uniq("idp-grp");
+
+    let stale = provision_and_sync(
+        &users,
+        &groups,
+        &claims(
+            &uniq("sub"),
+            &format!("{}@idp.local", uniq("s")),
+            &[&oidc_group],
+        ),
+        &rc,
+    )
+    .await
+    .unwrap();
+    let recent = provision_and_sync(
+        &users,
+        &groups,
+        &claims(
+            &uniq("sub"),
+            &format!("{}@idp.local", uniq("r")),
+            &[&oidc_group],
+        ),
+        &rc,
+    )
+    .await
+    .unwrap();
+    let (local, local_gid) = local_group(&groups, "local-grp").await;
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(stale.0)
+        .bind(local_gid)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE users SET last_login_at = now() - interval '8 days' WHERE id = $1")
+        .bind(stale.0)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    rc.take();
+
+    let dropped = groups
+        .drop_stale_oidc_memberships(std::time::Duration::from_secs(7 * 24 * 3600), &rc)
+        .await
+        .unwrap();
+
+    assert!(dropped >= 1, "the stale member is dropped");
+    assert_eq!(
+        names_of(&db, stale).await,
+        vec![local.clone()],
+        "the stale member keeps only the local membership"
+    );
+    assert_eq!(
+        names_of(&db, recent).await,
+        vec![oidc_group.clone()],
+        "a member who logged in recently keeps the OIDC group"
+    );
+    assert!(
+        rc.take()
+            .iter()
+            .any(|c| matches!(c, Call::Lock(names) if names.contains(&oidc_group))),
+        "dropping the stale member's OIDC group recompiles what names it"
+    );
+}
