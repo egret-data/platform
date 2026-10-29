@@ -12015,3 +12015,300 @@ async fn a_loop_in_an_errors_or_finally_list_spawns_its_iteration(pool: sqlx::Pg
         serde_json::json!(["CREATED", "RUNNING", "FAILED"])
     );
 }
+
+// ---------------------------------------------------------------------------
+// Package #6 Task A3 (spec D1): a `Loop`'s `outputs:` evaluated at the end of
+// each iteration's sub-execution, after its `errors:`/`finally:`.
+// ---------------------------------------------------------------------------
+
+/// A `Loop` over `values` whose body is `body` (indented six spaces), with
+/// `extra` (indented four spaces: `outputs:`, `errors:`, `finally:`,
+/// `transmitFailed:`) on the `Loop` itself.
+fn loop_with(id: &str, values: &str, body: &str, extra: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: loop\n    \
+         type: io.kestra.plugin.core.flow.Loop\n    values: '{values}'\n    \
+         tasks:\n{body}{extra}"
+    )
+}
+
+/// A `Return` of `{{ item.value }}` as a loop body.
+const RETURN_BODY: &str =
+    "      - id: r\n        type: io.kestra.plugin.core.debug.Return\n        \
+                           format: \"{{ item.value }}\"\n";
+
+/// An output whose `value:` names a task no iteration runs: its render fails.
+const FAILING_OUTPUT: &str = "    outputs:\n      - id: v\n        type: STRING\n        \
+                              value: \"{{ outputs.nope.value }}\"\n";
+
+/// Every sub-execution's history, by `loop_index`.
+async fn iteration_histories(pool: &sqlx::PgPool, parent: Uuid) -> Vec<serde_json::Value> {
+    sqlx::query_scalar(
+        "SELECT history FROM workflow.executions \
+          WHERE parent_execution_id = $1 ORDER BY loop_index",
+    )
+    .bind(parent)
+    .fetch_all(pool)
+    .await
+    .expect("read iteration histories")
+}
+
+/// `(level, message)` of every log line stored on `execution`, in order.
+async fn execution_log_lines(pool: &sqlx::PgPool, execution: Uuid) -> Vec<(i16, String)> {
+    sqlx::query_as(
+        "SELECT level, message FROM workflow.task_logs WHERE execution_id = $1 ORDER BY id",
+    )
+    .bind(execution)
+    .fetch_all(pool)
+    .await
+    .expect("read log lines")
+}
+
+/// **Golden `valids/loop-outputs-failed-render`: a failing output render
+/// fails the iteration AFTER its terminal, and `transmitFailed` (default)
+/// stops the `Loop` there.** One sub-execution `CREATED RUNNING SUCCESS
+/// FAILED`, the `Loop` run and the execution FAILED, and the error is logged
+/// on the sub-execution (Kestra's `Failed to render output values: …`).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_loop_output_that_fails_to_render_fails_its_iteration_after_its_terminal(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let source = loop_with("lo-fail", r#"["a", "b", "c"]"#, RETURN_BODY, FAILING_OUTPUT);
+    let ex = start_execution(&pool, ws, None, &source, serde_json::json!({}))
+        .await
+        .expect("start execution");
+
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
+
+    assert_eq!(
+        iteration_histories(&pool, ex).await,
+        vec![serde_json::json!([
+            "CREATED", "RUNNING", "SUCCESS", "FAILED"
+        ])],
+        "one iteration, FAILED appended after the SUCCESS it reached; \
+         transmitFailed stops the other two"
+    );
+    assert_eq!(
+        run_state(&pool, ex, "loop").await.as_deref(),
+        Some("FAILED")
+    );
+    assert_eq!(
+        execution_history(&pool, ex).await,
+        serde_json::json!(["CREATED", "RUNNING", "FAILED"])
+    );
+    let child: Uuid =
+        sqlx::query_scalar("SELECT id FROM workflow.executions WHERE parent_execution_id = $1")
+            .bind(ex)
+            .fetch_one(&pool)
+            .await
+            .expect("the iteration");
+    let state: String = sqlx::query_scalar("SELECT state FROM workflow.executions WHERE id = $1")
+        .bind(child)
+        .fetch_one(&pool)
+        .await
+        .expect("iteration state");
+    assert_eq!(state, "FAILED", "the row's state follows its history");
+    let lines = execution_log_lines(&pool, child).await;
+    assert!(
+        lines.iter().any(|(level, m)| *level == 4
+            && m.starts_with("Failed to render output values: ")
+            && m.contains("`v`")),
+        "an ERROR line naming the output on the sub-execution: {lines:?}"
+    );
+}
+
+/// **`transmitFailed: false`: every iteration runs, each fails after its
+/// terminal, and the `Loop` succeeds** (the continuation's third branch,
+/// `valids/loop-failed-no-transmit`, now reached through an output).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_failing_loop_output_under_transmit_failed_false_lets_every_iteration_run(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let extra = format!("    transmitFailed: false\n{FAILING_OUTPUT}");
+    let source = loop_with("lo-fail-nt", r#"["a", "b", "c"]"#, RETURN_BODY, &extra);
+    let ex = start_execution(&pool, ws, None, &source, serde_json::json!({}))
+        .await
+        .expect("start execution");
+
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
+
+    let failed = serde_json::json!(["CREATED", "RUNNING", "SUCCESS", "FAILED"]);
+    assert_eq!(
+        iteration_histories(&pool, ex).await,
+        vec![failed.clone(), failed.clone(), failed]
+    );
+    assert_eq!(
+        run_state(&pool, ex, "loop").await.as_deref(),
+        Some("SUCCESS")
+    );
+    assert_eq!(
+        execution_history(&pool, ex).await,
+        serde_json::json!(["CREATED", "RUNNING", "SUCCESS"])
+    );
+}
+
+/// **The evaluation runs after the iteration's `errors:` and `finally:`**,
+/// on the sub-execution's surface: outputs that read a `finally:` task's
+/// output and an `errors:` task's output render, so no FAILED is appended.
+/// The control is [`a_loop_output_that_fails_to_render_fails_its_iteration_after_its_terminal`]:
+/// an output naming a task that did not run fails.
+#[sqlx::test(migrations = "../../migrations")]
+async fn loop_outputs_see_the_iterations_errors_and_finally_outputs(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let ret = |id: &str, f: &str| {
+        format!(
+            "      - id: {id}\n        type: io.kestra.plugin.core.debug.Return\n        \
+             format: \"{f}\"\n"
+        )
+    };
+    // Succeeding body: `finally:` only.
+    let extra = format!(
+        "    finally:\n{}    outputs:\n      - id: fin\n        type: STRING\n        \
+         value: \"{{{{ outputs.fin.value }}}}\"\n      - id: body\n        type: INT\n        \
+         value: \"{{{{ outputs.r.value }}}}\"\n",
+        ret("fin", "done-{{ item.value }}")
+    );
+    let source = loop_with("lo-fin", r#"["1", "2"]"#, RETURN_BODY, &extra);
+    let ex = start_execution(&pool, ws, None, &source, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    // Failing body: `errors:` and `finally:`.
+    let extra = format!(
+        "    errors:\n{}    finally:\n{}    transmitFailed: false\n    outputs:\n      \
+         - id: handled\n        type: STRING\n        value: \"{{{{ outputs.h.value }}}}\"\n      \
+         - id: fin\n        type: STRING\n        value: \"{{{{ outputs.fin.value }}}}\"\n",
+        ret("h", "handled-{{ item.value }}"),
+        ret("fin", "done-{{ item.value }}")
+    );
+    let failing = loop_with(
+        "lo-err",
+        r#"["1"]"#,
+        "      - id: f\n        type: io.kestra.plugin.core.execution.Fail\n",
+        &extra,
+    );
+    let ex_err = start_execution(&pool, ws, None, &failing, serde_json::json!({}))
+        .await
+        .expect("start execution");
+
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
+
+    let ok = serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]);
+    assert_eq!(iteration_histories(&pool, ex).await, vec![ok.clone(), ok]);
+    assert_eq!(
+        execution_history(&pool, ex).await,
+        serde_json::json!(["CREATED", "RUNNING", "SUCCESS"])
+    );
+    assert_eq!(
+        iteration_histories(&pool, ex_err).await,
+        vec![serde_json::json!(["CREATED", "RUNNING", "FAILED"])],
+        "the iteration failed in its body; its outputs, which read the errors: \
+         and finally: tasks, rendered, so no second FAILED"
+    );
+}
+
+/// **An optional output that fails to render is `null` and a WARN line on
+/// the sub-execution; the iteration still succeeds** (spec D2, Kestra's
+/// `Failed to render optional flow output`).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_failing_optional_loop_output_is_logged_and_does_not_fail_the_iteration(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let extra =
+        "    outputs:\n      - id: maybe\n        type: STRING\n        required: false\n        \
+                 value: \"{{ outputs.nope.value }}\"\n";
+    let source = loop_with("lo-opt", r#"["a"]"#, RETURN_BODY, extra);
+    let ex = start_execution(&pool, ws, None, &source, serde_json::json!({}))
+        .await
+        .expect("start execution");
+
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
+
+    assert_eq!(
+        iteration_histories(&pool, ex).await,
+        vec![serde_json::json!(["CREATED", "RUNNING", "SUCCESS"])]
+    );
+    let child: Uuid =
+        sqlx::query_scalar("SELECT id FROM workflow.executions WHERE parent_execution_id = $1")
+            .bind(ex)
+            .fetch_one(&pool)
+            .await
+            .expect("the iteration");
+    let lines = execution_log_lines(&pool, child).await;
+    assert!(
+        lines.iter().any(|(level, m)| *level == 3
+            && m.starts_with("Failed to render optional flow output 'maybe'")),
+        "a WARN line on the sub-execution: {lines:?}"
+    );
+}
+
+/// **A failure line masks the SECRET inputs it renders against.** The
+/// coercer's message quotes the value it could not convert (`Cannot convert
+/// value '<v>' to Integer`); here that value is a SECRET input the iteration
+/// inherits, so the stored line must hold the mask and never the value.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_loop_output_failure_line_masks_the_secret_inputs(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    egret_workflow::secret_inputs::install_for_tests();
+    let (_db, ws) = seed(&pool).await;
+    const PLAIN: &str = "hunter2-a3-0123";
+    let source = format!(
+        "id: lo-secret\nnamespace: t\ninputs:\n  - id: pw\n    type: SECRET\ntasks:\n  \
+         - id: loop\n    type: io.kestra.plugin.core.flow.Loop\n    values: '[\"a\"]'\n    \
+         tasks:\n{RETURN_BODY}    outputs:\n      - id: n\n        type: INT\n        \
+         value: \"{{{{ inputs.pw }}}}\"\n"
+    );
+    let ex = start_execution(&pool, ws, None, &source, serde_json::json!({"pw": PLAIN}))
+        .await
+        .expect("start execution");
+
+    settle_everything(
+        &pool,
+        &Handlers::with_core_tasks(egret_workflow::storage::current()),
+    )
+    .await;
+
+    assert_eq!(
+        iteration_histories(&pool, ex).await,
+        vec![serde_json::json!([
+            "CREATED", "RUNNING", "SUCCESS", "FAILED"
+        ])]
+    );
+    let child: Uuid =
+        sqlx::query_scalar("SELECT id FROM workflow.executions WHERE parent_execution_id = $1")
+            .bind(ex)
+            .fetch_one(&pool)
+            .await
+            .expect("the iteration");
+    let lines = execution_log_lines(&pool, child).await;
+    let line = lines
+        .iter()
+        .find(|(_, m)| m.starts_with("Failed to render output values: "))
+        .unwrap_or_else(|| panic!("the failure line: {lines:?}"));
+    assert!(
+        line.1.contains("'******'") && !line.1.contains(PLAIN),
+        "the coercer's quoted value is masked: {line:?}"
+    );
+}

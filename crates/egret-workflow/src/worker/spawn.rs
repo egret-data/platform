@@ -76,6 +76,7 @@ use crate::executor::{
     apply, plan_stored, resolve_loop_values, Command, ExecutionState, LoopValues, RunIx, RunState,
     TaskIx, TaskKind,
 };
+use crate::logs::LogLevel;
 use crate::models::{Flow, Task, TaskKind as ModelTaskKind};
 
 /// One [`Command::SpawnExecution`](crate::executor::Command::SpawnExecution),
@@ -516,10 +517,19 @@ async fn insert_iteration(
 ///   That reads like a defect in Kestra and no corpus entry reaches it; it is
 ///   reproduced because this is a differential oracle and a deliberate
 ///   divergence needs a reason better than "it looks wrong".
+///
+/// # `outputs` (package #6 Task A3, spec D1)
+///
+/// The iteration's typed `outputs:` map, as [`iteration_outputs`] evaluated
+/// it in the iteration's own settle -- `None` when the `Loop` declares no
+/// `outputs:` (or the report is not an iteration's, or the evaluation failed
+/// and `state` is therefore `FAILED`). Task A4 appends it to the `Loop` run's
+/// list under the lock taken below; until then it is carried and dropped.
 pub(super) async fn on_execution_terminal(
     conn: &mut PgConnection,
     execution_id: Uuid,
     state: RunState,
+    outputs: Option<crate::outputs::Typed>,
     caller: claim::Caller,
 ) -> Result<Option<claim::Job>> {
     // Async recursion: a loop body may itself contain a `Loop`
@@ -560,6 +570,7 @@ pub(super) async fn on_execution_terminal(
         conn,
         execution_id,
         state,
+        outputs,
         caller,
     ))
     .await
@@ -569,6 +580,9 @@ async fn on_execution_terminal_inner(
     conn: &mut PgConnection,
     execution_id: Uuid,
     child_state: RunState,
+    // Task A4 (spec D3, D4) appends it, under the parent lock `claim::load`
+    // takes below. A3 only carries it here.
+    _outputs: Option<crate::outputs::Typed>,
     caller: claim::Caller,
 ) -> Result<Option<claim::Job>> {
     let Some((parent_id, parent_run)) = parent_of(conn, execution_id).await? else {
@@ -649,6 +663,167 @@ async fn on_execution_terminal_inner(
     Ok(Some(claim::Job::Settle(Box::new(claim::Frame::loaded(
         ctx, before, state, now,
     )))))
+}
+
+/// What the end of one LOOP iteration's sub-execution evaluates: its `Loop`'s
+/// `outputs:` (package #6 Task A3, spec D1).
+#[derive(Debug)]
+pub(super) enum IterationEnd {
+    /// Not a `Loop` iteration, or its `Loop` declares no `outputs:`: nothing
+    /// was evaluated and the report carries no map.
+    NoOutputs,
+    /// The typed map, for [`on_execution_terminal`] to append (Task A4).
+    /// SECRET values are in clear here; nothing stores them yet (spec D9 is
+    /// Task B4's).
+    Typed(crate::outputs::Typed),
+    /// The evaluation failed (a required output's render, a coercion, or the
+    /// per-iteration cap). The error is already logged on the sub-execution;
+    /// the caller appends `FAILED` after the terminal and reports `FAILED`.
+    Failed,
+}
+
+/// **Evaluate a LOOP iteration's `outputs:` at its terminal** (package #6
+/// Task A3, spec D1; Kestra `DefaultExecutor`'s terminal block,
+/// `loop.computeIterationOutput(runContext, execution)`).
+///
+/// Called from `claim`'s outbox phase in the settle where the sub-execution
+/// becomes terminated, so after its `errors:`/`finally:` -- they run inside
+/// the sub-execution -- and on that settle's own render surface (its task
+/// outputs, `item`, the outputs it inherits from its loop ancestors). Kestra
+/// evaluates on **any** terminal (its block is not gated on the state), and
+/// so does this.
+///
+/// The `Loop` is read from the **parent's** source: the iteration's own flow
+/// ([`sub_flow_source`]) is the `Loop`'s body and does not hold it. One
+/// indexed read, done only for a row with a `loop_index` (a replay or a
+/// `Subflow` child has none, so neither evaluates anything here).
+///
+/// Every line it writes goes to the sub-execution's log, masked with the
+/// render context's redactions (the SECRET inputs it renders against):
+/// Kestra's `Failed to render output values: <cause>` at ERROR, and one WARN
+/// per optional output that failed to render (`Typed::warnings`).
+///
+/// **The cap (spec D4, Q5).** A map that serialises to more than
+/// [`MAX_LOOP_ITERATION_OUTPUT_BYTES`](crate::runners::env::MAX_LOOP_ITERATION_OUTPUT_BYTES)
+/// fails the iteration, naming `fetchType: STORE`. Not applied to an
+/// explicit `fetchType: STORE`, whose map Task A5 writes to storage instead;
+/// `AUTO`, which A5 resolves, is capped as FETCH until then.
+pub(super) async fn iteration_outputs(
+    conn: &mut PgConnection,
+    ctx: &claim::ExecutionCtx,
+    surface: &super::render::Surface,
+    state: &ExecutionState,
+) -> Result<IterationEnd> {
+    let Some(row) = sqlx::query(
+        "SELECT p.source, tr.task_id, c.loop_index \
+           FROM workflow.executions c \
+           JOIN workflow.executions p ON p.id = c.parent_execution_id \
+           JOIN workflow.task_runs tr \
+             ON tr.execution_id = p.id AND tr.run_ix = c.parent_run_ix \
+          WHERE c.id = $1 AND c.loop_index IS NOT NULL",
+    )
+    .bind(ctx.id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(db_err)?
+    else {
+        return Ok(IterationEnd::NoOutputs);
+    };
+    let parent_source: String = row.get("source");
+    let task_id: String = row.get("task_id");
+    let index: i32 = row.get("loop_index");
+    let flow = crate::spec::parse(&parent_source)
+        .map_err(|e| worker_err(WorkerError::Unplannable(ctx.id, e.message)))?;
+    let the_loop = match find_task(&flow, &task_id).map(|t| &t.kind) {
+        Some(ModelTaskKind::Loop(l)) => l,
+        _ => {
+            return Err(worker_err(WorkerError::Corrupt(
+                ctx.id,
+                format!("the iteration's run names task {task_id:?}, which is not a Loop of its parent's source"),
+            )))
+        }
+    };
+    if the_loop.outputs.is_empty() {
+        return Ok(IterationEnd::NoOutputs);
+    }
+
+    let cx = surface.context(&ctx.plan, state, None);
+    let redactions = cx.redactions().to_vec();
+    let evaluated = crate::outputs::evaluate(&cx, &the_loop.outputs);
+    let typed = match evaluated {
+        Ok(typed) => typed,
+        Err(e) => {
+            let message = format!("Failed to render output values: {e}");
+            log_on_execution(conn, ctx, LogLevel::Error, &message, &redactions).await?;
+            return Ok(IterationEnd::Failed);
+        }
+    };
+    for warning in &typed.warnings {
+        log_on_execution(conn, ctx, LogLevel::Warn, warning, &redactions).await?;
+    }
+    if the_loop.fetch_type() != crate::models::LoopFetchType::Store {
+        if let Err(message) = iteration_cap(index, &typed) {
+            log_on_execution(conn, ctx, LogLevel::Error, &message, &redactions).await?;
+            return Ok(IterationEnd::Failed);
+        }
+    }
+    Ok(IterationEnd::Typed(typed))
+}
+
+/// The per-iteration cap of spec D4: `Err` with the message when `typed`'s
+/// map serialises to more than
+/// [`MAX_LOOP_ITERATION_OUTPUT_BYTES`](crate::runners::env::MAX_LOOP_ITERATION_OUTPUT_BYTES).
+fn iteration_cap(index: i32, typed: &crate::outputs::Typed) -> std::result::Result<(), String> {
+    use crate::runners::env::{MAX_LOOP_ITERATION_OUTPUT_BYTES, MAX_LOOP_OUTPUTS_BYTES};
+    // `Map` serialises infallibly to a `Vec`; a length of 0 cannot pass a
+    // cap that is positive, so an impossible error reads as "no bytes".
+    let bytes = serde_json::to_vec(&typed.values).map_or(0, |v| v.len());
+    if bytes <= MAX_LOOP_ITERATION_OUTPUT_BYTES {
+        return Ok(());
+    }
+    Err(format!(
+        "Loop outputs of iteration {index} are {bytes} bytes; egret keeps at most {} MiB per \
+         iteration and {} MiB per Loop in the execution. Use fetchType: STORE to keep them in \
+         internal storage.",
+        MAX_LOOP_ITERATION_OUTPUT_BYTES >> 20,
+        MAX_LOOP_OUTPUTS_BYTES >> 20,
+    ))
+}
+
+/// One line about `ctx`'s execution itself (no task run), written to
+/// `workflow.task_logs` on `conn` -- inside the settle's transaction, so a
+/// settle that rolls back leaves no line -- masked with `redactions`
+/// (`logs::mask`) and split into [`LOG_PIECE_CHARS`](crate::logs::LOG_PIECE_CHARS)
+/// pieces as every stored line is. Also traced, as a handler's line is not:
+/// this one has no `RunLog`.
+async fn log_on_execution(
+    conn: &mut PgConnection,
+    ctx: &claim::ExecutionCtx,
+    level: LogLevel,
+    message: &str,
+    redactions: &[String],
+) -> Result<()> {
+    let masked = crate::logs::mask(message, redactions);
+    tracing::info!(execution = %ctx.id, level = level.as_str(), message = %masked, "loop iteration outputs");
+    let chars: Vec<char> = masked.chars().collect();
+    let pieces: Vec<String> = chars
+        .chunks(crate::logs::LOG_PIECE_CHARS)
+        .map(|c| c.iter().collect())
+        .collect();
+    sqlx::query(
+        "INSERT INTO workflow.task_logs (workspace_id, execution_id, level, ts, message) \
+         SELECT $1, $2, $3, $5, m \
+           FROM unnest($4::text[]) WITH ORDINALITY AS t(m, n) ORDER BY t.n",
+    )
+    .bind(ctx.workspace_id)
+    .bind(ctx.id)
+    .bind(level.as_i16())
+    .bind(&pieces)
+    .bind(chrono::Utc::now())
+    .execute(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    Ok(())
 }
 
 /// The loop's resolved iteration values, as
@@ -990,6 +1165,39 @@ fn worker_err(e: WorkerError) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn typed_with(value: serde_json::Value) -> crate::outputs::Typed {
+        let mut typed = crate::outputs::Typed::default();
+        typed.values.insert("big".into(), value);
+        typed
+    }
+
+    /// Package #6 A3 (spec D4, Q5): a map over 1 MiB fails its iteration with
+    /// the message that names the iteration, its size and `fetchType: STORE`;
+    /// a map exactly at the cap passes.
+    #[test]
+    fn an_iteration_map_over_one_mib_fails_naming_fetch_type_store() {
+        use crate::runners::env::MAX_LOOP_ITERATION_OUTPUT_BYTES as CAP;
+        // `{"big":"<s>"}` is `s.len() + 10` bytes.
+        let at_cap = typed_with(serde_json::Value::String("x".repeat(CAP - 10)));
+        assert_eq!(
+            serde_json::to_vec(&at_cap.values).unwrap().len(),
+            CAP,
+            "fixture"
+        );
+        assert_eq!(iteration_cap(2, &at_cap), Ok(()));
+
+        let over = typed_with(serde_json::Value::String("x".repeat(CAP - 9)));
+        assert_eq!(
+            iteration_cap(2, &over),
+            Err(format!(
+                "Loop outputs of iteration 2 are {} bytes; egret keeps at most 1 MiB per \
+                 iteration and 16 MiB per Loop in the execution. Use fetchType: STORE to keep \
+                 them in internal storage.",
+                CAP + 1
+            ))
+        );
+    }
 
     /// End hooks A7 (carry c): a `Loop` nested in the body, in `errors:` and
     /// in `finally:` of the Loop stays where it is, and the iteration source

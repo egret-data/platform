@@ -864,7 +864,11 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
         // 36 -> 35 baselined, 265 -> 266 matching at package #5b Task B7
         // (2026-10-29): `valids/errors` (`errorLogs()`) banks (spec D11);
         // 35 + 266 = 301.
-        (301, 266, 35),
+        // 35 -> 34 baselined, 266 -> 267 matching at package #6 Task A3
+        // (2026-10-29): `valids/loop-outputs-failed-render` banks (a `Loop`'s
+        // `outputs:` are evaluated at each iteration's terminal, spec D1);
+        // 34 + 267 = 301.
+        (301, 267, 34),
         "301 = matching + baselined, the total beside its parts. It read \
          167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries, W8 \
          Task 4 banked `valids/waitfor-nested`, W8 Task 5 banked seven \
@@ -3147,7 +3151,8 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
 // `valids/loop-object`, `valids/loop-object-in-list` and `valids/task-runif-taskswithstate`.
 // 126 -> 124 at package #5b Task B6 (2026-10-29, measured): the 2 run terminals of `valids/variables`.
 // 124 -> 117 at package #5b Task B7 (2026-10-29, measured): the 7 run terminals of `valids/errors`.
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 117;
+// 117 -> 115 at package #6 Task A3 (2026-10-29, measured): the 2 run terminals of `valids/loop-outputs-failed-render`.
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 115;
 /// 43 from W6 Task 4 to W9a Task 10; **40 since W9a Task 11** -- the three
 /// iterations of `valids/loop-values-from-uri`.
 // 40 -> 39 at WorkingDirectory Task 8: `working-directory-taskrun` has one
@@ -3161,7 +3166,8 @@ const TERMINALS_ON_BASELINED_ENTRIES: usize = 117;
 // `valids/disable-flowable`'s three.
 // 22 -> 16 at package #5b Task B2 (2026-10-29, measured): the six sub-executions of `valids/loop-object` and
 // `valids/loop-object-in-list`.
-const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 16;
+// 16 -> 15 at package #6 Task A3 (2026-10-29, measured): the one sub-execution of `valids/loop-outputs-failed-render`.
+const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 15;
 /// **165 through W8 Task 2, 157 after W8 Task 3, 156 after W8 Task 4, 149 after
 /// W8 Task 5, 147 now** -- the eight `Pause` entries W8 Task 3 banked, the one
 /// `LoopUntil` entry W8 Task 4 banked, W8 Task 5's seven and W8 Task 6's two.
@@ -3207,7 +3213,8 @@ const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 16;
 // `valids/loop-object`, `valids/loop-object-in-list` and `valids/task-runif-taskswithstate`, and the six sub-executions under the first two.
 // 52 -> 51 at package #5b Task B6 (2026-10-29, measured): the one execution of `valids/variables`.
 // 51 -> 50 at package #5b Task B7 (2026-10-29, measured): the one execution of `valids/errors`.
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 50;
+// 50 -> 48 at package #6 Task A3 (2026-10-29, measured): the top-level execution of `valids/loop-outputs-failed-render` and its one sub-execution.
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 48;
 /// **1703 through W8 Task 2, 1647 after W8 Task 3, 1610 after W8 Task 4, 1528
 /// now** -- 56 run-history tokens on Task 3's eight, 37 on
 /// `valids/waitfor-nested` (whose seven runs include three loops reading
@@ -3253,7 +3260,8 @@ const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 50;
 // `valids/loop-object`, `valids/loop-object-in-list` and `valids/task-runif-taskswithstate`.
 // 539 -> 531 at package #5b Task B6 (2026-10-29, measured): the 8 run-history tokens of `valids/variables`.
 // 531 -> 507 at package #5b Task B7 (2026-10-29, measured): the 24 run-history tokens of `valids/errors`.
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 507;
+// 507 -> 500 at package #6 Task A3 (2026-10-29, measured): the 7 run-history tokens of `valids/loop-outputs-failed-render`.
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 500;
 /// **665 through W8 Task 2, 617 after W8 Task 3, 562 after W8 Task 4, 526 after
 /// W8 Task 5, 522 now** -- 48 execution-history tokens on Task 3's eight, i.e.
 /// six apiece (every one of them reads `CREATED RUNNING PAUSED RESTARTED
@@ -3299,7 +3307,8 @@ const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 507;
 // `valids/loop-object`, `valids/loop-object-in-list` and `valids/task-runif-taskswithstate`.
 // 221 -> 218 at package #5b Task B6 (2026-10-29, measured): the 3 execution-history tokens of `valids/variables`.
 // 218 -> 215 at package #5b Task B7 (2026-10-29, measured): the 3 execution-history tokens of `valids/errors`.
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 215;
+// 215 -> 208 at package #6 Task A3 (2026-10-29, measured): the 7 execution-history tokens of `valids/loop-outputs-failed-render` (3 on the execution, 4 on its sub-execution).
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 208;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -4692,7 +4701,9 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
 // 22 -> 20 at package #5b Task B2 (2026-10-29, measured): two of the three entries it banked (spec D8,
 // `valids/loop-object`, `valids/loop-object-in-list`,
 // `valids/task-runif-taskswithstate`) differed on `execution`.
-const MISMATCH_ON_EXECUTION: usize = 20;
+// 20 -> 19 at package #6 Task A3 (2026-10-29, measured): `valids/loop-outputs-failed-render` banked --
+// its `Loop`'s failing `outputs:` fail the iteration after its terminal (spec D1).
+const MISMATCH_ON_EXECUTION: usize = 19;
 /// **112 through W8 Task 2, 104 after W8 Task 3, 103 after W8 Task 4, 96 after
 /// W8 Task 5, 94 now** -- the same eight, then `valids/waitfor-nested`, then
 /// the seven `allow*` entries, then W8 Task 6's two. The last pair differ on
@@ -4735,7 +4746,8 @@ const MISMATCH_ON_EXECUTION: usize = 20;
 // 28 -> 25 at package #5b Task B2 (2026-10-29, measured): `valids/loop-object`, `valids/loop-object-in-list` (`is json`) and `valids/task-runif-taskswithstate` (`is empty`) banked (D8).
 // 25 -> 24 at package #5b Task B6 (2026-10-29, measured): `valids/variables` banked (D9).
 // 24 -> 23 at package #5b Task B7 (2026-10-29, measured): `valids/errors` banked (D11).
-const MISMATCH_ON_RUNS: usize = 23;
+// 23 -> 22 at package #6 Task A3 (2026-10-29, measured): `valids/loop-outputs-failed-render` banked (D1).
+const MISMATCH_ON_RUNS: usize = 22;
 /// **72 through W8 Task 2, 67 after W8 Task 3, 64 now**: five of Task 3's eight
 /// carry an ordered pair, and W8 Task 4 closed THREE on one entry --
 /// `valids/waitfor-nested`'s `loop_1_return`/`loop_2`,
@@ -4824,7 +4836,9 @@ const RUNS_REFUSED: [&str; 4] = [
 // their sub-executions match now (`disable-flowable` differed on its three).
 // 5 -> 3 at package #5b Task B2 (2026-10-29, measured): `valids/loop-object` and `valids/loop-object-in-list` banked;
 // their sub-executions match now (each iteration's `Switch` answers `is json`).
-const MISMATCH_ON_SPAWNED: usize = 3;
+// 3 -> 2 at package #6 Task A3 (2026-10-29, measured): `valids/loop-outputs-failed-render` banked; its
+// one sub-execution reads `CREATED RUNNING SUCCESS FAILED` and no second starts.
+const MISMATCH_ON_SPAWNED: usize = 2;
 /// **122 through W8 Task 2, 114 after W8 Task 3, 113 now** -- the eight `Pause`
 /// entries Task 3 banked and the one `LoopUntil` entry Task 4 did. The
 /// `refused` half of the golden is untouched by either: no `Pause` or
@@ -4859,7 +4873,8 @@ const MISMATCH_ON_SPAWNED: usize = 3;
 // 39 -> 36 at package #5b Task B2 (2026-10-29, measured): `valids/loop-object`, `valids/loop-object-in-list` and `valids/task-runif-taskswithstate` banked (D8).
 // 36 -> 35 at package #5b Task B6 (2026-10-29, measured): `valids/variables` banked (D9).
 // 35 -> 34 at package #5b Task B7 (2026-10-29, measured): `valids/errors` banked (D11).
-const MISMATCHING_RUNS_ENTRIES: usize = 34;
+// 34 -> 33 at package #6 Task A3 (2026-10-29, measured): `valids/loop-outputs-failed-render` banked (D1).
+const MISMATCHING_RUNS_ENTRIES: usize = 33;
 /// **84 through W5; 63 after W6 Task 3, and 59 since W6 Task 4 corrected the
 /// classifier.**
 ///
@@ -5125,8 +5140,9 @@ async fn the_sub_executions_are_compared_and_this_is_what_they_cost() {
             // (2026-10-29), when `if-in-flowable` matched; 10 -> 8 at package #5a
             // Task A7 (2026-10-29), when `all-flowable` and `disable-flowable`
             // matched; 8 -> 6 at package #5b Task B2 (2026-10-29), when
-            // `loop-object` and `loop-object-in-list` matched.
-            6,
+            // `loop-object` and `loop-object-in-list` matched; 6 -> 5 at package #6
+            // Task A3 (2026-10-29), when `loop-outputs-failed-render` matched.
+            5,
             41
         ),
         "the 41 partitioned: how many MATCH, how many agree on everything the \
@@ -5146,7 +5162,8 @@ async fn the_sub_executions_are_compared_and_this_is_what_they_cost() {
 // 29 -> 30 at package #5a Task A6 (2026-10-29): `valids/if-in-flowable` banked.
 // 30 -> 32 at package #5a Task A7 (2026-10-29): `valids/all-flowable` and `valids/disable-flowable` banked.
 // 32 -> 34 at package #5b Task B2 (2026-10-29): `valids/loop-object` and `valids/loop-object-in-list` banked.
-const SPAWNED_ENTRIES_THAT_MATCH: usize = 34;
+// 34 -> 35 at package #6 Task A3 (2026-10-29): `valids/loop-outputs-failed-render` banked.
+const SPAWNED_ENTRIES_THAT_MATCH: usize = 35;
 
 /// And the names, which is what `baseline.txt`'s header attributes one by one.
 /// Sixteen banked at W3b Task 5, `valids/replay-loop` at the whole-branch
@@ -5177,6 +5194,9 @@ const SPAWNED_ENTRIES_THAT_MATCH_BY_NAME: &[&str] = &[
     // `item.value is json` as Kestra does.
     "valids/loop-object",
     "valids/loop-object-in-list",
+    // Package #6 Task A3 (2026-10-29): a failing `Loop` `outputs:` fails the
+    // first iteration after its terminal and `transmitFailed` stops the loop.
+    "valids/loop-outputs-failed-render",
     "valids/loop-parallel-equal",
     "valids/loop-parallel-less",
     "valids/loop-parallel-more",
@@ -5560,15 +5580,11 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
     // minijinja answered. Package #5a Task A2 (spec D1) made egret's `<`
     // Kestra's, and the entry banked;
     // `the_one_corpus_comparison_pebble_refuses_is_refused_here_too` pins it.)
-    // **Unclaimed: a `Loop`'s own `outputs:`.** `advance()` does not implement
-    // them, so a loop whose `outputs:` fails to render — Kestra FAILED it at
-    // the first iteration — succeeds here and runs the other two. Named as a
-    // cause of the residual baseline's `Loop` row and owned by nobody.
-    (
-        "valids/loop-outputs-failed-render",
-        "unclaimed: a `Loop`'s `outputs:` reading `{{ outputs.nonExistentTask.value }}`. Kestra \
-         FAILED the loop at iteration 1; egret runs 3",
-    ),
+    // (`valids/loop-outputs-failed-render` was here, "unclaimed: a `Loop`'s
+    // own `outputs:`": egret did not evaluate them, so the loop whose
+    // `outputs:` fail to render succeeded and ran three iterations where Kestra
+    // FAILED it at the first. Package #6 Task A3 (2026-10-29, spec D1)
+    // evaluates them at each iteration's terminal, and the entry banked.)
     // **W6 made a `Subflow` execute, and these five are what that revealed: an
     // over-acceptance that was already registered on the CHILD, now visible in
     // its PARENT.** None of them is a new divergence. Before W6 Task 3 the
@@ -5636,8 +5652,11 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
 // fails on `taskrun.value` in the first iteration).
 // 38 -> 40 / 3 -> 1 at package #5b Task B2 (2026-10-29, measured): `valids/loop-object` and
 // `valids/loop-object-in-list` spawn the sub-executions Kestra did.
-const TOP_LEVEL_SPAWN_KEYS_IDENTICAL: usize = 40;
-const TOP_LEVEL_SPAWN_KEYS_DIFFER: usize = 1;
+// 40 -> 41 / 1 -> 0 at package #6 Task A3 (2026-10-29, measured):
+// `valids/loop-outputs-failed-render` spawns the one sub-execution Kestra did
+// (its failing `outputs:` fail the first iteration and `transmitFailed` stops).
+const TOP_LEVEL_SPAWN_KEYS_IDENTICAL: usize = 41;
+const TOP_LEVEL_SPAWN_KEYS_DIFFER: usize = 0;
 
 /// **`concurrencyLimit` defaults to 1, and the corpus can tell** — the one
 /// measurement that separates it from `Parallel::concurrent`'s default of 0.
@@ -7516,7 +7535,10 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
             // when null, spec D7).
             // 9 -> 7 at package #5b Task B2 (2026-10-29): `valids/loop-object`
             // and `valids/loop-object-in-list` banked (`is json`, spec D8).
-            7,
+            // 7 -> 6 at package #6 Task A3 (2026-10-29):
+            // `valids/loop-outputs-failed-render` banked (a `Loop`'s failing
+            // `outputs:` fail the iteration, spec D1).
+            6,
             &["io.kestra.plugin.core.flow.Loop\n", "core.loop\n"],
         ),
         // **`Subflow` was a row here with 22 through W5, and W6 Task 3 removed
@@ -8298,7 +8320,9 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
         // does `valids/variables`.
         // (2, 34, 36) -> (2, 33, 35) at package #5b Task B7 (2026-10-29): nor
         // does `valids/errors`.
-        (2, 33, 35),
+        // (2, 33, 35) -> (2, 32, 34) at package #6 Task A3 (2026-10-29): nor
+        // does `valids/loop-outputs-failed-render`.
+        (2, 32, 34),
         "the baselined population that declares a `timeout:`, and the rest \
          ((2, 106, 108) until no-silent-stall Task 1 banked \
          `invalids/invalid-task`, which declares none). It \

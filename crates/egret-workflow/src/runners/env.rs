@@ -203,6 +203,17 @@ const RECURSION_LIMIT: usize = 64;
 /// does not have, for the same reason `rewrite::MAX_NESTING_DEPTH` is.
 pub(crate) const MAX_OUTPUT_BYTES: usize = 1 << 20;
 
+/// Package #6 (spec D4, user decision Q5): the most one `Loop` iteration's
+/// FETCH outputs map may serialise to, in bytes. Beyond it the iteration
+/// fails in its own settle (`worker::spawn::iteration_outputs`). Kestra has
+/// no cap; an egret-only limit, recorded in the spec's §6.
+pub(crate) const MAX_LOOP_ITERATION_OUTPUT_BYTES: usize = MAX_OUTPUT_BYTES;
+
+/// Package #6 (spec D4, Q5): the most the whole `outputs` list of one `Loop`
+/// run may serialise to, in bytes. Checked at the append, under the parent
+/// lock (Task A4); named in the per-iteration message too.
+pub(crate) const MAX_LOOP_OUTPUTS_BYTES: usize = 16 << 20;
+
 /// The stack every render gets, whoever called it.
 ///
 /// # Why the render owns a thread

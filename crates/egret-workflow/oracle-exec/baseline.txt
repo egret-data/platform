@@ -598,7 +598,7 @@ valids/if-in-parallel
 # `valids/loop-object` and `valids/loop-object-in-list` banked 2026-10-29 (package #5b Task B2, spec D8): a `Switch` inside the `Loop` renders `{{ item.value is json }}`; `json` was an unknown test here, so every iteration's `Switch` FAILED, where Kestra's `JsonTest` answers for a String and fails its `(String)` cast on a map. Both now fail and answer as Kestra. Not predicted by the plan.
 valids/loop-outputs
 valids/loop-outputs-auto
-valids/loop-outputs-failed-render
+# `valids/loop-outputs-failed-render` banked 2026-10-29 (package #6 Task A3, spec D1), as the plan predicted: a `Loop`'s `outputs:` are evaluated at each iteration's terminal; its `{{ outputs.nonExistentTask.value }}` fails, so the iteration's history is `CREATED RUNNING SUCCESS FAILED`, `transmitFailed` stops the loop after one sub-execution, and the loop and the execution FAIL as in Kestra.
 valids/loop-outputs-store
 valids/loop-until-restart
 valids/parallel-disabled-tasks

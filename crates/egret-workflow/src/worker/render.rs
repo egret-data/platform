@@ -9,6 +9,12 @@
 //! `taskrun`, `execution`, `flow`, the loop `item` and `tasksWithState()`. The
 //! W3b spec (§4.4) calls that gap the reason W3c's `runIf:` fix banks nothing
 //! and the reason `loop-outputs-auto` cannot resolve its `values:`.
+//! **Corrected 2026-10-29 (package #6 Task A3, spec §2.2 item 7): that second
+//! reason is history.** W9a Task 11 gave this surface the file scope, and
+//! `loop-outputs-auto`'s `values:` (a `Write`'s URI) resolves and spawns its
+//! three iterations, which match the golden (package #6 T0). What held that
+//! entry was its `Loop`'s `outputs:`, which nothing evaluated before package
+//! #6 (`spawn::iteration_outputs`).
 //!
 //! Until this module, **nothing in the worker rendered anything**: Task 2's
 //! Concern 2 and Task 3's Concern 4 both name it, and the consequence is not an
