@@ -188,6 +188,9 @@ pub(super) async fn open_batch(
     // branch. With every row in place the loop counts the whole batch as
     // started, as Kestra's does (it emits the batch before any
     // iteration runs), and waits for it.
+    if base == 0 {
+        init_counters(conn, ctx.id, parent_run, values.len(), batch.len()).await?;
+    }
     let mut jobs = Vec::with_capacity(batch.len() + 1);
     for (r, (index, value)) in batch.iter().zip(picked) {
         match insert_iteration(conn, ctx, parent_run, r.task, index, &value).await? {
@@ -524,7 +527,9 @@ async fn insert_iteration(
 /// it in the iteration's own settle -- `None` when the `Loop` declares no
 /// `outputs:` (or the report is not an iteration's, or the evaluation failed
 /// and `state` is therefore `FAILED`). Task A4 appends it to the `Loop` run's
-/// list under the lock taken below; until then it is carried and dropped.
+/// list under the lock taken below, beside the counters (spec D3, D4): see
+/// [`LoopRunBook`]. SECRET values are stored as the mask and sealed into
+/// `task_runs.secret_outputs` (spec D9, brought forward from Task B4).
 pub(super) async fn on_execution_terminal(
     conn: &mut PgConnection,
     execution_id: Uuid,
@@ -581,8 +586,8 @@ async fn on_execution_terminal_inner(
     execution_id: Uuid,
     child_state: RunState,
     // Task A4 (spec D3, D4) appends it, under the parent lock `claim::load`
-    // takes below. A3 only carries it here.
-    _outputs: Option<crate::outputs::Typed>,
+    // takes below.
+    outputs: Option<crate::outputs::Typed>,
     caller: claim::Caller,
 ) -> Result<Option<claim::Job>> {
     let Some((parent_id, parent_run)) = parent_of(conn, execution_id).await? else {
@@ -631,14 +636,62 @@ async fn on_execution_terminal_inner(
     let values = values_of(&ctx, &state, run)?;
     let started = spawned_count(conn, parent_id, run).await?;
     let terminated = terminated_count(conn, parent_id, run).await?;
+    let transmit = transmit_failed(&ctx, task)?;
+    let mut child = as_the_loop_reads_it(child_state);
 
-    let terminal = match decide(
-        transmit_failed(&ctx, task)?,
-        as_the_loop_reads_it(child_state),
-        started,
-        terminated,
-        values.len(),
-    ) {
+    // **The list, the counters and the total cap (package #6 Task A4, spec
+    // D3, D4; `LoopExecutionEventMessageHandler.handleTerminated`).** Under
+    // the parent row lock `claim::load` took above, so two iterations ending
+    // at once queue here and neither loses the other's entry.
+    //
+    // A terminal-in-error under `transmitFailed` ends the loop without
+    // touching either (Kestra's first branch: `terminateLoop` alone, so the
+    // counters stay as the last iteration that went the other way left them,
+    // and the failing iteration's outputs are not appended).
+    if !(transmit && terminated_in_error(child)) {
+        let mut book = LoopRunBook::load(conn, parent_id, run).await?;
+        let entry = match outputs.filter(|t| !t.values.is_empty()) {
+            Some(typed) => Some(iteration_entry(conn, execution_id, &state, run, typed).await?),
+            None => None,
+        };
+        // The 16 MiB total, decided here because only the parent sees the
+        // whole list: an over-cap iteration is a FAILED iteration, its
+        // entry not appended and the message logged on the `Loop` run (the
+        // sub-execution's own history is not rewritten after it ended).
+        let mut entry = entry;
+        if let Some(e) = &entry {
+            let cap = crate::outputs::loop_list_cap(ctx.workspace_id);
+            if let Err(message) = book.would_fit(e, cap) {
+                log_line(
+                    conn,
+                    ctx.workspace_id,
+                    parent_id,
+                    Some(book.run_id),
+                    LogLevel::Error,
+                    &message,
+                    &[],
+                )
+                .await?;
+                entry = None;
+                child = RunState::Failed;
+            }
+        }
+        if !(transmit && terminated_in_error(child)) {
+            let next = decide(transmit, child, started, terminated, values.len());
+            let started_after = started + usize::from(matches!(next, Next::Start(_)));
+            book.count(
+                values.len(),
+                started_after.saturating_sub(terminated),
+                child,
+            );
+            if let Some(e) = entry {
+                book.append(e);
+            }
+            book.store(conn).await?;
+        }
+    }
+
+    let terminal = match decide(transmit, child, started, terminated, values.len()) {
         Next::Terminate(s) => s,
         Next::Start(index) => {
             let value = match &values {
@@ -665,6 +718,289 @@ async fn on_execution_terminal_inner(
     )))))
 }
 
+/// One iteration's entry for its `Loop` run's list (spec D3): `{item: {value,
+/// iteration, key?}, outputs}`, with each SECRET value replaced by
+/// [`MASK`](crate::logs::MASK) and kept aside for sealing (spec D9).
+struct Entry {
+    entry: serde_json::Value,
+    secrets: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Build `typed`'s entry for the iteration `child` of loop run `run`.
+///
+/// `item.value` is the iteration's value as a string (its row's
+/// `loop_value`), `iteration` its 0-based index, and `key` present only for a
+/// MAP `values:` -- the nth key of the loop run's own `rendered` object, as
+/// `worker::render`'s `item.key` reads it (Kestra's `loopRun.key()`).
+async fn iteration_entry(
+    conn: &mut PgConnection,
+    child: Uuid,
+    state: &ExecutionState,
+    run: RunIx,
+    typed: crate::outputs::Typed,
+) -> Result<Entry> {
+    let (index, value): (i32, Option<String>) = sqlx::query_as(
+        "SELECT loop_index, loop_value FROM workflow.executions \
+          WHERE id = $1 AND loop_index IS NOT NULL",
+    )
+    .bind(child)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    let mut item = serde_json::Map::new();
+    item.insert(
+        "value".into(),
+        serde_json::Value::from(value.unwrap_or_default()),
+    );
+    item.insert("iteration".into(), serde_json::Value::from(index));
+    if let Some(key) = state.runs[run]
+        .rendered
+        .as_deref()
+        .and_then(|r| map_key(r, index))
+    {
+        item.insert("key".into(), serde_json::Value::String(key));
+    }
+    let mut values = typed.values;
+    let mut secrets = serde_json::Map::new();
+    for id in &typed.secret_ids {
+        if let Some(v) = values.get_mut(id) {
+            secrets.insert(
+                id.clone(),
+                std::mem::replace(v, serde_json::Value::from(crate::logs::MASK)),
+            );
+        }
+    }
+    Ok(Entry {
+        entry: serde_json::json!({"item": item, "outputs": values}),
+        secrets,
+    })
+}
+
+/// The `index`th key of a MAP `values:` rendered as `rendered`, or `None`
+/// for any other shape (a list, a file).
+fn map_key(rendered: &str, index: i32) -> Option<String> {
+    if !rendered.trim_start().starts_with('{') {
+        return None;
+    }
+    match serde_json::from_str::<serde_json::Value>(rendered).ok()? {
+        serde_json::Value::Object(m) => m.keys().nth(usize::try_from(index).ok()?).cloned(),
+        _ => None,
+    }
+}
+
+/// A `Loop` run's `task_runs.outputs` and `secret_outputs`, read and written
+/// under the parent lock (spec D3, D4): `iterationCount`,
+/// `runningIterations`, `terminatedIterations` (state name -> count) and,
+/// once an entry was appended, `outputs` (the list, in termination order).
+struct LoopRunBook {
+    execution: Uuid,
+    run: RunIx,
+    run_id: Uuid,
+    outputs: serde_json::Map<String, serde_json::Value>,
+    sealed: Option<serde_json::Map<String, serde_json::Value>>,
+    changed_secrets: bool,
+}
+
+impl LoopRunBook {
+    async fn load(conn: &mut PgConnection, execution: Uuid, run: RunIx) -> Result<Self> {
+        let (run_id, outputs, sealed): (Uuid, Option<serde_json::Value>, Option<Vec<u8>>) =
+            sqlx::query_as(
+                "SELECT id, outputs, secret_outputs FROM workflow.task_runs \
+                  WHERE execution_id = $1 AND run_ix = $2",
+            )
+            .bind(execution)
+            .bind(run as i32)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(db_err)?;
+        let outputs = match outputs {
+            Some(serde_json::Value::Object(m)) => m,
+            _ => serde_json::Map::new(),
+        };
+        let sealed = sealed
+            .as_deref()
+            .map(crate::secret_inputs::open_outputs)
+            .transpose()?;
+        Ok(Self {
+            execution,
+            run,
+            run_id,
+            outputs,
+            sealed,
+            changed_secrets: false,
+        })
+    }
+
+    fn list_len(&self) -> usize {
+        self.outputs
+            .get("outputs")
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len)
+    }
+
+    /// `Err(message)` when appending `e` takes the list past `cap` bytes
+    /// (spec D4's 16 MiB variant: it names the total).
+    fn would_fit(&self, e: &Entry, cap: usize) -> std::result::Result<(), String> {
+        let list = self
+            .outputs
+            .get("outputs")
+            .map_or(2, |l| serde_json::to_vec(l).map_or(0, |v| v.len()));
+        let entry = serde_json::to_vec(&e.entry).map_or(0, |v| v.len());
+        // `[]` plus the entry, plus one comma when the list is not empty.
+        let total = list + entry + usize::from(self.list_len() > 0);
+        if total <= cap {
+            return Ok(());
+        }
+        let iteration = e.entry["item"]["iteration"].as_i64().unwrap_or(-1);
+        Err(total_cap_message(iteration, total, cap))
+    }
+
+    /// The three counters after one more terminated iteration in `child`.
+    fn count(&mut self, iteration_count: usize, running: usize, child: RunState) {
+        let mut terminated = match self.outputs.remove("terminatedIterations") {
+            Some(serde_json::Value::Object(m)) => m,
+            _ => serde_json::Map::new(),
+        };
+        let n = terminated
+            .get(child.wire())
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        terminated.insert(child.wire().to_string(), serde_json::Value::from(n + 1));
+        self.outputs
+            .insert("iterationCount".into(), iteration_count.into());
+        self.outputs
+            .insert("runningIterations".into(), running.into());
+        self.outputs.insert(
+            "terminatedIterations".into(),
+            serde_json::Value::Object(terminated),
+        );
+    }
+
+    fn append(&mut self, e: Entry) {
+        let pos = self.list_len();
+        if !e.secrets.is_empty() {
+            self.sealed
+                .get_or_insert_with(serde_json::Map::new)
+                .insert(pos.to_string(), serde_json::Value::Object(e.secrets));
+            self.changed_secrets = true;
+        }
+        match self.outputs.get_mut("outputs") {
+            Some(serde_json::Value::Array(list)) => list.push(e.entry),
+            _ => {
+                self.outputs
+                    .insert("outputs".into(), serde_json::Value::Array(vec![e.entry]));
+            }
+        }
+    }
+
+    async fn store(self, conn: &mut PgConnection) -> Result<()> {
+        // Re-sealed only when this append added a SECRET value; otherwise
+        // the column is left as it is.
+        let sealed = match (&self.sealed, self.changed_secrets) {
+            (Some(m), true) => Some(crate::secret_inputs::seal_object(m)?),
+            _ => None,
+        };
+        sqlx::query(
+            "UPDATE workflow.task_runs \
+                SET outputs = $3, secret_outputs = COALESCE($4, secret_outputs) \
+              WHERE execution_id = $1 AND run_ix = $2",
+        )
+        .bind(self.execution)
+        .bind(self.run as i32)
+        .bind(serde_json::Value::Object(self.outputs))
+        .bind(sealed)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+}
+
+/// Spec D4's message for the 16 MiB total, naming it.
+fn total_cap_message(iteration: i64, total: usize, cap: usize) -> String {
+    use crate::runners::env::MAX_LOOP_ITERATION_OUTPUT_BYTES;
+    format!(
+        "Loop outputs of iteration {iteration} would bring the Loop's outputs to {total} bytes; \
+         egret keeps at most {} per iteration and {} per Loop in the execution. Use fetchType: \
+         STORE to keep them in internal storage.",
+        bytes_text(MAX_LOOP_ITERATION_OUTPUT_BYTES),
+        bytes_text(cap),
+    )
+}
+
+/// `n` as `<k> MiB` when it is a whole number of MiB, else `<n> bytes`.
+fn bytes_text(n: usize) -> String {
+    if n > 0 && n.is_multiple_of(1 << 20) {
+        format!("{} MiB", n >> 20)
+    } else {
+        format!("{n} bytes")
+    }
+}
+
+/// **The counters a `Loop` run carries from its first batch** (spec D4):
+/// Kestra's `ExecutorService` saves `iterationCount` (the number of values),
+/// `runningIterations` (the first batch) and an empty `terminatedIterations`
+/// when it starts the loop, and `handleTerminated` updates them. Written
+/// once, by the first batch (`base == 0`), and only onto a run with no
+/// outputs yet.
+async fn init_counters(
+    conn: &mut PgConnection,
+    execution: Uuid,
+    run: RunIx,
+    iteration_count: usize,
+    running: usize,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE workflow.task_runs SET outputs = $3 \
+          WHERE execution_id = $1 AND run_ix = $2 AND outputs IS NULL",
+    )
+    .bind(execution)
+    .bind(run as i32)
+    .bind(serde_json::json!({
+        "iterationCount": iteration_count,
+        "runningIterations": running,
+        "terminatedIterations": {},
+    }))
+    .execute(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    Ok(())
+}
+
+/// **A `Loop` with no values carries the counters too** (spec D4): Kestra
+/// saves `{iterationCount: 0, runningIterations: 0, terminatedIterations:
+/// {}}` and ends the run `SUCCESS` (`ExecutorService`, `init.totalCount() ==
+/// 0`). Called after a settle's `persist`: every `Loop` run this settle
+/// moved to `SUCCESS` whose resolved values are empty gets them.
+pub(super) async fn empty_loop_counters(
+    conn: &mut PgConnection,
+    ctx: &claim::ExecutionCtx,
+    before: &ExecutionState,
+    state: &ExecutionState,
+) -> Result<()> {
+    for (ix, r) in state.runs.iter().enumerate() {
+        if !matches!(ctx.plan.tasks[r.task].kind, TaskKind::Loop { .. })
+            || r.history.last() != Some(&RunState::Success)
+            || before
+                .runs
+                .get(ix)
+                .and_then(|b| b.history.last())
+                .is_some_and(|s| s.is_terminal())
+        {
+            continue;
+        }
+        let empty = r
+            .rendered
+            .as_deref()
+            .and_then(|x| resolve_loop_values(x).ok())
+            .is_some_and(|v| v.is_empty());
+        if empty {
+            init_counters(conn, ctx.id, ix, 0, 0).await?;
+        }
+    }
+    Ok(())
+}
+
 /// What the end of one LOOP iteration's sub-execution evaluates: its `Loop`'s
 /// `outputs:` (package #6 Task A3, spec D1).
 #[derive(Debug)]
@@ -673,8 +1009,8 @@ pub(super) enum IterationEnd {
     /// was evaluated and the report carries no map.
     NoOutputs,
     /// The typed map, for [`on_execution_terminal`] to append (Task A4).
-    /// SECRET values are in clear here; nothing stores them yet (spec D9 is
-    /// Task B4's).
+    /// SECRET values are in clear here, in memory only: the append masks and
+    /// seals them (spec D9).
     Typed(crate::outputs::Typed),
     /// The evaluation failed (a required output's render, a coercion, or the
     /// per-iteration cap). The error is already logged on the sub-execution;
@@ -703,11 +1039,21 @@ pub(super) enum IterationEnd {
 /// Kestra's `Failed to render output values: <cause>` at ERROR, and one WARN
 /// per optional output that failed to render (`Typed::warnings`).
 ///
+/// **SECRET and FILE (spec D9, D10; Task A4 brought both forward from Task
+/// B4, so no task of the package stores either unchecked).** A SECRET output
+/// with no master key installed fails the iteration naming the output and
+/// `secrets.master_key`; its value is masked in every line written after the
+/// evaluation. A FILE output whose value is not a readable file of this
+/// execution's loop family fails it with `egret refuses output <id>: <uri> is
+/// not a file of this execution` (`storage::inputs::check_file_outputs`).
+///
 /// **The cap (spec D4, Q5).** A map that serialises to more than
 /// [`MAX_LOOP_ITERATION_OUTPUT_BYTES`](crate::runners::env::MAX_LOOP_ITERATION_OUTPUT_BYTES)
-/// fails the iteration, naming `fetchType: STORE`. Not applied to an
-/// explicit `fetchType: STORE`, whose map Task A5 writes to storage instead;
-/// `AUTO`, which A5 resolves, is capped as FETCH until then.
+/// fails the iteration, naming `fetchType: STORE`. **Corrected 2026-10-29
+/// (Task A4):** A3 exempted an explicit `fetchType: STORE`, whose map Task A5
+/// will write to storage; A4 stores every map in the `Loop` run's list until
+/// A5 lands, so the cap now applies to every `fetchType`, and A5 puts its
+/// STORE branch before it.
 pub(super) async fn iteration_outputs(
     conn: &mut PgConnection,
     ctx: &claim::ExecutionCtx,
@@ -748,7 +1094,7 @@ pub(super) async fn iteration_outputs(
     }
 
     let cx = surface.context(&ctx.plan, state, None);
-    let redactions = cx.redactions().to_vec();
+    let redactions: Vec<String> = cx.redactions().to_vec();
     let evaluated = crate::outputs::evaluate(&cx, &the_loop.outputs);
     let typed = match evaluated {
         Ok(typed) => typed,
@@ -758,14 +1104,48 @@ pub(super) async fn iteration_outputs(
             return Ok(IterationEnd::Failed);
         }
     };
+    // The SECRET outputs' own values are masked too in every line written
+    // from here on (spec D9).
+    let mut redactions = redactions;
+    redactions.extend(typed.secret_ids.iter().filter_map(|id| {
+        typed.values.get(id).map(|v| match v {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        })
+    }));
     for warning in &typed.warnings {
         log_on_execution(conn, ctx, LogLevel::Warn, warning, &redactions).await?;
     }
-    if the_loop.fetch_type() != crate::models::LoopFetchType::Store {
-        if let Err(message) = iteration_cap(index, &typed) {
-            log_on_execution(conn, ctx, LogLevel::Error, &message, &redactions).await?;
-            return Ok(IterationEnd::Failed);
-        }
+    // **Spec D9, brought forward from Task B4 (Task A4 is the first writer of
+    // the map):** a SECRET value is stored only sealed, so a deployment with
+    // no master key refuses the output, naming it and the setting, as a
+    // SECRET input start is refused.
+    if !typed.secret_ids.is_empty() && !crate::secret_inputs::can_seal() {
+        let message = crate::secret_inputs::no_key_for_secret_outputs(&typed.secret_ids);
+        log_on_execution(conn, ctx, LogLevel::Error, &message, &redactions).await?;
+        return Ok(IterationEnd::Failed);
+    }
+    // **Spec D10 (Q4), brought forward from Task B4:** a FILE output names a
+    // file of this execution's loop family, or the iteration fails.
+    if let Err(message) = crate::storage::inputs::check_file_outputs(
+        conn,
+        ctx.workspace_id,
+        ctx.id,
+        &the_loop.outputs,
+        &typed.values,
+    )
+    .await?
+    {
+        log_on_execution(conn, ctx, LogLevel::Error, &message, &redactions).await?;
+        return Ok(IterationEnd::Failed);
+    }
+    // Applied to every `fetchType` until Task A5 writes STORE maps to
+    // storage (Task A4): until then every map, STORE's included, is stored in
+    // the `Loop` run's list, so the cap that guards the list guards it too.
+    // A5 places its STORE branch before this check.
+    if let Err(message) = iteration_cap(index, &typed) {
+        log_on_execution(conn, ctx, LogLevel::Error, &message, &redactions).await?;
+        return Ok(IterationEnd::Failed);
     }
     Ok(IterationEnd::Typed(typed))
 }
@@ -803,23 +1183,48 @@ async fn log_on_execution(
     message: &str,
     redactions: &[String],
 ) -> Result<()> {
+    log_line(
+        conn,
+        ctx.workspace_id,
+        ctx.id,
+        None,
+        level,
+        message,
+        redactions,
+    )
+    .await
+}
+
+/// [`log_on_execution`], on one task run of `execution` when `task_run` is
+/// set (the `Loop` run's own line, Task A4).
+async fn log_line(
+    conn: &mut PgConnection,
+    workspace: Uuid,
+    execution: Uuid,
+    task_run: Option<Uuid>,
+    level: LogLevel,
+    message: &str,
+    redactions: &[String],
+) -> Result<()> {
     let masked = crate::logs::mask(message, redactions);
-    tracing::info!(execution = %ctx.id, level = level.as_str(), message = %masked, "loop iteration outputs");
+    tracing::info!(execution = %execution, level = level.as_str(), message = %masked, "loop iteration outputs");
     let chars: Vec<char> = masked.chars().collect();
     let pieces: Vec<String> = chars
         .chunks(crate::logs::LOG_PIECE_CHARS)
         .map(|c| c.iter().collect())
         .collect();
     sqlx::query(
-        "INSERT INTO workflow.task_logs (workspace_id, execution_id, level, ts, message) \
-         SELECT $1, $2, $3, $5, m \
+        "INSERT INTO workflow.task_logs \
+                (workspace_id, execution_id, task_run_id, level, ts, message) \
+         SELECT $1, $2, $6, $3, $5, m \
            FROM unnest($4::text[]) WITH ORDINALITY AS t(m, n) ORDER BY t.n",
     )
-    .bind(ctx.workspace_id)
-    .bind(ctx.id)
+    .bind(workspace)
+    .bind(execution)
     .bind(level.as_i16())
     .bind(&pieces)
     .bind(chrono::Utc::now())
+    .bind(task_run)
     .execute(&mut *conn)
     .await
     .map_err(db_err)?;

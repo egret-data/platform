@@ -197,7 +197,7 @@ impl Surface {
 
         let flow = crate::spec::parse(&ctx.source).ok();
         // KI-112: the one reader that opens the sealed SECRET values.
-        let (posted, secrets) = crate::secret_inputs::reveal(
+        let (posted, mut secrets) = crate::secret_inputs::reveal(
             row.get("inputs"),
             row.get::<Option<Vec<u8>>, _>("secret_inputs").as_deref(),
         )?;
@@ -473,7 +473,7 @@ impl Surface {
             inheriting = inheriting && here.loop_index.is_some();
             if inheriting {
                 let rows = sqlx::query(
-                    "SELECT task_id, outputs, state FROM workflow.task_runs \
+                    "SELECT task_id, outputs, state, secret_outputs FROM workflow.task_runs \
                        WHERE execution_id = $1 ORDER BY run_ix",
                 )
                 .bind(id)
@@ -486,10 +486,16 @@ impl Surface {
                         continue;
                     }
                     let task_id: String = r.get("task_id");
+                    if inherited.contains_key(&task_id) {
+                        continue;
+                    }
                     let outputs: Option<Value> = r.get("outputs");
-                    inherited
-                        .entry(task_id)
-                        .or_insert_with(|| outputs.unwrap_or_else(|| json!({})));
+                    let outputs = reveal_run_outputs(
+                        outputs,
+                        r.get::<Option<Vec<u8>>, _>("secret_outputs").as_deref(),
+                        &mut secrets,
+                    )?;
+                    inherited.insert(task_id, outputs.unwrap_or_else(|| json!({})));
                 }
             }
             root = id;
@@ -532,7 +538,7 @@ impl Surface {
         let labels = labels_value(&labels_list, &system_label);
 
         let rows = sqlx::query(
-            "SELECT run_ix, id, outputs, created_at FROM workflow.task_runs \
+            "SELECT run_ix, id, outputs, created_at, secret_outputs FROM workflow.task_runs \
                WHERE execution_id = $1 ORDER BY run_ix",
         )
         .bind(ctx.id)
@@ -544,7 +550,11 @@ impl Surface {
         let mut ids = std::collections::BTreeMap::new();
         for r in &rows {
             let ix = r.get::<i32, _>("run_ix").max(0) as usize;
-            if let Some(o) = r.get::<Option<Value>, _>("outputs") {
+            if let Some(o) = reveal_run_outputs(
+                r.get::<Option<Value>, _>("outputs"),
+                r.get::<Option<Vec<u8>>, _>("secret_outputs").as_deref(),
+                &mut secrets,
+            )? {
                 own.insert(ix, o);
             }
             let at: chrono::DateTime<chrono::Utc> = r.get("created_at");
@@ -2059,6 +2069,25 @@ fn renders_at(plan: &Plan, task: usize) -> RunState {
 }
 
 /// Keeps the `sqlx::Error` as the source (see `spawn`'s).
+/// A task run's stored `outputs` with its sealed SECRET outputs put back
+/// (package #6 spec D9: a `Loop` run's list, Task A4), their values added to
+/// `secrets` so every line the run writes masks them. The render surface is
+/// the one reader that opens the column, as for SECRET inputs.
+fn reveal_run_outputs(
+    outputs: Option<Value>,
+    sealed: Option<&[u8]>,
+    secrets: &mut Vec<String>,
+) -> Result<Option<Value>> {
+    match (outputs, sealed) {
+        (Some(o), Some(sealed)) => {
+            let (o, values) = crate::secret_inputs::reveal_loop_outputs(o, Some(sealed))?;
+            secrets.extend(values);
+            Ok(Some(o))
+        }
+        (o, _) => Ok(o),
+    }
+}
+
 fn db_err(e: sqlx::Error) -> egret_core::Error {
     egret_core::Error::Internal(anyhow::Error::new(e))
 }

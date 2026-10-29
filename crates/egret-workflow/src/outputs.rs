@@ -191,6 +191,42 @@ fn typed_value(output: &FlowOutput, current: Value) -> Result<Value, OutputError
     }
 }
 
+/// The most one `Loop` run's `outputs` list may serialise to in
+/// `workspace`, in bytes (spec D4, Q5): [`MAX_LOOP_OUTPUTS_BYTES`]
+/// (16 MiB), unless a test lowered it for its own workspace
+/// ([`lower_loop_list_cap_for_tests`]), so a test of the cap needs no 16 MiB
+/// of data and no other test sees the lowered value.
+///
+/// [`MAX_LOOP_OUTPUTS_BYTES`]: crate::runners::env::MAX_LOOP_OUTPUTS_BYTES
+pub(crate) fn loop_list_cap(workspace: uuid::Uuid) -> usize {
+    #[cfg(any(test, feature = "test-util"))]
+    if let Some(n) = lowered_caps()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&workspace).copied())
+    {
+        return n;
+    }
+    let _ = workspace;
+    crate::runners::env::MAX_LOOP_OUTPUTS_BYTES
+}
+
+#[cfg(any(test, feature = "test-util"))]
+fn lowered_caps() -> &'static std::sync::Mutex<std::collections::HashMap<uuid::Uuid, usize>> {
+    static CAPS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<uuid::Uuid, usize>>,
+    > = std::sync::OnceLock::new();
+    CAPS.get_or_init(Default::default)
+}
+
+/// Test-only: lower [`loop_list_cap`] to `bytes` for `workspace` alone.
+#[cfg(any(test, feature = "test-util"))]
+pub fn lower_loop_list_cap_for_tests(workspace: uuid::Uuid, bytes: usize) {
+    if let Ok(mut m) = lowered_caps().lock() {
+        m.insert(workspace, bytes);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Against survey §2 items 3-4 (`renderOutputs` + `typedOutputs`).

@@ -1262,3 +1262,219 @@ async fn an_outage_while_collecting_is_a_worker_error_and_spends_no_attempt() {
     assert_eq!(attempts(&db.pool, ex, "w").await, before);
     assert_eq!(indexed_uris(&db.pool, ex).await.len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// Package #6 Task A4 (spec D10, user decision Q4; brought forward from Task
+// B4): a `Loop`'s FILE output publishes only a file of its execution's loop
+// family -- the loop root and its iterations -- once Task A4 stores it.
+// ---------------------------------------------------------------------------
+
+/// The `Loop` run `each`'s stored outputs in `execution`.
+async fn each_outputs(pool: &sqlx::PgPool, execution: Uuid) -> Option<serde_json::Value> {
+    sqlx::query_scalar(
+        "SELECT outputs FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'each'",
+    )
+    .bind(execution)
+    .fetch_one(pool)
+    .await
+    .expect("the loop run")
+}
+
+/// The one iteration of `root`: `(history, its log lines)`.
+async fn the_iteration(pool: &sqlx::PgPool, root: Uuid) -> (serde_json::Value, Vec<String>) {
+    let (id, history): (Uuid, serde_json::Value) = sqlx::query_as(
+        "SELECT id, history FROM workflow.executions WHERE parent_execution_id = $1",
+    )
+    .bind(root)
+    .fetch_one(pool)
+    .await
+    .expect("the iteration");
+    let lines = sqlx::query_scalar(
+        "SELECT message FROM workflow.task_logs WHERE execution_id = $1 ORDER BY id",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await
+    .expect("its lines");
+    (history, lines)
+}
+
+/// **Accepted: the iteration's own file, and its loop root's.** Both are in
+/// the iteration's loop family and indexed, so the entry carries both URIs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_loop_file_output_of_its_own_loop_family_is_kept() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let source = loop_source(
+        "file_out_own",
+        "  - id: w\n    type: io.kestra.plugin.core.log.Log\n    message: w\n",
+        "      - id: iw\n        type: io.kestra.plugin.core.log.Log\n        message: w\n",
+        "    outputs:\n      - id: own\n        type: FILE\n        value: \"{{ outputs.iw.uri }}\"\n      \
+         - id: root\n        type: FILE\n        value: \"{{ outputs.w.uri }}\"\n",
+    );
+    let root = start_execution(&db.pool, ws, None, &source, json!({}))
+        .await
+        .unwrap();
+    let root_file = finish_writing(&db.pool, &fs, ws, "file_out_own", "w", "r.txt", b"r").await;
+    let own_file = finish_writing(&db.pool, &fs, ws, "file_out_own", "iw", "i.txt", b"i").await;
+    drain(&db.pool).await;
+
+    let (history, lines) = the_iteration(&db.pool, root).await;
+    assert_eq!(
+        history,
+        json!(["CREATED", "RUNNING", "SUCCESS"]),
+        "{lines:?}"
+    );
+    assert_eq!(
+        each_outputs(&db.pool, root)
+            .await
+            .map(|o| o["outputs"].clone()),
+        Some(json!([
+            {"item": {"value": "x", "iteration": 0},
+             "outputs": {"own": own_file, "root": root_file}}
+        ]))
+    );
+    assert_eq!(run_of(&db.pool, root, "each").await.1, "SUCCESS");
+}
+
+/// **Refused: anything else**, each failing the iteration after its terminal
+/// (`CREATED RUNNING SUCCESS FAILED`) with `egret refuses output f: <uri> is
+/// not a file of this execution`, and nothing appended:
+///
+/// - a file of an unrelated execution of the same namespace;
+/// - a path that is not `kestra://`;
+/// - a file of the execution's TRIGGER execution -- readable by `read()`
+///   (the readability rule admits the trigger family) but not publishable as
+///   an output, which is the narrower rule of spec D10.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_loop_file_output_outside_its_loop_family_fails_the_iteration() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, fs)) = setup().await else {
+        return;
+    };
+    let other = format!(
+        "id: file_out_src\nnamespace: {NS}\ntasks:\n  - id: w\n    type: io.kestra.plugin.core.log.Log\n    message: w\n"
+    );
+    let src = start_execution(&db.pool, ws, None, &other, json!({}))
+        .await
+        .unwrap();
+    let foreign = finish_writing(&db.pool, &fs, ws, "file_out_src", "w", "u.txt", b"u").await;
+    drain(&db.pool).await;
+
+    let looping = |flow: &str, uri: &str| {
+        loop_source(
+            flow,
+            "",
+            "      - id: r\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n",
+            &format!("    outputs:\n      - id: f\n        type: FILE\n        value: \"{uri}\"\n"),
+        )
+    };
+    let mut roots = Vec::new();
+    for (flow, uri) in [
+        ("file_out_foreign", foreign.as_str()),
+        ("file_out_path", "file:///etc/passwd"),
+    ] {
+        let root = start_execution(&db.pool, ws, None, &looping(flow, uri), json!({}))
+            .await
+            .unwrap();
+        roots.push((root, uri.to_string()));
+    }
+    // Started by `src` as its trigger: `read('<foreign>')` works here.
+    let listener = looping("file_out_trigger", &foreign);
+    let mut conn = db.pool.acquire().await.unwrap();
+    let triggered = start_execution_in(
+        &mut conn,
+        NewExecution {
+            workspace_id: ws,
+            flow_id: None,
+            source: &listener,
+            inputs: json!({}),
+            trigger: None,
+            scheduled_date: None,
+            trigger_execution_id: Some(src),
+            execution_depth: 0,
+            flow_trigger_event_id: None,
+            born_failed: false,
+            replayed_from_execution_id: None,
+            id: None,
+            input_files: Vec::new(),
+            labels: None,
+            backfill_id: None,
+            variables: None,
+            started_by: None,
+        },
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    roots.push((triggered, foreign.clone()));
+    drain(&db.pool).await;
+
+    for (root, uri) in roots {
+        let (history, lines) = the_iteration(&db.pool, root).await;
+        assert_eq!(
+            history,
+            json!(["CREATED", "RUNNING", "SUCCESS", "FAILED"]),
+            "{uri}: {lines:?}"
+        );
+        let want = format!("egret refuses output f: {uri} is not a file of this execution");
+        assert!(lines.contains(&want), "{uri}: {lines:?}");
+        assert_eq!(run_of(&db.pool, root, "each").await.1, "FAILED", "{uri}");
+        assert!(
+            each_outputs(&db.pool, root)
+                .await
+                .is_some_and(|o| o.get("outputs").is_none()),
+            "{uri}: nothing appended"
+        );
+    }
+}
+
+/// **No master key: a SECRET `Loop` output fails the iteration, naming the
+/// output and the setting** (spec D9, brought forward to Task A4), rather
+/// than storing the value in clear. Here because this binary never installs
+/// a cipher (`secret_inputs::install_for_tests` is process-wide, and the
+/// worker suite installs it); the first assertion says so if that changes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_secret_loop_output_without_a_master_key_fails_the_iteration() {
+    let _turn = SERIAL.lock().await;
+    let Some((db, ws, _fs)) = setup().await else {
+        return;
+    };
+    assert!(
+        !egret_workflow::secret_inputs::can_seal(),
+        "this binary must run without a master key for this test to mean anything"
+    );
+    let source = loop_source(
+        "secret_out_nokey",
+        "",
+        "      - id: r\n        type: io.kestra.plugin.core.debug.Return\n        format: hush-a4\n",
+        "    outputs:\n      - id: s\n        type: SECRET\n        value: \"{{ outputs.r.value }}\"\n",
+    );
+    let root = start_execution(&db.pool, ws, None, &source, json!({}))
+        .await
+        .unwrap();
+    drain(&db.pool).await;
+
+    let (history, lines) = the_iteration(&db.pool, root).await;
+    assert_eq!(
+        history,
+        json!(["CREATED", "RUNNING", "SUCCESS", "FAILED"]),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("egret refuses output s:")
+                && l.contains("secrets.master_key")
+                && !l.contains("hush-a4")),
+        "{lines:?}"
+    );
+    assert_eq!(run_of(&db.pool, root, "each").await.1, "FAILED");
+    let stored = each_outputs(&db.pool, root).await.unwrap_or_default();
+    assert!(
+        !stored.to_string().contains("hush-a4"),
+        "nothing stored in clear: {stored}"
+    );
+}

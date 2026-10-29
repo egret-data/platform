@@ -297,6 +297,59 @@ pub async fn check_file_inputs(
     Ok(Ok(()))
 }
 
+/// **A FILE output publishes only a file of its own execution** (package #6,
+/// spec D10, user decision Q4; a recorded security divergence: Kestra OSS
+/// checks nothing).
+///
+/// Every non-`null` value of a `type: FILE` output in `values` must be a
+/// `kestra:///` URI whose `{exec}` is `execution` or another execution of its
+/// LOOP FAMILY ([`super::loop_family`]: the loop root and every iteration
+/// under it), and which resolves as readable there
+/// ([`super::resolve_readable_many`] over that family). That is narrower than
+/// the readability rule of a read, which also admits the replay chain and the
+/// trigger family: an output publishes a file, a read only consumes one.
+/// Anything else -- another execution, a malformed URI, a path that is not
+/// `kestra://`, a value that is not a string -- is
+/// `Ok(Err("egret refuses output <id>: <uri> is not a file of this execution"))`.
+/// `Err` is the database's.
+pub async fn check_file_outputs(
+    conn: &mut PgConnection,
+    workspace: Uuid,
+    execution: Uuid,
+    outputs: &[crate::models::FlowOutput],
+    values: &serde_json::Map<String, serde_json::Value>,
+) -> Result<std::result::Result<(), String>> {
+    let refuse = |id: &str, shown: &str| {
+        format!("egret refuses output {id}: {shown} is not a file of this execution")
+    };
+    let mut given: Vec<(&str, String)> = Vec::new();
+    for output in outputs.iter().filter(|o| o.r#type == Some(InputType::File)) {
+        match values.get(&output.id) {
+            None | Some(serde_json::Value::Null) => {}
+            Some(serde_json::Value::String(s)) => given.push((output.id.as_str(), s.clone())),
+            Some(other) => return Ok(Err(refuse(&output.id, kind_of(other)))),
+        }
+    }
+    if given.is_empty() {
+        return Ok(Ok(()));
+    }
+    let family = super::loop_family(conn, workspace, execution).await?;
+    let uris: Vec<String> = given.iter().map(|(_, v)| v.clone()).collect();
+    let resolved = super::resolve_readable_many(conn, workspace, &family, &uris).await?;
+    for (id, value) in &given {
+        match resolved.get(value) {
+            Some(Ok(_)) => {}
+            Some(Err(_)) => return Ok(Err(refuse(id, value))),
+            None => {
+                return Err(egret_core::Error::Internal(anyhow::anyhow!(
+                    "resolve_readable_many did not answer {value}"
+                )))
+            }
+        }
+    }
+    Ok(Ok(()))
+}
+
 fn kind_of(v: &serde_json::Value) -> &'static str {
     match v {
         serde_json::Value::Array(_) => "an array",

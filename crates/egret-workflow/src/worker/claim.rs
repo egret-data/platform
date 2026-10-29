@@ -3806,6 +3806,9 @@ async fn begin(
     // `persist` serialises, so they ride the same UPDATE as the terminal state.
     stamps::stamp_attempt_ends(before, state, now);
     persist(conn, ctx, before, state, release, &marks, seq).await?;
+    // Package #6 Task A4 (spec D4): a `Loop` with no values ends here, and
+    // carries its counters all the same.
+    spawn::empty_loop_counters(conn, ctx, before, state).await?;
     if !side.is_empty() {
         // Built and boxed in a SYNC callee: `settle` re-enters itself through
         // a `Subflow` chain, and a statement future built inline (even one

@@ -253,26 +253,121 @@ pub fn reveal(inputs: Value, sealed: Option<&[u8]>) -> Result<(Value, Vec<String
 }
 
 fn open(sealed: &[u8]) -> Result<Map<String, Value>> {
+    open_named(sealed, "inputs")
+}
+
+/// Open one sealed JSON object; `what` (`inputs`, `outputs`) names it in the
+/// errors.
+fn open_named(sealed: &[u8], what: &str) -> Result<Map<String, Value>> {
     let cipher = CIPHER.get().ok_or_else(|| {
         Error::Internal(anyhow::anyhow!(
-            "this execution has SECRET inputs and secrets.master_key is not set"
+            "this execution has SECRET {what} and secrets.master_key is not set"
         ))
     })?;
     if sealed.len() < NONCE_BYTES {
         return Err(Error::Internal(anyhow::anyhow!(
-            "the sealed SECRET inputs are truncated"
+            "the sealed SECRET {what} are truncated"
         )));
     }
     let (nonce, ct) = sealed.split_at(NONCE_BYTES);
     let text = cipher
         .open(nonce, ct)
-        .map_err(|e| Error::Internal(anyhow::anyhow!("opening SECRET inputs: {e}")))?;
+        .map_err(|e| Error::Internal(anyhow::anyhow!("opening SECRET {what}: {e}")))?;
     match serde_json::from_str(&text) {
         Ok(Value::Object(m)) => Ok(m),
         _ => Err(Error::Internal(anyhow::anyhow!(
-            "the sealed SECRET inputs are not an object"
+            "the sealed SECRET {what} are not an object"
         ))),
     }
+}
+
+// ---------------------------------------------------------------------------
+// SECRET outputs (package #6, spec D9): the same cipher, the same column
+// shape (`nonce || ciphertext` of one JSON object), for a `Loop` run's list
+// (`workflow.task_runs.secret_outputs`, migration 0211). Brought forward from
+// Task B4 to Task A4, which is the first writer of a `Loop`'s outputs: a
+// SECRET value is never stored in clear, not even for one task.
+// ---------------------------------------------------------------------------
+
+/// Whether this process can seal a SECRET value (`secrets.master_key` set).
+/// An evaluation that would store one refuses without it (spec D9), as a
+/// SECRET input start does.
+pub fn can_seal() -> bool {
+    CIPHER.get().is_some()
+}
+
+/// The refusal of a SECRET output on a deployment with no master key, naming
+/// the outputs and the setting (spec D9; [`split`]'s text for inputs).
+pub fn no_key_for_secret_outputs(ids: &[String]) -> String {
+    format!(
+        "egret refuses output {}: a SECRET output's value cannot be stored on this \
+         deployment: set secrets.master_key",
+        ids.join(", ")
+    )
+}
+
+/// Seal `object` (one JSON object) under the installed cipher, as
+/// [`split`] seals inputs. `Err` with no cipher installed: the caller checks
+/// [`can_seal`] at evaluation, so reaching this without one is an outage.
+pub(crate) fn seal_object(object: &Map<String, Value>) -> Result<Vec<u8>> {
+    seal_object_with(object, CIPHER.get())
+}
+
+fn seal_object_with(object: &Map<String, Value>, cipher: Option<&Crypto>) -> Result<Vec<u8>> {
+    let cipher = cipher.ok_or_else(|| {
+        Error::Internal(anyhow::anyhow!(
+            "sealing SECRET outputs: secrets.master_key is not set"
+        ))
+    })?;
+    let (nonce, ct) = cipher
+        .seal(&Value::Object(object.clone()).to_string())
+        .map_err(|e| Error::Internal(anyhow::anyhow!("sealing SECRET outputs: {e}")))?;
+    let mut sealed = nonce;
+    sealed.extend(ct);
+    Ok(sealed)
+}
+
+/// Open a `Loop` run's sealed SECRET outputs: `{list position: {output id:
+/// value}}`.
+pub fn open_outputs(sealed: &[u8]) -> Result<Map<String, Value>> {
+    open_named(sealed, "outputs")
+}
+
+/// A `Loop` run's stored `outputs` (`{…, outputs: [{item, outputs}, …]}`)
+/// with its sealed SECRET values put back at their list positions, and those
+/// values as strings, for masking what the run writes (as [`reveal`] for
+/// inputs). Only the worker's render surface calls it. A position the list
+/// does not hold (a list cleared since) is skipped.
+pub(crate) fn reveal_loop_outputs(
+    outputs: Value,
+    sealed: Option<&[u8]>,
+) -> Result<(Value, Vec<String>)> {
+    let Some(sealed) = sealed else {
+        return Ok((outputs, Vec::new()));
+    };
+    let opened = open_outputs(sealed)?;
+    let mut outputs = outputs;
+    let mut values = Vec::new();
+    for (pos, secret) in opened {
+        let (Ok(pos), Value::Object(secret)) = (pos.parse::<usize>(), secret) else {
+            continue;
+        };
+        let Some(Value::Object(entry)) = outputs
+            .get_mut("outputs")
+            .and_then(|l| l.get_mut(pos))
+            .and_then(|e| e.get_mut("outputs"))
+        else {
+            continue;
+        };
+        for (id, v) in secret {
+            values.push(match &v {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            });
+            entry.insert(id, v);
+        }
+    }
+    Ok((outputs, values))
 }
 
 #[cfg(test)]
@@ -312,6 +407,41 @@ mod tests {
         assert_eq!(
             reveal(json!({"who": "world"}), None).unwrap(),
             (json!({"who": "world"}), Vec::new())
+        );
+    }
+
+    #[test]
+    fn a_loop_runs_secret_outputs_are_sealed_by_position_and_revealed_there() {
+        install_for_tests();
+        let mut sealed = Map::new();
+        sealed.insert("1".into(), json!({"s": "hunter2-out"}));
+        let sealed = seal_object(&sealed).unwrap();
+        assert!(
+            !sealed.windows(11).any(|w| w == b"hunter2-out"),
+            "the column never holds the plaintext"
+        );
+        let stored = json!({"iterationCount": 2, "outputs": [
+            {"item": {"value": "a", "iteration": 0}, "outputs": {"s": MASK, "n": 1}},
+            {"item": {"value": "b", "iteration": 1}, "outputs": {"s": MASK, "n": 2}},
+        ]});
+        let (revealed, values) = reveal_loop_outputs(stored.clone(), Some(&sealed)).unwrap();
+        assert_eq!(revealed["outputs"][1]["outputs"]["s"], json!("hunter2-out"));
+        assert_eq!(revealed["outputs"][0]["outputs"]["s"], json!(MASK));
+        assert_eq!(values, vec!["hunter2-out".to_string()]);
+        assert_eq!(reveal_loop_outputs(stored.clone(), None).unwrap().0, stored);
+    }
+
+    #[test]
+    fn a_secret_output_cannot_be_sealed_without_a_key() {
+        let mut object = Map::new();
+        object.insert("0".into(), json!({"s": "v"}));
+        let err = seal_object_with(&object, None).unwrap_err().to_string();
+        assert!(err.contains("secrets.master_key"), "{err}");
+        let refusal = no_key_for_secret_outputs(&["s".to_string()]);
+        assert!(
+            refusal.starts_with("egret refuses output s:")
+                && refusal.contains("secrets.master_key"),
+            "{refusal}"
         );
     }
 
