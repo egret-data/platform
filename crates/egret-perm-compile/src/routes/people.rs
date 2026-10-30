@@ -267,7 +267,7 @@ pub(super) async fn read_user(
     tag = "perm",
     params(("name" = String, Path, description = "The group's name, as a grant principal stores it; `public` for everyone")),
     responses(
-        (status = 200, description = "The group: source, direct members (as the compiler reads them; service accounts included), the roles and workspaces it holds (egret only), `standsFor` and clearances. `public` answers `isPublic: true` with no members", body = GroupPrincipal),
+        (status = 200, description = "The group: source, direct members (as the compiler reads them; service accounts included), the roles and workspaces it holds (its members get them on engines too), `standsFor` and clearances. `public` answers `isPublic: true` with no members", body = GroupPrincipal),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read permission", body = ErrorBody),
         (status = 404, description = "No group has this name", body = ErrorBody),
@@ -292,7 +292,7 @@ pub(super) async fn read_group(
     tag = "perm",
     params(("name" = String, Path, description = "The role's name, across every scope defining it")),
     responses(
-        (status = 200, description = "The role: scopes, live holders that are users (as the compiler reads them; service accounts included), groups holding it (egret only), `standsFor` and clearances", body = RolePrincipal),
+        (status = 200, description = "The role: scopes, live holders that are users (as the compiler reads them; service accounts included), groups holding it (their members get it on engines too), `standsFor` and clearances", body = RolePrincipal),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read permission", body = ErrorBody),
         (status = 404, description = "No role has this name", body = ErrorBody),
