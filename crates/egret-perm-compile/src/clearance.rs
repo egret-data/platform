@@ -168,7 +168,9 @@ use crate::grants::{level, PolicyTarget};
 use crate::rules::{
     column_resources, group_by_table, stamp_service_type, TableTarget, TaggedColumn, PUBLIC_GROUP,
 };
-use crate::table_columns::{current_columns_batch_via, Leaving, TableColumns, TableKey};
+use crate::table_columns::{
+    active_tables_via, current_columns_batch_via, Leaving, TableColumns, TableKey,
+};
 use crate::trigger::{SkippedItem, SourceKind, DEFAULT_EXPANSION_CEILING};
 
 /// One `classification_policies` row joined to the tag it gates. A row whose
@@ -630,58 +632,121 @@ pub(crate) const HIDDEN_COLUMNS: [&str; 2] = ["_file", "_pos"];
 /// `masks` are the profile's data-mask bodies (`policyType 1`), compiler-made
 /// and hand-written alike.
 ///
-/// The deny is `public`, excepting the users who see CLEAR values on every
-/// masked column of the table: the intersection of each mask's `MASK_NONE`
-/// users. The intersection is the conservative choice. A user cleared for only
-/// some masked columns is refused `SELECT *` rather than handed a path. A mask
-/// whose table is not one exact name (a wildcard, an exclusion) names no table
-/// here, so it adds no deny; that gap is named in the spec.
-pub(crate) fn hidden_column_denies(
+/// **Which tables.** A mask that names one exact table denies that table. A
+/// mask whose selector is a wildcard or an exclusion denies every table it
+/// matches, found by enumerating the active tables of the catalogs its catalog
+/// level matches (the same Lakekeeper source the rest of the compile reads).
+/// A database scope is never denied as a whole: that would refuse `SELECT *` on
+/// unmasked tables in the same database. Fail closed: when a wildcard catalog
+/// selector matches no registered catalog, or a matched catalog has no
+/// warehouse to list, the compile is refused rather than guessed.
+///
+/// Each deny is `public`, excepting the users who see CLEAR values on every
+/// masked column of that table: the intersection of the `MASK_NONE` users of
+/// every mask that matches it. A user cleared for only some masked columns is
+/// refused `SELECT *` rather than handed a path.
+pub(crate) async fn hidden_column_denies(
+    conn: &mut sqlx::PgConnection,
     masks: &[Value],
     service: &str,
 ) -> Result<Vec<(String, Value)>, CompileError> {
-    // key → (the table's names, the users cleared on every masked column so far).
-    let mut tables: BTreeMap<String, (Vec<String>, Option<BTreeSet<String>>)> = BTreeMap::new();
-    for mask in masks {
-        let Some(names) = exact_table(mask) else {
-            continue;
-        };
-        let Some(items) = mask.get("dataMaskPolicyItems").and_then(Value::as_array) else {
-            continue;
-        };
-        let cleared: BTreeSet<String> = items
-            .iter()
-            .filter(|item| {
-                item.pointer("/dataMaskInfo/dataMaskType")
-                    .and_then(Value::as_str)
-                    == Some("MASK_NONE")
-            })
-            .flat_map(|item| {
-                item.get("users")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-            })
-            .filter_map(Value::as_str)
-            .map(str::to_string)
-            .collect();
-        let entry = tables
-            .entry(names.join("."))
-            .or_insert_with(|| (names.clone(), None));
-        entry.1 = Some(match entry.1.take() {
-            None => cleared,
-            Some(so_far) => so_far.intersection(&cleared).cloned().collect(),
-        });
+    use egret_ranger_eval::resource::fold_identifier as fold;
+
+    let sources = mask_sources(masks);
+    let mut tables: BTreeSet<[String; 3]> = BTreeSet::new();
+    let wildcard: Vec<&MaskSource> = sources
+        .iter()
+        .filter(|s| exact_triple(&s.selector).is_none())
+        .collect();
+    if !wildcard.is_empty() {
+        let catalogs: Vec<(Option<Uuid>, String)> =
+            sqlx::query_as("SELECT warehouse_id, name FROM registry.catalogs")
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(|e| CompileError::Db(e.to_string()))?;
+        let mut listed: HashMap<Uuid, Vec<(String, String)>> = HashMap::new();
+        for source in wildcard {
+            let matched: Vec<&(Option<Uuid>, String)> = catalogs
+                .iter()
+                .filter(|(_, name)| source.selector[0].matches(&fold(name)))
+                .collect();
+            if matched.is_empty() {
+                return Err(unenumerable(
+                    source,
+                    "no registered catalog matches its catalog level",
+                ));
+            }
+            for (warehouse, catalog) in matched {
+                let Some(warehouse) = warehouse else {
+                    return Err(unenumerable(source, "the matched catalog has no warehouse"));
+                };
+                if !listed.contains_key(warehouse) {
+                    let found = active_tables_via(&mut *conn, *warehouse).await?;
+                    listed.insert(*warehouse, found);
+                }
+                for (namespace, table) in &listed[warehouse] {
+                    tables.insert([fold(catalog), fold(namespace), fold(table)]);
+                }
+            }
+        }
     }
+    let tables: Vec<[String; 3]> = tables.into_iter().collect();
+    plan_hidden_denies(&sources, &tables, service)
+}
+
+/// The refusal for a wildcard mask whose tables cannot be listed.
+fn unenumerable(source: &MaskSource, reason: &str) -> CompileError {
+    CompileError::HiddenColumnsUnenumerable {
+        selector: source.selector_text(),
+        reason: reason.to_string(),
+    }
+}
+
+/// The pure half of [`hidden_column_denies`]: given the masks and the active
+/// tables of every catalog a wildcard mask can reach, one deny per table a mask
+/// matches. `tables` are folded `[catalog, database, table]` triples.
+fn plan_hidden_denies(
+    sources: &[MaskSource],
+    tables: &[[String; 3]],
+    service: &str,
+) -> Result<Vec<(String, Value)>, CompileError> {
+    let mut targets: BTreeSet<[String; 3]> = BTreeSet::new();
+    for source in sources {
+        if let Some(exact) = exact_triple(&source.selector) {
+            targets.insert(exact);
+        }
+    }
+    targets.extend(tables.iter().cloned());
 
     let accesses = withheld_accesses(EngineType::StarRocks)?;
     let mut out = Vec::new();
-    for (key, (names, exempt)) in tables {
-        let name = format!("{COMPILER_HIDDEN_PREFIX}{key}");
+    for target in targets {
+        let levels = target.each_ref().map(|name| Selected::literal(name));
+        let reaching: Vec<&MaskSource> = sources
+            .iter()
+            .filter(|s| {
+                s.selector
+                    .iter()
+                    .zip(&levels)
+                    .all(|(sel, lvl)| sel.matches(&lvl.values[0]))
+            })
+            .collect();
+        if reaching.is_empty() {
+            continue;
+        }
+        let exempt: BTreeSet<String> = reaching
+            .iter()
+            .map(|s| s.cleared.clone())
+            .reduce(|a, b| a.intersection(&b).cloned().collect())
+            .unwrap_or_default();
+        let name = format!(
+            "{COMPILER_HIDDEN_PREFIX}{}.{}.{}",
+            target[0], target[1], target[2]
+        );
         let resources = BTreeMap::from([
-            ("catalog".to_string(), level(names[0].clone())),
-            ("database".to_string(), level(names[1].clone())),
-            ("table".to_string(), level(names[2].clone())),
+            ("catalog".to_string(), levels[0].ranger()),
+            ("database".to_string(), levels[1].ranger()),
+            ("table".to_string(), levels[2].ranger()),
             (
                 "column".to_string(),
                 ResourceLevel {
@@ -696,7 +761,7 @@ pub(crate) fn hidden_column_denies(
             service.to_string(),
             resources,
             &accesses,
-            exempt.unwrap_or_default().into_iter().collect(),
+            exempt.into_iter().collect(),
         );
         out.push((
             name,
@@ -706,31 +771,172 @@ pub(crate) fn hidden_column_denies(
     Ok(out)
 }
 
-/// The `[catalog, database, table]` a mask names exactly, folded to lowercase
-/// (Ranger matches StarRocks names case-insensitively), or `None` for a
-/// wildcard, an exclusion, or a level with other than one value.
-fn exact_table(mask: &Value) -> Option<Vec<String>> {
-    ["catalog", "database", "table"]
-        .into_iter()
-        .map(|lvl| {
-            let r = mask.pointer(&format!("/resources/{lvl}"))?;
-            if r.get("isExcludes")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                return None;
-            }
-            let values = r.get("values")?.as_array()?;
-            let [only] = values.as_slice() else {
-                return None;
-            };
-            let v = only.as_str()?;
-            if v.contains('*') || v.contains('?') {
-                return None;
-            }
-            Some(v.to_ascii_lowercase())
+/// One data mask's table selector and the users it shows CLEAR values to.
+struct MaskSource {
+    selector: [Selected; 3],
+    cleared: BTreeSet<String>,
+}
+
+impl MaskSource {
+    /// `catalog.database.table` as the mask states it, for a refusal message.
+    fn selector_text(&self) -> String {
+        self.selector
+            .iter()
+            .map(Selected::text)
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+}
+
+/// Every mask with policy items, as its selector and its `MASK_NONE` users. A
+/// mask with no items masks nothing and contributes neither a deny nor an
+/// exception.
+fn mask_sources(masks: &[Value]) -> Vec<MaskSource> {
+    masks
+        .iter()
+        .filter_map(|mask| {
+            let items = mask.get("dataMaskPolicyItems").and_then(Value::as_array)?;
+            let cleared: BTreeSet<String> = items
+                .iter()
+                .filter(|item| {
+                    item.pointer("/dataMaskInfo/dataMaskType")
+                        .and_then(Value::as_str)
+                        == Some("MASK_NONE")
+                })
+                .flat_map(|item| {
+                    item.get("users")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                })
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect();
+            Some(MaskSource {
+                selector: selector(mask),
+                cleared,
+            })
         })
         .collect()
+}
+
+/// One level of a mask's `[catalog, database, table]` selector as Ranger reads
+/// it: its values folded to lowercase (Ranger matches StarRocks names
+/// case-insensitively), and whether it is an exclusion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Selected {
+    values: Vec<String>,
+    excludes: bool,
+}
+
+impl Selected {
+    /// Every name at this level: what an absent or empty level means.
+    fn any() -> Self {
+        Self {
+            values: vec!["*".to_string()],
+            excludes: false,
+        }
+    }
+
+    /// A single literal name at this level.
+    fn literal(name: &str) -> Self {
+        Self {
+            values: vec![name.to_string()],
+            excludes: false,
+        }
+    }
+
+    /// The level as the mask states it. A level that is absent, empty, or holds
+    /// a non-string is read as [`Selected::any`]: the wider reading, so the
+    /// deny it feeds errs toward denying.
+    fn from_mask(mask: &Value, level: &str) -> Self {
+        let Some(r) = mask.pointer(&format!("/resources/{level}")) else {
+            return Self::any();
+        };
+        let values: Option<Vec<String>> =
+            r.get("values").and_then(Value::as_array).and_then(|vs| {
+                vs.iter()
+                    .map(|v| v.as_str().map(str::to_ascii_lowercase))
+                    .collect()
+            });
+        match values {
+            Some(values) if !values.is_empty() => Self {
+                values,
+                excludes: r
+                    .get("isExcludes")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            },
+            _ => Self::any(),
+        }
+    }
+
+    /// Whether the (folded) `name` is in this level: some value matches it as a
+    /// Ranger glob, inverted for an exclusion.
+    fn matches(&self, name: &str) -> bool {
+        let hit = self.values.iter().any(|v| glob_matches(v, name));
+        hit != self.excludes
+    }
+
+    fn has_wildcard(&self) -> bool {
+        self.values
+            .iter()
+            .any(|v| v.contains('*') || v.contains('?'))
+    }
+
+    fn text(&self) -> String {
+        let bang = if self.excludes { "!" } else { "" };
+        format!("{bang}{}", self.values.join(","))
+    }
+
+    fn ranger(&self) -> ResourceLevel {
+        ResourceLevel {
+            values: self.values.clone(),
+            is_excludes: self.excludes,
+            is_recursive: false,
+        }
+    }
+}
+
+/// The `[catalog, database, table]` selector a data mask names.
+fn selector(mask: &Value) -> [Selected; 3] {
+    ["catalog", "database", "table"].map(|lvl| Selected::from_mask(mask, lvl))
+}
+
+/// The folded `[catalog, database, table]` a selector names exactly, or `None`
+/// for a wildcard, an exclusion, or a level with other than one value.
+fn exact_triple(selector: &[Selected; 3]) -> Option<[String; 3]> {
+    if selector
+        .iter()
+        .any(|s| s.excludes || s.has_wildcard() || s.values.len() != 1)
+    {
+        return None;
+    }
+    Some(selector.each_ref().map(|s| s.values[0].clone()))
+}
+
+/// Ranger's glob for one name: `*` matches any run of characters, `?` one.
+fn glob_matches(pattern: &str, text: &str) -> bool {
+    let (p, t): (Vec<char>, Vec<char>) = (pattern.chars().collect(), text.chars().collect());
+    let (mut pi, mut ti) = (0, 0);
+    let (mut star, mut resume) = (None::<usize>, 0);
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            resume = ti;
+            pi += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            resume += 1;
+            ti = resume;
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|&c| c == '*')
 }
 
 /// The access type that lets a user store a query result as a materialized
@@ -979,14 +1185,31 @@ mod tests {
         assert_eq!(got[0].1.items[0].groups, vec!["public"]);
     }
 
-    /// A data-mask body on `catalog.database.table`, column `column`, whose
+    /// A data-mask body on `demo.sales.table`, column `column`, whose
     /// `MASK_NONE` outcome names `cleared`.
     fn mask_on(table: &str, column: &str, cleared: &[&str]) -> Value {
+        mask_at(
+            json!({"values": ["demo"]}),
+            json!({"values": ["sales"]}),
+            table,
+            column,
+            cleared,
+        )
+    }
+
+    /// As [`mask_on`], with the catalog and database levels given verbatim.
+    fn mask_at(
+        catalog: Value,
+        database: Value,
+        table: &str,
+        column: &str,
+        cleared: &[&str],
+    ) -> Value {
         json!({
             "policyType": 1,
             "resources": {
-                "catalog": {"values": ["demo"]},
-                "database": {"values": ["sales"]},
+                "catalog": catalog,
+                "database": database,
                 "table": {"values": [table]},
                 "column": {"values": [column]}
             },
@@ -1005,11 +1228,27 @@ mod tests {
         })
     }
 
+    /// A folded `[catalog, database, table]` triple, for the enumerated list.
+    fn tbl(catalog: &str, database: &str, table: &str) -> [String; 3] {
+        [catalog, database, table].map(str::to_string)
+    }
+
+    fn plan(masks: &[Value], tables: &[[String; 3]]) -> Vec<(String, Value)> {
+        plan_hidden_denies(&mask_sources(masks), tables, "sr").expect("plans")
+    }
+
+    fn named<'a>(got: &'a [(String, Value)], name: &str) -> &'a Value {
+        &got.iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("no deny named {name}: {got:?}"))
+            .1
+    }
+
     /// §11.4: a masked table gets one deny on the hidden columns, `public`
     /// denied, the cleared users excepted.
     #[test]
     fn a_masked_table_denies_public_the_hidden_columns_but_not_the_cleared() {
-        let got = hidden_column_denies(&[mask_on("t", "ssn", &["ann"])], "sr").expect("denies");
+        let got = plan(&[mask_on("t", "ssn", &["ann"])], &[]);
         assert_eq!(got.len(), 1, "{got:?}");
         let (name, body) = &got[0];
         assert_eq!(name, "perm-hidden-demo.sales.t");
@@ -1029,21 +1268,107 @@ mod tests {
             mask_on("t", "ssn", &["ann", "bob"]),
             mask_on("t", "email", &["bob"]),
         ];
-        let got = hidden_column_denies(&masks, "sr").expect("denies");
+        let got = plan(&masks, &[]);
         assert_eq!(got.len(), 1, "{got:?}");
         assert_eq!(got[0].1["denyExceptions"][0]["users"], json!(["bob"]));
     }
 
-    /// A wildcard table names no one table, so it adds no deny (the spec
-    /// names this gap).
+    /// A wildcard table denies each table it matches, not the database scope:
+    /// the unmasked `other` keeps its `SELECT *`.
     #[test]
-    fn a_wildcard_table_mask_adds_no_deny() {
-        let got = hidden_column_denies(&[mask_on("t*", "ssn", &["ann"])], "sr").expect("denies");
-        assert!(got.is_empty(), "{got:?}");
+    fn a_wildcard_table_mask_denies_each_matched_table_and_no_scope() {
+        let tables = [
+            tbl("demo", "sales", "t1"),
+            tbl("demo", "sales", "t2"),
+            tbl("demo", "sales", "other"),
+        ];
+        let got = plan(&[mask_on("t*", "ssn", &["ann"])], &tables);
+        let names: Vec<&str> = got.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            ["perm-hidden-demo.sales.t1", "perm-hidden-demo.sales.t2"]
+        );
+        assert_eq!(
+            named(&got, "perm-hidden-demo.sales.t1")["denyExceptions"][0]["users"],
+            json!(["ann"])
+        );
+    }
+
+    /// An excluded database matches the tables outside it only: `hr` is not
+    /// denied, `sales` is.
+    #[test]
+    fn an_excluded_database_denies_only_the_tables_outside_it() {
+        let masks = [mask_at(
+            json!({"values": ["demo"]}),
+            json!({"values": ["hr"], "isExcludes": true}),
+            "t*",
+            "ssn",
+            &["ann"],
+        )];
+        let tables = [tbl("demo", "sales", "t1"), tbl("demo", "hr", "t1")];
+        let got = plan(&masks, &tables);
+        let names: Vec<&str> = got.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["perm-hidden-demo.sales.t1"]);
+    }
+
+    /// A wildcard mask on `sales` does not narrow the exception of the exact
+    /// `hr` table deny: a mask on another database is disjoint from it.
+    #[test]
+    fn a_mask_on_another_database_does_not_narrow_its_deny() {
+        let masks = [
+            mask_at(
+                json!({"values": ["demo"]}),
+                json!({"values": ["hr"]}),
+                "t",
+                "ssn",
+                &[],
+            ),
+            mask_on("t*", "ssn", &["ann"]),
+        ];
+        let tables = [tbl("demo", "sales", "t1")];
+        let got = plan(&masks, &tables);
+        assert_eq!(
+            named(&got, "perm-hidden-demo.sales.t1")["denyExceptions"][0]["users"],
+            json!(["ann"])
+        );
+        assert_eq!(
+            named(&got, "perm-hidden-demo.hr.t")["denyExceptions"][0]["users"],
+            json!([])
+        );
+    }
+
+    /// A wildcard mask matches the exact table deny too, so the exception of
+    /// that table is only the users cleared on both masks.
+    #[test]
+    fn a_wildcard_mask_narrows_the_exact_table_deny_it_matches() {
+        let masks = [
+            mask_on("t", "ssn", &["ann", "bob"]),
+            mask_on("t*", "email", &["bob"]),
+        ];
+        let got = plan(&masks, &[]);
+        assert_eq!(
+            named(&got, "perm-hidden-demo.sales.t")["denyExceptions"][0]["users"],
+            json!(["bob"])
+        );
+    }
+
+    #[test]
+    fn a_wildcard_with_no_listed_table_adds_no_deny() {
+        assert!(plan(&[mask_on("t*", "ssn", &["ann"])], &[]).is_empty());
     }
 
     #[test]
     fn no_mask_means_no_hidden_deny() {
-        assert!(hidden_column_denies(&[], "sr").expect("denies").is_empty());
+        assert!(plan(&[], &[tbl("demo", "sales", "t1")]).is_empty());
+    }
+
+    #[test]
+    fn glob_matches_ranger_stars_and_question_marks() {
+        assert!(glob_matches("t*", "t1"));
+        assert!(glob_matches("*", ""));
+        assert!(glob_matches("a*b*c", "axxbyyc"));
+        assert!(glob_matches("t?", "t1"));
+        assert!(!glob_matches("t?", "t"));
+        assert!(!glob_matches("t*", "x1"));
     }
 }

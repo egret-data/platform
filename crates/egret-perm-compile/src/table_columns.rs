@@ -432,6 +432,27 @@ pub async fn table_states_ns_via(
 /// of the active table `schema.table`, `None` when there is none. The table
 /// hook compares it before and after a rename Lakekeeper answered non-2xx, to
 /// tell whether the rename committed anyway (review finding 4).
+/// Every active table of one egret warehouse, as `(namespace, table)` in the
+/// catalog's own spelling: the enumeration a wildcard data mask is planned
+/// against, since a Ranger wildcard names no table itself. Same "active"
+/// predicate as the column reads above.
+pub async fn active_tables_via(
+    conn: &mut sqlx::PgConnection,
+    warehouse_id: Uuid,
+) -> Result<Vec<(String, String)>, CompileError> {
+    sqlx::query_as(
+        "SELECT ti.tabular_namespace_name[1], ti.name \
+           FROM catalog.warehouses w \
+           JOIN lakekeeper.tabular ti ON ti.warehouse_id::text = w.lakekeeper_warehouse_id \
+          WHERE w.id = $1 AND ti.typ = 'table' AND ti.deleted_at IS NULL \
+            AND ti.metadata_location IS NOT NULL AND cardinality(ti.tabular_namespace_name) = 1",
+    )
+    .bind(warehouse_id)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|e| CompileError::Db(e.to_string()))
+}
+
 pub async fn live_tabular_id_via(
     conn: &mut sqlx::PgConnection,
     warehouse_id: Uuid,

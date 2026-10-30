@@ -646,7 +646,7 @@ async fn compile_desired(
                             .is_some_and(egret_policy::is_compiler_owned_policy_name)
                 }),
         );
-        for (name, body) in crate::clearance::hidden_column_denies(&masks, &svc.name)? {
+        for (name, body) in crate::clearance::hidden_column_denies(conn, &masks, &svc.name).await? {
             desired.insert(
                 (service_id, name),
                 DesiredPolicy {
