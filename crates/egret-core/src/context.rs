@@ -17,12 +17,25 @@ pub struct Impersonator {
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// The platform role that holds every platform permission. Held directly or
+/// through a group: [`Principal::platform_roles`] carries both.
+pub const PLATFORM_ADMIN_ROLE: &str = "platform_admin";
+
+/// Whether a set of platform role names includes [`PLATFORM_ADMIN_ROLE`]: the
+/// one predicate for "is a platform admin", for callers that hold a role list
+/// rather than a [`Principal`] (an impersonation target's roles, a re-check at
+/// an OIDC callback).
+pub fn holds_platform_admin(platform_roles: &[String]) -> bool {
+    platform_roles.iter().any(|r| r == PLATFORM_ADMIN_ROLE)
+}
+
 /// The authenticated caller.
 #[derive(Debug, Clone)]
 pub struct Principal {
     pub user_id: UserId,
     pub email: String,
-    /// Platform-level roles (e.g. `platform_admin`, `data_steward`).
+    /// Platform-level roles (e.g. `platform_admin`, `data_steward`), held
+    /// directly or through a group, unexpired (`SessionService::validate`).
     pub platform_roles: Vec<String>,
     /// Effective permission keys resolved at session build.
     pub permissions: Vec<String>,
@@ -30,6 +43,14 @@ pub struct Principal {
     pub group_ids: Vec<crate::ids::GroupId>,
     /// Set iff this request is an impersonation. See `Impersonator`.
     pub impersonator: Option<Impersonator>,
+}
+
+impl Principal {
+    /// Whether this caller is a platform admin, directly or through a group.
+    /// Every inline "is platform admin" check routes through here (#802).
+    pub fn is_platform_admin(&self) -> bool {
+        holds_platform_admin(&self.platform_roles)
+    }
 }
 
 /// Identity + the workspace the current request operates within.
@@ -43,10 +64,7 @@ pub struct WorkspaceContext {
 
 impl WorkspaceContext {
     pub fn is_platform_admin(&self) -> bool {
-        self.principal
-            .platform_roles
-            .iter()
-            .any(|r| r == "platform_admin")
+        self.principal.is_platform_admin()
     }
 }
 

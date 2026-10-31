@@ -169,10 +169,7 @@ where
         //    the specific objects they were granted are reachable — and only via
         //    `require_object`, which asks the PDP. `workspace_role` is never used
         //    for enforcement; it is display/precedence metadata only.
-        let is_admin = principal
-            .platform_roles
-            .iter()
-            .any(|r| r == "platform_admin");
+        let is_admin = principal.is_platform_admin();
         let workspace_role = if is_admin {
             "platform_admin".to_string()
         } else {

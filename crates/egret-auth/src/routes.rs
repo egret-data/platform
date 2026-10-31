@@ -370,7 +370,7 @@ async fn impersonate_start(
         return Err(AuthError(Error::Forbidden));
     }
     // 2. Must be a platform admin.
-    if !p.platform_roles.iter().any(|r| r == "platform_admin") {
+    if !p.is_platform_admin() {
         return Err(AuthError(Error::Forbidden));
     }
     // 3. Parse the target and run the SHARED target guards (not-self, reason
