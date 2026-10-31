@@ -210,6 +210,17 @@ async fn recompile(f: &Fixture) {
         .expect("recompile");
 }
 
+/// `user` lapses one minute ago. Nothing recompiles.
+async fn lapse(db: &Db, user: Uuid) {
+    sqlx::query(
+        "UPDATE access_grants SET expires_at = now() - interval '1 minute' WHERE principal_id = $1",
+    )
+    .bind(user)
+    .execute(&db.pool)
+    .await
+    .expect("lapse");
+}
+
 #[tokio::test]
 async fn a_lapsed_role_grant_is_swept_out_of_its_profile() {
     let Some(db) = test_db().await else { return };
@@ -230,14 +241,7 @@ async fn a_lapsed_role_grant_is_swept_out_of_its_profile() {
     assert!(can_select(&f, &lapsed_name).await, "the arrangement");
     assert!(can_select(&f, &live_name).await, "the arrangement");
 
-    // The lapse: the row's expiry passes one minute ago. Nothing recompiles.
-    sqlx::query(
-        "UPDATE access_grants SET expires_at = now() - interval '1 minute' WHERE principal_id = $1",
-    )
-    .bind(lapsed)
-    .execute(&db.pool)
-    .await
-    .expect("lapse");
+    lapse(&db, lapsed).await;
     assert!(
         can_select(&f, &lapsed_name).await,
         "before the sweep the lapsed holder is still named (narrowing 2)"
@@ -259,30 +263,44 @@ async fn a_lapsed_role_grant_is_swept_out_of_its_profile() {
     );
 }
 
-#[tokio::test]
-async fn the_sweep_is_idempotent() {
-    let Some(db) = test_db().await else { return };
-    let f = seed(&db).await;
-    let role = unique("auditor");
-    let role_id = new_role(&db, &role).await;
-    let user = new_user(&db, &unique("once")).await;
-    role_grant(&db, user, role_id, Some(3600)).await;
+/// A profile whose role grant names one holder, compiled while that holder
+/// is live. Returns the fixture and the holder.
+async fn profile_with_one_holder(db: &Db, role_prefix: &str) -> (Fixture, Uuid) {
+    let f = seed(db).await;
+    let role = unique(role_prefix);
+    let role_id = new_role(db, &role).await;
+    let user = new_user(db, &unique("holder")).await;
+    role_grant(db, user, role_id, Some(3600)).await;
     f.perm
         .create_grant(&allow_role(&f, &role))
         .await
         .expect("grant");
     recompile(&f).await;
-    sqlx::query(
-        "UPDATE access_grants SET expires_at = now() - interval '1 minute' WHERE principal_id = $1",
-    )
-    .bind(user)
-    .execute(&db.pool)
-    .await
-    .expect("lapse");
+    (f, user)
+}
 
-    recompile_lapsed_grants(&db.pool)
+/// The sweep reaches every profile with a lapse in its window, so a repeat
+/// run can rewrite ANOTHER profile whose lapse landed between the two runs
+/// (on the shared test database: the other test in this file). Idempotence
+/// is a claim about this profile, so it is asserted on this profile's id;
+/// the neighbour's lapse is made to land between the runs on purpose, so the
+/// interleaving that made a count-based assertion flaky is always present.
+#[tokio::test]
+async fn the_sweep_is_idempotent() {
+    let Some(db) = test_db().await else { return };
+    let (f, user) = profile_with_one_holder(&db, "auditor").await;
+    let (neighbour, neighbour_user) = profile_with_one_holder(&db, "neighbour").await;
+    lapse(&db, user).await;
+
+    let first = recompile_lapsed_grants(&db.pool)
         .await
         .expect("first sweep");
+    assert!(
+        first.rewritten.contains(&f.service_id),
+        "the first sweep drops the lapsed holder, so the profile is rewritten"
+    );
+
+    lapse(&db, neighbour_user).await;
     let second = recompile_lapsed_grants(&db.pool)
         .await
         .expect("second sweep");
@@ -290,8 +308,13 @@ async fn the_sweep_is_idempotent() {
         second.services.contains(&f.service_id),
         "the window still holds the lapse, so the profile is compiled again"
     );
-    assert_eq!(
-        second.rewritten, 0,
-        "an unchanged profile writes nothing on a repeat sweep"
+    assert!(
+        !second.rewritten.contains(&f.service_id),
+        "an unchanged profile writes nothing on a repeat sweep (rewritten: {:?})",
+        second.rewritten
+    );
+    assert!(
+        second.rewritten.contains(&neighbour.service_id),
+        "a lapse that landed between the runs is still rewritten by the second"
     );
 }

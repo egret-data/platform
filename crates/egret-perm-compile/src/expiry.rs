@@ -31,7 +31,7 @@ use crate::trigger::{
 /// is seen by two runs and a failed run is retried by the next.
 pub const LAPSE_DETECTION_WINDOW: Duration = Duration::from_secs(2 * 3600);
 
-/// The number of profiles recompiled by the sweep; the set is ascending and
+/// What one run of the sweep did. Both profile sets are ascending and
 /// deduplicated, as every compile entry point requires.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SweepSummary {
@@ -39,8 +39,11 @@ pub struct SweepSummary {
     pub lapsed_rows: usize,
     /// Profiles whose compile was run (ascending service ids).
     pub services: Vec<i64>,
-    /// Of `services`, the profiles whose compiled output changed.
-    pub rewritten: usize,
+    /// Of `services`, the profiles whose compiled output changed (ascending
+    /// service ids). Named rather than counted: the sweep reaches every
+    /// profile with a lapse in the window, so a count cannot tell one
+    /// profile's convergence from another profile's first rewrite.
+    pub rewritten: Vec<i64>,
 }
 
 /// Recompile every profile that a grant lapsed inside [`LAPSE_DETECTION_WINDOW`]
@@ -93,11 +96,16 @@ pub async fn recompile_lapsed_grants(pool: &PgPool) -> Result<SweepSummary, Comp
     let summaries = recompile_services_in_tx(&mut tx, &services).await?;
     tx.commit().await.map_err(db)?;
 
-    let rewritten = summaries.iter().filter(|s| s.wrote_anything()).count();
+    let rewritten: Vec<i64> = services
+        .iter()
+        .zip(&summaries)
+        .filter(|(_, s)| s.wrote_anything())
+        .map(|(&id, _)| id)
+        .collect();
     tracing::info!(
         lapsed_rows,
         profiles = services.len(),
-        rewritten,
+        rewritten = rewritten.len(),
         "recompiled the profiles that named a grant which lapsed"
     );
     Ok(SweepSummary {
