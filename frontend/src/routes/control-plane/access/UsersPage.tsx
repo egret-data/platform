@@ -221,7 +221,7 @@ export default function UsersPage() {
               <Badge
                 key={h.name}
                 variant={h.direct ? "secondary" : "outline"}
-                className="max-w-[16rem] truncate"
+                className="max-w-[22rem] truncate"
                 title={`${h.name} (${holdingSource(h)})`}
               >
                 {h.direct ? h.name : `${h.name} · ${holdingSource(h)}`}
