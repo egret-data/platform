@@ -327,6 +327,11 @@ export type adminUsersSetPlatformRolesResponse403 = {
   status: 403
 }
 
+export type adminUsersSetPlatformRolesResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type adminUsersSetPlatformRolesResponse500 = {
   data: ErrorBody
   status: 500
@@ -335,7 +340,7 @@ export type adminUsersSetPlatformRolesResponse500 = {
 export type adminUsersSetPlatformRolesResponseSuccess = (adminUsersSetPlatformRolesResponse200) & {
   headers: Headers;
 };
-export type adminUsersSetPlatformRolesResponseError = (adminUsersSetPlatformRolesResponse401 | adminUsersSetPlatformRolesResponse403 | adminUsersSetPlatformRolesResponse500) & {
+export type adminUsersSetPlatformRolesResponseError = (adminUsersSetPlatformRolesResponse401 | adminUsersSetPlatformRolesResponse403 | adminUsersSetPlatformRolesResponse409 | adminUsersSetPlatformRolesResponse500) & {
   headers: Headers;
 };
 

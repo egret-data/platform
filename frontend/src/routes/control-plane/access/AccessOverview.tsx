@@ -22,6 +22,7 @@ import { timeAgo } from "@/lib/relativeTime";
 import { cn } from "@/lib/utils";
 import { PageContainer } from "@/components/layout/PageContainer";
 import { PageTitle } from "@/components/layout/PageTitle";
+import { holdsPlatformAdmin } from "@/components/access/effectiveRoles";
 
 /**
  * egret's access model, top to bottom — the conceptual scaffolding that ties the
@@ -121,7 +122,7 @@ export default function AccessOverview() {
     workspace: data.filter((r) => r.scope === "workspace").length,
     zeroAssignee: data.filter((r) => r.assigneeCount === 0),
   }));
-  const platformAdmins = fromQuery(usersQuery, (data) => data.filter((u) => u.roles.includes("platform_admin")).length);
+  const platformAdmins = fromQuery(usersQuery, (data) => data.filter(holdsPlatformAdmin).length);
 
   const platformAdminCount = platformAdmins.status === "ok" ? platformAdmins.value : 0;
   // Share of accounts that are platform admins. Highlight the tile as a posture

@@ -310,7 +310,7 @@ pub async fn complete_impersonation_step_up(
     let authority_ok = match intent.workspace_id {
         // Platform scope: must still be a platform_admin.
         None => match st.sessions.platform_roles_of(authenticated).await {
-            Ok(roles) => roles.iter().any(|r| r == "platform_admin"),
+            Ok(roles) => egret_core::context::holds_platform_admin(&roles),
             Err(_) => false,
         },
         // Workspace scope (Task 9's path, which also completes through this

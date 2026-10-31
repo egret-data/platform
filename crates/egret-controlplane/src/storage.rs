@@ -215,10 +215,7 @@ fn conn_view<'a>(
     principal: &egret_core::context::Principal,
     conn: &'a StorageConn,
 ) -> Result<ConnView<'a>, CpError> {
-    let admin = principal
-        .platform_roles
-        .iter()
-        .any(|r| r == "platform_admin");
+    let admin = principal.is_platform_admin();
     ConnView::new(
         &st.storage_scope.system,
         &conn.bucket,

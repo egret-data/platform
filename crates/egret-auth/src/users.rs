@@ -316,6 +316,10 @@ impl UserRepo {
     /// covers the profiles reached through the user's roles, workspace
     /// memberships and clearances, and the delete records a `user:delete`
     /// governance event, by `actor`, on the same transaction.
+    ///
+    /// Refused with `Conflict` ([`crate::roles::LAST_ADMIN_REFUSAL`]) when the
+    /// target is the last active platform admin, directly or through a group,
+    /// under [`crate::roles::LastAdminGuard`] (KI-284).
     pub async fn hard_delete(
         &self,
         target: UserId,
@@ -341,6 +345,10 @@ impl UserRepo {
                 return Err(crate::groups::unstable());
             }
         };
+        // KI-284: deleting the last active platform admin is refused, on this
+        // transaction, whether they hold the role directly or through a group.
+        // Lock order: `crate::roles::LastAdminGuard`'s doc.
+        let guard = crate::roles::LastAdminGuard::lock_via(&mut tx).await?;
         // The groups' services and (F11) the profiles of engine grants that
         // target this user, in one ascending pass.
         let services = recompiler
@@ -392,6 +400,7 @@ impl UserRepo {
                 return Err(db_err(e));
             }
         };
+        guard.refuse_if_emptied_via(&mut tx).await?;
         if !groups.is_empty() || !services.is_empty() {
             recompiler.recompile_in_tx(&mut tx, &services).await?;
         }

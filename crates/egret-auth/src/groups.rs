@@ -103,6 +103,8 @@
 //! other. Transaction-scoped, so a lock cannot outlive the write it guards.
 
 use egret_core::{Result, UserId};
+
+use crate::roles::LastAdminGuard;
 use egret_metastore::Db;
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
@@ -212,6 +214,49 @@ pub struct GroupReference {
     pub effect: Option<String>,
     /// `"include"` or `"exclude"`.
     pub position: String,
+}
+
+/// The last-admin half of [`GroupRepo::sync_user_oidc_groups`] (KI-284): if
+/// the sync's write on `tx` left no active platform admin, re-add `user_id` to
+/// those of the `removed` groups that hold `platform_admin` at platform scope
+/// and warn. The sync cannot refuse (it runs at login and in a sweep), so it
+/// keeps the one membership that would end platform administration.
+///
+/// Re-adding them restores the set: before the write some active admin
+/// existed, and the sync changed only `user_id`'s memberships, so the admin it
+/// removed is `user_id`, who held the role through one of these groups.
+async fn keep_last_admin_memberships(
+    tx: &mut sqlx::PgConnection,
+    guard: LastAdminGuard,
+    user_id: UserId,
+    removed: &[String],
+) -> Result<()> {
+    if !guard.emptied_via(tx).await? {
+        return Ok(());
+    }
+    let kept: Vec<String> = sqlx::query_scalar(
+        "INSERT INTO user_groups (user_id, group_id) \
+         SELECT $1, g.id FROM groups g \
+          WHERE g.name = ANY($2) AND g.source = 'oidc' \
+            AND EXISTS (SELECT 1 FROM access_grants ag JOIN roles r ON r.id = ag.role_id \
+                         WHERE ag.principal_type = 'group' AND ag.principal_id = g.id \
+                           AND ag.scope_type = 'platform' AND r.name = $3) \
+         ON CONFLICT DO NOTHING \
+         RETURNING (SELECT name FROM groups WHERE id = group_id)",
+    )
+    .bind(user_id.0)
+    .bind(removed)
+    .bind(egret_core::context::PLATFORM_ADMIN_ROLE)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    tracing::warn!(
+        user_id = %user_id.0,
+        kept = ?kept,
+        "kept the OIDC group membership that is the last active platform admin's only hold on \
+         platform_admin; make another user a platform admin, then the next sync drops it"
+    );
+    Ok(())
 }
 
 /// The names of every group `user_id` directly belongs to, on `conn`.
@@ -622,6 +667,13 @@ impl GroupRepo {
     /// installation-wide write, which is the cost `egret_perm_compile::members`
     /// once cited for not expanding groups at all.
     ///
+    /// **It never removes the last active platform admin (KI-284).** If the
+    /// memberships it drops would leave no active platform admin, it keeps the
+    /// dropped ones that carry `platform_admin` and logs a warning instead of
+    /// failing: refusing would fail the login (or, for the stale-membership
+    /// sweep, retry forever), and either way an admin must first make someone
+    /// else a platform admin. The rest of the sync goes through.
+    ///
     /// A recompile failure refuses the sync and the login with it (the caller
     /// answers 500): the membership stays as it was and so does every policy
     /// computed from it, which is the consistent state. Committing the sync
@@ -642,7 +694,7 @@ impl GroupRepo {
 
         let mut held = HeldGroupLocks::default();
         let mut passes = 0;
-        let (moved, claimed) = loop {
+        let (moved, claimed, removed) = loop {
             let before: Vec<(String, String)> = sqlx::query_as(
                 "SELECT g.name, g.source FROM user_groups ug \
                  JOIN groups g ON g.id = ug.group_id WHERE ug.user_id = $1",
@@ -671,7 +723,8 @@ impl GroupRepo {
                 .cloned()
                 .collect();
             if !held.cover(&mut tx, &moved).await? {
-                break (moved, claimed);
+                let removed: Vec<String> = before_set.difference(&after_set).cloned().collect();
+                break (moved, claimed, removed);
             }
             passes += 1;
             if passes >= MAX_LOCK_PASSES {
@@ -679,6 +732,16 @@ impl GroupRepo {
             }
         };
 
+        // KI-284: a sync that drops a membership can take the last active
+        // platform admin's `platform_admin` away when they hold it through
+        // that group. Only such a sync takes the guard's lock, so a login
+        // whose claim did not shrink serialises with nothing. Lock order:
+        // `LastAdminGuard`'s doc.
+        let guard = if removed.is_empty() {
+            None
+        } else {
+            Some(LastAdminGuard::lock_via(&mut tx).await?)
+        };
         let services = if moved.is_empty() {
             Vec::new()
         } else {
@@ -712,6 +775,9 @@ impl GroupRepo {
             .await
             .map_err(db_err)?;
         }
+        if let Some(guard) = guard {
+            keep_last_admin_memberships(&mut tx, guard, user_id, &removed).await?;
+        }
 
         if !moved.is_empty() {
             recompiler.recompile_in_tx(&mut tx, &services).await?;
@@ -723,8 +789,10 @@ impl GroupRepo {
     /// Drop the OIDC group memberships of every member who has not logged in
     /// since `max_age` ago (a-i). Each goes through `sync_user_oidc_groups` with
     /// no claim, so the memberships are removed, the affected policies recompile,
-    /// and local memberships stay. A member whose drop fails is logged and retried
-    /// by the next sweep. Returns how many members were dropped.
+    /// and local memberships stay — except a membership that is the last active
+    /// platform admin's only hold on `platform_admin`, which the sync keeps with
+    /// a warning (KI-284). A member whose drop fails is logged and retried by
+    /// the next sweep. Returns how many members were dropped.
     pub async fn drop_stale_oidc_memberships(
         &self,
         max_age: std::time::Duration,
@@ -979,6 +1047,10 @@ impl GroupRepo {
                 detail,
             ));
         }
+        // KI-284: the cascade removes every member, so a delete can take the
+        // last active platform admin's `platform_admin` away when they hold it
+        // through this group. Lock order: `LastAdminGuard`'s doc.
+        let guard = LastAdminGuard::lock_via(&mut tx).await?;
         let services = recompiler
             .lock_affected_in_tx(&mut tx, std::slice::from_ref(&name))
             .await?;
@@ -988,6 +1060,7 @@ impl GroupRepo {
             .await
             .map_err(db_err)?
             .rows_affected();
+        guard.refuse_if_emptied_via(&mut tx).await?;
         if rows > 0 {
             recompiler.recompile_in_tx(&mut tx, &services).await?;
         }
@@ -1084,6 +1157,15 @@ impl GroupRepo {
                 _ => break name,
             }
         };
+        // KI-284: a REMOVE can take the last active platform admin's
+        // `platform_admin` away when they hold it through this group. The
+        // guard's lock sits after the user and group locks and before the
+        // profile locks (`LastAdminGuard`'s doc).
+        let guard = if add {
+            None
+        } else {
+            Some(LastAdminGuard::lock_via(&mut tx).await?)
+        };
         let services = match &name {
             Some(n) => {
                 recompiler
@@ -1105,6 +1187,9 @@ impl GroupRepo {
             .await
             .map_err(db_err)?
             .rows_affected();
+        if let Some(guard) = guard {
+            guard.refuse_if_emptied_via(&mut tx).await?;
+        }
         if name.is_some() && rows > 0 {
             recompiler.recompile_in_tx(&mut tx, &services).await?;
         }

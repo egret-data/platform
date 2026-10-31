@@ -143,6 +143,37 @@ impl RoleRepo {
         .map_err(db_err)
     }
 
+    /// The platform roles each of `user_ids` holds, as `(user id, role name,
+    /// group name)` rows: `None` for a direct grant, `Some(group)` for one held
+    /// through that group. Unexpired grants only, so the roles are the ones
+    /// `SessionService` puts in `Principal::platform_roles`, with where each
+    /// comes from (KI-260). Ordered by user, role, then direct before groups.
+    pub async fn effective_platform_roles_of_users(
+        &self,
+        user_ids: &[Uuid],
+    ) -> Result<Vec<(Uuid, String, Option<String>)>> {
+        sqlx::query_as(
+            "SELECT ag.principal_id AS user_id, r.name, NULL::text AS group_name \
+               FROM access_grants ag JOIN roles r ON r.id = ag.role_id \
+              WHERE ag.principal_type = 'user' AND ag.principal_id = ANY($1) \
+                AND ag.scope_type = 'platform' \
+                AND (ag.expires_at IS NULL OR ag.expires_at > now()) \
+             UNION \
+             SELECT ug.user_id, r.name, g.name AS group_name \
+               FROM user_groups ug \
+               JOIN groups g ON g.id = ug.group_id \
+               JOIN access_grants ag ON ag.principal_type = 'group' AND ag.principal_id = g.id \
+               JOIN roles r ON r.id = ag.role_id \
+              WHERE ug.user_id = ANY($1) AND ag.scope_type = 'platform' \
+                AND (ag.expires_at IS NULL OR ag.expires_at > now()) \
+             ORDER BY 1, 2, 3 NULLS FIRST",
+        )
+        .bind(user_ids)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)
+    }
+
     /// Every granted `(permission, role name)` pair across all roles — the raw
     /// join `GET /permissions` groups in Rust to attach each catalog
     /// permission's granting role names.
@@ -477,44 +508,92 @@ pub(crate) fn db_err(e: sqlx::Error) -> egret_core::Error {
 /// nothing in egret; leaving them in would keep an already-minted engine JWT
 /// (or an alert running as them) at ALL access.
 pub async fn engine_admin_user_ids_via(conn: &mut sqlx::PgConnection) -> Result<Vec<UserId>> {
-    engine_admin_ids_query(conn, None).await
+    engine_admin_ids_query(conn).await
 }
 
-/// The engine admins as they would be without the platform-scope
-/// `platform_admin` grant held by (`principal_type`, `principal_id`), that is
-/// after that principal is demoted: the last-admin guard of the role unassign
-/// routes refuses a demotion that leaves this empty.
-pub async fn engine_admin_user_ids_without_grant_via(
-    conn: &mut sqlx::PgConnection,
-    principal_type: &str,
-    principal_id: Uuid,
-) -> Result<Vec<UserId>> {
-    engine_admin_ids_query(conn, Some((principal_type, principal_id))).await
-}
-
-async fn engine_admin_ids_query(
-    conn: &mut sqlx::PgConnection,
-    without_grant: Option<(&str, Uuid)>,
-) -> Result<Vec<UserId>> {
-    let (ptype, pid) = without_grant.unzip();
+async fn engine_admin_ids_query(conn: &mut sqlx::PgConnection) -> Result<Vec<UserId>> {
     let rows = sqlx::query_scalar::<_, Uuid>(
         "SELECT u.id FROM users u \
           WHERE u.status = 'active' \
             AND (EXISTS (SELECT 1 FROM access_grants g JOIN roles r ON r.id = g.role_id \
                           WHERE r.name = 'platform_admin' AND g.scope_type = 'platform' \
-                            AND g.principal_type = 'user' AND g.principal_id = u.id \
-                            AND ($1::text IS NULL OR NOT (g.principal_type = $1 AND g.principal_id = $2))) \
+                            AND g.principal_type = 'user' AND g.principal_id = u.id) \
               OR EXISTS (SELECT 1 FROM access_grants g JOIN roles r ON r.id = g.role_id \
                            JOIN user_groups ug ON ug.group_id = g.principal_id \
                           WHERE r.name = 'platform_admin' AND g.scope_type = 'platform' \
-                            AND g.principal_type = 'group' AND ug.user_id = u.id \
-                            AND ($1::text IS NULL OR NOT (g.principal_type = $1 AND g.principal_id = $2)))) \
+                            AND g.principal_type = 'group' AND ug.user_id = u.id)) \
           ORDER BY u.id",
     )
-    .bind(ptype)
-    .bind(pid)
     .fetch_all(&mut *conn)
     .await
     .map_err(db_err)?;
     Ok(rows.into_iter().map(UserId).collect())
+}
+
+/// The answer every last-admin refusal gives (409), whichever write it refuses.
+pub const LAST_ADMIN_REFUSAL: &str = "Cannot remove the last active platform admin";
+
+/// Fixed advisory-lock key serializing every write that can shrink the set of
+/// active platform admins ([`LastAdminGuard`]). Single-`bigint` key space, like
+/// [`ROLE_GRAPH_LOCK_KEY`]; an arbitrary constant no other lock uses.
+pub const PLATFORM_ADMIN_SET_LOCK_KEY: i64 = 0x_E6E7_AD41_5E70;
+
+/// The last-admin guard (KI-284): a write that would leave no active platform
+/// admin ([`engine_admin_user_ids_via`]: active users holding `platform_admin`
+/// directly or through a group) is refused, or, for a background sweep that
+/// cannot refuse, skipped.
+///
+/// **One shape for every writer.** On the writer's own transaction:
+/// [`lock_via`](Self::lock_via) takes [`PLATFORM_ADMIN_SET_LOCK_KEY`] and reads
+/// whether any active admin exists; the writer writes; then
+/// [`refuse_if_emptied_via`](Self::refuse_if_emptied_via) (or
+/// [`emptied_via`](Self::emptied_via)) reads the set again, after the write, on
+/// the same transaction, and the refusal rolls the write back with it. Only a
+/// write that takes the set from non-empty to empty is refused, so an install
+/// with no admin yet is not wedged.
+///
+/// **Why the lock.** Under READ COMMITTED two writers removing two different
+/// admins each read the other's admin as still there and both commit, leaving
+/// none (the check-then-act race the old per-route guards accepted). Every
+/// writer that can remove an admin takes this one lock before its first read of
+/// the set, so the second waits for the first to commit and then reads the
+/// committed set.
+///
+/// **Where it sits in the lock order** (`crate::groups`' module doc: user
+/// locks, group locks, profile locks ascending, rows): after the user and group
+/// locks, once the group set is stable, and before any profile lock. No holder
+/// of this lock then waits for a user or group lock, and no holder of a profile
+/// lock waits for this one, so it adds no deadlock cycle.
+#[derive(Debug, Clone, Copy)]
+pub struct LastAdminGuard {
+    had_admin: bool,
+}
+
+impl LastAdminGuard {
+    /// Take the admin-set lock on `conn`'s transaction and record whether any
+    /// active platform admin exists before the write.
+    pub async fn lock_via(conn: &mut sqlx::PgConnection) -> Result<Self> {
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(PLATFORM_ADMIN_SET_LOCK_KEY)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_err)?;
+        let had_admin = !engine_admin_ids_query(conn).await?.is_empty();
+        Ok(Self { had_admin })
+    }
+
+    /// Whether the write made on `conn` since [`lock_via`](Self::lock_via) left
+    /// no active platform admin where there was one.
+    pub async fn emptied_via(&self, conn: &mut sqlx::PgConnection) -> Result<bool> {
+        Ok(self.had_admin && engine_admin_ids_query(conn).await?.is_empty())
+    }
+
+    /// [`emptied_via`](Self::emptied_via) as the 409 a request answers:
+    /// `Conflict(LAST_ADMIN_REFUSAL)`.
+    pub async fn refuse_if_emptied_via(&self, conn: &mut sqlx::PgConnection) -> Result<()> {
+        if self.emptied_via(conn).await? {
+            return Err(egret_core::Error::Conflict(LAST_ADMIN_REFUSAL.to_string()));
+        }
+        Ok(())
+    }
 }

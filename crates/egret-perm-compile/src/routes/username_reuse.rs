@@ -6,14 +6,11 @@
 use axum::extract::State;
 use axum::Json;
 
-use egret_auth::principal::Auth;
+use egret_auth::principal::PlatformAuth;
 use egret_core::http::ErrorBody;
 
 use super::{PermHttpError, PermState};
 use crate::username_reuse::{findings_via, UsernameReuseReport};
-
-/// The role the report requires, at platform scope.
-const PLATFORM_ADMIN: &str = "platform_admin";
 
 #[utoipa::path(
     get,
@@ -33,11 +30,8 @@ const PLATFORM_ADMIN: &str = "platform_admin";
 )]
 pub(super) async fn username_reuse(
     State(st): State<PermState>,
-    Auth(p): Auth,
+    _admin: PlatformAuth,
 ) -> Result<Json<UsernameReuseReport>, PermHttpError> {
-    if !p.platform_roles.iter().any(|r| r == PLATFORM_ADMIN) {
-        return Err(PermHttpError::Forbidden);
-    }
     let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         .execute(&mut *tx)

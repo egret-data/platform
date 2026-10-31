@@ -43,7 +43,7 @@
 //! is owned here, which also keeps the lock-ordering invariant in one place
 //! instead of at every HTTP handler.
 
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use egret_auth::roles::RoleRepo;
@@ -87,6 +87,20 @@ pub async fn unassign_platform_role_and_recompile(
     role_id: Uuid,
 ) -> Result<(), CompileError> {
     with_recompile(pool, Op::Unassign, ptype, pid, role_id).await
+}
+
+/// [`unassign_platform_role_and_recompile`] on the caller's transaction, which
+/// the caller commits. The control plane's revoke routes use it so the
+/// last-admin guard (`egret_auth::roles::LastAdminGuard`, KI-284) brackets the
+/// write on the same transaction: the guard's lock first, then this (profile
+/// locks, write, recompile), then the guard's check.
+pub async fn unassign_platform_role_and_recompile_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    ptype: &str,
+    pid: Uuid,
+    role_id: Uuid,
+) -> Result<(), CompileError> {
+    with_recompile_in_tx(tx, Op::Unassign, ptype, pid, role_id).await
 }
 
 /// Delete platform role `role_id` and recompile every service the deletion can
@@ -183,8 +197,22 @@ async fn with_recompile(
         .begin()
         .await
         .map_err(|e| CompileError::Db(e.to_string()))?;
+    with_recompile_in_tx(&mut tx, op, ptype, pid, role_id).await?;
+    tx.commit()
+        .await
+        .map_err(|e| CompileError::Db(e.to_string()))?;
+    Ok(())
+}
 
-    let name = RoleRepo::name_of_in_tx(&mut tx, role_id)
+/// [`with_recompile`]'s steps on the caller's transaction; the caller commits.
+async fn with_recompile_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    op: Op,
+    ptype: &str,
+    pid: Uuid,
+    role_id: Uuid,
+) -> Result<(), CompileError> {
+    let name = RoleRepo::name_of_in_tx(tx, role_id)
         .await
         .map_err(|e| CompileError::Db(e.to_string()))?;
 
@@ -193,10 +221,10 @@ async fn with_recompile(
     // write itself already answers that case (the INSERT's FK refuses it, the
     // DELETE is a no-op) and a full compile for a nameless role changes nothing.
     if let Some(name) = name.as_deref() {
-        let services = affected_services_for_role_membership(&mut tx, name).await?;
-        lock_services_in_tx(&mut tx, &services).await?;
-        apply(&mut tx, op, ptype, pid, role_id).await?;
-        for summary in recompile_services_in_tx(&mut tx, &services).await? {
+        let services = affected_services_for_role_membership(tx, name).await?;
+        lock_services_in_tx(tx, &services).await?;
+        apply(tx, op, ptype, pid, role_id).await?;
+        for summary in recompile_services_in_tx(tx, &services).await? {
             if !summary.skipped.is_empty() {
                 tracing::warn!(
                     role = %name,
@@ -206,12 +234,8 @@ async fn with_recompile(
             }
         }
     } else {
-        apply(&mut tx, op, ptype, pid, role_id).await?;
+        apply(tx, op, ptype, pid, role_id).await?;
     }
-
-    tx.commit()
-        .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
     Ok(())
 }
 
@@ -316,17 +340,30 @@ pub async fn set_user_status_and_recompile(
 ) -> Result<(), CompileError> {
     let db = |e: sqlx::Error| CompileError::Db(e.to_string());
     let mut tx = pool.begin().await.map_err(db)?;
-    let services = egret_policy::default_policies::admin_policy_services_via(&mut tx)
+    set_user_status_and_recompile_in_tx(&mut tx, user_id, status).await?;
+    tx.commit().await.map_err(db)?;
+    Ok(())
+}
+
+/// [`set_user_status_and_recompile`] on the caller's transaction, which the
+/// caller commits: the control plane's disable takes the last-admin guard
+/// (`egret_auth::roles::LastAdminGuard`, KI-284) on the same transaction,
+/// before these profile locks, and checks it after the write.
+pub async fn set_user_status_and_recompile_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    status: &str,
+) -> Result<(), CompileError> {
+    let services = egret_policy::default_policies::admin_policy_services_via(tx)
         .await
         .map_err(|e| CompileError::Db(e.to_string()))?;
-    lock_for_admin_sync_in_tx(&mut tx, &services).await?;
-    egret_auth::users::UserRepo::set_status_in_tx(&mut tx, egret_core::UserId(user_id), status)
+    lock_for_admin_sync_in_tx(tx, &services).await?;
+    egret_auth::users::UserRepo::set_status_in_tx(tx, egret_core::UserId(user_id), status)
         .await
         .map_err(|e| CompileError::Db(e.to_string()))?;
     for &service_id in &services {
-        crate::trigger::sync_admin_policy_in_tx(&mut tx, service_id).await?;
+        crate::trigger::sync_admin_policy_in_tx(tx, service_id).await?;
     }
-    tx.commit().await.map_err(db)?;
     Ok(())
 }
 

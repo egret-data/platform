@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
+import { holdsPlatformAdmin } from "@/components/access/effectiveRoles";
 
 /**
  * The delete and disable confirmations of a user, shared by the Users list and
@@ -111,7 +112,7 @@ export function DisableUserDialog({
           <AlertDialogDescription>
             They are signed out at once and cannot sign in until the account is enabled again.
             Their memberships and role grants are kept. Their engine username stays theirs.
-            {user?.roles.includes("platform_admin") &&
+            {user && holdsPlatformAdmin(user) &&
               " While disabled they lose all-access on engines."}
           </AlertDialogDescription>
         </AlertDialogHeader>
