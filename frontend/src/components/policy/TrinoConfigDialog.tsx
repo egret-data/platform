@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import { type ConfigFile, getTrinoConfig } from "@/api/policies";
+import { type TrinoConfig, getTrinoConfig } from "@/api/policies";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -17,7 +18,7 @@ interface Props {
 }
 
 export function TrinoConfigDialog({ open, service, onOpenChange }: Props) {
-  const cfg = useQuery<ConfigFile[]>({
+  const cfg = useQuery<TrinoConfig>({
     queryKey: ["trino-config", service],
     queryFn: () => getTrinoConfig(service),
     enabled: open,
@@ -38,7 +39,12 @@ export function TrinoConfigDialog({ open, service, onOpenChange }: Props) {
             this profile. (Assumes anonymous <code>/service</code>; a Ranger auth token needs extra proxy setup.)
           </DialogDescription>
         </DialogHeader>
-        {(cfg.data ?? []).map((file) => (
+        {(cfg.data?.warnings ?? []).map((w) => (
+          <Alert key={w}>
+            <AlertDescription>{w}</AlertDescription>
+          </Alert>
+        ))}
+        {(cfg.data?.files ?? []).map((file) => (
           <div key={file.name} className="space-y-1">
             <div className="flex items-center justify-between">
               <span className="font-mono text-sm">{file.name}</span>

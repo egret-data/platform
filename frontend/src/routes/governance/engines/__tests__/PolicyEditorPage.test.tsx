@@ -739,3 +739,27 @@ describe("PolicyEditorPage — absent resource levels (SP4d-4 B1)", () => {
     });
   });
 });
+
+// KI-267: the editor's title is the Policy name input, so its `h1` is a hidden
+// one that names the policy (FE-PAGE-7), in every branch.
+describe("PolicyEditorPage heading (KI-267)", () => {
+  beforeEach(() => {
+    routeParams = { kind: "masking" };
+  });
+
+  it("names a new policy by its kind until it has a name, then by its name", async () => {
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
+    const name = await screen.findByLabelText("Policy name");
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("New masking policy");
+    fireEvent.change(name, { target: { value: "mask emails" } });
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("mask emails");
+    expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+  });
+
+  it("has a heading while a stored policy loads", async () => {
+    routeParams = { kind: "access", policyId: "7" };
+    getPolicy.mockImplementationOnce(() => new Promise(() => {}));
+    wrap(<PolicyEditorPage service="trino" subject={{ profile: "trino" }} />);
+    expect(await screen.findByRole("heading", { level: 1 })).toHaveTextContent("Policy");
+  });
+});
