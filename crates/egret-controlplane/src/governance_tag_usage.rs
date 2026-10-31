@@ -174,7 +174,7 @@ async fn table_states(
     .bind(&warehouses)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| egret_perm::CompileError::Db(e.to_string()))?;
+    .map_err(egret_perm::CompileError::from_db)?;
     let at: Vec<usize> = (0..tables.len())
         .filter(|&i| embedded.contains(&tables[i].warehouse_id))
         .collect();

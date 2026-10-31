@@ -160,7 +160,7 @@ pub(crate) async fn impersonation_target_ok(
             .bind(target_user_id)
             .fetch_optional(&mut *conn)
             .await
-            .map_err(|e| CompileError::Db(e.to_string()))?
+            .map_err(CompileError::from_db)?
             .flatten();
     let Some(username) = username else {
         return Ok(Err(format!(
@@ -216,7 +216,7 @@ async fn is_platform_admin(
     .bind(PLATFORM_ADMIN_ROLE)
     .fetch_one(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(e.to_string()))
+    .map_err(CompileError::from_db)
 }
 
 /// How far [`impersonation_closure_problem`] walks before it refuses. A chain
@@ -234,7 +234,7 @@ async fn profile_policies(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
 ) -> Result<Option<ProfilePolicies>, CompileError> {
-    let db = |e: sqlx::Error| CompileError::Db(e.to_string());
+    let db = CompileError::from_db;
     let service_type: Option<String> =
         sqlx::query_scalar("SELECT type FROM policy.authz_services WHERE id = $1")
             .bind(service_id)
@@ -268,7 +268,7 @@ async fn identity_of(
     conn: &mut sqlx::PgConnection,
     username: &str,
 ) -> Result<(Vec<String>, Vec<String>), CompileError> {
-    let db = |e: sqlx::Error| CompileError::Db(e.to_string());
+    let db = CompileError::from_db;
     let mut groups: Vec<String> = sqlx::query_scalar(
         "SELECT lower(g.name) FROM users u JOIN user_groups ug ON ug.user_id = u.id \
            JOIN groups g ON g.id = ug.group_id WHERE u.username = $1::citext",
@@ -466,7 +466,7 @@ async fn engine_grant_hops(
     .bind(roles)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(e.to_string()))
+    .map_err(CompileError::from_db)
 }
 
 /// Why impersonating `username` on profile `service_id` would hand out more

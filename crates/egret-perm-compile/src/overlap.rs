@@ -253,7 +253,7 @@ pub async fn refuse_created_by_compile_via(
     tag_service: Option<i64>,
     desired: &[CompiledForOverlap<'_>],
 ) -> Result<(), CompileError> {
-    let db = |e: egret_policy::PolicyStoreError| CompileError::Db(e.to_string());
+    let db = crate::db_error::from_store;
     let mut units: BTreeSet<UnitIds> = BTreeSet::from([UnitIds {
         resource: Some(profile_id),
         tag_service,
@@ -350,12 +350,12 @@ pub async fn unit_snapshot_via(
 ) -> Result<UnitSnapshot, CompileError> {
     let units = units_for_services_via(conn, profile_ids)
         .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
+        .map_err(crate::db_error::from_store)?;
     let mut before = Vec::new();
     for &ids in &units {
         let unit = load_unit_via(conn, ids)
             .await
-            .map_err(|e| CompileError::Db(e.to_string()))?;
+            .map_err(crate::db_error::from_store)?;
         before.extend(unit.overlaps());
     }
     Ok(UnitSnapshot { units, before })
@@ -371,7 +371,7 @@ async fn rules_for_names_via(
     let names: Vec<&str> = names.iter().copied().collect();
     Ok(egret_policy::compiled_rule_names_via(conn, &names)
         .await
-        .map_err(|e| CompileError::Db(e.to_string()))?
+        .map_err(crate::db_error::from_store)?
         .into_iter()
         .map(|(policy, (id, name))| (policy, OverlapRule { id: Some(id), name }))
         .collect())
@@ -392,7 +392,7 @@ pub async fn refuse_created_overlaps_via(
     for &ids in &snapshot.units {
         let unit = load_unit_via(conn, ids)
             .await
-            .map_err(|e| CompileError::Db(e.to_string()))?;
+            .map_err(crate::db_error::from_store)?;
         let Some(o) = egret_policy::created_overlaps(&snapshot.before, unit.overlaps())
             .into_iter()
             .next()
@@ -404,7 +404,7 @@ pub async fn refuse_created_overlaps_via(
         let profile_id = ids.resource.or(ids.tag_service).unwrap_or_default();
         let profile = get_service_by_id_via(conn, profile_id)
             .await
-            .map_err(|e| CompileError::Db(e.to_string()))?
+            .map_err(crate::db_error::from_store)?
             .name;
         return Err(into_compile_error(&profile, named(o, &rules)));
     }
@@ -478,11 +478,11 @@ fn how_to_fix(o: &UnitOverlap, hand_written: bool) -> String {
 pub async fn stored_overlaps_via(
     conn: &mut sqlx::PgConnection,
 ) -> Result<Vec<StoredOverlap>, CompileError> {
-    let db = |e: egret_policy::PolicyStoreError| CompileError::Db(e.to_string());
+    let db = crate::db_error::from_store;
     let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM policy.authz_services ORDER BY id")
         .fetch_all(&mut *conn)
         .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
+        .map_err(CompileError::from_db)?;
     let units: Vec<UnitIds> = units_for_services_via(conn, &ids).await.map_err(db)?;
     let mut out = Vec::new();
     for ids in units {

@@ -435,7 +435,7 @@ pub(crate) async fn fold_plugin_versions(
     .bind(service_id)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(e.to_string()))?;
+    .map_err(CompileError::from_db)?;
     let unmodelled = |name: &str, why: String| {
         FoldVersions::Unmodelled(format!(
             "view protection (clearance mask) not active for {profile}: engine {name} runs an \

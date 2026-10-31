@@ -85,7 +85,7 @@ pub async fn classified_starrocks_engines(
     .bind(tag_key)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(e.to_string()))?;
+    .map_err(CompileError::from_db)?;
 
     let mut out: Vec<ClassifiedEngine> = Vec::new();
     for r in rows {
