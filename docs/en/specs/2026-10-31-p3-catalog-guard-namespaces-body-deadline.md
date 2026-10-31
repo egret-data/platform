@@ -52,3 +52,18 @@ lakekeeper's collation) and the vended-credentials spec (`2026-10-27-vended-cred
    an IP) for one store cannot be told apart without DNS, which egret does not do; no endpoint (AWS by region) and an
    explicit AWS endpoint are also compared as different. The check and lakekeeper's own are not serialized: two
    concurrent creates can both pass.
+
+## Live check (own demo stack, image from this branch, 2026-10-31)
+
+Catalog clients minted through `/oauth/token`, requests to `/catalog/v1/{prefix}/…` on the demo-warehouse:
+
+- KI-312: a client with only a table `write` grant got 403 creating `rogue` and `sales.sub`; a `namespace` `write`
+  grant on `stage` got 403 for `rogue2` and `corp.x` and 200 for `stage.child`. The table-grant client listed
+  namespaces as `[["sales"]]` and the tables of `sales` as `open` only (the engine client sees `secret` too); a
+  `corp.fin` reader saw `[["corp"]]` at the top and `[["corp","fin"]]` under `corp`.
+- KI-313: from inside the egret container to `127.0.0.1:8080` (no nginx in front), five requests declaring
+  `Content-Length: 4096` and sending nothing (rename, multi-table commit, table commit, namespace create, table
+  create) were each answered `408 Request Timeout` after 30 s.
+- KI-316: a warehouse on a storage connection `http://RUSTFS:9000/`, region `eu-west-1`, same bucket, got 409 naming
+  `demo-warehouse`; so did `https://rustfs:9000` with key prefix `sub`. One on `http://<rustfs container IP>:9000`
+  was created (201): the host-alias limit above.
