@@ -1086,11 +1086,11 @@ async fn set_tag_service(
         )));
     }
     let mut tx = st.store.begin().await?;
-    let changed = crate::store::set_tag_service_via(&mut *tx, svc.id, &b.tag_service).await?;
+    let changed = crate::store::set_tag_service_via(&mut tx, svc.id, &b.tag_service).await?;
     let after = match changed {
         Some(change) => {
             egret_audit::governance::record_change(
-                &mut *tx,
+                &mut tx,
                 egret_audit::governance::Change {
                     action: egret_audit::governance::action::PROFILE_TAG_SERVICE,
                     resource_type: egret_audit::governance::resource::POLICY_PROFILE,
