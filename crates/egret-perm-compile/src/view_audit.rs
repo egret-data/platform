@@ -79,10 +79,9 @@ pub struct RuleIndex {
 /// Read every rule, and the names of the catalogs path rules name, in two
 /// queries.
 pub async fn load_rule_index(conn: &mut sqlx::PgConnection) -> Result<RuleIndex, CompileError> {
-    let db = |e: &dyn std::fmt::Display| CompileError::Db(e.to_string());
     let rules = egret_perm::store::list_rules_via(conn)
         .await
-        .map_err(|e| db(&e))?;
+        .map_err(CompileError::from_perm)?;
     let ids: Vec<Uuid> = rules
         .iter()
         .filter_map(|r| match &r.selector {
@@ -101,7 +100,7 @@ pub async fn load_rule_index(conn: &mut sqlx::PgConnection) -> Result<RuleIndex,
         .bind(&ids)
         .fetch_all(&mut *conn)
         .await
-        .map_err(|e| db(&e))?
+        .map_err(CompileError::from_db)?
         .into_iter()
         .collect()
     };
@@ -140,7 +139,6 @@ pub async fn tables_have_rule(
     index: &RuleIndex,
     tables: &BTreeSet<LineageTable>,
 ) -> Result<bool, CompileError> {
-    let db = |e: &dyn std::fmt::Display| CompileError::Db(e.to_string());
     if path_rule_selects(index, tables) {
         return Ok(true);
     }
@@ -167,7 +165,7 @@ pub async fn tables_have_rule(
     .bind(&tag_keys)
     .fetch_one(&mut *conn)
     .await
-    .map_err(|e| db(&e))
+    .map_err(CompileError::from_db)
 }
 
 /// The path half of [`tables_have_rule`], pure so it can be tested without a
@@ -225,7 +223,7 @@ pub async fn owner_cleared(
     .bind(&ids)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(e.to_string()))?;
+    .map_err(CompileError::from_db)?;
     if gates.iter().any(|(_, roles)| roles.is_empty()) {
         return Ok(None);
     }

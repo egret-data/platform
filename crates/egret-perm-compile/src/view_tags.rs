@@ -41,8 +41,8 @@ use uuid::Uuid;
 
 use crate::lineage::{self, LineageTable, RecordedLineage, ViewRef};
 
-fn db_err<E: std::fmt::Display>(e: E) -> CompileError {
-    CompileError::Db(e.to_string())
+fn db_err(e: sqlx::Error) -> CompileError {
+    CompileError::from_db(e)
 }
 
 /// The one lock every writer of view tag rows or view lineage takes as the
@@ -325,7 +325,7 @@ pub async fn retag_view_in_tx(
     };
     let tags: Vec<Uuid> = lineage::view_tag_set(conn, &tables)
         .await
-        .map_err(db_err)?
+        .map_err(crate::db_error::from_lineage)?
         .into_iter()
         .collect();
 

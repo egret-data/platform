@@ -249,7 +249,7 @@ pub(crate) async fn compile_clearance(
     )
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(e.to_string()))?;
+    .map_err(CompileError::from_db)?;
 
     let mut out = Clearances {
         policies: Vec::new(),
@@ -372,7 +372,7 @@ pub(crate) async fn compile_clearance(
                 let targets = group_by_table(
                     tag_assignments_for_service_via(conn, service_id, &g.tag_key)
                         .await
-                        .map_err(|e| CompileError::Db(e.to_string()))?,
+                        .map_err(crate::db_error::from_store)?,
                 );
                 starrocks.push(StarRocksGate {
                     gate: g,
@@ -663,7 +663,7 @@ pub(crate) async fn hidden_column_denies(
             sqlx::query_as("SELECT warehouse_id, name FROM registry.catalogs")
                 .fetch_all(&mut *conn)
                 .await
-                .map_err(|e| CompileError::Db(e.to_string()))?;
+                .map_err(CompileError::from_db)?;
         let mut listed: HashMap<Uuid, Vec<(String, String)>> = HashMap::new();
         for source in wildcard {
             let matched: Vec<&(Option<Uuid>, String)> = catalogs

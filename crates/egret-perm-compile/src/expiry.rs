@@ -47,7 +47,7 @@ pub struct SweepSummary {
 /// can change, in one transaction. Idempotent: a run with nothing new, or a
 /// profile already converged, writes nothing.
 pub async fn recompile_lapsed_grants(pool: &PgPool) -> Result<SweepSummary, CompileError> {
-    let db = |e: sqlx::Error| CompileError::Db(e.to_string());
+    let db = CompileError::from_db;
     let window_secs = LAPSE_DETECTION_WINDOW.as_secs_f64();
     let mut tx = pool.begin().await.map_err(db)?;
 
