@@ -88,8 +88,10 @@ export function Harness({
 }
 
 export const PROFILES = [
-  { id: 11, name: "trino-main", type: "trino", policy_version: 1, policy_count: 0, engines: [], origin: "manual" },
-  { id: 12, name: "trino-taken", type: "trino", policy_version: 1, policy_count: 0, engines: [{ id: "e9", name: "other-trino", status: "running" }], origin: "manual" },
+  { id: 11, name: "trino-main", type: "trino", policy_version: 1, policy_count: 0, engines: [], origin: "manual", tag_service: "trino-main_tag" },
+  { id: 12, name: "trino-taken", type: "trino", policy_version: 1, policy_count: 0, engines: [{ id: "e9", name: "other-trino", status: "running" }], origin: "manual", tag_service: "trino-taken_tag" },
+  // A console-made Trino profile with no tag service: an engine cannot be bound to it (#786).
+  { id: 13, name: "trino-tagless", type: "trino", policy_version: 1, policy_count: 0, engines: [], origin: "manual", tag_service: null },
   { id: 21, name: "sr-main", type: "starrocks", policy_version: 1, policy_count: 0, engines: [], origin: "manual" },
 ];
 

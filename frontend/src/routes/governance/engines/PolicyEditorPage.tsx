@@ -581,9 +581,14 @@ export default function PolicyEditorPage({ service, subject }: { service: string
       items: [...f.items.filter((it: AccessItem) => it.effect === "allow"), ...next],
     }));
 
+  // KI-267 / FE-PAGE-7: the visible title is the Policy name input, so the
+  // page's `h1` is a hidden one naming the policy, in every branch below.
+  const kindNoun = kind === "masking" ? "masking" : kind === "rowfilter" ? "row filter" : "access";
+  const pageTitle = form.name.trim() || (id ? "Policy" : `New ${kindNoun} policy`);
   const backLink = (
     <div>
       <BackLink to={profileUrl}>{service || "Policies"}</BackLink>
+      <h1 className="sr-only">{pageTitle}</h1>
     </div>
   );
 

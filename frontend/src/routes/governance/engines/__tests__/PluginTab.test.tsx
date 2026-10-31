@@ -229,7 +229,7 @@ describe("the Plugin tab (spec §6.5, EP17–EP19)", () => {
   });
 
   it("offers Download Trino config on a Trino profile and opens the config dialog", async () => {
-    serve(answers(ok(pluginResponse()), { "/policies/services/lake-tr/trino-config": ok([]) }));
+    serve(answers(ok(pluginResponse()), { "/policies/services/lake-tr/trino-config": ok({ files: [], warnings: [] }) }));
     open();
     const btn = await within(await screen.findByRole("tabpanel", {}, T)).findByRole("button", { name: "Download Trino config" }, T);
     await userEvent.click(btn);

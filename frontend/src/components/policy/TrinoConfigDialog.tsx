@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import { type ConfigFile, getTrinoConfig } from "@/api/policies";
+import { type TrinoConfig, getTrinoConfig } from "@/api/policies";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -17,7 +18,7 @@ interface Props {
 }
 
 export function TrinoConfigDialog({ open, service, onOpenChange }: Props) {
-  const cfg = useQuery<ConfigFile[]>({
+  const cfg = useQuery<TrinoConfig>({
     queryKey: ["trino-config", service],
     queryFn: () => getTrinoConfig(service),
     enabled: open,
@@ -30,7 +31,9 @@ export function TrinoConfigDialog({ open, service, onOpenChange }: Props) {
           and better: scrolling the CONTENT took the close button with it, since the close
           button is absolutely positioned inside. The primitive scrolls an inner body and
           leaves the close button pinned. */}
-      <DialogContent className="max-w-2xl">
+      {/* One column no wider than the dialog: the files' long lines scroll inside their
+          own `pre` instead of widening the body and clipping the text and warnings. */}
+      <DialogContent className="max-w-2xl" bodyClassName="grid-cols-[minmax(0,1fr)]">
         <DialogHeader>
           <DialogTitle>Trino config — {service}</DialogTitle>
           <DialogDescription>
@@ -38,7 +41,12 @@ export function TrinoConfigDialog({ open, service, onOpenChange }: Props) {
             this profile. (Assumes anonymous <code>/service</code>; a Ranger auth token needs extra proxy setup.)
           </DialogDescription>
         </DialogHeader>
-        {(cfg.data ?? []).map((file) => (
+        {(cfg.data?.warnings ?? []).map((w) => (
+          <Alert key={w}>
+            <AlertDescription>{w}</AlertDescription>
+          </Alert>
+        ))}
+        {(cfg.data?.files ?? []).map((file) => (
           <div key={file.name} className="space-y-1">
             <div className="flex items-center justify-between">
               <span className="font-mono text-sm">{file.name}</span>

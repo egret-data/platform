@@ -226,6 +226,47 @@ pub fn plugin_base_url(egret_url: &str) -> String {
     format!("{}{RANGER_SURFACE_PREFIX}", egret_url.trim_end_matches('/'))
 }
 
+/// Why `raw` cannot be a download URL an engine reaches, if it cannot: its
+/// host is loopback or unspecified (`localhost`, `localhost.`, `127.0.0.0/8`,
+/// `0.0.0.0`, `::`, `::1`, an IPv4-mapped form of those), or it is not an
+/// http(s) URL with a host (`localhost:8080` parses as scheme `localhost`).
+/// Parsed, never substring-matched: `localhost.example.com` is an ordinary name.
+pub fn download_url_problem(raw: &str) -> Option<&'static str> {
+    use std::net::Ipv6Addr;
+    use url::Host;
+    let unusable = |v4: std::net::Ipv4Addr| v4.is_loopback() || v4.is_unspecified();
+    let url = url::Url::parse(raw).ok();
+    let Some(url) = url.filter(|u| matches!(u.scheme(), "http" | "https")) else {
+        return Some("is not an http(s) URL with a host");
+    };
+    let loopback = match url.host() {
+        None => return Some("is not an http(s) URL with a host"),
+        Some(Host::Domain(d)) => d.trim_end_matches('.').eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(ip)) => unusable(ip),
+        Some(Host::Ipv6(ip)) => {
+            ip == Ipv6Addr::UNSPECIFIED
+                || ip.is_loopback()
+                || ip.to_ipv4_mapped().is_some_and(unusable)
+        }
+    };
+    loopback.then_some("is a loopback or unspecified address")
+}
+
+/// The warning both plugin-configuration routes give when the URL egret renders
+/// into the files ([`plugin_base_url`]'s input) is one no engine can reach
+/// (KI-149): the external engine's `ranger-plugin-config` and a profile's
+/// `trino-config`. `None` when the URL is usable as far as egret can tell.
+pub fn download_url_warning(egret_url: &str) -> Option<String> {
+    let host_part = egret_url.trim_end_matches('/');
+    download_url_problem(host_part).map(|problem| {
+        format!(
+            "The download URL ({host_part}) {problem}: no engine can reach it. It comes from \
+             `[catalog] public_url`, which defaults to localhost on a fresh install; set it to \
+             an address the engine can reach."
+        )
+    })
+}
+
 /// The exact files egret mounts into its own engines, for `kind`.
 ///
 /// Trino: `access-control.properties`, `ranger-trino-security.xml`.
