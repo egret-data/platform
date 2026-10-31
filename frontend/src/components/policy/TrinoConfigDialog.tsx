@@ -31,7 +31,9 @@ export function TrinoConfigDialog({ open, service, onOpenChange }: Props) {
           and better: scrolling the CONTENT took the close button with it, since the close
           button is absolutely positioned inside. The primitive scrolls an inner body and
           leaves the close button pinned. */}
-      <DialogContent className="max-w-2xl">
+      {/* One column no wider than the dialog: the files' long lines scroll inside their
+          own `pre` instead of widening the body and clipping the text and warnings. */}
+      <DialogContent className="max-w-2xl" bodyClassName="grid-cols-[minmax(0,1fr)]">
         <DialogHeader>
           <DialogTitle>Trino config — {service}</DialogTitle>
           <DialogDescription>
