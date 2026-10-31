@@ -76,7 +76,7 @@ pub use mount::build_state_with_gc_poll;
 pub use mount::{
     build_state, catalog_engine_router, front_catalog_router, mount_catalog_engine,
     spawn_gc_workers, CatalogCaller, CatalogGuard, EngineAuthorizer, EngineServer, EngineState,
-    GuardedBody,
+    GuardedBody, Listing, BODY_DEADLINE,
 };
 pub use pool::{build_isolated_pool, LAKEKEEPER_SCHEMA};
 pub use recovery::{
