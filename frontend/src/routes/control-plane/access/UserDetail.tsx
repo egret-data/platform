@@ -163,6 +163,11 @@ export default function UserDetail() {
 
   const isActive = user.status === "active";
   const isSelf = user.id === me?.user_id;
+  // KI-260: the roles the user holds through a group, as the server reports
+  // them; the editor above lists the directly assigned ones.
+  const groupRoles = user.effectiveRoles.filter(
+    (r): r is { name: string; group: string } => r.group != null,
+  );
 
   return (
     <PageContainer className="space-y-6">
@@ -239,7 +244,7 @@ export default function UserDetail() {
         <div>
           <h2 className="text-base font-semibold">Roles</h2>
           <p className="text-sm text-muted-foreground">
-            Platform-wide roles this user holds. Workspace roles are assigned per workspace.
+            Platform-wide roles assigned to this user. Workspace roles are assigned per workspace.
           </p>
         </div>
         <RolesEditor
@@ -249,6 +254,38 @@ export default function UserDetail() {
           onAdd={(roleId) => assignMut.mutate(roleId)}
           onRemove={(roleId) => unassignMut.mutate(roleId)}
         />
+        <div className="space-y-2">
+          <h3 className="text-sm font-semibold">Through groups</h3>
+          <p className="text-sm text-muted-foreground">
+            Platform roles this user holds as a member of a group. Change them on the group's page.
+          </p>
+          <div className="rounded-md border">
+            <Table aria-label="Roles held through groups">
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Role</TableHead>
+                  <TableHead>Group</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {groupRoles.length === 0 ? (
+                  <TableRow className="hover:bg-transparent">
+                    <TableCell colSpan={2} className="py-6 text-center text-muted-foreground">
+                      No platform role through a group.
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  groupRoles.map((r) => (
+                    <TableRow key={`${r.name}:${r.group}`}>
+                      <TableCell className="font-medium">{r.name}</TableCell>
+                      <TableCell>{r.group}</TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </div>
+        </div>
       </section>
 
       {/* Groups (read-only — membership is managed from the Groups page) */}

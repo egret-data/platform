@@ -34,6 +34,7 @@ import {
 import { ApiError } from "@/api/client";
 import { useAuth } from "@/auth/useAuth";
 import { ImpersonateDialog } from "@/components/ImpersonateDialog";
+import { holdingSource, holdsPlatformAdmin, roleHoldings } from "@/components/access/effectiveRoles";
 import { lastActiveAdminReason } from "@/components/access/lastActiveAdmin";
 import { DeleteUserDialog, DisableUserDialog } from "@/components/access/UserLifecycleDialogs";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
@@ -206,25 +207,40 @@ export default function UsersPage() {
     {
       key: "roles",
       label: "Roles",
-      // Cap to two chips + a "+N" overflow so a heavily-assigned user never
-      // blows out the row width; the overflow badge lists the rest on hover.
-      cell: (u) =>
-        u.roles.length === 0 ? (
-          <span className="text-muted-foreground">—</span>
-        ) : (
+      // Every platform role the user holds, directly or through a group
+      // (KI-260). A role held only through groups names them in the chip, so
+      // the source is text, not colour alone. Cap to two chips + a "+N"
+      // overflow so a heavily-assigned user never blows out the row width; the
+      // overflow badge lists the rest on hover.
+      cell: (u) => {
+        const holdings = roleHoldings(u);
+        if (holdings.length === 0) return <span className="text-muted-foreground">—</span>;
+        return (
           <div className="flex flex-wrap items-center gap-1">
-            {u.roles.slice(0, 2).map((r) => (
-              <Badge key={r} variant="secondary" className="max-w-[10rem] truncate" title={r}>
-                {r}
+            {holdings.slice(0, 2).map((h) => (
+              <Badge
+                key={h.name}
+                variant={h.direct ? "secondary" : "outline"}
+                className="max-w-[16rem] truncate"
+                title={`${h.name} (${holdingSource(h)})`}
+              >
+                {h.direct ? h.name : `${h.name} · ${holdingSource(h)}`}
               </Badge>
             ))}
-            {u.roles.length > 2 ? (
-              <Badge variant="outline" title={u.roles.slice(2).join(", ")}>
-                +{u.roles.length - 2}
+            {holdings.length > 2 ? (
+              <Badge
+                variant="outline"
+                title={holdings
+                  .slice(2)
+                  .map((h) => `${h.name} (${holdingSource(h)})`)
+                  .join(", ")}
+              >
+                +{holdings.length - 2}
               </Badge>
             ) : null}
           </div>
-        ),
+        );
+      },
     },
     {
       key: "groups",
@@ -282,7 +298,7 @@ export default function UsersPage() {
                 disabled) for the caller's own row and for platform_admin targets —
                 the backend rejects both, but a visible-then-403 action reads as a
                 bug rather than a rule. */}
-            {isAdmin && u.id !== me?.user_id && !u.roles.includes("platform_admin") && (
+            {isAdmin && u.id !== me?.user_id && !holdsPlatformAdmin(u) && (
               <DropdownMenuItem onClick={() => setImpersonateTarget(u)}>
                 <UserCog className="mr-2 h-4 w-4" />
                 Impersonate

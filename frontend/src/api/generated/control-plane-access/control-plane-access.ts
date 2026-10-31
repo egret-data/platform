@@ -1836,6 +1836,11 @@ export type controlPlaneAccessRemoveGroupMemberResponse403 = {
   status: 403
 }
 
+export type controlPlaneAccessRemoveGroupMemberResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneAccessRemoveGroupMemberResponse500 = {
   data: ErrorBody
   status: 500
@@ -1844,7 +1849,7 @@ export type controlPlaneAccessRemoveGroupMemberResponse500 = {
 export type controlPlaneAccessRemoveGroupMemberResponseSuccess = (controlPlaneAccessRemoveGroupMemberResponse204) & {
   headers: Headers;
 };
-export type controlPlaneAccessRemoveGroupMemberResponseError = (controlPlaneAccessRemoveGroupMemberResponse401 | controlPlaneAccessRemoveGroupMemberResponse403 | controlPlaneAccessRemoveGroupMemberResponse500) & {
+export type controlPlaneAccessRemoveGroupMemberResponseError = (controlPlaneAccessRemoveGroupMemberResponse401 | controlPlaneAccessRemoveGroupMemberResponse403 | controlPlaneAccessRemoveGroupMemberResponse409 | controlPlaneAccessRemoveGroupMemberResponse500) & {
   headers: Headers;
 };
 
@@ -2531,8 +2536,8 @@ export const getControlPlaneAccessDeleteUserUrl = (id: string,) => {
 
 /**
  * @summary `DELETE /users/{id}` — hard-delete a user (Task 4). Guards: not yourself,
-not the last active platform admin (`guard_not_last_admin`, shared with the
-disable branch of `update_user`). Cleans up the user's sessions, group
+not the last active platform admin (the last-admin guard inside
+`UserRepo::hard_delete`, KI-284). Cleans up the user's sessions, group
 memberships, and platform role/permission grants, then removes the row
 itself, in one transaction (`UserRepo::hard_delete`).
  */
@@ -2584,8 +2589,8 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
     /**
  * @summary `DELETE /users/{id}` — hard-delete a user (Task 4). Guards: not yourself,
-not the last active platform admin (`guard_not_last_admin`, shared with the
-disable branch of `update_user`). Cleans up the user's sessions, group
+not the last active platform admin (the last-admin guard inside
+`UserRepo::hard_delete`, KI-284). Cleans up the user's sessions, group
 memberships, and platform role/permission grants, then removes the row
 itself, in one transaction (`UserRepo::hard_delete`).
  */

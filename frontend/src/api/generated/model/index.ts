@@ -134,6 +134,7 @@ export * from './controlPlaneAuditListAuditParams';
 export * from './controlPlaneCatalogListResourceTagsParams';
 export * from './controlPlaneCatalogRegistryListRegistryCatalogsParams';
 export * from './controlPlaneCatalogSearchTabularsParams';
+export * from './controlPlaneEffectiveRoleDto';
 export * from './controlPlaneEnginesPodLogsFollowParams';
 export * from './controlPlaneEnginesPodLogsParams';
 export * from './controlPlaneGovernanceBrowseParams';

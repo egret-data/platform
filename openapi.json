@@ -559,6 +559,16 @@
               }
             }
           },
+          "409": {
+            "description": "Would remove the last active platform admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -7328,7 +7338,7 @@
             }
           },
           "409": {
-            "description": "Cannot delete an OIDC-synced group; or grants or rule exemptions still name the group (the message lists them to a caller with policy:read, and otherwise gives only their count; remove them first)",
+            "description": "Cannot delete an OIDC-synced group; or grants or rule exemptions still name the group (the message lists them to a caller with policy:read, and otherwise gives only their count; remove them first); or the delete would remove the last active platform admin (a member who holds platform_admin only through this group)",
             "content": {
               "application/json": {
                 "schema": {
@@ -7616,6 +7626,16 @@
           },
           "403": {
             "description": "Requires platform_admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Would remove the last active platform admin (the user holds platform_admin only through this group)",
             "content": {
               "application/json": {
                 "schema": {
@@ -13205,7 +13225,7 @@
         "tags": [
           "control-plane-access"
         ],
-        "summary": "`DELETE /users/{id}` — hard-delete a user (Task 4). Guards: not yourself,\nnot the last active platform admin (`guard_not_last_admin`, shared with the\ndisable branch of `update_user`). Cleans up the user's sessions, group\nmemberships, and platform role/permission grants, then removes the row\nitself, in one transaction (`UserRepo::hard_delete`).",
+        "summary": "`DELETE /users/{id}` — hard-delete a user (Task 4). Guards: not yourself,\nnot the last active platform admin (the last-admin guard inside\n`UserRepo::hard_delete`, KI-284). Cleans up the user's sessions, group\nmemberships, and platform role/permission grants, then removes the row\nitself, in one transaction (`UserRepo::hard_delete`).",
         "operationId": "delete_user",
         "parameters": [
           {
@@ -41336,6 +41356,25 @@
           }
         }
       },
+      "ControlPlaneEffectiveRoleDto": {
+        "type": "object",
+        "description": "One platform role a user holds, and where from.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "group": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The group the role is held through; `null` when granted directly. A\nrole held both ways appears once per source."
+          }
+        }
+      },
       "ControlPlaneUserDto": {
         "type": "object",
         "required": [
@@ -41345,6 +41384,7 @@
           "provider",
           "status",
           "roles",
+          "effectiveRoles",
           "groups"
         ],
         "properties": {
@@ -41368,7 +41408,15 @@
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Platform roles granted to the user directly — the ones the Roles\neditor can unassign."
+          },
+          "effectiveRoles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ControlPlaneEffectiveRoleDto"
+            },
+            "description": "Every platform role the user holds, directly or through a group, each\nwith where it comes from (KI-260): what decides their access, and what\nthe last-admin guard counts."
           },
           "groups": {
             "type": "array",
