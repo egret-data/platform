@@ -3576,3 +3576,230 @@ async fn the_last_active_admin_cannot_be_removed_while_a_disabled_admin_remains(
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 }
+
+/// KI-284 + KI-260: a user who is the last active platform admin only through
+/// a group. The Users list shows the role with its group, and every path that
+/// would take it away answers the last-admin 409 and changes nothing: removing
+/// them from the group, deleting the group, revoking the group's role,
+/// disabling or deleting them. A second admin breaks the tie. The caller is
+/// not an admin, so the caller's own row never keeps the set non-empty.
+#[tokio::test]
+async fn the_last_admin_through_a_group_cannot_be_removed_by_any_path() {
+    let Some(f) = setup_isolated_schema("egret_test_iso_group_admin").await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    // Arrange: `admin` holds platform_admin only through `group`.
+    let admin_email = format!("group_admin_{}@egret.local", Uuid::new_v4().simple());
+    let admin = f
+        .users
+        .insert_local(&admin_email, "Group admin", "x")
+        .await
+        .expect("insert admin");
+    let group_name = format!("platform-admins-{}", Uuid::new_v4().simple());
+    let group: Uuid =
+        sqlx::query_scalar("INSERT INTO groups (name, source) VALUES ($1, 'local') RETURNING id")
+            .bind(&group_name)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("insert group");
+    let role_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM roles WHERE scope = 'platform' AND name = 'platform_admin'",
+    )
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("platform_admin role");
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ('group', $1, $2, 'platform', NULL)",
+    )
+    .bind(group)
+    .bind(role_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("grant the group platform_admin");
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(admin.0)
+        .bind(group)
+        .execute(&f.db.pool)
+        .await
+        .expect("add the admin to the group");
+    let caller = session_for_with_permission(&f, "remover", "group:manage_members").await;
+
+    // The Users list: no direct role, platform_admin through the group.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/users", &caller, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "body={j}");
+    let row = j
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["id"] == admin.0.to_string())
+        .expect("the admin's row");
+    assert_eq!(row["roles"], serde_json::json!([]), "row={row}");
+    assert_eq!(
+        row["effectiveRoles"],
+        serde_json::json!([{ "name": "platform_admin", "group": group_name }]),
+        "row={row}"
+    );
+
+    // Act + assert: every removal path refuses.
+    let attempts = [
+        (
+            "DELETE",
+            format!("/groups/{group}/members/{}", admin.0),
+            None,
+        ),
+        ("DELETE", format!("/groups/{group}"), None),
+        ("DELETE", format!("/groups/{group}/roles/{role_id}"), None),
+        (
+            "PATCH",
+            format!("/users/{}", admin.0),
+            Some(serde_json::json!({ "status": "disabled" })),
+        ),
+        ("DELETE", format!("/users/{}", admin.0), None),
+    ];
+    for (method, uri, body) in attempts {
+        let resp = f
+            .app
+            .clone()
+            .oneshot(req(method, &uri, &caller, body))
+            .await
+            .unwrap();
+        let (status, j) = into_json(resp).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "{method} {uri} on the last admin (through a group) must 409; body={j}"
+        );
+        assert!(
+            j["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("last active platform admin"),
+            "body={j}"
+        );
+    }
+    let (status, members): (String, i64) = sqlx::query_as(
+        "SELECT u.status, (SELECT count(*) FROM user_groups WHERE user_id = u.id AND group_id = $2) \
+           FROM users u WHERE u.id = $1",
+    )
+    .bind(admin.0)
+    .bind(group)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("the admin still exists");
+    assert_eq!((status.as_str(), members), ("active", 1));
+
+    // A second (direct) admin breaks the tie.
+    let _second = session_for(&f, "second_admin", true).await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/groups/{group}/members/{}", admin.0),
+            &caller,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+/// KI-284: the last-admin check and the write share one transaction under one
+/// lock, so two removals of two different admins cannot both pass. A
+/// concurrent writer (here the test, holding the admin-set lock with one
+/// admin's grant deleted but not committed) makes the route WAIT; once that
+/// commits, the route reads the committed set and refuses. Before the fix the
+/// route read the uncommitted delete as not there and revoked the other admin
+/// at once, leaving none.
+#[tokio::test]
+async fn a_revoke_waits_for_a_concurrent_admin_removal_and_then_refuses() {
+    let Some(f) = setup_isolated_schema("egret_test_iso_admin_race").await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let _x = session_for(&f, "admin_x", true).await;
+    let _y = session_for(&f, "admin_y", true).await;
+    let ids: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT u.id, u.email::text FROM access_grants g JOIN users u ON u.id = g.principal_id \
+         JOIN roles r ON r.id = g.role_id WHERE r.name = 'platform_admin' ORDER BY u.email",
+    )
+    .fetch_all(&f.db.pool)
+    .await
+    .unwrap();
+    let x = ids
+        .iter()
+        .find(|(_, e)| e.starts_with("admin_x_"))
+        .unwrap()
+        .0;
+    let y = ids
+        .iter()
+        .find(|(_, e)| e.starts_with("admin_y_"))
+        .unwrap()
+        .0;
+    let role_id: Uuid = sqlx::query_scalar("SELECT id FROM roles WHERE name = 'platform_admin'")
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+    let caller = session_for_with_permission(&f, "revoker", "user:assign_role").await;
+
+    // A concurrent removal of `x`, in flight: the lock held, the delete
+    // written, nothing committed.
+    let mut concurrent = f.db.pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(egret_auth::roles::PLATFORM_ADMIN_SET_LOCK_KEY)
+        .execute(&mut *concurrent)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM access_grants WHERE principal_id = $1 AND role_id = $2")
+        .bind(x)
+        .bind(role_id)
+        .execute(&mut *concurrent)
+        .await
+        .unwrap();
+
+    // The route revoking `y` meanwhile.
+    let app = f.app.clone();
+    let revoke = tokio::spawn(async move {
+        let resp = app
+            .oneshot(req(
+                "DELETE",
+                &format!("/users/{y}/roles/{role_id}"),
+                &caller,
+                None,
+            ))
+            .await
+            .unwrap();
+        into_json(resp).await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(
+        !revoke.is_finished(),
+        "the revoke must wait for the concurrent removal, not decide on a stale read: {:?}",
+        if revoke.is_finished() {
+            Some(revoke.await.unwrap())
+        } else {
+            None
+        }
+    );
+
+    concurrent.commit().await.unwrap();
+    let (status, j) = revoke.await.unwrap();
+    assert_eq!(status, StatusCode::CONFLICT, "body={j}");
+    let left: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM access_grants WHERE role_id = $1 AND principal_id = $2",
+    )
+    .bind(role_id)
+    .bind(y)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(left, 1, "the last admin keeps the role");
+}
