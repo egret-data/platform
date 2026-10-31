@@ -344,6 +344,73 @@ describe("creating a profile", () => {
   });
 });
 
+// #786 / KI-125: a Trino profile made here can name a tag service, so an engine can be bound to it.
+describe("creating a tag-capable Trino profile (#786)", () => {
+  it("offers Tag as a type and the existing tag profiles as the Trino profile's tag service", async () => {
+    const a = answers({ "POST /policies/services": ok({ id: 9, name: "ext-tr", type: "trino" }) });
+    const served = serve(a);
+    openArea(INDEX, CREATOR);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "New profile" }, T));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByLabelText("Name"), "ext-tr");
+    await user.click(within(dialog).getByRole("combobox", { name: "Tag service" }));
+    const options = (await screen.findAllByRole("option", {}, T)).map((o) => o.textContent);
+    expect(options).toEqual(["None", "lake-tr-tag"]);
+    await user.click(screen.getByRole("option", { name: "lake-tr-tag" }));
+    await user.click(within(dialog).getByRole("button", { name: "Create profile" }));
+    await waitFor(() =>
+      expect(served.bodies["POST /policies/services"]).toEqual([
+        { name: "ext-tr", type: "trino", config: { tagService: "lake-tr-tag" } },
+      ]),
+    );
+  });
+
+  it("creates the tag profile first, then comes back to the Trino profile with it picked", async () => {
+    const a = answers({ "POST /policies/services": ok({ id: 9, name: "ext-tr_tag", type: "tag" }) });
+    const served = serve(a);
+    openArea(INDEX, CREATOR);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "New profile" }, T));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByLabelText("Name"), "ext-tr");
+    await user.click(within(dialog).getByRole("button", { name: "New tag profile" }));
+    expect(within(dialog).getByLabelText("Name")).toHaveValue("ext-tr_tag");
+    expect(within(dialog).getByRole("combobox", { name: "Type" })).toHaveTextContent("Tag");
+    a["/policies/services"] = ok([...profiles(), profileDto("ext-tr_tag", { type: "tag", origin: "manual" })]);
+    await user.click(within(dialog).getByRole("button", { name: "Create profile" }));
+    await waitFor(() =>
+      expect(served.bodies["POST /policies/services"]).toEqual([{ name: "ext-tr_tag", type: "tag" }]),
+    );
+    expect(await within(dialog).findByText("Tag profile ext-tr_tag created.", {}, T)).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Name")).toHaveValue("ext-tr");
+    expect(within(dialog).getByRole("combobox", { name: "Type" })).toHaveTextContent("Trino");
+    await waitFor(() =>
+      expect(within(dialog).getByRole("combobox", { name: "Tag service" })).toHaveTextContent("ext-tr_tag"),
+    );
+    a["POST /policies/services"] = ok({ id: 10, name: "ext-tr", type: "trino" });
+    await user.click(within(dialog).getByRole("button", { name: "Create profile" }));
+    await waitFor(() =>
+      expect(served.bodies["POST /policies/services"]?.[1]).toEqual({
+        name: "ext-tr",
+        type: "trino",
+        config: { tagService: "ext-tr_tag" },
+      }),
+    );
+  });
+
+  it("asks no tag service of a StarRocks or tag profile", async () => {
+    serve(answers());
+    openArea(INDEX, CREATOR);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "New profile" }, T));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("combobox", { name: "Type" }));
+    await user.click(await screen.findByRole("option", { name: "StarRocks" }, T));
+    expect(within(dialog).queryByRole("combobox", { name: "Tag service" })).toBeNull();
+  });
+});
+
 describe("each section's states (FE-STATE-1)", () => {
   it("shows skeletons while loading, not empty sentences", async () => {
     serve(answers({ "/policies/services": "never", "/engines": "never" }));

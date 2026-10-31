@@ -25,6 +25,7 @@ import { editorUrl } from "@/routes/governance/engines/engineUrl";
 import type { TabContext } from "@/routes/governance/engines/PageFrame";
 import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
 import { cn } from "@/lib/utils";
+import { TagServiceSection } from "@/routes/governance/engines/tabs/TagServiceSection";
 
 export const ADVANCED_WARNING =
   "Manual policies are outside egret's model: egret does not recompile them, does not check overlaps with grants, and Data and People pages will mark them manual. Prefer Engine permissions or grants on Data.";
@@ -34,6 +35,30 @@ export const SEED_EXPLAINED =
   "Adds egret's default Trino set (group admin: all access). Existing policies are not changed.";
 
 const TYPE_LABEL: Record<string, string> = { access: "Access", masking: "Masking", rowfilter: "Row filter" };
+
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+/** What a seed answered, said on the tab (KI-135): the rows land on Policies, not in this tab's list. */
+export function seedResultSentence(created: number): string {
+  if (created === 0) return "No default policy was added: the profile already has policies.";
+  return `Added ${plural(created, "default policy", "default policies")}. They are egret-seeded, so they are listed on the Policies tab, not here.`;
+}
+
+/**
+ * Under "no manual policy": the profile's egret-compiled and egret-seeded
+ * policies, which this tab does not list, and where they are (KI-135).
+ */
+export function otherPoliciesSentence(rows: PolicySummary[]): string | undefined {
+  const compiled = rows.filter((r) => r.managed_by === "compiler").length;
+  const seeded = rows.filter((r) => r.managed_by === "infra").length;
+  const parts = [
+    compiled ? plural(compiled, "egret-compiled policy", "egret-compiled policies") : null,
+    seeded ? plural(seeded, "egret-seeded policy", "egret-seeded policies") : null,
+  ].filter((p): p is string => !!p);
+  if (parts.length === 0) return undefined;
+  const verb = compiled + seeded === 1 ? "is" : "are";
+  return `Its ${parts.join(" and ")} ${verb} listed on the Policies tab.`;
+}
 
 /**
  * Advanced (spec §6.6, EP2, EP9): the raw Ranger policies a person wrote by
@@ -48,6 +73,7 @@ export function AdvancedTab({ ctx }: { ctx: TabContext }) {
   const can = usePolicyPermissions();
   const queryClient = useQueryClient();
   const [seedError, setSeedError] = useState<string | null>(null);
+  const [seedResult, setSeedResult] = useState<string | null>(null);
   const profile = ctx.profile;
   const policies = ctx.policies;
 
@@ -58,6 +84,8 @@ export function AdvancedTab({ ctx }: { ctx: TabContext }) {
         void queryClient.invalidateQueries({ queryKey: getPolicyAdminListPoliciesQueryKey() });
         void queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] });
         const n = res.status === 200 ? res.data.created : 0;
+        // The toast alone was missed (KI-135): the result also stays on the tab.
+        setSeedResult(seedResultSentence(n));
         toast.success(
           n === 0
             ? "No default policy was added: the profile already has policies."
@@ -66,7 +94,10 @@ export function AdvancedTab({ ctx }: { ctx: TabContext }) {
               : `Added ${n} default policies.`,
         );
       },
-      onError: (e) => setSeedError(refusalMessage(e, "policy:seed", "The default policies could not be added.")),
+      onError: (e) => {
+        setSeedResult(null);
+        setSeedError(refusalMessage(e, "policy:seed", "The default policies could not be added."));
+      },
     },
   });
 
@@ -102,7 +133,13 @@ export function AdvancedTab({ ctx }: { ctx: TabContext }) {
   } else if (policies.isLoading) {
     list = <ListSkeleton rows={3} cols={4} />;
   } else if (handWritten.length === 0) {
-    list = <EmptyState icon={FileText} title="This profile has no manual policy." />;
+    list = (
+      <EmptyState
+        icon={FileText}
+        title="This profile has no manual policy."
+        description={otherPoliciesSentence(policies.rows)}
+      />
+    );
   } else {
     list = <HandWrittenTable rows={handWritten} ctx={ctx} />;
   }
@@ -134,12 +171,18 @@ export function AdvancedTab({ ctx }: { ctx: TabContext }) {
           ) : null}
         </div>
       ) : null}
+      {canSeed ? (
+        <p role="status" className="text-sm">
+          {seedResult}
+        </p>
+      ) : null}
       {seedError ? (
         <Alert variant="destructive">
           <AlertDescription>{seedError}</AlertDescription>
         </Alert>
       ) : null}
       <Section title="Manual policies">{list}</Section>
+      {profile.type === "trino" ? <TagServiceSection profile={profile} /> : null}
     </div>
   );
 }
