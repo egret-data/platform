@@ -19,8 +19,10 @@ built from `e.to_string()`, so the SQLSTATE was lost before the classifier saw i
 - ONE conversion reads the SQLSTATE: `CompileError::from_db(sqlx::Error)` and
   `CompileError::from_db_in(context, sqlx::Error)` (both through one private
   `classified`), 55P03 → `LockTimeout`, anything else → `Db`.
-  `CompileError::from_perm(PermError)` and `overlap::store_error(PolicyStoreError)`
-  send their `Db(sqlx::Error)` arm through `from_db`.
+  `CompileError::from_perm(PermError)` and `egret_perm_compile::db_error::{from_store,
+  from_core, from_lineage}` (`PolicyStoreError`, `egret_core::Error::Internal` holding
+  a `sqlx::Error`, `LineageError`) send their database arm through `from_db`; the
+  one `EngineMgmtError` site in `profile_compiler` does the same inline.
 - Construction sites from a `sqlx::Error` are converted mechanically. Sites that
   wrap a non-database error (a JSON parse, a missing field, an internal invariant)
   stay `Db`.
