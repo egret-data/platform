@@ -9,7 +9,7 @@
 export interface CreateProfileBody {
   /** Ranger service (profile) name. */
   name: string;
-  /** Ranger service type: `"trino"` or `"starrocks"`. */
+  /** Ranger service type: `"trino"`, `"starrocks"` or `"tag"`. */
   type: string;
   /**
      * Optional service config (e.g. StarRocks JDBC coordinates). Stored verbatim.
