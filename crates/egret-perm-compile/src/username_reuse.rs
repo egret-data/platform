@@ -22,7 +22,7 @@
 //! - `admin_policy_named_non_admin`: an `egret-admin` body naming someone who
 //!   is not an active platform admin, in the 0209 baseline or live. `definite`
 //!   when the body was last written before they existed; `stale` (live only)
-//!   when they hold a `platform_admin` grant (a disabled admin) or were minted
+//!   when they hold a live `platform_admin` grant (a disabled admin) or were minted
 //!   after 0209: no reuse, the sync has not caught up; otherwise `possible` (a
 //!   demoted admin, or someone given a deleted admin's name after their
 //!   `created_at`). A baseline row for a disabled admin, or naming nobody, is
@@ -257,15 +257,28 @@ SELECT r.place_type, r.place_id, r.engine_id, r.ref AS username, r.position, r.e
 /// Every name in every policy body now, and every row of the 0209 baseline,
 /// with the holder now, whether they hold `platform_admin` (at all, and as an
 /// active user), and the ledger. A baseline holder deleted since is no holder.
-const POLICIES: &str = "\
+///
+/// "Holds `platform_admin`" is the engine seed set's rule
+/// (`egret_auth::roles::engine_admin_user_ids_via`): a live `allow` grant,
+/// direct or through a group (`egret_auth::live_allow_grant!`). A `deny` or
+/// lapsed grant makes nobody an admin, so the `egret-admin` sync drops them,
+/// and the report must not call their name an admin's.
+const POLICIES: &str = concat!(
+    "\
 WITH admins AS ( \
     SELECT u.id, u.status FROM users u \
      WHERE (EXISTS (SELECT 1 FROM access_grants g JOIN roles r ON r.id = g.role_id \
                      WHERE r.name = 'platform_admin' AND g.scope_type = 'platform' \
+                       AND ",
+    egret_auth::live_allow_grant!("g"),
+    " \
                        AND g.principal_type = 'user' AND g.principal_id = u.id) \
          OR EXISTS (SELECT 1 FROM access_grants g JOIN roles r ON r.id = g.role_id \
                       JOIN user_groups ug ON ug.group_id = g.principal_id \
                      WHERE r.name = 'platform_admin' AND g.scope_type = 'platform' \
+                       AND ",
+    egret_auth::live_allow_grant!("g"),
+    " \
                        AND g.principal_type = 'group' AND ug.user_id = u.id)) \
 ) \
 SELECT p.id AS policy_id, p.name AS policy_name, s.name AS service, p.managed_by, \
@@ -288,7 +301,8 @@ SELECT b.policy_id, b.policy_name, COALESCE(s.name, b.service_id::text), b.manag
   LEFT JOIN policy.authz_services s ON s.id = b.service_id \
   LEFT JOIN users u ON u.id = b.holder_id \
   LEFT JOIN username_ledger l ON l.username = b.username \
- ORDER BY 6, 1";
+ ORDER BY 6, 1"
+);
 
 fn holder(
     id: Option<Uuid>,
