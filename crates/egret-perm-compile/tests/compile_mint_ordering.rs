@@ -507,3 +507,55 @@ async fn a_service_with_an_egret_admin_set_keeps_the_premint() {
         "the sweep ran for a service whose egret-admin sync can mint"
     );
 }
+
+/// A recompile bumps its tag service's `policy_version`, and migration 0191's
+/// trigger carries the bump to every profile naming that tag service, taking
+/// their row locks. So `lock_services_in_tx` locks those linkers up front: a
+/// second profile sharing the tag service is held after locking the first.
+#[tokio::test]
+async fn locking_a_profile_also_locks_the_other_linkers_of_its_tag_service() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else {
+        return;
+    };
+    let policy = PolicyStore::new(db.clone());
+    egret_policy::seed_trino(&policy).await.expect("trino def");
+    let tag_name = unique("p6_shared_tags");
+    egret_policy::seed_tag(&policy).await.expect("tag def");
+    let tag = policy
+        .create_service(&tag_name, "tag", &serde_json::json!({}))
+        .await
+        .expect("tag service")
+        .id;
+    let config = serde_json::json!({ "tagService": tag_name });
+    let p1 = policy
+        .create_service(&unique("p6_linker"), "trino", &config)
+        .await
+        .expect("profile 1")
+        .id;
+    let p2 = policy
+        .create_service(&unique("p6_linker"), "trino", &config)
+        .await
+        .expect("profile 2")
+        .id;
+
+    let mut tx = begin_bounded(&db).await;
+    egret_perm_compile::lock_services_in_tx(&mut tx, &[p1])
+        .await
+        .expect("lock profile 1");
+    let mut other = db.pool.begin().await.expect("begin");
+    for (what, id) in [
+        ("profile 1", p1),
+        ("its tag service", tag),
+        ("profile 2", p2),
+    ] {
+        let r = sqlx::query("SELECT id FROM policy.authz_services WHERE id = $1 FOR UPDATE NOWAIT")
+            .bind(id)
+            .execute(&mut *other)
+            .await;
+        assert!(r.is_err(), "{what} ({id}) was not locked");
+        let _ = other.rollback().await;
+        other = db.pool.begin().await.expect("begin");
+    }
+    tx.rollback().await.expect("rollback");
+}
