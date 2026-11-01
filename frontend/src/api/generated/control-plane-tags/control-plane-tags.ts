@@ -731,6 +731,11 @@ export type controlPlaneTagsSetAccessPolicyResponse403 = {
   status: 403
 }
 
+export type controlPlaneTagsSetAccessPolicyResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneTagsSetAccessPolicyResponse500 = {
   data: ErrorBody
   status: 500
@@ -739,7 +744,7 @@ export type controlPlaneTagsSetAccessPolicyResponse500 = {
 export type controlPlaneTagsSetAccessPolicyResponseSuccess = (controlPlaneTagsSetAccessPolicyResponse200) & {
   headers: Headers;
 };
-export type controlPlaneTagsSetAccessPolicyResponseError = (controlPlaneTagsSetAccessPolicyResponse401 | controlPlaneTagsSetAccessPolicyResponse403 | controlPlaneTagsSetAccessPolicyResponse500) & {
+export type controlPlaneTagsSetAccessPolicyResponseError = (controlPlaneTagsSetAccessPolicyResponse401 | controlPlaneTagsSetAccessPolicyResponse403 | controlPlaneTagsSetAccessPolicyResponse409 | controlPlaneTagsSetAccessPolicyResponse500) & {
   headers: Headers;
 };
 
