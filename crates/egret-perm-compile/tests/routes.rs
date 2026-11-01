@@ -9841,11 +9841,14 @@ async fn explain_reports_a_trino_classification_row_filter_on_a_tagged_table() {
     );
 }
 
-/// E14: on Trino a classification on a COLUMN reaches the table request as a
-/// descendant, so its row filter filters nothing. The table request is asked
-/// with the table-level resolution, so explain says so.
+/// KI-287 (owner decision: compile it table-level). On Trino a classification
+/// on a COLUMN reaches the table request only as a descendant, so the tag row
+/// filter does not fire there (E14); egret therefore also compiles a resource
+/// row filter on each table carrying the classification on columns only.
+/// Explain evaluates the served artifact, so it agrees with the compile: the
+/// rows are filtered, by the rule, through the policy on the table.
 #[tokio::test]
-async fn a_trino_row_filter_on_a_column_classification_filters_nothing() {
+async fn a_trino_row_filter_on_a_column_classification_filters_the_table() {
     let Some(f) = setup().await else { return };
     let token = admin_session(&f).await;
     let (catalog_id, _tag_service) = trino_tag_profile(&f, "vmask-trino-rfc").await;
@@ -9877,23 +9880,50 @@ async fn a_trino_row_filter_on_a_column_classification_filters_nothing() {
     ask["target"]["column"] = json!("email");
     let body = explain_with(&f, &token, ask).await;
     let trino = profile_for(&body, "trino");
+    let rf = &trino["row_filter"];
+    assert_eq!(rf["decision"]["kind"], "filtered", "body: {body}");
     assert_eq!(
-        trino["row_filter"]["decision"]["kind"], "no_filter",
+        rf["decision"]["result"]["filter_expr"], "region = 'us'",
         "body: {body}"
     );
-    // D3 (spec §5.8): the gap is listed and the rows line says it.
-    assert_eq!(
-        trino["row_filter_not_applied"],
-        json!([{"rule_id": rule_id, "rule_name": rule_name, "tag_name": tag.name}]),
+    assert_eq!(rf["attribution"]["kind"], "rule", "body: {body}");
+    assert_eq!(rf["attribution"]["rule_id"], json!(rule_id), "body: {body}");
+    assert!(
+        trino.get("row_filter_not_applied").is_none(),
         "body: {body}"
     );
     assert_eq!(
         trino["effect_lines"][1]["text"],
         json!(format!(
-            "analyst sees every row: rule {rule_name} does not filter on Trino here, because {} \
-             is on a column, not on the table",
-            tag.name
+            "analyst sees rows where region = 'us' (rule {rule_name})"
         )),
+        "body: {body}"
+    );
+
+    // The policy explain attributes is the one compiled on the table.
+    let catalog: String = sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
+        .bind(catalog_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("catalog name");
+    let service_id = trino["service_id"].as_i64().expect("service id");
+    let policy = format!(
+        "{}{rule_id}-{catalog}.sales.orders",
+        egret_policy::COMPILER_RULE_PREFIX
+    );
+    let compiled: Option<Value> = sqlx::query_scalar(
+        "SELECT policy_jsonb FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
+    )
+    .bind(service_id)
+    .bind(&policy)
+    .fetch_optional(&f.db.pool)
+    .await
+    .expect("compiled policy");
+    let compiled = compiled.unwrap_or_else(|| panic!("no policy {policy}; body: {body}"));
+    assert_eq!(compiled["policyType"], 2, "{compiled}");
+    assert_eq!(
+        rf["decision"]["result"]["policy_name"],
+        json!(policy),
         "body: {body}"
     );
 }
@@ -9983,63 +10013,33 @@ async fn no_profile_explain_says_not_enforced_with_the_catalog() {
     assert!(body.get("effect_line").is_none(), "body: {body}");
 }
 
-/// Spec §5.8 (D3, C9): a classification row filter's preview counts the
-/// tables where the classification is on columns only, in catalogs a Trino
-/// engine enforces it: there it filters nothing. A table carrying it as a
-/// whole is not counted; a mask, and a catalog only StarRocks enforces, get
-/// `null`. The stored rule's effect says the same.
+/// KI-287: a classification row filter filters a table carrying the
+/// classification on columns only on Trino too, so its preview and its stored
+/// effect no longer count such tables (the `trinoColumnOnly` warning of spec
+/// §5.8, D3, is gone with the gap it reported).
 #[tokio::test]
-async fn a_classification_row_filter_preview_counts_trino_column_only_tables() {
+async fn a_classification_row_filter_preview_has_no_trino_column_only_warning() {
     let Some(f) = setup().await else { return };
     let token = admin_session(&f).await;
     let (catalog_id, _tag_service) = trino_tag_profile(&f, "vmask-d3-count").await;
-    let name: String = sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
-        .bind(catalog_id)
-        .fetch_one(&f.db.pool)
-        .await
-        .expect("catalog name");
     let _lock = exclusive(&f).await;
     let (key, tag_id) = classification_named(&f, &unique("VmaskD3")).await;
     let wh = warehouse_of(&f, catalog_id).await;
     assign(&f, tag_id, wh, "orders", "email").await;
-    assign(&f, tag_id, wh, "orders", "phone").await;
-    // On the whole table AND a column: the table attachment filters, so it
-    // is not counted.
     assign(&f, tag_id, wh, "customers", "").await;
-    assign(&f, tag_id, wh, "customers", "id").await;
-    let selector = json!({"type": "tag", "key": key});
-
-    let rule = row_filter_rule("vmask-d3", selector.clone(), "region = 'us'");
+    let rule = row_filter_rule(
+        "vmask-d3",
+        json!({"type": "tag", "key": key}),
+        "region = 'us'",
+    );
     let (status, body) = preview_rule(&f, &token, rule.clone()).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(
-        body["effect"]["trinoColumnOnly"],
-        json!({"catalogs": [name], "tables": 1}),
-        "{body}"
-    );
+    assert_eq!(body["effect"]["kind"], "row_filter", "{body}");
+    assert!(body["effect"].get("trinoColumnOnly").is_none(), "{body}");
     let id = store_rule(&f, &token, rule).await;
     let (status, stored) = get_json(&f, &token, &format!("/perm/rules/{id}/effect")).await;
     assert_eq!(status, StatusCode::OK, "{stored}");
-    assert_eq!(
-        stored["trinoColumnOnly"], body["effect"]["trinoColumnOnly"],
-        "{stored}"
-    );
-
-    let (_, body) = preview_rule(&f, &token, mask_rule("vmask-d3-mask", selector, json!([]))).await;
-    assert!(body["effect"]["trinoColumnOnly"].is_null(), "{body}");
-
-    // The fixture's StarRocks-only catalog, its classification on a column.
-    let (_, body) = preview_rule(
-        &f,
-        &token,
-        row_filter_rule(
-            "vmask-d3-sr",
-            json!({"type": "tag", "key": f.tag_key}),
-            "1=1",
-        ),
-    )
-    .await;
-    assert!(body["effect"]["trinoColumnOnly"].is_null(), "{body}");
+    assert!(stored.get("trinoColumnOnly").is_none(), "{stored}");
 }
 
 /// Review finding 1: a rule whose OWN mask is `MASK_NONE` ("Unmasked"), or a

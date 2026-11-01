@@ -53,8 +53,6 @@ import {
   RefusalBody,
   showsNotEnforced,
   tickReason,
-  TrinoColumnOnlyNotice,
-  trinoTickReason,
   type ConflictActions,
 } from "@/routes/governance/RulePreview";
 import {
@@ -77,9 +75,9 @@ const EMPTY_SCOPE: Scope = { catalog_id: "" };
 
 /** Create's reason when only the preview is missing or out of date (spec C8.2). */
 export const PREVIEW_TO_ENABLE_CREATE = "Preview the rule to enable Create.";
-/** Spec §5.8 (D3): shown under Kind for a row filter on a classification. */
-export const TRINO_ROW_FILTER_HINT =
-  "On Trino, a row filter by classification applies only where the classification is on the whole table.";
+/** Shown under Kind for a row filter on a classification: what both engines filter (KI-287). */
+export const CLASSIFICATION_ROW_FILTER_HINT =
+  "A row filter by classification filters every table that carries the classification, on the whole table or on any of its columns, on Trino and on StarRocks.";
 /** The path-mask help (spec C8.1): an absent column is legal and means every column. */
 export const EMPTY_COLUMN_MASKS_EVERY_COLUMN = "Leave Column empty to mask every column of the table.";
 
@@ -596,9 +594,7 @@ function RuleForm({
   const effect = preview && !previewStale ? (preview.effect ?? null) : null;
   // Only a mask can be a second mask on a column; the server lists masks only, and the kind is checked anyway.
   const secondMask = !!effect && effect.kind === "mask" && effect.alreadyMasked.length > 0;
-  // Spec §5.8 (D3, C9): a classification row filter Trino would not apply on some tables asks for the same tick.
-  const trinoColumnOnly = effect?.kind === "row_filter" ? (effect.trinoColumnOnly ?? null) : null;
-  const needsTick = (secondMask || trinoColumnOnly !== null) && !ticked;
+  const needsTick = secondMask && !ticked;
   const createReason =
     blockedReason ??
     (previewStale || (!preview && !previewError)
@@ -606,27 +602,20 @@ function RuleForm({
       : previewError
         ? "The preview was refused. Change the rule, then preview it again."
         : needsTick
-          ? secondMask
-            ? tickReason(!!existing)
-            : trinoTickReason(!!existing)
+          ? tickReason(!!existing)
           : null);
   const canSave = createReason === null;
   const reasonId = useId();
   const warnId = useId();
-  const trinoWarnId = useId();
   const kindHintId = useId();
   // The reason when Create waits, and the warnings even when it does not (spec C7 A11y).
   const createDescribedBy =
     [
       canSave ? null : reasonId,
       showsNotEnforced(effect) ? warnId : null,
-      trinoColumnOnly ? trinoWarnId : null,
     ]
       .filter(Boolean)
       .join(" ") || undefined;
-  // The classification's name for the D3 warning: from the list, else as the entry point knows it, else its key.
-  const tagsQ = useTags();
-  const tagName = tagsQ.data?.find((t) => t.key === tagKey)?.name ?? knownTagName(entry, tagKey) ?? tagKey;
   const saveLabel = existing ? "Save changes" : "Create";
 
   /** The footer's error: the latest failure, in the server's words (FE-ACTION-3). */
@@ -730,7 +719,7 @@ function RuleForm({
           </Select>
           {kindType === "row_filter" && selectorType === "tag" && (
             <p id={kindHintId} className="text-xs text-muted-foreground">
-              {TRINO_ROW_FILTER_HINT}
+              {CLASSIFICATION_ROW_FILTER_HINT}
             </p>
           )}
         </div>
@@ -870,16 +859,6 @@ function RuleForm({
                       ticked={ticked}
                       onTick={setTicked}
                       editing={!!existing}
-                    />
-                  )}
-                  {trinoColumnOnly && (
-                    <TrinoColumnOnlyNotice
-                      only={trinoColumnOnly}
-                      classification={tagName}
-                      ticked={ticked}
-                      onTick={setTicked}
-                      editing={!!existing}
-                      id={trinoWarnId}
                     />
                   )}
                 </>

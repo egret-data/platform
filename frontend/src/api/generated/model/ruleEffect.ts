@@ -9,7 +9,6 @@ import type { EffectCatalog } from './effectCatalog';
 import type { EffectKind } from './effectKind';
 import type { ExistingMask } from './existingMask';
 import type { NotEnforced } from './notEnforced';
-import type { TrinoColumnOnly } from './trinoColumnOnly';
 
 /**
  * The rule's effect: reach, enforcement, exemptions and overlapping masks.
@@ -51,5 +50,4 @@ export interface RuleEffect {
      * (50), the classifications read (1000) or the entries listed (20).
      */
   truncated: boolean;
-  trinoColumnOnly?: null | TrinoColumnOnly;
 }

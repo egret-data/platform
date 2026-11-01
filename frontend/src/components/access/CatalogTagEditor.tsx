@@ -9,6 +9,7 @@
  */
 import { useState } from "react";
 import { X } from "lucide-react";
+import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import {
@@ -83,7 +84,11 @@ function AddCatalogTagSelect({
       <Select
         value={value}
         onValueChange={(tagId) => {
-          assign.mutate({ schema, table, column: column ?? "", tag_id: tagId });
+          assign.mutate(
+            { schema, table, column: column ?? "", tag_id: tagId },
+            // KI-307: an attach that succeeded can still need the steward's attention.
+            { onSuccess: (res) => res.notices.forEach((n) => toast.warning(n.message)) },
+          );
           setValue("");
         }}
       >

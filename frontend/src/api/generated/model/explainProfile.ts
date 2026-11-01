@@ -11,7 +11,6 @@ import type { ExplainEffectLine } from './explainEffectLine';
 import type { ExplainMask } from './explainMask';
 import type { ExplainResolvedTag } from './explainResolvedTag';
 import type { ExplainRowFilter } from './explainRowFilter';
-import type { ExplainRowFilterGap } from './explainRowFilterGap';
 import type { WireEngineType } from './wireEngineType';
 
 /**
@@ -106,13 +105,6 @@ export interface ExplainProfile {
      * masks exist (live spike, spec §14).
      */
   clearance_masks_missing?: ExplainClearanceMaskGap[];
-  /**
-     * For a read naming a table, Trino only (when the download has tag
-     * policies): the classification row filters that filter nothing here
-     * because their classification is on columns of the table only
-     * ([`ExplainRowFilterGap`]).
-     */
-  row_filter_not_applied?: ExplainRowFilterGap[];
   /**
      * The answer in words (spec §5.1, C1): for a `read`, the column (or
      * table) line and then the rows line, which a refused read does not get;

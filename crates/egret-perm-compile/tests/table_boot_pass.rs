@@ -41,7 +41,6 @@ struct Profile {
 /// A StarRocks profile with one engine and one registry catalog over a fresh
 /// warehouse linked to the stub catalog.
 async fn starrocks_profile(db: &Db, policy: &PolicyStore) -> Profile {
-    let pool = &db.pool;
     egret_policy::seed_starrocks(policy)
         .await
         .expect("seed starrocks");
@@ -49,6 +48,41 @@ async fn starrocks_profile(db: &Db, policy: &PolicyStore) -> Profile {
         .create_service(&unique("sr_boot"), "starrocks", &serde_json::json!({}))
         .await
         .expect("service");
+    let spec = serde_json::json!({
+        "starrocksConfig": {"feImage": egret_perm::DEFAULT_ENGINE_IMAGES.starrocks_fe_image}
+    });
+    bound_profile(db, service.id, "starrocks", spec).await
+}
+
+/// A Trino profile with a tag service, one engine and one registry catalog
+/// over a fresh warehouse linked to the stub catalog.
+async fn trino_profile(db: &Db, policy: &PolicyStore) -> Profile {
+    egret_policy::seed_trino(policy).await.expect("seed trino");
+    egret_policy::seed_tag(policy).await.expect("seed tag");
+    let tag_service = policy
+        .create_service(&unique("tag_boot"), "tag", &serde_json::json!({}))
+        .await
+        .expect("tag service");
+    let service = policy
+        .create_service(
+            &unique("trino_boot"),
+            "trino",
+            &serde_json::json!({ "tagService": tag_service.name }),
+        )
+        .await
+        .expect("service");
+    bound_profile(db, service.id, "trino", serde_json::json!({})).await
+}
+
+/// Bind profile `service_id` to a new `engine_type` engine attached to a
+/// registry catalog over a fresh warehouse linked to the stub catalog.
+async fn bound_profile(
+    db: &Db,
+    service_id: i64,
+    engine_type: &str,
+    spec: serde_json::Value,
+) -> Profile {
+    let pool = &db.pool;
     let ws: Uuid =
         sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,'Boot') RETURNING id")
             .bind(unique("boot-ws"))
@@ -75,13 +109,12 @@ async fn starrocks_profile(db: &Db, policy: &PolicyStore) -> Profile {
     .expect("warehouse");
     let engine: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,'starrocks','egret',$3,$2) RETURNING id",
+         VALUES ($1,$4,'egret',$3,$2) RETURNING id",
     )
     .bind(unique("boot-eng"))
-    .bind(service.id)
-    .bind(serde_json::json!({
-        "starrocksConfig": {"feImage": egret_perm::DEFAULT_ENGINE_IMAGES.starrocks_fe_image}
-    }))
+    .bind(service_id)
+    .bind(spec)
+    .bind(engine_type)
     .fetch_one(pool)
     .await
     .expect("engine");
@@ -107,7 +140,7 @@ async fn starrocks_profile(db: &Db, policy: &PolicyStore) -> Profile {
     .expect("attach");
     let lakekeeper = lakekeeper_stub::link_warehouse(db, warehouse_id).await;
     Profile {
-        service_id: service.id,
+        service_id,
         warehouse_id,
         lakekeeper,
         catalog,
@@ -299,4 +332,37 @@ async fn one_refusing_profile_does_not_stop_the_others() {
         last_outcome(&db, p2.service_id).await.map(|(o, _)| o),
         Some("ok".to_string())
     );
+}
+
+/// KI-287: a Trino profile that reaches a COLUMN attachment of a classification
+/// a row-filter rule selects compiles, at the first boot, the resource row
+/// filter on that table (the tag policy alone filters nothing there); a second
+/// boot writes nothing.
+#[tokio::test]
+async fn the_boot_pass_compiles_a_trino_row_filter_on_a_column_classification() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else { return };
+    let policy = PolicyStore::new(db.clone());
+    let perm = PermStore::new(db.pool.clone());
+    let p = trino_profile(&db, &policy).await;
+    let (tag, key) = new_tag(&db).await;
+    attach(&db, tag, &p, "orders", "email").await;
+    let rule = row_filter(&perm, &key, "region = 'us'").await;
+    assert!(
+        names(&db, p.service_id).await.is_empty(),
+        "nothing compiled yet"
+    );
+
+    recompile_table_classified_profiles(&db.pool)
+        .await
+        .expect("boot pass");
+
+    let want = format!("{COMPILER_RULE_PREFIX}{rule}-{}.sales.orders", p.catalog);
+    let names = names(&db, p.service_id).await;
+    assert!(names.contains(&want), "{want} in {names:?}");
+    let version = policy_version(&db, p.service_id).await;
+    recompile_table_classified_profiles(&db.pool)
+        .await
+        .expect("second boot");
+    assert_eq!(policy_version(&db, p.service_id).await, version);
 }
