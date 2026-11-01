@@ -14,7 +14,9 @@ use egret_auth::routes::AuthState;
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
 use egret_bin::bootstrap::{admin_report, AdminPassword};
-use egret_catalog_engine::grant_match::{catalog_grant_covers_by, grants_write, CatalogNameEq};
+use egret_catalog_engine::grant_match::{
+    catalog_grant_covers_by, grant_sees_namespace, grants_write, CatalogNameEq,
+};
 use egret_config::Config;
 use egret_core::ratelimit::RateLimiter;
 use egret_metastore::Db;
@@ -734,6 +736,39 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
                         write: true,
                     });
                 }
+                Some(egret_catalog_engine::GuardedBody::NamespaceCreate) => {
+                    // Creating a namespace is a write in its parent, as
+                    // creating a table is a write in its namespace (KI-312):
+                    // a namespace-level grant on the parent, or a
+                    // catalog-level one; a top-level namespace needs the
+                    // catalog.
+                    let ns = parse_namespace_create_body(body)
+                        .map_err(|m| malformed("namespace create", m))?;
+                    let name = ns.join(".");
+                    let parent = ns[..ns.len() - 1].to_vec();
+                    if parent.is_empty() {
+                        if !grants
+                            .iter()
+                            .any(|g| g.securable_type == "catalog" && grants_write(g))
+                        {
+                            return forbid(format!(
+                                "role '{token_role}' may not create namespace {name}: a \
+                                 top-level namespace needs a catalog-level write or manage grant"
+                            ));
+                        }
+                    } else {
+                        needs.push(Need {
+                            refusal: format!(
+                                "role '{token_role}' may not create namespace {name}: it needs \
+                                 write on namespace {}, its parent",
+                                parent.join(".")
+                            ),
+                            ns: parent,
+                            table: None,
+                            write: true,
+                        });
+                    }
+                }
                 None => {
                     // Resolve the request target: /namespaces/{ns}[/tables|views/{table}],
                     // decoded as lakekeeper decodes its path parameters.
@@ -776,7 +811,9 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
                     }
                     match target_ns {
                         // catalog-root op (list namespaces, …): any grant for
-                        // reads, a write/manage grant for writes.
+                        // reads, a write/manage grant for writes. A listing's
+                        // answer is then cut to what the role may see
+                        // (`filter_listing`).
                         None => {
                             if !grants.iter().any(|g| !is_write || grants_write(g)) {
                                 return forbid(refusal);
@@ -816,6 +853,112 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
         }
         Ok(caller)
     }
+
+    async fn filter_listing(
+        &self,
+        caller: &egret_catalog_engine::CatalogCaller,
+        listing: egret_catalog_engine::Listing,
+        body: &[u8],
+    ) -> Result<Option<Vec<u8>>, (axum::http::StatusCode, String)> {
+        use axum::http::StatusCode;
+        let unreadable = |m: String| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("the catalog's listing could not be read: {m}"),
+            )
+        };
+        let grants = self
+            .catalog
+            .grants_for_role(&caller.warehouse, &caller.role)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("grants: {e}")))?;
+        if grants.iter().any(|g| g.securable_type == "catalog") {
+            return Ok(None);
+        }
+        let mut json: serde_json::Value =
+            serde_json::from_slice(body).map_err(|e| unreadable(e.to_string()))?;
+        let key = match listing {
+            egret_catalog_engine::Listing::Namespaces => "namespaces",
+            egret_catalog_engine::Listing::Tables | egret_catalog_engine::Listing::Views => {
+                "identifiers"
+            }
+        };
+        let listed: Vec<TableIdent> = json
+            .get(key)
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| unreadable(format!("no `{key}` list")))?
+            .iter()
+            .enumerate()
+            .map(|(i, v)| match listing {
+                egret_catalog_engine::Listing::Namespaces => namespace_levels(v)
+                    .map(|ns| (ns, String::new()))
+                    .ok_or(format!("`namespaces[{i}]` is not a list of strings")),
+                _ => identifier(v, &format!("identifiers[{i}]")),
+            })
+            .collect::<Result<_, _>>()
+            .map_err(unreadable)?;
+
+        // Names compare as lakekeeper compares them (rename-authz spec §10.4).
+        let requested: Vec<&str> = listed
+            .iter()
+            .flat_map(|(ns, name)| ns.iter().map(String::as_str).chain([name.as_str()]))
+            .filter(|n| !n.is_empty())
+            .collect();
+        let eq = CatalogNameEq::load(&self.catalog, &grants, &requested)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("names: {e}")))?;
+        let eq = |a: &str, b: &str| eq.eq(a, b);
+        let keep: Vec<bool> = listed
+            .iter()
+            .map(|(ns, name)| match listing {
+                egret_catalog_engine::Listing::Namespaces => {
+                    grants.iter().any(|g| grant_sees_namespace(g, ns, &eq))
+                }
+                // What a load of the table or view would allow.
+                _ => grants
+                    .iter()
+                    .any(|g| catalog_grant_covers_by(g, Some(ns), Some(name), false, &eq)),
+            })
+            .collect();
+        if keep.iter().all(|k| *k) {
+            return Ok(None);
+        }
+        // Cut the list and every list beside it of the same length:
+        // lakekeeper's `namespace-uuids`, `table-uuids` and
+        // `protection-status` run in step with the names.
+        let n = keep.len();
+        if let Some(obj) = json.as_object_mut() {
+            for v in obj.values_mut() {
+                if let Some(arr) = v.as_array_mut().filter(|a| a.len() == n) {
+                    let mut k = keep.iter();
+                    arr.retain(|_| *k.next().unwrap_or(&false));
+                }
+            }
+        }
+        serde_json::to_vec(&json)
+            .map(Some)
+            .map_err(|e| unreadable(e.to_string()))
+    }
+}
+
+/// The namespace a namespace create body names: `namespace`, a non-empty
+/// list of non-empty strings. `Err` says what is wrong, for the 400.
+fn parse_namespace_create_body(body: Option<&[u8]>) -> Result<Vec<String>, String> {
+    let body = body.ok_or("no body")?;
+    let json: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("the body is not JSON: {e}"))?;
+    json.get("namespace")
+        .and_then(namespace_levels)
+        .filter(|ns| !ns.is_empty() && ns.iter().all(|l| !l.is_empty()))
+        .ok_or_else(|| "`namespace` is not a non-empty list of non-empty strings".to_string())
+}
+
+/// A JSON list of strings, as the levels of a namespace.
+fn namespace_levels(v: &serde_json::Value) -> Option<Vec<String>> {
+    v.as_array()?
+        .iter()
+        .map(|l| l.as_str().map(str::to_string))
+        .collect()
 }
 
 /// A table or view named in a request body: the namespace's levels and the

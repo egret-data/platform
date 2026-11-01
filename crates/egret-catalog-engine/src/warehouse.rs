@@ -71,6 +71,7 @@ pub async fn create_lakekeeper_warehouse(
     s3: &S3StorageConfig,
 ) -> Result<String, CatalogEngineError> {
     let metadata = system_request_metadata(system_user)?;
+    refuse_overlapping_storage(&engine_state.v1_state.catalog.read_pool(), s3).await?;
 
     // Build the storage profile + credential from JSON (the documented wire
     // shape) rather than the many-field builders.
@@ -107,6 +108,110 @@ pub async fn create_lakekeeper_warehouse(
     Ok(response.warehouse_id().to_string())
 }
 
+/// Refuse a warehouse on `s3` when its storage overlaps a warehouse the
+/// catalog already holds (KI-316). lakekeeper has the same check, but it
+/// compares the region and the endpoint as written, so two warehouses on one
+/// bucket and prefix slip past it when their storage connections spell the
+/// store differently, and a namespace writer in one could then register a
+/// table on the other's files. Here the store is the endpoint's host and port
+/// ([`store_identity`]); the region does not tell two stores apart. Two host
+/// names for one store cannot be told apart without asking DNS, which this
+/// does not do.
+async fn refuse_overlapping_storage(
+    pool: &sqlx::PgPool,
+    s3: &S3StorageConfig,
+) -> Result<(), CatalogEngineError> {
+    // The pool's search path is lakekeeper's schema.
+    let held: Vec<(String, serde_json::Value)> =
+        sqlx::query_as("SELECT warehouse_name, storage_profile FROM warehouse")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| CatalogEngineError::Internal(format!("listing warehouses: {e}")))?;
+    let new = StoreLocation::of(&s3.bucket, s3.endpoint.as_deref(), s3.key_prefix.as_deref());
+    for (name, profile) in held {
+        if profile.get("type").and_then(|t| t.as_str()) != Some("s3") {
+            continue;
+        }
+        let str_at = |k: &str| profile.get(k).and_then(|v| v.as_str());
+        let Some(bucket) = str_at("bucket") else {
+            continue;
+        };
+        if new.overlaps(&StoreLocation::of(
+            bucket,
+            str_at("endpoint"),
+            str_at("key-prefix"),
+        )) {
+            return Err(CatalogEngineError::Conflict(format!(
+                "the storage overlaps warehouse '{name}': the same bucket '{}' on the same \
+                 store, with key prefixes that contain one another; give each warehouse its \
+                 own bucket or key prefix",
+                s3.bucket
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Where a warehouse's files live, as [`refuse_overlapping_storage`] compares
+/// it.
+#[derive(Debug)]
+struct StoreLocation {
+    store: String,
+    bucket: String,
+    /// Without leading or trailing `/`; empty for the whole bucket.
+    prefix: String,
+}
+
+impl StoreLocation {
+    fn of(bucket: &str, endpoint: Option<&str>, key_prefix: Option<&str>) -> Self {
+        Self {
+            store: store_identity(endpoint, bucket),
+            bucket: bucket.to_ascii_lowercase(),
+            prefix: key_prefix
+                .unwrap_or("")
+                .trim()
+                .trim_matches('/')
+                .to_string(),
+        }
+    }
+
+    fn overlaps(&self, other: &Self) -> bool {
+        if self.store != other.store || self.bucket != other.bucket {
+            return false;
+        }
+        let (a, b) = (format!("{}/", self.prefix), format!("{}/", other.prefix));
+        self.prefix.is_empty() || other.prefix.is_empty() || a.starts_with(&b) || b.starts_with(&a)
+    }
+}
+
+/// The object store an S3 endpoint names, one string however the endpoint is
+/// written: the host in lower case without a trailing dot, the port (the
+/// scheme's default when none is written), and the path as lakekeeper keeps
+/// it (without `/` at either end, and without a trailing bucket name, which
+/// lakekeeper strips). The scheme is left out: one host and port is one store.
+/// No endpoint is the region's AWS endpoint. An endpoint that is not an
+/// `http(s)` URL with a host (lakekeeper refuses those) is kept as written, in
+/// lower case: a path is never read as a host.
+fn store_identity(endpoint: Option<&str>, bucket: &str) -> String {
+    let Some(raw) = endpoint.map(str::trim).filter(|e| !e.is_empty()) else {
+        return "aws".to_string();
+    };
+    let Ok(url) = url::Url::parse(raw) else {
+        return raw.to_ascii_lowercase();
+    };
+    let (Some(host), Some(port), true) = (
+        url.host_str(),
+        url.port_or_known_default(),
+        matches!(url.scheme(), "http" | "https"),
+    ) else {
+        return raw.to_ascii_lowercase();
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let path = url.path().trim_matches('/');
+    let path = path.strip_suffix(bucket).unwrap_or(path).trim_matches('/');
+    format!("{host}:{port}/{path}")
+}
+
 /// Create the lakekeeper warehouse `name` on lakekeeper's in-memory storage
 /// (`test-utils` only), for tests that commit tables and views without an
 /// object store. Returns the lakekeeper warehouse id.
@@ -139,6 +244,77 @@ pub async fn create_memory_warehouse(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// KI-316: the spellings of one store are one store.
+    #[test]
+    fn one_store_written_differently_is_one_store() {
+        let id = |e: &str| store_identity(Some(e), "lake");
+        let base = id("http://rustfs:9000");
+        for same in [
+            "http://rustfs:9000/",
+            "HTTP://RustFS:9000",
+            "http://rustfs.:9000",
+            "  http://rustfs:9000  ",
+            "https://rustfs:9000",
+            "http://rustfs:9000/lake",
+            "http://rustfs:9000/lake/",
+            "http://user@rustfs:9000",
+        ] {
+            assert_eq!(id(same), base, "{same}");
+        }
+        assert_eq!(id("http://s3.local"), id("http://s3.local:80/"));
+        assert_eq!(id("https://s3.local"), id("https://s3.local:443"));
+        assert_eq!(
+            store_identity(None, "lake"),
+            store_identity(Some(" "), "lake")
+        );
+    }
+
+    /// KI-316, and the URL-normaliser lesson: a path is never read as a host,
+    /// and different stores stay different.
+    #[test]
+    fn different_stores_and_paths_stay_apart() {
+        let id = |e: &str| store_identity(Some(e), "lake");
+        let rustfs = id("http://rustfs:9000");
+        for other in [
+            "http://rustfs:9001",
+            "http://minio:9000",
+            "http://proxy/rustfs:9000",
+            "http://proxy:9000/rustfs",
+            "rustfs:9000",
+            "//rustfs:9000",
+            "/rustfs:9000",
+        ] {
+            assert_ne!(id(other), rustfs, "{other}");
+        }
+        assert_eq!(id("http://proxy/rustfs:9000"), "proxy:80/rustfs:9000");
+        assert_ne!(store_identity(None, "lake"), rustfs);
+    }
+
+    #[test]
+    fn key_prefixes_overlap_when_one_contains_the_other() {
+        let at = |e: &str, p: Option<&str>| StoreLocation::of("lake", Some(e), p);
+        let a = at("http://rustfs:9000", Some("wh"));
+        assert!(a.overlaps(&at("http://rustfs:9000/", Some("/wh/"))));
+        assert!(a.overlaps(&at("http://RUSTFS:9000", Some("wh/sub"))));
+        assert!(
+            a.overlaps(&at("http://rustfs:9000", None)),
+            "the whole bucket"
+        );
+        assert!(
+            !a.overlaps(&at("http://rustfs:9000", Some("wh2"))),
+            "a sibling prefix"
+        );
+        assert!(
+            !a.overlaps(&at("http://minio:9000", Some("wh"))),
+            "another store"
+        );
+        assert!(!a.overlaps(&StoreLocation::of(
+            "other",
+            Some("http://rustfs:9000"),
+            Some("wh")
+        )));
+    }
 
     /// rename-authz spec §9: remote signing off is what keeps the S3 signer
     /// from signing any table's files for any role with a write grant.

@@ -472,6 +472,16 @@ impl egret_catalog_engine::CatalogGuard for StubGuard {
             role: String::new(),
         })
     }
+
+    /// Every listing as lakekeeper answers it.
+    async fn filter_listing(
+        &self,
+        _caller: &egret_catalog_engine::CatalogCaller,
+        _listing: egret_catalog_engine::Listing,
+        _body: &[u8],
+    ) -> Result<Option<Vec<u8>>, (StatusCode, String)> {
+        Ok(None)
+    }
 }
 
 impl Env {
