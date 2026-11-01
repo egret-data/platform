@@ -212,7 +212,7 @@ describe("Manual policies tab (route D)", () => {
     await screen.findByRole("link", { name: "p-x" }, T);
     expect(rowOf("p-x")).toHaveTextContent("Wider than its pattern");
     expect(rowOf("p-x")).toHaveTextContent(
-      "The engine applies this policy to every tag starting with p, not only the tags its pattern matches.",
+      "The engine applies this policy to every tag starting with “p”, not only the tags its pattern matches.",
     );
     expect(rowOf("ends-i")).toHaveTextContent(
       "The engine applies this policy to every tag, not only the tags its pattern matches.",

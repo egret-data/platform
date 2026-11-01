@@ -29,7 +29,7 @@ export const WIDER_THAN_PATTERN = "Wider than its pattern";
  */
 export function engineReach(prefix: string | null | undefined): string {
   return prefix
-    ? `The engine applies this policy to every tag starting with ${prefix}, not only the tags its pattern matches.`
+    ? `The engine applies this policy to every tag starting with “${prefix}”, not only the tags its pattern matches.`
     : "The engine applies this policy to every tag, not only the tags its pattern matches.";
 }
 
