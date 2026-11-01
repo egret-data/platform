@@ -390,38 +390,81 @@ function OrphanProfiles({ rows, canDelete }: { rows: ProfileDto[]; canDelete: bo
   );
 }
 
+type ProfileType = "trino" | "starrocks" | "tag";
+const NO_TAG_SERVICE = "__none__";
+
+export const TRINO_NEEDS_TAG_SERVICE =
+  "An engine can be bound to a Trino profile only once it names a tag service: the tag profile its classification masks and row filters live in.";
+
 /**
  * New profile (moved from the old Policies page): a profile for an engine egret
- * does not provision, or one to bind later. One dialog with two fields
- * (FE-PAGE-3); a refusal stays in the open dialog with every input kept
- * (FE-ACTION-3).
+ * does not provision, or one to bind later. A Trino profile names its tag
+ * service from the existing Tag profiles (#786); New tag profile switches the
+ * dialog to a Tag profile named `<name>_tag` and, once it is created, comes
+ * back to the Trino profile with it picked: two creates, each one visible, so a
+ * refusal never leaves half a pair. A refusal stays in the open dialog with
+ * every input kept (FE-ACTION-3).
  */
 function NewProfileDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const qc = useQueryClient();
   const create = usePolicyAdminCreateProfile();
+  const profilesQ = usePolicyAdminListProfiles();
   const [name, setName] = useState("");
-  const [type, setType] = useState<"trino" | "starrocks">("trino");
+  const [type, setType] = useState<ProfileType>("trino");
+  const [tagService, setTagService] = useState(NO_TAG_SERVICE);
+  /** The Trino profile's name while its tag profile is being created. */
+  const [returnTo, setReturnTo] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const tagProfiles =
+    profilesQ.data?.status === 200 ? profilesQ.data.data.filter((p) => p.type === "tag").map((p) => p.name) : [];
 
   const close = (next: boolean) => {
     if (!next) {
       setName("");
       setType("trino");
+      setTagService(NO_TAG_SERVICE);
+      setReturnTo(null);
+      setNote(null);
       setError(null);
       create.reset();
     }
     onOpenChange(next);
   };
 
+  const startTagProfile = () => {
+    const base = name.trim();
+    setReturnTo(base);
+    setName(base ? `${base}_tag` : "");
+    setType("tag");
+    setNote(null);
+    setError(null);
+  };
+
   const submit = (e: FormEvent) => {
     e.preventDefault();
     setError(null);
+    setNote(null);
     const trimmed = name.trim();
+    const data =
+      type === "trino" && tagService !== NO_TAG_SERVICE
+        ? { name: trimmed, type, config: { tagService } }
+        : { name: trimmed, type };
     create.mutate(
-      { data: { name: trimmed, type } },
+      { data },
       {
         onSuccess: () => {
           void qc.invalidateQueries({ queryKey: getPolicyAdminListProfilesQueryKey() });
+          if (type === "tag" && returnTo !== null) {
+            // Back to the Trino profile this tag profile was made for.
+            setName(returnTo);
+            setType("trino");
+            setTagService(trimmed);
+            setReturnTo(null);
+            setNote(`Tag profile ${trimmed} created.`);
+            return;
+          }
           toast.success(`Profile ${trimmed} created.`);
           close(false);
         },
@@ -454,16 +497,56 @@ function NewProfileDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="new-profile-type">Type</Label>
-              <Select value={type} onValueChange={(v) => setType(v as "trino" | "starrocks")}>
+              <Select
+                value={type}
+                onValueChange={(v) => {
+                  setType(v as ProfileType);
+                  setReturnTo(null);
+                }}
+              >
                 <SelectTrigger id="new-profile-type" className="w-full">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="trino">Trino</SelectItem>
                   <SelectItem value="starrocks">StarRocks</SelectItem>
+                  <SelectItem value="tag">Tag</SelectItem>
                 </SelectContent>
               </Select>
+              {type === "tag" ? (
+                <p className="text-xs text-muted-foreground">
+                  A Tag profile holds a Trino profile&apos;s tag-based policies. No engine is bound to it.
+                </p>
+              ) : null}
             </div>
+            {type === "trino" ? (
+              <div className="space-y-1.5">
+                <Label htmlFor="new-profile-tag-service">Tag service</Label>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Select value={tagService} onValueChange={setTagService}>
+                    <SelectTrigger id="new-profile-tag-service" className="w-64 max-w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NO_TAG_SERVICE}>None</SelectItem>
+                      {tagProfiles.map((t) => (
+                        <SelectItem key={t} value={t}>
+                          {t}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button type="button" size="sm" variant="outline" onClick={startTagProfile}>
+                    <Plus className="mr-1 h-4 w-4" aria-hidden />
+                    New tag profile
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">{TRINO_NEEDS_TAG_SERVICE}</p>
+              </div>
+            ) : null}
+            <p role="status" className="text-sm">
+              {note}
+            </p>
             {error ? (
               <Alert variant="destructive">
                 <AlertDescription>{error}</AlertDescription>

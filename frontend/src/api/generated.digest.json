@@ -1,6 +1,6 @@
 {
   "_comment": "Written by `npm run gen:api`; checked by egret-server's generated_client_was_emitted_from_the_committed_spec. Do not hand-edit — regenerate instead. See frontend/scripts/write-api-digest.mjs.",
-  "spec": "cf25f544cdbf3770c66fa88343968491e9f8891fb8a1289894b9a1622f88d3fb",
-  "client": "7216ad8eb21674ec0a577d89b74acfbee90e47f5ee3b55945ec03c8771f6ca9f",
-  "files": 828
+  "spec": "a41fb6036edb6fe21a69d4c5d52e0fa06b2f1e8be561e637db80d06c3356cab5",
+  "client": "b048e613b45ee56d64c76eb5df01897ccfef86bb7a52a87a7c8a63cd3a473b91",
+  "files": 831
 }

@@ -521,3 +521,44 @@ async fn a_timeout_names_the_limit_and_the_setting() {
     assert!(err.contains("1 s"), "{err}");
     assert!(err.contains("engine.query_timeout_secs"), "{err}");
 }
+
+/// KI-318: a DDL statement (a rename egret holds while engines confirm moved
+/// restrictions) can outlive SQL Lab's limit and still commit on the engine.
+/// Its timeout says so and points to Recent changes; a query's does not.
+#[tokio::test]
+async fn a_ddl_timeout_says_the_change_may_still_complete() {
+    let Some((jobs, store, wid, did, _factory)) =
+        setup_with_timeout(5000, Duration::from_secs(1)).await
+    else {
+        eprintln!("skip");
+        return;
+    };
+    let ddl = jobs
+        .submit(
+            wid,
+            did,
+            None,
+            None,
+            None,
+            "-- move it\nalter TABLE lake.s.orders RENAME TO lake.s.orders_old",
+            None,
+        )
+        .await
+        .unwrap();
+    let query = jobs
+        .submit(wid, did, None, None, None, "SELECT 1", None)
+        .await
+        .unwrap();
+    for id in [ddl, query] {
+        assert_eq!(
+            wait_status(&store, id, QueryStatus::Failed, 80).await,
+            QueryStatus::Failed
+        );
+    }
+    let ddl_err = store.get(ddl).await.unwrap().unwrap().error.unwrap();
+    assert!(ddl_err.contains("engine.query_timeout_secs"), "{ddl_err}");
+    assert!(ddl_err.contains("may still complete"), "{ddl_err}");
+    assert!(ddl_err.contains("Recent changes"), "{ddl_err}");
+    let query_err = store.get(query).await.unwrap().unwrap().error.unwrap();
+    assert!(!query_err.contains("Recent changes"), "{query_err}");
+}
