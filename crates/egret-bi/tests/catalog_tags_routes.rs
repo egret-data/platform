@@ -849,7 +849,10 @@ async fn a_clearance_on_a_table_not_in_the_catalog_answers_a_notice() {
     assert_eq!(json["ok"], true, "{json}");
     let notices = json["notices"].as_array().expect("notices");
     assert_eq!(notices.len(), 1, "{json}");
-    assert_eq!(notices[0]["code"], "clearance_masks_pending_table", "{json}");
+    assert_eq!(
+        notices[0]["code"], "clearance_masks_pending_table",
+        "{json}"
+    );
     assert_eq!(
         notices[0]["message"],
         format!(
