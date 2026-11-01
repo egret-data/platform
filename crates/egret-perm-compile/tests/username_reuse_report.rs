@@ -745,7 +745,7 @@ async fn a_deny_or_lapsed_admin_grant_makes_no_admin_in_the_report() {
         policy_naming(&e, "infra", "egret-admin - catalog", name).await;
     }
     let mut conn = e.db.pool.acquire().await.expect("conn");
-    let seed = egret_auth::roles::engine_admin_user_ids_via(&mut *conn)
+    let seed = egret_auth::roles::engine_admin_user_ids_via(&mut conn)
         .await
         .expect("engine admin set");
     assert!(seed.iter().any(|u| u.0 == live_id), "positive control");
