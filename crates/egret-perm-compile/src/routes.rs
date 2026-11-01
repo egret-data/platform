@@ -3382,7 +3382,7 @@ pub async fn confine_rule_selector(
 /// `pub` for the reason [`confine_to_overlay_workspace`] is: no session builds
 /// a confined principal that passes the `policy:*` gate, so
 /// `grant_and_rule_ids_answer_404_alike_outside_the_callers_workspace` in
-/// `tests/routes.rs` tests it directly.
+/// `tests/grant_rule_by_id.rs` tests it directly.
 pub async fn grant_in_reach(
     conn: &mut sqlx::PgConnection,
     p: &egret_core::Principal,
