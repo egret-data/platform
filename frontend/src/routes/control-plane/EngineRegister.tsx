@@ -32,6 +32,8 @@ import {
   ServerRefusal,
   UnmodelledVersionNote,
   profilesQueryKey,
+  noTagService,
+  NO_TAG_SERVICE_SUFFIX,
   useCan,
   ModelledPluginsUnavailable,
   useModelledPlugins,
@@ -323,9 +325,9 @@ export default function EngineRegister() {
                     {profilesOfType.map((p) => {
                       const owner = p.engines[0];
                       return (
-                        <SelectItem key={p.id} value={String(p.id)} disabled={!!owner}>
+                        <SelectItem key={p.id} value={String(p.id)} disabled={!!owner || noTagService(p)}>
                           {p.name}
-                          {owner ? ` — bound to ${owner.name}` : ""}
+                          {owner ? ` — bound to ${owner.name}` : noTagService(p) ? ` — ${NO_TAG_SERVICE_SUFFIX}` : ""}
                         </SelectItem>
                       );
                     })}

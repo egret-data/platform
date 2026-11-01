@@ -25,7 +25,6 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
-  ConfigFile,
   CreateProfileBody,
   CreatedPolicyId,
   CreatedProfile,
@@ -41,7 +40,10 @@ import type {
   PolicySummary,
   Principal,
   ProfileDto,
-  SeedResult
+  ProfileTagService,
+  SeedResult,
+  SetTagServiceBody,
+  TrinoConfigResponse
 } from '../model';
 
 import { customInstance } from '../../mutator';
@@ -1109,8 +1111,138 @@ export const usePolicyAdminSeedDefaults = <TError = ErrorBody,
       > => {
       return useMutation(getPolicyAdminSeedDefaultsMutationOptions(options), queryClient);
     }
+    export type policyAdminSetTagServiceResponse200 = {
+  data: ProfileTagService
+  status: 200
+}
+
+export type policyAdminSetTagServiceResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type policyAdminSetTagServiceResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type policyAdminSetTagServiceResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type policyAdminSetTagServiceResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type policyAdminSetTagServiceResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type policyAdminSetTagServiceResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type policyAdminSetTagServiceResponseSuccess = (policyAdminSetTagServiceResponse200) & {
+  headers: Headers;
+};
+export type policyAdminSetTagServiceResponseError = (policyAdminSetTagServiceResponse400 | policyAdminSetTagServiceResponse401 | policyAdminSetTagServiceResponse403 | policyAdminSetTagServiceResponse404 | policyAdminSetTagServiceResponse409 | policyAdminSetTagServiceResponse500) & {
+  headers: Headers;
+};
+
+export type policyAdminSetTagServiceResponse = (policyAdminSetTagServiceResponseSuccess | policyAdminSetTagServiceResponseError)
+
+export const getPolicyAdminSetTagServiceUrl = (service: string,) => {
+
+
+
+
+  return `/api/control-plane/policies/services/${encodeURIComponent(service)}/tag-service`
+}
+
+/**
+ * A Trino profile made by the console (name and type) had no way to acquire a
+ * tag service, so no engine could ever be bound to it ("has no usable tag
+ * service"). This is that way, with every guard the create path has (only a
+ * `trino` profile may carry one, the value is a non-empty string, it names an
+ * existing `tag` profile; see `egret_policy::store::set_tag_service_via`).
+ *
+ * **Conservative ruling: refuse rather than recompile.** A profile an engine
+ * downloads is refused (409): changing its tag service swaps the tag policies
+ * that engine enforces, and the tag service is checked against an engine at
+ * bind time. A profile the permission model compiles (`generated`) is refused
+ * too: the compiler files its tag rules into the tag service it reads, and this
+ * route does not recompile. Unbind, change, bind again. Recorded as the
+ * governance event `profile:tag_service`.
+ * @summary PUT /policies/services/{service}/tag-service — set, change or remove the
+`config.tagService` of an existing profile (#786).
+ */
+export const policyAdminSetTagService = async (service: string,
+    setTagServiceBody: SetTagServiceBody, options?: Parameters<typeof customInstance>[1]): Promise<policyAdminSetTagServiceResponse> => {
+
+  return customInstance<policyAdminSetTagServiceResponse>(getPolicyAdminSetTagServiceUrl(service),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(setTagServiceBody)
+  }
+);}
+
+
+
+
+
+export const getPolicyAdminSetTagServiceMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof policyAdminSetTagService>>, TError,{service: string;data: SetTagServiceBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof policyAdminSetTagService>>, TError,{service: string;data: SetTagServiceBody}, TContext> => {
+
+const mutationKey = ['policyAdminSetTagService'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof policyAdminSetTagService>>, {service: string;data: SetTagServiceBody}> = (props) => {
+          const {service,data} = props ?? {};
+
+          return  policyAdminSetTagService(service,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PolicyAdminSetTagServiceMutationResult = NonNullable<Awaited<ReturnType<typeof policyAdminSetTagService>>>
+    export type PolicyAdminSetTagServiceMutationBody = SetTagServiceBody
+    export type PolicyAdminSetTagServiceMutationError = ErrorBody
+
+    /**
+ * @summary PUT /policies/services/{service}/tag-service — set, change or remove the
+`config.tagService` of an existing profile (#786).
+ */
+export const usePolicyAdminSetTagService = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof policyAdminSetTagService>>, TError,{service: string;data: SetTagServiceBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof policyAdminSetTagService>>,
+        TError,
+        {service: string;data: SetTagServiceBody},
+        TContext
+      > => {
+      return useMutation(getPolicyAdminSetTagServiceMutationOptions(options), queryClient);
+    }
     export type policyAdminTrinoConfigResponse200 = {
-  data: ConfigFile[]
+  data: TrinoConfigResponse
   status: 200
 }
 

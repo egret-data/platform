@@ -18,9 +18,10 @@ const FILES = [
   },
 ];
 
-vi.mock("@/api/policies", () => ({
-  getTrinoConfig: vi.fn(() => Promise.resolve(FILES)),
-}));
+const WARNING =
+  "The download URL (http://localhost:8080) is a loopback or unspecified address: no engine can reach it.";
+const getTrinoConfig = vi.fn(() => Promise.resolve({ files: FILES, warnings: [] as string[] }));
+vi.mock("@/api/policies", () => ({ getTrinoConfig: () => getTrinoConfig() }));
 
 describe("TrinoConfigDialog", () => {
   it("lists both files with their content and downloads each by name", async () => {
@@ -44,5 +45,19 @@ describe("TrinoConfigDialog", () => {
     fireEvent.click(buttons[1]);
     expect(created).toHaveLength(1);
     expect(await created[0].text()).toBe(FILES[1].content);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  // KI-149: the same warning the external engine's plugin configuration shows.
+  it("shows the server's warnings above the files", async () => {
+    getTrinoConfig.mockResolvedValueOnce({ files: FILES, warnings: [WARNING] });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <TrinoConfigDialog open service="p2" onOpenChange={() => {}} />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(WARNING);
+    expect(screen.getByText("ranger-trino-security.xml")).toBeInTheDocument();
   });
 });

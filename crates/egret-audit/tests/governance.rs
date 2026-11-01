@@ -228,6 +228,11 @@ const EXPECTED: &[(&str, &str, Family)] = &[
     (action::MIGRATION_APPLY, "policy_profile", Family::Policy),
     (action::MIGRATION_UNDO, "policy_profile", Family::Policy),
     (action::PROFILE_COMPILE, "policy_profile", Family::Policy),
+    (
+        action::PROFILE_TAG_SERVICE,
+        "policy_profile",
+        Family::Policy,
+    ),
     (action::ENGINE_GRANT_CREATE, "engine_grant", Family::Policy),
     (action::ENGINE_GRANT_UPDATE, "engine_grant", Family::Policy),
     (action::ENGINE_GRANT_DELETE, "engine_grant", Family::Policy),

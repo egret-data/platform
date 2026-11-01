@@ -297,3 +297,120 @@ describe("the policy editor under the Advanced tab (spec §2, Q2)", () => {
     expect(where()).toBe(`/governance/engines/${E_TR}/advanced/policies/access/5`);
   });
 });
+
+// KI-135: seeding says what it did, on the tab, and the empty list says where seeded rows are.
+describe("Seed default policies says what happened (KI-135)", () => {
+  it("keeps the count on the tab and says the seeded policies are on Policies", async () => {
+    const a = answers({}, {
+      "/policies?service=lake-tr": ok([]),
+      "POST /policies/services/lake-tr/seed-defaults": ok({ created: 13 }),
+    });
+    serve(a);
+    open();
+    const p = await panel();
+    expect(await within(p).findByText("This profile has no manual policy.", {}, T)).toBeInTheDocument();
+    a["/policies?service=lake-tr"] = ok(Array.from({ length: 13 }, (_, i) => policy(20 + i, "infra")));
+    await userEvent.click(within(p).getByRole("button", { name: "Seed default policies" }));
+    const status = await within(p).findByRole("status", {}, T);
+    expect(status).toHaveTextContent(
+      "Added 13 default policies. They are egret-seeded, so they are listed on the Policies tab, not here.",
+    );
+    expect(
+      await within(p).findByText("Its 13 egret-seeded policies are listed on the Policies tab.", {}, T),
+    ).toBeInTheDocument();
+  });
+
+  it("says why nothing was added", async () => {
+    serve(answers({}, { "POST /policies/services/lake-tr/seed-defaults": ok({ created: 0 }) }));
+    open();
+    const p = await panel();
+    await userEvent.click(await within(p).findByRole("button", { name: "Seed default policies" }, T));
+    expect(await within(p).findByRole("status", {}, T)).toHaveTextContent(
+      "No default policy was added: the profile already has policies.",
+    );
+  });
+
+  it("names the egret-compiled and egret-seeded policies when there is no manual one", async () => {
+    serve(answers({}, { "/policies?service=lake-tr": ok([policy(3, "compiler"), policy(4, "compiler"), policy(5, "infra")]) }));
+    open();
+    expect(
+      await within(await panel()).findByText(
+        "Its 2 egret-compiled policies and 1 egret-seeded policy are listed on the Policies tab.",
+        {},
+        T,
+      ),
+    ).toBeInTheDocument();
+  });
+});
+
+// #786 / KI-125: the tag service of an unbound profile is set on its Advanced tab.
+describe("the tag service section (#786)", () => {
+  const unbound = (over: Partial<Parameters<typeof profileDto>[1]> = {}) => [
+    profileDto("loose", { id: 5, origin: "manual", ...over }),
+    profileDto("loose_tag", { id: 6, type: "tag", origin: "manual" }),
+    profileDto("other-tr", { id: 7, origin: "manual" }),
+  ];
+  const base = (profiles = unbound()): Record<string, Answer> => ({
+    "/policies/services": ok(profiles),
+    "/policies?service=loose": ok([]),
+    "/policies?service=loose_tag": ok([]),
+    "/perm/overlaps": ok([]),
+  });
+  const openLoose = (as = WRITER) => openArea("/governance/engines/profiles/loose?tab=advanced", as);
+
+  it("sets it from the existing tag profiles only, and says the engine can now be bound", async () => {
+    const a = base();
+    a["PUT /policies/services/loose/tag-service"] = ok({ name: "loose", tagService: "loose_tag" });
+    const served = serve(a);
+    openLoose();
+    const p = await panel();
+    const section = await within(p).findByRole("region", { name: "Tag service" }, T);
+    expect(within(section).getByText(/has no tag service, so no engine can be bound to it/)).toBeInTheDocument();
+    await userEvent.click(within(section).getByRole("combobox", { name: "Tag service" }));
+    const options = (await screen.findAllByRole("option", {}, T)).map((o) => o.textContent);
+    expect(options).toEqual(["None", "loose_tag"]);
+    await userEvent.click(screen.getByRole("option", { name: "loose_tag" }));
+    a["/policies/services"] = ok(unbound({ tag_service: "loose_tag" }));
+    await userEvent.click(within(section).getByRole("button", { name: "Save tag service" }));
+    await waitFor(() =>
+      expect(served.bodies["PUT /policies/services/loose/tag-service"]).toEqual([{ tagService: "loose_tag" }]),
+    );
+    expect(await within(section).findByRole("status", {}, T)).toHaveTextContent("Tag service set to loose_tag.");
+  });
+
+  it("shows the server's refusal in the section", async () => {
+    const a = base();
+    a["PUT /policies/services/loose/tag-service"] = fail(400, '"tagService" must name a `tag` profile');
+    serve(a);
+    openLoose();
+    const section = await within(await panel()).findByRole("region", { name: "Tag service" }, T);
+    await userEvent.click(within(section).getByRole("combobox", { name: "Tag service" }));
+    await userEvent.click(await screen.findByRole("option", { name: "loose_tag" }, T));
+    await userEvent.click(within(section).getByRole("button", { name: "Save tag service" }));
+    expect(await within(section).findByText(/must name a `tag` profile/, {}, T)).toBeInTheDocument();
+  });
+
+  it("is read-only on an engine's profile, and says why", async () => {
+    serve(answers({ tagService: "lake-tr-tag" }));
+    open();
+    const section = await within(await panel()).findByRole("region", { name: "Tag service" }, T);
+    expect(within(section).getByText("lake-tr-tag")).toBeInTheDocument();
+    expect(within(section).getByText(/Unbind the engine to change it/)).toBeInTheDocument();
+    expect(within(section).queryByRole("combobox")).toBeNull();
+  });
+
+  it("is read-only without policy:update", async () => {
+    serve(base());
+    openLoose(me(["policy:read"]));
+    const section = await within(await panel()).findByRole("region", { name: "Tag service" }, T);
+    expect(within(section).queryByRole("combobox")).toBeNull();
+  });
+
+  it("is not shown on a StarRocks profile", async () => {
+    serve(base([profileDto("loose", { id: 5, type: "starrocks", origin: "manual" })]));
+    openLoose();
+    const p = await panel();
+    await within(p).findByText(WARNING, {}, T);
+    expect(within(p).queryByRole("region", { name: "Tag service" })).toBeNull();
+  });
+});
