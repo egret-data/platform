@@ -2846,21 +2846,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // role, so a body an older compile wrote without a holder who had no
     // username names them now (role expansion mints since R5). Idempotent and
     // best-effort: an unchanged profile writes nothing, and a failure is
-    // logged and never blocks boot.
-    {
-        let pool = db.pool.clone();
-        tokio::spawn(async move {
-            if let Err(e) =
-                egret_perm_compile::role_membership::recompile_role_referencing_profiles(&pool)
-                    .await
-            {
-                tracing::warn!(
-                    error = %e,
-                    "the boot recompile of role-referencing profiles did not run"
-                );
-            }
-        });
-    }
+    // logged, retried with backoff (#787) and never blocks boot.
+    tokio::spawn(
+        egret_perm_compile::role_membership::repair_role_referencing_profiles_with_retry(
+            db.pool.clone(),
+        ),
+    );
     // Expiry sweep (narrowing 2 of `egret_perm_compile::members`): a grant that
     // lapses is not a write, so an hourly pass recompiles the profiles it named.
     // Spawned here, off the boot path; the first tick runs at once in the

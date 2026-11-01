@@ -260,8 +260,9 @@ async fn apply(
 /// role, its locks taken ascending ([`lock_services_in_tx`]), then
 /// [`recompile_services_in_tx`]. Idempotent: an unchanged body writes nothing
 /// and bumps no `policy_version`, which is why it runs on every boot with no
-/// record of having run. `egret-bin` spawns it off the boot path, and a
-/// failure is logged and never blocks boot.
+/// record of having run. `egret-bin` spawns it off the boot path through
+/// [`repair_role_referencing_profiles_with_retry`], which retries a failure
+/// and never blocks boot.
 pub async fn recompile_role_referencing_profiles(pool: &PgPool) -> Result<Vec<i64>, CompileError> {
     let db = CompileError::from_db;
     let mut tx = pool.begin().await.map_err(db)?;
@@ -301,6 +302,68 @@ pub async fn recompile_role_referencing_profiles(pool: &PgPool) -> Result<Vec<i6
          is named"
     );
     Ok(services)
+}
+
+/// The waits before each retry of the boot repair (#787): three retries, 5 s,
+/// 30 s and 2 min after the attempt before them, so four attempts in all.
+pub const BOOT_REPAIR_BACKOFF: [std::time::Duration; 3] = [
+    std::time::Duration::from_secs(5),
+    std::time::Duration::from_secs(30),
+    std::time::Duration::from_secs(120),
+];
+
+/// [`recompile_role_referencing_profiles`] as the boot repair runs it (#787):
+/// retried on ANY error after each wait in [`BOOT_REPAIR_BACKOFF`]. `egret-bin`
+/// spawns this, so boot never waits for it. Each failure is logged at `warn`;
+/// after the last, an `error` says what was left unrepaired. The pass is
+/// idempotent, so a retry after a partial failure is safe (it runs in one
+/// transaction, so a failed attempt wrote nothing anyway).
+pub async fn repair_role_referencing_profiles_with_retry(pool: PgPool) {
+    retry_boot_repair(&BOOT_REPAIR_BACKOFF, || {
+        recompile_role_referencing_profiles(&pool)
+    })
+    .await;
+}
+
+/// The retry loop of [`repair_role_referencing_profiles_with_retry`], over any
+/// attempt, so a test can drive it with a failing attempt and paused time.
+/// Returns the repaired profiles, or `None` when every attempt failed.
+#[doc(hidden)]
+pub async fn retry_boot_repair<F, Fut>(
+    backoff: &[std::time::Duration],
+    mut attempt: F,
+) -> Option<Vec<i64>>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<i64>, CompileError>>,
+{
+    let attempts = backoff.len() + 1;
+    for n in 1..=attempts {
+        match attempt().await {
+            Ok(services) => return Some(services),
+            Err(e) => match backoff.get(n - 1) {
+                Some(wait) => {
+                    tracing::warn!(
+                        error = %e,
+                        attempt = n,
+                        attempts,
+                        retry_in_secs = wait.as_secs(),
+                        "the boot recompile of role-referencing profiles failed; retrying"
+                    );
+                    tokio::time::sleep(*wait).await;
+                }
+                None => tracing::error!(
+                    error = %e,
+                    attempts,
+                    "the boot recompile of role-referencing profiles failed on every attempt: \
+                     the policy profiles whose model names a role were NOT recompiled, so a \
+                     body an older compiler wrote may still leave out a role holder until the \
+                     next restart or the next write that recompiles those profiles"
+                ),
+            },
+        }
+    }
+    None
 }
 
 /// Set `user_id`'s status (`active` | `disabled`) and converge every
