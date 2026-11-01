@@ -599,6 +599,20 @@ pub enum CompileError {
     /// that one grant rather than failing the whole profile.
     #[error("engine grant {id} cannot be compiled: {reason}")]
     InvalidEngineGrant { id: uuid::Uuid, reason: String },
+    /// The profiles this write recompiles grew after it took the compile-mint
+    /// lock (#792): an engine was bound or attached, or a profile or tag
+    /// service created, between the write's first read of its profile set and
+    /// its recompile. Locking the new profiles while holding the mint lock
+    /// would break the lock order (profiles, then the mint lock) and can
+    /// deadlock with a compile of those profiles, so the write is refused
+    /// before it waits on them. Nothing was written; the same request
+    /// succeeds when retried, because the set is then read before the lock.
+    #[error(
+        "the policy profiles this write recompiles changed while it ran (profile(s) {} were \
+         bound or created meanwhile); nothing was written, retry",
+        added.iter().map(i64::to_string).collect::<Vec<_>>().join(", ")
+    )]
+    ProfileSetChanged { added: Vec<i64> },
 }
 
 /// SQLSTATE `lock_not_available`: a lock wait ran past `lock_timeout`.
@@ -653,6 +667,20 @@ impl CompileError {
                 | CompileError::ProfileExpansionCeiling { .. }
         )
         .then(|| serde_json::json!({ "error": self.to_string(), "code": "expansion_ceiling" }))
+    }
+
+    /// The coded body of a [`CompileError::ProfileSetChanged`] refusal —
+    /// `{error, code: "profile_set_changed", retryable: true}` — or `None` for
+    /// any other error. Every write route answers it as a 409; a client shows
+    /// the sentence and the user retries (no automatic retry).
+    pub fn profile_set_changed_body(&self) -> Option<serde_json::Value> {
+        matches!(self, CompileError::ProfileSetChanged { .. }).then(|| {
+            serde_json::json!({
+                "error": self.to_string(),
+                "code": "profile_set_changed",
+                "retryable": true,
+            })
+        })
     }
 
     /// The structured 409 body of an order-ambiguous pair —

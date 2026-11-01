@@ -192,10 +192,28 @@ pub struct CatalogSettings {
     /// stable across deploys; changing it mints a *different* system admin.
     #[serde(default = "default_system_user")]
     pub system_user: String,
+    /// How long the S3 credentials the catalog vends stay valid, in seconds:
+    /// the `DurationSeconds` of the STS `AssumeRole` call (KI-315). A revoked
+    /// or narrowed grant stops new credentials at once, but a credential
+    /// already handed out keeps working until it expires, so this bounds how
+    /// long a revocation takes to reach the object store. Default 900, the STS
+    /// minimum; 900..=43200 (the STS maximum). egret writes it into every S3
+    /// warehouse's storage profile, at creation and at every boot.
+    #[serde(default = "default_sts_token_validity_seconds")]
+    pub sts_token_validity_seconds: u64,
 }
 
 fn default_system_user() -> String {
     "egret-system".into()
+}
+
+/// The STS minimum, and the default lifetime of a vended credential.
+pub const MIN_STS_TOKEN_VALIDITY_SECONDS: u64 = 900;
+/// The STS maximum (`AssumeRole` refuses a longer `DurationSeconds`).
+pub const MAX_STS_TOKEN_VALIDITY_SECONDS: u64 = 43_200;
+
+fn default_sts_token_validity_seconds() -> u64 {
+    MIN_STS_TOKEN_VALIDITY_SECONDS
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1969,6 +1987,7 @@ impl Default for Config {
                 // Derived from `server.port` in `Config::load` (KI-141).
                 public_url: None,
                 system_user: default_system_user(),
+                sts_token_validity_seconds: default_sts_token_validity_seconds(),
             },
             storage: StorageSettings {
                 endpoint: Some("http://localhost:9000".into()),
@@ -2073,6 +2092,13 @@ impl Config {
             {
                 return Err("catalog.enabled requires storage access_key/secret_key/bucket".into());
             }
+        }
+        let sts = self.catalog.sts_token_validity_seconds;
+        if !(MIN_STS_TOKEN_VALIDITY_SECONDS..=MAX_STS_TOKEN_VALIDITY_SECONDS).contains(&sts) {
+            return Err(format!(
+                "catalog.sts_token_validity_seconds must be between \
+                 {MIN_STS_TOKEN_VALIDITY_SECONDS} and {MAX_STS_TOKEN_VALIDITY_SECONDS}, got {sts}"
+            ));
         }
         // ranger.auth_token may be empty: an empty token is fine; engines authenticate with
         // their own credentials; `anonymous` (ranger.auth_mode) must be chosen explicitly.
@@ -3906,6 +3932,35 @@ values = { allowed-images = [] }
         // does not look at.
         cfg.storage.bucket = "b".into();
         assert!(cfg.validate().is_ok());
+    }
+
+    /// KI-315: vended credentials last 15 minutes unless configured, and
+    /// the lifetime stays within what STS `AssumeRole` accepts.
+    #[test]
+    fn sts_token_validity_defaults_to_900_and_is_bounded() {
+        let mut cfg = Config::default();
+        cfg.storage.bucket = "b".into();
+        cfg.storage.access_key = "a".into();
+        cfg.storage.secret_key = "s".into();
+        assert_eq!(cfg.catalog.sts_token_validity_seconds, 900);
+        assert!(cfg.validate().is_ok());
+
+        cfg.catalog.sts_token_validity_seconds = 899;
+        assert!(cfg.validate().is_err(), "below the STS minimum");
+        cfg.catalog.sts_token_validity_seconds = 43_201;
+        assert!(cfg.validate().is_err(), "above the STS maximum");
+        cfg.catalog.sts_token_validity_seconds = 3600;
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn sts_token_validity_reads_from_the_environment() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_CATALOG__STS_TOKEN_VALIDITY_SECONDS", "1800");
+            let cfg = Config::load()?;
+            assert_eq!(cfg.catalog.sts_token_validity_seconds, 1800);
+            Ok(())
+        });
     }
 
     #[test]

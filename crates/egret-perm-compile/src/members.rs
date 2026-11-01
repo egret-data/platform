@@ -284,7 +284,8 @@ pub(crate) async fn role_usernames(
 ///
 /// It adds no cycle with the profile locks: it is always taken after them, and
 /// nothing asks for a profile lock while holding it, because every recompile
-/// locks its whole profile set first. `crate::view_tags::lock_view_tags_in_tx`
+/// locks its whole profile set first, and a request for a profile not locked
+/// first is refused rather than waited on (below). `crate::view_tags::lock_view_tags_in_tx`
 /// and the group and member advisory locks (`egret_auth::groups`) come before
 /// the profile locks in any transaction that takes them. Re-taking it in the
 /// same transaction is free. A mint outside a compile — `ensure_username` on
@@ -300,19 +301,25 @@ pub(crate) async fn role_usernames(
 /// price of ruling the deadlock out. Taking it per user instead would need
 /// every writer to know, before its write, which users the compile will mint.
 ///
-/// **Known gap (not closed).** A writer that takes this lock early and then
-/// recompiles reads its profile set again: `retag_bump_and_recompile`'s
-/// `services_bound_to_warehouses`, `recompile_for_clearance_in_tx`'s
-/// `affected_services_for_classification`, and `lock_services_in_tx`'s
-/// tag-service expansion. If that set grew in between (a profile bound or
-/// attached concurrently), the new profile is locked while this lock is held,
-/// against the stated order, and can deadlock with a compile of that profile.
-/// Closing it means refusing with a retryable error when the set grows, or
-/// taking those late profile locks `NOWAIT`.
+/// **A profile set that grows after this lock (#792) is refused.** A writer
+/// that takes this lock early reads its profile set again at its recompile
+/// (`retag_bump_and_recompile`'s `services_bound_to_warehouses`,
+/// `recompile_for_clearance_in_tx`'s `affected_services_for_classification`,
+/// `lock_services_in_tx`'s tag-service expansion). A profile bound or created
+/// in between would be locked while this lock is held, against the stated
+/// order, and could deadlock with a compile of that profile. So this lock
+/// marks the transaction (`egret.compile_mint_held`, transaction-local), and
+/// the one profile-lock helper (`crate::trigger::lock_profile_rows_in_tx`)
+/// answers a request for a profile this transaction has not locked yet with
+/// [`CompileError::ProfileSetChanged`] while the mark is set, before any lock
+/// statement: the write is refused (a retryable 409) instead of waiting.
 pub async fn lock_compile_mints_in_tx(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('egret-compile-mint', 0))")
-        .execute(&mut *conn)
-        .await?;
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended('egret-compile-mint', 0)), \
+                set_config('egret.compile_mint_held', 'on', true)",
+    )
+    .execute(&mut *conn)
+    .await?;
     Ok(())
 }
 
@@ -344,9 +351,20 @@ async fn mint_for_compile(
 /// aborts one of them. Minting everyone first, ascending, means the passes
 /// find names already set and take no `users` row lock at all.
 ///
-/// The set is a SUBSET of what the passes mint, never wider, because a mint is
-/// a write a compile must not make for someone it does not name. It is built
-/// from the SAME shared reads the passes and People use —
+/// **What it guarantees, and what it does not (#790).** The set never names
+/// someone no compile of the current model would name, because a mint is a
+/// write a compile must not make for someone it does not name. It is meant to
+/// COVER this transaction's passes, but that is not provable: it reads
+/// statement by statement under READ COMMITTED, so a ref committed after it
+/// is minted by a pass. What keeps compile mints deadlock-free is the mint
+/// lock ([`lock_compile_mints_in_tx`]), under which no two compiles mint at
+/// once in any order; this sweep only keeps that lock to one acquisition and
+/// this transaction's `users` row locks ascending. That is also why it reads
+/// the whole model rather than the profiles being recompiled: a narrower
+/// sweep would have to restate, per profile, which refs each pass reads, the
+/// copy this sweep exists to avoid, for little gain (#790, not done).
+///
+/// It is built from the SAME shared reads the passes and People use —
 /// [`role_holders_via`], [`group_members_via`], [`workspace_members_via`] —
 /// over the refs the whole model holds (grant principals, rule exemptions,
 /// engine-grant principals (F11), a clearance's `required_roles`; `public` excluded; a workspace ref parsed as
