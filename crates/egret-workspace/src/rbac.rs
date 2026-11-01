@@ -16,21 +16,26 @@ impl Authorizer {
         Self { db }
     }
 
-    /// The principal's workspace role names for `ws` (direct + group), for display precedence.
+    /// The principal's workspace role names for `ws` (direct + group), for display
+    /// precedence. Live `allow` grants only (`egret_auth::live_allow_grant!`):
+    /// `WsContext` admits a member by this list being non-empty, so a `deny`
+    /// grant must not put a role in it.
     pub async fn workspace_roles_for(
         &self,
         user_id: UserId,
         ws: WorkspaceId,
     ) -> Result<Vec<String>> {
-        let rows: Vec<(String,)> = sqlx::query_as(
+        let rows: Vec<(String,)> = sqlx::query_as(concat!(
             "SELECT DISTINCT r.name FROM access_grants ag \
              JOIN roles r ON r.id = ag.role_id \
              WHERE ag.scope_type = 'workspace' AND ag.scope_id = $1 \
-               AND (ag.expires_at IS NULL OR ag.expires_at > now()) \
+               AND ",
+            egret_auth::live_allow_grant!("ag"),
+            " \
                AND ( (ag.principal_type = 'user'  AND ag.principal_id = $2) \
                   OR (ag.principal_type = 'group' AND ag.principal_id IN \
                          (SELECT group_id FROM user_groups WHERE user_id = $2)) )",
-        )
+        ))
         .bind(ws.0)
         .bind(user_id.0)
         .fetch_all(&self.db.pool)

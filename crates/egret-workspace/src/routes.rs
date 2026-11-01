@@ -1382,11 +1382,9 @@ async fn add_member(
     if body.role != "ws_admin"
         && st
             .members
-            .role_of(ctx.workspace_id, &body.principal_type, pid)
+            .is_live_ws_admin(ctx.workspace_id, &body.principal_type, pid)
             .await
             .map_err(AuthError)?
-            .as_deref()
-            == Some("ws_admin")
         && st
             .members
             .count_ws_admins(ctx.workspace_id)
@@ -1563,11 +1561,9 @@ async fn remove_member(
     // without platform intervention).
     if st
         .members
-        .role_of(ctx.workspace_id, &ptype, pid)
+        .is_live_ws_admin(ctx.workspace_id, &ptype, pid)
         .await
         .map_err(AuthError)?
-        .as_deref()
-        == Some("ws_admin")
         && st
             .members
             .count_ws_admins(ctx.workspace_id)

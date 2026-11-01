@@ -127,9 +127,29 @@ async fn a_deny_only_workspace_grant_makes_no_member() {
     let owner = seed_user(&db).await;
     let ws = st.workspaces.create(&uniq("ws"), "W", owner).await.unwrap();
     let denied = seed_user(&db).await;
-    grant(&db, "user", denied.0, "workspace", Some(ws.id.0), "ws_viewer", "deny", None).await;
+    grant(
+        &db,
+        "user",
+        denied.0,
+        "workspace",
+        Some(ws.id.0),
+        "ws_viewer",
+        "deny",
+        None,
+    )
+    .await;
     let member = seed_user(&db).await;
-    grant(&db, "user", member.0, "workspace", Some(ws.id.0), "ws_viewer", "allow", None).await;
+    grant(
+        &db,
+        "user",
+        member.0,
+        "workspace",
+        Some(ws.id.0),
+        "ws_viewer",
+        "allow",
+        None,
+    )
+    .await;
     let app = axum::Router::new()
         .route(
             "/api/ws/{workspace}/probe",
@@ -158,8 +178,16 @@ async fn a_deny_only_workspace_grant_makes_no_member() {
     let denied_status = probe(denied).await;
     let member_status = probe(member).await;
     let denied_roles = st.authz.workspace_roles_for(denied, ws.id).await.unwrap();
-    let denied_list = st.workspaces.list_for_principal(denied, false).await.unwrap();
-    let member_list = st.workspaces.list_for_principal(member, false).await.unwrap();
+    let denied_list = st
+        .workspaces
+        .list_for_principal(denied, false)
+        .await
+        .unwrap();
+    let member_list = st
+        .workspaces
+        .list_for_principal(member, false)
+        .await
+        .unwrap();
 
     // Assert
     assert_eq!(
@@ -167,8 +195,15 @@ async fn a_deny_only_workspace_grant_makes_no_member() {
         StatusCode::FORBIDDEN,
         "a deny-only grant must not admit its holder to the workspace"
     );
-    assert_eq!(member_status, StatusCode::OK, "the control: a live allow grant admits");
-    assert!(denied_roles.is_empty(), "a deny grant is no workspace role: {denied_roles:?}");
+    assert_eq!(
+        member_status,
+        StatusCode::OK,
+        "the control: a live allow grant admits"
+    );
+    assert!(
+        denied_roles.is_empty(),
+        "a deny grant is no workspace role: {denied_roles:?}"
+    );
     assert!(
         !denied_list.iter().any(|w| w.id == ws.id),
         "a deny-only grant must not list the workspace"
@@ -195,9 +230,29 @@ async fn the_last_ws_admin_guard_counts_only_live_allow_grants() {
         .await
         .unwrap();
     let lapsed = seed_user(&db).await;
-    grant(&db, "user", lapsed.0, "workspace", Some(ws.id.0), "ws_admin", "allow", Some(-60)).await;
+    grant(
+        &db,
+        "user",
+        lapsed.0,
+        "workspace",
+        Some(ws.id.0),
+        "ws_admin",
+        "allow",
+        Some(-60),
+    )
+    .await;
     let denied = seed_user(&db).await;
-    grant(&db, "user", denied.0, "workspace", Some(ws.id.0), "ws_admin", "deny", None).await;
+    grant(
+        &db,
+        "user",
+        denied.0,
+        "workspace",
+        Some(ws.id.0),
+        "ws_admin",
+        "deny",
+        None,
+    )
+    .await;
     let app = axum::Router::new()
         .nest("/api/ws", ws_member_router())
         .with_state(st.clone());
@@ -280,9 +335,39 @@ async fn the_member_list_badge_needs_a_live_allow_platform_admin_grant() {
             .await
             .unwrap();
     }
-    grant(&db, "user", denied.0, "platform", None, "platform_admin", "deny", None).await;
-    grant(&db, "user", lapsed.0, "platform", None, "platform_admin", "allow", Some(-60)).await;
-    grant(&db, "user", admin.0, "platform", None, "platform_admin", "allow", None).await;
+    grant(
+        &db,
+        "user",
+        denied.0,
+        "platform",
+        None,
+        "platform_admin",
+        "deny",
+        None,
+    )
+    .await;
+    grant(
+        &db,
+        "user",
+        lapsed.0,
+        "platform",
+        None,
+        "platform_admin",
+        "allow",
+        Some(-60),
+    )
+    .await;
+    grant(
+        &db,
+        "user",
+        admin.0,
+        "platform",
+        None,
+        "platform_admin",
+        "allow",
+        None,
+    )
+    .await;
 
     // Act
     let members = st.members.list(ws.id).await.unwrap();
