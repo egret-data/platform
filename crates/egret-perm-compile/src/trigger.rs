@@ -1198,13 +1198,10 @@ async fn apply_diff_in_tx(
         sweep.is_sorted(),
         "apply_diff_in_tx requires an ascending sweep set, got {sweep:?}"
     );
-    for &sid in sweep {
-        sqlx::query("SELECT id FROM policy.authz_services WHERE id = $1 FOR UPDATE")
-            .bind(sid)
-            .execute(&mut **tx)
-            .await
-            .map_err(db_err)?;
-    }
+    // Through the one profile-lock helper: a sweep member this transaction
+    // did not lock first (a tag service created after `lock_services_in_tx`'s
+    // expansion) is refused, not waited on, once the mint lock is held (#792).
+    lock_profile_rows_in_tx(tx, sweep).await?;
 
     let existing: Vec<ExistingPolicyRow> = sqlx::query_as(
         "SELECT id, service_id, name, policy_jsonb FROM policy.authz_policies \
@@ -1566,7 +1563,9 @@ pub async fn recompile_service_in_tx(
 ) -> Result<CompileSummary, CompileError> {
     lock_services_in_tx(tx, &[service_id]).await?;
     refuse_engine_of_another_type(tx, service_id).await?;
-    crate::members::premint_model_usernames(tx).await?;
+    if recompile_can_mint(tx, &[service_id]).await? {
+        crate::members::premint_model_usernames(tx).await?;
+    }
     recompile_locked_service_in_tx(tx, service_id).await
 }
 
@@ -2449,15 +2448,130 @@ pub async fn lock_services_in_tx(
     // the same pair ascending: the exact opposed order two transactions
     // deadlock on. Locking the expanded, sorted set here keeps every path's
     // acquisition order ascending over the same universe.
-    let expanded = services_and_tag_services_via(tx, service_ids)
+    let mut expanded = services_and_tag_services_via(tx, service_ids)
         .await
         .map_err(crate::db_error::from_store)?;
-    // The one spelling of the row lock, shared with the policy editor's
-    // overlap check (SP4d-4 Task 3 fix round 1, review I1): one statement per
-    // id, ascending — see `egret_policy::lock_service_rows_via`.
-    egret_policy::lock_service_rows_via(tx, &expanded)
+    // **P6: and every profile that names one of them as its `tagService`.**
+    // A recompile bumps the tag service's `policy_version`, and migration
+    // 0191's trigger (`authz_services_tag_bump_reaches_linkers`) carries that
+    // bump to every such linker, which takes their row locks: another profile
+    // sharing the tag service was locked by the trigger, after the tag
+    // service and after the compile-mint lock, outside any ascending order.
+    // Locking the linkers here, one hop as the trigger goes, makes the
+    // trigger's locks re-takes.
+    let linkers: Vec<i64> = sqlx::query_scalar(
+        "SELECT id FROM policy.authz_services \
+          WHERE config_jsonb ->> 'tagService' IN \
+                (SELECT name FROM policy.authz_services WHERE id = ANY($1))",
+    )
+    .bind(&expanded)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    expanded.extend(linkers);
+    expanded.sort_unstable();
+    expanded.dedup();
+    lock_profile_rows_in_tx(tx, &expanded).await
+}
+
+/// **The one place this crate takes a profile lock** (`policy.authz_services`
+/// row, `FOR UPDATE`), for [`lock_services_in_tx`] and `apply_diff_in_tx`.
+/// `service_ids` must be ascending.
+///
+/// It records the ids it locked in a transaction-local setting
+/// (`egret.profile_locks`), and skips the ones already recorded (re-taking a
+/// row lock this transaction holds is free anyway). **Once the compile-mint
+/// lock is held** (`egret.compile_mint_held`, set by
+/// [`crate::members::lock_compile_mints_in_tx`]) an id NOT recorded is refused
+/// with [`CompileError::ProfileSetChanged`], before any lock statement: the
+/// stated order is profiles, then the mint lock, and a profile locked after it
+/// can deadlock with a compile of that profile that holds it and waits on the
+/// mint lock (#792). The settings are transaction-local, so they end with the
+/// transaction, and a rolled-back savepoint reverts them together with the row
+/// locks taken inside it.
+///
+/// The row lock itself is still `egret_policy::lock_service_rows_via`, the one
+/// spelling shared with the policy editor's overlap check (SP4d-4 Task 3 fix
+/// round 1, review I1): one statement per id, ascending.
+pub(crate) async fn lock_profile_rows_in_tx(
+    conn: &mut sqlx::PgConnection,
+    service_ids: &[i64],
+) -> Result<(), CompileError> {
+    debug_assert!(
+        service_ids.is_sorted(),
+        "lock_profile_rows_in_tx requires ascending service ids, got {service_ids:?}"
+    );
+    if service_ids.is_empty() {
+        return Ok(());
+    }
+    let (mint_held, locked): (bool, String) = sqlx::query_as(
+        "SELECT coalesce(current_setting('egret.compile_mint_held', true), '') = 'on', \
+                coalesce(current_setting('egret.profile_locks', true), '')",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(CompileError::from_db)?;
+    let mut held: std::collections::BTreeSet<i64> =
+        locked.split(',').filter_map(|id| id.parse().ok()).collect();
+    let added: Vec<i64> = service_ids
+        .iter()
+        .copied()
+        .filter(|id| !held.contains(id))
+        .collect();
+    if added.is_empty() {
+        return Ok(());
+    }
+    if mint_held {
+        tracing::warn!(
+            ?added,
+            "a write's profile set grew after it took the compile-mint lock; refused (retryable)"
+        );
+        return Err(CompileError::ProfileSetChanged { added });
+    }
+    egret_policy::lock_service_rows_via(conn, &added)
         .await
-        .map_err(crate::db_error::from_store)
+        .map_err(crate::db_error::from_store)?;
+    held.extend(added);
+    let held = held
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    sqlx::query("SELECT set_config('egret.profile_locks', $1, true)")
+        .bind(held)
+        .execute(&mut *conn)
+        .await
+        .map_err(CompileError::from_db)?;
+    Ok(())
+}
+
+/// Whether a recompile of `service_ids` can mint a username at all (#791):
+/// some id is a profile this compiler targets ([`engine_type_for`]), whose
+/// passes expand principals, or holds an `egret-admin` set, whose sync names
+/// the engine admins (`sync_admin_policy_in_tx`, which runs even for a profile
+/// the compiler does not target). When neither holds, the pre-mint sweep is
+/// skipped, and with it the installation-wide compile-mint lock it takes when
+/// anyone in the model is unnamed.
+async fn recompile_can_mint(
+    conn: &mut sqlx::PgConnection,
+    service_ids: &[i64],
+) -> Result<bool, CompileError> {
+    if service_ids.is_empty() {
+        return Ok(false);
+    }
+    let types: Vec<String> =
+        sqlx::query_scalar("SELECT type FROM policy.authz_services WHERE id = ANY($1)")
+            .bind(service_ids)
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(db_err)?;
+    if types.iter().any(|t| engine_type_for(t).is_some()) {
+        return Ok(true);
+    }
+    let admin = egret_policy::default_policies::admin_policy_services_via(conn)
+        .await
+        .map_err(crate::db_error::from_store)?;
+    Ok(service_ids.iter().any(|id| admin.contains(id)))
 }
 
 /// The policy editor's recompile seam (final review I-3): an editor write that
@@ -2519,7 +2633,8 @@ pub async fn recompile_services_in_tx(
     // username this loop would mint in ONE ascending sweep, so the per-profile
     // expansions below take no `users` row lock out of order
     // (`crate::members::premint_model_usernames`).
-    if !service_ids.is_empty() {
+    // Skipped when nothing in the set can mint (#791).
+    if recompile_can_mint(tx, service_ids).await? {
         crate::members::premint_model_usernames(tx).await?;
     }
     let mut out = Vec::with_capacity(service_ids.len());

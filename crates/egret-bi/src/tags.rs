@@ -1033,6 +1033,13 @@ impl TagViewReach {
             )));
         }
         if !touched.is_empty() {
+            // The profile locks before the bump, so the bump only re-takes
+            // them: after `set_policy`'s early compile-mint lock, a profile
+            // bound since then is refused (`ProfileSetChanged`, #792) instead
+            // of locked by the bump against the lock order.
+            let services =
+                egret_catalog_registry::services_bound_to_warehouses(&mut **tx, &touched).await?;
+            egret_perm_compile::lock_services_in_tx(tx, &services).await?;
             egret_catalog_registry::bump_tag_versions_for_warehouses(tx, &touched).await?;
         }
         egret_perm_compile::view_tags::notify_classification_in_tx(tx, &self.tables_warehouses)

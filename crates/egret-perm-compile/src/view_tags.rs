@@ -520,6 +520,11 @@ impl ViewReach {
         touched.dedup();
         let services =
             egret_catalog_registry::services_bound_to_warehouses(&mut **tx, &touched).await?;
+        // The profile locks BEFORE the bump, whose own `FOR UPDATE` per id then
+        // re-takes locks already held: a profile bound since `of` is refused
+        // here, through the one profile-lock helper, rather than locked by the
+        // bump after the compile-mint lock (#792).
+        crate::lock_services_in_tx(tx, &services).await?;
         egret_catalog_registry::bump_tag_versions_for_warehouses(tx, &touched).await?;
         recompile_bound_services_in_tx(tx, &touched, &services).await?;
         notify_classification_in_tx(tx, &[self.warehouse_id]).await?;

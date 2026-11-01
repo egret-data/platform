@@ -31,9 +31,14 @@
 use std::time::{Duration, Instant};
 
 use egret_metastore::Db;
+use egret_perm::CompileError;
 use egret_perm_compile::view_tags::{ViewReach, ViewReachError};
 use egret_policy::PolicyStore;
 use uuid::Uuid;
+
+/// Every test here recompiles, and a recompile mints every unnamed person the
+/// model names (installation-wide), so the tests run one at a time.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// A backstop so a regression hangs for this long at most, not forever. Far
 /// above Postgres' `deadlock_timeout` (1 s by default), so the deadlock, when
@@ -172,6 +177,7 @@ fn is_deadlock(e: &str) -> bool {
 
 #[tokio::test]
 async fn a_profile_bound_after_the_early_mint_lock_is_refused_not_deadlocked() {
+    let _serial = SERIAL.lock().await;
     let Some(db) = test_db().await else {
         return;
     };
@@ -219,16 +225,14 @@ async fn a_profile_bound_after_the_early_mint_lock_is_refused_not_deadlocked() {
     until_waiting_on_advisory_lock(&db).await;
 
     // 4. A: the re-read finds S2.
+    let started = Instant::now();
     let a_result = reach.retag_bump_and_recompile(&mut a).await;
-    let a_outcome: Result<(), String> = match a_result {
-        Ok(()) => a.commit().await.map_err(|e| e.to_string()),
+    let a_took = started.elapsed();
+    let a_outcome: Result<(), ViewReachError> = match a_result {
+        Ok(()) => a.commit().await.map_err(|e| ViewReachError::Db(e)),
         Err(e) => {
-            let msg = match &e {
-                ViewReachError::Db(d) => format!("{d:?}"),
-                other => other.to_string(),
-            };
             let _ = a.rollback().await;
-            Err(msg)
+            Err(e)
         }
     };
     let c_outcome = tokio::time::timeout(Duration::from_secs(40), c)
@@ -236,19 +240,34 @@ async fn a_profile_bound_after_the_early_mint_lock_is_refused_not_deadlocked() {
         .expect("C finished")
         .expect("C did not panic");
 
-    // A must refuse (it cannot recompile S2, which it did not lock first),
-    // and must refuse by the retryable refusal, not by losing a deadlock.
-    let a_err = a_outcome.err().unwrap_or_else(|| {
-        panic!(
+    // A refuses with the retryable refusal naming S2, without waiting on it
+    // (a deadlock is only detected after `deadlock_timeout`, 1 s).
+    match a_outcome {
+        Err(ViewReachError::Compile(CompileError::ProfileSetChanged { added })) => {
+            assert_eq!(
+                added,
+                vec![s2.service_id],
+                "the refusal names the grown profile"
+            );
+        }
+        Ok(()) => panic!(
             "A recompiled S2, a profile it locked AFTER the compile-mint lock; C's outcome: \
              {c_outcome:?}"
-        )
-    });
+        ),
+        Err(other) => panic!(
+            "A failed{} instead of refusing with ProfileSetChanged: {other:?}",
+            if is_deadlock(&format!("{other:?}")) {
+                " as a deadlock victim"
+            } else {
+                ""
+            }
+        ),
+    }
     assert!(
-        !is_deadlock(&a_err),
-        "A was a deadlock victim instead of refusing: {a_err}"
+        a_took < Duration::from_millis(900),
+        "A refused only after {a_took:?}: it waited on S2"
     );
-    // C, which kept the stated order, must go through.
+    // C, which kept the stated order, goes through.
     c_outcome.unwrap_or_else(|e| {
         panic!(
             "C (profile lock, then mint lock) failed{}: {e}",
@@ -259,4 +278,232 @@ async fn a_profile_bound_after_the_early_mint_lock_is_refused_not_deadlocked() {
             }
         )
     });
+}
+
+/// The guard itself, through the public entry points: under the mint lock a
+/// profile already locked is re-taken, a new one is refused at once (even
+/// while another session holds its row), and without the mint lock a new
+/// profile is locked as before.
+#[tokio::test]
+async fn under_the_mint_lock_only_profiles_locked_first_can_be_locked() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else {
+        return;
+    };
+    let policy = PolicyStore::new(db.clone());
+    egret_policy::seed_starrocks(&policy).await.expect("def");
+    let s1 = profile(&db, &policy).await.service_id;
+    let s2 = profile(&db, &policy).await.service_id;
+
+    // Another session holds S2's row for the whole test.
+    let mut holder = begin_bounded(&db).await;
+    sqlx::query("SELECT id FROM policy.authz_services WHERE id = $1 FOR UPDATE")
+        .bind(s2)
+        .execute(&mut *holder)
+        .await
+        .expect("hold S2");
+
+    let mut tx = begin_bounded(&db).await;
+    egret_perm_compile::lock_services_in_tx(&mut tx, &[s1])
+        .await
+        .expect("S1 before the mint lock");
+    egret_perm_compile::lock_compile_mints_in_tx(&mut tx)
+        .await
+        .expect("mint lock");
+    egret_perm_compile::lock_services_in_tx(&mut tx, &[s1])
+        .await
+        .expect("a re-take of S1 under the mint lock");
+    let started = Instant::now();
+    let refused = egret_perm_compile::lock_services_in_tx(&mut tx, &[s1, s2]).await;
+    assert!(
+        matches!(&refused, Err(CompileError::ProfileSetChanged { added }) if added == &vec![s2]),
+        "{refused:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "the refusal waited on S2's holder"
+    );
+    let body = refused
+        .unwrap_err()
+        .profile_set_changed_body()
+        .expect("coded body");
+    assert_eq!(body["code"], "profile_set_changed");
+    assert_eq!(body["retryable"], true);
+    tx.rollback().await.expect("rollback");
+
+    // Without the mint lock, a new profile is locked as before (it waits for
+    // the holder, so release it first).
+    holder.rollback().await.expect("release S2");
+    let mut tx = begin_bounded(&db).await;
+    egret_perm_compile::lock_services_in_tx(&mut tx, &[s1])
+        .await
+        .expect("S1");
+    egret_perm_compile::lock_services_in_tx(&mut tx, &[s1, s2])
+        .await
+        .expect("S2 without the mint lock");
+    tx.rollback().await.expect("rollback");
+}
+
+/// #791 fixtures: a person the model names (through a clearance's required
+/// role) who has no username yet, so a pre-mint sweep would mint them.
+async fn unnamed_clearance_holder(db: &Db) -> Uuid {
+    let user: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (provider, email, name) VALUES ('local',$1,'T') RETURNING id",
+    )
+    .bind(format!("{}@p6.test", unique("u")))
+    .fetch_one(&db.pool)
+    .await
+    .expect("user");
+    let role = unique("p6_role");
+    let role_id: Uuid =
+        sqlx::query_scalar("INSERT INTO roles (scope, name) VALUES ('platform', $1) RETURNING id")
+            .bind(&role)
+            .fetch_one(&db.pool)
+            .await
+            .expect("role");
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type) \
+         VALUES ('user', $1, $2, 'platform')",
+    )
+    .bind(user)
+    .bind(role_id)
+    .execute(&db.pool)
+    .await
+    .expect("role grant");
+    let tag_id: Uuid =
+        sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $1) RETURNING id")
+            .bind(unique("p6_tag"))
+            .fetch_one(&db.pool)
+            .await
+            .expect("tag");
+    sqlx::query("INSERT INTO classification_policies (tag_id, required_roles) VALUES ($1, $2)")
+        .bind(tag_id)
+        .bind(vec![role])
+        .execute(&db.pool)
+        .await
+        .expect("clearance");
+    user
+}
+
+async fn username_of(db: &Db, user: Uuid) -> Option<String> {
+    sqlx::query_scalar("SELECT username::text FROM users WHERE id = $1")
+        .bind(user)
+        .fetch_one(&db.pool)
+        .await
+        .expect("username")
+}
+
+/// Whether THIS transaction holds the compile-mint lock, read from
+/// `pg_locks` (not from the marker the code sets).
+async fn holds_mint_lock(tx: &mut sqlx::Transaction<'static, sqlx::Postgres>) -> bool {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_locks l \
+                         WHERE l.locktype = 'advisory' AND l.pid = pg_backend_pid() \
+                           AND l.granted \
+                           AND ((l.classid::bigint << 32) | l.objid::bigint) \
+                               = hashtextextended('egret-compile-mint', 0))",
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .expect("pg_locks")
+}
+
+async fn tag_service(db: &Db, policy: &PolicyStore) -> i64 {
+    egret_policy::seed_tag(policy).await.expect("tag def");
+    let _ = db;
+    policy
+        .create_service(&unique("p6_tagsvc"), "tag", &serde_json::json!({}))
+        .await
+        .expect("tag service")
+        .id
+}
+
+/// #791: a recompile that cannot mint (a tag service: the compiler targets
+/// only trino and starrocks, and it holds no `egret-admin` set) runs no
+/// pre-mint, so it takes no compile-mint lock and mints nobody.
+#[tokio::test]
+async fn a_recompile_that_cannot_mint_runs_no_premint() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else {
+        return;
+    };
+    let policy = PolicyStore::new(db.clone());
+    let user = unnamed_clearance_holder(&db).await;
+    let svc = tag_service(&db, &policy).await;
+
+    let mut tx = begin_bounded(&db).await;
+    egret_perm_compile::recompile_service_in_tx(&mut tx, svc)
+        .await
+        .expect("recompile");
+    assert!(
+        !holds_mint_lock(&mut tx).await,
+        "a recompile with nothing to compile took the compile-mint lock"
+    );
+    tx.commit().await.expect("commit");
+    assert_eq!(username_of(&db, user).await, None, "nobody was minted");
+}
+
+/// The instrument of the test above, and the targeted case: a StarRocks
+/// profile's recompile still runs the sweep, mints the clearance holder and
+/// takes the mint lock.
+#[tokio::test]
+async fn a_recompile_of_a_targeted_profile_still_premints() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else {
+        return;
+    };
+    let policy = PolicyStore::new(db.clone());
+    egret_policy::seed_starrocks(&policy).await.expect("def");
+    let user = unnamed_clearance_holder(&db).await;
+    let svc = profile(&db, &policy).await.service_id;
+
+    let mut tx = begin_bounded(&db).await;
+    egret_perm_compile::recompile_service_in_tx(&mut tx, svc)
+        .await
+        .expect("recompile");
+    assert!(
+        holds_mint_lock(&mut tx).await,
+        "the sweep minted under the lock"
+    );
+    tx.commit().await.expect("commit");
+    assert!(
+        username_of(&db, user).await.is_some(),
+        "the sweep minted the holder"
+    );
+}
+
+/// #791's egret-admin guard: a service the compiler does not target still
+/// syncs its `egret-admin` set, which can mint, so its recompile keeps the
+/// sweep (the clearance holder, whom the admin sync alone never names, is
+/// minted).
+#[tokio::test]
+async fn a_service_with_an_egret_admin_set_keeps_the_premint() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else {
+        return;
+    };
+    let policy = PolicyStore::new(db.clone());
+    let user = unnamed_clearance_holder(&db).await;
+    let svc = tag_service(&db, &policy).await;
+    let name: String = sqlx::query_scalar("SELECT name FROM policy.authz_services WHERE id = $1")
+        .bind(svc)
+        .fetch_one(&db.pool)
+        .await
+        .expect("name");
+    egret_policy::seed_trino(&policy).await.expect("trino def");
+    let n = policy
+        .seed_admin_all_access(svc, &name, "trino", &["p6-seeded-admin".to_string()])
+        .await
+        .expect("seed egret-admin");
+    assert!(n > 0, "the service holds an egret-admin set");
+
+    let mut tx = begin_bounded(&db).await;
+    egret_perm_compile::recompile_service_in_tx(&mut tx, svc)
+        .await
+        .expect("recompile");
+    tx.commit().await.expect("commit");
+    assert!(
+        username_of(&db, user).await.is_some(),
+        "the sweep ran for a service whose egret-admin sync can mint"
+    );
 }

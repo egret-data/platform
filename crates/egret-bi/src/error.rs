@@ -111,6 +111,13 @@ impl From<egret_perm::CompileError> for BiError {
                 body,
             };
         }
+        // The profile set grew under the write (#792): retryable, a 409.
+        if let Some(body) = e.profile_set_changed_body() {
+            return BiError::Coded {
+                status: StatusCode::CONFLICT,
+                body,
+            };
+        }
         BiError::Engine(format!("permission recompile failed: {e}"))
     }
 }

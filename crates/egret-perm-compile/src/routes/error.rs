@@ -128,6 +128,12 @@ impl From<CompileError> for PermHttpError {
                     .expansion_ceiling_body()
                     .expect("expansion_ceiling_body answers every ceiling variant"),
             },
+            ref grew @ CompileError::ProfileSetChanged { .. } => PermHttpError::Coded {
+                status: StatusCode::CONFLICT,
+                body: grew
+                    .profile_set_changed_body()
+                    .expect("profile_set_changed_body answers ProfileSetChanged"),
+            },
             CompileError::ServiceDefUnreadable { .. } => {
                 tracing::error!(error = %e, "embedded service-def failed to parse");
                 PermHttpError::Internal

@@ -1689,6 +1689,8 @@ impl TableHook {
         let reach_refusal = |e: ViewReachError| match e {
             ViewReachError::Db(e) => db(e),
             ViewReachError::Compile(e) if compile_is_lock_timeout(&e) => busy(),
+            // A profile bound while the move ran (#792): retryable, like busy.
+            ViewReachError::Compile(egret_perm::CompileError::ProfileSetChanged { .. }) => busy(),
             other => refused(&other),
         };
         let mut tx = self.db.pool.begin().await.map_err(db)?;
