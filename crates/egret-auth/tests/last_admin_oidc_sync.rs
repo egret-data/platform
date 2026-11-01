@@ -55,7 +55,9 @@ async fn the_oidc_sync_keeps_the_last_admins_group_membership() {
         return;
     };
     // Arrange: `admin` is this database's only platform admin, through the
-    // OIDC group `admins`; `other` is an OIDC group with no role.
+    // OIDC group `admins`; `other` is an OIDC group with no role. `denied`
+    // and `lapsed` hold a `deny` and an expired `platform_admin` grant: neither
+    // makes anyone an admin, so keeping them would restore nothing (P5b).
     let users = UserRepo::new(db.clone());
     let groups = GroupRepo::new(db.clone());
     let rc = Recorder::default();
@@ -65,19 +67,38 @@ async fn the_oidc_sync_keeps_the_last_admins_group_membership() {
     let admins_id = groups.upsert_oidc_group(&admins).await.unwrap();
     groups.upsert_oidc_group(&other).await.unwrap();
     grant_platform_admin(&db, "group", admins_id).await;
+    let denied = format!("denied-{suffix}");
+    let lapsed = format!("lapsed-{suffix}");
+    let denied_id = groups.upsert_oidc_group(&denied).await.unwrap();
+    let lapsed_id = groups.upsert_oidc_group(&lapsed).await.unwrap();
+    sqlx::query(
+        "INSERT INTO access_grants \
+           (principal_type, principal_id, role_id, scope_type, scope_id, effect, expires_at) \
+         SELECT 'group', g.gid, r.id, 'platform', NULL, g.effect, g.expires_at \
+           FROM roles r, (VALUES ($1::uuid, 'deny', NULL::timestamptz), \
+                                 ($2::uuid, 'allow', now() - interval '1 minute')) \
+                AS g(gid, effect, expires_at) \
+          WHERE r.scope = 'platform' AND r.name = 'platform_admin'",
+    )
+    .bind(denied_id)
+    .bind(lapsed_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
     let admin = users
         .insert_local(&format!("admin-{suffix}@idp.local"), "Admin", "x")
         .await
         .unwrap();
     groups
-        .sync_user_oidc_groups(admin, &[admins.clone(), other.clone()], &rc)
+        .sync_user_oidc_groups(admin, &[admins.clone(), other.clone(), denied, lapsed], &rc)
         .await
         .unwrap();
 
     // Act: a login whose claim no longer names either group.
     groups.sync_user_oidc_groups(admin, &[], &rc).await.unwrap();
 
-    // Assert: the role-less membership is dropped, the admin one is kept.
+    // Assert: the role-less membership is dropped, the admin one is kept, and
+    // the deny and lapsed ones are dropped too.
     assert_eq!(group_names_of(&db, admin.0).await, vec![admins.clone()]);
 
     // Act: the stale-membership sweep replays the same empty claim.

@@ -211,7 +211,7 @@ impl MemberRepo {
     }
 
     pub async fn list(&self, ws: WorkspaceId) -> Result<Vec<WorkspaceMember>> {
-        let rows = sqlx::query_as::<_, MemberRow>(
+        let rows = sqlx::query_as::<_, MemberRow>(concat!(
             "SELECT ag.principal_type, ag.principal_id, r.name AS role, \
                     COALESCE(u.email::text, g.name) AS principal_name, \
                     gb.email::text AS granted_by_name, \
@@ -220,6 +220,9 @@ impl MemberRepo {
                       SELECT 1 FROM access_grants pa JOIN roles pr ON pr.id = pa.role_id \
                       WHERE pa.principal_type = ag.principal_type AND pa.principal_id = ag.principal_id \
                         AND pa.scope_type = 'platform' AND pr.name = 'platform_admin' \
+                        AND ",
+            egret_auth::live_allow_grant!("pa"),
+            " \
                     ) AS is_platform_admin \
              FROM access_grants ag \
              JOIN roles r ON r.id = ag.role_id \
@@ -228,7 +231,7 @@ impl MemberRepo {
              LEFT JOIN users  gb ON gb.id = ag.granted_by \
              WHERE ag.scope_type = 'workspace' AND ag.scope_id = $1 \
              ORDER BY ag.created_at",
-        )
+        ))
         .bind(ws.0)
         .fetch_all(&self.db.pool)
         .await
@@ -236,12 +239,16 @@ impl MemberRepo {
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
-    /// Number of members holding `ws_admin` in the workspace.
+    /// Number of members holding `ws_admin` in the workspace through a live
+    /// `allow` grant (`egret_auth::live_allow_grant!`): what the last-admin
+    /// guard counts, so a lapsed or `deny` `ws_admin` row is no second admin.
     pub async fn count_ws_admins(&self, ws: WorkspaceId) -> Result<i64> {
-        sqlx::query_scalar(
+        sqlx::query_scalar(concat!(
             "SELECT count(*) FROM access_grants ag JOIN roles r ON r.id = ag.role_id \
-             WHERE ag.scope_type = 'workspace' AND ag.scope_id = $1 AND r.name = 'ws_admin'",
-        )
+             WHERE ag.scope_type = 'workspace' AND ag.scope_id = $1 AND r.name = 'ws_admin' \
+               AND ",
+            egret_auth::live_allow_grant!("ag"),
+        ))
         .bind(ws.0)
         .fetch_one(&self.db.pool)
         .await
@@ -261,6 +268,26 @@ impl MemberRepo {
             .fetch_optional(&self.db.pool)
             .await
             .map_err(db_err)
+    }
+
+    /// Whether the principal holds `ws_admin` here through a live `allow` grant:
+    /// one of the admins [`Self::count_ws_admins`] counts. The last-admin guard
+    /// asks this of the member it is about to remove or demote.
+    pub async fn is_live_ws_admin(&self, ws: WorkspaceId, ptype: &str, pid: Uuid) -> Result<bool> {
+        sqlx::query_scalar(concat!(
+            "SELECT EXISTS (SELECT 1 FROM access_grants ag JOIN roles r ON r.id = ag.role_id \
+             WHERE ag.scope_type = 'workspace' AND ag.scope_id = $1 AND r.name = 'ws_admin' \
+               AND ag.principal_type = $2 AND ag.principal_id = $3 \
+               AND ",
+            egret_auth::live_allow_grant!("ag"),
+            ")",
+        ))
+        .bind(ws.0)
+        .bind(ptype)
+        .bind(pid)
+        .fetch_one(&self.db.pool)
+        .await
+        .map_err(db_err)
     }
 
     /// The workspace role a principal currently holds here, if any.

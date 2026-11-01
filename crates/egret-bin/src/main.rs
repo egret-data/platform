@@ -107,11 +107,15 @@ async fn init(config: Config, force: bool) -> anyhow::Result<()> {
     db.migrate().await.context("running migrations")?;
 
     if !force {
-        let existing: i64 = sqlx::query_scalar(
+        // A lapsed or `deny` grant makes no admin, so it does not stop the
+        // bootstrap (`egret_auth::live_allow_grant!`).
+        let existing: i64 = sqlx::query_scalar(concat!(
             "SELECT count(*) FROM access_grants ag \
              JOIN roles r ON r.id = ag.role_id \
-             WHERE r.scope='platform' AND r.name='platform_admin' AND ag.scope_type='platform'",
-        )
+             WHERE r.scope='platform' AND r.name='platform_admin' AND ag.scope_type='platform' \
+               AND ",
+            egret_auth::live_allow_grant!("ag"),
+        ))
         .fetch_one(&db.pool)
         .await?;
         if existing > 0 {

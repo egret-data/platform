@@ -258,7 +258,10 @@ impl AccessRequestRepo {
     /// Active workspaces the user is NOT already a member of (directly or via a
     /// group) — the valid targets for a join request. Mirrors
     /// `WorkspaceRepo::list_for_principal`'s grant subquery, including the P2a
-    /// expiry filter. Returns `(id, slug, name)` ordered by name.
+    /// expiry filter, with one difference: any live grant counts here, a `deny`
+    /// one too. A principal denied in a workspace is no member of it, but is
+    /// not offered a join request either (P5b, the conservative side).
+    /// Returns `(id, slug, name)` ordered by name.
     pub async fn joinable(&self, user_id: UserId) -> Result<Vec<(Uuid, String, String)>> {
         let rows = sqlx::query_as::<_, (Uuid, String, String)>(
             "SELECT w.id, w.slug, w.name FROM workspaces w \

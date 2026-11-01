@@ -153,7 +153,8 @@ impl WorkspaceRepo {
     }
 
     /// Workspaces the principal can access: all active if `include_all` (platform_admin),
-    /// else those where the user is a member directly or via a group.
+    /// else those where the user is a member directly or via a group (a live
+    /// `allow` grant, `egret_auth::live_allow_grant!`, as `WsContext` admits).
     pub async fn list_for_principal(
         &self,
         user_id: UserId,
@@ -169,19 +170,21 @@ impl WorkspaceRepo {
             .fetch_all(&self.db.pool)
             .await
         } else {
-            sqlx::query_as::<_, WorkspaceRow>(
+            sqlx::query_as::<_, WorkspaceRow>(concat!(
                 "SELECT DISTINCT w.id, w.slug, w.name, w.status, w.created_at, w.created_by, \
                         NULLIF(u.name, '') AS owner_name \
                  FROM workspaces w \
                  JOIN access_grants ag ON ag.scope_id = w.id AND ag.scope_type = 'workspace' \
                  LEFT JOIN users u ON u.id = w.created_by \
                  WHERE w.status = 'active' \
-                   AND (ag.expires_at IS NULL OR ag.expires_at > now()) \
+                   AND ",
+                egret_auth::live_allow_grant!("ag"),
+                " \
                    AND ( (ag.principal_type = 'user'  AND ag.principal_id = $1) \
                       OR (ag.principal_type = 'group' AND ag.principal_id IN \
                              (SELECT group_id FROM user_groups WHERE user_id = $1)) ) \
                  ORDER BY w.name",
-            )
+            ))
             .bind(user_id.0)
             .fetch_all(&self.db.pool)
             .await
