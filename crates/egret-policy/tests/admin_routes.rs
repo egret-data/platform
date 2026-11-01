@@ -119,6 +119,19 @@ impl Fixture {
     fn app_empty(&self) -> axum::Router {
         self.app(Arc::new(MockEngineReader::default()))
     }
+    /// Router with no bound engines whose rendered engine URL is `url`.
+    fn app_with_url(&self, url: &str) -> axum::Router {
+        policy_admin_router().with_state(PolicyAdminState {
+            store: self.store.clone(),
+            engines: Arc::new(MockEngineReader::default()),
+            users: self.users.clone(),
+            groups: self.groups.clone(),
+            sessions: self.sessions.clone(),
+            engine_egret_url: url.into(),
+            pdp: self.pdp.clone(),
+            recompiler: std::sync::Arc::new(NoRecompile),
+        })
+    }
 }
 
 /// Rebuild `f.pdp` with a REAL `CedarPdp`. The PDP snapshots the
@@ -580,7 +593,9 @@ async fn admin_gets_trino_config_for_profile() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "trino-config; body={body}");
-    let files = body.as_array().expect("array");
+    // KI-149: the in-cluster default is not a loopback address, so no warning.
+    assert_eq!(body["warnings"], serde_json::json!([]), "body={body}");
+    let files = body["files"].as_array().expect("files array");
     assert_eq!(files.len(), 2);
     assert!(files
         .iter()
@@ -4413,4 +4428,343 @@ async fn list_profiles_still_needs_policy_read() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+// ── KI-149: the Trino config warns about a download URL no engine can reach ──
+
+#[tokio::test]
+async fn trino_config_warns_when_the_download_url_is_loopback() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cfg_loopback", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    let (status, body) = into_json(
+        f.app_with_url("http://localhost:8080")
+            .oneshot(req(
+                "GET",
+                &format!("/policies/services/{svc_name}/trino-config"),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let warnings = body["warnings"].as_array().expect("warnings array");
+    assert_eq!(warnings.len(), 1, "body={body}");
+    let w = warnings[0].as_str().unwrap();
+    assert!(
+        w.contains("http://localhost:8080")
+            && w.contains("loopback")
+            && w.contains("[catalog] public_url"),
+        "{w}"
+    );
+    // The files are still rendered, with the URL the warning names.
+    assert!(
+        body["files"].to_string().contains("http://localhost:8080"),
+        "body={body}"
+    );
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+// ── #786 / KI-125: give an existing profile a tag service ──
+
+/// A `tag` profile, its def seeded first (FK `authz_services_type_fkey`).
+async fn tag_profile(f: &Fixture, label: &str) -> (String, i64) {
+    egret_policy::seed_tag(&f.store).await.expect("seed tag");
+    let name = format!("{label}-{}_tag", Uuid::new_v4().simple());
+    let id = f
+        .store
+        .create_service(&name, "tag", &serde_json::json!({}))
+        .await
+        .expect("create tag profile")
+        .id;
+    (name, id)
+}
+
+async fn put_tag_service(
+    app: axum::Router,
+    token: &str,
+    profile: &str,
+    value: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    into_json(
+        app.oneshot(req(
+            "PUT",
+            &format!("/policies/services/{profile}/tag-service"),
+            token,
+            Some(serde_json::json!({ "tagService": value })),
+        ))
+        .await
+        .unwrap(),
+    )
+    .await
+}
+
+async fn tag_service_events(f: &Fixture, profile_id: i64) -> Vec<(String, serde_json::Value)> {
+    sqlx::query_as(
+        "SELECT action, detail FROM audit.audit_log \
+          WHERE resource_type = 'policy_profile' AND resource_id = $1 ORDER BY id",
+    )
+    .bind(profile_id.to_string())
+    .fetch_all(&f.db.pool)
+    .await
+    .expect("events")
+}
+
+#[tokio::test]
+async fn a_console_made_trino_profile_can_be_given_a_tag_service_and_lose_it() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "set_tag", true).await;
+    // What the console's New profile makes: name and type, no config.
+    let (svc_name, svc_id) = seed_service(&f).await;
+    let (tag_name, tag_id) = tag_profile(&f, "set").await;
+    assert_eq!(f.store.usable_tag_service(svc_id).await.unwrap(), None);
+    let before = f.store.get_service(&svc_name).await.unwrap();
+    let tag_before = f.store.get_service(&tag_name).await.unwrap();
+
+    let (status, body) = put_tag_service(
+        f.app_empty(),
+        &token,
+        &svc_name,
+        serde_json::json!(tag_name),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(
+        body["tagService"],
+        serde_json::json!(tag_name),
+        "body={body}"
+    );
+    // Usable: the predicate `PUT /engines/{id}` binds on now answers.
+    assert_eq!(
+        f.store.usable_tag_service(svc_id).await.unwrap().as_deref(),
+        Some(tag_name.as_str())
+    );
+    let after = f.store.get_service(&svc_name).await.unwrap();
+    assert!(
+        after.policy_version > before.policy_version,
+        "profile not bumped"
+    );
+    let tag_after = f.store.get_service(&tag_name).await.unwrap();
+    assert!(
+        tag_after.tag_version > tag_before.tag_version,
+        "tag download not bumped"
+    );
+    let evs = tag_service_events(&f, svc_id).await;
+    assert_eq!(evs.len(), 1, "{evs:?}");
+    assert_eq!(evs[0].0, "profile:tag_service");
+    assert_eq!(
+        evs[0].1["before"]["tagService"],
+        serde_json::Value::Null,
+        "{evs:?}"
+    );
+    assert_eq!(
+        evs[0].1["after"]["tagService"],
+        serde_json::json!(tag_name),
+        "{evs:?}"
+    );
+
+    // The same value again writes nothing.
+    let (status, body) = put_tag_service(
+        f.app_empty(),
+        &token,
+        &svc_name,
+        serde_json::json!(tag_name),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(tag_service_events(&f, svc_id).await.len(), 1);
+
+    // `null` removes it.
+    let (status, body) =
+        put_tag_service(f.app_empty(), &token, &svc_name, serde_json::Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(body["tagService"], serde_json::Value::Null, "body={body}");
+    assert_eq!(f.store.usable_tag_service(svc_id).await.unwrap(), None);
+    let cfg = f.store.get_service(&svc_name).await.unwrap().config_jsonb;
+    assert!(cfg.get("tagService").is_none(), "{cfg}");
+    assert_eq!(tag_service_events(&f, svc_id).await.len(), 2);
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+    f.store.delete_service(tag_id).await.expect("cleanup");
+}
+
+/// Every guard the create path runs, run on the UPDATE: the target must be a
+/// `tag` profile that exists, the value a non-empty string, and only a `trino`
+/// profile may carry one. A refusal changes nothing.
+#[tokio::test]
+async fn set_tag_service_refuses_what_create_refuses_and_changes_nothing() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "set_tag_bad", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    let (other_trino, other_id) = seed_service(&f).await;
+    let (tag_name, tag_id) = tag_profile(&f, "bad").await;
+    egret_policy::seed_starrocks(&f.store)
+        .await
+        .expect("seed sr");
+    let sr = format!("sr-{}", Uuid::new_v4().simple());
+    let sr_id = f
+        .store
+        .create_service(&sr, "starrocks", &serde_json::json!({}))
+        .await
+        .unwrap()
+        .id;
+
+    let cases: Vec<(&str, serde_json::Value, &str)> = vec![
+        (
+            &svc_name,
+            serde_json::json!(other_trino),
+            "must name a `tag` profile",
+        ),
+        (
+            &svc_name,
+            serde_json::json!("no-such-profile"),
+            "no profile at all",
+        ),
+        (&svc_name, serde_json::json!(""), "non-empty"),
+        (&svc_name, serde_json::json!("  "), "non-empty"),
+        (&svc_name, serde_json::json!(7), "non-empty"),
+        (
+            &svc_name,
+            serde_json::json!(svc_name),
+            "must name a `tag` profile",
+        ),
+        (&sr, serde_json::json!(tag_name), "cannot carry"),
+        (&tag_name, serde_json::json!(tag_name), "cannot carry"),
+    ];
+    for (profile, value, says) in cases {
+        let before = f.store.get_service(profile).await.unwrap();
+        let (status, body) = put_tag_service(f.app_empty(), &token, profile, value.clone()).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{profile} <- {value}: body={body}"
+        );
+        assert!(
+            body.to_string().contains(says),
+            "{profile} <- {value}: body={body}"
+        );
+        let after = f.store.get_service(profile).await.unwrap();
+        assert_eq!(
+            after.config_jsonb, before.config_jsonb,
+            "{profile} <- {value}"
+        );
+        assert_eq!(
+            after.policy_version, before.policy_version,
+            "{profile} <- {value}"
+        );
+    }
+    let (status, _) = put_tag_service(
+        f.app_empty(),
+        &token,
+        "no-such",
+        serde_json::json!(tag_name),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(tag_service_events(&f, svc_id).await.is_empty());
+
+    for id in [svc_id, other_id, sr_id, tag_id] {
+        f.store.delete_service(id).await.expect("cleanup");
+    }
+}
+
+/// Conservative ruling: a profile an engine downloads, or one the permission
+/// model compiles, is refused (409) rather than recompiled.
+#[tokio::test]
+async fn set_tag_service_refuses_a_bound_or_generated_profile() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "set_tag_bound", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    let (tag_name, tag_id) = tag_profile(&f, "bound").await;
+    let reader = Arc::new(MockEngineReader {
+        bindings: vec![EngineBinding {
+            id: Uuid::new_v4(),
+            name: "trino-ext".into(),
+            status: "Running".into(),
+            authz_service_id: Some(svc_id),
+            warehouse_ids: Vec::new(),
+            origin: "external".into(),
+            r#type: "trino".into(),
+        }],
+        ..Default::default()
+    });
+    let (status, body) = put_tag_service(
+        f.app(reader),
+        &token,
+        &svc_name,
+        serde_json::json!(tag_name),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "body={body}");
+    assert!(body.to_string().contains("trino-ext"), "body={body}");
+    assert_eq!(f.store.usable_tag_service(svc_id).await.unwrap(), None);
+
+    let (gen_name, gen_id) = seed_service(&f).await;
+    sqlx::query("UPDATE policy.authz_services SET origin = 'generated' WHERE id = $1")
+        .bind(gen_id)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    let (status, body) = put_tag_service(
+        f.app_empty(),
+        &token,
+        &gen_name,
+        serde_json::json!(tag_name),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "body={body}");
+    assert_eq!(f.store.usable_tag_service(gen_id).await.unwrap(), None);
+    assert!(tag_service_events(&f, svc_id).await.is_empty());
+
+    for id in [svc_id, gen_id, tag_id] {
+        f.store.delete_service(id).await.expect("cleanup");
+    }
+}
+
+/// `policy:update` gates the route: `policy:read` alone (and `policy:create`)
+/// is refused, as an unprivileged principal under the real PDP.
+#[tokio::test]
+async fn set_tag_service_needs_policy_update() {
+    let Some(mut f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let reader_token = session_for_with_permission(&f, "tag_reader", "policy:read").await;
+    let creator_token = session_for_with_permission(&f, "tag_creator", "policy:create").await;
+    let updater_token = session_for_with_permission(&f, "tag_updater", "policy:update").await;
+    attach_real_pdp(&mut f).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    let (tag_name, tag_id) = tag_profile(&f, "perm").await;
+
+    for token in [&reader_token, &creator_token] {
+        let (status, body) =
+            put_tag_service(f.app_empty(), token, &svc_name, serde_json::json!(tag_name)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "body={body}");
+    }
+    assert_eq!(f.store.usable_tag_service(svc_id).await.unwrap(), None);
+    let (status, body) = put_tag_service(
+        f.app_empty(),
+        &updater_token,
+        &svc_name,
+        serde_json::json!(tag_name),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+    f.store.delete_service(tag_id).await.expect("cleanup");
 }

@@ -86,6 +86,17 @@ export const ENGINE_TYPE_LABEL: Record<string, string> = { trino: "Trino", starr
 /** The query key family of the profile list, shared with the governance pages. */
 export const profilesQueryKey = ["control-plane", "profiles"] as const;
 
+/** Why a Trino profile is not offered for binding (#786): the bind would be refused with 400. */
+export const NO_TAG_SERVICE_SUFFIX = "no tag service: give it one on its Advanced tab";
+
+/**
+ * A Trino profile with no usable tag service (`tag_service` is the usable one,
+ * resolved by the server). `PUT /engines/{id}` refuses to bind it, so the
+ * pickers disable it instead of letting the save fail.
+ */
+export const noTagService = (p: { type: string; tag_service?: string | null }) =>
+  p.type === "trino" && !p.tag_service;
+
 /** platform_admin, or the permission key — the rule `RequirePermission` applies. */
 export function useCan(perm: string): boolean {
   const { me } = useAuth();

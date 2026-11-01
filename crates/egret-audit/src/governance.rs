@@ -37,6 +37,8 @@ pub mod action {
     pub const MIGRATION_APPLY: &str = "policy_migration:apply";
     pub const MIGRATION_UNDO: &str = "policy_migration:undo";
     pub const PROFILE_COMPILE: &str = "profile:compile";
+    /// A profile's `config.tagService` set, changed or removed (#786).
+    pub const PROFILE_TAG_SERVICE: &str = "profile:tag_service";
     // F11 (engine-scoped grants, `perm.engine_grants`).
     pub const ENGINE_GRANT_CREATE: &str = "engine_grant:create";
     pub const ENGINE_GRANT_UPDATE: &str = "engine_grant:update";
@@ -148,6 +150,11 @@ pub const FAMILIES: &[(&str, &str, Family)] = &[
         Family::Policy,
     ),
     (
+        action::PROFILE_TAG_SERVICE,
+        resource::POLICY_PROFILE,
+        Family::Policy,
+    ),
+    (
         action::ENGINE_GRANT_CREATE,
         resource::ENGINE_GRANT,
         Family::Policy,
@@ -208,6 +215,7 @@ pub const GOVERNANCE_ACTIONS: &[&str] = &[
     action::MIGRATION_APPLY,
     action::MIGRATION_UNDO,
     action::PROFILE_COMPILE,
+    action::PROFILE_TAG_SERVICE,
     action::ENGINE_GRANT_CREATE,
     action::ENGINE_GRANT_UPDATE,
     action::ENGINE_GRANT_DELETE,

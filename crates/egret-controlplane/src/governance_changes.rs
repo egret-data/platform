@@ -307,6 +307,7 @@ fn truncated_phrase(action: &str) -> &'static str {
         action::MIGRATION_APPLY => "migrated policies of a profile",
         action::MIGRATION_UNDO => "undid a migration of a profile",
         action::PROFILE_COMPILE => "compiled a profile",
+        action::PROFILE_TAG_SERVICE => "changed the tag service of a profile",
         action::ENGINE_GRANT_CREATE => "created an engine grant",
         action::ENGINE_GRANT_UPDATE => "changed an engine grant",
         action::ENGINE_GRANT_DELETE => "deleted an engine grant",
@@ -514,6 +515,36 @@ async fn entry(c: &mut PgConnection, row: ChangeRow) -> Result<ChangeEntry, sqlx
                     d.get("updated").and_then(Value::as_i64).unwrap_or(0),
                     d.get("deleted").and_then(Value::as_i64).unwrap_or(0)
                 ),
+            };
+            let live = current.is_some();
+            (sentence, current.map(|name| Ref::Profile { name }), live)
+        }
+        action::PROFILE_TAG_SERVICE => {
+            let current: Option<String> =
+                sqlx::query_scalar("SELECT name FROM policy.authz_services WHERE id::text = $1")
+                    .bind(&id)
+                    .fetch_optional(&mut *c)
+                    .await?;
+            let profile = current
+                .clone()
+                .unwrap_or_else(|| s(d, "service").to_string());
+            let tag_of = |side: &str| {
+                d.get(side)
+                    .and_then(|v| v.get("tagService"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            };
+            let sentence = match (tag_of("before"), tag_of("after")) {
+                (None, Some(after)) => {
+                    format!("{a} set the tag service of profile {profile} to {after}")
+                }
+                (Some(before), Some(after)) => format!(
+                    "{a} changed the tag service of profile {profile} from {before} to {after}"
+                ),
+                (Some(before), None) => {
+                    format!("{a} removed the tag service {before} of profile {profile}")
+                }
+                (None, None) => format!("{a} changed the tag service of profile {profile}"),
             };
             let live = current.is_some();
             (sentence, current.map(|name| Ref::Profile { name }), live)

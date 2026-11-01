@@ -337,7 +337,8 @@ fn carries_tag_service(config: &Value) -> bool {
 /// | 3 | the five `SET policy_version = policy_version + 1` bumps in this file, and `egret-perm-compile`'s `trigger.rs` | no | no | cannot |
 /// | 4 | `egret_catalog_registry::tag_version`'s `SET tag_version = …` | no | no | cannot |
 /// | 5 | `egret-perm-compile`'s `trigger.rs` `SET origin = 'generated'` | no | no | cannot |
-/// | 6 | **an `UPDATE` of `type` or of `config_jsonb`** | — | — | **no such statement exists in any `src/` in this workspace.** So "change a profile's type to `starrocks` while it already carries a `tagService`" has no code path to refuse at today. Prose is not a bound, so the direction is closed in the SCHEMA instead: migration 0176's VALIDATED `CHECK` holds for every `INSERT` and every `UPDATE`, from Rust, from a future route, from `psql`, from a test's raw `sqlx::query` |
+/// | 5a | [`set_tag_service_via`] — `PUT /policies/services/{service}/tag-service` (#786), the one `UPDATE` of `config_jsonb` in `src/`; writes only the `tagService` key, never `type` | no | yes | **guarded**: runs this function, [`refuse_unnameable_tag_service`] and [`refuse_tag_service_naming_a_non_tag_profile`] on the stored `type` and the NEW config, under the profile's row lock, before the `UPDATE` |
+/// | 6 | **an `UPDATE` of `type`** (and, before #786, of `config_jsonb`) | — | — | **no such statement exists in any `src/` in this workspace.** So "change a profile's type to `starrocks` while it already carries a `tagService`" has no code path to refuse at today. Prose is not a bound, so the direction is closed in the SCHEMA instead: migration 0176's VALIDATED `CHECK` holds for every `INSERT` and every `UPDATE`, from Rust, from a future route, from `psql`, from a test's raw `sqlx::query` |
 ///
 /// Row 6 is why this function is not the whole fix, and why a test that only
 /// drives #1a would be a green from a population that cannot exercise the other
@@ -465,8 +466,9 @@ fn refuse_tag_service_naming_a_non_tag_profile(
 /// `tagPolicies` at all. And that population is not an edge case —
 /// `frontend/src/api/policies.ts::createProfile(name, type)` sends **no
 /// `config`**, so **every console-created Trino profile** is in it, and nothing
-/// can ever give one a `tagService` (there is no `UPDATE` of `config_jsonb` in
-/// any `src/`). The fix round removed that fallback: `list_profiles` resolves
+/// can ever give one a `tagService` (there was no `UPDATE` of `config_jsonb` in
+/// any `src/` until #786 added [`set_tag_service_via`], which runs this rule
+/// too). The fix round removed that fallback: `list_profiles` resolves
 /// through [`usable_tag_services_via`], the same join this row names, so all
 /// five readers now reach ONE conclusion for every shape — absent, `null`,
 /// non-string, empty, dangling, or good.
@@ -1246,6 +1248,113 @@ impl PolicyStore {
         let mut conn = self.db.pool.acquire().await?;
         tag_name_for_key_via(&mut conn, key).await
     }
+}
+
+/// What [`set_tag_service_via`] changed: the profile's `tagService` before and
+/// after (`None` = no tag service).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagServiceChange {
+    pub before: Option<String>,
+    pub after: Option<String>,
+}
+
+/// **The `UPDATE` writer of [`TAG_SERVICE_CONFIG_KEY`]** (#786): set, change or
+/// remove (JSON `null`) the tag service of the profile `profile_id`, on the caller's
+/// transaction. `Ok(None)` when the profile already says that (nothing written).
+///
+/// Before #786 the only writer of the key was the `INSERT` in
+/// [`PolicyStore::create_service`], so a profile made by the console (name and
+/// type only) could never acquire one, and `PUT /engines/{id}` refuses to bind a
+/// Trino profile with no usable tag service. This is the second writer, and it
+/// runs **every guard the first one runs**, on the stored `type` and the NEW
+/// config, under a row lock on the profile (`FOR UPDATE`) so the type it checks
+/// is the type it writes beside:
+///
+/// * [`refuse_tag_service_on_non_trino_profile`] — only `trino` may carry one
+///   (migration 0176's `CHECK` stays the schema bound);
+/// * [`refuse_unnameable_tag_service`] — the value is a non-empty string;
+/// * [`refuse_tag_service_naming_a_non_tag_profile`] — it names an existing
+///   `tag` profile, read on the same transaction (`FOR SHARE`, so the target
+///   cannot be deleted before this commits).
+///
+/// Only the key is written; the rest of `config_jsonb` is kept. The profile's
+/// `policy_version` is bumped (its download embeds the tag service's policies
+/// as `tagPolicies`), and so is the `tag_version` of the old and the new tag
+/// service: their tag download resolves the profile that names them
+/// ([`engine_binding_profile_via`]). Bumping a `tag` row's `tag_version` does
+/// not fire migration 0182's cascade (it watches `policy_version`).
+///
+/// The callers decide WHO may change it: the admin route refuses a profile an
+/// engine downloads or the permission model compiles (409) before calling this.
+pub async fn set_tag_service_via(
+    conn: &mut sqlx::PgConnection,
+    profile_id: i64,
+    tag_service: &Value,
+) -> Result<Option<TagServiceChange>, PolicyStoreError> {
+    let row: Option<(String, Value)> = sqlx::query_as(
+        r#"SELECT type, config_jsonb FROM policy.authz_services WHERE id = $1 FOR UPDATE"#,
+    )
+    .bind(profile_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((typ, config)) = row else {
+        return Err(PolicyStoreError::NotFound(format!(
+            "service id {profile_id}"
+        )));
+    };
+    let before = config
+        .get(TAG_SERVICE_CONFIG_KEY)
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let mut next = match config {
+        Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    };
+    // The value goes in as given, so a non-string reaches the same shape
+    // refusal the create path gives it; `null` removes the key.
+    if tag_service.is_null() {
+        next.remove(TAG_SERVICE_CONFIG_KEY);
+    } else {
+        next.insert(TAG_SERVICE_CONFIG_KEY.to_string(), tag_service.clone());
+    }
+    let next = Value::Object(next);
+    refuse_tag_service_on_non_trino_profile(&typ, &next)?;
+    refuse_unnameable_tag_service(&next)?;
+    let target = tag_service.as_str();
+    if let Some(target) = target {
+        let found: Option<String> =
+            sqlx::query_scalar("SELECT type FROM policy.authz_services WHERE name = $1 FOR SHARE")
+                .bind(target)
+                .fetch_optional(&mut *conn)
+                .await?;
+        refuse_tag_service_naming_a_non_tag_profile(target, found.as_deref())?;
+    }
+    let after = target.map(str::to_string);
+    if before == after {
+        return Ok(None);
+    }
+    sqlx::query(
+        r#"UPDATE policy.authz_services
+              SET config_jsonb = $2, policy_version = policy_version + 1, updated_at = now()
+            WHERE id = $1"#,
+    )
+    .bind(profile_id)
+    .bind(&next)
+    .execute(&mut *conn)
+    .await?;
+    let tag_names: Vec<&str> = [before.as_deref(), after.as_deref()]
+        .into_iter()
+        .flatten()
+        .collect();
+    sqlx::query(
+        r#"UPDATE policy.authz_services
+              SET tag_version = tag_version + 1, updated_at = now()
+            WHERE name = ANY($1) AND type = 'tag'"#,
+    )
+    .bind(&tag_names)
+    .execute(&mut *conn)
+    .await?;
+    Ok(Some(TagServiceChange { before, after }))
 }
 
 /// Connection-generic core of [`PolicyStore::get_service_by_id`] — SP4a

@@ -517,6 +517,10 @@ pub fn router() -> Router<PolicyAdminState> {
             get(trino_config),
         )
         .route(
+            "/policies/services/{service}/tag-service",
+            axum::routing::put(set_tag_service),
+        )
+        .route(
             "/policies/services/{service}/seed-defaults",
             axum::routing::post(seed_defaults),
         )
@@ -800,6 +804,7 @@ async fn list_profiles(
     //
     // The product gap this exposes — no way to give an existing profile a
     // `tagService` — is plan Task 18, not a regression introduced here.
+    // (Closed by #786: `PUT /policies/services/{service}/tag-service`.)
     let usable_tag: std::collections::HashMap<i64, String> = st
         .store
         .usable_tag_services(&services.iter().map(|s| s.id).collect::<Vec<_>>())
@@ -859,7 +864,7 @@ async fn list_profiles(
 pub struct CreateProfileBody {
     /// Ranger service (profile) name.
     pub name: String,
-    /// Ranger service type: `"trino"` or `"starrocks"`.
+    /// Ranger service type: `"trino"`, `"starrocks"` or `"tag"`.
     pub r#type: String,
     /// Optional service config (e.g. StarRocks JDBC coordinates). Stored verbatim.
     ///
@@ -991,6 +996,126 @@ pub struct ConfigFile {
     pub content: String,
 }
 
+/// What `trino-config` answers: the files, and what makes them not work as
+/// rendered (KI-149).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct TrinoConfigResponse {
+    pub files: Vec<ConfigFile>,
+    /// The same download-URL warning the external engine's plugin
+    /// configuration gives (`egret_engine_mgmt_api::ranger_config::download_url_warning`):
+    /// a loopback or unparseable URL no engine can reach. Empty when none.
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SetTagServiceBody {
+    /// The `tag` profile to name, or `null` to remove the tag service.
+    #[serde(rename = "tagService")]
+    #[schema(value_type = Option<String>)]
+    pub tag_service: Value,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ProfileTagService {
+    pub name: String,
+    /// The profile's tag service after the write; `null` when it has none.
+    #[serde(rename = "tagService")]
+    pub tag_service: Option<String>,
+}
+
+/// PUT /policies/services/{service}/tag-service — set, change or remove the
+/// `config.tagService` of an existing profile (#786).
+///
+/// A Trino profile made by the console (name and type) had no way to acquire a
+/// tag service, so no engine could ever be bound to it ("has no usable tag
+/// service"). This is that way, with every guard the create path has (only a
+/// `trino` profile may carry one, the value is a non-empty string, it names an
+/// existing `tag` profile; see `egret_policy::store::set_tag_service_via`).
+///
+/// **Conservative ruling: refuse rather than recompile.** A profile an engine
+/// downloads is refused (409): changing its tag service swaps the tag policies
+/// that engine enforces, and the tag service is checked against an engine at
+/// bind time. A profile the permission model compiles (`generated`) is refused
+/// too: the compiler files its tag rules into the tag service it reads, and this
+/// route does not recompile. Unbind, change, bind again. Recorded as the
+/// governance event `profile:tag_service`.
+#[utoipa::path(
+    put,
+    path = "/api/control-plane/policies/services/{service}/tag-service",
+    tag = "policy-admin",
+    params(("service" = String, Path, description = "Policy profile (Ranger service) name")),
+    request_body = SetTagServiceBody,
+    responses(
+        (status = 200, description = "The profile's tag service after the write. Setting the value it already has writes nothing", body = ProfileTagService),
+        (status = 400, description = "The profile is not of type `trino`; the value is not a non-empty string or `null`; or it names a profile that is missing or not of type `tag`. Nothing is written", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:update permission", body = ErrorBody),
+        (status = 404, description = "No such policy profile", body = ErrorBody),
+        (status = 409, description = "An engine downloads the profile (unbind it first), or egret compiles it (`generated`)", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn set_tag_service(
+    State(st): State<PolicyAdminState>,
+    Auth(p): Auth,
+    Path(service): Path<String>,
+    Json(b): Json<SetTagServiceBody>,
+) -> Result<Json<ProfileTagService>, PolicyHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
+    let svc = st.store.get_service(&service).await?;
+    let bound: Vec<String> = st
+        .engines
+        .list_engine_bindings()
+        .await?
+        .into_iter()
+        .filter(|e| e.authz_service_id == Some(svc.id))
+        .map(|e| e.name)
+        .collect();
+    if !bound.is_empty() {
+        return Err(PolicyHttpError::Conflict(format!(
+            "profile {service} is downloaded by {}: changing its tag service would swap the \
+             tag policies that engine enforces. Unbind the engine, change the tag service, then \
+             bind it again",
+            bound.join(", ")
+        )));
+    }
+    if svc.origin == "generated" {
+        return Err(PolicyHttpError::Conflict(format!(
+            "profile {service} is compiled by egret's permission model, which files its tag \
+             rules into the tag service it names; its tag service is not changed by hand"
+        )));
+    }
+    let mut tx = st.store.begin().await?;
+    let changed = crate::store::set_tag_service_via(&mut tx, svc.id, &b.tag_service).await?;
+    let after = match changed {
+        Some(change) => {
+            egret_audit::governance::record_change(
+                &mut tx,
+                egret_audit::governance::Change {
+                    action: egret_audit::governance::action::PROFILE_TAG_SERVICE,
+                    resource_type: egret_audit::governance::resource::POLICY_PROFILE,
+                    resource_id: svc.id.to_string(),
+                    summary: json!({
+                        "service": service,
+                        "before": { "tagService": change.before },
+                        "after": { "tagService": change.after },
+                    }),
+                    principal: &p,
+                },
+            )
+            .await
+            .map_err(crate::PolicyStoreError::from)?;
+            change.after
+        }
+        None => b.tag_service.as_str().map(str::to_string),
+    };
+    tx.commit().await.map_err(crate::PolicyStoreError::from)?;
+    Ok(Json(ProfileTagService {
+        name: service,
+        tag_service: after,
+    }))
+}
+
 /// GET /policies/services/{service}/trino-config — the two files a Trino
 /// coordinator needs to enforce this profile via the native ranger plugin.
 ///
@@ -1002,7 +1127,7 @@ pub struct ConfigFile {
     tag = "policy-admin",
     params(("service" = String, Path, description = "Policy profile (Ranger service) name")),
     responses(
-        (status = 200, description = "The Trino coordinator config files for this profile's native ranger plugin, from the same renderer that writes the files egret mounts into its own engines (`access-control.properties` and `ranger-trino-security.xml`). Since SP4d-4 the security file also carries the policy source, cache directory and client timeouts, the properties file points at `/etc/trino/ranger-trino-security.xml`, and the poll interval is 30000 ms; earlier responses omitted those keys and used a relative resource path", body = Vec<ConfigFile>),
+        (status = 200, description = "The Trino coordinator config files for this profile's native ranger plugin, from the same renderer that writes the files egret mounts into its own engines (`access-control.properties` and `ranger-trino-security.xml`), and `warnings`: the same download-URL warning as the external engine's plugin configuration (a loopback or unparseable `[catalog] public_url`). Since SP4d-4 the security file also carries the policy source, cache directory and client timeouts, the properties file points at `/etc/trino/ranger-trino-security.xml`, and the poll interval is 30000 ms. Before KI-149 the body was the bare array of files", body = TrinoConfigResponse),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read permission", body = ErrorBody),
         (status = 404, description = "No such policy profile", body = ErrorBody),
@@ -1013,7 +1138,7 @@ async fn trino_config(
     State(st): State<PolicyAdminState>,
     Auth(p): Auth,
     Path(service): Path<String>,
-) -> Result<Json<Vec<ConfigFile>>, PolicyHttpError> {
+) -> Result<Json<TrinoConfigResponse>, PolicyHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
     let _ = st.store.get_service(&service).await?; // 404 if the profile doesn't exist
 
@@ -1026,13 +1151,16 @@ async fn trino_config(
         egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS.into(),
         None,
     );
-    Ok(Json(
-        rendered
+    Ok(Json(TrinoConfigResponse {
+        files: rendered
             .files
             .into_iter()
             .map(|(name, content)| ConfigFile { name, content })
             .collect(),
-    ))
+        warnings: egret_engine_mgmt_api::ranger_config::download_url_warning(&st.engine_egret_url)
+            .into_iter()
+            .collect(),
+    }))
 }
 
 /// POST /policies/services/{service}/seed-defaults — seed default "admin has
@@ -1330,7 +1458,7 @@ pub struct SeedResult {
 ///   offering the name, so it could not invent a write target, and Task 9
 ///   initially kept it on that ground. The ruling went the other way once the
 ///   consequence was stated plainly: nothing can give an existing profile a
-///   `tagService` (no `UPDATE` of `config_jsonb` exists in `src/`, and
+///   `tagService` (no `UPDATE` of `config_jsonb` existed in `src/` before #786, and
 ///   `createProfile` sends no `config`), so the tab that fallback offered led to
 ///   a workflow that **cannot complete, ever** — a guaranteed 400 from right
 ///   here. `list_profiles` now resolves through the same join
@@ -2170,6 +2298,7 @@ async fn set_policy_enabled(
         create_profile,
         delete_profile,
         trino_config,
+        set_tag_service,
         seed_defaults,
         get_service_def,
         resource_lookup,
@@ -2183,6 +2312,9 @@ async fn set_policy_enabled(
         CreateProfileBody,
         CreatedProfile,
         ConfigFile,
+        TrinoConfigResponse,
+        SetTagServiceBody,
+        ProfileTagService,
         Principal,
         EnabledBody,
         CreatedPolicyId,

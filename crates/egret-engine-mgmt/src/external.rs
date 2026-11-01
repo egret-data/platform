@@ -753,32 +753,6 @@ struct PluginConfigFacts<'a> {
     version: Option<&'a str>,
 }
 
-/// Why `raw` cannot be a download URL an external engine reaches, if it cannot:
-/// its host is loopback or unspecified (`localhost`, `localhost.`, `127.0.0.0/8`,
-/// `0.0.0.0`, `::`, `::1`, an IPv4-mapped form of those), or it is not an
-/// http(s) URL with a host (`localhost:8080` parses as scheme `localhost`).
-/// Parsed, never substring-matched: `localhost.example.com` is an ordinary name.
-fn download_url_problem(raw: &str) -> Option<&'static str> {
-    use std::net::Ipv6Addr;
-    use url::Host;
-    let unusable = |v4: std::net::Ipv4Addr| v4.is_loopback() || v4.is_unspecified();
-    let url = url::Url::parse(raw).ok();
-    let Some(url) = url.filter(|u| matches!(u.scheme(), "http" | "https")) else {
-        return Some("is not an http(s) URL with a host");
-    };
-    let loopback = match url.host() {
-        None => return Some("is not an http(s) URL with a host"),
-        Some(Host::Domain(d)) => d.trim_end_matches('.').eq_ignore_ascii_case("localhost"),
-        Some(Host::Ipv4(ip)) => unusable(ip),
-        Some(Host::Ipv6(ip)) => {
-            ip == Ipv6Addr::UNSPECIFIED
-                || ip.is_loopback()
-                || ip.to_ipv4_mapped().is_some_and(unusable)
-        }
-    };
-    loopback.then_some("is a loopback or unspecified address")
-}
-
 fn plugin_config_judgements(
     f: &PluginConfigFacts<'_>,
 ) -> (&'static str, Vec<String>, Vec<String>, bool) {
@@ -794,12 +768,10 @@ fn plugin_config_judgements(
              cluster cannot reach it. Set `[catalog] public_url` to an address the engine can reach."
         ));
     }
-    if let Some(problem) = download_url_problem(host_part) {
-        warnings.push(format!(
-            "The download URL ({host_part}) {problem}: no external engine can reach it. It \
-             comes from `[catalog] public_url`, which defaults to localhost on a fresh install; \
-             set it to an address the engine can reach."
-        ));
+    // One judgement for both plugin-configuration routes (KI-149): the
+    // profile's `trino-config` gives the same warning.
+    if let Some(w) = egret_engine_mgmt_api::ranger_config::download_url_warning(f.public_url) {
+        warnings.push(w);
     }
     // The surface is authenticated unless egret runs it anonymous: the plugin
     // presents the engine's own credential (spec A11).
