@@ -187,3 +187,134 @@ async fn a_deny_grant_gives_the_session_no_platform_role() {
         p.permissions
     );
 }
+
+/// A workspace-scope grant of `role` on `ws` to `(ptype, pid)`, with the given
+/// effect and expiry (as [`platform_grant`]).
+async fn workspace_grant(
+    db: &Db,
+    ptype: &str,
+    pid: Uuid,
+    ws: Uuid,
+    role: &str,
+    effect: &str,
+    expires_in_secs: Option<i64>,
+) {
+    sqlx::query(
+        "INSERT INTO access_grants \
+           (principal_type, principal_id, role_id, scope_type, scope_id, effect, expires_at) \
+         SELECT $1, $2, id, 'workspace', $6, $4, \
+                CASE WHEN $5::bigint IS NULL THEN NULL \
+                     ELSE now() + make_interval(secs => $5::bigint) END \
+           FROM roles WHERE scope = 'workspace' AND name = $3",
+    )
+    .bind(ptype)
+    .bind(pid)
+    .bind(role)
+    .bind(effect)
+    .bind(expires_in_secs)
+    .bind(ws)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+}
+
+fn sessions(db: &Db) -> SessionService {
+    SessionService::new(
+        db.clone(),
+        chrono::Duration::hours(1),
+        chrono::Duration::minutes(30),
+    )
+}
+
+/// P5b row 2, the workspace form of KI-323: a `deny` `ws_admin` grant, direct
+/// or through a group, is no `ws_admin` for the OIDC step-up re-check
+/// (`ws_admin_of`) and no workspace role for the impersonation-target rule
+/// (`workspace_roles_of`). A lapsed grant is neither (already true on main;
+/// kept here so the rule is pinned in one place). A live allow grant is (the
+/// control).
+#[tokio::test]
+async fn a_deny_or_lapsed_workspace_grant_gives_no_workspace_role() {
+    let Some(db) = connect().await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    // Arrange
+    let ws = Uuid::new_v4();
+    let denied = active_user(&db).await;
+    workspace_grant(&db, "user", denied, ws, "ws_admin", "deny", None).await;
+    let denied_via_group = active_user(&db).await;
+    let g = group_with(&db, denied_via_group).await;
+    workspace_grant(&db, "group", g, ws, "ws_admin", "deny", None).await;
+    let lapsed = active_user(&db).await;
+    workspace_grant(&db, "user", lapsed, ws, "ws_admin", "allow", Some(-60)).await;
+    let live = active_user(&db).await;
+    workspace_grant(&db, "user", live, ws, "ws_admin", "allow", None).await;
+    let s = sessions(&db);
+    let w = egret_core::WorkspaceId(ws);
+
+    // Act + Assert
+    for (who, user) in [
+        ("a direct deny", denied),
+        ("a deny through a group", denied_via_group),
+        ("a lapsed grant", lapsed),
+    ] {
+        assert!(
+            !s.ws_admin_of(UserId(user), w).await.unwrap(),
+            "{who} of ws_admin is no ws_admin"
+        );
+        assert_eq!(
+            s.workspace_roles_of(UserId(user), w).await.unwrap(),
+            Vec::<String>::new(),
+            "{who} of ws_admin is no workspace role"
+        );
+    }
+    assert!(s.ws_admin_of(UserId(live), w).await.unwrap());
+    assert_eq!(
+        s.workspace_roles_of(UserId(live), w).await.unwrap(),
+        vec!["ws_admin".to_string()]
+    );
+}
+
+/// P5b row 3: `RoleRepo::platform_admin_user_ids` lists only holders of a live
+/// `allow` `platform_admin` grant, direct or through a group, like the
+/// engine-admin set (KI-322) and the session (KI-323).
+#[tokio::test]
+async fn platform_admin_user_ids_lists_only_live_allow_grants() {
+    let Some(db) = connect().await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    // Arrange
+    let live = active_user(&db).await;
+    platform_grant(&db, "user", live, "platform_admin", "allow", None).await;
+    let lapsed = active_user(&db).await;
+    platform_grant(&db, "user", lapsed, "platform_admin", "allow", Some(-60)).await;
+    let lapsed_via_group = active_user(&db).await;
+    let g = group_with(&db, lapsed_via_group).await;
+    platform_grant(&db, "group", g, "platform_admin", "allow", Some(-60)).await;
+    let denied = active_user(&db).await;
+    platform_grant(&db, "user", denied, "platform_admin", "deny", None).await;
+    let denied_via_group = active_user(&db).await;
+    let g2 = group_with(&db, denied_via_group).await;
+    platform_grant(&db, "group", g2, "platform_admin", "deny", None).await;
+
+    // Act
+    let ids: Vec<Uuid> = egret_auth::roles::RoleRepo::new(db.clone(), egret_events::EventBus::new())
+        .platform_admin_user_ids()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|u| u.0)
+        .collect();
+
+    // Assert
+    assert!(ids.contains(&live), "a live allow grant is an admin");
+    for (who, user) in [
+        ("a lapsed direct grant", lapsed),
+        ("a lapsed group grant", lapsed_via_group),
+        ("a direct deny", denied),
+        ("a deny through a group", denied_via_group),
+    ] {
+        assert!(!ids.contains(&user), "{who} is no platform admin");
+    }
+}

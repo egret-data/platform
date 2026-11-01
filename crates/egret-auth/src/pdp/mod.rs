@@ -286,10 +286,7 @@ impl Pdp for CedarPdp {
         // Feed the admin-graph `forbid` its exemption flag: true iff the subject
         // holds a platform-scoped grant on the `platform_admin` role. Computed
         // from the grants already loaded above — no extra query.
-        let is_admin = grants.iter().any(|g| {
-            g.scope_type == "platform"
-                && inner.role_names.get(&g.role_id).map(String::as_str) == Some("platform_admin")
-        });
+        let is_admin = entities::holds_platform_admin(&grants, &inner.role_names);
         // The distinct role NAMES the subject holds (from the grants already
         // loaded), fed to the classification `forbid`'s `unless` clearance check.
         // ALLOW-effect grants only: a `deny`-effect grant strips access, so its
