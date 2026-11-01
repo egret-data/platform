@@ -10517,3 +10517,308 @@ async fn a_grant_on_a_catalog_without_an_embedded_warehouse_is_not_locked() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
 }
+
+// ---------------------------------------------------------------------------
+// #789: the old affected set comes from the row as it stands under the locks
+// ---------------------------------------------------------------------------
+
+/// **#789.** A PATCH reads the stored grant before it takes any lock, so a
+/// concurrent PATCH of the same grant can commit in between. Its old affected
+/// set must come from the row re-read under the locks, not from that first
+/// read: otherwise it misses the profile the concurrent patch moved the grant
+/// to, and the re-check after the profile locks answers a 409 for a write that
+/// is perfectly sound (and, without that re-check, the moved-to profile would
+/// keep a policy nothing produces).
+///
+/// Deterministic through `egret_perm_compile::write_seam`: our PATCH (to
+/// catalog C) stops right after its first read; a second PATCH (to catalog B)
+/// runs to commit; ours resumes. Before the fix: 409. After: 200, B's policy
+/// reaped, C's compiled.
+#[tokio::test]
+async fn a_patch_racing_a_committed_patch_derives_its_old_set_from_the_fresh_row() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (service_b, catalog_b) = extra_profile(&f, "fresh-b").await;
+    let (service_c, catalog_c) = extra_profile(&f, "fresh-c").await;
+    // Same reason as `a_patch_whose_row_moved_while_it_waited_is_a_409`.
+    let _fanout = exclusive(&f).await;
+    let grant_id = create_grant_returning_id(&f, &token, grant_body(f.catalog_id, "analyst")).await;
+    let name = format!("{COMPILER_GRANT_PREFIX}{grant_id}");
+
+    // Ours: parked between its first read and its lock wait.
+    let (point, pause) = egret_perm_compile::write_seam::PausePoint::new();
+    let app = f.app();
+    let uri = format!("/perm/grants/{grant_id}");
+    let ours = tokio::spawn(egret_perm_compile::write_seam::run_with(point, {
+        let (uri, token) = (uri.clone(), token.clone());
+        async move {
+            app.oneshot(req("PATCH", &uri, &token, Some(grant_body(catalog_c, "analyst"))))
+                .await
+                .unwrap()
+        }
+    }));
+    pause.reached.await.expect("our PATCH reached the pause point");
+
+    // Theirs: commits while ours waits.
+    let (status, theirs) = into_json(
+        f.app()
+            .oneshot(req("PATCH", &uri, &token, Some(grant_body(catalog_b, "analyst"))))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the competing patch; body: {theirs}");
+    assert_eq!(f.compiled_policy_names_under(service_b).await, vec![name.clone()]);
+
+    pause.go.send(()).expect("resume our PATCH");
+    let (status, got) = into_json(ours.await.expect("our PATCH task")).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the row re-read under the locks says the grant is on B, so B belongs in the \
+         old set and nothing escaped it; body: {got}"
+    );
+    assert_eq!(
+        f.compiled_policy_names_under(service_b).await,
+        Vec::<String>::new(),
+        "the profile the competing patch moved the grant to must be reaped; body: {got}"
+    );
+    assert_eq!(f.compiled_policy_names_under(service_c).await, vec![name]);
+    let services = got["services"].as_array().expect("services");
+    assert!(
+        services.iter().any(|v| v.as_i64() == Some(service_b)),
+        "B is in the recompiled set; body: {got}"
+    );
+}
+
+/// The rule twin of the test above: `write_rule` derives its old set from the
+/// rule re-read under the group locks too.
+#[tokio::test]
+async fn a_rule_patch_racing_a_committed_patch_derives_its_old_set_from_the_fresh_row() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (service_b, catalog_b) = extra_profile(&f, "fresh-rule-b").await;
+    let (_, catalog_c) = extra_profile(&f, "fresh-rule-c").await;
+    let _fanout = exclusive(&f).await;
+    let rule_name = unique("fresh-rule");
+    let path_rule = |catalog: Uuid| {
+        json!({
+            "name": rule_name,
+            "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+            "selector": { "type": "path", "catalog_id": catalog,
+                          "schema": "sales", "table": "orders", "column": "email" },
+            "exempt": { "include": [], "exclude": [] }
+        })
+    };
+    let (status, created) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/rules", &token, Some(path_rule(f.catalog_id))))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {created}");
+    let rule_id = created["id"].as_str().expect("minted rule id").to_string();
+    let uri = format!("/perm/rules/{rule_id}");
+
+    let (point, pause) = egret_perm_compile::write_seam::PausePoint::new();
+    let app = f.app();
+    let ours = tokio::spawn(egret_perm_compile::write_seam::run_with(point, {
+        let (uri, token, body) = (uri.clone(), token.clone(), path_rule(catalog_c));
+        async move {
+            app.oneshot(req("PATCH", &uri, &token, Some(body)))
+                .await
+                .unwrap()
+        }
+    }));
+    pause.reached.await.expect("our PATCH reached the pause point");
+    let (status, theirs) = into_json(
+        f.app()
+            .oneshot(req("PATCH", &uri, &token, Some(path_rule(catalog_b))))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the competing patch; body: {theirs}");
+    pause.go.send(()).expect("resume our PATCH");
+    let (status, got) = into_json(ours.await.expect("our PATCH task")).await;
+
+    assert_eq!(status, StatusCode::OK, "body: {got}");
+    let services = got["services"].as_array().expect("services");
+    assert!(
+        services.iter().any(|v| v.as_i64() == Some(service_b)),
+        "the profile the competing patch moved the rule to is in the old set; body: {got}"
+    );
+    let catalog_now: Option<Uuid> =
+        sqlx::query_scalar("SELECT catalog_id FROM perm.rules WHERE id = $1")
+            .bind(Uuid::parse_str(&rule_id).unwrap())
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("read catalog_id");
+    assert_eq!(catalog_now, Some(catalog_c));
+}
+
+// ---------------------------------------------------------------------------
+// #801: a grant or rule id outside the caller's workspace answers like a
+// missing one
+// ---------------------------------------------------------------------------
+
+/// **#801, the stored-row reads every by-id route uses.** A caller confined to
+/// workspace A (a ws-scoped overlay) asking for a grant or rule that lives on
+/// workspace B's catalog must get exactly what it gets for an id that names no
+/// row: `NotFound`. A `Forbidden` there tells it the id exists elsewhere.
+///
+/// Tested directly, as `confine_to_overlay_workspace_allows_its_own_workspace_and_refuses_another`
+/// is and for the same reason: no session builds a confined principal that
+/// passes the `policy:*` gate in front of these routes. The control cells: the
+/// confined caller still reaches its own workspace's rows, and an unconfined
+/// caller reaches B's.
+#[tokio::test]
+async fn grant_and_rule_ids_answer_404_alike_outside_the_callers_workspace() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let ws_a = new_workspace(&f, "oracle-a").await;
+    let own = orphan_catalog(&f, "oracle-own-cat").await;
+    assign_catalog_to_workspace(&f, own, ws_a).await;
+    let ws_b = new_workspace(&f, "oracle-b").await;
+    let foreign = orphan_catalog(&f, "oracle-foreign-cat").await;
+    assign_catalog_to_workspace(&f, foreign, ws_b).await;
+
+    let own_grant = create_grant_returning_id(&f, &token, grant_body(own, "analyst")).await;
+    let foreign_grant = create_grant_returning_id(&f, &token, grant_body(foreign, "analyst")).await;
+    let rule_on = |catalog: Uuid| {
+        json!({
+            "name": unique("oracle-rule"),
+            "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+            "selector": { "type": "path", "catalog_id": catalog,
+                          "schema": "sales", "table": "orders", "column": "email" },
+            "exempt": { "include": [], "exclude": [] }
+        })
+    };
+    let mut rule_ids = Vec::new();
+    for catalog in [own, foreign] {
+        let (status, created) = into_json(
+            f.app()
+                .oneshot(req("POST", "/perm/rules", &token, Some(rule_on(catalog))))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "body: {created}");
+        rule_ids.push(Uuid::parse_str(created["id"].as_str().unwrap()).unwrap());
+    }
+    let (own_rule, foreign_rule) = (rule_ids[0], rule_ids[1]);
+    let own_grant = Uuid::parse_str(&own_grant).unwrap();
+    let foreign_grant = Uuid::parse_str(&foreign_grant).unwrap();
+    let missing = Uuid::new_v4();
+
+    let mut conn = f.db.pool.acquire().await.expect("acquire a connection");
+    let confined = principal_under_overlay(Some(ws_a));
+    let plain = principal_without_overlay();
+
+    // The oracle: foreign and missing answer the same.
+    let g_foreign = egret_perm_compile::routes::grant_in_reach(&mut conn, &confined, foreign_grant)
+        .await
+        .map(|g| g.id);
+    let g_missing = egret_perm_compile::routes::grant_in_reach(&mut conn, &confined, missing)
+        .await
+        .map(|g| g.id);
+    assert!(
+        matches!(g_foreign, Err(PermHttpError::NotFound)),
+        "a grant in another workspace must answer like a missing one; got {g_foreign:?}"
+    );
+    assert!(matches!(g_missing, Err(PermHttpError::NotFound)), "{g_missing:?}");
+    let r_foreign = egret_perm_compile::routes::rule_in_reach(&mut conn, &confined, foreign_rule)
+        .await
+        .map(|r| r.id);
+    let r_missing = egret_perm_compile::routes::rule_in_reach(&mut conn, &confined, missing)
+        .await
+        .map(|r| r.id);
+    assert!(
+        matches!(r_foreign, Err(PermHttpError::NotFound)),
+        "a rule in another workspace must answer like a missing one; got {r_foreign:?}"
+    );
+    assert!(matches!(r_missing, Err(PermHttpError::NotFound)), "{r_missing:?}");
+
+    // Controls: its own rows, and an unconfined caller's view of B's.
+    let g_own = egret_perm_compile::routes::grant_in_reach(&mut conn, &confined, own_grant)
+        .await
+        .map(|g| g.id);
+    assert!(matches!(g_own, Ok(id) if id == own_grant), "{g_own:?}");
+    let r_own = egret_perm_compile::routes::rule_in_reach(&mut conn, &confined, own_rule)
+        .await
+        .map(|r| r.id);
+    assert!(matches!(r_own, Ok(id) if id == own_rule), "{r_own:?}");
+    let g_plain = egret_perm_compile::routes::grant_in_reach(&mut conn, &plain, foreign_grant)
+        .await
+        .map(|g| g.id);
+    assert!(matches!(g_plain, Ok(id) if id == foreign_grant), "{g_plain:?}");
+    let r_plain = egret_perm_compile::routes::rule_in_reach(&mut conn, &plain, foreign_rule)
+        .await
+        .map(|r| r.id);
+    assert!(matches!(r_plain, Ok(id) if id == foreign_rule), "{r_plain:?}");
+}
+
+/// #801 over HTTP, as the caller who can actually reach these routes: a user
+/// with no `policy:*` permission gets the same status and body for an existing
+/// grant or rule id as for an id that names nothing, on every by-id route.
+#[tokio::test]
+async fn a_member_probing_another_workspaces_ids_gets_the_answer_a_random_id_gets() {
+    let Some(mut f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let grant_id = create_grant_returning_id(&f, &token, grant_body(f.catalog_id, "analyst")).await;
+    let rule_body = json!({
+        "name": unique("probe-rule"),
+        "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+        "selector": { "type": "path", "catalog_id": f.catalog_id,
+                      "schema": "sales", "table": "orders", "column": "email" },
+        "exempt": { "include": [], "exclude": [] }
+    });
+    let (status, created) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/rules", &token, Some(rule_body.clone())))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {created}");
+    let rule_id = created["id"].as_str().unwrap().to_string();
+    let member = session_with_permission(&mut f, "dashboard:read").await;
+    let missing = Uuid::new_v4();
+
+    let probe = |kind: &str, id: String| {
+        let body = if kind == "grants" {
+            grant_body(f.catalog_id, "analyst")
+        } else {
+            rule_body.clone()
+        };
+        vec![
+            ("PATCH", format!("/perm/{kind}/{id}"), Some(body)),
+            ("DELETE", format!("/perm/{kind}/{id}"), None),
+        ]
+    };
+    let mut cases = probe("grants", grant_id.clone());
+    cases.extend(probe("rules", rule_id.clone()));
+    cases.push(("GET", format!("/perm/rules/{rule_id}/effect"), None));
+    for (method, uri, body) in cases {
+        let random = uri
+            .replace(&grant_id, &missing.to_string())
+            .replace(&rule_id, &missing.to_string());
+        let real = into_json(
+            f.app()
+                .oneshot(req(method, &uri, &member, body.clone()))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let fake = into_json(
+            f.app()
+                .oneshot(req(method, &random, &member, body))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(real, fake, "{method} {uri} vs {random}");
+    }
+}
