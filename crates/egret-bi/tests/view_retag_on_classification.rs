@@ -6,6 +6,20 @@
 //! write it); the base write goes through `CatalogTagRepo` and
 //! `ClassificationPolicyRepo`, the paths an admin uses.
 //!
+//! # Why the tests inside it serialize
+//!
+//! A clearance write is installation-wide: `set_policy` reads every
+//! compiler-targeted profile, locks them, takes the compile-mint lock, and
+//! reads the set again at its recompile. Every fixture here creates profiles
+//! and binds engines to them, so one created in between by a concurrent test
+//! is refused as `profile_set_changed` (#792): a retryable 409 that is correct
+//! behaviour, and a race in the harness (seen on main CI at aa3d946c, where
+//! `a_tag_gaining_or_losing_its_clearance_retags_the_views`' `set_policy` met
+//! the four services of `one_classification_moves_each_affected_service_by_exactly_one`).
+//! So every fixture
+//! holds [`SERIAL`] for its test's whole run, as `clearance_events.rs` and
+//! `catalog_tag_overlap.rs` do.
+//!
 //! DB-gated; self-skips only under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS:
 //!   DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test \
 //!     cargo test -p egret-bi --test view_retag_on_classification
@@ -17,6 +31,9 @@ use egret_bi::ClassificationPolicyRepo;
 use egret_metastore::Db;
 use egret_perm_compile::lineage::{self, ViewRef};
 use uuid::Uuid;
+
+/// One test at a time: see the module doc comment.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn unique(prefix: &str) -> String {
     format!("{prefix}_{}", &Uuid::new_v4().simple().to_string()[..12])
@@ -36,6 +53,8 @@ struct Fx {
     /// A clearance-bearing tag.
     pii: Uuid,
     repo: CatalogTagRepo,
+    /// Held until the test ends: see the module doc comment.
+    _serial: tokio::sync::MutexGuard<'static, ()>,
 }
 
 async fn warehouse(pool: &sqlx::PgPool) -> Uuid {
@@ -112,6 +131,7 @@ async fn new_tag(pool: &sqlx::PgPool, gated: bool) -> Uuid {
 }
 
 async fn setup() -> Option<Fx> {
+    let serial = SERIAL.lock().await;
     let url = egret_test_db::url().await?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
@@ -163,6 +183,7 @@ async fn setup() -> Option<Fx> {
         c1,
         c2,
         pii,
+        _serial: serial,
     })
 }
 
