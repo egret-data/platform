@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { ControlPlaneEffectiveRoleDto } from './controlPlaneEffectiveRoleDto';
 
 export interface ControlPlaneUserDto {
   id: string;
@@ -12,7 +13,17 @@ export interface ControlPlaneUserDto {
   name: string;
   provider: string;
   status: string;
+  /**
+     * Platform roles granted to the user directly — the ones the Roles
+     * editor can unassign.
+     */
   roles: string[];
+  /**
+     * Every platform role the user holds, directly or through a group, each
+     * with where it comes from (KI-260): what decides their access, and what
+     * the last-admin guard counts.
+     */
+  effectiveRoles: ControlPlaneEffectiveRoleDto[];
   groups: string[];
   /**
      * The engine username, `null` until one is minted. Read-only: a delete

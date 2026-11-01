@@ -166,12 +166,7 @@ async fn owned(
     if q.workspace_id != ctx.workspace_id.0 {
         return Err(Error::NotFound("query".into()).into());
     }
-    let is_admin = ctx
-        .principal
-        .platform_roles
-        .iter()
-        .any(|r| r == "platform_admin");
-    if !is_admin && q.user_id != Some(ctx.principal.user_id.0) {
+    if !ctx.is_platform_admin() && q.user_id != Some(ctx.principal.user_id.0) {
         return Err(Error::Forbidden.into());
     }
     Ok(q)

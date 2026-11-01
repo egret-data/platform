@@ -28,9 +28,9 @@ const NON_ADMIN_ME: Me = {
 };
 
 const USERS: api.AccessUser[] = [
-  { id: "u1", email: "alice@example.com", name: "Alice", provider: "local", status: "active", roles: ["Admin"], groups: [] },
-  { id: "u2", email: "bob@example.com", name: "Bob", provider: "local", status: "disabled", roles: [], groups: [] },
-  { id: "u3", email: "carol@example.com", name: "Carol", provider: "local", status: "active", roles: ["Admin"], groups: [] },
+  { id: "u1", email: "alice@example.com", name: "Alice", provider: "local", status: "active", roles: ["Admin"], effectiveRoles: [{ name: "Admin", group: null }], groups: [] },
+  { id: "u2", email: "bob@example.com", name: "Bob", provider: "local", status: "disabled", roles: [], effectiveRoles: [], groups: [] },
+  { id: "u3", email: "carol@example.com", name: "Carol", provider: "local", status: "active", roles: ["Admin"], effectiveRoles: [{ name: "Admin", group: null }], groups: [] },
 ];
 
 const GROUPS: api.AccessGroup[] = [
@@ -117,7 +117,7 @@ describe("AccessOverview", () => {
 
     // Platform admins: Alice + Carol have "Admin" role -> 2.
     // "Admin" here isn't literally "platform_admin" in role name, but the
-    // count is derived from users whose `roles` include "platform_admin".
+    // count is derived from users whose `effectiveRoles` include "platform_admin".
   });
 
   // DG #4a spec §3: the data-plane layer opens Engine & policy, not the retired Policies page.
@@ -128,9 +128,9 @@ describe("AccessOverview", () => {
 
   test("counts platform admins from users whose roles include platform_admin", async () => {
     vi.mocked(api.listUsers).mockResolvedValue([
-      { id: "u1", email: "a@x.com", name: "A", provider: "local", status: "active", roles: ["platform_admin"], groups: [] },
-      { id: "u2", email: "b@x.com", name: "B", provider: "local", status: "active", roles: ["platform_admin"], groups: [] },
-      { id: "u3", email: "c@x.com", name: "C", provider: "local", status: "active", roles: [], groups: [] },
+      { id: "u1", email: "a@x.com", name: "A", provider: "local", status: "active", roles: ["platform_admin"], effectiveRoles: [{ name: "platform_admin", group: null }], groups: [] },
+      { id: "u2", email: "b@x.com", name: "B", provider: "local", status: "active", roles: ["platform_admin"], effectiveRoles: [{ name: "platform_admin", group: null }], groups: [] },
+      { id: "u3", email: "c@x.com", name: "C", provider: "local", status: "active", roles: [], effectiveRoles: [], groups: [] },
     ]);
 
     renderPage();
@@ -156,7 +156,7 @@ describe("AccessOverview", () => {
       { id: "r1", scope: "platform", name: "Admin", description: "", permissionCount: 10, assigneeCount: 2, inheritedPermissions: [] },
     ]);
     vi.mocked(api.listUsers).mockResolvedValue([
-      { id: "u1", email: "a@x.com", name: "A", provider: "local", status: "active", roles: [], groups: [] },
+      { id: "u1", email: "a@x.com", name: "A", provider: "local", status: "active", roles: [], effectiveRoles: [], groups: [] },
     ]);
 
     renderPage();
