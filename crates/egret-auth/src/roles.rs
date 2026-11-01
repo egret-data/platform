@@ -145,19 +145,22 @@ impl RoleRepo {
 
     /// The platform roles each of `user_ids` holds, as `(user id, role name,
     /// group name)` rows: `None` for a direct grant, `Some(group)` for one held
-    /// through that group. Unexpired grants only, so the roles are the ones
+    /// through that group. Live `allow` grants only
+    /// ([`crate::live_allow_grant!`]), so the roles are the ones
     /// `SessionService` puts in `Principal::platform_roles`, with where each
     /// comes from (KI-260). Ordered by user, role, then direct before groups.
     pub async fn effective_platform_roles_of_users(
         &self,
         user_ids: &[Uuid],
     ) -> Result<Vec<(Uuid, String, Option<String>)>> {
-        sqlx::query_as(
+        sqlx::query_as(concat!(
             "SELECT ag.principal_id AS user_id, r.name, NULL::text AS group_name \
                FROM access_grants ag JOIN roles r ON r.id = ag.role_id \
               WHERE ag.principal_type = 'user' AND ag.principal_id = ANY($1) \
                 AND ag.scope_type = 'platform' \
-                AND (ag.expires_at IS NULL OR ag.expires_at > now()) \
+                AND ",
+            crate::live_allow_grant!("ag"),
+            " \
              UNION \
              SELECT ug.user_id, r.name, g.name AS group_name \
                FROM user_groups ug \
@@ -165,9 +168,11 @@ impl RoleRepo {
                JOIN access_grants ag ON ag.principal_type = 'group' AND ag.principal_id = g.id \
                JOIN roles r ON r.id = ag.role_id \
               WHERE ug.user_id = ANY($1) AND ag.scope_type = 'platform' \
-                AND (ag.expires_at IS NULL OR ag.expires_at > now()) \
+                AND ",
+            crate::live_allow_grant!("ag"),
+            " \
              ORDER BY 1, 2, 3 NULLS FIRST",
-        )
+        ))
         .bind(user_ids)
         .fetch_all(&self.db.pool)
         .await
@@ -190,8 +195,9 @@ impl RoleRepo {
     /// User ids that hold the `platform_admin` role at platform scope — both
     /// DIRECT user grants AND users who hold it via a GROUP grant (group-granted
     /// admins ARE expanded through `user_groups`; see the query below), whatever
-    /// their status. The last-admin guards count ACTIVE admins instead
-    /// ([`engine_admin_user_ids_via`]).
+    /// their status. Only a live `allow` grant counts
+    /// ([`crate::live_allow_grant!`]). The last-admin guards count ACTIVE
+    /// admins instead ([`engine_admin_user_ids_via`]).
     pub async fn platform_admin_user_ids(&self) -> Result<Vec<UserId>> {
         // Both DIRECT user grants AND users who hold platform_admin via a GROUP
         // (OIDC groups sync into `user_groups`). The group arm expands each
@@ -199,20 +205,25 @@ impl RoleRepo {
         // expansion in `SessionService` (see session.rs). This is what lets a
         // group-granted platform admin (e.g. an OIDC `platform-admins` group) be
         // auto-seeded a Ranger policy on engine provision.
-        let rows = sqlx::query_scalar::<_, Uuid>(
+        let rows = sqlx::query_scalar::<_, Uuid>(concat!(
             "SELECT DISTINCT pra.principal_id FROM access_grants pra \
                JOIN roles r ON r.id = pra.role_id \
               WHERE r.name = 'platform_admin' \
                 AND pra.scope_type = 'platform' \
                 AND pra.principal_type = 'user' \
+                AND ",
+            crate::live_allow_grant!("pra"),
+            " \
              UNION \
              SELECT DISTINCT ug.user_id FROM access_grants pra \
                JOIN roles r ON r.id = pra.role_id \
                JOIN user_groups ug ON ug.group_id = pra.principal_id \
               WHERE r.name = 'platform_admin' \
                 AND pra.scope_type = 'platform' \
-                AND pra.principal_type = 'group'",
-        )
+                AND pra.principal_type = 'group' \
+                AND ",
+            crate::live_allow_grant!("pra"),
+        ))
         .fetch_all(&self.db.pool)
         .await
         .map_err(db_err)?;
@@ -508,9 +519,8 @@ pub(crate) fn db_err(e: sqlx::Error) -> egret_core::Error {
 /// nothing in egret; leaving them in would keep an already-minted engine JWT
 /// (or an alert running as them) at ALL access.
 ///
-/// **Only a live `allow` grant counts** (KI-322), the rule the session, the
-/// PDP and the console's access resolver apply (`expires_at` NULL or in the
-/// future; `effect = 'allow'`). A lapsed grant leaves the set at the next
+/// **Only a live `allow` grant counts** (KI-322; [`crate::live_allow_grant!`]),
+/// the rule the session, the PDP and the console's access resolver apply. A lapsed grant leaves the set at the next
 /// recompile of an admin-policy profile, which the hourly expiry sweep
 /// (`egret_perm_compile::expiry`) runs for a lapsed `platform_admin` row. The
 /// last-admin guard counts this same set, so it no longer counts a lapsed or
@@ -520,22 +530,24 @@ pub async fn engine_admin_user_ids_via(conn: &mut sqlx::PgConnection) -> Result<
 }
 
 async fn engine_admin_ids_query(conn: &mut sqlx::PgConnection) -> Result<Vec<UserId>> {
-    let rows = sqlx::query_scalar::<_, Uuid>(
+    let rows = sqlx::query_scalar::<_, Uuid>(concat!(
         "SELECT u.id FROM users u \
           WHERE u.status = 'active' \
             AND (EXISTS (SELECT 1 FROM access_grants g JOIN roles r ON r.id = g.role_id \
                           WHERE r.name = 'platform_admin' AND g.scope_type = 'platform' \
-                            AND g.effect = 'allow' \
-                            AND (g.expires_at IS NULL OR g.expires_at > now()) \
+                            AND ",
+        crate::live_allow_grant!("g"),
+        " \
                             AND g.principal_type = 'user' AND g.principal_id = u.id) \
               OR EXISTS (SELECT 1 FROM access_grants g JOIN roles r ON r.id = g.role_id \
                            JOIN user_groups ug ON ug.group_id = g.principal_id \
                           WHERE r.name = 'platform_admin' AND g.scope_type = 'platform' \
-                            AND g.effect = 'allow' \
-                            AND (g.expires_at IS NULL OR g.expires_at > now()) \
+                            AND ",
+        crate::live_allow_grant!("g"),
+        " \
                             AND g.principal_type = 'group' AND ug.user_id = u.id)) \
           ORDER BY u.id",
-    )
+    ))
     .fetch_all(&mut *conn)
     .await
     .map_err(db_err)?;

@@ -22,6 +22,41 @@ pub mod session;
 pub mod token;
 pub mod users;
 
+/// The one rule for "this `access_grants` row confers its role": an `allow`
+/// grant that has not expired. Expands to a parenthesised SQL predicate on the
+/// row aliased `$alias`, as a string literal, so a caller `concat!`s it into a
+/// `&'static str` query (what sqlx 0.9's `SqlSafeStr` takes):
+///
+/// ```
+/// const SQL: &str = concat!(
+///     "SELECT 1 FROM access_grants ag WHERE ",
+///     egret_auth::live_allow_grant!("ag"),
+/// );
+/// assert!(SQL.contains("ag.effect = 'allow'"));
+/// ```
+///
+/// Every read that answers "does this principal hold role X" (the session's
+/// roles, admin sets, last-admin guards, workspace membership) uses it. A
+/// `deny` grant takes the role's actions away in the PDP (it links the role's
+/// `forbid` template); it never confers the role, and it does not subtract an
+/// `allow` grant of the same role from a role list either (#810). Reads that
+/// need deny rows too (the PDP's `grants_for`, the access resolver) apply
+/// expiry alone and look at `effect` themselves.
+#[macro_export]
+macro_rules! live_allow_grant {
+    ($alias:literal) => {
+        concat!(
+            "(",
+            $alias,
+            ".effect = 'allow' AND (",
+            $alias,
+            ".expires_at IS NULL OR ",
+            $alias,
+            ".expires_at > now()))"
+        )
+    };
+}
+
 /// A `LIKE`/`ILIKE` pattern matching `needle` anywhere, with `%`, `_` and `\`
 /// in it taken literally. Use with `ESCAPE '\'` and bind it as a parameter.
 pub(crate) fn contains_pattern(needle: &str) -> String {

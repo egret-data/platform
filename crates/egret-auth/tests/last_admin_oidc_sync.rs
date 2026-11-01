@@ -90,11 +90,7 @@ async fn the_oidc_sync_keeps_the_last_admins_group_membership() {
         .await
         .unwrap();
     groups
-        .sync_user_oidc_groups(
-            admin,
-            &[admins.clone(), other.clone(), denied, lapsed],
-            &rc,
-        )
+        .sync_user_oidc_groups(admin, &[admins.clone(), other.clone(), denied, lapsed], &rc)
         .await
         .unwrap();
 

@@ -299,13 +299,14 @@ async fn platform_admin_user_ids_lists_only_live_allow_grants() {
     platform_grant(&db, "group", g2, "platform_admin", "deny", None).await;
 
     // Act
-    let ids: Vec<Uuid> = egret_auth::roles::RoleRepo::new(db.clone(), egret_events::EventBus::new())
-        .platform_admin_user_ids()
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|u| u.0)
-        .collect();
+    let ids: Vec<Uuid> =
+        egret_auth::roles::RoleRepo::new(db.clone(), egret_events::EventBus::new())
+            .platform_admin_user_ids()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|u| u.0)
+            .collect();
 
     // Assert
     assert!(ids.contains(&live), "a live allow grant is an admin");
@@ -317,4 +318,32 @@ async fn platform_admin_user_ids_lists_only_live_allow_grants() {
     ] {
         assert!(!ids.contains(&user), "{who} is no platform admin");
     }
+}
+
+/// P5b sweep: the console's per-user platform roles
+/// (`RoleRepo::effective_platform_roles_of_users`, KI-260) are the session's
+/// roles, so a `deny` grant, direct or through a group, lists no role there
+/// either; an `allow` grant does (the control).
+#[tokio::test]
+async fn the_consoles_effective_platform_roles_skip_deny_grants() {
+    let Some(db) = connect().await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    // Arrange
+    let user = active_user(&db).await;
+    platform_grant(&db, "user", user, "platform_admin", "deny", None).await;
+    let g = group_with(&db, user).await;
+    platform_grant(&db, "group", g, "platform_admin", "deny", None).await;
+    platform_grant(&db, "user", user, "data_steward", "allow", None).await;
+
+    // Act
+    let rows = egret_auth::roles::RoleRepo::new(db.clone(), egret_events::EventBus::new())
+        .effective_platform_roles_of_users(&[user])
+        .await
+        .unwrap();
+
+    // Assert
+    let names: Vec<&str> = rows.iter().map(|(_, n, _)| n.as_str()).collect();
+    assert_eq!(names, vec!["data_steward"], "only the allow grant: {rows:?}");
 }

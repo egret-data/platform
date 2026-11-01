@@ -126,13 +126,15 @@ pub fn build_entities(subject: &Subject, resource: &Resource, object_tags: &[Str
     Entities::from_entities(es, None).expect("entities build")
 }
 
-/// Whether `grants` make the subject a platform admin: a platform-scoped grant
-/// of the `platform_admin` role. This is the request context's
+/// Whether `grants` make the subject a platform admin: a platform-scoped
+/// `allow` grant of the `platform_admin` role. This is the request context's
 /// `is_platform_admin` flag, which exempts the subject from the admin-graph and
-/// classification `forbid`s.
+/// classification `forbid`s, so a `deny` grant must never set it (P5b). The
+/// grants come from `grants_for`, which already drops a lapsed one.
 pub fn holds_platform_admin(grants: &[Grant], role_names: &RoleNames) -> bool {
     grants.iter().any(|g| {
         g.scope_type == "platform"
+            && g.effect == "allow"
             && role_names.get(&g.role_id).map(String::as_str) == Some("platform_admin")
     })
 }
@@ -219,7 +221,10 @@ mod tests {
             "a deny grant must not exempt the subject from the admin forbids"
         );
         assert!(holds_platform_admin(&[grant("allow")], &names));
-        assert!(holds_platform_admin(&[grant("deny"), grant("allow")], &names));
+        assert!(holds_platform_admin(
+            &[grant("deny"), grant("allow")],
+            &names
+        ));
     }
 
     #[test]

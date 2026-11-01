@@ -284,7 +284,7 @@ impl Pdp for CedarPdp {
         let ents = entities::build_entities(subject, resource, &object_tags);
         let (p, a, r) = entities::request_uids(subject, action, resource);
         // Feed the admin-graph `forbid` its exemption flag: true iff the subject
-        // holds a platform-scoped grant on the `platform_admin` role. Computed
+        // holds a platform-scoped ALLOW grant on the `platform_admin` role. Computed
         // from the grants already loaded above — no extra query.
         let is_admin = entities::holds_platform_admin(&grants, &inner.role_names);
         // The distinct role NAMES the subject holds (from the grants already

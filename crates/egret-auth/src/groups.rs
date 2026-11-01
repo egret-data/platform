@@ -219,7 +219,8 @@ pub struct GroupReference {
 /// The last-admin half of [`GroupRepo::sync_user_oidc_groups`] (KI-284): if
 /// the sync's write on `tx` left no active platform admin, re-add `user_id` to
 /// those of the `removed` groups that hold `platform_admin` at platform scope
-/// and warn. The sync cannot refuse (it runs at login and in a sweep), so it
+/// through a live `allow` grant ([`crate::live_allow_grant!`]; a `deny` or
+/// lapsed grant restores no admin, so its group is not kept) and warn. The sync cannot refuse (it runs at login and in a sweep), so it
 /// keeps the one membership that would end platform administration.
 ///
 /// Re-adding them restores the set: before the write some active admin
@@ -234,16 +235,19 @@ async fn keep_last_admin_memberships(
     if !guard.emptied_via(tx).await? {
         return Ok(());
     }
-    let kept: Vec<String> = sqlx::query_scalar(
+    let kept: Vec<String> = sqlx::query_scalar(concat!(
         "INSERT INTO user_groups (user_id, group_id) \
          SELECT $1, g.id FROM groups g \
           WHERE g.name = ANY($2) AND g.source = 'oidc' \
             AND EXISTS (SELECT 1 FROM access_grants ag JOIN roles r ON r.id = ag.role_id \
                          WHERE ag.principal_type = 'group' AND ag.principal_id = g.id \
-                           AND ag.scope_type = 'platform' AND r.name = $3) \
+                           AND ag.scope_type = 'platform' AND r.name = $3 \
+                           AND ",
+        crate::live_allow_grant!("ag"),
+        ") \
          ON CONFLICT DO NOTHING \
          RETURNING (SELECT name FROM groups WHERE id = group_id)",
-    )
+    ))
     .bind(user_id.0)
     .bind(removed)
     .bind(egret_core::context::PLATFORM_ADMIN_ROLE)
