@@ -18,6 +18,19 @@ export interface TagPolicyRow {
   resourceSummary: string;
   /** The tag value matched by `*`/`?` rather than literally. */
   throughPattern: boolean;
+  /**
+     * The engines apply this policy to the tag although its pattern does not
+     * match it (#803): Ranger's tag phase picks tag policies by the literal
+     * prefix of each value before its first `*`, `?` or `{` (every tag for
+     * `isExcludes`; the whole value for `isRecursive`), not by the pattern.
+     */
+  widenedByEngine: boolean;
+  /**
+     * With `widened_by_engine`: the engines apply the policy to every tag
+     * whose name starts with this prefix; `""` means every tag.
+     * @nullable
+     */
+  engineTagPrefix?: string | null;
   enabled: boolean;
   denyAllElse: boolean;
   unmodelled: string[];
