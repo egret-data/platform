@@ -317,7 +317,6 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         crate::effect::ExistingMask,
         crate::effect::EffectKind,
         crate::effect::NotEnforced,
-        crate::effect::TrinoColumnOnly,
         crate::effect::RuleEnforcement,
         ExplainRequest,
         ExplainSubject,
@@ -771,8 +770,9 @@ pub struct ExplainProfile {
     pub mask: Option<ExplainMask>,
     /// The rows the subject sees: present for a `read` explain whose target
     /// names a table (or a column of one), on every engine. Asked against the
-    /// table with a TABLE-level tag resolution, so a classification on a column
-    /// does not reach it (E14: on Trino it filters nothing).
+    /// table with a TABLE-level tag resolution, as Trino's tag row filter is
+    /// (E14); a classification on columns only filters through the resource
+    /// row filter the compile adds on the table (KI-287).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub row_filter: Option<ExplainRowFilter>,
     /// StarRocks only, for a column read: the gated classifications that reach
@@ -783,12 +783,6 @@ pub struct ExplainProfile {
     /// masks exist (live spike, spec §14).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clearance_masks_missing: Vec<ExplainClearanceMaskGap>,
-    /// For a read naming a table, Trino only (when the download has tag
-    /// policies): the classification row filters that filter nothing here
-    /// because their classification is on columns of the table only
-    /// ([`ExplainRowFilterGap`]).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub row_filter_not_applied: Vec<ExplainRowFilterGap>,
     /// The answer in words (spec §5.1, C1): for a `read`, the column (or
     /// table) line and then the rows line, which a refused read does not get;
     /// for a `write`, one access line. Built by `explain_effect` from the
@@ -913,18 +907,6 @@ pub enum ClearanceMaskGapReason {
     /// The table exists, and the profile has not been recompiled since the
     /// column appeared.
     NotCompiled,
-}
-
-/// A classification row-filter rule that filters nothing on a Trino profile
-/// for the target's table (spec §5.8, D3, E14): the classification is on a
-/// column of the table and not on the table, and a Trino tag row filter fires
-/// only for a table-level attachment.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
-pub struct ExplainRowFilterGap {
-    pub rule_id: Uuid,
-    pub rule_name: String,
-    /// `tags.name`.
-    pub tag_name: String,
 }
 
 /// How many exempting principals [`ExplainExemption::via`] names (D1).
@@ -2679,10 +2661,6 @@ pub(crate) async fn explain_users(
     // Asked of the catalog at most once, and only for a column a StarRocks
     // artifact serves no clearance mask on.
     let mut gap_reason: Option<ClearanceMaskGapReason> = None;
-    let trino_row_filter_gaps = match &table_scope {
-        Some(scope) => row_filters_not_applied(&mut *conn, scope).await?,
-        None => Vec::new(),
-    };
     let mut cache = ExplainCache::default();
     let mut per_user: Vec<Vec<ExplainProfile>> = users.iter().map(|_| Vec::new()).collect();
     for service_id in services_for_catalog_via(&mut *conn, target.catalog_id).await? {
@@ -2993,12 +2971,6 @@ pub(crate) async fn explain_users(
                 mask,
                 row_filter,
                 clearance_masks_missing: clearance_masks_missing.clone(),
-                row_filter_not_applied: match engine {
-                    EngineType::Trino if tag_policies_in_download > 0 => {
-                        trino_row_filter_gaps.clone()
-                    }
-                    _ => Vec::new(),
-                },
                 masked_read_skips_access,
                 other_columns_access,
                 effect_lines: Vec::new(),
@@ -3978,51 +3950,6 @@ async fn line_names(
         }
     }
     Ok((tied, tag_names))
-}
-
-/// The classification row-filter rules on a classification that is on a column
-/// of the target table and NOT on the table: they filter nothing on Trino,
-/// whose tag row filter fires only for a table-level attachment (D3, E14).
-const ROW_FILTER_GAPS_COLUMN_ONLY: &str = "SELECT r.id, r.name, t.name \
-       FROM perm.rules r \
-       JOIN tags t ON t.key = r.tag_key \
-      WHERE r.kind = 'row_filter' AND r.selector_kind = 'tag' \
-        AND EXISTS (SELECT 1 FROM catalog_tag_assignments a \
-                      JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id \
-                     WHERE c.id = $1 AND a.tag_id = t.id \
-                       AND lower(a.schema_name) = lower($2) \
-                       AND lower(a.table_name) = lower($3) \
-                       AND a.column_name <> '') \
-        AND NOT EXISTS (SELECT 1 FROM catalog_tag_assignments a \
-                          JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id \
-                         WHERE c.id = $1 AND a.tag_id = t.id \
-                           AND lower(a.schema_name) = lower($2) \
-                           AND lower(a.table_name) = lower($3) \
-                           AND a.column_name = '') \
-      ORDER BY r.name, r.id";
-
-/// The classification row-filter rules that filter nothing on Trino for
-/// `table`'s rows ([`ExplainRowFilterGap`], [`ROW_FILTER_GAPS_COLUMN_ONLY`]).
-/// Levels compare case-folded, as the tag resolution does.
-async fn row_filters_not_applied(
-    conn: &mut sqlx::PgConnection,
-    table: &Scope,
-) -> Result<Vec<ExplainRowFilterGap>, PermHttpError> {
-    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(ROW_FILTER_GAPS_COLUMN_ONLY)
-        .bind(table.catalog_id)
-        .bind(table.schema.as_deref())
-        .bind(table.table.as_deref())
-        .fetch_all(&mut *conn)
-        .await
-        .map_err(PermHttpError::db)?;
-    Ok(rows
-        .into_iter()
-        .map(|(rule_id, rule_name, tag_name)| ExplainRowFilterGap {
-            rule_id,
-            rule_name,
-            tag_name,
-        })
-        .collect())
 }
 
 /// The model reads explain repeats, memoised for ONE request (spec §5.9, C7).

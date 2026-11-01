@@ -91,7 +91,7 @@ impl CatalogTagRepo {
         table: &str,
         column: &str,
         assigned_by: Option<Uuid>,
-    ) -> Result<(), BiApiError> {
+    ) -> Result<Vec<AssignNotice>, BiApiError> {
         if let Some(why) = unresolvable_coordinate(schema, table, column) {
             return Err(crate::error::BiError::BadRequest(why).into());
         }
@@ -197,8 +197,11 @@ impl CatalogTagRepo {
                 };
                 crate::error::BiError::from_assignment_check(e, &format!("this tag to {at}"))
             })?;
+        let notices = clearance_mask_notices(&mut tx, tag_id, warehouse_id, schema, table, column)
+            .await
+            .map_err(crate::error::BiError::from)?;
         tx.commit().await.map_err(crate::error::BiError::from)?;
-        Ok(())
+        Ok(notices)
     }
 
     /// Detach `tag_id` from a catalog resource (idempotent — deletes 0 or 1 row).
@@ -319,6 +322,79 @@ impl CatalogTagRepo {
 /// engines would leave this write on the old name, or put back on the new one
 /// a classification just removed (rename review finding 2). A try-lock on
 /// this transaction, released at its end, so no hold can start meanwhile.
+/// Something an assignment that succeeded wants its author to know.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct AssignNotice {
+    /// Stable, for programs: `clearance_masks_pending_table`.
+    pub code: String,
+    /// The sentence a person reads.
+    pub message: String,
+}
+
+/// [`AssignNotice::code`] of KI-307's notice.
+pub const CLEARANCE_MASKS_PENDING_TABLE: &str = "clearance_masks_pending_table";
+
+/// KI-307 (owner decision: warn at attach). A WHOLE-TABLE attachment of a
+/// classification with a role-bearing clearance, served by a StarRocks profile,
+/// compiles StarRocks NULL masks from the table's columns
+/// (`egret_perm_compile::clearance`); a table the catalog does not have yet
+/// (unknown, a view, a staged create) has none, so only the deny is compiled
+/// until the table exists, and a view over it shows the values. Read on the
+/// write's own transaction, after the row is in.
+async fn clearance_mask_notices(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tag_id: Uuid,
+    warehouse_id: Uuid,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> Result<Vec<AssignNotice>, egret_perm::CompileError> {
+    if !column.is_empty() {
+        return Ok(Vec::new());
+    }
+    let gated: Option<String> = sqlx::query_scalar(
+        "SELECT t.name FROM tags t JOIN classification_policies cp ON cp.tag_id = t.id \
+          WHERE t.id = $1 AND cardinality(cp.required_roles) > 0",
+    )
+    .bind(tag_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(egret_perm::CompileError::from_db)?;
+    let Some(tag_name) = gated else {
+        return Ok(Vec::new());
+    };
+    let served = egret_perm_compile::affected_starrocks_profiles_for_tables(
+        tx,
+        warehouse_id,
+        &[(schema.to_string(), Some(table.to_string()))],
+    )
+    .await?;
+    if served.is_empty()
+        || egret_perm_compile::table_columns::current_columns_via(tx, warehouse_id, schema, table)
+            .await?
+            .is_some()
+    {
+        return Ok(Vec::new());
+    }
+    Ok(vec![AssignNotice {
+        code: CLEARANCE_MASKS_PENDING_TABLE.to_string(),
+        message: format!(
+            "Attached. egret found no table {schema}.{table} in the catalog, so StarRocks has no \
+             column masks for clearance {tag_name} on it yet: a direct read is refused, but a \
+             view over the table shows the values. The masks take effect once the table exists \
+             in the catalog."
+        ),
+    }])
+}
+
+/// The answer of `PUT …/resource-tags`: `ok`, and what the author should know
+/// about an assignment that succeeded ([`AssignNotice`]; empty when nothing).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AssignResourceTagResponse {
+    pub ok: bool,
+    pub notices: Vec<AssignNotice>,
+}
+
 async fn refuse_while_held(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     warehouse_id: Uuid,
@@ -564,7 +640,7 @@ async fn require_warehouse_and_tag(
     params(("warehouse_id" = Uuid, Path, description = "Warehouse id")),
     request_body = ResourceTagBody,
     responses(
-        (status = 200, description = "Tag assigned to the catalog resource (idempotent)", body = egret_core::Ack),
+        (status = 200, description = "Tag assigned to the catalog resource (idempotent). `notices` lists what the author should know about an assignment that succeeded: `clearance_masks_pending_table` when a whole-table classification with a clearance is attached to a table a StarRocks engine serves but the catalog does not have yet (unknown, a view, a staged create): the select deny is compiled, the column NULL masks only once the table exists, so a view over it shows the values until then", body = AssignResourceTagResponse),
         (status = 400, description = "The coordinate cannot be stored (an empty schema or table, or `*`/`?` in any level — see migration 0177), or the tag is being attached to a whole TABLE while a tag-addressed mask names it, which would make that table unreadable rather than masked (code `table_tag_mask_conflict`, with `tag`, `tagId`, `schema`, `table`, `mask`, `maskOrigin`; `warehouseId` is null)", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing catalog_registry:update permission", body = egret_core::http::ErrorBody),
@@ -578,11 +654,11 @@ async fn assign_resource_tag(
     Auth(p): Auth,
     Path(warehouse_id): Path<Uuid>,
     Json(b): Json<ResourceTagBody>,
-) -> Result<Json<serde_json::Value>, BiApiError> {
+) -> Result<Json<AssignResourceTagResponse>, BiApiError> {
     egret_core::authz::require(&*st.pdp, &p, WAREHOUSE_WRITE).await?;
     require_warehouse_and_tag(&st.db, warehouse_id, b.tag_id).await?;
     let column = b.column.as_deref().unwrap_or("");
-    CatalogTagRepo::new(st.db.clone())
+    let notices = CatalogTagRepo::new(st.db.clone())
         .assign_catalog(
             b.tag_id,
             warehouse_id,
@@ -603,7 +679,7 @@ async fn assign_resource_tag(
         )),
         serde_json::json!({ "tag_id": b.tag_id }),
     ));
-    Ok(Json(serde_json::json!({ "ok": true })))
+    Ok(Json(AssignResourceTagResponse { ok: true, notices }))
 }
 
 #[utoipa::path(
@@ -652,7 +728,12 @@ async fn unassign_resource_tag(
 #[derive(utoipa::OpenApi)]
 #[openapi(
     paths(list_resource_tags, assign_resource_tag, unassign_resource_tag),
-    components(schemas(ResourceTagDto, ResourceTagBody))
+    components(schemas(
+        ResourceTagDto,
+        ResourceTagBody,
+        AssignResourceTagResponse,
+        AssignNotice
+    ))
 )]
 pub struct CatalogTagsApi;
 

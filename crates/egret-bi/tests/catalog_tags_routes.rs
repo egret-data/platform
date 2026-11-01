@@ -17,6 +17,9 @@ use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+#[path = "../../egret-perm-compile/tests/support/lakekeeper_stub.rs"]
+mod lakekeeper_stub;
+
 struct NoMinter;
 #[async_trait::async_trait]
 impl egret_analytics_api::engine_token::EngineTokenMinter for NoMinter {
@@ -727,4 +730,153 @@ async fn an_assignment_over_the_starrocks_clearance_ceiling_is_a_coded_409() {
     .await
     .expect("count");
     assert_eq!(stored, 0, "a refused assignment is not stored");
+}
+
+/// KI-307 (owner decision: warn at attach). A whole-table attachment of a
+/// classification with a role-bearing clearance, on a table a StarRocks profile
+/// serves but the catalog does not have yet, compiles the deny and no NULL
+/// masks: the attach succeeds and its answer carries a notice saying the masks
+/// take effect once the table exists. A table the catalog has, and a column
+/// attachment, answer no notice.
+#[tokio::test]
+async fn a_clearance_on_a_table_not_in_the_catalog_answers_a_notice() {
+    let Some(url) = egret_test_db::url().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let admin = seed_user(&db, true).await;
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    let st = build_state(db.clone(), pdp);
+    let token = session_for(&st.sessions.clone(), admin).await;
+    let app = egret_bi::resource_tags_router().with_state(st);
+    let wh = egret_test_db::seed_warehouse(&db.pool).await;
+    let lk = lakekeeper_stub::link_warehouse(&db, wh).await;
+    lakekeeper_stub::add_table(&db, lk, &["sales"], "orders", &["id", "email"]).await;
+
+    // A StarRocks profile with an engine attached to a catalog over `wh`.
+    let policy = egret_policy::PolicyStore::new(db.clone());
+    egret_policy::seed_starrocks(&policy)
+        .await
+        .expect("seed starrocks");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let svc = policy
+        .create_service(
+            &format!("k307-sr-{suffix}"),
+            "starrocks",
+            &serde_json::json!({}),
+        )
+        .await
+        .expect("profile");
+    let engine: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'starrocks','egret', \
+                 '{\"starrocksConfig\":{\"feImage\":\"starrocks/fe-ubuntu:4.1.4\"}}'::jsonb,$2) \
+         RETURNING id",
+    )
+    .bind(format!("k307-eng-{suffix}"))
+    .bind(svc.id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("engine");
+    let catalog: Uuid = sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) \
+         RETURNING id",
+    )
+    .bind(format!("k307_cat_{suffix}"))
+    .bind(wh)
+    .fetch_one(&db.pool)
+    .await
+    .expect("catalog");
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1,$2)",
+    )
+    .bind(engine)
+    .bind(catalog)
+    .execute(&db.pool)
+    .await
+    .expect("attach");
+
+    let tag = TagRepo::new(db.clone())
+        .create(
+            &format!("k307-k-{suffix}"),
+            &format!("K307-N-{suffix}"),
+            "",
+            "",
+            Some(admin),
+        )
+        .await
+        .expect("create tag");
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, ARRAY['k307-role'], '{}')",
+    )
+    .bind(tag.id)
+    .execute(&db.pool)
+    .await
+    .expect("gate");
+
+    let put = |table: &str, column: &str| {
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/control-plane/warehouses/{wh}/resource-tags"))
+            .header("Cookie", format!("egret_session={token}"))
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "schema": "sales", "table": table, "column": column, "tag_id": tag.id
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+    let answer = |resp: axum::response::Response| async move {
+        let status = resp.status();
+        let body = body_string(resp).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        serde_json::from_str::<serde_json::Value>(&body).expect("json body")
+    };
+
+    // Not in the catalog: the attach succeeds, with the notice.
+    let json = answer(app.clone().oneshot(put("ghost", "")).await.unwrap()).await;
+    assert_eq!(json["ok"], true, "{json}");
+    let notices = json["notices"].as_array().expect("notices");
+    assert_eq!(notices.len(), 1, "{json}");
+    assert_eq!(
+        notices[0]["code"], "clearance_masks_pending_table",
+        "{json}"
+    );
+    assert_eq!(
+        notices[0]["message"],
+        format!(
+            "Attached. egret found no table sales.ghost in the catalog, so StarRocks has no \
+             column masks for clearance {} on it yet: a direct read is refused, but a view \
+             over the table shows the values. The masks take effect once the table exists \
+             in the catalog.",
+            tag.name
+        ),
+        "{json}"
+    );
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM catalog_tag_assignments WHERE tag_id = $1 AND table_name = 'ghost'",
+    )
+    .bind(tag.id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("count");
+    assert_eq!(stored, 1, "the attachment is stored");
+
+    // In the catalog: no notice.
+    let json = answer(app.clone().oneshot(put("orders", "")).await.unwrap()).await;
+    assert_eq!(json["notices"], serde_json::json!([]), "{json}");
+    // A column attachment: no notice (its mask is compiled by column).
+    let json = answer(app.clone().oneshot(put("ghost2", "email")).await.unwrap()).await;
+    assert_eq!(json["notices"], serde_json::json!([]), "{json}");
 }

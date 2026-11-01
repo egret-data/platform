@@ -1512,3 +1512,103 @@ fn a_row_filter_ceiling_counts_tables() {
         "a mask still counts its 600 columns"
     );
 }
+
+/// KI-287 (owner decision: compile it table-level): on Trino a tag row filter
+/// is the tag policy, which filters a table carrying the classification on the
+/// table, PLUS one resource row filter per table carrying it on columns only,
+/// which the tag policy does not reach. A table carrying it at both levels is
+/// the tag policy's alone, so no table is filtered twice by one rule.
+#[test]
+fn a_trino_tag_row_filter_also_filters_the_tables_tagged_on_columns_only() {
+    let r = rowfilter_rule_on_tag("region", "country = 'US'");
+    let mut both = whole_table("wh", "sales", "customers");
+    both.columns.push("id".to_string());
+    let mut tagged = targets(&[
+        col("wh", "sales", "orders", "email"),
+        col("wh", "sales", "orders", "phone"),
+    ]);
+    tagged.push(whole_table("wh", "sales", "regions"));
+    tagged.push(both);
+    let out = compile_rule(
+        &r,
+        EngineType::Trino,
+        "trino-1",
+        Some("trino-1_tag"),
+        &resolved("wh", Some("region-tag")),
+        &tagged,
+        100,
+    )
+    .unwrap();
+    assert_eq!(out.len(), 2, "{out:?}");
+    assert_eq!(out[0]["service"], "trino-1_tag");
+    assert_eq!(out[0]["resources"]["tag"]["values"][0], "region-tag");
+    let table = &out[1];
+    assert_eq!(table["service"], "trino-1");
+    assert_eq!(table["policyType"], 2);
+    assert_eq!(
+        table["name"],
+        format!(
+            "{}{}-wh.sales.orders",
+            egret_policy::COMPILER_RULE_PREFIX,
+            Uuid::nil()
+        )
+    );
+    assert_eq!(
+        resource_keys(table),
+        vec![
+            "catalog".to_string(),
+            "schema".to_string(),
+            "table".to_string()
+        ]
+    );
+    assert_eq!(table["resources"]["catalog"]["values"][0], "wh");
+    assert_eq!(table["resources"]["schema"]["values"][0], "sales");
+    assert_eq!(table["resources"]["table"]["values"][0], "orders");
+    let last = table["rowFilterPolicyItems"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(last["rowFilterInfo"]["filterExpr"], "country = 'US'");
+    assert_eq!(last["groups"][0], "public");
+
+    // A Trino mask stays one tag policy: Trino masks a tagged column itself.
+    let m = mask_rule_on_tag("region", "MASK_HASH");
+    let out = compile_rule(
+        &m,
+        EngineType::Trino,
+        "trino-1",
+        Some("trino-1_tag"),
+        &resolved("wh", Some("region-tag")),
+        &tagged,
+        100,
+    )
+    .unwrap();
+    assert_eq!(out.len(), 1, "{out:?}");
+}
+
+/// KI-287: the Trino ceiling counts the column-only tables it expands to.
+#[test]
+fn a_trino_tag_row_filter_ceiling_counts_column_only_tables() {
+    let r = rowfilter_rule_on_tag("region", "country = 'US'");
+    let many = targets(
+        &(0..501)
+            .map(|i| col("wh", "sales", &format!("t{i}"), "email"))
+            .collect::<Vec<_>>(),
+    );
+    let err = compile_rule(
+        &r,
+        EngineType::Trino,
+        "trino-1",
+        Some("trino-1_tag"),
+        &resolved("wh", Some("region-tag")),
+        &many,
+        500,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CompileError::ExpansionCeiling { count: 501, .. }),
+        "{err:?}"
+    );
+}

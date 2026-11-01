@@ -27,6 +27,7 @@ import type {
 import type {
   Ack,
   AddGrantBody,
+  AssignResourceTagResponse,
   CatalogRoleDto,
   ClientDto,
   ColumnDto,
@@ -3363,7 +3364,7 @@ export function useControlPlaneCatalogListResourceTags<TData = Awaited<ReturnTyp
 
 
 export type controlPlaneCatalogAssignResourceTagResponse200 = {
-  data: Ack
+  data: AssignResourceTagResponse
   status: 200
 }
 

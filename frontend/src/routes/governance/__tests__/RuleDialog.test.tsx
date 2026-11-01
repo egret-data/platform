@@ -1318,7 +1318,8 @@ describe("RuleDialog — live walkthrough fixes (Task 13)", () => {
  * where it is on columns only, warns with the count and asks for the tick.
  */
 describe("RuleDialog — a classification row filter that filters nothing on Trino (D3)", () => {
-  const HINT = "On Trino, a row filter by classification applies only where the classification is on the whole table.";
+  const HINT =
+    "A row filter by classification filters every table that carries the classification, on the whole table or on any of its columns, on Trino and on StarRocks.";
 
   async function filterRows(user: ReturnType<typeof userEvent.setup>) {
     await user.click(screen.getByRole("combobox", { name: "Kind" }));
@@ -1357,51 +1358,28 @@ describe("RuleDialog — a classification row filter that filters nothing on Tri
     expect(screen.queryByText(HINT)).not.toBeInTheDocument();
   });
 
-  test("a preview counting column-only tables warns with the count and the catalogs, and Create waits for the tick", async () => {
+  // KI-287: Trino filters a table the classification is on at either level too.
+  test("a row filter preview never shows a Trino column-only warning, and Create needs no tick for it", async () => {
     const user = userEvent.setup();
+    // An older server may still send the removed count; it is not shown.
     const effect = { ...EFFECT, kind: "row_filter", columnCount: null, enforcedBy: 2, catalogs: [], trinoColumnOnly: { catalogs: ["lake", "wh"], tables: 3 } };
     previewMutateAsync.mockResolvedValue({ status: 200, data: { ...OK_PREVIEW_ONE.data, effect } });
     renderDialog({ entry: CLASSIFICATION_ENTRY });
     await filterRows(user);
     await user.click(screen.getByRole("button", { name: "Preview" }));
+    await screen.findByText(/Filters rows of/);
 
-    const warning = await screen.findByTestId("trino-column-only");
-    expect(warning).toHaveTextContent(
-      "On Trino this row filter filters nothing on 3 tables in lake and wh: PII Data is on their columns, not on the table. StarRocks filters them. Attach PII Data to the table to filter on Trino.",
-    );
-    const create = screen.getByRole("button", { name: "Create" });
-    expect(create).toHaveAttribute("aria-disabled", "true");
-    expect(create).toHaveAccessibleDescription(
-      expect.stringContaining("Tick 'Create anyway' to create a row filter that filters nothing on Trino on these tables."),
-    );
-    const tick = screen.getByRole("checkbox", { name: "Create anyway: I understand this row filter filters nothing on Trino on these tables" });
-    await user.click(tick);
-    expect(create).toHaveAttribute("aria-disabled", "false");
-
-    // A new preview asks again.
-    await user.click(screen.getByRole("button", { name: "Preview" }));
-    await waitFor(() => expect(previewMutateAsync).toHaveBeenCalledTimes(2));
-    expect(await screen.findByRole("checkbox", { name: /Create anyway/ })).not.toBeChecked();
-    expect(create).toHaveAttribute("aria-disabled", "true");
-  });
-
-  test("one table in one catalog is said in the singular", async () => {
-    const user = userEvent.setup();
-    const effect = { ...EFFECT, kind: "row_filter", columnCount: null, enforcedBy: 1, catalogs: [], trinoColumnOnly: { catalogs: ["wh"], tables: 1 } };
-    previewMutateAsync.mockResolvedValueOnce({ status: 200, data: { ...OK_PREVIEW_ONE.data, effect } });
-    renderDialog({ entry: CLASSIFICATION_ENTRY });
-    await filterRows(user);
-    await user.click(screen.getByRole("button", { name: "Preview" }));
-    expect(await screen.findByTestId("trino-column-only")).toHaveTextContent(
-      "On Trino this row filter filters nothing on 1 table in wh: PII Data is on its columns, not on the table.",
-    );
+    expect(screen.queryByTestId("trino-column-only")).not.toBeInTheDocument();
+    expect(screen.queryByText(/filters nothing on Trino/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /Create anyway/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create" })).toHaveAttribute("aria-disabled", "false");
   });
 
   // D2 (2026-10-25): StarRocks filters a table the classification is on at either level.
   test("a row filter preview never shows a StarRocks table-only warning, and Create needs no tick for it", async () => {
     const user = userEvent.setup();
     // An older server may still send the removed count; it is not shown.
-    const effect = { ...EFFECT, kind: "row_filter", columnCount: null, enforcedBy: 1, catalogs: [], trinoColumnOnly: null, starrocksTableOnly: { catalogs: ["wh"], tables: 2 } };
+    const effect = { ...EFFECT, kind: "row_filter", columnCount: null, enforcedBy: 1, catalogs: [], starrocksTableOnly: { catalogs: ["wh"], tables: 2 } };
     previewMutateAsync.mockResolvedValue({ status: 200, data: { ...OK_PREVIEW_ONE.data, effect } });
     renderDialog({ entry: CLASSIFICATION_ENTRY });
     await filterRows(user);
@@ -1411,19 +1389,6 @@ describe("RuleDialog — a classification row filter that filters nothing on Tri
     expect(screen.queryByTestId("starrocks-table-only")).not.toBeInTheDocument();
     expect(screen.queryByText(/filters nothing on StarRocks/)).not.toBeInTheDocument();
     expect(screen.queryByRole("checkbox", { name: /Create anyway/ })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Create" })).toHaveAttribute("aria-disabled", "false");
-  });
-
-  test("without the count there is no warning and no tick", async () => {
-    const user = userEvent.setup();
-    const effect = { ...EFFECT, kind: "row_filter", columnCount: null, enforcedBy: 1, catalogs: [], trinoColumnOnly: null };
-    previewMutateAsync.mockResolvedValueOnce({ status: 200, data: { ...OK_PREVIEW_ONE.data, effect } });
-    renderDialog({ entry: CLASSIFICATION_ENTRY });
-    await filterRows(user);
-    await user.click(screen.getByRole("button", { name: "Preview" }));
-    await screen.findByText(/Filters rows of/);
-    expect(screen.queryByTestId("trino-column-only")).not.toBeInTheDocument();
-    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Create" })).toHaveAttribute("aria-disabled", "false");
   });
 });

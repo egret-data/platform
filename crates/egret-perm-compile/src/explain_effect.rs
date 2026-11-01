@@ -24,7 +24,7 @@ use crate::explain_wire::{
 };
 use crate::routes::{
     ClearanceMaskGapReason, ExplainAccess, ExplainAttribution, ExplainExemption, ExplainProfile,
-    ExplainRowFilterGap, ExplainTagDecline, ExplainTargetLevel,
+    ExplainTagDecline, ExplainTargetLevel,
 };
 
 /// One sentence about one person on one engine.
@@ -893,7 +893,6 @@ impl Builder<'_> {
         let outcome = match &rf.decision {
             WireRowFilterDecision::NoFilter => {
                 self.every_row(&mut l);
-                self.append_row_filter_gaps(&mut l, &self.input.profile.row_filter_not_applied);
                 EffectOutcome::AllRows
             }
             WireRowFilterDecision::Filtered { result } => match (&rf.attribution, &rf.exemption) {
@@ -959,40 +958,6 @@ impl Builder<'_> {
         l.strong("rows where");
         l.text(" ");
         l.code(filter_expr);
-    }
-
-    /// D3: ": rule *X* does not filter on Trino here, because *PII* is on a
-    /// column, not on the table". Only Trino profiles carry these gaps.
-    fn append_row_filter_gaps(&self, l: &mut Line, gaps: &[ExplainRowFilterGap]) {
-        let (engine, here, there) = ("Trino", "a column", "the table");
-        match gaps {
-            [] => {}
-            [gap] => {
-                l.text(": rule ");
-                l.push(Self::rule_part(gap.rule_id, Some(&gap.rule_name)));
-                l.text(format!(
-                    " does not filter on {engine} here, because {} is on {here}, not on {there}",
-                    gap.tag_name
-                ));
-            }
-            several => {
-                l.text(": rules ");
-                for (i, gap) in several.iter().enumerate() {
-                    if i > 0 {
-                        l.text(if i + 1 == several.len() {
-                            " and "
-                        } else {
-                            ", "
-                        });
-                    }
-                    l.push(Self::rule_part(gap.rule_id, Some(&gap.rule_name)));
-                }
-                l.text(format!(
-                    " do not filter on {engine} here, because their classifications are on \
-                     {here}, not on {there}"
-                ));
-            }
-        }
     }
 
     /// A `write` is a summary of its access verdicts (spec §12).
@@ -1071,7 +1036,6 @@ mod tests {
             mask: None,
             row_filter: None,
             clearance_masks_missing: Vec::new(),
-            row_filter_not_applied: Vec::new(),
             masked_read_skips_access: false,
             other_columns_access: None,
             effect_lines: Vec::new(),
@@ -1385,10 +1349,6 @@ mod tests {
                 "u sees rows where region = 'us' (rule X)"),
             rows("filter exempt", with(t(), |p| p.row_filter = filter("", rule(RULE, "X"), Some(group_exemption()))),
                 "u sees every row (exempt from rule X via group data-team)"),
-            rows("D3 gap", with(t(), |p| {
-                p.row_filter = Some(ExplainRowFilter { access_type: "select".into(), decision: WireRowFilterDecision::NoFilter, attribution: None, exemption: None });
-                p.row_filter_not_applied = vec![ExplainRowFilterGap { rule_id: RULE, rule_name: "X".into(), tag_name: "PII".into() }];
-            }), "u sees every row: rule X does not filter on Trino here, because PII is on a column, not on the table"),
             rows("filter tie, agreeing", with(t(), |p| p.row_filter = Some(ExplainRowFilter { access_type: "select".into(), decision: WireRowFilterDecision::Undecidable { why: tie(vec![
                     WireTiedOutcome::RowFilter { filter_expr: "a = 1".into() }, WireTiedOutcome::RowFilter { filter_expr: "a = 1".into() }]) }, attribution: None, exemption: None })),
                 "u sees rows where a = 1 (2 rules agree: A, B)"),

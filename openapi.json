@@ -15674,11 +15674,11 @@
         },
         "responses": {
           "200": {
-            "description": "Tag assigned to the catalog resource (idempotent)",
+            "description": "Tag assigned to the catalog resource (idempotent). `notices` lists what the author should know about an assignment that succeeded: `clearance_masks_pending_table` when a whole-table classification with a clearance is attached to a table a StarRocks engine serves but the catalog does not have yet (unknown, a view, a staged create): the select deny is compiled, the column NULL masks only once the table exists, so a view over it shows the values until then",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Ack"
+                  "$ref": "#/components/schemas/AssignResourceTagResponse"
                 }
               }
             }
@@ -39358,6 +39358,43 @@
           }
         }
       },
+      "AssignNotice": {
+        "type": "object",
+        "description": "Refuse (409, code `table_change_held`) a write on `schema.table` while a\nhold holds the table's name: a rename of the table that is waiting for the\nengines would leave this write on the old name, or put back on the new one\na classification just removed (rename review finding 2). A try-lock on\nthis transaction, released at its end, so no hold can start meanwhile.\nSomething an assignment that succeeded wants its author to know.",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Stable, for programs: `clearance_masks_pending_table`."
+          },
+          "message": {
+            "type": "string",
+            "description": "The sentence a person reads."
+          }
+        }
+      },
+      "AssignResourceTagResponse": {
+        "type": "object",
+        "description": "The answer of `PUT …/resource-tags`: `ok`, and what the author should know\nabout an assignment that succeeded ([`AssignNotice`]; empty when nothing).",
+        "required": [
+          "ok",
+          "notices"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "notices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AssignNotice"
+            }
+          }
+        }
+      },
       "AssignRoleInput": {
         "type": "object",
         "required": [
@@ -46213,7 +46250,7 @@
               },
               {
                 "$ref": "#/components/schemas/ExplainRowFilter",
-                "description": "The rows the subject sees: present for a `read` explain whose target\nnames a table (or a column of one), on every engine. Asked against the\ntable with a TABLE-level tag resolution, so a classification on a column\ndoes not reach it (E14: on Trino it filters nothing)."
+                "description": "The rows the subject sees: present for a `read` explain whose target\nnames a table (or a column of one), on every engine. Asked against the\ntable with a TABLE-level tag resolution, as Trino's tag row filter is\n(E14); a classification on columns only filters through the resource\nrow filter the compile adds on the table (KI-287)."
               }
             ]
           },
@@ -46223,13 +46260,6 @@
               "$ref": "#/components/schemas/ExplainClearanceMaskGap"
             },
             "description": "StarRocks only, for a column read: the gated classifications that reach\nthe column (from the column or from its whole table) while the served\nartifact holds no clearance NULL mask for it\n([`ExplainClearanceMaskGap`]). The direct read is still refused by the\nclassification's deny; a view over the table shows the values until the\nmasks exist (live spike, spec §14)."
-          },
-          "row_filter_not_applied": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ExplainRowFilterGap"
-            },
-            "description": "For a read naming a table, Trino only (when the download has tag\npolicies): the classification row filters that filter nothing here\nbecause their classification is on columns of the table only\n([`ExplainRowFilterGap`])."
           },
           "effect_lines": {
             "type": "array",
@@ -46402,28 +46432,6 @@
                 "description": "Present when a rule's exempt item decided (an empty filter)."
               }
             ]
-          }
-        }
-      },
-      "ExplainRowFilterGap": {
-        "type": "object",
-        "description": "A classification row-filter rule that filters nothing on a Trino profile\nfor the target's table (spec §5.8, D3, E14): the classification is on a\ncolumn of the table and not on the table, and a Trino tag row filter fires\nonly for a table-level attachment.",
-        "required": [
-          "rule_id",
-          "rule_name",
-          "tag_name"
-        ],
-        "properties": {
-          "rule_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "rule_name": {
-            "type": "string"
-          },
-          "tag_name": {
-            "type": "string",
-            "description": "`tags.name`."
           }
         }
       },
@@ -53631,17 +53639,6 @@
           "truncated": {
             "type": "boolean",
             "description": "`alreadyMasked` may be incomplete: a cap cut the columns examined\n(50), the classifications read (1000) or the entries listed (20)."
-          },
-          "trinoColumnOnly": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/TrinoColumnOnly",
-                "description": "A classification ROW FILTER only: the tables it filters nothing on in\nTrino ([`TrinoColumnOnly`]); `null` for a mask, a path rule, or when\nthere is none."
-              }
-            ]
           }
         }
       },
@@ -56958,29 +56955,6 @@
           }
         ],
         "description": "A row of the workspace list: the flow, then the entry's fields.\n\nThe flow's uuid is `flow_uuid`, not `flow`: the entry is flattened in, and\nits own `flow` (a `Flow` trigger's info) would otherwise be a second key\nof the same name in one object."
-      },
-      "TrinoColumnOnly": {
-        "type": "object",
-        "description": "Where a classification row filter filters nothing on Trino (spec §5.8, D3,\nE14): tables where the classification is on at least one column and not on\nthe table, in catalogs a Trino engine enforces the rule on. A Trino tag row\nfilter fires only for a table-level attachment; StarRocks filters these.",
-        "required": [
-          "catalogs",
-          "tables"
-        ],
-        "properties": {
-          "catalogs": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "The catalogs those tables are in, by name, sorted."
-          },
-          "tables": {
-            "type": "integer",
-            "format": "int32",
-            "description": "Distinct tables.",
-            "minimum": 0
-          }
-        }
       },
       "TrinoConfigResponse": {
         "type": "object",

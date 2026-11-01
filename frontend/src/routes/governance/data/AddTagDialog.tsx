@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { ApiError } from "@/api/client";
 import { useControlPlaneCatalogAssignResourceTag } from "@/api/generated/control-plane-catalog/control-plane-catalog";
 import { useControlPlaneTagsListTags } from "@/api/generated/control-plane-tags/control-plane-tags";
-import type { RuleView } from "@/api/generated/model";
+import type { AssignNotice, RuleView } from "@/api/generated/model";
 import { usePermListRules } from "@/api/generated/perm/perm";
 import { invalidateTagAssignment, type Tag } from "@/api/tags";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -167,9 +167,11 @@ function AddTagForm({
   // What the server said, when it refused the pair.
   const serverConflict = tableTagMaskConflict(assign.error);
 
-  const succeed = (message: string) => {
+  /** A notice the server answered with (KI-307) replaces the plain success toast: it says the attach succeeded too. */
+  const succeed = (message: string, notices: AssignNotice[] = []) => {
     if (attachIntent() === picked?.id) clearAttachIntent();
-    toast.success(message);
+    if (notices.length === 0) toast.success(message);
+    for (const notice of notices) toast.warning(notice.message);
     onDone();
   };
 
@@ -181,9 +183,9 @@ function AddTagForm({
         data: { schema: target.schema, table: target.table, column: target.column ?? "", tag_id: picked.id },
       })
       .then(
-        () => {
+        (res) => {
           invalidateTagAssignment(queryClient, picked.id, target.warehouseId);
-          succeed("Classification attached.");
+          succeed("Classification attached.", res.status === 200 ? res.data.notices : []);
         },
         () => {
           // Shown beside the field from `assign.error`; the choice is kept.
