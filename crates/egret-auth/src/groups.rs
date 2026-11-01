@@ -381,6 +381,25 @@ pub enum ReferenceDetail {
     CountOnly,
 }
 
+/// Where a delete or rename gets its [`ReferenceDetail`] from, asked ONLY
+/// when it refuses because the model names the group (#788). Deciding it
+/// costs a PDP check of the requester's `policy:read`; a rename or delete
+/// that nothing names never uses the answer, so it must not pay for it — nor
+/// fail on a PDP error about a permission it does not need.
+///
+/// A [`ReferenceDetail`] is its own source, for callers that already know.
+#[async_trait::async_trait]
+pub trait ReferenceDetailSource: Send + Sync {
+    async fn reference_detail(&self) -> Result<ReferenceDetail>;
+}
+
+#[async_trait::async_trait]
+impl ReferenceDetailSource for ReferenceDetail {
+    async fn reference_detail(&self) -> Result<ReferenceDetail> {
+        Ok(*self)
+    }
+}
+
 /// How many entries a "still named" refusal lists before it counts the rest.
 const MAX_LISTED_REFERENCES: usize = 20;
 
@@ -914,7 +933,7 @@ impl GroupRepo {
         id: Uuid,
         name: &str,
         recompiler: &dyn GroupMembershipRecompiler,
-        detail: ReferenceDetail,
+        detail: impl ReferenceDetailSource,
     ) -> Result<u64> {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
         let mut held = HeldGroupLocks::default();
@@ -962,7 +981,7 @@ impl GroupRepo {
                 format!("cannot rename group `{old}` to `{name}`: these names are"),
                 &references,
                 true,
-                detail,
+                detail.reference_detail().await?,
             ));
         }
         let services = recompiler.lock_affected_in_tx(&mut tx, &names).await?;
@@ -1013,7 +1032,7 @@ impl GroupRepo {
         &self,
         id: Uuid,
         recompiler: &dyn GroupMembershipRecompiler,
-        detail: ReferenceDetail,
+        detail: impl ReferenceDetailSource,
     ) -> Result<u64> {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
         let mut held = HeldGroupLocks::default();
@@ -1044,7 +1063,7 @@ impl GroupRepo {
                 format!("group `{name}` is"),
                 &references,
                 false,
-                detail,
+                detail.reference_detail().await?,
             ));
         }
         // KI-284: the cascade removes every member, so a delete can take the
