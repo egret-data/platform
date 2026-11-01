@@ -10552,23 +10552,43 @@ async fn a_patch_racing_a_committed_patch_derives_its_old_set_from_the_fresh_row
     let ours = tokio::spawn(egret_perm_compile::write_seam::run_with(point, {
         let (uri, token) = (uri.clone(), token.clone());
         async move {
-            app.oneshot(req("PATCH", &uri, &token, Some(grant_body(catalog_c, "analyst"))))
-                .await
-                .unwrap()
+            app.oneshot(req(
+                "PATCH",
+                &uri,
+                &token,
+                Some(grant_body(catalog_c, "analyst")),
+            ))
+            .await
+            .unwrap()
         }
     }));
-    pause.reached.await.expect("our PATCH reached the pause point");
+    pause
+        .reached
+        .await
+        .expect("our PATCH reached the pause point");
 
     // Theirs: commits while ours waits.
     let (status, theirs) = into_json(
         f.app()
-            .oneshot(req("PATCH", &uri, &token, Some(grant_body(catalog_b, "analyst"))))
+            .oneshot(req(
+                "PATCH",
+                &uri,
+                &token,
+                Some(grant_body(catalog_b, "analyst")),
+            ))
             .await
             .unwrap(),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "the competing patch; body: {theirs}");
-    assert_eq!(f.compiled_policy_names_under(service_b).await, vec![name.clone()]);
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the competing patch; body: {theirs}"
+    );
+    assert_eq!(
+        f.compiled_policy_names_under(service_b).await,
+        vec![name.clone()]
+    );
 
     pause.go.send(()).expect("resume our PATCH");
     let (status, got) = into_json(ours.await.expect("our PATCH task")).await;
@@ -10613,7 +10633,12 @@ async fn a_rule_patch_racing_a_committed_patch_derives_its_old_set_from_the_fres
     };
     let (status, created) = into_json(
         f.app()
-            .oneshot(req("POST", "/perm/rules", &token, Some(path_rule(f.catalog_id))))
+            .oneshot(req(
+                "POST",
+                "/perm/rules",
+                &token,
+                Some(path_rule(f.catalog_id)),
+            ))
             .await
             .unwrap(),
     )
@@ -10632,7 +10657,10 @@ async fn a_rule_patch_racing_a_committed_patch_derives_its_old_set_from_the_fres
                 .unwrap()
         }
     }));
-    pause.reached.await.expect("our PATCH reached the pause point");
+    pause
+        .reached
+        .await
+        .expect("our PATCH reached the pause point");
     let (status, theirs) = into_json(
         f.app()
             .oneshot(req("PATCH", &uri, &token, Some(path_rule(catalog_b))))
@@ -10640,7 +10668,11 @@ async fn a_rule_patch_racing_a_committed_patch_derives_its_old_set_from_the_fres
             .unwrap(),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "the competing patch; body: {theirs}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the competing patch; body: {theirs}"
+    );
     pause.go.send(()).expect("resume our PATCH");
     let (status, got) = into_json(ours.await.expect("our PATCH task")).await;
 
@@ -10728,7 +10760,10 @@ async fn grant_and_rule_ids_answer_404_alike_outside_the_callers_workspace() {
         matches!(g_foreign, Err(PermHttpError::NotFound)),
         "a grant in another workspace must answer like a missing one; got {g_foreign:?}"
     );
-    assert!(matches!(g_missing, Err(PermHttpError::NotFound)), "{g_missing:?}");
+    assert!(
+        matches!(g_missing, Err(PermHttpError::NotFound)),
+        "{g_missing:?}"
+    );
     let r_foreign = egret_perm_compile::routes::rule_in_reach(&mut conn, &confined, foreign_rule)
         .await
         .map(|r| r.id);
@@ -10739,7 +10774,10 @@ async fn grant_and_rule_ids_answer_404_alike_outside_the_callers_workspace() {
         matches!(r_foreign, Err(PermHttpError::NotFound)),
         "a rule in another workspace must answer like a missing one; got {r_foreign:?}"
     );
-    assert!(matches!(r_missing, Err(PermHttpError::NotFound)), "{r_missing:?}");
+    assert!(
+        matches!(r_missing, Err(PermHttpError::NotFound)),
+        "{r_missing:?}"
+    );
 
     // Controls: its own rows, and an unconfined caller's view of B's.
     let g_own = egret_perm_compile::routes::grant_in_reach(&mut conn, &confined, own_grant)
@@ -10753,11 +10791,17 @@ async fn grant_and_rule_ids_answer_404_alike_outside_the_callers_workspace() {
     let g_plain = egret_perm_compile::routes::grant_in_reach(&mut conn, &plain, foreign_grant)
         .await
         .map(|g| g.id);
-    assert!(matches!(g_plain, Ok(id) if id == foreign_grant), "{g_plain:?}");
+    assert!(
+        matches!(g_plain, Ok(id) if id == foreign_grant),
+        "{g_plain:?}"
+    );
     let r_plain = egret_perm_compile::routes::rule_in_reach(&mut conn, &plain, foreign_rule)
         .await
         .map(|r| r.id);
-    assert!(matches!(r_plain, Ok(id) if id == foreign_rule), "{r_plain:?}");
+    assert!(
+        matches!(r_plain, Ok(id) if id == foreign_rule),
+        "{r_plain:?}"
+    );
 }
 
 /// #801 over HTTP, as the caller who can actually reach these routes: a user

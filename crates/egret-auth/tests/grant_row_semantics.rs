@@ -30,13 +30,12 @@ async fn active_user(db: &Db) -> Uuid {
 }
 
 async fn group_with(db: &Db, member: Uuid) -> Uuid {
-    let gid: Uuid = sqlx::query_scalar(
-        "INSERT INTO groups (name, source) VALUES ($1, 'local') RETURNING id",
-    )
-    .bind(format!("ki322-{}", Uuid::new_v4().simple()))
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
+    let gid: Uuid =
+        sqlx::query_scalar("INSERT INTO groups (name, source) VALUES ($1, 'local') RETURNING id")
+            .bind(format!("ki322-{}", Uuid::new_v4().simple()))
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
     sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
         .bind(member)
         .bind(gid)
@@ -98,7 +97,15 @@ async fn the_engine_admin_set_counts_only_live_allow_grants() {
     let live = active_user(&db).await;
     platform_grant(&db, "user", live, "platform_admin", "allow", Some(3600)).await;
     let lapsed_direct = active_user(&db).await;
-    platform_grant(&db, "user", lapsed_direct, "platform_admin", "allow", Some(-60)).await;
+    platform_grant(
+        &db,
+        "user",
+        lapsed_direct,
+        "platform_admin",
+        "allow",
+        Some(-60),
+    )
+    .await;
     let lapsed_via_group = active_user(&db).await;
     let g = group_with(&db, lapsed_via_group).await;
     platform_grant(&db, "group", g, "platform_admin", "allow", Some(-60)).await;
@@ -161,12 +168,19 @@ async fn a_deny_grant_gives_the_session_no_platform_role() {
         .await
         .unwrap()
         .token;
-    let p = sessions.validate(&token).await.unwrap().expect("live session");
+    let p = sessions
+        .validate(&token)
+        .await
+        .unwrap()
+        .expect("live session");
 
     // Assert
     assert_eq!(roles, vec![other.clone()], "only the allow grant");
     assert_eq!(p.platform_roles, vec![other]);
-    assert!(!p.is_platform_admin(), "a deny of platform_admin is not admin");
+    assert!(
+        !p.is_platform_admin(),
+        "a deny of platform_admin is not admin"
+    );
     assert!(
         !p.permissions.iter().any(|k| k.starts_with("policy:")),
         "a denied data_steward lends no policy:* permission: {:?}",

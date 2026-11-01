@@ -3868,7 +3868,9 @@ async fn an_unreferenced_group_rename_and_delete_do_not_ask_for_policy_read() {
             "PATCH",
             &format!("/groups/{gid}"),
             &admin,
-            Some(serde_json::json!({ "name": format!("lazy-renamed-{}", Uuid::new_v4().simple()) })),
+            Some(
+                serde_json::json!({ "name": format!("lazy-renamed-{}", Uuid::new_v4().simple()) }),
+            ),
         ))
         .await
         .unwrap();
