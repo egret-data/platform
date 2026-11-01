@@ -507,6 +507,14 @@ pub(crate) fn db_err(e: sqlx::Error) -> egret_core::Error {
 /// means "may do anything on this engine", and a disabled account may do
 /// nothing in egret; leaving them in would keep an already-minted engine JWT
 /// (or an alert running as them) at ALL access.
+///
+/// **Only a live `allow` grant counts** (KI-322), the rule the session, the
+/// PDP and the console's access resolver apply (`expires_at` NULL or in the
+/// future; `effect = 'allow'`). A lapsed grant leaves the set at the next
+/// recompile of an admin-policy profile, which the hourly expiry sweep
+/// (`egret_perm_compile::expiry`) runs for a lapsed `platform_admin` row. The
+/// last-admin guard counts this same set, so it no longer counts a lapsed or
+/// deny grant as an active admin.
 pub async fn engine_admin_user_ids_via(conn: &mut sqlx::PgConnection) -> Result<Vec<UserId>> {
     engine_admin_ids_query(conn).await
 }
@@ -517,10 +525,14 @@ async fn engine_admin_ids_query(conn: &mut sqlx::PgConnection) -> Result<Vec<Use
           WHERE u.status = 'active' \
             AND (EXISTS (SELECT 1 FROM access_grants g JOIN roles r ON r.id = g.role_id \
                           WHERE r.name = 'platform_admin' AND g.scope_type = 'platform' \
+                            AND g.effect = 'allow' \
+                            AND (g.expires_at IS NULL OR g.expires_at > now()) \
                             AND g.principal_type = 'user' AND g.principal_id = u.id) \
               OR EXISTS (SELECT 1 FROM access_grants g JOIN roles r ON r.id = g.role_id \
                            JOIN user_groups ug ON ug.group_id = g.principal_id \
                           WHERE r.name = 'platform_admin' AND g.scope_type = 'platform' \
+                            AND g.effect = 'allow' \
+                            AND (g.expires_at IS NULL OR g.expires_at > now()) \
                             AND g.principal_type = 'group' AND ug.user_id = u.id)) \
           ORDER BY u.id",
     )
