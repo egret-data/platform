@@ -233,3 +233,22 @@ guard off (`mint_held && false`) → the interleaving test and the guard test; #
 the `egret-admin` guard off → its test; linkers not locked → the linker test; tag-version bump moved back before the
 profile locks → the interleaving test; an extra `FOR UPDATE` on `authz_services` added to `egret-bi` → the scan
 test.
+
+**Found by the guard in the crate suites: the external engine's rebind.** `PATCH /engines/{id}/external` with a
+new `authzServiceId` recompiled the new profile, then the old one, each through `recompile_profile_in_tx`. The
+first recompile's pre-mint took the mint lock (whenever anyone in the model was unnamed), so the second locked
+its profile after it: the inversion this package closes, which the guard now refused as a 409
+(`egret-engine-mgmt` `patching_a_rebind_without_an_overlap_binds_and_unbinding_recompiles_the_old_profile`).
+Fix: `ProfileCompilerPort::lock_profiles_in_tx` (implemented with `lock_services_in_tx`), and the rebind locks
+both profiles, ascending, before the engine row's `UPDATE`, whose 0187 trigger bumps both. No other caller in
+the workspace recompiles more than one profile in a transaction without locking them all first (the group,
+workspace-member, RBAC, catalog-registry and tag-rename paths lock the set they then recompile).
+
+**Live check (own stack `egret-p6`, port 18288).** No test seam was needed: a second `psql` session held the
+classification's `tags` row `FOR UPDATE`, so the clearance write (`PUT /tags/{id}/access-policy`, from the
+Clearance tab) stopped at its `classification_policies` insert, after its profile locks and the mint lock
+(seen in `pg_locks`). Meanwhile an external StarRocks engine was bound to a second profile and committed. On
+release the write answered `409 {"error": "the policy profiles this write recompiles changed while it ran
+(profile(s) 2 were bound or created meanwhile); nothing was written, retry", "code": "profile_set_changed",
+"retryable": true}`; the tab showed the sentence in its error alert and a toast, at 1440 px and 390 px; nothing
+was stored. The same add, clicked again, answered 200 and stored the role.
