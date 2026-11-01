@@ -9873,6 +9873,7 @@ async fn a_trino_row_filter_on_a_column_classification_filters_the_table() {
         json!({"type": "tag", "key": tag.key}),
         "region = 'us'",
     );
+    let rule_name = rule["name"].as_str().expect("name").to_string();
     let rule_id = store_rule(&f, &token, rule).await;
 
     let mut ask = explain_body(catalog_id, "analyst");
@@ -9887,10 +9888,15 @@ async fn a_trino_row_filter_on_a_column_classification_filters_the_table() {
     );
     assert_eq!(rf["attribution"]["kind"], "rule", "body: {body}");
     assert_eq!(rf["attribution"]["rule_id"], json!(rule_id), "body: {body}");
-    assert!(trino.get("row_filter_not_applied").is_none(), "body: {body}");
+    assert!(
+        trino.get("row_filter_not_applied").is_none(),
+        "body: {body}"
+    );
     assert_eq!(
         trino["effect_lines"][1]["text"],
-        json!("analyst sees rows where region = 'us'"),
+        json!(format!(
+            "analyst sees rows where region = 'us' (rule {rule_name})"
+        )),
         "body: {body}"
     );
 
@@ -9920,7 +9926,6 @@ async fn a_trino_row_filter_on_a_column_classification_filters_the_table() {
         json!(policy),
         "body: {body}"
     );
-
 }
 
 /// A table with no row filter answers `no_filter`; a `write` has no row filter.
@@ -10022,7 +10027,11 @@ async fn a_classification_row_filter_preview_has_no_trino_column_only_warning() 
     let wh = warehouse_of(&f, catalog_id).await;
     assign(&f, tag_id, wh, "orders", "email").await;
     assign(&f, tag_id, wh, "customers", "").await;
-    let rule = row_filter_rule("vmask-d3", json!({"type": "tag", "key": key}), "region = 'us'");
+    let rule = row_filter_rule(
+        "vmask-d3",
+        json!({"type": "tag", "key": key}),
+        "region = 'us'",
+    );
     let (status, body) = preview_rule(&f, &token, rule.clone()).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["effect"]["kind"], "row_filter", "{body}");

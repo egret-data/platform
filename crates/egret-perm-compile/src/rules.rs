@@ -498,7 +498,43 @@ pub(crate) fn compile_rule_counting(
             let svc = tag_service.ok_or_else(|| CompileError::MissingTagService {
                 rule: r.name.clone(),
             })?;
-            Ok(vec![build_tag_body(r, service, tag_name, svc)?])
+            let mut out = vec![build_tag_body(r, service, tag_name, svc)?];
+            // KI-287 (owner decision: a row filter by classification is
+            // table-level). Trino's plugin applies a tag row filter only to a
+            // table carrying the tag itself: a column attachment reaches the
+            // table request as a descendant and filters nothing (E14). So a
+            // table carrying the classification on columns only gets its own
+            // resource row filter in the profile, named and shaped as the
+            // StarRocks expansion below names and shapes one. A table carrying
+            // it on the table stays the tag policy's alone. A mask needs none:
+            // Trino masks a tagged column through the tag policy.
+            if policy_target(&r.kind) == PolicyTarget::RowFilter {
+                let column_only: Vec<&TableTarget> =
+                    tagged.iter().filter(|t| !t.table_level).collect();
+                let count = column_only
+                    .iter()
+                    .filter(|t| {
+                        leaving.counts_toward_ceiling(&t.catalog, &t.schema, &t.table, None)
+                    })
+                    .count();
+                if count > ceiling {
+                    return Err(CompileError::ExpansionCeiling {
+                        rule: r.name.clone(),
+                        count,
+                        ceiling,
+                    });
+                }
+                for t in column_only {
+                    out.push(build_body(
+                        r,
+                        e,
+                        service,
+                        table_row_filter_name(r, t),
+                        table_resources(e, t),
+                    )?);
+                }
+            }
+            Ok(out)
         }
         (Selector::Tag { .. }, EngineType::StarRocks) => {
             // StarRocks' compiled body never carries the tag itself (each
@@ -544,10 +580,7 @@ pub(crate) fn compile_rule_counting(
                         });
                     }
                     for t in tagged {
-                        let name = format!(
-                            "{COMPILER_RULE_PREFIX}{}-{}.{}.{}",
-                            r.id, t.catalog, t.schema, t.table
-                        );
+                        let name = table_row_filter_name(r, t);
                         out.push(build_body(r, e, service, name, table_resources(e, t))?);
                     }
                 }
@@ -647,6 +680,14 @@ fn table_resources(e: EngineType, t: &TableTarget) -> BTreeMap<String, ResourceL
         map.insert(names[i].to_string(), level(values[i].clone()));
     }
     map
+}
+
+/// The name of a tag row filter's policy on one table, on either engine.
+fn table_row_filter_name(r: &Rule, t: &TableTarget) -> String {
+    format!(
+        "{COMPILER_RULE_PREFIX}{}-{}.{}.{}",
+        r.id, t.catalog, t.schema, t.table
+    )
 }
 
 /// Which Ranger policy type a rule's own `kind` renders to — the parameter

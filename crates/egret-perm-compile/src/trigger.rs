@@ -107,7 +107,7 @@ use uuid::Uuid;
 
 use egret_perm::{
     list_engine_grants_for_profile_via, list_grants_via, list_rules_via, CompileError, EngineGrant,
-    EngineType, Grant, PermStore, Rule, Selector,
+    EngineType, Grant, PermStore, Rule, RuleKind, Selector,
 };
 use egret_policy::admin::access_to_ranger_json;
 use egret_policy::{
@@ -1002,7 +1002,12 @@ async fn compile_one_rule(
                     });
                     return Ok(());
                 };
-                let tagged = if engine == EngineType::StarRocks {
+                // StarRocks expands every tag rule; Trino expands a row filter
+                // over the tables carrying the tag on columns only (KI-287,
+                // `rules::compile_rule`).
+                let expands =
+                    engine == EngineType::StarRocks || matches!(r.kind, RuleKind::RowFilter { .. });
+                let tagged = if expands {
                     crate::rules::group_by_table(
                         tag_assignments_for_service_via(conn, service_id, key)
                             .await
@@ -1772,7 +1777,9 @@ pub async fn affected_starrocks_profiles_for_tables(
 
 /// D2 (spec §5.6, C13): the boot pass. Recompiles every StarRocks profile
 /// that reaches a whole-table attachment of a classification with a
-/// role-bearing clearance, or of one a row-filter rule selects, so the first
+/// role-bearing clearance, or of one a row-filter rule selects, and every
+/// Trino profile that reaches a column attachment of a classification a
+/// row-filter rule selects (KI-287: compiled per table since), so the first
 /// compile after an upgrade does not wait for an unrelated write, and a
 /// table-commit hook recompile that failed is retried.
 ///
@@ -1792,13 +1799,18 @@ pub async fn recompile_table_classified_profiles(
            JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id \
            JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id \
            JOIN engine_mgmt.engines e ON e.id = ea.engine_id \
-          WHERE a.column_name = '' AND e.type = 'starrocks' \
-            AND e.authz_service_id IS NOT NULL \
-            AND (EXISTS (SELECT 1 FROM classification_policies cp \
-                          WHERE cp.tag_id = a.tag_id AND cardinality(cp.required_roles) > 0) \
-                 OR EXISTS (SELECT 1 FROM perm.rules r \
-                             WHERE r.selector_kind = 'tag' AND r.tag_key = t.key \
-                               AND r.kind = 'row_filter')) \
+          WHERE e.authz_service_id IS NOT NULL \
+            AND ((a.column_name = '' AND e.type = 'starrocks' \
+                  AND (EXISTS (SELECT 1 FROM classification_policies cp \
+                                WHERE cp.tag_id = a.tag_id \
+                                  AND cardinality(cp.required_roles) > 0) \
+                       OR EXISTS (SELECT 1 FROM perm.rules r \
+                                   WHERE r.selector_kind = 'tag' AND r.tag_key = t.key \
+                                     AND r.kind = 'row_filter'))) \
+                 OR (a.column_name <> '' AND e.type = 'trino' \
+                     AND EXISTS (SELECT 1 FROM perm.rules r \
+                                  WHERE r.selector_kind = 'tag' AND r.tag_key = t.key \
+                                    AND r.kind = 'row_filter'))) \
           ORDER BY 1",
     )
     .fetch_all(pool)
@@ -1818,7 +1830,7 @@ pub async fn recompile_table_classified_profiles(
                 tracing::warn!(
                     service_id,
                     error = %e,
-                    "the boot recompile of a StarRocks profile with whole-table \
+                    "the boot recompile of a profile with table-expanded \
                      classifications was refused; it keeps its previous compile"
                 );
                 record_failure_logged(pool, service_id, &e).await;

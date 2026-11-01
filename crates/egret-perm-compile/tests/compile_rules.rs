@@ -1555,7 +1555,11 @@ fn a_trino_tag_row_filter_also_filters_the_tables_tagged_on_columns_only() {
     );
     assert_eq!(
         resource_keys(table),
-        vec!["catalog".to_string(), "schema".to_string(), "table".to_string()]
+        vec![
+            "catalog".to_string(),
+            "schema".to_string(),
+            "table".to_string()
+        ]
     );
     assert_eq!(table["resources"]["catalog"]["values"][0], "wh");
     assert_eq!(table["resources"]["schema"]["values"][0], "sales");
