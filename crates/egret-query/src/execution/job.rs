@@ -129,15 +129,16 @@ impl JobManager {
             Err(EngineError::Timeout) => {
                 let _ = self
                     .store
-                    .fail(id, &timeout_message(self.limits.timeout))
+                    .fail(id, &timeout_message(self.limits.timeout, &sql))
                     .await;
             }
             // Trino's own stop at the same limit (egret sends it as
             // `query_max_run_time`): its words, plus where the limit comes from.
             Err(EngineError::Engine(m)) if m.contains("exceeded maximum time limit") => {
                 let msg = format!(
-                    "engine: {m}. The limit is SQL Lab's {} s, the server setting `engine.query_timeout_secs`.",
-                    self.limits.timeout.as_secs()
+                    "engine: {m}. The limit is SQL Lab's {} s, the server setting `engine.query_timeout_secs`.{}",
+                    self.limits.timeout.as_secs(),
+                    ddl_may_still_complete(&sql)
                 );
                 let _ = self.store.fail(id, &msg).await;
             }
@@ -249,10 +250,92 @@ pub async fn run_query(
 
 /// What a SQL Lab run that outran its time limit says (KI-211): the limit, and
 /// the setting an operator raises it with. A bare "timeout" said neither.
-fn timeout_message(limit: std::time::Duration) -> String {
+fn timeout_message(limit: std::time::Duration, sql: &str) -> String {
     format!(
         "timeout: the query ran longer than the {} s limit for SQL Lab queries and was stopped. \
-         The limit is the server setting `engine.query_timeout_secs`.",
-        limit.as_secs()
+         The limit is the server setting `engine.query_timeout_secs`.{}",
+        limit.as_secs(),
+        ddl_may_still_complete(sql)
     )
+}
+
+/// KI-318: SQL Lab stops WAITING at its limit, but a schema change it sent may
+/// still commit: egret's catalog holds a rename of a classified or restricted
+/// table for up to 90 s while the engines confirm the moved restrictions, and
+/// the engine finishes the statement after SQL Lab gave up. So the timeout of a
+/// DDL statement says the change may still complete and where to look before
+/// running it again. A query's timeout is unchanged: a stopped SELECT changed
+/// nothing. Empty for anything that is not DDL.
+fn ddl_may_still_complete(sql: &str) -> &'static str {
+    if is_ddl(sql) {
+        " This is a schema change: SQL Lab stopped waiting for it, but the engine may still \
+         complete it (a rename can be held while the engines confirm the moved restrictions). \
+         Check Governance → Recent changes, or list the tables, before you run it again."
+    } else {
+        ""
+    }
+}
+
+/// Whether the statement's first keyword, after comments and whitespace, starts
+/// a DDL statement. Tokenized (not a prefix match), so a leading `-- ALTER`
+/// comment or `"alter"` identifier does not count; text the tokenizer cannot
+/// read is not DDL, which keeps the old message.
+fn is_ddl(sql: &str) -> bool {
+    use sqlparser::dialect::GenericDialect;
+    use sqlparser::tokenizer::{Token, Tokenizer};
+    let Ok(tokens) = Tokenizer::new(&GenericDialect {}, sql).tokenize() else {
+        return false;
+    };
+    let first = tokens
+        .into_iter()
+        .find(|t| !matches!(t, Token::Whitespace(_)));
+    matches!(
+        first,
+        Some(Token::Word(w)) if w.quote_style.is_none()
+            && ["ALTER", "CREATE", "DROP", "RENAME", "TRUNCATE"]
+                .iter()
+                .any(|k| w.value.eq_ignore_ascii_case(k))
+    )
+}
+
+#[cfg(test)]
+mod ddl_tests {
+    use super::*;
+
+    #[test]
+    fn ddl_is_recognised_by_its_first_keyword() {
+        for sql in [
+            "ALTER TABLE a RENAME TO b",
+            "  -- rename\n alter table a rename to b",
+            "/* x */ CREATE TABLE t (i int)",
+            "drop view v",
+            "RENAME TABLE a TO b",
+            "TRUNCATE TABLE t",
+        ] {
+            assert!(is_ddl(sql), "{sql}");
+        }
+        for sql in [
+            "SELECT 1",
+            "-- ALTER TABLE a\nSELECT 1",
+            "\"alter\" ",
+            "WITH x AS (SELECT 1) SELECT * FROM x",
+            "INSERT INTO t VALUES (1)",
+            "",
+        ] {
+            assert!(!is_ddl(sql), "{sql}");
+        }
+    }
+
+    #[test]
+    fn only_a_ddl_timeout_points_to_recent_changes() {
+        let limit = std::time::Duration::from_secs(60);
+        let ddl = timeout_message(limit, "ALTER TABLE a RENAME TO b");
+        assert!(
+            ddl.contains("60 s") && ddl.contains("may still complete"),
+            "{ddl}"
+        );
+        assert!(ddl.contains("Recent changes"), "{ddl}");
+        let query = timeout_message(limit, "SELECT 1");
+        assert!(!query.contains("Recent changes"), "{query}");
+    }
 }

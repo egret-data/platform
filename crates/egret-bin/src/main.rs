@@ -2732,7 +2732,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                     Ok(s) if s.lapsed_rows > 0 => tracing::info!(
                         lapsed_rows = s.lapsed_rows,
                         profiles = s.services.len(),
-                        rewritten = s.rewritten,
+                        rewritten = s.rewritten.len(),
                         "expiry sweep ran"
                     ),
                     Ok(_) => {}
