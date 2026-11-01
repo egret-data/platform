@@ -39360,7 +39360,7 @@
       },
       "AssignNotice": {
         "type": "object",
-        "description": "Refuse (409, code `table_change_held`) a write on `schema.table` while a\nhold holds the table's name: a rename of the table that is waiting for the\nengines would leave this write on the old name, or put back on the new one\na classification just removed (rename review finding 2). A try-lock on\nthis transaction, released at its end, so no hold can start meanwhile.\nSomething an assignment that succeeded wants its author to know.",
+        "description": "Something an assignment that succeeded wants its author to know.",
         "required": [
           "code",
           "message"
