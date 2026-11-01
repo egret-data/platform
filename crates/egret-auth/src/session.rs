@@ -291,11 +291,17 @@ impl SessionService {
     }
 
     /// Platform roles for the user (direct + via group membership).
+    ///
+    /// Live `allow` grants only (KI-323): a `deny` grant of a role takes the
+    /// role's actions away in the PDP (it links the role's `forbid`
+    /// template), so it must never put the role in `platform_roles` — the same
+    /// rule `crate::effective`'s access resolver applies to the console.
     async fn platform_roles(&self, user_id: UserId) -> Result<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(
             "SELECT DISTINCT r.name FROM access_grants ag \
              JOIN roles r ON r.id = ag.role_id \
              WHERE ag.scope_type = 'platform' \
+               AND ag.effect = 'allow' \
                AND (ag.expires_at IS NULL OR ag.expires_at > now()) \
                AND ( (ag.principal_type = 'user'  AND ag.principal_id = $1) \
                   OR (ag.principal_type = 'group' AND ag.principal_id IN \
@@ -318,6 +324,7 @@ impl SessionService {
             "WITH RECURSIVE granted AS ( \
                SELECT ag.role_id FROM access_grants ag \
                WHERE ag.scope_type = 'platform' \
+                 AND ag.effect = 'allow' \
                  AND (ag.expires_at IS NULL OR ag.expires_at > now()) \
                  AND ( (ag.principal_type = 'user'  AND ag.principal_id = $1) \
                     OR (ag.principal_type = 'group' AND ag.principal_id IN \

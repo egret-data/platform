@@ -1335,49 +1335,31 @@ pub(crate) async fn write_grant(
         ));
     }
 
-    // The OLD affected set, and the origin the patched row keeps. Read from
-    // the stored row BEFORE anything is written — after the UPDATE the old
-    // catalog is gone and the profiles it reached are unrecoverable.
-    let (old_services, origin, stored_principals, effect_unchanged, old_scope) = match id {
+    // The stored row, read BEFORE any lock: it names the groups whose locks
+    // the patch must take (below), so it cannot wait for them. It is a
+    // prediction — a concurrent patch can commit before those locks are held —
+    // so everything the write derives from the stored row is derived again
+    // from the row re-read under the locks (#789).
+    let stale = match id {
         Some(id) => {
-            let Some(old) = get_grant_via(tx, id).await? else {
-                return Err(PermHttpError::NotFound);
-            };
-            // A `workspace_assignment` grant is the assignment path's row (D3):
-            // it is derived from `(catalog, workspace)` and recreated from the
-            // assignment on demand, so an edit here would either be reverted by
-            // the next sync or collide with `grants_one_per_assignment`. The
-            // create path refuses to MINT one for the same reason.
             // The patch's OTHER end. The body's catalog was confined at the top;
             // a grant can MOVE between catalogs, so a caller confined to one
             // workspace must also not be able to drag a *foreign* grant into its
             // own workspace — which is what confining only the body would allow.
-            confine_to_overlay_workspace(tx, p, old.scope.catalog_id).await?;
-            if !matches!(old.origin, GrantOrigin::Explicit) {
-                return Err(PermHttpError::BadRequest(
-                    "this grant is derived from a workspace assignment and is owned by the \
-                     assignment sync; change the assignment instead"
-                        .into(),
-                ));
-            }
-            // The R6 skip below holds only while the EFFECT is unchanged: a
-            // stored ref that matches nobody fails closed on an allow include
-            // and OPEN on a deny include, so flipping allow -> deny around it
-            // turns a harmless row into a fail-open one. A patch that changes
-            // the effect re-checks every principal.
-            let effect_unchanged = old.effect == body.effect;
-            (
-                affected_services_for_grant(tx, &old).await?,
-                old.origin,
-                Some(old.principals),
-                effect_unchanged,
-                Some(old.scope),
-            )
+            // A foreign grant answers 404, like a missing one (#801).
+            let old = grant_in_reach(tx, p, id).await?;
+            refuse_assignment_grant(&old)?;
+            Some(old)
         }
-        // The database mints the id on a create; `GrantOrigin::Explicit` is the
-        // only origin this surface may write — see `NewGrant`'s doc comment.
-        None => (Vec::new(), GrantOrigin::Explicit, None, false, None),
+        None => None,
     };
+    // The R6 skip below holds only while the EFFECT is unchanged: a stored ref
+    // that matches nobody fails closed on an allow include and OPEN on a deny
+    // include, so flipping allow -> deny around it turns a harmless row into a
+    // fail-open one. A patch that changes the effect re-checks every principal.
+    let effect_unchanged = stale.as_ref().is_some_and(|old| old.effect == body.effect);
+    let stored_principals = stale.map(|old| old.principals);
+    crate::write_seam::before_locks().await;
 
     // **Every ref must name someone egret knows** (J-F3) — include AND exclude,
     // on create, patch and preview alike, since all three are this function. A
@@ -1426,14 +1408,30 @@ pub(crate) async fn write_grant(
         [&principals].into_iter().chain(stored_principals.as_ref()),
     )
     .await?;
-    let old_principals = match (id, stored_principals.as_ref()) {
-        (Some(id), Some(stale)) if effect_unchanged => {
-            let Some(fresh) = get_grant_via(tx, id).await? else {
-                return Err(PermHttpError::NotFound);
-            };
-            (fresh.effect == body.effect).then(|| still_stored(stale, &fresh.principals))
+    // The OLD affected set, and the origin the patched row keeps, from the row
+    // as it stands NOW, under the group locks (#789). Read before anything is
+    // written — after the UPDATE the old catalog is gone and the profiles it
+    // reached are unrecoverable. From the stale copy instead, a patch that
+    // committed while this one waited would be missing from the set: the
+    // profiles it moved the grant to would keep a policy nothing produces, or,
+    // with the re-check after the profile locks, this write would answer a
+    // needless 409.
+    let (old_services, origin, old_principals, old_scope) = match (id, stored_principals.as_ref()) {
+        (Some(id), Some(stale)) => {
+            let fresh = grant_in_reach(tx, p, id).await?;
+            refuse_assignment_grant(&fresh)?;
+            let kept = (effect_unchanged && fresh.effect == body.effect)
+                .then(|| still_stored(stale, &fresh.principals));
+            (
+                affected_services_for_grant(tx, &fresh).await?,
+                fresh.origin,
+                kept,
+                Some(fresh.scope),
+            )
         }
-        _ => None,
+        // The database mints the id on a create; `GrantOrigin::Explicit` is the
+        // only origin this surface may write — see `NewGrant`'s doc comment.
+        _ => (Vec::new(), GrantOrigin::Explicit, None, None),
     };
     resolve_principal_refs(tx, "principals", &mut principals, old_principals.as_ref()).await?;
 
@@ -1592,6 +1590,22 @@ async fn refuse_while_held_in_tx(
     Ok(())
 }
 
+/// A `workspace_assignment` grant is the assignment path's row (D3): it is
+/// derived from `(catalog, workspace)` and recreated from the assignment on
+/// demand, so an edit here would either be reverted by the next sync or
+/// collide with `grants_one_per_assignment`. The create path refuses to MINT
+/// one for the same reason.
+fn refuse_assignment_grant(g: &Grant) -> Result<(), PermHttpError> {
+    if matches!(g.origin, GrantOrigin::Explicit) {
+        return Ok(());
+    }
+    Err(PermHttpError::BadRequest(
+        "this grant is derived from a workspace assignment and is owned by the \
+         assignment sync; change the assignment instead"
+            .into(),
+    ))
+}
+
 /// Re-read grant `id` now that every profile in `locked` is locked, and refuse
 /// if the row has moved outside that set — see the call site in [`write_grant`]
 /// for why the first read cannot take a row lock and what a stale one costs.
@@ -1658,22 +1672,18 @@ pub(crate) async fn write_rule(
         ));
     }
 
-    let (old_services, old_exempt, old_selector) = match id {
+    // The stored row, read before any lock, as in [`write_grant`] (#789): it
+    // names the groups to lock, and everything else is derived from the row
+    // re-read under those locks.
+    let old_exempt = match id {
         Some(id) => {
-            let Some(old) = get_rule_via(tx, id).await? else {
-                return Err(PermHttpError::NotFound);
-            };
             // The patch's other end — a rule can be moved between selectors, so
-            // see the twin comment in `write_grant`.
-            confine_rule_selector(tx, p, &old.selector).await?;
-            (
-                affected_services_for_rule(tx, &old).await?,
-                Some(old.exempt),
-                Some(old.selector),
-            )
+            // see the twin comment in `write_grant`. 404 when foreign (#801).
+            Some(rule_in_reach(tx, p, id).await?.exempt)
         }
-        None => (Vec::new(), None, None),
+        None => None,
     };
+    crate::write_seam::before_locks().await;
 
     // Same check, same position and same reason as [`write_grant`]'s: an
     // `exempt.include` naming nobody masks someone the author meant to exempt,
@@ -1687,14 +1697,18 @@ pub(crate) async fn write_rule(
     // the locks.
     let mut exempt = body.exempt;
     lock_named_groups(tx, [&exempt].into_iter().chain(old_exempt.as_ref())).await?;
-    let kept_exempt = match (id, old_exempt.as_ref()) {
+    // The OLD affected set from that fresh row too, for the reason
+    // `write_grant` gives at the same point (#789).
+    let (old_services, kept_exempt, old_selector) = match (id, old_exempt.as_ref()) {
         (Some(id), Some(stale)) => {
-            let Some(fresh) = get_rule_via(tx, id).await? else {
-                return Err(PermHttpError::NotFound);
-            };
-            Some(still_stored(stale, &fresh.exempt))
+            let fresh = rule_in_reach(tx, p, id).await?;
+            (
+                affected_services_for_rule(tx, &fresh).await?,
+                Some(still_stored(stale, &fresh.exempt)),
+                Some(fresh.selector),
+            )
         }
-        _ => None,
+        _ => (Vec::new(), None, None),
     };
     resolve_principal_refs(tx, "exempt", &mut exempt, kept_exempt.as_ref()).await?;
 
@@ -1983,12 +1997,9 @@ async fn delete_grant(
     let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
     // Read the grant BEFORE deleting it: the affected-service set is derived
     // from its own `scope.catalog_id`, which is gone once the row is.
-    let Some(g) = get_grant_via(&mut tx, id).await? else {
-        return Err(PermHttpError::NotFound);
-    };
-    // The delete paths build no body, so the containment runs on the stored row —
-    // see [`confine_to_overlay_workspace`].
-    confine_to_overlay_workspace(&mut tx, &p, g.scope.catalog_id).await?;
+    // The delete paths build no body, so the containment runs on the stored row,
+    // and a foreign grant answers 404 like a missing one — see [`grant_in_reach`].
+    let g = grant_in_reach(&mut tx, &p, id).await?;
     let services = affected_services_for_grant(&mut tx, &g).await?;
     refuse_while_held_in_tx(&mut tx, &[&g.scope]).await?;
     // Before the DELETE, never after — see `lock_services_in_tx`.
@@ -2159,9 +2170,9 @@ async fn rule_effect(
         .execute(&mut *tx)
         .await
         .map_err(PermHttpError::db)?;
-    let Some(r) = get_rule_via(&mut tx, id).await? else {
-        return Err(PermHttpError::NotFound);
-    };
+    // A rule outside a confined caller's workspace answers 404 like a missing
+    // one (#801) — see [`rule_in_reach`].
+    let r = rule_in_reach(&mut tx, &p, id).await?;
     let rule = NewRule {
         name: r.name,
         kind: r.kind,
@@ -2346,11 +2357,8 @@ async fn delete_rule(
     let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
     // Same reason as the grant delete: a rule's affected-service set depends
     // on its SELECTOR, which the row carries and the deletion removes.
-    let Some(r) = get_rule_via(&mut tx, id).await? else {
-        return Err(PermHttpError::NotFound);
-    };
     // Same as `delete_grant`'s.
-    confine_rule_selector(&mut tx, &p, &r.selector).await?;
+    let r = rule_in_reach(&mut tx, &p, id).await?;
     let services = affected_services_for_rule(&mut tx, &r).await?;
     if let Selector::Path(scope) = &r.selector {
         refuse_while_held_in_tx(&mut tx, &[scope]).await?;
@@ -3216,12 +3224,12 @@ fn validate_explain_target(target: &Scope) -> Result<(), PermHttpError> {
 /// earlier version of this paragraph stopped at "this route", which reads as a
 /// claim about every uuid the route accepts; the whole-branch review (2026-10-10,
 /// finding L-1) showed it is false for the GRANT and RULE uuids in the PATH,
-/// which answer `404` for a uuid naming no row and `403` for one naming a row in
-/// another workspace — so a contained caller can still learn that a grant id
-/// exists somewhere. That gap is recorded as accepted debt, not covered here:
-/// closing it means returning `404` for a row that does exist but is not the
-/// caller's to see, which is a decision about every `perm` read, not about this
-/// guard.
+/// which answered `404` for a uuid naming no row and `403` for one naming a row
+/// in another workspace — so a contained caller could learn that a grant id
+/// exists somewhere. #801 closed that: every route taking a grant or rule id
+/// reads the stored row through [`grant_in_reach`] / [`rule_in_reach`], which
+/// answer `404` for both. This function still answers `403` for a body's
+/// catalog, which names no row.
 ///
 /// **An unscoped overlay (`workspace_scope == None`, a platform_admin acting as
 /// someone) is unrestricted here, exactly as it is in `WsContext`.**
@@ -3236,8 +3244,9 @@ fn validate_explain_target(target: &Scope) -> Result<(), PermHttpError> {
 /// back by forgetting a call. A patch is confined TWICE, against the stored row's
 /// catalog and against the body's, because a patch can move a grant between
 /// catalogs and either end alone leaves half the move reachable. `delete_grant`
-/// and `delete_rule` call it directly on the stored row, since they never build a
-/// body.
+/// and `delete_rule` run it on the stored row only, since they never build a
+/// body. Every stored-row check goes through [`grant_in_reach`] /
+/// [`rule_in_reach`], which turn its `403` into the `404` a missing id gets.
 ///
 /// Still **not** confined here, deliberately and named so it is not mistaken for
 /// covered:
@@ -3359,6 +3368,51 @@ pub async fn confine_rule_selector(
             Err(PermHttpError::Forbidden)
         }
         Selector::Tag { .. } => Ok(()),
+    }
+}
+
+/// The stored grant `id` as `p` may address it: `NotFound` both when no row
+/// has that id and when the row is outside a confined caller's workspace
+/// (#801). Answering `Forbidden` for the second, as the bare
+/// [`confine_to_overlay_workspace`] does, tells such a caller that the id
+/// exists somewhere else. Every route that takes a grant id in its path reads
+/// the stored row through this, never through `get_grant_via` and a separate
+/// confinement.
+///
+/// `pub` for the reason [`confine_to_overlay_workspace`] is: no session builds
+/// a confined principal that passes the `policy:*` gate, so
+/// `grant_and_rule_ids_answer_404_alike_outside_the_callers_workspace` in
+/// `tests/grant_rule_by_id.rs` tests it directly.
+pub async fn grant_in_reach(
+    conn: &mut sqlx::PgConnection,
+    p: &egret_core::Principal,
+    id: Uuid,
+) -> Result<Grant, PermHttpError> {
+    let Some(g) = get_grant_via(&mut *conn, id).await? else {
+        return Err(PermHttpError::NotFound);
+    };
+    match confine_to_overlay_workspace(conn, p, g.scope.catalog_id).await {
+        Ok(()) => Ok(g),
+        Err(PermHttpError::Forbidden) => Err(PermHttpError::NotFound),
+        Err(e) => Err(e),
+    }
+}
+
+/// [`grant_in_reach`] for a rule: `NotFound` for a missing id and for a rule
+/// whose selector a confined caller may not address (a foreign path, or any
+/// tag selector — see [`confine_rule_selector`]).
+pub async fn rule_in_reach(
+    conn: &mut sqlx::PgConnection,
+    p: &egret_core::Principal,
+    id: Uuid,
+) -> Result<Rule, PermHttpError> {
+    let Some(r) = get_rule_via(&mut *conn, id).await? else {
+        return Err(PermHttpError::NotFound);
+    };
+    match confine_rule_selector(conn, p, &r.selector).await {
+        Ok(()) => Ok(r),
+        Err(PermHttpError::Forbidden) => Err(PermHttpError::NotFound),
+        Err(e) => Err(e),
     }
 }
 

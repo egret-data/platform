@@ -721,7 +721,7 @@ async fn rename_group(
             id,
             &body.name,
             &egret_perm_compile::PermGroupRecompiler,
-            reference_detail(&st, &p).await?,
+            PolicyReadDetail { st: &st, p: &p },
         )
         .await?;
     if rows == 0 {
@@ -758,7 +758,7 @@ async fn delete_group(
         .delete_local(
             id,
             &egret_perm_compile::PermGroupRecompiler,
-            reference_detail(&st, &p).await?,
+            PolicyReadDetail { st: &st, p: &p },
         )
         .await?;
     if rows == 0 {
@@ -774,15 +774,24 @@ async fn delete_group(
 /// review M-2). The entries are policy metadata, and `group:delete` /
 /// `group:update` can be held without `policy:read`: such a caller gets the
 /// count and who to ask, not the grant ids and rule names.
-async fn reference_detail(
-    st: &CpState,
-    p: &egret_core::Principal,
-) -> Result<egret_auth::groups::ReferenceDetail, CpError> {
-    use egret_auth::groups::ReferenceDetail;
-    match egret_core::authz::require(&*st.pdp, p, "policy:read").await {
-        Ok(()) => Ok(ReferenceDetail::Entries),
-        Err(egret_core::Error::Forbidden) => Ok(ReferenceDetail::CountOnly),
-        Err(e) => Err(e.into()),
+///
+/// **Asked lazily** (#788): the repo resolves it only when it refuses, so a
+/// rename or delete that nothing names runs no `policy:read` check, and a PDP
+/// error on that check can fail only a request that is being refused anyway.
+struct PolicyReadDetail<'a> {
+    st: &'a CpState,
+    p: &'a egret_core::Principal,
+}
+
+#[async_trait::async_trait]
+impl egret_auth::groups::ReferenceDetailSource for PolicyReadDetail<'_> {
+    async fn reference_detail(&self) -> egret_core::Result<egret_auth::groups::ReferenceDetail> {
+        use egret_auth::groups::ReferenceDetail;
+        match egret_core::authz::require(&*self.st.pdp, self.p, "policy:read").await {
+            Ok(()) => Ok(ReferenceDetail::Entries),
+            Err(egret_core::Error::Forbidden) => Ok(ReferenceDetail::CountOnly),
+            Err(e) => Err(e),
+        }
     }
 }
 

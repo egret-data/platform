@@ -26,6 +26,9 @@ egret-perm.workspace = true
 # `egret-query` and faked in tests, and is held as `dyn` by the commit hold.
 async-trait.workspace = true
 egret-policy.workspace = true
+# #787: the boot repair's retry sleeps between attempts; #789: the PATCH
+# path's test seam is a task-local.
+tokio.workspace = true
 # Rename spec C11: `view_tags::ViewReach` (moved from `egret-bi`) resolves the
 # services bound to the warehouses a tag write reaches. That crate does not
 # depend on this one.
@@ -88,7 +91,8 @@ required-features = ["harness"]
 [dev-dependencies]
 egret-metastore.workspace = true
 egret-test-db.workspace = true
-tokio.workspace = true
+# #787: `start_paused` drives the boot repair's backoff without waiting it out.
+tokio = { workspace = true, features = ["test-util"] }
 # `tests/routes.rs` drives the composed router with `oneshot` and a real
 # session cookie, and builds a real `CedarPdp` for the 403 assertions.
 tower.workspace = true

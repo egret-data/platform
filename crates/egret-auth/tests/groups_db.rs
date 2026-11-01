@@ -664,3 +664,76 @@ fn deleter() -> egret_core::Principal {
         impersonator: None,
     }
 }
+
+/// A [`egret_auth::groups::ReferenceDetailSource`] that counts how often it is
+/// asked and answers with an error, so a test sees both whether the repo asked
+/// and what asking costs.
+#[derive(Default)]
+struct CountingDetail {
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl egret_auth::groups::ReferenceDetailSource for &CountingDetail {
+    async fn reference_detail(&self) -> egret_core::Result<egret_auth::groups::ReferenceDetail> {
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(egret_core::Error::Internal(anyhow::anyhow!(
+            "the PDP is down (test)"
+        )))
+    }
+}
+
+/// #788: the detail of a "still named" refusal is decided lazily. A rename or
+/// delete that nothing names never asks for it — so a failing source (a PDP
+/// error on `policy:read`) cannot fail it — and a refusal asks exactly once.
+#[tokio::test]
+async fn the_reference_detail_is_asked_only_when_the_write_is_refused() {
+    let Some(db) = connect().await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    // Arrange: an unreferenced group and a source that would fail if asked.
+    let groups = GroupRepo::new(db.clone());
+    let gid = groups
+        .create_local(&uniq("t_lazy_detail"), &Recorder::default())
+        .await
+        .unwrap();
+    let detail = CountingDetail::default();
+
+    // Act + Assert: unreferenced rename and delete succeed without asking.
+    let renamed = groups
+        .rename(gid, &uniq("t_lazy_renamed"), &Recorder::default(), &detail)
+        .await
+        .expect("an unreferenced rename needs no detail");
+    assert_eq!(renamed, 1);
+    let deleted = groups
+        .delete_local(gid, &Recorder::default(), &detail)
+        .await
+        .expect("an unreferenced delete needs no detail");
+    assert_eq!(deleted, 1);
+    assert_eq!(
+        detail.asked.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "nothing names the group, so the detail must not be asked for"
+    );
+
+    // Arrange: a referenced group.
+    let name = uniq("t_lazy_ref");
+    let gid = groups
+        .create_local(&name, &Recorder::default())
+        .await
+        .unwrap();
+    let rc = Recorder::with_references(vec![egret_auth::groups::GroupReference {
+        group_name: name.clone(),
+        source: "grant".into(),
+        id: uuid::Uuid::new_v4(),
+        rule_name: None,
+        effect: Some("allow".into()),
+        position: "include".into(),
+    }]);
+
+    // Act + Assert: the refusal asks, once, and its error is what surfaces.
+    let err = groups.delete_local(gid, &rc, &detail).await.unwrap_err();
+    assert!(matches!(err, egret_core::Error::Internal(_)), "{err:?}");
+    assert_eq!(detail.asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
