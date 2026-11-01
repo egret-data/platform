@@ -737,3 +737,92 @@ async fn the_reference_detail_is_asked_only_when_the_write_is_refused() {
     assert!(matches!(err, egret_core::Error::Internal(_)), "{err:?}");
     assert_eq!(detail.asked.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
+
+/// KI-324: a role grant names its group by id with no foreign key, so a group
+/// delete must take the group's `access_grants` rows (every scope) with it, in
+/// the same transaction — and leave another group's grants alone.
+#[tokio::test]
+async fn deleting_a_group_removes_its_role_grants() {
+    let Some(db) = connect().await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    // Arrange: two local groups, each granted a platform role, a workspace
+    // role and an object role.
+    let groups = GroupRepo::new(db.clone());
+    let doomed = groups
+        .create_local(&uniq("t_grant_doomed"), &Recorder::default())
+        .await
+        .unwrap();
+    let kept = groups
+        .create_local(&uniq("t_grant_kept"), &Recorder::default())
+        .await
+        .unwrap();
+    let workspace = uuid::Uuid::new_v4();
+    for gid in [doomed, kept] {
+        sqlx::query(
+            "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+             SELECT 'group', $1, id, 'platform', NULL FROM roles \
+              WHERE scope = 'platform' AND name <> 'platform_admin' \
+             ORDER BY name LIMIT 1",
+        )
+        .bind(gid)
+        .execute(&db.pool)
+        .await
+        .expect("platform grant");
+        sqlx::query(
+            "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+             SELECT 'group', $1, id, 'workspace', $2 FROM roles \
+              WHERE scope = 'workspace' ORDER BY name LIMIT 1",
+        )
+        .bind(gid)
+        .bind(workspace)
+        .execute(&db.pool)
+        .await
+        .expect("workspace grant");
+        sqlx::query(
+            "INSERT INTO access_grants \
+               (principal_type, principal_id, role_id, scope_type, object_type, scope_id, effect) \
+             SELECT 'group', $1, id, 'object', 'dashboard', $2, 'deny' FROM roles \
+              WHERE scope = 'workspace' ORDER BY name LIMIT 1",
+        )
+        .bind(gid)
+        .bind(uuid::Uuid::new_v4())
+        .execute(&db.pool)
+        .await
+        .expect("object grant");
+    }
+    let count = |gid: uuid::Uuid| {
+        let pool = db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM access_grants \
+                  WHERE principal_type = 'group' AND principal_id = $1",
+            )
+            .bind(gid)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(
+        count(doomed).await,
+        3,
+        "positive control: three grants seeded"
+    );
+
+    // Act
+    let rows = groups
+        .delete_local(
+            doomed,
+            &Recorder::default(),
+            egret_auth::groups::ReferenceDetail::Entries,
+        )
+        .await
+        .unwrap();
+
+    // Assert
+    assert_eq!(rows, 1);
+    assert_eq!(count(doomed).await, 0, "the deleted group's grants must go");
+    assert_eq!(count(kept).await, 3, "another group's grants must stay");
+}
