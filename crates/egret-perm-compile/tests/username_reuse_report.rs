@@ -707,3 +707,55 @@ async fn the_stronger_verdict_wins_when_live_and_baseline_disagree() {
         "{f:?}"
     );
 }
+
+/// A `platform_admin` grant of `effect`, expiring at `expires` (NULL: never).
+async fn admin_grant(e: &Env, user: Uuid, effect: &str, expires: Option<&str>) {
+    sqlx::query(
+        "INSERT INTO access_grants \
+           (principal_type, principal_id, role_id, scope_type, effect, expires_at) \
+         SELECT 'user', $1, id, 'platform', $2, $3::timestamptz FROM roles \
+          WHERE scope = 'platform' AND name = 'platform_admin'",
+    )
+    .bind(user)
+    .bind(effect)
+    .bind(expires)
+    .execute(&e.db.pool)
+    .await
+    .expect("platform_admin grant");
+}
+
+/// The report's admins are the engine seed set (`engine_admin_user_ids_via`,
+/// #810): only a live `allow` grant makes an admin. A `deny` or lapsed grant
+/// does not, so the `egret-admin` body still naming that user is a finding,
+/// as for anyone else who is no admin.
+#[tokio::test]
+async fn a_deny_or_lapsed_admin_grant_makes_no_admin_in_the_report() {
+    let Some(e) = env().await else { return };
+    // Arrange: three active users named by a live `egret-admin` body.
+    let live = format!("live_{}", tag());
+    let denied = format!("denied_{}", tag());
+    let lapsed = format!("lapsed_{}", tag());
+    let live_id = user(&e.db, Some(&live)).await;
+    admin_grant(&e, live_id, "allow", None).await;
+    let denied_id = user(&e.db, Some(&denied)).await;
+    admin_grant(&e, denied_id, "deny", None).await;
+    let lapsed_id = user(&e.db, Some(&lapsed)).await;
+    admin_grant(&e, lapsed_id, "allow", Some(LONG_AGO)).await;
+    for name in [&live, &denied, &lapsed] {
+        policy_naming(&e, "infra", "egret-admin - catalog", name).await;
+    }
+    let mut conn = e.db.pool.acquire().await.expect("conn");
+    let seed = egret_auth::roles::engine_admin_user_ids_via(&mut conn)
+        .await
+        .expect("engine admin set");
+    assert!(seed.iter().any(|u| u.0 == live_id), "positive control");
+    assert!(!seed.iter().any(|u| u.0 == denied_id || u.0 == lapsed_id));
+
+    // Act + Assert: the live admin is no finding; the other two are.
+    assert!(findings_for(&e, &live).await.is_empty());
+    for name in [&denied, &lapsed] {
+        let f = findings_for(&e, name).await;
+        assert_eq!(f.len(), 1, "{name}: {f:?}");
+        assert_eq!(f[0]["kind"], "admin_policy_named_non_admin", "{f:?}");
+    }
+}

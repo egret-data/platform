@@ -1048,3 +1048,70 @@ async fn the_grant_list_says_which_accounts_keep_invoke_after_a_revoke() {
     let kept = f.call_as(f.member_account, "x").await;
     assert_eq!(kept.status, StatusCode::OK, "{}", kept.body);
 }
+
+/// Only a live `allow` row is "already granted". An expired `allow` row used to
+/// make a re-grant a no-op (the INSERT conflicted with it), so the account
+/// stayed without access after a 200; the re-grant must leave a live grant.
+#[tokio::test]
+async fn re_granting_over_an_expired_grant_restores_invoke() {
+    let f = skip_without_db!();
+    // Arrange: a grant that has since lapsed.
+    let ep = f.publish_endpoint("GET", "/x", "SELECT 1 AS n").await;
+    let first = f.grant_invoke(f.service_account, ep).await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+    sqlx::query("UPDATE access_grants SET expires_at = now() - interval '1 day' WHERE id = $1")
+        .bind(Uuid::parse_str(first.body["id"].as_str().unwrap()).unwrap())
+        .execute(&f.db.pool)
+        .await
+        .expect("expire the grant");
+    assert_eq!(
+        f.call("x").await.status,
+        StatusCode::FORBIDDEN,
+        "positive control: a lapsed grant does not admit"
+    );
+
+    // Act
+    let again = f.grant_invoke(f.service_account, ep).await;
+
+    // Assert
+    assert_eq!(again.status, StatusCode::OK, "{}", again.body);
+    let after = f.call("x").await;
+    assert_eq!(after.status, StatusCode::OK, "{}", after.body);
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM access_grants WHERE principal_id = $1 AND scope_id = $2",
+    )
+    .bind(f.service_account)
+    .bind(ep)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, 1, "one grant row per (account, endpoint)");
+}
+
+/// A `deny` row on the same (account, endpoint) is no grant either: a grant
+/// must leave the account able to invoke, not an `allow` the `deny` overrides.
+#[tokio::test]
+async fn granting_over_a_deny_row_gives_invoke() {
+    let f = skip_without_db!();
+    // Arrange: a deny row written straight into the database.
+    let ep = f.publish_endpoint("GET", "/x", "SELECT 1 AS n").await;
+    sqlx::query(
+        "INSERT INTO access_grants \
+           (principal_type, principal_id, role_id, scope_type, object_type, scope_id, effect) \
+         SELECT 'user', $1, role_id, 'object', 'data_api_endpoint', $2, 'deny' \
+           FROM (SELECT id AS role_id FROM roles WHERE scope = 'workspace' AND name = 'data_api_invoker') r",
+    )
+    .bind(f.service_account)
+    .bind(ep)
+    .execute(&f.db.pool)
+    .await
+    .expect("deny row");
+
+    // Act
+    let g = f.grant_invoke(f.service_account, ep).await;
+
+    // Assert
+    assert_eq!(g.status, StatusCode::OK, "{}", g.body);
+    let after = f.call("x").await;
+    assert_eq!(after.status, StatusCode::OK, "{}", after.body);
+}

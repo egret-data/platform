@@ -1027,6 +1027,10 @@ impl GroupRepo {
     /// every grant and rule write takes before it validates (R3), so the
     /// answer holds until this commits.
     ///
+    /// The group's role grants (`access_grants` rows whose principal is the
+    /// group: platform, workspace and object scope) go with it, in the same
+    /// transaction (KI-324): they name the group by id with no foreign key.
+    ///
     /// `user_groups.group_id` is `ON DELETE CASCADE`
     /// (`migrations/0002_identity.sql`), so this removes EVERY member at once —
     /// the largest REMOVE there is — and is recompiled like one. Since R1 an
@@ -1077,6 +1081,16 @@ impl GroupRepo {
         let services = recompiler
             .lock_affected_in_tx(&mut tx, std::slice::from_ref(&name))
             .await?;
+        // KI-324: a role grant names the group by id with no foreign key, so
+        // the cascade below leaves it behind. Removed in the same transaction,
+        // after the affected set above was read from it.
+        sqlx::query(
+            "DELETE FROM access_grants WHERE principal_type = 'group' AND principal_id = $1",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
         let rows = sqlx::query("DELETE FROM groups WHERE id = $1 AND source = 'local'")
             .bind(id)
             .execute(&mut *tx)
