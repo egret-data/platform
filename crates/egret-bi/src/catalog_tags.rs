@@ -317,11 +317,6 @@ impl CatalogTagRepo {
     }
 }
 
-/// Refuse (409, code `table_change_held`) a write on `schema.table` while a
-/// hold holds the table's name: a rename of the table that is waiting for the
-/// engines would leave this write on the old name, or put back on the new one
-/// a classification just removed (rename review finding 2). A try-lock on
-/// this transaction, released at its end, so no hold can start meanwhile.
 /// Something an assignment that succeeded wants its author to know.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct AssignNotice {
@@ -417,6 +412,11 @@ pub struct AssignResourceTagResponse {
     pub notices: Vec<AssignNotice>,
 }
 
+/// Refuse (409, code `table_change_held`) a write on `schema.table` while a
+/// hold holds the table's name: a rename of the table that is waiting for the
+/// engines would leave this write on the old name, or put back on the new one
+/// a classification just removed (rename review finding 2). A try-lock on
+/// this transaction, released at its end, so no hold can start meanwhile.
 async fn refuse_while_held(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     warehouse_id: Uuid,

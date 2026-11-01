@@ -428,10 +428,6 @@ pub async fn table_states_ns_via(
         .collect())
 }
 
-/// The Lakekeeper `tabular_id` (the Iceberg table uuid, which a rename keeps)
-/// of the active table `schema.table`, `None` when there is none. The table
-/// hook compares it before and after a rename Lakekeeper answered non-2xx, to
-/// tell whether the rename committed anyway (review finding 4).
 /// Every active table of one egret warehouse, as `(namespace, table)` in the
 /// catalog's own spelling: the enumeration a wildcard data mask is planned
 /// against, since a Ranger wildcard names no table itself. Same "active"
@@ -463,21 +459,55 @@ pub async fn is_active_view_via(
     schema: &str,
     view: &str,
 ) -> Result<bool, CompileError> {
-    sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM catalog.warehouses w \
-           JOIN lakekeeper.tabular ti ON ti.warehouse_id::text = w.lakekeeper_warehouse_id \
-          WHERE w.id = $1 AND ti.typ = 'view' AND ti.deleted_at IS NULL \
-            AND ti.metadata_location IS NOT NULL AND cardinality(ti.tabular_namespace_name) = 1 \
-            AND lower(ti.tabular_namespace_name[1]) = lower($2) AND lower(ti.name) = lower($3))",
-    )
-    .bind(warehouse_id)
-    .bind(schema)
-    .bind(view)
-    .fetch_one(&mut *conn)
-    .await
-    .map_err(|e| CompileError::from_db_in("reading whether a name is a view in the catalog", e))
+    let key = TableKey {
+        warehouse_id,
+        schema: schema.to_string(),
+        table: view.to_string(),
+    };
+    Ok(active_views_batch_via(conn, std::slice::from_ref(&key))
+        .await?
+        .pop()
+        .unwrap_or(false))
 }
 
+/// [`is_active_view_via`] for many names in one query; the answer is in
+/// `keys`' order.
+pub async fn active_views_batch_via(
+    conn: &mut sqlx::PgConnection,
+    keys: &[TableKey],
+) -> Result<Vec<bool>, CompileError> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let warehouses: Vec<Uuid> = keys.iter().map(|k| k.warehouse_id).collect();
+    let schemas: Vec<String> = keys.iter().map(|k| k.schema.clone()).collect();
+    let names: Vec<String> = keys.iter().map(|k| k.table.clone()).collect();
+    let rows: Vec<(i64, bool)> = sqlx::query_as(
+        "SELECT q.ord, EXISTS (SELECT 1 FROM catalog.warehouses w \
+                  JOIN lakekeeper.tabular ti \
+                    ON ti.warehouse_id::text = w.lakekeeper_warehouse_id \
+                 WHERE w.id = q.warehouse_id AND ti.typ = 'view' AND ti.deleted_at IS NULL \
+                   AND ti.metadata_location IS NOT NULL \
+                   AND cardinality(ti.tabular_namespace_name) = 1 \
+                   AND lower(ti.tabular_namespace_name[1]) = lower(q.schema_name) \
+                   AND lower(ti.name) = lower(q.view_name)) \
+           FROM unnest($1::uuid[], $2::text[], $3::text[]) WITH ORDINALITY \
+                AS q(warehouse_id, schema_name, view_name, ord) \
+          ORDER BY q.ord",
+    )
+    .bind(&warehouses)
+    .bind(&schemas)
+    .bind(&names)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|e| CompileError::from_db_in("reading whether names are views in the catalog", e))?;
+    Ok(rows.into_iter().map(|(_, view)| view).collect())
+}
+
+/// The Lakekeeper `tabular_id` (the Iceberg table uuid, which a rename keeps)
+/// of the active table `schema.table`, `None` when there is none. The table
+/// hook compares it before and after a rename Lakekeeper answered non-2xx, to
+/// tell whether the rename committed anyway (review finding 4).
 pub async fn live_tabular_id_via(
     conn: &mut sqlx::PgConnection,
     warehouse_id: Uuid,

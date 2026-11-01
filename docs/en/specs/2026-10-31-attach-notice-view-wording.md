@@ -42,5 +42,10 @@ through views, measured (view governance A2), is a base table's column mask.
 - The frontend shows `notice.message` as a warning toast for any code, so no
   frontend logic changes; the OpenAPI description and the generated model doc
   list the new code.
-- Out of scope, reported: the recompile's skip text in `clearance.rs` still says
-  "(unknown, a view, or not yet created) … until the table exists".
+- The recompile's skip text in `clearance.rs` (the `skipped` list of
+  `POST /perm/compile`) told the same wrong promise. It now tells a view apart
+  the same way (`table_columns::active_views_batch_via`, one batch query over
+  the names the column read did not find), with the same wording; an unknown
+  name keeps "until the table exists".
+- Two doc comments #818 separated from their functions are moved back
+  (`refuse_while_held`, `live_tabular_id_via`).
