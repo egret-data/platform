@@ -74,6 +74,10 @@ impl Authorizer {
     }
 
     /// Replace the user's platform role assignments with the supplied (validated) role names.
+    ///
+    /// Refused with `Conflict` (`egret_auth::roles::LAST_ADMIN_REFUSAL`) when
+    /// the new set would leave no active platform admin, under
+    /// `egret_auth::roles::LastAdminGuard` on this transaction (KI-284).
     pub async fn replace_platform_roles(&self, user_id: UserId, roles: &[String]) -> Result<()> {
         for r in roles {
             if !PLATFORM_ROLES.contains(&r.as_str()) {
@@ -81,6 +85,9 @@ impl Authorizer {
             }
         }
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+        // KI-284: taken before the reads below and the profile locks
+        // (`LastAdminGuard`'s doc for the lock order).
+        let guard = egret_auth::roles::LastAdminGuard::lock_via(&mut tx).await?;
 
         // **SP4c Task 3, input 3: who holds the clearing role.** This method
         // REPLACES a user's whole platform role set, so the affected services are
@@ -151,6 +158,7 @@ impl Authorizer {
             .await
             .map_err(db_err)?;
         }
+        guard.refuse_if_emptied_via(&mut tx).await?;
         // A recompile FAILURE fails the whole replace, deliberately: a committed
         // role set whose engine policies were never rewritten is worse than a
         // rejected one, because egret's UI shows the new set as in force.

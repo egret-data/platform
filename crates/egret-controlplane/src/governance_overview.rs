@@ -57,7 +57,7 @@ const KNOWN_PERMISSIONS: [&str; 4] = [POLICY_READ, TAG_READ, ENGINE_READ, CATALO
 /// in `held` (username-takeover spec §4.5). The username-reuse source shows
 /// emails and holders across workspaces, so only an admin runs it; everyone
 /// else gets it in `notChecked`.
-const PLATFORM_ADMIN: &str = "platform_admin";
+const PLATFORM_ADMIN: &str = egret_core::context::PLATFORM_ADMIN_ROLE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
@@ -413,7 +413,7 @@ async fn attention(
             Err(e) => return Err(e.into()),
         }
     }
-    if p.platform_roles.iter().any(|r| r == PLATFORM_ADMIN) {
+    if p.is_platform_admin() {
         held.insert(PLATFORM_ADMIN);
     }
     let mut tx = begin_snapshot(&st).await?;

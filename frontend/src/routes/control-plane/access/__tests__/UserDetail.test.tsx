@@ -32,6 +32,7 @@ const USERS: api.AccessUser[] = [
     provider: "local",
     status: "active",
     roles: ["data_steward"],
+    effectiveRoles: [{ name: "data_steward", group: null }],
     groups: ["Engineering"],
     username: "alice_eng",
   },
@@ -42,6 +43,7 @@ const USERS: api.AccessUser[] = [
     provider: "oidc",
     status: "active",
     roles: ["platform_admin"],
+    effectiveRoles: [{ name: "platform_admin", group: null }],
     groups: [],
     username: null,
   },
@@ -52,8 +54,20 @@ const USERS: api.AccessUser[] = [
     provider: "local",
     status: "disabled",
     roles: [],
+    effectiveRoles: [],
     groups: [],
     username: "otto",
+  },
+  {
+    id: "u4",
+    email: "grace@example.com",
+    name: "Grace",
+    provider: "oidc",
+    status: "active",
+    roles: [],
+    effectiveRoles: [{ name: "platform_admin", group: "platform-admins" }],
+    groups: ["platform-admins"],
+    username: "grace",
   },
 ];
 
@@ -251,6 +265,25 @@ describe("UserDetail", () => {
     await user.click(screen.getByRole("button", { name: /^Disable$/ }));
     const dialog = await screen.findByRole("alertdialog");
     expect(dialog).toHaveTextContent("Their engine username stays theirs.");
+    expect(dialog).toHaveTextContent("While disabled they lose all-access on engines.");
+  });
+
+  test("a role held through a group is listed with its group (KI-260)", async () => {
+    renderDetail("u4");
+    await screen.findByRole("heading", { name: "Grace" });
+
+    const table = screen.getByRole("table", { name: "Roles held through groups" });
+    const row = within(table).getByRole("row", { name: /platform_admin/ });
+    expect(row).toHaveTextContent("platform-admins");
+  });
+
+  test("disabling a platform admin through a group says they lose all-access on engines (KI-285)", async () => {
+    const user = userEvent.setup();
+    renderDetail("u4");
+    await screen.findByRole("heading", { name: "Grace" });
+
+    await user.click(screen.getByRole("button", { name: /^Disable$/ }));
+    const dialog = await screen.findByRole("alertdialog");
     expect(dialog).toHaveTextContent("While disabled they lose all-access on engines.");
   });
 });

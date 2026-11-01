@@ -33,8 +33,8 @@ const ROLES: api.AccessRole[] = [
 ];
 
 const USERS: api.AccessUser[] = [
-  { id: "u1", email: "alice@example.com", name: "Alice", provider: "local", status: "active", roles: [], groups: [] },
-  { id: "u2", email: "bob@example.com", name: "Bob", provider: "local", status: "active", roles: [], groups: [] },
+  { id: "u1", email: "alice@example.com", name: "Alice", provider: "local", status: "active", roles: [], effectiveRoles: [], groups: [] },
+  { id: "u2", email: "bob@example.com", name: "Bob", provider: "local", status: "active", roles: [], effectiveRoles: [], groups: [] },
 ];
 
 const GROUP_MEMBERS: api.GroupMember[] = [

@@ -19,7 +19,7 @@ use axum::http::StatusCode;
 use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use egret_auth::principal::Auth;
-use egret_auth::roles::is_seeded;
+use egret_auth::roles::{is_seeded, LastAdminGuard};
 use egret_core::rbac;
 use egret_core::UserId;
 use serde::{Deserialize, Serialize};
@@ -31,8 +31,6 @@ use egret_core::http::ErrorBody;
 use crate::error::CpError;
 use crate::CpState;
 
-/// The platform role every last-admin guard protects.
-const PLATFORM_ADMIN_ROLE: &str = "platform_admin";
 /// Cap for the admin Users/Groups/Roles list views (control-plane admin
 /// surfaces; not paginated in the UI yet).
 const LIST_LIMIT: i64 = 1000;
@@ -68,83 +66,63 @@ pub fn router() -> Router<CpState> {
         .route("/access/who-can-access", get(who_can_access))
 }
 
-/// Reject removing a role assignment that would leave no active platform
-/// admin — shared by the user- and group-role unassign endpoints.
-///
-/// "Active platform admin" is the engine-admin definition
-/// (`egret_auth::roles::engine_admin_user_ids_via`, username-takeover spec
-/// 2026-10-23 §10): a disabled admin cannot sign in, so it does not keep the
-/// platform managed. Only a demotion that takes the set from non-empty to empty
-/// is refused.
-async fn guard_last_admin(
+/// Revoke platform role `role_id` from (`principal_type`, `principal_id`)
+/// under the last-admin guard (KI-284), shared by the user- and group-role
+/// unassign routes: the guard's lock, the revoke and its recompile, and the
+/// guard's check share one transaction, so a revoke that would leave no active
+/// platform admin (directly or through a group) is refused with 409 and rolled
+/// back, and two concurrent revokes cannot both pass
+/// (`egret_auth::roles::LastAdminGuard`).
+async fn unassign_role_guarded(
     st: &CpState,
     principal_type: &str,
     principal_id: Uuid,
     role_id: Uuid,
 ) -> Result<(), CpError> {
-    let role = st.roles.get(role_id).await?.ok_or(CpError::NotFound)?;
-    if role.name != PLATFORM_ADMIN_ROLE {
-        return Ok(());
-    }
-    let mut conn = st
-        .roles
-        .pool()
-        .acquire()
-        .await
-        .map_err(|e| egret_core::Error::Internal(e.into()))?;
-    let now = egret_auth::roles::engine_admin_user_ids_via(&mut conn).await?;
-    let after = egret_auth::roles::engine_admin_user_ids_without_grant_via(
-        &mut conn,
+    st.roles.get(role_id).await?.ok_or(CpError::NotFound)?;
+    let mut tx = st.roles.pool().begin().await.map_err(internal)?;
+    let guard = LastAdminGuard::lock_via(&mut tx).await?;
+    egret_perm_compile::unassign_platform_role_and_recompile_in_tx(
+        &mut tx,
         principal_type,
         principal_id,
+        role_id,
     )
-    .await?;
-    if !now.is_empty() && after.is_empty() {
-        return Err(CpError::Conflict(
-            "Cannot remove the last active platform admin".to_string(),
-        ));
-    }
+    .await
+    .map_err(CpError::from)?;
+    guard.refuse_if_emptied_via(&mut tx).await?;
+    tx.commit().await.map_err(internal)?;
     Ok(())
 }
 
-/// Reject an action that would remove the last active platform admin, or that
-/// a caller aims at their own account. Reused by disable + delete (Task 4).
-///
-/// "Active" is the engine-admin definition
-/// (`egret_auth::roles::engine_admin_user_ids_via`): a disabled admin does not
-/// count, so the last ACTIVE admin cannot be disabled or deleted while a
-/// disabled one remains (username-takeover spec 2026-10-23 §10).
-///
-/// A self-target is a `BadRequest` (400) — a bad actor/target, not a state
-/// conflict — while removing the last admin is a `Conflict` (409), matching the
-/// sibling `guard_last_admin`. Like `guard_last_admin`, this check-then-act is
-/// TOCTOU-racy — a known, accepted limitation: two concurrent disables aimed at
-/// different admins in a 2-admin system could both read `len == 2`, pass, and
-/// leave zero admins. The window is tiny and admin-only; a hard invariant would
-/// need a DB constraint or a serialized transaction.
-async fn guard_not_last_admin(
-    st: &CpState,
-    caller: &egret_core::Principal,
-    target: UserId,
-) -> Result<(), CpError> {
+/// Disable `target` under the last-admin guard (KI-284): the guard's lock, the
+/// status write and its `egret-admin` sync, and the guard's check share one
+/// transaction (`egret_auth::roles::LastAdminGuard`).
+async fn disable_user_guarded(st: &CpState, target: UserId) -> Result<(), CpError> {
+    let mut tx = st.roles.pool().begin().await.map_err(internal)?;
+    let guard = LastAdminGuard::lock_via(&mut tx).await?;
+    egret_perm_compile::set_user_status_and_recompile_in_tx(&mut tx, target.0, "disabled")
+        .await
+        .map_err(CpError::from)?;
+    guard.refuse_if_emptied_via(&mut tx).await?;
+    tx.commit().await.map_err(internal)?;
+    Ok(())
+}
+
+/// Refuse a disable or delete a caller aims at their own account (400: a bad
+/// target, not a state conflict). Whether the target is the last active
+/// platform admin is decided by the write itself, under the last-admin guard.
+fn refuse_self_target(caller: &egret_core::Principal, target: UserId) -> Result<(), CpError> {
     if caller.user_id == target {
         return Err(CpError::BadRequest(
             "you cannot disable or delete your own account".into(),
         ));
     }
-    let mut conn = st
-        .roles
-        .pool()
-        .acquire()
-        .await
-        .map_err(|e| egret_core::Error::Internal(e.into()))?;
-    let admins = egret_auth::roles::engine_admin_user_ids_via(&mut conn).await?;
-    if admins.contains(&target) && admins.iter().all(|a| *a == target) {
-        return Err(CpError::Conflict(
-            "Cannot remove the last active platform admin".into(),
-        ));
-    }
     Ok(())
+}
+
+fn internal(e: sqlx::Error) -> CpError {
+    CpError::from(egret_core::Error::Internal(e.into()))
 }
 
 /// A service account is a `users` row (Data API P2) with no password and no
@@ -156,7 +134,7 @@ async fn guard_not_last_admin(
 /// service account, and `ClientStore::verify` honours it, but the only API that
 /// can set it is the `status` branch of [`update_user`]. Refusing a service
 /// account for the whole of `PATCH /users/{id}` therefore deleted the documented
-/// kill switch — and with it the `user:disable` re-check, `guard_not_last_admin`
+/// kill switch — and with it the `user:disable` re-check, the last-admin guard
 /// and session revocation that branch already performs. So the refusal covers
 /// name/email and lets `status` through.
 async fn refuse_service_account_profile(st: &CpState, id: UserId) -> Result<(), CpError> {
@@ -185,12 +163,43 @@ pub struct UserDto {
     pub name: String,
     pub provider: String,
     pub status: String,
+    /// Platform roles granted to the user directly — the ones the Roles
+    /// editor can unassign.
     pub roles: Vec<String>,
+    /// Every platform role the user holds, directly or through a group, each
+    /// with where it comes from (KI-260): what decides their access, and what
+    /// the last-admin guard counts.
+    pub effective_roles: Vec<EffectiveRoleDto>,
     pub groups: Vec<String>,
     /// The engine username, `null` until one is minted. Read-only: a delete
     /// retires it for good (username-takeover spec 2026-10-23 §4.4), so the
     /// delete dialog names it.
     pub username: Option<String>,
+}
+
+/// One platform role a user holds, and where from.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[schema(as = ControlPlaneEffectiveRoleDto)]
+#[serde(rename_all = "camelCase")]
+pub struct EffectiveRoleDto {
+    pub name: String,
+    /// The group the role is held through; `null` when granted directly. A
+    /// role held both ways appears once per source.
+    pub group: Option<String>,
+}
+
+/// The effective platform roles of `ids`, keyed by user id.
+async fn effective_roles_of(
+    st: &CpState,
+    ids: &[Uuid],
+) -> Result<HashMap<Uuid, Vec<EffectiveRoleDto>>, CpError> {
+    let mut out: HashMap<Uuid, Vec<EffectiveRoleDto>> = HashMap::new();
+    for (user_id, name, group) in st.roles.effective_platform_roles_of_users(ids).await? {
+        out.entry(user_id)
+            .or_default()
+            .push(EffectiveRoleDto { name, group });
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -233,6 +242,7 @@ async fn list_users(
     let users = st.users.list(LIST_LIMIT, 0).await?;
     let ids: Vec<Uuid> = users.iter().map(|u| u.id.0).collect();
     let mut usernames = st.users.usernames(&ids).await?;
+    let mut effective = effective_roles_of(&st, &ids).await?;
     let mut out = Vec::with_capacity(users.len());
     for u in users {
         let roles = st
@@ -250,6 +260,7 @@ async fn list_users(
             provider: u.provider,
             status: u.status,
             roles,
+            effective_roles: effective.remove(&u.id.0).unwrap_or_default(),
             groups,
             username: usernames.remove(&u.id.0),
         });
@@ -291,6 +302,7 @@ async fn create_user(
             provider: "local".to_string(),
             status: "active".to_string(),
             roles: vec![],
+            effective_roles: vec![],
             groups: vec![],
             username: None,
         }),
@@ -343,12 +355,11 @@ async fn update_user(
         if status == "disabled" {
             // Disabling is a stronger action than a plain profile update.
             egret_core::authz::require(&*st.pdp, &p, "user:disable").await?;
-            guard_not_last_admin(&st, &p, user_id).await?;
+            refuse_self_target(&p, user_id)?;
             // Username takeover (spec 2026-10-23 §4.2): a disabled admin
-            // leaves every `egret-admin` set in the same commit.
-            egret_perm_compile::set_user_status_and_recompile(st.roles.pool(), id, status)
-                .await
-                .map_err(CpError::from)?;
+            // leaves every `egret-admin` set in the same commit — refused if
+            // they are the last active platform admin (KI-284).
+            disable_user_guarded(&st, user_id).await?;
             // Immediate lockout: kill the user's live sessions now, rather than
             // waiting for `SessionService::validate` to reject them on their
             // next request.
@@ -374,6 +385,10 @@ async fn update_user(
         .collect();
     let groups = st.groups.groups_of_user(user_id).await?;
     let username = st.users.usernames(&[id]).await?.remove(&id);
+    let effective_roles = effective_roles_of(&st, &[id])
+        .await?
+        .remove(&id)
+        .unwrap_or_default();
     Ok(Json(UserDto {
         id: updated.id.0,
         email: updated.email,
@@ -381,14 +396,15 @@ async fn update_user(
         provider: updated.provider,
         status: updated.status,
         roles,
+        effective_roles,
         groups,
         username,
     }))
 }
 
 /// `DELETE /users/{id}` — hard-delete a user (Task 4). Guards: not yourself,
-/// not the last active platform admin (`guard_not_last_admin`, shared with the
-/// disable branch of `update_user`). Cleans up the user's sessions, group
+/// not the last active platform admin (the last-admin guard inside
+/// `UserRepo::hard_delete`, KI-284). Cleans up the user's sessions, group
 /// memberships, and platform role/permission grants, then removes the row
 /// itself, in one transaction (`UserRepo::hard_delete`).
 #[utoipa::path(
@@ -417,7 +433,7 @@ async fn delete_user(
         .find_by_id(user_id)
         .await?
         .ok_or(CpError::NotFound)?;
-    guard_not_last_admin(&st, &p, user_id).await?;
+    refuse_self_target(&p, user_id)?;
     // J-F3 Task 1b: deleting a user removes them from every group (FK cascade),
     // and a group compiles to its members — so the policies their groups reach
     // are recompiled in the delete's own transaction
@@ -554,15 +570,12 @@ async fn unassign_user_role(
     Path((id, role_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "user:assign_role").await?;
-    guard_last_admin(&st, "user", id, role_id).await?;
     // SP4c Task 3: the REVOKE direction, which is the one that fails OPEN when
     // its recompile is missed — the revoked holder stays named in every clearance
     // exception and every role-granted policy, still reading a classified column
     // whose clearance was taken away, with the `access_grants` row egret's own UI
     // reads showing the revoke as done.
-    egret_perm_compile::unassign_platform_role_and_recompile(st.roles.pool(), "user", id, role_id)
-        .await
-        .map_err(CpError::from)?;
+    unassign_role_guarded(&st, "user", id, role_id).await?;
     st.audit.emit(egret_audit::mutation_for(
         &p,
         None,
@@ -728,7 +741,7 @@ async fn rename_group(
         (status = 204, description = "Group deleted"),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing group:delete permission", body = ErrorBody),
-        (status = 409, description = "Cannot delete an OIDC-synced group; or grants or rule exemptions still name the group (the message lists them to a caller with policy:read, and otherwise gives only their count; remove them first)", body = ErrorBody),
+        (status = 409, description = "Cannot delete an OIDC-synced group; or grants or rule exemptions still name the group (the message lists them to a caller with policy:read, and otherwise gives only their count; remove them first); or the delete would remove the last active platform admin (a member who holds platform_admin only through this group)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -859,6 +872,7 @@ async fn add_group_member(
         (status = 204, description = "User removed from the group"),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Requires platform_admin", body = ErrorBody),
+        (status = 409, description = "Would remove the last active platform admin (the user holds platform_admin only through this group)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -952,10 +966,7 @@ async fn unassign_group_role(
     Path((id, role_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "user:assign_role").await?;
-    guard_last_admin(&st, "group", id, role_id).await?;
-    egret_perm_compile::unassign_platform_role_and_recompile(st.roles.pool(), "group", id, role_id)
-        .await
-        .map_err(CpError::from)?;
+    unassign_role_guarded(&st, "group", id, role_id).await?;
     st.audit.emit(egret_audit::mutation_for(
         &p,
         None,
