@@ -101,7 +101,14 @@
   --card-foreground: oklch(0.21 0.11 263.16);
   --popover: oklch(0.98 0 264.7);
   --popover-foreground: oklch(0.14 0 285.86);
-  --primary: oklch(0.59 0.15 185);
+  /* Was `oklch(0.59 …)`: white `--primary-foreground` on it measured 3.50:1, a
+     fail of WCAG 1.4.3 for the 12-13px labels of the default Badge and Button.
+     0.46 is set by the tightest pair built on this token, not the plain fill:
+     the hover fill (`/90` over the page) reads 4.80:1 and the 10% tint behind
+     teal ink on a muted row 4.88:1; the plain fill reads 5.85:1 and teal ink
+     on the page 6.00:1. Hue and chroma are unchanged; dark is unchanged.
+     Measured in Chromium by tests/e2e/badge-variant-contrast.spec.ts. */
+  --primary: oklch(0.46 0.15 185);
   --primary-foreground: oklch(0.99 0 0);
   --secondary: oklch(0.95 0.01 258.36);
   --dashboard: oklch(0.955 0.004 270); /* Metabase-style light-gray dashboard canvas (cards float on this) */
