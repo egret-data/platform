@@ -572,6 +572,15 @@ pub enum CompileError {
     /// the parse error itself.
     #[error("database error: {0}")]
     Db(String),
+    /// A database error whose SQLSTATE is 55P03 (`lock_not_available`): a
+    /// lock wait ran past the transaction's `lock_timeout`. Callers answer it
+    /// as "busy, retry", not as a refusal of the write. Built only by
+    /// [`CompileError::from_db`] / [`CompileError::from_db_in`], which read the
+    /// SQLSTATE, never the message: Postgres translates the message under a
+    /// non-English `lc_messages`. Carries the same rendered text as
+    /// [`Self::Db`], for the same reason (`Clone + PartialEq + Eq`).
+    #[error("database error: {0}")]
+    LockTimeout(String),
     /// A hidden-column deny the compiler cannot plan: the wildcard data mask
     /// `selector` (`catalog.database.table`) matches tables that cannot be
     /// listed, because no registered catalog matches its catalog level or the
@@ -592,7 +601,45 @@ pub enum CompileError {
     InvalidEngineGrant { id: uuid::Uuid, reason: String },
 }
 
+/// SQLSTATE `lock_not_available`: a lock wait ran past `lock_timeout`.
+const LOCK_NOT_AVAILABLE: &str = "55P03";
+
 impl CompileError {
+    /// A database error, as [`Self::LockTimeout`] when its SQLSTATE is 55P03
+    /// and as [`Self::Db`] otherwise. The one place a `sqlx::Error` becomes a
+    /// `CompileError`.
+    pub fn from_db(e: sqlx::Error) -> Self {
+        let message = e.to_string();
+        Self::classified(&e, message)
+    }
+
+    /// [`Self::from_db`], its message prefixed with `context` (`"{context}: {e}"`).
+    pub fn from_db_in(context: &str, e: sqlx::Error) -> Self {
+        let message = format!("{context}: {e}");
+        Self::classified(&e, message)
+    }
+
+    /// A `perm` store error: its database error through [`Self::from_db`],
+    /// anything else as [`Self::Db`].
+    pub fn from_perm(e: crate::PermError) -> Self {
+        match e {
+            crate::PermError::Db(e) => Self::from_db(e),
+            other => Self::Db(other.to_string()),
+        }
+    }
+
+    fn classified(e: &sqlx::Error, message: String) -> Self {
+        let lock_timeout = e
+            .as_database_error()
+            .and_then(|d| d.code())
+            .is_some_and(|c| c == LOCK_NOT_AVAILABLE);
+        if lock_timeout {
+            Self::LockTimeout(message)
+        } else {
+            Self::Db(message)
+        }
+    }
+
     /// The coded body of an expansion-ceiling refusal (a rule, a clearance or
     /// a profile total over its ceiling) — `{error, code: "expansion_ceiling"}`
     /// — or `None` for any other error. It is a refusal of the write that

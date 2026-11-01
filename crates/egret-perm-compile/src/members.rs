@@ -325,10 +325,10 @@ async fn mint_for_compile(
 ) -> Result<String, CompileError> {
     lock_compile_mints_in_tx(conn)
         .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
+        .map_err(CompileError::from_db)?;
     ensure_username_via(conn, UserId(user_id))
         .await
-        .map_err(|e| CompileError::Db(e.to_string()))
+        .map_err(crate::db_error::from_core)
 }
 
 /// Mint, in ONE ascending sweep, the username of every person a compile of
@@ -367,7 +367,7 @@ pub(crate) async fn premint_model_usernames(
     )
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(e.to_string()))?;
+    .map_err(CompileError::from_db)?;
     let mut roles: BTreeSet<String> = BTreeSet::new();
     let mut groups: BTreeSet<String> = BTreeSet::new();
     let mut workspaces: BTreeSet<Uuid> = BTreeSet::new();
@@ -415,16 +415,16 @@ pub(crate) async fn premint_model_usernames(
     // `sync_admin_policy_in_tx`).
     if !egret_policy::default_policies::admin_policy_services_via(conn)
         .await
-        .map_err(|e| CompileError::Db(e.to_string()))?
+        .map_err(crate::db_error::from_store)?
         .is_empty()
     {
         let admins = egret_auth::roles::engine_admin_user_ids_via(conn)
             .await
-            .map_err(|e| CompileError::Db(e.to_string()))?;
+            .map_err(crate::db_error::from_core)?;
         let ids: Vec<Uuid> = admins.iter().map(|u| u.0).collect();
         let named = egret_auth::users::usernames_via(conn, &ids)
             .await
-            .map_err(|e| CompileError::Db(e.to_string()))?;
+            .map_err(crate::db_error::from_core)?;
         unnamed.extend(ids.into_iter().filter(|id| !named.contains_key(id)));
     }
 
@@ -447,11 +447,11 @@ pub(crate) async fn engine_admin_usernames_via(
 ) -> Result<Vec<String>, CompileError> {
     let admins = egret_auth::roles::engine_admin_user_ids_via(conn)
         .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
+        .map_err(crate::db_error::from_core)?;
     let ids: Vec<Uuid> = admins.iter().map(|u| u.0).collect();
     let named = egret_auth::users::usernames_via(conn, &ids)
         .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
+        .map_err(crate::db_error::from_core)?;
     let mut out = Vec::with_capacity(ids.len());
     for id in ids {
         match named.get(&id) {
@@ -558,7 +558,7 @@ pub(crate) async fn role_holders_via(
     .bind(roles)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(e.to_string()))
+    .map_err(CompileError::from_db)
 }
 
 /// The members of each group that holds a role in `roles` (a live `allow`
@@ -588,7 +588,7 @@ pub(crate) async fn role_group_holders_via(
     .bind(roles)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(e.to_string()))
+    .map_err(CompileError::from_db)
 }
 
 /// The direct user members of each workspace in `ids`: the membership
@@ -628,7 +628,7 @@ pub(crate) async fn workspace_members_via(
     .bind(ids)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(e.to_string()))
+    .map_err(CompileError::from_db)
 }
 
 /// The direct members of each group NAME in `names` (J-F3 Task 1b):
@@ -652,7 +652,7 @@ pub(crate) async fn group_members_via(
     .bind(names)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(e.to_string()))
+    .map_err(CompileError::from_db)
 }
 
 /// What a model references that has to be enumerated: workspace ids, role

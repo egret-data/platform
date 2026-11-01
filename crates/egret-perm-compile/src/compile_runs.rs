@@ -60,7 +60,7 @@ pub(crate) async fn record_compile_ok_in_tx(
     .bind(count(s.skipped.len()))
     .execute(&mut **tx)
     .await
-    .map_err(|e| CompileError::Db(e.to_string()))?;
+    .map_err(CompileError::from_db)?;
     Ok(())
 }
 

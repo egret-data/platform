@@ -259,7 +259,7 @@ async fn recompile_catalog_assignment(
 ) -> Result<(), egret_perm::CompileError> {
     let mut ids = egret_policy::services_for_catalog_via(tx, catalog_id)
         .await
-        .map_err(|e| egret_perm::CompileError::Db(e.to_string()))?;
+        .map_err(egret_perm_compile::db_error::from_store)?;
     ids.sort_unstable();
     ids.dedup();
     if ids.is_empty() {

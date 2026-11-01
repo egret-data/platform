@@ -46,6 +46,7 @@
 // own doc comment for the four live no-model-object shapes it must not choke
 // on.
 pub mod attribution;
+pub mod db_error;
 // SP4d-2a Task 4: hand-written wire DTOs mirroring `egret-ranger-eval`'s
 // `Decision`/`DenyReason`/`UndecidableCause` and mask/row-filter results —
 // see that module's own doc comment for why they are hand-written and not

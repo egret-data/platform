@@ -857,12 +857,12 @@ async fn bump_and_recompile(
     Ok(())
 }
 
-/// [`is_lock_timeout`] for an error the compiler returns. `CompileError::Db`
-/// carries the database error as text only (`egret_perm`), so this reads the
-/// message Postgres gives SQLSTATE 55P03 ("canceling statement due to lock
-/// timeout"), as sqlx renders it.
+/// [`is_lock_timeout`] for an error the compiler returns: the compiler turns a
+/// database error of SQLSTATE 55P03 into `CompileError::LockTimeout`
+/// (`CompileError::from_db`), so this never reads the message, which Postgres
+/// translates under a non-English `lc_messages`.
 pub(crate) fn compile_is_lock_timeout(e: &egret_perm::CompileError) -> bool {
-    matches!(e, egret_perm::CompileError::Db(m) if m.contains("lock timeout"))
+    matches!(e, egret_perm::CompileError::LockTimeout(_))
 }
 
 /// The rows a hold's step-3 write puts on the view.
@@ -2196,16 +2196,110 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// A recompile that ran out of `lock_timeout` is the busy refusal, not an
-    /// overlap: `CompileError::Db` carries sqlx's rendering of SQLSTATE 55P03.
-    #[test]
-    fn a_recompile_lock_timeout_is_recognised_and_nothing_else_is() {
-        assert!(compile_is_lock_timeout(&egret_perm::CompileError::Db(
-            "error returned from database: canceling statement due to lock timeout".into()
-        )));
-        assert!(!compile_is_lock_timeout(&egret_perm::CompileError::Db(
-            "error returned from database: deadlock detected".into()
-        )));
+    /// What a server under `lc_messages = 'de_DE'` sends for SQLSTATE 55P03:
+    /// PostgreSQL 16's own German catalogue (`postgres-16.mo`) renders
+    /// "canceling statement due to lock timeout" as this text. The test
+    /// Postgres has no German locale (`SET lc_messages` refuses it), so the
+    /// tests raise the translated error themselves, with its real SQLSTATE.
+    const GERMAN_LOCK_TIMEOUT: &str = "DO $$ BEGIN RAISE EXCEPTION \
+        'storniere Anfrage wegen Zeitüberschreitung einer Sperre' USING ERRCODE = '55P03'; END $$";
+
+    /// The English lock-timeout text under another SQLSTATE (40P01, a
+    /// deadlock): the text alone must not make a busy refusal.
+    const ENGLISH_TEXT_OTHER_CODE: &str = "DO $$ BEGIN RAISE EXCEPTION \
+        'canceling statement due to lock timeout' USING ERRCODE = '40P01'; END $$";
+
+    async fn raised(dsn: &str, statement: &'static str) -> sqlx::Error {
+        let mut conn = sqlx::PgConnection::connect(dsn).await.expect("connect");
+        sqlx::query(statement)
+            .execute(&mut conn)
+            .await
+            .expect_err("the statement raises")
+    }
+
+    /// #793: a recompile's lock timeout is recognised by its SQLSTATE, so a
+    /// translated message is still the busy refusal, and the English text
+    /// under another SQLSTATE is not.
+    #[tokio::test]
+    async fn a_recompile_lock_timeout_is_read_from_its_sqlstate_not_its_message() {
+        let Some(dsn) = egret_test_db::url().await else {
+            return;
+        };
+        let translated = egret_perm::CompileError::from_db(raised(&dsn, GERMAN_LOCK_TIMEOUT).await);
+        assert!(compile_is_lock_timeout(&translated), "{translated:?}");
+        let other = egret_perm::CompileError::from_db(raised(&dsn, ENGLISH_TEXT_OTHER_CODE).await);
+        assert!(!compile_is_lock_timeout(&other), "{other:?}");
+    }
+
+    /// #793, driven by a real `lock_timeout`: a recompile that waits on a
+    /// profile row another transaction holds runs out of its lock wait, and
+    /// [`bump_and_recompile`] answers the busy refusal, not an overlap.
+    #[tokio::test]
+    async fn a_recompile_that_runs_out_of_lock_timeout_is_the_busy_refusal() {
+        let Some(dsn) = egret_test_db::url().await else {
+            return;
+        };
+        let db = Db::connect(&dsn, 4).await.expect("connect");
+        // `authz_services.type` is a foreign key onto `authz_service_defs(name)`
+        // and no migration seeds a def, so this test seeds its own.
+        let def = format!("vh_busy_{}", &Uuid::new_v4().simple().to_string()[..12]);
+        let def_id = (Uuid::new_v4().as_u128() % 1_000_000_000) as i64 + 1_000_000_000;
+        sqlx::query(
+            "INSERT INTO policy.authz_service_defs (id, name, def_jsonb) VALUES ($1, $2, '{}')",
+        )
+        .bind(def_id)
+        .bind(&def)
+        .execute(&db.pool)
+        .await
+        .expect("a service def");
+        let service_id: i64 = sqlx::query_scalar(
+            "INSERT INTO policy.authz_services (name, type) VALUES ($1, $1) RETURNING id",
+        )
+        .bind(&def)
+        .fetch_one(&db.pool)
+        .await
+        .expect("a profile");
+        let mut blocker = db.pool.begin().await.expect("blocker");
+        sqlx::query("SELECT id FROM policy.authz_services WHERE id = $1 FOR UPDATE")
+            .bind(service_id)
+            .execute(&mut *blocker)
+            .await
+            .expect("hold the profile row");
+
+        let mut tx = db.pool.begin().await.expect("tx");
+        sqlx::query("SELECT set_config('lock_timeout', '200ms', true)")
+            .execute(&mut *tx)
+            .await
+            .expect("lock_timeout");
+        let compiled = egret_perm_compile::recompile_services_in_tx(&mut tx, &[service_id]).await;
+        tx.rollback().await.expect("rollback");
+        let e = compiled.expect_err("the profile row is held");
+        assert!(
+            matches!(e, egret_perm::CompileError::LockTimeout(_)),
+            "{e:?}"
+        );
+
+        let mut tx = db.pool.begin().await.expect("tx");
+        sqlx::query("SELECT set_config('lock_timeout', '200ms', true)")
+            .execute(&mut *tx)
+            .await
+            .expect("lock_timeout");
+        let refusal = bump_and_recompile(&mut tx, Uuid::new_v4(), &[service_id])
+            .await
+            .expect_err("the profile row is held");
+        tx.rollback().await.expect("rollback");
+        blocker.rollback().await.expect("release");
+        assert!(refusal.0.starts_with(BUSY_REFUSAL), "{}", refusal.0);
+        sqlx::query("DELETE FROM policy.authz_services WHERE id = $1")
+            .bind(service_id)
+            .execute(&db.pool)
+            .await
+            .expect("clean up");
+        sqlx::query("DELETE FROM policy.authz_service_defs WHERE id = $1")
+            .bind(def_id)
+            .execute(&db.pool)
+            .await
+            .expect("clean up");
     }
 
     #[test]

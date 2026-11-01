@@ -121,21 +121,18 @@ pub async fn delete_platform_role_and_recompile(
     pool: &PgPool,
     role_id: Uuid,
 ) -> Result<(), CompileError> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
+    let mut tx = pool.begin().await.map_err(CompileError::from_db)?;
 
     let name = RoleRepo::name_of_in_tx(&mut tx, role_id)
         .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
+        .map_err(crate::db_error::from_core)?;
 
     if let Some(name) = name.as_deref() {
         let services = affected_services_for_role_membership(&mut tx, name).await?;
         lock_services_in_tx(&mut tx, &services).await?;
         RoleRepo::delete_in_tx(&mut tx, role_id)
             .await
-            .map_err(|e| CompileError::Db(e.to_string()))?;
+            .map_err(crate::db_error::from_core)?;
         for summary in recompile_services_in_tx(&mut tx, &services).await? {
             if !summary.skipped.is_empty() {
                 tracing::warn!(
@@ -148,12 +145,10 @@ pub async fn delete_platform_role_and_recompile(
     } else {
         RoleRepo::delete_in_tx(&mut tx, role_id)
             .await
-            .map_err(|e| CompileError::Db(e.to_string()))?;
+            .map_err(crate::db_error::from_core)?;
     }
 
-    tx.commit()
-        .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
+    tx.commit().await.map_err(CompileError::from_db)?;
     Ok(())
 }
 
@@ -179,14 +174,11 @@ async fn with_recompile(
     pid: Uuid,
     role_id: Uuid,
 ) -> Result<(), CompileError> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
+    let mut tx = pool.begin().await.map_err(CompileError::from_db)?;
 
     let name = RoleRepo::name_of_in_tx(&mut tx, role_id)
         .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
+        .map_err(crate::db_error::from_core)?;
 
     // A role name that resolves is looked up BEFORE the write, and the locks are
     // taken before it too; a role that does not exist skips both, because the
@@ -209,9 +201,7 @@ async fn with_recompile(
         apply(&mut tx, op, ptype, pid, role_id).await?;
     }
 
-    tx.commit()
-        .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
+    tx.commit().await.map_err(CompileError::from_db)?;
     Ok(())
 }
 
@@ -226,7 +216,7 @@ async fn apply(
         Op::Assign => RoleRepo::assign_in_tx(conn, ptype, pid, role_id).await,
         Op::Unassign => RoleRepo::unassign_in_tx(conn, ptype, pid, role_id).await,
     }
-    .map_err(|e| CompileError::Db(e.to_string()))
+    .map_err(crate::db_error::from_core)
 }
 
 /// Recompile every profile whose model names a role — a `role` principal in
@@ -249,7 +239,7 @@ async fn apply(
 /// record of having run. `egret-bin` spawns it off the boot path, and a
 /// failure is logged and never blocks boot.
 pub async fn recompile_role_referencing_profiles(pool: &PgPool) -> Result<Vec<i64>, CompileError> {
-    let db = |e: sqlx::Error| CompileError::Db(e.to_string());
+    let db = CompileError::from_db;
     let mut tx = pool.begin().await.map_err(db)?;
 
     let roles: Vec<String> = sqlx::query_scalar(
@@ -314,15 +304,15 @@ pub async fn set_user_status_and_recompile(
     user_id: Uuid,
     status: &str,
 ) -> Result<(), CompileError> {
-    let db = |e: sqlx::Error| CompileError::Db(e.to_string());
+    let db = CompileError::from_db;
     let mut tx = pool.begin().await.map_err(db)?;
     let services = egret_policy::default_policies::admin_policy_services_via(&mut tx)
         .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
+        .map_err(crate::db_error::from_store)?;
     lock_for_admin_sync_in_tx(&mut tx, &services).await?;
     egret_auth::users::UserRepo::set_status_in_tx(&mut tx, egret_core::UserId(user_id), status)
         .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
+        .map_err(crate::db_error::from_core)?;
     for &service_id in &services {
         crate::trigger::sync_admin_policy_in_tx(&mut tx, service_id).await?;
     }
@@ -341,7 +331,7 @@ async fn lock_for_admin_sync_in_tx(
     if !services.is_empty() {
         crate::members::lock_compile_mints_in_tx(tx)
             .await
-            .map_err(|e| CompileError::Db(e.to_string()))?;
+            .map_err(CompileError::from_db)?;
     }
     Ok(())
 }
@@ -355,12 +345,12 @@ async fn lock_for_admin_sync_in_tx(
 /// engine is repaired. Idempotent (an unchanged body writes nothing). Returns
 /// how many services it repaired or found current.
 pub async fn sync_admin_policies(pool: &PgPool) -> Result<usize, CompileError> {
-    let db = |e: sqlx::Error| CompileError::Db(e.to_string());
+    let db = CompileError::from_db;
     let services = {
         let mut conn = pool.acquire().await.map_err(db)?;
         egret_policy::default_policies::admin_policy_services_via(&mut conn)
             .await
-            .map_err(|e| CompileError::Db(e.to_string()))?
+            .map_err(crate::db_error::from_store)?
     };
     let mut synced = 0;
     for service_id in services {

@@ -328,8 +328,8 @@ fn target_service_id(
     })
 }
 
-fn db_err<E: std::fmt::Display>(e: E) -> CompileError {
-    CompileError::Db(e.to_string())
+fn db_err(e: sqlx::Error) -> CompileError {
+    CompileError::from_db(e)
 }
 
 /// `None` when `service_type` names something this compiler was never built
@@ -382,14 +382,14 @@ async fn compile_desired(
 ) -> Result<Option<Compiled>, CompileError> {
     let svc = get_service_by_id_via(conn, service_id)
         .await
-        .map_err(db_err)?;
+        .map_err(crate::db_error::from_store)?;
     let Some(engine) = engine_type_for(&svc.r#type) else {
         return Ok(None);
     };
 
     let catalogs = catalogs_for_service_via(conn, service_id)
         .await
-        .map_err(db_err)?;
+        .map_err(crate::db_error::from_store)?;
     let catalog_names: HashMap<Uuid, String> =
         catalogs.into_iter().map(|c| (c.id, c.name)).collect();
     // A held rename's leaving coordinates (rename spec C8): emitted, never
@@ -415,7 +415,10 @@ async fn compile_desired(
             .get(egret_policy_api::TAG_SERVICE_CONFIG_KEY)
             .and_then(|v| v.as_str())
         {
-            Some(name) => match service_id_by_name_via(conn, name).await.map_err(db_err)? {
+            Some(name) => match service_id_by_name_via(conn, name)
+                .await
+                .map_err(crate::db_error::from_store)?
+            {
                 Some(tag_id) => {
                     writable.insert(name.to_string(), tag_id);
                     sweep.push(tag_id);
@@ -443,8 +446,12 @@ async fn compile_desired(
     sweep.sort_unstable();
     sweep.dedup();
 
-    let mut all_grants = list_grants_via(conn).await.map_err(db_err)?;
-    let mut all_rules = list_rules_via(conn).await.map_err(db_err)?;
+    let mut all_grants = list_grants_via(conn)
+        .await
+        .map_err(CompileError::from_perm)?;
+    let mut all_rules = list_rules_via(conn)
+        .await
+        .map_err(CompileError::from_perm)?;
     // D3: turn every `workspace_members` principal — and, since SP4c Task 2b,
     // every `role` principal, and since J-F3 Task 1b every non-`public` `group`
     // principal — into the people it stands for BEFORE anything is compiled,
@@ -456,7 +463,7 @@ async fn compile_desired(
     // resolves to one name.
     let mut engine_grants = list_engine_grants_for_profile_via(conn, service_id)
         .await
-        .map_err(db_err)?;
+        .map_err(CompileError::from_perm)?;
     crate::members::expand_enumerated_principals(
         conn,
         &mut all_grants,
@@ -636,7 +643,7 @@ async fn compile_desired(
         masks.extend(
             egret_policy::enabled_policies_for_service_via(conn, service_id)
                 .await
-                .map_err(db_err)?
+                .map_err(crate::db_error::from_store)?
                 .into_iter()
                 .filter(|b| {
                     is_mask(b)
@@ -890,7 +897,7 @@ async fn fold_clearance_masks(
     others.extend(
         egret_policy::enabled_policies_for_service_via(conn, service_id)
             .await
-            .map_err(db_err)?
+            .map_err(crate::db_error::from_store)?
             .into_iter()
             .filter(|b| {
                 is_mask(b)
@@ -973,7 +980,10 @@ async fn compile_one_rule(
                 (name.clone(), None, Vec::new())
             }
             Selector::Tag { key } => {
-                let Some(name) = tag_name_for_key_via(conn, key).await.map_err(db_err)? else {
+                let Some(name) = tag_name_for_key_via(conn, key)
+                    .await
+                    .map_err(crate::db_error::from_store)?
+                else {
                     // The rule names a tag that no longer exists. Not a
                     // compiler defect and not the WorkspaceMembers case
                     // either — record and move on rather than aborting the
@@ -996,7 +1006,7 @@ async fn compile_one_rule(
                     crate::rules::group_by_table(
                         tag_assignments_for_service_via(conn, service_id, key)
                             .await
-                            .map_err(db_err)?,
+                            .map_err(crate::db_error::from_store)?,
                     )
                 } else {
                     Vec::new()
@@ -1607,7 +1617,7 @@ pub(crate) async fn sync_admin_policy_in_tx(
 ) -> Result<(), CompileError> {
     if !egret_policy::default_policies::admin_policy_services_via(tx)
         .await
-        .map_err(db_err)?
+        .map_err(crate::db_error::from_store)?
         .contains(&service_id)
     {
         return Ok(());
@@ -1615,7 +1625,7 @@ pub(crate) async fn sync_admin_policy_in_tx(
     let users = crate::members::engine_admin_usernames_via(tx).await?;
     let sync = egret_policy::default_policies::sync_admin_all_access_in_tx(tx, service_id, &users)
         .await
-        .map_err(db_err)?;
+        .map_err(crate::db_error::from_store)?;
     if sync.changed {
         tracing::info!(
             service_id,
@@ -1636,7 +1646,7 @@ async fn admin_policy_services_in(
     ids.extend(
         egret_policy::default_policies::admin_policy_services_via(conn)
             .await
-            .map_err(db_err)?,
+            .map_err(crate::db_error::from_store)?,
     );
     Ok(())
 }
@@ -1828,7 +1838,7 @@ pub async fn affected_services_for_grant(
 ) -> Result<Vec<i64>, CompileError> {
     let mut ids = services_for_catalog_via(conn, g.scope.catalog_id)
         .await
-        .map_err(db_err)?;
+        .map_err(crate::db_error::from_store)?;
     normalize_service_order(&mut ids);
     Ok(ids)
 }
@@ -1874,8 +1884,10 @@ pub async fn affected_services_for_rule(
     let mut ids = match &r.selector {
         Selector::Path(scope) => services_for_catalog_via(conn, scope.catalog_id)
             .await
-            .map_err(db_err)?,
-        Selector::Tag { .. } => compiler_targeted_services_via(conn).await.map_err(db_err)?,
+            .map_err(crate::db_error::from_store)?,
+        Selector::Tag { .. } => compiler_targeted_services_via(conn)
+            .await
+            .map_err(crate::db_error::from_store)?,
     };
     normalize_service_order(&mut ids);
     Ok(ids)
@@ -1925,7 +1937,9 @@ pub async fn affected_services_for_tag_rename(
     if !selected {
         return Ok(Vec::new());
     }
-    let mut ids = compiler_targeted_services_via(conn).await.map_err(db_err)?;
+    let mut ids = compiler_targeted_services_via(conn)
+        .await
+        .map_err(crate::db_error::from_store)?;
     normalize_service_order(&mut ids);
     Ok(ids)
 }
@@ -1952,7 +1966,9 @@ pub async fn affected_services_for_tag_rename(
 pub async fn affected_services_for_classification(
     conn: &mut sqlx::PgConnection,
 ) -> Result<Vec<i64>, CompileError> {
-    let mut ids = compiler_targeted_services_via(conn).await.map_err(db_err)?;
+    let mut ids = compiler_targeted_services_via(conn)
+        .await
+        .map_err(crate::db_error::from_store)?;
     normalize_service_order(&mut ids);
     Ok(ids)
 }
@@ -2010,7 +2026,11 @@ pub async fn affected_services_for_role_membership(
 
     let mut ids: Vec<i64> = Vec::new();
     if clears {
-        ids.extend(compiler_targeted_services_via(conn).await.map_err(db_err)?);
+        ids.extend(
+            compiler_targeted_services_via(conn)
+                .await
+                .map_err(crate::db_error::from_store)?,
+        );
     }
 
     // Grants: a `role` principal in either mode. `exclude` matters as much as
@@ -2029,7 +2049,7 @@ pub async fn affected_services_for_role_membership(
         ids.extend(
             services_for_catalog_via(conn, catalog_id)
                 .await
-                .map_err(db_err)?,
+                .map_err(crate::db_error::from_store)?,
         );
     }
     // F11: the profile of every engine whose engine grants name the role.
@@ -2107,7 +2127,11 @@ pub async fn affected_services_for_workspace_members(
 
     let mut ids: Vec<i64> = Vec::new();
     if tag_rule_exempts {
-        ids.extend(compiler_targeted_services_via(conn).await.map_err(db_err)?);
+        ids.extend(
+            compiler_targeted_services_via(conn)
+                .await
+                .map_err(crate::db_error::from_store)?,
+        );
     }
     for catalog_id in catalogs
         .into_iter()
@@ -2116,7 +2140,7 @@ pub async fn affected_services_for_workspace_members(
         ids.extend(
             services_for_catalog_via(conn, catalog_id)
                 .await
-                .map_err(db_err)?,
+                .map_err(crate::db_error::from_store)?,
         );
     }
     normalize_service_order(&mut ids);
@@ -2197,13 +2221,17 @@ pub async fn affected_services_for_group_membership(
 
     let mut ids: Vec<i64> = Vec::new();
     if tag_rule_exempts {
-        ids.extend(compiler_targeted_services_via(conn).await.map_err(db_err)?);
+        ids.extend(
+            compiler_targeted_services_via(conn)
+                .await
+                .map_err(crate::db_error::from_store)?,
+        );
     }
     for catalog_id in catalogs {
         ids.extend(
             services_for_catalog_via(conn, catalog_id)
                 .await
-                .map_err(db_err)?,
+                .map_err(crate::db_error::from_store)?,
         );
     }
     // F11: the profile of every engine whose engine grants name the group.
@@ -2423,13 +2451,13 @@ pub async fn lock_services_in_tx(
     // acquisition order ascending over the same universe.
     let expanded = services_and_tag_services_via(tx, service_ids)
         .await
-        .map_err(db_err)?;
+        .map_err(crate::db_error::from_store)?;
     // The one spelling of the row lock, shared with the policy editor's
     // overlap check (SP4d-4 Task 3 fix round 1, review I1): one statement per
     // id, ascending — see `egret_policy::lock_service_rows_via`.
     egret_policy::lock_service_rows_via(tx, &expanded)
         .await
-        .map_err(db_err)
+        .map_err(crate::db_error::from_store)
 }
 
 /// The policy editor's recompile seam (final review I-3): an editor write that
@@ -2453,7 +2481,7 @@ impl egret_policy::ProfileRecompiler for PermRecompiler {
             Err(e) => Err(match crate::overlap::refusal_body(&e) {
                 Some(body) => PolicyHttpError::Overlap { body },
                 None => match e {
-                    CompileError::Db(detail) => {
+                    CompileError::Db(detail) | CompileError::LockTimeout(detail) => {
                         tracing::error!(%detail, ?service_ids, "editor write: recompile failed");
                         PolicyHttpError::Internal
                     }

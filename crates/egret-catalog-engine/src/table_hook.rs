@@ -548,7 +548,7 @@ impl TableHook {
     async fn recompile(&self, profiles: &[i64]) {
         for &service_id in profiles {
             let result: Result<(), egret_perm::CompileError> = async {
-                let db = |e: sqlx::Error| egret_perm::CompileError::Db(e.to_string());
+                let db = egret_perm::CompileError::from_db;
                 let mut tx = self.db.pool.begin().await.map_err(db)?;
                 sqlx::query("SELECT set_config('lock_timeout', $1, true)")
                     .bind(format!("{}ms", self.lock_wait.as_millis()))
@@ -672,7 +672,7 @@ impl TableHook {
     /// Recompile `profiles` in ONE transaction (the profiles locked in
     /// ascending order first), committing only if every one compiles.
     async fn recompile_or_refuse(&self, profiles: &[i64]) -> Result<(), egret_perm::CompileError> {
-        let db = |e: sqlx::Error| egret_perm::CompileError::Db(e.to_string());
+        let db = egret_perm::CompileError::from_db;
         let mut tx = self.db.pool.begin().await.map_err(db)?;
         sqlx::query("SELECT set_config('lock_timeout', $1, true)")
             .bind(format!("{}ms", self.lock_wait.as_millis()))

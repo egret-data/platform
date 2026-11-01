@@ -260,7 +260,10 @@ pub(crate) async fn bind_profile_guarded(
                 .engine_mgmt
                 .set_engine_authz_service_in_tx(&mut tx, engine_id, Some(profile_id), &status)
                 .await
-                .map_err(|e| egret_perm::CompileError::Db(e.to_string()))?;
+                .map_err(|e| match e {
+                    crate::EngineMgmtError::Db(e) => egret_perm::CompileError::from_db(e),
+                    other => egret_perm::CompileError::Db(other.to_string()),
+                })?;
             if !bound {
                 return Ok(false);
             }
@@ -306,7 +309,9 @@ fn bind_refusal(
     tracing::error!(engine = %engine_name, service_id = profile_id, error = %e,
         "the guarded bind could not complete; the engine was not bound");
     match e {
-        egret_perm::CompileError::Db(_) => crate::EngineHttpError::Internal,
+        egret_perm::CompileError::Db(_) | egret_perm::CompileError::LockTimeout(_) => {
+            crate::EngineHttpError::Internal
+        }
         other => crate::EngineHttpError::Conflict(format!(
             "engine {engine_name} was not bound to policy profile {profile_id}: the profile \
              could not be checked for order-ambiguous pairs: {other}"
