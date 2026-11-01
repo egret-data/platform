@@ -56197,6 +56197,7 @@
           "policyType",
           "resourceSummary",
           "throughPattern",
+          "widenedByEngine",
           "enabled",
           "denyAllElse",
           "unmodelled",
@@ -56225,6 +56226,17 @@
           "throughPattern": {
             "type": "boolean",
             "description": "The tag value matched by `*`/`?` rather than literally."
+          },
+          "widenedByEngine": {
+            "type": "boolean",
+            "description": "The engines apply this policy to the tag although its pattern does not\nmatch it (#803): Ranger's tag phase picks tag policies by the literal\nprefix of each value before its first `*`, `?` or `{` (every tag for\n`isExcludes`; the whole value for `isRecursive`), not by the pattern."
+          },
+          "engineTagPrefix": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "With `widened_by_engine`: the engines apply the policy to every tag\nwhose name starts with this prefix; `\"\"` means every tag."
           },
           "enabled": {
             "type": "boolean"

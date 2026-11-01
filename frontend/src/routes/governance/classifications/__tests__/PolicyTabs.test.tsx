@@ -88,6 +88,8 @@ function row(over: Partial<TagPolicyRow> & Pick<TagPolicyRow, "id" | "name">): T
     policyType: "access",
     resourceSummary: "tag=PII",
     throughPattern: false,
+    widenedByEngine: false,
+    engineTagPrefix: null,
     enabled: true,
     denyAllElse: false,
     unmodelled: [],
@@ -193,6 +195,29 @@ describe("Manual policies tab (route D)", () => {
     expect(r).toHaveTextContent("Denies every access its items do not allow (deny all else).");
     expect(r).toHaveTextContent("Has conditions egret does not evaluate.");
     expect(r).toHaveTextContent("Names this classification through a pattern.");
+  });
+
+  it("flags a policy the engine applies wider than its pattern, with the prefix (#803)", async () => {
+    open("handwritten", STEWARD, {
+      [HW]: ok(
+        handwritten({
+          policies: [
+            row({ id: 1, name: "p-x", resourceSummary: "tag=p*x", widenedByEngine: true, engineTagPrefix: "p" }),
+            row({ id: 2, name: "ends-i", resourceSummary: "tag=*i", widenedByEngine: true, engineTagPrefix: "" }),
+            row({ id: 3, name: "plain", resourceSummary: "tag=PII" }),
+          ],
+        }),
+      ),
+    });
+    await screen.findByRole("link", { name: "p-x" }, T);
+    expect(rowOf("p-x")).toHaveTextContent("Wider than its pattern");
+    expect(rowOf("p-x")).toHaveTextContent(
+      "The engine applies this policy to every tag starting with “p”, not only the tags its pattern matches.",
+    );
+    expect(rowOf("ends-i")).toHaveTextContent(
+      "The engine applies this policy to every tag, not only the tags its pattern matches.",
+    );
+    expect(rowOf("plain")).not.toHaveTextContent("Wider than its pattern");
   });
 
   it("lists unreadable tag policies and says the list may be incomplete", async () => {
