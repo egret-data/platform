@@ -584,6 +584,7 @@ async fn handwritten_restrictions_naming_the_table_refuse() {
         &[bound],
         &cat,
         &f.table_move("orders", "orders_v2"),
+        egret_perm_compile::follow::MovedObject::Table,
     )
     .await
     .expect("check");
