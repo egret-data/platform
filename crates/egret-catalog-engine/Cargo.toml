@@ -109,6 +109,9 @@ http.workspace = true
 # `LengthLimitError`: the mount tells a guarded body over its cap (413) from
 # one that failed to read (400).
 http-body-util = "0.1"
+# `http_body::Body` for the mount's body deadline (KI-313); the same 1.x
+# axum is built on.
+http-body = "1"
 # uuid with v7: `RequestMetadata::new_lakekeeper_internal` and project ids use
 # v7/nil. v5 (name-based) derives the STABLE system-admin `UserId` deterministically
 # from `catalog.system_user` (see bootstrap.rs). Feature-unified with lakekeeper's

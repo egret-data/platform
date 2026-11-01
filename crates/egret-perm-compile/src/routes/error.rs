@@ -111,7 +111,9 @@ impl From<PolicyStoreError> for PermHttpError {
 impl From<CompileError> for PermHttpError {
     fn from(e: CompileError) -> Self {
         match e {
-            CompileError::Db(detail) => PermHttpError::db(detail),
+            CompileError::Db(detail) | CompileError::LockTimeout(detail) => {
+                PermHttpError::db(detail)
+            }
             ref overlap @ CompileError::AmbiguousMaskOrFilterArbitration { .. } => {
                 PermHttpError::Overlap {
                     body: crate::overlap::refusal_body(overlap)

@@ -1832,3 +1832,328 @@ async fn a_captured_trino_commit_passes_the_guard() {
     assert_eq!(status, StatusCode::OK, "{resp}");
     assert_eq!(resp["metadata"]["current-schema-id"], 1, "{resp}");
 }
+
+// ── KI-312: namespace create and listings ───────────────────────────────────
+
+impl Env {
+    async fn create_namespace(&self, token: &str, ns: &[&str]) -> (StatusCode, Value) {
+        self.send(
+            &self.app,
+            Some(token),
+            "POST",
+            "namespaces",
+            json!({ "namespace": ns }),
+        )
+        .await
+    }
+
+    /// Does lakekeeper hold namespace `ns` (levels joined by `%1F`)?
+    async fn namespace_exists(&self, ns: &str) -> bool {
+        let (status, body) = self
+            .send(
+                &self.raw,
+                None,
+                "GET",
+                &format!("namespaces/{ns}"),
+                Value::Null,
+            )
+            .await;
+        match status {
+            StatusCode::OK => true,
+            StatusCode::NOT_FOUND => false,
+            other => panic!("load namespace {ns}: {other} {body}"),
+        }
+    }
+
+    /// The names a listing at `path` answers `token` with (namespaces joined
+    /// by `.`, tables and views by name), after checking that the lists
+    /// beside them were cut in step.
+    async fn listed(&self, token: &str, path: &str) -> Vec<String> {
+        let (status, body) = self
+            .send(&self.app, Some(token), "GET", path, Value::Null)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+        let (key, uuids) = if path.ends_with("namespaces") || path.contains("namespaces?") {
+            ("namespaces", "namespace-uuids")
+        } else {
+            ("identifiers", "table-uuids")
+        };
+        let items = body[key].as_array().expect("a list").clone();
+        if let Some(ids) = body[uuids].as_array() {
+            assert_eq!(ids.len(), items.len(), "{path}: {uuids} in step: {body}");
+        }
+        let mut names: Vec<String> = items
+            .iter()
+            .map(|v| match key {
+                "namespaces" => v
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|l| l.as_str().unwrap())
+                    .collect::<Vec<_>>()
+                    .join("."),
+                _ => v["name"].as_str().unwrap().to_string(),
+            })
+            .collect();
+        names.sort();
+        names
+    }
+}
+
+/// KI-312: a namespace is created by a write grant on its parent (or the
+/// catalog for a top-level one), not by any write grant anywhere.
+#[tokio::test]
+async fn creating_a_namespace_needs_write_on_its_parent() {
+    let env = env_or_skip!();
+    let table_writer = env
+        .token_for(
+            "external",
+            &[grant("table", Some(&["sales"]), Some("t"), "write")],
+        )
+        .await;
+    let stage_writer = env
+        .token_for(
+            "external",
+            &[grant("namespace", Some(&["stage"]), None, "write")],
+        )
+        .await;
+    let corp_reader = env
+        .token_for(
+            "external",
+            &[grant("namespace", Some(&["corp"]), None, "read")],
+        )
+        .await;
+    let catalog_reader = env
+        .token_for("external", &[grant("catalog", None, None, "read")])
+        .await;
+    for (who, token, ns, path) in [
+        ("a table writer", &table_writer, vec!["rogue"], "rogue"),
+        (
+            "a table writer",
+            &table_writer,
+            vec!["sales", "sub"],
+            "sales%1Fsub",
+        ),
+        ("a stage writer", &stage_writer, vec!["rogue2"], "rogue2"),
+        (
+            "a stage writer",
+            &stage_writer,
+            vec!["corp", "x"],
+            "corp%1Fx",
+        ),
+        ("a corp reader", &corp_reader, vec!["corp", "y"], "corp%1Fy"),
+        ("a catalog reader", &catalog_reader, vec!["top"], "top"),
+        ("a stage writer", &stage_writer, vec!["stage"], "stage"),
+    ] {
+        let (status, body) = env.create_namespace(token, &ns).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{who} creates {ns:?}: {body}"
+        );
+        if path != "stage" {
+            assert!(
+                !env.namespace_exists(path).await,
+                "{who}: {ns:?} not created"
+            );
+        }
+    }
+
+    // Allowed: a namespace grant creates under its namespace, a catalog
+    // write grant anywhere.
+    let (status, body) = env
+        .create_namespace(&stage_writer, &["stage", "child"])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(env.namespace_exists("stage%1Fchild").await);
+    let engine = env
+        .token_for("engine", &[grant("catalog", None, None, "manage")])
+        .await;
+    let (status, body) = env.create_namespace(&engine, &["fresh"]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // A body that names no namespace is the guard's 400.
+    for bad in [
+        json!({}),
+        json!({"namespace": []}),
+        json!({"namespace": ["a", ""]}),
+    ] {
+        let (status, body) = env
+            .send(&env.app, Some(&engine), "POST", "namespaces", bad.clone())
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+        assert!(
+            message(&body).contains("malformed namespace create"),
+            "{bad}: {body}"
+        );
+    }
+}
+
+/// KI-312: listing namespaces shows a role the namespaces it holds a grant
+/// on, under or above; not every namespace in the catalog.
+#[tokio::test]
+async fn listing_namespaces_shows_only_what_the_role_can_see() {
+    let env = env_or_skip!();
+    env.create_table("corp", "t").await;
+    let sales_table = env
+        .token_for(
+            "external",
+            &[grant("table", Some(&["sales"]), Some("secret"), "read")],
+        )
+        .await;
+    assert_eq!(env.listed(&sales_table, "namespaces").await, ["sales"]);
+    assert!(env
+        .listed(&sales_table, "namespaces?parent=corp")
+        .await
+        .is_empty());
+
+    let fin = env
+        .token_for(
+            "external",
+            &[grant("namespace", Some(&["corp", "fin"]), None, "read")],
+        )
+        .await;
+    assert_eq!(env.listed(&fin, "namespaces").await, ["corp"], "above");
+    assert_eq!(
+        env.listed(&fin, "namespaces?parent=corp").await,
+        ["corp.fin"],
+        "on"
+    );
+
+    let corp = env
+        .token_for(
+            "external",
+            &[grant("namespace", Some(&["CORP"]), None, "read")],
+        )
+        .await;
+    assert_eq!(env.listed(&corp, "namespaces").await, ["corp"], "any case");
+    assert_eq!(
+        env.listed(&corp, "namespaces?parent=corp").await,
+        ["corp.fin"],
+        "under"
+    );
+
+    let corp_table = env
+        .token_for(
+            "external",
+            &[grant("table", Some(&["corp"]), Some("t"), "read")],
+        )
+        .await;
+    assert!(
+        env.listed(&corp_table, "namespaces?parent=corp")
+            .await
+            .is_empty(),
+        "a table grant does not see the namespaces beside its table"
+    );
+
+    let catalog = env
+        .token_for("external", &[grant("catalog", None, None, "read")])
+        .await;
+    assert_eq!(
+        env.listed(&catalog, "namespaces").await,
+        ["corp", "sales", "stage"]
+    );
+}
+
+/// KI-312: a table grant lists only its own table (or view) in the
+/// namespace, not every name in it.
+#[tokio::test]
+async fn listing_tables_shows_only_the_granted_ones() {
+    let env = env_or_skip!();
+    env.create_table("sales", "secret").await;
+    env.create_table("sales", "open").await;
+    env.create_view("sales", "hidden_v").await;
+    env.create_view("sales", "open_v").await;
+    let narrow = env
+        .token_for(
+            "external",
+            &[
+                grant("table", Some(&["sales"]), Some("OPEN"), "read"),
+                grant("table", Some(&["sales"]), Some("open_v"), "read"),
+            ],
+        )
+        .await;
+    assert_eq!(
+        env.listed(&narrow, "namespaces/sales/tables").await,
+        ["open"]
+    );
+    assert_eq!(
+        env.listed(&narrow, "namespaces/sales/views").await,
+        ["open_v"]
+    );
+    let whole = env
+        .token_for(
+            "external",
+            &[grant("namespace", Some(&["sales"]), None, "read")],
+        )
+        .await;
+    assert_eq!(
+        env.listed(&whole, "namespaces/sales/tables").await,
+        ["open", "secret"]
+    );
+    assert_eq!(
+        env.listed(&whole, "namespaces/sales/views").await,
+        ["hidden_v", "open_v"]
+    );
+}
+
+// ── KI-313: a body that never arrives ───────────────────────────────────────
+
+/// KI-313: a request whose body never arrives is answered 408 once the
+/// mount's body deadline passes, on the routes whose body the guard reads and
+/// on those read behind it; nothing is changed.
+#[tokio::test]
+async fn a_body_that_never_arrives_is_a_408() {
+    let env = env_or_skip!();
+    let engine = env
+        .token_for("engine", &[grant("catalog", None, None, "manage")])
+        .await;
+    let within = egret_catalog_engine::BODY_DEADLINE + std::time::Duration::from_secs(10);
+    let routes = [
+        "tables/rename",
+        "transactions/commit",
+        "namespaces/sales/tables/t",
+        "namespaces",
+        "namespaces/sales/tables",
+        "namespaces/sales/views",
+    ];
+    let started = std::time::Instant::now();
+    let answers = futures_util::future::join_all(routes.iter().map(|route| {
+        let (body, _) = endless_body(16);
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/{}/{route}", env.prefix))
+            .header("content-type", "application/json")
+            .header("content-length", "4096")
+            .header("authorization", format!("Bearer {engine}"))
+            .body(body)
+            .unwrap();
+        let app = env.app.clone();
+        async move {
+            let resp = tokio::time::timeout(within, app.oneshot(req))
+                .await
+                .unwrap_or_else(|_| panic!("{route}: no answer within {within:?}"))
+                .unwrap();
+            let status = resp.status();
+            let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            (
+                *route,
+                status,
+                serde_json::from_slice::<Value>(&bytes).unwrap(),
+            )
+        }
+    }))
+    .await;
+    assert!(
+        started.elapsed() >= egret_catalog_engine::BODY_DEADLINE,
+        "answered at the deadline, not before"
+    );
+    for (route, status, body) in answers {
+        assert_eq!(status, StatusCode::REQUEST_TIMEOUT, "{route}: {body}");
+        assert_eq!(body["error"]["code"], 408, "{route}: {body}");
+        assert!(message(&body).contains("did not arrive"), "{route}: {body}");
+    }
+    assert!(!env.exists("tables", "sales", "t").await);
+}

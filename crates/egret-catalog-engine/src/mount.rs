@@ -239,10 +239,10 @@ pub fn catalog_engine_router(state: ApiContext<EngineState>) -> axum::Router {
 /// `path`/`query` are lakekeeper-relative (the router is mounted under
 /// `/catalog/v1`, so a request to `/catalog/v1/config` arrives here as `/config`).
 ///
-/// `body` is the request body for a rename, a multi-table commit or a
-/// single-table commit ([`GuardedBody`]), whose targets are named (or
-/// re-named) there, and `None` for every other request, which streams through
-/// unread.
+/// `body` is the request body for a rename, a multi-table commit, a
+/// single-table commit or a namespace create ([`GuardedBody`]), whose targets
+/// are named (or re-named) there, and `None` for every other request, which
+/// streams through unread.
 #[async_trait::async_trait]
 pub trait CatalogGuard: Send + Sync {
     /// Verify the bearer token only (authN). The mount calls it before it
@@ -264,6 +264,60 @@ pub trait CatalogGuard: Send + Sync {
         bearer: Option<&str>,
         body: Option<&[u8]>,
     ) -> Result<CatalogCaller, (axum::http::StatusCode, String)>;
+
+    /// The answer to an allowed [`Listing`], cut to what `caller` may see
+    /// (KI-312): `Ok(None)` leaves `body` as lakekeeper wrote it,
+    /// `Ok(Some(bytes))` replaces it, and `Err` answers the refusal instead.
+    async fn filter_listing(
+        &self,
+        caller: &CatalogCaller,
+        listing: Listing,
+        body: &[u8],
+    ) -> Result<Option<Vec<u8>>, (axum::http::StatusCode, String)>;
+}
+
+/// The listings whose answer names more than the caller may be granted, and
+/// that the mount hands back to the guard to cut ([`CatalogGuard::filter_listing`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Listing {
+    /// `GET /{prefix}/namespaces`, with or without `parent`.
+    Namespaces,
+    /// `GET /{prefix}/namespaces/{ns}/tables`.
+    Tables,
+    /// `GET /{prefix}/namespaces/{ns}/views`.
+    Views,
+}
+
+impl Listing {
+    /// Which of them this request is, if any.
+    pub fn of(method: &str, path: &str) -> Option<Self> {
+        if method != "GET" {
+            return None;
+        }
+        match path_segments(path).as_slice() {
+            [_, "namespaces"] => Some(Self::Namespaces),
+            [_, "namespaces", _, "tables"] => Some(Self::Tables),
+            [_, "namespaces", _, "views"] => Some(Self::Views),
+            _ => None,
+        }
+    }
+}
+
+/// The most of a listing's answer the mount buffers to cut it. A page of
+/// names is far smaller.
+const LISTING_LIMIT: usize = 16 << 20;
+
+/// How long the mount waits for a request's body, from the request's arrival
+/// (KI-313). An Iceberg request body is a few kilobytes; 16 MiB, the largest
+/// the mount accepts, takes about 4 s at 32 Mbit/s.
+pub const BODY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A path's non-empty segments.
+fn path_segments(path: &str) -> Vec<&str> {
+    path.trim_start_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 /// The requests that name their targets only in the body, whose body the
@@ -277,6 +331,9 @@ pub enum GuardedBody {
     /// `POST /{prefix}/namespaces/{ns}/tables/{t}`: its body may name another
     /// table in `identifier`, and lakekeeper commits to that one (§10.3).
     TableCommit,
+    /// `POST /{prefix}/namespaces`: the namespace it creates is named only in
+    /// the body (KI-312).
+    NamespaceCreate,
 }
 
 impl GuardedBody {
@@ -285,26 +342,22 @@ impl GuardedBody {
         if method != "POST" {
             return None;
         }
-        let segs: Vec<&str> = path
-            .trim_start_matches('/')
-            .split('/')
-            .filter(|s| !s.is_empty())
-            .collect();
-        match segs.as_slice() {
+        match path_segments(path).as_slice() {
             [_, "tables" | "views", "rename"] => Some(Self::Rename),
             [_, "transactions", "commit"] => Some(Self::MultiTableCommit),
             [_, "namespaces", _, "tables", _] => Some(Self::TableCommit),
+            [_, "namespaces"] => Some(Self::NamespaceCreate),
             _ => None,
         }
     }
 
-    /// The most of the body the mount buffers. A rename body is a few hundred
-    /// bytes. A commit carries whole schemas and snapshots; the table hook
-    /// behind the guard already buffers it up to 16 MiB, so the guard takes
-    /// the same cap and adds no new limit.
+    /// The most of the body the mount buffers. A rename or namespace create
+    /// body is a few hundred bytes. A commit carries whole schemas and
+    /// snapshots; the table hook behind the guard already buffers it up to
+    /// 16 MiB, so the guard takes the same cap and adds no new limit.
     pub fn limit(self) -> usize {
         match self {
-            Self::Rename => 1 << 20,
+            Self::Rename | Self::NamespaceCreate => 1 << 20,
             Self::MultiTableCommit | Self::TableCommit => 16 << 20,
         }
     }
@@ -315,6 +368,7 @@ impl GuardedBody {
             Self::Rename => "rename request",
             Self::MultiTableCommit => "multi-table commit",
             Self::TableCommit => "table commit",
+            Self::NamespaceCreate => "namespace create",
         }
     }
 }
@@ -414,7 +468,16 @@ async fn guard_then_inject_metadata(
         .unwrap_or("http")
         .to_string();
 
+    // The caller the guard allowed and, for a listing, what it lists: its
+    // answer is cut to what the caller may see (KI-312).
+    let mut listed: Option<(CatalogCaller, Listing)> = None;
+    // Set when a body read ran out of time (KI-313): whoever was reading it
+    // failed, and the client is told why.
+    let body_timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     if let Some(g) = &guard {
+        // Every body has until this deadline to arrive, counted from now.
+        let deadline = tokio::time::Instant::now() + BODY_DEADLINE;
+        req = req.map(|body| deadline_body(body, deadline, body_timed_out.clone()));
         let method = req.method().as_str().to_string();
         let query = req.uri().query().map(str::to_string);
         let bearer = req
@@ -454,6 +517,9 @@ async fn guard_then_inject_metadata(
             let (parts, body) = req.into_parts();
             let bytes = match axum::body::to_bytes(body, kind.limit()).await {
                 Ok(b) => b,
+                Err(_) if body_timed_out.load(std::sync::atomic::Ordering::SeqCst) => {
+                    return body_timeout(kind.what());
+                }
                 Err(e) => {
                     let over_cap = e
                         .into_inner()
@@ -484,6 +550,9 @@ async fn guard_then_inject_metadata(
             .await
         {
             Ok(caller) => {
+                if let Some(listing) = Listing::of(&method, &path) {
+                    listed = Some((caller.clone(), listing));
+                }
                 let metadata = caller_metadata(&path, &caller);
                 req.extensions_mut().insert(caller);
                 req.extensions_mut().insert(metadata);
@@ -497,6 +566,14 @@ async fn guard_then_inject_metadata(
             ));
     }
     let response = next.run(req).await;
+    if body_timed_out.load(std::sync::atomic::Ordering::SeqCst) {
+        return body_timeout("request");
+    }
+    if let (Some(g), Some((caller, listing))) = (&guard, listed) {
+        if response.status().is_success() {
+            return cut_listing(g.as_ref(), &caller, listing, response).await;
+        }
+    }
 
     // Rewrite the `/config` response so the advertised catalog `uri` (and S3
     // signer uri) point back at egret via the host the client actually used —
@@ -508,6 +585,118 @@ async fn guard_then_inject_metadata(
         }
     }
     response
+}
+
+/// `body`, failing once `deadline` passes while it still waits for a byte
+/// (KI-313), and setting `timed_out` when it does. An empty body is left as
+/// it is.
+fn deadline_body(
+    body: axum::body::Body,
+    deadline: tokio::time::Instant,
+    timed_out: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> axum::body::Body {
+    use axum::body::HttpBody as _;
+    if body.is_end_stream() {
+        return body;
+    }
+    axum::body::Body::new(DeadlineBody {
+        inner: body,
+        sleep: Box::pin(tokio::time::sleep_until(deadline)),
+        timed_out,
+    })
+}
+
+/// See [`deadline_body`].
+struct DeadlineBody {
+    inner: axum::body::Body,
+    sleep: std::pin::Pin<Box<tokio::time::Sleep>>,
+    timed_out: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// The error a [`DeadlineBody`] ends with.
+#[derive(Debug)]
+struct BodyDeadlinePassed;
+
+impl std::fmt::Display for BodyDeadlinePassed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the request body did not arrive within {} s",
+            BODY_DEADLINE.as_secs()
+        )
+    }
+}
+
+impl std::error::Error for BodyDeadlinePassed {}
+
+impl http_body::Body for DeadlineBody {
+    type Data = axum::body::Bytes;
+    type Error = axum::BoxError;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        use std::future::Future as _;
+        use std::task::Poll;
+        let this = &mut *self;
+        if let Poll::Ready(frame) = std::pin::Pin::new(&mut this.inner).poll_frame(cx) {
+            return Poll::Ready(frame.map(|r| r.map_err(Into::into)));
+        }
+        if this.sleep.as_mut().poll(cx).is_ready() {
+            this.timed_out
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            return Poll::Ready(Some(Err(Box::new(BodyDeadlinePassed))));
+        }
+        Poll::Pending
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+/// The 408 of a body that did not arrive in time; `what` names the request.
+fn body_timeout(what: &str) -> axum::response::Response {
+    iceberg_error(
+        axum::http::StatusCode::REQUEST_TIMEOUT,
+        &format!(
+            "the body of the {what} did not arrive within {} s; nothing was changed",
+            BODY_DEADLINE.as_secs()
+        ),
+    )
+}
+
+/// Hand a listing's answer to the guard to cut ([`CatalogGuard::filter_listing`]).
+/// An answer that cannot be read is not passed on.
+async fn cut_listing(
+    guard: &dyn CatalogGuard,
+    caller: &CatalogCaller,
+    listing: Listing,
+    response: axum::response::Response,
+) -> axum::response::Response {
+    let (mut parts, body) = response.into_parts();
+    let bytes = match axum::body::to_bytes(body, LISTING_LIMIT).await {
+        Ok(b) => b,
+        Err(e) => {
+            return iceberg_error(
+                axum::http::StatusCode::BAD_GATEWAY,
+                &format!("the catalog's listing could not be read: {e}"),
+            )
+        }
+    };
+    match guard.filter_listing(caller, listing, &bytes).await {
+        Ok(None) => axum::response::Response::from_parts(parts, axum::body::Body::from(bytes)),
+        Ok(Some(cut)) => {
+            parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+            axum::response::Response::from_parts(parts, axum::body::Body::from(cut))
+        }
+        Err((status, msg)) => iceberg_error(status, &msg),
+    }
 }
 
 /// The metadata lakekeeper's handlers get for a request the guard allowed

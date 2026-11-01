@@ -617,6 +617,16 @@ impl egret_catalog_engine::CatalogGuard for BodyReadingGuard {
             role: String::new(),
         })
     }
+
+    /// Every listing as lakekeeper answers it.
+    async fn filter_listing(
+        &self,
+        _caller: &egret_catalog_engine::CatalogCaller,
+        _listing: egret_catalog_engine::Listing,
+        _body: &[u8],
+    ) -> Result<Option<Vec<u8>>, (StatusCode, String)> {
+        Ok(None)
+    }
 }
 
 fn schema(id: i64, columns: &[&str]) -> Value {

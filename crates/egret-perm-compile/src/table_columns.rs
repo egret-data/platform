@@ -160,7 +160,7 @@ pub async fn leaving_via(conn: &mut sqlx::PgConnection) -> Result<Leaving, Compi
     .bind(&warehouses)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(format!("reading the catalogs of a held move: {e}")))?;
+    .map_err(|e| CompileError::from_db_in("reading the catalogs of a held move", e))?;
     for p in &pending {
         for (_, catalog) in catalogs.iter().filter(|(w, _)| *w == p.warehouse_id) {
             let t = (
@@ -298,7 +298,7 @@ async fn stored_current_schemas(
     .bind(&tables)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(format!("reading table columns from the catalog: {e}")))
+    .map_err(|e| CompileError::from_db_in("reading table columns from the catalog", e))
 }
 
 /// The STORED current top-level fields of one table, `None` when it is not an
@@ -413,7 +413,7 @@ pub async fn table_states_ns_via(
     .bind(&tables)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(format!("reading table states from the catalog: {e}")))?;
+    .map_err(|e| CompileError::from_db_in("reading table states from the catalog", e))?;
     Ok(rows
         .into_iter()
         .map(|(_, live, dropped)| {
@@ -450,7 +450,7 @@ pub async fn active_tables_via(
     .bind(warehouse_id)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(e.to_string()))
+    .map_err(CompileError::from_db)
 }
 
 pub async fn live_tabular_id_via(
@@ -472,7 +472,7 @@ pub async fn live_tabular_id_via(
     .bind(table)
     .fetch_optional(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(format!("reading a table id from the catalog: {e}")))
+    .map_err(|e| CompileError::from_db_in("reading a table id from the catalog", e))
 }
 
 /// Whether each of `keys` names a SOFT-DELETED tabular (any number may share
@@ -506,7 +506,7 @@ pub async fn has_dropped_tabular_via(
     .bind(&tables)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(format!("reading dropped tables from the catalog: {e}")))
+    .map_err(|e| CompileError::from_db_in("reading dropped tables from the catalog", e))
 }
 
 /// A classified column a live table does not have (rename spec R8, §5.8).
@@ -558,7 +558,7 @@ pub async fn missing_columns_via(
     .bind(&names)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(format!("reading table schemas from the catalog: {e}")))?;
+    .map_err(|e| CompileError::from_db_in("reading table schemas from the catalog", e))?;
     let mut out = Vec::new();
     for (i, (key, columns)) in tables.iter().enumerate() {
         let ord = i as i64 + 1;
@@ -620,7 +620,7 @@ pub async fn dropped_table_columns_via(
     .bind(tabular_id)
     .fetch_optional(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(format!("reading a dropped table's columns: {e}")))?;
+    .map_err(|e| CompileError::from_db_in("reading a dropped table's columns", e))?;
     Ok(row.map(|(schema, table, iceberg_schema)| TableColumns {
         schema,
         table,
@@ -638,7 +638,7 @@ async fn pending_columns(
         .bind(PENDING_COLUMNS_SETTING)
         .fetch_one(&mut *conn)
         .await
-        .map_err(|e| CompileError::Db(format!("reading the pending table columns: {e}")))?;
+        .map_err(|e| CompileError::from_db_in("reading the pending table columns", e))?;
     match raw.as_deref() {
         None | Some("") => Ok(Vec::new()),
         Some(json) => serde_json::from_str(json).map_err(|e| {
@@ -689,7 +689,7 @@ pub async fn stored_schema_fields_via(
     .bind(i32::try_from(schema_id).unwrap_or(-1))
     .fetch_optional(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(format!("reading a stored table schema: {e}")))?;
+    .map_err(|e| CompileError::from_db_in("reading a stored table schema", e))?;
     Ok(found.as_ref().map(top_level_fields))
 }
 

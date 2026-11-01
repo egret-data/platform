@@ -108,7 +108,7 @@ pub enum PeopleList {
 }
 
 fn db(e: sqlx::Error) -> CompileError {
-    CompileError::Db(e.to_string())
+    CompileError::from_db(e)
 }
 
 /// The users filter, shared by the count and the page so the two cannot
