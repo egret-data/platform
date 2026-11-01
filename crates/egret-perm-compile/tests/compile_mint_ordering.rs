@@ -229,7 +229,7 @@ async fn a_profile_bound_after_the_early_mint_lock_is_refused_not_deadlocked() {
     let a_result = reach.retag_bump_and_recompile(&mut a).await;
     let a_took = started.elapsed();
     let a_outcome: Result<(), ViewReachError> = match a_result {
-        Ok(()) => a.commit().await.map_err(|e| ViewReachError::Db(e)),
+        Ok(()) => a.commit().await.map_err(ViewReachError::Db),
         Err(e) => {
             let _ = a.rollback().await;
             Err(e)

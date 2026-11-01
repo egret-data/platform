@@ -256,6 +256,23 @@ mod tests {
         assert_eq!(e.to_string(), "engine: line 1:14: mismatched input");
     }
 
+    /// #792: a profile set that grew under the write is a retryable 409 with
+    /// a stable code, not the 502 a compile failure otherwise becomes.
+    #[test]
+    fn a_grown_profile_set_is_a_retryable_409() {
+        let e = BiError::from(CompileError::ProfileSetChanged { added: vec![7] });
+        let response = e.into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let BiError::Coded { body, .. } =
+            BiError::from(CompileError::ProfileSetChanged { added: vec![7] })
+        else {
+            panic!("expected a coded refusal");
+        };
+        assert_eq!(body["code"], "profile_set_changed");
+        assert_eq!(body["retryable"], true);
+        assert!(body["error"].as_str().unwrap().ends_with("retry"), "{body}");
+    }
+
     #[test]
     fn a_non_overlap_failure_is_not_an_overlap() {
         assert!(matches!(

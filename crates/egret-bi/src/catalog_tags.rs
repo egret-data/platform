@@ -569,7 +569,7 @@ async fn require_warehouse_and_tag(
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing catalog_registry:update permission", body = egret_core::http::ErrorBody),
         (status = 404, description = "`code` is `warehouse_not_found` (no warehouse has `warehouse_id`; the body adds `warehouseId`) or `tag_not_found` (no classification has `tag_id`; the body adds `tagId`)", body = egret_core::http::ErrorBody),
-        (status = 409, description = "A rule overlap: the assignment would make two mask (or two row-filter) policies decide one column differently (compiled rules, hand-written tag policies, or one of each), or a profile it recompiles already holds such a pair. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = egret_core::http::ErrorBody),
+        (status = 409, description = "A rule overlap: the assignment would make two mask (or two row-filter) policies decide one column differently (compiled rules, hand-written tag policies, or one of each), or a profile it recompiles already holds such a pair. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`). Or `code: \"profile_set_changed\"` with `retryable: true`: an engine was bound, or a policy profile created, while this write ran, so a profile it recompiles was not locked first (#792); nothing was written, and the same request succeeds when retried", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
@@ -617,7 +617,7 @@ async fn assign_resource_tag(
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing catalog_registry:update permission", body = egret_core::http::ErrorBody),
         (status = 404, description = "`code` is `warehouse_not_found` or `tag_not_found`, as for the assignment", body = egret_core::http::ErrorBody),
-        (status = 409, description = "A rule overlap that the unassignment does not remove: a profile it recompiles already holds two mask (or two row-filter) rules that decide one request differently. Same body as the assignment's 409", body = egret_core::http::ErrorBody),
+        (status = 409, description = "A rule overlap that the unassignment does not remove: a profile it recompiles already holds two mask (or two row-filter) rules that decide one request differently. Same body as the assignment's 409. Or `code: \"profile_set_changed\"` with `retryable: true`: an engine was bound, or a policy profile created, while this write ran, so a profile it recompiles was not locked first (#792); nothing was written, and the same request succeeds when retried", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]

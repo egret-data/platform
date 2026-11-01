@@ -185,3 +185,51 @@ second session; a service with an `egret-admin` set still pre-mints).
 In production that is a 500 on whichever write Postgres picks (a grant write, a login's group sync, another tag
 write). Run with:
 `DATABASE_URL=postgres://egret:egret@localhost:5432/egret cargo test -p egret-perm-compile --test compile_mint_ordering`.
+
+## 6. Phase 2: decisions and implementation notes (append-only)
+
+**Owner decisions (2026-11-01):** all four recommendations of §4 approved. #792: 409
+`profile_set_changed`, `retryable: true`, no client auto-retry. The group/login path keeps 500 and `egret-auth`
+is not touched. #790: won't-do; only the `members.rs` doc comments change. #791: implemented with the
+`egret-admin` guard.
+
+**What landed.**
+
+- `CompileError::ProfileSetChanged { added }` and `profile_set_changed_body()` (`egret-perm`). Mapped to a coded
+  409 by `BiError`, `CpError` and `PermHttpError`, to a plain 409 by `EngineHttpError`, and to the table hook's
+  existing busy refusal.
+- `lock_compile_mints_in_tx` sets `egret.compile_mint_held`; `trigger::lock_profile_rows_in_tx` is the guard
+  (§1 design). It skips ids already recorded in `egret.profile_locks` instead of re-locking them.
+- `ViewReach::retag_bump_and_recompile` and `TagViewReach::retag_and_bump` lock the bound profiles before the
+  tag-version bump.
+- `recompile_can_mint` decides the pre-mint for `recompile_service_in_tx` and `recompile_services_in_tx` (#791).
+
+**Found while proving §1 step 4: a trigger also locks profiles.** Migration 0191's
+`authz_services_tag_bump_reaches_linkers` carries a tag service's `policy_version` bump to every profile whose
+`tagService` names it, with an `UPDATE`, so a row lock. A recompile bumps its tag service, so a second profile
+sharing that tag service was locked by the trigger, after the tag service and after the mint lock, with no
+order at all. The guard cannot see a trigger's lock. Fix: `lock_services_in_tx` also locks every profile that
+names a member of the expanded set as `tagService` (one hop, as the trigger goes), so the trigger's locks are
+re-takes. Test: `locking_a_profile_also_locks_the_other_linkers_of_its_tag_service`. A residual remains: a
+profile CREATED naming the tag service between the lock and the bump is still locked by the trigger. That needs
+an admin creating a profile at that instant, and nothing holds the new profile's lock while waiting on the mint
+lock, so it cannot close a cycle.
+
+**The claim "every profile-row lock after the mint lock goes through the guard" is now a test.**
+`tests/profile_lock_sites.rs` scans every non-comment line of `crates/*/src` and `migrations/*.sql` for a row
+lock on `policy.authz_services` (`FOR UPDATE` / `FOR SHARE` / `FOR NO KEY` / `FOR KEY SHARE` near the table
+name, `UPDATE policy.authz_services`, `DELETE FROM policy.authz_services`) and compares the count per file with a
+list that gives each site's reason. 28 sites in 11 files on this branch; a new one fails the test until it is
+routed through the guard or explained there. The reasons, in short: the compiler's own writes touch only its
+locked sweep; `lock_service_rows_via` is what the guard calls; the policy CRUD bumps write a profile every
+caller already holds (the migration undo locks the route's own profile first); `delete_service` and
+`set_tag_service_via` are admin routes that take no mint lock; the tag-version bump now runs after
+`lock_services_in_tx` in both places it follows the mint lock; 0187's trigger fires on engine writes, which never
+follow the mint lock; 0191's cascade is covered by the linker lock; 0176/0190/0195 are one-off data migrations;
+`view_hold.rs`'s two are test code.
+
+**Mutation checks** (each mutant applied alone and restored from git; every one turns a test red):
+guard off (`mint_held && false`) → the interleaving test and the guard test; #791 skip off → the no-premint test;
+the `egret-admin` guard off → its test; linkers not locked → the linker test; tag-version bump moved back before the
+profile locks → the interleaving test; an extra `FOR UPDATE` on `authz_services` added to `egret-bi` → the scan
+test.
