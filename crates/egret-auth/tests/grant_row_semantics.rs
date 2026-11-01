@@ -345,5 +345,9 @@ async fn the_consoles_effective_platform_roles_skip_deny_grants() {
 
     // Assert
     let names: Vec<&str> = rows.iter().map(|(_, n, _)| n.as_str()).collect();
-    assert_eq!(names, vec!["data_steward"], "only the allow grant: {rows:?}");
+    assert_eq!(
+        names,
+        vec!["data_steward"],
+        "only the allow grant: {rows:?}"
+    );
 }
