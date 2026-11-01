@@ -85,6 +85,19 @@ pub trait ProfileCompilerPort: Send + Sync {
         service_id: i64,
     ) -> Result<(), egret_perm::CompileError>;
 
+    /// Lock every profile in `service_ids` on the CALLER's transaction, in the
+    /// one order every recompile path shares (`egret_perm_compile::lock_services_in_tx`:
+    /// expanded with tag services and their other linkers, ascending), before a
+    /// write that recompiles SEVERAL profiles. Without it the second recompile
+    /// locks its profile after the first one's pre-mint took the compile-mint
+    /// lock, which the compiler refuses as `ProfileSetChanged` (#792), and which
+    /// before that refusal was a lock-order inversion that could deadlock.
+    async fn lock_profiles_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_ids: &[i64],
+    ) -> Result<(), egret_perm::CompileError>;
+
     /// The mask and row-filter pairs stored in every unit the profiles in
     /// `service_ids` belong to, read on the caller's transaction **before** a
     /// write that changes which catalogs — and so which tag assignments — a
@@ -202,6 +215,23 @@ pub(crate) async fn snapshot_overlaps(
     Ok(Some(
         compiler.overlap_snapshot_in_tx(tx, &[service_id]).await?,
     ))
+}
+
+/// Lock `service_ids` (any order; sorted here) on the caller's transaction
+/// before a write that recompiles several of them. A no-op when no compiler is
+/// wired.
+pub(crate) async fn lock_profiles(
+    st: &crate::EngineMgmtState,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    service_ids: &[i64],
+) -> Result<(), egret_perm::CompileError> {
+    let Some(compiler) = st.perm_compiler.clone() else {
+        return Ok(());
+    };
+    let mut ids = service_ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    compiler.lock_profiles_in_tx(tx, &ids).await
 }
 
 /// Recompile `service_id` on the caller's transaction and refuse the pairs the

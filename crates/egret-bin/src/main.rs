@@ -320,6 +320,14 @@ impl egret_engine_mgmt::ProfileCompilerPort for ProfileCompilerImpl {
         recompile_one_profile(tx, service_id).await
     }
 
+    async fn lock_profiles_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_ids: &[i64],
+    ) -> Result<(), egret_perm::CompileError> {
+        egret_perm_compile::lock_services_in_tx(tx, service_ids).await
+    }
+
     async fn overlap_snapshot_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,

@@ -200,6 +200,10 @@ impl From<egret_perm::CompileError> for EngineHttpError {
         if e.expansion_ceiling_body().is_some() {
             return EngineHttpError::Conflict(e.to_string());
         }
+        // So is a profile set that grew under the write (#792): retry.
+        if e.profile_set_changed_body().is_some() {
+            return EngineHttpError::Conflict(e.to_string());
+        }
         tracing::error!(
             error = %e,
             "perm-model recompile failed inside a catalog-workspace assignment write"
