@@ -131,6 +131,10 @@ pub mod view_exposure;
 // View governance B3 (Task 9): a view's lineage-derived column tags follow
 // its base tables' classifications.
 pub mod view_tags;
+// #789: the pause point a test sets between a PATCH's first read of the stored
+// row and its lock wait; inert unless a test scopes one.
+#[doc(hidden)]
+pub mod write_seam;
 
 pub use attribution::{attribute_policy_name, PolicyAttribution};
 pub use grants::{compile_grant, validate_grant_shape};

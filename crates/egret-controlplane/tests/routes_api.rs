@@ -3803,3 +3803,100 @@ async fn a_revoke_waits_for_a_concurrent_admin_removal_and_then_refuses() {
     .unwrap();
     assert_eq!(left, 1, "the last admin keeps the role");
 }
+
+/// A PDP that allows every action except `policy:read`, which it cannot
+/// decide (an internal error), and records every action it is asked about.
+#[derive(Default)]
+struct PolicyReadFailsPdp {
+    asked: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl egret_core::authz::Pdp for PolicyReadFailsPdp {
+    async fn authorize(
+        &self,
+        _s: &egret_core::authz::Subject,
+        a: &str,
+        _r: &egret_core::authz::Resource,
+    ) -> egret_core::Result<egret_core::authz::Decision> {
+        self.asked.lock().unwrap().push(a.to_string());
+        if a == "policy:read" {
+            return Err(egret_core::Error::Internal(anyhow::anyhow!(
+                "the PDP cannot decide policy:read (test)"
+            )));
+        }
+        Ok(egret_core::authz::Decision {
+            allow: true,
+            reasons: vec![],
+        })
+    }
+}
+
+/// #788: renaming or deleting a group that nothing names runs no `policy:read`
+/// check — that check only decides how much a refusal lists — so a PDP that
+/// cannot decide `policy:read` does not fail either request. Before the fix
+/// both answered 500.
+#[tokio::test]
+async fn an_unreferenced_group_rename_and_delete_do_not_ask_for_policy_read() {
+    let Some(mut f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    // Arrange: a local group, and the app rebuilt on the failing PDP.
+    let admin = session_for(&f, "lazy_detail_admin", true).await;
+    let gid = egret_auth::groups::GroupRepo::new(f.db.clone())
+        .create_local(
+            &format!("lazy-detail-{}", Uuid::new_v4().simple()),
+            &egret_perm_compile::PermGroupRecompiler,
+        )
+        .await
+        .expect("create group");
+    let pdp = std::sync::Arc::new(PolicyReadFailsPdp::default());
+    f.app = build_app(
+        &f.db,
+        &f.users,
+        &f.sessions,
+        pdp.clone(),
+        egret_audit::AuditSink::new(16).0,
+    );
+
+    // Act: rename, then delete.
+    let renamed = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            &format!("/groups/{gid}"),
+            &admin,
+            Some(
+                serde_json::json!({ "name": format!("lazy-renamed-{}", Uuid::new_v4().simple()) }),
+            ),
+        ))
+        .await
+        .unwrap();
+    let (rename_status, rename_body) = into_json(renamed).await;
+    let deleted = f
+        .app
+        .clone()
+        .oneshot(req("DELETE", &format!("/groups/{gid}"), &admin, None))
+        .await
+        .unwrap();
+    let (delete_status, delete_body) = into_json(deleted).await;
+
+    // Assert
+    assert_eq!(
+        rename_status,
+        StatusCode::NO_CONTENT,
+        "rename; body={rename_body}"
+    );
+    assert_eq!(
+        delete_status,
+        StatusCode::NO_CONTENT,
+        "delete; body={delete_body}"
+    );
+    let asked = pdp.asked.lock().unwrap().clone();
+    assert!(
+        !asked.iter().any(|a| a == "policy:read"),
+        "nothing names the group, so policy:read must not be asked; asked: {asked:?}"
+    );
+}
