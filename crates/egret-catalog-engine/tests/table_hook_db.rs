@@ -4425,6 +4425,152 @@ async fn a_disabled_or_unbound_policy_does_not_refuse() {
     assert!(status.is_success(), "rename: {status} {body}");
 }
 
+// ── KI-320: hand-written policies that reach the table through a pattern ──
+
+/// KI-320: an enabled hand-written deny on the table value `ord*` reaches
+/// `orders` through a pattern; a rename to `archive`, which it does not reach,
+/// is refused with a 409 naming the policy, and nothing is renamed. A rename
+/// to a name it still reaches goes through.
+#[tokio::test]
+async fn a_handwritten_deny_through_a_pattern_refuses_a_rename_it_stops_covering() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    let deny = env
+        .handwritten(env.access_policy(&["ord*"], false, true), true)
+        .await;
+    let before = env.policy_row(deny).await;
+
+    let (status, body) = env.rename("orders", "archive").await;
+    env.assert_refused_and_unrenamed(
+        status,
+        &body,
+        &[
+            format!("{}/", env.trino_name),
+            format!("({deny})"),
+            "through a name pattern".to_string(),
+        ],
+    )
+    .await;
+    assert_eq!(
+        env.policy_row(deny).await,
+        before,
+        "the policy is untouched"
+    );
+
+    let (status, body) = env.rename("orders", "orders_v2").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+}
+
+/// KI-320, by Ranger's matching for the profile's own service-def: a
+/// StarRocks mask on `database`/`table` `ord*`, and a Trino deny whose
+/// pattern sits in an `additionalResources` map, each refuse.
+#[tokio::test]
+async fn handwritten_patterns_are_matched_as_the_engine_matches_them() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id"), (2, "email")]).await;
+    let mask: i64 = sqlx::query_scalar(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, enabled, managed_by) \
+         VALUES ($1, $2, $3, true, 'operator') RETURNING id",
+    )
+    .bind(env.profile_id)
+    .bind(unique("th-sr-hand"))
+    .bind(json!({
+        "policyType": 1,
+        "resources": {
+            "catalog": {"values": [env.catalog]}, "database": {"values": ["sales"]},
+            "table": {"values": ["ord*"]}, "column": {"values": ["email"]},
+        },
+        "dataMaskPolicyItems": [{"users": ["u"], "dataMaskInfo": {"dataMaskType": "MASK_HASH"}}],
+    }))
+    .fetch_one(&env.db.pool)
+    .await
+    .expect("starrocks policy");
+    let (status, body) = env.rename("orders", "archive").await;
+    env.assert_refused_and_unrenamed(
+        status,
+        &body,
+        &[format!("{}/", env.profile_name), format!("({mask})")],
+    )
+    .await;
+
+    sqlx::query("DELETE FROM policy.authz_policies WHERE id = $1")
+        .bind(mask)
+        .execute(&env.db.pool)
+        .await
+        .expect("clear");
+    let mut deny = env.access_policy(&["customers"], false, true);
+    deny["additionalResources"] = json!([{
+        "catalog": {"values": [env.catalog]}, "schema": {"values": ["sales"]},
+        "table": {"values": ["o?ders"]}, "column": {"values": ["*"]},
+    }]);
+    let deny = env.handwritten(deny, true).await;
+    let (status, body) = env.rename("orders", "archive").await;
+    env.assert_refused_and_unrenamed(status, &body, &[format!("({deny})")])
+        .await;
+}
+
+/// KI-320: a hand-written allow-only pattern that stops reaching the table
+/// is not refused; it is recorded (`ranger_policy:left`), as #764 records a
+/// plain literal allow.
+#[tokio::test]
+async fn a_handwritten_allow_pattern_that_stops_covering_is_reported() {
+    let Some(env) = env().await else { return };
+    env.create_table("orders", &[(1, "id")]).await;
+    let allow = env
+        .handwritten(env.access_policy(&["ord*"], false, false), true)
+        .await;
+    let (status, body) = env.rename("orders", "archive").await;
+    assert!(status.is_success(), "rename: {status} {body}");
+    let left: Vec<(String, Value)> = sqlx::query_as(
+        "SELECT resource_id, detail FROM audit.audit_log \
+          WHERE action = 'ranger_policy:left' AND resource_id = $1",
+    )
+    .bind(allow.to_string())
+    .fetch_all(&env.db.pool)
+    .await
+    .expect("events");
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert_eq!(
+        left[0].1["rename"],
+        json!({"from": "sales.orders", "to": "sales.archive"})
+    );
+}
+
+/// KI-320: an exclusion list is a statement about names. An allow on every
+/// table but `tmp*` would newly reach `tmp_a` renamed to `a`, and a deny on
+/// every table but `pub*` would stop reaching `orders` renamed to
+/// `pub_orders`: both are refused.
+#[tokio::test]
+async fn a_rename_across_a_handwritten_exclusion_pattern_is_refused() {
+    let Some(env) = env().await else { return };
+    env.create_table("tmp_a", &[(1, "id")]).await;
+    let allow = env
+        .handwritten(env.access_policy(&["tmp*"], true, false), true)
+        .await;
+    let (status, body) = env.rename("tmp_a", "a").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains(&format!("({allow})")),
+        "{body}"
+    );
+
+    sqlx::query("DELETE FROM policy.authz_policies WHERE id = $1")
+        .bind(allow)
+        .execute(&env.db.pool)
+        .await
+        .expect("clear");
+    env.create_table("orders", &[(1, "id")]).await;
+    let deny = env
+        .handwritten(env.access_policy(&["pub*"], true, true), true)
+        .await;
+    let (status, body) = env.rename("orders", "pub_orders").await;
+    env.assert_refused_and_unrenamed(status, &body, &[format!("({deny})")])
+        .await;
+}
+
 // ── Grants follow a rename, Task 11: the defaults (D11, D13, swap) ──
 
 impl Env {

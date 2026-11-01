@@ -84,6 +84,14 @@ impl egret_engine_mgmt::ProfileCompilerPort for RecordingProfileCompiler {
         Ok(())
     }
 
+    async fn lock_profiles_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        _service_ids: &[i64],
+    ) -> Result<(), egret_perm::CompileError> {
+        Ok(())
+    }
+
     async fn overlap_snapshot_in_tx(
         &self,
         _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -148,6 +156,15 @@ impl egret_engine_mgmt::ProfileCompilerPort for RealProfileCompiler {
         egret_perm_compile::lock_services_in_tx(tx, &[service_id]).await?;
         egret_perm_compile::recompile_service_in_tx(tx, service_id).await?;
         Ok(())
+    }
+
+    /// The same call `egret-bin`'s `lock_profiles_in_tx` makes.
+    async fn lock_profiles_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_ids: &[i64],
+    ) -> Result<(), egret_perm::CompileError> {
+        egret_perm_compile::lock_services_in_tx(tx, service_ids).await
     }
 
     async fn overlap_snapshot_in_tx(
@@ -13287,6 +13304,13 @@ impl egret_engine_mgmt::ProfileCompilerPort for ConflictAfterDryRun {
         service_id: i64,
     ) -> Result<(), egret_perm::CompileError> {
         self.inner.recompile_profile_in_tx(tx, service_id).await
+    }
+    async fn lock_profiles_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_ids: &[i64],
+    ) -> Result<(), egret_perm::CompileError> {
+        self.inner.lock_profiles_in_tx(tx, service_ids).await
     }
     async fn overlap_snapshot_in_tx(
         &self,

@@ -18,7 +18,13 @@
 //!   through lakekeeper's own router and judged like a new one; a version
 //!   that cannot be resolved or loaded is refused on a classified profile;
 //! - rename, `POST /{prefix}/views/rename`, which moves the view's lineage and
-//!   tag assignments to the new name under the same hold;
+//!   tag assignments to the new name under the same hold, and carries the
+//!   view's grants, path masks and path row filters and its catalog grants by
+//!   the rules a table rename follows (KI-319, platform #764): restrictions
+//!   are copied before the commit and kept on the old name, allows and
+//!   catalog grants move after it, and a pattern or hand-written restriction
+//!   the new name would escape refuses the rename. One wait covers the moved
+//!   tags and the copied restrictions;
 //! - drop, `DELETE /{prefix}/namespaces/{ns}/views/{view}` (spec B3): after
 //!   lakekeeper answers 2xx, the view's lineage and its lineage-derived tag
 //!   rows are deleted. A tag an admin put on the view by hand stays.
@@ -105,14 +111,21 @@ use axum::http::{Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use egret_metastore::Db;
+use egret_perm_compile::follow::{self, MovedObject};
 use egret_perm_compile::lineage::{self, ExplainRunner, LineageError, RecordedLineage, ViewRef};
-use egret_policy::{wait_for_tag_version, PolicyStore, WaitError};
+use egret_policy::{wait_for_tag_version, wait_for_versions, PolicyStore, WaitError};
 use serde_json::Value;
 use sqlx::Connection as _;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 use tracing::Instrument as _;
 use uuid::Uuid;
+
+use crate::mount::CatalogCaller;
+use crate::table_hook::{
+    delete_copies_in_tx, record_perm_events, starrocks_policy_versions, trino_policy_versions,
+    CatalogFollow, Coordinate, PermPart, DEFAULT_LOCK_WAIT,
+};
 
 /// The reason a view is refused when egret cannot judge what it reads.
 pub const LINEAGE_REFUSAL: &str = "lineage could not be computed";
@@ -287,6 +300,10 @@ impl Refusal {
             "the classification tags cannot be assigned: {e}; resolve the overlapping mask or \
              row-filter policies, then retry"
         ))
+    }
+    /// A restriction the rename would let escape (#764's G3/G4 text, KI-319).
+    fn permissions(why: String) -> Self {
+        Self(why)
     }
     fn unconfirmed(limit: Duration, waiting_on: &[String]) -> Self {
         Self(format!(
@@ -1795,15 +1812,69 @@ impl ViewHold {
         }
     }
 
-    /// Rename: copy the source's lineage and tag assignments to the
-    /// destination, hold until the plugins report the version, let lakekeeper
-    /// rename, then delete the source's.
+    /// Rename: catalog grants follow a live view's rename after its commit,
+    /// held or not (KI-319, as #764 D8 for a table: a `table` catalog grant
+    /// also covers a view of that name). The rest is [`Self::hold_rename_inner`].
+    #[allow(clippy::too_many_arguments)]
     async fn hold_rename(
+        &self,
+        deadline: Instant,
+        prefix: &str,
+        body: &Value,
+        source: (String, String),
+        destination: (String, String),
+        req: Request,
+        next: Next,
+    ) -> Response {
+        let caller = req.extensions().get::<CatalogCaller>().cloned();
+        let follow = match CatalogFollow::of(&self.db, prefix, body, MovedObject::View).await {
+            Ok(f) => f,
+            Err(e) => return Refusal::internal("catalog grants", e).into_response(),
+        };
+        let Some(follow) = follow else {
+            return self
+                .hold_rename_inner(deadline, prefix, source, destination, caller, req, next)
+                .await;
+        };
+        let this = self.clone();
+        let prefix = prefix.to_string();
+        uncancellable(async move {
+            let response = this
+                .hold_rename_inner(
+                    deadline,
+                    &prefix,
+                    source,
+                    destination,
+                    caller.clone(),
+                    req,
+                    next,
+                )
+                .await;
+            if response.status().is_success() || follow.renamed(&this.db).await {
+                follow
+                    .follow(&this.db, DEFAULT_LOCK_WAIT, caller.as_ref())
+                    .await;
+            }
+            response
+        })
+        .await
+    }
+
+    /// Rename: copy the source's lineage and tag assignments to the
+    /// destination, and its deny grants, path masks and path row filters
+    /// (KI-319, #764's rules for a table: `egret_perm_compile::follow`), hold
+    /// until the plugins report the versions, let lakekeeper rename, then
+    /// delete the source's tags and lineage and move its allow grants. A
+    /// restriction that reaches the view through a pattern and would not reach
+    /// the new name, or a hand-written policy that restricts it, refuses.
+    #[allow(clippy::too_many_arguments)]
+    async fn hold_rename_inner(
         &self,
         deadline: Instant,
         prefix: &str,
         source: (String, String),
         destination: (String, String),
+        caller: Option<CatalogCaller>,
         req: Request,
         next: Next,
     ) -> Response {
@@ -1832,10 +1903,14 @@ impl ViewHold {
             Ok(st) => st.lineage != RecordedLineage::Missing || !st.rows.is_empty(),
             Err(refusal) => return refusal.into_response(),
         };
-        if !carries {
+        let perm = match self.perm_plan(warehouse_id, &src, &dst).await {
+            Ok(p) => p,
+            Err(refusal) => return refusal.into_response(),
+        };
+        if !carries && perm.is_none() {
             return next.run(req).await;
         }
-        if multi {
+        if multi && carries {
             return Refusal::multi_level().into_response();
         }
 
@@ -1854,7 +1929,17 @@ impl ViewHold {
         let this = self.clone();
         uncancellable(async move {
             let response = this
-                .move_view(deadline, warehouse_id, &src, &dst, req, next)
+                .move_view(
+                    deadline,
+                    warehouse_id,
+                    &src,
+                    &dst,
+                    carries,
+                    perm,
+                    caller.as_ref(),
+                    req,
+                    next,
+                )
                 .await;
             held.release().await;
             response
@@ -1862,13 +1947,56 @@ impl ViewHold {
         .await
     }
 
+    /// What the rename carries of the permission model (KI-319), read before
+    /// the hold: `None` when nothing (a case-only rename changes no name an
+    /// engine matches). A restriction the rename would let escape refuses
+    /// here, before any lock.
+    async fn perm_plan(
+        &self,
+        warehouse_id: Uuid,
+        src: &ViewRef,
+        dst: &ViewRef,
+    ) -> Result<Option<PermPart>, Refusal> {
+        let fold = |s: &str| s.to_lowercase();
+        if fold(&src.schema) == fold(&dst.schema) && fold(&src.name) == fold(&dst.name) {
+            return Ok(None);
+        }
+        let at = |v: &ViewRef| Coordinate {
+            schema: v.schema.clone(),
+            table: v.name.clone(),
+            column: None,
+        };
+        let mut conn = self
+            .db
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| Refusal::internal("database", e))?;
+        let perm = PermPart::read(
+            &mut conn,
+            warehouse_id,
+            &[(at(src), at(dst))],
+            MovedObject::View,
+        )
+        .await
+        .map_err(|e| Refusal::internal("permissions", e))?;
+        if let Some(why) = perm.refusal() {
+            return Err(Refusal::permissions(why));
+        }
+        Ok(perm.has_work().then_some(perm))
+    }
+
     /// The rename's hold, under its lock.
+    #[allow(clippy::too_many_arguments)]
     async fn move_view(
         &self,
         deadline: Instant,
         warehouse_id: Uuid,
         src: &ViewRef,
         dst: &ViewRef,
+        carries: bool,
+        perm: Option<PermPart>,
+        caller: Option<&CatalogCaller>,
         req: Request,
         next: Next,
     ) -> Response {
@@ -1879,6 +2007,10 @@ impl ViewHold {
             columns: src_columns,
         } = match self.state_of(warehouse_id, src).await {
             Ok(s) => s,
+            Err(refusal) => return refusal.into_response(),
+        };
+        let view_id = match self.live_view_id(warehouse_id, src).await {
+            Ok(id) => id,
             Err(refusal) => return refusal.into_response(),
         };
         let rows: Vec<Assignment> = src_rows
@@ -1893,32 +2025,92 @@ impl ViewHold {
                 )
             })
             .collect();
-        let written = match self
-            .write(
+        let written = if carries {
+            match self
+                .write(
+                    deadline,
+                    warehouse_id,
+                    dst,
+                    Rows::Fixed(&rows),
+                    &src_lineage,
+                    src_columns.as_deref(),
+                )
+                .await
+            {
+                Ok(w) => Some(w),
+                Err(r) => return r.into_response(),
+            }
+        } else {
+            None
+        };
+        let copied = match &perm {
+            Some(plan) => match self.copy_perm(deadline, warehouse_id, dst, plan).await {
+                Ok(c) => Some(c),
+                Err(refusal) => {
+                    if let Some(w) = &written {
+                        self.compensate(w).await;
+                    }
+                    return refusal.into_response();
+                }
+            },
+            None => None,
+        };
+        let undo = |this: &Self| {
+            let (written, copied) = (written.as_ref(), copied.as_ref());
+            let this = this.clone();
+            async move {
+                if let Some(c) = copied {
+                    this.compensate_perm(warehouse_id, c).await;
+                }
+                if let Some(w) = written {
+                    this.compensate(w).await;
+                }
+            }
+        };
+        if let Err(refusal) = self
+            .wait_moved(
                 deadline,
-                warehouse_id,
-                dst,
-                Rows::Fixed(&rows),
-                &src_lineage,
-                src_columns.as_deref(),
+                !rows.is_empty(),
+                written.as_ref(),
+                copied.as_ref(),
             )
             .await
         {
-            Ok(w) => w,
-            Err(r) => return r.into_response(),
-        };
-        if !rows.is_empty() {
-            if let Err(refusal) = self.wait(&written, deadline).await {
-                self.compensate(&written).await;
-                return refusal.into_response();
-            }
+            undo(self).await;
+            return refusal.into_response();
         }
         let response = next.run(req).await;
         if !response.status().is_success() {
-            self.compensate(&written).await;
-            return response;
+            // A non-2xx is not proof that nothing committed (#764's review
+            // finding 4): undo only when the catalog shows the view still
+            // under its old name.
+            match self.renamed_view(warehouse_id, dst, view_id).await {
+                Ok(false) => {
+                    undo(self).await;
+                    return response;
+                }
+                Ok(true) => tracing::warn!(status = %response.status(), ?dst,
+                    "lakekeeper answered a held view rename with an error, but the rename \
+                     committed: finishing the move"),
+                Err(e) => {
+                    tracing::error!(error = %e, ?dst,
+                        "lakekeeper answered a held view rename with an error, and egret could \
+                         not tell whether it committed: what the view carries stays on both names");
+                    return response;
+                }
+            }
         }
-        // The source no longer exists: drop what it held.
+        if written.is_some() {
+            self.forget_renamed(warehouse_id, src, &src_rows).await;
+        }
+        if let Some(c) = &copied {
+            self.finish_perm(warehouse_id, c, caller).await;
+        }
+        response
+    }
+
+    /// The source no longer exists: drop the tags and lineage it held.
+    async fn forget_renamed(&self, warehouse_id: Uuid, src: &ViewRef, src_rows: &[Assignment]) {
         let result = async {
             let mut tx = self.db.pool.begin().await.map_err(|e| e.to_string())?;
             egret_perm_compile::view_tags::lock_view_tags_in_tx(&mut tx)
@@ -1927,7 +2119,7 @@ impl ViewHold {
             let bound = egret_catalog_registry::services_bound_to_warehouse(&mut *tx, warehouse_id)
                 .await
                 .map_err(|e| e.to_string())?;
-            delete_rows(&mut tx, warehouse_id, &src_rows)
+            delete_rows(&mut tx, warehouse_id, src_rows)
                 .await
                 .map_err(|e| e.to_string())?;
             lineage::delete_lineage(&mut tx, src)
@@ -1944,8 +2136,253 @@ impl ViewHold {
         if let Err(e) = result {
             tracing::warn!(?src, error = %e, "view hold: the renamed view's old rows remain");
         }
-        response
     }
+
+    /// The live view id of `view`, `None` when it is not a live view.
+    async fn live_view_id(
+        &self,
+        warehouse_id: Uuid,
+        view: &ViewRef,
+    ) -> Result<Option<Uuid>, Refusal> {
+        let mut conn = self
+            .db
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| Refusal::internal("database", e))?;
+        let ns: Vec<String> = view.schema.split('\u{1f}').map(str::to_string).collect();
+        crate::store::embedded::live_view_id_via(&mut conn, warehouse_id, &ns, &view.name)
+            .await
+            .map_err(|e| Refusal::internal("database", e))
+    }
+
+    /// Did the rename commit? The destination is the source's view.
+    async fn renamed_view(
+        &self,
+        warehouse_id: Uuid,
+        dst: &ViewRef,
+        view_id: Option<Uuid>,
+    ) -> Result<bool, String> {
+        let Some(view_id) = view_id else {
+            return Ok(false);
+        };
+        let now = self
+            .live_view_id(warehouse_id, dst)
+            .await
+            .map_err(|r| r.0)?;
+        Ok(now == Some(view_id))
+    }
+
+    /// Wait, within the one deadline, for the Trino plugins to report the
+    /// moved tags (when the view carries rows) and for every bound plugin to
+    /// report the copied restrictions' policy version (KI-319, #764 D6), in
+    /// one wait. Moved tags with no Trino bound refuse at once, as before.
+    async fn wait_moved(
+        &self,
+        deadline: Instant,
+        tagged: bool,
+        written: Option<&Written>,
+        copied: Option<&PermCopied>,
+    ) -> Result<(), Refusal> {
+        let tags: &[(i64, i64)] = match written {
+            Some(w) if tagged => {
+                if w.required.is_empty() {
+                    return Err(Refusal::no_trino());
+                }
+                &w.required
+            }
+            _ => &[],
+        };
+        let policies: &[(i64, i64)] = copied.map_or(&[], |c| &c.policies);
+        if tags.is_empty() && policies.is_empty() {
+            return Ok(());
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        match wait_for_versions(&self.policy, tags, policies, left).await {
+            Ok(()) => Ok(()),
+            Err(WaitError::Timeout { waiting_on }) => {
+                Err(Refusal::unconfirmed(self.limit, &waiting_on))
+            }
+            Err(WaitError::Store(e)) => Err(Refusal::internal("plugin download ledger", e)),
+        }
+    }
+
+    /// The pre-commit copy of the view's restrictions (KI-319, #764 D1): one
+    /// transaction that reads the plan again under the hold's lock (a pattern
+    /// or a hand-written policy written since refuses), copies the deny
+    /// grants, path masks and path row filters to the new name, recompiles
+    /// the bound profiles and refuses an overlap the copy creates.
+    async fn copy_perm(
+        &self,
+        deadline: Instant,
+        warehouse_id: Uuid,
+        dst: &ViewRef,
+        plan: &PermPart,
+    ) -> Result<PermCopied, Refusal> {
+        let limit = self.limit;
+        let db = move |e: sqlx::Error| db_refusal(limit, e);
+        let refused = |e: &dyn std::fmt::Display| {
+            Refusal(format!(
+                "the view's permissions cannot move to {}.{}: {e}. Nothing was renamed.",
+                dst.schema.replace('\u{1f}', "."),
+                dst.name
+            ))
+        };
+        let mut tx = self.db.pool.begin().await.map_err(db)?;
+        let wait = deadline
+            .saturating_duration_since(Instant::now())
+            .max(MIN_LOCK_WAIT);
+        sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+            .bind(format!("{}ms", wait.as_millis()))
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?;
+        let perm = plan
+            .reread(&mut tx)
+            .await
+            .map_err(|e| Refusal::internal("permissions", e))?;
+        if let Some(why) = perm.refusal() {
+            return Err(Refusal::permissions(why));
+        }
+        let bound = egret_catalog_registry::services_bound_to_warehouse(&mut *tx, warehouse_id)
+            .await
+            .map_err(db)?;
+        let overlaps_before = egret_perm_compile::overlap::unit_snapshot_via(&mut tx, &bound)
+            .await
+            .map_err(|e| Refusal::internal("overlap snapshot", e))?;
+        let copies = perm.copy_in_tx(&mut tx).await.map_err(|e| match e {
+            egret_perm::PermError::Db(e) => match e.as_database_error().and_then(|d| d.code()) {
+                // 0177's CHECK: a destination name holding `*` or `?`.
+                Some(c) if c == "23514" => refused(&e),
+                _ => db(e),
+            },
+            other => refused(&other),
+        })?;
+        let copied_any = copies.iter().any(|c| !c.is_empty());
+        let mut policies = Vec::new();
+        if copied_any {
+            recompile_bound(&mut tx, &bound).await?;
+            egret_perm_compile::overlap::refuse_created_overlaps_via(&mut tx, &overlaps_before)
+                .await
+                .map_err(|e| refused(&e))?;
+            // Read after the recompile, in the same transaction: the
+            // versions the copies are served under.
+            policies = starrocks_policy_versions(&mut tx, warehouse_id)
+                .await
+                .map_err(db)?;
+            policies.extend(
+                trino_policy_versions(&mut tx, warehouse_id)
+                    .await
+                    .map_err(db)?,
+            );
+        }
+        tx.commit().await.map_err(db)?;
+        Ok(PermCopied {
+            perm,
+            copies,
+            policies,
+        })
+    }
+
+    /// Undo [`Self::copy_perm`]: delete exactly the rows it inserted and
+    /// recompile. A failure is logged; the copies stay on a name that did not
+    /// get the view, which restricts and never exposes.
+    async fn compensate_perm(&self, warehouse_id: Uuid, c: &PermCopied) {
+        if c.copies.iter().all(follow::Copies::is_empty) {
+            return;
+        }
+        let result: Result<(), String> = async {
+            let mut tx = self.db.pool.begin().await.map_err(|e| e.to_string())?;
+            sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+                .bind(format!("{}ms", DEFAULT_LOCK_WAIT.as_millis()))
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
+            let bound = egret_catalog_registry::services_bound_to_warehouse(&mut *tx, warehouse_id)
+                .await
+                .map_err(|e| e.to_string())?;
+            delete_copies_in_tx(&mut tx, &c.copies).await?;
+            recompile_bound(&mut tx, &bound).await.map_err(|r| r.0)?;
+            tx.commit().await.map_err(|e| e.to_string())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::error!(error = %e,
+                "view hold could not undo a view's copied restrictions; they remain on a name \
+                 that did not get the view");
+        }
+    }
+
+    /// After the commit: move the view's allow grants to the new name (ids
+    /// kept, #764 D2), recompile, and record the copy, move and left events by
+    /// `caller` (D9). A failure is logged: the allows stay on the old name,
+    /// which fails closed.
+    async fn finish_perm(
+        &self,
+        warehouse_id: Uuid,
+        c: &PermCopied,
+        caller: Option<&CatalogCaller>,
+    ) {
+        let result: Result<(), String> = async {
+            let mut tx = self.db.pool.begin().await.map_err(|e| e.to_string())?;
+            sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+                .bind(format!("{}ms", DEFAULT_LOCK_WAIT.as_millis()))
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
+            let moved = c.perm.move_allows_in_tx(&mut tx).await?;
+            if moved.iter().any(|m| !m.is_empty()) {
+                let bound =
+                    egret_catalog_registry::services_bound_to_warehouse(&mut *tx, warehouse_id)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                recompile_bound(&mut tx, &bound).await.map_err(|r| r.0)?;
+            }
+            record_perm_events(&mut tx, &c.perm, &c.copies, &moved, caller).await?;
+            tx.commit().await.map_err(|e| e.to_string())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!(error = %e,
+                "a view was renamed, but moving its allow grants failed; they stay on the old \
+                 name until moved");
+        }
+    }
+}
+
+/// What [`ViewHold::copy_perm`] wrote and must be waited for.
+struct PermCopied {
+    /// The plan as read under the lock.
+    perm: PermPart,
+    /// The rows each move's copy inserted.
+    copies: Vec<follow::Copies>,
+    /// `(profile, policy version)` to wait for: every bound StarRocks and
+    /// Trino profile, when a restriction was copied.
+    policies: Vec<(i64, i64)>,
+}
+
+/// Recompile the bound profiles on `tx`, as a permission write does. A lock
+/// wait past the transaction's `lock_timeout` is the busy refusal.
+async fn recompile_bound(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    bound: &[i64],
+) -> Result<(), Refusal> {
+    egret_perm_compile::recompile_services_in_tx(tx, bound)
+        .await
+        .map(|_| ())
+        .map_err(|e| {
+            if compile_is_lock_timeout(&e) {
+                Refusal(
+                    "egret could not copy the view's restrictions in time, because other \
+                     permission changes were being written; retry"
+                        .to_string(),
+                )
+            } else {
+                Refusal(format!(
+                    "the view's restrictions cannot be copied: {e}. Nothing was renamed."
+                ))
+            }
+        })
 }
 
 /// Delete those of `rows` (the rows a hold inserted) in `warehouse_id` that
@@ -2173,7 +2610,7 @@ pub async fn hold_view_commits(
         Target::Drop { .. } => unreachable!("a drop is handled before its body is read"),
         Target::Rename => match rename_of(&json) {
             Some((source, destination)) => {
-                hold.hold_rename(deadline, &prefix, source, destination, req, next)
+                hold.hold_rename(deadline, &prefix, &json, source, destination, req, next)
                     .await
             }
             None => next.run(req).await,

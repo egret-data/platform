@@ -429,6 +429,11 @@ async fn update_external_engine(
     // Taken BEFORE the write: a rebind changes which catalogs, hence which tag
     // assignments, the new profile's unit resolves.
     let touched: Vec<i64> = new_profile.into_iter().chain(old_profile).collect();
+    // Both profiles locked first, ascending: the engine row's UPDATE below bumps
+    // both through migration 0187's trigger, and the recompile of the second
+    // would otherwise lock it after the first one's pre-mint took the
+    // compile-mint lock (refused as `ProfileSetChanged`, #792).
+    crate::profile_compiler::lock_profiles(&st, &mut tx, &touched).await?;
     let before = crate::profile_compiler::snapshot_overlaps_of(&st, &mut tx, &touched).await?;
     let updated = sqlx::query_as::<_, Engine>(
         "UPDATE engine_mgmt.engines \

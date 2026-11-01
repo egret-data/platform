@@ -997,6 +997,7 @@ fn egret_s3_profile() -> Value {
         access_key: "AK".into(),
         secret_key: "SK".into(),
         key_prefix: Some("kp".into()),
+        sts_token_validity_seconds: 900,
     })
 }
 

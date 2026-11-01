@@ -29,6 +29,9 @@ pub struct S3StorageConfig {
     pub access_key: String,
     pub secret_key: String,
     pub key_prefix: Option<String>,
+    /// How long a vended credential stays valid, in seconds (the STS
+    /// `DurationSeconds`; `catalog.sts_token_validity_seconds`, KI-315).
+    pub sts_token_validity_seconds: u64,
 }
 
 /// The lakekeeper storage profile egret gives every S3 warehouse, in its JSON
@@ -56,6 +59,11 @@ pub fn s3_storage_profile(s3: &S3StorageConfig) -> serde_json::Value {
         // or manage ([`crate::EgretAuthorizer`]). Remote request-signing stays off
         // (see above).
         "sts-enabled": true,
+        // lakekeeper's default is 3600 s. A credential outlives the grant it
+        // was vended for by up to this long (KI-315); lakekeeper caches it
+        // for half of it, so a cached key is handed out with at least half
+        // its lifetime left.
+        "sts-token-validity-seconds": s3.sts_token_validity_seconds,
         "remote-signing-enabled": false,
         "key-prefix": s3.key_prefix,
     })
@@ -106,6 +114,41 @@ pub async fn create_lakekeeper_warehouse(
     .map_err(|e| CatalogEngineError::from_lakekeeper("lakekeeper create_warehouse", e))?;
 
     Ok(response.warehouse_id().to_string())
+}
+
+/// Give every S3 warehouse the catalog holds the vended-credential lifetime
+/// `seconds` (KI-315). A warehouse created before the lifetime was
+/// configurable carries lakekeeper's 3600 s, and one created under another
+/// `catalog.sts_token_validity_seconds` carries that; egret runs this at boot,
+/// before the catalog serves, so the configured lifetime holds for all of
+/// them. Returns how many warehouses changed.
+///
+/// lakekeeper's own storage update would also re-test the store and replace
+/// the storage secret; only this one profile field changes here. Its in-memory
+/// warehouse cache is empty at boot; another replica still serving picks the
+/// change up when its cache entry expires.
+pub async fn apply_vended_credential_lifetime(
+    engine_state: &ApiContext<EngineState>,
+    seconds: u64,
+) -> Result<u64, CatalogEngineError> {
+    let seconds = i64::try_from(seconds).map_err(|_| {
+        CatalogEngineError::Internal(format!(
+            "vended credential lifetime {seconds} s is too long"
+        ))
+    })?;
+    // The pool's search path is lakekeeper's schema.
+    let changed = sqlx::query(
+        "UPDATE warehouse \
+         SET storage_profile = jsonb_set(storage_profile, '{sts-token-validity-seconds}', to_jsonb($1::bigint)) \
+         WHERE storage_profile->>'type' = 's3' \
+         AND storage_profile->'sts-token-validity-seconds' IS DISTINCT FROM to_jsonb($1::bigint)",
+    )
+    .bind(seconds)
+    .execute(&engine_state.v1_state.catalog.write_pool())
+    .await
+    .map_err(|e| CatalogEngineError::Internal(format!("setting the vended credential lifetime: {e}")))?
+    .rows_affected();
+    Ok(changed)
 }
 
 /// Refuse a warehouse on `s3` when its storage overlaps a warehouse the
@@ -328,6 +371,7 @@ mod tests {
             access_key: "AK".into(),
             secret_key: "SK".into(),
             key_prefix: None,
+            sts_token_validity_seconds: 900,
         });
         assert_eq!(profile["remote-signing-enabled"], serde_json::json!(false));
         let parsed: StorageProfile = serde_json::from_value(profile).expect("a storage profile");

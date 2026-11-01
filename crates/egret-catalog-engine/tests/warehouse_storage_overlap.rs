@@ -89,6 +89,7 @@ fn s3(bucket: &str, endpoint: &str, region: &str, key_prefix: Option<&str>) -> S
         access_key: "AK".into(),
         secret_key: "SK".into(),
         key_prefix: key_prefix.map(str::to_string),
+        sts_token_validity_seconds: 900,
     }
 }
 
