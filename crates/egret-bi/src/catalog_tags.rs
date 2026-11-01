@@ -325,7 +325,7 @@ impl CatalogTagRepo {
 /// Something an assignment that succeeded wants its author to know.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct AssignNotice {
-    /// Stable, for programs: `clearance_masks_pending_table`.
+    /// Stable, for programs: `clearance_masks_pending_table` or `clearance_on_view`.
     pub code: String,
     /// The sentence a person reads.
     pub message: String,
@@ -334,13 +334,20 @@ pub struct AssignNotice {
 /// [`AssignNotice::code`] of KI-307's notice.
 pub const CLEARANCE_MASKS_PENDING_TABLE: &str = "clearance_masks_pending_table";
 
+/// [`AssignNotice::code`] when the name is a view in the catalog: a view never
+/// becomes a table, so no masks follow later (KI-307 follow-up).
+pub const CLEARANCE_ON_VIEW: &str = "clearance_on_view";
+
 /// KI-307 (owner decision: warn at attach). A WHOLE-TABLE attachment of a
 /// classification with a role-bearing clearance, served by a StarRocks profile,
 /// compiles StarRocks NULL masks from the table's columns
 /// (`egret_perm_compile::clearance`); a table the catalog does not have yet
-/// (unknown, a view, a staged create) has none, so only the deny is compiled
-/// until the table exists, and a view over it shows the values. Read on the
-/// write's own transaction, after the row is in.
+/// (unknown, a staged create) has none, so only the deny is compiled until the
+/// table exists, and a view over it shows the values. A VIEW in the catalog
+/// has no columns there either and never will: it gets [`CLEARANCE_ON_VIEW`],
+/// which says what the compile gives it (the deny on its name, never masks)
+/// and points at the table it reads. Read on the write's own transaction,
+/// after the row is in.
 async fn clearance_mask_notices(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tag_id: Uuid,
@@ -375,6 +382,21 @@ async fn clearance_mask_notices(
             .is_some()
     {
         return Ok(Vec::new());
+    }
+    if egret_perm_compile::table_columns::is_active_view_via(tx, warehouse_id, schema, table)
+        .await?
+    {
+        return Ok(vec![AssignNotice {
+            code: CLEARANCE_ON_VIEW.to_string(),
+            message: format!(
+                "Attached. {schema}.{table} is a view in the catalog, not a table. On StarRocks, \
+                 clearance {tag_name} on a view compiles only a select deny on that name, which \
+                 egret has not measured StarRocks applying to a view, and no column masks, now \
+                 or later: egret builds masks from a table's columns. To protect the values the \
+                 view shows, classify the table it reads: that table's masks hold through the \
+                 views over it."
+            ),
+        }]);
     }
     Ok(vec![AssignNotice {
         code: CLEARANCE_MASKS_PENDING_TABLE.to_string(),
@@ -640,7 +662,7 @@ async fn require_warehouse_and_tag(
     params(("warehouse_id" = Uuid, Path, description = "Warehouse id")),
     request_body = ResourceTagBody,
     responses(
-        (status = 200, description = "Tag assigned to the catalog resource (idempotent). `notices` lists what the author should know about an assignment that succeeded: `clearance_masks_pending_table` when a whole-table classification with a clearance is attached to a table a StarRocks engine serves but the catalog does not have yet (unknown, a view, a staged create): the select deny is compiled, the column NULL masks only once the table exists, so a view over it shows the values until then", body = AssignResourceTagResponse),
+        (status = 200, description = "Tag assigned to the catalog resource (idempotent). `notices` lists what the author should know about an assignment that succeeded: `clearance_masks_pending_table` when a whole-table classification with a clearance is attached to a table a StarRocks engine serves but the catalog does not have yet (unknown, a staged create): the select deny is compiled, the column NULL masks only once the table exists, so a view over it shows the values until then; `clearance_on_view` when the name is a view in the catalog: only the select deny on its name is compiled, never column masks, so the message points at classifying the table the view reads", body = AssignResourceTagResponse),
         (status = 400, description = "The coordinate cannot be stored (an empty schema or table, or `*`/`?` in any level — see migration 0177), or the tag is being attached to a whole TABLE while a tag-addressed mask names it, which would make that table unreadable rather than masked (code `table_tag_mask_conflict`, with `tag`, `tagId`, `schema`, `table`, `mask`, `maskOrigin`; `warehouseId` is null)", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing catalog_registry:update permission", body = egret_core::http::ErrorBody),

@@ -15674,7 +15674,7 @@
         },
         "responses": {
           "200": {
-            "description": "Tag assigned to the catalog resource (idempotent). `notices` lists what the author should know about an assignment that succeeded: `clearance_masks_pending_table` when a whole-table classification with a clearance is attached to a table a StarRocks engine serves but the catalog does not have yet (unknown, a view, a staged create): the select deny is compiled, the column NULL masks only once the table exists, so a view over it shows the values until then",
+            "description": "Tag assigned to the catalog resource (idempotent). `notices` lists what the author should know about an assignment that succeeded: `clearance_masks_pending_table` when a whole-table classification with a clearance is attached to a table a StarRocks engine serves but the catalog does not have yet (unknown, a staged create): the select deny is compiled, the column NULL masks only once the table exists, so a view over it shows the values until then; `clearance_on_view` when the name is a view in the catalog: only the select deny on its name is compiled, never column masks, so the message points at classifying the table the view reads",
             "content": {
               "application/json": {
                 "schema": {
@@ -39368,7 +39368,7 @@
         "properties": {
           "code": {
             "type": "string",
-            "description": "Stable, for programs: `clearance_masks_pending_table`."
+            "description": "Stable, for programs: `clearance_masks_pending_table` or `clearance_on_view`."
           },
           "message": {
             "type": "string",

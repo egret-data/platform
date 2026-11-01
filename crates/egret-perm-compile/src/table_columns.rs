@@ -453,6 +453,31 @@ pub async fn active_tables_via(
     .map_err(CompileError::from_db)
 }
 
+/// Is `schema.view` an active VIEW of the catalog (`typ = 'view'`, not
+/// deleted, with a metadata location, single-level namespace)? Folds case like
+/// the column reads above. A view never becomes a table, so a caller telling
+/// the author why a name has no columns needs to tell it from an unknown name.
+pub async fn is_active_view_via(
+    conn: &mut sqlx::PgConnection,
+    warehouse_id: Uuid,
+    schema: &str,
+    view: &str,
+) -> Result<bool, CompileError> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM catalog.warehouses w \
+           JOIN lakekeeper.tabular ti ON ti.warehouse_id::text = w.lakekeeper_warehouse_id \
+          WHERE w.id = $1 AND ti.typ = 'view' AND ti.deleted_at IS NULL \
+            AND ti.metadata_location IS NOT NULL AND cardinality(ti.tabular_namespace_name) = 1 \
+            AND lower(ti.tabular_namespace_name[1]) = lower($2) AND lower(ti.name) = lower($3))",
+    )
+    .bind(warehouse_id)
+    .bind(schema)
+    .bind(view)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(|e| CompileError::from_db_in("reading whether a name is a view in the catalog", e))
+}
+
 pub async fn live_tabular_id_via(
     conn: &mut sqlx::PgConnection,
     warehouse_id: Uuid,

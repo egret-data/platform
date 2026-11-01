@@ -15,7 +15,7 @@
  * Something an assignment that succeeded wants its author to know.
  */
 export interface AssignNotice {
-  /** Stable, for programs: `clearance_masks_pending_table`. */
+  /** Stable, for programs: `clearance_masks_pending_table` or `clearance_on_view`. */
   code: string;
   /** The sentence a person reads. */
   message: string;
