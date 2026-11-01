@@ -126,6 +126,19 @@ pub fn build_entities(subject: &Subject, resource: &Resource, object_tags: &[Str
     Entities::from_entities(es, None).expect("entities build")
 }
 
+/// Whether `grants` make the subject a platform admin: a platform-scoped
+/// `allow` grant of the `platform_admin` role. This is the request context's
+/// `is_platform_admin` flag, which exempts the subject from the admin-graph and
+/// classification `forbid`s, so a `deny` grant must never set it (P5b). The
+/// grants come from `grants_for`, which already drops a lapsed one.
+pub fn holds_platform_admin(grants: &[Grant], role_names: &RoleNames) -> bool {
+    grants.iter().any(|g| {
+        g.scope_type == "platform"
+            && g.effect == "allow"
+            && role_names.get(&g.role_id).map(String::as_str) == Some("platform_admin")
+    })
+}
+
 /// One template-linked policy per grant, binding ?principal (the granted
 /// principal) and ?resource (the grant's scope). Returns the augmented policy set.
 pub fn link_grants(
@@ -183,6 +196,36 @@ mod tests {
     use crate::pdp::templates::template_for_role;
     use cedar_policy::{Authorizer, Context, Decision, Request, Template};
     use egret_core::ids::{UserId, WorkspaceId};
+
+    /// P5b row 1: a `deny` `platform_admin` grant does not set the context's
+    /// `is_platform_admin` flag (the exemption from the admin-graph and
+    /// classification `forbid`s); an `allow` one does. (`grants_for` already
+    /// drops a lapsed grant before this runs.)
+    #[test]
+    fn a_deny_platform_admin_grant_is_no_platform_admin() {
+        // Arrange
+        let admin_role = uuid::Uuid::new_v4();
+        let names: RoleNames =
+            std::iter::once((admin_role, "platform_admin".to_string())).collect();
+        let grant = |effect: &str| Grant {
+            role_id: admin_role,
+            scope_type: "platform".into(),
+            scope_id: None,
+            object_type: None,
+            effect: effect.into(),
+        };
+
+        // Act + Assert
+        assert!(
+            !holds_platform_admin(&[grant("deny")], &names),
+            "a deny grant must not exempt the subject from the admin forbids"
+        );
+        assert!(holds_platform_admin(&[grant("allow")], &names));
+        assert!(holds_platform_admin(
+            &[grant("deny"), grant("allow")],
+            &names
+        ));
+    }
 
     #[test]
     fn workspace_grant_allows_scoped_action() {

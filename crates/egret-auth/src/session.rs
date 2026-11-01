@@ -227,27 +227,30 @@ impl SessionService {
         self.platform_roles(user_id).await
     }
 
-    /// True if `user_id` holds a `ws_admin` grant on `workspace_id` (direct or via a
-    /// group), non-expired. A direct `access_grants` query — egret-auth can't import
+    /// True if `user_id` holds a live `allow` `ws_admin` grant on `workspace_id`
+    /// (direct or via a group; [`crate::live_allow_grant!`]): a `deny` grant is
+    /// no `ws_admin`. A direct `access_grants` query — egret-auth can't import
     /// egret-workspace's `Authorizer` (that would be a dependency cycle), and this
     /// authority IS just a grant row. Modeled on `platform_roles` (same
-    /// group-membership union and `expires_at` filter), narrowed to
+    /// group-membership union and grant-row rule), narrowed to
     /// `scope_type = 'workspace' AND scope_id = $ws AND r.name = 'ws_admin'`.
     ///
     /// Used by the OIDC step-up callback to re-check a workspace-scoped
     /// impersonation's authority at completion time (closes the ws-path demotion
     /// TOCTOU, Task 9).
     pub async fn ws_admin_of(&self, user_id: UserId, workspace_id: WorkspaceId) -> Result<bool> {
-        let exists: bool = sqlx::query_scalar(
+        let exists: bool = sqlx::query_scalar(concat!(
             "SELECT EXISTS ( \
                SELECT 1 FROM access_grants ag \
                JOIN roles r ON r.id = ag.role_id \
                WHERE ag.scope_type = 'workspace' AND ag.scope_id = $2 AND r.name = 'ws_admin' \
-                 AND (ag.expires_at IS NULL OR ag.expires_at > now()) \
+                 AND ",
+            crate::live_allow_grant!("ag"),
+            " \
                  AND ( (ag.principal_type = 'user'  AND ag.principal_id = $1) \
                     OR (ag.principal_type = 'group' AND ag.principal_id IN \
                            (SELECT group_id FROM user_groups WHERE user_id = $1)) ) )",
-        )
+        ))
         .bind(user_id.0)
         .bind(workspace_id.0)
         .fetch_one(&self.db.pool)
@@ -256,8 +259,9 @@ impl SessionService {
         Ok(exists)
     }
 
-    /// The user's role names in ONE workspace (direct + via group, non-expired). An
-    /// empty vector means the user is not a member of it.
+    /// The user's role names in ONE workspace (direct + via group, live `allow`
+    /// grants only, [`crate::live_allow_grant!`]). An empty vector means the
+    /// user is not a member of it.
     ///
     /// A direct `access_grants` query for the same reason [`Self::ws_admin_of`] is
     /// one — egret-auth cannot import egret-workspace's `Authorizer` without a
@@ -273,15 +277,17 @@ impl SessionService {
         user_id: UserId,
         workspace_id: WorkspaceId,
     ) -> Result<Vec<String>> {
-        let rows: Vec<(String,)> = sqlx::query_as(
+        let rows: Vec<(String,)> = sqlx::query_as(concat!(
             "SELECT DISTINCT r.name FROM access_grants ag \
              JOIN roles r ON r.id = ag.role_id \
              WHERE ag.scope_type = 'workspace' AND ag.scope_id = $2 \
-               AND (ag.expires_at IS NULL OR ag.expires_at > now()) \
+               AND ",
+            crate::live_allow_grant!("ag"),
+            " \
                AND ( (ag.principal_type = 'user'  AND ag.principal_id = $1) \
                   OR (ag.principal_type = 'group' AND ag.principal_id IN \
                          (SELECT group_id FROM user_groups WHERE user_id = $1)) )",
-        )
+        ))
         .bind(user_id.0)
         .bind(workspace_id.0)
         .fetch_all(&self.db.pool)
@@ -292,21 +298,22 @@ impl SessionService {
 
     /// Platform roles for the user (direct + via group membership).
     ///
-    /// Live `allow` grants only (KI-323): a `deny` grant of a role takes the
+    /// Live `allow` grants only (KI-323, [`crate::live_allow_grant!`]): a `deny` grant of a role takes the
     /// role's actions away in the PDP (it links the role's `forbid`
     /// template), so it must never put the role in `platform_roles` — the same
     /// rule `crate::effective`'s access resolver applies to the console.
     async fn platform_roles(&self, user_id: UserId) -> Result<Vec<String>> {
-        let rows: Vec<(String,)> = sqlx::query_as(
+        let rows: Vec<(String,)> = sqlx::query_as(concat!(
             "SELECT DISTINCT r.name FROM access_grants ag \
              JOIN roles r ON r.id = ag.role_id \
              WHERE ag.scope_type = 'platform' \
-               AND ag.effect = 'allow' \
-               AND (ag.expires_at IS NULL OR ag.expires_at > now()) \
+               AND ",
+            crate::live_allow_grant!("ag"),
+            " \
                AND ( (ag.principal_type = 'user'  AND ag.principal_id = $1) \
                   OR (ag.principal_type = 'group' AND ag.principal_id IN \
                          (SELECT group_id FROM user_groups WHERE user_id = $1)) )",
-        )
+        ))
         .bind(user_id.0)
         .fetch_all(&self.db.pool)
         .await
@@ -320,12 +327,13 @@ impl SessionService {
     /// frontend's permission-aware UI gating — matching what the PDP enforces via its
     /// closure. (FE gating only; enforcement is always the PDP.)
     async fn permissions(&self, user_id: UserId) -> Result<Vec<String>> {
-        let rows: Vec<(String,)> = sqlx::query_as(
+        let rows: Vec<(String,)> = sqlx::query_as(concat!(
             "WITH RECURSIVE granted AS ( \
                SELECT ag.role_id FROM access_grants ag \
                WHERE ag.scope_type = 'platform' \
-                 AND ag.effect = 'allow' \
-                 AND (ag.expires_at IS NULL OR ag.expires_at > now()) \
+                 AND ",
+            crate::live_allow_grant!("ag"),
+            " \
                  AND ( (ag.principal_type = 'user'  AND ag.principal_id = $1) \
                     OR (ag.principal_type = 'group' AND ag.principal_id IN \
                            (SELECT group_id FROM user_groups WHERE user_id = $1)) ) \
@@ -339,7 +347,7 @@ impl SessionService {
              ) \
              SELECT DISTINCT rp.permission \
                FROM closure c JOIN role_permissions rp ON rp.role_id = c.role_id",
-        )
+        ))
         .bind(user_id.0)
         .fetch_all(&self.db.pool)
         .await
