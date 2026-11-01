@@ -1123,6 +1123,8 @@ fn catalog_grant_covers(
 struct LakekeeperProvisioner {
     engine_state: egret_catalog_engine::ApiContext<egret_catalog_engine::EngineState>,
     system_user: String,
+    /// `catalog.sts_token_validity_seconds` (KI-315).
+    sts_token_validity_seconds: u64,
 }
 
 #[async_trait::async_trait]
@@ -1140,6 +1142,7 @@ impl egret_catalog_engine::WarehouseProvisioner for LakekeeperProvisioner {
             access_key: s3.access_key.clone(),
             secret_key: s3.secret_key.clone(),
             key_prefix: s3.key_prefix.clone(),
+            sts_token_validity_seconds: self.sts_token_validity_seconds,
         };
         egret_catalog_engine::create_lakekeeper_warehouse(
             self.engine_state.clone(),
@@ -2605,11 +2608,24 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         )
         .await
         .context("bootstrapping catalog engine")?;
+        // KI-315: warehouses created before, or under another setting, get
+        // the configured vended-credential lifetime before the catalog serves.
+        let lifetime = config.catalog.sts_token_validity_seconds;
+        let changed =
+            egret_catalog_engine::apply_vended_credential_lifetime(&engine_state, lifetime)
+                .await
+                .context("setting the vended credential lifetime")?;
+        tracing::info!(
+            seconds = lifetime,
+            warehouses_changed = changed,
+            "vended credential lifetime"
+        );
         let gc_cancel = egret_catalog_engine::CancellationToken::new();
         egret_catalog_engine::spawn_gc_workers(gc_registry, gc_cancel);
         catalog_provisioner = Some(std::sync::Arc::new(LakekeeperProvisioner {
             engine_state: engine_state.clone(),
             system_user: config.catalog.system_user.clone(),
+            sts_token_validity_seconds: lifetime,
         }));
         let table_hook = std::sync::Arc::new(egret_catalog_engine::TableHook::new(db.clone()));
         catalog_browser = Some(std::sync::Arc::new(LakekeeperBrowser {

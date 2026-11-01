@@ -49,6 +49,8 @@ struct Vended {
     /// `TableAccess`'s resources, as keys in the bucket: `key/` and `key/*`.
     resources: Vec<String>,
     bucket: String,
+    /// The `DurationSeconds` lakekeeper asked for; absent, STS uses 3600.
+    duration_seconds: i64,
 }
 
 impl Vended {
@@ -146,10 +148,15 @@ impl MockS3 {
                 k.to_string()
             })
             .collect();
+        let duration_seconds = form
+            .get("DurationSeconds")
+            .map(|d| d.parse().expect("a numeric DurationSeconds"))
+            .unwrap_or(3600);
         let vended = Vended {
             actions,
             resources,
             bucket,
+            duration_seconds,
         };
         let key = format!(
             "VEND{}{}",
@@ -158,7 +165,8 @@ impl MockS3 {
         );
         self.vended.lock().unwrap().insert(key.clone(), vended);
         self.minted.lock().unwrap().push(key.clone());
-        let expiration = (chrono::Utc::now() + chrono::Duration::hours(1))
+        // As STS: the credential expires `DurationSeconds` from now.
+        let expiration = (chrono::Utc::now() + chrono::Duration::seconds(duration_seconds))
             .format("%Y-%m-%dT%H:%M:%SZ")
             .to_string();
         xml(
@@ -415,8 +423,19 @@ struct Env {
 }
 
 /// A warehouse on egret's S3 profile over a fresh [`MockS3`], with
-/// namespaces `sales` and `other`.
+/// namespaces `sales` and `other`, and the vended-credential lifetime egret
+/// configures by default.
 async fn env() -> Option<Env> {
+    env_with_lifetime(
+        egret_config::Config::default()
+            .catalog
+            .sts_token_validity_seconds,
+    )
+    .await
+}
+
+/// The same, with vended credentials that live `sts_token_validity_seconds`.
+async fn env_with_lifetime(sts_token_validity_seconds: u64) -> Option<Env> {
     let dsn = egret_test_db::url().await?;
     let db = egret_metastore::Db::connect(&dsn, 10)
         .await
@@ -448,6 +467,7 @@ async fn env() -> Option<Env> {
             access_key: MockS3::STATIC_KEY.into(),
             secret_key: "STATICSK".into(),
             key_prefix: Some("kp".into()),
+            sts_token_validity_seconds,
         },
     )
     .await
@@ -1342,4 +1362,76 @@ async fn a_renamed_tables_catalog_grants_and_credentials_follow_it() {
     for a in &actors {
         assert_eq!(a["client_id"], json!(subject), "{a}");
     }
+}
+
+// ── KI-315: how long a vended credential lives ──────────────────────────────
+
+/// The expiry a load result's storage credential carries, in ms since the
+/// epoch (the top-level `config` has none).
+fn expires_at_ms(load: &Value) -> i64 {
+    load["storage-credentials"][0]["config"]["s3.session-token-expires-at-ms"]
+        .as_str()
+        .and_then(|ms| ms.parse().ok())
+        .unwrap_or_else(|| panic!("a session token expiry in the load result: {load}"))
+}
+
+/// KI-315: by default, a vended credential lives 15 minutes, not
+/// lakekeeper's hour: lakekeeper asks the STS for 900 s, and the load result
+/// tells the client the credential expires 15 minutes from now.
+#[tokio::test]
+async fn vended_credentials_live_fifteen_minutes_by_default() {
+    let env = env_or_skip!();
+    env.create_table("sales", "orders").await;
+    let writer = env
+        .token_for(
+            "external",
+            &[("table", Some("sales"), Some("orders"), "write")],
+        )
+        .await;
+
+    let before = chrono::Utc::now().timestamp_millis();
+    let load = env.load(&writer, "sales", "orders", &[VENDED]).await;
+    let after = chrono::Utc::now().timestamp_millis();
+    let (_, policy) = env.vended_in_config(&load);
+
+    assert_eq!(policy.duration_seconds, 900, "the STS DurationSeconds");
+    let expires_at = expires_at_ms(&load);
+    // The mock's expiry has whole seconds.
+    assert!(
+        expires_at > before + 899_000 - 1_000 && expires_at <= after + 900_000,
+        "expires 900 s after the load, not {} s",
+        (expires_at - before) / 1000
+    );
+}
+
+/// KI-315: a warehouse created before the lifetime was configured carries
+/// lakekeeper's 3600 s in its stored profile. egret's boot step moves it to
+/// the configured lifetime, and the next credential lives that long.
+#[tokio::test]
+async fn a_warehouse_from_before_gets_the_configured_lifetime() {
+    let Some(env) = env_with_lifetime(3600).await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    env.create_table("sales", "orders").await;
+
+    let changed = egret_catalog_engine::apply_vended_credential_lifetime(&env.state, 900)
+        .await
+        .expect("set the lifetime");
+    assert!(changed >= 1, "the 3600 s warehouse changed");
+
+    let writer = env
+        .token_for(
+            "external",
+            &[("table", Some("sales"), Some("orders"), "write")],
+        )
+        .await;
+    let load = env.load(&writer, "sales", "orders", &[VENDED]).await;
+    let (_, policy) = env.vended_in_config(&load);
+    assert_eq!(policy.duration_seconds, 900, "the STS DurationSeconds");
+
+    let again = egret_catalog_engine::apply_vended_credential_lifetime(&env.state, 900)
+        .await
+        .expect("set the lifetime again");
+    assert_eq!(again, 0, "a second boot changes nothing");
 }
