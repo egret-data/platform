@@ -43,7 +43,8 @@ use egret_policy::{
 };
 use egret_ranger_eval::model::{ItemBucket, PolicyItem, RangerPolicy, ResourceLevel, Unmodelled};
 use egret_ranger_eval::resource::{
-    MatchType, PreparedPolicyResources, RequestResource, ResourceMapSource,
+    tag_trie_candidacy, MatchType, PreparedPolicyResources, RequestResource, ResourceMapSource,
+    TagTrieCandidacy,
 };
 use egret_ranger_eval::servicedef::ServiceDef;
 use serde::Serialize;
@@ -1411,6 +1412,14 @@ pub struct TagPolicyRow {
     pub resource_summary: String,
     /// The tag value matched by `*`/`?` rather than literally.
     pub through_pattern: bool,
+    /// The engines apply this policy to the tag although its pattern does not
+    /// match it (#803): Ranger's tag phase picks tag policies by the literal
+    /// prefix of each value before its first `*`, `?` or `{` (every tag for
+    /// `isExcludes`; the whole value for `isRecursive`), not by the pattern.
+    pub widened_by_engine: bool,
+    /// With `widened_by_engine`: the engines apply the policy to every tag
+    /// whose name starts with this prefix; `""` means every tag.
+    pub engine_tag_prefix: Option<String>,
     pub enabled: bool,
     pub deny_all_else: bool,
     pub unmodelled: Vec<String>,
@@ -1433,9 +1442,54 @@ pub struct TagHandWritten {
     pub unreadable: Vec<UnreadablePolicy>,
 }
 
+/// How a tag policy reaches a tag, when it does: Route D's per-policy answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagReach {
+    /// The policy's pattern matches the tag through `*`/`?` rather than
+    /// literally.
+    pub through_pattern: bool,
+    /// `Some` when the engines apply the policy although its pattern does not
+    /// match the tag: every tag starting with this prefix (`""` = every tag).
+    pub engine_tag_prefix: Option<String>,
+}
+
+/// Whether the engines apply the hand-written tag policy `policy` to the tag
+/// named `tag`, and how (#803).
+///
+/// Ranger's tag phase filters tag policies with the TAG repository's trie
+/// alone ([`tag_trie_candidacy`]), never the policy matcher, so that is the
+/// answer; the matcher only says whether the pattern itself matches, which
+/// separates a widened row from an ordinary one. A shape the trie rule was not
+/// measured on keeps the matcher's answer.
+pub fn tag_reach(policy: &RangerPolicy, def: &ServiceDef, tag: &str) -> Option<TagReach> {
+    let prepared = PreparedPolicyResources::new(policy, def);
+    let request = RequestResource::new().with("tag", tag);
+    let matched = match object_match(&prepared, policy, &request) {
+        ObjectMatch::Applies { through_pattern } => Some(through_pattern),
+        _ => None,
+    };
+    let reach = |through_pattern, engine_tag_prefix| TagReach {
+        through_pattern,
+        engine_tag_prefix,
+    };
+    match (tag_trie_candidacy(policy, def, tag), matched) {
+        // Not measured: the matcher is all there is to go on.
+        (TagTrieCandidacy::NotMeasured, m) => m.map(|t| reach(t, None)),
+        // The trie is the engine's whole filter, in both directions.
+        (TagTrieCandidacy::NotReturned, _) => None,
+        (_, Some(t)) => Some(reach(t, None)),
+        (TagTrieCandidacy::Exact, None) => Some(reach(false, None)),
+        (TagTrieCandidacy::Prefix(p), None) => Some(reach(false, Some(p))),
+    }
+}
+
 /// Route D (spec §4.5): every usable tag service's hand-written (`operator`)
-/// policies whose tag resource matches this tag's NAME through the tag
-/// service-def's matcher (no case folding: `ignoreCase: false`).
+/// policies the engines apply to this tag's NAME. That is what the tag
+/// repository's trie returns ([`tag_trie_candidacy`], #803), not what the
+/// policy matcher accepts: for a tag request Ranger never consults the
+/// matcher. A row the trie returns but the matcher rejects is flagged
+/// `widened_by_engine`. A shape the trie rule was not measured on falls back
+/// to the matcher (no case folding: `ignoreCase: false`).
 pub async fn handwritten_for_tag_via(
     conn: &mut sqlx::PgConnection,
     tag_id: Uuid,
@@ -1479,7 +1533,6 @@ pub async fn handwritten_for_tag_via(
         policies: Vec::new(),
         unreadable: Vec::new(),
     };
-    let request = RequestResource::new().with("tag", name.as_str());
     let mut defs = Defs::default();
     for (tag_service, mut profiles) in by_tag_service {
         profiles.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1514,9 +1567,10 @@ pub async fn handwritten_for_tag_via(
                     continue;
                 }
             };
-            let prepared = PreparedPolicyResources::new(&policy, def);
-            let ObjectMatch::Applies { through_pattern } =
-                object_match(&prepared, &policy, &request)
+            let Some(TagReach {
+                through_pattern,
+                engine_tag_prefix,
+            }) = tag_reach(&policy, def, &name)
             else {
                 continue;
             };
@@ -1527,6 +1581,8 @@ pub async fn handwritten_for_tag_via(
                 policy_type: policy_type_word(policy.policy_type).to_string(),
                 resource_summary: resource_summary(&policy),
                 through_pattern,
+                widened_by_engine: engine_tag_prefix.is_some(),
+                engine_tag_prefix,
                 enabled: row.enabled,
                 deny_all_else: policy.is_deny_all_else,
                 unmodelled: unmodelled_sentences(&policy),

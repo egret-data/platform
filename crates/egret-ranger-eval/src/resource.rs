@@ -443,6 +443,107 @@ pub fn level_excluded_by_trie(
     !LevelMatcher::build(level, def).is_match(Some(request_value))
 }
 
+/// Why Ranger's TAG-repository trie returns a tag policy for one tag name, or
+/// that it does not — [`tag_trie_candidacy`]'s answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TagTrieCandidacy {
+    /// The trie does not return the policy for this tag, so Ranger never
+    /// evaluates it there.
+    NotReturned,
+    /// A literal value (no wildcard, not recursive) equals the tag name.
+    Exact,
+    /// Returned for every tag name starting with this prefix — the literal
+    /// part of a value before its first `*`, `?` or `{`, or the whole value of
+    /// an `isRecursive` level. `""` means every tag (a leading wildcard or
+    /// token, or `isExcludes`).
+    Prefix(String),
+    /// A shape the measurement did not cover (see [`tag_trie_candidacy`]):
+    /// the caller has no trie answer to use.
+    NotMeasured,
+}
+
+/// What Ranger's tag phase applies to the tag `tag`: whether the TAG
+/// repository's resource trie returns `policy` for it (#803).
+///
+/// For a `RangerTagAccessRequest` `RangerDefaultPolicyEvaluator.evaluate`
+/// takes the match type from the request and never calls the policy matcher,
+/// so the trie (`getLikelyMatchPolicyEvaluators`) is the WHOLE filter — and it
+/// is wider than the matcher for the shapes [`trie_reproduces_matcher`]
+/// refuses. The rule, per value of the `tag` level:
+///
+/// * `isExcludes` → every tag (the trie keeps an excludes resource among its
+///   inherited evaluators), including the excluded one;
+/// * a value with `*`, `?` or `{`, or an `isRecursive` level → every tag that
+///   starts with the value's literal prefix before its first `*`/`?`/`{`
+///   (case-sensitive); so `*i`, `?ii` and `{USER}` reach every tag and `p*x`
+///   reaches every tag starting with `p`;
+/// * otherwise → the tag equal to the value.
+///
+/// MEASURED end-to-end through `RangerPolicyEngineImpl` (ranger-plugins-common
+/// 2.5.0, 2.8.0 and 2.9.0, identical; allow, deny and mask variants agree) on
+/// 37 tag-resource shapes × 24 tag names; the corpus and the verdicts are
+/// committed as `egret-perm-compile/tests/fixtures/route_d_tag_trie.json` and
+/// `egret-perm-compile/tests/route_d_tag_pattern.rs` checks this function
+/// against all 888 pairs.
+///
+/// [`TagTrieCandidacy::NotMeasured`] for every shape outside that corpus,
+/// rather than a guess: a resource map that is not exactly `{"tag": …}`,
+/// additional resource maps, an empty value list or an empty value, and a
+/// `tag` resource def whose matcher or `matcherOptions` differ from the
+/// bundled tag service-def's (`RangerDefaultResourceMatcher`, `wildCard`
+/// true, `ignoreCase` false, `replaceTokens` true, `quotedCaseSensitive`
+/// false).
+pub fn tag_trie_candidacy(
+    policy: &RangerPolicy,
+    service_def: &ServiceDef,
+    tag: &str,
+) -> TagTrieCandidacy {
+    const TAG: &str = "tag";
+    if !policy.additional_resources.is_empty()
+        || policy.resources.len() != 1
+        || !policy.resources.contains_key(TAG)
+    {
+        return TagTrieCandidacy::NotMeasured;
+    }
+    let level = &policy.resources[TAG];
+    let measured_def = service_def
+        .resource(PolicyType::from_code(policy.policy_type), TAG)
+        .is_some_and(|d| {
+            let o = &d.matcher_options;
+            (d.matcher.is_empty() || d.matcher.ends_with("RangerDefaultResourceMatcher"))
+                && o.wild_card
+                && !o.ignore_case
+                && o.replace_tokens
+                && !o.quoted_case_sensitive
+        });
+    if !measured_def || level.values.is_empty() || level.values.iter().any(String::is_empty) {
+        return TagTrieCandidacy::NotMeasured;
+    }
+    if level.is_excludes {
+        return TagTrieCandidacy::Prefix(String::new());
+    }
+    let mut widest: Option<&str> = None;
+    for value in &level.values {
+        let (prefix, wild) = match value.find(['*', '?', '{']) {
+            Some(i) => (&value[..i], true),
+            None => (value.as_str(), false),
+        };
+        if !wild && !level.is_recursive {
+            if tag == value {
+                return TagTrieCandidacy::Exact;
+            }
+        } else if tag.starts_with(prefix) && widest.is_none_or(|w| prefix.len() > w.len()) {
+            // The longest prefix that reaches the tag: the most specific
+            // reason to state when several values do.
+            widest = Some(prefix);
+        }
+    }
+    match widest {
+        Some(p) => TagTrieCandidacy::Prefix(p.to_string()),
+        None => TagTrieCandidacy::NotReturned,
+    }
+}
+
 /// `RangerAbstractResourceMatcher.isAllValuesRequested`: does this request
 /// element ask for **every value at its level** rather than naming one?
 ///

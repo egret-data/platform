@@ -154,6 +154,56 @@ async fn tag_policies_match_by_name_through_the_tag_matcher() {
     );
 }
 
+/// #803: the engines pick tag policies with the tag repository's trie, which
+/// is wider than the pattern — `*i` reaches every tag, `PII1*zz` every tag
+/// starting with `PII1`, an excludes policy every tag. Route D lists them, with
+/// the prefix the engine uses, and still omits what the trie does not return.
+#[tokio::test]
+async fn tag_policies_the_engine_reaches_wider_than_the_pattern_are_flagged() {
+    let e = env().await;
+    let (_, _, tsvc, _, _) = profile(&e).await;
+    // `unique` ends in hex digits: never `i`, never `zz`.
+    let n = unique("PII");
+    let id = tag(&e, &n).await;
+    let leading = unique("leading-");
+    let interior = unique("interior-");
+    let excludes = unique("excludes-");
+    let elsewhere = unique("elsewhere-");
+    insert(&e, tsvc, &leading, "*i", "operator").await;
+    insert(&e, tsvc, &interior, &format!("{}*zz", &n[..4]), "operator").await;
+    insert(&e, tsvc, &elsewhere, "QQ*zz", "operator").await;
+    let body: Value = json!({
+        "name": excludes, "service": "x", "serviceType": "tag", "policyType": 0, "isEnabled": true,
+        "resources": { "tag": { "values": [n], "isExcludes": true } },
+        "denyPolicyItems": [{ "users": ["ua"], "accesses": [{ "type": "select", "isAllowed": true }] }]
+    });
+    sqlx::query(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, managed_by) \
+         VALUES ($1, $2, $3, 'operator')",
+    )
+    .bind(tsvc)
+    .bind(&excludes)
+    .bind(body)
+    .execute(&e.pool)
+    .await
+    .unwrap();
+
+    let r = read(&e, id).await.unwrap();
+    let row = |name: &str| {
+        r.policies
+            .iter()
+            .find(|p| p.name == name)
+            .unwrap_or_else(|| panic!("{name} not listed: {:?}", names(&r)))
+    };
+    for (name, prefix) in [(&leading, ""), (&interior, &n[..4]), (&excludes, "")] {
+        let p = row(name);
+        assert!(p.widened_by_engine, "{name}");
+        assert_eq!(p.engine_tag_prefix.as_deref(), Some(prefix), "{name}");
+        assert!(!p.through_pattern, "{name}");
+    }
+    assert!(!names(&r).contains(&elsewhere.as_str()));
+}
+
 #[tokio::test]
 async fn unknown_tag_is_not_found() {
     let e = env().await;
