@@ -1,0 +1,262 @@
+//! #792 (username-takeover spec 2026-10-23 §11 item 6; P6 spec
+//! `docs/en/specs/2026-11-01-p6-compile-mint-ordering.md`): the profile set a
+//! writer locks before the compile-mint lock can GROW before its recompile, and
+//! the grown profile is then locked while the mint lock is held, against the
+//! stated order (profiles, then the mint lock, then any row write or mint).
+//!
+//! Driven as a deterministic interleaving of three sessions over the real
+//! catalog-tag reach (`ViewReach`, which `egret_bi::CatalogTagRepo` and the
+//! table hook's move both use):
+//!
+//! 1. A: `ViewReach::of_tables` on warehouse W. W's only bound profile is S1,
+//!    so A locks S1 and then the compile-mint lock.
+//! 2. B: attaches the engine of profile S2 to a catalog of W, and commits. W
+//!    is now reached through S1 and S2.
+//! 3. C: a writer of S2 in the stated order: the S2 profile lock, then the
+//!    mint lock, which A holds, so C waits.
+//! 4. A: `retag_bump_and_recompile` reads W's profiles again, finds S2, and
+//!    locks it while holding the mint lock. A waits on C, C waits on A.
+//!
+//! Wanted (owner decision for #792, option (a)): A refuses with a retryable
+//! error before it waits on any profile it did not lock early, and C goes
+//! through. On the code before the fix Postgres breaks the cycle with a
+//! deadlock (40P01), and C is the victim.
+//!
+//! Its own test binary, so `egret-test-db` gives it a private database.
+//!
+//! DB-gated; self-skips only under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS:
+//!   export DATABASE_URL=postgres://egret:egret@localhost:5432/egret
+//!   env -u EGRET_ALLOW_DB_SKIP cargo test -p egret-perm-compile --test compile_mint_ordering
+
+use std::time::{Duration, Instant};
+
+use egret_metastore::Db;
+use egret_perm_compile::view_tags::{ViewReach, ViewReachError};
+use egret_policy::PolicyStore;
+use uuid::Uuid;
+
+/// A backstop so a regression hangs for this long at most, not forever. Far
+/// above Postgres' `deadlock_timeout` (1 s by default), so the deadlock, when
+/// there is one, is what ends the wait.
+const LOCK_TIMEOUT: &str = "20s";
+
+async fn test_db() -> Option<Db> {
+    let dsn = egret_test_db::url().await?;
+    let db = Db::connect(&dsn, 6).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    Some(db)
+}
+
+fn unique(prefix: &str) -> String {
+    format!("{prefix}_{}", &Uuid::new_v4().simple().to_string()[..12])
+}
+
+struct Profile {
+    service_id: i64,
+    engine_id: Uuid,
+}
+
+/// A StarRocks profile with one engine bound to it (StarRocks, so nothing here
+/// needs a tag service).
+async fn profile(db: &Db, policy: &PolicyStore) -> Profile {
+    let service = policy
+        .create_service(&unique("sr_mintorder"), "starrocks", &serde_json::json!({}))
+        .await
+        .expect("create service");
+    let engine_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'starrocks','egret','{}'::jsonb,$2) RETURNING id",
+    )
+    .bind(unique("mintorder-eng"))
+    .bind(service.id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("engine");
+    Profile {
+        service_id: service.id,
+        engine_id,
+    }
+}
+
+async fn warehouse(db: &Db) -> Uuid {
+    let pool = &db.pool;
+    let workspace_id: Uuid =
+        sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,$2) RETURNING id")
+            .bind(unique("mintorder-ws"))
+            .bind("Mint Order WS")
+            .fetch_one(pool)
+            .await
+            .expect("workspace");
+    let sc_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
+         VALUES ($1,'us-east-1','egret-mintorder-test','AKIATEST') RETURNING id",
+    )
+    .bind(unique("mintorder-sc"))
+    .fetch_one(pool)
+    .await
+    .expect("storage connection");
+    sqlx::query_scalar(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) \
+         VALUES ($1,$2,$3) RETURNING id",
+    )
+    .bind(unique("mintorder_wh"))
+    .bind(workspace_id)
+    .bind(sc_id)
+    .fetch_one(pool)
+    .await
+    .expect("warehouse")
+}
+
+async fn catalog(db: &Db, warehouse_id: Uuid) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) \
+         RETURNING id",
+    )
+    .bind(unique("mintorder_cat"))
+    .bind(warehouse_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("registry catalog")
+}
+
+async fn attach(db: &Db, engine_id: Uuid, catalog_id: Uuid) {
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1,$2)",
+    )
+    .bind(engine_id)
+    .bind(catalog_id)
+    .execute(&db.pool)
+    .await
+    .expect("attach catalog");
+}
+
+async fn begin_bounded(db: &Db) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    let mut tx = db.pool.begin().await.expect("begin");
+    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+        .bind(LOCK_TIMEOUT)
+        .execute(&mut *tx)
+        .await
+        .expect("lock_timeout");
+    tx
+}
+
+/// Wait until some session waits on an advisory lock (C on the mint lock).
+async fn until_waiting_on_advisory_lock(db: &Db) {
+    let start = Instant::now();
+    loop {
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_locks \
+                             WHERE locktype = 'advisory' AND NOT granted \
+                               AND database = (SELECT oid FROM pg_database \
+                                                WHERE datname = current_database()))",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .expect("pg_locks");
+        if waiting {
+            return;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "C never reached its wait on the compile-mint lock"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn is_deadlock(e: &str) -> bool {
+    e.contains("40P01") || e.contains("deadlock")
+}
+
+#[tokio::test]
+async fn a_profile_bound_after_the_early_mint_lock_is_refused_not_deadlocked() {
+    let Some(db) = test_db().await else {
+        return;
+    };
+    let policy = PolicyStore::new(db.clone());
+    egret_policy::seed_starrocks(&policy)
+        .await
+        .expect("seed starrocks service-def");
+
+    // S1 is created first, so S1 < S2: A's early lock (S1) and the grown one
+    // (S2) are ascending, and the only order broken is the mint lock's.
+    let s1 = profile(&db, &policy).await;
+    let s2 = profile(&db, &policy).await;
+    assert!(s1.service_id < s2.service_id);
+    let w = warehouse(&db).await;
+    let c1 = catalog(&db, w).await;
+    attach(&db, s1.engine_id, c1).await;
+
+    // 1. A: the reach of a catalog-tag write on W.
+    let mut a = begin_bounded(&db).await;
+    let reach = ViewReach::of_tables(&mut a, w, &[("sales".into(), "orders".into())])
+        .await
+        .expect("reach");
+    assert_eq!(
+        reach.services,
+        vec![s1.service_id],
+        "W is reached through S1 only"
+    );
+
+    // 2. B: W gains a second profile, committed.
+    attach(&db, s2.engine_id, c1).await;
+
+    // 3. C: a writer of S2, in the stated order; it waits on A's mint lock.
+    let c_db = db.clone();
+    let s2_id = s2.service_id;
+    let c = tokio::spawn(async move {
+        let mut tx = begin_bounded(&c_db).await;
+        egret_perm_compile::lock_services_in_tx(&mut tx, &[s2_id])
+            .await
+            .map_err(|e| e.to_string())?;
+        egret_perm_compile::lock_compile_mints_in_tx(&mut tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        tx.commit().await.map_err(|e| e.to_string())
+    });
+    until_waiting_on_advisory_lock(&db).await;
+
+    // 4. A: the re-read finds S2.
+    let a_result = reach.retag_bump_and_recompile(&mut a).await;
+    let a_outcome: Result<(), String> = match a_result {
+        Ok(()) => a.commit().await.map_err(|e| e.to_string()),
+        Err(e) => {
+            let msg = match &e {
+                ViewReachError::Db(d) => format!("{d:?}"),
+                other => other.to_string(),
+            };
+            let _ = a.rollback().await;
+            Err(msg)
+        }
+    };
+    let c_outcome = tokio::time::timeout(Duration::from_secs(40), c)
+        .await
+        .expect("C finished")
+        .expect("C did not panic");
+
+    // A must refuse (it cannot recompile S2, which it did not lock first),
+    // and must refuse by the retryable refusal, not by losing a deadlock.
+    let a_err = a_outcome.err().unwrap_or_else(|| {
+        panic!(
+            "A recompiled S2, a profile it locked AFTER the compile-mint lock; C's outcome: \
+             {c_outcome:?}"
+        )
+    });
+    assert!(
+        !is_deadlock(&a_err),
+        "A was a deadlock victim instead of refusing: {a_err}"
+    );
+    // C, which kept the stated order, must go through.
+    c_outcome.unwrap_or_else(|e| {
+        panic!(
+            "C (profile lock, then mint lock) failed{}: {e}",
+            if is_deadlock(&e) {
+                " as a deadlock victim"
+            } else {
+                ""
+            }
+        )
+    });
+}
