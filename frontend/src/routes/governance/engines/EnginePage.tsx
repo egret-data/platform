@@ -29,6 +29,7 @@ import { EngineTabBody } from "@/routes/governance/engines/tabBodies";
 import { useProfilePolicies } from "@/routes/governance/engines/profilePolicies";
 import { useProfileOverlaps } from "@/routes/governance/engines/tabs/OverlapsTab";
 import { PageContainer } from "@/components/layout/PageContainer";
+import { StarRocksMetadataTablesWarning } from "@/routes/control-plane/StarRocksMetadataTablesWarning";
 
 /**
  * An engine's page (spec §6): `/governance/engines/:id`, `policy:read`.
@@ -140,6 +141,7 @@ export default function EnginePage() {
         <Banner>{sharedSentence(profileName, others)}</Banner>
       ) : null}
       {engine?.origin === "external" ? <Banner>{EXTERNAL_SENTENCE}</Banner> : null}
+      {engine ? <StarRocksMetadataTablesWarning engineType={engine.type} bound={!!profileName} /> : null}
       <FrameTabs
         tabs={tabs}
         badges={overlaps.pairs ? { overlaps: overlaps.pairs.length } : undefined}
