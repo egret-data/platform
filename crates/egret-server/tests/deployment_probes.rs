@@ -546,3 +546,67 @@ fn the_apps_network_policy_opens_both_the_edit_and_the_run_port() {
         );
     }
 }
+
+/// The engines' NetworkPolicy (`networkpolicy-engines.yaml`), measured on kind 0.29 with a pod
+/// listening on 8030/9030/8080/9010: on by default, it lets in the engine namespace and egret's
+/// `app: egret` pods on every port, the StarRocks operator on the FE's 8030 and 9030 only, the
+/// configured ingress peers on the engine HTTP ports only, and nobody else (a task pod and a
+/// non-egret pod of the release namespace were refused on every port). Each rule is asserted so a
+/// widened one (any namespace, or the operator on every port) fails here.
+#[test]
+fn the_engine_network_policy_admits_only_the_engines_egret_and_the_operator() {
+    let np = without_comments(&read(
+        "deploy/helm/egret/templates/networkpolicy-engines.yaml",
+    ));
+    let values = values();
+    let section = &values[values
+        .find("engineNetworkPolicy:")
+        .expect("engineNetworkPolicy values")..];
+    assert!(
+        section.lines().nth(1).unwrap().trim() == "enabled: true",
+        "on by default"
+    );
+    assert!(
+        section.contains("operatorNamespaces: [starrocks]"),
+        "the operator's namespace"
+    );
+    assert!(section.contains("ingressFrom: []") && section.contains("extraFrom: []"));
+
+    assert!(
+        np.contains("policyTypes: [Ingress]"),
+        "ingress only: engines reach egret and storage"
+    );
+    assert!(
+        !np.contains("namespaceSelector: {}"),
+        "no rule may admit every namespace"
+    );
+    assert!(np.contains("matchLabels: { app: egret }"), "egret's pods");
+
+    let between = |from: &str, to: &str| {
+        let start = np.find(from).unwrap_or_else(|| panic!("no `{from}`"));
+        let end = np[start..].find(to).map_or(np.len(), |e| start + e);
+        np[start..end].to_string()
+    };
+    let ports = |rule: &str| {
+        rule.lines()
+            .filter_map(|l| l.split("port: ").nth(1))
+            .map(|p| p.trim_end_matches(['}', ' ']).to_string())
+            .collect::<Vec<_>>()
+    };
+    let operator = between("range $np.operatorNamespaces", "with $np.ingressFrom");
+    assert_eq!(
+        ports(&operator),
+        ["8030", "9030"],
+        "the operator on the FE's HTTP and query ports only:\n{operator}"
+    );
+    let ingress = between("with $np.ingressFrom", "with $np.extraFrom");
+    assert_eq!(
+        ports(&ingress),
+        ["8030", "8080", "8443"],
+        "an Ingress on the engine HTTP ports only:\n{ingress}"
+    );
+    assert!(
+        !np.contains("9010"),
+        "the FE edit-log port stays inside the engine namespace"
+    );
+}

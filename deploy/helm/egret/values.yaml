@@ -75,6 +75,19 @@ engineNamespace: egret-engines
 # The engine namespace is normally pre-created by `just k8s-up`. Set true only on
 # a bare cluster where it doesn't exist yet (else Helm can't adopt it).
 createEngineNamespace: false
+# Who may connect to the provisioned engines in engineNamespace (templates/networkpolicy-engines.yaml):
+# that namespace's own pods, egret's pods, and the peers below. App pods and workflow task pods query
+# through egret and are kept out.
+engineNetworkPolicy:
+  enabled: true
+  # The StarRocks operator runs SQL (9030) and HTTP (8030) against the FE.
+  operatorNamespaces: [starrocks]
+  # NetworkPolicy peers an engine Ingress forwards from, allowed on 8030 (StarRocks FE) and 8080/8443
+  # (Trino). Required when an engine has an Ingress, e.g.:
+  #   - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ingress-nginx } }
+  ingressFrom: []
+  # Other NetworkPolicy peers, allowed on every port (for example a metrics scraper).
+  extraFrom: []
 admin:
   email: admin@egret.local
   password: Admin12345!
