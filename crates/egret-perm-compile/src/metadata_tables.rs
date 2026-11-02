@@ -376,6 +376,53 @@ pub(crate) async fn tagged_tables_via(
     Ok(out)
 }
 
+/// `envelope` (a Trino profile's download, its tag block included) with the
+/// metadata-table denies the compiler derives from it added, the ones it
+/// already carries kept as they are.
+///
+/// The migration gate compares a profile BEFORE and AFTER moving hand-written
+/// policies into the model. A profile the compiler has never written to has no
+/// metadata-table deny yet, and the first compile adds one for every
+/// restricting policy, hand-written or not; comparing against the bare
+/// download would refuse every migration of a mask or row filter over a
+/// difference the migration does not make. So the gate's BEFORE is the profile
+/// as the compiler serves it.
+pub(crate) async fn with_denies_via(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+    envelope: &mut egret_policy_api::ServicePolicies,
+) -> Result<(), CompileError> {
+    let tag_sources: Vec<Value> = envelope
+        .tag_policies
+        .as_ref()
+        .map(|t| t.policies.clone())
+        .unwrap_or_default();
+    let tags: Vec<String> = tag_sources
+        .iter()
+        .flat_map(tag_values)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let tagged = tagged_tables_via(conn, service_id, &tags).await?;
+    let service = envelope.service_name.clone();
+    let denies: Vec<(String, Value)> = resource_denies(&envelope.policies, &service)
+        .into_iter()
+        .chain(tag_denies(&tag_sources, &tagged, &service))
+        .collect();
+    let present: BTreeSet<String> = envelope
+        .policies
+        .iter()
+        .filter_map(|p| p.get("name").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect();
+    for (name, body) in denies {
+        if !present.contains(&name) {
+            envelope.policies.push(body);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
