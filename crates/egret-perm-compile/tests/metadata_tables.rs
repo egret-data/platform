@@ -286,3 +286,23 @@ async fn a_tag_mask_denies_the_metadata_tables_of_each_tagged_table() {
         .unwrap_or_else(|| panic!("no metadata-table deny {name}"));
     assert_metadata_deny(&f, &deny, "people$*");
 }
+
+/// Governance sub-project 1, Task 4: `ir_load::load_ep` reads the enforcement
+/// point exactly as `compile_desired` uses it — the profile's engine, its
+/// classification channel (a `tagService` that names a real service), its
+/// catalog scope and its sweep set (the profile plus its tag service).
+#[cfg(feature = "harness")]
+#[tokio::test]
+async fn the_loader_reads_the_ep_as_the_compiler_does() {
+    let Some(db) = test_db().await else { return };
+    let f = trino_fixture(&db).await;
+    let mut conn = db.pool.acquire().await.unwrap();
+    let l = egret_perm_compile::harness_support::load_ep_for_test(&mut conn, f.service_id)
+        .await
+        .unwrap()
+        .expect("a trino profile");
+    assert_eq!(l.ep.kind.engine, egret_perm::EngineType::Trino);
+    assert!(l.ep.classification_channel);
+    assert!(l.ep.catalogs.contains_key(&f.catalog_id));
+    assert_eq!(l.sweep.len(), 2, "profile plus tag service");
+}

@@ -112,3 +112,24 @@ pub async fn golden_desired_in_tx(
         sweep: c.sweep.clone(),
     }))
 }
+
+/// What `ir_load::load_ep` read for one profile, for the loader's own test
+/// (governance sub-project 1, Task 4): the enforcement point and the sweep set.
+pub struct LoadedForTest {
+    pub ep: egret_perm_ir::ep::EpInput,
+    pub sweep: Vec<i64>,
+}
+
+/// Run `ir_load::load_ep` on `conn`. `None` when the compiler does not target
+/// the service.
+pub async fn load_ep_for_test(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<Option<LoadedForTest>, CompileError> {
+    Ok(crate::ir_load::load_ep(conn, service_id)
+        .await?
+        .map(|l| LoadedForTest {
+            ep: l.ep,
+            sweep: l.sweep,
+        }))
+}

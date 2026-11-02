@@ -59,6 +59,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use egret_perm::{CompileError, EngineType};
+use egret_perm_ir::ep::EpInput;
 use egret_policy::admin::{masking_to_ranger_json, MaskItemInput, MaskingPolicyInput};
 use egret_policy::COMPILER_CLEARANCE_PREFIX;
 use egret_ranger_eval::eval::{
@@ -422,20 +423,10 @@ pub(crate) enum FoldVersions {
 /// pair the evaluator does not model makes the masks a SKIP for the profile,
 /// naming the engine (user ruling 2026-10-13): binding such an engine is not
 /// refused, and the per-column denies are still compiled.
-pub(crate) async fn fold_plugin_versions(
-    conn: &mut sqlx::PgConnection,
-    service_id: i64,
-    profile: &str,
-    engine: EngineType,
-) -> Result<FoldVersions, CompileError> {
-    let bound: Vec<crate::routes::BoundEngine> = sqlx::query_as(
-        "SELECT name, origin, type, ranger_plugin_version, spec FROM engine_mgmt.engines \
-          WHERE authz_service_id = $1 ORDER BY name",
-    )
-    .bind(service_id)
-    .fetch_all(&mut *conn)
-    .await
-    .map_err(CompileError::from_db)?;
+///
+/// Reads nothing: `ep.engines` and `ep.default_version` are filled by
+/// [`crate::ir_load::bound_engines`] before this is called.
+pub(crate) fn fold_plugin_versions(ep: &EpInput, profile: &str) -> FoldVersions {
     let unmodelled = |name: &str, why: String| {
         FoldVersions::Unmodelled(format!(
             "view protection (clearance mask) not active for {profile}: engine {name} runs an \
@@ -443,21 +434,30 @@ pub(crate) async fn fold_plugin_versions(
              docs/en/guides/engine-versions.md). {why}"
         ))
     };
+    let parse = |label: &str| {
+        crate::ir_load::plugin_version_from_label(label)
+            .ok_or_else(|| format!("plugin version {label} has no evaluator variant"))
+    };
     let mut out: Vec<PluginVersion> = Vec::new();
-    for e in &bound {
-        match e.plugin_version() {
+    for e in &ep.engines {
+        match e.version.as_deref().map_err(Clone::clone).and_then(parse) {
             Ok(v) if !out.contains(&v) => out.push(v),
             Ok(_) => {}
-            Err(why) => return Ok(unmodelled(&e.name, why)),
+            Err(why) => return unmodelled(&e.name, why),
         }
     }
     if out.is_empty() {
-        match crate::routes::default_image_plugin_version(crate::routes::ranger_engine(engine)) {
+        match ep
+            .default_version
+            .as_deref()
+            .map_err(Clone::clone)
+            .and_then(parse)
+        {
             Ok(v) => out.push(v),
-            Err(why) => return Ok(unmodelled("(none bound; egret's default image)", why)),
+            Err(why) => return unmodelled("(none bound; egret's default image)", why),
         }
     }
-    Ok(FoldVersions::Modelled(out))
+    FoldVersions::Modelled(out)
 }
 
 #[cfg(test)]

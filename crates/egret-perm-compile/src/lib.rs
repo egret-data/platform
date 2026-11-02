@@ -61,6 +61,9 @@ pub(crate) mod clearance;
 // View governance A2: the StarRocks priority-1 clearance MASK per classified
 // column, its cleared items folded through `egret-ranger-eval`.
 pub(crate) mod clearance_mask;
+// Governance sub-project 1, Task 4: every read the lowering of one profile
+// needs, in one loader.
+pub(crate) mod ir_load;
 // Deny a Trino profile's restricted people the Iceberg metadata tables
 // (`t$files`, ...) of the tables masked, filtered or denied to them.
 pub(crate) mod metadata_tables;

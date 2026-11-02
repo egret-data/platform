@@ -42,7 +42,8 @@
 //!    established: every read (the model, the reachable catalogs, the
 //!    tagged columns, the tag name, the existing compiled state) AND every
 //!    write happen against the SAME `&mut Transaction`, via
-//!    `egret_perm::{list_grants_via, list_rules_via}` and
+//!    `egret_perm::{list_grants_via, list_rules_via}` and (since governance
+//!    sub-project 1, gathered in `crate::ir_load`)
 //!    `egret_policy::{get_service_by_id_via, catalogs_for_service_via,
 //!    tag_assignments_for_service_via, tag_name_for_key_via}` (all
 //!    connection-generic, added in this fix round for exactly this reason).
@@ -106,13 +107,11 @@ use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use egret_perm::{
-    list_engine_grants_for_profile_via, list_grants_via, list_rules_via, CompileError, EngineGrant,
-    EngineType, Grant, PermStore, Rule, RuleKind, Selector,
+    CompileError, EngineGrant, EngineType, Grant, PermStore, Rule, RuleKind, Selector,
 };
 use egret_policy::admin::access_to_ranger_json;
 use egret_policy::{
-    catalogs_for_service_via, compiler_targeted_services_via, get_service_by_id_via,
-    service_id_by_name_via, services_and_tag_services_via, services_for_catalog_via,
+    compiler_targeted_services_via, services_and_tag_services_via, services_for_catalog_via,
     tag_assignments_for_service_via, tag_name_for_key_via, PolicyStore, COMPILER_CLEARANCE_PREFIX,
     COMPILER_ENGINE_GRANT_PREFIX, COMPILER_GRANT_PREFIX, COMPILER_HIDDEN_PREFIX,
     COMPILER_RULE_PREFIX,
@@ -381,103 +380,28 @@ pub(crate) async fn compile_desired(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
 ) -> Result<Option<Compiled>, CompileError> {
-    let svc = get_service_by_id_via(conn, service_id)
-        .await
-        .map_err(crate::db_error::from_store)?;
-    let Some(engine) = engine_type_for(&svc.r#type) else {
+    let Some(l) = crate::ir_load::load_ep(conn, service_id).await? else {
         return Ok(None);
     };
-
-    let catalogs = catalogs_for_service_via(conn, service_id)
-        .await
-        .map_err(crate::db_error::from_store)?;
-    let catalog_names: HashMap<Uuid, String> =
-        catalogs.into_iter().map(|c| (c.id, c.name)).collect();
-    // A held rename's leaving coordinates (rename spec C8): emitted, never
-    // counted against a ceiling.
-    let leaving = crate::table_columns::leaving_via(conn).await?;
-
-    // The services this recompile may write into, by the NAME a compiled body
-    // stamps on itself: the profile always, and its tag service when the
-    // profile both configures one AND that configured name resolves to a real
-    // `policy.authz_services` row. A `tagService` naming nothing is treated
-    // exactly like an absent one — the tag plugin polls that service BY NAME
-    // (`/service/plugins/policies/download/{service}`, 404 on an unknown
-    // name), so a policy filed under a profile that does not exist could not
-    // be served to anyone. That lands in the same `MissingTagService` skip the
-    // unconfigured case already took, rather than aborting the recompile.
-    let mut writable: HashMap<String, i64> = HashMap::new();
-    writable.insert(svc.name.clone(), service_id);
-    let mut sweep: Vec<i64> = vec![service_id];
-
-    let tag_service: Option<String> = if engine == EngineType::Trino {
-        match svc
-            .config_jsonb
-            .get(egret_policy_api::TAG_SERVICE_CONFIG_KEY)
-            .and_then(|v| v.as_str())
-        {
-            Some(name) => match service_id_by_name_via(conn, name)
-                .await
-                .map_err(crate::db_error::from_store)?
-            {
-                Some(tag_id) => {
-                    writable.insert(name.to_string(), tag_id);
-                    sweep.push(tag_id);
-                    Some(name.to_string())
-                }
-                None => {
-                    tracing::warn!(
-                        service_id,
-                        tag_service = %name,
-                        "profile's `tagService` names no policy profile — tag rules cannot \
-                         compile for this profile"
-                    );
-                    None
-                }
-            },
-            None => None,
-        }
-    } else {
-        None
-    };
-
-    // Ascending: `apply_diff_in_tx` takes a row lock per swept service and the
-    // acquisition order is what turns two overlapping recompiles into a queue
-    // instead of a deadlock (see that function).
-    sweep.sort_unstable();
-    sweep.dedup();
-
-    let mut all_grants = list_grants_via(conn)
-        .await
-        .map_err(CompileError::from_perm)?;
-    let mut all_rules = list_rules_via(conn)
-        .await
-        .map_err(CompileError::from_perm)?;
-    // D3: turn every `workspace_members` principal — and, since SP4c Task 2b,
-    // every `role` principal, and since J-F3 Task 1b every non-`public` `group`
-    // principal — into the people it stands for BEFORE anything is compiled,
-    // so the pure compilers below never see one. See `crate::members`
-    // for what a member is, what it costs, and why a role name cannot be left
-    // for Ranger to resolve.
-    // F11: the engine grants of every engine bound to this profile, expanded
-    // in the same call so a person named by a grant and an engine grant
-    // resolves to one name.
-    let mut engine_grants = list_engine_grants_for_profile_via(conn, service_id)
-        .await
-        .map_err(CompileError::from_perm)?;
-    crate::members::expand_enumerated_principals(
-        conn,
-        &mut all_grants,
-        &mut all_rules,
-        &mut engine_grants,
-    )
-    .await?;
+    let crate::ir_load::Loaded {
+        mut ep,
+        profile_name,
+        tag_service,
+        writable,
+        sweep,
+        leaving,
+        grants: all_grants,
+        rules: all_rules,
+        engine_grants,
+        directory: _,
+    } = l;
+    let engine = ep.kind.engine;
 
     let mut desired: BTreeMap<PolicyKey, DesiredPolicy> = BTreeMap::new();
     let mut skipped: Vec<SkippedItem> = Vec::new();
 
     for g in &all_grants {
-        let Some(catalog_name) = catalog_names.get(&g.scope.catalog_id) else {
+        let Some(catalog_name) = ep.catalogs.get(&g.scope.catalog_id) else {
             continue; // not reachable by this service — out of scope
         };
         if g.principals.include.is_empty() {
@@ -503,7 +427,7 @@ pub(crate) async fn compile_desired(
             });
             continue;
         }
-        match compile_grant(g, catalog_name, &svc.name, engine) {
+        match compile_grant(g, catalog_name, &profile_name, engine) {
             Ok(input) => {
                 let name = input.name.clone();
                 let body = stamp_service_type(access_to_ranger_json(&input), engine);
@@ -542,7 +466,7 @@ pub(crate) async fn compile_desired(
     compile_engine_grants(
         conn,
         service_id,
-        &svc.name,
+        &profile_name,
         engine,
         &engine_grants,
         &writable,
@@ -555,11 +479,11 @@ pub(crate) async fn compile_desired(
         compile_one_rule(
             r,
             engine,
-            &svc.name,
+            &profile_name,
             tag_service.as_deref(),
             conn,
             service_id,
-            &catalog_names,
+            &ep.catalogs,
             &writable,
             &leaving,
             &mut desired,
@@ -585,7 +509,7 @@ pub(crate) async fn compile_desired(
         conn,
         engine,
         service_id,
-        &svc.name,
+        &profile_name,
         tag_service.as_deref(),
         &leaving,
     )
@@ -618,9 +542,10 @@ pub(crate) async fn compile_desired(
         fold_clearance_masks(
             conn,
             service_id,
-            &svc.name,
+            &profile_name,
             engine,
             clearances.masks,
+            &mut ep,
             &writable,
             &mut desired,
             &mut skipped,
@@ -654,7 +579,9 @@ pub(crate) async fn compile_desired(
                             .is_some_and(egret_policy::is_compiler_owned_policy_name)
                 }),
         );
-        for (name, body) in crate::clearance::hidden_column_denies(conn, &masks, &svc.name).await? {
+        for (name, body) in
+            crate::clearance::hidden_column_denies(conn, &masks, &profile_name).await?
+        {
             desired.insert(
                 (service_id, name),
                 DesiredPolicy {
@@ -713,12 +640,12 @@ pub(crate) async fn compile_desired(
             .into_iter()
             .collect();
         let tagged = crate::metadata_tables::tagged_tables_via(conn, service_id, &tags).await?;
-        let denies = crate::metadata_tables::resource_denies(&profile_sources, &svc.name)
+        let denies = crate::metadata_tables::resource_denies(&profile_sources, &profile_name)
             .into_iter()
             .chain(crate::metadata_tables::tag_denies(
                 &tag_sources,
                 &tagged,
-                &svc.name,
+                &profile_name,
             ));
         for (name, body) in denies {
             desired.insert(
@@ -785,7 +712,7 @@ pub(crate) async fn compile_desired(
         .collect();
     crate::overlap::refuse_created_by_compile_via(
         conn,
-        &svc.name,
+        &profile_name,
         service_id,
         tag_service_id,
         &for_overlap,
@@ -820,7 +747,7 @@ pub(crate) async fn compile_desired(
         desired,
         skipped,
         sweep,
-        profile_name: svc.name,
+        profile_name,
         largest: whole_tables,
         uncounted,
     }))
@@ -949,6 +876,7 @@ async fn fold_clearance_masks(
     profile: &str,
     engine: EngineType,
     pending: Vec<crate::clearance_mask::PendingMask>,
+    ep: &mut egret_perm_ir::ep::EpInput,
     writable: &HashMap<String, i64>,
     desired: &mut BTreeMap<PolicyKey, DesiredPolicy>,
     skipped: &mut Vec<SkippedItem>,
@@ -986,19 +914,20 @@ async fn fold_clearance_masks(
             reason,
         });
     };
-    let plugins =
-        match crate::clearance_mask::fold_plugin_versions(conn, service_id, profile, engine).await?
-        {
-            FoldVersions::Modelled(v) => v,
-            // An engine-level reason: no mask for ANY column of this profile,
-            // one skip per column so each classified column says so.
-            FoldVersions::Unmodelled(reason) => {
-                for p in &merged {
-                    skip(p.tag_id, reason.clone());
-                }
-                return Ok(());
+    // The bound engines are read HERE, after the enabled policies above, as
+    // they always were: see `crate::ir_load`'s module doc.
+    crate::ir_load::bound_engines(conn, ep).await?;
+    let plugins = match crate::clearance_mask::fold_plugin_versions(ep, profile) {
+        FoldVersions::Modelled(v) => v,
+        // An engine-level reason: no mask for ANY column of this profile,
+        // one skip per column so each classified column says so.
+        FoldVersions::Unmodelled(reason) => {
+            for p in &merged {
+                skip(p.tag_id, reason.clone());
             }
-        };
+            return Ok(());
+        }
+    };
     for p in merged {
         let name = crate::clearance_mask::clearance_mask_name(p.tag_id, &p.column);
         let body = match crate::clearance_mask::fold_at_versions(
@@ -1032,7 +961,7 @@ async fn compile_one_rule(
     tag_service: Option<&str>,
     conn: &mut sqlx::PgConnection,
     service_id: i64,
-    catalog_names: &HashMap<Uuid, String>,
+    catalog_names: &BTreeMap<Uuid, String>,
     writable: &HashMap<String, i64>,
     leaving: &crate::table_columns::Leaving,
     desired: &mut BTreeMap<PolicyKey, DesiredPolicy>,
