@@ -34,7 +34,7 @@
 //! # The design oracle: this is the inverse of `compile_grant`
 //!
 //! Everything accepted here is written as a real permission and compiled back
-//! by [`crate::grants::compile_grant`]. So the rule for every field is: if the
+//! by [`crate::ranger::grants::compile_grant`]. So the rule for every field is: if the
 //! compiled-back body could decide differently from the body read here, the
 //! field is refused. `tests/grammar_access.rs`'s
 //! `every_accepted_body_compiles_back_to_what_it_came_from` checks that
@@ -101,11 +101,9 @@ use egret_ranger_eval::model::{
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::grants::{
-    level_is_a_wildcard_run, resource_level_names, validate_user_ref, PolicyTarget,
-    ROW_FILTER_LEVELS,
-};
+use crate::ranger::grants::{resource_level_names, PolicyTarget, ROW_FILTER_LEVELS};
 use crate::rules::{declared_mask_types, validate_rule_shape};
+use egret_perm_ir::lower::grants::{level_is_a_wildcard_run, validate_user_ref};
 
 /// Why one Ranger policy cannot become model objects. Each variant names the
 /// offending value where there is one, so Task 5 can render it as a sentence
@@ -935,7 +933,7 @@ fn actions(it: &PolicyItem, engine: EngineType, b: &mut Vec<Blocker>) -> Vec<Act
 /// [`Rule`]s it is equivalent to, or every reason it is not expressible.
 ///
 /// The design oracle is [`crate::rules::compile_rule`], exactly as
-/// [`crate::grants::compile_grant`] is for [`grants_from_access_policy`]: an
+/// [`crate::ranger::grants::compile_grant`] is for [`grants_from_access_policy`]: an
 /// accepted body, compiled back, must decide identically. What that compiler
 /// emits, and therefore the only shape accepted here:
 ///

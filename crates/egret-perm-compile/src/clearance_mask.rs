@@ -70,7 +70,7 @@ use egret_ranger_eval::model::ServicePolicySet;
 use egret_ranger_eval::resource::RequestResource;
 use egret_ranger_eval::servicedef::ServiceDef;
 
-use crate::grants::{resource_level_names, PolicyTarget};
+use crate::ranger::grants::{resource_level_names, PolicyTarget};
 use crate::rules::{column_resources, stamp_service_type, TaggedColumn, PUBLIC_GROUP};
 
 /// The clearance mask's type for everyone not cleared. Never `MASK_HASH`.

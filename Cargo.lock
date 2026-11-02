@@ -3584,6 +3584,7 @@ dependencies = [
 name = "egret-perm-ir"
 version = "0.1.0"
 dependencies = [
+ "egret-core",
  "egret-perm",
  "tracing",
  "uuid",

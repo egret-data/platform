@@ -324,7 +324,7 @@ pub fn trie_reproduces_matcher(policy_value: &str, wild_card: bool) -> bool {
         // `scope_to_resources` copied it through, which made the level
         // `isMatchAny` and enforced the grant across the whole catalog. SP4d
         // debt Task 12 closed that — `migrations/0178_perm_scope_levels_are_named.sql`
-        // plus `egret_perm_compile::grants::ensure_scope_levels_are_named`, which
+        // plus `egret_perm_ir::lower::grants::ensure_scope_levels_are_named`, which
         // runs at the authoring boundary AND inside `compile_grant`. Stated by
         // code path now, not by authorship; see
         // `crate::eval::UndecidableCause::ResourceCandidacyNotReproducible`'s table.

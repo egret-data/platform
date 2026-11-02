@@ -84,13 +84,13 @@ use crate::attribution::{attribute_policy_name, PolicyAttribution};
 use crate::explain_wire::{
     WireDecision, WireEngineType, WireMaskDecision, WireRowFilterDecision, WireUndecidableCause,
 };
-use crate::grants::validate_grant_shape;
 use crate::principal_refs::{resolve_principal_refs, still_stored};
 use crate::rules::validate_rule_shape;
 use crate::trigger::{
     affected_services_for_grant, affected_services_for_rule, engine_type_for, lock_services_in_tx,
     merge_service_ids, recompile_services_in_tx, CompileSummary, SkippedItem, SourceKind,
 };
+use egret_perm_ir::lower::grants::validate_grant_shape;
 
 mod engine_grants;
 mod error;

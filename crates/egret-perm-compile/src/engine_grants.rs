@@ -121,7 +121,7 @@ pub fn compile_engine_grant(
         );
     }
 
-    let item = crate::grants::expanded_principal_item(
+    let item = crate::ranger::grants::expanded_principal_item(
         &g.principals.include,
         Effect::Allow,
         &[cap.access.to_string()],

@@ -164,7 +164,7 @@ use egret_policy::{
 };
 
 use crate::clearance_mask::PendingMask;
-use crate::grants::{level, PolicyTarget};
+use crate::ranger::grants::{level, PolicyTarget};
 use crate::rules::{
     column_resources, group_by_table, stamp_service_type, TableTarget, TaggedColumn, PUBLIC_GROUP,
 };

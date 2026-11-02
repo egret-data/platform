@@ -3,7 +3,7 @@
 //!
 //! # Why an unknown ref is a security defect and not a typo
 //!
-//! The compiler writes a ref through verbatim (`crate::grants`'s module doc), so a
+//! The compiler writes a ref through verbatim (`egret_perm_ir::lower::grants`' module doc), so a
 //! ref that matches nobody compiles to a Ranger item naming nobody. Where that
 //! lands decides which way it fails:
 //!
@@ -12,7 +12,7 @@
 //!   exclude** fails **OPEN**: the deny or the subtract silently evaporates and
 //!   the compiled policy allows more than the model states;
 //! - a **deny grant's exclude** fails closed: it compiles to a
-//!   `denyExceptions` item (`crate::grants`, `compile_grant`), and an exception
+//!   `denyExceptions` item (`crate::ranger::grants`, `compile_grant`), and an exception
 //!   naming nobody makes the deny WIDER than written, not narrower;
 //! - a rule's **`exempt.include`** fails closed the other way: the mask applies to
 //!   someone the author meant to exempt.
@@ -436,7 +436,7 @@ enum Stored {
 ///
 /// - **A `user` ref the lookup finds only by case** (`Analyst` for `analyst`)
 ///   is unresolved here, where the write path would have rewritten it: a
-///   stored row is compiled byte-for-byte (`crate::grants`' module doc) and
+///   stored row is compiled byte-for-byte (`egret_perm_ir::lower::grants`' module doc) and
 ///   compared byte-for-byte downstream, so on an engine it names nobody.
 /// - **A group that exists with no members** is `empty`: since J-F3 Task 1b
 ///   a non-`public` group compiles to its members' usernames through

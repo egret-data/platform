@@ -24,8 +24,8 @@
 //! `stamp_service_type` is the one place this module touches an already-
 //! rendered `Value` after the fact, fixing a `serviceType` the renderer
 //! itself hardcodes to `"trino"` — that is a targeted correction of one
-//! field, not hand-written JSON. See `grants.rs` for `compile_grant` (grants
-//! → access policies) and `rules.rs` for `compile_rule` (named rules →
+//! field, not hand-written JSON. See `ranger/grants.rs` for `compile_grant` (grants
+//! → access policies, decided by `egret_perm_ir::lower::grants`) and `rules.rs` for `compile_rule` (named rules →
 //! masking/row-filter policies, with the StarRocks tag expansion), and
 //! `egret_perm::actions` for the `Action` → Ranger access-type map the
 //! former consumes.
@@ -99,11 +99,8 @@ mod governance_events;
 pub mod equivalence;
 // SP4d-3 Task 3: the closed grammar from a hand-written Ranger access policy to
 // the `Grant`s it is equivalent to, or every named reason it is not. Pure; the
-// inverse of `grants::compile_grant` — see that module's own doc comment.
+// inverse of `compile_grant` — see `ranger::grants`' own doc comment.
 pub mod grammar;
-// SP4d-3 Task 7: the migration transaction (re-classify, write, recompile,
-// switch off, provenance, re-gate every affected profile) and its undo.
-pub mod grants;
 // J-F3 Task 1b: a group expands to its members at compile time, so every
 // `user_groups` writer recompiles through this port implementation — see that
 // module's own doc comment for why it is a port and `role_membership` is not.
@@ -117,6 +114,8 @@ pub mod lineage;
 #[cfg(test)]
 mod lineage_compile_tests;
 pub(crate) mod members;
+// SP4d-3 Task 7: the migration transaction (re-classify, write, recompile,
+// switch off, provenance, re-gate every affected profile) and its undo.
 pub mod migrate;
 pub(crate) mod people;
 // People & groups Task 3: `standsFor` agrees with the compiler's expansion
@@ -129,6 +128,9 @@ pub mod overlap;
 // J-F3: every principal ref a grant or rule names must name someone egret
 // knows, or a deny/exclude on it fails open — see that module's doc comment.
 pub mod principal_refs;
+// Governance sub-project 1 Task 5: the Ranger target. Renders the neutral
+// statements `egret_perm_ir::lower` produces; decides nothing.
+pub(crate) mod ranger;
 pub mod role_membership;
 pub mod routes;
 pub mod rules;
@@ -148,10 +150,11 @@ pub mod view_tags;
 pub mod write_seam;
 
 pub use attribution::{attribute_policy_name, PolicyAttribution};
-pub use grants::{compile_grant, validate_grant_shape};
+pub use egret_perm_ir::lower::grants::validate_grant_shape;
 pub use group_membership::PermGroupRecompiler;
 pub use members::lock_compile_mints_in_tx;
 pub use principal_refs::{mint_missing_usernames, UsernameRepair};
+pub use ranger::grants::compile_grant;
 pub use role_membership::{
     assign_platform_role_and_recompile, delete_platform_role_and_recompile,
     set_user_status_and_recompile, set_user_status_and_recompile_in_tx, sync_admin_policies,

@@ -55,7 +55,7 @@
 //! T3b and T4). The OTHER assumption that paragraph used to sit next to — the
 //! resource-hierarchy ANCESTOR match `grants.rs` cited from upstream Ranger
 //! source — was measured in the same run and **refuted** for access policies;
-//! see `grants::scope_to_resources`. The masking and row-filter resource maps
+//! see `ranger::grants::scope_to_resources`. The masking and row-filter resource maps
 //! this module emits are the ones that were measured working, and are
 //! deliberately left as they are.
 //!
@@ -96,11 +96,11 @@ use egret_policy::{starrocks_service_def, trino_service_def, COMPILER_RULE_PREFI
 
 use egret_perm::{CompileError, EngineType, PrincipalKind, PrincipalSet, Rule, RuleKind, Selector};
 
-use crate::grants::{
-    ensure_scope_levels_are_named, level, resource_level_names, scope_to_resources,
-    validate_user_ref, PolicyTarget, ROW_FILTER_LEVELS,
+use crate::ranger::grants::{
+    level, resource_level_names, scope_to_resources, PolicyTarget, ROW_FILTER_LEVELS,
 };
 use crate::table_columns::Leaving;
+use egret_perm_ir::lower::grants::{ensure_scope_levels_are_named, validate_user_ref};
 
 /// One column carrying the tag a rule selects on, resolved by the CALLER —
 /// this compiler does no I/O and cannot itself know which columns carry
@@ -229,13 +229,13 @@ pub struct ResolvedNames<'a> {
 }
 
 /// The part of compiling a rule that needs **no service and no engine** —
-/// the rule-side twin of [`crate::grants::validate_grant_shape`]; read that
+/// the rule-side twin of [`egret_perm_ir::lower::grants::validate_grant_shape`]; read that
 /// function's doc for why a write-time check is needed at all and how "service
 /// independent" is drawn.
 ///
 /// In: a path selector naming a level as the EMPTY string
 /// (`EmptyScopeLevel` — SP4d debt Task 12; see
-/// [`crate::grants::ensure_scope_levels_are_named`] for the measurement and for
+/// [`egret_perm_ir::lower::grants::ensure_scope_levels_are_named`] for the measurement and for
 /// why this is the rule side of a GRANT-side escalation rather than the same
 /// severity: an empty level makes a mask or row filter cover every sibling at
 /// that level, which withholds more than the author wrote instead of granting
@@ -263,7 +263,7 @@ pub fn validate_rule_shape(r: &Rule) -> Result<(), CompileError> {
         }
     }
     if let Selector::Path(scope) = &r.selector {
-        // ⚠ `grants::ensure_a_grant_wildcard_level_has_nothing_named_beneath_it`
+        // ⚠ `egret_perm_ir::lower::grants::ensure_a_grant_wildcard_level_has_nothing_named_beneath_it`
         // is deliberately NOT called here — product decision 2026-10-10, recorded
         // in `migrations/0179`'s closing section. A match-any level above a named
         // one widens AUTHORITY on a grant (fails open: the measured escalation)
@@ -311,7 +311,7 @@ pub fn validate_rule_shape(r: &Rule) -> Result<(), CompileError> {
 /// table", while in enforcement terms both are a table with NO schema.
 ///
 /// * `''` never reaches this function: [`validate_rule_shape`] runs
-///   [`crate::grants::ensure_scope_levels_are_named`] (Task 12) first, and
+///   [`egret_perm_ir::lower::grants::ensure_scope_levels_are_named`] (Task 12) first, and
 ///   `0178` refuses the value in the table as well.
 /// * `'*'` **does** reach it now, and is **accepted on purpose** — product
 ///   decision 2026-10-10 (`migrations/0179`'s closing section). A row filter on
@@ -378,7 +378,7 @@ fn ensure_row_filter_scope_is_a_table(r: &Rule) -> Result<(), CompileError> {
 /// # The SCOPE-SHAPE refusal that runs here as well as at the authoring boundary
 ///
 /// A `Path` selector's scope goes through
-/// [`crate::grants::ensure_scope_levels_are_named`] (SP4d debt Task 12), exactly
+/// [`egret_perm_ir::lower::grants::ensure_scope_levels_are_named`] (SP4d debt Task 12), exactly
 /// as `compile_grant` does: `''` is an absence, not an authored value, and a
 /// `pub` entry point should not emit an artifact its own validator refuses.
 ///
@@ -400,7 +400,7 @@ fn ensure_row_filter_scope_is_a_table(r: &Rule) -> Result<(), CompileError> {
 /// `"wildCard": true` on `ranger-plugins-common` 2.5.0 and 2.8.0), and
 /// `('sales','*','email')` is a mask a steward writes on purpose. It is not a
 /// wrong artifact; it is the one the author asked for. The predicate is now
-/// named [`crate::grants::ensure_a_grant_wildcard_level_has_nothing_named_beneath_it`]
+/// named [`egret_perm_ir::lower::grants::ensure_a_grant_wildcard_level_has_nothing_named_beneath_it`]
 /// for the table it binds to, and nothing on the rule path calls it.
 ///
 /// ⚠ **The trade-off that ruling accepts**, because this is a place a reader
@@ -417,7 +417,7 @@ fn ensure_row_filter_scope_is_a_table(r: &Rule) -> Result<(), CompileError> {
 /// severity. The shapes it refuses — a row-filter scope naming a column, or
 /// stopping above the table — are shapes `0154` still permits in `perm.rules`, so
 /// rows written before that guard existed are STORABLE today; and
-/// `crate::grants::scope_to_resources`' `RowFilter` arm exists precisely to make
+/// `crate::ranger::grants::scope_to_resources`' `RowFilter` arm exists precisely to make
 /// such a row compile to something the plugin can still match instead of to a
 /// silent no-op (read that arm's comment). Moving the refusal into `compile_rule`
 /// would turn those stored rows uncompilable, which is a behaviour change rather

@@ -9,5 +9,8 @@ license.workspace = true
 # docs/en/specs/2026-11-02-governance-layer-concepts.md.
 [dependencies]
 egret-perm.workspace = true
+# Task 5: a grant's `User` ref is refused when it names a principal egret runs
+# as (`egret_core::engine_principals`). Default features only: no I/O.
+egret-core.workspace = true
 uuid.workspace = true
 tracing.workspace = true

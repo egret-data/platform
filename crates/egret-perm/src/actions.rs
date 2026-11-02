@@ -435,7 +435,7 @@ pub enum CompileError {
     /// `grants_check` on the same connection.
     ///
     /// What the empty level then does:
-    /// `crate::grants::scope_to_resources` copies the level through verbatim, so
+    /// `egret_perm_compile::ranger::grants::scope_to_resources` copies the level through verbatim, so
     /// the compiled policy carries `"schema": {"values": [""]}`;
     /// `RangerAbstractResourceMatcher.init()` **drops an empty policy value**
     /// before a matcher is built for it; a level left with no matchers is
@@ -480,7 +480,7 @@ pub enum CompileError {
     /// # This is NOT "`*` is illegitimate"
     ///
     /// A grant scoped to a whole catalog or a whole schema is an ordinary thing
-    /// a steward writes, `crate::grants::scope_to_resources` emits `*` ITSELF at
+    /// a steward writes, `egret_perm_compile::ranger::grants::scope_to_resources` emits `*` ITSELF at
     /// every level the scope does not name, and the compiled resources a steward
     /// reads back are full of it. `('*','*')`, `('sales','orders','*')` and every
     /// other shape where a `*` has nothing named beneath it stay legal, and the

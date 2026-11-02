@@ -117,7 +117,6 @@ use egret_policy::{
     COMPILER_RULE_PREFIX,
 };
 
-use crate::grants::compile_grant;
 use crate::rules::{stamp_service_type, ResolvedNames, TableTarget};
 
 /// The StarRocks per-column expansion ceiling this driver enforces.
@@ -400,68 +399,19 @@ pub(crate) async fn compile_desired(
     let mut desired: BTreeMap<PolicyKey, DesiredPolicy> = BTreeMap::new();
     let mut skipped: Vec<SkippedItem> = Vec::new();
 
-    for g in &all_grants {
-        let Some(catalog_name) = ep.catalogs.get(&g.scope.catalog_id) else {
-            continue; // not reachable by this service — out of scope
-        };
-        if g.principals.include.is_empty() {
-            // Nothing to name. Emitting the policy anyway would write a Ranger
-            // item with empty `users`/`groups`/`roles`, which matches nobody —
-            // the same answer, said less clearly, and one more policy against
-            // the profile total. Recorded so "my workspace has no members yet"
-            // is visible rather than inferred from a missing policy.
-            let reason = "the grant's principals name no engine principal (an empty include, or \
-                          a workspace_members, role or group reference that expands to no \
-                          member)"
-                .to_string();
-            tracing::warn!(
-                service_id,
-                grant_id = %g.id,
-                reason = %reason,
-                "grant skipped during recompile"
-            );
-            skipped.push(SkippedItem {
-                source_kind: SourceKind::Grant,
-                id: g.id,
-                reason,
-            });
-            continue;
-        }
-        match compile_grant(g, catalog_name, &profile_name, engine) {
-            Ok(input) => {
-                let name = input.name.clone();
-                let body = stamp_service_type(access_to_ranger_json(&input), engine);
-                let target = target_service_id(&body, &writable, &format!("grant {}", g.id))?;
-                desired.insert(
-                    (target, name),
-                    DesiredPolicy {
-                        body,
-                        source_kind: SourceKind::Grant,
-                        grant_id: Some(g.id),
-                        rule_id: None,
-                    },
-                );
-            }
-            Err(CompileError::UnexpandedPrincipalKind { kind }) => {
-                let reason = format!(
-                    "principal kind {kind:?} reached the compiler unexpanded — a bug in \
-                     `crate::members::expand_enumerated_principals`, not in the grant"
-                );
-                tracing::warn!(
-                    service_id,
-                    grant_id = %g.id,
-                    reason = %reason,
-                    "grant skipped during recompile"
-                );
-                skipped.push(SkippedItem {
-                    source_kind: SourceKind::Grant,
-                    id: g.id,
-                    reason,
-                });
-            }
-            Err(other) => return Err(other),
-        }
+    // Governance sub-project 1 Task 5: grants are decided by the IR lowering
+    // and only rendered here.
+    let lowered = egret_perm_ir::lower::grants::lower_grants(&ep, &all_grants)?;
+    for s in &lowered.statements {
+        let r = crate::ranger::grants::render(s, &profile_name, engine)?;
+        let target = target_service_id(
+            &r.body,
+            &writable,
+            &format!("grant {}", r.grant_id.expect("a grant statement")),
+        )?;
+        desired.insert((target, r.name.clone()), r.into_desired());
     }
+    skipped.extend(lowered.lowerings.iter().map(crate::ranger::skipped));
 
     compile_engine_grants(
         conn,
@@ -719,7 +669,7 @@ pub(crate) async fn compile_desired(
     )
     .await?;
 
-    let levels = crate::grants::resource_level_names(engine);
+    let levels = crate::ranger::grants::resource_level_names(engine);
     // Only a body the classifications produced leaves with them: a held
     // rename moves the classification rows, so the source's clearance and
     // tag-rule bodies are gone once it is done. A grant's or a path rule's
