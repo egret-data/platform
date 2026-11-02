@@ -15674,7 +15674,7 @@
         },
         "responses": {
           "200": {
-            "description": "Tag assigned to the catalog resource (idempotent). `notices` lists what the author should know about an assignment that succeeded: `clearance_masks_pending_table` when a whole-table classification with a clearance is attached to a table a StarRocks engine serves but the catalog does not have yet (unknown, a view, a staged create): the select deny is compiled, the column NULL masks only once the table exists, so a view over it shows the values until then",
+            "description": "Tag assigned to the catalog resource (idempotent). `notices` lists what the author should know about an assignment that succeeded: `clearance_masks_pending_table` when a whole-table classification with a clearance is attached to a table a StarRocks engine serves but the catalog does not have yet (unknown, a staged create): the select deny is compiled, the column NULL masks only once the table exists, so a view over it shows the values until then; `clearance_on_view` when the name is a view in the catalog: only the select deny on its name is compiled, never column masks, so the message points at classifying the table the view reads",
             "content": {
               "application/json": {
                 "schema": {
@@ -39360,7 +39360,7 @@
       },
       "AssignNotice": {
         "type": "object",
-        "description": "Refuse (409, code `table_change_held`) a write on `schema.table` while a\nhold holds the table's name: a rename of the table that is waiting for the\nengines would leave this write on the old name, or put back on the new one\na classification just removed (rename review finding 2). A try-lock on\nthis transaction, released at its end, so no hold can start meanwhile.\nSomething an assignment that succeeded wants its author to know.",
+        "description": "Something an assignment that succeeded wants its author to know.",
         "required": [
           "code",
           "message"
@@ -39368,7 +39368,7 @@
         "properties": {
           "code": {
             "type": "string",
-            "description": "Stable, for programs: `clearance_masks_pending_table`."
+            "description": "Stable, for programs: `clearance_masks_pending_table` or `clearance_on_view`."
           },
           "message": {
             "type": "string",
