@@ -475,7 +475,7 @@ export default function EngineDetail() {
           {data.rangerPluginVersionModelled === false && data.rangerPluginVersionNote && (
             <WarningCallout testId="plugin-version-note">{data.rangerPluginVersionNote}</WarningCallout>
           )}
-          {data.type === "starrocks" && <ProvisionedStarRocksMetadataTablesWarning engineId={id} />}
+          {data.type === "starrocks" && <ProvisionedStarRocksMetadataTablesWarning engineId={id} image={engineImage(data)} />}
           <EngineTabs engine={data} engineId={id} />
         </>
       )}

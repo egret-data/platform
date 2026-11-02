@@ -290,11 +290,47 @@ describe("the profile page (EP13, EP15)", () => {
 
 describe("the engine page's StarRocks metadata-table warning", () => {
   const SR_ENGINE = { id: E_TR, name: "lake-sr", type: "starrocks", origin: "provisioned", status: "running" };
-  const WARNING = /StarRocks serves the metadata tables of Iceberg tables .* without asking Ranger/;
+  const WARNING = /StarRocks images serve the metadata tables of Iceberg tables .* without asking Ranger/;
+  const cpEngine = (feImage: string) => ({
+    id: E_TR,
+    name: "lake-sr",
+    type: "starrocks",
+    namespace: "engines",
+    status: { phase: "running", message: null, pods: [] },
+    spec: { starrocksConfig: { feImage } },
+    origin: "provisioned",
+  });
 
   it("is shown for a StarRocks engine bound to a profile", async () => {
     serve(engineAnswers({ [`/perm/engines/${E_TR}/grants`]: ok(grantsResponse({ engine: SR_ENGINE })) }));
     openArea(`/governance/engines/${E_TR}`, READER);
+    expect(await screen.findByText(WARNING, {}, T)).toBeInTheDocument();
+  });
+
+  it("is not shown, with engine:read, for a provisioned engine on egret's patched image", async () => {
+    const asked = serve(
+      engineAnswers({
+        [`/perm/engines/${E_TR}/grants`]: ok(grantsResponse({ engine: SR_ENGINE })),
+        [`/engines/${E_TR}`]: ok(
+          cpEngine(`ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.1@sha256:${"a".repeat(64)}`),
+        ),
+      }),
+    ).asked;
+    openArea(`/governance/engines/${E_TR}`, OPERATOR);
+    expect(await screen.findByRole("heading", { level: 1, name: "lake-sr" }, T)).toBeInTheDocument();
+    await waitFor(() => expect(asked).toContain(`GET /engines/${E_TR}`), T);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryByText(WARNING)).not.toBeInTheDocument();
+  });
+
+  it("is shown, with engine:read, for a provisioned engine on an official image", async () => {
+    serve(
+      engineAnswers({
+        [`/perm/engines/${E_TR}/grants`]: ok(grantsResponse({ engine: SR_ENGINE })),
+        [`/engines/${E_TR}`]: ok(cpEngine(`starrocks/fe-ubuntu:4.1.6@sha256:${"d".repeat(64)}`)),
+      }),
+    );
+    openArea(`/governance/engines/${E_TR}`, OPERATOR);
     expect(await screen.findByText(WARNING, {}, T)).toBeInTheDocument();
   });
 

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 
 import EngineDetail from "@/routes/control-plane/EngineDetail";
 import EngineRegister from "@/routes/control-plane/EngineRegister";
+import { isPatchedStarRocksImage } from "@/routes/control-plane/StarRocksMetadataTablesWarning";
 import {
   ADMIN,
   CATALOGS,
@@ -22,7 +23,7 @@ afterEach(() => {
 });
 
 const T = { timeout: 3000 };
-const WARNING = /serves the metadata tables of Iceberg tables .* without asking Ranger/;
+const WARNING = /serve the metadata tables of Iceberg tables .* without asking Ranger, and apply no mask or row filter to prepared statements/;
 
 const SR_EXTERNAL = { ...EXTERNAL_ENGINE, name: "legacy-sr", type: "starrocks", port: 9030, rangerPluginVersion: "2.8.0" };
 const SR_PROVISIONED = {
@@ -105,6 +106,33 @@ describe("StarRocks metadata-table warning, Control plane", () => {
     expect(await screen.findByTestId("starrocks-metadata-tables", {}, T)).toHaveTextContent(WARNING);
   });
 
+  test("provisioned StarRocks engine on the official image, bound: shown", async () => {
+    const official = {
+      ...SR_PROVISIONED,
+      spec: { starrocksConfig: { feImage: `starrocks/fe-ubuntu:4.1.6@sha256:${"d".repeat(64)}` } },
+    };
+    stubFetch(detailRoutes(official, 21));
+    renderDetail();
+    expect(await screen.findByTestId("starrocks-metadata-tables", {}, T)).toHaveTextContent(WARNING);
+  });
+
+  test("provisioned StarRocks engine on egret's patched image, bound: no warning", async () => {
+    const patched = {
+      ...SR_PROVISIONED,
+      spec: {
+        starrocksConfig: {
+          feImage: `ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.1@sha256:${"a".repeat(64)}`,
+        },
+      },
+    };
+    const calls = stubFetch(detailRoutes(patched, 21));
+    renderDetail();
+    expect(await screen.findByRole("heading", { name: "lake-sr", level: 1 }, T)).toBeInTheDocument();
+    await vi.waitFor(() => expect(calls.some((c) => c.path === "/api/control-plane/policies/services")).toBe(true));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryByTestId("starrocks-metadata-tables")).not.toBeInTheDocument();
+  });
+
   test("provisioned StarRocks engine bound to no profile: no warning", async () => {
     const calls = stubFetch(detailRoutes(SR_PROVISIONED, null));
     renderDetail();
@@ -141,5 +169,24 @@ describe("StarRocks metadata-table warning, Control plane", () => {
     await user.click(screen.getByRole("combobox", { name: "Policy profile" }));
     await user.click(await screen.findByRole("option", { name: /sr-main/ }));
     expect(screen.getByTestId("starrocks-metadata-tables")).toHaveTextContent(WARNING);
+  });
+});
+
+describe("isPatchedStarRocksImage", () => {
+  const digest = `@sha256:${"0".repeat(64)}`;
+  test.each([
+    ["ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.1", true],
+    [`ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.12${digest}`, true],
+    [" ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.1 ", true],
+    ["ghcr.io/egret-data/egret-starrocks-fe", false],
+    ["ghcr.io/egret-data/egret-starrocks-fe:latest", false],
+    ["ghcr.io/egret-data/egret-starrocks-fe:4.1.7", false],
+    ["ghcr.io/egret-data/egret-starrocks-allin1:4.1.7-egret.1", false],
+    ["mirror.example/egret-data/egret-starrocks-fe:4.1.7-egret.1", false],
+    [`starrocks/fe-ubuntu:4.1.7${digest}`, false],
+    ["", false],
+    [undefined, false],
+  ])("%s -> %s", (image, expected) => {
+    expect(isPatchedStarRocksImage(image)).toBe(expected);
   });
 });

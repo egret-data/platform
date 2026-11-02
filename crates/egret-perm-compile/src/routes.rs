@@ -6402,7 +6402,8 @@ mod engine_plugin_version_tests {
     }
 
     // Both engines' default images are modelled: Trino 483 runs Ranger 2.8.0
-    // (proved in engine-upgrade Task 5) and StarRocks 4.1.6 runs 2.9.0 (Task 4).
+    // (proved in engine-upgrade Task 5) and egret's patched StarRocks 4.1.7
+    // (egret-starrocks-fe:4.1.7-egret.1) runs 2.9.0, the official jars.
     // No known image is unmodelled any more, so the "refused, not guessed" cover
     // below uses an UNKNOWN image (a floating or unrecognised tag).
     #[test]
@@ -6416,7 +6417,7 @@ mod engine_plugin_version_tests {
         assert_eq!(
             super::default_image_plugin_version(EngineType::StarRocks),
             Ok(PluginVersion::Ranger2_9_0),
-            "egret's default StarRocks image is fe-ubuntu:4.1.6, which runs Ranger 2.9.0"
+            "egret's default StarRocks image is egret-starrocks-fe:4.1.7-egret.1, which runs Ranger 2.9.0"
         );
     }
 
