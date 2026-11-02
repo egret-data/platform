@@ -287,3 +287,28 @@ describe("the profile page (EP13, EP15)", () => {
     expect(screen.getByRole("heading", { level: 1, name: "loose" })).toBeInTheDocument();
   });
 });
+
+describe("the engine page's StarRocks metadata-table warning", () => {
+  const SR_ENGINE = { id: E_TR, name: "lake-sr", type: "starrocks", origin: "provisioned", status: "running" };
+  const WARNING = /StarRocks serves the metadata tables of Iceberg tables .* without asking Ranger/;
+
+  it("is shown for a StarRocks engine bound to a profile", async () => {
+    serve(engineAnswers({ [`/perm/engines/${E_TR}/grants`]: ok(grantsResponse({ engine: SR_ENGINE })) }));
+    openArea(`/governance/engines/${E_TR}`, READER);
+    expect(await screen.findByText(WARNING, {}, T)).toBeInTheDocument();
+  });
+
+  it("is not shown for a StarRocks engine with no profile", async () => {
+    serve(engineAnswers({ [`/perm/engines/${E_TR}/grants`]: ok(grantsResponse({ engine: SR_ENGINE, profile: null })) }));
+    openArea(`/governance/engines/${E_TR}`, READER);
+    expect(await screen.findByText("No profile", {}, T)).toBeInTheDocument();
+    expect(screen.queryByText(WARNING)).not.toBeInTheDocument();
+  });
+
+  it("is not shown for a Trino engine bound to a profile", async () => {
+    serve(engineAnswers());
+    openArea(`/governance/engines/${E_TR}`, READER);
+    expect(await screen.findByRole("heading", { level: 1, name: "lake-trino" }, T)).toBeInTheDocument();
+    expect(screen.queryByText(WARNING)).not.toBeInTheDocument();
+  });
+});
