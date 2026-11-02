@@ -143,6 +143,37 @@ async fn provision_creates_then_updates_same_user() {
     assert_eq!(u.email.to_lowercase(), e2.to_lowercase());
 }
 
+/// A first OIDC sign-in creates a user with an engine username, minted
+/// through `ensure_username_via` on the insert's transaction (spec
+/// 2026-10-31-local-user-username), so a grant can name them before their
+/// first query. Before the fix the row stayed NULL until that query.
+#[tokio::test]
+async fn a_first_oidc_sign_in_leaves_a_username() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let users = UserRepo::new(db.clone());
+    let groups = GroupRepo::new(db.clone());
+    let local = format!("sso_{}", uuid::Uuid::new_v4().simple());
+    let id = provision_and_sync(
+        &users,
+        &groups,
+        &claims(&uniq("sub"), &format!("{local}@idp.local"), &[]),
+        &Recorder::default(),
+    )
+    .await
+    .unwrap();
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT username::text FROM users WHERE id = $1")
+            .bind(id.0)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(stored.as_deref(), Some(&*local));
+    assert_eq!(users.ensure_username(id).await.unwrap(), local);
+}
+
 /// Regression (Task 5, STS token broker): the egret-minted engine token's `groups`
 /// claim is sourced from `GroupRepo::groups_of_user`, which reads `user_groups`.
 /// This proves the OIDC login callback path (`provision_and_sync`) JIT-writes the
