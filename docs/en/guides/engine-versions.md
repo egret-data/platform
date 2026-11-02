@@ -6,17 +6,31 @@ The control plane shows the result for every engine: the image it runs, the Rang
 
 ## What egret pins
 
-These three images are the ones egret has measured: the plugin jar was read out of each image. Defaults for new engines are pinned by digest.
+These four images are the ones egret has measured: the plugin jar was read out of each image. Defaults for new engines are pinned by digest.
 
 | Engine | Image | Digest | Ranger plugin |
 |---|---|---|---|
 | Trino | `trinodb/trino:483` | `sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534` | 2.8.0 |
 | StarRocks | `starrocks/fe-ubuntu:4.1.4` | `sha256:0b9099483e52ee66f9ee0244799bd32f3ccb491492857c59ada622ceb15b914b` | 2.8.0 |
 | StarRocks | `starrocks/fe-ubuntu:4.1.6` | `sha256:d07aa750be77625a09866a76dbfe0ee032baeb5e48fe0e952d30cb525329dc31` | 2.9.0 |
+| StarRocks | `ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.1` (egret's patched 4.1.7) | `sha256:da948dad19e98a5a43b0073ec48f87c9e7429246ce4581a000c0955c742af250` | 2.9.0 |
 
-A new engine defaults to Trino 483 and StarRocks 4.1.6 (FE and CN, each pinned by digest). The modelled (type, plugin version) pairs are Trino 2.8.0, StarRocks 2.8.0 and StarRocks 2.9.0. `GET /api/control-plane/engines/modelled-ranger-plugins` lists them, and the register form for an external engine offers only the pairs for the chosen type, plus "Other…".
+A new engine defaults to Trino 483 and StarRocks 4.1.7: the FE is egret's patched image, the CN the official `starrocks/cn-ubuntu:4.1.7` (each pinned by digest). See [egret's patched StarRocks image](#egrets-patched-starrocks-image). The modelled (type, plugin version) pairs are Trino 2.8.0, StarRocks 2.8.0 and StarRocks 2.9.0. `GET /api/control-plane/engines/modelled-ranger-plugins` lists them, and the register form for an external engine offers only the pairs for the chosen type, plus "Other…".
 
 A tag with a digest matches only if the digest is the measured one. A tag without a digest matches the measured tag.
+
+## egret's patched StarRocks image
+
+The official StarRocks images have two holes that no policy egret compiles can close:
+
+- **Iceberg metadata tables are not checked.** StarRocks serves `t$files`, `t$partitions`, `t$manifests`, `t$snapshots`, `t$history`, `t$refs`, `t$metadata_log_entries` and the other metadata tables of an Iceberg table without asking Ranger. Anyone who can log in reads, for every table, row counts, partition values, data file paths and each column's lowest and highest value, whatever the grants, masks, row filters and classifications say.
+- **Prepared statements skip masks and row filters.** A statement run through `PREPARE`/`EXECUTE` or the MySQL binary protocol (`COM_STMT_PREPARE`/`COM_STMT_EXECUTE`) gets no mask and no row filter. egret's StarRocks connector runs Data API endpoints with parameters this way, so on an official image such an endpoint returns every row and column in the clear (measured on 4.1.6 and 4.1.7; upstream issue [#78176](https://github.com/StarRocks/starrocks/issues/78176)).
+
+`ghcr.io/egret-data/egret-starrocks-fe` closes both. It is the official `starrocks/fe-ubuntu` image of the same release with two FE jars rebuilt from the release tag plus two patches; nothing else differs, and it ships the official Ranger plugin jars. The source, the patches and the security end-to-end test that every image passes before it is published are in [github.com/egret-data/egret-starrocks](https://github.com/egret-data/egret-starrocks). Compute nodes use the official `starrocks/cn-ubuntu` image of the same release: no patch touches them.
+
+The engine page shows the warning about both holes for a StarRocks engine bound to a profile unless its FE image is egret's patched image. An external engine always shows it, because egret does not know which image it runs.
+
+To move an existing StarRocks engine onto the patched image, update it as in [How to pin](#how-to-pin) with `feImage` `ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.1@sha256:da948dad19e98a5a43b0073ec48f87c9e7429246ce4581a000c0955c742af250` and `cnImage` `starrocks/cn-ubuntu:4.1.7@sha256:39f7320127c9924abb1f1ce0ba0583ab11989cbe5bd1bb6274ada6f89ba5740d`. From 4.1.4 or 4.1.6 this is an upgrade (to 4.1.7), never a downgrade.
 
 ## Ranger plugin 2.8.0 is the floor (Trino 470 is dropped)
 

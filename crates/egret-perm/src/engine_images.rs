@@ -13,7 +13,7 @@ pub struct KnownEngineImage {
 }
 
 /// Measured: each row's plugin jar was read out of the image itself.
-pub const KNOWN_ENGINE_IMAGES: [KnownEngineImage; 3] = [
+pub const KNOWN_ENGINE_IMAGES: [KnownEngineImage; 4] = [
     KnownEngineImage {
         engine_type: "trino",
         repository: "trinodb/trino",
@@ -35,6 +35,17 @@ pub const KNOWN_ENGINE_IMAGES: [KnownEngineImage; 3] = [
         digest: "sha256:d07aa750be77625a09866a76dbfe0ee032baeb5e48fe0e952d30cb525329dc31",
         plugin_version: "2.9.0",
     },
+    // StarRocks 4.1.7 with egret's security patches (github.com/egret-data/egret-starrocks):
+    // Iceberg metadata tables need SELECT on the base table and are refused under a mask or
+    // row filter, and masks and row filters apply to prepared statements. The official 4.1.7
+    // FE image with fe-core and fe-spi rebuilt, so it ships the official plugin jars.
+    KnownEngineImage {
+        engine_type: "starrocks",
+        repository: "ghcr.io/egret-data/egret-starrocks-fe",
+        tag: "4.1.7-egret.1",
+        digest: "sha256:da948dad19e98a5a43b0073ec48f87c9e7429246ce4581a000c0955c742af250",
+        plugin_version: "2.9.0",
+    },
 ];
 
 pub struct DefaultEngineImages {
@@ -45,8 +56,10 @@ pub struct DefaultEngineImages {
 
 pub const DEFAULT_ENGINE_IMAGES: DefaultEngineImages = DefaultEngineImages {
     trino_image_version: "483@sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534",
-    starrocks_fe_image: "starrocks/fe-ubuntu:4.1.6@sha256:d07aa750be77625a09866a76dbfe0ee032baeb5e48fe0e952d30cb525329dc31",
-    starrocks_cn_image: "starrocks/cn-ubuntu:4.1.6@sha256:bf0f5ca7fd9fc4e568d4d0e593e362f229b376976b513a5a549b1b922d9ec23b",
+    // The patched FE (KNOWN_ENGINE_IMAGES); no patch touches the CN, which stays the official
+    // image of the same release.
+    starrocks_fe_image: "ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.1@sha256:da948dad19e98a5a43b0073ec48f87c9e7429246ce4581a000c0955c742af250",
+    starrocks_cn_image: "starrocks/cn-ubuntu:4.1.7@sha256:39f7320127c9924abb1f1ce0ba0583ab11989cbe5bd1bb6274ada6f89ba5740d",
 };
 
 pub fn trino_image_ref(image_version: &str) -> String {
@@ -216,6 +229,12 @@ mod tests {
                 ("trino", "trinodb/trino", "483", "2.8.0"),
                 ("starrocks", "starrocks/fe-ubuntu", "4.1.4", "2.8.0"),
                 ("starrocks", "starrocks/fe-ubuntu", "4.1.6", "2.9.0"),
+                (
+                    "starrocks",
+                    "ghcr.io/egret-data/egret-starrocks-fe",
+                    "4.1.7-egret.1",
+                    "2.9.0"
+                ),
             ]
         );
     }
@@ -421,11 +440,16 @@ mod tests {
                     "4.1.6",
                     "sha256:d07aa750be77625a09866a76dbfe0ee032baeb5e48fe0e952d30cb525329dc31"
                 ),
+                (
+                    "ghcr.io/egret-data/egret-starrocks-fe",
+                    "4.1.7-egret.1",
+                    "sha256:da948dad19e98a5a43b0073ec48f87c9e7429246ce4581a000c0955c742af250"
+                ),
             ]
         );
         assert_eq!(
             DEFAULT_ENGINE_IMAGES.starrocks_cn_image,
-            "starrocks/cn-ubuntu:4.1.6@sha256:bf0f5ca7fd9fc4e568d4d0e593e362f229b376976b513a5a549b1b922d9ec23b"
+            "starrocks/cn-ubuntu:4.1.7@sha256:39f7320127c9924abb1f1ce0ba0583ab11989cbe5bd1bb6274ada6f89ba5740d"
         );
     }
 

@@ -8,17 +8,32 @@ Control plane hiện kết quả cho mọi engine: image nó chạy, phiên bả
 
 ## egret pin gì
 
-Ba image dưới đây là những image egret đã đo: jar plugin được đọc ra từ chính mỗi image. Mặc định cho engine mới được pin theo digest.
+Bốn image dưới đây là những image egret đã đo: jar plugin được đọc ra từ chính mỗi image. Mặc định cho engine mới được pin theo digest.
 
 | Engine | Image | Digest | Ranger plugin |
 |---|---|---|---|
 | Trino | `trinodb/trino:483` | `sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534` | 2.8.0 |
 | StarRocks | `starrocks/fe-ubuntu:4.1.4` | `sha256:0b9099483e52ee66f9ee0244799bd32f3ccb491492857c59ada622ceb15b914b` | 2.8.0 |
 | StarRocks | `starrocks/fe-ubuntu:4.1.6` | `sha256:d07aa750be77625a09866a76dbfe0ee032baeb5e48fe0e952d30cb525329dc31` | 2.9.0 |
+| StarRocks | `ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.1` (bản 4.1.7 egret đã vá) | `sha256:da948dad19e98a5a43b0073ec48f87c9e7429246ce4581a000c0955c742af250` | 2.9.0 |
 
-Engine mới mặc định là Trino 483 và StarRocks 4.1.6 (FE và CN, mỗi cái pin theo digest). Các cặp (loại, phiên bản plugin) được mô hình hoá là Trino 2.8.0, StarRocks 2.8.0 và StarRocks 2.9.0. `GET /api/control-plane/engines/modelled-ranger-plugins` liệt kê chúng, và form đăng ký engine external chỉ đưa ra các cặp của loại đã chọn, cùng "Other…".
+Engine mới mặc định là Trino 483 và StarRocks 4.1.7: FE là image egret đã vá, CN là image chính thức `starrocks/cn-ubuntu:4.1.7` (mỗi cái pin theo digest). Xem [Image StarRocks egret đã vá](#image-starrocks-egret-đã-vá). Các cặp (loại, phiên bản plugin) được mô hình hoá là Trino 2.8.0, StarRocks 2.8.0 và StarRocks 2.9.0. `GET /api/control-plane/engines/modelled-ranger-plugins` liệt kê chúng, và form đăng ký engine external chỉ đưa ra các cặp của loại đã chọn, cùng "Other…".
 
 Tag có digest chỉ khớp nếu digest là digest đã đo. Tag không có digest khớp với tag đã đo.
+
+
+## Image StarRocks egret đã vá
+
+Image StarRocks chính thức có hai lỗ mà không policy nào egret biên dịch đóng được:
+
+- **Bảng metadata Iceberg không được kiểm tra quyền.** StarRocks trả `t$files`, `t$partitions`, `t$manifests`, `t$snapshots`, `t$history`, `t$refs`, `t$metadata_log_entries` và các bảng metadata khác của một bảng Iceberg mà không hỏi Ranger. Ai đăng nhập được cũng đọc được, với mọi bảng, số dòng, giá trị partition, đường dẫn file dữ liệu và giá trị nhỏ nhất, lớn nhất của từng cột, bất kể grant, mask, row filter và classification nói gì.
+- **Prepared statement bỏ qua mask và row filter.** Câu lệnh chạy qua `PREPARE`/`EXECUTE` hoặc giao thức nhị phân MySQL (`COM_STMT_PREPARE`/`COM_STMT_EXECUTE`) không bị áp mask hay row filter nào. Connector StarRocks của egret chạy các endpoint Data API có tham số theo cách này, nên trên image chính thức, endpoint như vậy trả mọi dòng và mọi cột ở dạng gốc (đo trên 4.1.6 và 4.1.7; issue upstream [#78176](https://github.com/StarRocks/starrocks/issues/78176)).
+
+`ghcr.io/egret-data/egret-starrocks-fe` đóng cả hai. Đây là image chính thức `starrocks/fe-ubuntu` cùng bản phát hành, với hai jar FE được build lại từ tag của bản đó cộng hai patch; ngoài ra không khác gì, và vẫn mang jar Ranger plugin chính thức. Mã nguồn, các patch và test bảo mật end-to-end mà mọi image phải qua trước khi được publish nằm ở [github.com/egret-data/egret-starrocks](https://github.com/egret-data/egret-starrocks). Compute node dùng image chính thức `starrocks/cn-ubuntu` cùng bản phát hành: không patch nào đụng tới CN.
+
+Trang engine hiện cảnh báo về hai lỗ này cho một engine StarRocks đã gắn profile, trừ khi image FE của nó là image egret đã vá. Engine external luôn hiện cảnh báo, vì egret không biết nó chạy image nào.
+
+Để chuyển một engine StarRocks đang có sang image đã vá, cập nhật nó như trong [Cách pin](#cách-pin) với `feImage` `ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.1@sha256:da948dad19e98a5a43b0073ec48f87c9e7429246ce4581a000c0955c742af250` và `cnImage` `starrocks/cn-ubuntu:4.1.7@sha256:39f7320127c9924abb1f1ce0ba0583ab11989cbe5bd1bb6274ada6f89ba5740d`. Từ 4.1.4 hoặc 4.1.6 đây là nâng cấp (lên 4.1.7), không bao giờ là hạ cấp.
 
 ## Ranger plugin 2.8.0 là mức sàn (bỏ Trino 470)
 

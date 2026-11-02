@@ -3,8 +3,9 @@
 //! as 2.8.0. The count makes an empty scan fail rather than pass.
 use std::path::Path;
 
-/// A pinned image: a numeric tag (`483`) for Trino or `N.N.N` for StarRocks, and
-/// a `sha256:` digest of 64 hex digits. A positive rule, so a new floating
+/// A pinned image: a numeric tag (`483`) for Trino, `N.N.N` for StarRocks or
+/// `N.N.N-egret.N` for egret's patched StarRocks (`egret-data/egret-starrocks-*`),
+/// and a `sha256:` digest of 64 hex digits. A positive rule, so a new floating
 /// spelling (`stable`, `4.1`, `nightly`) fails too, not just `latest`.
 fn pinned(image: &str) -> bool {
     let Some((name, digest)) = image.split_once('@') else {
@@ -18,11 +19,17 @@ fn pinned(image: &str) -> bool {
         return false;
     };
     let digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+    let release = |t: &str| {
+        let parts: Vec<&str> = t.split('.').collect();
+        parts.len() == 3 && parts.iter().all(|p| digits(p))
+    };
     if repo.starts_with("trinodb/") || repo.contains("/trinodb/") {
         digits(tag)
+    } else if repo.contains("egret-data/egret-starrocks-") {
+        tag.split_once("-egret.")
+            .is_some_and(|(upstream, level)| release(upstream) && digits(level))
     } else {
-        let parts: Vec<&str> = tag.split('.').collect();
-        parts.len() == 3 && parts.iter().all(|p| digits(p))
+        release(tag)
     }
 }
 
@@ -33,7 +40,8 @@ fn engine_image(image: &str) -> Option<&str> {
     let i = image.trim().trim_matches(|c| c == '"' || c == '\'');
     let i = i.strip_prefix("docker.io/").unwrap_or(i);
     let named = |repo: &str| i.starts_with(&format!("{repo}/")) || i.contains(&format!("/{repo}/"));
-    (named("trinodb") || named("starrocks")).then_some(i)
+    let patched_starrocks = i.contains("egret-data/egret-starrocks-");
+    (named("trinodb") || named("starrocks") || patched_starrocks).then_some(i)
 }
 
 /// Every literal Trino/StarRocks image ref in TS/TSX source. A ref that ends in
@@ -42,7 +50,7 @@ fn engine_image(image: &str) -> Option<&str> {
 fn literal_engine_refs(src: &str) -> Vec<String> {
     let ref_char = |c: char| c.is_ascii_alphanumeric() || "._/:@-".contains(c);
     let mut out = Vec::new();
-    for needle in ["trinodb/", "starrocks/"] {
+    for needle in ["trinodb/", "starrocks/", "egret-data/egret-starrocks-"] {
         let mut from = 0;
         while let Some(off) = src[from..].find(needle) {
             let mut start = from + off;
@@ -140,6 +148,8 @@ fn the_pin_rule_rejects_every_floating_spelling() {
     for ok in [
         format!("trinodb/trino:483{d}"),
         format!("starrocks/allin1-ubuntu:4.1.6{d}"),
+        format!("ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.1{d}"),
+        format!("ghcr.io/egret-data/egret-starrocks-allin1:4.1.7-egret.12{d}"),
     ] {
         assert!(pinned(&ok), "{ok}");
     }
@@ -150,6 +160,12 @@ fn the_pin_rule_rejects_every_floating_spelling() {
         format!("starrocks/allin1-ubuntu:4.1-latest{d}"),
         format!("starrocks/allin1-ubuntu:4.1{d}"),
         "starrocks/fe-ubuntu:4.1.6@sha256:abc".to_string(),
+        "ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.1".to_string(),
+        format!("ghcr.io/egret-data/egret-starrocks-fe:latest{d}"),
+        format!("ghcr.io/egret-data/egret-starrocks-fe:4.1.7{d}"),
+        format!("ghcr.io/egret-data/egret-starrocks-fe:4.1-egret.1{d}"),
+        format!("ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.x{d}"),
+        format!("starrocks/fe-ubuntu:4.1.7-egret.1{d}"),
     ] {
         assert!(!pinned(&bad), "{bad}");
     }
@@ -181,6 +197,7 @@ fn the_frontend_scan_sees_every_literal_and_skips_interpolations() {
         const c = `trinodb/trino:${v}`;
         // overrides the default `trinodb/trino:{version}`
         const d = "mirror.corp/starrocks/cn-ubuntu:4.1.6";
+        const e = "ghcr.io/egret-data/egret-starrocks-fe:latest";
     "#;
     assert_eq!(
         literal_engine_refs(src),
@@ -188,6 +205,7 @@ fn the_frontend_scan_sees_every_literal_and_skips_interpolations() {
             "docker.io/trinodb/trino:483".to_string(),
             "starrocks/fe-ubuntu:4.1-latest".to_string(),
             "mirror.corp/starrocks/cn-ubuntu:4.1.6".to_string(),
+            "ghcr.io/egret-data/egret-starrocks-fe:latest".to_string(),
         ]
     );
 }
