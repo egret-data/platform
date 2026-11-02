@@ -666,6 +666,72 @@ async fn compile_desired(
         }
     }
 
+    // **Trino: a mask, row filter or deny does not reach `t$files`.** Trino
+    // asks Ranger about a metadata table under its own name (`orders$files`),
+    // which a `table: *` grant matches and a policy on `orders` does not, so
+    // the people a policy restricts read the bounds, partition values and
+    // counts it withholds. Each restricting policy of the profile (compiled
+    // and hand-written) and of its tag service gets a deny on the metadata
+    // tables of the tables it reaches. Read `crate::metadata_tables`.
+    if engine == EngineType::Trino {
+        let tag_service_id = sweep.iter().copied().find(|&id| id != service_id);
+        let mut profile_sources: Vec<Value> = Vec::new();
+        let mut tag_sources: Vec<Value> = Vec::new();
+        for ((sid, _), dp) in &desired {
+            if *sid == service_id {
+                profile_sources.push(dp.body.clone());
+            } else if Some(*sid) == tag_service_id {
+                tag_sources.push(dp.body.clone());
+            }
+        }
+        let hand_written = |b: &Value| {
+            !b.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(egret_policy::is_compiler_owned_policy_name)
+        };
+        profile_sources.extend(
+            egret_policy::enabled_policies_for_service_via(conn, service_id)
+                .await
+                .map_err(crate::db_error::from_store)?
+                .into_iter()
+                .filter(hand_written),
+        );
+        if let Some(tag_id) = tag_service_id {
+            tag_sources.extend(
+                egret_policy::enabled_policies_for_service_via(conn, tag_id)
+                    .await
+                    .map_err(crate::db_error::from_store)?
+                    .into_iter()
+                    .filter(hand_written),
+            );
+        }
+        let tags: Vec<String> = tag_sources
+            .iter()
+            .flat_map(crate::metadata_tables::tag_values)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let tagged = crate::metadata_tables::tagged_tables_via(conn, service_id, &tags).await?;
+        let denies = crate::metadata_tables::resource_denies(&profile_sources, &svc.name)
+            .into_iter()
+            .chain(crate::metadata_tables::tag_denies(
+                &tag_sources,
+                &tagged,
+                &svc.name,
+            ));
+        for (name, body) in denies {
+            desired.insert(
+                (service_id, name),
+                DesiredPolicy {
+                    body,
+                    source_kind: SourceKind::Clearance,
+                    grant_id: None,
+                    rule_id: None,
+                },
+            );
+        }
+    }
+
     // **SP4d debt Task 6, item 1: the write side of `EvalOrderAmbiguous`** —
     // widened by SP4d-4 Task 3 to the profile's whole evaluation unit.
     // Checked HERE, on the complete desired set, because no single
