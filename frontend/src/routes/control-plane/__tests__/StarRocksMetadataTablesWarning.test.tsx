@@ -23,7 +23,8 @@ afterEach(() => {
 });
 
 const T = { timeout: 3000 };
-const WARNING = /serve the metadata tables of Iceberg tables .* without asking Ranger, and apply no mask or row filter to prepared statements/;
+const WARNING =
+  /Unless this engine runs egret-starrocks-fe 4\.1\.7-egret\.3 or later.*metadata tables of Iceberg tables .* without asking Ranger.*prepared statements.*HTTP SQL API or Arrow Flight SQL.*FILES\(\).*materialized view/;
 
 const SR_EXTERNAL = { ...EXTERNAL_ENGINE, name: "legacy-sr", type: "starrocks", port: 9030, rangerPluginVersion: "2.8.0" };
 const SR_PROVISIONED = {
@@ -116,12 +117,26 @@ describe("StarRocks metadata-table warning, Control plane", () => {
     expect(await screen.findByTestId("starrocks-metadata-tables", {}, T)).toHaveTextContent(WARNING);
   });
 
-  test("provisioned StarRocks engine on egret's patched image, bound: no warning", async () => {
-    const patched = {
+  test("provisioned StarRocks engine on an earlier patched image (egret.1), bound: shown", async () => {
+    const earlier = {
       ...SR_PROVISIONED,
       spec: {
         starrocksConfig: {
           feImage: `ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.1@sha256:${"a".repeat(64)}`,
+        },
+      },
+    };
+    stubFetch(detailRoutes(earlier, 21));
+    renderDetail();
+    expect(await screen.findByTestId("starrocks-metadata-tables", {}, T)).toHaveTextContent(WARNING);
+  });
+
+  test("provisioned StarRocks engine on egret's complete patched image, bound: no warning", async () => {
+    const patched = {
+      ...SR_PROVISIONED,
+      spec: {
+        starrocksConfig: {
+          feImage: `ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.3@sha256:${"a".repeat(64)}`,
         },
       },
     };
@@ -175,9 +190,16 @@ describe("StarRocks metadata-table warning, Control plane", () => {
 describe("isPatchedStarRocksImage", () => {
   const digest = `@sha256:${"0".repeat(64)}`;
   test.each([
-    ["ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.1", true],
+    ["ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.3", true],
     [`ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.12${digest}`, true],
-    [" ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.1 ", true],
+    [" ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.3 ", true],
+    ["ghcr.io/egret-data/egret-starrocks-fe:4.1.8-egret.1", true],
+    ["ghcr.io/egret-data/egret-starrocks-fe:4.2.0-egret.1", true],
+    ["ghcr.io/egret-data/egret-starrocks-fe:5.0.0-egret.1", true],
+    ["ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.1", false],
+    [`ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.2${digest}`, false],
+    ["ghcr.io/egret-data/egret-starrocks-fe:4.1.6-egret.9", false],
+    ["ghcr.io/egret-data/egret-starrocks-fe:3.9.9-egret.9", false],
     ["ghcr.io/egret-data/egret-starrocks-fe", false],
     ["ghcr.io/egret-data/egret-starrocks-fe:latest", false],
     ["ghcr.io/egret-data/egret-starrocks-fe:4.1.7", false],

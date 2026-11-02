@@ -290,7 +290,7 @@ describe("the profile page (EP13, EP15)", () => {
 
 describe("the engine page's StarRocks metadata-table warning", () => {
   const SR_ENGINE = { id: E_TR, name: "lake-sr", type: "starrocks", origin: "provisioned", status: "running" };
-  const WARNING = /StarRocks images serve the metadata tables of Iceberg tables .* without asking Ranger/;
+  const WARNING = /Unless this engine runs egret-starrocks-fe 4\.1\.7-egret\.3 or later.*metadata tables of Iceberg tables .* without asking Ranger/;
   const cpEngine = (feImage: string) => ({
     id: E_TR,
     name: "lake-sr",
@@ -312,7 +312,7 @@ describe("the engine page's StarRocks metadata-table warning", () => {
       engineAnswers({
         [`/perm/engines/${E_TR}/grants`]: ok(grantsResponse({ engine: SR_ENGINE })),
         [`/engines/${E_TR}`]: ok(
-          cpEngine(`ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.1@sha256:${"a".repeat(64)}`),
+          cpEngine(`ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.3@sha256:${"a".repeat(64)}`),
         ),
       }),
     ).asked;

@@ -200,7 +200,7 @@ describe("EngineCreate", () => {
     expect(screen.getByLabelText("FE image")).toHaveValue("");
     expect(screen.getByLabelText("FE image")).toHaveAttribute(
       "placeholder",
-      "ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.1@sha256:da948dad19e98a5a43b0073ec48f87c9e7429246ce4581a000c0955c742af250",
+      "ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.3@sha256:5c74c820f9b741bc8054247f47f3d54dd9e526710b6fc2b5a7873cae6bb2d2b0",
     );
     expect(screen.getByLabelText("CN image")).toHaveValue("");
     expect(screen.getByLabelText("CN image")).toHaveAttribute(

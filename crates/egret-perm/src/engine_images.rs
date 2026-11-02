@@ -13,7 +13,7 @@ pub struct KnownEngineImage {
 }
 
 /// Measured: each row's plugin jar was read out of the image itself.
-pub const KNOWN_ENGINE_IMAGES: [KnownEngineImage; 4] = [
+pub const KNOWN_ENGINE_IMAGES: [KnownEngineImage; 5] = [
     KnownEngineImage {
         engine_type: "trino",
         repository: "trinodb/trino",
@@ -35,15 +35,27 @@ pub const KNOWN_ENGINE_IMAGES: [KnownEngineImage; 4] = [
         digest: "sha256:d07aa750be77625a09866a76dbfe0ee032baeb5e48fe0e952d30cb525329dc31",
         plugin_version: "2.9.0",
     },
-    // StarRocks 4.1.7 with egret's security patches (github.com/egret-data/egret-starrocks):
-    // Iceberg metadata tables need SELECT on the base table and are refused under a mask or
-    // row filter, and masks and row filters apply to prepared statements. The official 4.1.7
-    // FE image with fe-core and fe-spi rebuilt, so it ships the official plugin jars.
+    // StarRocks 4.1.7 with egret's security patches (github.com/egret-data/egret-starrocks),
+    // the official 4.1.7 FE image with fe-core and fe-spi rebuilt, so it ships the official
+    // plugin jars. egret.1 (patches 0001-0002): Iceberg metadata tables need SELECT on the base
+    // table and are refused under a mask or row filter; masks and row filters apply to prepared
+    // statements. Kept so engines already on it stay modelled.
     KnownEngineImage {
         engine_type: "starrocks",
         repository: "ghcr.io/egret-data/egret-starrocks-fe",
         tag: "4.1.7-egret.1",
         digest: "sha256:da948dad19e98a5a43b0073ec48f87c9e7429246ce4581a000c0955c742af250",
+        plugin_version: "2.9.0",
+    },
+    // egret.3 (patches 0001-0007): also `_file`/`_pos` stay out of `SELECT *` under a policy;
+    // the HTTP SQL API and Arrow Flight SQL apply masks and row filters; SHOW CREATE CATALOG
+    // needs a privilege on the catalog; FILES() needs OPERATE on SYSTEM; no materialized view
+    // over a table under its creator's mask or row filter.
+    KnownEngineImage {
+        engine_type: "starrocks",
+        repository: "ghcr.io/egret-data/egret-starrocks-fe",
+        tag: "4.1.7-egret.3",
+        digest: "sha256:5c74c820f9b741bc8054247f47f3d54dd9e526710b6fc2b5a7873cae6bb2d2b0",
         plugin_version: "2.9.0",
     },
 ];
@@ -58,7 +70,7 @@ pub const DEFAULT_ENGINE_IMAGES: DefaultEngineImages = DefaultEngineImages {
     trino_image_version: "483@sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534",
     // The patched FE (KNOWN_ENGINE_IMAGES); no patch touches the CN, which stays the official
     // image of the same release.
-    starrocks_fe_image: "ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.1@sha256:da948dad19e98a5a43b0073ec48f87c9e7429246ce4581a000c0955c742af250",
+    starrocks_fe_image: "ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.3@sha256:5c74c820f9b741bc8054247f47f3d54dd9e526710b6fc2b5a7873cae6bb2d2b0",
     starrocks_cn_image: "starrocks/cn-ubuntu:4.1.7@sha256:39f7320127c9924abb1f1ce0ba0583ab11989cbe5bd1bb6274ada6f89ba5740d",
 };
 
@@ -233,6 +245,12 @@ mod tests {
                     "starrocks",
                     "ghcr.io/egret-data/egret-starrocks-fe",
                     "4.1.7-egret.1",
+                    "2.9.0"
+                ),
+                (
+                    "starrocks",
+                    "ghcr.io/egret-data/egret-starrocks-fe",
+                    "4.1.7-egret.3",
                     "2.9.0"
                 ),
             ]
@@ -444,6 +462,11 @@ mod tests {
                     "ghcr.io/egret-data/egret-starrocks-fe",
                     "4.1.7-egret.1",
                     "sha256:da948dad19e98a5a43b0073ec48f87c9e7429246ce4581a000c0955c742af250"
+                ),
+                (
+                    "ghcr.io/egret-data/egret-starrocks-fe",
+                    "4.1.7-egret.3",
+                    "sha256:5c74c820f9b741bc8054247f47f3d54dd9e526710b6fc2b5a7873cae6bb2d2b0"
                 ),
             ]
         );
