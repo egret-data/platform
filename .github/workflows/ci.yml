@@ -28,7 +28,47 @@ env:
   EGRET_TEST_SHARED_STORE_URL: redis://localhost:6379
 
 jobs:
+  # Which jobs a pull request needs. A change that touches only docs, top-level Markdown or a workflow
+  # other than this one cannot change what rust, ranger-differential or frontend test: no Rust test
+  # reads a file under docs/ (checked: the docs paths in crates/ are message strings), and the
+  # frontend reads three docs files, listed below. A push to main always runs everything, and so does a
+  # pull request whose `changes` job did not succeed (fail closed: never a vacuous green).
+  changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.code.outputs.code }}
+      frontend_docs: ${{ steps.frontend_docs.outputs.frontend_docs }}
+    steps:
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: code
+        with:
+          # A file counts as code unless it matches one of the exclusions.
+          predicate-quantifier: every
+          filters: |
+            code:
+              - '!docs/**'
+              - '!*.md'
+              - '!.github/workflows/ghcr-cleanup.yml'
+              - '!.github/workflows/images.yml'
+              - '!.github/workflows/apps-image.yml'
+              - '!.github/workflows/oss-hygiene.yml'
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: frontend_docs
+        with:
+          # Read by frontend/eslint-rules/__tests__/rulebook.test.js.
+          filters: |
+            frontend_docs:
+              - 'docs/en/frontend-rules.md'
+              - 'docs/vi/frontend-rules.md'
+              - 'docs/en/ui-conventions.md'
+
   rust:
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -174,6 +214,8 @@ jobs:
   # `continue-on-error` is deliberately NOT set: a gate allowed to fail is the
   # vacuous green again, one level up.
   ranger-differential:
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -198,6 +240,8 @@ jobs:
         run: EGRET_TEST_RANGER_E2E=1 cargo test -p egret-ranger-eval --test differential --no-fail-fast -- --nocapture
 
   frontend:
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.code == 'true' || needs.changes.outputs.frontend_docs == 'true') }}
     runs-on: ubuntu-latest
     defaults:
       run:
