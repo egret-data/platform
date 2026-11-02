@@ -72,6 +72,7 @@ import {
 } from "./externalEngine";
 import { catalogKey, catalogsQueryKey, engineDetailKey } from "./queryKeys";
 import { RangerCredentialSection, useRotationToken } from "./RangerCredential";
+import { StarRocksMetadataTablesWarning } from "./StarRocksMetadataTablesWarning";
 import { PageContainer } from "@/components/layout/PageContainer";
 import { DetailHeader } from "@/components/layout/DetailHeader";
 
@@ -279,6 +280,7 @@ function Overview({
           </dd>
         </dl>
       </section>
+      <StarRocksMetadataTablesWarning engineType={engine.type} bound={!!bound} />
       {engine.rangerPluginVersionModelled === false && <UnmodelledVersionNote />}
     </>
   );
@@ -658,6 +660,7 @@ function SettingsForm({
               Changing or removing the profile recompiles both the old and the new one. If that would leave two mask or
               row-filter rules deciding one column differently, egret refuses and changes nothing.
             </p>
+            <StarRocksMetadataTablesWarning engineType={engine.type} bound={profileId !== ""} />
           </div>
         )}
       </section>
