@@ -1016,3 +1016,47 @@ fn rowfilter_items(
     });
     Ok(items)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// M19: the matrix's mask types are exactly the ones each embedded
+    /// service-def declares, in its order, and nothing else is native.
+    #[test]
+    fn matrix_mask_types_equal_the_service_def() {
+        use egret_perm_ir::matrix::{
+            support_for_kind, Capability, EpKind, Mechanism, Support, STARROCKS_MASK_TYPES,
+            TRINO_MASK_TYPES,
+        };
+        for e in [EngineType::Trino, EngineType::StarRocks] {
+            let k = EpKind {
+                engine: e,
+                mechanism: Mechanism::Ranger,
+            };
+            let declared = declared_mask_types(e).unwrap();
+            assert!(!declared.is_empty(), "{e:?} declares no mask type");
+            for t in &declared {
+                assert_eq!(
+                    support_for_kind(k, None, true, &Capability::MaskType(t.clone())),
+                    Support::Native,
+                    "{e:?} {t}"
+                );
+            }
+            let matrix = match e {
+                EngineType::Trino => TRINO_MASK_TYPES,
+                EngineType::StarRocks => STARROCKS_MASK_TYPES,
+            };
+            assert_eq!(matrix, declared.as_slice(), "{e:?}");
+            assert_ne!(
+                support_for_kind(
+                    k,
+                    None,
+                    true,
+                    &Capability::MaskType("MASK_NOT_A_TYPE".into())
+                ),
+                Support::Native
+            );
+        }
+    }
+}

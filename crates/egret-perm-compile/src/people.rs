@@ -40,6 +40,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 use egret_perm::CompileError;
+use egret_perm_ir::enforcement::withhold_engine_reason;
 
 use crate::members::{group_members_via, role_group_holders_via, role_holders_via};
 
@@ -700,6 +701,26 @@ struct Gate {
     required_groups: Vec<Uuid>,
 }
 
+impl Gate {
+    /// The capability matrix's M10 ([`withhold_engine_reason`]): engines
+    /// enforce no group exemption, so the gate's group half is not enforced
+    /// there.
+    fn group_half_not_enforced(&self) -> bool {
+        withhold_engine_reason(
+            self.required_roles.is_empty(),
+            self.required_groups.is_empty(),
+        )
+        .is_some()
+    }
+
+    /// The gate names only groups and engines do not enforce them (M10), so
+    /// nothing is compiled for it (`clearance.rs`, the groups-only skip).
+    /// [`gates_via`] never returns a gate with both lists empty.
+    fn groups_only_not_enforced(&self) -> bool {
+        self.required_roles.is_empty() && self.group_half_not_enforced()
+    }
+}
+
 /// Every gate, and the names of the groups they require. Both lists empty is
 /// no gate (`clearance.rs`, "BOTH lists empty is NO gate").
 async fn gates_via(
@@ -1019,7 +1040,7 @@ pub async fn read_user_via(
     let clearances = gates
         .iter()
         .map(|g| {
-            let engines = if g.required_roles.is_empty() {
+            let engines = if g.groups_only_not_enforced() {
                 EngineClearance::NotEnforcedGroupsOnly
             } else {
                 match g.required_roles.iter().find(|r| holds.contains(*r)) {
@@ -1033,7 +1054,9 @@ pub async fn read_user_via(
                             .any(|r| r.expired && g.required_roles.contains(&r.role_name))
                         {
                             Some(EngineNotClearedReason::Expired)
-                        } else if group_ids.iter().any(|gid| g.required_groups.contains(gid)) {
+                        } else if g.group_half_not_enforced()
+                            && group_ids.iter().any(|gid| g.required_groups.contains(gid))
+                        {
                             Some(EngineNotClearedReason::GroupsNotEnforced)
                         } else {
                             None
@@ -1230,7 +1253,7 @@ pub async fn read_group_via(
         .iter()
         .map(|g| {
             let held_role = clearing_row(&held, &g.required_roles);
-            let engines = if g.required_roles.is_empty() {
+            let engines = if g.groups_only_not_enforced() {
                 EngineClearance::NotEnforcedGroupsOnly
             } else if let Some(r) = held_role {
                 EngineClearance::Cleared {
@@ -1238,7 +1261,7 @@ pub async fn read_group_via(
                 }
             } else {
                 EngineClearance::NotCleared {
-                    because: if g.required_groups.contains(&gid) {
+                    because: if g.group_half_not_enforced() && g.required_groups.contains(&gid) {
                         Some(EngineNotClearedReason::GroupsNotEnforced)
                     } else {
                         None
@@ -1318,7 +1341,7 @@ pub async fn read_role_via(
         .iter()
         .map(|g| {
             let required = g.required_roles.iter().any(|r| r == name);
-            let engines = if g.required_roles.is_empty() {
+            let engines = if g.groups_only_not_enforced() {
                 EngineClearance::NotEnforcedGroupsOnly
             } else if required {
                 EngineClearance::Cleared {

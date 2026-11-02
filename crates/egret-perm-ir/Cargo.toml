@@ -1,0 +1,12 @@
+[package]
+name = "egret-perm-ir"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# Governance sub-project 1: the target-neutral IR between the `perm` store and
+# every compiler target. Pure: no database, no Ranger. See
+# docs/en/specs/2026-11-02-governance-layer-concepts.md.
+[dependencies]
+egret-perm.workspace = true
+uuid.workspace = true

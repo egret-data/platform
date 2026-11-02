@@ -465,6 +465,29 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// M13: the view guard is lowered at exactly the StarRocks plugin versions
+    /// egret models, the ones `fold_plugin_versions` accepts.
+    #[test]
+    fn matrix_view_guard_versions_equal_the_modelled_starrocks_plugins() {
+        use egret_perm_ir::matrix::{Versions, ENTRIES};
+        let guard: Vec<&[&str]> = ENTRIES
+            .iter()
+            .filter(|e| {
+                e.kind.engine == EngineType::StarRocks && e.capability == "WithholdThroughView"
+            })
+            .map(|e| match e.versions {
+                Versions::Exactly(list) => list,
+                Versions::Any => panic!("M13 must name its measured versions"),
+            })
+            .collect();
+        let modelled: Vec<&str> = egret_perm::MODELLED_RANGER_PLUGINS
+            .iter()
+            .filter(|(engine, _)| *engine == "starrocks")
+            .map(|(_, v)| *v)
+            .collect();
+        assert_eq!(guard, vec![modelled.as_slice()]);
+    }
+
     const SERVICE: &str = "sr_profile";
 
     fn ssn() -> TaggedColumn {

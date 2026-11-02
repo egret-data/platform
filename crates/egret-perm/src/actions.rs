@@ -33,7 +33,10 @@
 use crate::model::{Action, PrincipalKind};
 
 /// The two engines SP4a's compiler targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Ord` and `Hash` because governance sub-project 1's `egret_perm_ir::ep::EpKind`
+/// (`engine × mechanism`) is a map key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EngineType {
     Trino,
     StarRocks,

@@ -3559,6 +3559,7 @@ dependencies = [
  "egret-events",
  "egret-metastore",
  "egret-perm",
+ "egret-perm-ir",
  "egret-policy",
  "egret-policy-api",
  "egret-query-api",
@@ -3576,6 +3577,14 @@ dependencies = [
  "tower",
  "tracing",
  "utoipa",
+ "uuid",
+]
+
+[[package]]
+name = "egret-perm-ir"
+version = "0.1.0"
+dependencies = [
+ "egret-perm",
  "uuid",
 ]
 
