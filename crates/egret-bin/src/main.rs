@@ -132,7 +132,7 @@ async fn init(config: Config, force: bool) -> anyhow::Result<()> {
     let hash = hash_password(password.secret())?;
 
     let users = UserRepo::new(db.clone());
-    let user_id = users.insert_local(&email, "Administrator", &hash).await?;
+    let (user_id, _) = users.create_local(&email, "Administrator", &hash).await?;
 
     // NOT EXISTS rather than ON CONFLICT: platform grants have a NULL scope_id,
     // which the UNIQUE index treats as distinct, so ON CONFLICT would not dedupe.
@@ -2914,6 +2914,27 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 Err(e) => tracing::warn!(
                     error = %e,
                     "the boot sync of the egret-admin policies did not run"
+                ),
+            }
+        });
+    }
+    // A human user has a username from creation (spec 2026-10-31
+    // local-user-username); name the users created before that, through the
+    // steward's allocation core and its stale-ref guard. Best-effort; a
+    // failure is logged and never blocks boot, and the next boot retries.
+    {
+        let pool = db.pool.clone();
+        tokio::spawn(async move {
+            match egret_perm_compile::mint_missing_usernames(&pool).await {
+                Ok(r) if r.minted > 0 || r.refused > 0 => tracing::info!(
+                    minted = r.minted,
+                    refused = r.refused,
+                    "usernames allocated at boot for users created without one"
+                ),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "the boot allocation of missing usernames did not finish; retried next boot"
                 ),
             }
         });

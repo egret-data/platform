@@ -140,6 +140,7 @@ pub use attribution::{attribute_policy_name, PolicyAttribution};
 pub use grants::{compile_grant, validate_grant_shape};
 pub use group_membership::PermGroupRecompiler;
 pub use members::lock_compile_mints_in_tx;
+pub use principal_refs::{mint_missing_usernames, UsernameRepair};
 pub use role_membership::{
     assign_platform_role_and_recompile, delete_platform_role_and_recompile,
     set_user_status_and_recompile, set_user_status_and_recompile_in_tx, sync_admin_policies,
