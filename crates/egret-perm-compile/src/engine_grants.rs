@@ -554,7 +554,7 @@ pub(crate) async fn impersonation_closure_problem(
 mod tests {
     use super::*;
     use crate::engine_capabilities::CAPABILITIES;
-    use crate::rules::stamp_service_type;
+    use crate::ranger::rules::stamp_service_type;
     use egret_perm::{Principal, PrincipalKind, PrincipalSet};
     use egret_policy::admin::access_to_ranger_json;
     use serde_json::{json, Value};

@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::trigger::{DesiredPolicy, SkippedItem, SourceKind};
 
 pub(crate) mod grants;
+pub(crate) mod rules;
 
 /// One statement rendered for one Ranger service: the policy body, its name
 /// (the desired-set key) and where it came from.

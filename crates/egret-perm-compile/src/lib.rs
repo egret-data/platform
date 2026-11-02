@@ -20,13 +20,15 @@
 //! This module builds typed `egret_policy::admin::{AccessPolicyInput,
 //! AccessItemInput, ResourceLevel, MaskingPolicyInput, RowFilterPolicyInput,
 //! ...}` values and leaves RENDERING those to JSON to that existing code —
-//! nothing here hand-writes a Ranger policy body from scratch. `rules.rs`'s
+//! nothing here hand-writes a Ranger policy body from scratch. `ranger/rules.rs`'s
 //! `stamp_service_type` is the one place this module touches an already-
 //! rendered `Value` after the fact, fixing a `serviceType` the renderer
 //! itself hardcodes to `"trino"` — that is a targeted correction of one
 //! field, not hand-written JSON. See `ranger/grants.rs` for `compile_grant` (grants
-//! → access policies, decided by `egret_perm_ir::lower::grants`) and `rules.rs` for `compile_rule` (named rules →
-//! masking/row-filter policies, with the StarRocks tag expansion), and
+//! → access policies, decided by `egret_perm_ir::lower::grants`) and
+//! `ranger/rules.rs` for `compile_rule`'s rendering (named rules →
+//! masking/row-filter policies, decided — StarRocks tag expansion included —
+//! by `egret_perm_ir::lower::rules`), and
 //! `egret_perm::actions` for the `Action` → Ranger access-type map the
 //! former consumes.
 //!
@@ -151,6 +153,7 @@ pub mod write_seam;
 
 pub use attribution::{attribute_policy_name, PolicyAttribution};
 pub use egret_perm_ir::lower::grants::validate_grant_shape;
+pub use egret_perm_ir::lower::rules::validate_rule_shape;
 pub use group_membership::PermGroupRecompiler;
 pub use members::lock_compile_mints_in_tx;
 pub use principal_refs::{mint_missing_usernames, UsernameRepair};
@@ -161,7 +164,7 @@ pub use role_membership::{
     unassign_platform_role_and_recompile, unassign_platform_role_and_recompile_in_tx,
 };
 pub use routes::{openapi, perm_router, PermHttpError, PermState};
-pub use rules::{compile_rule, validate_rule_shape, ResolvedNames, TableTarget, TaggedColumn};
+pub use rules::{compile_rule, ResolvedNames, TableTarget, TaggedColumn};
 pub use trigger::{
     affected_services_for_classification, affected_services_for_grant,
     affected_services_for_group_membership, affected_services_for_role_membership,

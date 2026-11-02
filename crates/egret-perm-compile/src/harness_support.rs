@@ -15,7 +15,8 @@ use egret_ranger_eval::eval::PluginVersion;
 
 use crate::clearance::{mv_deny_inputs, starrocks_deny, withheld_accesses, WHOLE_TABLE_COLUMN};
 use crate::clearance_mask::{clearance_mask_name, fold_clearance_mask};
-use crate::rules::{stamp_service_type, TaggedColumn};
+use crate::ranger::rules::stamp_service_type;
+use crate::rules::TaggedColumn;
 
 /// The StarRocks clearance mask body for `column`, folded over `others`.
 pub fn starrocks_clearance_mask(

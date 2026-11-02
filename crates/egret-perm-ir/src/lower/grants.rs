@@ -87,7 +87,7 @@ use crate::statement::{
 };
 
 /// The one check every `User` ref gets before it is emitted, shared by
-/// [`grant_statement`] here and `egret-perm-compile`'s `rules::exempt_principals`
+/// [`grant_statement`] here and [`crate::lower::rules`]' `exempt_audience`
 /// — the two places a `User` principal is ever bucketed. A `User` ref is
 /// emitted verbatim (see module doc comment) after being checked for the two
 /// shapes that prove it was never resolved to a bare `users.username`: empty,
@@ -132,16 +132,16 @@ pub fn validate_user_ref(r#ref: &str) -> Result<(), CompileError> {
 /// (create, patch and the rolled-back preview all reach it), `compile_grant` (`egret-perm-compile`)
 /// runs it again because the compiler is the last point at which a wrong artifact
 /// becomes an enforced one and it is `pub` to callers that never went near the
-/// store, and `egret_perm_compile::rules::validate_rule_shape` and
-/// `egret_perm_compile::rules::compile_rule` are the same pair on the rule side.
+/// store, and [`crate::lower::rules::validate_rule_shape`] and
+/// [`crate::lower::rules::lower_rule`] are the same pair on the rule side.
 ///
 /// ⚠ **`compile_rule` was NOT a call site when Task 12 wrote this**, on the
 /// argument that an empty level in a rule renders a mask or row filter covering
 /// MORE than it was written for (fails closed) while in a grant it ALLOWS more.
 /// That argument is sound about severity and does not answer the question a `pub`
 /// entry point raises — SP4d debt Task 14 step 5 added the call and
-/// `egret_perm_compile::rules::compile_rule`'s doc carries the full reasoning, including why
-/// `egret_perm_compile::rules::ensure_row_filter_scope_is_a_table` staying boundary-only is a
+/// [`crate::lower::rules::lower_rule`]'s doc carries the full reasoning, including why
+/// `crate::lower::rules::ensure_row_filter_scope_is_a_table` staying boundary-only is a
 /// different case and not the same omission.
 ///
 /// `catalog` is absent from the loop and needs nothing: the value emitted at

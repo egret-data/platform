@@ -106,18 +106,16 @@ use serde_json::Value;
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
-use egret_perm::{
-    CompileError, EngineGrant, EngineType, Grant, PermStore, Rule, RuleKind, Selector,
-};
+use egret_perm::{CompileError, EngineGrant, EngineType, Grant, PermStore, Rule, Selector};
 use egret_policy::admin::access_to_ranger_json;
 use egret_policy::{
     compiler_targeted_services_via, services_and_tag_services_via, services_for_catalog_via,
-    tag_assignments_for_service_via, tag_name_for_key_via, PolicyStore, COMPILER_CLEARANCE_PREFIX,
-    COMPILER_ENGINE_GRANT_PREFIX, COMPILER_GRANT_PREFIX, COMPILER_HIDDEN_PREFIX,
-    COMPILER_RULE_PREFIX,
+    PolicyStore, COMPILER_CLEARANCE_PREFIX, COMPILER_ENGINE_GRANT_PREFIX, COMPILER_GRANT_PREFIX,
+    COMPILER_HIDDEN_PREFIX, COMPILER_RULE_PREFIX,
 };
 
-use crate::rules::{stamp_service_type, ResolvedNames, TableTarget};
+use crate::ranger::rules::stamp_service_type;
+use egret_perm_ir::statement::Source;
 
 /// The StarRocks per-column expansion ceiling this driver enforces.
 ///
@@ -195,7 +193,7 @@ pub const PROFILE_EXPANSION_CEILING: usize = 1000;
 
 // The name prefixes every policy `compile_grant`/`compile_rule` produces
 // carries (`grants.rs`'s `format!("{COMPILER_GRANT_PREFIX}{}", g.id)`,
-// `rules.rs`'s `format!("{COMPILER_RULE_PREFIX}{}", ...)`). `apply_diff_in_tx`
+// `ranger/rules.rs`'s `format!("{COMPILER_RULE_PREFIX}{rule_id}", ...)`). `apply_diff_in_tx`
 // uses these to find every policy THIS COMPILER owns under a service
 // directly from `policy.authz_policies`, independent of whether
 // `perm.compiled` still has a provenance row for it (fix round 1 Critical —
@@ -277,7 +275,7 @@ impl CompileSummary {
 /// One policy this recompile wants to exist. **Which service it must exist
 /// under travels in the map KEY** ([`PolicyKey`]), not here: a tag-selected
 /// rule on Trino compiles to a body whose own `service` field names the
-/// profile's TAG service (`rules::build_tag_body` → `tagify`), and that is
+/// profile's TAG service (`ranger::rules::build_tag_body` → `tagify`), and that is
 /// where the row has to land or the tag plugin never downloads it. See
 /// [`target_service_id`] and `apply_diff_in_tx`.
 pub(crate) struct DesiredPolicy {
@@ -425,22 +423,39 @@ pub(crate) async fn compile_desired(
     )
     .await?;
 
-    for r in &all_rules {
-        compile_one_rule(
-            r,
-            engine,
-            &profile_name,
-            tag_service.as_deref(),
-            conn,
-            service_id,
-            &ep.catalogs,
-            &writable,
-            &leaving,
-            &mut desired,
-            &mut skipped,
-        )
-        .await?;
+    // Governance sub-project 1 Task 6: rules (masks and row filters) are
+    // decided by the IR lowering and only rendered here. The loader makes the
+    // classification reads the old per-rule loop made, in the same order.
+    let (rule_inputs, read_skips) = crate::ir_load::load_rule_inputs(conn, &ep, &all_rules).await?;
+    let lowered = egret_perm_ir::lower::rules::lower_rules(
+        &ep,
+        &all_rules,
+        &rule_inputs,
+        read_skips,
+        DEFAULT_EXPANSION_CEILING,
+        &leaving,
+    )?;
+    for s in &lowered.statements {
+        let Source::Rule { rule_id, rule_name } = &s.source else {
+            unreachable!("lower_rules emits rule statements only");
+        };
+        let body = crate::ranger::rules::render(s, &profile_name, tag_service.as_deref(), engine)?;
+        let what = format!("rule {rule_name:?}");
+        let name = body_name(&body, &what)?;
+        // A TAG body names the tag service here, a path body the profile —
+        // the routing that Task 10 found missing.
+        let target = target_service_id(&body, &writable, &what)?;
+        desired.insert(
+            (target, name),
+            DesiredPolicy {
+                body,
+                source_kind: SourceKind::Rule,
+                grant_id: None,
+                rule_id: Some(*rule_id),
+            },
+        );
     }
+    skipped.extend(lowered.lowerings.iter().map(crate::ranger::skipped));
 
     // **SP4c Task 2: a classification's CLEARANCE, which AMENDS SP4a's D2**
     // ("tags drive rules only, never access") — the argument is at the site,
@@ -901,175 +916,6 @@ async fn fold_clearance_masks(
         );
     }
     Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn compile_one_rule(
-    r: &Rule,
-    engine: EngineType,
-    service_name: &str,
-    tag_service: Option<&str>,
-    conn: &mut sqlx::PgConnection,
-    service_id: i64,
-    catalog_names: &BTreeMap<Uuid, String>,
-    writable: &HashMap<String, i64>,
-    leaving: &crate::table_columns::Leaving,
-    desired: &mut BTreeMap<PolicyKey, DesiredPolicy>,
-    skipped: &mut Vec<SkippedItem>,
-) -> Result<(), CompileError> {
-    let (catalog_name, tag_name, tagged): (String, Option<String>, Vec<TableTarget>) =
-        match &r.selector {
-            Selector::Path(scope) => {
-                let Some(name) = catalog_names.get(&scope.catalog_id) else {
-                    return Ok(()); // not reachable by this service — out of scope
-                };
-                (name.clone(), None, Vec::new())
-            }
-            Selector::Tag { key } => {
-                let Some(name) = tag_name_for_key_via(conn, key)
-                    .await
-                    .map_err(crate::db_error::from_store)?
-                else {
-                    // The rule names a tag that no longer exists. Not a
-                    // compiler defect and not the WorkspaceMembers case
-                    // either — record and move on rather than aborting the
-                    // whole service's recompile over one dangling rule.
-                    let reason = format!("tag key {key:?} has no matching row in `tags`");
-                    tracing::warn!(
-                        service_id,
-                        rule_id = %r.id,
-                        reason = %reason,
-                        "rule skipped during recompile"
-                    );
-                    skipped.push(SkippedItem {
-                        source_kind: SourceKind::Rule,
-                        id: r.id,
-                        reason,
-                    });
-                    return Ok(());
-                };
-                // StarRocks expands every tag rule; Trino expands a row filter
-                // over the tables carrying the tag on columns only (KI-287,
-                // `rules::compile_rule`).
-                let expands =
-                    engine == EngineType::StarRocks || matches!(r.kind, RuleKind::RowFilter { .. });
-                let tagged = if expands {
-                    crate::rules::group_by_table(
-                        tag_assignments_for_service_via(conn, service_id, key)
-                            .await
-                            .map_err(crate::db_error::from_store)?,
-                    )
-                } else {
-                    Vec::new()
-                };
-                (String::new(), Some(name), tagged)
-            }
-        };
-
-    let resolved = ResolvedNames {
-        catalog_name: &catalog_name,
-        tag_name: tag_name.as_deref(),
-    };
-
-    let bodies = crate::rules::compile_rule_counting(
-        r,
-        engine,
-        service_name,
-        tag_service,
-        &resolved,
-        &tagged,
-        DEFAULT_EXPANSION_CEILING,
-        leaving,
-    );
-    match bodies {
-        Ok(bodies) => {
-            for body in bodies {
-                let what = format!("rule {:?}", r.name);
-                let name = body_name(&body, &what)?;
-                // A TAG body names the tag service here, a path body the
-                // profile — the routing that Task 10 found missing.
-                let target = target_service_id(&body, writable, &what)?;
-                desired.insert(
-                    (target, name),
-                    DesiredPolicy {
-                        body,
-                        source_kind: SourceKind::Rule,
-                        grant_id: None,
-                        rule_id: Some(r.id),
-                    },
-                );
-            }
-            Ok(())
-        }
-        Err(CompileError::UnexpandedPrincipalKind { kind }) => {
-            let reason = format!(
-                "principal kind {kind:?} reached the compiler unexpanded — a bug in \
-                 `crate::members::expand_enumerated_principals`, not in the rule"
-            );
-            tracing::warn!(
-                service_id,
-                rule_id = %r.id,
-                reason = %reason,
-                "rule skipped during recompile"
-            );
-            skipped.push(SkippedItem {
-                source_kind: SourceKind::Rule,
-                id: r.id,
-                reason,
-            });
-            Ok(())
-        }
-        // A Trino profile with no `tagService` in its config cannot host a
-        // tag policy at all — the Ranger tag plugin it would be resolved by
-        // is not wired to this profile. That is a property of the PROFILE,
-        // not a defect in the rule, so it is recorded as a skip (and warned
-        // about) exactly like the dangling-tag-key case above rather than
-        // aborting the service's recompile.
-        //
-        // **The discriminator for skip-vs-refuse, stated once here because it
-        // is the question every future variant will have to answer: would the
-        // skipped item have been ENFORCED had it compiled?**
-        //
-        // - A deny grant: yes. Skipping it silently drops an enforced denial,
-        //   which fails OPEN, so the compiler refuses instead.
-        // - A tag rule on a profile with no `tagService`: no. Ranger's
-        //   `download_tags` (`egret-policy/src/ranger/api/download.rs`) reads
-        //   the tag service strictly from `config_jsonb`, with no fallback, so
-        //   this profile serves no tag policies to anyone whatever we do here.
-        //   Aborting would have left it unmasked AND stopped every OTHER
-        //   profile from getting the mask. Skipping is strictly more
-        //   protective, not merely more convenient.
-        //
-        // **Why this matters as of SP4a Task 9 and not before.** Task 7's
-        // only caller recompiled the handful of profiles bound to ONE
-        // warehouse. Task 9's rule-mutation path recompiles every
-        // compiler-targeted profile in the installation, because a Trino tag
-        // rule is catalog-unscoped (see `affected_services_for_rule`). Under
-        // an abort, one misconfigured Trino profile anywhere would make
-        // every tag-rule create and delete fail with a 500 — a profile
-        // nobody involved in the write has heard of blocking the write. Each
-        // skip still reaches the caller in `CompileSummary::skipped` and the
-        // logs, so it is visible rather than silent.
-        Err(CompileError::MissingTagService { rule }) => {
-            let reason = format!(
-                "profile has no usable `tagService` (unconfigured, or naming a profile that \
-                 does not exist), so tag rule {rule:?} cannot compile here"
-            );
-            tracing::warn!(
-                service_id,
-                rule_id = %r.id,
-                reason = %reason,
-                "rule skipped during recompile"
-            );
-            skipped.push(SkippedItem {
-                source_kind: SourceKind::Rule,
-                id: r.id,
-                reason,
-            });
-            Ok(())
-        }
-        Err(other) => Err(other),
-    }
 }
 
 #[derive(sqlx::FromRow)]
@@ -1665,7 +1511,7 @@ pub(crate) async fn record_failure_logged(
 // - A **rule** depends on its selector. A path-selector rule is catalog-scoped
 //   in exactly the same way a grant is. A TAG-selector rule is not: on Trino it
 //   compiles to one tag policy addressed to the profile's tag service, with no
-//   catalog resource at all (D5, `rules::build_tag_body`), so it lands in EVERY
+//   catalog resource at all (D5, `ranger::rules::build_tag_body`), so it lands in EVERY
 //   Trino profile regardless of which catalogs that profile reaches. On
 //   StarRocks it compiles per tagged column, which is catalog-scoped in effect
 //   — but "which StarRocks profiles have a column carrying this tag" is a
@@ -2145,7 +1991,7 @@ pub async fn affected_services_for_group_membership(
     let names: Vec<&str> = group_names
         .iter()
         .map(String::as_str)
-        .filter(|n| *n != crate::rules::PUBLIC_GROUP)
+        .filter(|n| *n != crate::ranger::rules::PUBLIC_GROUP)
         .collect();
     if names.is_empty() {
         return Ok(Vec::new());
@@ -2358,7 +2204,7 @@ pub async fn group_references_via(
          ORDER BY group_name, source, id, position",
     )
     .bind(group_names)
-    .bind(crate::rules::PUBLIC_GROUP)
+    .bind(crate::ranger::rules::PUBLIC_GROUP)
     .fetch_all(&mut *conn)
     .await
     .map_err(db_err)

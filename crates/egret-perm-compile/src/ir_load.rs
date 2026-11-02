@@ -17,13 +17,19 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use egret_perm::Selector;
 use egret_perm::{
     list_engine_grants_for_profile_via, list_grants_via, list_rules_via, CompileError, EngineGrant,
     EngineType, Grant, Rule,
 };
 use egret_perm_ir::audience::Directory;
 use egret_perm_ir::ep::{BoundEngine, EpInput, EpKind, Mechanism};
-use egret_policy::{catalogs_for_service_via, get_service_by_id_via, service_id_by_name_via};
+use egret_perm_ir::lower::rules::{needs_tagged_tables, RuleInputs};
+use egret_perm_ir::statement::{Lowering, ReasonCode, Source};
+use egret_policy::{
+    catalogs_for_service_via, get_service_by_id_via, service_id_by_name_via,
+    tag_assignments_for_service_via, tag_name_for_key_via,
+};
 use egret_ranger_eval::eval::PluginVersion;
 use uuid::Uuid;
 
@@ -175,6 +181,82 @@ pub(crate) async fn load_ep(
         engine_grants,
         directory,
     }))
+}
+
+/// Read what each of `rules` needs from the classification store, in rule
+/// order: for a tag selector, the tag's `tags.name` and — when the matrix
+/// expands the rule on this EP ([`needs_tagged_tables`]) — the tables carrying
+/// the tag, grouped by [`crate::rules::group_by_table`]. A path selector reads
+/// nothing. These are the statements the recompile driver used to make inside
+/// its per-rule loop, in the same order; the lowering between them did no
+/// I/O, so issuing them all first changes neither the statements nor their
+/// order.
+///
+/// A rule naming a tag that no longer exists is a read result, so its skip is
+/// produced here, keyed by rule id for [`egret_perm_ir::lower::rules::lower_rules`]
+/// to place in rule order.
+pub(crate) async fn load_rule_inputs(
+    conn: &mut sqlx::PgConnection,
+    ep: &EpInput,
+    rules: &[Rule],
+) -> Result<(BTreeMap<Uuid, RuleInputs>, BTreeMap<Uuid, Lowering>), CompileError> {
+    let mut inputs = BTreeMap::new();
+    let mut skips = BTreeMap::new();
+    for r in rules {
+        let Selector::Tag { key } = &r.selector else {
+            continue;
+        };
+        let Some(name) = tag_name_for_key_via(conn, key)
+            .await
+            .map_err(crate::db_error::from_store)?
+        else {
+            // The rule names a tag that no longer exists. Not a compiler
+            // defect and not the WorkspaceMembers case either — record and
+            // move on rather than aborting the whole service's recompile over
+            // one dangling rule.
+            let reason = format!("tag key {key:?} has no matching row in `tags`");
+            tracing::warn!(
+                service_id = ep.profile_id,
+                rule_id = %r.id,
+                reason = %reason,
+                "rule skipped during recompile"
+            );
+            skips.insert(
+                r.id,
+                Lowering {
+                    source: Source::Rule {
+                        rule_id: r.id,
+                        rule_name: r.name.clone(),
+                    },
+                    code: ReasonCode::UnknownClassification,
+                    detail: reason,
+                },
+            );
+            continue;
+        };
+        // StarRocks expands every tag rule; Trino expands a row filter over
+        // the tables carrying the tag on columns only (KI-287).
+        let tagged = if needs_tagged_tables(ep, r) {
+            crate::rules::group_by_table(
+                tag_assignments_for_service_via(conn, ep.profile_id, key)
+                    .await
+                    .map_err(crate::db_error::from_store)?,
+            )
+            .iter()
+            .map(crate::rules::TableTarget::to_tagged)
+            .collect()
+        } else {
+            Vec::new()
+        };
+        inputs.insert(
+            r.id,
+            RuleInputs {
+                classification_name: Some(name),
+                tagged,
+            },
+        );
+    }
+    Ok((inputs, skips))
 }
 
 /// Fill `ep.engines` (each engine bound to the profile, by name, with the

@@ -33,8 +33,8 @@
 //!
 //! **Prefixes are the compiler's own** (`egret_policy::{COMPILER_GRANT_PREFIX,
 //! COMPILER_RULE_PREFIX, COMPILER_CLEARANCE_PREFIX}`) — this module does not
-//! keep a second copy of those strings, for the same reason `grants.rs`,
-//! `rules.rs`, `clearance.rs`, and `trigger.rs` all import them rather than
+//! keep a second copy of those strings, for the same reason `ranger/grants.rs`,
+//! `ranger/rules.rs`, `clearance.rs`, and `trigger.rs` all import them rather than
 //! re-typing them: two independent copies would drift.
 
 use egret_policy::{
@@ -47,10 +47,10 @@ use uuid::Uuid;
 ///
 /// - [`PolicyAttribution::Grant`] — `perm-grant-{uuid}` (`ranger::grants::compile_grant`,
 ///   `grants.rs:451`). Always a bare id; a grant never mints a locator suffix.
-/// - [`PolicyAttribution::Rule`] — `perm-rule-{uuid}` (`rules::compile_rule`,
-///   `rules.rs:339` for a path-addressed rule, `:445` for a Trino
-///   tag-addressed one), or, for StarRocks' per-column tag expansion,
-///   `perm-rule-{uuid}-{locator}` (`rules.rs:317-326`). **A per-column rule
+/// - [`PolicyAttribution::Rule`] — `perm-rule-{uuid}` (`ranger::rules::render`,
+///   for a path-addressed rule and for a Trino tag-addressed one), or, for
+///   StarRocks' per-column tag expansion and a table's tag row filter,
+///   `perm-rule-{uuid}-{locator}` (the same function). **A per-column rule
 ///   expands ONE `perm.rules` row into N policies**, so this mapping is
 ///   many-to-one and `locator` is the only thing that says which of the N
 ///   expansions decided a given resource — kept verbatim (not re-split into

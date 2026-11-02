@@ -36,16 +36,16 @@ use egret_perm_ir::statement::{self, Level, Privilege, Source, Statement, Target
 
 use super::{Rendered, SourceKind};
 
-/// Sort `members` into a Ranger item's `users`/`groups` buckets, each in member
-/// order, and set `effect`/`accesses` on it. The members were checked by the
-/// lowering; a `Role` or `WorkspaceMembers` still present (only reachable from
-/// a statement built by hand) is refused rather than dropped, for the reason
-/// `egret_perm_ir::lower::grants`' module doc gives.
-pub(crate) fn item_from_members(
+/// Sort `members` into a Ranger item's `users`/`groups` buckets, each in
+/// member order. The members were checked by the lowering; a `Role` or
+/// `WorkspaceMembers` still present (only reachable from a statement built by
+/// hand) is refused rather than dropped, for the reason
+/// `egret_perm_ir::lower::grants`' module doc gives. Shared with the rule
+/// items (`crate::ranger::rules`), so an access item and a mask or row-filter
+/// item bucket a principal alike.
+pub(crate) fn member_buckets(
     members: &[Member],
-    effect: Effect,
-    accesses: &[String],
-) -> Result<AccessItemInput, CompileError> {
+) -> Result<(Vec<String>, Vec<String>), CompileError> {
     let mut users = Vec::new();
     let mut groups = Vec::new();
     for m in members {
@@ -53,8 +53,8 @@ pub(crate) fn item_from_members(
             MemberName::User(n) => users.push(n.clone()),
             MemberName::Everyone => groups.push(egret_perm::PUBLIC_GROUP.to_string()),
             // After expansion only `public` reaches here; a direct
-            // `compile_grant` caller (the grammar differential) may still
-            // name another group, which is the input being compared.
+            // `compile_grant`/`compile_rule` caller (the grammar differential)
+            // may still name another group, which is the input being compared.
             MemberName::Unexpanded(p) if p.kind == egret_perm::PrincipalKind::Group => {
                 groups.push(p.r#ref.clone())
             }
@@ -63,6 +63,16 @@ pub(crate) fn item_from_members(
             }
         }
     }
+    Ok((users, groups))
+}
+
+/// [`member_buckets`] as an access item, with `effect`/`accesses` set on it.
+pub(crate) fn item_from_members(
+    members: &[Member],
+    effect: Effect,
+    accesses: &[String],
+) -> Result<AccessItemInput, CompileError> {
+    let (users, groups) = member_buckets(members)?;
     Ok(AccessItemInput {
         users,
         groups,
@@ -108,7 +118,7 @@ pub(crate) fn expanded_principal_item(
 /// against each one's declared name + parent chain, so this can't drift
 /// from the service-defs silently the way the write-up in round 1 could
 /// have (its Trino-only test never opened a service-def).
-// `pub(crate)`: `crate::rules` (Task 5) reuses this and `level`/
+// `pub(crate)`: `crate::ranger::rules` reuses this and `level`/
 // `scope_to_resources` rather than duplicating the per-engine hierarchy
 // naming a second time.
 pub(crate) fn resource_level_names(e: EngineType) -> [&'static str; 4] {
@@ -263,7 +273,7 @@ pub(crate) fn scope_to_resources(
             // rows.
             //
             // `RULE_SCOPE` at the authoring boundary
-            // (`crate::rules::validate_rule_shape`) refuses a path row-filter
+            // (`egret_perm_ir::lower::rules::validate_rule_shape`) refuses a path row-filter
             // scope that does not name exactly catalog+schema+table, so a
             // rule written through egret's own API never reaches either
             // shape. This arm is what makes a row already in `perm.rules`
@@ -293,8 +303,8 @@ pub(crate) fn scope_to_resources(
 /// `catalog`, `schema`|`database`, `table` — and never `column`, which
 /// `rowFilterDef.resources` does not declare on either engine (Trino
 /// service-def id 203, StarRocks id 205). One constant, read by the emission
-/// (`scope_to_resources`, `crate::rules::column_resources`) and by the
-/// write-time refusal (`crate::rules::validate_rule_shape`), so the two
+/// (`scope_to_resources`, `crate::ranger::rules::column_resources`) and by the
+/// write-time refusal (`egret_perm_ir::lower::rules::validate_rule_shape`), so the two
 /// cannot drift apart the way the mask and row-filter paths did.
 pub(crate) const ROW_FILTER_LEVELS: usize = 3;
 
@@ -402,7 +412,7 @@ pub(crate) fn render(
         _ => unreachable!("render_grant refuses a non-grant statement"),
     };
     Ok(Rendered {
-        body: crate::rules::stamp_service_type(access_to_ranger_json(&input), e),
+        body: super::rules::stamp_service_type(access_to_ranger_json(&input), e),
         name: input.name,
         source_kind: SourceKind::Grant,
         grant_id: Some(grant_id),

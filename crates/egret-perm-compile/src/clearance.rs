@@ -82,7 +82,7 @@
 //! **StarRocks has no tag service** (upstream `starrocks#67458`), so a
 //! clearance expands to **one ACCESS deny per tagged column**, reusing the very
 //! same `column_resources` expansion SP4a's tag MASKS already use on this
-//! engine ([`crate::rules::column_resources`]). D0b
+//! engine ([`crate::ranger::rules::column_resources`]). D0b
 //! (`docs/en/plans/2026-09-28-sp4c-d0b-starrocks-result.md`) measured that this
 //! works, and three of its findings constrain the shape:
 //!
@@ -165,9 +165,8 @@ use egret_policy::{
 
 use crate::clearance_mask::PendingMask;
 use crate::ranger::grants::{level, PolicyTarget};
-use crate::rules::{
-    column_resources, group_by_table, stamp_service_type, TableTarget, TaggedColumn, PUBLIC_GROUP,
-};
+use crate::ranger::rules::{column_resources, stamp_service_type, PUBLIC_GROUP};
+use crate::rules::{group_by_table, TableTarget, TaggedColumn};
 use crate::table_columns::{
     active_tables_via, active_views_batch_via, current_columns_batch_via, Leaving, TableColumns,
     TableKey,

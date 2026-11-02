@@ -71,7 +71,8 @@ use egret_ranger_eval::resource::RequestResource;
 use egret_ranger_eval::servicedef::ServiceDef;
 
 use crate::ranger::grants::{resource_level_names, PolicyTarget};
-use crate::rules::{column_resources, stamp_service_type, TaggedColumn, PUBLIC_GROUP};
+use crate::ranger::rules::{column_resources, stamp_service_type, PUBLIC_GROUP};
+use crate::rules::TaggedColumn;
 
 /// The clearance mask's type for everyone not cleared. Never `MASK_HASH`.
 pub(crate) const CLEARANCE_MASK_TYPE: &str = "MASK_NULL";

@@ -5672,9 +5672,9 @@ pub(crate) async fn check_profile_bindable(
     // `egret_policy::service_def::STARROCKS_SERVICE_DEF_JSON`), so a StarRocks
     // profile is not supposed to have a tag service: the compiler EXPANDS a
     // tag-selector rule into per-column resource policies on the profile
-    // itself, and `CompileError::MissingTagService` is raised only on the
-    // `(Selector::Tag, EngineType::Trino)` branch
-    // (`egret-perm-compile/src/rules.rs`). Applying this guard to StarRocks
+    // itself, and `CompileError::MissingTagService` is raised only where the
+    // capability matrix needs a classification channel (Trino, M1/M2;
+    // `egret-perm-ir/src/lower/rules.rs`). Applying this guard to StarRocks
     // would refuse every legitimate StarRocks bind — including the one the
     // live masking gate depends on — while protecting nothing.
     if svc.r#type == "trino"

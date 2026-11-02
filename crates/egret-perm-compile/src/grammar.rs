@@ -102,8 +102,9 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::ranger::grants::{resource_level_names, PolicyTarget, ROW_FILTER_LEVELS};
-use crate::rules::{declared_mask_types, validate_rule_shape};
+use crate::ranger::rules::declared_mask_types;
 use egret_perm_ir::lower::grants::{level_is_a_wildcard_run, validate_user_ref};
+use egret_perm_ir::lower::rules::validate_rule_shape;
 
 /// Why one Ranger policy cannot become model objects. Each variant names the
 /// offending value where there is one, so Task 5 can render it as a sentence
@@ -229,7 +230,7 @@ pub enum Blocker {
     /// per-principal mask or filter the model has no shape for.
     NotAnExemption { index: usize },
     /// The exemption item names the `public` group, which would exempt
-    /// everyone (`rules::exempt_principals` refuses it).
+    /// everyone (`egret_perm_ir::lower::rules`' `exempt_audience` refuses it).
     PublicExemption,
     /// A tag-addressed policy for a StarRocks profile: StarRocks has no tag
     /// service, so a tag rule compiles there to one resource policy per
@@ -647,7 +648,7 @@ fn from_unmodelled(u: &Unmodelled) -> Blocker {
 /// grant only (0179): there it widens AUTHORITY, the measured escalation. On a
 /// rule it widens RESTRICTION and both plugins enforce it — product decision
 /// 2026-10-10, `migrations/0179`'s closing section, and the reason
-/// `rules::validate_rule_shape` does not call the grant-side guard either.
+/// `egret_perm_ir::lower::rules::validate_rule_shape` does not call the grant-side guard either.
 fn refuses_wildcard_over_named(target: PolicyTarget) -> bool {
     matches!(target, PolicyTarget::Access)
 }
@@ -1256,7 +1257,7 @@ fn rule_items(
     ))
 }
 
-/// What `rules::mask_items` / `rowfilter_items` put in the exemption item.
+/// What `ranger::rules::mask_items` / `rowfilter_items` put in the exemption item.
 fn lifts_the_control(kind: &RuleKind) -> bool {
     match kind {
         RuleKind::Mask {

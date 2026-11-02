@@ -85,12 +85,12 @@ use crate::explain_wire::{
     WireDecision, WireEngineType, WireMaskDecision, WireRowFilterDecision, WireUndecidableCause,
 };
 use crate::principal_refs::{resolve_principal_refs, still_stored};
-use crate::rules::validate_rule_shape;
 use crate::trigger::{
     affected_services_for_grant, affected_services_for_rule, engine_type_for, lock_services_in_tx,
     merge_service_ids, recompile_services_in_tx, CompileSummary, SkippedItem, SourceKind,
 };
 use egret_perm_ir::lower::grants::validate_grant_shape;
+use egret_perm_ir::lower::rules::validate_rule_shape;
 
 mod engine_grants;
 mod error;
@@ -912,7 +912,7 @@ pub enum ClearanceMaskGapReason {
 /// How many exempting principals [`ExplainExemption::via`] names (D1).
 pub const EXEMPTION_VIA_SHOWN: usize = 3;
 
-/// The mask type a rule's exempt item carries (`rules::mask_items`); an empty
+/// The mask type a rule's exempt item carries (`ranger::rules::mask_items`); an empty
 /// `filterExpr` is the row-filter equivalent.
 const EXEMPT_MASK_TYPE: &str = "MASK_NONE";
 

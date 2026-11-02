@@ -77,6 +77,14 @@ pub struct Leaving {
     columns: HashSet<(String, String, String, String)>,
 }
 
+/// The IR's ceiling question (`egret_perm_ir::lower::rules`) answered by
+/// [`Leaving::counts_toward_ceiling`].
+impl egret_perm_ir::lower::rules::CeilingCount for Leaving {
+    fn counts(&self, catalog: &str, schema: &str, table: &str, column: Option<&str>) -> bool {
+        self.counts_toward_ceiling(catalog, schema, table, column)
+    }
+}
+
 impl Leaving {
     /// Does a policy on `catalog.schema.table` (and `column`, when it names
     /// one) count toward an expansion ceiling? Not when its table or its
