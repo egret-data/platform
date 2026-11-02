@@ -3624,6 +3624,23 @@ pub(crate) async fn served_artifact_via(
     to_policy_set(&envelope)
 }
 
+/// [`artifact_via`] as the compiler serves the profile: on Trino, with the
+/// metadata-table denies of `crate::metadata_tables` its restricting policies
+/// get once it is compiled. The migration gate's BEFORE (see
+/// `crate::metadata_tables::with_denies_via`).
+pub(crate) async fn compiled_artifact_via(
+    conn: &mut sqlx::PgConnection,
+    svc: &ServiceRow,
+) -> Result<ServicePolicySet, PermHttpError> {
+    let mut envelope = envelope_via(conn, svc).await?;
+    if svc.r#type == "trino" {
+        crate::metadata_tables::with_denies_via(conn, svc.id, &mut envelope)
+            .await
+            .map_err(PermHttpError::from)?;
+    }
+    to_policy_set(&envelope)
+}
+
 fn to_policy_set(envelope: &ServicePolicies) -> Result<ServicePolicySet, PermHttpError> {
     // Through JSON on purpose: the plugin reads JSON, and
     // `ServicePolicySet`'s `Deserialize` is where every `Unmodelled` construct
