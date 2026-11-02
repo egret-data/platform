@@ -70,7 +70,7 @@ function engineTabs(engines: Engine[]): EngineType[] {
 export const DEFAULT_TRINO_IMAGE_VERSION =
   "483@sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534";
 export const DEFAULT_SR_FE_IMAGE =
-  "ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.1@sha256:da948dad19e98a5a43b0073ec48f87c9e7429246ce4581a000c0955c742af250";
+  "ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.3@sha256:5c74c820f9b741bc8054247f47f3d54dd9e526710b6fc2b5a7873cae6bb2d2b0";
 export const DEFAULT_SR_CN_IMAGE =
   "starrocks/cn-ubuntu:4.1.7@sha256:39f7320127c9924abb1f1ce0ba0583ab11989cbe5bd1bb6274ada6f89ba5740d";
 
