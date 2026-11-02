@@ -81,4 +81,4 @@ The Rust image compiles the whole workspace in the builder stage. Its BuildKit c
 
 ## Retention
 
-[`.github/workflows/ghcr-cleanup.yml`](../../../.github/workflows/ghcr-cleanup.yml) runs every Monday and, per image package, deletes untagged versions and `sha-*` images beyond the newest 20. It never deletes `latest`, `edge` or a version tag (any tag with a dot), never anything younger than two days (a publish in progress), and never the chart. Platform manifests and attestations belong to their image and go only with it. A manual run ("ghcr-cleanup", Run workflow) is a dry run unless you untick "dry-run".
+[`.github/workflows/ghcr-cleanup.yml`](../../../.github/workflows/ghcr-cleanup.yml) runs daily, one job per image package (three at a time), and deletes untagged versions and `sha-*` images beyond the newest 20. It never deletes `latest`, `edge` or a version tag (any tag with a dot), never anything younger than two days (a publish in progress), and never the chart. Platform manifests and attestations belong to their image and go only with it. A manual run ("ghcr-cleanup", Run workflow) is a dry run unless you untick "dry-run".

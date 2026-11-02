@@ -1,4 +1,4 @@
-# Weekly retention for the images `images.yml` publishes.
+# Daily retention for the images `images.yml` publishes.
 #
 # Deletes, per package:
 #   - untagged versions (a `sha-*` or `edge` tag moved away, a publish whose `merge` failed);
@@ -12,11 +12,16 @@
 #
 # `older-than: 2 days` keeps it away from a publish in progress, whose per-platform digests are
 # untagged until `merge` joins them.
+#
+# One job per package, daily: GitHub deletes about one version a second, and every push to main adds
+# about five versions to each of the seven packages (an index, two platform manifests and their
+# attestations). The weekly single job had ~1400 versions a week plus its backlog to delete and hit
+# its 30 minute timeout on 2026-11-02 (run 41436104915, cancelled with ~330 versions per package left).
 name: ghcr-cleanup
 
 on:
   schedule:
-    - cron: "17 3 * * 1" # Monday 03:17 UTC
+    - cron: "17 3 * * *" # daily 03:17 UTC
   workflow_dispatch:
     inputs:
       dry-run:
@@ -34,14 +39,27 @@ jobs:
   cleanup:
     if: github.repository == 'egret-data/platform'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       packages: write
+    strategy:
+      fail-fast: false
+      # The jobs share one token; a few at a time stays clear of GitHub's secondary rate limit on deletes.
+      max-parallel: 3
+      matrix:
+        package:
+          - egret-backend
+          - egret-backend-demo
+          - egret-frontend
+          - egret-renderer
+          - egret-apps
+          - egret-plugin-host
+          - egret-task-helper
     steps:
       - uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
         with:
           owner: egret-data
-          packages: egret-backend,egret-backend-demo,egret-frontend,egret-renderer,egret-apps,egret-plugin-host,egret-task-helper
+          packages: ${{ matrix.package }}
           delete-untagged: true
           delete-tags: sha-*
           keep-n-tagged: 20
