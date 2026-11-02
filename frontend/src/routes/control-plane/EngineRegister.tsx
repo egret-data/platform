@@ -39,6 +39,7 @@ import {
   useModelledPlugins,
 } from "./externalEngine";
 import { OneTimeCredentialDialog } from "./RangerCredential";
+import { StarRocksMetadataTablesWarning } from "./StarRocksMetadataTablesWarning";
 import { PageContainer } from "@/components/layout/PageContainer";
 import { DetailHeader } from "@/components/layout/DetailHeader";
 
@@ -338,6 +339,7 @@ export default function EngineRegister() {
                     There is no {ENGINE_TYPE_LABEL[type]} profile yet. Create one under Governance → Policies.
                   </p>
                 )}
+                <StarRocksMetadataTablesWarning engineType={type} bound={!!chosenProfile} />
               </div>
             )}
           </section>
