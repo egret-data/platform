@@ -417,7 +417,7 @@ There are three instruments, all built and green on unchanged code in Task 1.
   Normalisation is deterministic and complete. The fixture registers every id it creates (grant, rule, tag, engine-grant, user, workspace) under a role name. The harness replaces each registered UUID with `{role}`, the injected `id` with its ordinal in the served list, and fails on any unregistered UUID left in the output. Bodies are written with sorted keys. `EGRET_GOLDEN_BLESS=1` writes the files; without it the harness compares and writes `target/golden-actual/<fixture>.json` on a mismatch.
 
 - **(a) Every existing DB-backed compile test, by shadow comparison.**
-  - Task 1 adds the cargo feature `shadow-compile` to `egret-perm-compile`. Under it, `compile_desired` runs twice on the same transaction and asserts that both results are identical (desired bytes, skipped, sweep), appending one line per comparison to `$EGRET_SHADOW_LOG`.
+  - Task 1 adds the cargo feature `shadow-compile` to `egret-perm-compile`. Under it, `compile_desired` runs twice on the same transaction and asserts that both results are identical (desired bytes, skipped, sweep), appending one line per comparison to `$EGRET_TEST_SHADOW_LOG`.
   - Running `cargo test --workspace --features egret-perm-compile/shadow-compile` therefore turns every recompile in every existing test (egret-perm-compile, egret-bi, egret-workspace, egret-auth, egret-catalog-engine, …) into a determinism check. Determinism is the precondition for a golden.
   - Each family task temporarily points the shadow at **old vs new** (old kept only within the task), runs the workspace suite, records the comparison count in the commit body, then deletes the old path before committing.
 - **(c) Demo stack recipe.** `scripts/golden-demo-capture.sh` runs before and after the deploy:
@@ -798,7 +798,7 @@ pub(crate) async fn compare(
         .expect("the same profile compiled the first time");
     let (a, b) = (bytes(first), bytes(&second));
     assert_eq!(a, b, "shadow compile of service {service_id} differs");
-    if let Some(path) = std::env::var_os("EGRET_SHADOW_LOG") {
+    if let Some(path) = std::env::var_os("EGRET_TEST_SHADOW_LOG") {
         use std::io::Write;
         let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).expect("shadow log");
         writeln!(f, "{service_id}").ok();
@@ -863,7 +863,7 @@ Then open every golden file and check it against the fixture's intent. Each gold
 - [ ] **Step 6: Run the determinism shadow over the workspace. Expected: PASS**, with the log holding at least one line per recompiling test.
 
 ```bash
-EGRET_SHADOW_LOG=/tmp/shadow.log cargo test --workspace --features egret-perm-compile/shadow-compile --no-fail-fast
+EGRET_TEST_SHADOW_LOG=/tmp/shadow.log cargo test --workspace --features egret-perm-compile/shadow-compile --no-fail-fast
 wc -l /tmp/shadow.log
 ```
 
@@ -1577,7 +1577,7 @@ DATABASE_URL=postgres://egret:egret@localhost:5432/egret cargo test -p egret-per
 
 ```bash
 just test-golden
-EGRET_SHADOW_LOG=/tmp/shadow3.log cargo test --workspace --features egret-perm-compile/shadow-compile --no-fail-fast
+EGRET_TEST_SHADOW_LOG=/tmp/shadow3.log cargo test --workspace --features egret-perm-compile/shadow-compile --no-fail-fast -- --test-threads=1
 ```
 
 Expected: golden PASS and no shadow assertion.
@@ -1841,8 +1841,8 @@ In `trigger.rs`, replace `:486-555` with:
   3. Run:
 
      ```bash
-     EGRET_SHADOW_LEGACY=grants EGRET_SHADOW_LOG=/tmp/shadow5.log \
-       cargo test --workspace --features egret-perm-compile/shadow-compile --no-fail-fast
+     EGRET_SHADOW_LEGACY=grants EGRET_TEST_SHADOW_LOG=/tmp/shadow5.log \
+       cargo test --workspace --features egret-perm-compile/shadow-compile --no-fail-fast -- --test-threads=1
      wc -l /tmp/shadow5.log
      ```
 
@@ -2404,7 +2404,7 @@ DATABASE_URL=… cargo test -p egret-perm-compile --features harness
 DATABASE_URL=… cargo test --workspace --no-fail-fast
 just test-golden && just test-ranger-gates
 cargo test -p egret-perm-compile --test profile_lock_sites && cargo test -p egret-perm-ir --test boundary
-EGRET_SHADOW_LOG=/tmp/shadow10.log cargo test --workspace --features egret-perm-compile/shadow-compile --no-fail-fast
+EGRET_TEST_SHADOW_LOG=/tmp/shadow10.log cargo test --workspace --features egret-perm-compile/shadow-compile --no-fail-fast -- --test-threads=1
 ```
 
 The last line is the determinism shadow, now back to same-path mode.

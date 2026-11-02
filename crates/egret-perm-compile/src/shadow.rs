@@ -2,6 +2,13 @@
 //! transaction and asserts byte-identical output. During a sub-project 1
 //! family task the second compile is the OLD path; between tasks it is the same
 //! path (a determinism check, the precondition for a golden).
+//!
+//! **Limitation: run shadow sweeps with `-- --test-threads=1`.** The second
+//! compile shares the caller's READ COMMITTED transaction, so a row a
+//! concurrent test commits between the two compiles (a gated tag or a tag
+//! rule, which every Trino profile reads) is seen by the second compile only,
+//! and reads as a mismatch. Measured in Task 1: 11 such failures in a
+//! parallel workspace run, none single-threaded.
 use crate::trigger::{compile_desired, Compiled};
 use egret_perm::CompileError;
 
