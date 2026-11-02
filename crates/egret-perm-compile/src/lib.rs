@@ -61,6 +61,9 @@ pub(crate) mod clearance;
 // View governance A2: the StarRocks priority-1 clearance MASK per classified
 // column, its cleared items folded through `egret-ranger-eval`.
 pub(crate) mod clearance_mask;
+// Deny a Trino profile's restricted people the Iceberg metadata tables
+// (`t$files`, ...) of the tables masked, filtered or denied to them.
+pub(crate) mod metadata_tables;
 // Task 3 of view governance: the two StarRocks bodies the differential harness
 // asks the real jars about, built by the compiler's own functions.
 #[cfg(feature = "harness")]
