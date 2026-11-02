@@ -109,8 +109,9 @@ use uuid::Uuid;
 use egret_auth::users::ensure_username_via;
 use egret_core::UserId;
 use egret_perm::{
-    CompileError, EngineGrant, Grant, Principal, PrincipalKind, PrincipalSet, Rule, PUBLIC_GROUP,
+    CompileError, EngineGrant, Grant, PrincipalKind, PrincipalSet, Rule, PUBLIC_GROUP,
 };
+use egret_perm_ir::audience::{audience, is_expanded_group, Directory};
 
 /// The usernames of the users currently holding each role NAME in `roles` —
 /// the expansion SP4c needs twice over (**SP4c Task 2 and Task 2b**).
@@ -682,15 +683,6 @@ struct Referenced {
     groups: BTreeSet<String>,
 }
 
-/// Whether `p` is a group this module expands: every group except
-/// [`PUBLIC_GROUP`], the one name every engine resolves without a group
-/// provider (`egret_perm::PUBLIC_GROUP`'s doc) — the compiler's own "applies to
-/// everyone" item uses it, and expanding it would turn "everyone" into "every
-/// user who has a row naming a group called public".
-fn is_expanded_group(p: &Principal) -> bool {
-    p.kind == PrincipalKind::Group && p.r#ref != PUBLIC_GROUP
-}
-
 /// Every workspace id a `workspace_members` principal names, every role NAME a
 /// `role` principal names, and every group NAME a non-`public` `group`
 /// principal names, across `grants` and `rules`. A workspace ref that does not
@@ -784,14 +776,14 @@ pub(crate) async fn expand_enumerated_principals(
     grants: &mut [Grant],
     rules: &mut [Rule],
     engine_grants: &mut [EngineGrant],
-) -> Result<(), CompileError> {
+) -> Result<Directory, CompileError> {
     let Referenced {
         workspaces: wanted,
         roles: wanted_roles,
         groups: wanted_groups,
     } = referenced_principals(grants, rules, engine_grants);
     if wanted.is_empty() && wanted_roles.is_empty() && wanted_groups.is_empty() {
-        return Ok(());
+        return Ok(Directory::default());
     }
     let ids: Vec<Uuid> = wanted.iter().copied().collect();
 
@@ -837,7 +829,7 @@ pub(crate) async fn expand_enumerated_principals(
         resolved.insert(user_id, minted);
     }
 
-    let mut members: HashMap<Uuid, Vec<String>> = HashMap::new();
+    let mut members: BTreeMap<Uuid, Vec<String>> = BTreeMap::new();
     for row in &rows {
         let Some(name) = resolved.get(&row.user_id) else {
             continue;
@@ -856,7 +848,7 @@ pub(crate) async fn expand_enumerated_principals(
         names.dedup();
     }
     // A referenced workspace with no members at all still has to appear in the
-    // map, so substitution knows it expanded to zero rather than that it was
+    // directory, so the audience knows it expanded to zero rather than that it was
     // never looked up.
     for id in &ids {
         members.entry(*id).or_default();
@@ -887,22 +879,22 @@ pub(crate) async fn expand_enumerated_principals(
     let roles: Vec<String> = wanted_roles.into_iter().collect();
     let role_members = role_usernames(conn, &roles, MissingUsername::Mint).await?;
 
-    let expansions = Expansions {
-        workspaces: &members,
-        roles: &role_members,
-        groups: &group_members,
+    let dir = Directory {
+        workspaces: members,
+        roles: role_members,
+        groups: group_members,
     };
     for g in grants.iter_mut() {
-        substitute(&mut g.principals, &expansions);
+        g.principals = audience(&g.principals, &dir).to_principal_set(&g.principals);
     }
     for r in rules.iter_mut() {
-        substitute(&mut r.exempt, &expansions);
+        r.exempt = audience(&r.exempt, &dir).to_principal_set(&r.exempt);
     }
     // F11: an engine grant's grantees are expanded exactly as a grant's.
     for g in engine_grants.iter_mut() {
-        substitute(&mut g.principals, &expansions);
+        g.principals = audience(&g.principals, &dir).to_principal_set(&g.principals);
     }
-    Ok(())
+    Ok(dir)
 }
 
 // **`workspaces_for_username` and `roles_for_username` lived here and are
@@ -920,123 +912,15 @@ pub(crate) async fn expand_enumerated_principals(
 // read from the other direction (role -> holders) and is still live, because
 // the compiler needs it.
 
-/// The three member lists a substitution reads, keyed the way each principal
-/// kind stores its ref.
-struct Expansions<'a> {
-    workspaces: &'a HashMap<Uuid, Vec<String>>,
-    roles: &'a BTreeMap<String, Vec<String>>,
-    groups: &'a BTreeMap<String, Vec<String>>,
-}
-
-/// Rewrite one `PrincipalSet` in place: every `WorkspaceMembers`, every `Role`
-/// and every non-`public` `Group` entry becomes the `User` entries it stands
-/// for, everything else is carried through untouched and in its original
-/// order. Duplicates are collapsed — a grant that names `alice` explicitly AND
-/// the workspace she belongs to (or a role she holds, or a group she is in)
-/// must not emit `alice` twice into the same Ranger item.
-fn substitute(set: &mut PrincipalSet, x: &Expansions<'_>) {
-    substitute_one(&mut set.include, x);
-    substitute_one(&mut set.exclude, x);
-}
-
-fn substitute_one(list: &mut Vec<Principal>, x: &Expansions<'_>) {
-    if !list.iter().any(|p| {
-        matches!(
-            p.kind,
-            PrincipalKind::WorkspaceMembers | PrincipalKind::Role
-        ) || is_expanded_group(p)
-    }) {
-        return;
-    }
-    let mut out: Vec<Principal> = Vec::with_capacity(list.len());
-    let mut seen: BTreeMap<(&'static str, String), ()> = BTreeMap::new();
-    for p in list.drain(..) {
-        let expanded: Vec<Principal> = match p.kind {
-            PrincipalKind::WorkspaceMembers => {
-                let names = p
-                    .r#ref
-                    .parse::<Uuid>()
-                    .ok()
-                    .and_then(|id| x.workspaces.get(&id))
-                    .cloned()
-                    .unwrap_or_default();
-                if names.is_empty() {
-                    tracing::warn!(
-                        workspace_ref = %p.r#ref,
-                        "a workspace_members principal expanded to no engine principal — it \
-                         names no workspace, or the workspace has no direct user members with \
-                         a live allow grant"
-                    );
-                }
-                as_users(names)
-            }
-            PrincipalKind::Role => {
-                let names = x.roles.get(&p.r#ref).cloned().unwrap_or_default();
-                if names.is_empty() {
-                    tracing::warn!(
-                        role = %p.r#ref,
-                        "a role principal expanded to no engine principal — no such role, or \
-                         nobody holds it with a live allow grant. The \
-                         Ranger `roles` bucket is NOT used as a fallback: D0 measured that it \
-                         matches nobody, so naming the role there would be a control that does \
-                         nothing (in an include) or one that denies everybody (in a \
-                         denyException)"
-                    );
-                }
-                as_users(names)
-            }
-            PrincipalKind::Group if is_expanded_group(&p) => {
-                let names = x.groups.get(&p.r#ref).cloned().unwrap_or_default();
-                if names.is_empty() {
-                    tracing::warn!(
-                        group = %p.r#ref,
-                        "a group principal expanded to no engine principal — no such group, or \
-                         it has no members. The Ranger `groups` bucket is NOT used as a \
-                         fallback: D7 measured that no engine egret provisions resolves a \
-                         group, so naming it there would be a control that does nothing"
-                    );
-                }
-                as_users(names)
-            }
-            _ => vec![p],
-        };
-        for e in expanded {
-            if seen
-                .insert((e.kind.as_str(), e.r#ref.clone()), ())
-                .is_none()
-            {
-                out.push(e);
-            }
-        }
-    }
-    *list = out;
-}
-
-fn as_users(names: Vec<String>) -> Vec<Principal> {
-    names
-        .into_iter()
-        .map(|name| Principal {
-            kind: PrincipalKind::User,
-            r#ref: name,
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egret_perm::Principal;
 
     fn ws_principal(id: Uuid) -> Principal {
         Principal {
             kind: PrincipalKind::WorkspaceMembers,
             r#ref: id.to_string(),
-        }
-    }
-
-    fn user(name: &str) -> Principal {
-        Principal {
-            kind: PrincipalKind::User,
-            r#ref: name.to_string(),
         }
     }
 
@@ -1047,63 +931,8 @@ mod tests {
         }
     }
 
-    static NO_ROLES: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    static NO_GROUPS: BTreeMap<String, Vec<String>> = BTreeMap::new();
-
-    fn ws_only(members: &HashMap<Uuid, Vec<String>>) -> Expansions<'_> {
-        Expansions {
-            workspaces: members,
-            roles: &NO_ROLES,
-            groups: &NO_GROUPS,
-        }
-    }
-
-    /// J-F3 Task 1b: a group expands to its members on BOTH sides, in place,
-    /// deduplicated against an explicitly named member — and an empty group
-    /// leaves nothing behind, never an entry naming the group.
-    #[test]
-    fn a_group_expands_to_its_members_and_an_empty_group_to_nothing() {
-        let no_ws = HashMap::new();
-        let mut groups = BTreeMap::new();
-        groups.insert(
-            "analysts".to_string(),
-            vec!["alice".to_string(), "bob".to_string()],
-        );
-        groups.insert("nobody".to_string(), Vec::new());
-        let x = Expansions {
-            workspaces: &no_ws,
-            roles: &NO_ROLES,
-            groups: &groups,
-        };
-        let mut set = PrincipalSet {
-            include: vec![user("alice"), group("analysts"), group("nobody")],
-            exclude: vec![group("analysts")],
-        };
-        substitute(&mut set, &x);
-        assert_eq!(set.include, vec![user("alice"), user("bob")]);
-        assert_eq!(set.exclude, vec![user("alice"), user("bob")]);
-    }
-
-    /// `public` is the one group every engine resolves; it is never expanded,
-    /// even if a `groups` row carries that name and has members.
-    #[test]
-    fn the_public_group_is_never_expanded() {
-        let no_ws = HashMap::new();
-        let mut groups = BTreeMap::new();
-        groups.insert(PUBLIC_GROUP.to_string(), vec!["mallory".to_string()]);
-        let x = Expansions {
-            workspaces: &no_ws,
-            roles: &NO_ROLES,
-            groups: &groups,
-        };
-        let mut set = PrincipalSet {
-            include: vec![group(PUBLIC_GROUP)],
-            exclude: vec![],
-        };
-        substitute(&mut set, &x);
-        assert_eq!(set.include, vec![group(PUBLIC_GROUP)]);
-
-        let grant = Grant {
+    fn read_grant(principals: PrincipalSet) -> Grant {
+        Grant {
             id: Uuid::nil(),
             effect: egret_perm::Effect::Allow,
             actions: vec![egret_perm::Action::Read],
@@ -1113,12 +942,20 @@ mod tests {
                 table: None,
                 column: None,
             },
-            principals: PrincipalSet {
-                include: vec![group(PUBLIC_GROUP), group("analysts")],
-                exclude: vec![],
-            },
+            principals,
             origin: egret_perm::GrantOrigin::Explicit,
-        };
+        }
+    }
+
+    /// `public` is the one group every engine resolves; it is not even looked
+    /// up. (That it is never expanded is `egret_perm_ir::audience`'s
+    /// `the_public_group_is_never_expanded`.)
+    #[test]
+    fn the_public_group_is_never_looked_up() {
+        let grant = read_grant(PrincipalSet {
+            include: vec![group(PUBLIC_GROUP), group("analysts")],
+            exclude: vec![],
+        });
         assert_eq!(
             referenced_principals(&[grant], &[], &[])
                 .groups
@@ -1130,69 +967,6 @@ mod tests {
     }
 
     #[test]
-    fn a_workspace_expands_to_its_members_in_place() {
-        let ws = Uuid::new_v4();
-        let mut members = HashMap::new();
-        members.insert(ws, vec!["alice".to_string(), "bob-2".to_string()]);
-        let mut set = PrincipalSet {
-            include: vec![user("carol"), ws_principal(ws)],
-            exclude: vec![],
-        };
-        substitute(&mut set, &ws_only(&members));
-        assert_eq!(
-            set.include,
-            vec![user("carol"), user("alice"), user("bob-2")],
-            "explicit principals keep their place; the expansion follows, sorted"
-        );
-    }
-
-    #[test]
-    fn an_already_named_member_is_not_named_twice() {
-        let ws = Uuid::new_v4();
-        let mut members = HashMap::new();
-        members.insert(ws, vec!["alice".to_string()]);
-        let mut set = PrincipalSet {
-            include: vec![user("alice"), ws_principal(ws)],
-            exclude: vec![],
-        };
-        substitute(&mut set, &ws_only(&members));
-        assert_eq!(set.include, vec![user("alice")]);
-    }
-
-    /// The `exclude` half is the one that fails OPEN when it is got wrong: a
-    /// subtract that evaporates grants MORE than the model states. Expanding
-    /// it to zero principals must leave the list EMPTY (so `compile_grant`
-    /// emits no exception block at all), never an entry naming nobody.
-    #[test]
-    fn an_empty_workspace_expands_to_nothing_rather_than_to_an_empty_item() {
-        let ws = Uuid::new_v4();
-        let mut members = HashMap::new();
-        members.insert(ws, Vec::new());
-        let mut set = PrincipalSet {
-            include: vec![ws_principal(ws)],
-            exclude: vec![ws_principal(ws)],
-        };
-        substitute(&mut set, &ws_only(&members));
-        assert!(set.include.is_empty());
-        assert!(set.exclude.is_empty());
-    }
-
-    /// Same answer the evaluator gives a ref it cannot parse
-    /// (`matches_principal` → `unwrap_or(false)`): it matches nobody.
-    #[test]
-    fn a_ref_that_is_not_a_uuid_expands_to_nothing() {
-        let mut set = PrincipalSet {
-            include: vec![Principal {
-                kind: PrincipalKind::WorkspaceMembers,
-                r#ref: "not-a-uuid".into(),
-            }],
-            exclude: vec![],
-        };
-        substitute(&mut set, &ws_only(&HashMap::new()));
-        assert!(set.include.is_empty());
-    }
-
-    #[test]
     fn referenced_principals_skips_unparseable_workspace_refs() {
         let ws = Uuid::new_v4();
         let mut set = PrincipalSet::default();
@@ -1201,20 +975,7 @@ mod tests {
             kind: PrincipalKind::WorkspaceMembers,
             r#ref: "nope".into(),
         });
-        let grant = Grant {
-            id: Uuid::nil(),
-            effect: egret_perm::Effect::Allow,
-            actions: vec![egret_perm::Action::Read],
-            scope: egret_perm::Scope {
-                catalog_id: Uuid::nil(),
-                schema: None,
-                table: None,
-                column: None,
-            },
-            principals: set,
-            origin: egret_perm::GrantOrigin::Explicit,
-        };
-        let found = referenced_principals(&[grant], &[], &[]).workspaces;
+        let found = referenced_principals(&[read_grant(set)], &[], &[]).workspaces;
         assert_eq!(found.into_iter().collect::<Vec<_>>(), vec![ws]);
     }
 }

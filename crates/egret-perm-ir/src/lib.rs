@@ -7,6 +7,7 @@
 //! rule's enforcement ([`enforcement`]). Target-specific rendering lives in
 //! the target's own crate.
 
+pub mod audience;
 pub mod enforcement;
 pub mod ep;
 pub mod matrix;

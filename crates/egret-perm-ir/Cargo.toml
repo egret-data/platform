@@ -10,3 +10,4 @@ license.workspace = true
 [dependencies]
 egret-perm.workspace = true
 uuid.workspace = true
+tracing.workspace = true
