@@ -1016,7 +1016,7 @@ pub(crate) async fn migrate_in_tx(
                 tag: r.tag_name,
             })
             .collect();
-        let download = artifact_via(tx, &svc).await?;
+        let download = crate::routes::compiled_artifact_via(tx, &svc).await?;
         let def = ServiceDef::parse(&download.service_def);
         before.insert(
             id,
