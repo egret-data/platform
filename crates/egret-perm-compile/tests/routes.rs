@@ -5165,7 +5165,9 @@ async fn explain_shows_a_cleared_reader_the_clearance_mask_as_no_transform() {
 
 /// D2 (U4): a whole-table classification on a table the catalog does not have
 /// compiles its deny and no masks, and `POST /perm/compile`'s `skipped` list
-/// says so, naming the table, while the call succeeds.
+/// says so, naming the table, while the call succeeds. On a name that is a VIEW
+/// in the catalog the skip says so instead, and never promises masks "until
+/// the table exists": a view never becomes one (KI-307 follow-up).
 #[tokio::test]
 async fn compile_reports_a_whole_table_clearance_on_an_unknown_table_on_the_wire() {
     let Some(f) = setup().await else { return };
@@ -5180,8 +5182,11 @@ async fn compile_reports_a_whole_table_clearance_on_an_unknown_table_on_the_wire
         .fetch_one(&f.db.pool)
         .await
         .expect("catalog name");
-    lakekeeper_stub::link_warehouse(&f.db, warehouse_id).await;
+    let lk = lakekeeper_stub::link_warehouse(&f.db, warehouse_id).await;
+    let view = unique("ghost_v");
+    lakekeeper_stub::add_view(&f.db, lk, &["sales"], &view).await;
     let tag = assign_tag(&f, f.catalog_id, "sales", "ghost", "").await;
+    let view_tag = assign_tag(&f, f.catalog_id, "sales", &view, "").await;
     let _lock = exclusive(&f).await;
     let token = admin_session(&f).await;
     let tag_id: Uuid = sqlx::query_scalar("SELECT id FROM tags WHERE key = $1")
@@ -5189,15 +5194,22 @@ async fn compile_reports_a_whole_table_clearance_on_an_unknown_table_on_the_wire
         .fetch_one(&f.db.pool)
         .await
         .expect("tag id");
-    sqlx::query(
-        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
-         VALUES ($1, ARRAY[$2], '{}')",
-    )
-    .bind(tag_id)
-    .bind(unique("d2-role"))
-    .execute(&f.db.pool)
-    .await
-    .expect("gate");
+    let view_tag_id: Uuid = sqlx::query_scalar("SELECT id FROM tags WHERE key = $1")
+        .bind(&view_tag.key)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("view tag id");
+    for id in [tag_id, view_tag_id] {
+        sqlx::query(
+            "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+             VALUES ($1, ARRAY[$2], '{}')",
+        )
+        .bind(id)
+        .bind(unique("d2-role"))
+        .execute(&f.db.pool)
+        .await
+        .expect("gate");
+    }
 
     let (status, body) = into_json(
         f.app()
@@ -5212,21 +5224,38 @@ async fn compile_reports_a_whole_table_clearance_on_an_unknown_table_on_the_wire
     )
     .await;
     lift_gate(&f, tag_id).await;
+    lift_gate(&f, view_tag_id).await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
-    let skips: Vec<&Value> = body["skipped"]
-        .as_array()
-        .expect("skipped")
-        .iter()
-        .filter(|s| s["id"] == json!(tag_id.to_string()))
-        .collect();
-    assert_eq!(skips.len(), 1, "body: {body}");
-    assert_eq!(skips[0]["source_kind"], "clearance", "body: {body}");
-    let reason = skips[0]["reason"].as_str().expect("reason");
-    assert!(
-        reason.contains(&format!("{catalog}.sales.ghost")),
-        "{reason}"
+    let reason_of = |id: Uuid| -> String {
+        let skips: Vec<&Value> = body["skipped"]
+            .as_array()
+            .expect("skipped")
+            .iter()
+            .filter(|s| s["id"] == json!(id.to_string()))
+            .collect();
+        assert_eq!(skips.len(), 1, "body: {body}");
+        assert_eq!(skips[0]["source_kind"], "clearance", "body: {body}");
+        skips[0]["reason"].as_str().expect("reason").to_string()
+    };
+    let reason = reason_of(tag_id);
+    assert_eq!(
+        reason,
+        format!(
+            "{catalog}.sales.ghost is not a table in the catalog (unknown, or not yet created): \
+             its whole-table select deny is compiled, its NULL masks are not, so a view over it \
+             is not protected until the table exists"
+        ),
     );
-    assert!(reason.contains("not protected"), "{reason}");
+    let reason = reason_of(view_tag_id);
+    assert_eq!(
+        reason,
+        format!(
+            "{catalog}.sales.{view} is a view in the catalog, not a table: its whole-table \
+             select deny is compiled on the view's name, which egret has not measured StarRocks \
+             applying to a view, and no NULL masks, now or later, since egret builds them from \
+             a table's columns; classify the table the view reads to protect what it shows"
+        ),
+    );
 }
 
 /// Live check F1 (D2, U3): a rule write that would push a tag rule's StarRocks

@@ -736,8 +736,11 @@ async fn an_assignment_over_the_starrocks_clearance_ceiling_is_a_coded_409() {
 /// classification with a role-bearing clearance, on a table a StarRocks profile
 /// serves but the catalog does not have yet, compiles the deny and no NULL
 /// masks: the attach succeeds and its answer carries a notice saying the masks
-/// take effect once the table exists. A table the catalog has, and a column
-/// attachment, answer no notice.
+/// take effect once the table exists. A name that is a VIEW in the catalog
+/// never becomes a table, so it answers its own notice (`clearance_on_view`)
+/// saying what the compile gives a view and pointing at the underlying table
+/// (KI-307 follow-up). A table the catalog has, and a column attachment,
+/// answer no notice.
 #[tokio::test]
 async fn a_clearance_on_a_table_not_in_the_catalog_answers_a_notice() {
     let Some(url) = egret_test_db::url().await else {
@@ -758,6 +761,7 @@ async fn a_clearance_on_a_table_not_in_the_catalog_answers_a_notice() {
     let wh = egret_test_db::seed_warehouse(&db.pool).await;
     let lk = lakekeeper_stub::link_warehouse(&db, wh).await;
     lakekeeper_stub::add_table(&db, lk, &["sales"], "orders", &["id", "email"]).await;
+    lakekeeper_stub::add_view(&db, lk, &["sales"], "orders_us").await;
 
     // A StarRocks profile with an engine attached to a catalog over `wh`.
     let policy = egret_policy::PolicyStore::new(db.clone());
@@ -872,6 +876,25 @@ async fn a_clearance_on_a_table_not_in_the_catalog_answers_a_notice() {
     .await
     .expect("count");
     assert_eq!(stored, 1, "the attachment is stored");
+
+    // A view in the catalog: its own notice, which never promises masks later.
+    let json = answer(app.clone().oneshot(put("ORDERS_US", "")).await.unwrap()).await;
+    assert_eq!(json["ok"], true, "{json}");
+    let notices = json["notices"].as_array().expect("notices");
+    assert_eq!(notices.len(), 1, "{json}");
+    assert_eq!(notices[0]["code"], "clearance_on_view", "{json}");
+    assert_eq!(
+        notices[0]["message"],
+        format!(
+            "Attached. sales.ORDERS_US is a view in the catalog, not a table. On StarRocks, \
+             clearance {} on a view compiles only a select deny on that name, which egret has \
+             not measured StarRocks applying to a view, and no column masks, now or later: \
+             egret builds masks from a table's columns. To protect the values the view shows, \
+             classify the table it reads: that table's masks hold through the views over it.",
+            tag.name
+        ),
+        "{json}"
+    );
 
     // In the catalog: no notice.
     let json = answer(app.clone().oneshot(put("orders", "")).await.unwrap()).await;

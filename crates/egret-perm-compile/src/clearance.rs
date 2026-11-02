@@ -149,7 +149,7 @@
 //! the evaluator once the whole desired set is known. See
 //! `crate::clearance_mask`.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde_json::Value;
 use uuid::Uuid;
@@ -169,7 +169,8 @@ use crate::rules::{
     column_resources, group_by_table, stamp_service_type, TableTarget, TaggedColumn, PUBLIC_GROUP,
 };
 use crate::table_columns::{
-    active_tables_via, current_columns_batch_via, Leaving, TableColumns, TableKey,
+    active_tables_via, active_views_batch_via, current_columns_batch_via, Leaving, TableColumns,
+    TableKey,
 };
 use crate::trigger::{SkippedItem, SourceKind, DEFAULT_EXPANSION_CEILING};
 
@@ -447,6 +448,17 @@ async fn compile_starrocks_gates(
     let catalog_of = |t: &TableTarget| -> Option<&TableColumns> {
         index.get(&key_of(t)).and_then(|&i| found[i].as_ref())
     };
+    // A name with no columns may be a VIEW, which never becomes a table: its
+    // skip must not promise masks "once the table exists" (KI-307 follow-up).
+    // Asked only for the names the column read did not find.
+    let missing: Vec<usize> = (0..keys.len()).filter(|&i| found[i].is_none()).collect();
+    let missing_keys: Vec<TableKey> = missing.iter().map(|&i| keys[i].clone()).collect();
+    let views: HashSet<usize> = missing
+        .iter()
+        .zip(active_views_batch_via(conn, &missing_keys).await?)
+        .filter_map(|(&i, view)| view.then_some(i))
+        .collect();
+    let is_view = |t: &TableTarget| index.get(&key_of(t)).is_some_and(|i| views.contains(i));
 
     let mut mv_cleared = Vec::new();
     let mut whole_tables: BTreeMap<String, usize> = BTreeMap::new();
@@ -528,14 +540,28 @@ async fn compile_starrocks_gates(
                     }
                     // U4: the deny needs no column list and is compiled; the
                     // masks do. The live spike measured that the deny alone
-                    // lets a view read real values, so the skip says so.
+                    // lets a view read real values, so the skip says so. A
+                    // view has no columns in the catalog and never will, and
+                    // nobody measured StarRocks applying a table deny to an
+                    // Iceberg view, so its skip says that instead.
+                    None if is_view(t) => out.skipped.push(skip(
+                        g.gate,
+                        format!(
+                            "{}.{schema}.{table} is a view in the catalog, not a table: its \
+                             whole-table select deny is compiled on the view's name, which egret \
+                             has not measured StarRocks applying to a view, and no NULL masks, \
+                             now or later, since egret builds them from a table's columns; \
+                             classify the table the view reads to protect what it shows",
+                            t.catalog
+                        ),
+                    )),
                     None => out.skipped.push(skip(
                         g.gate,
                         format!(
-                            "{}.{schema}.{table} is not a table in the catalog (unknown, a view, \
-                             or not yet created): its whole-table select deny is compiled, its \
-                             NULL masks are not, so a view over it is not protected until the \
-                             table exists",
+                            "{}.{schema}.{table} is not a table in the catalog (unknown, or not \
+                             yet created): its whole-table select deny is compiled, its NULL \
+                             masks are not, so a view over it is not protected until the table \
+                             exists",
                             t.catalog
                         ),
                     )),

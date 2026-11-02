@@ -7,15 +7,10 @@
  */
 
 /**
- * Refuse (409, code `table_change_held`) a write on `schema.table` while a
- * hold holds the table's name: a rename of the table that is waiting for the
- * engines would leave this write on the old name, or put back on the new one
- * a classification just removed (rename review finding 2). A try-lock on
- * this transaction, released at its end, so no hold can start meanwhile.
  * Something an assignment that succeeded wants its author to know.
  */
 export interface AssignNotice {
-  /** Stable, for programs: `clearance_masks_pending_table`. */
+  /** Stable, for programs: `clearance_masks_pending_table` or `clearance_on_view`. */
   code: string;
   /** The sentence a person reads. */
   message: string;
