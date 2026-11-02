@@ -44,7 +44,7 @@ pub async fn provision_and_sync(
         }
         None => {
             users
-                .insert_oidc(&claims.subject, &claims.email, &claims.name)
+                .create_oidc(&claims.subject, &claims.email, &claims.name)
                 .await?
         }
     };

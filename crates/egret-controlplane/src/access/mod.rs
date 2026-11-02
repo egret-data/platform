@@ -289,9 +289,11 @@ async fn create_user(
 ) -> Result<(StatusCode, Json<UserDto>), CpError> {
     egret_core::authz::require(&*st.pdp, &p, "user:create").await?;
     let hash = egret_auth::password::hash_password(&body.password)?;
-    let id = st
+    // The username is minted on the insert's transaction, so a grant can name
+    // the new user at once (spec 2026-10-31-local-user-username).
+    let (id, username) = st
         .users
-        .insert_local(&body.email, &body.name, &hash)
+        .create_local(&body.email, &body.name, &hash)
         .await?;
     Ok((
         StatusCode::CREATED,
@@ -304,7 +306,7 @@ async fn create_user(
             roles: vec![],
             effective_roles: vec![],
             groups: vec![],
-            username: None,
+            username: Some(username),
         }),
     ))
 }
