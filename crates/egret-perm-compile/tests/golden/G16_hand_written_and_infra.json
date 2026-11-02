@@ -1,0 +1,1982 @@
+[
+  {
+    "desired": [
+      {
+        "service": "{g16.trino}",
+        "name": "perm-grant-{g16.read}",
+        "body": {
+          "additionalResources": [],
+          "allowExceptions": [],
+          "denyExceptions": [],
+          "denyPolicyItems": [],
+          "description": "",
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-grant-{g16.read}",
+          "policyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [],
+              "roles": [],
+              "users": [
+                "{g16.alice.username}"
+              ]
+            }
+          ],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g16_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            },
+            "schema": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            }
+          },
+          "service": "{g16.trino}",
+          "serviceType": "trino"
+        }
+      }
+    ],
+    "skipped": [],
+    "served": [
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 0,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "all - catalog",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              },
+              {
+                "isAllowed": true,
+                "type": "insert"
+              },
+              {
+                "isAllowed": true,
+                "type": "create"
+              },
+              {
+                "isAllowed": true,
+                "type": "drop"
+              },
+              {
+                "isAllowed": true,
+                "type": "delete"
+              },
+              {
+                "isAllowed": true,
+                "type": "use"
+              },
+              {
+                "isAllowed": true,
+                "type": "alter"
+              },
+              {
+                "isAllowed": true,
+                "type": "grant"
+              },
+              {
+                "isAllowed": true,
+                "type": "revoke"
+              },
+              {
+                "isAllowed": true,
+                "type": "show"
+              },
+              {
+                "isAllowed": true,
+                "type": "impersonate"
+              },
+              {
+                "isAllowed": true,
+                "type": "execute"
+              },
+              {
+                "isAllowed": true,
+                "type": "read_sysinfo"
+              },
+              {
+                "isAllowed": true,
+                "type": "write_sysinfo"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [
+              "{g16.admin.username}s"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 1,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "all - catalog, schema",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              },
+              {
+                "isAllowed": true,
+                "type": "insert"
+              },
+              {
+                "isAllowed": true,
+                "type": "create"
+              },
+              {
+                "isAllowed": true,
+                "type": "drop"
+              },
+              {
+                "isAllowed": true,
+                "type": "delete"
+              },
+              {
+                "isAllowed": true,
+                "type": "use"
+              },
+              {
+                "isAllowed": true,
+                "type": "alter"
+              },
+              {
+                "isAllowed": true,
+                "type": "grant"
+              },
+              {
+                "isAllowed": true,
+                "type": "revoke"
+              },
+              {
+                "isAllowed": true,
+                "type": "show"
+              },
+              {
+                "isAllowed": true,
+                "type": "impersonate"
+              },
+              {
+                "isAllowed": true,
+                "type": "execute"
+              },
+              {
+                "isAllowed": true,
+                "type": "read_sysinfo"
+              },
+              {
+                "isAllowed": true,
+                "type": "write_sysinfo"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [
+              "{g16.admin.username}s"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 2,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "all - catalog, schema, table",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              },
+              {
+                "isAllowed": true,
+                "type": "insert"
+              },
+              {
+                "isAllowed": true,
+                "type": "create"
+              },
+              {
+                "isAllowed": true,
+                "type": "drop"
+              },
+              {
+                "isAllowed": true,
+                "type": "delete"
+              },
+              {
+                "isAllowed": true,
+                "type": "use"
+              },
+              {
+                "isAllowed": true,
+                "type": "alter"
+              },
+              {
+                "isAllowed": true,
+                "type": "grant"
+              },
+              {
+                "isAllowed": true,
+                "type": "revoke"
+              },
+              {
+                "isAllowed": true,
+                "type": "show"
+              },
+              {
+                "isAllowed": true,
+                "type": "impersonate"
+              },
+              {
+                "isAllowed": true,
+                "type": "execute"
+              },
+              {
+                "isAllowed": true,
+                "type": "read_sysinfo"
+              },
+              {
+                "isAllowed": true,
+                "type": "write_sysinfo"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [
+              "{g16.admin.username}s"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 3,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "all - catalog, schema, table, column",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              },
+              {
+                "isAllowed": true,
+                "type": "insert"
+              },
+              {
+                "isAllowed": true,
+                "type": "create"
+              },
+              {
+                "isAllowed": true,
+                "type": "drop"
+              },
+              {
+                "isAllowed": true,
+                "type": "delete"
+              },
+              {
+                "isAllowed": true,
+                "type": "use"
+              },
+              {
+                "isAllowed": true,
+                "type": "alter"
+              },
+              {
+                "isAllowed": true,
+                "type": "grant"
+              },
+              {
+                "isAllowed": true,
+                "type": "revoke"
+              },
+              {
+                "isAllowed": true,
+                "type": "show"
+              },
+              {
+                "isAllowed": true,
+                "type": "impersonate"
+              },
+              {
+                "isAllowed": true,
+                "type": "execute"
+              },
+              {
+                "isAllowed": true,
+                "type": "read_sysinfo"
+              },
+              {
+                "isAllowed": true,
+                "type": "write_sysinfo"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [
+              "{g16.admin.username}s"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 4,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "all - trinouser",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "impersonate"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [
+              "{g16.admin.username}s"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "trinouser": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 5,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "all - systemproperty",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "alter"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [
+              "{g16.admin.username}s"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "systemproperty": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 6,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "all - catalog, sessionproperty",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "alter"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [
+              "{g16.admin.username}s"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "sessionproperty": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 7,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "all - function",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "execute"
+              },
+              {
+                "isAllowed": true,
+                "type": "grant"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [
+              "{g16.admin.username}s"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "function": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 8,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "all - catalog, schema, procedure",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "execute"
+              },
+              {
+                "isAllowed": true,
+                "type": "grant"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [
+              "{g16.admin.username}s"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "procedure": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 9,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "all - catalog, schema, schemafunction",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "create"
+              },
+              {
+                "isAllowed": true,
+                "type": "drop"
+              },
+              {
+                "isAllowed": true,
+                "type": "show"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [
+              "{g16.admin.username}s"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schemafunction": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 10,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "all - queryid",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "execute"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [
+              "{g16.admin.username}s"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "queryid": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 11,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "all - sysinfo",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "read_sysinfo"
+              },
+              {
+                "isAllowed": true,
+                "type": "write_sysinfo"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [
+              "{g16.admin.username}s"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "sysinfo": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 12,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "all - role",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "create"
+              },
+              {
+                "isAllowed": true,
+                "type": "drop"
+              },
+              {
+                "isAllowed": true,
+                "type": "show"
+              },
+              {
+                "isAllowed": true,
+                "type": "grant"
+              },
+              {
+                "isAllowed": true,
+                "type": "revoke"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [
+              "{g16.admin.username}s"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "role": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 13,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-admin - catalog",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              },
+              {
+                "isAllowed": true,
+                "type": "insert"
+              },
+              {
+                "isAllowed": true,
+                "type": "create"
+              },
+              {
+                "isAllowed": true,
+                "type": "drop"
+              },
+              {
+                "isAllowed": true,
+                "type": "delete"
+              },
+              {
+                "isAllowed": true,
+                "type": "use"
+              },
+              {
+                "isAllowed": true,
+                "type": "alter"
+              },
+              {
+                "isAllowed": true,
+                "type": "grant"
+              },
+              {
+                "isAllowed": true,
+                "type": "revoke"
+              },
+              {
+                "isAllowed": true,
+                "type": "show"
+              },
+              {
+                "isAllowed": true,
+                "type": "impersonate"
+              },
+              {
+                "isAllowed": true,
+                "type": "execute"
+              },
+              {
+                "isAllowed": true,
+                "type": "read_sysinfo"
+              },
+              {
+                "isAllowed": true,
+                "type": "write_sysinfo"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g16.admin.username}"
+            ]
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 2
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 14,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-admin - catalog, schema",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              },
+              {
+                "isAllowed": true,
+                "type": "insert"
+              },
+              {
+                "isAllowed": true,
+                "type": "create"
+              },
+              {
+                "isAllowed": true,
+                "type": "drop"
+              },
+              {
+                "isAllowed": true,
+                "type": "delete"
+              },
+              {
+                "isAllowed": true,
+                "type": "use"
+              },
+              {
+                "isAllowed": true,
+                "type": "alter"
+              },
+              {
+                "isAllowed": true,
+                "type": "grant"
+              },
+              {
+                "isAllowed": true,
+                "type": "revoke"
+              },
+              {
+                "isAllowed": true,
+                "type": "show"
+              },
+              {
+                "isAllowed": true,
+                "type": "impersonate"
+              },
+              {
+                "isAllowed": true,
+                "type": "execute"
+              },
+              {
+                "isAllowed": true,
+                "type": "read_sysinfo"
+              },
+              {
+                "isAllowed": true,
+                "type": "write_sysinfo"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g16.admin.username}"
+            ]
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 2
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 15,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-admin - catalog, schema, table",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              },
+              {
+                "isAllowed": true,
+                "type": "insert"
+              },
+              {
+                "isAllowed": true,
+                "type": "create"
+              },
+              {
+                "isAllowed": true,
+                "type": "drop"
+              },
+              {
+                "isAllowed": true,
+                "type": "delete"
+              },
+              {
+                "isAllowed": true,
+                "type": "use"
+              },
+              {
+                "isAllowed": true,
+                "type": "alter"
+              },
+              {
+                "isAllowed": true,
+                "type": "grant"
+              },
+              {
+                "isAllowed": true,
+                "type": "revoke"
+              },
+              {
+                "isAllowed": true,
+                "type": "show"
+              },
+              {
+                "isAllowed": true,
+                "type": "impersonate"
+              },
+              {
+                "isAllowed": true,
+                "type": "execute"
+              },
+              {
+                "isAllowed": true,
+                "type": "read_sysinfo"
+              },
+              {
+                "isAllowed": true,
+                "type": "write_sysinfo"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g16.admin.username}"
+            ]
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 2
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 16,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-admin - catalog, schema, table, column",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              },
+              {
+                "isAllowed": true,
+                "type": "insert"
+              },
+              {
+                "isAllowed": true,
+                "type": "create"
+              },
+              {
+                "isAllowed": true,
+                "type": "drop"
+              },
+              {
+                "isAllowed": true,
+                "type": "delete"
+              },
+              {
+                "isAllowed": true,
+                "type": "use"
+              },
+              {
+                "isAllowed": true,
+                "type": "alter"
+              },
+              {
+                "isAllowed": true,
+                "type": "grant"
+              },
+              {
+                "isAllowed": true,
+                "type": "revoke"
+              },
+              {
+                "isAllowed": true,
+                "type": "show"
+              },
+              {
+                "isAllowed": true,
+                "type": "impersonate"
+              },
+              {
+                "isAllowed": true,
+                "type": "execute"
+              },
+              {
+                "isAllowed": true,
+                "type": "read_sysinfo"
+              },
+              {
+                "isAllowed": true,
+                "type": "write_sysinfo"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g16.admin.username}"
+            ]
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 2
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 17,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-admin - trinouser",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "impersonate"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g16.admin.username}"
+            ]
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "trinouser": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 2
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 18,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-admin - systemproperty",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "alter"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g16.admin.username}"
+            ]
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "systemproperty": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 2
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 19,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-admin - catalog, sessionproperty",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "alter"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g16.admin.username}"
+            ]
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "sessionproperty": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 2
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 20,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-admin - function",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "execute"
+              },
+              {
+                "isAllowed": true,
+                "type": "grant"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g16.admin.username}"
+            ]
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "function": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 2
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 21,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-admin - catalog, schema, procedure",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "execute"
+              },
+              {
+                "isAllowed": true,
+                "type": "grant"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g16.admin.username}"
+            ]
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "procedure": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 2
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 22,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-admin - catalog, schema, schemafunction",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "create"
+              },
+              {
+                "isAllowed": true,
+                "type": "drop"
+              },
+              {
+                "isAllowed": true,
+                "type": "show"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g16.admin.username}"
+            ]
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schemafunction": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 2
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 23,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-admin - queryid",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "execute"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g16.admin.username}"
+            ]
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "queryid": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 2
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 24,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-admin - sysinfo",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "read_sysinfo"
+              },
+              {
+                "isAllowed": true,
+                "type": "write_sysinfo"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g16.admin.username}"
+            ]
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "sysinfo": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 2
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 25,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-admin - role",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "create"
+              },
+              {
+                "isAllowed": true,
+                "type": "drop"
+              },
+              {
+                "isAllowed": true,
+                "type": "show"
+              },
+              {
+                "isAllowed": true,
+                "type": "grant"
+              },
+              {
+                "isAllowed": true,
+                "type": "revoke"
+              }
+            ],
+            "delegateAdmin": true,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g16.admin.username}"
+            ]
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "role": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 2
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 26,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-delegator-impersonate",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "impersonate"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "egret_delegator"
+            ]
+          }
+        ],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "trinouser": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 27,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-user-impersonate-self",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "impersonate"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{USER}"
+            ]
+          }
+        ],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "trinouser": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "{USER}"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 28,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-user-execute-query",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "execute"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{USER}"
+            ]
+          }
+        ],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "queryid": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 29,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-query-timeout",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "alter"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{USER}"
+            ]
+          }
+        ],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "systemproperty": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "query_max_run_time"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 30,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "g16 operator allow",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g16.alice.username}"
+            ]
+          }
+        ],
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g16_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "ops"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "additionalResources": [],
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "description": "",
+        "id": 31,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "perm-grant-{g16.read}",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g16.alice.username}"
+            ]
+          }
+        ],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g16_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "sales"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g16.trino}",
+        "serviceType": "trino",
+        "version": 1
+      }
+    ]
+  }
+]

@@ -194,6 +194,8 @@ jobs:
       # carry the flag like the other two axes.
       - name: Test
         run: EGRET_ALLOW_ENGINE_SKIP=1 EGRET_ALLOW_DOCKER_SKIP=1 cargo test --workspace --no-fail-fast
+      - name: Golden compile corpus
+        run: cargo test -p egret-perm-compile --features harness --test golden_compile
       # Prints on failure too, so a future disk exhaustion is a number in the log rather than a
       # mystery SIGBUS — this one cost a full investigation to identify.
       - name: Disk after build

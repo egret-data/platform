@@ -1,0 +1,44 @@
+[
+  {
+    "desired": [],
+    "skipped": [
+      {
+        "kind": "Rule",
+        "id": "{g10.mask}",
+        "reason": "profile has no usable `tagService` (unconfigured, or naming a profile that does not exist), so tag rule \"g10.mask\" cannot compile here"
+      },
+      {
+        "kind": "Rule",
+        "id": "{g10.dangling}",
+        "reason": "tag key \"g10.gone\" has no matching row in `tags`"
+      },
+      {
+        "kind": "Clearance",
+        "id": "{g10.pii}",
+        "reason": "this Trino profile has no usable `tagService` (unconfigured, or naming a profile that does not exist), and a Trino clearance is a TAG policy — nothing filed here could be served to any plugin"
+      }
+    ],
+    "served": []
+  },
+  {
+    "desired": [],
+    "skipped": [
+      {
+        "kind": "Rule",
+        "id": "{g10.mask}",
+        "reason": "profile has no usable `tagService` (unconfigured, or naming a profile that does not exist), so tag rule \"g10.mask\" cannot compile here"
+      },
+      {
+        "kind": "Rule",
+        "id": "{g10.dangling}",
+        "reason": "tag key \"g10.gone\" has no matching row in `tags`"
+      },
+      {
+        "kind": "Clearance",
+        "id": "{g10.pii}",
+        "reason": "this Trino profile has no usable `tagService` (unconfigured, or naming a profile that does not exist), and a Trino clearance is a TAG policy — nothing filed here could be served to any plugin"
+      }
+    ],
+    "served": []
+  }
+]

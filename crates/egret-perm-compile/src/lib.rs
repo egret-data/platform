@@ -69,6 +69,11 @@ pub(crate) mod metadata_tables;
 #[cfg(feature = "harness")]
 #[doc(hidden)]
 pub mod harness_support;
+// Governance sub-project 1: every recompile compiles twice and asserts the two
+// agree (a determinism check, and during a refactor the old path against the
+// new). Off in every production build.
+#[cfg(feature = "shadow-compile")]
+mod shadow;
 // SP4d-3 Task 5: classify every policy of a profile (owner, verdict, blocker
 // sentences) for `GET /perm/policies/services/{id}/classify`.
 pub mod classify;

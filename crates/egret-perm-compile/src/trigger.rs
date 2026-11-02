@@ -221,6 +221,7 @@ pub const PROFILE_EXPANSION_CEILING: usize = 1000;
 /// (`perm.engine_grants`, [`crate::engine_grants`]), whose id is the engine
 /// grant's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum SourceKind {
     Grant,
     Rule,
@@ -281,11 +282,11 @@ impl CompileSummary {
 /// profile's TAG service (`rules::build_tag_body` → `tagify`), and that is
 /// where the row has to land or the tag plugin never downloads it. See
 /// [`target_service_id`] and `apply_diff_in_tx`.
-struct DesiredPolicy {
-    body: Value,
-    source_kind: SourceKind,
-    grant_id: Option<Uuid>,
-    rule_id: Option<Uuid>,
+pub(crate) struct DesiredPolicy {
+    pub(crate) body: Value,
+    pub(crate) source_kind: SourceKind,
+    pub(crate) grant_id: Option<Uuid>,
+    pub(crate) rule_id: Option<Uuid>,
 }
 
 /// The `(service_id, name)` a desired policy is keyed by — the same pair
@@ -376,7 +377,7 @@ fn body_name(body: &Value, what: &str) -> Result<String, CompileError> {
 /// transaction sees its own uncommitted writes). `None` means `service_id`
 /// names something this compiler doesn't target (see [`engine_type_for`]) —
 /// nothing to diff, nothing to write.
-async fn compile_desired(
+pub(crate) async fn compile_desired(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
 ) -> Result<Option<Compiled>, CompileError> {
@@ -917,19 +918,19 @@ async fn compile_engine_grants(
 /// from the profile's configuration, not from what happened to compile: a
 /// profile with a tag service sweeps it even when zero tag policies are
 /// desired, which is exactly the "the rule was deleted" case.
-struct Compiled {
-    desired: BTreeMap<PolicyKey, DesiredPolicy>,
-    skipped: Vec<SkippedItem>,
-    sweep: Vec<i64>,
+pub(crate) struct Compiled {
+    pub(crate) desired: BTreeMap<PolicyKey, DesiredPolicy>,
+    pub(crate) skipped: Vec<SkippedItem>,
+    pub(crate) sweep: Vec<i64>,
     /// The profile's own service NAME — carried alongside `sweep` so
     /// [`apply_diff_in_tx`]'s [`CompileError::ProfileExpansionCeiling`]
     /// refusal can name the profile, not just its numeric id.
-    profile_name: String,
+    pub(crate) profile_name: String,
     /// The largest whole-table classified tables (D2), for the same refusal.
-    largest: Vec<egret_perm::TableCount>,
+    pub(crate) largest: Vec<egret_perm::TableCount>,
     /// The profile's desired policies on a held rename's leaving coordinates,
     /// which the profile total does not count (rename spec C8).
-    uncounted: usize,
+    pub(crate) uncounted: usize,
 }
 
 /// Fold one priority-1 clearance mask per classified column into `desired`
@@ -1658,6 +1659,8 @@ async fn recompile_locked_service_in_tx(
     let Some(compiled) = compile_desired(tx, service_id).await? else {
         return Ok(CompileSummary::default());
     };
+    #[cfg(feature = "shadow-compile")]
+    crate::shadow::compare(tx, service_id, &compiled).await?;
     let summary = apply_diff_in_tx(
         tx,
         service_id,

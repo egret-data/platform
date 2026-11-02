@@ -83,9 +83,17 @@ chrono.workspace = true
 # Off in every production build; enabled only by `egret-ranger-eval`'s
 # dev-dependency and by `tests/gate_timing.rs` (`required-features`).
 harness = []
+# Governance sub-project 1: every recompile compiles a second time on the same
+# transaction and asserts the two agree (`src/shadow.rs`). Test-only.
+shadow-compile = []
 
 [[test]]
 name = "gate_timing"
+required-features = ["harness"]
+
+# Governance sub-project 1: the golden corpus of compiled Ranger artifacts.
+[[test]]
+name = "golden_compile"
 required-features = ["harness"]
 
 [dev-dependencies]

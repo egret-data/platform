@@ -1,0 +1,1526 @@
+[
+  {
+    "desired": [
+      {
+        "service": "{g14.trino}_tag",
+        "name": "perm-clearance-{g14.secret}",
+        "body": {
+          "allowExceptions": [],
+          "denyExceptions": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                },
+                {
+                  "isAllowed": true,
+                  "type": "insert"
+                },
+                {
+                  "isAllowed": true,
+                  "type": "delete"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [],
+              "roles": [],
+              "users": [
+                "{g14.bob.username}"
+              ]
+            }
+          ],
+          "denyPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                },
+                {
+                  "isAllowed": true,
+                  "type": "insert"
+                },
+                {
+                  "isAllowed": true,
+                  "type": "delete"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "users": []
+            }
+          ],
+          "description": "",
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-clearance-{g14.secret}",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "tag": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "g14.secret"
+              ]
+            }
+          },
+          "service": "{g14.trino}_tag",
+          "serviceType": "tag"
+        }
+      },
+      {
+        "service": "{g14.trino}_tag",
+        "name": "perm-rule-{g14.tagmask}",
+        "body": {
+          "dataMaskPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "dataMaskInfo": {
+                "dataMaskType": "MASK_HASH"
+              },
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "users": []
+            }
+          ],
+          "denyPolicyItems": [],
+          "description": "",
+          "isEnabled": true,
+          "name": "perm-rule-{g14.tagmask}",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 1,
+          "resources": {
+            "tag": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "g14.pii"
+              ]
+            }
+          },
+          "service": "{g14.trino}_tag",
+          "serviceType": "tag"
+        }
+      },
+      {
+        "service": "{g14.trino}",
+        "name": "perm-grant-{g14.deny}",
+        "body": {
+          "additionalResources": [],
+          "allowExceptions": [],
+          "denyExceptions": [],
+          "denyPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [],
+              "roles": [],
+              "users": [
+                "{g14.alice.username}"
+              ]
+            }
+          ],
+          "description": "",
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-grant-{g14.deny}",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g14_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            },
+            "schema": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "payments"
+              ]
+            }
+          },
+          "service": "{g14.trino}",
+          "serviceType": "trino"
+        }
+      },
+      {
+        "service": "{g14.trino}",
+        "name": "perm-hidden-meta-g14 hand deny",
+        "body": {
+          "additionalResources": [],
+          "allowExceptions": [],
+          "denyExceptions": [],
+          "denyPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [],
+              "roles": [],
+              "users": [
+                "{g14.alice.username}"
+              ]
+            }
+          ],
+          "description": "",
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-hidden-meta-g14 hand deny",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g14_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            },
+            "schema": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "finance"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "budget$*"
+              ]
+            }
+          },
+          "service": "{g14.trino}",
+          "serviceType": "trino"
+        }
+      },
+      {
+        "service": "{g14.trino}",
+        "name": "perm-hidden-meta-perm-clearance-{g14.secret}-gold_g14_cat.hr.staff",
+        "body": {
+          "additionalResources": [],
+          "allowExceptions": [],
+          "denyExceptions": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [],
+              "roles": [],
+              "users": [
+                "{g14.bob.username}"
+              ]
+            }
+          ],
+          "denyPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "users": []
+            }
+          ],
+          "description": "",
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-hidden-meta-perm-clearance-{g14.secret}-gold_g14_cat.hr.staff",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g14_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            },
+            "schema": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "hr"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "staff$*"
+              ]
+            }
+          },
+          "service": "{g14.trino}",
+          "serviceType": "trino"
+        }
+      },
+      {
+        "service": "{g14.trino}",
+        "name": "perm-hidden-meta-perm-grant-{g14.deny}",
+        "body": {
+          "additionalResources": [],
+          "allowExceptions": [],
+          "denyExceptions": [],
+          "denyPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [],
+              "roles": [],
+              "users": [
+                "{g14.alice.username}"
+              ]
+            }
+          ],
+          "description": "",
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-hidden-meta-perm-grant-{g14.deny}",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g14_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            },
+            "schema": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "payments$*"
+              ]
+            }
+          },
+          "service": "{g14.trino}",
+          "serviceType": "trino"
+        }
+      },
+      {
+        "service": "{g14.trino}",
+        "name": "perm-hidden-meta-perm-rule-{g14.mask}",
+        "body": {
+          "additionalResources": [],
+          "allowExceptions": [],
+          "denyExceptions": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [],
+              "roles": [],
+              "users": [
+                "{g14.alice.username}"
+              ]
+            }
+          ],
+          "denyPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "users": []
+            }
+          ],
+          "description": "",
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-hidden-meta-perm-rule-{g14.mask}",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g14_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            },
+            "schema": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "orders$*"
+              ]
+            }
+          },
+          "service": "{g14.trino}",
+          "serviceType": "trino"
+        }
+      },
+      {
+        "service": "{g14.trino}",
+        "name": "perm-hidden-meta-perm-rule-{g14.filter}",
+        "body": {
+          "additionalResources": [],
+          "allowExceptions": [],
+          "denyExceptions": [],
+          "denyPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "users": []
+            }
+          ],
+          "description": "",
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-hidden-meta-perm-rule-{g14.filter}",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g14_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            },
+            "schema": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "customers$*"
+              ]
+            }
+          },
+          "service": "{g14.trino}",
+          "serviceType": "trino"
+        }
+      },
+      {
+        "service": "{g14.trino}",
+        "name": "perm-hidden-meta-perm-rule-{g14.tagmask}-gold_g14_cat.sales.leads",
+        "body": {
+          "additionalResources": [],
+          "allowExceptions": [],
+          "denyExceptions": [],
+          "denyPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "users": []
+            }
+          ],
+          "description": "",
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-hidden-meta-perm-rule-{g14.tagmask}-gold_g14_cat.sales.leads",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g14_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            },
+            "schema": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "leads$*"
+              ]
+            }
+          },
+          "service": "{g14.trino}",
+          "serviceType": "trino"
+        }
+      },
+      {
+        "service": "{g14.trino}",
+        "name": "perm-rule-{g14.mask}",
+        "body": {
+          "dataMaskPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "dataMaskInfo": {
+                "dataMaskType": "MASK_NONE"
+              },
+              "groups": [],
+              "roles": [],
+              "users": [
+                "{g14.alice.username}"
+              ]
+            },
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "dataMaskInfo": {
+                "dataMaskType": "MASK_NULL"
+              },
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "users": []
+            }
+          ],
+          "denyPolicyItems": [],
+          "description": "",
+          "isEnabled": true,
+          "name": "perm-rule-{g14.mask}",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 1,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g14_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "email"
+              ]
+            },
+            "schema": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "orders"
+              ]
+            }
+          },
+          "service": "{g14.trino}",
+          "serviceType": "trino"
+        }
+      },
+      {
+        "service": "{g14.trino}",
+        "name": "perm-rule-{g14.filter}",
+        "body": {
+          "denyPolicyItems": [],
+          "description": "",
+          "isEnabled": true,
+          "name": "perm-rule-{g14.filter}",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 2,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g14_cat"
+              ]
+            },
+            "schema": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "customers"
+              ]
+            }
+          },
+          "rowFilterPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "rowFilterInfo": {
+                "filterExpr": "region = 'EU'"
+              },
+              "users": []
+            }
+          ],
+          "service": "{g14.trino}",
+          "serviceType": "trino"
+        }
+      }
+    ],
+    "skipped": [],
+    "served": [
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g14.alice.username}"
+            ]
+          }
+        ],
+        "id": 0,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "g14 hand deny",
+        "policyItems": [],
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g14_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "finance"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "budget"
+            ]
+          }
+        },
+        "service": "{g14.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "additionalResources": [],
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g14.alice.username}"
+            ]
+          }
+        ],
+        "description": "",
+        "id": 1,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "perm-grant-{g14.deny}",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g14_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "sales"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "payments"
+            ]
+          }
+        },
+        "service": "{g14.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "additionalResources": [],
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g14.alice.username}"
+            ]
+          }
+        ],
+        "description": "",
+        "id": 2,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "perm-hidden-meta-g14 hand deny",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g14_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "finance"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "budget$*"
+            ]
+          }
+        },
+        "service": "{g14.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "additionalResources": [],
+        "allowExceptions": [],
+        "denyExceptions": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g14.bob.username}"
+            ]
+          }
+        ],
+        "denyPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "description": "",
+        "id": 3,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "perm-hidden-meta-perm-clearance-{g14.secret}-gold_g14_cat.hr.staff",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g14_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "hr"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "staff$*"
+            ]
+          }
+        },
+        "service": "{g14.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "additionalResources": [],
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g14.alice.username}"
+            ]
+          }
+        ],
+        "description": "",
+        "id": 4,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "perm-hidden-meta-perm-grant-{g14.deny}",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g14_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "sales"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "payments$*"
+            ]
+          }
+        },
+        "service": "{g14.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "additionalResources": [],
+        "allowExceptions": [],
+        "denyExceptions": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g14.alice.username}"
+            ]
+          }
+        ],
+        "denyPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "description": "",
+        "id": 5,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "perm-hidden-meta-perm-rule-{g14.mask}",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g14_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "sales"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "orders$*"
+            ]
+          }
+        },
+        "service": "{g14.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "additionalResources": [],
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "description": "",
+        "id": 6,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "perm-hidden-meta-perm-rule-{g14.filter}",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g14_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "sales"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "customers$*"
+            ]
+          }
+        },
+        "service": "{g14.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "additionalResources": [],
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "description": "",
+        "id": 7,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "perm-hidden-meta-perm-rule-{g14.tagmask}-gold_g14_cat.sales.leads",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g14_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "sales"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "leads$*"
+            ]
+          }
+        },
+        "service": "{g14.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "dataMaskPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "dataMaskInfo": {
+              "dataMaskType": "MASK_NONE"
+            },
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g14.alice.username}"
+            ]
+          },
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "dataMaskInfo": {
+              "dataMaskType": "MASK_NULL"
+            },
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "denyPolicyItems": [],
+        "description": "",
+        "id": 8,
+        "isEnabled": true,
+        "name": "perm-rule-{g14.mask}",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 1,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g14_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "email"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "sales"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "orders"
+            ]
+          }
+        },
+        "service": "{g14.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "denyPolicyItems": [],
+        "description": "",
+        "id": 9,
+        "isEnabled": true,
+        "name": "perm-rule-{g14.filter}",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 2,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g14_cat"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "sales"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "customers"
+            ]
+          }
+        },
+        "rowFilterPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "rowFilterInfo": {
+              "filterExpr": "region = 'EU'"
+            },
+            "users": []
+          }
+        ],
+        "service": "{g14.trino}",
+        "serviceType": "trino",
+        "version": 1
+      }
+    ],
+    "servedTag": [
+      {
+        "allowExceptions": [],
+        "denyExceptions": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              },
+              {
+                "isAllowed": true,
+                "type": "insert"
+              },
+              {
+                "isAllowed": true,
+                "type": "delete"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g14.bob.username}"
+            ]
+          }
+        ],
+        "denyPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              },
+              {
+                "isAllowed": true,
+                "type": "insert"
+              },
+              {
+                "isAllowed": true,
+                "type": "delete"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "description": "",
+        "id": 0,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "perm-clearance-{g14.secret}",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "tag": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "g14.secret"
+            ]
+          }
+        },
+        "service": "{g14.trino}_tag",
+        "serviceType": "tag",
+        "version": 1
+      },
+      {
+        "dataMaskPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "dataMaskInfo": {
+              "dataMaskType": "MASK_HASH"
+            },
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "denyPolicyItems": [],
+        "description": "",
+        "id": 1,
+        "isEnabled": true,
+        "name": "perm-rule-{g14.tagmask}",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 1,
+        "resources": {
+          "tag": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "g14.pii"
+            ]
+          }
+        },
+        "service": "{g14.trino}_tag",
+        "serviceType": "tag",
+        "version": 1
+      }
+    ]
+  }
+]

@@ -1,0 +1,601 @@
+[
+  {
+    "desired": [
+      {
+        "service": "{g15.starrocks}",
+        "name": "perm-hidden-gold_g15_cat.sales.customers",
+        "body": {
+          "additionalResources": [],
+          "allowExceptions": [],
+          "denyExceptions": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [],
+              "roles": [],
+              "users": []
+            }
+          ],
+          "denyPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "users": []
+            }
+          ],
+          "description": "",
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-hidden-gold_g15_cat.sales.customers",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g15_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "_file",
+                "_pos"
+              ]
+            },
+            "database": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "customers"
+              ]
+            }
+          },
+          "service": "{g15.starrocks}",
+          "serviceType": "starrocks"
+        }
+      },
+      {
+        "service": "{g15.starrocks}",
+        "name": "perm-hidden-gold_g15_cat.sales.orders",
+        "body": {
+          "additionalResources": [],
+          "allowExceptions": [],
+          "denyExceptions": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [],
+              "roles": [],
+              "users": [
+                "{g15.alice.username}"
+              ]
+            }
+          ],
+          "denyPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "users": []
+            }
+          ],
+          "description": "",
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-hidden-gold_g15_cat.sales.orders",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g15_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "_file",
+                "_pos"
+              ]
+            },
+            "database": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "orders"
+              ]
+            }
+          },
+          "service": "{g15.starrocks}",
+          "serviceType": "starrocks"
+        }
+      },
+      {
+        "service": "{g15.starrocks}",
+        "name": "perm-rule-{g15.exact}",
+        "body": {
+          "dataMaskPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "dataMaskInfo": {
+                "dataMaskType": "MASK_NONE"
+              },
+              "groups": [],
+              "roles": [],
+              "users": [
+                "{g15.alice.username}"
+              ]
+            },
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "dataMaskInfo": {
+                "dataMaskType": "MASK_NULL"
+              },
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "users": []
+            }
+          ],
+          "denyPolicyItems": [],
+          "description": "",
+          "isEnabled": true,
+          "name": "perm-rule-{g15.exact}",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 1,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g15_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "email"
+              ]
+            },
+            "database": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "orders"
+              ]
+            }
+          },
+          "service": "{g15.starrocks}",
+          "serviceType": "starrocks"
+        }
+      }
+    ],
+    "skipped": [],
+    "served": [
+      {
+        "dataMaskPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "dataMaskInfo": {
+              "dataMaskType": "MASK_NULL"
+            },
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "denyPolicyItems": [],
+        "id": 0,
+        "isEnabled": true,
+        "name": "g15 wildcard mask",
+        "policyItems": [],
+        "policyType": 1,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g15_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "ssn"
+            ]
+          },
+          "database": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "hr"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g15.starrocks}",
+        "serviceType": "starrocks",
+        "version": 1
+      },
+      {
+        "dataMaskPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "dataMaskInfo": {
+              "dataMaskType": "MASK"
+            },
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g15.alice.username}"
+            ]
+          }
+        ],
+        "denyPolicyItems": [],
+        "id": 1,
+        "isEnabled": true,
+        "name": "g15 hand mask",
+        "policyItems": [],
+        "policyType": 1,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g15_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "name"
+            ]
+          },
+          "database": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "sales"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "customers"
+            ]
+          }
+        },
+        "service": "{g15.starrocks}",
+        "serviceType": "starrocks",
+        "version": 1
+      },
+      {
+        "additionalResources": [],
+        "allowExceptions": [],
+        "denyExceptions": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "denyPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "description": "",
+        "id": 2,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "perm-hidden-gold_g15_cat.sales.customers",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g15_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "_file",
+              "_pos"
+            ]
+          },
+          "database": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "sales"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "customers"
+            ]
+          }
+        },
+        "service": "{g15.starrocks}",
+        "serviceType": "starrocks",
+        "version": 1
+      },
+      {
+        "additionalResources": [],
+        "allowExceptions": [],
+        "denyExceptions": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g15.alice.username}"
+            ]
+          }
+        ],
+        "denyPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "description": "",
+        "id": 3,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "perm-hidden-gold_g15_cat.sales.orders",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g15_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "_file",
+              "_pos"
+            ]
+          },
+          "database": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "sales"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "orders"
+            ]
+          }
+        },
+        "service": "{g15.starrocks}",
+        "serviceType": "starrocks",
+        "version": 1
+      },
+      {
+        "dataMaskPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "dataMaskInfo": {
+              "dataMaskType": "MASK_NONE"
+            },
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g15.alice.username}"
+            ]
+          },
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "dataMaskInfo": {
+              "dataMaskType": "MASK_NULL"
+            },
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "denyPolicyItems": [],
+        "description": "",
+        "id": 4,
+        "isEnabled": true,
+        "name": "perm-rule-{g15.exact}",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 1,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g15_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "email"
+            ]
+          },
+          "database": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "sales"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "orders"
+            ]
+          }
+        },
+        "service": "{g15.starrocks}",
+        "serviceType": "starrocks",
+        "version": 1
+      }
+    ]
+  }
+]

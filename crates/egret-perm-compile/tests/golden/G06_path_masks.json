@@ -1,0 +1,1037 @@
+[
+  {
+    "desired": [
+      {
+        "service": "{g06.trino}",
+        "name": "perm-hidden-meta-perm-rule-{g06.null}",
+        "body": {
+          "additionalResources": [],
+          "allowExceptions": [],
+          "denyExceptions": [],
+          "denyPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "users": []
+            }
+          ],
+          "description": "",
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-hidden-meta-perm-rule-{g06.null}",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g06_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            },
+            "schema": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "orders$*"
+              ]
+            }
+          },
+          "service": "{g06.trino}",
+          "serviceType": "trino"
+        }
+      },
+      {
+        "service": "{g06.trino}",
+        "name": "perm-hidden-meta-perm-rule-{g06.custom}",
+        "body": {
+          "additionalResources": [],
+          "allowExceptions": [],
+          "denyExceptions": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [],
+              "roles": [],
+              "users": [
+                "{g06.alice.username}",
+                "{g06.bob.username}"
+              ]
+            }
+          ],
+          "denyPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "users": []
+            }
+          ],
+          "description": "",
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-hidden-meta-perm-rule-{g06.custom}",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g06_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            },
+            "schema": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "orders$*"
+              ]
+            }
+          },
+          "service": "{g06.trino}",
+          "serviceType": "trino"
+        }
+      },
+      {
+        "service": "{g06.trino}",
+        "name": "perm-rule-{g06.null}",
+        "body": {
+          "dataMaskPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "dataMaskInfo": {
+                "dataMaskType": "MASK_NULL"
+              },
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "users": []
+            }
+          ],
+          "denyPolicyItems": [],
+          "description": "",
+          "isEnabled": true,
+          "name": "perm-rule-{g06.null}",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 1,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g06_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "phone"
+              ]
+            },
+            "schema": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "orders"
+              ]
+            }
+          },
+          "service": "{g06.trino}",
+          "serviceType": "trino"
+        }
+      },
+      {
+        "service": "{g06.trino}",
+        "name": "perm-rule-{g06.custom}",
+        "body": {
+          "dataMaskPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "dataMaskInfo": {
+                "dataMaskType": "MASK_NONE"
+              },
+              "groups": [],
+              "roles": [],
+              "users": [
+                "{g06.alice.username}",
+                "{g06.bob.username}"
+              ]
+            },
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "dataMaskInfo": {
+                "dataMaskType": "CUSTOM",
+                "valueExpr": "concat('x-', {col})"
+              },
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "users": []
+            }
+          ],
+          "denyPolicyItems": [],
+          "description": "",
+          "isEnabled": true,
+          "name": "perm-rule-{g06.custom}",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 1,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g06_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "email"
+              ]
+            },
+            "schema": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "orders"
+              ]
+            }
+          },
+          "service": "{g06.trino}",
+          "serviceType": "trino"
+        }
+      }
+    ],
+    "skipped": [],
+    "served": [
+      {
+        "additionalResources": [],
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "description": "",
+        "id": 0,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "perm-hidden-meta-perm-rule-{g06.null}",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g06_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "sales"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "orders$*"
+            ]
+          }
+        },
+        "service": "{g06.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "additionalResources": [],
+        "allowExceptions": [],
+        "denyExceptions": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g06.alice.username}",
+              "{g06.bob.username}"
+            ]
+          }
+        ],
+        "denyPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "description": "",
+        "id": 1,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "perm-hidden-meta-perm-rule-{g06.custom}",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g06_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "sales"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "orders$*"
+            ]
+          }
+        },
+        "service": "{g06.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "dataMaskPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "dataMaskInfo": {
+              "dataMaskType": "MASK_NULL"
+            },
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "denyPolicyItems": [],
+        "description": "",
+        "id": 2,
+        "isEnabled": true,
+        "name": "perm-rule-{g06.null}",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 1,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g06_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "phone"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "sales"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "orders"
+            ]
+          }
+        },
+        "service": "{g06.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "dataMaskPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "dataMaskInfo": {
+              "dataMaskType": "MASK_NONE"
+            },
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g06.alice.username}",
+              "{g06.bob.username}"
+            ]
+          },
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "dataMaskInfo": {
+              "dataMaskType": "CUSTOM",
+              "valueExpr": "concat('x-', {col})"
+            },
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "denyPolicyItems": [],
+        "description": "",
+        "id": 3,
+        "isEnabled": true,
+        "name": "perm-rule-{g06.custom}",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 1,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g06_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "email"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "sales"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "orders"
+            ]
+          }
+        },
+        "service": "{g06.trino}",
+        "serviceType": "trino",
+        "version": 1
+      }
+    ],
+    "servedTag": []
+  },
+  {
+    "desired": [
+      {
+        "service": "{g06.starrocks}",
+        "name": "perm-hidden-gold_g06_cat.sales.orders",
+        "body": {
+          "additionalResources": [],
+          "allowExceptions": [],
+          "denyExceptions": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [],
+              "roles": [],
+              "users": []
+            }
+          ],
+          "denyPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "users": []
+            }
+          ],
+          "description": "",
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-hidden-gold_g06_cat.sales.orders",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g06_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "_file",
+                "_pos"
+              ]
+            },
+            "database": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "orders"
+              ]
+            }
+          },
+          "service": "{g06.starrocks}",
+          "serviceType": "starrocks"
+        }
+      },
+      {
+        "service": "{g06.starrocks}",
+        "name": "perm-rule-{g06.null}",
+        "body": {
+          "dataMaskPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "dataMaskInfo": {
+                "dataMaskType": "MASK_NULL"
+              },
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "users": []
+            }
+          ],
+          "denyPolicyItems": [],
+          "description": "",
+          "isEnabled": true,
+          "name": "perm-rule-{g06.null}",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 1,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g06_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "phone"
+              ]
+            },
+            "database": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "orders"
+              ]
+            }
+          },
+          "service": "{g06.starrocks}",
+          "serviceType": "starrocks"
+        }
+      },
+      {
+        "service": "{g06.starrocks}",
+        "name": "perm-rule-{g06.custom}",
+        "body": {
+          "dataMaskPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "dataMaskInfo": {
+                "dataMaskType": "MASK_NONE"
+              },
+              "groups": [],
+              "roles": [],
+              "users": [
+                "{g06.alice.username}",
+                "{g06.bob.username}"
+              ]
+            },
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "dataMaskInfo": {
+                "dataMaskType": "CUSTOM",
+                "valueExpr": "concat('x-', {col})"
+              },
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "users": []
+            }
+          ],
+          "denyPolicyItems": [],
+          "description": "",
+          "isEnabled": true,
+          "name": "perm-rule-{g06.custom}",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 1,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g06_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "email"
+              ]
+            },
+            "database": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "orders"
+              ]
+            }
+          },
+          "service": "{g06.starrocks}",
+          "serviceType": "starrocks"
+        }
+      }
+    ],
+    "skipped": [],
+    "served": [
+      {
+        "additionalResources": [],
+        "allowExceptions": [],
+        "denyExceptions": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "denyPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "description": "",
+        "id": 0,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "perm-hidden-gold_g06_cat.sales.orders",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g06_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "_file",
+              "_pos"
+            ]
+          },
+          "database": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "sales"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "orders"
+            ]
+          }
+        },
+        "service": "{g06.starrocks}",
+        "serviceType": "starrocks",
+        "version": 1
+      },
+      {
+        "dataMaskPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "dataMaskInfo": {
+              "dataMaskType": "MASK_NULL"
+            },
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "denyPolicyItems": [],
+        "description": "",
+        "id": 1,
+        "isEnabled": true,
+        "name": "perm-rule-{g06.null}",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 1,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g06_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "phone"
+            ]
+          },
+          "database": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "sales"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "orders"
+            ]
+          }
+        },
+        "service": "{g06.starrocks}",
+        "serviceType": "starrocks",
+        "version": 1
+      },
+      {
+        "dataMaskPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "dataMaskInfo": {
+              "dataMaskType": "MASK_NONE"
+            },
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g06.alice.username}",
+              "{g06.bob.username}"
+            ]
+          },
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "dataMaskInfo": {
+              "dataMaskType": "CUSTOM",
+              "valueExpr": "concat('x-', {col})"
+            },
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "denyPolicyItems": [],
+        "description": "",
+        "id": 2,
+        "isEnabled": true,
+        "name": "perm-rule-{g06.custom}",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 1,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g06_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "email"
+            ]
+          },
+          "database": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "sales"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "orders"
+            ]
+          }
+        },
+        "service": "{g06.starrocks}",
+        "serviceType": "starrocks",
+        "version": 1
+      }
+    ]
+  }
+]

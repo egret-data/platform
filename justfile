@@ -156,6 +156,7 @@ check:
     {{ no_db_skip }} {{ no_store_skip }} {{ no_engine }} {{ no_docker }} \
       DATABASE_URL={{ test_database_url }} EGRET_TEST_SHARED_STORE_URL={{ test_store_url }} \
       cargo test --workspace
+    just test-golden
     # ⚠ LAST, and it is in `check` rather than beside it ON PURPOSE — open item 0b.
     # The line above RUNS both Ranger gates and they SELF-SKIP without the flag,
     # reporting `1 passed … 0.00s` each, so their contribution to that green was
@@ -178,6 +179,11 @@ check:
     @echo "   RAN  the two Ranger gates against the real 2.8.0 + 2.9.0 jars"
     @echo "   SKIPPED engine-gated suites       (EGRET_ALLOW_ENGINE_SKIP=1) → just test-workflow-starrocks, test-engine-mgmt-starrocks, test-dataapi-starrocks"
     @echo "   SKIPPED docker-gated suites       (EGRET_ALLOW_DOCKER_SKIP=1) → just test-workflow-docker"
+
+# Governance SP1: the golden corpus. Needs the `harness` feature, so
+# `cargo test --workspace` never runs it.
+test-golden:
+    {{ no_db_skip }} DATABASE_URL={{ test_database_url }} cargo test -p egret-perm-compile --features harness --test golden_compile
 
 # The two gates whose other side is Apache Ranger ITSELF rather than this repository's
 # reading of the jars: the enforcement gate (`crates/egret-policy`) and the differential

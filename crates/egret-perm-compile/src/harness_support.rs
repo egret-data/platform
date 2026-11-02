@@ -69,3 +69,46 @@ pub fn starrocks_table_clearance_deny(
     );
     Ok(body)
 }
+
+/// What one profile compiles to, for the golden corpus (governance
+/// sub-project 1): every desired policy as `(service name, policy name, body)`
+/// in the compiler's own order, every skip as `(kind, id, reason)` in order,
+/// and the services the recompile sweeps.
+pub struct GoldenCompiled {
+    pub desired: Vec<(String, String, Value)>,
+    pub skipped: Vec<(String, Uuid, String)>,
+    pub sweep: Vec<i64>,
+}
+
+/// Compile `service_id` on `conn` without writing anything. `None` when the
+/// compiler does not target the service (a tag service, say).
+pub async fn golden_desired_in_tx(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<Option<GoldenCompiled>, CompileError> {
+    let Some(c) = crate::trigger::compile_desired(conn, service_id).await? else {
+        return Ok(None);
+    };
+    let mut names: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
+    for sid in &c.sweep {
+        let n: String = sqlx::query_scalar("SELECT name FROM policy.authz_services WHERE id = $1")
+            .bind(sid)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(CompileError::from_db)?;
+        names.insert(*sid, n);
+    }
+    Ok(Some(GoldenCompiled {
+        desired: c
+            .desired
+            .iter()
+            .map(|((sid, name), dp)| (names[sid].clone(), name.clone(), dp.body.clone()))
+            .collect(),
+        skipped: c
+            .skipped
+            .iter()
+            .map(|s| (format!("{:?}", s.source_kind), s.id, s.reason.clone()))
+            .collect(),
+        sweep: c.sweep.clone(),
+    }))
+}
