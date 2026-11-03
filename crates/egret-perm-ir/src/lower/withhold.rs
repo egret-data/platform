@@ -268,6 +268,75 @@ pub fn cleared_for_every(cleared_sets: &[Vec<String>]) -> Option<Vec<String>> {
     cleared
 }
 
+/// The mechanism versions a StarRocks EP's view guard (M13) is folded at:
+/// each distinct version of its bound engines, in name order (the loader reads
+/// them `ORDER BY name`), first appearance first; or, with no engine bound, the
+/// version of egret's default image for the engine type, which is the version
+/// `explain` evaluates an unbound profile at.
+///
+/// `Err` is the skip reason, naming the engine and the remedy. An engine whose
+/// version is unknown (`BoundEngine::version` is `Err`, today's
+/// `engine_plugin_version` sentence) makes the guard a skip for the whole EP
+/// (user ruling 2026-10-13): binding such an engine is not refused, and the
+/// per-column withholds are still lowered. The first such engine, in order,
+/// names the skip.
+///
+/// A version the matrix does not lower the guard at (M13 lists 2.8.0 and
+/// 2.9.0) is a skip too, with its own text. **That text is unreachable in
+/// production**: the loader's versions come from `engine_plugin_version`,
+/// which yields only modelled (engine type, version) pairs — for StarRocks
+/// exactly M13's two — so it is new text that no compile has ever emitted.
+pub fn view_guard_versions(ep: &EpInput) -> Result<Vec<String>, String> {
+    let profile = &ep.profile_name;
+    let unmodelled = |name: &str, why: &str| {
+        format!(
+            "view protection (clearance mask) not active for {profile}: engine {name} runs an \
+             image egret has not modelled — pin it to a known image (see \
+             docs/en/guides/engine-versions.md). {why}"
+        )
+    };
+    let measured = |name: &str, v: &str| {
+        if support_for_kind(
+            ep.kind,
+            Some(v),
+            ep.classification_channel,
+            &Capability::WithholdThroughView,
+        ) == Support::Lowered(LoweringKind::ViewGuardMask)
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "view protection (clearance mask) not active for {profile}: engine {name} runs \
+                 plugin version {v}, at which the view guard has not been measured — pin it to \
+                 a known image (see docs/en/guides/engine-versions.md)"
+            ))
+        }
+    };
+    let mut out: Vec<String> = Vec::new();
+    for e in &ep.engines {
+        match &e.version {
+            Ok(v) => {
+                measured(&e.name, v)?;
+                if !out.contains(v) {
+                    out.push(v.clone());
+                }
+            }
+            Err(why) => return Err(unmodelled(&e.name, why)),
+        }
+    }
+    if out.is_empty() {
+        const DEFAULT_IMAGE: &str = "(none bound; egret's default image)";
+        match &ep.default_version {
+            Ok(v) => {
+                measured(DEFAULT_IMAGE, v)?;
+                out.push(v.clone());
+            }
+            Err(why) => return Err(unmodelled(DEFAULT_IMAGE, why)),
+        }
+    }
+    Ok(out)
+}
+
 /// Everyone (the `public` group), except the `cleared` users.
 fn everyone_except(cleared: &[String]) -> Audience {
     audience_from_expanded(&PrincipalSet {
@@ -1035,6 +1104,78 @@ mod tests {
         assert_eq!(
             withheld_privileges(trino_ep(true).kind),
             vec![Privilege::Read, Privilege::Write]
+        );
+    }
+
+    fn starrocks_ep_with(engines: Vec<crate::ep::BoundEngine>) -> EpInput {
+        EpInput {
+            profile_name: "sr".into(),
+            engines,
+            ..starrocks_ep()
+        }
+    }
+    fn bound(name: &str, version: Result<&str, String>) -> crate::ep::BoundEngine {
+        crate::ep::BoundEngine {
+            name: name.into(),
+            version: version.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn the_view_guard_folds_at_each_distinct_bound_version() {
+        let ep = starrocks_ep_with(vec![
+            bound("sr-a", Ok("2.8.0")),
+            bound("sr-b", Ok("2.9.0")),
+            bound("sr-c", Ok("2.8.0")),
+        ]);
+        assert_eq!(
+            view_guard_versions(&ep).unwrap(),
+            vec!["2.8.0".to_string(), "2.9.0".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_unmodelled_engine_names_itself_m13() {
+        let ep = starrocks_ep_with(vec![bound(
+            "sr-x",
+            Err("image foo:1 is not a known image".into()),
+        )]);
+        let why = view_guard_versions(&ep).unwrap_err();
+        assert!(why.starts_with(
+            "view protection (clearance mask) not active for sr: engine sr-x runs an image \
+             egret has not modelled"
+        ));
+        assert!(why.ends_with(". image foo:1 is not a known image"));
+    }
+
+    #[test]
+    fn a_known_but_unmeasured_version_is_not_measured() {
+        let ep = starrocks_ep_with(vec![bound("sr-y", Ok("2.10.0"))]);
+        assert!(view_guard_versions(&ep).unwrap_err().contains("sr-y"));
+    }
+
+    #[test]
+    fn with_no_engine_bound_the_default_image_decides() {
+        let mut ep = starrocks_ep_with(vec![]);
+        ep.default_version = Ok("2.8.0".into());
+        assert_eq!(view_guard_versions(&ep).unwrap(), vec!["2.8.0".to_string()]);
+        ep.default_version = Err("no default".into());
+        assert!(view_guard_versions(&ep)
+            .unwrap_err()
+            .contains("engine (none bound; egret's default image) runs an image"));
+    }
+
+    #[test]
+    fn the_first_unmodelled_engine_wins_over_later_ones() {
+        let ep = starrocks_ep_with(vec![
+            bound("sr-a", Ok("2.8.0")),
+            bound("sr-b", Err("b".into())),
+            bound("sr-c", Err("c".into())),
+        ]);
+        let why = view_guard_versions(&ep).unwrap_err();
+        assert!(
+            why.contains("engine sr-b ") && why.ends_with(". b"),
+            "{why}"
         );
     }
 }

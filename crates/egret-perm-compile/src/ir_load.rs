@@ -419,7 +419,9 @@ pub(crate) async fn load_withhold_inputs(
 /// Fill `ep.engines` (each engine bound to the profile, by name, with the
 /// plugin version it runs or why that is unknown) and `ep.default_version`
 /// (the plugin of egret's default image for the engine type). One SELECT on
-/// `conn`, the one `clearance_mask::fold_plugin_versions` used to make.
+/// `conn`, the one the clearance-mask fold has always made, at the same point
+/// (`trigger::fold_clearance_masks`, before
+/// `egret_perm_ir::lower::withhold::view_guard_versions` decides the versions).
 pub(crate) async fn bound_engines(
     conn: &mut sqlx::PgConnection,
     ep: &mut EpInput,

@@ -59,7 +59,6 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use egret_perm::{CompileError, EngineType};
-use egret_perm_ir::ep::EpInput;
 use egret_policy::admin::{masking_to_ranger_json, MaskItemInput, MaskingPolicyInput};
 use egret_policy::COMPILER_CLEARANCE_PREFIX;
 use egret_ranger_eval::eval::{
@@ -419,66 +418,14 @@ pub(crate) fn fold_at_versions(
     })
 }
 
-/// The plugin versions a profile's clearance masks can be folded at, or why
-/// none can.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum FoldVersions {
-    Modelled(Vec<PluginVersion>),
-    /// The skip reason, naming the engine and the remedy.
-    Unmodelled(String),
-}
-
-/// The Ranger plugin versions a profile's clearance masks are folded at: each
-/// distinct version of its bound engines, or — with no engine bound — the
-/// plugin of egret's default image for the engine type, which is the version
-/// `explain` evaluates an unbound profile at. An engine whose (type, version)
-/// pair the evaluator does not model makes the masks a SKIP for the profile,
-/// naming the engine (user ruling 2026-10-13): binding such an engine is not
-/// refused, and the per-column denies are still compiled.
-///
-/// Reads nothing: `ep.engines` and `ep.default_version` are filled by
-/// [`crate::ir_load::bound_engines`] before this is called.
-pub(crate) fn fold_plugin_versions(ep: &EpInput, profile: &str) -> FoldVersions {
-    let unmodelled = |name: &str, why: String| {
-        FoldVersions::Unmodelled(format!(
-            "view protection (clearance mask) not active for {profile}: engine {name} runs an \
-             image egret has not modelled — pin it to a known image (see \
-             docs/en/guides/engine-versions.md). {why}"
-        ))
-    };
-    let parse = |label: &str| {
-        crate::ir_load::plugin_version_from_label(label)
-            .ok_or_else(|| format!("plugin version {label} has no evaluator variant"))
-    };
-    let mut out: Vec<PluginVersion> = Vec::new();
-    for e in &ep.engines {
-        match e.version.as_deref().map_err(Clone::clone).and_then(parse) {
-            Ok(v) if !out.contains(&v) => out.push(v),
-            Ok(_) => {}
-            Err(why) => return unmodelled(&e.name, why),
-        }
-    }
-    if out.is_empty() {
-        match ep
-            .default_version
-            .as_deref()
-            .map_err(Clone::clone)
-            .and_then(parse)
-        {
-            Ok(v) => out.push(v),
-            Err(why) => return unmodelled("(none bound; egret's default image)", why),
-        }
-    }
-    FoldVersions::Modelled(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
     /// M13: the view guard is lowered at exactly the StarRocks plugin versions
-    /// egret models, the ones `fold_plugin_versions` accepts.
+    /// egret models, the ones `egret_perm_ir::lower::withhold::view_guard_versions`
+    /// accepts.
     #[test]
     fn matrix_view_guard_versions_equal_the_modelled_starrocks_plugins() {
         use egret_perm_ir::matrix::{Versions, ENTRIES};

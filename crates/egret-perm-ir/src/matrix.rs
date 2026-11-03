@@ -377,7 +377,7 @@ pub fn support_for_kind(
 
 /// Every bound engine's version must support `cap` the same way; with none
 /// bound, egret's default image decides (as
-/// `clearance_mask::fold_plugin_versions` does).
+/// [`crate::lower::withhold::view_guard_versions`] does).
 pub fn support(ep: &EpInput, cap: &Capability) -> Support {
     let versions: Vec<Option<&str>> = if ep.engines.is_empty() {
         vec![ep.default_version.as_deref().ok()]

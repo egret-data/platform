@@ -883,7 +883,7 @@ async fn fold_clearance_masks(
             }),
     );
 
-    use crate::clearance_mask::{FoldVersions, Folded};
+    use crate::clearance_mask::Folded;
     let merged = crate::clearance_mask::merge_by_column(pending);
     let mut skip = |tag_id: Uuid, reason: String| {
         tracing::warn!(service_id, tag_id = %tag_id, reason = %reason,
@@ -897,11 +897,29 @@ async fn fold_clearance_masks(
     // The bound engines are read HERE, after the enabled policies above, as
     // they always were: see `crate::ir_load`'s module doc.
     crate::ir_load::bound_engines(conn, ep).await?;
-    let plugins = match crate::clearance_mask::fold_plugin_versions(ep, profile) {
-        FoldVersions::Modelled(v) => v,
+    // The versions are the IR's decision (matrix M13); turning its labels into
+    // the evaluator's enum is this target's shape. A label with no variant is
+    // unreachable (M13 lists 2.8.0 and 2.9.0, both variants), so its skip text
+    // is new and no compile has ever emitted it; it is a skip, not a panic,
+    // because the cause would be the matrix, not anything a steward wrote.
+    let decided = egret_perm_ir::lower::withhold::view_guard_versions(ep).and_then(|labels| {
+        labels
+            .iter()
+            .map(|label| {
+                crate::ir_load::plugin_version_from_label(label).ok_or_else(|| {
+                    format!(
+                        "view protection (clearance mask) not active for {profile}: plugin \
+                         version {label} has no evaluator variant"
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()
+    });
+    let plugins = match decided {
+        Ok(v) => v,
         // An engine-level reason: no mask for ANY column of this profile,
         // one skip per column so each classified column says so.
-        FoldVersions::Unmodelled(reason) => {
+        Err(reason) => {
             for p in &merged {
                 skip(p.tag_id, reason.clone());
             }
