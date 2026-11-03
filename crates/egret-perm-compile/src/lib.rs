@@ -17,31 +17,40 @@
 //! none of which need Ranger) and on `egret-policy`. `egret-perm` itself
 //! carries no `egret-policy` dependency at all.
 //!
-//! This module builds typed `egret_policy::admin::{AccessPolicyInput,
-//! AccessItemInput, ResourceLevel, MaskingPolicyInput, RowFilterPolicyInput,
-//! ...}` values and leaves RENDERING those to JSON to that existing code —
-//! nothing here hand-writes a Ranger policy body from scratch. `ranger/rules.rs`'s
-//! `stamp_service_type` is the one place this module touches an already-
-//! rendered `Value` after the fact, fixing a `serviceType` the renderer
-//! itself hardcodes to `"trino"` — that is a targeted correction of one
-//! field, not hand-written JSON. See `ranger/grants.rs` for `compile_grant` (grants
-//! → access policies, decided by `egret_perm_ir::lower::grants`) and
-//! `ranger/rules.rs` for `compile_rule`'s rendering (named rules →
-//! masking/row-filter policies, decided — StarRocks tag expansion included —
-//! by `egret_perm_ir::lower::rules`), and
-//! `egret_perm::actions` for the `Action` → Ranger access-type map the
-//! former consumes.
+//! **The pipeline (governance sub-project 1).** A profile's compile is four
+//! stages, driven by `trigger::compile_desired`:
 //!
-//! **`trigger::recompile_service` (SP4a Task 7)** is this crate's first real
-//! caller of `compile_grant`/`compile_rule` outside their own tests — nothing
-//! else in the codebase called either before this. It loads a profile's
-//! model, resolves the registry/tag reads `compile_grant`/`compile_rule`
-//! themselves stay free of (see those modules' doc comments), and diffs the
+//! 1. **Load** (`ir_load`): every store read the lowerings need, on the
+//!    caller's connection, as stored (`load_ep`, then the per-family loaders).
+//!    `load_ep` does not read the bound engines; `ir_load::bound_engines` runs
+//!    inside `fold_clearance_masks`, at the point the old code read them.
+//! 2. **Lower** (crate `egret-perm-ir`, `lower::{grants, rules, withhold,
+//!    engine_privileges}`): all decisions (scope, skip, refusal, StarRocks tag
+//!    expansion) taken on plain data, with the capability matrix saying what
+//!    each enforcement point can enforce. Pure: no database, no I/O.
+//! 3. **Render** (`ranger::{grants, rules, withhold, engine_privileges}`, via
+//!    `ranger::emit`): the neutral statements become typed
+//!    `egret_policy::admin` inputs and Ranger JSON. Shape only; nothing is
+//!    decided here. `ranger/rules.rs`'s `stamp_service_type` is the one place
+//!    an already-rendered `Value` is corrected (a `serviceType` the renderer
+//!    hardcodes to `"trino"`).
+//! 4. **Complete** (`ranger::completion`): the denies a profile needs because
+//!    of what its whole served unit does (hidden columns on StarRocks,
+//!    Iceberg metadata tables on Trino), run on the complete desired set.
+//!
+//! The D4 boundary: store-to-IR holds decisions, IR-to-Ranger renders shape
+//! only. `egret-perm-ir` has no dependency on `egret-policy`,
+//! `egret-policy-api` or `egret-ranger-eval` and no Ranger word in its public
+//! type names (`egret-perm-ir/tests/boundary.rs`).
+//!
+//! **`trigger::recompile_service` (SP4a Task 7)** loads a profile's model,
+//! resolves the registry/tag reads the lowerings stay free of, and diffs the
 //! result against `perm.compiled` so a recompile writes only what changed.
 //! `egret-bi::catalog_tags` calls it on every catalog-tag write, alongside
-//! the `tag_version` bump already there — see `trigger`'s own module doc for
+//! the `tag_version` bump already there. See `trigger`'s own module doc for
 //! why a `WorkspaceMembers`-only refusal is skipped rather than aborting the
-//! whole recompile.
+//! whole recompile. `egret_perm::actions` holds the `Action` to Ranger
+//! access-type map.
 
 // SP4d-2a Task 3: mapping a compiled Ranger policy NAME back to the `perm`
 // model object that minted it — pure, no DB, no evaluator. See that module's

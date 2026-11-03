@@ -10,7 +10,7 @@
 //! Ranger's: `Action` has two values and expands to a FIXED access-type set per
 //! engine (`egret_perm::actions::engine_accesses`), `Scope` names ONE catalog by
 //! registry UUID, `principals.exclude` emits exactly one exception item, and
-//! `grants.rs::level` hard-codes `is_excludes: false` and `is_recursive: false`.
+//! `ranger::grants::level` hard-codes `is_excludes: false` and `is_recursive: false`.
 //! Anything outside that is refused with a blocker that names it.
 //!
 //! **The subset rule is the whole point.** `Action::Write` is atomic: on Trino

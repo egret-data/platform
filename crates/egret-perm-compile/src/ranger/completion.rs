@@ -11,8 +11,7 @@
 //!   tables (`t$files`, ...) of each table a restricting policy reaches
 //!   ([`metadata_tables`]).
 //!
-//! A classification's CLEARANCE itself, which this file used to compile (as
-//! `clearance.rs`), is the IR's `withhold` effect (governance sub-project 1,
+//! A classification's CLEARANCE itself, which this file used to compile, is the IR's `withhold` effect (governance sub-project 1,
 //! Task 7): the decisions are `egret_perm_ir::lower::withhold`'s, the reads
 //! `crate::ir_load::load_withhold_inputs`', and the Ranger shape
 //! `crate::ranger::withhold`'s, whose `clearance_input` the hidden-column deny

@@ -46,7 +46,7 @@ use uuid::Uuid;
 /// The compiler-owned model object a Ranger policy NAME attributes to.
 ///
 /// - [`PolicyAttribution::Grant`] — `perm-grant-{uuid}` (`ranger::grants::compile_grant`,
-///   `grants.rs:451`). Always a bare id; a grant never mints a locator suffix.
+///   `ranger/grants.rs`). Always a bare id; a grant never mints a locator suffix.
 /// - [`PolicyAttribution::Rule`] — `perm-rule-{uuid}` (`ranger::rules::render`,
 ///   for a path-addressed rule and for a Trino tag-addressed one), or, for
 ///   StarRocks' per-column tag expansion and a table's tag row filter,

@@ -747,7 +747,7 @@ fn referenced_principals(
 ///
 /// **`role` joined this function in SP4c Task 2b, and it is a FIX.** Before it,
 /// `compile_grant` put a `role` principal straight into the Ranger `roles`
-/// bucket (`grants.rs:105`), which D0 measured is never populated — so a role
+/// bucket (`ranger/grants.rs`), which D0 measured is never populated — so a role
 /// grant matched nobody in the engine while `egret_perm::eval` matched it
 /// happily and `explain` reported an access the engine did not grant. Same
 /// divergence class D7 found for groups, on a path D7 did not look at. It is

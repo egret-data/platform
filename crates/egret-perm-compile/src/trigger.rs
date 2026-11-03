@@ -7,7 +7,7 @@
 //! tag-masking/tag-rowfilter policy that the Ranger tag plugin resolves
 //! itself; egret never has to touch it again. StarRocks has no tag service
 //! (upstream `starrocks#67458`), so the SAME rule compiles to one policy PER
-//! matching column, enumerated at compile time (`egret-perm-compile::rules`) —
+//! matching column, enumerated at compile time (`egret_perm_ir::lower::rules`) —
 //! and that enumeration is stale the moment a new column gets the tag.
 //! `egret-catalog-registry::tag_version::bump_bound_tag_versions` already
 //! bumps a bound service's `tag_version` on every tag write; this module is
@@ -21,7 +21,7 @@
 //! how writes are composed:**
 //!
 //! 1. **The sweep no longer reads through `perm.compiled`.** `perm.compiled.grant_id`/
-//!    `rule_id` are `ON DELETE CASCADE` (`migrations/0154_perm_model.sql:121-122`):
+//!    `rule_id` are `ON DELETE CASCADE` (`migrations/0154_perm_model.sql`):
 //!    deleting a grant or rule erases its PROVENANCE row, but the
 //!    `policy.authz_policies` row it produced survives untouched. Round 1's
 //!    `apply_diff` joined `perm.compiled ⋈ policy.authz_policies` to find
