@@ -4,7 +4,7 @@ import { type Profile, listProfiles } from "@/api/policies";
 import { WarningCallout, profilesQueryKey } from "./externalEngine";
 
 export const STARROCKS_METADATA_TABLES_SENTENCE =
-  "Unless this engine runs egret-starrocks-fe 4.1.7-egret.3 or later, its StarRocks lets users past this profile's grants, masks, row filters and classifications. Official images serve the metadata tables of Iceberg tables ($files, $partitions, $manifests, $snapshots, $history, $refs, $metadata_log_entries) without asking Ranger and apply no mask or row filter to prepared statements (Data API endpoints with parameters); official images and egret's earlier patched images also apply none through the HTTP SQL API or Arrow Flight SQL, let anyone read object storage through FILES(), and let a masked or filtered user store a table's rows in the clear in a materialized view. Run the engine on egret-starrocks-fe 4.1.7-egret.3 or later (the default for new engines), or give StarRocks logins only to people who may see every value and serve masked or filtered data through Trino.";
+  "Unless this engine runs egret-starrocks-fe 4.1.7-egret.4 or later, its StarRocks lets users past this profile's grants, masks, row filters and classifications. Official images serve the metadata tables of Iceberg tables ($files, $partitions, $manifests, $snapshots, $history, $refs, $metadata_log_entries) without asking Ranger and apply no mask or row filter to prepared statements (Data API endpoints with parameters); official images and egret's earlier patched images also apply none through the HTTP SQL API or Arrow Flight SQL, let anyone read object storage through FILES(), and let a masked or filtered user store a table's rows in the clear in a materialized view; images before 4.1.7-egret.4 also show a filtered user the statistics of the rows it hides through EXPLAIN COSTS, and let anyone reach object storage with the cluster's own identity through BROKER LOAD, EXPORT and SELECT INTO OUTFILE without keys. Run the engine on egret-starrocks-fe 4.1.7-egret.4 or later (the default for new engines), or give StarRocks logins only to people who may see every value and serve masked or filtered data through Trino.";
 
 /** egret's patched StarRocks FE image: `<N.N.N>-egret.<N>`, with or without its digest. */
 const PATCHED_STARROCKS_FE =
@@ -12,14 +12,14 @@ const PATCHED_STARROCKS_FE =
 
 /**
  * The first patch level of each upstream release that closes every hole the warning names
- * (egret-starrocks: 0001 to 0007 on 4.1.7). A later upstream release starts at level 1 with
+ * (egret-starrocks: 0001 to 0009 on 4.1.7). A later upstream release starts at level 1 with
  * every patch rebased onto it, so any level of it counts.
  */
-const FIRST_COMPLETE = { release: [4, 1, 7], level: 3 } as const;
+const FIRST_COMPLETE = { release: [4, 1, 7], level: 4 } as const;
 
 /**
  * Whether `image` is an egret-patched StarRocks FE that closes every hole the warning
- * describes: 4.1.7 from egret.3, or any later release. Anything else, including an earlier
+ * describes: 4.1.7 from egret.4, or any later release. Anything else, including an earlier
  * patch level and an engine whose image egret does not know, is treated as unpatched.
  */
 export function isPatchedStarRocksImage(image: string | null | undefined): boolean {
