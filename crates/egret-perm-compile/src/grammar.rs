@@ -195,7 +195,7 @@ pub enum Blocker {
     /// A tag-addressed ACCESS policy (`policyType` 0 with a `tag` resource).
     /// The only tag access policy the model has is a CLEARANCE, and its
     /// cleared set is the MEMBERSHIP of `required_roles`, enumerated at
-    /// compile time (`crate::clearance`): a hand-written list of users cannot
+    /// compile time (`crate::ir_load::load_withhold_inputs`): a hand-written list of users cannot
     /// be inverted into roles, and a tag ALLOW has no model at all. Clearance
     /// migration is therefore OUT OF SCOPE (user ruling, 2026-10-10).
     ClearanceNotExpressible,

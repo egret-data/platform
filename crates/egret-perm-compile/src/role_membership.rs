@@ -25,7 +25,7 @@
 //! # ONE trigger, TWO consumers
 //!
 //! The enumeration happens in two places — a clearance's `denyExceptions`
-//! ([`crate::clearance`]) and a `role` principal in a grant
+//! ([`crate::ir_load::load_withhold_inputs`]) and a `role` principal in a grant
 //! ([`crate::members`]) — and both read the same `role_usernames`, which mints
 //! a holder's missing username (2026-10-18 design R5), so the recompile a
 //! grant triggers names a holder who never used an engine. So there is

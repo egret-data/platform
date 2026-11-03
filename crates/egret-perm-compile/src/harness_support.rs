@@ -2,8 +2,8 @@
 //!
 //! The differential asks the real Ranger jars about the bodies egret emits, so
 //! it must be handed the bodies the compiler's own functions produce, not a
-//! hand-copied JSON. `fold_clearance_mask` and `mv_deny_inputs` are
-//! crate-private; these wrappers are the single, doc-hidden crossing. They add
+//! hand-copied JSON. `fold_clearance_mask` and the `ranger::withhold`
+//! renderers are crate-private; these wrappers are the single, doc-hidden crossing. They add
 //! no logic of their own.
 
 use serde_json::Value;
@@ -13,9 +13,13 @@ use egret_perm::{CompileError, EngineType};
 use egret_policy::admin::access_to_ranger_json;
 use egret_ranger_eval::eval::PluginVersion;
 
-use crate::clearance::{mv_deny_inputs, starrocks_deny, withheld_accesses, WHOLE_TABLE_COLUMN};
+use egret_perm_ir::ep::{EpKind, Mechanism};
+use egret_perm_ir::lower::withhold::{cleared_for_every, withheld_privileges};
+
 use crate::clearance_mask::{clearance_mask_name, fold_clearance_mask};
+use crate::ranger::grants::read_write_accesses;
 use crate::ranger::rules::stamp_service_type;
+use crate::ranger::withhold::{mv_deny_input, starrocks_deny, MV_CATALOG, WHOLE_TABLE_COLUMN};
 use crate::rules::TaggedColumn;
 
 /// The StarRocks clearance mask body for `column`, folded over `others`.
@@ -39,19 +43,24 @@ pub fn starrocks_clearance_mask(
 }
 
 /// The `create materialized view` deny bodies for the given (column, cleared)
-/// pairs, stamped as `compile_clearance` stamps them: at most one, on
-/// `default_catalog`/`*` (A3 revised 2026-10-14).
+/// pairs, as the recompile builds them: at most one, on `default_catalog`/`*`
+/// (A3 revised 2026-10-14), excepting the users cleared for every pair
+/// (`egret_perm_ir::lower::withhold::cleared_for_every`).
 pub fn starrocks_mv_denies(service: &str, pending: &[(TaggedColumn, Vec<String>)]) -> Vec<Value> {
     let cleared: Vec<Vec<String>> = pending.iter().map(|(_, c)| c.clone()).collect();
-    mv_deny_inputs(&cleared, service)
+    cleared_for_every(&cleared)
         .into_iter()
-        .map(|(_, input)| stamp_service_type(access_to_ranger_json(&input), EngineType::StarRocks))
+        .map(|cleared| {
+            let (_, input) = mv_deny_input(MV_CATALOG, cleared, service);
+            stamp_service_type(access_to_ranger_json(&input), EngineType::StarRocks)
+        })
         .collect()
 }
 
 /// The whole-table clearance deny (D2, user decision U1) on
-/// `{catalog}.{schema}.{table}`, excepting `cleared`, as `compile_clearance`
-/// builds it: `select` denied to `{public}` on `column: *`.
+/// `{catalog}.{schema}.{table}`, excepting `cleared`, as the recompile
+/// builds it: the privileges the IR withholds on StarRocks (`select`) denied
+/// to `{public}` on `column: *`.
 pub fn starrocks_table_clearance_deny(
     service: &str,
     tag_id: Uuid,
@@ -61,11 +70,15 @@ pub fn starrocks_table_clearance_deny(
     cleared: &[String],
 ) -> Result<Value, CompileError> {
     let all = TaggedColumn::new(catalog, schema, table, WHOLE_TABLE_COLUMN)?;
+    let privileges = withheld_privileges(EpKind {
+        engine: EngineType::StarRocks,
+        mechanism: Mechanism::Ranger,
+    });
     let (_, body) = starrocks_deny(
         tag_id,
         service,
         &all,
-        &withheld_accesses(EngineType::StarRocks)?,
+        &read_write_accesses(&privileges, EngineType::StarRocks, "harness_support")?,
         cleared.to_vec(),
     );
     Ok(body)

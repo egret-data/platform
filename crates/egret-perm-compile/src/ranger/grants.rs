@@ -106,6 +106,37 @@ pub(crate) fn expanded_principal_item(
     item_from_members(&audience.include, effect, accesses)
 }
 
+/// The access types `privileges` name on engine `e`, each once, in order:
+/// `Read` and `Write` through the `Action` → access-type map
+/// (`egret_perm::engine_accesses`), so a statement cannot drift from what the
+/// model can express. `CreateMaterializedView` is refused: no grant or
+/// withhold carries it (`caller` names the renderer in the refusal). Shared
+/// with `crate::ranger::withhold`.
+pub(crate) fn read_write_accesses(
+    privileges: &[Privilege],
+    e: EngineType,
+    caller: &str,
+) -> Result<Vec<String>, CompileError> {
+    let mut accesses: Vec<String> = Vec::new();
+    for p in privileges {
+        let action = match p {
+            Privilege::Read => Action::Read,
+            Privilege::Write => Action::Write,
+            Privilege::CreateMaterializedView => {
+                return Err(CompileError::Db(format!(
+                    "{caller} handed a CreateMaterializedView privilege"
+                )))
+            }
+        };
+        for acc in engine_accesses(action, e)? {
+            if !accesses.iter().any(|a| a == acc) {
+                accesses.push((*acc).to_string());
+            }
+        }
+    }
+    Ok(accesses)
+}
+
 /// The Ranger resource-level names the target engine's service-def declares
 /// for a catalog/schema/table/column path, in that order. Trino calls the
 /// second level `schema`; StarRocks calls it `database`
@@ -342,23 +373,7 @@ pub(crate) fn render_grant(
         )));
     };
 
-    let mut accesses: Vec<String> = Vec::new();
-    for p in privileges {
-        let action = match p {
-            Privilege::Read => Action::Read,
-            Privilege::Write => Action::Write,
-            Privilege::CreateMaterializedView => {
-                return Err(CompileError::Db(
-                    "render_grant handed a CreateMaterializedView privilege".to_string(),
-                ))
-            }
-        };
-        for acc in engine_accesses(action, e)? {
-            if !accesses.iter().any(|a| a == acc) {
-                accesses.push((*acc).to_string());
-            }
-        }
-    }
+    let accesses = read_write_accesses(privileges, e, "render_grant")?;
 
     let item = item_from_members(&s.audience.include, effect, &accesses)?;
 

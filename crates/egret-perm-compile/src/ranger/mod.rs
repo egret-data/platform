@@ -11,6 +11,7 @@ use crate::trigger::{DesiredPolicy, SkippedItem, SourceKind};
 
 pub(crate) mod grants;
 pub(crate) mod rules;
+pub(crate) mod withhold;
 
 /// One statement rendered for one Ranger service: the policy body, its name
 /// (the desired-set key) and where it came from.

@@ -230,7 +230,7 @@ pub async fn compute_lineage(
 /// matches; the catalog joins on `registry.catalogs.name` (module doc).
 ///
 /// A group-only gate is included although the compiler cannot enforce it on an
-/// engine (`crate::clearance`'s skip): the view column carries the same
+/// engine (`egret_perm_ir::lower::withhold`'s skip): the view column carries the same
 /// classification as its base, which is what Cedar enforces for it.
 ///
 /// **An empty `tables` is [`LineageError::Empty`], never "no tags"**: a caller

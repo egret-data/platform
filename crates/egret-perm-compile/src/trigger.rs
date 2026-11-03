@@ -212,7 +212,7 @@ pub const PROFILE_EXPANSION_CEILING: usize = 1000;
 /// Which half of the `perm` model a compiled policy (or a skip) came from —
 /// plus, since SP4c Task 2, a third source that is not in the `perm` model at
 /// all: a TAG's classification clearance (`classification_policies`), compiled
-/// by [`crate::clearance`]. Its `SkippedItem::id` is the `tags.id`, not a
+/// by `egret_perm_ir::lower::withhold` ([`crate::ranger::withhold`]). Its `SkippedItem::id` is the `tags.id`, not a
 /// grant or rule id. And since F11 a fourth: an ENGINE GRANT
 /// (`perm.engine_grants`, [`crate::engine_grants`]), whose id is the engine
 /// grant's.
@@ -459,29 +459,38 @@ pub(crate) async fn compile_desired(
 
     // **SP4c Task 2: a classification's CLEARANCE, which AMENDS SP4a's D2**
     // ("tags drive rules only, never access") — the argument is at the site,
-    // in `crate::clearance`'s module doc, because a classification exists to
-    // withhold data and a mask still answers the query. Clearances come from
-    // `classification_policies`, not from the `perm` model.
+    // in `crate::ranger::withhold`'s module doc, because a classification
+    // exists to withhold data and a mask still answers the query. Clearances
+    // come from `classification_policies`, not from the `perm` model.
     //
-    // **Installation-wide on Trino, service-scoped on StarRocks** (SP4c Task
-    // 2d). A Trino clearance is one TAG policy carrying no catalog resource, so
-    // it compiles identically into every Trino profile with a tag service. A
-    // StarRocks clearance expands to one ACCESS deny per tagged column
-    // reachable from THIS service — the same `tag_assignments_for_service_via`
-    // expansion a tag-selected rule uses above — so `service_id` and the
-    // profile's own name both have to reach the compiler.
-    let clearances = crate::clearance::compile_clearance(
-        conn,
-        engine,
-        service_id,
-        &profile_name,
-        tag_service.as_deref(),
+    // Governance sub-project 1 Task 7: decided by the IR lowering
+    // (`egret_perm_ir::lower::withhold`, the `withhold` effect) and only
+    // rendered here. **Installation-wide on Trino, service-scoped on
+    // StarRocks** (SP4c Task 2d): a Trino clearance is one TAG policy carrying
+    // no catalog resource, so it compiles identically into every Trino profile
+    // with a tag service; a StarRocks clearance expands to one ACCESS deny per
+    // tagged column reachable from THIS service — the same
+    // `tag_assignments_for_service_via` expansion a tag-selected rule uses
+    // above. The loader makes the reads the clearance compile always made, at
+    // the same point and in the same order.
+    let gates = crate::ir_load::load_withhold_inputs(conn, &ep, service_id).await?;
+    let withheld = egret_perm_ir::lower::withhold::lower_withholds(
+        &ep,
+        &gates,
+        egret_ranger_eval::resource::fold_identifier,
+        DEFAULT_EXPANSION_CEILING,
         &leaving,
-    )
-    .await?;
-    skipped.extend(clearances.skipped);
-    let whole_tables = clearances.whole_tables;
-    for (name, body) in clearances.policies {
+    )?;
+    skipped.extend(
+        withheld
+            .lowered
+            .lowerings
+            .iter()
+            .map(crate::ranger::skipped),
+    );
+    for s in &withheld.lowered.statements {
+        let (name, body) =
+            crate::ranger::withhold::render(s, &ep, &profile_name, tag_service.as_deref())?;
         let target = target_service_id(&body, &writable, &format!("clearance {name}"))?;
         desired.insert(
             (target, name),
@@ -493,6 +502,12 @@ pub(crate) async fn compile_desired(
             },
         );
     }
+    let whole_tables = withheld.whole_tables;
+    let view_guard: Vec<crate::clearance_mask::PendingMask> = withheld
+        .view_guard
+        .into_iter()
+        .map(crate::clearance_mask::PendingMask::from)
+        .collect();
 
     // **View governance A2: the StarRocks clearance MASK, folded through the
     // evaluator.** A base deny does not hold through a plain view; a base mask
@@ -503,13 +518,13 @@ pub(crate) async fn compile_desired(
     // the complete desired set holds every rule mask (exact AND wildcard) that
     // can reach the column, and BEFORE the overlap check below, which must see
     // the masks it will serve. Read `crate::clearance_mask`'s module doc.
-    if engine == EngineType::StarRocks && !clearances.masks.is_empty() {
+    if engine == EngineType::StarRocks && !view_guard.is_empty() {
         fold_clearance_masks(
             conn,
             service_id,
             &profile_name,
             engine,
-            clearances.masks,
+            view_guard,
             &mut ep,
             &writable,
             &mut desired,
@@ -628,7 +643,7 @@ pub(crate) async fn compile_desired(
     // **SP4d debt Task 6, item 1: the write side of `EvalOrderAmbiguous`** —
     // widened by SP4d-4 Task 3 to the profile's whole evaluation unit.
     // Checked HERE, on the complete desired set, because no single
-    // `compile_rule`/`compile_clearance` call can see another rule's output —
+    // `compile_rule`/`lower_withholds` call can see another rule's output —
     // the pair SP4d-1's F2 measured came from two different `perm.rules` rows
     // compiled independently, and the ambiguity exists only in their union.
     //
@@ -1721,7 +1736,7 @@ pub async fn affected_services_for_rule(
 /// real fail-OPEN gap, not a tidy-up.** Until SP4c a tag's name reached a
 /// compiled policy only through a `perm.rules` tag selector, so this function
 /// early-returned on `perm.rules` alone. A CLEARANCE also stamps `tags.name`
-/// into a Trino tag policy's `tag` resource ([`crate::clearance`]) — and a gated
+/// into a Trino tag policy's `tag` resource ([`crate::ranger::withhold`]) — and a gated
 /// tag needs no rule. So renaming a gated-but-unruled tag returned an EMPTY
 /// affected set, the clearance deny kept naming the OLD tag, and at the next tag
 /// map refresh the deny matched nothing: the classified column started answering
@@ -1758,7 +1773,7 @@ pub async fn affected_services_for_tag_rename(
 /// StarRocks clearance expands into every StarRocks profile from which any
 /// column carrying the tag is reachable. Deriving the narrow StarRocks set would
 /// mean walking `catalog_tag_assignments → catalogs → attachments → engines` for
-/// the tag here, duplicating a resolution `compile_clearance` already does
+/// the tag here, duplicating a resolution `load_withhold_inputs` already does
 /// per-service — and getting it wrong in the narrow direction is the failure
 /// this function exists to prevent, while getting it wrong WIDE costs one
 /// recompile that writes nothing (`apply_diff_in_tx` diffs each body
@@ -1788,7 +1803,7 @@ pub async fn affected_services_for_classification(
 /// and `disableRoleResolution` defaults true; D0b re-derived it for StarRocks,
 /// where `setUserRoles` is never called anywhere in `fe/`). So egret enumerates
 /// the holders at compile time in **two** places — a clearance's
-/// `denyExceptions` ([`crate::clearance`], SP4c Task 2/2d) and a `role`
+/// `denyExceptions` ([`crate::ir_load::load_withhold_inputs`], SP4c Task 2/2d) and a `role`
 /// principal in a grant ([`crate::members`], SP4c Task 2b) — and both read the
 /// same `role_usernames`, which mints a holder's missing username (2026-10-18
 /// design R5), so a holder is named from the compile their grant triggers, not
@@ -1976,7 +1991,7 @@ pub async fn affected_services_for_workspace_members(
 ///
 /// **There is deliberately no clearance arm.** A tag's `required_groups` is not
 /// expanded — a group-only gate still compiles to nothing and reports the skip
-/// (`crate::clearance`'s module doc) — so no clearance body names a group's
+/// (`egret_perm_ir::lower::withhold`'s module doc) — so no clearance body names a group's
 /// members, and nothing there can go stale.
 ///
 /// `public` contributes nothing: it is never expanded (every engine resolves

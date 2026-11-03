@@ -714,7 +714,7 @@ impl Gate {
     }
 
     /// The gate names only groups and engines do not enforce them (M10), so
-    /// nothing is compiled for it (`clearance.rs`, the groups-only skip).
+    /// nothing is compiled for it (`egret_perm_ir::lower::withhold`, the groups-only skip).
     /// [`gates_via`] never returns a gate with both lists empty.
     fn groups_only_not_enforced(&self) -> bool {
         self.required_roles.is_empty() && self.group_half_not_enforced()
@@ -722,7 +722,7 @@ impl Gate {
 }
 
 /// Every gate, and the names of the groups they require. Both lists empty is
-/// no gate (`clearance.rs`, "BOTH lists empty is NO gate").
+/// no gate (`egret_perm_ir::lower::withhold::lower_withholds`).
 async fn gates_via(
     conn: &mut sqlx::PgConnection,
 ) -> Result<(Vec<Gate>, BTreeMap<Uuid, String>), CompileError> {
@@ -1604,7 +1604,7 @@ async fn group_role_holders_via(
 /// Direct role holders and group members come from the compiler's own reads
 /// ([`role_holders_via`], [`group_members_via`]), never a predicate written
 /// here, so the people marked `on_engines` are exactly those a compile
-/// excepts from the deny (`crate::clearance`, which reads
+/// excepts from the deny (`crate::ir_load::load_withhold_inputs`, which reads
 /// [`crate::members::role_usernames`] over the same [`role_holders_via`]).
 pub async fn cleared_people_via(
     conn: &mut sqlx::PgConnection,
@@ -1636,7 +1636,7 @@ pub async fn cleared_people_via(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    // `crate::clearance`: a gate with no required role compiles to nothing
+    // `egret_perm_ir::lower::withhold`: a gate with no required role compiles to nothing
     // on engines.
     let engines_enforce = !roles.is_empty();
     // A gate stores group ids; membership is read by name, the key the

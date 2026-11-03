@@ -34,7 +34,7 @@
 //! **Prefixes are the compiler's own** (`egret_policy::{COMPILER_GRANT_PREFIX,
 //! COMPILER_RULE_PREFIX, COMPILER_CLEARANCE_PREFIX}`) — this module does not
 //! keep a second copy of those strings, for the same reason `ranger/grants.rs`,
-//! `ranger/rules.rs`, `clearance.rs`, and `trigger.rs` all import them rather than
+//! `ranger/rules.rs`, `ranger/withhold.rs`, `clearance.rs`, and `trigger.rs` all import them rather than
 //! re-typing them: two independent copies would drift.
 
 use egret_policy::{
@@ -59,9 +59,9 @@ use uuid::Uuid;
 ///   `catalog.schema.table.column`) and further parsing is not this
 ///   function's job.
 /// - [`PolicyAttribution::Clearance`] — `perm-clearance-{tag_id}`
-///   (`clearance::compile_clearance`, `clearance.rs:307`), or, for
+///   (`ranger::withhold::render`, a classification statement), or, for
 ///   StarRocks' per-column expansion, `perm-clearance-{tag_id}-{locator}`
-///   (`clearance.rs:354`). `tag_id` names a `tags.id` row — a third object
+///   (`ranger::withhold::starrocks_deny`). `tag_id` names a `tags.id` row — a third object
 ///   class, neither a grant nor a rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyAttribution {
@@ -77,7 +77,7 @@ pub enum PolicyAttribution {
         tag_id: Uuid,
         locator: Option<String>,
     },
-    /// `perm-clearance-mv` (`clearance::mv_deny_inputs`, view governance A3):
+    /// `perm-clearance-mv` (`ranger::withhold::mv_deny_input`, view governance A3):
     /// the engine-wide `create materialized view` deny of a StarRocks profile.
     /// It belongs to no single tag: its exceptions are the users cleared for
     /// every classification on the profile.
@@ -103,7 +103,7 @@ pub fn attribute_policy_name(name: &str) -> Option<PolicyAttribution> {
         return Some(PolicyAttribution::Rule { id, locator });
     }
     if let Some(rest) = name.strip_prefix(COMPILER_CLEARANCE_PREFIX) {
-        if rest == crate::clearance::MV_DENY_SUFFIX {
+        if rest == crate::ranger::withhold::MV_DENY_SUFFIX {
             return Some(PolicyAttribution::MaterializedViewDeny);
         }
         let (tag_id, locator) = parse_uuid_and_locator(rest)?;

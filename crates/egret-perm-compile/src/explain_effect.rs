@@ -260,7 +260,7 @@ fn mask_label(mask_type: Option<&str>) -> &str {
 }
 
 /// A clearance deny on a whole table (D2): its locator ends in the `*`
-/// column ([`crate::clearance`]'s whole-table deny).
+/// column ([`crate::ranger::withhold::WHOLE_TABLE_COLUMN`]).
 fn is_whole_table_clearance(attribution: Option<&ExplainAttribution>) -> bool {
     matches!(attribution, Some(ExplainAttribution::Clearance { locator: Some(l), .. })
         if l.ends_with(".*"))

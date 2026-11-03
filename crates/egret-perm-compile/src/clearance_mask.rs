@@ -4,7 +4,7 @@
 //! # Why a mask, beside the deny
 //!
 //! On StarRocks a clearance compiles to a per-column ACCESS deny
-//! ([`crate::clearance`]). That withholds the column from a DIRECT read, and
+//! (`egret_perm_ir::lower::withhold`, [`crate::ranger::withhold`]). That withholds the column from a DIRECT read, and
 //! nothing else: a plain view is an access boundary, so a reader holding the
 //! view grant reads the classified column straight through the base deny
 //! (measured on 4.1.4 and 4.1.6). A base-column data MASK, by contrast,
@@ -111,6 +111,17 @@ pub(crate) struct PendingMask {
     /// `column` is spelled as the catalog spells it (read from the column
     /// source), rather than as an assignment was typed.
     pub(crate) catalog_spelled: bool,
+}
+
+impl From<egret_perm_ir::lower::withhold::PendingGuard> for PendingMask {
+    fn from(g: egret_perm_ir::lower::withhold::PendingGuard) -> Self {
+        Self {
+            tag_id: g.classification_id,
+            column: g.column,
+            cleared: g.cleared,
+            catalog_spelled: g.catalog_spelled,
+        }
+    }
 }
 
 /// One mask per column. A column carrying several gated classifications gets
@@ -225,7 +236,7 @@ pub(crate) fn fold_clearance_mask(
             user: user.clone(),
             // No group provider and no role download on the engines egret
             // provisions: `public` is the only group that can match, and it
-            // matches regardless (`crate::clearance`'s D0 notes).
+            // matches regardless (`crate::ranger::withhold`'s D0 notes).
             groups: BTreeSet::new(),
             roles: BTreeSet::new(),
             access_type: "select".to_string(),

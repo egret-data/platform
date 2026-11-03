@@ -15,7 +15,7 @@
 //! [`EpInput`] leaves the loader with `engines` empty and `default_version`
 //! `Err(NOT_READ)`, and the clearance-mask fold fills both at the old point.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use egret_perm::Selector;
 use egret_perm::{
@@ -25,12 +25,17 @@ use egret_perm::{
 use egret_perm_ir::audience::Directory;
 use egret_perm_ir::ep::{BoundEngine, EpInput, EpKind, Mechanism};
 use egret_perm_ir::lower::rules::{needs_tagged_tables, RuleInputs};
+use egret_perm_ir::lower::withhold::{
+    needs_table_shapes, needs_targets, Gate, GateTarget, TableShape,
+};
 use egret_perm_ir::statement::{Lowering, ReasonCode, Source};
 use egret_policy::{
     catalogs_for_service_via, get_service_by_id_via, service_id_by_name_via,
     tag_assignments_for_service_via, tag_name_for_key_via,
 };
 use egret_ranger_eval::eval::PluginVersion;
+
+use crate::table_columns::{active_views_batch_via, current_columns_batch_via, TableKey};
 use uuid::Uuid;
 
 /// `EpInput::default_version` before [`bound_engines`] has run.
@@ -257,6 +262,158 @@ pub(crate) async fn load_rule_inputs(
         );
     }
     Ok((inputs, skips))
+}
+
+/// One `classification_policies` row joined to the tag it gates. A row whose
+/// tag no longer exists is dropped by the join — there is no tag left to deny
+/// on.
+#[derive(sqlx::FromRow)]
+struct GateRow {
+    tag_id: Uuid,
+    /// `tags.name`, never `tags.key` (see [`Gate::classification_name`]).
+    tag_name: String,
+    /// `tags.key` — the STABLE identifier, needed only to read the targets:
+    /// `tag_assignments_for_service_via` selects assignments by key, the same
+    /// lookup [`load_rule_inputs`] does for a tag-selected rule.
+    tag_key: String,
+    required_roles: Vec<String>,
+    required_groups: Vec<Uuid>,
+}
+
+/// Read every gated classification for the enforcement point `ep`
+/// (`service_id`), as [`egret_perm_ir::lower::withhold::lower_withholds`]
+/// consumes them. The statements, on `conn`, in the order the clearance
+/// compile always made them:
+///
+/// 1. every `classification_policies` row joined to its tag, by `tag_id`
+///    (no gate: nothing else is read);
+/// 2. the holders of every role any gate names, in one query, a holder with
+///    no username minted (`MissingUsername::Mint`, 2026-10-18 design R5, R6:
+///    a clearing-role holder is excepted now, not after the recompile that
+///    follows their first query). This runs after the model expansion's
+///    mints ([`load_ep`]), as it always has;
+/// 3. per gate, in order, the tables carrying its tag on this service, when
+///    [`needs_targets`] (StarRocks, a gate naming a role);
+/// 4. when [`needs_table_shapes`]: one column read for every table any gate
+///    classifies as a whole (folded, first spelling), then one view read for
+///    the names the column read did not find — a name with no columns may be
+///    a VIEW, which never becomes a table (KI-307 follow-up).
+///
+/// `cleared` is the UNION of the gate's roles' holders, sorted and
+/// deduplicated.
+pub(crate) async fn load_withhold_inputs(
+    conn: &mut sqlx::PgConnection,
+    ep: &EpInput,
+    service_id: i64,
+) -> Result<Vec<Gate>, CompileError> {
+    use egret_ranger_eval::resource::fold_identifier as fold;
+
+    let rows: Vec<GateRow> = sqlx::query_as(
+        "SELECT cp.tag_id, t.name AS tag_name, t.key AS tag_key, cp.required_roles, \
+                cp.required_groups \
+           FROM classification_policies cp \
+           JOIN tags t ON t.id = cp.tag_id \
+          ORDER BY cp.tag_id",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(CompileError::from_db)?;
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // One query for every role named by every gate, rather than one per tag.
+    let wanted: Vec<String> = rows
+        .iter()
+        .flat_map(|g| g.required_roles.iter().cloned())
+        .collect::<std::collections::BTreeSet<String>>()
+        .into_iter()
+        .collect();
+    let members =
+        crate::members::role_usernames(conn, &wanted, crate::members::MissingUsername::Mint)
+            .await?;
+
+    let mut gates: Vec<Gate> = Vec::with_capacity(rows.len());
+    // Each gate's targets with their warehouse, which the catalog reads need.
+    let mut targets: Vec<Vec<crate::rules::TableTarget>> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut cleared: Vec<String> = Vec::new();
+        for role in &row.required_roles {
+            if let Some(names) = members.get(role) {
+                cleared.extend(names.iter().cloned());
+            }
+        }
+        cleared.sort();
+        cleared.dedup();
+        let gate = Gate {
+            classification_id: row.tag_id,
+            classification_name: row.tag_name,
+            required_roles: row.required_roles,
+            required_groups_empty: row.required_groups.is_empty(),
+            cleared,
+            targets: Vec::new(),
+        };
+        let read = if needs_targets(ep, &gate) {
+            crate::rules::group_by_table(
+                tag_assignments_for_service_via(conn, service_id, &row.tag_key)
+                    .await
+                    .map_err(crate::db_error::from_store)?,
+            )
+        } else {
+            Vec::new()
+        };
+        gates.push(gate);
+        targets.push(read);
+    }
+    if !needs_table_shapes(ep, &gates) {
+        return Ok(gates);
+    }
+
+    type Key = (Uuid, String, String);
+    let key_of = |t: &crate::rules::TableTarget| -> Key {
+        (t.warehouse_id, fold(&t.schema), fold(&t.table))
+    };
+    let mut keys: Vec<TableKey> = Vec::new();
+    let mut index: HashMap<Key, usize> = HashMap::new();
+    for t in targets.iter().flatten().filter(|t| t.table_level) {
+        index.entry(key_of(t)).or_insert_with(|| {
+            keys.push(TableKey {
+                warehouse_id: t.warehouse_id,
+                schema: t.schema.clone(),
+                table: t.table.clone(),
+            });
+            keys.len() - 1
+        });
+    }
+    let found = current_columns_batch_via(conn, &keys).await?;
+    let missing: Vec<usize> = (0..keys.len()).filter(|&i| found[i].is_none()).collect();
+    let missing_keys: Vec<TableKey> = missing.iter().map(|&i| keys[i].clone()).collect();
+    let views: HashSet<usize> = missing
+        .iter()
+        .zip(active_views_batch_via(conn, &missing_keys).await?)
+        .filter_map(|(&i, view)| view.then_some(i))
+        .collect();
+    for (gate, read) in gates.iter_mut().zip(targets) {
+        gate.targets = read
+            .iter()
+            .map(|t| GateTarget {
+                table: t.to_tagged(),
+                shape: match index.get(&key_of(t)) {
+                    Some(&i) => match &found[i] {
+                        Some(c) => TableShape::Known {
+                            schema: c.schema.clone(),
+                            table: c.table.clone(),
+                            columns: c.columns.clone(),
+                        },
+                        None if views.contains(&i) => TableShape::View,
+                        None => TableShape::Unknown,
+                    },
+                    None => TableShape::Unknown,
+                },
+            })
+            .collect();
+    }
+    Ok(gates)
 }
 
 /// Fill `ep.engines` (each engine bound to the profile, by name, with the

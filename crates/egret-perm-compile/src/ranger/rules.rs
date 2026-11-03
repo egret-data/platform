@@ -380,7 +380,7 @@ pub(crate) fn declared_mask_types(e: EngineType) -> Result<Vec<String>, CompileE
 /// group would carry `MASK_NONE`/an empty filter for "everyone", exempting
 /// every principal from the rule — the one fail-open this exempt design
 /// otherwise avoids by refusing everything it cannot express correctly.
-// `pub(crate)`: SP4c's clearance compiler (`crate::clearance`) puts this SAME
+// `pub(crate)`: SP4c's clearance renderer (`crate::ranger::withhold`) puts this SAME
 // literal on the deny side of a tag policy to mean "everybody", which is the
 // half of Ranger's deny/deny-exception pair D0 measured IS expressible. Two
 // copies of this string would drift, and a drift makes a control that withholds
