@@ -71,20 +71,22 @@ pub struct Member {
 pub struct Audience {
     pub include: Vec<Member>,
     pub except: Vec<Member>,
-    /// Whether `[include, exclude]` named anything expandable. A half that
-    /// did not is handed back unchanged by [`Audience::to_principal_set`],
-    /// duplicates included, as the compiler always has.
-    pub(crate) touched: [bool; 2],
 }
+
+/// The bridge back to a `PrincipalSet` is gone (governance sub-project 1,
+/// Task 10): every family reads the audience.
+///
+/// ```compile_fail
+/// let _ = egret_perm_ir::audience::Audience::default().to_principal_set(&Default::default());
+/// ```
+#[doc(hidden)]
+pub struct BridgeRemoved;
 
 /// Expand `set` against `dir`. Each half is expanded on its own.
 pub fn audience(set: &PrincipalSet, dir: &Directory) -> Audience {
-    let (include, inc_touched) = expand(&set.include, dir);
-    let (except, exc_touched) = expand(&set.exclude, dir);
     Audience {
-        include,
-        except,
-        touched: [inc_touched, exc_touched],
+        include: expand(&set.include, dir),
+        except: expand(&set.exclude, dir),
     }
 }
 
@@ -109,31 +111,15 @@ pub fn audience_from_expanded(set: &PrincipalSet) -> Audience {
     Audience {
         include: direct(&set.include),
         except: direct(&set.exclude),
-        touched: [false, false],
-    }
-}
-
-impl Audience {
-    /// The bridge for compiler families not yet lowered onto the IR: the
-    /// audience as a `PrincipalSet` of `User` entries and the `public` group.
-    /// A half that named nothing expandable comes back as `original` has it.
-    /// Deleted once every family reads the audience (Task 10).
-    pub fn to_principal_set(&self, original: &PrincipalSet) -> PrincipalSet {
-        let half = |touched: bool, members: &[Member], orig: &[Principal]| -> Vec<Principal> {
-            if !touched {
-                return orig.to_vec();
-            }
-            members.iter().map(|m| m.name.to_principal()).collect()
-        };
-        PrincipalSet {
-            include: half(self.touched[0], &self.include, &original.include),
-            exclude: half(self.touched[1], &self.except, &original.exclude),
-        }
     }
 }
 
 impl MemberName {
-    fn to_principal(&self) -> Principal {
+    /// The principal this member is handed to an enforcement point as: a
+    /// `User`, the `public` group, or the unexpanded principal as authored.
+    /// The families check each member through it, so a member is refused
+    /// exactly as the principal it stands for always was.
+    pub fn to_principal(&self) -> Principal {
         match self {
             MemberName::User(n) => Principal {
                 kind: PrincipalKind::User,
@@ -161,15 +147,25 @@ pub fn is_expanded_group(p: &Principal) -> bool {
 /// One half of a set. Explicit principals keep their place; each expansion
 /// follows in the directory's order. A name already emitted is not emitted
 /// again — a set that names `alice` explicitly AND a workspace, role or group
-/// she belongs to must not name her twice. Returns whether anything was
-/// expandable.
-fn expand(list: &[Principal], dir: &Directory) -> (Vec<Member>, bool) {
+/// she belongs to must not name her twice.
+///
+/// A half that names nothing expandable (users and `public` only) maps one to
+/// one, duplicates included: the compiler has always handed such a half to
+/// the engine as authored.
+fn expand(list: &[Principal], dir: &Directory) -> Vec<Member> {
     let touched = list.iter().any(|p| {
         matches!(
             p.kind,
             PrincipalKind::WorkspaceMembers | PrincipalKind::Role
         ) || is_expanded_group(p)
     });
+    if !touched {
+        return audience_from_expanded(&PrincipalSet {
+            include: list.to_vec(),
+            exclude: Vec::new(),
+        })
+        .include;
+    }
     let mut out: Vec<Member> = Vec::with_capacity(list.len());
     // Keyed `(kind, ref)` as the principal it lowers to, so `User("public")`
     // and `Everyone` stay distinct.
@@ -237,7 +233,7 @@ fn expand(list: &[Principal], dir: &Directory) -> (Vec<Member>, bool) {
             }
         }
     }
-    (out, touched)
+    out
 }
 
 fn users(names: Vec<String>, via: Via) -> Vec<Member> {
@@ -268,10 +264,10 @@ mod tests {
             include: vec![p(PrincipalKind::User, "a"), p(PrincipalKind::User, "a")],
             exclude: vec![],
         };
-        let out = audience(&set, &Directory::default()).to_principal_set(&set);
+        let out = expanded(&set, &Directory::default());
         assert_eq!(
             out, set,
-            "substitute_one returns early when nothing expands (members.rs:943-951)"
+            "a half naming nothing expandable is handed on as authored, duplicates included"
         );
     }
 
@@ -333,8 +329,16 @@ mod tests {
         p(PrincipalKind::WorkspaceMembers, &id.to_string())
     }
 
+    fn principals(a: &Audience) -> PrincipalSet {
+        let half = |m: &[Member]| m.iter().map(|m| m.name.to_principal()).collect();
+        PrincipalSet {
+            include: half(&a.include),
+            exclude: half(&a.except),
+        }
+    }
+
     fn expanded(set: &PrincipalSet, dir: &Directory) -> PrincipalSet {
-        audience(set, dir).to_principal_set(set)
+        principals(&audience(set, dir))
     }
 
     /// J-F3 Task 1b: a group expands to its members on BOTH sides, in place,
@@ -403,7 +407,7 @@ mod tests {
             exclude: vec![],
         };
         let a = audience(&set, &dir);
-        assert_eq!(a.to_principal_set(&set).include, vec![user("alice")]);
+        assert_eq!(principals(&a).include, vec![user("alice")]);
         assert_eq!(a.include[0].via, Via::Direct, "the first source wins");
     }
 
@@ -441,7 +445,7 @@ mod tests {
     }
 
     /// Without a directory nothing expands and every principal maps one to
-    /// one; the bridge hands the set back unchanged.
+    /// one, so the members name the set unchanged.
     #[test]
     fn audience_from_expanded_keeps_unexpanded_members() {
         let set = PrincipalSet {
@@ -462,6 +466,6 @@ mod tests {
             a.except[0].name,
             MemberName::Unexpanded(p(PrincipalKind::WorkspaceMembers, "w"))
         );
-        assert_eq!(a.to_principal_set(&set), set);
+        assert_eq!(principals(&a), set);
     }
 }

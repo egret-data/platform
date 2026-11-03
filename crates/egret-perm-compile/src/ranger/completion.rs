@@ -1,12 +1,22 @@
-//! The StarRocks hidden-column deny (§11.4): one deny per masked table on
-//! `_file`/`_pos`, which a `SELECT *` still reads when every visible column is
-//! masked ([`hidden_column_denies`]).
+//! The served-unit completion passes (governance sub-project 1, Task 10):
+//! the denies a profile needs because of what the REST of its served unit
+//! does, run by [`complete`] on the complete desired set, after every family
+//! is rendered and before the overlap check. Which passes run is the
+//! capability matrix's answer for the enforcement point ([`passes`]):
 //!
-//! A classification's CLEARANCE itself, which this module used to compile, is
-//! now the IR's `withhold` effect (governance sub-project 1, Task 7): the
-//! decisions are `egret_perm_ir::lower::withhold`'s, the reads
+//! - **M16, StarRocks** ([`Pass::HiddenColumns`]): one deny per masked table
+//!   on `_file`/`_pos`, which a `SELECT *` still reads when every visible
+//!   column is masked ([`hidden_column_denies`]).
+//! - **M17, Trino** ([`Pass::MetadataTables`]): a deny on the Iceberg metadata
+//!   tables (`t$files`, ...) of each table a restricting policy reaches
+//!   ([`metadata_tables`]).
+//!
+//! A classification's CLEARANCE itself, which this file used to compile (as
+//! `clearance.rs`), is the IR's `withhold` effect (governance sub-project 1,
+//! Task 7): the decisions are `egret_perm_ir::lower::withhold`'s, the reads
 //! `crate::ir_load::load_withhold_inputs`', and the Ranger shape
-//! `crate::ranger::withhold`'s, whose `clearance_input` the deny below shares.
+//! `crate::ranger::withhold`'s, whose `clearance_input` the hidden-column deny
+//! shares.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -17,9 +27,167 @@ use egret_perm::{CompileError, EngineType};
 use egret_policy::admin::{access_to_ranger_json, ResourceLevel};
 use egret_policy::COMPILER_HIDDEN_PREFIX;
 
+use egret_perm_ir::ep::EpKind;
+use egret_perm_ir::matrix::{support_for_kind, Capability, LoweringKind, Support};
+
+use crate::ir_load::Loaded;
 use crate::ranger::rules::stamp_service_type;
 use crate::ranger::withhold::clearance_input;
 use crate::table_columns::active_tables_via;
+use crate::trigger::{DesiredPolicy, PolicyKey, SourceKind};
+
+pub(crate) mod metadata_tables;
+
+/// A completion pass, chosen by the capability matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Pass {
+    /// M16: `MaskCoversHiddenColumns` lowers to `DenyHiddenColumns`.
+    HiddenColumns,
+    /// M17: `PoliciesReachMetadataTables` lowers to `DenyMetadataTables`.
+    MetadataTables,
+}
+
+/// The passes an enforcement point of `kind` runs, in the order [`complete`]
+/// runs them: each pass whose capability the matrix answers with its deny
+/// lowering. Both entries hold for every version and do not depend on the
+/// classification channel.
+pub(crate) fn passes(kind: EpKind) -> Vec<Pass> {
+    [
+        (Capability::MaskCoversHiddenColumns, Pass::HiddenColumns),
+        (
+            Capability::PoliciesReachMetadataTables,
+            Pass::MetadataTables,
+        ),
+    ]
+    .into_iter()
+    .filter(|(cap, _)| {
+        matches!(
+            support_for_kind(kind, None, false, cap),
+            Support::Lowered(LoweringKind::DenyHiddenColumns | LoweringKind::DenyMetadataTables)
+        )
+    })
+    .map(|(_, pass)| pass)
+    .collect()
+}
+
+/// Run the completion passes for the profile `l` loaded on `desired`, the
+/// complete set every family rendered: each pass adds its denies under the
+/// profile. `tag_service_id` is the profile's tag service, when it has one.
+pub(crate) async fn complete(
+    conn: &mut sqlx::PgConnection,
+    l: &Loaded,
+    desired: &mut BTreeMap<PolicyKey, DesiredPolicy>,
+    tag_service_id: Option<i64>,
+) -> Result<(), CompileError> {
+    let passes = passes(l.ep.kind);
+    let service_id = l.ep.profile_id;
+    let profile_name = &l.profile_name;
+
+    // **§11.4: hide `_file` and `_pos` wherever the profile masks a table.** A
+    // `SELECT *` on a masked StarRocks table still returns those two columns
+    // (the Iceberg data-file path and the row position) with every visible
+    // column nulled, so the masks alone leak the path. The masks are the
+    // profile's compiled ones and its enabled hand-written ones, the same set
+    // the clearance fold sees as `others`. Read [`hidden_column_denies`].
+    if passes.contains(&Pass::HiddenColumns) {
+        let is_mask = |b: &Value| b.get("policyType").and_then(Value::as_i64) == Some(1);
+        let mut masks: Vec<Value> = desired
+            .iter()
+            .filter(|((sid, _), dp)| *sid == service_id && is_mask(&dp.body))
+            .map(|(_, dp)| dp.body.clone())
+            .collect();
+        masks.extend(
+            egret_policy::enabled_policies_for_service_via(conn, service_id)
+                .await
+                .map_err(crate::db_error::from_store)?
+                .into_iter()
+                .filter(|b| {
+                    is_mask(b)
+                        && !b
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .is_some_and(egret_policy::is_compiler_owned_policy_name)
+                }),
+        );
+        for (name, body) in hidden_column_denies(conn, &masks, profile_name).await? {
+            desired.insert(
+                (service_id, name),
+                DesiredPolicy {
+                    body,
+                    source_kind: SourceKind::Clearance,
+                    grant_id: None,
+                    rule_id: None,
+                },
+            );
+        }
+    }
+
+    // **Trino: a mask, row filter or deny does not reach `t$files`.** Trino
+    // asks Ranger about a metadata table under its own name (`orders$files`),
+    // which a `table: *` grant matches and a policy on `orders` does not, so
+    // the people a policy restricts read the bounds, partition values and
+    // counts it withholds. Each restricting policy of the profile (compiled
+    // and hand-written) and of its tag service gets a deny on the metadata
+    // tables of the tables it reaches. Read [`metadata_tables`].
+    if passes.contains(&Pass::MetadataTables) {
+        let mut profile_sources: Vec<Value> = Vec::new();
+        let mut tag_sources: Vec<Value> = Vec::new();
+        for ((sid, _), dp) in desired.iter() {
+            if *sid == service_id {
+                profile_sources.push(dp.body.clone());
+            } else if Some(*sid) == tag_service_id {
+                tag_sources.push(dp.body.clone());
+            }
+        }
+        let hand_written = |b: &Value| {
+            !b.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(egret_policy::is_compiler_owned_policy_name)
+        };
+        profile_sources.extend(
+            egret_policy::enabled_policies_for_service_via(conn, service_id)
+                .await
+                .map_err(crate::db_error::from_store)?
+                .into_iter()
+                .filter(hand_written),
+        );
+        if let Some(tag_id) = tag_service_id {
+            tag_sources.extend(
+                egret_policy::enabled_policies_for_service_via(conn, tag_id)
+                    .await
+                    .map_err(crate::db_error::from_store)?
+                    .into_iter()
+                    .filter(hand_written),
+            );
+        }
+        let tags: Vec<String> = tag_sources
+            .iter()
+            .flat_map(metadata_tables::tag_values)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let tagged = metadata_tables::tagged_tables_via(conn, service_id, &tags).await?;
+        let denies = metadata_tables::resource_denies(&profile_sources, profile_name)
+            .into_iter()
+            .chain(metadata_tables::tag_denies(
+                &tag_sources,
+                &tagged,
+                profile_name,
+            ));
+        for (name, body) in denies {
+            desired.insert(
+                (service_id, name),
+                DesiredPolicy {
+                    body,
+                    source_kind: SourceKind::Clearance,
+                    grant_id: None,
+                    rule_id: None,
+                },
+            );
+        }
+    }
+    Ok(())
+}
 
 /// The hidden StarRocks columns a masked table still exposes (§11.4). A
 /// `SELECT *` on a table whose visible columns are all masked still reads them:
@@ -410,6 +578,33 @@ mod tests {
 
     /// §11.4: a masked table gets one deny on the hidden columns, `public`
     /// denied, the cleared users excepted.
+    #[test]
+    fn completion_passes_are_chosen_by_the_matrix() {
+        use egret_perm_ir::ep::{EpKind, Mechanism};
+        use egret_perm_ir::matrix::{support_for_kind, Capability, LoweringKind, Support};
+        let k = |engine| EpKind {
+            engine,
+            mechanism: Mechanism::Ranger,
+        };
+        assert_eq!(
+            passes(k(egret_perm::EngineType::Trino)),
+            vec![Pass::MetadataTables]
+        );
+        assert_eq!(
+            passes(k(egret_perm::EngineType::StarRocks)),
+            vec![Pass::HiddenColumns]
+        );
+        assert_eq!(
+            support_for_kind(
+                k(egret_perm::EngineType::StarRocks),
+                None,
+                false,
+                &Capability::MaskCoversHiddenColumns
+            ),
+            Support::Lowered(LoweringKind::DenyHiddenColumns)
+        );
+    }
+
     #[test]
     fn a_masked_table_denies_public_the_hidden_columns_but_not_the_cleared() {
         let got = plan(&[mask_on("t", "ssn", &["ann"])], &[]);

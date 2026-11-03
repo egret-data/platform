@@ -34,7 +34,7 @@
 //! **Prefixes are the compiler's own** (`egret_policy::{COMPILER_GRANT_PREFIX,
 //! COMPILER_RULE_PREFIX, COMPILER_CLEARANCE_PREFIX}`) — this module does not
 //! keep a second copy of those strings, for the same reason `ranger/grants.rs`,
-//! `ranger/rules.rs`, `ranger/withhold.rs`, `clearance.rs`, and `trigger.rs` all import them rather than
+//! `ranger/rules.rs`, `ranger/withhold.rs`, `ranger/completion.rs`, and `trigger.rs` all import them rather than
 //! re-typing them: two independent copies would drift.
 
 use egret_policy::{

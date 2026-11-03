@@ -157,6 +157,7 @@ pub fn compile_rule(
     };
     lower_rule(
         r,
+        &egret_perm_ir::audience::audience_from_expanded(&r.exempt),
         kind,
         tag_service.is_some(),
         resolved.catalog_name,

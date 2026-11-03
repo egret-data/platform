@@ -13,10 +13,10 @@
 
 use std::collections::BTreeMap;
 
-use egret_perm::{CompileError, EngineGrant, PrincipalSet};
+use egret_perm::{CompileError, EngineGrant};
 use uuid::Uuid;
 
-use crate::audience::audience_from_expanded;
+use crate::audience::{audience, audience_from_expanded, Audience, Directory};
 use crate::lower::grants::check_expanded_principal;
 use crate::statement::{
     Derivation, Effect, LowerResult, Lowered, Lowering, ReasonCode, Source, Statement, Target,
@@ -41,10 +41,10 @@ pub enum Check {
 const EMPTY_AUDIENCE: &str = "the engine grant's principals name no engine principal (a role or \
                               group reference that expands to no member)";
 
-/// Lower `grants` (already expanded) with the loader's `checks`, keyed by
-/// grant id. Each grant, in order:
+/// Lower `grants` with the loader's `checks`, keyed by grant id. Each grant's
+/// grantees are expanded against `dir` ([`audience`]). Each grant, in order:
 ///
-/// 1. an empty include is skipped ([`ReasonCode::EmptyAudience`]) BEFORE its
+/// 1. an audience including nobody is skipped ([`ReasonCode::EmptyAudience`]) BEFORE its
 ///    check is consulted, so the loader need not check it at all — today's
 ///    order, in which a grant that is both empty and has a dead impersonation
 ///    target reports the empty include;
@@ -57,6 +57,7 @@ const EMPTY_AUDIENCE: &str = "the engine grant's principals name no engine princ
 /// A non-empty grant with no check is a loader bug and aborts.
 pub fn lower_engine_privileges(
     grants: &[EngineGrant],
+    dir: &Directory,
     checks: &BTreeMap<Uuid, Check>,
 ) -> LowerResult {
     let mut out = Lowered::default();
@@ -71,7 +72,8 @@ pub fn lower_engine_privileges(
                 detail,
             })
         };
-        if g.principals.include.is_empty() {
+        let a = audience(&g.principals, dir);
+        if a.include.is_empty() {
             skip(ReasonCode::EmptyAudience, EMPTY_AUDIENCE.to_string());
             continue;
         }
@@ -88,7 +90,7 @@ pub fn lower_engine_privileges(
                 )))
             }
         };
-        match engine_privilege_statement(g, capability, values) {
+        match statement_for_audience(g, a, capability, values) {
             Ok(s) => out.statements.push(s),
             Err(e @ CompileError::UnexpandedPrincipalKind { .. }) => {
                 skip(ReasonCode::UnexpandedPrincipal, e.to_string())
@@ -106,22 +108,37 @@ pub fn lower_engine_privileges(
 /// [`crate::lower::grants::check_expanded_principal`], so an engine grant's
 /// grantees are refused exactly as a grant's are. An empty include is not
 /// refused here: the statement then names nobody.
+///
+/// The grantees are taken as already expanded ([`audience_from_expanded`]);
+/// the recompile lowers through [`lower_engine_privileges`], which expands
+/// them.
 pub fn engine_privilege_statement(
     g: &EngineGrant,
     capability: &str,
     values: &[String],
 ) -> Result<Statement, CompileError> {
-    for p in &g.principals.include {
-        check_expanded_principal(p)?;
+    statement_for_audience(g, audience_from_expanded(&g.principals), capability, values)
+}
+
+/// [`engine_privilege_statement`] with the audience the caller expanded. Its
+/// except half is dropped: an engine grant is include-only.
+fn statement_for_audience(
+    g: &EngineGrant,
+    a: Audience,
+    capability: &str,
+    values: &[String],
+) -> Result<Statement, CompileError> {
+    for m in &a.include {
+        check_expanded_principal(&m.name.to_principal())?;
     }
     Ok(Statement {
         source: Source::EnginePrivilege {
             engine_grant_id: g.id,
         },
-        audience: audience_from_expanded(&PrincipalSet {
-            include: g.principals.include.clone(),
-            exclude: Vec::new(),
-        }),
+        audience: Audience {
+            include: a.include,
+            except: Vec::new(),
+        },
         target: Target::EngineObject {
             capability: capability.to_string(),
             values: values.to_vec(),
@@ -136,6 +153,10 @@ pub fn engine_privilege_statement(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dir() -> Directory {
+        Directory::default()
+    }
     use crate::statement::*;
     use egret_perm::{Principal, PrincipalKind, PrincipalSet};
 
@@ -170,8 +191,8 @@ mod tests {
     #[test]
     fn an_empty_include_is_skipped_with_todays_text() {
         let g = eg(vec![], None);
-        let out =
-            lower_engine_privileges(std::slice::from_ref(&g), &[(g.id, ok())].into()).unwrap();
+        let out = lower_engine_privileges(std::slice::from_ref(&g), &dir(), &[(g.id, ok())].into())
+            .unwrap();
         assert!(out.statements.is_empty());
         assert_eq!(out.lowerings[0].code, ReasonCode::EmptyAudience);
         assert_eq!(
@@ -188,20 +209,21 @@ mod tests {
         let g = eg(vec![], Some(Uuid::from_u128(3)));
         let out = lower_engine_privileges(
             std::slice::from_ref(&g),
+            &dir(),
             &[(g.id, Check::Skip("impersonation target gone".into()))].into(),
         )
         .unwrap();
         assert_eq!(out.lowerings[0].code, ReasonCode::EmptyAudience);
         // And the loader need not have checked it at all.
-        let out = lower_engine_privileges(&[g], &BTreeMap::new()).unwrap();
+        let out = lower_engine_privileges(&[g], &dir(), &BTreeMap::new()).unwrap();
         assert_eq!(out.lowerings[0].code, ReasonCode::EmptyAudience);
     }
 
     #[test]
     fn a_checked_grant_is_one_engine_privilege_statement() {
         let g = eg(vec![user("ann")], None);
-        let out =
-            lower_engine_privileges(std::slice::from_ref(&g), &[(g.id, ok())].into()).unwrap();
+        let out = lower_engine_privileges(std::slice::from_ref(&g), &dir(), &[(g.id, ok())].into())
+            .unwrap();
         assert!(out.lowerings.is_empty());
         let s = &out.statements[0];
         assert_eq!(
@@ -235,6 +257,7 @@ mod tests {
         let g = eg(vec![user("ann")], Some(Uuid::from_u128(3)));
         let out = lower_engine_privileges(
             std::slice::from_ref(&g),
+            &dir(),
             &[(g.id, Check::Skip("impersonation target gone".into()))].into(),
         )
         .unwrap();
@@ -243,8 +266,10 @@ mod tests {
         assert_eq!(out.lowerings[0].detail, "impersonation target gone");
     }
 
+    /// The lowering expands a grantee against the directory, so a role
+    /// reaches the statement as its holders.
     #[test]
-    fn an_unexpanded_grantee_is_a_skip_with_the_errors_text() {
+    fn a_role_grantee_expands_to_its_holders() {
         let g = eg(
             vec![Principal {
                 kind: PrincipalKind::Role,
@@ -252,11 +277,35 @@ mod tests {
             }],
             None,
         );
+        let mut d = dir();
+        d.roles.insert("r".into(), vec!["ann".into()]);
         let out =
-            lower_engine_privileges(std::slice::from_ref(&g), &[(g.id, ok())].into()).unwrap();
-        assert_eq!(out.lowerings[0].code, ReasonCode::UnexpandedPrincipal);
+            lower_engine_privileges(std::slice::from_ref(&g), &d, &[(g.id, ok())].into()).unwrap();
         assert_eq!(
-            out.lowerings[0].detail,
+            out.statements[0].audience.include[0].name,
+            crate::audience::MemberName::User("ann".into())
+        );
+        assert_eq!(
+            out.statements[0].audience.include[0].via,
+            crate::audience::Via::Role("r".into())
+        );
+    }
+
+    /// A grantee handed to the statement unexpanded is refused with the
+    /// error the lowering would skip with.
+    #[test]
+    fn an_unexpanded_grantee_is_refused_by_the_statement() {
+        let g = eg(
+            vec![Principal {
+                kind: PrincipalKind::Role,
+                r#ref: "r".into(),
+            }],
+            None,
+        );
+        assert_eq!(
+            engine_privilege_statement(&g, "c", &[])
+                .unwrap_err()
+                .to_string(),
             CompileError::UnexpandedPrincipalKind {
                 kind: PrincipalKind::Role
             }
@@ -268,7 +317,7 @@ mod tests {
     fn an_unusable_grantee_aborts() {
         let g = eg(vec![user("a@b")], None);
         assert!(matches!(
-            lower_engine_privileges(std::slice::from_ref(&g), &[(g.id, ok())].into()),
+            lower_engine_privileges(std::slice::from_ref(&g), &dir(), &[(g.id, ok())].into()),
             Err(CompileError::UnusableUserRef { .. })
         ));
     }
@@ -282,7 +331,8 @@ mod tests {
         let mut c = eg(vec![user("ann")], None);
         c.id = Uuid::from_u128(5);
         let checks = [(a.id, Check::Skip("a".into())), (c.id, ok())].into();
-        let out = lower_engine_privileges(&[a.clone(), b.clone(), c.clone()], &checks).unwrap();
+        let out =
+            lower_engine_privileges(&[a.clone(), b.clone(), c.clone()], &dir(), &checks).unwrap();
         let ids: Vec<_> = out.lowerings.iter().map(|l| l.source.clone()).collect();
         assert_eq!(
             ids,

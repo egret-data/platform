@@ -1293,7 +1293,7 @@ pub(crate) async fn write_grant(
     // **A grant with nothing in `principals.include` REVOKES, silently** (SP4b-1
     // review, I-2). `NewGrant.principals` is `#[serde(default)]`, so a body that
     // omits the field deserializes to an empty `PrincipalSet` — and
-    // `compile_desired` treats an empty include as a SKIP (`trigger.rs`, "the
+    // `compile_desired` treats an empty include as a SKIP (`egret_perm_ir::lower::grants`, "the
     // grant's principals name no engine principal"), which means the recompile
     // produces nothing for the grant and the sweep REAPS the policy it had.
     // Over a PATCH that is a 200 that quietly stops enforcing a live grant, and
@@ -3625,16 +3625,16 @@ pub(crate) async fn served_artifact_via(
 }
 
 /// [`artifact_via`] as the compiler serves the profile: on Trino, with the
-/// metadata-table denies of `crate::metadata_tables` its restricting policies
+/// metadata-table denies of `crate::ranger::completion::metadata_tables` its restricting policies
 /// get once it is compiled. The migration gate's BEFORE (see
-/// `crate::metadata_tables::with_denies_via`).
+/// `crate::ranger::completion::metadata_tables::with_denies_via`).
 pub(crate) async fn compiled_artifact_via(
     conn: &mut sqlx::PgConnection,
     svc: &ServiceRow,
 ) -> Result<ServicePolicySet, PermHttpError> {
     let mut envelope = envelope_via(conn, svc).await?;
     if svc.r#type == "trino" {
-        crate::metadata_tables::with_denies_via(conn, svc.id, &mut envelope)
+        crate::ranger::completion::metadata_tables::with_denies_via(conn, svc.id, &mut envelope)
             .await
             .map_err(PermHttpError::from)?;
     }

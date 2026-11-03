@@ -4,8 +4,9 @@
 //! [`load_ep`] is the head `compile_desired` used to carry inline, moved here
 //! verbatim: the same statements, on the caller's connection, in the same
 //! order. It returns the profile as an [`EpInput`] plus the store rows the
-//! lowering consumes, already expanded by
-//! [`crate::members::expand_enumerated_principals`].
+//! lowering consumes, as stored, and the [`Directory`]
+//! [`crate::members::expand_enumerated_principals`] read for them, which each
+//! lowering expands its audiences against.
 //!
 //! The one read [`load_ep`] does NOT make is the bound engines' plugin
 //! versions ([`bound_engines`]). Today only a StarRocks profile with at least
@@ -55,10 +56,8 @@ pub(crate) struct Loaded {
     pub grants: Vec<Grant>,
     pub rules: Vec<Rule>,
     pub engine_grants: Vec<EngineGrant>,
-    /// Who each workspace, role and group stood for at expansion. Not read
-    /// yet: the lowering that consumes it lands in a later task of the
-    /// sub-project.
-    #[allow(dead_code)]
+    /// Who each workspace, role and group referenced by `grants`, `rules` and
+    /// `engine_grants` stands for; each lowering expands against it.
     pub directory: Directory,
 }
 
@@ -137,31 +136,27 @@ pub(crate) async fn load_ep(
     sweep.sort_unstable();
     sweep.dedup();
 
-    let mut grants = list_grants_via(conn)
+    let grants = list_grants_via(conn)
         .await
         .map_err(CompileError::from_perm)?;
-    let mut rules = list_rules_via(conn)
+    let rules = list_rules_via(conn)
         .await
         .map_err(CompileError::from_perm)?;
-    // D3: turn every `workspace_members` principal — and, since SP4c Task 2b,
-    // every `role` principal, and since J-F3 Task 1b every non-`public` `group`
-    // principal — into the people it stands for BEFORE anything is compiled,
-    // so the pure compilers never see one. See `crate::members` for what a
+    // D3: read who every `workspace_members` principal — and, since SP4c Task
+    // 2b, every `role` principal, and since J-F3 Task 1b every non-`public`
+    // `group` principal — stands for BEFORE anything is compiled, so each
+    // lowering expands its audiences against the directory and the pure
+    // compilers never see one. See `crate::members` for what a
     // member is, what it costs, and why a role name cannot be left for Ranger
     // to resolve.
     // F11: the engine grants of every engine bound to this profile, expanded
     // in the same call so a person named by a grant and an engine grant
     // resolves to one name.
-    let mut engine_grants = list_engine_grants_for_profile_via(conn, service_id)
+    let engine_grants = list_engine_grants_for_profile_via(conn, service_id)
         .await
         .map_err(CompileError::from_perm)?;
-    let directory = crate::members::expand_enumerated_principals(
-        conn,
-        &mut grants,
-        &mut rules,
-        &mut engine_grants,
-    )
-    .await?;
+    let directory =
+        crate::members::expand_enumerated_principals(conn, &grants, &rules, &engine_grants).await?;
 
     let ep = EpInput {
         profile_id: service_id,
@@ -270,13 +265,16 @@ pub(crate) async fn load_rule_inputs(
 /// keyed by grant id. Per grant, in grant order, the statements the recompile
 /// driver used to make inside its per-grant loop:
 ///
-/// - a grant with an empty include is not checked and reads nothing — the
+/// Each grant's grantees are expanded against `dir` as the lowering expands
+/// them.
+///
+/// - a grant whose grantees include nobody is not checked and reads nothing — the
 ///   lowering skips it before it looks for a check, as the old loop did
 ///   before it read the target;
 /// - an impersonation grant reads its target
 ///   ([`crate::engine_grants::impersonation_target_ok`]), and one refused
 ///   there is skipped with that reason and goes no further;
-/// - every other check is [`crate::engine_grants::check_engine_grant`], which
+/// - every other check is [`crate::engine_grants::check_engine_grant_for`], which
 ///   is pure, and an `InvalidEngineGrant` (or `UnexpandedPrincipalKind`) is
 ///   skipped with the error's text.
 ///
@@ -289,10 +287,12 @@ pub(crate) async fn load_engine_privilege_checks(
     service_id: i64,
     engine: EngineType,
     grants: &[EngineGrant],
+    dir: &Directory,
 ) -> Result<BTreeMap<Uuid, Check>, CompileError> {
     let mut checks = BTreeMap::new();
     for g in grants {
-        if g.principals.include.is_empty() {
+        let grantees = egret_perm_ir::audience::audience(&g.principals, dir);
+        if grantees.include.is_empty() {
             continue;
         }
         let target = match g.target_user_id {
@@ -309,7 +309,12 @@ pub(crate) async fn load_engine_privilege_checks(
             }
             None => None,
         };
-        let check = match crate::engine_grants::check_engine_grant(g, target.as_deref(), engine) {
+        let check = match crate::engine_grants::check_engine_grant_for(
+            g,
+            !grantees.except.is_empty(),
+            target.as_deref(),
+            engine,
+        ) {
             Ok(values) => Check::Ok {
                 capability: g.capability.clone(),
                 values,

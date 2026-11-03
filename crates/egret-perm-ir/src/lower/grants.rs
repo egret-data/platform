@@ -79,7 +79,7 @@
 use egret_perm::{Action, CompileError, Grant, Principal, PrincipalKind, Scope};
 use uuid::Uuid;
 
-use crate::audience::audience_from_expanded;
+use crate::audience::{audience, audience_from_expanded, Audience, Directory};
 use crate::ep::EpInput;
 use crate::statement::{
     Derivation, Effect, Level, LowerResult, Lowered, Lowering, Path, Privilege, ReasonCode, Source,
@@ -397,21 +397,22 @@ const EMPTY_AUDIENCE: &str =
                               a workspace_members, role or group reference that expands to no \
                               member)";
 
-/// Lower `grants` for the enforcement point `ep`. The principals were already
-/// expanded by the loader, so each grant's audience is
-/// [`audience_from_expanded`].
+/// Lower `grants` for the enforcement point `ep`. Each grant's audience is
+/// its principals expanded against `dir` ([`audience`]), every grant's, in
+/// order, before its scope is looked at.
 ///
 /// A grant whose catalog is not in `ep.catalogs` is out of scope and silently
-/// absent. A grant with an empty include, or one whose principals reached here
+/// absent. A grant whose audience includes nobody, or one with a member left
 /// unexpanded, is a [`Lowering`] carrying the exact text the recompile has
 /// always reported. Every other error aborts the lowering.
-pub fn lower_grants(ep: &EpInput, grants: &[Grant]) -> LowerResult {
+pub fn lower_grants(ep: &EpInput, grants: &[Grant], dir: &Directory) -> LowerResult {
     let mut out = Lowered::default();
     for g in grants {
+        let a = audience(&g.principals, dir);
         let Some(catalog_name) = ep.catalogs.get(&g.scope.catalog_id) else {
             continue; // not reachable by this service — out of scope
         };
-        if g.principals.include.is_empty() {
+        if a.include.is_empty() {
             // Nothing to name. Emitting the policy anyway would write an item
             // with no principal, which matches nobody — the same answer, said
             // less clearly, and one more policy against the profile total.
@@ -431,7 +432,7 @@ pub fn lower_grants(ep: &EpInput, grants: &[Grant]) -> LowerResult {
             });
             continue;
         }
-        match grant_statement(g, catalog_name, g.scope.catalog_id) {
+        match statement_for_audience(g, a, catalog_name, g.scope.catalog_id) {
             Ok(s) => out.statements.push(s),
             Err(CompileError::UnexpandedPrincipalKind { kind }) => {
                 let reason = format!(
@@ -469,15 +470,36 @@ pub fn lower_grants(ep: &EpInput, grants: &[Grant]) -> LowerResult {
 /// Privileges keep the grant's action order with duplicates dropped at their
 /// first appearance, so a target expanding them in order reproduces the
 /// access list the old compiler built action by action.
+///
+/// The grant's principals are taken as already expanded
+/// ([`audience_from_expanded`]); the recompile lowers through
+/// [`lower_grants`], which expands them.
 pub fn grant_statement(
     g: &Grant,
     catalog: &str,
     catalog_id: Uuid,
 ) -> Result<Statement, CompileError> {
+    statement_for_audience(
+        g,
+        audience_from_expanded(&g.principals),
+        catalog,
+        catalog_id,
+    )
+}
+
+/// [`grant_statement`] with the audience the caller expanded: each member is
+/// checked as the principal it stands for ([`check_expanded_principal`]),
+/// include before except.
+fn statement_for_audience(
+    g: &Grant,
+    audience: Audience,
+    catalog: &str,
+    catalog_id: Uuid,
+) -> Result<Statement, CompileError> {
     ensure_scope_levels_are_named(&g.scope)?;
     ensure_a_grant_wildcard_level_has_nothing_named_beneath_it(&g.scope)?;
-    for p in g.principals.include.iter().chain(&g.principals.exclude) {
-        check_expanded_principal(p)?;
+    for m in audience.include.iter().chain(&audience.except) {
+        check_expanded_principal(&m.name.to_principal())?;
     }
     let mut privileges: Vec<Privilege> = Vec::new();
     for a in &g.actions {
@@ -492,7 +514,7 @@ pub fn grant_statement(
     let level = |v: &Option<String>| v.clone().map_or(Level::Unnamed, Level::Named);
     Ok(Statement {
         source: Source::Grant { grant_id: g.id },
-        audience: audience_from_expanded(&g.principals),
+        audience,
         target: Target::Path(Path {
             catalog_id: Some(catalog_id),
             catalog: catalog.to_string(),
@@ -564,6 +586,7 @@ mod tests {
         let out = lower_grants(
             &ep(c),
             &[grant(c, vec![user("a")], vec![user("b")], Effect::Deny)],
+            &Directory::default(),
         )
         .unwrap();
         let s = &out.statements[0];
@@ -599,6 +622,7 @@ mod tests {
                 vec![],
                 Effect::Allow,
             )],
+            &Directory::default(),
         )
         .unwrap();
         assert!(out.statements.is_empty() && out.lowerings.is_empty());
@@ -607,7 +631,12 @@ mod tests {
     #[test]
     fn an_empty_audience_is_a_lowering_with_todays_text() {
         let c = Uuid::from_u128(9);
-        let out = lower_grants(&ep(c), &[grant(c, vec![], vec![], Effect::Allow)]).unwrap();
+        let out = lower_grants(
+            &ep(c),
+            &[grant(c, vec![], vec![], Effect::Allow)],
+            &Directory::default(),
+        )
+        .unwrap();
         assert_eq!(out.lowerings[0].code, ReasonCode::EmptyAudience);
         assert!(out.lowerings[0]
             .detail

@@ -66,6 +66,18 @@ pub(crate) fn check_engine_grant(
     target: Option<&str>,
     engine: EngineType,
 ) -> Result<Vec<String>, CompileError> {
+    check_engine_grant_for(g, !g.principals.exclude.is_empty(), target, engine)
+}
+
+/// [`check_engine_grant`] with the exclude judged by the caller:
+/// `excludes_anyone` is whether the grant's exclude, expanded as the
+/// recompile expands it, names anyone (`crate::ir_load`).
+pub(crate) fn check_engine_grant_for(
+    g: &EngineGrant,
+    excludes_anyone: bool,
+    target: Option<&str>,
+    engine: EngineType,
+) -> Result<Vec<String>, CompileError> {
     let cap = capability(&g.capability)
         .ok_or_else(|| invalid(g, format!("unknown capability {:?}", g.capability)))?;
     if cap.engine != engine {
@@ -74,7 +86,7 @@ pub(crate) fn check_engine_grant(
             format!("{} is not a capability of a {engine:?} engine", cap.id),
         ));
     }
-    if !g.principals.exclude.is_empty() {
+    if excludes_anyone {
         return Err(invalid(g, "an engine grant is include-only"));
     }
 

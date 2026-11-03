@@ -111,7 +111,7 @@ use egret_core::UserId;
 use egret_perm::{
     CompileError, EngineGrant, Grant, PrincipalKind, PrincipalSet, Rule, PUBLIC_GROUP,
 };
-use egret_perm_ir::audience::{audience, is_expanded_group, Directory};
+use egret_perm_ir::audience::{is_expanded_group, Directory};
 
 /// The usernames of the users currently holding each role NAME in `roles` —
 /// the expansion SP4c needs twice over (**SP4c Task 2 and Task 2b**).
@@ -724,23 +724,25 @@ fn referenced_principals(
     out
 }
 
-/// Replace every `workspace_members`, every `role` **and every non-`public`
-/// `group`** principal in `grants` and `rules` with the `User` principals it
-/// stands for, read from the database on `conn`.
+/// Read who every `workspace_members`, every `role` **and every non-`public`
+/// `group`** principal in `grants`, `rules` and `engine_grants` stands for, from
+/// the database on `conn`, as the [`Directory`] each family expands its
+/// audience against (`egret_perm_ir::audience::audience`). The model itself
+/// is not rewritten (governance sub-project 1, Task 10).
 ///
 /// Runs ONE query for every workspace referenced by the whole model and ONE for
 /// every group (minting a username for any member that has none — module doc),
 /// and ONE for every role name ([`role_usernames`], which mints the same way
-/// since the 2026-10-18 design R5). After this returns, no `PrincipalKind::WorkspaceMembers`, no
-/// `PrincipalKind::Role` and no group other than `public` survives anywhere in
-/// `grants`/`rules` — which is what lets
+/// since the 2026-10-18 design R5). Expanded against the directory, no
+/// `PrincipalKind::WorkspaceMembers`, no `PrincipalKind::Role` and no group
+/// other than `public` survives in an audience — which is what lets
 /// `compile_grant`/`compile_rule` refuse the first two kinds outright as a
-/// defence in depth (a group is not refused there; `grants.rs`' module doc says
+/// defence in depth (a group is not refused there; `egret_perm_ir::lower::grants`' module doc says
 /// why): reaching them with an unexpanded principal is a bug in THIS function,
 /// not an authoring mistake, and a refusal says so loudly instead of emitting a
 /// policy that silently grants nobody (an `include` that fails closed) or
 /// silently grants everybody the subtract was meant to remove (an `exclude`
-/// that fails OPEN — the reason dropping was never an option; see `grants.rs`'s
+/// that fails OPEN — the reason dropping was never an option; see `egret_perm_ir::lower::grants`'
 /// module doc).
 ///
 /// **`role` joined this function in SP4c Task 2b, and it is a FIX.** Before it,
@@ -773,9 +775,9 @@ fn referenced_principals(
 /// the compiler answer identically for the same model. It is logged.
 pub(crate) async fn expand_enumerated_principals(
     conn: &mut sqlx::PgConnection,
-    grants: &mut [Grant],
-    rules: &mut [Rule],
-    engine_grants: &mut [EngineGrant],
+    grants: &[Grant],
+    rules: &[Rule],
+    engine_grants: &[EngineGrant],
 ) -> Result<Directory, CompileError> {
     let Referenced {
         workspaces: wanted,
@@ -879,22 +881,11 @@ pub(crate) async fn expand_enumerated_principals(
     let roles: Vec<String> = wanted_roles.into_iter().collect();
     let role_members = role_usernames(conn, &roles, MissingUsername::Mint).await?;
 
-    let dir = Directory {
+    Ok(Directory {
         workspaces: members,
         roles: role_members,
         groups: group_members,
-    };
-    for g in grants.iter_mut() {
-        g.principals = audience(&g.principals, &dir).to_principal_set(&g.principals);
-    }
-    for r in rules.iter_mut() {
-        r.exempt = audience(&r.exempt, &dir).to_principal_set(&r.exempt);
-    }
-    // F11: an engine grant's grantees are expanded exactly as a grant's.
-    for g in engine_grants.iter_mut() {
-        g.principals = audience(&g.principals, &dir).to_principal_set(&g.principals);
-    }
-    Ok(dir)
+    })
 }
 
 // **`workspaces_for_username` and `roles_for_username` lived here and are

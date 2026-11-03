@@ -42,12 +42,12 @@
 
 use std::collections::BTreeMap;
 
-use egret_perm::{
-    CompileError, Principal, PrincipalKind, PrincipalSet, Rule, RuleKind, Selector, PUBLIC_GROUP,
-};
+use egret_perm::{CompileError, PrincipalKind, Rule, RuleKind, Selector, PUBLIC_GROUP};
 use uuid::Uuid;
 
-use crate::audience::{audience_from_expanded, Audience};
+use crate::audience::{
+    audience, audience_from_expanded, Audience, Directory, Member, MemberName, Via,
+};
 use crate::ep::{EpInput, EpKind};
 use crate::lower::grants::{ensure_scope_levels_are_named, validate_user_ref};
 use crate::matrix::{support_for_kind, Capability, LoweringKind, RuleEffectKind, Support};
@@ -179,7 +179,7 @@ pub fn validate_rule_shape(r: &Rule) -> Result<(), CompileError> {
         ensure_scope_levels_are_named(scope)?;
     }
     ensure_row_filter_scope_is_a_table(r)?;
-    exempt_audience(r)?;
+    exempt_audience(r, &audience_from_expanded(&r.exempt))?;
     Ok(())
 }
 
@@ -331,9 +331,12 @@ fn invalid_custom_mask(rule_name: &str, expr: &str) -> CompileError {
 /// everything it cannot express correctly. `WorkspaceMembers` refuses for the
 /// same not-yet-expanded reason a grant refuses it
 /// (`CompileError::UnexpandedPrincipalKind`).
-fn exempt_audience(rule: &Rule) -> Result<Audience, CompileError> {
-    let exempt: &PrincipalSet = &rule.exempt;
-    if !exempt.exclude.is_empty() {
+///
+/// `exempt` is the rule's exempt set as an audience: expanded by
+/// [`lower_rules`], taken as already expanded by every other caller. Each
+/// member is checked as the principal it stands for.
+fn exempt_audience(rule: &Rule, exempt: &Audience) -> Result<Audience, CompileError> {
+    if !exempt.except.is_empty() {
         return Err(CompileError::UnexpressibleExemption {
             rule: rule.name.clone(),
             reason: "exempt.exclude is non-empty, but a masking/row-filter item has no \
@@ -341,7 +344,8 @@ fn exempt_audience(rule: &Rule) -> Result<Audience, CompileError> {
                 .to_string(),
         });
     }
-    for p in &exempt.include {
+    for m in &exempt.include {
+        let p = m.name.to_principal();
         match p.kind {
             PrincipalKind::User => {
                 validate_user_ref(&p.r#ref)?;
@@ -370,13 +374,13 @@ fn exempt_audience(rule: &Rule) -> Result<Audience, CompileError> {
             }
         }
     }
-    Ok(audience_from_expanded(&PrincipalSet {
-        include: vec![Principal {
-            kind: PrincipalKind::Group,
-            r#ref: PUBLIC_GROUP.to_string(),
+    Ok(Audience {
+        include: vec![Member {
+            name: MemberName::Everyone,
+            via: Via::Direct,
         }],
-        exclude: exempt.include.clone(),
-    }))
+        except: exempt.include.clone(),
+    })
 }
 
 fn effect_kind(kind: &RuleKind) -> RuleEffectKind {
@@ -510,8 +514,10 @@ fn ensure_within_ceiling(r: &Rule, count: usize, ceiling: usize) -> Result<(), C
 /// population: since `0178` nothing stored can carry an empty level. (`0179`
 /// constrains `perm.grants` only, so a match-any level above a named one IS
 /// storable in `perm.rules` — by decision, and `scope_to_resources` renders it.)
+#[allow(clippy::too_many_arguments)]
 pub fn lower_rule(
     r: &Rule,
+    exempt: &Audience,
     ep_kind: EpKind,
     classification_channel: bool,
     catalog: &str,
@@ -569,7 +575,7 @@ pub fn lower_rule(
 
     if let Selector::Path(scope) = &r.selector {
         let level = |v: &Option<String>| v.clone().map_or(Level::Unnamed, Level::Named);
-        let audience = exempt_audience(r)?;
+        let audience = exempt_audience(r, exempt)?;
         return Ok(vec![statement(
             &audience,
             Target::Path(Path {
@@ -602,7 +608,7 @@ pub fn lower_rule(
         &Capability::ClassificationSelector(effect),
     ) {
         Support::Native => {
-            let audience = exempt_audience(r)?;
+            let audience = exempt_audience(r, exempt)?;
             let mut out = vec![statement(
                 &audience,
                 Target::Classification { name: name.clone() },
@@ -664,7 +670,7 @@ pub fn lower_rule(
             ensure_within_ceiling(r, count, ceiling)?;
             let mut out = Vec::new();
             if !inputs.tagged.is_empty() {
-                let audience = exempt_audience(r)?;
+                let audience = exempt_audience(r, exempt)?;
                 for t in &inputs.tagged {
                     out.push(statement(
                         &audience,
@@ -689,7 +695,7 @@ pub fn lower_rule(
             ensure_within_ceiling(r, count, ceiling)?;
             let mut out = Vec::new();
             if !columns.is_empty() {
-                let audience = exempt_audience(r)?;
+                let audience = exempt_audience(r, exempt)?;
                 for c in &columns {
                     out.push(statement(
                         &audience,
@@ -708,7 +714,9 @@ pub fn lower_rule(
     }
 }
 
-/// Lower `rules` for the enforcement point `ep`, in rule order.
+/// Lower `rules` for the enforcement point `ep`, in rule order. Each rule's
+/// exempt set is expanded against `dir` ([`audience`]), every rule's, before
+/// anything else about it is looked at.
 ///
 /// A path-selected rule whose catalog is not in `ep.catalogs` is out of scope
 /// and silently absent. A rule with a `read_skips` entry (the loader could not
@@ -723,6 +731,7 @@ pub fn lower_rule(
 pub fn lower_rules(
     ep: &EpInput,
     rules: &[Rule],
+    dir: &Directory,
     inputs: &BTreeMap<Uuid, RuleInputs>,
     mut read_skips: BTreeMap<Uuid, Lowering>,
     ceiling: usize,
@@ -731,6 +740,7 @@ pub fn lower_rules(
     let none = RuleInputs::default();
     let mut out = Lowered::default();
     for r in rules {
+        let exempt = audience(&r.exempt, dir);
         if let Some(l) = read_skips.remove(&r.id) {
             out.lowerings.push(l);
             continue;
@@ -745,6 +755,7 @@ pub fn lower_rules(
         let rule_inputs = inputs.get(&r.id).unwrap_or(&none);
         let (code, reason) = match lower_rule(
             r,
+            &exempt,
             ep.kind,
             ep.classification_channel,
             catalog,
@@ -893,7 +904,17 @@ mod tests {
     #[test]
     fn trino_classification_mask_is_one_native_statement() {
         let r = tag_mask_rule("pii", "MASK_HASH");
-        let s = lower_rule(&r, trino(), true, "", &inputs("PII", vec![]), 500, &Always).unwrap();
+        let s = lower_rule(
+            &r,
+            &audience_from_expanded(&r.exempt),
+            trino(),
+            true,
+            "",
+            &inputs("PII", vec![]),
+            500,
+            &Always,
+        )
+        .unwrap();
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].target, Target::Classification { name: "PII".into() });
         assert_eq!(s[0].derivation, Derivation::AsDeclared);
@@ -907,7 +928,17 @@ mod tests {
             table("c", "s", "orders", false, &["email"]),
             table("c", "s", "customers", true, &[]),
         ];
-        let s = lower_rule(&r, trino(), true, "", &inputs("PII", tagged), 500, &Always).unwrap();
+        let s = lower_rule(
+            &r,
+            &audience_from_expanded(&r.exempt),
+            trino(),
+            true,
+            "",
+            &inputs("PII", tagged),
+            500,
+            &Always,
+        )
+        .unwrap();
         assert_eq!(
             s.len(),
             2,
@@ -926,6 +957,7 @@ mod tests {
         assert_eq!(
             lower_rule(
                 &r,
+                &audience_from_expanded(&r.exempt),
                 starrocks(),
                 false,
                 "",
@@ -940,6 +972,7 @@ mod tests {
         assert!(matches!(
             lower_rule(
                 &r,
+                &audience_from_expanded(&r.exempt),
                 starrocks(),
                 false,
                 "",
@@ -959,7 +992,16 @@ mod tests {
     fn a_trino_classification_rule_without_a_channel_is_missing_tag_service() {
         let r = tag_mask_rule("pii", "MASK_NULL");
         assert!(matches!(
-            lower_rule(&r, trino(), false, "", &inputs("PII", vec![]), 500, &Always),
+            lower_rule(
+                &r,
+                &audience_from_expanded(&r.exempt),
+                trino(),
+                false,
+                "",
+                &inputs("PII", vec![]),
+                500,
+                &Always
+            ),
             Err(CompileError::MissingTagService { .. })
         ));
     }
@@ -980,6 +1022,7 @@ mod tests {
         assert_eq!(
             lower_rule(
                 &r,
+                &audience_from_expanded(&r.exempt),
                 starrocks(),
                 false,
                 "",
