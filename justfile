@@ -180,8 +180,10 @@ check:
     @echo "   SKIPPED engine-gated suites       (EGRET_ALLOW_ENGINE_SKIP=1) → just test-workflow-starrocks, test-engine-mgmt-starrocks, test-dataapi-starrocks"
     @echo "   SKIPPED docker-gated suites       (EGRET_ALLOW_DOCKER_SKIP=1) → just test-workflow-docker"
 
-# Governance SP1: the golden corpus. Needs the `harness` feature, so
-# `cargo test --workspace` never runs it.
+# Governance SP1: the golden corpus. Needs the `harness` feature. A workspace
+# build turns that feature on anyway (egret-ranger-eval's dev-dependency on
+# egret-perm-compile enables it, `cargo tree -e features -i egret-perm-compile`),
+# so `cargo test --workspace` can compile it too; this recipe runs it explicitly.
 test-golden:
     {{ no_db_skip }} DATABASE_URL={{ test_database_url }} cargo test -p egret-perm-compile --features harness --test golden_compile
 

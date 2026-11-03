@@ -17,7 +17,7 @@
 //! none of which need Ranger) and on `egret-policy`. `egret-perm` itself
 //! carries no `egret-policy` dependency at all.
 //!
-//! **The pipeline (governance sub-project 1).** A profile's compile is four
+//! **The pipeline (governance sub-project 1).** A profile's compile is these
 //! stages, driven by `trigger::compile_desired`:
 //!
 //! 1. **Load** (`ir_load`): every store read the lowerings need, on the
@@ -34,9 +34,14 @@
 //!    decided here. `ranger/rules.rs`'s `stamp_service_type` is the one place
 //!    an already-rendered `Value` is corrected (a `serviceType` the renderer
 //!    hardcodes to `"trino"`).
+//!    3b. **Fold** (`trigger::fold_clearance_masks`): the StarRocks clearance
+//!    masks are folded into the rendered mask policies, which needs the
+//!    rendered Ranger masks and the bound engines.
 //! 4. **Complete** (`ranger::completion`): the denies a profile needs because
 //!    of what its whole served unit does (hidden columns on StarRocks,
 //!    Iceberg metadata tables on Trino), run on the complete desired set.
+//! 5. **Refuse overlaps** (`trigger::refuse_overlaps`): the compile is
+//!    refused when its finished set would create ambiguous-priority overlaps.
 //!
 //! The D4 boundary: store-to-IR holds decisions, IR-to-Ranger renders shape
 //! only. `egret-perm-ir` has no dependency on `egret-policy`,

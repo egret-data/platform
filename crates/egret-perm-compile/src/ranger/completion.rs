@@ -52,20 +52,22 @@ pub(crate) enum Pass {
 /// classification channel.
 pub(crate) fn passes(kind: EpKind) -> Vec<Pass> {
     [
-        (Capability::MaskCoversHiddenColumns, Pass::HiddenColumns),
+        (
+            Capability::MaskCoversHiddenColumns,
+            LoweringKind::DenyHiddenColumns,
+            Pass::HiddenColumns,
+        ),
         (
             Capability::PoliciesReachMetadataTables,
+            LoweringKind::DenyMetadataTables,
             Pass::MetadataTables,
         ),
     ]
     .into_iter()
-    .filter(|(cap, _)| {
-        matches!(
-            support_for_kind(kind, None, false, cap),
-            Support::Lowered(LoweringKind::DenyHiddenColumns | LoweringKind::DenyMetadataTables)
-        )
+    .filter(|(cap, lowering, _)| {
+        support_for_kind(kind, None, false, cap) == Support::Lowered(*lowering)
     })
-    .map(|(_, pass)| pass)
+    .map(|(_, _, pass)| pass)
     .collect()
 }
 
@@ -575,8 +577,7 @@ mod tests {
             .1
     }
 
-    /// §11.4: a masked table gets one deny on the hidden columns, `public`
-    /// denied, the cleared users excepted.
+    /// The passes an enforcement point runs are the ones the matrix lowers.
     #[test]
     fn completion_passes_are_chosen_by_the_matrix() {
         use egret_perm_ir::ep::{EpKind, Mechanism};
@@ -604,6 +605,8 @@ mod tests {
         );
     }
 
+    /// §11.4: a masked table gets one deny on the hidden columns, `public`
+    /// denied, the cleared users excepted.
     #[test]
     fn a_masked_table_denies_public_the_hidden_columns_but_not_the_cleared() {
         let got = plan(&[mask_on("t", "ssn", &["ann"])], &[]);

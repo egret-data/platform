@@ -2,8 +2,8 @@
 //! NAME back to the `perm` model object that minted it. Pure function, no DB.
 //!
 //! One test per shape the compiler actually mints (read at the minting
-//! sites, not assumed): `grants.rs:451`, `rules.rs:339`/`:445` (bare rule),
-//! `rules.rs:317-326` (StarRocks per-column tag expansion, row-filter and
+//! sites, not assumed): `ranger/grants.rs` (grant policy name), `ranger/rules.rs` (bare rule),
+//! `ranger/rules.rs` (StarRocks per-column tag expansion, row-filter and
 //! mask arities), `ranger::withhold::render` (bare clearance),
 //! `ranger::withhold::starrocks_deny` (StarRocks per-column clearance expansion) — plus every
 //! no-model-object shape that is LIVE in the cluster today and must come

@@ -115,7 +115,8 @@ pub struct Statement {
     pub derivation: Derivation,
 }
 
-/// Why something was not compiled (or compiled weaker), with today's exact text.
+/// Why something was not compiled (or compiled weaker). The code is the
+/// machine-readable reason; the exact text lives in `Lowering::detail`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReasonCode {
     EmptyAudience,
@@ -127,8 +128,6 @@ pub enum ReasonCode {
     TableNotInCatalog,
     NotMeasured,
     VersionsDisagree,
-    MaskPrincipalGap,
-    ImpersonationTarget,
     InvalidEnginePrivilege,
 }
 

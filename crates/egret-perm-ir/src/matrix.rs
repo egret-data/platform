@@ -108,7 +108,7 @@ const STARROCKS: EpKind = EpKind {
 
 /// The mask types each service-def declares (`service-defs/{trino,starrocks}.json`
 /// `dataMaskDef.maskTypes`); pinned to the file by
-/// `rules::tests::matrix_mask_types_equal_the_service_def`.
+/// `egret-perm-compile`'s `ranger::rules::tests::matrix_mask_types_equal_the_service_def`.
 pub const TRINO_MASK_TYPES: &[&str] = &[
     "MASK",
     "MASK_SHOW_LAST_4",
