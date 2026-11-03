@@ -71,7 +71,7 @@ services:
       - ./trino/etc/trino-keystore.p12:/etc/trino/trino-keystore.p12
 
   starrocks:
-    image: ghcr.io/egret-data/egret-starrocks-allin1:4.1.7-egret.3@sha256:2903fa5cd4186143e1358b66408861492d2180660295958a8b13194938296c1a
+    image: ghcr.io/egret-data/egret-starrocks-allin1:4.1.7-egret.4@sha256:bcb14c9013857bb6ca8c687142fda16be80444f6cfa04f9ddca4a93a4e450376
     ports:
       - "9030:9030"   # MySQL protocol (query)
       - "8030:8030"   # FE HTTP

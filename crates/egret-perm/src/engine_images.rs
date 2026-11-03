@@ -13,7 +13,7 @@ pub struct KnownEngineImage {
 }
 
 /// Measured: each row's plugin jar was read out of the image itself.
-pub const KNOWN_ENGINE_IMAGES: [KnownEngineImage; 5] = [
+pub const KNOWN_ENGINE_IMAGES: [KnownEngineImage; 6] = [
     KnownEngineImage {
         engine_type: "trino",
         repository: "trinodb/trino",
@@ -58,6 +58,16 @@ pub const KNOWN_ENGINE_IMAGES: [KnownEngineImage; 5] = [
         digest: "sha256:5c74c820f9b741bc8054247f47f3d54dd9e526710b6fc2b5a7873cae6bb2d2b0",
         plugin_version: "2.9.0",
     },
+    // egret.4 (patches 0001-0009 and the AuditLoader plugin): also EXPLAIN COSTS is refused
+    // under a mask or row filter; BROKER LOAD, EXPORT, INTO OUTFILE and FILE tables without
+    // credentials of their own need OPERATE on SYSTEM.
+    KnownEngineImage {
+        engine_type: "starrocks",
+        repository: "ghcr.io/egret-data/egret-starrocks-fe",
+        tag: "4.1.7-egret.4",
+        digest: "sha256:55ec35ecf6df85320557f017e0c3c16056d82a258cf4a4e79a80a6565ac6fdc5",
+        plugin_version: "2.9.0",
+    },
 ];
 
 pub struct DefaultEngineImages {
@@ -70,7 +80,7 @@ pub const DEFAULT_ENGINE_IMAGES: DefaultEngineImages = DefaultEngineImages {
     trino_image_version: "483@sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534",
     // The patched FE (KNOWN_ENGINE_IMAGES); no patch touches the CN, which stays the official
     // image of the same release.
-    starrocks_fe_image: "ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.3@sha256:5c74c820f9b741bc8054247f47f3d54dd9e526710b6fc2b5a7873cae6bb2d2b0",
+    starrocks_fe_image: "ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.4@sha256:55ec35ecf6df85320557f017e0c3c16056d82a258cf4a4e79a80a6565ac6fdc5",
     starrocks_cn_image: "starrocks/cn-ubuntu:4.1.7@sha256:39f7320127c9924abb1f1ce0ba0583ab11989cbe5bd1bb6274ada6f89ba5740d",
 };
 
@@ -251,6 +261,12 @@ mod tests {
                     "starrocks",
                     "ghcr.io/egret-data/egret-starrocks-fe",
                     "4.1.7-egret.3",
+                    "2.9.0"
+                ),
+                (
+                    "starrocks",
+                    "ghcr.io/egret-data/egret-starrocks-fe",
+                    "4.1.7-egret.4",
                     "2.9.0"
                 ),
             ]
@@ -467,6 +483,11 @@ mod tests {
                     "ghcr.io/egret-data/egret-starrocks-fe",
                     "4.1.7-egret.3",
                     "sha256:5c74c820f9b741bc8054247f47f3d54dd9e526710b6fc2b5a7873cae6bb2d2b0"
+                ),
+                (
+                    "ghcr.io/egret-data/egret-starrocks-fe",
+                    "4.1.7-egret.4",
+                    "sha256:55ec35ecf6df85320557f017e0c3c16056d82a258cf4a4e79a80a6565ac6fdc5"
                 ),
             ]
         );
