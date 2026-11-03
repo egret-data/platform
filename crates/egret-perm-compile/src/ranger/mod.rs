@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::trigger::{DesiredPolicy, SkippedItem, SourceKind};
 
+pub(crate) mod engine_privileges;
 pub(crate) mod grants;
 pub(crate) mod rules;
 pub(crate) mod withhold;

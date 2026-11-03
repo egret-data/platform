@@ -24,6 +24,7 @@ use egret_perm::{
 };
 use egret_perm_ir::audience::Directory;
 use egret_perm_ir::ep::{BoundEngine, EpInput, EpKind, Mechanism};
+use egret_perm_ir::lower::engine_privileges::Check;
 use egret_perm_ir::lower::rules::{needs_tagged_tables, RuleInputs};
 use egret_perm_ir::lower::withhold::{
     needs_table_shapes, needs_targets, Gate, GateTarget, TableShape,
@@ -262,6 +263,64 @@ pub(crate) async fn load_rule_inputs(
         );
     }
     Ok((inputs, skips))
+}
+
+/// Check every engine grant of the profile for the lowering
+/// ([`egret_perm_ir::lower::engine_privileges::lower_engine_privileges`]),
+/// keyed by grant id. Per grant, in grant order, the statements the recompile
+/// driver used to make inside its per-grant loop:
+///
+/// - a grant with an empty include is not checked and reads nothing — the
+///   lowering skips it before it looks for a check, as the old loop did
+///   before it read the target;
+/// - an impersonation grant reads its target
+///   ([`crate::engine_grants::impersonation_target_ok`]), and one refused
+///   there is skipped with that reason and goes no further;
+/// - every other check is [`crate::engine_grants::check_engine_grant`], which
+///   is pure, and an `InvalidEngineGrant` (or `UnexpandedPrincipalKind`) is
+///   skipped with the error's text.
+///
+/// The lowering between those reads did no I/O, so issuing them all first
+/// changes neither the statements nor their order on the success path. It
+/// runs at the point the old loop ran: after the grant lowering, before the
+/// rule reads ([`load_rule_inputs`]).
+pub(crate) async fn load_engine_privilege_checks(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+    engine: EngineType,
+    grants: &[EngineGrant],
+) -> Result<BTreeMap<Uuid, Check>, CompileError> {
+    let mut checks = BTreeMap::new();
+    for g in grants {
+        if g.principals.include.is_empty() {
+            continue;
+        }
+        let target = match g.target_user_id {
+            Some(user_id) => {
+                match crate::engine_grants::impersonation_target_ok(conn, service_id, user_id)
+                    .await?
+                {
+                    Ok(username) => Some(username),
+                    Err(reason) => {
+                        checks.insert(g.id, Check::Skip(reason));
+                        continue;
+                    }
+                }
+            }
+            None => None,
+        };
+        let check = match crate::engine_grants::check_engine_grant(g, target.as_deref(), engine) {
+            Ok(values) => Check::Ok {
+                capability: g.capability.clone(),
+                values,
+            },
+            Err(e @ CompileError::InvalidEngineGrant { .. })
+            | Err(e @ CompileError::UnexpandedPrincipalKind { .. }) => Check::Skip(e.to_string()),
+            Err(other) => return Err(other),
+        };
+        checks.insert(g.id, check);
+    }
+    Ok(checks)
 }
 
 /// One `classification_policies` row joined to the tag it gates. A row whose

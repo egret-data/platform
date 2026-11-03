@@ -106,7 +106,7 @@ use serde_json::Value;
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
-use egret_perm::{CompileError, EngineGrant, EngineType, Grant, PermStore, Rule, Selector};
+use egret_perm::{CompileError, EngineType, Grant, PermStore, Rule, Selector};
 use egret_policy::admin::access_to_ranger_json;
 use egret_policy::{
     compiler_targeted_services_via, services_and_tag_services_via, services_for_catalog_via,
@@ -411,17 +411,48 @@ pub(crate) async fn compile_desired(
     }
     skipped.extend(lowered.lowerings.iter().map(crate::ranger::skipped));
 
-    compile_engine_grants(
-        conn,
-        service_id,
-        &profile_name,
-        engine,
-        &engine_grants,
-        &writable,
-        &mut desired,
-        &mut skipped,
-    )
-    .await?;
+    // Governance sub-project 1 Task 9: engine grants (F11, spec §4.2) are
+    // checked by the loader, decided by the IR lowering and only rendered
+    // here. A grant with no grantee left, or whose impersonation target can no
+    // longer be compiled (spec E11), or that the compiler cannot express, is
+    // SKIPPED with its reason rather than failing the profile: a user deleted
+    // or renamed elsewhere must not fail every recompile. The loader makes the
+    // target reads the old per-grant loop made, at the same point and in the
+    // same order.
+    let checks =
+        crate::ir_load::load_engine_privilege_checks(conn, service_id, engine, &engine_grants)
+            .await?;
+    let lowered =
+        egret_perm_ir::lower::engine_privileges::lower_engine_privileges(&engine_grants, &checks)?;
+    for s in &lowered.statements {
+        let input = crate::ranger::engine_privileges::render(s, &profile_name, engine)?;
+        let name = input.name.clone();
+        let body = stamp_service_type(access_to_ranger_json(&input), engine);
+        let Source::EnginePrivilege { engine_grant_id } = s.source else {
+            unreachable!("lower_engine_privileges emits engine-privilege statements only");
+        };
+        let target =
+            target_service_id(&body, &writable, &format!("engine grant {engine_grant_id}"))?;
+        desired.insert(
+            (target, name),
+            DesiredPolicy {
+                body,
+                source_kind: SourceKind::EngineGrant,
+                grant_id: None,
+                rule_id: None,
+            },
+        );
+    }
+    for l in &lowered.lowerings {
+        let item = crate::ranger::skipped(l);
+        tracing::warn!(
+            service_id,
+            engine_grant_id = %item.id,
+            reason = %item.reason,
+            "engine grant skipped during recompile"
+        );
+        skipped.push(item);
+    }
 
     // Governance sub-project 1 Task 6: rules (masks and row filters) are
     // decided by the IR lowering and only rendered here. The loader makes the
@@ -731,84 +762,6 @@ pub(crate) async fn compile_desired(
         largest: whole_tables,
         uncounted,
     }))
-}
-
-/// F11 (spec §4.2): compile every engine grant of the profile into
-/// `desired`. A grant with no grantee left, or whose impersonation target can
-/// no longer be compiled (spec E11), or that the compiler cannot express, is
-/// SKIPPED with its reason rather than failing the profile: a user deleted or
-/// renamed elsewhere must not fail every recompile.
-#[allow(clippy::too_many_arguments)]
-async fn compile_engine_grants(
-    conn: &mut sqlx::PgConnection,
-    service_id: i64,
-    profile_name: &str,
-    engine: EngineType,
-    engine_grants: &[EngineGrant],
-    writable: &HashMap<String, i64>,
-    desired: &mut BTreeMap<PolicyKey, DesiredPolicy>,
-    skipped: &mut Vec<SkippedItem>,
-) -> Result<(), CompileError> {
-    let mut skip = |id: Uuid, reason: String| {
-        tracing::warn!(
-            service_id,
-            engine_grant_id = %id,
-            reason = %reason,
-            "engine grant skipped during recompile"
-        );
-        skipped.push(SkippedItem {
-            source_kind: SourceKind::EngineGrant,
-            id,
-            reason,
-        });
-    };
-    for g in engine_grants {
-        if g.principals.include.is_empty() {
-            skip(
-                g.id,
-                "the engine grant's principals name no engine principal (a role or group \
-                 reference that expands to no member)"
-                    .to_string(),
-            );
-            continue;
-        }
-        let target = match g.target_user_id {
-            Some(user_id) => {
-                match crate::engine_grants::impersonation_target_ok(conn, service_id, user_id)
-                    .await?
-                {
-                    Ok(username) => Some(username),
-                    Err(reason) => {
-                        skip(g.id, reason);
-                        continue;
-                    }
-                }
-            }
-            None => None,
-        };
-        match crate::engine_grants::compile_engine_grant(g, target.as_deref(), profile_name, engine)
-        {
-            Ok(input) => {
-                let name = input.name.clone();
-                let body = stamp_service_type(access_to_ranger_json(&input), engine);
-                let target_service =
-                    target_service_id(&body, writable, &format!("engine grant {}", g.id))?;
-                desired.insert(
-                    (target_service, name),
-                    DesiredPolicy {
-                        body,
-                        source_kind: SourceKind::EngineGrant,
-                        grant_id: None,
-                        rule_id: None,
-                    },
-                );
-            }
-            Err(e @ CompileError::InvalidEngineGrant { .. })
-            | Err(e @ CompileError::UnexpandedPrincipalKind { .. }) => skip(g.id, e.to_string()),
-            Err(other) => return Err(other),
-        }
-    }
-    Ok(())
 }
 
 /// What one profile's compile produced: the desired policies keyed by the

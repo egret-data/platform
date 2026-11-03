@@ -27,11 +27,9 @@ use egret_policy::admin::{
 };
 use egret_policy::COMPILER_GRANT_PREFIX;
 
-use egret_perm::{
-    engine_accesses, Action, CompileError, Effect, EngineType, Grant, Principal, Scope,
-};
-use egret_perm_ir::audience::{audience_from_expanded, Member, MemberName};
-use egret_perm_ir::lower::grants::{check_expanded_principal, grant_statement};
+use egret_perm::{engine_accesses, Action, CompileError, Effect, EngineType, Grant, Scope};
+use egret_perm_ir::audience::{Member, MemberName};
+use egret_perm_ir::lower::grants::grant_statement;
 use egret_perm_ir::statement::{self, Level, Privilege, Source, Statement, Target};
 
 use super::{Rendered, SourceKind};
@@ -67,6 +65,8 @@ pub(crate) fn member_buckets(
 }
 
 /// [`member_buckets`] as an access item, with `effect`/`accesses` set on it.
+/// Shared with an engine privilege's item (`crate::ranger::engine_privileges`),
+/// whose grantees the lowering checked exactly as a grant's.
 pub(crate) fn item_from_members(
     members: &[Member],
     effect: Effect,
@@ -85,25 +85,6 @@ pub(crate) fn item_from_members(
         accesses: accesses.to_vec(),
         effect: effect.as_str().to_string(),
     })
-}
-
-/// The item builder `crate::engine_grants` shares with grants, over a
-/// principal set that has already been expanded, so an engine grant's
-/// grantees are checked exactly as a grant's are
-/// (`egret_perm_ir::lower::grants::check_expanded_principal`).
-pub(crate) fn expanded_principal_item(
-    refs: &[Principal],
-    effect: Effect,
-    accesses: &[String],
-) -> Result<AccessItemInput, CompileError> {
-    for p in refs {
-        check_expanded_principal(p)?;
-    }
-    let audience = audience_from_expanded(&egret_perm::PrincipalSet {
-        include: refs.to_vec(),
-        exclude: Vec::new(),
-    });
-    item_from_members(&audience.include, effect, accesses)
 }
 
 /// The access types `privileges` name on engine `e`, each once, in order:
