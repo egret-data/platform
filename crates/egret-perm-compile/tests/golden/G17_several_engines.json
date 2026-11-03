@@ -1604,7 +1604,7 @@
       {
         "kind": "Clearance",
         "id": "{g17.secret}",
-        "reason": "view protection (clearance mask) not active for {g17.unmeasured}: engine gold-g17-e-unknown runs an image egret has not modelled — pin it to a known image (see docs/en/guides/engine-versions.md). engine \"gold-g17-e-unknown\": image \"starrocks/fe-ubuntu:9.9.9\" is not one whose Ranger plugin egret has measured for a starrocks engine; pin the engine to one of: starrocks/fe-ubuntu:4.1.4, starrocks/fe-ubuntu:4.1.6, ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.1, ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.3"
+        "reason": "view protection (clearance mask) not active for {g17.unmeasured}: engine gold-g17-e-unknown runs an image egret has not modelled — pin it to a known image (see docs/en/guides/engine-versions.md). engine \"gold-g17-e-unknown\": image \"starrocks/fe-ubuntu:9.9.9\" is not one whose Ranger plugin egret has measured for a starrocks engine; pin the engine to one of: starrocks/fe-ubuntu:4.1.4, starrocks/fe-ubuntu:4.1.6, ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.1, ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.3, ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.4"
       }
     ],
     "served": [
