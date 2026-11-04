@@ -8292,6 +8292,96 @@ mod tests {
         e
     }
 
+    /// `egret_core::engine_delegation` is the pure form of the apply path's
+    /// delegation decisions. The oracle for the auth condition is the real
+    /// `resolve_auth` (what `build_provision_req_with` assigns to `config.auth`;
+    /// `build_trino_config` itself always leaves `auth` as `None`). Self-skips
+    /// without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`.
+    #[tokio::test]
+    async fn delegation_facts_match_the_apply_path() {
+        use egret_core::engine_delegation as ed;
+        let Some(mut st) = test_state().await else {
+            eprintln!("skipping delegation_facts_match_the_apply_path: DATABASE_URL not set");
+            return;
+        };
+        // A platform JWKS so a jwt block resolves instead of being rejected.
+        st.engine_jwks_uri = "https://idp/jwks".into();
+        let specs = [
+            serde_json::json!({}),
+            serde_json::json!({"trinoConfig": {}}),
+            serde_json::json!({"trinoConfig": {"delegationMode": "jwt", "auth": {"jwt": {}}}}),
+            serde_json::json!({"trinoConfig": {"delegationMode": "open"}}),
+            serde_json::json!({"trinoConfig": {"coordinator": {}, "auth": {"password": {}}}}),
+            serde_json::json!({"trinoConfig": {"coordinator": {}, "delegationMode": "impersonate", "auth": {"jwt": {}}}}),
+            serde_json::json!({"trinoConfig": {"coordinator": {}, "delegationMode": "jwt", "auth": {"jwt": {}}}}),
+            serde_json::json!({"trinoConfig": {"coordinator": {}}}),
+            // flat spec (no coordinator object), auth present
+            serde_json::json!({"trinoConfig": {"auth": {"passwordUsers": []}}}),
+            // auth present but empty
+            serde_json::json!({"trinoConfig": {"auth": {}}}),
+            serde_json::json!({"trinoConfig": {"coordinator": {}, "auth": {}}}),
+            // auth not an object
+            serde_json::json!({"trinoConfig": {"auth": null}}),
+            serde_json::json!({"trinoConfig": {"auth": "yes"}}),
+            // password-only auth, structured and flat
+            serde_json::json!({"trinoConfig": {"coordinator": {}, "auth": {"passwordUsers": []}}}),
+            // jwt not an object
+            serde_json::json!({"trinoConfig": {"auth": {"jwt": true}}}),
+        ];
+        for spec in specs {
+            let mut e = dummy_engine();
+            e.spec = spec.clone();
+            assert!(build_trino_config(&e.spec).auth.is_none(), "{spec}");
+            let auth = resolve_auth(&st, &e.spec["trinoConfig"])
+                .await
+                .expect("resolves")
+                .is_some();
+            let apply = auth && e.is_impersonate_delegation();
+            assert_eq!(ed::delegator_impersonates("trino", &spec), apply, "{spec}");
+            assert_eq!(
+                ed::supports_delegation("trino", &spec),
+                e.supports_delegation(),
+                "{spec}"
+            );
+            assert_eq!(ed::delegation_mode("trino", &spec), e.delegation_mode());
+            assert_eq!(
+                ed::supports_jwt_delegation("trino", &spec),
+                e.supports_jwt_delegation()
+            );
+        }
+        for spec in [
+            serde_json::json!({}),
+            serde_json::json!({"trinoConfig": {"auth": {"jwt": {}}}}),
+            serde_json::json!({"starrocksConfig": {"delegation": {"mode": "impersonate"}}}),
+            serde_json::json!({"starrocksConfig": {"delegation": {"mode": "jwt"}}}),
+        ] {
+            assert!(!ed::delegator_impersonates("starrocks", &spec), "{spec}");
+            let mut e = dummy_engine();
+            e.r#type = "starrocks".into();
+            e.spec = spec.clone();
+            assert_eq!(
+                ed::supports_delegation("starrocks", &spec),
+                e.supports_delegation(),
+                "{spec}"
+            );
+        }
+        assert!(!ed::qualifies_for_infra(
+            "trino",
+            "external",
+            &serde_json::json!({})
+        ));
+        assert!(ed::qualifies_for_infra(
+            "trino",
+            "provisioned",
+            &serde_json::json!({})
+        ));
+        assert!(!ed::qualifies_for_infra(
+            "starrocks",
+            "provisioned",
+            &serde_json::json!({})
+        ));
+    }
+
     #[test]
     fn provision_branch_gates_tls_delegator_and_monitor_by_mode() {
         // impersonate: delegation-capable, TLS provisioned, delegator injected,
