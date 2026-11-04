@@ -21,7 +21,7 @@ use axum::http::{Request as HttpRequest, StatusCode};
 use egret_auth::session::SessionService;
 use egret_metastore::Db;
 use egret_perm::{Action, Effect, PermStore, Selector};
-use egret_perm_compile::opa::cache::SnapshotCache;
+use egret_perm_compile::opa::cache::{Lookup, SnapshotCache};
 use egret_perm_compile::{perm_router, PermState};
 use egret_perm_eval::{Snapshot, SnapshotInput};
 use egret_policy::PolicyStore;
@@ -632,6 +632,7 @@ async fn a_profile_whose_snapshot_cannot_be_built_is_refused_without_its_error()
         assert_eq!(accesses.len(), n, "{p}");
         for a in accesses {
             assert_eq!(a["decision"]["kind"], "denied", "{a}");
+            assert_eq!(a["decision"]["reason"], "no_policy_matched", "{a}");
             assert_eq!(
                 a["ir_reason"], "no OPA snapshot: build failed (UnusableUserRef)",
                 "{a}"
@@ -660,15 +661,22 @@ async fn the_cached_snapshot_is_used_only_at_the_profiles_current_key() {
     };
     let at_key = Arc::new(SnapshotCache::default());
     at_key.insert_for_test(st.profile, empty(current));
-    let stale = Arc::new(SnapshotCache::default());
-    stale.insert_for_test(st.profile, empty((current.0 - 1, current.1)));
+    // Stale on `policy_version` only, and on `tag_version` only: a comparison
+    // of either half alone uses one of them.
+    let stale_policy = Arc::new(SnapshotCache::default());
+    stale_policy.insert_for_test(st.profile, empty((current.0 - 1, current.1)));
+    let stale_tag = Arc::new(SnapshotCache::default());
+    stale_tag.insert_for_test(st.profile, empty((current.0, current.1 - 1)));
     let (app_at_key, token) = app(&db, Some(at_key)).await;
-    let (app_stale, _) = app(&db, Some(stale)).await;
+    let (app_stale_policy, _) = app(&db, Some(stale_policy)).await;
+    let (app_stale_tag, _) = app(&db, Some(stale_tag)).await;
     let id = target(st.cat, Some("t"), Some("id"));
 
     // Act
     let (_, from_cache, _) = explain(&app_at_key, &token, &st.bob, "read", id.clone()).await;
-    let (_, rebuilt, _) = explain(&app_stale, &token, &st.bob, "read", id).await;
+    let (_, rebuilt_policy, _) =
+        explain(&app_stale_policy, &token, &st.bob, "read", id.clone()).await;
+    let (_, rebuilt_tag, _) = explain(&app_stale_tag, &token, &st.bob, "read", id).await;
 
     // Assert
     let a = access(only_profile(&from_cache), "select");
@@ -676,11 +684,20 @@ async fn the_cached_snapshot_is_used_only_at_the_profiles_current_key() {
         a["decision"]["kind"], "denied",
         "the cached snapshot at the current key answered: {a}"
     );
-    let a = access(only_profile(&rebuilt), "select");
-    assert_eq!(
-        a["decision"]["kind"], "allowed",
-        "a stale cached snapshot is not used; explain built a fresh one: {a}"
-    );
+    for rebuilt in [&rebuilt_policy, &rebuilt_tag] {
+        let a = access(only_profile(rebuilt), "select");
+        assert_eq!(
+            a["decision"]["kind"], "allowed",
+            "a stale cached snapshot is not used; explain built a fresh one: {a}"
+        );
+        assert!(
+            !a["ir_reason"]
+                .as_str()
+                .unwrap()
+                .contains("previous snapshot"),
+            "a fresh build is not a splice: {a}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -689,7 +706,17 @@ async fn an_evaluator_error_refuses_that_profile_and_not_the_request() {
     let db = db().await;
     let st = store(&db, &prefix("xo6"), Extra::TwoMasks).await;
     set_mechanism(&db, st.profile, "opa").await;
-    let (app, token) = app(&db, None).await;
+    // Settles review ⚠️ 1: the refresher BUILDS this state (two stored mask
+    // RULES are not a stored-policy overlap, and nothing here is an operator
+    // row), so the surface answers it and the error is the evaluator's.
+    let cache = Arc::new(SnapshotCache::default());
+    cache.refresh_once(&db.pool).await.expect("refresh");
+    assert!(
+        matches!(cache.get(st.profile), Lookup::Ready(_)),
+        "the refresher builds the two-mask state: {:?}",
+        cache.get(st.profile)
+    );
+    let (app, token) = app(&db, Some(cache)).await;
 
     // Act
     let (s_email, email, raw) = explain(
@@ -739,4 +766,188 @@ async fn an_evaluator_error_refuses_that_profile_and_not_the_request() {
     }
     let a = access(only_profile(&id), "select");
     assert_eq!(a["decision"]["kind"], "allowed", "{a}");
+}
+
+/// A hand-written (`managed_by = 'operator'`) allow on the profile: a row the
+/// evaluator would ignore, so the refresher refuses the profile (C8).
+async fn operator_policy(db: &Db, profile: i64, prefix: &str, user: &str) -> i64 {
+    let policy = PolicyStore::new(db.clone());
+    let svc = policy.get_service_by_id(profile).await.expect("profile");
+    let name = format!("{prefix}-operator");
+    let any = json!({ "values": ["*"], "isExcludes": false, "isRecursive": false });
+    policy
+        .create_policy(
+            profile,
+            &name,
+            &json!({
+                "name": name,
+                "service": svc.name,
+                "serviceType": "trino",
+                "policyType": 0,
+                "isEnabled": true,
+                "resources": { "catalog": any, "schema": any, "table": any, "column": any },
+                "policyItems": [{
+                    "users": [user], "groups": [], "roles": [],
+                    "accesses": [{ "type": "select", "isAllowed": true }],
+                    "delegateAdmin": false,
+                }],
+                "denyPolicyItems": [],
+                "allowExceptions": [],
+                "denyExceptions": [],
+            }),
+        )
+        .await
+        .expect("operator policy")
+}
+
+fn assert_refused(body: &Value, class: &str) {
+    let p = only_profile(body);
+    assert_eq!(p["mechanism"], "opa", "{p}");
+    assert!(p.get("opa").is_none(), "{p}");
+    for a in p["accesses"].as_array().unwrap() {
+        assert_eq!(a["decision"]["kind"], "denied", "{a}");
+        assert_eq!(a["decision"]["reason"], "no_policy_matched", "{a}");
+        assert_eq!(
+            a["ir_reason"],
+            format!("no OPA snapshot: build failed ({class})"),
+            "{a}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_stored_state_refusal_refuses_the_profile_while_the_cache_is_empty() {
+    // Arrange: bob is granted Read, and an operator row sits on the profile.
+    let db = db().await;
+    let p = prefix("xo7");
+    let st = store(&db, &p, Extra::None).await;
+    operator_policy(&db, st.profile, &p, &st.carol).await;
+    set_mechanism(&db, st.profile, "opa").await;
+    let refresher = SnapshotCache::default();
+    refresher.refresh_once(&db.pool).await.expect("refresh");
+    let (no_cache, token) = app(&db, None).await;
+    let (empty_cache, _) = app(&db, Some(Arc::new(SnapshotCache::default()))).await;
+    let id = target(st.cat, Some("t"), Some("id"));
+
+    // Act
+    let (s1, uncached, _) = explain(&no_cache, &token, &st.bob, "read", id.clone()).await;
+    let (s2, empty, _) = explain(&empty_cache, &token, &st.bob, "read", id).await;
+
+    // Assert: the surface refuses everything on this profile, and so does
+    // explain — not bob's grant.
+    assert!(
+        matches!(refresher.get(st.profile), Lookup::NotBuilt { .. }),
+        "the refresher refuses the stored state"
+    );
+    assert_eq!(s1, StatusCode::OK, "{uncached}");
+    assert_eq!(s2, StatusCode::OK, "{empty}");
+    assert_refused(&uncached, "StoredStateRefused");
+    assert_refused(&empty, "StoredStateRefused");
+}
+
+#[tokio::test]
+async fn a_not_built_cache_entry_at_the_current_key_refuses_the_profile() {
+    // Arrange: the refresher refuses the profile at key K; the operator row
+    // is then removed without moving K, so a build of its own would succeed.
+    let db = db().await;
+    let p = prefix("xo8");
+    let st = store(&db, &p, Extra::None).await;
+    let policy_id = operator_policy(&db, st.profile, &p, &st.carol).await;
+    set_mechanism(&db, st.profile, "opa").await;
+    let cache = Arc::new(SnapshotCache::default());
+    cache.refresh_once(&db.pool).await.expect("refresh");
+    assert!(matches!(cache.get(st.profile), Lookup::NotBuilt { .. }));
+    let k = key(&db, st.profile).await;
+    sqlx::query("DELETE FROM policy.authz_policies WHERE id = $1")
+        .bind(policy_id)
+        .execute(&db.pool)
+        .await
+        .expect("delete operator row");
+    sqlx::query(
+        "UPDATE policy.authz_services SET policy_version = $2, tag_version = $3 WHERE id = $1",
+    )
+    .bind(st.profile)
+    .bind(k.0)
+    .bind(k.1)
+    .execute(&db.pool)
+    .await
+    .expect("hold the key");
+    let (cached, token) = app(&db, Some(cache)).await;
+    let (uncached, _) = app(&db, None).await;
+    let id = target(st.cat, Some("t"), Some("id"));
+
+    // Act
+    let (_, from_cache, _) = explain(&cached, &token, &st.bob, "read", id.clone()).await;
+    let (_, built, _) = explain(&uncached, &token, &st.bob, "read", id).await;
+
+    // Assert: what the surface holds at K decides, not a build of explain's own.
+    assert_refused(&from_cache, "StoredStateRefused");
+    assert_eq!(
+        access(only_profile(&built), "select")["decision"]["kind"],
+        "allowed",
+        "the state itself builds now: {built}"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_data_lowering_is_answered_from_the_previous_snapshot_as_the_surface_does() {
+    // Arrange: the refresher holds a good snapshot at K1; then a stored grant
+    // the lowering refuses lands and the key moves to K2.
+    let db = db().await;
+    let p = prefix("xo9");
+    let st = store(&db, &p, Extra::None).await;
+    set_mechanism(&db, st.profile, "opa").await;
+    let cache = Arc::new(SnapshotCache::default());
+    cache.refresh_once(&db.pool).await.expect("refresh");
+    assert!(matches!(cache.get(st.profile), Lookup::Ready(_)));
+    {
+        let mut names = Names::default();
+        let mut tx = db.pool.begin().await.expect("tx");
+        grant(
+            &mut tx,
+            &format!("{p}.unusable"),
+            Effect::Allow,
+            &[Action::Read],
+            scope(st.cat, None, None, None),
+            set(&[user_ref(LEAKED_REF)], &[]),
+            &mut names,
+        )
+        .await;
+        sqlx::query(
+            "UPDATE policy.authz_services SET policy_version = policy_version + 1 WHERE id = $1",
+        )
+        .bind(st.profile)
+        .execute(&mut *tx)
+        .await
+        .expect("bump");
+        tx.commit().await.expect("commit");
+    }
+    let (cached, token) = app(&db, Some(Arc::clone(&cache))).await;
+    let (uncached, _) = app(&db, None).await;
+    let id = target(st.cat, Some("t"), Some("id"));
+
+    // Act: before the refresher has seen K2, then after it spliced.
+    let (_, before_refresh, raw) = explain(&cached, &token, &st.bob, "read", id.clone()).await;
+    cache.refresh_once(&db.pool).await.expect("refresh");
+    let (_, after_refresh, _) = explain(&cached, &token, &st.bob, "read", id.clone()).await;
+    let (_, no_previous, _) = explain(&uncached, &token, &st.bob, "read", id).await;
+
+    // Assert
+    assert!(
+        matches!(cache.get(st.profile), Lookup::Ready(_)),
+        "the refresher spliced"
+    );
+    for body in [&before_refresh, &after_refresh] {
+        let a = access(only_profile(body), "select");
+        assert_eq!(
+            a["decision"]["kind"], "allowed",
+            "the surface answers bob from the previous data: {a}"
+        );
+        let reason = a["ir_reason"].as_str().unwrap();
+        assert!(reason.starts_with("grant "), "{reason}");
+        assert!(reason.contains("from the previous snapshot"), "{reason}");
+    }
+    assert!(!raw.contains(LEAKED_REF), "{raw}");
+    // With no previous snapshot there is nothing to splice into.
+    assert_refused(&no_previous, "UnusableUserRef");
 }

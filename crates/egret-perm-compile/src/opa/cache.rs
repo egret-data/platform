@@ -122,6 +122,9 @@ struct CacheEntry {
     verified: Option<(i64, i64)>,
     snapshot: Option<Arc<Snapshot>>,
     error: Option<String>,
+    /// The refusal class of a not-built outcome ([`Outcome::Failed`]'s
+    /// `class`); None for every other outcome.
+    class: Option<&'static str>,
     /// Consecutive unread outcomes; any other outcome resets it.
     unread: u32,
 }
@@ -156,7 +159,7 @@ pub struct RefreshReport {
 }
 
 /// How one build ended, before it is stored.
-enum Outcome {
+pub(crate) enum Outcome {
     Rebuilt(Snapshot),
     Spliced {
         snapshot: Snapshot,
@@ -164,6 +167,11 @@ enum Outcome {
     },
     Failed {
         error: String,
+        /// What kind of refusal, naming nothing the error carries: a
+        /// [`CompileError`] variant, `StoredStateRefused`, `SnapshotRefused`,
+        /// `NotATrinoProfile`, `InfraNotLowered` or `InfraNotSpliced`. Explain
+        /// answers with this, never with `error`.
+        class: &'static str,
     },
     /// `read`: the key the build read before it failed; None: unknown. The
     /// held snapshot is kept only when `read` is unknown or equals the key
@@ -174,12 +182,12 @@ enum Outcome {
     },
 }
 
-struct Built {
+pub(crate) struct Built {
     /// None: the state could not be read (retry next period).
-    key: Option<(i64, i64)>,
-    outcome: Outcome,
+    pub(crate) key: Option<(i64, i64)>,
+    pub(crate) outcome: Outcome,
     /// The message `record_compile_failure` records, without its prefix.
-    record: Option<String>,
+    pub(crate) record: Option<String>,
 }
 
 impl SnapshotCache {
@@ -194,6 +202,20 @@ impl SnapshotCache {
                 error: e.error.clone(),
             },
         }
+    }
+
+    /// The key `service_id`'s entry was last decided at (the key its last
+    /// build read), and the refusal class when that decision was "not
+    /// built"; None: no entry, or its state could not be read. Explain reads
+    /// it to tell a `NotBuilt` at the profile's current key (the refresher
+    /// refused that state) from one it has not rebuilt yet, and a `Ready`
+    /// spliced at the current key from a stale one.
+    pub fn decided_at(&self, service_id: i64) -> Option<((i64, i64), Option<&'static str>)> {
+        let state = self.state.read().unwrap_or_else(|p| p.into_inner());
+        state
+            .entries
+            .get(&service_id)
+            .and_then(|e| e.key.map(|k| (k, e.class)))
     }
 
     /// The profile an engine is bound to, as of the last refresh; None: unknown or bound to no served profile.
@@ -214,6 +236,7 @@ impl SnapshotCache {
                 verified: key,
                 snapshot: Some(Arc::new(snapshot)),
                 error: None,
+                class: None,
                 unread: 0,
             },
         );
@@ -230,6 +253,7 @@ impl SnapshotCache {
                 verified: None,
                 snapshot: None,
                 error,
+                class: None,
                 unread: 0,
             },
         );
@@ -327,26 +351,29 @@ impl SnapshotCache {
     /// (the unread bound was reached), without its `OPA snapshot: ` prefix.
     fn apply(&self, id: i64, built: Built, report: &mut RefreshReport) -> Option<String> {
         let mut state = self.state.write().unwrap_or_else(|p| p.into_inner());
-        let decided = |snapshot: Option<Snapshot>, error: Option<String>| CacheEntry {
+        let decided = |snapshot: Option<Snapshot>,
+                       error: Option<String>,
+                       class: Option<&'static str>| CacheEntry {
             key: built.key,
             verified: built.key,
             snapshot: snapshot.map(Arc::new),
             error,
+            class,
             unread: 0,
         };
         let mut record = None;
         let entry = match built.outcome {
             Outcome::Rebuilt(s) => {
                 report.rebuilt.push(id);
-                decided(Some(s), None)
+                decided(Some(s), None, None)
             }
             Outcome::Spliced { snapshot, error } => {
                 report.spliced.push(id);
-                decided(Some(snapshot), Some(error))
+                decided(Some(snapshot), Some(error), None)
             }
-            Outcome::Failed { error } => {
+            Outcome::Failed { error, class } => {
                 report.failed.push(id);
-                decided(None, Some(error))
+                decided(None, Some(error), Some(class))
             }
             Outcome::Unread { cause, read } => {
                 report.unread.push(id);
@@ -369,6 +396,7 @@ impl SnapshotCache {
                     verified,
                     snapshot,
                     error: Some(format!("the profile's state could not be read: {cause}")),
+                    class: None,
                     unread: count,
                 }
             }
@@ -394,12 +422,13 @@ fn unread(id: i64, read: Option<(i64, i64)>, e: String) -> Built {
     }
 }
 
-fn failed(id: i64, key: (i64, i64), error: String) -> Built {
+fn failed(id: i64, key: (i64, i64), error: String, class: &'static str) -> Built {
     tracing::warn!(service_id = id, error = %error, "OPA snapshot build failed; the profile is not built");
     Built {
         key: Some(key),
         outcome: Outcome::Failed {
             error: error.clone(),
+            class,
         },
         record: Some(error),
     }
@@ -429,14 +458,33 @@ async fn build_entry(pool: &PgPool, id: i64, previous: Option<Arc<Snapshot>>) ->
         Ok(k) => k,
         Err(e) => return unread(id, None, e.to_string()),
     };
+    build_outcome_via(&mut tx, id, key, previous).await
+}
 
+/// Steps (a)–(c) of a build at `key`, the key the caller read in its own
+/// `REPEATABLE READ, READ ONLY` transaction on `conn`: the stored-state check
+/// (C8), data ++ infrastructure, and the splice into `previous` on a
+/// data-lowering failure (C4). Never mints ([`MissingUsername::Omit`]).
+///
+/// **The one place a snapshot is chosen.** The refresher calls it from
+/// [`build_entry`]; `/perm/explain` calls it on a cache miss with the cached
+/// snapshot as `previous`, so explain answers from what the surface serves.
+pub(crate) async fn build_outcome_via(
+    conn: &mut sqlx::PgConnection,
+    id: i64,
+    key: (i64, i64),
+    previous: Option<Arc<Snapshot>>,
+) -> Built {
     // (a) The stored-state checks (C8).
-    match stored_state_refusal(&mut tx, id).await {
+    match stored_state_refusal(&mut *conn, id).await {
         Ok(Some(msg)) => {
             tracing::warn!(service_id = id, reason = %msg, "OPA snapshot refused: stored state");
             return Built {
                 key: Some(key),
-                outcome: Outcome::Failed { error: msg.clone() },
+                outcome: Outcome::Failed {
+                    error: msg.clone(),
+                    class: "StoredStateRefused",
+                },
                 record: Some(msg),
             };
         }
@@ -446,18 +494,19 @@ async fn build_entry(pool: &PgPool, id: i64, previous: Option<Arc<Snapshot>>) ->
 
     // (b) data ++ infrastructure; (c) on a data-lowering failure, fresh
     // infrastructure alone (C4).
-    match snapshot_parts_via(&mut tx, id, MissingUsername::Omit).await {
+    match snapshot_parts_via(&mut *conn, id, MissingUsername::Omit).await {
         Ok(Some(parts)) => outcome_from_parts(id, key, parts, previous),
         Ok(None) => failed(
             id,
             key,
             "the profile is not a Trino or StarRocks profile".to_string(),
+            "NotATrinoProfile",
         ),
         // The transaction is aborted: lowering the infrastructure on it
         // would only fail too.
         Err(e) if is_transient(&e) => unread(id, Some(key), e.to_string()),
         Err(e) => {
-            let infra = lower_infra_via(&mut tx, id, MissingUsername::Omit).await;
+            let infra = lower_infra_via(&mut *conn, id, MissingUsername::Omit).await;
             outcome_from_data_error(id, key, e, infra, previous)
         }
     }
@@ -487,7 +536,7 @@ fn outcome_from_parts(
             outcome: Outcome::Rebuilt(s),
             record: None,
         },
-        Err(e) => spliced_or_failed(id, key, e.to_string(), infra, previous),
+        Err(e) => spliced_or_failed(id, key, e.to_string(), "SnapshotRefused", infra, previous),
     }
 }
 
@@ -504,13 +553,21 @@ fn outcome_from_data_error(
         return unread(id, Some(key), error.to_string());
     }
     match infra {
-        Ok(Some(infra)) => spliced_or_failed(id, key, error.to_string(), infra, previous),
-        Ok(None) => failed(id, key, error.to_string()),
+        Ok(Some(infra)) => spliced_or_failed(
+            id,
+            key,
+            error.to_string(),
+            compile_error_class(&error),
+            infra,
+            previous,
+        ),
+        Ok(None) => failed(id, key, error.to_string(), compile_error_class(&error)),
         Err(e) if is_transient(&e) => unread(id, Some(key), e.to_string()),
         Err(e) => failed(
             id,
             key,
             format!("{error}; the infrastructure did not lower either: {e}"),
+            "InfraNotLowered",
         ),
     }
 }
@@ -521,11 +578,12 @@ fn spliced_or_failed(
     id: i64,
     key: (i64, i64),
     error: String,
+    class: &'static str,
     infra: Vec<Statement>,
     previous: Option<Arc<Snapshot>>,
 ) -> Built {
     let Some(previous) = previous else {
-        return failed(id, key, error);
+        return failed(id, key, error, class);
     };
     match previous.with_infra(infra) {
         Ok(snapshot) => {
@@ -547,7 +605,42 @@ fn spliced_or_failed(
             id,
             key,
             format!("{error}; the infrastructure did not splice: {e}"),
+            "InfraNotSpliced",
         ),
+    }
+}
+
+/// The [`CompileError`] variant's name, and nothing it carries. No wildcard
+/// arm: a new variant must be named here before it can be answered. A
+/// `Snapshot::build` refusal reached through `build_snapshot_via` is
+/// `Db("OPA snapshot: …")`.
+pub(crate) fn compile_error_class(e: &CompileError) -> &'static str {
+    match e {
+        CompileError::Db(m) if m.starts_with("OPA snapshot:") => "SnapshotRefused",
+        CompileError::Db(_) => "Db",
+        CompileError::LockTimeout(_) => "LockTimeout",
+        CompileError::UnsupportedAction { .. } => "UnsupportedAction",
+        CompileError::ExpansionCeiling { .. } => "ExpansionCeiling",
+        CompileError::ClearanceExpansionCeiling { .. } => "ClearanceExpansionCeiling",
+        CompileError::ClearanceMaskUndecidable { .. } => "ClearanceMaskUndecidable",
+        CompileError::ProfileExpansionCeiling { .. } => "ProfileExpansionCeiling",
+        CompileError::AmbiguousMaskOrFilterArbitration { .. } => "AmbiguousMaskOrFilterArbitration",
+        CompileError::UnusableUserRef { .. } => "UnusableUserRef",
+        CompileError::ReservedEnginePrincipal { .. } => "ReservedEnginePrincipal",
+        CompileError::UnexpandedPrincipalKind { .. } => "UnexpandedPrincipalKind",
+        CompileError::InvalidCustomMask { .. } => "InvalidCustomMask",
+        CompileError::UnsupportedMaskType { .. } => "UnsupportedMaskType",
+        CompileError::MissingTagService { .. } => "MissingTagService",
+        CompileError::MissingTagName { .. } => "MissingTagName",
+        CompileError::ServiceDefUnreadable { .. } => "ServiceDefUnreadable",
+        CompileError::EngineTypeMismatch { .. } => "EngineTypeMismatch",
+        CompileError::UnfilterableRowFilterScope { .. } => "UnfilterableRowFilterScope",
+        CompileError::EmptyScopeLevel { .. } => "EmptyScopeLevel",
+        CompileError::NamedLevelUnderWildcard { .. } => "NamedLevelUnderWildcard",
+        CompileError::UnexpressibleExemption { .. } => "UnexpressibleExemption",
+        CompileError::HiddenColumnsUnenumerable { .. } => "HiddenColumnsUnenumerable",
+        CompileError::InvalidEngineGrant { .. } => "InvalidEngineGrant",
+        CompileError::ProfileSetChanged { .. } => "ProfileSetChanged",
     }
 }
 
@@ -747,7 +840,7 @@ mod tests {
     fn not_built(b: &Built) -> &str {
         assert_eq!(b.key, Some(KEY), "a not-built outcome remembers its key");
         match &b.outcome {
-            Outcome::Failed { error } => {
+            Outcome::Failed { error, .. } => {
                 assert_eq!(b.record.as_deref(), Some(error.as_str()));
                 error
             }

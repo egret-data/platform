@@ -2,12 +2,24 @@
 //! IR evaluator (`egret-perm-eval`) over the profile's snapshot — the same
 //! evaluator, over the same snapshot, the OPA surface answers Trino from.
 //!
-//! **The snapshot** is the refresher's when its key is the profile's current
-//! `(policy_version, tag_version)` as read in explain's own read-only
-//! transaction, and otherwise one built in that transaction with
-//! [`MissingUsername::Omit`], which never mints. The build runs under a
-//! savepoint, so a failing read cannot poison the transaction the rest of the
-//! request (other profiles, the not-enforced line) still reads from.
+//! **The snapshot is chosen exactly as the refresher chooses it** (review
+//! I1/I2), because explain must answer what the surface answers:
+//!
+//! - the cache's `Ready` snapshot when its entry was decided at the profile's
+//!   current `(policy_version, tag_version)` (read in explain's own read-only
+//!   transaction), or when the snapshot's own key is that key — spliced or
+//!   not, it is what the surface serves;
+//! - the cache's `NotBuilt` decided at the current key: refused, with the
+//!   refresher's refusal class;
+//! - otherwise [`build_outcome_via`], the refresher's own build (the C8
+//!   stored-state check, data ++ infrastructure, and the C4 splice into the
+//!   cached snapshot as `previous`), in explain's transaction under a
+//!   savepoint that is always rolled back, with [`crate::opa::build::MissingUsername::Omit`],
+//!   which never mints. A failing read cannot poison the transaction the rest
+//!   of the request still reads from.
+//!
+//! A spliced snapshot answers from the previous data, and every `ir_reason`
+//! says so.
 //!
 //! **A profile whose snapshot cannot be built is refused, never a 500.** Every
 //! access is `Denied` and its `ir_reason` names the refusal class (the
@@ -22,7 +34,7 @@
 
 use std::sync::Arc;
 
-use egret_perm::{Action, CompileError, EngineType, Scope};
+use egret_perm::{Action, EngineType, Scope};
 use egret_perm_eval::trino_ops::DataPrivilege;
 use egret_perm_eval::{render_mask, Decision, EvalError, ObjectPath, Snapshot};
 
@@ -30,52 +42,68 @@ use super::{ranger_engine, ExplainAccess, ExplainProfile, PermHttpError};
 use crate::explain_wire::{
     ExplainOpa, WireDecision, WireDenyReason, WireEngineType, WireMechanism,
 };
-use crate::opa::build::MissingUsername;
-use crate::opa::cache::{Lookup, SnapshotCache};
+use crate::opa::cache::{build_outcome_via, Lookup, Outcome, SnapshotCache};
 
 /// The column type explain renders a mask with: the engine substitutes the
 /// column's own type, which explain does not know.
 const EXPLAIN_MASK_COLUMN_TYPE: &str = "varchar";
 
+/// What explain evaluates an OPA profile with.
+pub(super) struct Served {
+    pub snapshot: Arc<Snapshot>,
+    /// The data lowering failed at the current key, and the surface serves
+    /// the previous data with fresh infrastructure (C4).
+    pub spliced: bool,
+}
+
 /// The snapshot explain evaluates, or the `ir_reason` every access of the
 /// profile is refused with.
-pub(super) type ExplainSnapshot = Result<Arc<Snapshot>, String>;
+pub(super) type ExplainSnapshot = Result<Served, String>;
 
-/// The refresher's snapshot when it is at `key`, else one built now in the
-/// caller's (read-only, `REPEATABLE READ`) transaction.
+/// What the surface serves for `service_id` at `key` (see the module doc).
 pub(super) async fn opa_snapshot_for_explain(
     conn: &mut sqlx::PgConnection,
     cache: Option<&SnapshotCache>,
     service_id: i64,
     key: (i64, i64),
 ) -> Result<ExplainSnapshot, PermHttpError> {
-    if let Some(cache) = cache {
-        if let Lookup::Ready(s) = cache.get(service_id) {
-            if s.key() == key {
-                return Ok(Ok(s));
-            }
+    let (lookup, decided) = match cache {
+        Some(c) => (c.get(service_id), c.decided_at(service_id)),
+        None => (Lookup::NotOpa, None),
+    };
+    let decided_now = decided.is_some_and(|(k, _)| k == key);
+    let previous = match lookup {
+        Lookup::Ready(s) if decided_now || s.key() == key => {
+            let spliced = s.key() != key;
+            return Ok(Ok(Served {
+                snapshot: s,
+                spliced,
+            }));
         }
-    }
+        Lookup::Ready(s) => Some(s),
+        Lookup::NotBuilt { .. } if decided_now => {
+            let class = decided.and_then(|(_, c)| c).unwrap_or("NotBuilt");
+            return Ok(Err(refusal(class)));
+        }
+        Lookup::NotBuilt { .. } | Lookup::NotOpa => None,
+    };
     let mut savepoint = sqlx::Connection::begin(&mut *conn)
         .await
         .map_err(PermHttpError::db)?;
-    let built =
-        crate::opa::build::build_snapshot_via(&mut savepoint, service_id, MissingUsername::Omit)
-            .await;
+    let built = build_outcome_via(&mut savepoint, service_id, key, previous).await;
     savepoint.rollback().await.map_err(PermHttpError::db)?;
-    Ok(match built {
-        Ok(Some(s)) => Ok(Arc::new(s)),
-        // `build_snapshot_via` answers `None` only for a profile that is not
-        // Trino or StarRocks, which `engine_type_for` already excluded.
-        Ok(None) => Err(refusal("NotATrinoProfile")),
-        Err(e) => {
-            tracing::warn!(
-                service_id,
-                error = %e,
-                "explain: the profile's OPA snapshot did not build; its accesses are refused"
-            );
-            Err(refusal(refusal_class(&e)))
-        }
+    Ok(match built.outcome {
+        Outcome::Rebuilt(s) => Ok(Served {
+            snapshot: Arc::new(s),
+            spliced: false,
+        }),
+        Outcome::Spliced { snapshot, .. } => Ok(Served {
+            snapshot: Arc::new(snapshot),
+            spliced: true,
+        }),
+        Outcome::Failed { class, .. } => Err(refusal(class)),
+        // A database error: the refresher retries; explain refuses.
+        Outcome::Unread { .. } => Err(refusal("Unread")),
     })
 }
 
@@ -83,38 +111,10 @@ fn refusal(class: &str) -> String {
     format!("no OPA snapshot: build failed ({class})")
 }
 
-/// The [`CompileError`] variant's name, and nothing it carries. No wildcard
-/// arm: a new variant must be named here before it can be answered. A
-/// `Snapshot::build` refusal reaches here as `Db("OPA snapshot: …")`.
-fn refusal_class(e: &CompileError) -> &'static str {
-    match e {
-        CompileError::Db(m) if m.starts_with("OPA snapshot:") => "SnapshotRefused",
-        CompileError::Db(_) => "Db",
-        CompileError::LockTimeout(_) => "LockTimeout",
-        CompileError::UnsupportedAction { .. } => "UnsupportedAction",
-        CompileError::ExpansionCeiling { .. } => "ExpansionCeiling",
-        CompileError::ClearanceExpansionCeiling { .. } => "ClearanceExpansionCeiling",
-        CompileError::ClearanceMaskUndecidable { .. } => "ClearanceMaskUndecidable",
-        CompileError::ProfileExpansionCeiling { .. } => "ProfileExpansionCeiling",
-        CompileError::AmbiguousMaskOrFilterArbitration { .. } => "AmbiguousMaskOrFilterArbitration",
-        CompileError::UnusableUserRef { .. } => "UnusableUserRef",
-        CompileError::ReservedEnginePrincipal { .. } => "ReservedEnginePrincipal",
-        CompileError::UnexpandedPrincipalKind { .. } => "UnexpandedPrincipalKind",
-        CompileError::InvalidCustomMask { .. } => "InvalidCustomMask",
-        CompileError::UnsupportedMaskType { .. } => "UnsupportedMaskType",
-        CompileError::MissingTagService { .. } => "MissingTagService",
-        CompileError::MissingTagName { .. } => "MissingTagName",
-        CompileError::ServiceDefUnreadable { .. } => "ServiceDefUnreadable",
-        CompileError::EngineTypeMismatch { .. } => "EngineTypeMismatch",
-        CompileError::UnfilterableRowFilterScope { .. } => "UnfilterableRowFilterScope",
-        CompileError::EmptyScopeLevel { .. } => "EmptyScopeLevel",
-        CompileError::NamedLevelUnderWildcard { .. } => "NamedLevelUnderWildcard",
-        CompileError::UnexpressibleExemption { .. } => "UnexpressibleExemption",
-        CompileError::HiddenColumnsUnenumerable { .. } => "HiddenColumnsUnenumerable",
-        CompileError::InvalidEngineGrant { .. } => "InvalidEngineGrant",
-        CompileError::ProfileSetChanged { .. } => "ProfileSetChanged",
-    }
-}
+/// Appended to every `ir_reason` of a spliced snapshot.
+const SPLICED_NOTE: &str =
+    " (from the previous snapshot: the current model did not build, and the engine is answered \
+     from the previous data)";
 
 pub(super) struct OpaProfileInput<'a> {
     pub snapshot: &'a ExplainSnapshot,
@@ -228,8 +228,8 @@ pub(super) fn opa_profile(i: &OpaProfileInput<'_>) -> ExplainProfile {
     };
     // The snapshot, or why nothing it answers can be shown.
     let answered: Result<(&Snapshot, Option<ExplainOpa>), String> = match i.snapshot {
-        Ok(s) => match opa_values(s, i) {
-            Ok(opa) => Ok((s.as_ref(), opa)),
+        Ok(served) => match opa_values(&served.snapshot, i) {
+            Ok(opa) => Ok((served.snapshot.as_ref(), opa)),
             Err(e) => {
                 tracing::warn!(
                     service_id = i.service_id,
@@ -256,6 +256,10 @@ pub(super) fn opa_profile(i: &OpaProfileInput<'_>) -> ExplainProfile {
                 },
                 refused.clone(),
             ),
+        };
+        let ir_reason = match (&answered, i.snapshot) {
+            (Ok(_), Ok(Served { spliced: true, .. })) => format!("{ir_reason}{SPLICED_NOTE}"),
+            _ => ir_reason,
         };
         accesses.push(ExplainAccess {
             access_type: (*access_type).to_string(),
