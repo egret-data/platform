@@ -1,0 +1,12 @@
+[package]
+name = "egret-perm-eval"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# Governance SP2b: the OPA decision evaluator over the neutral IR. Pure: no
+# sqlx, tokio, network or filesystem in src/ (tests/boundary.rs), like
+# egret-ranger-eval, so it can move into a sidecar later (spec S2).
+[dependencies]
+egret-perm-ir.workspace = true
+thiserror.workspace = true

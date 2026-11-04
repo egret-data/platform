@@ -3581,6 +3581,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "egret-perm-eval"
+version = "0.1.0"
+dependencies = [
+ "egret-perm-ir",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "egret-perm-ir"
 version = "0.1.0"
 dependencies = [

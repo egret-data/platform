@@ -1,0 +1,227 @@
+## OpaBatchAccessControl: filterColumns and the batch request builders
+  public java.util.Map<io.trino.spi.connector.SchemaTableName, java.util.Set<java.lang.String>> filterColumns(io.trino.spi.security.SystemSecurityContext, java.lang.String, java.util.Map<io.trino.spi.connector.SchemaTableName, java.util.Set<java.lang.String>>);
+    Code:
+       0: aload_0
+       1: aload_1
+       2: invokevirtual #63                 // Method buildQueryContext:(Lio/trino/spi/security/SystemSecurityContext;)Lio/trino/plugin/opa/schema/OpaQueryContext;
+       5: ldc           #77                 // String FilterColumns
+       7: aload_2
+       8: invokedynamic #79,  0             // InvokeDynamic #4:apply:(Ljava/lang/String;)Ljava/util/function/BiFunction;
+      13: invokestatic  #82                 // Method batchRequestBuilder:(Lio/trino/plugin/opa/schema/OpaQueryContext;Ljava/lang/String;Ljava/util/function/BiFunction;)Ljava/util/function/BiFunction;
+      16: astore        4
+      18: aload_0
+      19: getfield      #45                 // Field opaHttpClient:Lio/trino/plugin/opa/OpaHttpClient;
+      22: aload_3
+      23: aload         4
+      25: aload_0
+      26: getfield      #21                 // Field opaBatchedPolicyUri:Ljava/net/URI;
+      29: aload_0
+      30: getfield      #37                 // Field batchResultCodec:Lio/airlift/json/JsonCodec;
+      33: invokevirtual #86                 // Method io/trino/plugin/opa/OpaHttpClient.parallelBatchFilterFromOpa:(Ljava/util/Map;Ljava/util/function/BiFunction;Ljava/net/URI;Lio/airlift/json/JsonCodec;)Ljava/util/Map;
+      36: areturn
+
+  private static io.trino.plugin.opa.schema.OpaQueryInput lambda$batchRequestBuilder$1(io.trino.plugin.opa.schema.OpaQueryContext, java.lang.String, java.util.function.BiFunction, java.lang.Object, java.util.List);
+    Code:
+       0: new           #103                // class io/trino/plugin/opa/schema/OpaQueryInput
+       3: dup
+       4: aload_0
+       5: invokestatic  #105                // Method io/trino/plugin/opa/schema/OpaQueryInputAction.builder:()Lio/trino/plugin/opa/schema/OpaQueryInputAction$Builder;
+       8: aload_1
+       9: invokevirtual #111                // Method io/trino/plugin/opa/schema/OpaQueryInputAction$Builder.operation:(Ljava/lang/String;)Lio/trino/plugin/opa/schema/OpaQueryInputAction$Builder;
+      12: aload_2
+      13: aload_3
+      14: aload         4
+      16: invokeinterface #117,  3          // InterfaceMethod java/util/function/BiFunction.apply:(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;
+      21: checkcast     #122                // class io/trino/plugin/opa/schema/OpaQueryInputResource
+      24: invokestatic  #124                // Method com/google/common/collect/ImmutableList.of:(Ljava/lang/Object;)Lcom/google/common/collect/ImmutableList;
+      27: invokevirtual #130                // Method io/trino/plugin/opa/schema/OpaQueryInputAction$Builder.filterResources:(Ljava/util/Collection;)Lio/trino/plugin/opa/schema/OpaQueryInputAction$Builder;
+      30: invokevirtual #134                // Method io/trino/plugin/opa/schema/OpaQueryInputAction$Builder.build:()Lio/trino/plugin/opa/schema/OpaQueryInputAction;
+      33: invokespecial #138                // Method io/trino/plugin/opa/schema/OpaQueryInput."<init>":(Lio/trino/plugin/opa/schema/OpaQueryContext;Lio/trino/plugin/opa/schema/OpaQueryInputAction;)V
+      36: areturn
+
+  private static io.trino.plugin.opa.schema.OpaQueryInput lambda$batchRequestBuilder$0(io.trino.plugin.opa.schema.OpaQueryContext, java.lang.String, java.util.function.Function, java.util.List);
+    Code:
+       0: new           #103                // class io/trino/plugin/opa/schema/OpaQueryInput
+       3: dup
+       4: aload_0
+       5: invokestatic  #105                // Method io/trino/plugin/opa/schema/OpaQueryInputAction.builder:()Lio/trino/plugin/opa/schema/OpaQueryInputAction$Builder;
+       8: aload_1
+       9: invokevirtual #111                // Method io/trino/plugin/opa/schema/OpaQueryInputAction$Builder.operation:(Ljava/lang/String;)Lio/trino/plugin/opa/schema/OpaQueryInputAction$Builder;
+      12: aload_3
+      13: invokeinterface #141,  1          // InterfaceMethod java/util/List.stream:()Ljava/util/stream/Stream;
+      18: aload_2
+      19: invokeinterface #147,  2          // InterfaceMethod java/util/stream/Stream.map:(Ljava/util/function/Function;)Ljava/util/stream/Stream;
+      24: invokestatic  #153                // Method com/google/common/collect/ImmutableList.toImmutableList:()Ljava/util/stream/Collector;
+      27: invokeinterface #157,  2          // InterfaceMethod java/util/stream/Stream.collect:(Ljava/util/stream/Collector;)Ljava/lang/Object;
+      32: checkcast     #161                // class java/util/Collection
+      35: invokevirtual #130                // Method io/trino/plugin/opa/schema/OpaQueryInputAction$Builder.filterResources:(Ljava/util/Collection;)Lio/trino/plugin/opa/schema/OpaQueryInputAction$Builder;
+      38: invokevirtual #134                // Method io/trino/plugin/opa/schema/OpaQueryInputAction$Builder.build:()Lio/trino/plugin/opa/schema/OpaQueryInputAction;
+      41: invokespecial #138                // Method io/trino/plugin/opa/schema/OpaQueryInput."<init>":(Lio/trino/plugin/opa/schema/OpaQueryContext;Lio/trino/plugin/opa/schema/OpaQueryInputAction;)V
+      44: areturn
+
+  private static io.trino.plugin.opa.schema.OpaQueryInputResource lambda$filterColumns$0(java.lang.String, io.trino.spi.connector.SchemaTableName, java.util.List);
+    Code:
+       0: invokestatic  #163                // Method io/trino/plugin/opa/schema/OpaQueryInputResource.builder:()Lio/trino/plugin/opa/schema/OpaQueryInputResource$Builder;
+       3: new           #194                // class io/trino/plugin/opa/schema/TrinoTable
+       6: dup
+       7: aload_0
+       8: aload_1
+       9: invokevirtual #196                // Method io/trino/spi/connector/SchemaTableName.getSchemaName:()Ljava/lang/String;
+      12: aload_1
+      13: invokevirtual #201                // Method io/trino/spi/connector/SchemaTableName.getTableName:()Ljava/lang/String;
+      16: invokespecial #204                // Method io/trino/plugin/opa/schema/TrinoTable."<init>":(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V
+      19: aload_2
+      20: invokestatic  #207                // Method com/google/common/collect/ImmutableSet.copyOf:(Ljava/util/Collection;)Lcom/google/common/collect/ImmutableSet;
+      23: invokevirtual #213                // Method io/trino/plugin/opa/schema/TrinoTable.withColumns:(Ljava/util/Set;)Lio/trino/plugin/opa/schema/TrinoTable;
+      26: invokevirtual #217                // Method io/trino/plugin/opa/schema/OpaQueryInputResource$Builder.table:(Lio/trino/plugin/opa/schema/TrinoTable;)Lio/trino/plugin/opa/schema/OpaQueryInputResource$Builder;
+      29: invokevirtual #191                // Method io/trino/plugin/opa/schema/OpaQueryInputResource$Builder.build:()Lio/trino/plugin/opa/schema/OpaQueryInputResource;
+      32: areturn
+
+## OpaHighLevelClient and OpaAccessControl: the column-mask requests
+  public java.util.Map<io.trino.spi.connector.ColumnSchema, io.trino.plugin.opa.schema.OpaViewExpression> getColumnMasksFromOpa(io.trino.plugin.opa.schema.OpaQueryContext, io.trino.spi.connector.CatalogSchemaTableName, java.util.List<io.trino.spi.connector.ColumnSchema>);
+    Code:
+       0: aload_0
+       1: getfield      #73                 // Field opaBatchColumnMaskingUri:Ljava/util/Optional;
+       4: aload_0
+       5: aload_1
+       6: aload_2
+       7: aload_3
+       8: invokedynamic #222,  0            // InvokeDynamic #1:apply:(Lio/trino/plugin/opa/OpaHighLevelClient;Lio/trino/plugin/opa/schema/OpaQueryContext;Lio/trino/spi/connector/CatalogSchemaTableName;Ljava/util/List;)Ljava/util/function/Function;
+      13: invokevirtual #204                // Method java/util/Optional.map:(Ljava/util/function/Function;)Ljava/util/Optional;
+      16: aload_0
+      17: aload_1
+      18: aload_2
+      19: aload_3
+      20: invokedynamic #225,  0            // InvokeDynamic #2:get:(Lio/trino/plugin/opa/OpaHighLevelClient;Lio/trino/plugin/opa/schema/OpaQueryContext;Lio/trino/spi/connector/CatalogSchemaTableName;Ljava/util/List;)Ljava/util/function/Supplier;
+      25: invokevirtual #229                // Method java/util/Optional.or:(Ljava/util/function/Supplier;)Ljava/util/Optional;
+      28: invokestatic  #233                // Method com/google/common/collect/ImmutableMap.of:()Lcom/google/common/collect/ImmutableMap;
+      31: invokevirtual #216                // Method java/util/Optional.orElse:(Ljava/lang/Object;)Ljava/lang/Object;
+      34: checkcast     #236                // class java/util/Map
+      37: areturn
+
+       8: ldc           #238                // String GetColumnMask
+      10: invokevirtual #127                // Method io/trino/plugin/opa/schema/OpaQueryInputAction$Builder.operation:(Ljava/lang/String;)Lio/trino/plugin/opa/schema/OpaQueryInputAction$Builder;
+      13: aload         4
+      15: invokeinterface #240,  1          // InterfaceMethod java/util/List.stream:()Ljava/util/stream/Stream;
+      20: aload_3
+      21: invokedynamic #244,  0            // InvokeDynamic #3:apply:(Lio/trino/spi/connector/CatalogSchemaTableName;)Ljava/util/function/Function;
+      26: invokeinterface #247,  2          // InterfaceMethod java/util/stream/Stream.map:(Ljava/util/function/Function;)Ljava/util/stream/Stream;
+      31: invokestatic  #252                // Method com/google/common/collect/ImmutableList.toImmutableList:()Ljava/util/stream/Collector;
+      34: invokeinterface #256,  2          // InterfaceMethod java/util/stream/Stream.collect:(Ljava/util/stream/Collector;)Ljava/lang/Object;
+      39: checkcast     #260                // class java/util/Collection
+      42: invokevirtual #262                // Method io/trino/plugin/opa/schema/OpaQueryInputAction$Builder.filterResources:(Ljava/util/Collection;)Lio/trino/plugin/opa/schema/OpaQueryInputAction$Builder;
+      45: invokevirtual #140                // Method io/trino/plugin/opa/schema/OpaQueryInputAction$Builder.build:()Lio/trino/plugin/opa/schema/OpaQueryInputAction;
+      48: invokespecial #144                // Method io/trino/plugin/opa/schema/OpaQueryInput."<init>":(Lio/trino/plugin/opa/schema/OpaQueryContext;Lio/trino/plugin/opa/schema/OpaQueryInputAction;)V
+      51: astore        5
+      53: aload_0
+      54: getfield      #42                 // Field opaHttpClient:Lio/trino/plugin/opa/OpaHttpClient;
+      57: aload_0
+      58: getfield      #42                 // Field opaHttpClient:Lio/trino/plugin/opa/OpaHttpClient;
+      61: aload         5
+      63: aload_1
+      64: aload_0
+      65: getfield      #35                 // Field batchColumnMaskQueryResultCodec:Lio/airlift/json/JsonCodec;
+      68: invokevirtual #93                 // Method io/trino/plugin/opa/OpaHttpClient.submitOpaRequest:(Lio/trino/plugin/opa/schema/OpaQueryInput;Ljava/net/URI;Lio/airlift/json/JsonCodec;)Lcom/google/common/util/concurrent/FluentFuture;
+      71: invokevirtual #97                 // Method io/trino/plugin/opa/OpaHttpClient.consumeOpaResponse:(Lcom/google/common/util/concurrent/ListenableFuture;)Ljava/lang/Object;
+      74: checkcast     #266                // class io/trino/plugin/opa/schema/OpaBatchColumnMaskQueryResult
+      77: astore        6
+      79: aload         6
+      81: invokevirtual #268                // Method io/trino/plugin/opa/schema/OpaBatchColumnMaskQueryResult.result:()Ljava/util/List;
+      84: invokeinterface #240,  1          // InterfaceMethod java/util/List.stream:()Ljava/util/stream/Stream;
+      89: aload         4
+      91: invokedynamic #271,  0            // InvokeDynamic #4:apply:(Ljava/util/List;)Ljava/util/function/Function;
+      96: invokedynamic #274,  0            // InvokeDynamic #5:apply:()Ljava/util/function/Function;
+     101: invokestatic  #277                // Method com/google/common/collect/ImmutableMap.toImmutableMap:(Ljava/util/function/Function;Ljava/util/function/Function;)Ljava/util/stream/Collector;
+     104: invokeinterface #256,  2          // InterfaceMethod java/util/stream/Stream.collect:(Ljava/util/stream/Collector;)Ljava/lang/Object;
+     109: checkcast     #236                // class java/util/Map
+     112: areturn
+
+       8: ldc           #238                // String GetColumnMask
+      10: invokevirtual #127                // Method io/trino/plugin/opa/schema/OpaQueryInputAction$Builder.operation:(Ljava/lang/String;)Lio/trino/plugin/opa/schema/OpaQueryInputAction$Builder;
+      13: invokestatic  #181                // Method io/trino/plugin/opa/schema/OpaQueryInputResource.builder:()Lio/trino/plugin/opa/schema/OpaQueryInputResource$Builder;
+      16: new           #350                // class io/trino/plugin/opa/schema/TrinoColumn
+      19: dup
+      20: aload_1
+      21: aload_2
+      22: invokevirtual #352                // Method io/trino/spi/connector/ColumnSchema.getName:()Ljava/lang/String;
+      25: aload_2
+      26: invokevirtual #358                // Method io/trino/spi/connector/ColumnSchema.getType:()Lio/trino/spi/type/Type;
+      29: invokespecial #362                // Method io/trino/plugin/opa/schema/TrinoColumn."<init>":(Lio/trino/spi/connector/CatalogSchemaTableName;Ljava/lang/String;Lio/trino/spi/type/Type;)V
+      32: invokevirtual #365                // Method io/trino/plugin/opa/schema/OpaQueryInputResource$Builder.column:(Lio/trino/plugin/opa/schema/TrinoColumn;)Lio/trino/plugin/opa/schema/OpaQueryInputResource$Builder;
+      35: invokevirtual #197                // Method io/trino/plugin/opa/schema/OpaQueryInputResource$Builder.build:()Lio/trino/plugin/opa/schema/OpaQueryInputResource;
+      38: invokevirtual #133                // Method io/trino/plugin/opa/schema/OpaQueryInputAction$Builder.resource:(Lio/trino/plugin/opa/schema/OpaQueryInputResource;)Lio/trino/plugin/opa/schema/OpaQueryInputAction$Builder;
+      41: invokevirtual #140                // Method io/trino/plugin/opa/schema/OpaQueryInputAction$Builder.build:()Lio/trino/plugin/opa/schema/OpaQueryInputAction;
+      44: invokespecial #144                // Method io/trino/plugin/opa/schema/OpaQueryInput."<init>":(Lio/trino/plugin/opa/schema/OpaQueryContext;Lio/trino/plugin/opa/schema/OpaQueryInputAction;)V
+      47: areturn
+
+  private java.util.Optional lambda$getColumnMasksFromOpa$1(io.trino.plugin.opa.schema.OpaQueryContext, io.trino.spi.connector.CatalogSchemaTableName, java.util.List);
+    Code:
+       0: aload_0
+       1: getfield      #67                 // Field opaColumnMaskingUri:Ljava/util/Optional;
+       4: aload_0
+       5: aload_1
+       6: aload_2
+       7: aload_3
+       8: invokedynamic #378,  0            // InvokeDynamic #9:apply:(Lio/trino/plugin/opa/OpaHighLevelClient;Lio/trino/plugin/opa/schema/OpaQueryContext;Lio/trino/spi/connector/CatalogSchemaTableName;Ljava/util/List;)Ljava/util/function/Function;
+      13: invokevirtual #204                // Method java/util/Optional.map:(Ljava/util/function/Function;)Ljava/util/Optional;
+      16: areturn
+
+  private java.util.Map lambda$getColumnMasksFromOpa$2(io.trino.plugin.opa.schema.OpaQueryContext, io.trino.spi.connector.CatalogSchemaTableName, java.util.List, java.net.URI);
+    Code:
+       0: aload_0
+       1: aload         4
+       3: aload_1
+       4: aload_2
+       5: aload_3
+       6: invokevirtual #379                // Method getParallelColumnMasksFromOpa:(Ljava/net/URI;Lio/trino/plugin/opa/schema/OpaQueryContext;Lio/trino/spi/connector/CatalogSchemaTableName;Ljava/util/List;)Ljava/util/Map;
+       9: areturn
+
+  private java.util.Map lambda$getColumnMasksFromOpa$0(io.trino.plugin.opa.schema.OpaQueryContext, io.trino.spi.connector.CatalogSchemaTableName, java.util.List, java.net.URI);
+    Code:
+       0: aload_0
+       1: aload         4
+       3: aload_1
+       4: aload_2
+       5: aload_3
+       6: invokevirtual #383                // Method getBatchColumnMasksFromOpa:(Ljava/net/URI;Lio/trino/plugin/opa/schema/OpaQueryContext;Lio/trino/spi/connector/CatalogSchemaTableName;Ljava/util/List;)Ljava/util/Map;
+       9: areturn
+
+  public java.util.Map<io.trino.spi.connector.ColumnSchema, io.trino.spi.security.ViewExpression> getColumnMasks(io.trino.spi.security.SystemSecurityContext, io.trino.spi.connector.CatalogSchemaTableName, java.util.List<io.trino.spi.connector.ColumnSchema>);
+    Code:
+       0: aload_0
+       1: getfield      #27                 // Field opaHighLevelClient:Lio/trino/plugin/opa/OpaHighLevelClient;
+       4: aload_0
+       5: aload_1
+       6: invokevirtual #124                // Method buildQueryContext:(Lio/trino/spi/security/SystemSecurityContext;)Lio/trino/plugin/opa/schema/OpaQueryContext;
+       9: aload_2
+      10: aload_3
+      11: invokevirtual #576                // Method io/trino/plugin/opa/OpaHighLevelClient.getColumnMasksFromOpa:(Lio/trino/plugin/opa/schema/OpaQueryContext;Lio/trino/spi/connector/CatalogSchemaTableName;Ljava/util/List;)Ljava/util/Map;
+      14: invokeinterface #306,  1          // InterfaceMethod java/util/Map.entrySet:()Ljava/util/Set;
+      19: invokeinterface #580,  1          // InterfaceMethod java/util/Set.stream:()Ljava/util/stream/Stream;
+      24: aload_2
+      25: invokedynamic #581,  0            // InvokeDynamic #62:apply:(Lio/trino/spi/connector/CatalogSchemaTableName;)Ljava/util/function/Function;
+      30: invokeinterface #560,  2          // InterfaceMethod java/util/stream/Stream.map:(Ljava/util/function/Function;)Ljava/util/stream/Stream;
+      35: invokedynamic #582,  0            // InvokeDynamic #63:apply:()Ljava/util/function/Function;
+      40: invokedynamic #585,  0            // InvokeDynamic #64:apply:()Ljava/util/function/Function;
+      45: invokestatic  #586                // Method com/google/common/collect/ImmutableMap.toImmutableMap:(Ljava/util/function/Function;Ljava/util/function/Function;)Ljava/util/stream/Collector;
+      48: invokeinterface #572,  2          // InterfaceMethod java/util/stream/Stream.collect:(Ljava/util/stream/Collector;)Ljava/lang/Object;
+      53: checkcast     #307                // class java/util/Map
+      56: areturn
+
+  private static java.util.Map$Entry lambda$getColumnMasks$0(io.trino.spi.connector.CatalogSchemaTableName, java.util.Map$Entry);
+    Code:
+       0: aload_1
+       1: invokeinterface #329,  1          // InterfaceMethod java/util/Map$Entry.getKey:()Ljava/lang/Object;
+       6: checkcast     #659                // class io/trino/spi/connector/ColumnSchema
+       9: aload_1
+      10: invokeinterface #343,  1          // InterfaceMethod java/util/Map$Entry.getValue:()Ljava/lang/Object;
+      15: checkcast     #661                // class io/trino/plugin/opa/schema/OpaViewExpression
+      18: aload_0
+      19: invokevirtual #663                // Method io/trino/spi/connector/CatalogSchemaTableName.getCatalogName:()Ljava/lang/String;
+      22: aload_0
+      23: invokevirtual #664                // Method io/trino/spi/connector/CatalogSchemaTableName.getSchemaTableName:()Lio/trino/spi/connector/SchemaTableName;
+      26: invokevirtual #334                // Method io/trino/spi/connector/SchemaTableName.getSchemaName:()Ljava/lang/String;
+      29: invokevirtual #668                // Method io/trino/plugin/opa/schema/OpaViewExpression.toTrinoViewExpression:(Ljava/lang/String;Ljava/lang/String;)Lio/trino/spi/security/ViewExpression;
+      32: invokestatic  #655                // InterfaceMethod java/util/Map.entry:(Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Map$Entry;
+      35: areturn
+
