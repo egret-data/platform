@@ -439,6 +439,7 @@ export * from './objectRef';
 export * from './objectTags';
 export * from './oidcOidcCallbackParams';
 export * from './oidcStepUp';
+export * from './opaPluginConfigDto';
 export * from './orderBy';
 export * from './outputSpec';
 export * from './ownerDto';

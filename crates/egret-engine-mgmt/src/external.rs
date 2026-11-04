@@ -160,14 +160,20 @@ fn present_or_null<'de, D: serde::Deserializer<'de>>(
 /// [`crate::openapi`].
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(register_external_engine, update_external_engine, ranger_plugin_config),
+    paths(
+        register_external_engine,
+        update_external_engine,
+        ranger_plugin_config,
+        opa_plugin_config
+    ),
     components(schemas(
         RegisterExternalEngine,
         RegisteredExternalEngineDto,
         RangerCredentialDto,
         UpdateExternalEngine,
         RangerPluginConfigDto,
-        RangerPluginFileDto
+        RangerPluginFileDto,
+        OpaPluginConfigDto
     ))
 )]
 pub struct ExternalEngineApi;
@@ -180,6 +186,7 @@ pub fn routes() -> Router<CpState> {
             "/engines/{id}/ranger-plugin-config",
             get(ranger_plugin_config),
         )
+        .route("/engines/{id}/opa-plugin-config", get(opa_plugin_config))
 }
 
 fn validate_name(name: &str) -> Result<(), CpError> {
@@ -919,6 +926,99 @@ async fn ranger_plugin_config(
             .into_iter()
             .map(|(name, content)| RangerPluginFileDto { name, content })
             .collect(),
+    }))
+}
+
+/// The Trino OPA plugin configuration an external engine's admin installs.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OpaPluginConfigDto {
+    /// `access-control.properties`, then the context file; the context file
+    /// carries a placeholder in place of the engine's secret.
+    pub files: Vec<RangerPluginFileDto>,
+    pub warnings: Vec<String>,
+    /// What the admin supplies that egret cannot.
+    pub admin_must_supply: Vec<String>,
+}
+
+/// `GET /api/control-plane/engines/{id}/opa-plugin-config`.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/engines/{id}/opa-plugin-config",
+    tag = "control-plane-engines",
+    params(("id" = Uuid, Path, description = "Engine id")),
+    responses(
+        (status = 200, description = "The Trino OPA plugin files to install on this external engine, rendered by the same code that renders the files egret mounts into its own engines. The context file carries the engine's id and a placeholder in place of its secret: the secret (the engine's Ranger plugin credential) was shown once and is never returned here. Nothing is minted", body = OpaPluginConfigDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:read permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 409, description = "The engine is provisioned (egret mounts these files itself), it is bound to no policy profile (bind one first), or its profile is on Ranger (use /ranger-plugin-config)", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn opa_plugin_config(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<OpaPluginConfigDto>, CpError> {
+    use egret_engine_mgmt_api::opa_config::{
+        opa_plugin_files, AccessMechanism, OPA_EXTERNAL_ENGINE_NOTE, OPA_LOG_REQUESTS_WARNING,
+    };
+    egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
+    let engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    if !is_external(&engine) {
+        return Err(CpError::Conflict(format!(
+            "engine {} is provisioned: egret mounts its OPA plugin files itself",
+            engine.name
+        )));
+    }
+    let Some(service_name) =
+        crate::engines::resolve_ranger_service_name(&st, engine.authz_service_id).await?
+    else {
+        return Err(CpError::Conflict(format!(
+            "engine {} is bound to no policy profile: bind a profile first",
+            engine.name
+        )));
+    };
+    let mechanism = crate::engines::resolve_profile_mechanism(&st, engine.authz_service_id).await?;
+    if mechanism != AccessMechanism::Opa {
+        return Err(CpError::Conflict(format!(
+            "profile {service_name} is on Ranger; use /ranger-plugin-config"
+        )));
+    }
+    // The secret is a placeholder: the real one was shown once and is never
+    // re-rendered here.
+    let rendered = opa_plugin_files(
+        &engine.id.to_string(),
+        &st.engine_egret_url,
+        egret_engine_mgmt_api::ranger_config::PASSWORD_PLACEHOLDER,
+    )
+    .map_err(|e| {
+        tracing::error!(engine = %engine.name, error = %e, "the OPA plugin files are unrenderable");
+        CpError::Internal
+    })?;
+    let mut warnings = vec![
+        OPA_LOG_REQUESTS_WARNING.to_string(),
+        OPA_EXTERNAL_ENGINE_NOTE.to_string(),
+    ];
+    warnings.extend(egret_engine_mgmt_api::ranger_config::download_url_warning(
+        &st.engine_egret_url,
+    ));
+    Ok(Json(OpaPluginConfigDto {
+        files: rendered
+            .files
+            .into_iter()
+            .map(|(name, content)| RangerPluginFileDto { name, content })
+            .collect(),
+        warnings,
+        admin_must_supply: vec![
+            "egret.secret: the engine's Ranger plugin credential (rotate it with POST /api/control-plane/engines/{id}/rotate-ranger-credential to see it once)".to_string(),
+            "a Trino 483 or later coordinator with plugin/opa (it ships in trinodb/trino:483)".to_string(),
+        ],
     }))
 }
 

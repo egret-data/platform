@@ -5048,6 +5048,89 @@
         }
       }
     },
+    "/api/control-plane/engines/{id}/opa-plugin-config": {
+      "get": {
+        "tags": [
+          "control-plane-engines"
+        ],
+        "summary": "`GET /api/control-plane/engines/{id}/opa-plugin-config`.",
+        "operationId": "opa_plugin_config",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Engine id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The Trino OPA plugin files to install on this external engine, rendered by the same code that renders the files egret mounts into its own engines. The context file carries the engine's id and a placeholder in place of its secret: the secret (the engine's Ranger plugin credential) was shown once and is never returned here. Nothing is minted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpaPluginConfigDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing engine:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The engine is provisioned (egret mounts these files itself), it is bound to no policy profile (bind one first), or its profile is on Ranger (use /ranger-plugin-config)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/engines/{id}/pods/{pod}/exec": {
       "get": {
         "tags": [
@@ -50565,6 +50648,37 @@
           "authorize_url": {
             "type": "string",
             "description": "The OIDC authorize URL (carries the sealed impersonation intent in `state`)."
+          }
+        }
+      },
+      "OpaPluginConfigDto": {
+        "type": "object",
+        "description": "The Trino OPA plugin configuration an external engine's admin installs.",
+        "required": [
+          "files",
+          "warnings",
+          "adminMustSupply"
+        ],
+        "properties": {
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RangerPluginFileDto"
+            },
+            "description": "`access-control.properties`, then the context file; the context file\ncarries a placeholder in place of the engine's secret."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "adminMustSupply": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What the admin supplies that egret cannot."
           }
         }
       },

@@ -674,6 +674,15 @@ async fn column_mask(
 mod tests {
     use super::*;
 
+    /// The plugin files egret renders point at this prefix.
+    #[test]
+    fn opa_surface_prefix_is_the_one_the_plugin_files_name() {
+        assert_eq!(
+            OPA_SURFACE_PREFIX,
+            egret_engine_mgmt_api::opa_config::OPA_SURFACE_PREFIX
+        );
+    }
+
     /// The match is exhaustive: a new `Route` variant fails to compile here
     /// until it is given an index, and then `ALL` must hold it at that index.
     #[test]

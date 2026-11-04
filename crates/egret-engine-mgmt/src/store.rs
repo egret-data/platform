@@ -410,6 +410,37 @@ impl EngineMgmtStore {
         .await?)
     }
 
+    /// The engines bound to a policy profile, by name: the engines a switch of
+    /// its mechanism re-applies (governance SP2b Task 15).
+    pub async fn list_engines_bound_to_authz_service(
+        &self,
+        service_id: i64,
+    ) -> Result<Vec<Engine>, EngineMgmtError> {
+        Ok(sqlx::query_as::<_, Engine>(
+            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id \
+             FROM engine_mgmt.engines WHERE authz_service_id = $1 ORDER BY name",
+        )
+        .bind(service_id)
+        .fetch_all(self.pool())
+        .await?)
+    }
+
+    /// Record the mechanism (`ranger` or `opa`) the provisioner accepted for
+    /// this engine. The OPA surface keeps answering an engine still running the
+    /// OPA plugin after its profile went back to Ranger, until this says otherwise.
+    pub async fn set_applied_mechanism(
+        &self,
+        id: Uuid,
+        mechanism: &str,
+    ) -> Result<(), EngineMgmtError> {
+        sqlx::query("UPDATE engine_mgmt.engines SET applied_mechanism = $2 WHERE id = $1")
+            .bind(id)
+            .bind(mechanism)
+            .execute(self.pool())
+            .await?;
+        Ok(())
+    }
+
     /// Persist the generated delegator secret id for an engine (idempotent bookkeeping).
     pub async fn set_delegator_secret(
         &self,
