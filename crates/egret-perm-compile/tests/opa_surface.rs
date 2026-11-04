@@ -908,3 +908,37 @@ async fn no_log_or_body_carries_the_secret() {
     assert!(log.contains("connection refused"), "the 500 was not logged");
     assert!(!log.contains(secret), "a log line carries the secret");
 }
+
+/// A verifier that vouches for GOOD whatever it was asked about.
+struct Confused;
+
+#[async_trait::async_trait]
+impl EngineCredentialVerifier for Confused {
+    async fn verify(&self, _: uuid::Uuid, _: &str) -> Result<Option<EngineIdentity>, String> {
+        Ok(Some(EngineIdentity {
+            engine_id: GOOD,
+            authz_service_id: Some(1),
+        }))
+    }
+}
+
+#[tokio::test]
+async fn an_identity_for_another_engine_is_a_refusal() {
+    logs();
+    let cache = Arc::new(SnapshotCache::default());
+    cache.insert_for_test(1, snapshot(1, vec![]));
+    cache.bind_for_test(GOOD, Some(1));
+    cache.bind_for_test(GOOD2, Some(1));
+    let router = opa_surface(OpaState {
+        cache,
+        verifier: Arc::new(Confused),
+        credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
+    });
+    // The verifier's answer is about GOOD: GOOD is admitted, GOOD2 is not.
+    let (route, action) = every_route().remove(0);
+    assert_eq!(
+        post(&router, route, &GOOD.to_string(), RIGHT, action).await,
+        (200, json!({"result": true}))
+    );
+    assert_refused_everywhere(&router, &GOOD2.to_string(), RIGHT, "confused verifier").await;
+}
