@@ -193,6 +193,7 @@ async fn env() -> Option<Env> {
             .expect("pdp"),
     );
     let app = perm_router().with_state(PermState {
+        opa_cache: None,
         perm: PermStore::new(pool),
         policy,
         sessions,

@@ -9,9 +9,11 @@ import type { ExplainAccess } from './explainAccess';
 import type { ExplainClearanceMaskGap } from './explainClearanceMaskGap';
 import type { ExplainEffectLine } from './explainEffectLine';
 import type { ExplainMask } from './explainMask';
+import type { ExplainOpa } from './explainOpa';
 import type { ExplainResolvedTag } from './explainResolvedTag';
 import type { ExplainRowFilter } from './explainRowFilter';
 import type { WireEngineType } from './wireEngineType';
+import type { WireMechanism } from './wireMechanism';
 
 /**
  * One policy profile's answer: the artifact ITS plugin downloads, evaluated
@@ -32,6 +34,15 @@ export interface ExplainProfile {
      */
   service_name: string;
   engine: WireEngineType;
+  /**
+     * How this profile's engines are asked, and so which evaluator answered:
+     * `ranger` evaluates the served Ranger download with `egret-ranger-eval`,
+     * `opa` evaluates the profile's IR snapshot with `egret-perm-eval`
+     * (governance SP2b Task 16). An OPA profile carries no Ranger-only
+     * fields (`mask`, `row_filter`, `tags`); its values are in `opa`.
+     */
+  mechanism: WireMechanism;
+  opa?: null | ExplainOpa;
   accesses: ExplainAccess[];
   /**
      * The tag set **this profile's** verdicts could have been decided by.

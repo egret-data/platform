@@ -115,6 +115,7 @@ const explainOf = (...decisions: WireDecision[]): ExplainResponse => ({
       service_id: 11,
       service_name: "egret-trino-prod",
       engine: "trino",
+      mechanism: "ranger",
       tags: [],
       tag_policies_in_download: 0,
       effect_lines: [],
@@ -301,6 +302,7 @@ describe("Check access for a group or a role", () => {
           service_id: 11,
           service_name: "vgtr",
           engine: "trino",
+          mechanism: "ranger",
           tags: [],
           tag_policies_in_download: 0,
           effect_lines: [
@@ -314,6 +316,7 @@ describe("Check access for a group or a role", () => {
           service_id: 12,
           service_name: "vgsr",
           engine: "starrocks",
+          mechanism: "ranger",
           tags: [],
           tag_policies_in_download: 0,
           effect_lines: [ruleMaskLine("ana", "email", "NULL", "Null personal data", "rule-1"), everyRowLine("ana")],
@@ -333,6 +336,7 @@ describe("Check access for a group or a role", () => {
           service_id: 12,
           service_name: "vgsr",
           engine: "starrocks",
+          mechanism: "ranger",
           tags: [],
           tag_policies_in_download: 0,
           effect_lines: [

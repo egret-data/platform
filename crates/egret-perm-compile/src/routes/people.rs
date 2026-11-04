@@ -479,7 +479,14 @@ pub(super) async fn explain_principal(
     let results = if usernames.is_empty() {
         Vec::new()
     } else {
-        super::explain_users(&mut tx, &usernames, body.action, &body.target).await?
+        super::explain_users(
+            &mut tx,
+            &usernames,
+            body.action,
+            &body.target,
+            st.opa_cache.as_deref(),
+        )
+        .await?
     };
     tx.rollback().await.map_err(PermHttpError::db)?;
     let evaluated = named

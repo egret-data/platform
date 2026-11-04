@@ -31,4 +31,12 @@ export interface ExplainAccess {
      */
   decision: WireDecision;
   attribution?: null | ExplainAttribution;
+  /**
+     * An OPA profile only (governance SP2b Task 16): the IR evaluator's own
+     * words for the verdict — the deciding statement's source on an allow
+     * (`grant …`, `rule …`), the reason on a deny (`withhold pii`), or why
+     * the profile's snapshot could not be built. Absent on a Ranger profile.
+     * @nullable
+     */
+  ir_reason?: string | null;
 }

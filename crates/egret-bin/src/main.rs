@@ -2877,7 +2877,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // the manual compile trigger. Both stores are built over the SAME `db`,
     // which is what lets a grant write and its recompile share one
     // transaction across the `perm.*` and `policy.*` schemas.
-    let perm = Some(egret_perm_compile::PermState {
+    let mut perm = Some(egret_perm_compile::PermState {
+        // Set below, once the OPA refresher's cache exists (gate on).
+        opa_cache: None,
         perm: egret_perm::PermStore::new(db.pool.clone()),
         policy: egret_policy::PolicyStore::new(db.clone()),
         sessions: sessions.clone(),
@@ -3186,6 +3188,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         &reaper_cancel,
     )
     .map(|(state, _refresher)| state);
+    // Governance SP2b Task 16: `/perm/explain*` answers an OPA profile from the
+    // refresher's snapshot when it is current (gate off: `None`, and explain
+    // builds the snapshot itself).
+    if let (Some(perm), Some(opa)) = (perm.as_mut(), opa.as_ref()) {
+        perm.opa_cache = Some(std::sync::Arc::clone(&opa.cache));
+    }
 
     // Control plane: global platform-admin Storage + Secrets + Access console.
     // Keeps `storage` (CatalogStore) + `browser` for the Storage router's

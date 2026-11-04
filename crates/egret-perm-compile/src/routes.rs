@@ -82,7 +82,8 @@ use sqlx::{Postgres, Transaction};
 
 use crate::attribution::{attribute_policy_name, PolicyAttribution};
 use crate::explain_wire::{
-    WireDecision, WireEngineType, WireMaskDecision, WireRowFilterDecision, WireUndecidableCause,
+    ExplainOpa, WireDecision, WireEngineType, WireMaskDecision, WireMechanism,
+    WireRowFilterDecision, WireUndecidableCause,
 };
 use crate::principal_refs::{resolve_principal_refs, still_stored};
 use crate::trigger::{
@@ -94,9 +95,11 @@ use egret_perm_ir::lower::rules::validate_rule_shape;
 
 mod engine_grants;
 mod error;
+mod explain_opa;
 mod people;
 mod username_reuse;
 pub use error::PermHttpError;
+use explain_opa::{opa_profile, opa_snapshot_for_explain, OpaProfileInput};
 pub use people::{
     ExplainPrincipalRequest, ExplainPrincipalResponse, PeoplePage, PeopleQuery, PersonKind,
     PersonRow, EXPLAIN_MEMBER_LIMIT,
@@ -114,6 +117,12 @@ pub struct PermState {
     /// Policy decision point; every route gates through
     /// `egret_core::authz::require`. `platform_admin` bypasses inside the PDP.
     pub pdp: Arc<dyn egret_core::authz::Pdp>,
+    /// Governance SP2b Task 16: the OPA refresher's snapshot cache, set by
+    /// `egret-bin` while `[governance.opa] enabled` is on and `None`
+    /// otherwise. `explain` answers an OPA profile from the cached snapshot
+    /// when its key is the profile's current `(policy_version, tag_version)`,
+    /// and builds one in its own read-only transaction when it is not.
+    pub opa_cache: Option<Arc<crate::opa::cache::SnapshotCache>>,
 }
 
 impl FromRef<PermState> for SessionService {
@@ -668,6 +677,12 @@ pub struct ExplainAccess {
     /// [`ExplainAttribution`]. Always `None` for `Undecidable`, which has no
     /// single deciding policy.
     pub attribution: Option<ExplainAttribution>,
+    /// An OPA profile only (governance SP2b Task 16): the IR evaluator's own
+    /// words for the verdict — the deciding statement's source on an allow
+    /// (`grant …`, `rule …`), the reason on a deny (`withhold pii`), or why
+    /// the profile's snapshot could not be built. Absent on a Ranger profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ir_reason: Option<String>,
 }
 
 /// Whether the deciding mask is `MASK_NULL`, whichever policy decided it
@@ -698,6 +713,17 @@ pub struct ExplainProfile {
     /// `/service/plugins/policies/download/{service}` with.
     pub service_name: String,
     pub engine: WireEngineType,
+    /// How this profile's engines are asked, and so which evaluator answered:
+    /// `ranger` evaluates the served Ranger download with `egret-ranger-eval`,
+    /// `opa` evaluates the profile's IR snapshot with `egret-perm-eval`
+    /// (governance SP2b Task 16). An OPA profile carries no Ranger-only
+    /// fields (`mask`, `row_filter`, `tags`); its values are in `opa`.
+    pub mechanism: WireMechanism,
+    /// An OPA profile's `read` of a table or column: the rendered column mask
+    /// and the row filter. Absent on a Ranger profile, on a `write`, on a
+    /// target above the table, and when the snapshot could not be built.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opa: Option<ExplainOpa>,
     pub accesses: Vec<ExplainAccess>,
     /// The tag set **this profile's** verdicts could have been decided by.
     ///
@@ -2542,6 +2568,7 @@ async fn explain(
         std::slice::from_ref(&body.subject.user),
         body.action,
         &body.target,
+        st.opa_cache.as_deref(),
     )
     .await?;
     tx.rollback().await.map_err(PermHttpError::db)?;
@@ -2610,6 +2637,7 @@ pub(crate) async fn explain_users(
     users: &[String],
     action: Action,
     target: &Scope,
+    opa_cache: Option<&crate::opa::cache::SnapshotCache>,
 ) -> Result<Vec<ExplainResponse>, PermHttpError> {
     // ONE resolution for the whole response, not one per profile: the levels it
     // synthesises are the literal `catalog`/`schema`/`table`/`column` keys
@@ -2674,6 +2702,42 @@ pub(crate) async fn explain_users(
         let Some(engine) = engine_type_for(&svc.r#type) else {
             continue;
         };
+        // Governance SP2b Task 16: an OPA profile's engines are asked by egret
+        // itself, from the profile's IR snapshot, so that is what explains it.
+        // Before the plugin-version read below: an OPA profile runs no Ranger
+        // plugin, and its engines' images say nothing about one. The catalog
+        // lookup is the Ranger path's own, below, repeated here so that path's
+        // order (and so its refusals) stays exactly as it was.
+        if svc.mechanism == "opa" {
+            let Some(catalog_name) = catalogs_for_service_via(&mut *conn, service_id)
+                .await?
+                .into_iter()
+                .find(|c| c.id == target.catalog_id)
+                .map(|c| c.name)
+            else {
+                continue;
+            };
+            let snapshot = opa_snapshot_for_explain(
+                &mut *conn,
+                opa_cache,
+                service_id,
+                (svc.policy_version, svc.tag_version),
+            )
+            .await?;
+            for (i, user) in users.iter().enumerate() {
+                per_user[i].push(opa_profile(&OpaProfileInput {
+                    snapshot: &snapshot,
+                    service_id,
+                    service_name: &svc.name,
+                    engine,
+                    catalog: &catalog_name,
+                    user,
+                    action,
+                    target,
+                })?);
+            }
+            continue;
+        }
         // The version this profile's plugin runs at: the bound engine's when
         // exactly one is bound (an external engine declares its own), the plugin
         // version of egret's default image for the type when none is. Several bound engines of one profile are
@@ -2886,6 +2950,7 @@ pub(crate) async fn explain_users(
                     access_type: access_type.to_string(),
                     decision: WireDecision::from(&decision),
                     attribution,
+                    ir_reason: None,
                 });
             }
 
@@ -2913,6 +2978,7 @@ pub(crate) async fn explain_users(
                         access_type: "select".to_string(),
                         decision: WireDecision::from(&decision),
                         attribution,
+                        ir_reason: None,
                     })
                 }
                 _ => None,
@@ -2966,6 +3032,8 @@ pub(crate) async fn explain_users(
                 service_id,
                 service_name: svc.name.clone(),
                 engine: WireEngineType::from(ranger_engine(engine)),
+                mechanism: WireMechanism::Ranger,
+                opa: None,
                 accesses,
                 tags: tags_for_profile(&resolved_for_display, tag_policies_in_download),
                 tag_policies_in_download,

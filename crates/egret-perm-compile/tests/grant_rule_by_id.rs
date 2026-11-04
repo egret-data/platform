@@ -54,6 +54,7 @@ struct Fixture {
 impl Fixture {
     fn app(&self) -> axum::Router {
         perm_router().with_state(PermState {
+            opa_cache: None,
             perm: self.perm.clone(),
             policy: self.policy.clone(),
             sessions: self.sessions.clone(),

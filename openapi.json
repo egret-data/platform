@@ -45939,6 +45939,13 @@
                 "description": "The deciding policy's `perm` model object, or `None` — see\n[`ExplainAttribution`]. Always `None` for `Undecidable`, which has no\nsingle deciding policy."
               }
             ]
+          },
+          "ir_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An OPA profile only (governance SP2b Task 16): the IR evaluator's own\nwords for the verdict — the deciding statement's source on an allow\n(`grant …`, `rule …`), the reason on a deny (`withhold pii`), or why\nthe profile's snapshot could not be built. Absent on a Ranger profile."
           }
         }
       },
@@ -46288,6 +46295,33 @@
           }
         }
       },
+      "ExplainOpa": {
+        "type": "object",
+        "description": "What the IR evaluator answers for an OPA profile's `read` beyond access:\nthe rendered column mask (for a column target) and the AND of the row\nfilters (for a target naming a table). `None` means nothing applies.\n\nThe column's type is not known to explain, so a mask is rendered with\n`varchar` where the engine substitutes the column's own type.",
+        "properties": {
+          "column_mask": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The SQL the plugin would apply to the column, rendered with `varchar`."
+          },
+          "column_mask_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The mask type the evaluator chose (`MASK_HASH`, `MASK_NULL`, ...):\npresent exactly when `column_mask` is."
+          },
+          "row_filter": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The AND of every applying row filter on the target's table."
+          }
+        }
+      },
       "ExplainOutcome": {
         "type": "string",
         "description": "Which of `explain`'s two shapes a response carries.\n\n**\"No engine serves this catalog\" is not a refusal.** Collapsing it into a\n`Denied` would tell a steward the model is withholding an access when in\nfact no plugin is ever consulted about the resource — nothing is enforcing,\nwhich is a different fact. `profiles` is empty for exactly this outcome,\nand this discriminator exists so a client never has to infer a\nsecurity-relevant fact from the absence of data (an empty list also reads\nas \"we did not look\").",
@@ -46380,6 +46414,7 @@
           "service_id",
           "service_name",
           "engine",
+          "mechanism",
           "accesses",
           "tags",
           "tag_policies_in_download",
@@ -46397,6 +46432,21 @@
           },
           "engine": {
             "$ref": "#/components/schemas/WireEngineType"
+          },
+          "mechanism": {
+            "$ref": "#/components/schemas/WireMechanism",
+            "description": "How this profile's engines are asked, and so which evaluator answered:\n`ranger` evaluates the served Ranger download with `egret-ranger-eval`,\n`opa` evaluates the profile's IR snapshot with `egret-perm-eval`\n(governance SP2b Task 16). An OPA profile carries no Ranger-only\nfields (`mask`, `row_filter`, `tags`); its values are in `opa`."
+          },
+          "opa": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExplainOpa",
+                "description": "An OPA profile's `read` of a table or column: the rendered column mask\nand the row filter. Absent on a Ranger profile, on a `write`, on a\ntarget above the table, and when the snapshot could not be built."
+              }
+            ]
           },
           "accesses": {
             "type": "array",
@@ -59339,6 +59389,14 @@
             ]
           }
         }
+      },
+      "WireMechanism": {
+        "type": "string",
+        "description": "How a profile's engines are asked (`policy.authz_services.mechanism`,\nmigration 0213), and so which evaluator answered an explain profile:\n`egret-ranger-eval` over the served Ranger download, or the IR evaluator\n(`egret-perm-eval`) over the profile's OPA snapshot.",
+        "enum": [
+          "ranger",
+          "opa"
+        ]
       },
       "WirePluginVersion": {
         "type": "string",

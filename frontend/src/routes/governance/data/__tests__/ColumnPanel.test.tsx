@@ -118,6 +118,7 @@ const EXPLAIN: ExplainResponse = {
       service_id: 11,
       service_name: "egret-trino-prod",
       engine: "trino",
+      mechanism: "ranger",
       tags: [],
       tag_policies_in_download: 0,
       effect_lines: [],
