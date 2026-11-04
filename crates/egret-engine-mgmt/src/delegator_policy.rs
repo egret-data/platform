@@ -1,134 +1,20 @@
-//! Ranger seed policies for delegated Trino engines, stored as real,
-//! auditable infrastructure policies (`managed_by = 'infra'`).
-//!
-//! - **Delegator** (impersonate engines only): `egret_delegator` may
-//!   impersonate any user — [`delegator_impersonate_policy`].
-//! - **Per-user baseline** (every delegating Trino engine, JWT and
-//!   impersonate): the three per-user checks Trino 483's Ranger plugin makes on
-//!   every session, measured live in DG Task 6b (live result §4.8) —
-//!   [`user_baseline_policies`]. Without them every delegated query fails
-//!   before it reads a row.
-
-use serde_json::{json, Value};
+//! Ranger seed policies for delegated Trino engines are built in
+//! `egret_policy_api::infra_bodies`; this module keeps the names and the
+//! delegator principal that `engines.rs` and `assignment.rs` refer to.
 
 /// The Trino service user egret authenticates as for impersonate-mode delegation.
 /// Declared in `egret_core` so `egret-perm-compile` can refuse it as an
 /// impersonation target (engine grants spec, C6).
 pub use egret_core::engine_principals::DELEGATOR_PRINCIPAL as DELEGATOR_USERNAME;
-// Declared in `egret_policy_api::infra_names` so the guard, the backfill and this
-// producer read one list. Re-exported rather than moved outright: `engines.rs`
-// refers to them as `dp::IMPERSONATE_POLICY_NAME` / `dp::QUERY_TIMEOUT_POLICY_NAME`
-// and those call sites are correct as they stand.
 pub use egret_policy_api::infra_names::{
     EXECUTE_QUERY_POLICY_NAME, IMPERSONATE_POLICY_NAME, QUERY_TIMEOUT_POLICY_NAME,
     SELF_IMPERSONATE_POLICY_NAME,
 };
-const QUERY_TIMEOUT_PROPERTY: &str = "query_max_run_time";
-/// Ranger's `RangerPolicyEngine.USER_CURRENT`: the requesting user.
-const USER_MACRO: &str = "{USER}";
-
-fn policy(service: &str, name: &str, resources: Value, users: Value, access: &str) -> Value {
-    json!({
-        "name": name,
-        "service": service,
-        "serviceType": "trino",
-        "policyType": 0,
-        "isEnabled": true,
-        "resources": resources,
-        "policyItems": [{
-            "users": users,
-            "groups": [],
-            "roles": [],
-            "accesses": [{ "type": access, "isAllowed": true }],
-            "delegateAdmin": false
-        }],
-        "denyPolicyItems": [],
-        "allowExceptions": [],
-        "denyExceptions": [],
-        "isDenyAllElse": false,
-        "policyPriority": 0
-    })
-}
-
-/// `egret_delegator` may impersonate any user. Only the delegator holds this
-/// grant; its password lives only in an egret secret, so no end-user can use it.
-pub fn delegator_impersonate_policy(service: &str) -> Value {
-    policy(
-        service,
-        IMPERSONATE_POLICY_NAME,
-        json!({ "trinouser": { "values": ["*"], "isExcludes": false, "isRecursive": false } }),
-        json!([DELEGATOR_USERNAME]),
-        "impersonate",
-    )
-}
-
-/// Every user may become THEMSELF: `trinouser = {USER}`, `impersonate`, users
-/// `{USER}`. Trino 483 checks `checkCanSetUser` as an `impersonate` on
-/// `trinouser=<user>` for every session, principal == user included; without
-/// this a query fails `Principal u cannot become user u`.
-///
-/// Self only, as measured — not as a claim about Ranger's matcher. On the
-/// real 2.5.0 and 2.8.0 engines `tests/ranger`'s `EgretUserTokenWildcardTest`
-/// finds that a requester whose name is a wildcard (`*`, `a*`) is denied
-/// becoming anyone else; those rows do not establish HOW `{USER}` is matched.
-/// On Trino 483 (live verification §4.16, step 4a,
-/// `docs/en/plans/2026-10-13-view-governance-live-result.md`) A→B is denied
-/// (`Principal vcplain cannot become user vcownerc`) and A→A succeeds. The
-/// match is case-insensitive (`trinouser` is `ignoreCase`);
-/// `users.username` is `citext UNIQUE`, so no two egret users differ only by
-/// case.
-pub fn self_impersonate_policy(service: &str) -> Value {
-    policy(
-        service,
-        SELF_IMPERSONATE_POLICY_NAME,
-        json!({ "trinouser": { "values": [USER_MACRO], "isExcludes": false, "isRecursive": false } }),
-        json!([USER_MACRO]),
-        "impersonate",
-    )
-}
-
-/// Every user may execute queries: `queryid = *`, `execute`, users `{USER}`.
-/// Without it: `Access Denied: Cannot execute query`.
-pub fn execute_query_policy(service: &str) -> Value {
-    policy(
-        service,
-        EXECUTE_QUERY_POLICY_NAME,
-        json!({ "queryid": { "values": ["*"], "isExcludes": false, "isRecursive": false } }),
-        json!([USER_MACRO]),
-        "execute",
-    )
-}
-
-/// The per-user baseline, `(name, body)`, in the order Trino checks it on a
-/// session: set user, execute query, system session property.
-pub fn user_baseline_policies(service: &str) -> [(&'static str, Value); 3] {
-    [
-        (
-            SELF_IMPERSONATE_POLICY_NAME,
-            self_impersonate_policy(service),
-        ),
-        (EXECUTE_QUERY_POLICY_NAME, execute_query_policy(service)),
-        (QUERY_TIMEOUT_POLICY_NAME, query_timeout_policy(service)),
-    ]
-}
-
-/// Every user may `alter` the `query_max_run_time` system property on their own
-/// session (egret's connector sets it on each statement). Without it:
-/// `Cannot set system session property query_max_run_time`. Not an
-/// impersonation grant — no cross-user identity or data access.
-pub fn query_timeout_policy(service: &str) -> Value {
-    policy(
-        service,
-        QUERY_TIMEOUT_POLICY_NAME,
-        json!({ "systemproperty": { "values": [QUERY_TIMEOUT_PROPERTY], "isExcludes": false, "isRecursive": false } }),
-        json!([USER_MACRO]),
-        "alter",
-    )
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     /// F11 (spec C6): one name, declared in `egret_core::engine_principals`
     /// so `egret-perm-compile` can refuse it as an impersonation target.
@@ -140,114 +26,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn impersonate_policy_grants_delegator_impersonate_any_user() {
-        let p = delegator_impersonate_policy("rgr2");
-        assert_eq!(p["service"], "rgr2");
-        assert_eq!(p["policyType"], 0);
-        assert_eq!(p["resources"]["trinouser"]["values"][0], "*");
-        let item = &p["policyItems"][0];
-        assert_eq!(item["users"][0], "egret_delegator");
-        assert_eq!(item["accesses"][0]["type"], "impersonate");
-        assert_eq!(item["accesses"][0]["isAllowed"], true);
-    }
-
-    #[test]
-    fn query_timeout_policy_lets_each_user_set_the_property() {
-        let p = query_timeout_policy("rgr2");
-        assert_eq!(
-            p["resources"]["systemproperty"]["values"][0],
-            "query_max_run_time"
-        );
-        let item = &p["policyItems"][0];
-        assert_eq!(item["users"][0], "{USER}");
-        assert_eq!(item["accesses"][0]["type"], "alter");
-    }
-
-    #[test]
-    fn seed_names_are_stable() {
-        assert_eq!(IMPERSONATE_POLICY_NAME, "egret-delegator-impersonate");
-        assert_eq!(QUERY_TIMEOUT_POLICY_NAME, "egret-query-timeout");
-        assert_eq!(SELF_IMPERSONATE_POLICY_NAME, "egret-user-impersonate-self");
-        assert_eq!(EXECUTE_QUERY_POLICY_NAME, "egret-user-execute-query");
-    }
-
-    /// The one shape every baseline policy shares: an allow for `{USER}`
-    /// alone, one access, no groups, no roles, no deny or exception buckets,
-    /// and exactly one resource level that is not excluded.
-    fn assert_user_only_allow(p: &serde_json::Value, resource: &str, value: &str, access: &str) {
-        assert_eq!(p["serviceType"], "trino");
-        assert_eq!(p["policyType"], 0);
-        assert_eq!(p["isEnabled"], true);
-        assert_eq!(
-            p["resources"],
-            json!({ resource: { "values": [value], "isExcludes": false, "isRecursive": false } }),
-            "exactly one resource level, not excluded"
-        );
-        assert_eq!(
-            p["policyItems"],
-            json!([{
-                "users": ["{USER}"],
-                "groups": [],
-                "roles": [],
-                "accesses": [{ "type": access, "isAllowed": true }],
-                "delegateAdmin": false
-            }]),
-            "one item: {{USER}} only, one access"
-        );
-        for bucket in ["denyPolicyItems", "allowExceptions", "denyExceptions"] {
-            assert_eq!(p[bucket], json!([]), "{bucket}");
-        }
-        assert_eq!(p["isDenyAllElse"], false);
-    }
-
-    #[test]
-    fn self_impersonate_policy_names_the_session_user_as_the_target() {
-        let p = self_impersonate_policy("rgr2");
-        assert_eq!(p["name"], SELF_IMPERSONATE_POLICY_NAME);
-        assert_eq!(p["service"], "rgr2");
-        assert_user_only_allow(&p, "trinouser", "{USER}", "impersonate");
-    }
-
-    #[test]
-    fn execute_query_policy_lets_each_user_run_queries() {
-        let p = execute_query_policy("rgr2");
-        assert_eq!(p["name"], EXECUTE_QUERY_POLICY_NAME);
-        assert_user_only_allow(&p, "queryid", "*", "execute");
-    }
-
-    #[test]
-    fn query_timeout_policy_has_the_baseline_shape() {
-        let p = query_timeout_policy("rgr2");
-        assert_eq!(p["name"], QUERY_TIMEOUT_POLICY_NAME);
-        assert_user_only_allow(&p, "systemproperty", "query_max_run_time", "alter");
-    }
-
-    /// The three, in the order Trino 483 checks them on a session (live
-    /// result §4.8): set user, execute query, system session property.
-    #[test]
-    fn the_user_baseline_is_the_measured_three_in_check_order() {
-        let set = user_baseline_policies("rgr2");
-        let names: Vec<&str> = set.iter().map(|(n, _)| *n).collect();
-        assert_eq!(
-            names,
-            [
-                SELF_IMPERSONATE_POLICY_NAME,
-                EXECUTE_QUERY_POLICY_NAME,
-                QUERY_TIMEOUT_POLICY_NAME
-            ]
-        );
-        for (name, body) in &set {
-            assert_eq!(
-                body["name"], *name,
-                "the body carries the name it is stored under"
-            );
-            assert_eq!(body["service"], "rgr2");
-        }
-        // The delegator's grant is NOT part of the per-user baseline.
-        assert!(!names.contains(&IMPERSONATE_POLICY_NAME));
-    }
-
+    // Kept here, not in `egret-policy-api`: it needs `egret-policy` (the def) and
+    // `egret-ranger-eval`, which only this crate has as dev-dependencies.
     /// `trinouser = {USER}` lets a user become only THEMSELF.
     ///
     /// Three sources, because none is enough alone:
@@ -313,7 +93,11 @@ mod tests {
             ("a*", "alice2"),
             ("?lice", "alice"),
         ] {
-            let d = ask(self_impersonate_policy("svc"), user, target);
+            let d = ask(
+                egret_policy_api::infra_bodies::self_impersonate_policy("svc"),
+                user,
+                target,
+            );
             assert!(
                 matches!(d, Decision::Undecidable { .. }),
                 "the evaluator must decline, not decide, {user} as {target}: {d:?}"
@@ -322,7 +106,7 @@ mod tests {
 
         // (3) the substitution model, plain usernames only.
         let expanded_for = |user: &str| {
-            let mut body = self_impersonate_policy("svc");
+            let mut body = egret_policy_api::infra_bodies::self_impersonate_policy("svc");
             body["resources"]["trinouser"]["values"] = json!([user]);
             body
         };

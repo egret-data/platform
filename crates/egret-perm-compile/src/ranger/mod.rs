@@ -19,6 +19,7 @@ use crate::trigger::{
 pub(crate) mod completion;
 pub(crate) mod engine_privileges;
 pub(crate) mod grants;
+pub(crate) mod infra;
 pub(crate) mod rules;
 pub(crate) mod withhold;
 

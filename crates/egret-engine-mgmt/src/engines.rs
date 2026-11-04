@@ -2573,7 +2573,7 @@ async fn seed_delegator_policies(st: &CpState, service_name: &str) -> Result<(),
         .upsert_infra_policy(
             svc.id,
             dp::IMPERSONATE_POLICY_NAME,
-            &dp::delegator_impersonate_policy(service_name),
+            &egret_policy_api::infra_bodies::delegator_impersonate_policy(service_name),
         )
         .await
         .map_err(|e| CpError::BadRequest(format!("seed policy: {e}")))?;
@@ -2581,7 +2581,7 @@ async fn seed_delegator_policies(st: &CpState, service_name: &str) -> Result<(),
     Ok(())
 }
 
-/// Seed the per-user baseline ([`crate::delegator_policy::user_baseline_policies`])
+/// Seed the per-user baseline ([`egret_policy_api::infra_bodies::user_baseline_policies`])
 /// onto a delegating Trino engine's bound service: the three per-user checks
 /// Trino 483 makes on every session, without which every delegated query fails
 /// (DG Task 6b, live result §4.8, finding B-F1). JWT and impersonate engines
@@ -2592,7 +2592,6 @@ async fn seed_delegator_policies(st: &CpState, service_name: &str) -> Result<(),
 /// only its own `perm-*` names), and the compiled-profile guard on
 /// `create_policy` does not refuse it.
 pub(crate) async fn seed_user_baseline(st: &CpState, service_name: &str) -> Result<(), CpError> {
-    use crate::delegator_policy as dp;
     let Some(svc) = st
         .authz
         .get_service_opt(service_name)
@@ -2601,7 +2600,7 @@ pub(crate) async fn seed_user_baseline(st: &CpState, service_name: &str) -> Resu
     else {
         return Ok(());
     };
-    for (name, body) in dp::user_baseline_policies(service_name) {
+    for (name, body) in egret_policy_api::infra_bodies::user_baseline_policies(service_name) {
         st.authz
             .upsert_infra_policy(svc.id, name, &body)
             .await
@@ -9533,8 +9532,7 @@ mod tests {
     /// Every policy of the per-user baseline is stored exactly once, with the
     /// producer's body, owned by egret's plumbing.
     fn assert_user_baseline(rows: &[(String, serde_json::Value, String)], profile_name: &str) {
-        use crate::delegator_policy as dp;
-        for (name, body) in dp::user_baseline_policies(profile_name) {
+        for (name, body) in egret_policy_api::infra_bodies::user_baseline_policies(profile_name) {
             let hits: Vec<_> = rows.iter().filter(|(n, _, _)| n == name).collect();
             assert_eq!(
                 hits.len(),
@@ -9612,7 +9610,7 @@ mod tests {
         assert_eq!(delegator.len(), 1, "{rows:#?}");
         assert_eq!(
             delegator[0].1,
-            crate::delegator_policy::delegator_impersonate_policy(&profile)
+            egret_policy_api::infra_bodies::delegator_impersonate_policy(&profile)
         );
         assert_eq!(delegator[0].2, "infra");
     }

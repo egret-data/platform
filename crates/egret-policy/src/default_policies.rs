@@ -252,6 +252,29 @@ async fn service_name_and_type(
         .ok_or_else(|| PolicyStoreError::NotFound(format!("service id {service_id}")))
 }
 
+/// The `egret-admin - …` bodies for `users`, one per resource hierarchy of the
+/// service-def: `starrocks_service_def` for `"starrocks"`, else the Trino def.
+/// Pure: no database. An empty `users` yields bodies that name nobody.
+pub fn admin_all_access_bodies(
+    service_type: &str,
+    service_name: &str,
+    users: &[String],
+) -> Result<Vec<(String, Value)>, PolicyStoreError> {
+    let def = if service_type == "starrocks" {
+        starrocks_service_def()?
+    } else {
+        trino_service_def()?
+    };
+    Ok(build_default_policies(
+        &def,
+        service_name,
+        service_type,
+        ADMIN_ALL_ACCESS_NAME_PREFIX,
+        users,
+        &[],
+    ))
+}
+
 /// [`sync_admin_all_access_in_tx`] with the bodies' service name and def type
 /// given (engine apply passes its own). The name guard reads the row's type.
 async fn write_admin_all_access_in_tx(
@@ -262,19 +285,7 @@ async fn write_admin_all_access_in_tx(
     users: &[String],
 ) -> Result<AdminPolicySync, PolicyStoreError> {
     let (_, row_type) = service_name_and_type(conn, service_id).await?;
-    let def = if service_type == "starrocks" {
-        starrocks_service_def()?
-    } else {
-        trino_service_def()?
-    };
-    let policies = build_default_policies(
-        &def,
-        service_name,
-        service_type,
-        ADMIN_ALL_ACCESS_NAME_PREFIX,
-        users,
-        &[],
-    );
+    let policies = admin_all_access_bodies(service_type, service_name, users)?;
 
     let before: Vec<(String, Value)> = sqlx::query_as(
         "SELECT name, policy_jsonb FROM policy.authz_policies \
