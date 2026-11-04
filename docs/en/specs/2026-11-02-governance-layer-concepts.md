@@ -86,14 +86,14 @@ Consequence for `iceberg-rest`: an external Iceberg client reads files directly,
  Store (source of truth)        Neutral IR                  Compiler per EP          Delivery to the EP
  securables, principals,  ──►   per-EP statement set  ──►   ranger(trino@2.5)  ──►   Ranger download (as today)
  grants, rules, EP config       names resolved, scoped      ranger(starrocks@2.8)    Ranger download
-                                to the EP's catalogs        opa(trino)         ──►   OPA bundle (egret as bundle server)
+                                to the EP's catalogs        opa(trino)         ──►   OPA decision API served by egret
                                       ▲                     iceberg-rest       ──►   catalog guard + STS scope
                                capability matrix
 ```
 
 1. **Store → IR** (new crate `egret-perm-ir`): resolves inheritance, expands groups into users and service accounts (no engine egret runs understands groups today), applies the EP's catalog scope and the capability matrix. It knows nothing about Ranger or OPA. Its output contains only what that EP can enforce, and every lowering carries provenance and a reason.
-2. **IR → target**: one module per target, translating shape only; no policy decisions. The current Ranger compiler becomes the `ranger` target. Infrastructure policies (`egret-admin`, the defaults, delegator) become a per-EP generated part, not stored rows.
-3. **Delivery**: unchanged channels (Ranger download, plugin authentication, version bumps); OPA adds a bundle endpoint.
+2. **IR → target**: one module per target, translating shape only; no policy decisions. The current Ranger compiler becomes the `ranger` target. Infrastructure policies (`egret-admin`, the defaults, delegator) become a per-EP generated part (sub-project 2): they still materialise as `managed_by='infra'` rows, but as compiler output, not hand-authored input.
+3. **Delivery**: unchanged channels (Ranger download, plugin authentication, version bumps); for OPA, egret answers the OPA REST decision API itself (sub-project 2, [spec](2026-11-04-gov-sp2-trino-opa.md)).
 
 `explain` ("Who can read?", "Why denied?") evaluates the IR, so one evaluator serves every EP. `egret-ranger-eval` stays as a test oracle for differences between the IR and a given plugin version.
 
@@ -138,7 +138,7 @@ Fail closed everywhere:
 
 1. **IR unit tests**: inheritance, group expansion, deny-wins, capability lowering, each with a shape test.
 2. **Byte-identical** (sub-project 1): the Ranger target through the IR produces byte-identical JSON to today's compiler on the whole corpus and the demo stack's profiles.
-3. **Differential against real enforcers**: the existing `ranger-differential` (jars 2.5.0 and 2.8.0); an OPA harness (real OPA, same questions) in sub-project 2. `explain` on the IR must match the real enforcer, per version.
+3. **Differential against real enforcers**: the existing `ranger-differential` (jars 2.5.0 and 2.8.0); for OPA (sub-project 2), egret's evaluator against real Ranger on a neutral corpus, and Trino-on-OPA against Trino-on-Ranger end to end. `explain` on the IR must match the real enforcer, per version.
 4. **Live checks** for every behaviour-changing PR: own stack, an unprivileged user querying a real engine.
 
 ## Sub-projects and acceptance
