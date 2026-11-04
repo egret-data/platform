@@ -10,3 +10,7 @@ license.workspace = true
 [dependencies]
 egret-perm-ir.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+egret-perm.workspace = true
+uuid.workspace = true
