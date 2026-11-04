@@ -90,7 +90,7 @@ From the code at `origin/main` 06331547:
   - `AnyQuery`;
   - `SystemProperty(name)`.
 - `SessionUser` is neutral. The Ranger target renders it as `{USER}`, and an evaluator compares it with the session user.
-- The effect is `Effect::EnginePrivilege { capability }`, with `capability` one of `all`, `impersonate`, `execute` or `alter`. The audience is the admins, the delegator principal, or `public`.
+- The effect is `Effect::EnginePrivilege { capability }`, with `capability` one of `all`, `impersonate`, `execute` or `alter`. The audience is the admins, the delegator principal, or every user (`MemberName::Everyone`, which the Ranger target renders as `users: ["{USER}"]`, `groups: []`). It is not the Ranger `public` group.
 - `egret_perm_ir::lower::infra::lower_infra(&InfraInputs) -> Vec<Statement>` is pure. `InfraInputs` holds:
   - the engine type;
   - the sorted, deduped engine admins;
