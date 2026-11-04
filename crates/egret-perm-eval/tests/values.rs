@@ -892,3 +892,46 @@ fn an_unknown_mask_type_fails_closed_to_null() {
         Some("NULL")
     );
 }
+
+fn classification_mask(name: &str) -> Statement {
+    Statement {
+        source: Source::Rule {
+            rule_id: Uuid::nil(),
+            rule_name: "r".into(),
+        },
+        audience: who(&["*"], &[]),
+        target: Target::Classification { name: name.into() },
+        effect: mask("MASK_NULL", None),
+        derivation: Derivation::AsDeclared,
+    }
+}
+
+#[test]
+fn a_mask_selects_its_classification_ignoring_case() {
+    let s = snap(
+        vec![classification_mask("PII")],
+        vec![tag("t", Some("ssn"), "pii")],
+    );
+    assert_eq!(
+        s.column_masks("ann", "lake", "s", "t", &one("ssn", "varchar"))
+            .unwrap()
+            .get("ssn")
+            .map(String::as_str),
+        Some("NULL")
+    );
+}
+
+#[test]
+fn a_tagged_column_is_masked_whatever_case_the_request_uses() {
+    let s = snap(
+        vec![classification_mask("pii")],
+        vec![tag("t", Some("ssn"), "pii")],
+    );
+    assert_eq!(
+        s.column_masks("ann", "lake", "s", "t", &one("SSN", "varchar"))
+            .unwrap()
+            .get("SSN")
+            .map(String::as_str),
+        Some("NULL")
+    );
+}

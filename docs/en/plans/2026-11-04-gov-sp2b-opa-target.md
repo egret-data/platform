@@ -170,7 +170,7 @@ UpdateTableColumns ViewQueryOwnedBy WriteSystemInformation
 
 - **Mask rendering by the Ranger plugin:**
   - `MASK_NULL` becomes `NULL`.
-  - `CUSTOM` becomes `maskedValue`, with `NULL` when it is absent.
+  - `CUSTOM` becomes `maskedValue`, with `NULL` when it is absent. `{col}` and `{type}` are substituted in it too: the plugin replaces them in whichever expression it chose, and `maskedValue` holds the literal `{col}` (`egret-ranger-eval/tests/mask_filter.rs:552-570`). The lowering requires `{col}` in every CUSTOM expression (`InvalidCustomMask`).
   - Every other type becomes the service-def's `transformer`, with `{col}` replaced by the column name and `{type}` by the column type's display name.
   - `MASK_NONE` gives no mask.
   - The transformers are in `crates/egret-policy/src/service-defs/trino.json` → `dataMaskDef.maskTypes[].transformer`.
@@ -1013,7 +1013,8 @@ impl Snapshot {
         -> Result<Option<(String, Option<String>)>, EvalError>;
 }
 /// Ranger Trino plugin rendering: MASK_NULL→"NULL"; CUSTOM→expr or "NULL"; MASK_NONE→None;
-/// others→the transformer with {col}→column and {type}→column_type.
+/// others→the transformer; then {col}→column and {type}→column_type in the chosen expression,
+/// CUSTOM's included (egret-ranger-eval/tests/mask_filter.rs:552-570).
 pub fn render_mask(mask_type: &str, custom: Option<&str>, column: &str, column_type: &str) -> Option<String>;
 pub const TRINO_MASK_TRANSFORMERS: &[(&str, &str)];
 ```
