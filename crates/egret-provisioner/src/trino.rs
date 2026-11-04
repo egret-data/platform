@@ -1504,6 +1504,7 @@ mod tests {
 
     fn bound_as(id: &str, credential: Option<(&str, &str)>) -> RangerBinding {
         RangerBinding {
+            mechanism: egret_engine_mgmt_api::opa_config::AccessMechanism::Ranger,
             service_name: "demo2".into(),
             egret_url: "http://host.docker.internal:8080".into(),
             poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,

@@ -640,6 +640,7 @@ mod tests {
     fn rich_spec() -> EngineSpec {
         let mut s = sample_spec();
         s.ranger = Some(RangerBinding {
+            mechanism: egret_engine_mgmt_api::opa_config::AccessMechanism::Ranger,
             service_name: "demo".into(),
             egret_url: "http://egret:8080".into(),
             poll_interval_ms: 30_000,

@@ -4,6 +4,7 @@
 //! Kube-free by construction: this crate has no dependencies.
 
 pub mod credential;
+pub mod opa_config;
 pub mod ranger_config;
 
 pub use credential::{
@@ -419,6 +420,9 @@ pub struct RangerBinding {
     /// writes it into each container's security XML. `None` renders no
     /// credential.
     pub credential: Option<ranger_config::RenderableCredential>,
+    /// How the engine's decisions are made: the Ranger plugin or the Trino OPA
+    /// plugin (governance SP2b). Selects the plugin files the provisioners render.
+    pub mechanism: opa_config::AccessMechanism,
 }
 
 impl RangerBinding {

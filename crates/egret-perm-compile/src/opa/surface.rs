@@ -241,15 +241,37 @@ impl VerifiedCache {
     }
 }
 
+/// The path the router mounts `route` at.
+fn route_path(route: Route) -> String {
+    format!("{OPA_SURFACE_PREFIX}/{}", route.name())
+}
+
+/// The five paths [`opa_surface`] mounts, each from the same function that
+/// mounts it. The engine-side plugin configuration
+/// (`egret_engine_mgmt_api::opa_config::opa_plugin_files`) must point at
+/// exactly these; a test compares them, so a renamed route cannot silently
+/// break the engine.
+pub fn opa_route_paths() -> [String; 5] {
+    [
+        route_path(Route::Allow),
+        route_path(Route::Batch),
+        route_path(Route::RowFilters),
+        route_path(Route::BatchColumnMasks),
+        route_path(Route::ColumnMask),
+    ]
+}
+
 /// The routes, under [`OPA_SURFACE_PREFIX`].
 pub fn opa_surface(state: OpaState) -> axum::Router {
-    let at = |route: Route| format!("{OPA_SURFACE_PREFIX}/{}", route.name());
     axum::Router::new()
-        .route(&at(Route::Allow), post(allow))
-        .route(&at(Route::Batch), post(batch))
-        .route(&at(Route::RowFilters), post(row_filters))
-        .route(&at(Route::BatchColumnMasks), post(batch_column_masks))
-        .route(&at(Route::ColumnMask), post(column_mask))
+        .route(&route_path(Route::Allow), post(allow))
+        .route(&route_path(Route::Batch), post(batch))
+        .route(&route_path(Route::RowFilters), post(row_filters))
+        .route(
+            &route_path(Route::BatchColumnMasks),
+            post(batch_column_masks),
+        )
+        .route(&route_path(Route::ColumnMask), post(column_mask))
         .layer(DefaultBodyLimit::max(OPA_BODY_LIMIT_BYTES))
         .with_state(state)
 }

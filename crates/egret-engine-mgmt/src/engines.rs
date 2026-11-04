@@ -1037,6 +1037,7 @@ async fn ranger_binding(
             ))
         })?;
     Ok(Some(egret_engine_mgmt_api::RangerBinding {
+        mechanism: egret_engine_mgmt_api::opa_config::AccessMechanism::Ranger,
         service_name,
         egret_url: st.engine_egret_url.clone(),
         poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
@@ -13044,6 +13045,7 @@ mod tests {
             .expect("build request");
         let render = |built: &mut BuiltReq, id: String| {
             built.req.ranger = Some(egret_engine_mgmt_api::RangerBinding {
+                mechanism: egret_engine_mgmt_api::opa_config::AccessMechanism::Ranger,
                 service_name: "p".into(),
                 egret_url: "http://egret:8080".into(),
                 poll_interval_ms: 30_000,

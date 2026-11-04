@@ -4487,6 +4487,57 @@ async fn trino_config_warns_when_the_download_url_is_loopback() {
     f.store.delete_service(svc_id).await.expect("cleanup");
 }
 
+#[tokio::test]
+async fn trino_config_of_an_opa_profile_shows_the_opa_files_and_the_log_warning() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cfg_opa", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    sqlx::query("UPDATE policy.authz_services SET mechanism = 'opa' WHERE id = $1")
+        .bind(svc_id)
+        .execute(&f.db.pool)
+        .await
+        .expect("set mechanism");
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "GET",
+                &format!("/policies/services/{svc_name}/trino-config"),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(body["mechanism"], "opa", "body={body}");
+    let files = body["files"].as_array().expect("files");
+    let names: Vec<&str> = files.iter().map(|x| x["name"].as_str().unwrap()).collect();
+    assert_eq!(
+        names,
+        ["access-control.properties", "egret-opa-context.properties"]
+    );
+    let ctx = files[1]["content"].as_str().unwrap();
+    assert!(
+        ctx.contains(egret_engine_mgmt_api::ranger_config::PASSWORD_PLACEHOLDER),
+        "{ctx}"
+    );
+    let warnings: Vec<&str> = body["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w.as_str().unwrap())
+        .collect();
+    assert!(
+        warnings.contains(&egret_engine_mgmt_api::opa_config::OPA_LOG_REQUESTS_WARNING),
+        "{warnings:?}"
+    );
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
 // ── #786 / KI-125: give an existing profile a tag service ──
 
 /// A `tag` profile, its def seeded first (FK `authz_services_type_fkey`).

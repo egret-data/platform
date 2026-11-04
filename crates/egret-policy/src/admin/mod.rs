@@ -1039,6 +1039,10 @@ pub struct TrinoConfigResponse {
     /// configuration gives (`egret_engine_mgmt_api::ranger_config::download_url_warning`):
     /// a loopback or unparseable URL no engine can reach. Empty when none.
     pub warnings: Vec<String>,
+    /// `"ranger"` or `"opa"`: which plugin the files configure. An OPA
+    /// profile's files are the plugin selector and the context file that
+    /// carries the engine id and secret (both shown as placeholders).
+    pub mechanism: String,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -1174,25 +1178,41 @@ async fn trino_config(
     Path(service): Path<String>,
 ) -> Result<Json<TrinoConfigResponse>, PolicyHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
-    let _ = st.store.get_service(&service).await?; // 404 if the profile doesn't exist
+    let profile = st.store.get_service(&service).await?; // 404 if the profile doesn't exist
+    let opa = profile.mechanism == "opa";
 
     // ONE renderer: the same code that writes the files egret mounts into its own
     // engines (SP4d-4 Task 9). The poll interval is the one shared constant.
-    let rendered = egret_engine_mgmt_api::ranger_config::ranger_plugin_files(
-        egret_engine_mgmt_api::EngineKind::Trino,
-        &service,
-        &st.engine_egret_url,
-        egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS.into(),
-        None,
-    );
+    let rendered = if opa {
+        egret_engine_mgmt_api::opa_config::opa_plugin_files(
+            egret_engine_mgmt_api::opa_config::PLACEHOLDER_ENGINE_ID,
+            &st.engine_egret_url,
+            egret_engine_mgmt_api::ranger_config::PASSWORD_PLACEHOLDER,
+        )
+    } else {
+        egret_engine_mgmt_api::ranger_config::ranger_plugin_files(
+            egret_engine_mgmt_api::EngineKind::Trino,
+            &service,
+            &st.engine_egret_url,
+            egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS.into(),
+            None,
+        )
+    };
+    let mut warnings: Vec<String> =
+        egret_engine_mgmt_api::ranger_config::download_url_warning(&st.engine_egret_url)
+            .into_iter()
+            .collect();
+    if opa {
+        warnings.push(egret_engine_mgmt_api::opa_config::OPA_LOG_REQUESTS_WARNING.to_string());
+        warnings.push(egret_engine_mgmt_api::opa_config::OPA_EXTERNAL_ENGINE_NOTE.to_string());
+    }
     Ok(Json(TrinoConfigResponse {
+        mechanism: profile.mechanism,
+        warnings,
         files: rendered
             .files
             .into_iter()
             .map(|(name, content)| ConfigFile { name, content })
-            .collect(),
-        warnings: egret_engine_mgmt_api::ranger_config::download_url_warning(&st.engine_egret_url)
-            .into_iter()
             .collect(),
     }))
 }

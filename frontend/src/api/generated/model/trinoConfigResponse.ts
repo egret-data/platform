@@ -19,4 +19,10 @@ export interface TrinoConfigResponse {
      * a loopback or unparseable URL no engine can reach. Empty when none.
      */
   warnings: string[];
+  /**
+     * `"ranger"` or `"opa"`: which plugin the files configure. An OPA
+     * profile's files are the plugin selector and the context file that
+     * carries the engine id and secret (both shown as placeholders).
+     */
+  mechanism: string;
 }
