@@ -62,7 +62,7 @@ async fn trino_profile_with_engine_and_config(
         .expect("create trino service");
     let engine_id: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,'trino','egret','{\"imageVersion\":\"483\"}'::jsonb,$2) RETURNING id",
+         VALUES ($1,'trino','egret','{\"imageVersion\":\"483\",\"trinoConfig\":{\"delegationMode\":\"open\"}}'::jsonb,$2) RETURNING id",
     )
     .bind(unique("mig-eng"))
     .bind(svc.id)
@@ -1638,7 +1638,9 @@ async fn an_external_trino_declaring_2_5_0_refuses_the_migration_naming_the_pair
 /// Point the provisioned engine bound to `f.p` at a Trino `imageVersion`.
 async fn pin_bound_trino_image(f: &Fixture, image_version: &str) {
     let res = sqlx::query(
-        "UPDATE engine_mgmt.engines SET spec = jsonb_build_object('imageVersion', $2::text) \
+        "UPDATE engine_mgmt.engines \
+            SET spec = jsonb_build_object('imageVersion', $2::text, \
+                                          'trinoConfig', '{\"delegationMode\":\"open\"}'::jsonb) \
           WHERE authz_service_id = $1",
     )
     .bind(f.p)
