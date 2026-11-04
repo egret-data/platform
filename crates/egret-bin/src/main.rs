@@ -1952,6 +1952,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         _ => None,
     };
 
+    // The Ranger surface's engine credential verifier, shared with the OPA
+    // surface; `None` while the Ranger surface is off.
+    let mut engine_credential_verifier: Option<
+        std::sync::Arc<dyn egret_engine_mgmt_api::credential::EngineCredentialVerifier>,
+    > = None;
     let ranger = if config.ranger.enabled {
         let store = egret_policy::PolicyStore::new(db.clone());
         egret_policy::seed_trino(&store)
@@ -1979,22 +1984,25 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 egret_policy::ranger::AuthMode::Anonymous
             }
         };
+        // Engine plugins authenticate with their per-engine credential
+        // (current or previous, `egret_engine_mgmt::ranger_credential`),
+        // read from the same engine rows and secret store the engine-mgmt
+        // seam writes them to. The OPA surface (governance SP2b) checks the
+        // same credential through this same verifier.
+        let verifier: std::sync::Arc<
+            dyn egret_engine_mgmt_api::credential::EngineCredentialVerifier,
+        > = std::sync::Arc::new(egret_engine_mgmt::ranger_credential::DbVerifier::new(
+            egret_engine_mgmt::ranger_credential::RangerCredentialStore::new(
+                egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
+                workspace_secrets.clone(),
+            ),
+        ));
+        engine_credential_verifier = Some(verifier.clone());
         Some(egret_policy::RangerState {
             store,
             auth_token: config.ranger.auth_token.clone().into(),
             mode,
-            // Engine plugins authenticate with their per-engine credential
-            // (current or previous, `egret_engine_mgmt::ranger_credential`),
-            // read from the same engine rows and secret store the engine-mgmt
-            // seam writes them to.
-            verifier: Some(std::sync::Arc::new(
-                egret_engine_mgmt::ranger_credential::DbVerifier::new(
-                    egret_engine_mgmt::ranger_credential::RangerCredentialStore::new(
-                        egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
-                        workspace_secrets.clone(),
-                    ),
-                ),
-            )),
+            verifier: Some(verifier),
         })
     } else {
         None
@@ -3145,6 +3153,19 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         );
     }
 
+    // Governance SP2b: the OPA decision surface and its snapshot refresher,
+    // only while `[governance.opa] enabled` (default false) and the Ranger
+    // surface is on. With the gate off, `opa` is `None`: the routes are not
+    // mounted and no refresher runs. The refresher stops with the other
+    // background loops.
+    let opa = egret_perm_compile::start_opa(
+        config.governance.opa.enabled,
+        engine_credential_verifier.clone(),
+        db.pool.clone(),
+        reaper_cancel.clone().cancelled_owned(),
+    )
+    .map(|(state, _refresher)| state);
+
     // Control plane: global platform-admin Storage + Secrets + Access console.
     // Keeps `storage` (CatalogStore) + `browser` for the Storage router's
     // credential-rotation push-down onto provisioned warehouses; the warehouse
@@ -3537,6 +3558,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         workspace: Some(workspace),
         oidc,
         ranger,
+        opa,
         database,
         engine,
         bi,

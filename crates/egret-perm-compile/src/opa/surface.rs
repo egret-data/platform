@@ -55,9 +55,27 @@ use super::wire::{self, OpaRequest, FILTER_COLUMNS};
 
 pub const OPA_SURFACE_PREFIX: &str = "/opa/v1/data/egret/trino";
 
-/// The largest request body accepted (M13): a FilterTables/FilterColumns batch
-/// for 10k objects.
-pub const OPA_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+/// The largest request body accepted: 1 MiB, past which the request is
+/// refused with 413 (a non-2xx, so the plugin fails the query) before any
+/// parse. The body is parsed into a `serde_json::Value` BEFORE the engine's
+/// credential is checked, so this bound is what an unauthenticated caller can
+/// make egret buffer and parse per request (Task 9 review, M6; it was 16 MiB).
+///
+/// Why 1 MiB is enough: Trino 483's plugin sends one request per access check
+/// and one per filter batch. The largest are `FilterTables` (one
+/// `{"table":{"catalogName","schemaName","tableName"}}` object per table, about
+/// 120 bytes with 20-character names) and `FilterColumns` (one table and its
+/// column names, about 25 bytes per column), so 1 MiB holds about 8 000 tables
+/// in one schema or 40 000 columns in one table. A larger listing fails the
+/// query rather than being answered; raise the bound if one is measured. It is also below axum's
+/// default 2 MB limit, so this layer, not the default, is what bounds the
+/// surface.
+pub const OPA_BODY_LIMIT_BYTES: usize = 1024 * 1024;
+
+/// How long a verified `(engine, secret)` is remembered before the verifier is
+/// asked again (spec: 5 s). A retired secret keeps being accepted for at most
+/// this long.
+pub const VERIFIED_TTL: Duration = Duration::from_secs(5);
 
 /// How long a refused `(engine, secret)` is remembered as refused. A negative
 /// entry can only refuse, never admit, and it is keyed by the secret it

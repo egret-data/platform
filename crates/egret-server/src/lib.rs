@@ -32,6 +32,11 @@ pub struct AppState {
     pub oidc: Option<OidcRoutesState>,
     /// Present when `config.ranger.enabled`; `None` otherwise (or in unit tests).
     pub ranger: Option<egret_policy::RangerState>,
+    /// The OPA decision surface (governance SP2b) Trino's OPA plugin calls.
+    /// `Some` only when `[governance.opa] enabled` and the Ranger surface is
+    /// on (see `egret_perm_compile::start_opa`); `None` means the routes are
+    /// not mounted at all.
+    pub opa: Option<egret_perm_compile::OpaState>,
     /// Present once a database is wired (in `egret-bin`); `None` in pure health unit tests.
     pub database: Option<egret_query::DatabaseState>,
     /// Present once the engine is wired (in `egret-bin`); `None` in unit tests.
@@ -107,6 +112,8 @@ impl AppState {
             workspace: None,
             oidc: None,
             ranger: None,
+            // Off: `[governance.opa] enabled` defaults to false.
+            opa: None,
             database: None,
             engine: None,
             bi: None,
@@ -319,6 +326,13 @@ pub fn build_router(state: AppState) -> Router {
 
     if let Some(ranger) = state.ranger.clone() {
         router = router.merge(egret_policy::ranger_surface(ranger).with_state(()));
+    }
+
+    // Like the Ranger surface, a third-party protocol for the engine, not the
+    // browser: no CSRF layer, no OpenAPI entry. Its body limit is the
+    // surface's own layer (`OPA_BODY_LIMIT_BYTES`).
+    if let Some(opa) = state.opa.clone() {
+        router = router.merge(egret_perm_compile::opa_surface(opa).with_state(()));
     }
 
     if let Some(database) = state.database.clone() {

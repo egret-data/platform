@@ -109,6 +109,10 @@ impl std::fmt::Debug for Lookup {
 /// dropped and one failure is recorded (about 30 s at the 1 s period).
 pub const MAX_UNREAD: u32 = 30;
 
+/// How often the refresher runs [`SnapshotCache::refresh_once`] in
+/// production. [`MAX_UNREAD`] assumes it.
+pub const REFRESH_PERIOD: std::time::Duration = std::time::Duration::from_secs(1);
+
 struct CacheEntry {
     /// The key the last build read (authoritative for the refresh); None:
     /// the state could not be read, so the next refresh retries.
