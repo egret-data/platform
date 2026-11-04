@@ -64,6 +64,10 @@ impl egret_engine_mgmt::ProfileCompilerPort for RecordingProfileCompiler {
         Ok(())
     }
 
+    async fn converge_infra(&self, _service_id: i64) -> Result<(), egret_perm::CompileError> {
+        Ok(())
+    }
+
     async fn recompile_catalog_assignment_in_tx(
         &self,
         _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -125,6 +129,12 @@ struct RealProfileCompiler {
 impl egret_engine_mgmt::ProfileCompilerPort for RealProfileCompiler {
     async fn recompile_profile(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
         egret_perm_compile::recompile_service(&self.perm, &self.policy, service_id)
+            .await
+            .map(|_| ())
+    }
+
+    async fn converge_infra(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
+        egret_perm_compile::converge_infra_policy(self.perm.pool(), service_id)
             .await
             .map(|_| ())
     }
@@ -13288,6 +13298,9 @@ impl egret_engine_mgmt::ProfileCompilerPort for ConflictAfterDryRun {
             fut.await;
         }
         self.inner.recompile_profile(service_id).await
+    }
+    async fn converge_infra(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
+        self.inner.converge_infra(service_id).await
     }
     async fn recompile_catalog_assignment_in_tx(
         &self,

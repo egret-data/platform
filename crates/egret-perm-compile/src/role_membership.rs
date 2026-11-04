@@ -407,23 +407,21 @@ pub async fn set_user_status_and_recompile_in_tx(
     user_id: Uuid,
     status: &str,
 ) -> Result<(), CompileError> {
-    let services = egret_policy::default_policies::admin_policy_services_via(tx)
-        .await
-        .map_err(crate::db_error::from_store)?;
+    let services = crate::infra::infra_services_via(tx).await?;
     lock_for_admin_sync_in_tx(tx, &services).await?;
     egret_auth::users::UserRepo::set_status_in_tx(tx, egret_core::UserId(user_id), status)
         .await
         .map_err(crate::db_error::from_core)?;
     for &service_id in &services {
-        crate::trigger::sync_admin_policy_in_tx(tx, service_id).await?;
+        crate::infra::converge_infra_in_tx(tx, service_id).await?;
     }
     Ok(())
 }
 
-/// The locks an `egret-admin` sync outside a compile takes, in the compile's
-/// order: the profiles ascending, then the mint lock (the sync may mint an
-/// admin's missing username).
-async fn lock_for_admin_sync_in_tx(
+/// The locks an infrastructure convergence outside a compile takes, in the
+/// compile's order: the profiles ascending, then the mint lock (convergence
+/// may mint an admin's missing username).
+pub(crate) async fn lock_for_admin_sync_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     services: &[i64],
 ) -> Result<(), CompileError> {
@@ -436,36 +434,29 @@ async fn lock_for_admin_sync_in_tx(
     Ok(())
 }
 
-/// The boot pass of the `egret-admin` sync (username-takeover spec 2026-10-23
-/// §4.2): converge every service holding an `egret-admin` set, so a body
-/// written before the fix (or by an apply that raced an admin change) is
-/// repaired at startup. The sync alone, one transaction per service (review
-/// L1): a profile that cannot compile still gets its `egret-admin` set
-/// repaired, and a service that fails is logged and skipped while every other
-/// engine is repaired. Idempotent (an unchanged body writes nothing). Returns
-/// how many services it repaired or found current.
-pub async fn sync_admin_policies(pool: &PgPool) -> Result<usize, CompileError> {
+/// The boot pass of infrastructure convergence (username-takeover spec
+/// 2026-10-23 §4.2; governance SP2a, D4): converge every infra service
+/// ([`crate::infra::infra_services_via`]), so a body written before the fix,
+/// by an apply that raced an admin change, or left by an engine no longer
+/// bound, is repaired at startup. Convergence alone, one transaction per
+/// service (review L1): a profile that cannot compile still gets its infra
+/// rows repaired, and a service that fails is logged and skipped while every
+/// other engine is repaired. Idempotent (an unchanged set writes nothing).
+/// Returns how many services it repaired or found current.
+pub async fn converge_infra_policies(pool: &PgPool) -> Result<usize, CompileError> {
     let db = CompileError::from_db;
     let services = {
         let mut conn = pool.acquire().await.map_err(db)?;
-        egret_policy::default_policies::admin_policy_services_via(&mut conn)
-            .await
-            .map_err(crate::db_error::from_store)?
+        crate::infra::infra_services_via(&mut conn).await?
     };
     let mut synced = 0;
     for service_id in services {
-        let one = async {
-            let mut tx = pool.begin().await.map_err(db)?;
-            lock_for_admin_sync_in_tx(&mut tx, &[service_id]).await?;
-            crate::trigger::sync_admin_policy_in_tx(&mut tx, service_id).await?;
-            tx.commit().await.map_err(db)
-        };
-        match one.await {
-            Ok(()) => synced += 1,
+        match crate::infra::converge_infra_policy(pool, service_id).await {
+            Ok(_) => synced += 1,
             Err(e) => tracing::warn!(
                 service_id,
                 error = %e,
-                "the boot sync could not converge this profile's egret-admin set"
+                "the boot pass could not converge this profile's infrastructure policies"
             ),
         }
     }

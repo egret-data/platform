@@ -23,7 +23,9 @@ const SITES: &[(&str, usize, &str)] = &[
         "crates/egret-perm-compile/src/trigger.rs",
         2,
         "`origin = 'generated'` and `bump_policy_version` write only a profile of the sweep, \
-         which `apply_diff_in_tx` locked through the guard first",
+         which `apply_diff_in_tx` locked through the guard first; `infra::converge_infra_in_tx` \
+         bumps through `bump_policy_version` only the profile its caller locked (the compile's \
+         own, or `lock_for_admin_sync_in_tx`)",
     ),
     (
         "crates/egret-policy/src/store.rs",

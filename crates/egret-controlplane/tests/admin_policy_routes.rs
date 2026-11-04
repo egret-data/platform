@@ -132,7 +132,9 @@ async fn admin(db: &Db) -> (Uuid, String) {
     (id, name)
 }
 
-/// A Trino profile whose `egret-admin` names `users`.
+/// A Trino profile whose `egret-admin` names `users`, with a qualifying
+/// (impersonate-mode) Trino engine bound: convergence keeps `egret-admin` only
+/// on such a profile (governance SP2a, D2).
 async fn seeded_service(db: &Db, users: &[String]) -> i64 {
     let policy = PolicyStore::new(db.clone());
     egret_policy::seed_trino(&policy).await.expect("def");
@@ -147,6 +149,15 @@ async fn seeded_service(db: &Db, users: &[String]) -> i64 {
         .seed_admin_all_access(svc.id, &name, "trino", &users)
         .await
         .expect("seed");
+    sqlx::query(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1, 'trino', 'egret', '{}'::jsonb, $2)",
+    )
+    .bind(unique("cp-engine").replace('_', "-"))
+    .bind(svc.id)
+    .execute(&db.pool)
+    .await
+    .expect("engine");
     svc.id
 }
 

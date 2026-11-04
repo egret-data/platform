@@ -152,7 +152,7 @@ async fn init(config: Config, force: bool) -> anyhow::Result<()> {
     // Username takeover (spec 2026-10-23 §4.2): with `--force` on an install
     // that already has engines, the new admin joins every `egret-admin` set
     // now rather than at the next boot.
-    if let Err(e) = egret_perm_compile::sync_admin_policies(&db.pool).await {
+    if let Err(e) = egret_perm_compile::converge_infra_policies(&db.pool).await {
         tracing::warn!(error = %e, "could not add the new admin to the engines' egret-admin \
             policies; the boot pass will");
     }
@@ -300,6 +300,12 @@ async fn recompile_one_profile(
 impl egret_engine_mgmt::ProfileCompilerPort for ProfileCompilerImpl {
     async fn recompile_profile(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
         egret_perm_compile::recompile_service(&self.perm, &self.policy, service_id)
+            .await
+            .map(|_| ())
+    }
+
+    async fn converge_infra(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
+        egret_perm_compile::converge_infra_policy(self.perm.pool(), service_id)
             .await
             .map(|_| ())
     }
@@ -2903,17 +2909,18 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             }
         });
     }
-    // Username takeover (spec 2026-10-23 §4.2): converge every `egret-admin`
-    // set to the active platform admins, repairing bodies written before the
-    // fix. Best-effort; a failure is logged and never blocks boot.
+    // Username takeover (spec 2026-10-23 §4.2) and governance SP2a (D4):
+    // converge every profile's infrastructure policies, so `egret-admin` names
+    // the active platform admins and bodies written before the fix are
+    // repaired. Best-effort; a failure is logged and never blocks boot.
     {
         let pool = db.pool.clone();
         tokio::spawn(async move {
-            match egret_perm_compile::sync_admin_policies(&pool).await {
-                Ok(n) => tracing::info!(services = n, "egret-admin policies synced at boot"),
+            match egret_perm_compile::converge_infra_policies(&pool).await {
+                Ok(n) => tracing::info!(services = n, "infrastructure policies converged at boot"),
                 Err(e) => tracing::warn!(
                     error = %e,
-                    "the boot sync of the egret-admin policies did not run"
+                    "the boot convergence of the infrastructure policies did not run"
                 ),
             }
         });

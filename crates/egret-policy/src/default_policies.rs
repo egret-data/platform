@@ -162,7 +162,7 @@ impl PolicyStore {
 
     /// Seed an "admin has all access" policy per resource hierarchy for the
     /// given `users` on any Ranger service (Trino or StarRocks): engine apply's
-    /// call, [`sync_admin_all_access_in_tx`] in its own transaction. Unlike
+    /// call, [`write_admin_all_access_in_tx`] in its own transaction. Unlike
     /// [`seed_default_trino_policies`], this has NO empty-service guard, so it
     /// is safe to call repeatedly. An empty `users` rewrites the existing
     /// bodies to name nobody and creates none (before the username-takeover
@@ -186,59 +186,13 @@ impl PolicyStore {
     }
 }
 
-/// What [`sync_admin_all_access_in_tx`] did to one service's `egret-admin`
-/// policies.
+/// What [`write_admin_all_access_in_tx`] did to one service's `egret-admin`
+/// policies. Engine apply's writer only, until it converges instead
+/// (governance SP2a, Task 5).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct AdminPolicySync {
-    /// Whether any body changed (and so `policy_version` moved, once).
-    pub changed: bool,
+struct AdminPolicySync {
     /// How many `egret-admin` policies the service has afterwards.
-    pub present: usize,
-    /// Names the bodies named before and no longer name, sorted.
-    pub removed: Vec<String>,
-    /// Names they name now and did not before, sorted.
-    pub added: Vec<String>,
-}
-
-/// Every service holding at least one `egret-admin - …` infra policy: the
-/// engines egret seeded, whose admin set [`sync_admin_all_access_in_tx`]
-/// keeps current. Ascending.
-pub async fn admin_policy_services_via(
-    conn: &mut sqlx::PgConnection,
-) -> Result<Vec<i64>, PolicyStoreError> {
-    let rows: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT service_id, name FROM policy.authz_policies \
-          WHERE managed_by = 'infra' AND starts_with(name, $1) ORDER BY service_id",
-    )
-    .bind(ADMIN_ALL_ACCESS_NAME_PREFIX)
-    .fetch_all(&mut *conn)
-    .await?;
-    let mut ids: Vec<i64> = rows
-        .into_iter()
-        .filter(|(_, name)| is_admin_all_access_policy_name(name))
-        .map(|(id, _)| id)
-        .collect();
-    ids.dedup();
-    Ok(ids)
-}
-
-/// Make `service_id`'s `egret-admin - …` policies name exactly `users`, on
-/// the caller's transaction (username-takeover spec 2026-10-23 §4.2, D2).
-///
-/// `users` is the engine-admin set's usernames, sorted (the caller mints
-/// them). One body per resource hierarchy of the service's def, upserted only
-/// where it differs (`IS DISTINCT FROM`), and `policy_version` bumped once
-/// when any did, so an unchanged set writes nothing and a plugin re-downloads
-/// nothing. An empty `users` rewrites the existing bodies to `users: []`, an
-/// item that matches nobody, and creates none. The caller holds the service's
-/// profile lock (every recompile does).
-pub async fn sync_admin_all_access_in_tx(
-    conn: &mut sqlx::PgConnection,
-    service_id: i64,
-    users: &[String],
-) -> Result<AdminPolicySync, PolicyStoreError> {
-    let (service_name, service_type) = service_name_and_type(conn, service_id).await?;
-    write_admin_all_access_in_tx(conn, service_id, &service_name, &service_type, users).await
+    present: usize,
 }
 
 async fn service_name_and_type(
@@ -275,8 +229,12 @@ pub fn admin_all_access_bodies(
     ))
 }
 
-/// [`sync_admin_all_access_in_tx`] with the bodies' service name and def type
-/// given (engine apply passes its own). The name guard reads the row's type.
+/// Make `service_id`'s `egret-admin - …` policies name exactly `users`, with
+/// the bodies' service name and def type given (engine apply passes its own).
+/// The name guard reads the row's type. Engine apply's writer until Task 5 of
+/// governance SP2a moves apply onto convergence
+/// (`egret_perm_compile::infra::converge_infra_in_tx`, which every other path
+/// already uses).
 async fn write_admin_all_access_in_tx(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
@@ -295,20 +253,6 @@ async fn write_admin_all_access_in_tx(
     .bind(ADMIN_ALL_ACCESS_NAME_PREFIX)
     .fetch_all(&mut *conn)
     .await?;
-    let named_before: std::collections::BTreeSet<String> = before
-        .iter()
-        .filter(|(name, _)| is_admin_all_access_policy_name(name))
-        .flat_map(|(_, body)| {
-            body["policyItems"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .flat_map(|item| item["users"].as_array().into_iter().flatten())
-                .filter_map(|u| u.as_str().map(str::to_string))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-
     let mut changed = false;
     let mut present = 0usize;
     for (name, body) in &policies {
@@ -375,13 +319,7 @@ async fn write_admin_all_access_in_tx(
         .execute(&mut *conn)
         .await?;
     }
-    let now: std::collections::BTreeSet<String> = users.iter().cloned().collect();
-    Ok(AdminPolicySync {
-        changed,
-        present,
-        removed: named_before.difference(&now).cloned().collect(),
-        added: now.difference(&named_before).cloned().collect(),
-    })
+    Ok(AdminPolicySync { present })
 }
 
 #[cfg(test)]

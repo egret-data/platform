@@ -15,10 +15,6 @@ use serde_json::Value;
 /// resource hierarchy of the engine's service-def; every other kind is one
 /// row. A statement of another family is refused (only reachable by building
 /// one by hand).
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "first caller is crate::infra, added in Task 4")
-)]
 pub(crate) fn render(
     s: &Statement,
     service_name: &str,

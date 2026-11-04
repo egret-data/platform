@@ -76,6 +76,9 @@ pub(crate) mod clearance_mask;
 // Governance sub-project 1, Task 4: every read the lowering of one profile
 // needs, in one loader.
 pub(crate) mod ir_load;
+// Governance SP2a, Task 4: a profile's IR-owned infrastructure policies,
+// converged before every compile and on their own.
+pub mod infra;
 // Task 3 of view governance: the two StarRocks bodies the differential harness
 // asks the real jars about, built by the compiler's own functions.
 #[cfg(feature = "harness")]
@@ -162,13 +165,15 @@ pub use attribution::{attribute_policy_name, PolicyAttribution};
 pub use egret_perm_ir::lower::grants::validate_grant_shape;
 pub use egret_perm_ir::lower::rules::validate_rule_shape;
 pub use group_membership::PermGroupRecompiler;
+pub use infra::{converge_infra_policy, InfraSync};
 pub use members::lock_compile_mints_in_tx;
 pub use principal_refs::{mint_missing_usernames, UsernameRepair};
 pub use ranger::grants::compile_grant;
 pub use role_membership::{
-    assign_platform_role_and_recompile, delete_platform_role_and_recompile,
-    set_user_status_and_recompile, set_user_status_and_recompile_in_tx, sync_admin_policies,
-    unassign_platform_role_and_recompile, unassign_platform_role_and_recompile_in_tx,
+    assign_platform_role_and_recompile, converge_infra_policies,
+    delete_platform_role_and_recompile, set_user_status_and_recompile,
+    set_user_status_and_recompile_in_tx, unassign_platform_role_and_recompile,
+    unassign_platform_role_and_recompile_in_tx,
 };
 pub use routes::{openapi, perm_router, PermHttpError, PermState};
 pub use rules::{compile_rule, ResolvedNames, TableTarget, TaggedColumn};

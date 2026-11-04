@@ -112,3 +112,42 @@ fn is_seeded_hierarchy_name(name: &str, prefix: &str) -> bool {
         None => false,
     }
 }
+
+/// Whether `name` is one of the infrastructure policies the permission IR
+/// owns (governance SP2a): an `egret-admin - …` row, or one of the four fixed
+/// names. Convergence reads, writes and deletes exactly these. The `all - …`
+/// default set is deliberately NOT one: it stays outside the IR, written only
+/// by its own route.
+pub fn is_ir_infra_name(name: &str) -> bool {
+    is_admin_all_access_policy_name(name)
+        || name == IMPERSONATE_POLICY_NAME
+        || name == SELF_IMPERSONATE_POLICY_NAME
+        || name == EXECUTE_QUERY_POLICY_NAME
+        || name == QUERY_TIMEOUT_POLICY_NAME
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_ir_owns_egret_admin_and_the_four_fixed_names_only() {
+        assert!(is_ir_infra_name("egret-admin - catalog"));
+        assert!(is_ir_infra_name("egret-admin - catalog, schema, table"));
+        for fixed in [
+            IMPERSONATE_POLICY_NAME,
+            SELF_IMPERSONATE_POLICY_NAME,
+            EXECUTE_QUERY_POLICY_NAME,
+            QUERY_TIMEOUT_POLICY_NAME,
+        ] {
+            assert!(is_ir_infra_name(fixed), "{fixed} is IR-owned");
+        }
+        assert!(
+            !is_ir_infra_name("all - catalog"),
+            "the `all - …` default set stays out of the IR"
+        );
+        assert!(!is_ir_infra_name("egret-admin"), "no separator");
+        assert!(!is_ir_infra_name("egret-admins - x"), "another prefix");
+        assert!(!is_ir_infra_name("perm-grant-1"));
+    }
+}

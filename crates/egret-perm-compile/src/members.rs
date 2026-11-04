@@ -429,14 +429,9 @@ pub(crate) async fn premint_model_usernames(
             unnamed.insert(m.user_id);
         }
     }
-    // The engine admins, when any engine carries an `egret-admin` set: every
-    // recompile of such a profile names them (`crate::trigger`'s
-    // `sync_admin_policy_in_tx`).
-    if !egret_policy::default_policies::admin_policy_services_via(conn)
-        .await
-        .map_err(crate::db_error::from_store)?
-        .is_empty()
-    {
+    // The engine admins, when there is any infra service: every recompile of
+    // such a profile names them (`crate::infra::converge_infra_in_tx`).
+    if !crate::infra::infra_services_via(conn).await?.is_empty() {
         let admins = egret_auth::roles::engine_admin_user_ids_via(conn)
             .await
             .map_err(crate::db_error::from_core)?;

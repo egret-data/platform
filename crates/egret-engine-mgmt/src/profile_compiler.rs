@@ -31,6 +31,13 @@ pub trait ProfileCompilerPort: Send + Sync {
     /// `service_id` is a `policy.authz_services` id.
     async fn recompile_profile(&self, service_id: i64) -> Result<(), egret_perm::CompileError>;
 
+    /// Converge one profile's infrastructure policies (the `egret-admin - …`
+    /// set and the delegation baseline) from the store, in a transaction of
+    /// its own, without compiling the profile (governance SP2a, D4). Engine
+    /// apply calls it after binding or changing an engine, so a profile whose
+    /// compile fails still gets its infrastructure rows.
+    async fn converge_infra(&self, service_id: i64) -> Result<(), egret_perm::CompileError>;
+
     /// Recompile, on the CALLER's own open transaction, every profile
     /// `catalog_id` currently reaches — the same affected-service set a
     /// grant scoped to that catalog would use

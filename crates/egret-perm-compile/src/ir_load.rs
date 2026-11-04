@@ -532,6 +532,71 @@ pub(crate) fn plugin_version_from_label(label: &str) -> Option<PluginVersion> {
     }
 }
 
+/// One profile's infrastructure inputs (governance SP2a, D2), with the
+/// service name and type the Ranger renderer needs.
+pub(crate) struct LoadedInfra {
+    pub service_name: String,
+    pub service_type: String,
+    pub inputs: egret_perm_ir::lower::infra::InfraInputs,
+}
+
+/// Read what the infrastructure statements of profile `service_id` depend on,
+/// on the caller's connection. `None` when the profile is not one this
+/// compiler targets (see [`crate::trigger::engine_type_for`]).
+///
+/// The engine admins are read only when some bound engine qualifies: an
+/// admin's missing username is minted on that read, and a profile that gets no
+/// `egret-admin` row must not mint one.
+pub(crate) async fn load_infra_inputs(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<Option<LoadedInfra>, CompileError> {
+    use egret_core::engine_delegation::{delegator_impersonates, qualifies_for_infra};
+
+    let svc: Option<(String, String)> =
+        sqlx::query_as("SELECT name, type FROM policy.authz_services WHERE id = $1")
+            .bind(service_id)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(CompileError::from_db)?;
+    let Some((service_name, service_type)) = svc else {
+        return Ok(None);
+    };
+    let Some(engine) = crate::trigger::engine_type_for(&service_type) else {
+        return Ok(None);
+    };
+    let engines: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT type, origin, spec FROM engine_mgmt.engines WHERE authz_service_id = $1",
+    )
+    .bind(service_id)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(CompileError::from_db)?;
+    let qualifying: Vec<&(String, String, serde_json::Value)> = engines
+        .iter()
+        .filter(|(t, origin, spec)| qualifies_for_infra(t, origin, spec))
+        .collect();
+    let delegating = !qualifying.is_empty();
+    let delegator_impersonates = qualifying
+        .iter()
+        .any(|(t, _, spec)| delegator_impersonates(t, spec));
+    let admins = if delegating {
+        crate::members::engine_admin_usernames_via(conn).await?
+    } else {
+        Vec::new()
+    };
+    Ok(Some(LoadedInfra {
+        service_name,
+        service_type,
+        inputs: egret_perm_ir::lower::infra::InfraInputs {
+            engine,
+            admins,
+            delegating,
+            delegator_impersonates,
+        },
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

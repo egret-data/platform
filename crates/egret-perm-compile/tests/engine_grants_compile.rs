@@ -84,10 +84,17 @@ async fn seed(db: &Db) -> Fixture {
     }
 }
 
+/// An engine bound to `profile`. A Trino one is in `open` mode, so it brings
+/// no infrastructure policies (governance SP2a, D2) and a compile's
+/// `policy_version` bump is the compile's own.
 async fn engine(pool: &PgPool, ty: &str, profile: Option<i64>) -> Uuid {
     sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1, $2, 'egret', '{}'::jsonb, $3) RETURNING id",
+         VALUES ($1, $2, 'egret', \
+                 CASE WHEN $2 = 'trino' \
+                      THEN '{\"trinoConfig\": {\"delegationMode\": \"open\"}}'::jsonb \
+                      ELSE '{}'::jsonb END, \
+                 $3) RETURNING id",
     )
     .bind(unique("eg-eng"))
     .bind(ty)
