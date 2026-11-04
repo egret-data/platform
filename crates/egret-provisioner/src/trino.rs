@@ -1631,9 +1631,28 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string();
+        assert_eq!(ac, "access-control.name=egret-unrenderable-opa-binding\n");
+    }
+
+    #[tokio::test]
+    async fn an_unrenderable_opa_value_fails_before_anything_is_applied() {
+        use crate::kube_client::FakeKube;
+        let kube = std::sync::Arc::new(FakeKube::default());
+        let p = TrinoProvisioner::new(kube.clone());
+        let spec = opa_spec("bad\nsecret=x");
+        let e = p.apply_all(&spec).await.expect_err("an unsafe secret");
+        assert!(!e.to_string().contains("bad"));
         assert!(
-            !ac.contains("allow-all") && !ac.contains("name=opa"),
-            "{ac}"
+            kube.applied.lock().unwrap().is_empty(),
+            "nothing applied, not even the ConfigMap"
+        );
+    }
+
+    #[test]
+    fn changing_only_the_opa_secret_changes_the_pod_checksum() {
+        assert_ne!(
+            config_checksum(&opa_spec("pw-one")),
+            config_checksum(&opa_spec("pw-two"))
         );
     }
 
