@@ -3,8 +3,8 @@
 //!
 //! - With `AppState::opa` set, the five routes answer through the composed
 //!   router; with it `None` (the gate off) they are not there at all (404).
-//! - The request body is bounded at [`OPA_BODY_LIMIT_BYTES`]: one byte over is
-//!   refused with a non-2xx (the plugin fails the query), never answered.
+//! - The request body is bounded at [`OPA_BODY_LIMIT_BYTES`] (4 MiB): one byte
+//!   over is refused with a non-2xx (the plugin fails the query), never answered.
 //! - [`start_opa`] returns nothing and touches no database while the gate is
 //!   off; with it on, the refresher runs, survives refresh errors and stops at
 //!   shutdown.
@@ -18,7 +18,7 @@ use axum::body::Body;
 use axum::http::Request;
 use egret_engine_mgmt_api::credential::{EngineCredentialVerifier, EngineIdentity};
 use egret_perm_compile::opa::cache::{SnapshotCache, MAX_UNREAD, REFRESH_PERIOD};
-use egret_perm_compile::opa::surface::{VerifiedCache, OPA_BODY_LIMIT_BYTES};
+use egret_perm_compile::opa::surface::{ParseGate, VerifiedCache, OPA_BODY_LIMIT_BYTES};
 use egret_perm_compile::{start_opa, OpaState, OPA_SURFACE_PREFIX};
 use egret_perm_eval::{Snapshot, SnapshotInput};
 use egret_perm_ir::audience::{Audience, Member, MemberName, Via};
@@ -90,6 +90,7 @@ fn opa_state(verifier: Arc<dyn EngineCredentialVerifier>, engine: uuid::Uuid) ->
         cache,
         verifier,
         credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
+        parses: Arc::new(ParseGate::default()),
     }
 }
 
@@ -227,9 +228,8 @@ async fn a_body_at_the_limit_is_answered_and_one_byte_over_is_refused() {
 }
 
 #[test]
-fn the_body_limit_is_one_mebibyte() {
-    // Below axum's 2 MB default, so the bound is the surface's own layer.
-    assert_eq!(OPA_BODY_LIMIT_BYTES, 1024 * 1024);
+fn the_body_limit_is_four_mebibytes() {
+    assert_eq!(OPA_BODY_LIMIT_BYTES, 4 * 1024 * 1024);
 }
 
 // ---- the gate and the refresher ----

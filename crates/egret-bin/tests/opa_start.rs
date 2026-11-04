@@ -1,0 +1,86 @@
+//! Governance SP2b Task 10: the gate line `main` runs,
+//! `start_opa_from_config`. No database: the pool points at a port nothing
+//! listens on, so a running refresher only fails and retries.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use egret_bin::start_opa_from_config;
+use egret_config::{GovernanceConfig, OpaSettings};
+use egret_engine_mgmt_api::credential::{EngineCredentialVerifier, EngineIdentity};
+use tokio_util::sync::CancellationToken;
+
+struct RefuseAll;
+
+#[async_trait::async_trait]
+impl EngineCredentialVerifier for RefuseAll {
+    async fn verify(&self, _: uuid::Uuid, _: &str) -> Result<Option<EngineIdentity>, String> {
+        Ok(None)
+    }
+}
+
+fn verifier() -> Option<Arc<dyn EngineCredentialVerifier>> {
+    Some(Arc::new(RefuseAll))
+}
+
+fn unreachable_pool() -> sqlx::PgPool {
+    sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(Duration::from_millis(200))
+        .connect_lazy("postgres://egret:egret@127.0.0.1:1/egret")
+        .expect("lazy pool")
+}
+
+fn gate(enabled: bool) -> GovernanceConfig {
+    GovernanceConfig {
+        opa: OpaSettings { enabled },
+    }
+}
+
+#[tokio::test]
+async fn the_default_config_starts_nothing() {
+    // Act
+    let started = start_opa_from_config(
+        &GovernanceConfig::default(),
+        verifier(),
+        unreachable_pool(),
+        &CancellationToken::new(),
+    );
+
+    // Assert
+    assert!(started.is_none());
+}
+
+#[tokio::test]
+async fn the_gate_on_with_the_ranger_verifier_starts_and_stops_on_cancel() {
+    // Arrange
+    let cancel = CancellationToken::new();
+
+    // Act
+    let (_state, handle) =
+        start_opa_from_config(&gate(true), verifier(), unreachable_pool(), &cancel)
+            .expect("the gate is on");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let running = !handle.is_finished();
+    cancel.cancel();
+    let joined = tokio::time::timeout(Duration::from_secs(5), handle).await;
+
+    // Assert
+    assert!(running);
+    joined
+        .expect("the refresher stops when the token is cancelled")
+        .expect("no panic");
+}
+
+#[tokio::test]
+async fn the_gate_on_without_the_ranger_verifier_starts_nothing() {
+    // Act
+    let started = start_opa_from_config(
+        &gate(true),
+        None,
+        unreachable_pool(),
+        &CancellationToken::new(),
+    );
+
+    // Assert
+    assert!(started.is_none());
+}

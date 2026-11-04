@@ -5,6 +5,28 @@ pub mod engine_minter;
 pub mod identity;
 pub mod workflow_secrets;
 
+/// Governance SP2b: the OPA surface's state with its snapshot refresher
+/// running, per `[governance.opa] enabled` (default off: `None`, nothing
+/// spawned). `verifier` is the Ranger surface's engine credential verifier
+/// (`None` while the Ranger surface is off, which also leaves OPA off). The
+/// refresher stops when `shutdown` is cancelled, with the other background
+/// loops. Lives here, not inline in `main`, so the gate line is tested.
+pub fn start_opa_from_config(
+    governance: &egret_config::GovernanceConfig,
+    verifier: Option<
+        std::sync::Arc<dyn egret_engine_mgmt_api::credential::EngineCredentialVerifier>,
+    >,
+    pool: sqlx::PgPool,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> Option<(egret_perm_compile::OpaState, tokio::task::JoinHandle<()>)> {
+    egret_perm_compile::start_opa(
+        governance.opa.enabled,
+        verifier,
+        pool,
+        shutdown.clone().cancelled_owned(),
+    )
+}
+
 use anyhow::Context;
 use egret_auth::groups::GroupRepo;
 use egret_auth::users::UserRepo;

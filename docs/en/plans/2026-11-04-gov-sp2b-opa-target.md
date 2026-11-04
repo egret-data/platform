@@ -1731,7 +1731,10 @@ mod tests {
 ```rust
 pub const OPA_SURFACE_PREFIX: &str = "/opa/v1/data/egret/trino";
 /// The largest request body accepted (M13): a FilterTables/FilterColumns batch for 10k objects.
-pub const OPA_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+/// (Task 10 fix round 1: 4 MiB, about 28-35k tables at 120-150 B each, with a
+/// pre-auth parse bound `OPA_MAX_CONCURRENT_PARSES`; was 16 MiB.)
+/// Task 20 must measure a live `SHOW TABLES` on a 10k-table schema.
+pub const OPA_BODY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Clone)]
 pub struct OpaState {
     pub cache: std::sync::Arc<crate::opa::cache::SnapshotCache>,

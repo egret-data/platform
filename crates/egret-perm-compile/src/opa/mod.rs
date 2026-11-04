@@ -13,7 +13,7 @@ use egret_engine_mgmt_api::credential::EngineCredentialVerifier;
 use sqlx::PgPool;
 
 use cache::{spawn_snapshot_refresher, SnapshotCache, REFRESH_PERIOD};
-use surface::{OpaState, VerifiedCache, VERIFIED_TTL};
+use surface::OpaState;
 
 /// The OPA surface's state, with its snapshot refresher running, when
 /// `enabled` (`[governance.opa] enabled`) and the Ranger surface's engine
@@ -35,18 +35,15 @@ pub fn start_opa(
         return None;
     }
     let Some(verifier) = verifier else {
-        tracing::warn!(
+        tracing::error!(
             "governance.opa.enabled is set but the Ranger surface (ranger.enabled) is off: \
-             the OPA surface shares its engine credentials, so it is not mounted"
+             OPA IS NOT RUNNING. The OPA surface checks engines with the Ranger surface's \
+             credentials, so its routes are not mounted and no snapshot is built; every OPA \
+             request gets 404 and fails its query. Enable ranger.enabled to run OPA."
         );
         return None;
     };
     let cache = Arc::new(SnapshotCache::default());
     let refresher = spawn_snapshot_refresher(Arc::clone(&cache), pool, REFRESH_PERIOD, shutdown);
-    let state = OpaState {
-        cache,
-        verifier,
-        credentials: Arc::new(VerifiedCache::new(VERIFIED_TTL)),
-    };
-    Some((state, refresher))
+    Some((OpaState::new(cache, verifier), refresher))
 }

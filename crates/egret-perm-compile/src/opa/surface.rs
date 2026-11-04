@@ -38,6 +38,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::body::Bytes;
+use axum::extract::rejection::BytesRejection;
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -55,22 +56,65 @@ use super::wire::{self, OpaRequest, FILTER_COLUMNS};
 
 pub const OPA_SURFACE_PREFIX: &str = "/opa/v1/data/egret/trino";
 
-/// The largest request body accepted: 1 MiB, past which the request is
-/// refused with 413 (a non-2xx, so the plugin fails the query) before any
-/// parse. The body is parsed into a `serde_json::Value` BEFORE the engine's
-/// credential is checked, so this bound is what an unauthenticated caller can
-/// make egret buffer and parse per request (Task 9 review, M6; it was 16 MiB).
+/// The largest request body accepted: 4 MiB. A larger body is refused with
+/// 413 (a non-2xx, so the plugin fails the query) before any parse, and the
+/// refusal is logged and counted like every other one. The body is parsed
+/// into a `serde_json::Value` BEFORE the engine's credential is checked, so
+/// this bound is what an unauthenticated caller can make egret parse per
+/// request (Task 9 review, M6; it was 16 MiB).
 ///
-/// Why 1 MiB is enough: Trino 483's plugin sends one request per access check
-/// and one per filter batch. The largest are `FilterTables` (one
-/// `{"table":{"catalogName","schemaName","tableName"}}` object per table, about
-/// 120 bytes with 20-character names) and `FilterColumns` (one table and its
-/// column names, about 25 bytes per column), so 1 MiB holds about 8 000 tables
-/// in one schema or 40 000 columns in one table. A larger listing fails the
-/// query rather than being answered; raise the bound if one is measured. It is also below axum's
-/// default 2 MB limit, so this layer, not the default, is what bounds the
-/// surface.
-pub const OPA_BODY_LIMIT_BYTES: usize = 1024 * 1024;
+/// Why 4 MiB: Trino 483's plugin sends one request per access check and one
+/// per filter batch. The largest is `FilterTables`, one
+/// `{"table":{"catalogName","schemaName","tableName"}}` object per table: 59
+/// bytes of JSON plus the three names, so 120 to 150 bytes with 20- to
+/// 30-character names. 4 MiB holds 28 000 to 35 000 tables in one schema,
+/// three times the plan's 10 000-table figure. `FilterColumns` carries one
+/// table and about 25 bytes per column. A larger listing fails the query
+/// rather than being answered. A parsed `Value` costs about ten times its
+/// bytes, so one parse at the limit is about 40 MB; [`OPA_MAX_CONCURRENT_PARSES`]
+/// bounds how many run at once.
+pub const OPA_BODY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
+
+/// The most request bodies parsed at once, before authentication. At the
+/// body limit a parse holds about 40 MB, so 16 bound the transient pre-auth
+/// parse memory near 640 MB. A permit is held only while the body is parsed
+/// (microseconds for the small `/allow` bodies that make up nearly all of
+/// Trino's traffic), so 16 is not a throughput limit in practice.
+pub const OPA_MAX_CONCURRENT_PARSES: usize = 16;
+
+/// How long a request waits for a parse permit before it is answered 503
+/// (the plugin fails the query: fail closed).
+pub const OPA_PARSE_WAIT: Duration = Duration::from_secs(1);
+
+/// Bounds the pre-authentication parses ([`OPA_MAX_CONCURRENT_PARSES`],
+/// [`OPA_PARSE_WAIT`] in production).
+pub struct ParseGate {
+    permits: tokio::sync::Semaphore,
+    wait: Duration,
+}
+
+impl ParseGate {
+    pub fn new(permits: usize, wait: Duration) -> Self {
+        Self {
+            permits: tokio::sync::Semaphore::new(permits),
+            wait,
+        }
+    }
+
+    /// A permit, or `None` once the wait has passed without one.
+    pub async fn acquire(&self) -> Option<tokio::sync::SemaphorePermit<'_>> {
+        tokio::time::timeout(self.wait, self.permits.acquire())
+            .await
+            .ok()
+            .and_then(Result::ok)
+    }
+}
+
+impl Default for ParseGate {
+    fn default() -> Self {
+        Self::new(OPA_MAX_CONCURRENT_PARSES, OPA_PARSE_WAIT)
+    }
+}
 
 /// How long a verified `(engine, secret)` is remembered before the verifier is
 /// asked again (spec: 5 s). A retired secret keeps being accepted for at most
@@ -93,6 +137,20 @@ pub struct OpaState {
     pub cache: Arc<SnapshotCache>,
     pub verifier: Arc<dyn EngineCredentialVerifier>,
     pub credentials: Arc<VerifiedCache>,
+    pub parses: Arc<ParseGate>,
+}
+
+impl OpaState {
+    /// The production state: credentials remembered for [`VERIFIED_TTL`],
+    /// parses bounded by [`ParseGate::default`].
+    pub fn new(cache: Arc<SnapshotCache>, verifier: Arc<dyn EngineCredentialVerifier>) -> Self {
+        Self {
+            cache,
+            verifier,
+            credentials: Arc::new(VerifiedCache::new(VERIFIED_TTL)),
+            parses: Arc::new(ParseGate::default()),
+        }
+    }
 }
 
 /// `(engine, sha256(secret))`.
@@ -267,6 +325,16 @@ impl Who<'_> {
         metrics::counter!("egret_opa_allow_total", "route" => self.route.name()).increment(1);
     }
 
+    /// Too many bodies being parsed: 503, so the plugin fails the query.
+    fn busy(&self) -> Response {
+        self.denied(None, "too many requests being parsed");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "busy" })),
+        )
+            .into_response()
+    }
+
     /// Log and count a refusal, and answer it.
     fn refuse(&self, reason: &str) -> Response {
         self.refuse_logging(reason, reason)
@@ -338,16 +406,30 @@ impl Who<'_> {
 async fn admit(
     state: &OpaState,
     route: Route,
-    body: &Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Result<(OpaRequest, Uuid, Arc<Snapshot>), Box<Response>> {
     let mut who = Who {
         route,
         engine: None,
         req: None,
     };
-    let parsed = serde_json::from_slice::<Value>(body)
-        .map_err(|_| "body is not JSON".to_string())
-        .and_then(|v| wire::parse_request(&v));
+    // Over the body limit (413) or unreadable: logged and counted like any
+    // refusal, answered with the extractor's own non-2xx status.
+    let body = match body {
+        Ok(b) => b,
+        Err(rejection) => {
+            who.denied(None, &format!("request body refused: {rejection}"));
+            return Err(rejection.into_response().into());
+        }
+    };
+    let parsed = {
+        let Some(_permit) = state.parses.acquire().await else {
+            return Err(who.busy().into());
+        };
+        serde_json::from_slice::<Value>(&body)
+            .map_err(|_| "body is not JSON".to_string())
+            .and_then(|v| wire::parse_request(&v))
+    };
     let req = match parsed {
         Ok(r) => r,
         Err(e) => return Err(who.refuse(&format!("malformed input: {e}")).into()),
@@ -393,8 +475,8 @@ async fn admit(
     Ok((req, engine, snapshot))
 }
 
-async fn allow(State(state): State<OpaState>, body: Bytes) -> Response {
-    let (req, engine, s) = match admit(&state, Route::Allow, &body).await {
+async fn allow(State(state): State<OpaState>, body: Result<Bytes, BytesRejection>) -> Response {
+    let (req, engine, s) = match admit(&state, Route::Allow, body).await {
         Ok(x) => x,
         Err(r) => return *r,
     };
@@ -415,8 +497,8 @@ async fn allow(State(state): State<OpaState>, body: Bytes) -> Response {
     }
 }
 
-async fn batch(State(state): State<OpaState>, body: Bytes) -> Response {
-    let (req, engine, s) = match admit(&state, Route::Batch, &body).await {
+async fn batch(State(state): State<OpaState>, body: Result<Bytes, BytesRejection>) -> Response {
+    let (req, engine, s) = match admit(&state, Route::Batch, body).await {
         Ok(x) => x,
         Err(r) => return *r,
     };
@@ -464,8 +546,11 @@ async fn batch(State(state): State<OpaState>, body: Bytes) -> Response {
     who.built(wire::batch_result(&allowed, request_len))
 }
 
-async fn row_filters(State(state): State<OpaState>, body: Bytes) -> Response {
-    let (req, engine, s) = match admit(&state, Route::RowFilters, &body).await {
+async fn row_filters(
+    State(state): State<OpaState>,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let (req, engine, s) = match admit(&state, Route::RowFilters, body).await {
         Ok(x) => x,
         Err(r) => return *r,
     };
@@ -487,8 +572,11 @@ async fn row_filters(State(state): State<OpaState>, body: Bytes) -> Response {
     }
 }
 
-async fn batch_column_masks(State(state): State<OpaState>, body: Bytes) -> Response {
-    let (req, engine, s) = match admit(&state, Route::BatchColumnMasks, &body).await {
+async fn batch_column_masks(
+    State(state): State<OpaState>,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let (req, engine, s) = match admit(&state, Route::BatchColumnMasks, body).await {
         Ok(x) => x,
         Err(r) => return *r,
     };
@@ -525,8 +613,11 @@ async fn batch_column_masks(State(state): State<OpaState>, body: Bytes) -> Respo
     who.built(built)
 }
 
-async fn column_mask(State(state): State<OpaState>, body: Bytes) -> Response {
-    let (req, engine, s) = match admit(&state, Route::ColumnMask, &body).await {
+async fn column_mask(
+    State(state): State<OpaState>,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let (req, engine, s) = match admit(&state, Route::ColumnMask, body).await {
         Ok(x) => x,
         Err(r) => return *r,
     };

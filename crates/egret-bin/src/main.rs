@@ -3158,11 +3158,13 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // surface is on. With the gate off, `opa` is `None`: the routes are not
     // mounted and no refresher runs. The refresher stops with the other
     // background loops.
-    let opa = egret_perm_compile::start_opa(
-        config.governance.opa.enabled,
+    // The refresher supervises its own ticks (a panicking refresh is logged
+    // and retried), so its handle is not kept.
+    let opa = egret_bin::start_opa_from_config(
+        &config.governance,
         engine_credential_verifier.clone(),
         db.pool.clone(),
-        reaper_cancel.clone().cancelled_owned(),
+        &reaper_cancel,
     )
     .map(|(state, _refresher)| state);
 

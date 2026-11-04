@@ -22,7 +22,9 @@ use axum::body::Body;
 use axum::http::Request;
 use egret_engine_mgmt_api::credential::{EngineCredentialVerifier, EngineIdentity};
 use egret_perm_compile::opa::cache::SnapshotCache;
-use egret_perm_compile::opa::surface::{VerifiedCache, MAX_VERDICTS, NEGATIVE_TTL};
+use egret_perm_compile::opa::surface::{
+    ParseGate, VerifiedCache, MAX_VERDICTS, NEGATIVE_TTL, OPA_BODY_LIMIT_BYTES, VERIFIED_TTL,
+};
 use egret_perm_compile::{opa_surface, OpaState, OPA_SURFACE_PREFIX};
 use egret_perm_eval::{Snapshot, SnapshotInput};
 use egret_perm_ir::audience::{Audience, Member, MemberName, Via};
@@ -224,6 +226,7 @@ fn app_with(credentials: VerifiedCache) -> App {
         cache: Arc::clone(&cache),
         verifier: stub.clone(),
         credentials: Arc::new(credentials),
+        parses: Arc::new(ParseGate::default()),
     });
     App {
         router,
@@ -788,6 +791,7 @@ async fn an_unreachable_verifier_answers_500_on_every_route() {
         cache,
         verifier: Arc::new(Down),
         credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
+        parses: Arc::new(ParseGate::default()),
     });
     for (route, action) in every_route() {
         let (status, _) = post(&router, route, &GOOD.to_string(), RIGHT, action).await;
@@ -993,6 +997,7 @@ async fn no_log_or_body_carries_the_secret() {
         cache: Arc::clone(&cache),
         verifier: stub.clone(),
         credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
+        parses: Arc::new(ParseGate::default()),
     });
 
     let mut answers = Vec::new();
@@ -1059,6 +1064,7 @@ async fn no_log_or_body_carries_the_secret() {
         cache,
         verifier: Arc::new(Down),
         credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
+        parses: Arc::new(ParseGate::default()),
     });
     for (route, action) in every_route() {
         bodies.push(
@@ -1108,6 +1114,7 @@ async fn an_identity_for_another_engine_is_a_refusal() {
         cache,
         verifier: Arc::new(Confused),
         credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
+        parses: Arc::new(ParseGate::default()),
     });
     // The verifier's answer is about GOOD: GOOD is admitted, GOOD2 is not.
     let (route, action) = every_route().remove(0);
@@ -1116,4 +1123,100 @@ async fn an_identity_for_another_engine_is_a_refusal() {
         (200, json!({"result": true}))
     );
     assert_refused_everywhere(&router, &GOOD2.to_string(), RIGHT, REFUSED).await;
+}
+
+// ---- fix round 1: the production state, the parse bound, the 413 log ----
+
+fn ready_cache() -> Arc<SnapshotCache> {
+    let cache = Arc::new(SnapshotCache::default());
+    cache.insert_for_test(1, snapshot(1, vec![]));
+    cache.bind_for_test(GOOD, Some(1));
+    cache
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_production_state_remembers_a_verified_secret_for_five_seconds() {
+    // Arrange
+    assert_eq!(VERIFIED_TTL, Duration::from_secs(5));
+    logs();
+    let stub = Arc::new(Stub::standard());
+    let router = opa_surface(OpaState::new(ready_cache(), stub.clone()));
+    let (route, action) = every_route().remove(0);
+    let e = GOOD.to_string();
+    let calls = || stub.calls.load(Ordering::SeqCst);
+
+    // Act + Assert: asked once, remembered until just before the TTL ends ...
+    assert_eq!(
+        post(&router, route, &e, RIGHT, action.clone()).await,
+        (200, json!({"result": true}))
+    );
+    tokio::time::advance(VERIFIED_TTL - Duration::from_millis(1)).await;
+    post(&router, route, &e, RIGHT, action.clone()).await;
+    assert_eq!(calls(), 1, "remembered within the TTL");
+
+    // ... and asked again once it has.
+    tokio::time::advance(Duration::from_millis(2)).await;
+    post(&router, route, &e, RIGHT, action).await;
+    assert_eq!(calls(), 2, "asked again past the TTL");
+}
+
+#[tokio::test]
+async fn with_every_parse_permit_held_a_request_is_answered_503_on_every_route() {
+    // Arrange: one permit, held by the test.
+    logs();
+    let stub = Arc::new(Stub::standard());
+    let parses = Arc::new(ParseGate::new(1, Duration::from_millis(50)));
+    let router = opa_surface(OpaState {
+        cache: ready_cache(),
+        verifier: stub,
+        credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
+        parses: Arc::clone(&parses),
+    });
+    let held = parses.acquire().await.expect("the one permit");
+
+    // Act + Assert: refused while held, never answered.
+    for (route, action) in every_route() {
+        let busy = post(&router, route, &GOOD.to_string(), RIGHT, action).await;
+        assert_eq!(busy, (503, json!({"error": "busy"})), "{route}");
+    }
+    assert!(log_text().contains("too many requests being parsed"));
+
+    // Released: answered again.
+    drop(held);
+    let (route, action) = every_route().remove(0);
+    assert_eq!(
+        post(&router, route, &GOOD.to_string(), RIGHT, action).await,
+        (200, json!({"result": true}))
+    );
+}
+
+#[tokio::test]
+async fn an_oversize_body_is_refused_413_and_logged() {
+    // Arrange: a request that would be allowed, one byte over the limit.
+    let a = app();
+    let (route, action) = every_route().remove(0);
+    let mut raw = body("ann", &GOOD.to_string(), RIGHT, action).to_string();
+    raw.push_str(&" ".repeat(OPA_BODY_LIMIT_BYTES + 1 - raw.len()));
+
+    // Act
+    let res = a
+        .router
+        .clone()
+        .oneshot(
+            Request::post(format!("{OPA_SURFACE_PREFIX}{route}"))
+                .header("content-type", "application/json")
+                .body(Body::from(raw))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    // Assert
+    assert_eq!(res.status().as_u16(), 413);
+    let text = log_text();
+    assert!(
+        text.lines()
+            .any(|l| l.contains("opa: denied") && l.contains("request body refused")),
+        "the 413 is logged as a denial"
+    );
 }

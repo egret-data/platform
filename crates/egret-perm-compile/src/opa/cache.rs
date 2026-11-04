@@ -578,23 +578,47 @@ async fn stored_state_refusal(
 
 /// Runs [`SnapshotCache::refresh_once`] every `period` until `shutdown`
 /// resolves. A refresh that cannot list the profiles leaves the cache as it
-/// was and is retried next period.
+/// was and is retried next period; a refresh that panics is logged at `error`
+/// and the loop goes on.
 pub fn spawn_snapshot_refresher(
     cache: Arc<SnapshotCache>,
     pool: PgPool,
     period: std::time::Duration,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> tokio::task::JoinHandle<()> {
+    spawn_ticker(period, shutdown, move || {
+        let cache = Arc::clone(&cache);
+        let pool = pool.clone();
+        async move {
+            if let Err(e) = cache.refresh_once(&pool).await {
+                tracing::warn!(error = %e, "OPA snapshot refresh failed");
+            }
+        }
+    })
+}
+
+/// Runs `tick()` every `period` (the first at once) until `shutdown`
+/// resolves. Each tick runs as its own task and is awaited, so a panic in it
+/// ends that tick only: it is logged at `error` and the next tick runs.
+pub fn spawn_ticker<F, Fut>(
+    period: std::time::Duration,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    mut tick: F,
+) -> tokio::task::JoinHandle<()>
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
     tokio::spawn(async move {
         tokio::pin!(shutdown);
-        let mut tick = tokio::time::interval(period);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut interval = tokio::time::interval(period);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 _ = &mut shutdown => break,
-                _ = tick.tick() => {
-                    if let Err(e) = cache.refresh_once(&pool).await {
-                        tracing::warn!(error = %e, "OPA snapshot refresh failed");
+                _ = interval.tick() => {
+                    if let Err(e) = tokio::spawn(tick()).await {
+                        tracing::error!(error = %e, "OPA snapshot refresh panicked; retrying next period");
                     }
                 }
             }
@@ -1042,5 +1066,39 @@ mod tests {
             "{:?}",
             cache.get(ID)
         );
+    }
+
+    #[tokio::test]
+    async fn a_panicking_tick_does_not_stop_later_ticks() {
+        // Arrange: the first tick panics, the later ones count.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let counted = Arc::clone(&ticks);
+        let handle = spawn_ticker(
+            std::time::Duration::from_millis(10),
+            async {
+                let _ = stopped.await;
+            },
+            move || {
+                let n = counted.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    assert!(n != 0, "the first tick panics (expected in this test)");
+                }
+            },
+        );
+
+        // Act
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let running = !handle.is_finished();
+        let _ = stop.send(());
+        let joined = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+
+        // Assert
+        assert!(running, "a panicking tick ended the loop");
+        assert!(ticks.load(Ordering::SeqCst) >= 3, "later ticks ran");
+        joined
+            .expect("stops at shutdown")
+            .expect("the loop itself never panics");
     }
 }
