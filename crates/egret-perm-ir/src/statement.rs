@@ -23,6 +23,21 @@ pub enum Source {
     EnginePrivilege {
         engine_grant_id: Uuid,
     },
+    /// An infrastructure statement the platform derives from the engines
+    /// bound to a profile; no model object stands behind it.
+    Infra {
+        kind: InfraKind,
+    },
+}
+
+/// Which infrastructure statement a [`Source::Infra`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum InfraKind {
+    AdminAllAccess,
+    DelegatorImpersonate,
+    SelfImpersonate,
+    ExecuteQuery,
+    QueryTimeout,
 }
 
 /// One level of a [`Path`]: a value the author wrote, or none.
@@ -56,6 +71,23 @@ pub enum Target {
         capability: String,
         values: Vec<String>,
     },
+    /// An object of the EP itself, for infrastructure statements.
+    Infra(InfraObject),
+}
+
+/// The EP's own objects an infrastructure statement applies to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InfraObject {
+    /// Every object the EP has.
+    WholeEp,
+    /// Any user, as the object of impersonation.
+    AnyUser,
+    /// The session user themself, as the object of impersonation.
+    SessionUser,
+    /// Any query.
+    AnyQuery,
+    /// One system session property.
+    SystemProperty(String),
 }
 
 /// A privilege a statement allows, denies or withholds.

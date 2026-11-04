@@ -53,6 +53,8 @@ pub(crate) fn skipped(l: &Lowering) -> SkippedItem {
             classification_id, ..
         } => (SourceKind::Clearance, *classification_id),
         Source::EnginePrivilege { engine_grant_id } => (SourceKind::EngineGrant, *engine_grant_id),
+        // `lower_infra` produces no lowerings, so this arm is never reached.
+        Source::Infra { .. } => (SourceKind::Infra, Uuid::nil()),
     };
     SkippedItem {
         source_kind,
@@ -133,6 +135,12 @@ pub(crate) fn emit(
                         rule_id: None,
                     },
                 )
+            }
+            Source::Infra { .. } => {
+                return Err(CompileError::Db(
+                    "infrastructure statements are converged by infra::converge_infra_in_tx, never emitted"
+                        .into(),
+                ));
             }
         };
         desired.insert(key, policy);

@@ -219,6 +219,8 @@ pub enum SourceKind {
     Rule,
     Clearance,
     EngineGrant,
+    /// An infrastructure statement; converged outside the compile.
+    Infra,
 }
 
 impl SourceKind {
@@ -228,6 +230,7 @@ impl SourceKind {
             SourceKind::Rule => "rule",
             SourceKind::Clearance => "clearance",
             SourceKind::EngineGrant => "engine_grant",
+            SourceKind::Infra => "infra",
         }
     }
 }
@@ -504,7 +507,7 @@ pub(crate) async fn compile_desired(
     let follows_classifications = |dp: &DesiredPolicy| match dp.source_kind {
         SourceKind::Clearance => true,
         SourceKind::Rule => dp.rule_id.is_some_and(|id| tag_rules.contains(&id)),
-        SourceKind::Grant | SourceKind::EngineGrant => false,
+        SourceKind::Grant | SourceKind::EngineGrant | SourceKind::Infra => false,
     };
     let uncounted = desired
         .iter()
@@ -1085,7 +1088,7 @@ async fn record_compiled(
     // (`perm-engine-{id}`) already carries its id.
     if matches!(
         dp.source_kind,
-        SourceKind::Clearance | SourceKind::EngineGrant
+        SourceKind::Clearance | SourceKind::EngineGrant | SourceKind::Infra
     ) {
         return Ok(());
     }
