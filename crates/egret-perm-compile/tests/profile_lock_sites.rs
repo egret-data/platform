@@ -37,12 +37,6 @@ const SITES: &[(&str, usize, &str)] = &[
          `delete_service` and `set_tag_service_via` are admin routes that take no mint lock",
     ),
     (
-        "crates/egret-policy/src/default_policies.rs",
-        1,
-        "the `egret-admin` sync bumps the profile it syncs, which its caller locked \
-         (`lock_services_in_tx` / `lock_for_admin_sync_in_tx`)",
-    ),
-    (
         "crates/egret-catalog-registry/src/tag_version.rs",
         2,
         "`bump_tag_versions_for_warehouses` runs after the mint lock only in \

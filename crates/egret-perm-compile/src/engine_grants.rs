@@ -193,13 +193,13 @@ fn is_pattern(value: &str) -> bool {
 }
 
 /// The platform role whose holders egret seeds as engine admins
-/// (`egret_engine_mgmt`'s `admin_usernames` → `seed_admin_all_access`).
+/// (`members::engine_admin_usernames_via` → `infra::converge_infra_in_tx`).
 pub(crate) const PLATFORM_ADMIN_ROLE: &str = "platform_admin";
 
 /// Whether `username` holds `platform_admin` at platform scope, directly or
 /// through a group: the same two arms as
 /// `egret_auth::roles::RoleRepo::platform_admin_user_ids`, the list
-/// `seed_admin_all_access` seeds as engine admins.
+/// convergence writes into `egret-admin` as engine admins.
 async fn is_platform_admin(
     conn: &mut sqlx::PgConnection,
     username: &str,
@@ -526,8 +526,8 @@ pub(crate) async fn impersonation_closure_problem(
         }
         let (groups, roles) = identity_of(conn, &user).await?;
         // egret seeds every platform admin as an engine admin (`egret-admin -
-        // …`, `seed_admin_all_access`) at each engine apply, so a platform admin
-        // is near-root whether or not that seed has run on this profile yet.
+        // …`, converged at each engine apply and recompile), so a platform admin
+        // is near-root whether or not that convergence has run on this profile yet.
         if is_platform_admin(conn, &user).await? {
             return Ok(Some(format!(
                 "{via}is a platform admin, whom egret seeds as an engine admin"

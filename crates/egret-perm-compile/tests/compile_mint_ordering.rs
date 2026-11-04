@@ -28,6 +28,8 @@
 //!   export DATABASE_URL=postgres://egret:egret@localhost:5432/egret
 //!   env -u EGRET_ALLOW_DB_SKIP cargo test -p egret-perm-compile --test compile_mint_ordering
 
+#[path = "support/admin_rows.rs"]
+mod admin_rows;
 use std::time::{Duration, Instant};
 
 use egret_metastore::Db;
@@ -491,10 +493,14 @@ async fn a_service_with_an_egret_admin_set_keeps_the_premint() {
         .await
         .expect("name");
     egret_policy::seed_trino(&policy).await.expect("trino def");
-    let n = policy
-        .seed_admin_all_access(svc, &name, "trino", &["p6-seeded-admin".to_string()])
-        .await
-        .expect("seed egret-admin");
+    let n = admin_rows::write_admin_rows(
+        &db.pool,
+        svc,
+        &name,
+        "trino",
+        &["p6-seeded-admin".to_string()],
+    )
+    .await;
     assert!(n > 0, "the service holds an egret-admin set");
 
     let mut tx = begin_bounded(&db).await;

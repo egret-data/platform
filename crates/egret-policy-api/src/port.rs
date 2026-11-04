@@ -98,22 +98,13 @@ pub trait PolicyPort: Send + Sync {
     /// (`origin = 'generated'`): that guard is for hand-written policies, and
     /// egret's plumbing must land on a compiled profile too. Errors `Backend`
     /// for a name `infra_names::is_egret_infrastructure_policy` does not
-    /// recognise on the profile's type. Used by engine provisioning for the
-    /// delegator grant and the per-user baseline.
+    /// recognise on the profile's type. The infrastructure rows the IR owns
+    /// (`egret-admin - …`, the delegator grant, the per-user baseline) are
+    /// written by convergence (`egret_perm_compile::infra`), not through this.
     async fn upsert_infra_policy(
         &self,
         service_id: i64,
         name: &str,
         policy: &Value,
     ) -> Result<(), PolicyError>;
-
-    /// Seed idempotent admin all-access policies for `users` on the given
-    /// service type ("trino"/"starrocks"). Returns the count written.
-    async fn seed_admin_all_access(
-        &self,
-        service_id: i64,
-        service_name: &str,
-        service_type: &str,
-        users: &[String],
-    ) -> Result<usize, PolicyError>;
 }

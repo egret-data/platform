@@ -30,7 +30,8 @@
 //! test, that the column and the names still agree.
 
 /// Name prefix of the per-admin all-access policies
-/// (`seed_admin_all_access` → `build_default_policies(..., "egret-admin", ...)`).
+/// (`admin_all_access_bodies` → `build_default_policies(..., "egret-admin", ...)`,
+/// written by convergence, `egret_perm_compile::infra`).
 pub const ADMIN_ALL_ACCESS_NAME_PREFIX: &str = "egret-admin";
 
 /// Name prefix of the group-granted default policy set
@@ -85,9 +86,9 @@ pub const DEFAULT_ALL_ACCESS_SERVICE_TYPE: &str = "trino";
 ///
 /// The type matters for one shape only. The four fixed names and the
 /// `egret-admin - …` per-admin set are infrastructure on EVERY type (the
-/// per-admin set is seeded StarRocks-shaped on StarRocks profiles by
-/// `seed_admin_all_access(…, "starrocks", …)`, and unlocking it would let an
-/// operator lock every admin out). The `all - …` default set is
+/// per-admin set is written StarRocks-shaped on StarRocks profiles, by
+/// convergence from `admin_all_access_bodies("starrocks", …)`, and unlocking
+/// it would let an operator lock every admin out). The `all - …` default set is
 /// infrastructure only on [`DEFAULT_ALL_ACCESS_SERVICE_TYPE`]. There is
 /// deliberately no name-only variant: two predicates would be two spellings.
 pub fn is_egret_infrastructure_policy(service_type: &str, name: &str) -> bool {

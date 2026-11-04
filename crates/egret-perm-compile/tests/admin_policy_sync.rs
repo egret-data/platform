@@ -18,6 +18,8 @@
 #[path = "support/engine_eval.rs"]
 mod engine_eval;
 
+#[path = "support/admin_rows.rs"]
+mod admin_rows;
 use egret_auth::groups::{GroupRepo, ReferenceDetail};
 use egret_auth::roles::engine_admin_user_ids_via;
 use egret_auth::users::UserRepo;
@@ -208,10 +210,7 @@ async fn seeded_rows_only(db: &Db, service_type: &str, users: &[String]) -> i64 
         .create_service(&name, service_type, &serde_json::json!({}))
         .await
         .expect("service");
-    let n = policy
-        .seed_admin_all_access(svc.id, &name, service_type, users)
-        .await
-        .expect("seed");
+    let n = admin_rows::write_admin_rows(&db.pool, svc.id, &name, service_type, users).await;
     assert!(n > 0, "the seed wrote the egret-admin set");
     svc.id
 }
@@ -903,10 +902,7 @@ async fn convergence_deletes_egret_admin_rows_its_def_no_longer_builds() {
         .id;
     let mut both = vec![admin.clone(), stranger.clone()];
     both.sort();
-    policy
-        .seed_admin_all_access(svc, &name, "starrocks", &both)
-        .await
-        .expect("foreign seed");
+    admin_rows::write_admin_rows(&db.pool, svc, &name, "starrocks", &both).await;
     bind_qualifying_engine(&db, svc, "trino").await;
 
     converge_infra_policy(&db.pool, svc)

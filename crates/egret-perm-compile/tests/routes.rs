@@ -25,6 +25,8 @@
 //! profile in the database, including other tests' — `compile.services`
 //! therefore has no bounded length and nothing here asserts one.
 
+#[path = "support/admin_rows.rs"]
+mod admin_rows;
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};
 use axum::response::Response;
@@ -6277,16 +6279,14 @@ async fn a_seeded_egret_admin_policy_is_visible_to_explain() {
         .expect("service row");
     let user = unique("seeded-admin-subject");
 
-    let seeded = f
-        .policy
-        .seed_admin_all_access(
-            f.service_id,
-            &svc.name,
-            &svc.r#type,
-            std::slice::from_ref(&user),
-        )
-        .await
-        .expect("seed egret-admin policies");
+    let seeded = admin_rows::write_admin_rows(
+        &f.db.pool,
+        f.service_id,
+        &svc.name,
+        &svc.r#type,
+        std::slice::from_ref(&user),
+    )
+    .await;
     assert!(seeded > 0, "the seeder must actually have written policies");
     assert!(
         f.compiled_policy_names().await.is_empty(),

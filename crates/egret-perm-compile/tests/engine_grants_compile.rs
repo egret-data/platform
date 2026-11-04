@@ -8,6 +8,8 @@
 //!
 //!   env -u EGRET_ALLOW_DB_SKIP cargo test -p egret-perm-compile --test engine_grants_compile
 
+#[path = "support/admin_rows.rs"]
+mod admin_rows;
 use egret_metastore::Db;
 use egret_perm::{
     create_engine_grant_in_tx, delete_engine_grant_in_tx, EngineGrant, PermStore, Principal,
@@ -461,15 +463,14 @@ async fn an_impersonation_target_is_rendered_from_its_id_and_skipped_when_it_fai
     .execute(pool)
     .await
     .expect("make the target a platform admin");
-    f.policy
-        .seed_admin_all_access(
-            f.trino_profile,
-            &f.trino_profile_name,
-            "trino",
-            std::slice::from_ref(&renamed),
-        )
-        .await
-        .expect("seed admin all-access");
+    admin_rows::write_admin_rows(
+        pool,
+        f.trino_profile,
+        &f.trino_profile_name,
+        "trino",
+        std::slice::from_ref(&renamed),
+    )
+    .await;
     let summary = recompile_service(&f.perm, &f.policy, f.trino_profile)
         .await
         .expect("recompile");

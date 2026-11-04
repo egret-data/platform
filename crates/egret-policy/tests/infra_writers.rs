@@ -90,24 +90,9 @@ async fn the_default_trino_seeder_stamps_infra() {
     assert_all_infra(&owners(&pool, id).await, n);
 }
 
-#[tokio::test]
-async fn the_admin_all_access_seeder_stamps_infra() {
-    let Some((s, pool)) = store().await else {
-        return;
-    };
-    let id = trino_service(&s).await;
-    let n = s
-        .seed_admin_all_access(id, "writers-svc", "trino", &["admin".to_string()])
-        .await
-        .expect("seed");
-    assert!(n > 0);
-    assert_all_infra(&owners(&pool, id).await, n);
-}
-
-/// The delegator seeding (`engines.rs::seed_delegator_policies`) calls exactly
-/// `PolicyPort::create_infra_policy` with these two names. It needs a live
-/// engine/CpState to reach, so this drives the `PolicyPort` implementation it
-/// calls, with the delegator's own name constants.
+/// `PolicyPort::create_infra_policy` stamps `infra` on the delegator's own
+/// name constants. (The rows under these names on an engine's profile are
+/// written by convergence, `egret_perm_compile::infra`, since governance SP2a.)
 #[tokio::test]
 async fn the_delegator_policy_port_call_stamps_infra_on_both_names() {
     let Some((s, pool)) = store().await else {
@@ -167,8 +152,9 @@ async fn the_infra_writers_refuse_a_name_the_predicate_does_not_recognise() {
 
 /// SP4d-3 final review I-1: the default `all - …` set is Trino-shaped, so on a
 /// StarRocks profile neither infra writer may stamp that shape (a pre-0180
-/// leftover of it is the operator's to delete). The per-admin set IS seeded
-/// StarRocks-shaped there and stays infrastructure — the narrowed ruling.
+/// leftover of it is the operator's to delete). A fixed infra name stays
+/// infrastructure there — the narrowed ruling. (The StarRocks-shaped per-admin
+/// set is written by convergence, covered in `egret-perm-compile`.)
 #[tokio::test]
 async fn on_a_starrocks_profile_the_infra_writers_refuse_the_trino_default_shape_only() {
     let Some((s, pool)) = store().await else {
@@ -200,14 +186,9 @@ async fn on_a_starrocks_profile_the_infra_writers_refuse_the_trino_default_shape
         "a refused write left a row"
     );
 
-    // The allow cells: the StarRocks-shaped per-admin set and the delegator.
-    let n = s
-        .seed_admin_all_access(id, "sr-writers", "starrocks", &["admin".to_string()])
-        .await
-        .expect("per-admin seed on starrocks");
-    assert!(n > 0);
+    // The allow cell: a fixed infra name.
     s.create_infra_policy(id, QUERY_TIMEOUT_POLICY_NAME, &json!({}))
         .await
         .expect("delegator name on starrocks");
-    assert_all_infra_on("starrocks", &owners(&pool, id).await, n + 1);
+    assert_all_infra_on("starrocks", &owners(&pool, id).await, 1);
 }

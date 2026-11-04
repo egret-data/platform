@@ -113,6 +113,70 @@ impl egret_engine_mgmt::ProfileCompilerPort for RecordingProfileCompiler {
     }
 }
 
+/// A `ProfileCompilerPort` whose only real call is `converge_infra`, against
+/// the fixture's own pool; every other call is a no-op, as with no compiler.
+/// Governance SP2a: apply converges a bound profile's infrastructure policies
+/// through the compiler and is refused without one, so a test that applied a
+/// bound engine with no compiler (when apply wrote those rows itself) now
+/// arranges this one, the closest analogue of what it had.
+#[derive(Clone)]
+struct ConvergeOnlyCompiler {
+    pool: sqlx::PgPool,
+}
+
+#[async_trait::async_trait]
+impl egret_engine_mgmt::ProfileCompilerPort for ConvergeOnlyCompiler {
+    async fn recompile_profile(&self, _service_id: i64) -> Result<(), egret_perm::CompileError> {
+        Ok(())
+    }
+
+    async fn converge_infra(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
+        egret_perm_compile::converge_infra_policy(&self.pool, service_id)
+            .await
+            .map(|_| ())
+    }
+
+    async fn recompile_catalog_assignment_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        _catalog_id: Uuid,
+    ) -> Result<(), egret_perm::CompileError> {
+        Ok(())
+    }
+
+    async fn recompile_profile_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        _service_id: i64,
+    ) -> Result<(), egret_perm::CompileError> {
+        Ok(())
+    }
+
+    async fn lock_profiles_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        _service_ids: &[i64],
+    ) -> Result<(), egret_perm::CompileError> {
+        Ok(())
+    }
+
+    async fn overlap_snapshot_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        _service_ids: &[i64],
+    ) -> Result<egret_engine_mgmt::OverlapSnapshot, egret_perm::CompileError> {
+        Ok(egret_engine_mgmt::OverlapSnapshot::new(()))
+    }
+
+    async fn refuse_created_overlaps_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        _snapshot: &egret_engine_mgmt::OverlapSnapshot,
+    ) -> Result<(), egret_perm::CompileError> {
+        Ok(())
+    }
+}
+
 /// A `ProfileCompilerPort` that really recompiles, against the fixture's own
 /// DB pool — the same construction `egret-bin`'s `ProfileCompilerImpl` wires
 /// in production. `RecordingProfileCompiler` above is enough for the
@@ -381,6 +445,31 @@ async fn setup_with_ranger(
     ranger_enabled: bool,
 ) -> Option<Fixture> {
     setup_with_ranger_and_compiler(engine_provisioner, kube, ranger_enabled, None).await
+}
+
+/// `setup_with_ranger` with a [`ConvergeOnlyCompiler`] wired: for a test
+/// that applies an engine bound to a profile, which converges the profile's
+/// infrastructure policies through the compiler (governance SP2a).
+async fn setup_with_ranger_converging(
+    engine_provisioner: Option<Arc<dyn EngineProvisioningPort>>,
+    kube: Option<Arc<dyn KubeClient>>,
+    ranger_enabled: bool,
+) -> Option<Fixture> {
+    let mut f = setup_with_ranger(engine_provisioner, kube, ranger_enabled).await?;
+    f.perm_compiler = Some(Arc::new(ConvergeOnlyCompiler {
+        pool: f.db.pool.clone(),
+    }));
+    f.app = build_app(
+        &f.db,
+        &f.sessions,
+        f.engine_provisioner.clone(),
+        f.kube.clone(),
+        std::sync::Arc::new(AllowAllPdp),
+        f.ranger_enabled,
+        f.starrocks_ddl.clone(),
+        f.perm_compiler.clone(),
+    );
+    Some(f)
 }
 
 /// `setup_with_ranger` with the SP4a profile compiler under the test's control.
@@ -5171,7 +5260,7 @@ async fn authz_service_of(f: &Fixture, name: &str) -> Option<i64> {
 #[tokio::test]
 async fn recreate_with_same_name_binds_the_orphan_profile_before_provisioning() {
     let port = FakeEnginePort::default();
-    let Some(f) = setup_with_ranger(
+    let Some(f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         true,
@@ -5216,7 +5305,7 @@ async fn recreate_with_same_name_binds_the_orphan_profile_before_provisioning() 
 #[tokio::test]
 async fn create_whose_profile_is_bound_elsewhere_is_409_and_mints_nothing() {
     let port = FakeEnginePort::default();
-    let Some(f) = setup_with_ranger(
+    let Some(f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         true,
@@ -5288,7 +5377,7 @@ async fn create_whose_profile_is_bound_elsewhere_is_409_and_mints_nothing() {
 #[tokio::test]
 async fn apply_late_binds_ranger_once_it_is_enabled_after_an_unbound_create() {
     let port = FakeEnginePort::default();
-    let Some(mut f) = setup_with_ranger(
+    let Some(mut f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         false, // created while Ranger is OFF
@@ -5359,7 +5448,7 @@ async fn apply_late_binds_ranger_once_it_is_enabled_after_an_unbound_create() {
 async fn failed_create_removes_the_profile_it_created() {
     let port = FakeEnginePort::default();
     port.set_fail_provision(true);
-    let Some(f) = setup_with_ranger(
+    let Some(f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         true,
@@ -5757,7 +5846,7 @@ async fn sweep_ranger_retire(f: &Fixture) -> usize {
 #[tokio::test]
 async fn a_bound_trino_engine_is_applied_with_a_ranger_credential_that_verifies() {
     let port = FakeEnginePort::default();
-    let Some(f) = setup_with_ranger(
+    let Some(f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         true,
@@ -5850,7 +5939,7 @@ async fn a_starrocks_engine_name_over_the_volume_budget_is_refused() {
 #[tokio::test]
 async fn an_existing_starrocks_engine_over_the_name_bound_is_refused_on_apply() {
     let port = FakeEnginePort::default();
-    let Some(f) = setup_with_ranger(
+    let Some(f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         true,
@@ -5915,7 +6004,7 @@ async fn an_existing_starrocks_engine_over_the_name_bound_is_refused_on_apply() 
 #[tokio::test]
 async fn a_bound_starrocks_engine_is_applied_with_a_ranger_credential_that_verifies() {
     let port = FakeEnginePort::default();
-    let Some(f) = setup_with_ranger(
+    let Some(f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         true,
@@ -5984,7 +6073,7 @@ async fn a_bound_starrocks_engine_is_applied_with_a_ranger_credential_that_verif
 #[tokio::test]
 async fn rotate_ranger_credential_keeps_the_old_one_until_the_rollout_is_observed_complete() {
     let port = FakeEnginePort::default();
-    let Some(f) = setup_with_ranger(
+    let Some(f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         true,
@@ -6143,7 +6232,7 @@ async fn rotate_ranger_credential_keeps_the_old_one_until_the_rollout_is_observe
 #[tokio::test]
 async fn a_failed_rollout_probe_keeps_the_previous_ranger_credential() {
     let port = FakeEnginePort::default();
-    let Some(f) = setup_with_ranger(
+    let Some(f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         true,
@@ -6188,7 +6277,7 @@ async fn a_failed_rollout_probe_keeps_the_previous_ranger_credential() {
 #[tokio::test]
 async fn a_panicking_retire_pass_does_not_stop_the_sweep() {
     let port = FakeEnginePort::default();
-    let Some(f) = setup_with_ranger(
+    let Some(f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         true,
@@ -6233,7 +6322,7 @@ async fn a_panicking_retire_pass_does_not_stop_the_sweep() {
 #[tokio::test]
 async fn an_unrenderable_stored_credential_fails_the_apply_until_rotated() {
     let port = FakeEnginePort::default();
-    let Some(f) = setup_with_ranger(
+    let Some(f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         true,
@@ -14751,7 +14840,7 @@ async fn the_engine_dto_exposes_the_ranger_credential_id_and_pending_flag_never_
 #[tokio::test]
 async fn a_provisioned_engine_dto_shows_its_rotation_pending_until_the_rollout_completes() {
     let port = FakeEnginePort::default();
-    let Some(f) = setup_with_ranger(
+    let Some(f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         true,
@@ -14801,7 +14890,7 @@ async fn a_provisioned_engine_dto_shows_its_rotation_pending_until_the_rollout_c
 #[tokio::test]
 async fn an_engine_read_does_not_wait_on_a_hung_rollout_probe() {
     let port = FakeEnginePort::default();
-    let Some(f) = setup_with_ranger(
+    let Some(f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         true,
