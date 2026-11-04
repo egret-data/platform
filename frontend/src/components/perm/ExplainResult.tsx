@@ -30,6 +30,7 @@ import type {
   WireTagNormalisationProblem,
   WireTagResourceProblem,
   WireUndecidableCause,
+  WireMechanism,
   WireUnmodelled,
 } from "@/api/generated/model";
 import { EffectLine } from "@/components/perm/EffectLine";
@@ -61,6 +62,28 @@ const ENGINE_LABEL: Record<WireEngineType, string> = {
   trino: "Trino",
   starrocks: "StarRocks",
 };
+
+/** How the profile's engines are asked, as the profile header names it. */
+const MECHANISM_LABEL: Record<WireMechanism, string> = {
+  ranger: "Ranger",
+  opa: "OPA",
+};
+
+/**
+ * The hint under an OPA verdict's badge. An OPA profile is answered by egret's
+ * own evaluator over the permission model, not by a downloaded Ranger policy
+ * set, so `decisionMeta`'s hints (which speak of "the policy set this engine
+ * downloads") would say something untrue about it.
+ */
+function opaHint(d: WireDecision): string {
+  if (d.kind === "allowed") {
+    return "egret allows this access: the statement named below allows it, and nothing in the permission model refuses it. The engine's OPA plugin gets the same answer.";
+  }
+  if (d.kind === "denied" && d.reason === "deny_policy_item") {
+    return "Somebody forbade this: a deny grant or a withheld classification in the permission model refuses it.";
+  }
+  return "egret refuses this access: nothing in the permission model allows it, or the profile could not be answered at all (named below). The engine's OPA plugin is refused too.";
+}
 
 const PLUGIN_LABEL: Record<WirePluginVersion, string> = {
   ranger_2_5_0: "Ranger 2.5.0",
@@ -800,8 +823,12 @@ function namesADecidingPolicy(d: DecidedDecision): boolean {
 function AccessRow({
   verdict,
   declined,
+  opa = false,
 }: {
   verdict: AccessVerdict;
+  /** The profile is on OPA: the verdict is egret's evaluator's, and its
+   *  explanation is `ir_reason`, never a Ranger policy. */
+  opa?: boolean;
   /** `ExplainResponse::tag_resolution_declined`, which is per RESPONSE because it
    *  is a property of the target and the catalog rather than of this access. */
   declined?: ExplainTagDecline;
@@ -821,8 +848,14 @@ function AccessRow({
         </Badge>
       </div>
       <div className="min-w-0 flex-1 space-y-1.5">
-        <p className="text-sm text-muted-foreground">{meta.hint}</p>
-        {verdict.decision.kind === "undecidable" ? (
+        <p className="text-sm text-muted-foreground">{opa ? opaHint(verdict.decision) : meta.hint}</p>
+        {opa ? (
+          verdict.ir_reason && (
+            <p data-testid="explain-ir-reason" className="text-xs text-muted-foreground">
+              Decided by egret’s evaluator: <code className="font-mono text-xs">{verdict.ir_reason}</code>
+            </p>
+          )
+        ) : verdict.decision.kind === "undecidable" ? (
           <ul data-testid="undecidable-causes" className="space-y-1">
             {verdict.decision.why.map((cause, i) => (
               <li
@@ -881,6 +914,7 @@ function ProfileBlock({
   profile: ExplainProfile;
   declined?: ExplainTagDecline;
 }) {
+  const isOpa = profile.mechanism === "opa";
   return (
     <section
       data-testid="explain-profile"
@@ -891,6 +925,9 @@ function ProfileBlock({
         <Server className="h-4 w-4 text-muted-foreground" />
         <h3 className="text-sm font-semibold">{profile.service_name}</h3>
         <Badge variant="outline">{ENGINE_LABEL[profile.engine]}</Badge>
+        <Badge data-testid="explain-mechanism" variant="outline">
+          {MECHANISM_LABEL[profile.mechanism]}
+        </Badge>
         <span className="text-xs text-muted-foreground">service id {profile.service_id}</span>
       </div>
       {/* Spec §5.10: the answer in sentences first, built by the server (C1);
@@ -906,11 +943,13 @@ function ProfileBlock({
         <summary className="cursor-pointer text-xs font-medium">Which policies decided this</summary>
         <div className="mt-2 space-y-2">
           <p className="text-xs text-muted-foreground">
-            Evaluated over the policy set this profile’s plugin downloads.
+            {isOpa
+              ? "Evaluated by egret over this profile’s permission model: the answer its engines’ OPA plugin gets."
+              : "Evaluated over the policy set this profile’s plugin downloads."}
           </p>
           <ul className="space-y-2">
             {profile.accesses.map((verdict) => (
-              <AccessRow key={verdict.access_type} verdict={verdict} declined={declined} />
+              <AccessRow key={verdict.access_type} verdict={verdict} declined={declined} opa={isOpa} />
             ))}
             {/* Final review V-1: StarRocks asks no access decision for a column
                 whose deciding mask is MASK_NULL, from whichever policy, so there is
@@ -947,6 +986,7 @@ function ProfileBlock({
             </p>
           )}
           {profile.row_filter && <RowFilterLine rowFilter={profile.row_filter} declined={declined} />}
+          {profile.opa && <OpaValues opa={profile.opa} />}
           {/* Task 12, M-4: the materialized-view deny is engine-wide, so the page
               states the rule instead of a verdict for one database. */}
           {profile.engine === "starrocks" && (
@@ -957,10 +997,43 @@ function ProfileBlock({
               database.
             </p>
           )}
-          <ProfileTags profile={profile} declined={declined} />
+          {/* Tags in a Ranger download decide nothing on OPA: the evaluator reads
+              the classifications themselves, and its verdicts name them. */}
+          {!isOpa && <ProfileTags profile={profile} declined={declined} />}
         </div>
       </details>
     </section>
+  );
+}
+
+/**
+ * An OPA profile's values for the read (Task 16): the column mask egret's
+ * evaluator chose, rendered as the plugin would apply it (with `varchar`
+ * where the engine puts the column's own type), and the row filter.
+ */
+function OpaValues({ opa }: { opa: NonNullable<ExplainProfile["opa"]> }) {
+  return (
+    <div data-testid="explain-opa-values" className="space-y-1 text-xs text-muted-foreground">
+      <p data-testid="explain-opa-mask">
+        {opa.column_mask ? (
+          <>
+            Column mask: <span className="font-mono">{opa.column_mask_type}</span>, applied as{" "}
+            <code className="font-mono text-xs">{opa.column_mask}</code>
+          </>
+        ) : (
+          "No column mask applies."
+        )}
+      </p>
+      <p data-testid="explain-opa-row-filter">
+        {opa.row_filter ? (
+          <>
+            Row filter: <code className="font-mono text-xs">{opa.row_filter}</code>
+          </>
+        ) : (
+          "No row filter applies."
+        )}
+      </p>
+    </div>
   );
 }
 
