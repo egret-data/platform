@@ -2,3 +2,5 @@
 //!
 //! This crate is pure: no database, async runtime, network or filesystem
 //! access. `tests/boundary.rs` enforces it.
+
+pub mod trino_ops;
