@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use egret_perm_ir::audience::{Audience, MemberName};
+use egret_perm_ir::lower::grants::level_is_a_wildcard_run;
 use egret_perm_ir::statement::{
     Effect, InfraObject, Level, Path, Privilege, Source, Statement, Target,
 };
@@ -177,21 +178,33 @@ fn applies(a: &Audience, user: &str) -> bool {
     a.include.iter().any(|m| names(&m.name)) && !a.except.iter().any(|m| names(&m.name))
 }
 
+/// A named level against a present request value. A value that is literally
+/// `*` or empty asks for every value, so only a match-any pattern (a run of
+/// `*`) answers it, as Ranger's `requests_all_values` does.
+fn named_matches(p: &str, v: &str) -> bool {
+    if v.is_empty() || v == "*" {
+        level_is_a_wildcard_run(p)
+    } else {
+        pattern::matches(p, v)
+    }
+}
+
 /// One level against a request level. A present value matches `Unnamed` or
 /// the pattern; an absent one matches only a statement covering the whole
-/// level (`Unnamed` or exactly `*`).
+/// level: `Unnamed` or a run of `*` (Ranger's `SelfAndAllDescendants`; the
+/// compiler's own predicate, so `**` is the same as `*`).
 fn level_covers(level: &Level, value: Option<&str>) -> bool {
     match (level, value) {
         (Level::Unnamed, _) => true,
-        (Level::Named(p), Some(v)) => pattern::matches(p, v),
-        (Level::Named(p), None) => p == "*",
+        (Level::Named(p), Some(v)) => named_matches(p, v),
+        (Level::Named(p), None) => level_is_a_wildcard_run(p),
     }
 }
 
 /// The statement's path is the object or one of its ancestors: the data
 /// match, and the deny side of reach.
 fn path_covers(p: &Path, o: &Obj) -> bool {
-    pattern::matches(&p.catalog, o.catalog)
+    named_matches(&p.catalog, o.catalog)
         && level_covers(&p.schema, o.schema)
         && level_covers(&p.table, o.table)
         && level_covers(&p.column, o.column)
@@ -201,7 +214,7 @@ fn path_covers(p: &Path, o: &Obj) -> bool {
 /// side of reach. The object's named levels must match; deeper levels are free.
 fn path_reaches(p: &Path, o: &Obj) -> bool {
     let free = |l: &Level, v: Option<&str>| v.is_none_or(|v| level_covers(l, Some(v)));
-    pattern::matches(&p.catalog, o.catalog)
+    named_matches(&p.catalog, o.catalog)
         && free(&p.schema, o.schema)
         && free(&p.table, o.table)
         && free(&p.column, o.column)
@@ -210,7 +223,7 @@ fn path_reaches(p: &Path, o: &Obj) -> bool {
 /// The levels a metadata-table restriction is looked for on: catalog, schema
 /// and table; any column.
 fn path_on_table(p: &Path, catalog: &str, schema: &str, table: &str) -> bool {
-    pattern::matches(&p.catalog, catalog)
+    named_matches(&p.catalog, catalog)
         && level_covers(&p.schema, Some(schema))
         && level_covers(&p.table, Some(table))
 }

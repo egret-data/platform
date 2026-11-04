@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use egret_perm_ir::audience::{Audience, MemberName};
-use egret_perm_ir::statement::{Source, Statement, Target};
+use egret_perm_ir::statement::{Level, Path, Source, Statement, Target};
 
 use crate::pattern;
 
@@ -33,6 +33,8 @@ pub struct SnapshotInput {
 pub enum SnapshotError {
     #[error("statement {index} names an unexpanded principal {principal}")]
     UnexpandedMember { index: usize, principal: String },
+    #[error("statement {index} has a path Ranger would read wider than written: {reason}")]
+    MalformedPath { index: usize, reason: &'static str },
 }
 
 /// The classifications of one table: on the table itself, and per column.
@@ -74,6 +76,9 @@ impl Snapshot {
         let mut index = Index::default();
         for (i, s) in input.statements.iter().enumerate() {
             check_expanded(i, &s.audience)?;
+            if let Target::Path(p) = &s.target {
+                check_path(i, p)?;
+            }
             match &s.target {
                 Target::Path(p) if pattern::is_wild(&p.catalog) => index.wild_catalog.push(i),
                 Target::Path(p) => index
@@ -164,6 +169,29 @@ fn check_expanded(index: usize, a: &Audience) -> Result<(), SnapshotError> {
                 index,
                 principal: format!("{}:{}", p.kind.as_str(), p.r#ref),
             });
+        }
+    }
+    Ok(())
+}
+
+/// Refuse the path shapes Ranger renders wider than the evaluator would read
+/// them, so the evaluator fails closed on its own instead of trusting the
+/// upstream checks (`grants_check`, `ensure_scope_levels_are_named`):
+/// - an empty value: Ranger drops it, which leaves match-any;
+/// - a named level below an unnamed one: `scope_to_resources` latches `*`
+///   below the first unnamed level.
+fn check_path(index: usize, p: &Path) -> Result<(), SnapshotError> {
+    let bad = |reason| Err(SnapshotError::MalformedPath { index, reason });
+    if p.catalog.is_empty() {
+        return bad("an empty catalog");
+    }
+    let mut unnamed_above = false;
+    for level in [&p.schema, &p.table, &p.column] {
+        match level {
+            Level::Named(v) if v.is_empty() => return bad("an empty named level"),
+            Level::Named(_) if unnamed_above => return bad("a named level below an unnamed one"),
+            Level::Named(_) => {}
+            Level::Unnamed => unnamed_above = true,
         }
     }
     Ok(())

@@ -190,7 +190,7 @@ UpdateTableColumns ViewQueryOwnedBy WriteSystemInformation
   - `Read` answers `select`.
   - `Write` answers `insert` and `delete`.
   - Everything else (create, drop, alter, show, sysinfo) is held only by `Target::Infra(InfraObject::WholeEp)`, the `egret-admin` all-access. Grants never compile those access types, and the `all - …` defaults are refused at the switch.
-- **An empty column list is one table-level Read check.** The column level is absent: it matches statements whose column is `Unnamed` or `*`. A column-only deny does not apply, mirroring Ranger's descendant match. This is how `count(*)` is checked.
+- **An empty column list is one table-level Read check.** The column level is absent: it matches statements whose column is `Unnamed` or a run of `*` (`*`, `**`, …; `level_is_a_wildcard_run`). A column-only deny does not apply, mirroring Ranger's descendant match. This is how `count(*)` is checked.
 - **Reach is the `_any` check, in its conservative form** (decided 2026-11-04). A user reaches an object iff both hold:
   - some applying allow matches the object or a descendant. An allow is an `Allow` path, `WholeEp`, or an `EngineObject` whose capability's first resource key is `catalog` (`trino.set_catalog_session_property`, `trino.execute_procedure`, `trino.execute_function`) and whose first value is the object's catalog;
   - **no** applying `Deny` or `Withhold` carrying **any** privilege matches the object or an ancestor. That covers a match by path, and a match by a classification on the object (for a column, also on its table).
@@ -694,7 +694,7 @@ impl Snapshot {
 - **Audience.** A statement applies to `user` when:
   - `include` holds `MemberName::User(user)` or `MemberName::Everyone`;
   - and `except` holds neither.
-- **Data.** For `Data(Read)` on a `Table`, check each listed column; every column must be allowed. **An empty `columns` list is one table-level Read check**, not a vacuous allow: the column level is absent, so it matches statements whose column is `Unnamed` or `*`, and a column-only deny does not apply. This mirrors the Ranger plugin, whose `RangerTrinoResource.forColumns` asks `select` on `{catalog, schema, table}` for an empty set; `SELECT count(*)` arrives this way. For `Data(Write)`, check the table, with the column level absent in the same way. A privilege on an object is allowed when:
+- **Data.** For `Data(Read)` on a `Table`, check each listed column; every column must be allowed. **An empty `columns` list is one table-level Read check**, not a vacuous allow: the column level is absent, so it matches statements whose column is `Unnamed` or a run of `*` (`*`, `**`, …; `level_is_a_wildcard_run`), and a column-only deny does not apply. This mirrors the Ranger plugin, whose `RangerTrinoResource.forColumns` asks `select` on `{catalog, schema, table}` for an empty set; `SELECT count(*)` arrives this way. For `Data(Write)`, check the table, with the column level absent in the same way. A privilege on an object is allowed when:
   - an applying `Effect::Allow { privileges }` with that privilege has a `Target::Path` matching all four levels; or an applying `Target::Infra(InfraObject::WholeEp)` statement exists;
   - and no applying `Effect::Deny`/`Effect::Withhold` with that privilege matches. A withhold matches through `Target::Path` (StarRocks shape) or `Target::Classification { name }`. For a column request, the classification is the column's or its table's; for a table request, only the table's.
 - **Reach** (operations `Reach`), on the request's object:
@@ -744,7 +744,7 @@ impl Snapshot {
 
   A question scans only `by_catalog[c] ∪ wild_catalog` plus the classification lists of the classifications its object carries.
 - **`filter`** returns the indices `i` for which `decide(user, op, &resources[i])` allows, ascending.
-- **`decide_privilege`** applies the Data rule to an `ObjectPath`. An absent level matches only statements whose level is `Unnamed` or exactly `*`.
+- **`decide_privilege`** applies the Data rule to an `ObjectPath`. An absent level matches only statements whose level is `Unnamed` or a run of `*`.
 
 - [ ] **Step 1: Write the failing tests** `tests/decide.rs`. Build statements directly; this is the helper set:
 

@@ -1227,3 +1227,349 @@ fn an_unexpanded_except_member_fails_the_build_with_its_index() {
         })
     );
 }
+
+// ---- Fix round 1 (review I1, I2, M1, M3).
+
+/// I1: Ranger treats every pure run of `*` as match-any, so a deny on `t / **`
+/// covers a table-level request (`SelfAndAllDescendants`).
+#[test]
+fn a_wildcard_run_below_the_request_covers_it() {
+    let allow = st(
+        1,
+        who(&["ann"], &[]),
+        path("lake", None, None, None),
+        Effect::Allow {
+            privileges: vec![Privilege::Read, Privilege::Write],
+        },
+    );
+    let read = snap(
+        vec![
+            allow.clone(),
+            st(
+                2,
+                who(&["ann"], &[]),
+                path("lake", Some("s"), Some("t"), Some("**")),
+                Effect::Deny {
+                    privileges: vec![Privilege::Read],
+                },
+            ),
+        ],
+        vec![],
+    );
+    assert!(
+        !allowed(&read.decide("ann", "SelectFromColumns", &cols("lake", "s", "t", &[]))),
+        "count(*) under a `**` column deny"
+    );
+    let write = snap(
+        vec![
+            allow.clone(),
+            st(
+                2,
+                who(&["ann"], &[]),
+                path("lake", Some("s"), Some("t"), Some("**")),
+                Effect::Deny {
+                    privileges: vec![Privilege::Write],
+                },
+            ),
+        ],
+        vec![],
+    );
+    for op in [
+        "InsertIntoTable",
+        "DeleteFromTable",
+        "TruncateTable",
+        "UpdateTableColumns",
+    ] {
+        assert!(
+            !allowed(&write.decide("ann", op, &cols("lake", "s", "t", &[]))),
+            "{op} under a `**` column deny"
+        );
+    }
+    let catalog = snap(
+        vec![
+            allow,
+            st(
+                2,
+                who(&["ann"], &[]),
+                path("lake", Some("**"), None, None),
+                Effect::Deny {
+                    privileges: vec![Privilege::Read],
+                },
+            ),
+        ],
+        vec![],
+    );
+    assert!(
+        !allowed(&catalog.decide("ann", "AccessCatalog", &Resource::Catalog("lake".into()))),
+        "reach under a `lake.**` deny"
+    );
+}
+
+#[test]
+fn decide_privilege_treats_a_wildcard_run_as_the_whole_level() {
+    use egret_perm_eval::trino_ops::DataPrivilege;
+    use egret_perm_eval::ObjectPath;
+    let s = snap(
+        vec![
+            st(
+                1,
+                who(&["ann"], &[]),
+                path("lake", None, None, None),
+                Effect::Allow {
+                    privileges: vec![Privilege::Read],
+                },
+            ),
+            st(
+                2,
+                who(&["ann"], &[]),
+                path("lake", Some("s"), Some("***"), None),
+                Effect::Deny {
+                    privileges: vec![Privilege::Read],
+                },
+            ),
+        ],
+        vec![],
+    );
+    let o = ObjectPath {
+        catalog: "lake".into(),
+        schema: Some("s".into()),
+        table: None,
+        column: None,
+    };
+    assert!(!allowed(&s.decide_privilege(
+        "ann",
+        DataPrivilege::Read,
+        &o
+    )));
+}
+
+/// I2 (a): Ranger's all-access bodies are ordinary allow policies; a deny beats them.
+#[test]
+fn a_deny_beats_the_all_access_grant() {
+    let s = snap(
+        vec![
+            infra(
+                InfraKind::AdminAllAccess,
+                who(&["root"], &[]),
+                InfraObject::WholeEp,
+                "all",
+            ),
+            st(
+                1,
+                who(&["root"], &[]),
+                path("lake", Some("s"), Some("t"), Some("ssn")),
+                Effect::Deny {
+                    privileges: vec![Privilege::Read],
+                },
+            ),
+            st(
+                2,
+                who(&["root"], &[]),
+                path("lake", Some("hr"), None, None),
+                Effect::Deny {
+                    privileges: vec![Privilege::Write],
+                },
+            ),
+        ],
+        vec![],
+    );
+    assert!(allowed(&s.decide(
+        "root",
+        "SelectFromColumns",
+        &cols("lake", "s", "t", &["id"])
+    )));
+    let d = s.decide(
+        "root",
+        "SelectFromColumns",
+        &cols("lake", "s", "t", &["ssn"]),
+    );
+    assert!(matches!(d, Decision::Deny { explicit: true, .. }), "{d:?}");
+    assert!(!allowed(&s.decide(
+        "root",
+        "ShowTables",
+        &Resource::Schema {
+            catalog: "lake".into(),
+            schema: "hr".into()
+        }
+    )));
+}
+
+/// I2 (b): an engine object answers its grantee only.
+#[test]
+fn engine_objects_answer_only_their_grantee() {
+    let s = snap(
+        vec![Statement {
+            source: Source::EnginePrivilege {
+                engine_grant_id: Uuid::nil(),
+            },
+            audience: who(&["ann"], &[]),
+            target: Target::EngineObject {
+                capability: "trino.execute_procedure".into(),
+                values: vec!["lake".into(), "system".into(), "rollback".into()],
+            },
+            effect: Effect::EnginePrivilege {
+                capability: "trino.execute_procedure".into(),
+            },
+            derivation: Derivation::AsDeclared,
+        }],
+        vec![],
+    );
+    let f = Resource::Function {
+        catalog: "lake".into(),
+        schema: "system".into(),
+        function: "rollback".into(),
+    };
+    assert!(allowed(&s.decide("ann", "ExecuteProcedure", &f)));
+    assert!(
+        !allowed(&s.decide("bob", "ExecuteProcedure", &f)),
+        "bob is not the grantee"
+    );
+    assert!(allowed(&s.decide(
+        "ann",
+        "AccessCatalog",
+        &Resource::Catalog("lake".into())
+    )));
+    assert!(
+        !allowed(&s.decide("bob", "AccessCatalog", &Resource::Catalog("lake".into()))),
+        "nor does it give bob reach"
+    );
+}
+
+/// I2 (c)
+#[test]
+fn execute_query_needs_an_any_query_statement() {
+    let s = snap(
+        vec![infra(
+            InfraKind::ExecuteQuery,
+            who(&["ann"], &[]),
+            InfraObject::AnyQuery,
+            "execute",
+        )],
+        vec![],
+    );
+    assert!(allowed(&s.decide("ann", "ExecuteQuery", &Resource::None)));
+    assert!(!allowed(&s.decide("bob", "ExecuteQuery", &Resource::None)));
+    assert!(!allowed(&snap(vec![], vec![]).decide(
+        "ann",
+        "ExecuteQuery",
+        &Resource::None
+    )));
+}
+
+/// I2 (d): values are compared whole, never as a prefix.
+#[test]
+fn an_engine_object_with_fewer_values_is_not_a_prefix_match() {
+    let s = snap(
+        vec![Statement {
+            source: Source::EnginePrivilege {
+                engine_grant_id: Uuid::nil(),
+            },
+            audience: who(&["ann"], &[]),
+            target: Target::EngineObject {
+                capability: "trino.execute_procedure".into(),
+                values: vec!["lake".into()],
+            },
+            effect: Effect::EnginePrivilege {
+                capability: "trino.execute_procedure".into(),
+            },
+            derivation: Derivation::AsDeclared,
+        }],
+        vec![],
+    );
+    let f = Resource::Function {
+        catalog: "lake".into(),
+        schema: "system".into(),
+        function: "rollback".into(),
+    };
+    assert!(!allowed(&s.decide("ann", "ExecuteProcedure", &f)));
+}
+
+fn build_err(p: Target) -> bool {
+    Snapshot::build(SnapshotInput {
+        service_id: 1,
+        key: (1, 1),
+        classified: vec![],
+        statements: vec![st(
+            1,
+            who(&["ann"], &[]),
+            p,
+            Effect::Deny {
+                privileges: vec![Privilege::Read],
+            },
+        )],
+    })
+    .is_err()
+}
+
+/// M1: Ranger renders these shapes wider than they read; the snapshot refuses them.
+#[test]
+fn an_empty_named_level_fails_the_build() {
+    assert!(build_err(path("lake", Some(""), None, None)));
+    assert!(build_err(path("lake", Some("s"), Some("t"), Some(""))));
+    assert!(build_err(path("", None, None, None)), "an empty catalog");
+    assert!(!build_err(path("lake", Some("s"), Some("t"), Some("c"))));
+}
+
+#[test]
+fn a_named_level_below_an_unnamed_one_fails_the_build() {
+    assert!(build_err(path("lake", None, Some("t"), None)));
+    assert!(build_err(path("lake", Some("s"), None, Some("c"))));
+    assert!(build_err(path("lake", None, None, Some("c"))));
+    assert!(!build_err(path("lake", Some("s"), None, None)));
+}
+
+/// M3: a request value that is literally `*` or empty matches only a match-any level.
+#[test]
+fn a_star_or_empty_request_value_matches_only_match_any() {
+    let s = snap(
+        vec![
+            st(
+                1,
+                who(&["ann"], &[]),
+                path("lake", Some("s"), Some("t"), Some("?")),
+                Effect::Allow {
+                    privileges: vec![Privilege::Read],
+                },
+            ),
+            st(
+                2,
+                who(&["ann"], &[]),
+                path("lake", Some("s"), Some("u"), Some("**")),
+                Effect::Allow {
+                    privileges: vec![Privilege::Read],
+                },
+            ),
+            st(
+                3,
+                who(&["ann"], &[]),
+                path("lake", Some("s"), Some("v"), Some("x*")),
+                Effect::Allow {
+                    privileges: vec![Privilege::Read],
+                },
+            ),
+        ],
+        vec![],
+    );
+    assert!(allowed(&s.decide(
+        "ann",
+        "SelectFromColumns",
+        &cols("lake", "s", "t", &["a"])
+    )));
+    assert!(
+        !allowed(&s.decide("ann", "SelectFromColumns", &cols("lake", "s", "t", &["*"]))),
+        "`?` does not answer a column named `*`"
+    );
+    assert!(
+        !allowed(&s.decide("ann", "SelectFromColumns", &cols("lake", "s", "v", &[""]))),
+        "`x*` does not answer an empty name"
+    );
+    assert!(
+        allowed(&s.decide("ann", "SelectFromColumns", &cols("lake", "s", "u", &["*"]))),
+        "a run of `*` is match-any"
+    );
+    assert!(allowed(&s.decide(
+        "ann",
+        "SelectFromColumns",
+        &cols("lake", "s", "u", &[""])
+    )));
+}
