@@ -1050,13 +1050,16 @@ export const getPolicyAdminSetMechanismUrl = (service: string,) => {
 /**
  * Under the row locks of the profile **and** its tag service, taken in the
  * order a recompile takes them, the switch to OPA re-checks every condition
- * ([`opa_switch_check`]) in the same transaction that writes, so an operator
- * insert into the tag service cannot slip between the check and the write.
- * Switching to Ranger has no condition and skips the check (the gate
- * included). A change writes `mechanism`, bumps `policy_version` once,
- * recompiles the profile's Ranger artifact (which every profile keeps,
- * whatever its mechanism) and records `profile:mechanism`. The same
- * mechanism again writes nothing.
+ * (the profile is a generated Trino profile, OPA is enabled, every bound
+ * egret-provisioned engine runs an image with the OPA plugin, no `all - …`
+ * defaults, no hand-written policies, no stored mask/row-filter pairs) in
+ * the same transaction that writes, so an operator insert into the tag
+ * service cannot slip between the check and the write. Switching to Ranger
+ * has no condition and skips the check (the gate included). A change writes
+ * `mechanism`, recompiles the profile's Ranger artifact (which every profile
+ * keeps, whatever its mechanism) and records `profile:mechanism`. It bumps
+ * `policy_version` at least once, plus once more if the Ranger recompile
+ * writes. The same mechanism again writes nothing.
  *
  * After the commit the bound engines are always reconfigured, also when
  * nothing was written: re-sending the PATCH is how a failed reconfigure is

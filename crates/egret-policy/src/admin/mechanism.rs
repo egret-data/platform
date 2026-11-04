@@ -208,13 +208,16 @@ impl MechanismName {
 ///
 /// Under the row locks of the profile **and** its tag service, taken in the
 /// order a recompile takes them, the switch to OPA re-checks every condition
-/// ([`opa_switch_check`]) in the same transaction that writes, so an operator
-/// insert into the tag service cannot slip between the check and the write.
-/// Switching to Ranger has no condition and skips the check (the gate
-/// included). A change writes `mechanism`, bumps `policy_version` once,
-/// recompiles the profile's Ranger artifact (which every profile keeps,
-/// whatever its mechanism) and records `profile:mechanism`. The same
-/// mechanism again writes nothing.
+/// (the profile is a generated Trino profile, OPA is enabled, every bound
+/// egret-provisioned engine runs an image with the OPA plugin, no `all - …`
+/// defaults, no hand-written policies, no stored mask/row-filter pairs) in
+/// the same transaction that writes, so an operator insert into the tag
+/// service cannot slip between the check and the write. Switching to Ranger
+/// has no condition and skips the check (the gate included). A change writes
+/// `mechanism`, recompiles the profile's Ranger artifact (which every profile
+/// keeps, whatever its mechanism) and records `profile:mechanism`. It bumps
+/// `policy_version` at least once, plus once more if the Ranger recompile
+/// writes. The same mechanism again writes nothing.
 ///
 /// After the commit the bound engines are always reconfigured, also when
 /// nothing was written: re-sending the PATCH is how a failed reconfigure is
@@ -246,6 +249,15 @@ pub async fn set_mechanism(
 
     egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
     let svc = st.store.get_service(&service).await?;
+
+    let mut tx = st.store.begin().await?;
+    super::lock_unit_rows(&mut tx, svc.id).await?;
+    let svc = crate::get_service_by_id_via(&mut tx, svc.id).await?;
+    // The bound engines and their images, read once the profile's rows are
+    // locked, so the image check judges the bindings current at the switch.
+    // A bind or re-image that lands after the commit is refused at apply time
+    // by the engine seam's image guard for an OPA profile (governance SP2b
+    // Task 15, I6), not here.
     let bindings: Vec<EngineBinding> = st
         .engines
         .list_engine_bindings()
@@ -253,10 +265,6 @@ pub async fn set_mechanism(
         .into_iter()
         .filter(|e| e.authz_service_id == Some(svc.id))
         .collect();
-
-    let mut tx = st.store.begin().await?;
-    super::lock_unit_rows(&mut tx, svc.id).await?;
-    let svc = crate::get_service_by_id_via(&mut tx, svc.id).await?;
     let external_engines_unchanged = match b.mechanism {
         MechanismName::Opa => {
             let check =
@@ -301,7 +309,7 @@ pub async fn set_mechanism(
                 action: egret_audit::governance::action::PROFILE_MECHANISM,
                 resource_type: egret_audit::governance::resource::POLICY_PROFILE,
                 resource_id: svc.id.to_string(),
-                summary: json!({ "before": svc.mechanism, "after": after }),
+                summary: json!({ "service": svc.name, "before": svc.mechanism, "after": after }),
                 principal: &p,
             },
         )

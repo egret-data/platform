@@ -561,6 +561,8 @@ mod route {
         recompiles: Arc<Recompiles>,
         reconfigures: Arc<Reconfigures>,
         bindings: Vec<EngineBinding>,
+        /// Replaces `Bindings(bindings)` as the engine read when set.
+        engines: Option<Arc<dyn EngineBindingReader>>,
         opa_enabled: bool,
     }
 
@@ -579,6 +581,7 @@ mod route {
             recompiles: Arc::default(),
             reconfigures: Arc::default(),
             bindings: Vec::new(),
+            engines: None,
             opa_enabled: true,
             db,
         })
@@ -588,7 +591,10 @@ mod route {
         fn app(&self) -> axum::Router {
             policy_admin_router().with_state(PolicyAdminState {
                 store: self.store.clone(),
-                engines: Arc::new(Bindings(self.bindings.clone())),
+                engines: self
+                    .engines
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(Bindings(self.bindings.clone()))),
                 users: self.users.clone(),
                 groups: GroupRepo::new(self.db.clone()),
                 sessions: self.sessions.clone(),
@@ -770,13 +776,15 @@ mod route {
         assert_eq!(
             h.row(svc.id).await,
             ("opa".to_string(), version_before + 1),
-            "mechanism written, version bumped exactly once"
+            "mechanism written; the switch's own bump is +1 (a Ranger recompile that writes \
+             adds one more; this stub recompiler writes nothing)"
         );
         assert_eq!(h.recompiled(), vec![vec![svc.id]]);
         assert_eq!(h.reconfigured(), vec![svc.id]);
         let events = h.events(svc.id).await;
         assert_eq!(events.len(), 1, "{events:?}");
         assert_eq!(events[0].0, "profile:mechanism");
+        assert_eq!(events[0].1["service"], json!(svc.name), "{events:?}");
         assert_eq!(events[0].1["before"], "ranger", "{events:?}");
         assert_eq!(events[0].1["after"], "opa", "{events:?}");
     }
@@ -1076,6 +1084,82 @@ mod route {
         let (status, body) = patch.await.expect("join");
         assert_eq!(status, StatusCode::OK, "body={body}");
         assert_eq!(h.row(svc.id).await.0, "opa");
+    }
+
+    /// Answers `bindings`, and records, at each call, whether profile
+    /// `service_id`'s row is locked by someone else (`FOR UPDATE NOWAIT`
+    /// from its own connection).
+    struct LockProbe {
+        db: Db,
+        service_id: i64,
+        bindings: Vec<EngineBinding>,
+        locked: Mutex<Vec<bool>>,
+    }
+
+    #[async_trait::async_trait]
+    impl EngineBindingReader for LockProbe {
+        async fn list_engine_bindings(&self) -> Result<Vec<EngineBinding>, EngineReadError> {
+            let mut tx = self.db.pool.begin().await.expect("probe tx");
+            let free =
+                sqlx::query("SELECT id FROM policy.authz_services WHERE id = $1 FOR UPDATE NOWAIT")
+                    .bind(self.service_id)
+                    .execute(&mut *tx)
+                    .await
+                    .is_ok();
+            tx.rollback().await.expect("probe rollback");
+            self.locked.lock().unwrap().push(!free);
+            Ok(self.bindings.clone())
+        }
+        async fn engine_catalog_names(&self, _: Uuid) -> Result<Vec<String>, EngineReadError> {
+            Ok(vec![])
+        }
+        async fn warehouse_schemas(&self, _: Uuid) -> Result<Vec<String>, EngineReadError> {
+            Ok(vec![])
+        }
+        async fn warehouse_tables(&self, _: Uuid, _: &str) -> Result<Vec<String>, EngineReadError> {
+            Ok(vec![])
+        }
+        async fn warehouse_columns(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: &str,
+        ) -> Result<Vec<String>, EngineReadError> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn the_bindings_the_image_check_judges_are_read_under_the_lock() {
+        // Arrange
+        let Some(mut h) = harness().await else {
+            eprintln!("skip: DATABASE_URL not set");
+            return;
+        };
+        let (svc, _) = trino_profile(&h.db, &h.store, true).await;
+        let probe = Arc::new(LockProbe {
+            db: h.db.clone(),
+            service_id: svc.id,
+            bindings: vec![binding(
+                svc.id,
+                "old-trino",
+                "provisioned",
+                Some("trinodb/trino:470"),
+            )],
+            locked: Mutex::new(Vec::new()),
+        });
+        h.engines = Some(probe.clone());
+
+        // Act
+        let (status, body) = h.patch(&svc.name, "opa").await;
+
+        // Assert
+        assert_eq!(status, StatusCode::CONFLICT, "body={body}");
+        assert_eq!(
+            *probe.locked.lock().unwrap(),
+            vec![true],
+            "the bindings are listed once, after the profile row is locked"
+        );
     }
 
     #[tokio::test]
