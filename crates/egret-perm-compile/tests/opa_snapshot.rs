@@ -213,6 +213,11 @@ async fn a_table_level_classification_reaches_every_column_of_the_table() {
     let mut tx = db.pool.begin().await.expect("tx");
     let st = store(&db, "opa2", &mut names, &mut tx).await;
     tag_table(&mut tx, st.pii, st.warehouse, "s", "u").await;
+    // A catalog no engine of the profile reaches: its classifications are not
+    // the profile's (`catalogs_for_service_via`, C3).
+    let elsewhere = warehouse(&mut tx, "opa2x", &mut names).await;
+    catalog(&mut tx, "opa2x.other", elsewhere, &[], &mut names).await;
+    tag_table(&mut tx, st.pii, elsewhere, "s", "elsewhere").await;
 
     // Act
     let snap = build(&mut tx, st.profile).await;
@@ -255,6 +260,10 @@ async fn a_table_level_classification_reaches_every_column_of_the_table() {
     assert!(classified
         .iter()
         .any(|c| c.table == "t" && c.column.as_deref() == Some("ssn") && c.classification == pii));
+    assert!(
+        classified.iter().all(|c| c.catalog == st.lake),
+        "only the bound catalog's classifications: {classified:?}"
+    );
     tx.rollback().await.expect("rollback");
 }
 
@@ -306,7 +315,8 @@ async fn a_qualifying_engine_puts_the_infra_statements_in_the_snapshot() {
 
 #[tokio::test]
 async fn the_snapshot_build_never_mints_a_username() {
-    // Arrange: an unnamed holder at every place a compile mints — a role
+    // Arrange (committed, in a profile of its own): an unnamed holder at
+    // every place a compile mints — a role
     // holder, a workspace member, a group member, an engine admin and the
     // holder of a classification's clearing role.
     let db = db().await;
@@ -362,6 +372,14 @@ async fn the_snapshot_build_never_mints_a_username() {
         &mut names,
     )
     .await;
+    // Committed, so the build can run as the refresher runs it: in a
+    // `REPEATABLE READ, READ ONLY` transaction, where any write fails.
+    tx.commit().await.expect("commit the arranged state");
+    let mut tx = db.pool.begin().await.expect("tx");
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .expect("read only");
     let unnamed = [by_role, by_ws, by_group, admin, by_gate];
     let before = count_unnamed(&mut tx, &unnamed).await;
     assert_eq!(before, 5);
@@ -378,5 +396,85 @@ async fn the_snapshot_build_never_mints_a_username() {
         &table(&lake, "t", &["id"]),
     );
     assert!(is_allow(&d), "the named role holder reads: {d:?}");
+    tx.rollback().await.expect("rollback");
+}
+
+/// `opa/build.rs`' safety argument for `Omit`, pinned: allow `{public}`, deny
+/// a role whose one holder has no username. The read-only build cannot name
+/// the holder, so its deny names nobody; what closes that is the recompile,
+/// which mints the holder first (premint) and moves the key, and the rebuild
+/// at the new key denies them.
+#[tokio::test]
+async fn an_unnamed_deny_holder_is_denied_once_a_recompile_names_them() {
+    // Arrange
+    let db = db().await;
+    let mut names = Names::default();
+    let (profile, _, _) = fixtures::profile(&db, "opa5", "trino", false, &mut names).await;
+    let mut tx = db.pool.begin().await.expect("tx");
+    let wh = warehouse(&mut tx, "opa5", &mut names).await;
+    let engine = engine_bound_spec(
+        &mut tx,
+        "opa5.engine",
+        profile,
+        "trino",
+        json!({"trinoConfig": {"delegationMode": "open"}}),
+        &mut names,
+    )
+    .await;
+    let cat = catalog(&mut tx, "opa5.lake", wh, &[engine], &mut names).await;
+    let lake = catalog_name(&mut tx, cat).await;
+    let x = user(&mut tx, "opa5.x", None, &mut names).await;
+    platform_role(&mut tx, "opa5_denied", &mut names).await;
+    role_held(&mut tx, x, "opa5_denied").await;
+    grant(
+        &mut tx,
+        "opa5.allow",
+        Effect::Allow,
+        &[Action::Read],
+        scope(cat, None, None, None),
+        set(&[group_ref(egret_perm::PUBLIC_GROUP)], &[]),
+        &mut names,
+    )
+    .await;
+    grant(
+        &mut tx,
+        "opa5.deny",
+        Effect::Deny,
+        &[Action::Read],
+        scope(cat, None, None, None),
+        set(&[role_ref("opa5_denied")], &[]),
+        &mut names,
+    )
+    .await;
+    let read = table(&lake, "t", &["id"]);
+
+    // Act 1: the read-only build, before any recompile has named x.
+    let before = build(&mut tx, profile).await;
+    assert_eq!(count_unnamed(&mut tx, &[x]).await, 1, "Omit minted x");
+
+    // Act 2: a recompile mints x's username first, then compiles.
+    egret_perm_compile::recompile_service_in_tx(&mut tx, profile)
+        .await
+        .expect("recompile");
+    let minted: String = sqlx::query_scalar("SELECT username::text FROM users WHERE id = $1")
+        .bind(x)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("the recompile minted x a username");
+    let after = build(&mut tx, profile).await;
+
+    // Assert: the snapshot built while x was unnamed left x out of the deny
+    // (it allows the name x got later), the recompile moved the key, and the
+    // snapshot at the new key denies x.
+    let d = before.decide(&minted, "SelectFromColumns", &read);
+    assert!(
+        is_allow(&d),
+        "the unnamed holder was left out of the deny: {d:?}"
+    );
+    assert_ne!(before.key(), after.key(), "the recompile moved the key");
+    let d = after.decide(&minted, "SelectFromColumns", &read);
+    assert!(is_explicit_deny(&d), "named, x is denied: {d:?}");
+    let d = after.decide("opa5_somebody", "SelectFromColumns", &read);
+    assert!(is_allow(&d), "public still reads: {d:?}");
     tx.rollback().await.expect("rollback");
 }

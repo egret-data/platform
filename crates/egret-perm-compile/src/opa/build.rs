@@ -12,6 +12,25 @@
 //! **Nothing here writes** when called with [`MissingUsername::Omit`] (I9):
 //! the refresher builds in a `READ ONLY` transaction, and a person with no
 //! username yet is left out rather than minted for.
+//!
+//! **Why leaving them out is safe — and what it depends on.** A login or
+//! first-query mint recompiles nothing (`crate::members::role_usernames`'
+//! doc, design R5/R6), so a username appearing later does not by itself move
+//! this snapshot's key. What closes the gap is the compile: every recompile
+//! first mints a username for every person the model names
+//! (`crate::members::premint_model_usernames`, called by every
+//! `crate::trigger` recompile entry after the profile locks), and a
+//! recompile that fails rolls back with the write that caused it. So no
+//! committed state holds an unnamed person the model names — in particular
+//! none in a grant-`Deny` include or an `Allow` except, the only positions
+//! where leaving a person out would loosen the answer. `Omit` therefore
+//! drops only people a Ranger compile of the same state would not name
+//! either (legacy rows written before R5, a transient row no recompile has
+//! seen), and the Ranger artifact agrees until the next recompile mints them
+//! and bumps the key. **This holds only while every model and membership
+//! write keeps running the Ranger recompile, premint included, for OPA
+//! profiles too**; `tests/opa_snapshot.rs`
+//! (`an_unnamed_deny_holder_is_denied_once_a_recompile_names_them`) pins it.
 
 use egret_perm::CompileError;
 use egret_perm_eval::{ClassifiedColumn, Snapshot, SnapshotInput};
@@ -74,11 +93,27 @@ pub async fn lower_infra_via(
 }
 
 /// None: the service is not trino/starrocks. Reads at the caller's transaction.
+///
+/// **The caller must hold one `REPEATABLE READ` snapshot** for the whole call
+/// (the refresher's `REPEATABLE READ, READ ONLY` transaction, D3), so that
+/// the key and every statement come from one point in time. The key is read
+/// FIRST: should a caller run this under `READ COMMITTED` anyway, a commit
+/// landing mid-build leaves content newer than its key — one extra rebuild
+/// next period — never content older than its key, which the refresher would
+/// keep serving because the key would not move again.
 pub async fn snapshot_parts_via(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
     missing: MissingUsername,
 ) -> Result<Option<SnapshotParts>, CompileError> {
+    let key: (i64, i64) = sqlx::query_as(
+        "SELECT policy_version, tag_version FROM policy.authz_services WHERE id = $1",
+    )
+    .bind(service_id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(CompileError::from_db)?
+    .ok_or_else(|| CompileError::Db(format!("OPA snapshot: no profile {service_id}")))?;
     let Some(lowered) = crate::trigger::lower_ep_via(conn, service_id, missing).await? else {
         return Ok(None);
     };
@@ -91,13 +126,6 @@ pub async fn snapshot_parts_via(
         return Ok(None);
     };
     let classified = load_classified_columns_via(conn, service_id).await?;
-    let key: (i64, i64) = sqlx::query_as(
-        "SELECT policy_version, tag_version FROM policy.authz_services WHERE id = $1",
-    )
-    .bind(service_id)
-    .fetch_one(&mut *conn)
-    .await
-    .map_err(CompileError::from_db)?;
     Ok(Some(SnapshotParts {
         key,
         data,
@@ -106,7 +134,8 @@ pub async fn snapshot_parts_via(
     }))
 }
 
-/// `snapshot_parts_via` then `Snapshot::build` over data ++ infra.
+/// `snapshot_parts_via` then `Snapshot::build` over data ++ infra. The same
+/// `REPEATABLE READ` requirement as [`snapshot_parts_via`].
 pub async fn build_snapshot_via(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
