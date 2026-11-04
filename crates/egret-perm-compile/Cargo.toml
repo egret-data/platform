@@ -106,6 +106,11 @@ required-features = ["harness"]
 name = "opa_snapshot"
 required-features = ["harness"]
 
+# Governance SP2b Task 7: the snapshot cache and its refresher.
+[[test]]
+name = "opa_cache"
+required-features = ["harness"]
+
 [dev-dependencies]
 egret-metastore.workspace = true
 egret-test-db.workspace = true

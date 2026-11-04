@@ -3,3 +3,4 @@
 //! same lowering `crate::trigger::compile_desired` renders for Ranger.
 
 pub mod build;
+pub mod cache;
