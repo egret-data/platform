@@ -22,16 +22,42 @@ use serde_json::{json, Map, Value};
 pub const ENGINE_PROPERTY: &str = "egret.engine";
 pub const SECRET_PROPERTY: &str = "egret.secret";
 
+/// The batch operation whose indices address one table's columns.
+pub const FILTER_COLUMNS: &str = "FilterColumns";
 /// The operation the plugin sends to `/row_filters`.
 pub const GET_ROW_FILTERS: &str = "GetRowFilters";
 /// The operation the plugin sends to `/column_mask` and `/batch_column_masks`.
 pub const GET_COLUMN_MASK: &str = "GetColumnMask";
 
+/// The `egret.secret` property. Its `Debug` prints `<redacted>`, so `{:?}`,
+/// `tracing`'s `?req`, a panicking `unwrap` or a failed `assert_eq` on an
+/// [`OpaRequest`] never shows the value. Read it only through [`Secret::expose`]
+/// at the one place that verifies it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(value: String) -> Self {
+        Secret(value)
+    }
+
+    /// The raw value, for the credential check only. Never log it.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(<redacted>)")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpaRequest {
     pub user: String,
     pub engine: Option<String>,
-    pub secret: Option<String>,
+    pub secret: Option<Secret>,
     pub operation: String,
     pub resource: Resource,
     pub filter_resources: Vec<Resource>,
@@ -70,7 +96,8 @@ pub fn parse_request(body: &Value) -> Result<OpaRequest, String> {
             optional_string(
                 p.get(SECRET_PROPERTY),
                 "input.context.properties.egret.secret",
-            )?,
+            )?
+            .map(Secret::new),
         ),
         Some(_) => return Err("input.context.properties is not an object".into()),
     };
@@ -123,6 +150,17 @@ pub fn expand_filter_columns(req: &OpaRequest) -> Result<Vec<Resource>, String> 
     }
 }
 
+/// The length of the list a `/batch` answer's indices address: the expanded
+/// columns for FilterColumns, `filter_resources` otherwise. The same `Err` as
+/// [`expand_filter_columns`] for a FilterColumns request of another shape.
+pub fn batch_len(req: &OpaRequest) -> Result<usize, String> {
+    if req.operation == FILTER_COLUMNS {
+        expand_filter_columns(req).map(|x| x.len())
+    } else {
+        Ok(req.filter_resources.len())
+    }
+}
+
 /// `/row_filters`: the operation must be `GetRowFilters` and the resource one
 /// table with real names. Any other shape is an `Err`, which the route answers
 /// with 403, never with "no filter".
@@ -160,6 +198,11 @@ pub fn allow_result(allowed: bool) -> Value {
 /// `{"result": [..]}`. Every index must address one of the request's
 /// `request_len` items; one outside it is an `Err` (an evaluator bug the route
 /// answers with 500), never an index the plugin would act on.
+///
+/// `request_len` is the length of the list the indices address. For
+/// FilterColumns that is the number of **columns** of its one table (the
+/// output of [`expand_filter_columns`]), not `filter_resources.len()` (which
+/// is 1). Take it from [`batch_len`] rather than computing it.
 pub fn batch_result(indices: &[usize], request_len: usize) -> Result<Value, String> {
     check_indices(indices.iter().copied(), request_len)?;
     Ok(json!({ "result": indices }))
@@ -273,8 +316,21 @@ fn parse_resource(v: &Value, at: &str) -> Result<Resource, String> {
     let obj = object(Some(v), at)?;
     let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
     let [key] = keys.as_slice() else {
-        return Err(format!("unrecognised resource: {}", keys.join(",")));
+        let shown: Vec<String> = keys
+            .iter()
+            .take(MAX_ECHOED_KEYS)
+            .map(|k| echo_key(k))
+            .collect();
+        let more = keys.len().saturating_sub(MAX_ECHOED_KEYS);
+        let tail = if more > 0 {
+            format!(",+{more} more")
+        } else {
+            String::new()
+        };
+        return Err(format!("unrecognised resource: {}{tail}", shown.join(",")));
     };
+    // Only the eight known keys reach the format below, so `inner_at` never
+    // carries a caller-chosen key.
     let inner_at = format!("{at}.{key}");
     let body = || object(obj.get(*key), &inner_at);
     let field = |o: &Map<String, Value>, name: &str| -> Result<String, String> {
@@ -334,8 +390,24 @@ fn parse_resource(v: &Value, at: &str) -> Result<Resource, String> {
                 column_type: field(o, "columnType")?,
             }
         }
-        other => return Err(format!("unrecognised resource: {other}")),
+        other => return Err(format!("unrecognised resource: {}", echo_key(other))),
     })
+}
+
+/// How much of a caller-chosen key an error may echo.
+const MAX_ECHOED_KEY_CHARS: usize = 64;
+const MAX_ECHOED_KEYS: usize = 8;
+
+/// A caller-chosen key for an error text: at most 64 chars, with control
+/// characters (and quotes, backslashes) escaped by `{:?}`, so a key can
+/// neither flood a log line nor forge a new one.
+fn echo_key(k: &str) -> String {
+    let cut: String = k.chars().take(MAX_ECHOED_KEY_CHARS).collect();
+    if cut.len() < k.len() {
+        format!("{cut:?}…")
+    } else {
+        format!("{cut:?}")
+    }
 }
 
 fn object<'a>(v: Option<&'a Value>, at: &str) -> Result<&'a Map<String, Value>, String> {
@@ -455,7 +527,7 @@ mod tests {
             json!({"operation": "SelectFromColumns", "resource": {"bogus": {}}}),
         ))
         .unwrap_err();
-        assert!(!e.contains("s3cr3t"), "{e}");
+        assert!(!e.contains("s3cr3t"), "an error echoed the secret");
         assert!(parse_request(&json!({"input": {}})).is_err());
     }
 
@@ -537,7 +609,10 @@ mod tests {
     #[test]
     fn the_secret_and_engine_are_read_from_properties() {
         let r = parse_request(&input(json!({"operation": "ExecuteQuery"}))).unwrap();
-        assert_eq!(r.secret.as_deref(), Some("s3cr3t"));
+        assert!(
+            r.secret.as_ref().map(Secret::expose) == Some("s3cr3t"),
+            "secret mismatch"
+        );
         assert_eq!(r.engine.as_deref(), Some("e1"));
         assert_eq!(r.resource, Resource::None);
         assert!(r.filter_resources.is_empty());
@@ -553,7 +628,7 @@ mod tests {
             let body = json!({"input": {"context": {"identity": {"user": "ann"}, "properties": props},
                 "action": {"operation": "ExecuteQuery"}}});
             let e = parse_request(&body).unwrap_err();
-            assert!(!e.contains("s3cr3t"), "{e}");
+            assert!(!e.contains("s3cr3t"), "an error echoed the secret");
         }
     }
 
@@ -703,11 +778,11 @@ mod tests {
                 json!({"operation": "X", "resource": resource.clone()}),
             ))
             .unwrap_err();
-            assert!(!e.contains("s3cr3t"), "{e}");
+            assert!(!e.contains("s3cr3t"), "an error echoed the secret");
         }
         let e = parse_request(&input(json!({"operation": "X", "resource": {"bogus": {}}})))
             .unwrap_err();
-        assert!(e.starts_with("unrecognised resource: bogus"), "{e}");
+        assert_eq!(e, "unrecognised resource: \"bogus\"");
     }
 
     #[test]
@@ -861,5 +936,96 @@ mod tests {
         assert!(column_masks_result(&[(2, "NULL".into())], 2).is_err());
         assert!(column_masks_result(&[(1, "NULL".into())], 2).is_ok());
         assert!(column_masks_result(&[(0, "NULL".into()), (0, "x".into())], 2).is_err());
+    }
+
+    // ---- fix round 1 ----
+
+    #[test]
+    fn debug_of_a_request_never_shows_the_secret() {
+        let r = parse_request(&input(json!({"operation": "ExecuteQuery"}))).unwrap();
+        let shown = format!("{r:?}");
+        assert!(!shown.contains("s3cr3t"), "Debug printed the secret");
+        assert!(
+            shown.contains("<redacted>"),
+            "Debug dropped the secret's presence"
+        );
+        let pretty = format!("{r:#?}");
+        assert!(
+            !pretty.contains("s3cr3t"),
+            "pretty Debug printed the secret"
+        );
+        assert!(
+            r.secret.as_ref().map(Secret::expose) == Some("s3cr3t"),
+            "secret mismatch"
+        );
+    }
+
+    #[test]
+    fn an_echoed_key_is_capped_and_escaped() {
+        let huge = format!("evil\nINFO forged line{}", "k".repeat(1 << 20));
+        let mut one = serde_json::Map::new();
+        one.insert(huge.clone(), json!({}));
+        let e = parse_request(&input(json!({"operation": "X", "resource": one}))).unwrap_err();
+        assert!(e.len() < 200, "echoed {} bytes", e.len());
+        assert!(!e.contains('\n'), "a raw newline reached the error");
+        assert!(
+            e.contains("evil\\nINFO"),
+            "the key prefix is not shown escaped"
+        );
+
+        let mut two = serde_json::Map::new();
+        two.insert(huge.clone(), json!({}));
+        two.insert("table".into(), json!({}));
+        let e = parse_request(&input(json!({"operation": "X", "resource": two}))).unwrap_err();
+        assert!(e.len() < 300, "echoed {} bytes", e.len());
+        assert!(!e.contains('\n'), "a raw newline reached the error");
+
+        let mut many = serde_json::Map::new();
+        for i in 0..10_000 {
+            many.insert(format!("k{i}"), json!({}));
+        }
+        let e = parse_request(&input(json!({"operation": "X", "resource": many}))).unwrap_err();
+        assert!(e.len() < 300, "echoed {} bytes", e.len());
+        assert!(e.ends_with(",+9992 more"), "{e}");
+    }
+
+    #[test]
+    fn batch_len_counts_filter_columns_by_column() {
+        let t = |n: &str| json!({"table": {"catalogName": "lake", "schemaName": "s", "tableName": n, "columns": ["a", "b", "c"]}});
+        let fc = parse_request(&input(
+            json!({"operation": "FilterColumns", "filterResources": [t("t")]}),
+        ))
+        .unwrap();
+        assert_eq!(batch_len(&fc), Ok(3));
+        let two = parse_request(&input(
+            json!({"operation": "FilterColumns", "filterResources": [t("t1"), t("t2")]}),
+        ))
+        .unwrap();
+        assert!(batch_len(&two).is_err());
+        let ft = parse_request(&input(
+            json!({"operation": "FilterTables", "filterResources": [t("t1"), t("t2")]}),
+        ))
+        .unwrap();
+        assert_eq!(batch_len(&ft), Ok(2));
+        let none = parse_request(&input(json!({"operation": "FilterCatalogs"}))).unwrap();
+        assert_eq!(batch_len(&none), Ok(0));
+    }
+
+    #[test]
+    fn a_null_resource_is_absent_and_refused_by_the_value_routes() {
+        let r = parse_request(&input(
+            json!({"operation": "GetRowFilters", "resource": null, "filterResources": null}),
+        ))
+        .unwrap();
+        assert_eq!(r.resource, Resource::None);
+        assert!(r.filter_resources.is_empty());
+        assert!(row_filter_target(&r).is_err());
+        let m = parse_request(&input(
+            json!({"operation": "GetColumnMask", "resource": null, "filterResources": null}),
+        ))
+        .unwrap();
+        assert_eq!(m.resource, Resource::None);
+        assert!(column_mask_target(&m).is_err());
+        assert!(column_mask_targets(&m).is_err());
     }
 }
