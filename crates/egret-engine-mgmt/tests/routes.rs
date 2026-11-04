@@ -55,6 +55,8 @@ struct RecordingProfileCompiler {
     /// asserting the update path's in-transaction recompile cannot be
     /// satisfied by the create path's fire-and-forget one.
     in_tx_calls: Arc<std::sync::Mutex<Vec<i64>>>,
+    /// `converge_infra` calls (governance SP2a infrastructure convergence).
+    converge_calls: Arc<std::sync::Mutex<Vec<i64>>>,
 }
 
 #[async_trait::async_trait]
@@ -64,7 +66,8 @@ impl egret_engine_mgmt::ProfileCompilerPort for RecordingProfileCompiler {
         Ok(())
     }
 
-    async fn converge_infra(&self, _service_id: i64) -> Result<(), egret_perm::CompileError> {
+    async fn converge_infra(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
+        self.converge_calls.lock().unwrap().push(service_id);
         Ok(())
     }
 
@@ -11950,6 +11953,7 @@ async fn a_late_refusal_restores_the_previous_binding() {
     let target_name = format!("srtarget-{}", Uuid::new_v4().simple());
     let target = seed_profile_without_tag_service(&f, &target_name, "starrocks").await;
     compiler.in_tx_calls.lock().unwrap().clear();
+    compiler.converge_calls.lock().unwrap().clear();
 
     // This engine has no primary warehouse attachment, so the StarRocks
     // provision-req build 400s — after the bind.
@@ -11973,6 +11977,14 @@ async fn a_late_refusal_restores_the_previous_binding() {
     // Both profile rows survive — a restore unbinds, never deletes.
     assert!(service_exists(&f, &start_name).await);
     assert!(service_exists(&f, &target_name).await);
+    // SP2a final review I1: both profiles' infrastructure rows are converged
+    // again once the binding is restored, since the failed attempt may have
+    // converged them with the engine on the target.
+    let converged = compiler.converge_calls.lock().unwrap().clone();
+    assert!(
+        converged.contains(&start) && converged.contains(&target),
+        "both profiles must be re-converged after the rollback; got {converged:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

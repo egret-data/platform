@@ -5332,6 +5332,44 @@ async fn restore_engine_spec(
                  the stored spec is ahead of the cluster");
         }
     }
+    // The failed attempt's build converged (and committed) the bound profile's
+    // infrastructure rows for the spec just rolled back; converge them again
+    // for the spec the cluster still runs.
+    match st.engine_mgmt.get_engine(id).await {
+        Ok(Some(engine)) => reconverge_infra_after_rollback(st, &[engine.authz_service_id]).await,
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(engine_id = %id, error = %e,
+                "could not read the engine back to re-converge its profile's infrastructure \
+                 policies after a failed update; they are converged at the next recompile or boot");
+        }
+    }
+}
+
+/// Converge the infrastructure policies of every profile in `service_ids`
+/// again after a failed engine update has been rolled back (governance SP2a,
+/// final review I1). The failed attempt's build converged them for the spec
+/// or binding that was just put back, and convergence commits on its own, so
+/// the rollback alone leaves them describing an engine the cluster does not
+/// run (impersonate → open deletes the delegator grant and the per-user
+/// baseline while the cluster still impersonates).
+///
+/// Best-effort: the caller is already returning the original error, so a
+/// failure here is logged and the rows are converged at the next recompile or
+/// boot. Each profile converges in its own transaction, under the locks
+/// `converge_infra` takes itself, one profile at a time.
+async fn reconverge_infra_after_rollback(st: &CpState, service_ids: &[Option<i64>]) {
+    let Some(compiler) = st.perm_compiler.as_ref() else {
+        return;
+    };
+    let ids: std::collections::BTreeSet<i64> = service_ids.iter().flatten().copied().collect();
+    for sid in ids {
+        if let Err(e) = compiler.converge_infra(sid).await {
+            tracing::warn!(service_id = sid, error = %e,
+                "could not re-converge a profile's infrastructure policies after a failed \
+                 engine update was rolled back; they are converged at the next recompile or boot");
+        }
+    }
 }
 
 /// Re-materialize every workspace assigned to `engine_id`, shared by both
@@ -5741,6 +5779,7 @@ async fn update_engine(
     let previous_authz_service_id = engine.authz_service_id;
     apply_authz_service_update(&st, &mut engine, b.authz_service_id).await?;
     let rebound = engine.authz_service_id != previous_authz_service_id;
+    let engine_authz_after_bind = engine.authz_service_id;
     // StarRocks has its own spec builder + provision-req assembler (FE/CN roles,
     // builtin storage volume) — dispatch to it rather than running the Trino
     // spec/assembly below.
@@ -5755,6 +5794,10 @@ async fn update_engine(
     // re-pointed. See `restore_engine_authz_service`.
     if out.is_err() && rebound {
         restore_engine_authz_service(&st, engine_id, previous_authz_service_id).await;
+        // Both profiles were converged with the engine on the NEW one: put the
+        // infrastructure rows of each back in line with the restored binding.
+        reconverge_infra_after_rollback(&st, &[engine_authz_after_bind, previous_authz_service_id])
+            .await;
     }
     // The update stood: the profile the engine left must stop serving what the
     // engine's grants compiled there (spec E10).
@@ -9564,6 +9607,94 @@ mod tests {
         }
         let rows = stored_policies(sid).await;
         assert_user_baseline(&rows, &profile);
+    }
+
+    /// `(id, name)` of every IR-owned infrastructure row stored under
+    /// `service_id`, in id order.
+    async fn ir_owned_infra_rows(service_id: i64) -> Vec<(i64, String)> {
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 2)
+            .await
+            .expect("connect");
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT id, name FROM policy.authz_policies WHERE service_id = $1 ORDER BY id",
+        )
+        .bind(service_id)
+        .fetch_all(&db.pool)
+        .await
+        .expect("read policies");
+        rows.into_iter()
+            .filter(|(_, n)| egret_policy_api::infra_names::is_ir_infra_name(n))
+            .collect()
+    }
+
+    /// SP2a final review I1: the build converges (and commits) the profile's
+    /// infrastructure rows for the NEW spec before the apply runs. A PUT that
+    /// switches impersonate → open converges every row away; when the apply
+    /// then fails, the spec is restored and the cluster still runs
+    /// impersonate, so the rows must be converged back for the restored spec.
+    /// Otherwise every delegated query is denied until some later recompile.
+    #[tokio::test]
+    async fn a_failed_update_reconverges_the_infra_rows_for_the_restored_spec() {
+        let Some(mut st) = converging_state().await else {
+            eprintln!("skipping a_failed_update_reconverges_the_infra_rows_for_the_restored_spec: DATABASE_URL not set");
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(FailingUpdateProvisioner));
+        let (engine, sid, profile) = bound_trino_engine(
+            &st,
+            serde_json::json!({ "delegationMode": "impersonate", "auth": {} }),
+        )
+        .await;
+        build_provision_req(&st, &engine)
+            .await
+            .expect("build_provision_req");
+        let before = ir_owned_infra_rows(sid).await;
+        assert!(
+            before
+                .iter()
+                .any(|(_, n)| n == crate::delegator_policy::IMPERSONATE_POLICY_NAME),
+            "the fixture must hold the delegator grant: {before:#?}"
+        );
+
+        let body = CreateEngineBody {
+            name: engine.name.clone(),
+            warehouse_id: None,
+            catalogs: Vec::new(),
+            image_version: None,
+            coordinator_replicas: 1,
+            worker_replicas: 1,
+            cpu_min: "1".into(),
+            cpu_max: "2".into(),
+            memory: "4Gi".into(),
+            trino_config: Some(serde_json::json!({ "delegationMode": "none", "auth": {} })),
+            authz_service_id: None,
+            kind: "trino".into(),
+            starrocks: None,
+            tls_cert_secret_ref: None,
+        };
+        let err = update_trino_engine(st.clone(), engine.clone(), body)
+            .await
+            .err()
+            .expect("the apply failure must surface");
+        assert!(matches!(err, CpError::ClusterApplyFailed(_)), "got {err:?}");
+
+        let reloaded = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.spec, engine.spec, "stored spec restored");
+        assert!(reloaded.is_impersonate_delegation());
+        // By name: the build's convergence deleted the rows and the
+        // re-convergence inserts them again, so their ids are new.
+        let names = |rows: Vec<(i64, String)>| {
+            rows.into_iter()
+                .map(|(_, n)| n)
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(
+            names(ir_owned_infra_rows(sid).await),
+            names(before),
+            "the infra rows must match the restored spec"
+        );
+        assert_user_baseline(&stored_policies(sid).await, &profile);
     }
 
     /// Live finding B-F2 turned on egret's own seed: once a profile holds a

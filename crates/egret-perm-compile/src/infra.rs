@@ -149,7 +149,7 @@ pub async fn converge_infra_in_tx(
             removed = ?sync.removed,
             admins_removed = ?named_before.difference(&named_now).collect::<Vec<_>>(),
             admins_added = ?named_now.difference(&named_before).collect::<Vec<_>>(),
-            "infrastructure policies converged; egret-admin now names exactly the engine admins"
+            "infrastructure policies converged"
         );
     }
     Ok(sync)
