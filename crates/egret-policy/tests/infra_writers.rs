@@ -7,11 +7,8 @@
 //! Every read is scoped to this fixture's own `service_id`.
 
 use egret_metastore::Db;
-use egret_policy::infra_names::{
-    is_egret_infrastructure_policy, IMPERSONATE_POLICY_NAME, QUERY_TIMEOUT_POLICY_NAME,
-};
+use egret_policy::infra_names::{is_egret_infrastructure_policy, QUERY_TIMEOUT_POLICY_NAME};
 use egret_policy::{PolicyStore, PolicyStoreError};
-use egret_policy_api::PolicyPort;
 use serde_json::json;
 
 async fn store() -> Option<(PolicyStore, sqlx::PgPool)> {
@@ -90,32 +87,6 @@ async fn the_default_trino_seeder_stamps_infra() {
     assert_all_infra(&owners(&pool, id).await, n);
 }
 
-/// `PolicyPort::create_infra_policy` stamps `infra` on the delegator's own
-/// name constants. (The rows under these names on an engine's profile are
-/// written by convergence, `egret_perm_compile::infra`, since governance SP2a.)
-#[tokio::test]
-async fn the_delegator_policy_port_call_stamps_infra_on_both_names() {
-    let Some((s, pool)) = store().await else {
-        return;
-    };
-    let id = trino_service(&s).await;
-    for name in [IMPERSONATE_POLICY_NAME, QUERY_TIMEOUT_POLICY_NAME] {
-        PolicyPort::create_infra_policy(&s, id, name, &json!({"name": name}))
-            .await
-            .expect("create infra policy");
-    }
-    let rows = owners(&pool, id).await;
-    assert_eq!(rows.len(), 2, "{rows:?}");
-    assert_all_infra(&rows, 2);
-
-    // Create semantics are preserved: a second create is AlreadyExists.
-    let again = PolicyPort::create_infra_policy(&s, id, IMPERSONATE_POLICY_NAME, &json!({})).await;
-    assert!(matches!(
-        again,
-        Err(egret_policy_api::PolicyError::AlreadyExists(_))
-    ));
-}
-
 #[tokio::test]
 async fn the_infra_writers_refuse_a_name_the_predicate_does_not_recognise() {
     let Some((s, pool)) = store().await else {
@@ -125,11 +96,6 @@ async fn the_infra_writers_refuse_a_name_the_predicate_does_not_recognise() {
     let human = "sales can read orders";
     assert!(!is_egret_infrastructure_policy("trino", human));
 
-    let created = s.create_infra_policy(id, human, &json!({})).await;
-    assert!(
-        matches!(created, Err(PolicyStoreError::BadRequest(_))),
-        "{created:?}"
-    );
     let upserted = s.upsert_infra_policy(id, human, &json!({})).await;
     assert!(
         matches!(upserted, Err(PolicyStoreError::BadRequest(_))),
@@ -140,14 +106,11 @@ async fn the_infra_writers_refuse_a_name_the_predicate_does_not_recognise() {
         "a refused write left a row"
     );
 
-    // The other cell: an infra name is accepted by both.
-    s.create_infra_policy(id, "egret-admin - catalog", &json!({}))
-        .await
-        .expect("infra name accepted by create");
+    // The other cell: an infra name is accepted.
     s.upsert_infra_policy(id, "all - catalog", &json!({}))
         .await
         .expect("infra name accepted by upsert");
-    assert_all_infra(&owners(&pool, id).await, 2);
+    assert_all_infra(&owners(&pool, id).await, 1);
 }
 
 /// SP4d-3 final review I-1: the default `all - …` set is Trino-shaped, so on a
@@ -169,11 +132,6 @@ async fn on_a_starrocks_profile_the_infra_writers_refuse_the_trino_default_shape
         matches!(upserted, Err(PolicyStoreError::BadRequest(_))),
         "{upserted:?}"
     );
-    let created = s.create_infra_policy(id, "all - catalog", &json!({})).await;
-    assert!(
-        matches!(created, Err(PolicyStoreError::BadRequest(_))),
-        "{created:?}"
-    );
     let seeded = s
         .seed_default_trino_policies(id, "sr-writers", "admin")
         .await;
@@ -187,7 +145,7 @@ async fn on_a_starrocks_profile_the_infra_writers_refuse_the_trino_default_shape
     );
 
     // The allow cell: a fixed infra name.
-    s.create_infra_policy(id, QUERY_TIMEOUT_POLICY_NAME, &json!({}))
+    s.upsert_infra_policy(id, QUERY_TIMEOUT_POLICY_NAME, &json!({}))
         .await
         .expect("delegator name on starrocks");
     assert_all_infra_on("starrocks", &owners(&pool, id).await, 1);

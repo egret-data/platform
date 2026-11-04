@@ -2951,7 +2951,7 @@ async fn the_policy_list_carries_each_rows_owner() {
     let token = session_for(&f, "list_owner", true).await;
     let (svc_name, svc_id) = seed_service(&f).await;
     f.store
-        .create_infra_policy(
+        .upsert_infra_policy(
             svc_id,
             "egret-query-timeout",
             &serde_json::json!({"name": "egret-query-timeout"}),

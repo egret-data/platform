@@ -2486,22 +2486,6 @@ impl PolicyStore {
             .await
     }
 
-    /// [`create_policy`](Self::create_policy) for egret's OWN infrastructure
-    /// policies (the delegator's two): same guards and errors, but the row is
-    /// stamped `managed_by = 'infra'`. Refuses a name that
-    /// [`is_egret_infrastructure_policy`] does not recognise on the profile's
-    /// type, so this writer cannot drift from the predicate that defines the
-    /// owner.
-    pub async fn create_infra_policy(
-        &self,
-        service_id: i64,
-        name: &str,
-        policy: &Value,
-    ) -> Result<i64, PolicyStoreError> {
-        self.insert_policy_owned_by(service_id, name, policy, "infra")
-            .await
-    }
-
     async fn insert_policy_owned_by(
         &self,
         service_id: i64,
