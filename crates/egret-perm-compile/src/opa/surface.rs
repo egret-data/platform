@@ -64,10 +64,10 @@ pub const OPA_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 /// refused, so it never refuses a different (right) secret.
 pub const NEGATIVE_TTL: Duration = Duration::from_secs(5);
 
-/// The most `(engine, secret)` verdicts held. Past it, expired verdicts are
-/// dropped first; if still full, the new verdict is simply not cached (the
-/// next request asks the verifier again), so a flood of distinct wrong
-/// secrets cannot grow the map.
+/// The most `(engine, secret)` verdicts held in each of the verified and the
+/// refused map. Past it, that map's expired verdicts are dropped first; if it
+/// is still full, the new verdict is simply not cached (the next request asks
+/// the verifier again), so a flood of distinct wrong secrets cannot grow it.
 pub const MAX_VERDICTS: usize = 4096;
 
 #[derive(Clone)]
@@ -82,11 +82,39 @@ type VerdictKey = (Uuid, [u8; 32]);
 
 /// Remembers only "this (engine, sha256(secret)) verified / was refused" (I3).
 /// Never the binding, never the profile, never the secret.
+///
+/// Verified and refused verdicts are held in separate maps, each capped at
+/// [`MAX_VERDICTS`], so a flood of distinct wrong secrets fills only the
+/// refused map and never stops a right secret from being remembered. The
+/// verified map holds only secrets the verifier accepted, which a caller
+/// without a valid secret cannot add to.
 pub struct VerifiedCache {
     ttl: Duration,
     negative_ttl: Duration,
-    /// `(engine, sha256(secret))` → (verified, expires).
-    verdicts: Mutex<HashMap<VerdictKey, (bool, Instant)>>,
+    verdicts: Mutex<Verdicts>,
+}
+
+#[derive(Default)]
+struct Verdicts {
+    /// `(engine, sha256(secret))` → expires.
+    verified: HashMap<VerdictKey, Instant>,
+    refused: HashMap<VerdictKey, Instant>,
+}
+
+/// Remember `key` in `map` until `expires`, unless the map is full of live
+/// entries.
+fn remember(
+    map: &mut HashMap<VerdictKey, Instant>,
+    key: VerdictKey,
+    expires: Instant,
+    now: Instant,
+) {
+    if map.len() >= MAX_VERDICTS && !map.contains_key(&key) {
+        map.retain(|_, e| *e > now);
+    }
+    if map.len() < MAX_VERDICTS || map.contains_key(&key) {
+        map.insert(key, expires);
+    }
 }
 
 impl VerifiedCache {
@@ -96,7 +124,7 @@ impl VerifiedCache {
         Self {
             ttl,
             negative_ttl: ttl.min(NEGATIVE_TTL),
-            verdicts: Mutex::new(HashMap::new()),
+            verdicts: Mutex::new(Verdicts::default()),
         }
     }
 
@@ -111,10 +139,13 @@ impl VerifiedCache {
         let key: VerdictKey = (engine, Sha256::digest(secret.as_bytes()).into());
         {
             let verdicts = self.verdicts.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some((ok, expires)) = verdicts.get(&key) {
-                if *expires > Instant::now() {
-                    return Ok(*ok);
-                }
+            let now = Instant::now();
+            let live = |m: &HashMap<VerdictKey, Instant>| m.get(&key).is_some_and(|e| *e > now);
+            if live(&verdicts.verified) {
+                return Ok(true);
+            }
+            if live(&verdicts.refused) {
+                return Ok(false);
             }
         }
         // An identity for another engine than the one asked about is a
@@ -124,13 +155,11 @@ impl VerifiedCache {
             .await?
             .is_some_and(|id| id.engine_id == engine);
         let now = Instant::now();
-        let expires = now + if ok { self.ttl } else { self.negative_ttl };
         let mut verdicts = self.verdicts.lock().unwrap_or_else(|p| p.into_inner());
-        if verdicts.len() >= MAX_VERDICTS && !verdicts.contains_key(&key) {
-            verdicts.retain(|_, (_, e)| *e > now);
-        }
-        if verdicts.len() < MAX_VERDICTS || verdicts.contains_key(&key) {
-            verdicts.insert(key, (ok, expires));
+        if ok {
+            remember(&mut verdicts.verified, key, now + self.ttl, now);
+        } else {
+            remember(&mut verdicts.refused, key, now + self.negative_ttl, now);
         }
         Ok(ok)
     }
@@ -222,8 +251,14 @@ impl Who<'_> {
 
     /// Log and count a refusal, and answer it.
     fn refuse(&self, reason: &str) -> Response {
-        self.denied(self.req.map(|r| &r.resource), reason);
-        self.route.refusal(reason)
+        self.refuse_logging(reason, reason)
+    }
+
+    /// A refusal whose log line carries more than the answer: `answered` goes
+    /// to the engine, `logged` only to egret's log.
+    fn refuse_logging(&self, answered: &str, logged: &str) -> Response {
+        self.denied(self.req.map(|r| &r.resource), logged);
+        self.route.refusal(answered)
     }
 
     /// An internal error: 500, so the plugin fails the query.
@@ -328,12 +363,12 @@ async fn admit(
     let snapshot = match state.cache.get(service_id) {
         Lookup::Ready(s) => s,
         Lookup::NotOpa => return Err(who.refuse("profile is not on OPA").into()),
-        Lookup::NotBuilt { error } => {
+        // The stored build error can name rules, tables, other users and
+        // database internals: it is logged, never answered.
+        Lookup::NotBuilt { error: None } => return Err(who.refuse("no snapshot: building").into()),
+        Lookup::NotBuilt { error: Some(e) } => {
             return Err(who
-                .refuse(&format!(
-                    "no snapshot: {}",
-                    error.as_deref().unwrap_or("building")
-                ))
+                .refuse_logging("no snapshot: build failed", &format!("no snapshot: {e:?}"))
                 .into())
         }
     };

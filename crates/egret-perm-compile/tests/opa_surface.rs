@@ -22,7 +22,7 @@ use axum::body::Body;
 use axum::http::Request;
 use egret_engine_mgmt_api::credential::{EngineCredentialVerifier, EngineIdentity};
 use egret_perm_compile::opa::cache::SnapshotCache;
-use egret_perm_compile::opa::surface::{VerifiedCache, NEGATIVE_TTL};
+use egret_perm_compile::opa::surface::{VerifiedCache, MAX_VERDICTS, NEGATIVE_TTL};
 use egret_perm_compile::{opa_surface, OpaState, OPA_SURFACE_PREFIX};
 use egret_perm_eval::{Snapshot, SnapshotInput};
 use egret_perm_ir::audience::{Audience, Member, MemberName, Via};
@@ -34,24 +34,43 @@ use tower::ServiceExt;
 const GOOD: uuid::Uuid = uuid::Uuid::from_u128(1); // bound to service 1 (on OPA, Ready)
 const GOOD2: uuid::Uuid = uuid::Uuid::from_u128(2); // bound to service 2 (not in the cache: a Ranger profile)
 const UNBOUND: uuid::Uuid = uuid::Uuid::from_u128(3); // verified, bound to nothing
-const RIGHT: &str = "right";
+const RIGHT: &str = "right"; // GOOD's secret
+const RIGHT2: &str = "right-2"; // GOOD2's secret
+const RIGHT3: &str = "right-3"; // UNBOUND's secret
 const WRONG: &str = "wrong";
 
+/// Each engine has its own secret: one engine's secret is wrong for another.
 struct Stub {
     calls: AtomicUsize,
+    secrets: Vec<(uuid::Uuid, &'static str)>,
+}
+
+impl Stub {
+    fn new(secrets: &[(uuid::Uuid, &'static str)]) -> Self {
+        Stub {
+            calls: AtomicUsize::new(0),
+            secrets: secrets.to_vec(),
+        }
+    }
+
+    fn standard() -> Self {
+        Stub::new(&[(GOOD, RIGHT), (GOOD2, RIGHT2), (UNBOUND, RIGHT3)])
+    }
 }
 
 #[async_trait::async_trait]
 impl EngineCredentialVerifier for Stub {
     async fn verify(&self, id: uuid::Uuid, pw: &str) -> Result<Option<EngineIdentity>, String> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(
-            ([GOOD, GOOD2, UNBOUND].contains(&id) && pw == RIGHT).then_some(EngineIdentity {
+        Ok(self
+            .secrets
+            .iter()
+            .any(|(e, s)| *e == id && *s == pw)
+            .then_some(EngineIdentity {
                 engine_id: id,
                 // Deliberately wrong: the surface must use the cache's binding.
                 authz_service_id: Some(99),
-            }),
-        )
+            }))
     }
 }
 
@@ -200,9 +219,7 @@ fn app_with(credentials: VerifiedCache) -> App {
     cache.bind_for_test(GOOD, Some(1));
     cache.bind_for_test(GOOD2, Some(2));
     cache.bind_for_test(UNBOUND, None);
-    let stub = Arc::new(Stub {
-        calls: AtomicUsize::new(0),
-    });
+    let stub = Arc::new(Stub::standard());
     let router = opa_surface(OpaState {
         cache: Arc::clone(&cache),
         verifier: stub.clone(),
@@ -294,29 +311,32 @@ fn every_route() -> Vec<(&'static str, Value)> {
 }
 
 /// The refusal each route must answer: 200 false / [] on the decision
-/// routes, 403 with an error on the value routes (never `[]` or `null`).
-async fn assert_refused_everywhere(app: &axum::Router, engine: &str, secret: &str, why: &str) {
+/// routes, 403 `{"error": reason}` exactly on the value routes (never `[]` or
+/// `null`).
+async fn assert_refused_everywhere(app: &axum::Router, engine: &str, secret: &str, reason: &str) {
     for (route, action) in every_route() {
         let (status, v) = post(app, route, engine, secret, action).await;
         match route {
             "/allow" => assert_eq!(
                 (status, v),
                 (200, json!({"result": false})),
-                "{why} {route}"
+                "{reason} {route}"
             ),
-            "/batch" => assert_eq!((status, v), (200, json!({"result": []})), "{why} {route}"),
-            _ => {
-                assert_eq!(status, 403, "{why} {route}: {v}");
-                assert!(v["error"].is_string(), "{why} {route}: {v}");
-                assert_eq!(
-                    v.as_object().map(|o| o.len()),
-                    Some(1),
-                    "{why} {route}: {v}"
-                );
-            }
+            "/batch" => assert_eq!(
+                (status, v),
+                (200, json!({"result": []})),
+                "{reason} {route}"
+            ),
+            _ => assert_eq!(
+                (status, v),
+                (403, json!({ "error": reason })),
+                "{reason} {route}"
+            ),
         }
     }
 }
+
+const REFUSED: &str = "engine credential refused";
 
 // ---- tests ----
 
@@ -447,55 +467,89 @@ async fn the_binding_comes_from_the_cache_not_the_verifier() {
 #[tokio::test]
 async fn wrong_secret_is_refused_on_every_route() {
     let a = app();
-    assert_refused_everywhere(&a.router, &GOOD.to_string(), WRONG, "wrong secret").await;
-    assert_refused_everywhere(&a.router, &GOOD.to_string(), "", "empty secret").await;
+    assert_refused_everywhere(&a.router, &GOOD.to_string(), WRONG, REFUSED).await;
+    assert_refused_everywhere(&a.router, &GOOD.to_string(), "", REFUSED).await;
 }
 
 #[tokio::test]
 async fn unknown_engine_is_refused_on_every_route() {
     let a = app();
     let e = uuid::Uuid::new_v4().to_string();
-    assert_refused_everywhere(&a.router, &e, RIGHT, "unknown engine").await;
+    // Indistinguishable from a wrong secret.
+    assert_refused_everywhere(&a.router, &e, RIGHT, REFUSED).await;
 }
 
 #[tokio::test]
 async fn a_ranger_profile_is_refused_on_every_route() {
     let a = app();
-    assert_refused_everywhere(&a.router, &GOOD2.to_string(), RIGHT, "ranger profile").await;
+    assert_refused_everywhere(
+        &a.router,
+        &GOOD2.to_string(),
+        RIGHT2,
+        "profile is not on OPA",
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn an_unbound_engine_is_refused_on_every_route() {
     let a = app();
-    assert_refused_everywhere(&a.router, &UNBOUND.to_string(), RIGHT, "unbound").await;
+    assert_refused_everywhere(
+        &a.router,
+        &UNBOUND.to_string(),
+        RIGHT3,
+        "engine is bound to no profile served on OPA",
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn a_not_built_profile_is_refused_on_every_route() {
     let a = app();
-    a.cache
-        .insert_not_built_for_test(3, Some("lowering failed".into()));
+    // A stored build error can name rules, tables and other users: it is
+    // logged, and the engine gets a generic reason.
+    let stored = "compiling rule \"r-7f2\": cleared user \"carol-91\" undecidable";
+    a.cache.insert_not_built_for_test(3, Some(stored.into()));
     a.cache.bind_for_test(GOOD, Some(3));
-    assert_refused_everywhere(&a.router, &GOOD.to_string(), RIGHT, "not built").await;
-    let (_, v) = post(
+    assert_refused_everywhere(
+        &a.router,
+        &GOOD.to_string(),
+        RIGHT,
+        "no snapshot: build failed",
+    )
+    .await;
+    let marker = "notbuilt-user-3e8a";
+    let (status, v) = send(
         &a.router,
         "/row_filters",
-        &GOOD.to_string(),
-        RIGHT,
-        json!({"operation": "GetRowFilters", "resource": table()}),
+        body(
+            marker,
+            &GOOD.to_string(),
+            RIGHT,
+            json!({"operation": "GetRowFilters", "resource": table()}),
+        ),
     )
     .await;
-    assert_eq!(v, json!({"error": "no snapshot: lowering failed"}));
+    assert_eq!(
+        (status, &v),
+        (403, &json!({"error": "no snapshot: build failed"}))
+    );
+    assert!(!v.to_string().contains("carol-91"), "{v}");
+    assert!(!v.to_string().contains("r-7f2"), "{v}");
+    let log = log_text();
+    let lines: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains(marker) && l.contains("opa: denied"))
+        .collect();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].contains("carol-91") && lines[0].contains("r-7f2"),
+        "the stored error is the logged reason: {}",
+        lines[0]
+    );
+
     a.cache.insert_not_built_for_test(3, None);
-    let (_, v) = post(
-        &a.router,
-        "/column_mask",
-        &GOOD.to_string(),
-        RIGHT,
-        json!({"operation": "GetColumnMask", "resource": column("c")}),
-    )
-    .await;
-    assert_eq!(v, json!({"error": "no snapshot: building"}));
+    assert_refused_everywhere(&a.router, &GOOD.to_string(), RIGHT, "no snapshot: building").await;
 }
 
 #[tokio::test]
@@ -787,6 +841,41 @@ async fn a_verified_secret_is_remembered_within_the_ttl_and_a_refused_one_briefl
     assert_eq!(calls(), 4);
 }
 
+#[tokio::test]
+async fn one_engines_secret_does_not_admit_another_bound_ready_engine() {
+    let a = app();
+    // GOOD2 is now bound to the same Ready profile as GOOD.
+    a.cache.bind_for_test(GOOD2, Some(1));
+    let (route, action) = every_route().remove(0);
+    assert_eq!(
+        post(&a.router, route, &GOOD.to_string(), RIGHT, action.clone()).await,
+        (200, json!({"result": true}))
+    );
+    // GOOD's secret, freshly verified for GOOD, presented as GOOD2.
+    assert_refused_everywhere(&a.router, &GOOD2.to_string(), RIGHT, REFUSED).await;
+    // GOOD2's own secret is admitted on the same profile.
+    assert_eq!(
+        post(&a.router, route, &GOOD2.to_string(), RIGHT2, action).await,
+        (200, json!({"result": true}))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_flood_of_wrong_secrets_does_not_stop_a_right_one_being_remembered() {
+    let stub = Stub::standard();
+    let cache = VerifiedCache::new(Duration::from_secs(5));
+    for i in 0..MAX_VERDICTS + 10 {
+        assert!(!cache
+            .verified(&stub, GOOD, &format!("wrong-{i}"))
+            .await
+            .expect("verdict"));
+    }
+    let before = stub.calls.load(Ordering::SeqCst);
+    assert!(cache.verified(&stub, GOOD, RIGHT).await.expect("verdict"));
+    assert!(cache.verified(&stub, GOOD, RIGHT).await.expect("verdict"));
+    assert_eq!(stub.calls.load(Ordering::SeqCst), before + 1);
+}
+
 #[tokio::test(start_paused = true)]
 async fn the_credential_verdict_is_per_engine() {
     let a = app();
@@ -868,45 +957,131 @@ async fn a_denied_allow_and_a_refusal_each_log_one_line() {
 
 #[tokio::test]
 async fn no_log_or_body_carries_the_secret() {
-    let secret = "s3cr3t-value";
-    let a = app();
-    let mut bodies = Vec::new();
-    for engine in [GOOD, GOOD2, UNBOUND, uuid::Uuid::new_v4()] {
-        for (route, action) in every_route() {
-            let (_, v) = post(&a.router, route, &engine.to_string(), secret, action).await;
-            bodies.push(v.to_string());
+    // Every engine's secret is ACCEPTED, and carries this stem.
+    const STEM: &str = "s3cr3t-value";
+    const BUILDING: uuid::Uuid = uuid::Uuid::from_u128(4); // bound to a NotBuilt profile
+    let secrets: &[(uuid::Uuid, &'static str)] = &[
+        (GOOD, "s3cr3t-value-1"),
+        (GOOD2, "s3cr3t-value-2"),
+        (UNBOUND, "s3cr3t-value-3"),
+        (BUILDING, "s3cr3t-value-4"),
+    ];
+    logs();
+    let two_masks = "secretlog-twomask-user";
+    let cache = Arc::new(SnapshotCache::default());
+    cache.insert_for_test(
+        1,
+        snapshot(
+            1,
+            vec![st(
+                9,
+                who(&[two_masks]),
+                path("lake", Some("s"), Some("t"), Some("c")),
+                Effect::Mask {
+                    mask_type: "MASK_HASH".into(),
+                    expression: None,
+                },
+            )],
+        ),
+    );
+    cache.insert_not_built_for_test(3, Some("lowering failed".into()));
+    cache.bind_for_test(GOOD, Some(1));
+    cache.bind_for_test(GOOD2, Some(2));
+    cache.bind_for_test(BUILDING, Some(3));
+    let stub = Arc::new(Stub::new(secrets));
+    let router = opa_surface(OpaState {
+        cache: Arc::clone(&cache),
+        verifier: stub.clone(),
+        credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
+    });
+
+    let mut answers = Vec::new();
+    // Admitted (allowed, denied, TwoMasks 500) and every post-auth refusal
+    // (NotOpa, unbound, NotBuilt), each with the engine's own right secret.
+    for (engine, secret) in secrets {
+        for user in ["ann", "bob", two_masks] {
+            for (route, action) in every_route() {
+                answers.push(
+                    send(
+                        &router,
+                        route,
+                        body(user, &engine.to_string(), secret, action),
+                    )
+                    .await,
+                );
+            }
         }
     }
-    // A malformed request carrying the secret, and an engine of the wrong type.
+    let statuses: std::collections::BTreeSet<u16> = answers.iter().map(|(s, _)| *s).collect();
+    assert_eq!(
+        statuses,
+        [200, 403, 500].into(),
+        "the admitted path, a refusal and a 500 were all driven"
+    );
+    assert!(answers.contains(&(200, json!({"result": true}))));
+    // A wrong secret, an unknown engine, a malformed request and a mistyped
+    // engine, each carrying a secret.
+    let mut bodies: Vec<String> = answers.iter().map(|(_, v)| v.to_string()).collect();
     for (route, action) in every_route() {
-        let mut b = body("ann", &GOOD.to_string(), secret, action.clone());
+        bodies.push(
+            post(
+                &router,
+                route,
+                &GOOD.to_string(),
+                "s3cr3t-value-x",
+                action.clone(),
+            )
+            .await
+            .1
+            .to_string(),
+        );
+        bodies.push(
+            post(
+                &router,
+                route,
+                &uuid::Uuid::new_v4().to_string(),
+                "s3cr3t-value-1",
+                action.clone(),
+            )
+            .await
+            .1
+            .to_string(),
+        );
+        let mut b = body("ann", &GOOD.to_string(), "s3cr3t-value-1", action.clone());
         b["input"]["action"]["operation"] = json!(7);
-        bodies.push(send(&a.router, route, b).await.1.to_string());
-        let mut b = body("ann", &GOOD.to_string(), secret, action);
-        b["input"]["context"]["properties"]["egret.engine"] = json!([secret]);
-        bodies.push(send(&a.router, route, b).await.1.to_string());
+        bodies.push(send(&router, route, b).await.1.to_string());
+        let mut b = body("ann", &GOOD.to_string(), "s3cr3t-value-1", action);
+        b["input"]["context"]["properties"]["egret.engine"] = json!(["s3cr3t-value-1"]);
+        bodies.push(send(&router, route, b).await.1.to_string());
     }
-    // The verifier failing on a request carrying it.
+    // The verifier failing on a request carrying a secret.
     let down = opa_surface(OpaState {
-        cache: Arc::clone(&a.cache),
+        cache,
         verifier: Arc::new(Down),
         credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
     });
     for (route, action) in every_route() {
         bodies.push(
-            post(&down, route, &GOOD.to_string(), secret, action)
+            post(&down, route, &GOOD.to_string(), "s3cr3t-value-1", action)
                 .await
                 .1
                 .to_string(),
         );
     }
     for b in &bodies {
-        assert!(!b.contains(secret), "a body carries the secret");
+        assert!(!b.contains(STEM), "a body carries a secret");
     }
     let log = log_text();
     assert!(log.contains("opa: denied"), "nothing was logged at all");
-    assert!(log.contains("connection refused"), "the 500 was not logged");
-    assert!(!log.contains(secret), "a log line carries the secret");
+    assert!(
+        log.contains("two masks on one column"),
+        "the TwoMasks 500 was not logged"
+    );
+    assert!(
+        log.contains("connection refused"),
+        "the verifier 500 was not logged"
+    );
+    assert!(!log.contains(STEM), "a log line carries a secret");
 }
 
 /// A verifier that vouches for GOOD whatever it was asked about.
@@ -940,5 +1115,5 @@ async fn an_identity_for_another_engine_is_a_refusal() {
         post(&router, route, &GOOD.to_string(), RIGHT, action).await,
         (200, json!({"result": true}))
     );
-    assert_refused_everywhere(&router, &GOOD2.to_string(), RIGHT, "confused verifier").await;
+    assert_refused_everywhere(&router, &GOOD2.to_string(), RIGHT, REFUSED).await;
 }
