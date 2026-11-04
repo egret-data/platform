@@ -31,12 +31,26 @@
 //! queries, or a database error (`CompileError::Db`/`LockTimeout`) from
 //! either lowering. A database error aborts the Postgres transaction, so
 //! nothing read after it means anything. The entry's key becomes `None`, so
-//! the next period retries; nothing is recorded in `compile_runs`; and **a
-//! previous snapshot is kept** (a profile with none stays not built). That is
-//! as safe as dropping it: the previous snapshot was built and checked from
-//! committed state at an older key, and any change since bumped the key,
-//! which is read again every period until the read succeeds. The answer is
-//! never looser than the last verified state for longer than the outage.
+//! the next period retries, and a single unread records nothing in
+//! `compile_runs`. Whether the held snapshot survives depends on what the
+//! build learnt before the error:
+//!
+//! - **The key was read and differs from the key the held snapshot was
+//!   verified at** (a later step failed: the stored-state queries or either
+//!   lowering): the snapshot is **dropped** and the profile denies. The state
+//!   it was verified against has changed (an operator row may have been
+//!   added, an admin disabled); serving it while the error lasts, which for a
+//!   deterministic sqlx error is forever, would answer from state the store
+//!   no longer holds.
+//! - **The key could not be read** (begin, `SET TRANSACTION` or the key read
+//!   failed), or it equals the verified key: the snapshot is **kept**. While
+//!   the database cannot be read, no commit can land either, so the state
+//!   the snapshot was verified at is the latest committed state this
+//!   refresher could have seen.
+//! - **Bound:** at [`MAX_UNREAD`] consecutive unread outcomes (any other
+//!   outcome resets the count) any held snapshot is dropped and one failure
+//!   is recorded, `"OPA snapshot: state unreadable for {n} refreshes:
+//!   {err}"`. Nothing more is recorded until the count resets.
 //!
 //! **Which key is authoritative.** The entry's key is the key the last build
 //! READ; the refresher compares against it. [`Snapshot::key`] is the key the
@@ -91,12 +105,21 @@ impl std::fmt::Debug for Lookup {
     }
 }
 
+/// Consecutive unread refreshes after which a profile's held snapshot is
+/// dropped and one failure is recorded (about 30 s at the 1 s period).
+pub const MAX_UNREAD: u32 = 30;
+
 struct CacheEntry {
     /// The key the last build read (authoritative for the refresh); None:
     /// the state could not be read, so the next refresh retries.
     key: Option<(i64, i64)>,
+    /// The key the last deterministic outcome was decided at: what the held
+    /// snapshot, if any, was verified against. An unread leaves it as it was.
+    verified: Option<(i64, i64)>,
     snapshot: Option<Arc<Snapshot>>,
     error: Option<String>,
+    /// Consecutive unread outcomes; any other outcome resets it.
+    unread: u32,
 }
 
 #[derive(Default)]
@@ -138,9 +161,12 @@ enum Outcome {
     Failed {
         error: String,
     },
-    /// The entry keeps whatever snapshot it held.
+    /// `read`: the key the build read before it failed; None: unknown. The
+    /// held snapshot is kept only when `read` is unknown or equals the key
+    /// that snapshot was verified at.
     Unread {
-        error: String,
+        cause: String,
+        read: Option<(i64, i64)>,
     },
 }
 
@@ -234,50 +260,74 @@ impl SnapshotCache {
                     tracing::warn!(service_id = id, error = %e, "could not record the OPA snapshot failure");
                 }
             }
-            self.apply(id, built, &mut report);
+            if let Some(msg) = self.apply(id, built, &mut report) {
+                if let Err(e) = crate::compile_runs::record_compile_failure(
+                    pool,
+                    id,
+                    &format!("OPA snapshot: {msg}"),
+                )
+                .await
+                {
+                    tracing::warn!(service_id = id, error = %e, "could not record the OPA snapshot failure");
+                }
+            }
         }
         Ok(report)
     }
 
     /// Store one build's outcome as `id`'s entry.
-    fn apply(&self, id: i64, built: Built, report: &mut RefreshReport) {
+    /// Store one build's outcome as `id`'s entry. Some: a failure to record
+    /// (the unread bound was reached), without its `OPA snapshot: ` prefix.
+    fn apply(&self, id: i64, built: Built, report: &mut RefreshReport) -> Option<String> {
         let mut state = self.state.write().unwrap_or_else(|p| p.into_inner());
-        let held = state.entries.get(&id).and_then(|e| e.snapshot.clone());
+        let decided = |snapshot: Option<Snapshot>, error: Option<String>| CacheEntry {
+            key: built.key,
+            verified: built.key,
+            snapshot: snapshot.map(Arc::new),
+            error,
+            unread: 0,
+        };
+        let mut record = None;
         let entry = match built.outcome {
             Outcome::Rebuilt(s) => {
                 report.rebuilt.push(id);
-                CacheEntry {
-                    key: built.key,
-                    snapshot: Some(Arc::new(s)),
-                    error: None,
-                }
+                decided(Some(s), None)
             }
             Outcome::Spliced { snapshot, error } => {
                 report.spliced.push(id);
-                CacheEntry {
-                    key: built.key,
-                    snapshot: Some(Arc::new(snapshot)),
-                    error: Some(error),
-                }
+                decided(Some(snapshot), Some(error))
             }
             Outcome::Failed { error } => {
                 report.failed.push(id);
-                CacheEntry {
-                    key: built.key,
-                    snapshot: None,
-                    error: Some(error),
-                }
+                decided(None, Some(error))
             }
-            Outcome::Unread { error } => {
+            Outcome::Unread { cause, read } => {
                 report.unread.push(id);
+                let (held, verified, count) = match state.entries.get(&id) {
+                    Some(e) => (e.snapshot.clone(), e.verified, e.unread + 1),
+                    None => (None, None, 1),
+                };
+                // The key moved since the snapshot was verified: it no longer
+                // describes the store.
+                let still_current = read.is_none() || read == verified;
+                let mut snapshot = if still_current { held } else { None };
+                if count >= MAX_UNREAD {
+                    snapshot = None;
+                }
+                if count == MAX_UNREAD {
+                    record = Some(format!("state unreadable for {count} refreshes: {cause}"));
+                }
                 CacheEntry {
-                    key: built.key,
-                    snapshot: held,
-                    error: Some(error),
+                    key: None,
+                    verified,
+                    snapshot,
+                    error: Some(format!("the profile's state could not be read: {cause}")),
+                    unread: count,
                 }
             }
         };
         state.entries.insert(id, entry);
+        record
     }
 }
 
@@ -287,13 +337,12 @@ fn is_transient(e: &CompileError) -> bool {
     matches!(e, CompileError::Db(_) | CompileError::LockTimeout(_))
 }
 
-fn unread(id: i64, e: String) -> Built {
+/// `read`: the key the build read before `e`; None: it could not be read.
+fn unread(id: i64, read: Option<(i64, i64)>, e: String) -> Built {
     tracing::warn!(service_id = id, error = %e, "OPA snapshot: could not read the profile; retrying next period");
     Built {
         key: None,
-        outcome: Outcome::Unread {
-            error: format!("the profile's state could not be read: {e}"),
-        },
+        outcome: Outcome::Unread { cause: e, read },
         record: None,
     }
 }
@@ -315,13 +364,13 @@ fn failed(id: i64, key: (i64, i64), error: String) -> Built {
 async fn build_entry(pool: &PgPool, id: i64, previous: Option<Arc<Snapshot>>) -> Built {
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
-        Err(e) => return unread(id, e.to_string()),
+        Err(e) => return unread(id, None, e.to_string()),
     };
     if let Err(e) = sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         .execute(&mut *tx)
         .await
     {
-        return unread(id, e.to_string());
+        return unread(id, None, e.to_string());
     }
     let key: (i64, i64) = match sqlx::query_as(
         "SELECT policy_version, tag_version FROM policy.authz_services WHERE id = $1",
@@ -331,7 +380,7 @@ async fn build_entry(pool: &PgPool, id: i64, previous: Option<Arc<Snapshot>>) ->
     .await
     {
         Ok(k) => k,
-        Err(e) => return unread(id, e.to_string()),
+        Err(e) => return unread(id, None, e.to_string()),
     };
 
     // (a) The stored-state checks (C8).
@@ -345,7 +394,7 @@ async fn build_entry(pool: &PgPool, id: i64, previous: Option<Arc<Snapshot>>) ->
             };
         }
         Ok(None) => {}
-        Err(e) => return unread(id, e),
+        Err(e) => return unread(id, Some(key), e),
     }
 
     // (b) data ++ infrastructure; (c) on a data-lowering failure, fresh
@@ -359,7 +408,7 @@ async fn build_entry(pool: &PgPool, id: i64, previous: Option<Arc<Snapshot>>) ->
         ),
         // The transaction is aborted: lowering the infrastructure on it
         // would only fail too.
-        Err(e) if is_transient(&e) => unread(id, e.to_string()),
+        Err(e) if is_transient(&e) => unread(id, Some(key), e.to_string()),
         Err(e) => {
             let infra = lower_infra_via(&mut tx, id, MissingUsername::Omit).await;
             outcome_from_data_error(id, key, e, infra, previous)
@@ -405,12 +454,12 @@ fn outcome_from_data_error(
     previous: Option<Arc<Snapshot>>,
 ) -> Built {
     if is_transient(&error) {
-        return unread(id, error.to_string());
+        return unread(id, Some(key), error.to_string());
     }
     match infra {
         Ok(Some(infra)) => spliced_or_failed(id, key, error.to_string(), infra, previous),
         Ok(None) => failed(id, key, error.to_string()),
-        Err(e) if is_transient(&e) => unread(id, e.to_string()),
+        Err(e) if is_transient(&e) => unread(id, Some(key), e.to_string()),
         Err(e) => failed(
             id,
             key,
@@ -756,7 +805,7 @@ mod tests {
     }
 
     #[test]
-    fn a_database_error_is_unread_retried_unrecorded_and_keeps_the_previous_snapshot() {
+    fn a_database_error_at_the_verified_key_is_unread_unrecorded_and_keeps_the_held_snapshot() {
         let cache = SnapshotCache::default();
         let mut report = RefreshReport::default();
         let ready = outcome_from_parts(
@@ -792,6 +841,137 @@ mod tests {
             let state = cache.state.read().unwrap();
             assert_eq!(state.entries[&ID].key, None, "retried next period");
         }
+    }
+
+    /// A cache holding a Ready snapshot verified at `KEY`.
+    fn ready_cache() -> SnapshotCache {
+        let cache = SnapshotCache::default();
+        let built = outcome_from_parts(
+            ID,
+            KEY,
+            parts(vec![grant_read("ann", "lake")], vec![root()]),
+            None,
+        );
+        assert!(cache
+            .apply(ID, built, &mut RefreshReport::default())
+            .is_none());
+        assert!(matches!(cache.get(ID), Lookup::Ready(_)));
+        cache
+    }
+
+    fn apply(cache: &SnapshotCache, built: Built) -> Option<String> {
+        cache.apply(ID, built, &mut RefreshReport::default())
+    }
+
+    fn is_ready(cache: &SnapshotCache) -> bool {
+        matches!(cache.get(ID), Lookup::Ready(_))
+    }
+
+    #[test]
+    fn a_moved_key_then_a_database_error_denies_rather_than_serving_the_held_snapshot() {
+        let moved = (KEY.0 + 1, KEY.1);
+        for built in [
+            // The data lowering failed after the key was read.
+            outcome_from_data_error(
+                ID,
+                moved,
+                CompileError::Db("connection reset".into()),
+                Ok(None),
+                Some(previous()),
+            ),
+            // The infrastructure lowering failed after the key was read.
+            outcome_from_data_error(
+                ID,
+                moved,
+                user_ref_error(),
+                Err(CompileError::LockTimeout("lock timeout".into())),
+                Some(previous()),
+            ),
+            // A stored-state query failed after the key was read.
+            unread(ID, Some(moved), "decode error".into()),
+        ] {
+            // Arrange
+            let cache = ready_cache();
+
+            // Act
+            let record = apply(&cache, built);
+
+            // Assert
+            assert!(record.is_none(), "one unread records nothing");
+            assert!(
+                matches!(cache.get(ID), Lookup::NotBuilt { error: Some(ref e) } if e.contains("could not be read")),
+                "the held snapshot was served past a moved key: {:?}",
+                cache.get(ID)
+            );
+            assert_eq!(cache.state.read().unwrap().entries[&ID].key, None);
+            // An unknown key afterwards does not bring it back.
+            apply(&cache, unread(ID, None, "connection refused".into()));
+            assert!(!is_ready(&cache));
+        }
+    }
+
+    #[test]
+    fn an_unknown_key_then_a_database_error_keeps_the_held_snapshot() {
+        // Arrange
+        let cache = ready_cache();
+
+        // Act: begin, SET TRANSACTION or the key read failed.
+        let record = apply(&cache, unread(ID, None, "connection refused".into()));
+
+        // Assert
+        assert!(record.is_none());
+        assert!(is_ready(&cache), "{:?}", cache.get(ID));
+        assert_eq!(
+            cache.state.read().unwrap().entries[&ID].key,
+            None,
+            "retried"
+        );
+
+        // Act: next period the key reads as the verified one, and a later step fails.
+        apply(&cache, unread(ID, Some(KEY), "decode error".into()));
+
+        // Assert: the key did not move, so the snapshot still describes the store.
+        assert!(is_ready(&cache), "{:?}", cache.get(ID));
+    }
+
+    #[test]
+    fn the_unread_bound_drops_the_held_snapshot_and_records_once() {
+        // Arrange
+        let cache = ready_cache();
+        let blip = || unread(ID, None, "connection refused".into());
+
+        // Act / Assert: below the bound, kept and unrecorded.
+        for n in 1..MAX_UNREAD {
+            assert_eq!(apply(&cache, blip()), None, "refresh {n}");
+            assert!(is_ready(&cache), "refresh {n}");
+        }
+        // At the bound: dropped, recorded once.
+        assert_eq!(
+            apply(&cache, blip()),
+            Some(format!(
+                "state unreadable for {MAX_UNREAD} refreshes: connection refused"
+            ))
+        );
+        assert!(!is_ready(&cache));
+        // Past it: still dropped, not recorded again.
+        assert_eq!(apply(&cache, blip()), None);
+        assert!(!is_ready(&cache));
+
+        // Any other outcome resets the count.
+        let rebuilt = outcome_from_parts(
+            ID,
+            KEY,
+            parts(vec![grant_read("ann", "lake")], vec![root()]),
+            None,
+        );
+        assert_eq!(apply(&cache, rebuilt), None);
+        assert!(is_ready(&cache));
+        for n in 1..MAX_UNREAD {
+            assert_eq!(apply(&cache, blip()), None, "after reset, refresh {n}");
+            assert!(is_ready(&cache), "after reset, refresh {n}");
+        }
+        assert!(apply(&cache, blip()).is_some(), "the bound fires again");
+        assert!(!is_ready(&cache));
     }
 
     #[test]
