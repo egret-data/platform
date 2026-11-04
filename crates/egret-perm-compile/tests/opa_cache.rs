@@ -25,6 +25,10 @@ use serde_json::json;
 use uuid::Uuid;
 
 static SEEDED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+/// One test at a time: every cache refreshes every OPA profile of the shared
+/// database, so a concurrent test's refresh would write the `compile_runs`
+/// row of another test's profile.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn db() -> Db {
     let dsn = egret_test_db::url().await.expect("a test database");
@@ -100,6 +104,15 @@ async fn compile_error(db: &Db, profile: i64) -> Option<String> {
         .await
         .expect("compile run")
         .flatten()
+}
+
+/// When the profile's last compile run was written (a recorded failure moves it).
+async fn attempted_at(db: &Db, profile: i64) -> String {
+    sqlx::query_scalar("SELECT attempted_at::text FROM perm.compile_runs WHERE service_id = $1")
+        .bind(profile)
+        .fetch_one(&db.pool)
+        .await
+        .expect("a compile run")
 }
 
 async fn recompile(db: &Db, profile: i64) {
@@ -217,6 +230,7 @@ async fn ready_store(db: &Db, prefix: &str, cache: &SnapshotCache, names: &mut N
 #[tokio::test]
 async fn a_ranger_profile_is_not_cached_and_an_opa_profile_is_built_once_per_version() {
     // Arrange
+    let _serial = SERIAL.lock().await;
     let db = db().await;
     let mut names = Names::default();
     let st = store(&db, "oc1", open(), &mut names).await;
@@ -271,6 +285,7 @@ async fn a_ranger_profile_is_not_cached_and_an_opa_profile_is_built_once_per_ver
 #[tokio::test]
 async fn switching_back_to_ranger_drops_the_entry_once_no_engine_runs_opa() {
     // Arrange
+    let _serial = SERIAL.lock().await;
     let db = db().await;
     let mut names = Names::default();
     let cache = SnapshotCache::default();
@@ -307,6 +322,7 @@ async fn switching_back_to_ranger_drops_the_entry_once_no_engine_runs_opa() {
 #[tokio::test]
 async fn bindings_follow_the_engine_rows_every_refresh() {
     // Arrange
+    let _serial = SERIAL.lock().await;
     let db = db().await;
     let mut names = Names::default();
     let cache = SnapshotCache::default();
@@ -330,6 +346,7 @@ async fn bindings_follow_the_engine_rows_every_refresh() {
 #[tokio::test]
 async fn a_failed_build_still_drops_a_disabled_admins_all_access() {
     // Arrange: an engine admin, a qualifying impersonate engine; built once.
+    let _serial = SERIAL.lock().await;
     let db = db().await;
     let mut names = Names::default();
     let cache = SnapshotCache::default();
@@ -368,9 +385,11 @@ async fn a_failed_build_still_drops_a_disabled_admins_all_access() {
     egret_perm_compile::set_user_status_and_recompile(&db.pool, root, "disabled")
         .await
         .expect("the kill switch waits on no compile");
-    if key_of(&db, st.profile).await == before {
-        bump(&db, st.profile).await;
-    }
+    assert_ne!(
+        key_of(&db, st.profile).await,
+        before,
+        "the kill switch must move the version key"
+    );
 
     // Act
     let report = refresh(&cache, &db).await;
@@ -397,6 +416,7 @@ async fn a_failed_build_still_drops_a_disabled_admins_all_access() {
 #[tokio::test]
 async fn a_hand_written_tag_policy_added_after_the_switch_makes_the_profile_deny() {
     // Arrange
+    let _serial = SERIAL.lock().await;
     let db = db().await;
     let mut names = Names::default();
     let cache = SnapshotCache::default();
@@ -427,11 +447,21 @@ async fn a_hand_written_tag_policy_added_after_the_switch_makes_the_profile_deny
     assert!(error.contains("gold_oc5_trino_tag holds 1"), "{error}");
     let recorded = compile_error(&db, st.profile).await.expect("recorded");
     assert_eq!(recorded, format!("OPA snapshot: {error}"));
+    let attempted = attempted_at(&db, st.profile).await;
+
+    // Act: nothing moved.
+    let again = refresh(&cache, &db).await;
+
+    // Assert: the refused key is remembered; nothing is rebuilt or recorded again.
+    assert!(listed(&again, st.profile).is_empty(), "{again:?}");
+    assert_eq!(attempted_at(&db, st.profile).await, attempted);
+    not_built_error(&cache, st.profile);
 }
 
 #[tokio::test]
 async fn a_hand_written_profile_policy_makes_the_profile_deny() {
     // Arrange
+    let _serial = SERIAL.lock().await;
     let db = db().await;
     let mut names = Names::default();
     let cache = SnapshotCache::default();
@@ -465,6 +495,7 @@ async fn a_hand_written_profile_policy_makes_the_profile_deny() {
 
 #[tokio::test]
 async fn an_all_defaults_row_or_a_stored_overlap_makes_the_profile_deny() {
+    let _serial = SERIAL.lock().await;
     let db = db().await;
     let mut names = Names::default();
     let cache = SnapshotCache::default();

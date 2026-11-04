@@ -22,10 +22,34 @@
 //!    lowering is broken. With no previous snapshot, or when the
 //!    infrastructure cannot be lowered either, the profile is not built.
 //!
-//! The key a build read is recorded whatever the outcome, so the same failure
-//! is not retried every period. The one exception is a failure to read the
-//! state at all (a transport error): the entry fails closed and is retried
-//! next period.
+//! **The key is remembered** whatever a deterministic outcome was (built,
+//! spliced, refused, not built), so the same failure is not retried, nor
+//! recorded again, every period.
+//!
+//! **A failure to read the state is not an outcome** ("unread"): an error
+//! beginning the transaction, reading the key or running the stored-state
+//! queries, or a database error (`CompileError::Db`/`LockTimeout`) from
+//! either lowering. A database error aborts the Postgres transaction, so
+//! nothing read after it means anything. The entry's key becomes `None`, so
+//! the next period retries; nothing is recorded in `compile_runs`; and **a
+//! previous snapshot is kept** (a profile with none stays not built). That is
+//! as safe as dropping it: the previous snapshot was built and checked from
+//! committed state at an older key, and any change since bumped the key,
+//! which is read again every period until the read succeeds. The answer is
+//! never looser than the last verified state for longer than the outage.
+//!
+//! **Which key is authoritative.** The entry's key is the key the last build
+//! READ; the refresher compares against it. [`Snapshot::key`] is the key the
+//! snapshot's DATA was read at: after a splice it is older than the entry's
+//! key, because the data is the previous build's and only the
+//! infrastructure is fresh. A caller that reports "the version this decision
+//! was made at" should report the snapshot's key (the data's), and take the
+//! entry's freshness from the refresher, not from the snapshot.
+//!
+//! **One refresh at a time.** [`SnapshotCache::refresh_once`] holds an async
+//! mutex for its whole run, so two callers (the refresher and a warm-up) can
+//! neither overwrite a newer build with an older one nor re-insert an entry
+//! the other just dropped.
 //!
 //! **Which profiles** (open question (a)): those with `mechanism = 'opa'`, and
 //! those with a bound engine whose `applied_mechanism = 'opa'`. A switch back
@@ -35,10 +59,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
+use egret_perm::CompileError;
 use egret_perm_eval::{Snapshot, SnapshotInput};
+use egret_perm_ir::statement::Statement;
 use sqlx::PgPool;
 
-use super::build::{lower_infra_via, snapshot_parts_via, MissingUsername};
+use super::build::{lower_infra_via, snapshot_parts_via, MissingUsername, SnapshotParts};
 
 /// What the decision path finds for one profile.
 pub enum Lookup {
@@ -66,8 +92,8 @@ impl std::fmt::Debug for Lookup {
 }
 
 struct CacheEntry {
-    /// The key the last build read; None: the state could not be read, so
-    /// the next refresh retries.
+    /// The key the last build read (authoritative for the refresh); None:
+    /// the state could not be read, so the next refresh retries.
     key: Option<(i64, i64)>,
     snapshot: Option<Arc<Snapshot>>,
     error: Option<String>,
@@ -82,6 +108,8 @@ struct State {
 #[derive(Default)]
 pub struct SnapshotCache {
     state: RwLock<State>,
+    /// Held across [`Self::refresh_once`]: one refresh at a time.
+    refreshing: tokio::sync::Mutex<()>,
 }
 
 /// What one [`SnapshotCache::refresh_once`] did, by profile id.
@@ -95,13 +123,25 @@ pub struct RefreshReport {
     pub failed: Vec<i64>,
     /// No longer served over OPA: the entry is gone.
     pub dropped: Vec<i64>,
+    /// The state could not be read: retried next period, a previous snapshot
+    /// kept (none: not built).
+    pub unread: Vec<i64>,
 }
 
 /// How one build ended, before it is stored.
 enum Outcome {
     Rebuilt(Snapshot),
-    Spliced { snapshot: Snapshot, error: String },
-    Failed { error: String },
+    Spliced {
+        snapshot: Snapshot,
+        error: String,
+    },
+    Failed {
+        error: String,
+    },
+    /// The entry keeps whatever snapshot it held.
+    Unread {
+        error: String,
+    },
 }
 
 struct Built {
@@ -133,6 +173,7 @@ impl SnapshotCache {
     }
 
     pub async fn refresh_once(&self, pool: &PgPool) -> Result<RefreshReport, sqlx::Error> {
+        let _one_at_a_time = self.refreshing.lock().await;
         let listed: Vec<(i64, i64, i64)> = sqlx::query_as(
             "SELECT s.id, s.policy_version, s.tag_version FROM policy.authz_services s \
               WHERE s.mechanism = 'opa' \
@@ -193,36 +234,78 @@ impl SnapshotCache {
                     tracing::warn!(service_id = id, error = %e, "could not record the OPA snapshot failure");
                 }
             }
-            let entry = match built.outcome {
-                Outcome::Rebuilt(s) => {
-                    report.rebuilt.push(id);
-                    CacheEntry {
-                        key: built.key,
-                        snapshot: Some(Arc::new(s)),
-                        error: None,
-                    }
-                }
-                Outcome::Spliced { snapshot, error } => {
-                    report.spliced.push(id);
-                    CacheEntry {
-                        key: built.key,
-                        snapshot: Some(Arc::new(snapshot)),
-                        error: Some(error),
-                    }
-                }
-                Outcome::Failed { error } => {
-                    report.failed.push(id);
-                    CacheEntry {
-                        key: built.key,
-                        snapshot: None,
-                        error: Some(error),
-                    }
-                }
-            };
-            let mut state = self.state.write().unwrap_or_else(|p| p.into_inner());
-            state.entries.insert(id, entry);
+            self.apply(id, built, &mut report);
         }
         Ok(report)
+    }
+
+    /// Store one build's outcome as `id`'s entry.
+    fn apply(&self, id: i64, built: Built, report: &mut RefreshReport) {
+        let mut state = self.state.write().unwrap_or_else(|p| p.into_inner());
+        let held = state.entries.get(&id).and_then(|e| e.snapshot.clone());
+        let entry = match built.outcome {
+            Outcome::Rebuilt(s) => {
+                report.rebuilt.push(id);
+                CacheEntry {
+                    key: built.key,
+                    snapshot: Some(Arc::new(s)),
+                    error: None,
+                }
+            }
+            Outcome::Spliced { snapshot, error } => {
+                report.spliced.push(id);
+                CacheEntry {
+                    key: built.key,
+                    snapshot: Some(Arc::new(snapshot)),
+                    error: Some(error),
+                }
+            }
+            Outcome::Failed { error } => {
+                report.failed.push(id);
+                CacheEntry {
+                    key: built.key,
+                    snapshot: None,
+                    error: Some(error),
+                }
+            }
+            Outcome::Unread { error } => {
+                report.unread.push(id);
+                CacheEntry {
+                    key: built.key,
+                    snapshot: held,
+                    error: Some(error),
+                }
+            }
+        };
+        state.entries.insert(id, entry);
+    }
+}
+
+/// A database error: the transaction is aborted and the build says nothing
+/// about the stored state.
+fn is_transient(e: &CompileError) -> bool {
+    matches!(e, CompileError::Db(_) | CompileError::LockTimeout(_))
+}
+
+fn unread(id: i64, e: String) -> Built {
+    tracing::warn!(service_id = id, error = %e, "OPA snapshot: could not read the profile; retrying next period");
+    Built {
+        key: None,
+        outcome: Outcome::Unread {
+            error: format!("the profile's state could not be read: {e}"),
+        },
+        record: None,
+    }
+}
+
+fn failed(id: i64, key: (i64, i64), error: String) -> Built {
+    tracing::warn!(service_id = id, error = %error, "OPA snapshot build failed; the profile is not built");
+    Built {
+        key: Some(key),
+        outcome: Outcome::Failed {
+            error: error.clone(),
+        },
+        record: Some(error),
     }
 }
 
@@ -230,25 +313,15 @@ impl SnapshotCache {
 /// (rolled back when it returns, before the caller records a failure on the
 /// pool).
 async fn build_entry(pool: &PgPool, id: i64, previous: Option<Arc<Snapshot>>) -> Built {
-    let unread = |e: String| {
-        tracing::warn!(service_id = id, error = %e, "OPA snapshot: could not read the profile");
-        Built {
-            key: None,
-            outcome: Outcome::Failed {
-                error: format!("the profile's state could not be read: {e}"),
-            },
-            record: None,
-        }
-    };
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
-        Err(e) => return unread(e.to_string()),
+        Err(e) => return unread(id, e.to_string()),
     };
     if let Err(e) = sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         .execute(&mut *tx)
         .await
     {
-        return unread(e.to_string());
+        return unread(id, e.to_string());
     }
     let key: (i64, i64) = match sqlx::query_as(
         "SELECT policy_version, tag_version FROM policy.authz_services WHERE id = $1",
@@ -258,7 +331,7 @@ async fn build_entry(pool: &PgPool, id: i64, previous: Option<Arc<Snapshot>>) ->
     .await
     {
         Ok(k) => k,
-        Err(e) => return unread(e.to_string()),
+        Err(e) => return unread(id, e.to_string()),
     };
 
     // (a) The stored-state checks (C8).
@@ -272,81 +345,91 @@ async fn build_entry(pool: &PgPool, id: i64, previous: Option<Arc<Snapshot>>) ->
             };
         }
         Ok(None) => {}
-        Err(e) => return unread(e),
+        Err(e) => return unread(id, e),
     }
 
-    // (b) data ++ infrastructure.
-    let data_error = match snapshot_parts_via(&mut tx, id, MissingUsername::Omit).await {
-        Ok(Some(parts)) => {
-            let infra = parts.infra.clone();
-            let mut statements = parts.data;
-            statements.extend(parts.infra);
-            match Snapshot::build(SnapshotInput {
-                service_id: id,
-                key: parts.key,
-                statements,
-                classified: parts.classified,
-            }) {
-                Ok(s) => {
-                    return Built {
-                        key: Some(key),
-                        outcome: Outcome::Rebuilt(s),
-                        record: None,
-                    }
-                }
-                // A malformed path is a lowering error: the infrastructure
-                // already lowered at this key is spliced like (c).
-                Err(e) => {
-                    return spliced_or_failed(id, key, e.to_string(), Ok(Some(infra)), previous)
-                }
-            }
+    // (b) data ++ infrastructure; (c) on a data-lowering failure, fresh
+    // infrastructure alone (C4).
+    match snapshot_parts_via(&mut tx, id, MissingUsername::Omit).await {
+        Ok(Some(parts)) => outcome_from_parts(id, key, parts, previous),
+        Ok(None) => failed(
+            id,
+            key,
+            "the profile is not a Trino or StarRocks profile".to_string(),
+        ),
+        // The transaction is aborted: lowering the infrastructure on it
+        // would only fail too.
+        Err(e) if is_transient(&e) => unread(id, e.to_string()),
+        Err(e) => {
+            let infra = lower_infra_via(&mut tx, id, MissingUsername::Omit).await;
+            outcome_from_data_error(id, key, e, infra, previous)
         }
-        Ok(None) => {
-            let msg = "the profile is not a Trino or StarRocks profile".to_string();
-            return Built {
-                key: Some(key),
-                outcome: Outcome::Failed { error: msg.clone() },
-                record: Some(msg),
-            };
-        }
-        Err(e) => e.to_string(),
-    };
-
-    // (c) The data lowering failed (C4): fresh infrastructure alone.
-    let infra = lower_infra_via(&mut tx, id, MissingUsername::Omit)
-        .await
-        .map_err(|e| e.to_string());
-    spliced_or_failed(id, key, data_error, infra, previous)
+    }
 }
 
+/// (b): the lowered parts into a fresh snapshot at the key the build read. A
+/// `Snapshot::build` refusal (a malformed path, an unexpanded member) is a
+/// lowering error: the infrastructure lowered at this key is spliced into
+/// the previous snapshot as in (c).
+fn outcome_from_parts(
+    id: i64,
+    key: (i64, i64),
+    parts: SnapshotParts,
+    previous: Option<Arc<Snapshot>>,
+) -> Built {
+    let infra = parts.infra.clone();
+    let mut statements = parts.data;
+    statements.extend(parts.infra);
+    match Snapshot::build(SnapshotInput {
+        service_id: id,
+        key: parts.key,
+        statements,
+        classified: parts.classified,
+    }) {
+        Ok(s) => Built {
+            key: Some(key),
+            outcome: Outcome::Rebuilt(s),
+            record: None,
+        },
+        Err(e) => spliced_or_failed(id, key, e.to_string(), infra, previous),
+    }
+}
+
+/// (c): the data lowering failed with `error`; `infra` is the infrastructure
+/// lowered alone on the same transaction.
+fn outcome_from_data_error(
+    id: i64,
+    key: (i64, i64),
+    error: CompileError,
+    infra: Result<Option<Vec<Statement>>, CompileError>,
+    previous: Option<Arc<Snapshot>>,
+) -> Built {
+    if is_transient(&error) {
+        return unread(id, error.to_string());
+    }
+    match infra {
+        Ok(Some(infra)) => spliced_or_failed(id, key, error.to_string(), infra, previous),
+        Ok(None) => failed(id, key, error.to_string()),
+        Err(e) if is_transient(&e) => unread(id, e.to_string()),
+        Err(e) => failed(
+            id,
+            key,
+            format!("{error}; the infrastructure did not lower either: {e}"),
+        ),
+    }
+}
+
+/// The previous snapshot's data with `infra`, or not built when there is no
+/// previous snapshot or the infrastructure does not build.
 fn spliced_or_failed(
     id: i64,
     key: (i64, i64),
     error: String,
-    infra: Result<Option<Vec<egret_perm_ir::statement::Statement>>, String>,
+    infra: Vec<Statement>,
     previous: Option<Arc<Snapshot>>,
 ) -> Built {
-    let failed = |error: String| {
-        tracing::warn!(service_id = id, error = %error, "OPA snapshot build failed; the profile is not built");
-        Built {
-            key: Some(key),
-            outcome: Outcome::Failed {
-                error: error.clone(),
-            },
-            record: Some(error),
-        }
-    };
-    let infra = match infra {
-        Ok(Some(infra)) => infra,
-        Ok(None) => return failed(error),
-        Err(e) => {
-            return failed(format!(
-                "{error}; the infrastructure did not lower either: {e}"
-            ))
-        }
-    };
     let Some(previous) = previous else {
-        return failed(error);
+        return failed(id, key, error);
     };
     match previous.with_infra(infra) {
         Ok(snapshot) => {
@@ -364,7 +447,11 @@ fn spliced_or_failed(
                 record: Some(error),
             }
         }
-        Err(e) => failed(format!("{error}; the infrastructure did not splice: {e}")),
+        Err(e) => failed(
+            id,
+            key,
+            format!("{error}; the infrastructure did not splice: {e}"),
+        ),
     }
 }
 
@@ -417,4 +504,316 @@ pub fn spawn_snapshot_refresher(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    //! The outcome rules, without a database: C4 with and without a previous
+    //! snapshot, an infrastructure failure, the `Snapshot::build` refusal arm,
+    //! and a database error (unread).
+
+    use egret_perm::{Principal, PrincipalKind};
+    use egret_perm_eval::{Decision, Resource};
+    use egret_perm_ir::audience::{Audience, Member, MemberName, Via};
+    use egret_perm_ir::statement::{
+        Derivation, Effect, InfraKind, InfraObject, Level, Path, Privilege, Source, Target,
+    };
+    use uuid::Uuid;
+
+    use super::*;
+
+    const ID: i64 = 7;
+    const KEY: (i64, i64) = (5, 6);
+
+    fn who(name: MemberName) -> Audience {
+        Audience {
+            include: vec![Member {
+                name,
+                via: Via::Direct,
+            }],
+            except: vec![],
+        }
+    }
+
+    fn grant_read(user: &str, catalog: &str) -> Statement {
+        Statement {
+            source: Source::Grant {
+                grant_id: Uuid::from_u128(1),
+            },
+            audience: who(MemberName::User(user.into())),
+            target: Target::Path(Path {
+                catalog_id: None,
+                catalog: catalog.into(),
+                schema: Level::Unnamed,
+                table: Level::Unnamed,
+                column: Level::Unnamed,
+            }),
+            effect: Effect::Allow {
+                privileges: vec![Privilege::Read],
+            },
+            derivation: Derivation::AsDeclared,
+        }
+    }
+
+    fn admin(name: MemberName) -> Statement {
+        Statement {
+            source: Source::Infra {
+                kind: InfraKind::AdminAllAccess,
+            },
+            audience: who(name),
+            target: Target::Infra(InfraObject::WholeEp),
+            effect: Effect::EnginePrivilege {
+                capability: "all".into(),
+            },
+            derivation: Derivation::AsDeclared,
+        }
+    }
+
+    fn root() -> Statement {
+        admin(MemberName::User("root".into()))
+    }
+
+    /// An infrastructure statement `Snapshot::build` refuses.
+    fn unexpanded_admin() -> Statement {
+        admin(MemberName::Unexpanded(Principal {
+            kind: PrincipalKind::Group,
+            r#ref: "admins".into(),
+        }))
+    }
+
+    /// Built at key (1, 1): ann reads `lake`, root holds all-access.
+    fn previous() -> Arc<Snapshot> {
+        Arc::new(
+            Snapshot::build(SnapshotInput {
+                service_id: ID,
+                key: (1, 1),
+                statements: vec![grant_read("ann", "lake"), root()],
+                classified: vec![],
+            })
+            .expect("the previous snapshot"),
+        )
+    }
+
+    fn parts(data: Vec<Statement>, infra: Vec<Statement>) -> SnapshotParts {
+        SnapshotParts {
+            key: KEY,
+            data,
+            infra,
+            classified: vec![],
+        }
+    }
+
+    fn reads(s: &Snapshot, user: &str) -> bool {
+        let t = Resource::Table {
+            catalog: "lake".into(),
+            schema: "s".into(),
+            table: "t".into(),
+            columns: vec!["id".into()],
+        };
+        matches!(
+            s.decide(user, "SelectFromColumns", &t),
+            Decision::Allow { .. }
+        )
+    }
+
+    fn creates(s: &Snapshot, user: &str) -> bool {
+        let t = Resource::Table {
+            catalog: "lake".into(),
+            schema: "s".into(),
+            table: "new_t".into(),
+            columns: vec![],
+        };
+        matches!(s.decide(user, "CreateTable", &t), Decision::Allow { .. })
+    }
+
+    fn not_built(b: &Built) -> &str {
+        assert_eq!(b.key, Some(KEY), "a not-built outcome remembers its key");
+        match &b.outcome {
+            Outcome::Failed { error } => {
+                assert_eq!(b.record.as_deref(), Some(error.as_str()));
+                error
+            }
+            _ => panic!("expected not built"),
+        }
+    }
+
+    fn user_ref_error() -> CompileError {
+        CompileError::UnusableUserRef {
+            r#ref: "bad@ref".into(),
+        }
+    }
+
+    #[test]
+    fn well_formed_parts_are_rebuilt_at_the_key_read() {
+        // Arrange
+        let p = parts(vec![grant_read("ann", "lake")], vec![root()]);
+
+        // Act
+        let b = outcome_from_parts(ID, KEY, p, Some(previous()));
+
+        // Assert
+        assert_eq!(b.key, Some(KEY));
+        assert!(b.record.is_none());
+        let Outcome::Rebuilt(s) = b.outcome else {
+            panic!("expected rebuilt")
+        };
+        assert_eq!(s.key(), KEY);
+        assert!(reads(&s, "ann") && creates(&s, "root"));
+    }
+
+    #[test]
+    fn a_malformed_data_path_splices_fresh_infra_into_the_previous_snapshot() {
+        // Arrange: the admin was disabled (no infra), and a data path is malformed.
+        let p = parts(vec![grant_read("bob", "")], vec![]);
+
+        // Act
+        let b = outcome_from_parts(ID, KEY, p, Some(previous()));
+
+        // Assert
+        assert_eq!(b.key, Some(KEY));
+        let Outcome::Spliced { snapshot, error } = b.outcome else {
+            panic!("expected spliced")
+        };
+        assert!(error.contains("an empty catalog"), "{error}");
+        assert_eq!(b.record.as_deref(), Some(error.as_str()));
+        assert!(
+            !creates(&snapshot, "root"),
+            "the disabled admin keeps all-access"
+        );
+        assert!(reads(&snapshot, "ann"), "the previous data is kept");
+        assert_eq!(
+            snapshot.key(),
+            (1, 1),
+            "the data's key is the previous build's"
+        );
+    }
+
+    #[test]
+    fn a_malformed_data_path_with_no_previous_snapshot_is_not_built() {
+        // Arrange
+        let p = parts(vec![grant_read("bob", "")], vec![root()]);
+
+        // Act
+        let b = outcome_from_parts(ID, KEY, p, None);
+
+        // Assert
+        assert!(not_built(&b).contains("an empty catalog"));
+    }
+
+    #[test]
+    fn a_malformed_infra_statement_is_not_built_even_with_a_previous_snapshot() {
+        // Arrange
+        let p = parts(vec![grant_read("ann", "lake")], vec![unexpanded_admin()]);
+
+        // Act
+        let b = outcome_from_parts(ID, KEY, p, Some(previous()));
+
+        // Assert
+        assert!(not_built(&b).contains("unexpanded"), "{}", not_built(&b));
+    }
+
+    #[test]
+    fn a_data_lowering_failure_with_no_previous_snapshot_is_not_built() {
+        // Act
+        let b = outcome_from_data_error(ID, KEY, user_ref_error(), Ok(Some(vec![root()])), None);
+
+        // Assert
+        assert_eq!(not_built(&b), user_ref_error().to_string());
+    }
+
+    #[test]
+    fn a_data_lowering_failure_splices_fresh_infra() {
+        // Act
+        let b = outcome_from_data_error(
+            ID,
+            KEY,
+            user_ref_error(),
+            Ok(Some(vec![])),
+            Some(previous()),
+        );
+
+        // Assert
+        assert_eq!(b.key, Some(KEY));
+        let Outcome::Spliced { snapshot, .. } = b.outcome else {
+            panic!("expected spliced")
+        };
+        assert!(!creates(&snapshot, "root") && reads(&snapshot, "ann"));
+    }
+
+    #[test]
+    fn an_infra_lowering_failure_is_not_built_even_with_a_previous_snapshot() {
+        // Act
+        let b = outcome_from_data_error(
+            ID,
+            KEY,
+            user_ref_error(),
+            Err(user_ref_error()),
+            Some(previous()),
+        );
+
+        // Assert
+        assert!(not_built(&b).contains("the infrastructure did not lower either"));
+    }
+
+    #[test]
+    fn a_database_error_is_unread_retried_unrecorded_and_keeps_the_previous_snapshot() {
+        let cache = SnapshotCache::default();
+        let mut report = RefreshReport::default();
+        let ready = outcome_from_parts(
+            ID,
+            KEY,
+            parts(vec![grant_read("ann", "lake")], vec![root()]),
+            None,
+        );
+        cache.apply(ID, ready, &mut report);
+        let db = || CompileError::Db("connection reset by peer".into());
+        let lock = || CompileError::LockTimeout("lock timeout".into());
+        for (data, infra) in [
+            (db(), Ok(Some(vec![]))),
+            (lock(), Ok(Some(vec![]))),
+            (user_ref_error(), Err(db())),
+        ] {
+            // Act
+            let b = outcome_from_data_error(ID, KEY, data, infra, Some(previous()));
+            assert_eq!(b.key, None, "an unread build remembers no key");
+            assert!(b.record.is_none(), "an unread build records nothing");
+            let mut report = RefreshReport::default();
+            cache.apply(ID, b, &mut report);
+
+            // Assert
+            assert_eq!(report.unread, vec![ID]);
+            let Lookup::Ready(s) = cache.get(ID) else {
+                panic!(
+                    "a database error denied a Ready profile: {:?}",
+                    cache.get(ID)
+                )
+            };
+            assert!(reads(&s, "ann") && creates(&s, "root"));
+            let state = cache.state.read().unwrap();
+            assert_eq!(state.entries[&ID].key, None, "retried next period");
+        }
+    }
+
+    #[test]
+    fn a_database_error_with_no_previous_snapshot_stays_not_built() {
+        // Arrange
+        let cache = SnapshotCache::default();
+        let b = outcome_from_data_error(
+            ID,
+            KEY,
+            CompileError::Db("connection reset".into()),
+            Ok(None),
+            None,
+        );
+
+        // Act
+        cache.apply(ID, b, &mut RefreshReport::default());
+
+        // Assert
+        assert!(
+            matches!(cache.get(ID), Lookup::NotBuilt { error: Some(ref e) } if e.contains("could not be read")),
+            "{:?}",
+            cache.get(ID)
+        );
+    }
 }
