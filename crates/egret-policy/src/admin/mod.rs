@@ -476,6 +476,9 @@ pub struct ProfileDto {
     /// field the editor cannot tell an operator which half they are looking
     /// at, and the first thing they learn is the 409 on save.
     pub origin: String,
+    /// How the profile's engines are asked: `"ranger"` or `"opa"` (Trino only;
+    /// migration 0213).
+    pub mechanism: String,
     /// Policies by owner, the profile's own plus its `tag_service`'s (DG #4a
     /// Q1): `compiler` (egret-compiled), `infra` (egret-seeded), `operator`
     /// (hand-written). `policy_count` stays the profile's own total.
@@ -865,6 +868,7 @@ async fn list_profiles(
                 policy_version: s.policy_version,
                 tag_service,
                 origin: s.origin,
+                mechanism: s.mechanism,
             }
         })
         .collect();

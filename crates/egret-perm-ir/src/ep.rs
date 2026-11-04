@@ -5,10 +5,12 @@ use std::collections::BTreeMap;
 use egret_perm::EngineType;
 use uuid::Uuid;
 
-/// How an engine is asked. Ranger is the only mechanism in sub-project 1.
+/// How an engine is asked: the profile's `policy.authz_services.mechanism`
+/// (migration 0213). `Opa` exists for Trino only (governance SP2b).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Mechanism {
     Ranger,
+    Opa,
 }
 
 /// `engine × mechanism`; the version is per bound engine (several share one profile).

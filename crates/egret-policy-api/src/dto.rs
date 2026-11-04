@@ -13,6 +13,8 @@ pub struct PolicyService {
     pub id: i64,
     pub name: String,
     pub r#type: String,
+    /// `"ranger"` or `"opa"` (migration 0213).
+    pub mechanism: String,
 }
 
 /// The download payload the Trino Ranger plugin consumes (`@JsonInclude(NON_EMPTY)`, camelCase).
@@ -332,10 +334,12 @@ mod tests {
             id: 7,
             name: "trino_prod".into(),
             r#type: "trino".into(),
+            mechanism: "ranger".into(),
         };
         let j = serde_json::to_value(&s).unwrap();
         assert_eq!(j["id"], 7);
         assert_eq!(j["name"], "trino_prod");
         assert_eq!(j["type"], "trino");
+        assert_eq!(j["mechanism"], "ranger");
     }
 }

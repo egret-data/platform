@@ -163,7 +163,10 @@ pub(crate) async fn load_ep(
         profile_name: svc.name.clone(),
         kind: EpKind {
             engine,
-            mechanism: Mechanism::Ranger,
+            mechanism: match svc.mechanism.as_str() {
+                "opa" => Mechanism::Opa,
+                _ => Mechanism::Ranger,
+            },
         },
         engines: Vec::new(),
         default_version: Err(NOT_READ.to_string()),

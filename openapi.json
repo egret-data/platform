@@ -51542,6 +51542,7 @@
           "policy_count",
           "engines",
           "origin",
+          "mechanism",
           "policy_counts"
         ],
         "properties": {
@@ -51579,6 +51580,10 @@
           "origin": {
             "type": "string",
             "description": "`\"manual\"` (hand-authored, fully editable) or `\"generated\"` (compiled\nby the SP4a permission model from its grants and rules).\n\n**Exposed because D4's requirement is that the profile says so BEFORE\nan edit is overwritten, not after** (whole-branch review, Important 4).\nThe raw-JSON policy editor still ships in SP4a and is still the only\npolicy UI, and a `'generated'` profile is now only PARTLY frozen — its\n`perm-*` policies are compiler-owned and refuse an edit with a 409,\nwhile foreign policies in the same profile stay editable. Without this\nfield the editor cannot tell an operator which half they are looking\nat, and the first thing they learn is the 409 on save."
+          },
+          "mechanism": {
+            "type": "string",
+            "description": "How the profile's engines are asked: `\"ranger\"` or `\"opa\"` (Trino only;\nmigration 0213)."
           },
           "policy_counts": {
             "$ref": "#/components/schemas/PolicyCounts",

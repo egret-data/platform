@@ -54,6 +54,9 @@ pub struct ServiceRow {
     /// it (see [`refuse_if_compiler_owned_policies_remain`]), not merely
     /// because the profile is (or was ever) `"generated"`.
     pub origin: String,
+    /// How the profile's engines are asked: `"ranger"` (the default) or
+    /// `"opa"` (Trino only; migration 0213's CHECKs).
+    pub mechanism: String,
 }
 
 /// One catalog resource → tag pairing for a service's warehouse(s), the row
@@ -912,7 +915,7 @@ impl PolicyStore {
         }
         sqlx::query_as::<_, ServiceRow>(
             r#"INSERT INTO policy.authz_services (name, type, config_jsonb)
-               VALUES ($1,$2,$3) RETURNING id, name, type, config_jsonb, policy_version, tag_version, origin"#,
+               VALUES ($1,$2,$3) RETURNING id, name, type, config_jsonb, policy_version, tag_version, origin, mechanism"#,
         )
         .bind(name)
         .bind(typ)
@@ -955,7 +958,7 @@ impl PolicyStore {
 
     pub async fn get_service(&self, name: &str) -> Result<ServiceRow, PolicyStoreError> {
         sqlx::query_as::<_, ServiceRow>(
-            r#"SELECT id, name, type, config_jsonb, policy_version, tag_version, origin FROM policy.authz_services WHERE name = $1"#,
+            r#"SELECT id, name, type, config_jsonb, policy_version, tag_version, origin, mechanism FROM policy.authz_services WHERE name = $1"#,
         )
         .bind(name)
         .fetch_optional(&self.db.pool)
@@ -970,7 +973,7 @@ impl PolicyStore {
         name: &str,
     ) -> Result<Option<ServiceRow>, PolicyStoreError> {
         Ok(sqlx::query_as::<_, ServiceRow>(
-            r#"SELECT id, name, type, config_jsonb, policy_version, tag_version, origin FROM policy.authz_services WHERE name = $1"#,
+            r#"SELECT id, name, type, config_jsonb, policy_version, tag_version, origin, mechanism FROM policy.authz_services WHERE name = $1"#,
         )
         .bind(name)
         .fetch_optional(&self.db.pool)
@@ -995,7 +998,7 @@ impl PolicyStore {
 
     pub async fn list_services(&self) -> Result<Vec<ServiceRow>, PolicyStoreError> {
         Ok(sqlx::query_as::<_, ServiceRow>(
-            r#"SELECT id, name, type, config_jsonb, policy_version, tag_version, origin FROM policy.authz_services ORDER BY name"#,
+            r#"SELECT id, name, type, config_jsonb, policy_version, tag_version, origin, mechanism FROM policy.authz_services ORDER BY name"#,
         )
         .fetch_all(&self.db.pool)
         .await?)
@@ -1370,7 +1373,7 @@ pub async fn get_service_by_id_via(
     id: i64,
 ) -> Result<ServiceRow, PolicyStoreError> {
     sqlx::query_as::<_, ServiceRow>(
-        r#"SELECT id, name, type, config_jsonb, policy_version, tag_version, origin FROM policy.authz_services WHERE id = $1"#,
+        r#"SELECT id, name, type, config_jsonb, policy_version, tag_version, origin, mechanism FROM policy.authz_services WHERE id = $1"#,
     )
     .bind(id)
     .fetch_optional(&mut *conn)

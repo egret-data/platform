@@ -123,6 +123,7 @@ export function profileDto(name: string, over: Partial<ProfileDto> = {}): Profil
     name,
     type: "trino",
     origin: "generated",
+    mechanism: "ranger",
     policy_version: 3,
     policy_count: 0,
     policy_counts: { compiler: 0, infra: 0, operator: 0 },
