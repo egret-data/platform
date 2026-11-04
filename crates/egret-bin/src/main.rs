@@ -2841,6 +2841,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // Policy/Ranger seam admin router (E2d): the Policies console. Owns the
     // policy store; reads the engine seam through `EngineBindingReader` (which
     // engines bind to which profile) — wired here in the composition root.
+    // Filled once the engine seam's state is built (below); until then a
+    // switch reports every bound engine as not reconfigured.
+    let engine_mgmt_cell: std::sync::Arc<
+        tokio::sync::OnceCell<egret_engine_mgmt::EngineMgmtState>,
+    > = std::sync::Arc::default();
     let policy_admin = Some(egret_policy::PolicyAdminState {
         store: egret_policy::PolicyStore::new(db.clone()),
         engines: std::sync::Arc::new(EngineBindingReaderImpl {
@@ -2859,9 +2864,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // Final review I-3: an editor write to a StarRocks data mask refolds the
         // clearance masks in the same transaction.
         recompiler: std::sync::Arc::new(egret_perm_compile::PermRecompiler),
-        // Governance SP2b Task 15 wires the engine seam's reconfigurer; until
-        // then a switch reconfigures nothing and logs that it did not.
-        reconfigurer: std::sync::Arc::new(egret_policy::NoReconfigure),
+        // Governance SP2b Task 15: a switch re-applies the profile's engines
+        // over the engine seam, whose state is built below and put in the cell.
+        reconfigurer: std::sync::Arc::new(egret_bin::reconfigurer::ReconfigurerImpl {
+            cp: engine_mgmt_cell.clone(),
+            store: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
+        }),
         opa_enabled: config.governance.opa.enabled,
     });
 
@@ -3139,6 +3147,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         catalog_assignment_compiler: Some(profile_compiler.clone()
             as std::sync::Arc<dyn egret_catalog_registry::CatalogAssignmentCompiler>),
     });
+
+    if let Some(st) = engine_mgmt.as_ref() {
+        if engine_mgmt_cell.set(st.clone()).is_err() {
+            tracing::error!("the engine reconfigurer's state was already set");
+        }
+    }
 
     // Spec 2026-10-20-ranger-surface-auth A10 (Task 6b): a provisioned engine's
     // previous Ranger credential is retired only once the rollout of the

@@ -3,6 +3,7 @@
 pub mod bootstrap;
 pub mod engine_minter;
 pub mod identity;
+pub mod reconfigurer;
 pub mod workflow_secrets;
 
 /// Governance SP2b: the OPA surface's state with its snapshot refresher
