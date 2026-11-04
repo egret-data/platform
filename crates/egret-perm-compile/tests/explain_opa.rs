@@ -228,6 +228,22 @@ async fn store(db: &Db, prefix: &str, extra: Extra) -> Store {
             )
             .await;
         }
+        Extra::TwoMasks => {
+            // Two distinct masks on one column for everyone: the write path
+            // refuses this overlap (`overlap.rs`), a stored row from before
+            // that check does not, and the evaluator answers `TwoMasks`.
+            for (role, mask_type) in [("hash", "MASK_HASH"), ("last4", "MASK_SHOW_LAST_4")] {
+                rule(
+                    &mut tx,
+                    &format!("{prefix}.{role}"),
+                    mask(mask_type, None),
+                    Selector::Path(scope(cat, Some("s"), Some("t"), Some("email"))),
+                    set(&[], &[]),
+                    &mut names,
+                )
+                .await;
+            }
+        }
         Extra::UnusableGrant => {
             // Written past the authoring check (J-F3), as a row stored before
             // it would be: the lowering refuses it with `UnusableUserRef`,
@@ -262,6 +278,7 @@ enum Extra {
     None,
     MaskAndFilter,
     UnusableGrant,
+    TwoMasks,
 }
 
 async fn set_mechanism(db: &Db, profile: i64, mechanism: &str) {
@@ -664,4 +681,62 @@ async fn the_cached_snapshot_is_used_only_at_the_profiles_current_key() {
         a["decision"]["kind"], "allowed",
         "a stale cached snapshot is not used; explain built a fresh one: {a}"
     );
+}
+
+#[tokio::test]
+async fn an_evaluator_error_refuses_that_profile_and_not_the_request() {
+    // Arrange
+    let db = db().await;
+    let st = store(&db, &prefix("xo6"), Extra::TwoMasks).await;
+    set_mechanism(&db, st.profile, "opa").await;
+    let (app, token) = app(&db, None).await;
+
+    // Act
+    let (s_email, email, raw) = explain(
+        &app,
+        &token,
+        &st.ann,
+        "read",
+        target(st.cat, Some("t"), Some("email")),
+    )
+    .await;
+    // The same user on a column no mask reaches: the snapshot itself is fine.
+    let (s_id, id, _) = explain(
+        &app,
+        &token,
+        &st.ann,
+        "read",
+        target(st.cat, Some("t"), Some("id")),
+    )
+    .await;
+
+    // Assert
+    assert_eq!(s_email, StatusCode::OK, "{email}");
+    assert_eq!(s_id, StatusCode::OK, "{id}");
+    let p = only_profile(&email);
+    assert_eq!(p["mechanism"], "opa", "{p}");
+    assert!(
+        p.get("opa").is_none(),
+        "no values beside an evaluator error: {p}"
+    );
+    let a = access(p, "select");
+    assert_eq!(a["decision"]["kind"], "denied", "{a}");
+    assert_eq!(a["decision"]["reason"], "no_policy_matched", "{a}");
+    assert_eq!(
+        a["ir_reason"], "no OPA answer: evaluator error (TwoMasks)",
+        "{a}"
+    );
+    assert_eq!(
+        line_outcomes(p),
+        vec![("access".to_string(), "refused".to_string())],
+        "{p}"
+    );
+    for leaked in ["MASK_HASH", "MASK_SHOW_LAST_4", "sha256", "two masks"] {
+        assert!(
+            !raw.contains(leaked),
+            "the error is not echoed ({leaked}): {raw}"
+        );
+    }
+    let a = access(only_profile(&id), "select");
+    assert_eq!(a["decision"]["kind"], "allowed", "{a}");
 }

@@ -2734,7 +2734,7 @@ pub(crate) async fn explain_users(
                     user,
                     action,
                     target,
-                })?);
+                }));
             }
             continue;
         }

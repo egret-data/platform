@@ -14,12 +14,17 @@
 //! [`CompileError`] variant) and nothing else. The build error's own text can
 //! name other users, rules and SQL, so it is logged and never answered — the
 //! rule the OPA surface's 403 body follows.
+//!
+//! **An evaluator error is refused the same way, for that profile only**
+//! (`TwoMasks` from `column_mask_choice`, or any error `row_filters` grows):
+//! the OPA surface answers it 500, which fails the query, so every access is
+//! `Denied`, `ir_reason` names the error class, and there is no `opa` block.
 
 use std::sync::Arc;
 
 use egret_perm::{Action, CompileError, EngineType, Scope};
 use egret_perm_eval::trino_ops::DataPrivilege;
-use egret_perm_eval::{render_mask, Decision, ObjectPath, Snapshot};
+use egret_perm_eval::{render_mask, Decision, EvalError, ObjectPath, Snapshot};
 
 use super::{ranger_engine, ExplainAccess, ExplainProfile, PermHttpError};
 use crate::explain_wire::{
@@ -161,8 +166,59 @@ fn wire_decision(d: &Decision) -> (WireDecision, String) {
     }
 }
 
+/// The evaluator error's class, and nothing it carries (the column, the user,
+/// the masks). No wildcard arm.
+fn eval_error_class(e: &EvalError) -> &'static str {
+    match e {
+        EvalError::TwoMasks { .. } => "TwoMasks",
+    }
+}
+
+/// The row filter and column mask for a `read` naming a table, from a Ready
+/// snapshot; `Ok(None)` for every other request.
+fn opa_values(
+    snapshot: &Snapshot,
+    i: &OpaProfileInput<'_>,
+) -> Result<Option<ExplainOpa>, EvalError> {
+    let target = i.target;
+    let (Action::Read, Some(schema), Some(table)) = (i.action, &target.schema, &target.table)
+    else {
+        return Ok(None);
+    };
+    let filters = snapshot.row_filters(i.user, i.catalog, schema, table)?;
+    let row_filter = (!filters.is_empty()).then(|| filters.join(" AND "));
+    let (column_mask_type, column_mask) = match &target.column {
+        Some(column) => {
+            match snapshot.column_mask_choice(i.user, i.catalog, schema, table, column)? {
+                Some((mask_type, custom)) => match render_mask(
+                    &mask_type,
+                    custom.as_deref(),
+                    column,
+                    EXPLAIN_MASK_COLUMN_TYPE,
+                ) {
+                    Some(expr) => (Some(mask_type), Some(expr)),
+                    // `MASK_NONE`: no mask.
+                    None => (None, None),
+                },
+                None => (None, None),
+            }
+        }
+        None => (None, None),
+    };
+    Ok(Some(ExplainOpa {
+        column_mask,
+        column_mask_type,
+        row_filter,
+    }))
+}
+
 /// One OPA profile's answer for one user.
-pub(super) fn opa_profile(i: &OpaProfileInput<'_>) -> Result<ExplainProfile, PermHttpError> {
+///
+/// **An evaluator error is this profile's, never the request's.** The OPA
+/// surface answers it 500 on a value route, which the Trino plugin turns into
+/// a failed query, so explain answers every access of the profile `Denied`
+/// with an `ir_reason` naming only the error class, and no `opa` block.
+pub(super) fn opa_profile(i: &OpaProfileInput<'_>) -> ExplainProfile {
     let target = i.target;
     let object = ObjectPath {
         catalog: i.catalog.to_string(),
@@ -170,10 +226,28 @@ pub(super) fn opa_profile(i: &OpaProfileInput<'_>) -> Result<ExplainProfile, Per
         table: target.table.clone(),
         column: target.column.clone(),
     };
+    // The snapshot, or why nothing it answers can be shown.
+    let answered: Result<(&Snapshot, Option<ExplainOpa>), String> = match i.snapshot {
+        Ok(s) => match opa_values(s, i) {
+            Ok(opa) => Ok((s.as_ref(), opa)),
+            Err(e) => {
+                tracing::warn!(
+                    service_id = i.service_id,
+                    error = %e,
+                    "explain: the IR evaluator failed for this profile; its accesses are refused"
+                );
+                Err(format!(
+                    "no OPA answer: evaluator error ({})",
+                    eval_error_class(&e)
+                ))
+            }
+        },
+        Err(refused) => Err(refused.clone()),
+    };
     let mut accesses = Vec::new();
     for (access_type, privilege) in accesses_for(i.action) {
-        let (decision, ir_reason) = match i.snapshot {
-            Ok(s) => wire_decision(&s.decide_privilege(i.user, *privilege, &object)),
+        let (decision, ir_reason) = match &answered {
+            Ok((s, _)) => wire_decision(&s.decide_privilege(i.user, *privilege, &object)),
             Err(refused) => (
                 WireDecision::Denied {
                     policy_id: None,
@@ -190,44 +264,7 @@ pub(super) fn opa_profile(i: &OpaProfileInput<'_>) -> Result<ExplainProfile, Per
             ir_reason: Some(ir_reason),
         });
     }
-
-    let opa = match (i.snapshot, i.action, &target.schema, &target.table) {
-        (Ok(s), Action::Read, Some(schema), Some(table)) => {
-            let filters = s
-                .row_filters(i.user, i.catalog, schema, table)
-                .map_err(PermHttpError::db)?;
-            let row_filter = (!filters.is_empty()).then(|| filters.join(" AND "));
-            let (column_mask_type, column_mask) = match &target.column {
-                Some(column) => {
-                    match s
-                        .column_mask_choice(i.user, i.catalog, schema, table, column)
-                        .map_err(PermHttpError::db)?
-                    {
-                        Some((mask_type, custom)) => {
-                            match render_mask(
-                                &mask_type,
-                                custom.as_deref(),
-                                column,
-                                EXPLAIN_MASK_COLUMN_TYPE,
-                            ) {
-                                Some(expr) => (Some(mask_type), Some(expr)),
-                                // `MASK_NONE`: no mask.
-                                None => (None, None),
-                            }
-                        }
-                        None => (None, None),
-                    }
-                }
-                None => (None, None),
-            };
-            Some(ExplainOpa {
-                column_mask,
-                column_mask_type,
-                row_filter,
-            })
-        }
-        _ => None,
-    };
+    let opa = answered.ok().and_then(|(_, opa)| opa);
 
     let mut profile = ExplainProfile {
         service_id: i.service_id,
@@ -247,5 +284,5 @@ pub(super) fn opa_profile(i: &OpaProfileInput<'_>) -> Result<ExplainProfile, Per
     };
     profile.effect_lines =
         crate::explain_effect::opa_effect_lines(i.user, i.action, target, &profile);
-    Ok(profile)
+    profile
 }
