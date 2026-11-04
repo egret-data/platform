@@ -86,7 +86,7 @@ pub const TRINO_483_OPERATIONS: &[OpRow] = &[
     OpRow {
         name: "CreateViewWithExecuteFunction",
         class: OpClass::EngineCapability("trino.execute_function"),
-        why: "Ranger: EXECUTE on schemafunction",
+        why: "Ranger: EXECUTE on schemafunction, which the all-access does not hold (the service-def restricts schemafunction to create, drop, show)",
     },
     OpRow {
         name: "CreateViewWithSelectFromColumns",
@@ -136,7 +136,7 @@ pub const TRINO_483_OPERATIONS: &[OpRow] = &[
     OpRow {
         name: "ExecuteFunction",
         class: OpClass::EngineCapability("trino.execute_function"),
-        why: "Ranger: EXECUTE on schemafunction",
+        why: "Ranger: EXECUTE on schemafunction, which the all-access does not hold (the service-def restricts schemafunction to create, drop, show)",
     },
     OpRow {
         name: "ExecuteProcedure",

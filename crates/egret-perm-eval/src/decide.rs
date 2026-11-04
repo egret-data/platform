@@ -85,6 +85,17 @@ const CATALOG_KEYED: &[&str] = &[
 /// Of [`CATALOG_KEYED`], the ones whose second resource key is `schema`.
 const SCHEMA_KEYED: &[&str] = &["trino.execute_procedure", "trino.execute_function"];
 
+/// The engine-capability operations the all-access statement does not allow:
+/// the two that ask `execute` on a `schemafunction`. egret's all-access
+/// policies take their access types from each leaf's `accessTypeRestrictions`
+/// (`egret_policy::default_policies::admin_all_access_bodies`), and the Trino
+/// service-def restricts `schemafunction` to `create`, `drop` and `show`, so
+/// the Ranger artifact gives the all-access holder no `execute` there; only a
+/// `trino.execute_function` engine grant does. `FilterFunctions` asks `_any`,
+/// which `show` answers, so the all-access still allows it. Measured against
+/// the real Ranger engine by `egret-perm-compile/tests/opa_differential.rs`.
+const NOT_BY_WHOLE_EP: &[&str] = &["ExecuteFunction", "CreateViewWithExecuteFunction"];
+
 /// A data object. A level is present only when every level above it is
 /// (`Obj::new` refuses anything else).
 #[derive(Debug, Clone, Copy)]
@@ -276,7 +287,11 @@ impl Snapshot {
                     _ => return malformed(operation),
                 };
                 self.engine_object(user, id, &values)
-                    .or_else(|| self.whole_ep(user))
+                    .or_else(|| {
+                        (!NOT_BY_WHOLE_EP.contains(&operation))
+                            .then(|| self.whole_ep(user))
+                            .flatten()
+                    })
                     .map_or_else(
                         || deny(format!("no {id} grant on {}", values.join("."))),
                         |by| Decision::Allow { by },

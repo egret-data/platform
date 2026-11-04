@@ -328,6 +328,60 @@ fn admin_only_needs_the_whole_ep_statement() {
     );
 }
 
+/// Task 18 (opa_differential, seed 0x5b2b00000001 state 8): Ranger denied
+/// the all-access holder `CreateViewWithExecuteFunction`, because egret's
+/// all-access grants only `create, drop, show` on `schemafunction` (the
+/// service-def's `accessTypeRestrictions`). Only an engine grant executes a
+/// catalog function; the other capabilities and `FilterFunctions` (`_any`)
+/// stay with the all-access.
+#[test]
+fn the_all_access_does_not_execute_a_catalog_function() {
+    let admin = infra(
+        InfraKind::AdminAllAccess,
+        who(&["root"], &[]),
+        InfraObject::WholeEp,
+        "all",
+    );
+    let grant = Statement {
+        source: Source::EnginePrivilege {
+            engine_grant_id: Uuid::nil(),
+        },
+        audience: who(&["ann"], &[]),
+        target: Target::EngineObject {
+            capability: "trino.execute_function".into(),
+            values: vec!["lake".into(), "s".into(), "f".into()],
+        },
+        effect: Effect::EnginePrivilege {
+            capability: "trino.execute_function".into(),
+        },
+        derivation: Derivation::AsDeclared,
+    };
+    let s = snap(vec![admin, grant], vec![]);
+    let f = Resource::Function {
+        catalog: "lake".into(),
+        schema: "s".into(),
+        function: "f".into(),
+    };
+    for op in ["ExecuteFunction", "CreateViewWithExecuteFunction"] {
+        assert!(
+            !allowed(&s.decide("root", op, &f)),
+            "{op} by the all-access"
+        );
+        assert!(allowed(&s.decide("ann", op, &f)), "{op} by an engine grant");
+    }
+    assert!(allowed(&s.decide("root", "FilterFunctions", &f)));
+    assert!(allowed(&s.decide("root", "ExecuteProcedure", &f)));
+    let property = Resource::CatalogSessionProperty {
+        catalog: "lake".into(),
+        property: "p".into(),
+    };
+    assert!(allowed(&s.decide(
+        "root",
+        "SetCatalogSessionProperty",
+        &property
+    )));
+}
+
 #[test]
 fn impersonation_rules() {
     let s = snap(
