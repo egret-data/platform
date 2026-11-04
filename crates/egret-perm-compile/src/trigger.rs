@@ -2416,6 +2416,30 @@ impl egret_policy::ProfileRecompiler for PermRecompiler {
             }),
         }
     }
+
+    /// [`crate::overlap::stored_overlaps_of_via`], the predicate the OPA
+    /// snapshot refresher re-checks, one line per pair.
+    async fn stored_overlaps_in_tx(
+        &self,
+        tx: &mut Transaction<'static, Postgres>,
+        service_id: i64,
+    ) -> Result<Vec<String>, egret_policy::PolicyHttpError> {
+        let pairs = crate::overlap::stored_overlaps_of_via(tx, service_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, service_id, "switch to OPA: stored overlaps unreadable");
+                egret_policy::PolicyHttpError::Internal
+            })?;
+        Ok(pairs.iter().map(opa_switch_pair_line).collect())
+    }
+}
+
+/// `"{kind} on {coordinate}: {rule names joined by ', '}"`, how the switch to
+/// OPA names a stored pair. The names are those `GET /perm/overlaps` shows the
+/// profile's admin.
+fn opa_switch_pair_line(o: &crate::overlap::StoredOverlap) -> String {
+    let names: Vec<&str> = o.rules.iter().map(|m| m.name.as_str()).collect();
+    format!("{} on {}: {}", o.kind, o.coordinate, names.join(", "))
 }
 
 /// Recompile every service in `service_ids` on the CALLER's open transaction.

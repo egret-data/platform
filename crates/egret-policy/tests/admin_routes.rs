@@ -840,6 +840,7 @@ async fn list_profiles_shows_bound_engines_from_reader() {
             status: "Running".into(),
             authz_service_id: Some(svc_id),
             warehouse_ids: Vec::new(),
+            image: None,
             origin: "provisioned".into(),
             r#type: "trino".into(),
         }],
@@ -1126,6 +1127,7 @@ async fn delete_profile_refused_while_engine_bound() {
             status: "Running".into(),
             authz_service_id: Some(svc_id),
             warehouse_ids: Vec::new(),
+            image: None,
             origin: "provisioned".into(),
             r#type: "trino".into(),
         }],
@@ -1181,6 +1183,7 @@ async fn resource_lookup_suggests_live_catalog_metadata() {
             status: "Running".into(),
             authz_service_id: Some(svc_id),
             warehouse_ids: vec![wh],
+            image: None,
             origin: "provisioned".into(),
             r#type: "trino".into(),
         }],
@@ -1261,6 +1264,7 @@ async fn resource_lookup_suggests_every_warehouse_the_engine_reads() {
             status: "Running".into(),
             authz_service_id: Some(svc_id),
             warehouse_ids: vec![primary_wh, second_wh],
+            image: None,
             origin: "provisioned".into(),
             r#type: "trino".into(),
         }],
@@ -4234,6 +4238,13 @@ impl egret_policy::ProfileRecompiler for NoRecompile {
     ) -> Result<(), egret_policy::PolicyHttpError> {
         Ok(())
     }
+    async fn stored_overlaps_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+        _service_id: i64,
+    ) -> Result<Vec<String>, egret_policy::PolicyHttpError> {
+        Ok(vec![])
+    }
 }
 
 // ── DG #4a Q1: origin, type and per-owner counts on `GET /policies/services` ──
@@ -4277,6 +4288,7 @@ async fn list_profiles_shows_each_engines_origin_and_type() {
                 status: "running".into(),
                 authz_service_id: Some(svc_id),
                 warehouse_ids: Vec::new(),
+                image: None,
                 origin: "provisioned".into(),
                 r#type: "trino".into(),
             },
@@ -4286,6 +4298,7 @@ async fn list_profiles_shows_each_engines_origin_and_type() {
                 status: "running".into(),
                 authz_service_id: Some(svc_id),
                 warehouse_ids: Vec::new(),
+                image: None,
                 origin: "external".into(),
                 r#type: "starrocks".into(),
             },
@@ -4697,6 +4710,7 @@ async fn set_tag_service_refuses_a_bound_or_generated_profile() {
             status: "Running".into(),
             authz_service_id: Some(svc_id),
             warehouse_ids: Vec::new(),
+            image: None,
             origin: "external".into(),
             r#type: "trino".into(),
         }],

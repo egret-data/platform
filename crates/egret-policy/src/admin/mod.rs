@@ -7,6 +7,7 @@
 //! 2 = row-filter (`rowFilterPolicyItems`).
 
 mod error;
+pub mod mechanism;
 mod ranger_json;
 mod reader;
 
@@ -121,6 +122,17 @@ pub trait ProfileRecompiler: Send + Sync {
         tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
         service_ids: &[i64],
     ) -> Result<(), PolicyHttpError>;
+
+    /// The mask/row-filter pairs already stored in profile `service_id`'s
+    /// download whose winner the compiled artifact does not express, one
+    /// `"{kind} on {coordinate}: {rule names joined by ', '}"` each — the
+    /// same pairs the OPA snapshot refresher refuses to build over. The switch
+    /// to OPA refuses while any remain ([`mechanism::opa_switch_check`]).
+    async fn stored_overlaps_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+        service_id: i64,
+    ) -> Result<Vec<String>, PolicyHttpError>;
 }
 
 /// Whether a write to `body` under `service_id` changes what a StarRocks

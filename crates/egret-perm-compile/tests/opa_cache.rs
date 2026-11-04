@@ -579,3 +579,160 @@ async fn an_all_defaults_row_or_a_stored_overlap_makes_the_profile_deny() {
          (see GET /perm/overlaps)"
     );
 }
+
+/// The switch to OPA (`egret_policy::opa_switch_check`, over the production
+/// `PermRecompiler`) of `profile`, its one provisioned engine on Trino 483.
+async fn switch_refusals(db: &Db, profile: i64, engine: Uuid) -> Vec<egret_policy::SwitchRefusal> {
+    let svc = PolicyStore::new(db.clone())
+        .get_service_by_id(profile)
+        .await
+        .expect("the profile");
+    let bindings = [egret_policy::EngineBinding {
+        id: engine,
+        name: "engine".into(),
+        status: "running".into(),
+        origin: "provisioned".into(),
+        r#type: "trino".into(),
+        authz_service_id: Some(profile),
+        warehouse_ids: Vec::new(),
+        image: Some("trinodb/trino:483".into()),
+    }];
+    let mut tx = db.pool.begin().await.expect("tx");
+    let check = egret_policy::opa_switch_check(
+        &mut tx,
+        true,
+        &svc,
+        &bindings,
+        &egret_perm_compile::PermRecompiler,
+    )
+    .await
+    .expect("the switch check reads");
+    tx.rollback().await.expect("rollback");
+    check.refusals
+}
+
+/// Task 11, carry 2: the switch and the refresher judge stored state with
+/// the same predicates. A state the switch allows builds Ready; a state it
+/// refuses (a hand-written row, a stored overlap pair) is NotBuilt with the
+/// same text, and undoing it clears both.
+#[tokio::test]
+async fn the_switch_and_the_refresher_agree() {
+    let _serial = SERIAL.lock().await;
+    let db = db().await;
+    let mut names = Names::default();
+    let cache = SnapshotCache::default();
+
+    // Allowed: a generated Trino profile with nothing stored outside the model.
+    let st = store(&db, "oc11", open(), &mut names).await;
+    recompile(&db, st.profile).await;
+    assert_eq!(switch_refusals(&db, st.profile, st.engine).await, vec![]);
+    set_mechanism(&db, st.profile, "opa").await;
+    let report = refresh(&cache, &db).await;
+    assert_eq!(listed(&report, st.profile), vec!["rebuilt"], "{report:?}");
+    ready(&cache, st.profile);
+
+    // Refused: a hand-written row in the profile.
+    let hand: i64 = sqlx::query_scalar(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, managed_by) \
+         VALUES ($1, 'oc11 hand', $2, 'operator') RETURNING id",
+    )
+    .bind(st.profile)
+    .bind(
+        json!({"name": "oc11 hand", "policyType": 0, "isEnabled": true,
+                 "resources": {"catalog": {"values": ["x"]}},
+                 "policyItems": [], "denyPolicyItems": []}),
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("a hand-written policy");
+    bump(&db, st.profile).await;
+    let refused = switch_refusals(&db, st.profile, st.engine).await;
+    assert!(
+        matches!(
+            refused.as_slice(),
+            [egret_policy::SwitchRefusal::Stored(
+                egret_policy::opa_guard::StoredStateRefusal::HandWritten { count: 1, .. }
+            )]
+        ),
+        "{refused:?}"
+    );
+    let report = refresh(&cache, &db).await;
+    assert_eq!(listed(&report, st.profile), vec!["failed"], "{report:?}");
+    assert_eq!(not_built_error(&cache, st.profile), refused[0].message());
+
+    // Undone: both allow again.
+    exec(&db, "DELETE FROM policy.authz_policies WHERE id = $1", hand).await;
+    bump(&db, st.profile).await;
+    assert_eq!(switch_refusals(&db, st.profile, st.engine).await, vec![]);
+    let report = refresh(&cache, &db).await;
+    assert_eq!(listed(&report, st.profile), vec!["rebuilt"], "{report:?}");
+    ready(&cache, st.profile);
+
+    // Refused: a stored pair of differing masks on one column (the state an
+    // older compile, or a `psql` write, leaves behind).
+    let mut tx = db.pool.begin().await.expect("tx");
+    rule(
+        &mut tx,
+        "oc11.mask_a",
+        mask("MASK", None),
+        Selector::Path(scope(st.catalog, Some("s"), Some("t"), Some("email"))),
+        set(&[], &[]),
+        &mut names,
+    )
+    .await;
+    let b = rule(
+        &mut tx,
+        "oc11.mask_b",
+        mask("MASK_NULL", None),
+        Selector::Path(scope(st.catalog, Some("s"), Some("t"), Some("phone"))),
+        set(&[], &[]),
+        &mut names,
+    )
+    .await;
+    tx.commit().await.expect("commit");
+    recompile(&db, st.profile).await;
+    assert_eq!(switch_refusals(&db, st.profile, st.engine).await, vec![]);
+    sqlx::query("UPDATE perm.rules SET column_name = 'email' WHERE id = $1")
+        .bind(b)
+        .execute(&db.pool)
+        .await
+        .expect("move the rule");
+    let moved = sqlx::query(
+        "UPDATE policy.authz_policies \
+            SET policy_jsonb = jsonb_set(policy_jsonb, '{resources,column,values}', \
+                                         to_jsonb(ARRAY['email'::text])) \
+          WHERE name LIKE $1",
+    )
+    .bind(format!("perm-rule-{b}%"))
+    .execute(&db.pool)
+    .await
+    .expect("move the compiled body")
+    .rows_affected();
+    assert!(moved >= 1, "the rule's compiled policy was moved");
+    bump(&db, st.profile).await;
+
+    let refused = switch_refusals(&db, st.profile, st.engine).await;
+    let [egret_policy::SwitchRefusal::StoredOverlaps { pairs }] = refused.as_slice() else {
+        panic!("one StoredOverlaps refusal: {refused:?}");
+    };
+    assert_eq!(pairs.len(), 1, "{pairs:?}");
+    // `{kind} on {coordinate}: {rule names}`, the coordinate and names as
+    // `GET /perm/overlaps` shows them; the pair's order is the policy names'.
+    let prefix = format!(
+        "mask on catalog=[{}] column=[email] schema=[s] table=[t]: ",
+        st.lake
+    );
+    let rules = pairs[0]
+        .strip_prefix(&prefix)
+        .unwrap_or_else(|| panic!("{pairs:?}"));
+    let mut rules: Vec<&str> = rules.split(", ").collect();
+    rules.sort();
+    assert_eq!(rules, vec!["oc11.mask_a", "oc11.mask_b"], "{pairs:?}");
+    let report = refresh(&cache, &db).await;
+    assert_eq!(listed(&report, st.profile), vec!["failed"], "{report:?}");
+    assert_eq!(
+        not_built_error(&cache, st.profile),
+        "the profile serves 1 mask/row-filter pairs whose winner the artifact does not express \
+         (see GET /perm/overlaps)"
+    );
+}

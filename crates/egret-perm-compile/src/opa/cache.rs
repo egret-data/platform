@@ -562,12 +562,10 @@ async fn stored_state_refusal(
     if let Some(first) = refusals.first() {
         return Ok(Some(first.message()));
     }
-    let pairs = crate::overlap::stored_overlaps_via(conn)
+    let pairs = crate::overlap::stored_overlaps_of_via(conn, id)
         .await
         .map_err(|e| e.to_string())?
-        .into_iter()
-        .filter(|o| o.service_id == id)
-        .count();
+        .len();
     Ok((pairs > 0).then(|| {
         format!(
             "the profile serves {pairs} mask/row-filter pairs whose winner the artifact does not \

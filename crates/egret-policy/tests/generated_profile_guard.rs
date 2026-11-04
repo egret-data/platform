@@ -1073,6 +1073,13 @@ impl egret_policy::ProfileRecompiler for NoRecompile {
     ) -> Result<(), egret_policy::PolicyHttpError> {
         Ok(())
     }
+    async fn stored_overlaps_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+        _service_id: i64,
+    ) -> Result<Vec<String>, egret_policy::PolicyHttpError> {
+        Ok(vec![])
+    }
 }
 
 /// F11 (spec E7, §4.3 item 3): a compiled engine grant (`perm-engine-{uuid}`)

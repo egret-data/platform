@@ -23,7 +23,7 @@ pub struct ServiceDefRow {
     pub def_jsonb: Value,
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ServiceRow {
     pub id: i64,
     pub name: String,
@@ -2178,6 +2178,39 @@ pub async fn get_service_def_via(
     .ok_or_else(|| PolicyStoreError::NotFound(format!("service-def {name}")))
 }
 
+/// Governance SP2b C8: refuse a hand-written policy in the tag service of a
+/// profile on OPA. The OPA evaluator reads the lowered permission model, never
+/// stored Ranger JSON, so the row would be silently ignored; and the snapshot
+/// refresher would refuse to build the profile over it
+/// ([`crate::opa_guard::stored_state_refusals_via`]), denying everything. The
+/// profile itself needs no guard here: it is `generated`, and
+/// [`refuse_if_generated`] already refuses.
+async fn refuse_hand_written_in_opa_tag_service(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<(), PolicyStoreError> {
+    let profiles: i64 = sqlx::query_scalar::<_, i64>(
+        r#"SELECT count(*) FROM policy.authz_services
+            WHERE mechanism = 'opa'
+              AND config_jsonb->>'tagService' = (SELECT name FROM policy.authz_services WHERE id = $1)"#,
+    )
+    .bind(service_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if profiles > 0 {
+        let name: String =
+            sqlx::query_scalar::<_, String>("SELECT name FROM policy.authz_services WHERE id = $1")
+                .bind(service_id)
+                .fetch_one(&mut *conn)
+                .await?;
+        return Err(PolicyStoreError::CompilerOwned(format!(
+            "{name} is the tag service of a profile on OPA; OPA would ignore a hand-written \
+             policy here"
+        )));
+    }
+    Ok(())
+}
+
 /// Connection-generic core of [`PolicyStore::create_policy`] (and its infra
 /// twin): the same owner/name guards, the same refusal order, the INSERT and
 /// the `policy_version` bump, on the CALLER's transaction. Does not begin or
@@ -2205,6 +2238,9 @@ pub async fn insert_policy_owned_by_via(
         refuse_infrastructure_name(&service_type, name)?;
     }
     refuse_before_policy_insert(&mut *conn, service_id, name).await?;
+    if managed_by == "operator" {
+        refuse_hand_written_in_opa_tag_service(&mut *conn, service_id).await?;
+    }
     let id: i64 = sqlx::query_scalar::<_, i64>(
         r#"INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, managed_by)
                VALUES ($1,$2,$3,$4) RETURNING id"#,

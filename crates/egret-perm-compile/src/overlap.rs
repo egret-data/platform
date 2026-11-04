@@ -465,6 +465,23 @@ fn how_to_fix(o: &UnitOverlap, hand_written: bool) -> String {
     )
 }
 
+/// The pairs of [`stored_overlaps_via`] that profile `service_id`'s download
+/// serves. Governance SP2b: the one predicate behind both the OPA snapshot
+/// refresher's re-check on every build (`opa::cache`) and the switch to OPA
+/// (`egret_policy::opa_switch_check`, through [`crate::PermRecompiler`]), so a
+/// profile the switch accepts is never refused by the refresher for a stored
+/// pair, nor the reverse.
+pub async fn stored_overlaps_of_via(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<Vec<StoredOverlap>, CompileError> {
+    Ok(stored_overlaps_via(conn)
+        .await?
+        .into_iter()
+        .filter(|o| o.service_id == service_id)
+        .collect())
+}
+
 /// **Every pair stored in every profile's download**, read through
 /// `egret_policy::unit_overlaps` over the stored units (compiled AND
 /// hand-written, enabled, as each download holds them): each profile with its

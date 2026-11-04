@@ -441,6 +441,7 @@ impl egret_policy::EngineBindingReader for EngineBindingReaderImpl {
             .into_iter()
             .map(|e| egret_policy::EngineBinding {
                 warehouse_ids: warehouses.remove(&e.id).unwrap_or_default(),
+                image: egret_perm::stored_engine_image(&e.r#type, &e.spec),
                 id: e.id,
                 name: e.name,
                 status: e.status,
