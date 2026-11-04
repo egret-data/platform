@@ -98,6 +98,13 @@ pub struct PolicyAdminState {
     /// of its data masks (final review I-3). Not optional: an editor without
     /// it would leave the clearance-mask fold stale.
     pub recompiler: Arc<dyn ProfileRecompiler>,
+    /// Re-applies a profile's bound egret-provisioned engines after its
+    /// mechanism is set (governance SP2b Task 12;
+    /// [`mechanism::NoReconfigure`] until the engine seam provides one).
+    pub reconfigurer: Arc<dyn mechanism::ProfileEngineReconfigurer>,
+    /// `[governance.opa] enabled`: while false, the switch to OPA is refused
+    /// (switching back to Ranger never is).
+    pub opa_enabled: bool,
 }
 
 /// Recompiles policy profiles on the caller's open transaction — the seam
@@ -536,7 +543,7 @@ pub fn router() -> Router<PolicyAdminState> {
         )
         .route(
             "/policies/services/{service}",
-            axum::routing::delete(delete_profile),
+            axum::routing::delete(delete_profile).patch(mechanism::set_mechanism),
         )
         .route(
             "/policies/services/{service}/trino-config",
@@ -2324,6 +2331,7 @@ async fn set_policy_enabled(
         list_profiles,
         create_profile,
         delete_profile,
+        mechanism::set_mechanism,
         trino_config,
         set_tag_service,
         seed_defaults,
@@ -2342,6 +2350,9 @@ async fn set_policy_enabled(
         TrinoConfigResponse,
         SetTagServiceBody,
         ProfileTagService,
+        mechanism::SetMechanismBody,
+        mechanism::ProfileMechanism,
+        mechanism::MechanismName,
         Principal,
         EnabledBody,
         CreatedPolicyId,

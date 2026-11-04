@@ -2859,6 +2859,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // Final review I-3: an editor write to a StarRocks data mask refolds the
         // clearance masks in the same transaction.
         recompiler: std::sync::Arc::new(egret_perm_compile::PermRecompiler),
+        // Governance SP2b Task 15 wires the engine seam's reconfigurer; until
+        // then a switch reconfigures nothing and logs that it did not.
+        reconfigurer: std::sync::Arc::new(egret_policy::NoReconfigure),
+        opa_enabled: config.governance.opa.enabled,
     });
 
     // Data-permission model surface (SP4a Task 9): grants/rules/explain, plus

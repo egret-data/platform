@@ -11012,6 +11012,107 @@
             }
           }
         }
+      },
+      "patch": {
+        "tags": [
+          "policy-admin"
+        ],
+        "summary": "PATCH /policies/services/{service} — switch a profile between Ranger and\nOPA (`policy.authz_services.mechanism`).",
+        "description": "Under the row locks of the profile **and** its tag service, taken in the\norder a recompile takes them, the switch to OPA re-checks every condition\n([`opa_switch_check`]) in the same transaction that writes, so an operator\ninsert into the tag service cannot slip between the check and the write.\nSwitching to Ranger has no condition and skips the check (the gate\nincluded). A change writes `mechanism`, bumps `policy_version` once,\nrecompiles the profile's Ranger artifact (which every profile keeps,\nwhatever its mechanism) and records `profile:mechanism`. The same\nmechanism again writes nothing.\n\nAfter the commit the bound engines are always reconfigured, also when\nnothing was written: re-sending the PATCH is how a failed reconfigure is\nretried.",
+        "operationId": "set_mechanism",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "path",
+            "description": "Policy profile (Ranger service) name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetMechanismBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The coordinator of every bound egret-provisioned engine restarts to load the new access control; queries running on it fail. External engines are listed in `external_engines_unchanged`: their operator installs the new plugin files and must run Trino 483 or later with `plugin/opa`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileMechanism"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such policy profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The switch to OPA is refused: `{error, code: \"mechanism_refused\", refusals}`, `refusals` naming every condition that holds (`error` is the first). Nothing is written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The switch is committed, but some bound engines were not reconfigured: `{error, engines_reconfigured, engines_failed: [{engine, error}]}`. Send the same PATCH again to retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/control-plane/policies/services/{service}/seed-defaults": {
@@ -48808,6 +48909,14 @@
           }
         }
       },
+      "MechanismName": {
+        "type": "string",
+        "description": "How a profile's engines are asked (`policy.authz_services.mechanism`).",
+        "enum": [
+          "ranger",
+          "opa"
+        ]
+      },
       "MemberDto": {
         "type": "object",
         "required": [
@@ -51618,6 +51727,38 @@
           "type": {
             "type": "string",
             "description": "The engine type: `trino`, `starrocks`, … (DG #4a Q1)."
+          }
+        }
+      },
+      "ProfileMechanism": {
+        "type": "object",
+        "description": "The profile's mechanism after the switch, and what happened to its engines.",
+        "required": [
+          "name",
+          "mechanism",
+          "engines_reconfigured",
+          "external_engines_unchanged"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "mechanism": {
+            "$ref": "#/components/schemas/MechanismName"
+          },
+          "engines_reconfigured": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The bound egret-provisioned engines re-applied with the new mechanism."
+          },
+          "external_engines_unchanged": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The bound external engines: egret does not configure them; their\noperator installs the new plugin files."
           }
         }
       },
@@ -54899,6 +55040,17 @@
             ],
             "format": "uuid",
             "description": "`null` moves the schedule back to Uncategorized."
+          }
+        }
+      },
+      "SetMechanismBody": {
+        "type": "object",
+        "required": [
+          "mechanism"
+        ],
+        "properties": {
+          "mechanism": {
+            "$ref": "#/components/schemas/MechanismName"
           }
         }
       },

@@ -26,6 +26,11 @@ pub enum PolicyHttpError {
     BadRequestBody { body: serde_json::Value },
     #[error("conflict: {0}")]
     Conflict(String),
+    /// A 409 with a structured body served as is, mirroring
+    /// [`BadRequestBody`](Self::BadRequestBody) — e.g. the refused switch to
+    /// OPA, `{error, code: "mechanism_refused", refusals}`.
+    #[error("conflict")]
+    ConflictBody { body: serde_json::Value },
     /// A mask/row-filter overlap (SP4d-4 Task 3 fix round 1, M1): 409 with the
     /// structured body every surface answers it with — `{error, code:
     /// "rule_overlap", rules, coordinate, kind}` — served as is.
@@ -90,6 +95,9 @@ impl IntoResponse for PolicyHttpError {
             }
             PolicyHttpError::BadRequestBody { body } => {
                 return (StatusCode::BAD_REQUEST, Json(body.clone())).into_response()
+            }
+            PolicyHttpError::ConflictBody { body } => {
+                return (StatusCode::CONFLICT, Json(body.clone())).into_response()
             }
             PolicyHttpError::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,

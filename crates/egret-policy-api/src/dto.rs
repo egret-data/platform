@@ -230,6 +230,17 @@ impl ServiceTags {
     }
 }
 
+/// What re-applying a profile's bound egret-provisioned engines did
+/// (governance SP2b Task 12): the engines that now run the profile's current
+/// mechanism, and each one that did not with why. Declared here so the engine
+/// seam (`egret-engine-mgmt`) can build one; re-exported from `egret_policy`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ReconfigureReport {
+    pub applied: Vec<String>,
+    /// `(engine name, error)`, one per engine that was tried and failed.
+    pub failed: Vec<(String, String)>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

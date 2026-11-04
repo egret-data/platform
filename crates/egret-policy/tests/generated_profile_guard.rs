@@ -125,6 +125,8 @@ impl Fixture {
             engine_egret_url: "http://egret:8080".into(),
             pdp: self.pdp.clone(),
             recompiler: std::sync::Arc::new(NoRecompile),
+            reconfigurer: std::sync::Arc::new(egret_policy::NoReconfigure),
+            opa_enabled: false,
         })
     }
 }

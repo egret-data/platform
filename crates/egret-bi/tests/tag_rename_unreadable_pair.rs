@@ -288,6 +288,8 @@ async fn setup() -> Option<Fixture> {
         engine_egret_url: "http://egret:8080".into(),
         pdp,
         recompiler: Arc::new(egret_perm_compile::PermRecompiler),
+        reconfigurer: std::sync::Arc::new(egret_policy::NoReconfigure),
+        opa_enabled: false,
     });
     let resource_tags = egret_bi::resource_tags_router().with_state(st);
     let ranger = egret_policy::ranger_router(RangerState {

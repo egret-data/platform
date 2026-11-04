@@ -15,6 +15,7 @@
 use super::{EngineBinding, PolicyHttpError, ProfileRecompiler};
 use crate::opa_guard::StoredStateRefusal;
 use crate::ServiceRow;
+use egret_core::http::ErrorBody;
 
 /// How a profile's engines are asked (`policy.authz_services.mechanism`).
 #[derive(
@@ -143,4 +144,201 @@ pub async fn opa_switch_check(
         refusals,
         external_engines_unchanged,
     })
+}
+
+// ── Task 12: the switch itself, `PATCH /policies/services/{service}` ──
+
+pub use egret_policy_api::ReconfigureReport;
+
+/// Re-applies the engines egret provisioned for a profile, after a switch
+/// commits — the seam `egret-engine-mgmt` fills (this crate cannot depend on
+/// it).
+#[async_trait::async_trait]
+pub trait ProfileEngineReconfigurer: Send + Sync {
+    /// Re-apply every egret-provisioned engine bound to `service_id`, each with the profile's
+    /// current mechanism. Never stops at the first failure: every engine is tried.
+    async fn reconfigure_bound_engines(&self, service_id: i64) -> ReconfigureReport;
+}
+
+/// The reconfigurer until the engine seam provides one (governance SP2b
+/// Task 15): reconfigures nothing, says so in the log, and reports an empty
+/// result, so the switch answers 200 with no engine reconfigured.
+pub struct NoReconfigure;
+
+#[async_trait::async_trait]
+impl ProfileEngineReconfigurer for NoReconfigure {
+    async fn reconfigure_bound_engines(&self, service_id: i64) -> ReconfigureReport {
+        tracing::warn!(
+            service_id,
+            "a profile's mechanism was set, but no engine reconfigurer is wired: its bound \
+             engines keep the configuration they run"
+        );
+        ReconfigureReport::default()
+    }
+}
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct SetMechanismBody {
+    pub mechanism: MechanismName,
+}
+
+/// The profile's mechanism after the switch, and what happened to its engines.
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct ProfileMechanism {
+    pub name: String,
+    pub mechanism: MechanismName,
+    /// The bound egret-provisioned engines re-applied with the new mechanism.
+    pub engines_reconfigured: Vec<String>,
+    /// The bound external engines: egret does not configure them; their
+    /// operator installs the new plugin files.
+    pub external_engines_unchanged: Vec<String>,
+}
+
+impl MechanismName {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ranger => "ranger",
+            Self::Opa => "opa",
+        }
+    }
+}
+
+/// PATCH /policies/services/{service} — switch a profile between Ranger and
+/// OPA (`policy.authz_services.mechanism`).
+///
+/// Under the row locks of the profile **and** its tag service, taken in the
+/// order a recompile takes them, the switch to OPA re-checks every condition
+/// ([`opa_switch_check`]) in the same transaction that writes, so an operator
+/// insert into the tag service cannot slip between the check and the write.
+/// Switching to Ranger has no condition and skips the check (the gate
+/// included). A change writes `mechanism`, bumps `policy_version` once,
+/// recompiles the profile's Ranger artifact (which every profile keeps,
+/// whatever its mechanism) and records `profile:mechanism`. The same
+/// mechanism again writes nothing.
+///
+/// After the commit the bound engines are always reconfigured, also when
+/// nothing was written: re-sending the PATCH is how a failed reconfigure is
+/// retried.
+#[utoipa::path(
+    patch,
+    path = "/api/control-plane/policies/services/{service}",
+    tag = "policy-admin",
+    params(("service" = String, Path, description = "Policy profile (Ranger service) name")),
+    request_body = SetMechanismBody,
+    responses(
+        (status = 200, description = "The coordinator of every bound egret-provisioned engine restarts to load the new access control; queries running on it fail. External engines are listed in `external_engines_unchanged`: their operator installs the new plugin files and must run Trino 483 or later with `plugin/opa`.", body = ProfileMechanism),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:update permission", body = ErrorBody),
+        (status = 404, description = "No such policy profile", body = ErrorBody),
+        (status = 409, description = "The switch to OPA is refused: `{error, code: \"mechanism_refused\", refusals}`, `refusals` naming every condition that holds (`error` is the first). Nothing is written", body = Object),
+        (status = 500, description = "Internal error", body = ErrorBody),
+        (status = 502, description = "The switch is committed, but some bound engines were not reconfigured: `{error, engines_reconfigured, engines_failed: [{engine, error}]}`. Send the same PATCH again to retry", body = Object),
+    ),
+)]
+pub async fn set_mechanism(
+    axum::extract::State(st): axum::extract::State<super::PolicyAdminState>,
+    egret_auth::principal::Auth(p): egret_auth::principal::Auth,
+    axum::extract::Path(service): axum::extract::Path<String>,
+    axum::Json(b): axum::Json<SetMechanismBody>,
+) -> Result<axum::response::Response, PolicyHttpError> {
+    use axum::response::IntoResponse;
+    use serde_json::json;
+
+    egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
+    let svc = st.store.get_service(&service).await?;
+    let bindings: Vec<EngineBinding> = st
+        .engines
+        .list_engine_bindings()
+        .await?
+        .into_iter()
+        .filter(|e| e.authz_service_id == Some(svc.id))
+        .collect();
+
+    let mut tx = st.store.begin().await?;
+    super::lock_unit_rows(&mut tx, svc.id).await?;
+    let svc = crate::get_service_by_id_via(&mut tx, svc.id).await?;
+    let external_engines_unchanged = match b.mechanism {
+        MechanismName::Opa => {
+            let check =
+                opa_switch_check(&mut tx, st.opa_enabled, &svc, &bindings, &*st.recompiler).await?;
+            if !check.refusals.is_empty() {
+                let refusals: Vec<String> =
+                    check.refusals.iter().map(SwitchRefusal::message).collect();
+                return Err(PolicyHttpError::ConflictBody {
+                    body: json!({
+                        "error": refusals[0],
+                        "code": "mechanism_refused",
+                        "refusals": refusals,
+                    }),
+                });
+            }
+            check.external_engines_unchanged
+        }
+        // Switching back is always allowed: no condition, no gate.
+        MechanismName::Ranger => bindings
+            .iter()
+            .filter(|e| e.origin == "external")
+            .map(|e| e.name.clone())
+            .collect(),
+    };
+    let after = b.mechanism.as_str();
+    if svc.mechanism != after {
+        sqlx::query(
+            "UPDATE policy.authz_services \
+                SET mechanism = $2, policy_version = policy_version + 1, updated_at = now() \
+              WHERE id = $1",
+        )
+        .bind(svc.id)
+        .bind(after)
+        .execute(&mut *tx)
+        .await
+        .map_err(crate::PolicyStoreError::from)?;
+        // S8: every profile keeps its Ranger artifact; a switch never skips it.
+        st.recompiler.recompile_in_tx(&mut tx, &[svc.id]).await?;
+        egret_audit::governance::record_change(
+            &mut tx,
+            egret_audit::governance::Change {
+                action: egret_audit::governance::action::PROFILE_MECHANISM,
+                resource_type: egret_audit::governance::resource::POLICY_PROFILE,
+                resource_id: svc.id.to_string(),
+                summary: json!({ "before": svc.mechanism, "after": after }),
+                principal: &p,
+            },
+        )
+        .await
+        .map_err(crate::PolicyStoreError::from)?;
+    }
+    tx.commit().await.map_err(crate::PolicyStoreError::from)?;
+
+    // Always, also when nothing was written: the retry path of a failed
+    // reconfigure (plan-review ruling a).
+    let report = st.reconfigurer.reconfigure_bound_engines(svc.id).await;
+    if !report.failed.is_empty() {
+        let names: Vec<&str> = report.failed.iter().map(|(n, _)| n.as_str()).collect();
+        let failed: Vec<serde_json::Value> = report
+            .failed
+            .iter()
+            .map(|(engine, error)| json!({ "engine": engine, "error": error }))
+            .collect();
+        return Ok((
+            axum::http::StatusCode::BAD_GATEWAY,
+            axum::Json(json!({
+                "error": format!(
+                    "the profile is now on {after}; engines not reconfigured: {}. \
+                     Send the same PATCH again to retry.",
+                    names.join(", ")
+                ),
+                "engines_reconfigured": report.applied,
+                "engines_failed": failed,
+            })),
+        )
+            .into_response());
+    }
+    Ok(axum::Json(ProfileMechanism {
+        name: svc.name,
+        mechanism: b.mechanism,
+        engines_reconfigured: report.applied,
+        external_engines_unchanged,
+    })
+    .into_response())
 }

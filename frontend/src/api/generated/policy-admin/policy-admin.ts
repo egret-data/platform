@@ -36,12 +36,16 @@ import type {
   PolicyAdminListPoliciesParams,
   PolicyAdminListPrincipalsParams,
   PolicyAdminResourceLookupParams,
+  PolicyAdminSetMechanism409,
+  PolicyAdminSetMechanism502,
   PolicyAdminUpdatePolicyBody,
   PolicySummary,
   Principal,
   ProfileDto,
+  ProfileMechanism,
   ProfileTagService,
   SeedResult,
+  SetMechanismBody,
   SetTagServiceBody,
   TrinoConfigResponse
 } from '../model';
@@ -990,6 +994,136 @@ export const usePolicyAdminDeleteProfile = <TError = ErrorBody,
         TContext
       > => {
       return useMutation(getPolicyAdminDeleteProfileMutationOptions(options), queryClient);
+    }
+    export type policyAdminSetMechanismResponse200 = {
+  data: ProfileMechanism
+  status: 200
+}
+
+export type policyAdminSetMechanismResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type policyAdminSetMechanismResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type policyAdminSetMechanismResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type policyAdminSetMechanismResponse409 = {
+  data: PolicyAdminSetMechanism409
+  status: 409
+}
+
+export type policyAdminSetMechanismResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type policyAdminSetMechanismResponse502 = {
+  data: PolicyAdminSetMechanism502
+  status: 502
+}
+
+export type policyAdminSetMechanismResponseSuccess = (policyAdminSetMechanismResponse200) & {
+  headers: Headers;
+};
+export type policyAdminSetMechanismResponseError = (policyAdminSetMechanismResponse401 | policyAdminSetMechanismResponse403 | policyAdminSetMechanismResponse404 | policyAdminSetMechanismResponse409 | policyAdminSetMechanismResponse500 | policyAdminSetMechanismResponse502) & {
+  headers: Headers;
+};
+
+export type policyAdminSetMechanismResponse = (policyAdminSetMechanismResponseSuccess | policyAdminSetMechanismResponseError)
+
+export const getPolicyAdminSetMechanismUrl = (service: string,) => {
+
+
+
+
+  return `/api/control-plane/policies/services/${encodeURIComponent(service)}`
+}
+
+/**
+ * Under the row locks of the profile **and** its tag service, taken in the
+ * order a recompile takes them, the switch to OPA re-checks every condition
+ * ([`opa_switch_check`]) in the same transaction that writes, so an operator
+ * insert into the tag service cannot slip between the check and the write.
+ * Switching to Ranger has no condition and skips the check (the gate
+ * included). A change writes `mechanism`, bumps `policy_version` once,
+ * recompiles the profile's Ranger artifact (which every profile keeps,
+ * whatever its mechanism) and records `profile:mechanism`. The same
+ * mechanism again writes nothing.
+ *
+ * After the commit the bound engines are always reconfigured, also when
+ * nothing was written: re-sending the PATCH is how a failed reconfigure is
+ * retried.
+ * @summary PATCH /policies/services/{service} — switch a profile between Ranger and
+OPA (`policy.authz_services.mechanism`).
+ */
+export const policyAdminSetMechanism = async (service: string,
+    setMechanismBody: SetMechanismBody, options?: Parameters<typeof customInstance>[1]): Promise<policyAdminSetMechanismResponse> => {
+
+  return customInstance<policyAdminSetMechanismResponse>(getPolicyAdminSetMechanismUrl(service),
+  {
+    ...options,
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(setMechanismBody)
+  }
+);}
+
+
+
+
+
+export const getPolicyAdminSetMechanismMutationOptions = <TError = ErrorBody | PolicyAdminSetMechanism409 | PolicyAdminSetMechanism502,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof policyAdminSetMechanism>>, TError,{service: string;data: SetMechanismBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof policyAdminSetMechanism>>, TError,{service: string;data: SetMechanismBody}, TContext> => {
+
+const mutationKey = ['policyAdminSetMechanism'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof policyAdminSetMechanism>>, {service: string;data: SetMechanismBody}> = (props) => {
+          const {service,data} = props ?? {};
+
+          return  policyAdminSetMechanism(service,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PolicyAdminSetMechanismMutationResult = NonNullable<Awaited<ReturnType<typeof policyAdminSetMechanism>>>
+    export type PolicyAdminSetMechanismMutationBody = SetMechanismBody
+    export type PolicyAdminSetMechanismMutationError = ErrorBody | PolicyAdminSetMechanism409 | PolicyAdminSetMechanism502
+
+    /**
+ * @summary PATCH /policies/services/{service} — switch a profile between Ranger and
+OPA (`policy.authz_services.mechanism`).
+ */
+export const usePolicyAdminSetMechanism = <TError = ErrorBody | PolicyAdminSetMechanism409 | PolicyAdminSetMechanism502,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof policyAdminSetMechanism>>, TError,{service: string;data: SetMechanismBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof policyAdminSetMechanism>>,
+        TError,
+        {service: string;data: SetMechanismBody},
+        TContext
+      > => {
+      return useMutation(getPolicyAdminSetMechanismMutationOptions(options), queryClient);
     }
     export type policyAdminSeedDefaultsResponse200 = {
   data: SeedResult
