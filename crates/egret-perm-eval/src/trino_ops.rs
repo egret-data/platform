@@ -46,7 +46,7 @@ pub const TRINO_483_OPERATIONS: &[OpRow] = &[
     OpRow {
         name: "AddColumn",
         class: OpClass::AdminOnly,
-        why: "Ranger: CREATE, which no grant compiles; only the egret-admin all-access holds it",
+        why: "Ranger: ALTER, which no grant compiles; only the egret-admin all-access holds it",
     },
     OpRow {
         name: "AlterColumn",
@@ -166,7 +166,7 @@ pub const TRINO_483_OPERATIONS: &[OpRow] = &[
     OpRow {
         name: "FilterFunctions",
         class: OpClass::EngineCapability("trino.execute_function"),
-        why: "Ranger: EXECUTE on schemafunction",
+        why: "Ranger: _ANY on the function (filterFunctions); egret is deliberately stricter and requires the execute_function capability, which fails closed",
     },
     OpRow {
         name: "FilterSchemas",
@@ -271,7 +271,7 @@ pub const TRINO_483_OPERATIONS: &[OpRow] = &[
     OpRow {
         name: "SetSystemSessionProperty",
         class: OpClass::SystemSessionProperty,
-        why: "Ranger: ALTER on systemproperty",
+        why: "Ranger: ALTER _ANY (checkCanSetSystemSessionProperty); egret answers it by the SystemSessionProperty class, not by a resource grant",
     },
     OpRow {
         name: "SetTableAuthorization",
