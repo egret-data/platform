@@ -244,7 +244,7 @@ fn role_files(spec: &EngineSpec, role: Role) -> Result<Vec<PlanFile>, String> {
         .cloned()
         .unwrap_or_default();
     let tls = trino_tls_secret(spec);
-    let ranger = trino_ranger_secret(spec).map_err(|e| e.to_string())?;
+    let ranger = trino_ranger_secret(spec).map_err(|e| format!("engine {}: {e}", spec.name))?;
     resolve_mounts(
         &mounts,
         &trino_config_map(spec),
@@ -699,6 +699,24 @@ mod tests {
         let ac = file(p, "/etc/trino/access-control.properties");
         assert!(String::from_utf8_lossy(&ac.content).starts_with("access-control.name=opa\n"));
         assert_eq!(ac.mode, 0o644);
+    }
+
+    /// The Docker twin: an OPA binding with no engine credential plans
+    /// nothing and names the engine and the missing credential.
+    #[test]
+    fn an_opa_coordinator_without_a_credential_is_refused_by_name() {
+        let mut s = rich_spec();
+        let r = s.ranger.as_mut().unwrap();
+        r.mechanism = egret_engine_mgmt_api::opa_config::AccessMechanism::Opa;
+        r.credential = None;
+        let e = plan(&s).unwrap_err();
+        assert_eq!(
+            e,
+            format!(
+                "engine {}: no engine credential for the OPA context file",
+                s.name
+            )
+        );
     }
 
     #[test]

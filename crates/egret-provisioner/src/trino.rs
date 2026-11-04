@@ -507,7 +507,13 @@ pub fn trino_ranger_secret(spec: &EngineSpec) -> Result<Option<Value>, Unrendera
         return Ok(None);
     };
     let (file_name, content) = if r.mechanism == AccessMechanism::Opa {
-        let secret = r.credential.as_ref().map_or("", |c| c.password());
+        // Never an empty `egret.secret=`: egret would refuse every request
+        // of an engine whose context file carries none.
+        let secret = r
+            .credential
+            .as_ref()
+            .ok_or_else(UnrenderableOpaValue::missing_credential)?
+            .password();
         let files = opa_plugin_files(&r.engine_id, &r.egret_url, secret)?;
         let ctx = files
             .get(OPA_CONTEXT_FILE)
@@ -1286,7 +1292,7 @@ impl TrinoProvisioner {
         // ConfigMaps + Secret first so the Deployments mount current data; the
         // checksum annotation on the pod template rolls pods when they change.
         // An OPA value the renderer refuses fails here, before anything is applied.
-        trino_ranger_secret(spec)?;
+        trino_ranger_secret(spec).map_err(|e| anyhow::anyhow!("engine {}: {e}", spec.name))?;
         self.kube.apply(&trino_config_map(spec)).await?;
         self.kube.apply(&trino_catalogs_config_map(spec)).await?;
         self.kube.apply(&trino_env_secret(spec)).await?;
@@ -1646,6 +1652,33 @@ mod tests {
             kube.applied.lock().unwrap().is_empty(),
             "nothing applied, not even the ConfigMap"
         );
+    }
+
+    /// Task 14 ruling, carried to Task 15: an OPA binding with no engine
+    /// credential is a named error on the Kubernetes path, never an empty
+    /// `egret.secret=`, and nothing is applied.
+    #[tokio::test]
+    async fn an_opa_binding_without_a_credential_fails_by_name_before_anything_is_applied() {
+        use crate::kube_client::FakeKube;
+        let mut spec = opa_spec("pw");
+        spec.ranger.as_mut().unwrap().credential = None;
+        let e = trino_ranger_secret(&spec).unwrap_err();
+        assert!(e.missing);
+        assert_eq!(
+            e.to_string(),
+            egret_engine_mgmt_api::opa_config::NO_OPA_CREDENTIAL
+        );
+        let kube = std::sync::Arc::new(FakeKube::default());
+        let p = TrinoProvisioner::new(kube.clone());
+        let e = p.apply_all(&spec).await.expect_err("no credential");
+        assert_eq!(
+            e.to_string(),
+            format!(
+                "engine {}: no engine credential for the OPA context file",
+                spec.name
+            )
+        );
+        assert!(kube.applied.lock().unwrap().is_empty(), "nothing applied");
     }
 
     #[test]

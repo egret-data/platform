@@ -34,15 +34,34 @@ pub enum AccessMechanism {
     Opa,
 }
 
-/// A value that cannot be written into a Java `.properties` line as is.
-/// Names the field, never the value.
+/// Why an OPA binding has no context file to render.
+pub const NO_OPA_CREDENTIAL: &str = "no engine credential for the OPA context file";
+
+/// A value that cannot be written into a Java `.properties` line as is, or
+/// (`missing`) is not there at all. Names the field, never the value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnrenderableOpaValue {
     pub field: &'static str,
+    /// The value is absent: an OPA binding with no engine credential, which
+    /// would otherwise render an empty `egret.secret=`.
+    pub missing: bool,
+}
+
+impl UnrenderableOpaValue {
+    /// The binding carries no engine credential ([`NO_OPA_CREDENTIAL`]).
+    pub fn missing_credential() -> Self {
+        Self {
+            field: "secret",
+            missing: true,
+        }
+    }
 }
 
 impl std::fmt::Display for UnrenderableOpaValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.missing {
+            return f.write_str(NO_OPA_CREDENTIAL);
+        }
         write!(
             f,
             "the OPA plugin's {} contains a character that is unsafe in a .properties file",
@@ -64,7 +83,10 @@ fn check_properties_value(
     let bad = value.chars().any(|c| c.is_ascii_control() || c == '\\')
         || (strict && (value.contains(['=', ':']) || value.trim() != value));
     if bad {
-        Err(UnrenderableOpaValue { field })
+        Err(UnrenderableOpaValue {
+            field,
+            missing: false,
+        })
     } else {
         Ok(())
     }
