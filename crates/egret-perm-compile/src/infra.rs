@@ -64,7 +64,10 @@ pub async fn converge_infra_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     service_id: i64,
 ) -> Result<InfraSync, CompileError> {
-    let Some(loaded) = crate::ir_load::load_infra_inputs(tx, service_id).await? else {
+    let Some(loaded) =
+        crate::ir_load::load_infra_inputs(tx, service_id, crate::members::MissingUsername::Mint)
+            .await?
+    else {
         return Ok(InfraSync::default());
     };
     let engine = loaded.inputs.engine;

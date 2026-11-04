@@ -79,6 +79,9 @@ pub(crate) mod ir_load;
 // Governance SP2a, Task 4: a profile's IR-owned infrastructure policies,
 // converged before every compile and on their own.
 pub mod infra;
+// Governance SP2b: the OPA target — the evaluator snapshot built from the same
+// lowering the Ranger compile renders.
+pub mod opa;
 // Task 3 of view governance: the two StarRocks bodies the differential harness
 // asks the real jars about, built by the compiler's own functions.
 #[cfg(feature = "harness")]

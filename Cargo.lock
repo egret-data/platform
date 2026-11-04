@@ -3559,6 +3559,7 @@ dependencies = [
  "egret-events",
  "egret-metastore",
  "egret-perm",
+ "egret-perm-eval",
  "egret-perm-ir",
  "egret-policy",
  "egret-policy-api",

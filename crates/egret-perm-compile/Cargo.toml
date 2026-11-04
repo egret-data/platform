@@ -24,6 +24,9 @@ license.workspace = true
 egret-perm.workspace = true
 # Governance sub-project 1: the capability matrix and the neutral IR.
 egret-perm-ir.workspace = true
+# Governance SP2b Task 6: the OPA snapshot (`opa::build`) is the pure
+# evaluator's input, built from the same lowering the Ranger compile renders.
+egret-perm-eval.workspace = true
 # View governance Task 7: `lineage::ExplainRunner` is implemented by a runner in
 # `egret-query` and faked in tests, and is held as `dyn` by the commit hold.
 async-trait.workspace = true
@@ -96,6 +99,11 @@ required-features = ["harness"]
 # Governance sub-project 1: the golden corpus of compiled Ranger artifacts.
 [[test]]
 name = "golden_compile"
+required-features = ["harness"]
+
+# Governance SP2b Task 6: the OPA snapshot, built over the golden builders.
+[[test]]
+name = "opa_snapshot"
 required-features = ["harness"]
 
 [dev-dependencies]

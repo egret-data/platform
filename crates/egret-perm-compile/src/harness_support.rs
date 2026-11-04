@@ -140,10 +140,22 @@ pub async fn load_ep_for_test(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
 ) -> Result<Option<LoadedForTest>, CompileError> {
-    Ok(crate::ir_load::load_ep(conn, service_id)
-        .await?
-        .map(|l| LoadedForTest {
-            ep: l.ep,
-            sweep: l.sweep,
-        }))
+    Ok(
+        crate::ir_load::load_ep(conn, service_id, crate::members::MissingUsername::Mint)
+            .await?
+            .map(|l| LoadedForTest {
+                ep: l.ep,
+                sweep: l.sweep,
+            }),
+    )
+}
+
+/// The OPA snapshot of `service_id` as the refresher builds it: lowered with
+/// `MissingUsername::Omit`, so nothing is minted (governance SP2b Task 6).
+pub async fn build_snapshot_for_test(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<Option<egret_perm_eval::Snapshot>, CompileError> {
+    crate::opa::build::build_snapshot_via(conn, service_id, crate::members::MissingUsername::Omit)
+        .await
 }

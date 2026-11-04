@@ -458,6 +458,7 @@ pub(crate) async fn premint_model_usernames(
 /// pre-mint sweep normally got there first).
 pub(crate) async fn engine_admin_usernames_via(
     conn: &mut sqlx::PgConnection,
+    missing: MissingUsername,
 ) -> Result<Vec<String>, CompileError> {
     let admins = egret_auth::roles::engine_admin_user_ids_via(conn)
         .await
@@ -470,7 +471,11 @@ pub(crate) async fn engine_admin_usernames_via(
     for id in ids {
         match named.get(&id) {
             Some(u) => out.push(u.clone()),
-            None => out.push(mint_for_compile(conn, id).await?),
+            None if missing == MissingUsername::Mint => out.push(mint_for_compile(conn, id).await?),
+            // A read that must not write (the OPA snapshot): an unnamed admin
+            // is no principal on any engine yet, so leaving them out grants
+            // nobody anything.
+            None => {}
         }
     }
     out.sort();
@@ -478,15 +483,20 @@ pub(crate) async fn engine_admin_usernames_via(
     Ok(out)
 }
 
-/// What [`role_usernames`] does with a holder who has no `users.username`
-/// yet (2026-10-18 design R5).
+/// What a read of who a principal stands for ([`role_usernames`],
+/// [`expand_enumerated_principals`], [`engine_admin_usernames_via`]) does with
+/// a person who has no `users.username` yet (2026-10-18 design R5).
+///
+/// `pub` (governance SP2b Task 6) because the OPA snapshot build takes it
+/// (`crate::opa::build`, which re-exports it); the module stays crate-private.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MissingUsername {
+pub enum MissingUsername {
     /// Mint one on the caller's connection with `ensure_username_via`, so the
     /// compiled policy names the identity the engine will see. Every compile.
     Mint,
-    /// Leave the holder out. A read that must not write: `owner_cleared`,
-    /// served on GET routes.
+    /// Leave the person out, and write nothing. A read that must not write:
+    /// `owner_cleared`, served on GET routes, and the OPA snapshot build,
+    /// which runs in a `READ ONLY` transaction (SP2b I9).
     Omit,
 }
 
@@ -773,6 +783,7 @@ pub(crate) async fn expand_enumerated_principals(
     grants: &[Grant],
     rules: &[Rule],
     engine_grants: &[EngineGrant],
+    missing: MissingUsername,
 ) -> Result<Directory, CompileError> {
     let Referenced {
         workspaces: wanted,
@@ -815,6 +826,13 @@ pub(crate) async fn expand_enumerated_principals(
             }
         }
     }
+    // `Omit` (the OPA snapshot): an unnamed member is left out, as
+    // `role_usernames` leaves out an unnamed holder, and nothing is written.
+    let to_mint = if missing == MissingUsername::Mint {
+        to_mint
+    } else {
+        BTreeSet::new()
+    };
     for user_id in to_mint {
         let minted = mint_for_compile(conn, user_id).await?;
         tracing::info!(
@@ -874,7 +892,7 @@ pub(crate) async fn expand_enumerated_principals(
     // AFTER the mints above, so the role pass mints only holders the member
     // pass did not reach (see this function's doc comment).
     let roles: Vec<String> = wanted_roles.into_iter().collect();
-    let role_members = role_usernames(conn, &roles, MissingUsername::Mint).await?;
+    let role_members = role_usernames(conn, &roles, missing).await?;
 
     Ok(Directory {
         workspaces: members,

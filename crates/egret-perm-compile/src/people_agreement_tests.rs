@@ -18,7 +18,7 @@ use egret_perm::{
 };
 use uuid::Uuid;
 
-use crate::members::expand_enumerated_principals;
+use crate::members::{expand_enumerated_principals, MissingUsername};
 use crate::people::{read_user_via, NotOnEngines, UserPrincipal};
 
 async fn test_db() -> Option<Db> {
@@ -112,7 +112,7 @@ async fn expanded(conn: &mut sqlx::PgConnection, p: Principal) -> BTreeSet<Strin
         },
         origin: GrantOrigin::Explicit,
     }];
-    let dir = expand_enumerated_principals(conn, &grants, &[], &[])
+    let dir = expand_enumerated_principals(conn, &grants, &[], &[], MissingUsername::Mint)
         .await
         .expect("expand");
     egret_perm_ir::audience::audience(&grants[0].principals, &dir)
