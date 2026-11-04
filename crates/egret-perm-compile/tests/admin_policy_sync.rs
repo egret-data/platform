@@ -545,24 +545,91 @@ async fn deleting_an_admin_drops_them() {
     );
 }
 
+/// The chokepoint converges BEFORE the compile reads the profile.
+///
+/// `compile_desired` returns early only for a profile type this compiler does
+/// not target, where convergence has nothing to do either, so the ordering
+/// that matters is the one the compile can see: the engine-grant loader's
+/// near-root check scans the profile's stored policies, `egret-admin`
+/// included. An impersonation grant whose target a stale `egret-admin` row
+/// still names (ALL access) compiles only if that row was converged first;
+/// converged after the compile, the target reads as near-root and the grant is
+/// skipped.
 #[tokio::test]
-async fn a_recompile_of_an_untargeted_profile_still_syncs() {
+async fn a_recompile_converges_egret_admin_before_it_compiles() {
     let _serial = SERIAL.lock().await;
     let Some(db) = test_db().await else { return };
+    let admin = unique("adm");
+    let admin_id = new_user(&db, Some(&admin)).await;
+    make_admin_directly(&db, admin_id).await;
     let stale = unique("stale");
+    let stale_id = new_user(&db, Some(&stale)).await;
+    let grantee = unique("ua");
+    new_user(&db, Some(&grantee)).await;
     // Seeded for someone who is no admin at all, as an old apply left it.
     let svc = seeded_service(&db, "trino", std::slice::from_ref(&stale)).await;
     assert!(trino_can_select(&db, svc, &stale).await, "the arrangement");
-    recompile_service(
+    let engine: Uuid =
+        sqlx::query_scalar("SELECT id FROM engine_mgmt.engines WHERE authz_service_id = $1")
+            .bind(svc)
+            .fetch_one(&db.pool)
+            .await
+            .expect("the bound engine");
+    let grant = {
+        let g = egret_perm::EngineGrant {
+            id: Uuid::nil(),
+            engine_id: engine,
+            capability: "trino.impersonate_user".into(),
+            values: vec![],
+            target_user_id: Some(stale_id),
+            principals: egret_perm::PrincipalSet {
+                include: vec![egret_perm::Principal {
+                    kind: egret_perm::PrincipalKind::User,
+                    r#ref: grantee.clone(),
+                }],
+                exclude: vec![],
+            },
+        };
+        let mut tx = db.pool.begin().await.unwrap();
+        let id = egret_perm::create_engine_grant_in_tx(&mut tx, &g)
+            .await
+            .expect("engine grant");
+        tx.commit().await.unwrap();
+        id
+    };
+
+    let summary = recompile_service(
         &PermStore::new(db.pool.clone()),
         &PolicyStore::new(db.clone()),
         svc,
     )
     .await
     .expect("recompile");
+
+    assert!(
+        !summary.skipped.iter().any(|s| s.id == grant),
+        "the compile read the stale egret-admin body (its target near-root), so convergence \
+         ran after it: {summary:?}"
+    );
+    let compiled: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
+    )
+    .bind(svc)
+    .bind(format!("perm-engine-{grant}"))
+    .fetch_optional(&db.pool)
+    .await
+    .unwrap();
+    assert!(
+        compiled.is_some(),
+        "the impersonation grant did not compile"
+    );
     assert!(
         !trino_can_select(&db, svc, &stale).await,
-        "a profile the compiler does not target keeps a stale egret-admin body"
+        "a recompile kept a stale egret-admin body"
+    );
+    assert!(
+        trino_can_select(&db, svc, &admin).await,
+        "the recompile's convergence did not name the real admin"
     );
 }
 
