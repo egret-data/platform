@@ -9,16 +9,26 @@
 
 **Architecture:**
 - **Evaluator.** A new pure crate `egret-perm-eval` holds `Snapshot` (one profile's lowered statements plus its resolved column classifications). It answers `decide`, `filter`, `row_filters` and `column_masks`. Every operation name the Trino 483 OPA plugin sends is classified in one table, `trino_ops.rs`.
-- **Snapshot build.** `egret-perm-compile` builds snapshots with the same loaders and lowerings the Ranger compile uses (`lower_ep_via`, split out of `compile_desired`). A `SnapshotCache` holds one `Arc<Snapshot>` per OPA profile, keyed by `(policy_version, tag_version)`. A background refresher rebuilds a snapshot when its key moves. The decision path reads only the cache.
-- **Endpoint.** `opa_surface()` serves four `POST /opa/v1/data/egret/trino/*` routes. It authenticates the engine id and secret carried in `input.context.properties` with the engine's Ranger credential (the same constant-time check), through a short-TTL credential cache.
-- **Switch.** Migration `0213` adds `policy.authz_services.mechanism`. `PATCH /api/control-plane/policies/services/{service}` with `{"mechanism": …}` refuses with a named condition unless:
+- **Snapshot build.** `egret-perm-compile` builds snapshots with the same loaders and lowerings the Ranger compile uses (`lower_ep_via`, split out of `compile_desired`, run with `MissingUsername::Omit` so it never writes). A `SnapshotCache` holds one `Arc<Snapshot>` per profile that is on OPA or has an engine still applied with OPA, keyed by `(policy_version, tag_version)`. A background refresher:
+  - rebuilds a snapshot when its key moves;
+  - re-checks the switch's stored-state refusals on every build;
+  - splices fresh infrastructure into the previous snapshot when only the data lowering fails, so the SP2a kill switch still works.
+
+  The decision path reads only the cache.
+- **Endpoint.** `opa_surface()` serves five `POST /opa/v1/data/egret/trino/*` routes. It authenticates the engine id and secret carried in `input.context.properties` with the engine's Ranger credential (the same constant-time check).
+  - A 5-second verification cache sits in front of the check.
+  - The engine → profile binding comes from a map the refresher reloads every second.
+  - `allow` and `batch` refuse with HTTP 200 `false`/`[]`. The value routes refuse with HTTP 403, so a refusal there never reads as "no mask, no filter".
+- **Switch.** Migration `0213` adds `policy.authz_services.mechanism` and `engine_mgmt.engines.applied_mechanism`. `PATCH /api/control-plane/policies/services/{service}` with `{"mechanism": …}` refuses with a named condition unless:
+  - OPA is enabled on the installation (`[governance.opa] enabled`, default `false` until 2b-2's last task);
   - the profile is Trino;
   - the profile is generated;
-  - every bound engine's image ships `plugin/opa`;
+  - every bound **provisioned** engine's image ships `plugin/opa` (external engines are listed in the response, because their operator installs the plugin);
   - the profile holds no `all - …` default row;
-  - the profile and its tag service hold no hand-written (`managed_by = 'operator'`) row.
+  - the profile and its tag service hold no hand-written (`managed_by = 'operator'`) row;
+  - the profile serves no stored differing mask or row-filter pair.
 
-  On success it recompiles and re-applies every bound engine.
+  On success it recompiles and re-applies every bound provisioned engine.
 - **Engine configuration.** `opa_plugin_files` sits next to `ranger_plugin_files`. Both provisioners render the OPA `access-control.properties` and the context file. Externally run engines get `GET /engines/{id}/opa-plugin-config`.
 - **Explain.** `/perm/explain*` answers an OPA profile through `egret-perm-eval`.
 - **Ranger stays the oracle (S8).** An OPA profile still compiles its Ranger artifact.
@@ -27,7 +37,11 @@
 
 **Spec:** `docs/en/specs/2026-11-04-gov-sp2-trino-opa.md`, section "2b — the OPA target", with "Errors", "Verification" and "Out of scope". Decisions S1–S8 bind. Divergences from the spec are listed under **Spec deviations** below. Each one follows the code or the measured jar.
 
-**Split point.** The plan has 25 tasks. **Package 2b-1** is Tasks 1–20: a usable OPA engine plus the Layer 1 differential and its CI job, ending in a live check. **Package 2b-2** is Tasks 21–25: Layer 2, latency, the UI and the docs page. Each package is its own PR. 2b-2 branches from 2b-1 once 2b-1 merges.
+**Split point.** The plan has 26 tasks.
+- **Package 2b-1** is Tasks 1–20: the OPA engine behind a default-off switch, plus the Layer 1 differential and its CI job, ending in a live check.
+- **Package 2b-2** is Tasks 21–26: Layer 2, latency, the UI, the docs page, and finally turning the switch on by default.
+
+Each package is its own PR. 2b-2 branches from 2b-1 once 2b-1 merges.
 
 ## Global Constraints
 
@@ -50,6 +64,13 @@
   - dependencies `egret-perm-ir` and `thiserror` only, plus `criterion` as a dev-dependency from Task 22;
   - a test, `crates/egret-perm-eval/tests/boundary.rs`, that enforces this.
 - **The decision path never queries the database.** The only exception is a credential-cache miss (Task 9), which calls the existing `DbVerifier`.
+- **OPA is off by default.** `egret_config::Config::governance.opa.enabled` (`[governance.opa] enabled`, env `EGRET_GOVERNANCE__OPA__ENABLED`) defaults to `false` until Task 26. While it is false:
+  - the OPA surface is not mounted;
+  - the refresher does not run;
+  - `PATCH …/services/{service}` with `mechanism: "opa"` answers 409 `"OPA is not enabled on this installation"`.
+
+  Switching back to Ranger always works.
+- **Value routes fail closed with 403.** On `/row_filters`, `/batch_column_masks` and `/column_mask`, only an evaluation against a `Ready` snapshot answers 200. Every refusal, malformed request, wrong resource shape or not-built state answers HTTP 403 `{"error": reason}`. `/allow` and `/batch` answer refusals with 200 `false`/`[]`. An internal evaluator error answers 500 on every route.
 - **Migration number `0213`.** Only Task 5 adds a migration. Evidence, gathered 2026-11-04:
   - `origin/main` ends at `0212_drop_orphan_group_grants.sql`;
   - the open PRs are #835 `docs/gov-sp2-spec` and #836 `feat/gov-sp2a-infra-ir`, and both end at `0212`;
@@ -74,7 +95,7 @@
   - Never run `just up/down/reset-testdata`.
   - No StarRocks is involved. If one ever is, use only `ghcr.io/egret-data/egret-starrocks-{fe,allin1}` pinned images.
 - **The secret is never logged.** No log line, error text or test assertion message contains the value of `egret.secret` or a Ranger credential.
-- **Fail closed.** Every refusal path answers a denying result. For the two value routes, an internal error answers HTTP 500, which the plugin also turns into a failure.
+- **Fail closed.** Every refusal path answers a denying result: `false`/`[]` on `allow`/`batch`, 403 on the value routes. The plugin turns any non-2xx into a failed query.
 
 ---
 
@@ -125,7 +146,10 @@ UpdateTableColumns ViewQueryOwnedBy WriteSystemInformation
   - Batch: a list of allowed indices.
   - Row filters: a list of `{expression, identity?}`.
   - Batch column masks: a list of `{index, viewExpression {expression, identity?}}`.
+  - Single column mask (`opa.policy.column-masking-uri`, `OpaColumnMaskQueryResult`): `{expression, identity?}` or `null`.
   - The plugin builds the Trino `ViewExpression` with the table's catalog and schema, as the Ranger plugin does.
+- **egret configures both masking URIs**, batch and single. Whichever SPI mask method Trino 483's engine calls, the plugin then has a URI for it; an unset URI would mean "no mask", which fails open.
+- **`SELECT count(*)` and other column-less reads** reach both plugins as `SelectFromColumns` with an empty column set. The Ranger plugin's `RangerTrinoResource.forColumns` turns an empty set into one table-level resource (`forTable`), so Ranger asks `select` on `{catalog, schema, table}`. Verified with `javap` on `io.trino_trino-ranger-483.jar`.
 - **What the Trino Ranger plugin checks for the same calls** (`RangerSystemAccessControl` 483):
 
 | Calls | Ranger access type on the named resource |
@@ -166,24 +190,36 @@ UpdateTableColumns ViewQueryOwnedBy WriteSystemInformation
   - `Read` answers `select`.
   - `Write` answers `insert` and `delete`.
   - Everything else (create, drop, alter, show, sysinfo) is held only by `Target::Infra(InfraObject::WholeEp)`, the `egret-admin` all-access. Grants never compile those access types, and the `all - …` defaults are refused at the switch.
-- **Reach** is the `_any` check:
-  - A user reaches an object when some allowing statement for that user matches the object or any object below it.
-  - The allowing statement is an `Allow`, a `WholeEp`, or an `EngineObject` whose leading values name the object.
-  - A deny on the object or an ancestor removes a privilege from that reach. The object is reached while at least one privilege remains.
+- **An empty column list is one table-level Read check.** The column level is absent: it matches statements whose column is `Unnamed` or `*`. A column-only deny does not apply, mirroring Ranger's descendant match. This is how `count(*)` is checked.
+- **Reach is the `_any` check, in its conservative form** (decided 2026-11-04). A user reaches an object iff both hold:
+  - some applying allow matches the object or a descendant. An allow is an `Allow` path, `WholeEp`, or an `EngineObject` whose capability's first resource key is `catalog` (`trino.set_catalog_session_property`, `trino.execute_procedure`, `trino.execute_function`) and whose first value is the object's catalog;
+  - **no** applying `Deny` or `Withhold` carrying **any** privilege matches the object or an ancestor. That covers a match by path, and a match by a classification on the object (for a column, also on its table).
+
+  A deny that matches only a descendant is ignored. A reach difference where OPA allows and Ranger denies is never accepted as explained; the evaluator is fixed instead (Task 18).
 - **Infrastructure and engine capabilities:**
   - `WholeEp` allows every check.
   - `AnyUser`/`SessionUser` allow impersonation: `SessionUser` only when the target user equals the session user.
   - `AnyQuery` allows `ExecuteQuery`.
   - `SystemProperty(p)` allows `SetSystemSessionProperty` of `p`.
   - `EngineObject { capability, values }` allows the operation named by the capability id (`trino.impersonate_user`, `trino.set_system_session_property`, `trino.set_catalog_session_property`, `trino.execute_procedure`, `trino.execute_function`) when its values equal the request's, compared case-insensitively.
-- **Row filters** of every matching `RowFilter` statement combine with `AND`, in statement order: `(a) AND (b)`.
+- **Row filters.**
+  - A `RowFilter` path level that is `Unnamed` matches every value. The Ranger renderer writes `*` for it (`ranger/grants.rs:290-307`, legacy rows stored before `validate_rule_shape`).
+  - Identical expressions are merged first: they are the agreeing ties `ambiguous_arbitration` admits (`crates/egret-policy/src/ambiguous_arbitration.rs:18-32`).
+  - The remaining expressions combine with `AND`, in statement order: `(a) AND (b)`. After the switch's `StoredOverlaps` refusal and the compile's `refuse_overlaps`, more than one distinct filter is reachable only from a state that is already refused.
 - **Masks.**
-  - At most one mask applies per column per user.
+  - A `Mask` whose column level is `Unnamed` matches every column of the tables it names. The Ranger target omits that level (`ranger/grants.rs:264-270`) and its behaviour is unmeasured, so Layer 1 decides; any difference goes into `explained.toml`.
+  - Applying masks with identical `(mask_type, expression)` are merged first (agreeing ties).
+  - After merging, at most one mask applies per column per user.
   - `WithholdMask` counts as a `MASK_NULL` mask for its audience.
-  - Two masks on one column for one user is an `EvalError::TwoMasks`. The routes answer it with HTTP 500, so the plugin fails the query.
-- **Metadata tables** (`t$files`, …), mirroring `ranger/completion/metadata_tables.rs`:
+  - Two distinct masks on one column for one user is an `EvalError::TwoMasks`. The routes answer it with HTTP 500, the last guard, and the plugin fails the query.
+- **Metadata tables** (`t$files`, …), mirroring `ranger/completion/metadata_tables.rs:25-35` (M17):
   - A table name containing `$` is matched as written, so a grant on `*` reaches it and a grant on `t` does not.
-  - In addition, a `Read` on `t$…` is denied to any user for whom a mask, a row filter, a deny or a withhold reaches any column of `t`.
+  - In addition, a `Read` on `t$…` is denied to any user restricted on `t` by any of:
+    - a `Deny` or `Withhold` carrying Read;
+    - a non-`MASK_NONE` mask;
+    - a non-empty row filter.
+
+    Exempt users and `MASK_NONE` items do not count.
 
 ### D3. Snapshot, cache and refresher
 
@@ -196,10 +232,13 @@ UpdateTableColumns ViewQueryOwnedBy WriteSystemInformation
   - `SnapshotCache` maps `service_id → CacheEntry { key: (policy_version, tag_version), snapshot: Option<Arc<Snapshot>>, error: Option<String> }`.
   - `get(service_id)` answers `Lookup::{NotOpa, NotBuilt { error }, Ready(Arc<Snapshot>)}`.
 - **The refresher**, `spawn_snapshot_refresher(cache, pool, period = 1 s, shutdown)`, runs `refresh_once` each period:
-  - it reads `SELECT id, policy_version, tag_version FROM policy.authz_services WHERE mechanism = 'opa' ORDER BY id`;
-  - it drops entries no longer listed;
-  - it rebuilds each entry whose key moved, in a `REPEATABLE READ, READ ONLY` transaction;
-  - when a build fails, it keeps the previous snapshot, stores the error, logs at `warn`, and calls `compile_runs::record_compile_failure(pool, id, "OPA snapshot: {e}")`.
+  - **Which profiles.** Those with `mechanism = 'opa'`, and those with a bound engine whose `applied_mechanism = 'opa'` (open question (a): an engine not yet re-applied after a switch back to Ranger keeps being answered).
+  - **The engine → profile map.** `SELECT id, authz_service_id FROM engine_mgmt.engines WHERE authz_service_id = ANY($1)` for those profiles, loaded in the same pass. The surface reads the binding from this map, never from a cached credential.
+  - **Stale entries.** It drops entries no longer listed.
+  - **Rebuilds.** It rebuilds each entry whose key moved, in a `REPEATABLE READ, READ ONLY` transaction, lowering with `MissingUsername::Omit`.
+  - **The stored-state refusals on every build:** `all - …` rows, `operator` rows (profile and tag service), and stored differing overlaps. A hit makes the entry `NotBuilt { error: <the refusal message> }`, which denies everything, and records a compile failure naming it.
+  - **A data-lowering failure.** It splices freshly lowered infrastructure into the previous snapshot (`Snapshot::with_infra`), stores the error, logs at `warn`, and calls `compile_runs::record_compile_failure(pool, id, "OPA snapshot: {e}")`.
+  - **An infrastructure-lowering failure** makes the entry `NotBuilt`.
 
 ### D4. Spec deviations
 
@@ -213,16 +252,50 @@ UpdateTableColumns ViewQueryOwnedBy WriteSystemInformation
    - "Always denied" has no row: per D1, GRANT/REVOKE/role operations never reach egret.
    - "Always allowed" has no row: `FilterViewQueryOwnedBy` on one's own queries is answered by the `egret-user-impersonate-self` infra statement, which is how Ranger answers it.
    - An unknown name is still denied as "operation not modelled".
-5. **Two more switch refusals.** Besides the decided `all - …` refusal (D-all), the switch is refused while the profile or its tag service holds a `managed_by = 'operator'` row. The reason is the same: it is stored Ranger JSON the evaluator would silently ignore.
+5. **More switch refusals, also re-checked by the refresher.** Besides the decided `all - …` refusal (D-all), the switch is refused while:
+   - the profile or its tag service holds a `managed_by = 'operator'` row;
+   - the profile serves a stored differing mask or row-filter pair (`StoredOverlaps`, through a new `ProfileRecompiler::stored_overlaps_in_tx` over `overlap::stored_overlaps_via`).
+
+   Both are stored state the evaluator cannot express. The refresher re-checks all three on every build, and `create_policy` refuses a hand-written policy in the tag service of an OPA profile.
 6. **"Unknown engine" and "wrong secret" log one reason**, "engine credential refused". The `EngineCredentialVerifier` contract (`egret-engine-mgmt-api/src/credential.rs:47`) forbids callers to tell them apart.
-7. **A credential cache, the one database read.** The decision path consults a credential cache (positive entries 30 s, negative 5 s). A miss calls `DbVerifier`, the one database read on the request path. Without the cache, every OPA request would read the engine row and the secret store.
-8. **Internal evaluator errors answer HTTP 500** on `row_filters` and `batch_column_masks`. On those two routes `[]` means "no filter, no mask", which would fail open. Refusals still answer 200 with a denying result, as the spec says.
+7. **A 5-second verification cache, the one database read.** The cache holds only "this (engine, secret hash) verified". The binding comes from the refresher's per-second map. A miss calls `DbVerifier`, the one database read on the request path.
+8. **The value routes refuse with 403, not 200 `[]`** (controller ruling C1). On those routes `[]`/`null` means "no filter, no mask", so a 200 refusal would fail open whenever `/allow` had already said yes. Internal evaluator errors answer 500.
 9. **The matrix rows for `opa(trino)` copy the Ranger Trino rows' answers.** Their evidence names the Layer 1 tests (Task 18), and a unit test keeps the two in step. This keeps the lowered statement set, and so the Ranger artifact of an OPA profile, identical to a Ranger profile's.
 10. **Layer 1 builds store states with the golden fixture builders.** It writes them into Postgres through `crates/egret-perm-compile/tests/golden/fixtures.rs`. The existing 2000-case Ranger corpus draws raw Ranger JSON and has no egret store states to reuse.
     - What Layer 1 reuses is the Java runner (`tests/ranger/src/test/java/EgretCaseRunner.java`) and its Rust driver, `ask_ranger_json`.
     - It runs 40 states × 50 questions = 2000 cases.
 11. **`explained.toml` is new.** The Ranger differential keeps its accepted differences as Rust consts (`ID_DIVERGENCES`, `DECLINED_CEILINGS`). The OPA differential uses the file the spec names.
 12. **The migration number is `0213`**, chosen by the evidence in Global Constraints.
+13. **The image refusal covers provisioned engines only** (ruling C6). An external engine has no stored image, and its operator installs the plugin config. The switch's 200 body lists them as `external_engines_unchanged`, and the dialog and the docs say the operator must run Trino ≥ 483 with `plugin/opa`.
+14. **A default-off configuration gate** (ruling I8): `[governance.opa] enabled = false` until Task 26.
+15. **`engine_mgmt.engines.applied_mechanism`** (open question (a)) records what each provisioned engine was last applied with. Snapshots are kept for a profile while any of its engines still runs OPA, and a re-sent PATCH with the profile's current mechanism re-runs the reconfigure.
+16. **A fifth route, `/column_mask`**, with `opa.policy.column-masking-uri`, so the single-column mask path cannot fail open (I4).
+
+### D5. Review findings not applied
+
+None. Every Critical and Important claim of the 2026-11-04 plan review was checked against the code before its fix was written in:
+
+| Finding | Evidence |
+|---|---|
+| C1 | protocol per D1 |
+| C2 | `RangerTrinoResource.forColumns` → `forTable` on an empty set, by `javap` |
+| C3 | `migrations/0081_catalog_tag_targets.sql:14`; `store.rs:1462`, `:1497` |
+| C4 | spec 2a convergence |
+| C6 | `engine_delegation.rs:86-88`; `engine_images.rs:108-130` |
+| C7 | `ranger/grants.rs:290-307` |
+| C8 | `store.rs:565` |
+| I1 | `ambiguous_arbitration.rs:18-32` |
+| I2 | `golden/fixtures.rs:1004-1006`; `golden_compile.rs:65,142` |
+| I3 | `credential.rs:12-18` |
+| I5 | `matrix.rs:358-368` |
+| I9 | `members.rs:484-491`; `ir_load.rs:397` |
+
+- **C5** rests on a reading of Ranger's item matcher that the reviewer marked as a reading. It is applied anyway, because it is the conservative direction (ruling (b)).
+- **C8 nuance.** A tag service *is* stamped `generated` once a compile writes into it (`trigger.rs:923-938`). It stays `manual` only while nothing compiles into it. The fix still holds for that case and for shared tag services.
+
+### D6. Deferred minors
+
+Every plan-text minor (M1–M14, M4b) is applied in its task. None is deferred.
 
 ---
 
@@ -235,15 +308,19 @@ UpdateTableColumns ViewQueryOwnedBy WriteSystemInformation
 | `crates/egret-perm-eval/tests/fixtures/trino-483-opa-operations.txt` | 1 | The 63 operation names |
 | `crates/egret-perm-eval/tests/fixtures/trino-483-ranger-checks.txt` | 1 | Ranger plugin method → access types |
 | `crates/egret-perm-eval/tests/fixtures/trino-483-plugins.sha256` | 1 | Jar digests |
+| `crates/egret-perm-eval/tests/fixtures/trino-483-opa-request-shapes.txt` | 1 | Bytecode of the batch filter and mask request builders |
 | `crates/egret-perm-eval/src/trino_ops.rs` | 2 | The operation table |
 | `crates/egret-perm-eval/src/{pattern.rs,snapshot.rs,decide.rs}` | 3 | Matching, the snapshot, `decide`/`filter` |
 | `crates/egret-perm-eval/src/values.rs` | 4 | `row_filters`, `column_masks`, mask rendering |
-| `migrations/0213_profile_mechanism.sql` | 5 | The `mechanism` column |
+| `migrations/0213_profile_mechanism.sql` | 5 | `policy.authz_services.mechanism`, `engine_mgmt.engines.applied_mechanism` |
 | `crates/egret-perm-ir/src/{ep.rs,matrix.rs}` | 5 | `Mechanism::Opa`, `opa(trino)` rows |
 | `crates/egret-perm-compile/src/opa/{mod.rs,build.rs}` | 6 | `lower_ep_via`, `build_snapshot_via`, classified columns |
-| `crates/egret-perm-compile/src/opa/cache.rs` | 7 | `SnapshotCache`, refresher |
+| `crates/egret-perm-compile/src/opa/cache.rs` | 7 | `SnapshotCache`, refresher, engine binding map |
+| `crates/egret-policy/src/opa_guard.rs` | 7 | Stored-state checks shared by the refresher and the switch |
+| `crates/egret-perm-compile/tests/opa_support/fixtures_host.rs` | 6 | What `golden/fixtures.rs` needs from its includer |
+| `crates/egret-config/src/lib.rs` | 5, 26 | `[governance.opa] enabled` |
 | `crates/egret-perm-compile/src/opa/wire.rs` | 8 | OPA input parsing and result building |
-| `crates/egret-perm-compile/src/opa/surface.rs` | 9 | `opa_surface`, `OpaState`, credential cache |
+| `crates/egret-perm-compile/src/opa/surface.rs` | 9 | `opa_surface`, `OpaState`, verification cache |
 | `crates/egret-server/src/lib.rs`, `crates/egret-bin/src/main.rs` | 10, 15 | Mounting and wiring |
 | `crates/egret-policy/src/admin/mechanism.rs` | 11, 12 | Switch refusals and the PATCH route |
 | `crates/egret-engine-mgmt-api/src/opa_config.rs` | 13 | `opa_plugin_files` |
@@ -273,13 +350,13 @@ UpdateTableColumns ViewQueryOwnedBy WriteSystemInformation
 **Files:**
 - Create: `scripts/opa/extract-trino-plugin-facts.sh`
 - Create: `crates/egret-perm-eval/Cargo.toml`, `crates/egret-perm-eval/src/lib.rs`, `crates/egret-perm-eval/tests/boundary.rs`
-- Create (generated by the script, then committed): `crates/egret-perm-eval/tests/fixtures/trino-483-opa-operations.txt`, `trino-483-ranger-checks.txt`, `trino-483-plugins.sha256`
+- Create (generated by the script, then committed): `crates/egret-perm-eval/tests/fixtures/trino-483-opa-operations.txt`, `trino-483-ranger-checks.txt`, `trino-483-opa-request-shapes.txt`, `trino-483-plugins.sha256`
 - Modify: root `Cargo.toml`. Add `egret-perm-eval = { path = "crates/egret-perm-eval" }` under `[workspace.dependencies]`; `members = ["crates/*"]` already picks the crate up.
 
 **Interfaces:**
 - Produces:
   - the crate `egret_perm_eval`;
-  - the three fixture files;
+  - the four fixture files;
   - the script, which needs `docker`, `unzip` and `javap` (JDK 17+).
 
 - [ ] **Step 1: Write the script.**
@@ -318,7 +395,27 @@ javap -c -p -constants "$WORK/ranger/io/trino/plugin/ranger/RangerSystemAccessCo
          match($0, /RangerTrinoAccessType\.[A-Z_]+/); a = substr($0, RSTART + 22, RLENGTH - 22)
          if (index(acc, " " a) == 0) acc = acc " " a }
        END { print m ":" acc }' | sort -u > "$OUT/trino-483-ranger-checks.txt"
+
+# Request shapes of the batch filters and of both mask paths, as committed evidence
+# (open question (c)): the bytecode that builds FilterColumns and GetColumnMask requests.
+{
+  echo "## OpaBatchAccessControl: filterColumns and the batch request builders"
+  javap -c -p -constants "$WORK/opa/io/trino/plugin/opa/OpaBatchAccessControl.class" \
+    | awk '/filterColumns|lambda\$filterColumns\$0|lambda\$batchRequestBuilder\$[01]/,/^$/'
+  echo "## OpaHighLevelClient and OpaAccessControl: the column-mask requests"
+  for c in OpaHighLevelClient OpaAccessControl; do
+    javap -c -p -constants "$WORK/opa/io/trino/plugin/opa/$c.class" \
+      | awk '/getColumnMask|getColumnMasks|GetColumnMask/,/^$/'
+  done
+} > "$OUT/trino-483-opa-request-shapes.txt"
 ```
+
+  Read `trino-483-opa-request-shapes.txt` and write down in the task report:
+  - whether one `FilterColumns` request carries exactly one table, with the result indices referring to that table's `columns`;
+  - whether a batch `GetColumnMask` request carries one `column` resource per column in `filterResources`;
+  - which of `getColumnMask`/`getColumnMasks` the plugin implements.
+
+  Task 8 relies on these answers; if they differ from its assumptions, Task 8's tests change to match the fixture.
 
   Run it as `bash scripts/opa/extract-trino-plugin-facts.sh crates/egret-perm-eval/tests/fixtures`.
   - Expected: `trino-483-opa-operations.txt` has exactly 63 lines, the list in D1 of this plan.
@@ -549,6 +646,9 @@ pub enum SnapshotError {
 pub struct Snapshot { /* private: statements, indexes */ }
 impl Snapshot {
     pub fn build(input: SnapshotInput) -> Result<Snapshot, SnapshotError>;
+    /// A copy whose infrastructure statements (`Source::Infra`) are replaced by `infra`,
+    /// every other statement kept. The refresher uses it when only the data lowering failed (C4).
+    pub fn with_infra(&self, infra: Vec<egret_perm_ir::statement::Statement>) -> Result<Snapshot, SnapshotError>;
     pub fn service_id(&self) -> i64;
     pub fn key(&self) -> (i64, i64);
     pub fn len(&self) -> usize;
@@ -594,7 +694,7 @@ impl Snapshot {
 - **Audience.** A statement applies to `user` when:
   - `include` holds `MemberName::User(user)` or `MemberName::Everyone`;
   - and `except` holds neither.
-- **Data.** For `Data(Read)` on a `Table`, check each listed column; every column must be allowed. For `Data(Write)`, check the table, with column `*`. A privilege on an object is allowed when:
+- **Data.** For `Data(Read)` on a `Table`, check each listed column; every column must be allowed. **An empty `columns` list is one table-level Read check**, not a vacuous allow: the column level is absent, so it matches statements whose column is `Unnamed` or `*`, and a column-only deny does not apply. This mirrors the Ranger plugin, whose `RangerTrinoResource.forColumns` asks `select` on `{catalog, schema, table}` for an empty set; `SELECT count(*)` arrives this way. For `Data(Write)`, check the table, with the column level absent in the same way. A privilege on an object is allowed when:
   - an applying `Effect::Allow { privileges }` with that privilege has a `Target::Path` matching all four levels; or an applying `Target::Infra(InfraObject::WholeEp)` statement exists;
   - and no applying `Effect::Deny`/`Effect::Withhold` with that privilege matches. A withhold matches through `Target::Path` (StarRocks shape) or `Target::Classification { name }`. For a column request, the classification is the column's or its table's; for a table request, only the table's.
 - **Reach** (operations `Reach`), on the request's object:
@@ -603,7 +703,11 @@ impl Snapshot {
   - Table: a `Table` with no columns, or a `Table` in `filter` for `FilterTables`.
   - `FilterColumns`: each column (Task 8 turns that request into one `Table` per column).
 
-  An applying allow (Allow path, WholeEp, or EngineObject whose first value equals the catalog) whose levels are compatible with the object's named levels makes it reachable. Unnamed or deeper levels are free. A deny counts only if its path covers the object (every level the object names matches, and every deeper deny level is `*`/Unnamed) and it denies every privilege the allow grants.
+  A user reaches the object iff both hold:
+  - **some applying allow matches the object or a descendant.** The allow is an `Allow` path whose levels are compatible with the object's named levels (unnamed or deeper levels are free), or WholeEp, or an `EngineObject` whose capability's first resource key is `catalog` and whose first value equals the object's catalog. Those capabilities are `trino.set_catalog_session_property`, `trino.execute_procedure` and `trino.execute_function` (`engine_capabilities.rs:92-145`); never `trino.impersonate_user`, whose first value is a username;
+  - **no applying `Deny` or `Withhold` carrying any privilege matches the object or an ancestor.** It may match by path, or by a classification carried by the object (a column: its own or its table's; a table: its own).
+
+  A deny that matches only a descendant is ignored. This is the conservative rule (ruling (b)): a reach where OPA allows and Ranger denies is never accepted as an explained difference.
 - **`AdminOnly`.** Allowed only by an applying WholeEp. The deny reason is `"{op} needs the all-access engine administration grant"`.
 - **`EngineCapability(id)`.** Allowed by:
   - an applying `Target::EngineObject { capability == id, values }` whose values equal the request's values, compared case-insensitively. Values are `[catalog, schema, function]` for `Function`, and `[catalog, property]` for `CatalogSessionProperty`;
@@ -623,7 +727,13 @@ impl Snapshot {
 - **A resource of the wrong shape** for its class → `Deny { reason: "malformed resource for {op}", explicit: false }`.
 - **Metadata tables.** A table name containing `$`:
   1. is checked as written;
-  2. is then denied for `Read` if any Mask, RowFilter, Deny, Withhold or WithholdMask statement applying to the user reaches any column of the base table (the name before the first `$`), by path or by classification.
+  2. is then denied for `Read` if the user is restricted on any column of the base table (the name before the first `$`), by path or by classification. Restricted means one of:
+     - an applying `Deny`/`Withhold` carrying Read;
+     - a `Mask` whose type is not `MASK_NONE`;
+     - a `WithholdMask`;
+     - a non-empty `RowFilter`.
+
+     Exempt users and `MASK_NONE` do not count, as in `ranger/completion/metadata_tables.rs:25-35`.
 - **The index.** `Snapshot::build` sorts statement indices into:
   - `by_catalog: BTreeMap<String /* lowercase literal */, Vec<usize>>`;
   - `wild_catalog: Vec<usize>` (catalog level contains `*`/`?`);
@@ -746,12 +856,12 @@ fn admin_only_needs_the_whole_ep_statement() {
 #[test]
 fn impersonation_rules() {
     let s = snap(vec![
-        infra(InfraKind::DelegatorImpersonate, who(&["egret-delegator"], &[]), InfraObject::AnyUser, "impersonate"),
+        infra(InfraKind::DelegatorImpersonate, who(&["egret_delegator"], &[]), InfraObject::AnyUser, "impersonate"),
         infra(InfraKind::SelfImpersonate, who(&["*"], &[]), InfraObject::SessionUser, "impersonate"),
         infra(InfraKind::ExecuteQuery, who(&["*"], &[]), InfraObject::AnyQuery, "execute"),
         infra(InfraKind::QueryTimeout, who(&["*"], &[]), InfraObject::SystemProperty("query_max_run_time".into()), "alter"),
     ], vec![]);
-    assert!(allowed(&s.decide("egret-delegator", "ImpersonateUser", &Resource::User("ann".into()))));
+    assert!(allowed(&s.decide("egret_delegator", "ImpersonateUser", &Resource::User("ann".into()))));
     assert!(allowed(&s.decide("ann", "KillQueryOwnedBy", &Resource::User("ann".into()))));
     assert!(!allowed(&s.decide("ann", "KillQueryOwnedBy", &Resource::User("bob".into()))));
     assert!(allowed(&s.decide("ann", "ExecuteQuery", &Resource::None)));
@@ -800,6 +910,65 @@ fn an_unexpanded_member_fails_the_build() {
         statements: vec![st(1, a, path("lake", None, None, None), Effect::Allow { privileges: vec![Privilege::Read] })] });
     assert!(e.is_err());
 }
+
+#[test]
+fn count_star_needs_a_table_level_read() {
+    // SELECT count(*) arrives as SelectFromColumns with no columns (D1, Ranger's forColumns → forTable).
+    let none = snap(vec![], vec![]);
+    assert!(!allowed(&none.decide("ann", "SelectFromColumns", &cols("lake", "s", "t", &[]))), "no grant, no count(*)");
+    let catalog = snap(vec![st(1, who(&["ann"], &[]), path("lake", None, None, None),
+                               Effect::Allow { privileges: vec![Privilege::Read] })], vec![]);
+    assert!(allowed(&catalog.decide("ann", "SelectFromColumns", &cols("lake", "s", "t", &[]))));
+    let column_only = snap(vec![st(1, who(&["ann"], &[]), path("lake", Some("s"), Some("t"), Some("id")),
+                                   Effect::Allow { privileges: vec![Privilege::Read] })], vec![]);
+    assert!(!allowed(&column_only.decide("ann", "SelectFromColumns", &cols("lake", "s", "t", &[]))),
+            "a column grant does not answer a table-level select");
+}
+
+#[test]
+fn a_withheld_column_is_not_reached() {
+    let s = snap(vec![
+        st(1, who(&["*"], &[]), path("lake", None, None, None), Effect::Allow { privileges: vec![Privilege::Read] }),
+        Statement { source: Source::Withhold { classification_id: Uuid::nil(), classification_name: "pii".into() },
+                    audience: who(&["*"], &[]), target: Target::Classification { name: "pii".into() },
+                    effect: Effect::Withhold { privileges: vec![Privilege::Read] }, derivation: Derivation::AsDeclared },
+    ], vec![ClassifiedColumn { catalog: "lake".into(), schema: "s".into(), table: "t".into(), column: Some("ssn".into()), classification: "pii".into() }]);
+    let one = |c: &str| cols("lake", "s", "t", &[c]);
+    assert_eq!(s.filter("ann", "FilterColumns", &[one("id"), one("ssn")]), vec![0], "the withheld column is hidden");
+    assert!(allowed(&s.decide("ann", "ShowColumns", &cols("lake", "s", "t", &[]))), "a deny on a descendant is ignored");
+}
+
+#[test]
+fn a_deny_carrying_any_privilege_on_an_ancestor_hides_the_object() {
+    let s = snap(vec![
+        st(1, who(&["ann"], &[]), path("lake", None, None, None), Effect::Allow { privileges: vec![Privilege::Read, Privilege::Write] }),
+        st(2, who(&["ann"], &[]), path("lake", Some("s"), None, None), Effect::Deny { privileges: vec![Privilege::Write] }),
+    ], vec![]);
+    assert!(!allowed(&s.decide("ann", "ShowTables", &Resource::Schema { catalog: "lake".into(), schema: "s".into() })),
+            "Ranger's _any: a deny item with any access type on the object refuses it");
+    assert!(allowed(&s.decide("ann", "AccessCatalog", &Resource::Catalog("lake".into()))), "the deny is on a descendant of the catalog");
+}
+
+#[test]
+fn an_impersonation_grant_is_not_catalog_reach() {
+    let s = snap(vec![Statement {
+        source: Source::EnginePrivilege { engine_grant_id: Uuid::nil() }, audience: who(&["ann"], &[]),
+        target: Target::EngineObject { capability: "trino.impersonate_user".into(), values: vec!["lake".into()] },
+        effect: Effect::EnginePrivilege { capability: "trino.impersonate_user".into() }, derivation: Derivation::AsDeclared }], vec![]);
+    assert!(!allowed(&s.decide("ann", "AccessCatalog", &Resource::Catalog("lake".into()))),
+            "a username that happens to equal a catalog name is not a catalog");
+}
+
+#[test]
+fn with_infra_replaces_only_the_infrastructure() {
+    let s = snap(vec![
+        st(1, who(&["ann"], &[]), path("lake", None, None, None), Effect::Allow { privileges: vec![Privilege::Read] }),
+        infra(InfraKind::AdminAllAccess, who(&["root"], &[]), InfraObject::WholeEp, "all"),
+    ], vec![]);
+    let t = s.with_infra(vec![]).unwrap();
+    assert!(!allowed(&t.decide("root", "CreateTable", &cols("lake", "s", "t", &[]))), "the disabled admin lost all-access");
+    assert!(allowed(&t.decide("ann", "SelectFromColumns", &cols("lake", "s", "t", &["a"]))), "data statements kept");
+}
 ```
 
   Add `egret-perm.workspace = true` and `uuid.workspace = true` under `[dev-dependencies]` for these tests.
@@ -814,6 +983,9 @@ fn an_unexpanded_member_fails_the_build() {
   - (d) Let `SessionUser` match any target.
   - (e) Allow `AdminOnly` with an `Allow { Read }` path statement.
   - (f) Skip the metadata-table rule.
+  - (g) Treat an empty column list as allowed. `count_star_needs_a_table_level_read` must fail.
+  - (h) Drop classification withholds from reach. `a_withheld_column_is_not_reached` must fail.
+  - (i) Count a reach deny only when it denies every privilege the allow grants. `a_deny_carrying_any_privilege_on_an_ancestor_hides_the_object` must fail.
 - [ ] **Step 6: Commit** `feat(perm-eval): snapshot, matching, decide and filter`.
 
 ---
@@ -831,7 +1003,7 @@ fn an_unexpanded_member_fails_the_build() {
 
 ```rust
 impl Snapshot {
-    /// The AND of every applying row filter on the table, in statement order; empty when none.
+    /// The AND of every distinct applying row filter on the table, in statement order; empty when none.
     pub fn row_filters(&self, user: &str, catalog: &str, schema: &str, table: &str) -> Result<Vec<String>, EvalError>;
     /// Column name → SQL expression, only for masked columns. `columns` are (name, Trino type display name).
     pub fn column_masks(&self, user: &str, catalog: &str, schema: &str, table: &str, columns: &[(String, String)])
@@ -858,16 +1030,43 @@ pub const TRINO_MASK_TRANSFORMERS: &[(&str, &str)];
 
   In the Rust source the `||` is written unescaped.
 - **Semantics:**
-  - A `RowFilter { expression }` statement applies when its audience applies and its `Target::Path` names exactly this catalog, schema and table (wildcards allowed), or its `Target::Classification` is carried by the table.
-  - Several filters become one string, `(e1) AND (e2)`, returned as a one-element vector.
-  - A `Mask` matches a column by path (all four levels) or by a classification on the column or its table.
+  - **Which row filters apply.** A `RowFilter { expression }` statement applies when its audience applies, and either:
+    - its `Target::Path` matches this catalog, schema and table (wildcards allowed; an `Unnamed` level matches every value, because the Ranger renderer writes `*` for it in `crates/egret-perm-compile/src/ranger/grants.rs:290-307`); or
+    - its `Target::Classification` is carried by the table.
+  - **Merging filters.**
+    1. Identical expressions are merged first. They are the agreeing ties `crates/egret-policy/src/ambiguous_arbitration.rs:18-32` admits.
+    2. The rest become one string, `(e1) AND (e2)`, returned as a one-element vector.
+  - **Which masks apply.** A `Mask` matches a column:
+    - by path: catalog, schema and table match, and the column level matches or is `Unnamed` (an `Unnamed` column covers every column of the table; the Ranger target omits that level, so Layer 1 decides whether Ranger agrees);
+    - or by a classification on the column or its table.
   - A `WithholdMask` counts as `MASK_NULL`.
-  - `MASK_NONE` is an applying mask that renders to nothing. It still counts toward the two-mask check.
-  - More than one applying mask → `Err(EvalError::TwoMasks { user, column })`.
+  - `MASK_NONE` is an applying mask that renders to nothing.
+  - **Merging masks.** Applying masks with identical `(mask_type, expression)` are merged into one (agreeing ties).
+  - After merging, more than one applying mask → `Err(EvalError::TwoMasks { user, column })`.
 
-- [ ] **Step 1: Write the failing tests** `tests/values.rs`, reusing Task 3's helper set (copy the helpers block into this file):
+- [ ] **Step 1: Write the failing tests** `tests/values.rs`, reusing Task 3's helper set (copy the helpers block into this file, and add `use egret_perm_eval::EvalError;`):
 
 ```rust
+#[test]
+fn a_legacy_row_filter_with_an_unnamed_table_filters_every_table_of_the_schema() {
+    let s = snap(vec![st(1, who(&["*"], &[]), path("lake", Some("s"), None, None),
+                         Effect::RowFilter { expression: "region = 'us'".into() })], vec![]);
+    assert_eq!(s.row_filters("ann", "lake", "s", "any_table").unwrap(), vec!["(region = 'us')".to_string()]);
+    assert!(s.row_filters("ann", "lake", "other", "t").unwrap().is_empty());
+}
+
+#[test]
+fn an_agreeing_tie_is_one_mask_and_one_filter() {
+    let s = snap(vec![
+        st(1, who(&["*"], &[]), path("lake", Some("s"), Some("t"), Some("c")), Effect::Mask { mask_type: "MASK".into(), expression: None }),
+        st(2, who(&["*"], &[]), path("lake", Some("s"), Some("t"), Some("c")), Effect::Mask { mask_type: "MASK".into(), expression: None }),
+        st(3, who(&["*"], &[]), path("lake", Some("s"), Some("t"), None), Effect::RowFilter { expression: "x = 1".into() }),
+        st(4, who(&["ann"], &[]), path("lake", Some("s"), Some("t"), None), Effect::RowFilter { expression: "x = 1".into() }),
+    ], vec![]);
+    assert_eq!(s.column_masks("ann", "lake", "s", "t", &[("c".into(), "varchar".into())]).unwrap().len(), 1);
+    assert_eq!(s.row_filters("ann", "lake", "s", "t").unwrap(), vec!["(x = 1)".to_string()]);
+}
+
 #[test]
 fn row_filters_combine_with_and_in_statement_order() {
     let s = snap(vec![
@@ -939,16 +1138,23 @@ fn two_masks_on_one_column_is_an_error_not_a_choice() {
   - (b) Return the first mask instead of erroring on two.
   - (c) Drop the `{type}` replacement.
   - (d) Ignore `WithholdMask`.
+  - (e) Do not merge identical masks. `an_agreeing_tie_is_one_mask_and_one_filter` must fail.
+  - (f) Treat an `Unnamed` row-filter table as matching nothing. The legacy row-filter test must fail.
 - [ ] **Step 6: Commit** `feat(perm-eval): row filters and column masks`.
 
 ---
 
 ## Phase 2 — the mechanism and the snapshot
 
-### Task 5: Migration 0213, `Mechanism::Opa`, and the profile's mechanism everywhere it is read
+### Task 5: Migration 0213, `Mechanism::Opa`, the OPA config gate, and the profile's mechanism everywhere it is read
 
 **Files:**
 - Create: `migrations/0213_profile_mechanism.sql`
+- Modify: `crates/egret-config/src/lib.rs`. `Config` (:539) gains `#[serde(default)] pub governance: GovernanceConfig`, with:
+  - `#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)] pub struct GovernanceConfig { #[serde(default)] pub opa: OpaSettings }`;
+  - `#[derive(…same…)] pub struct OpaSettings { #[serde(default)] pub enabled: bool }`;
+  - a doc comment saying the key is `[governance.opa] enabled`, env `EGRET_GOVERNANCE__OPA__ENABLED`, default `false` until SP2b-2 (Task 26). Model it on `WorkflowConfig::webhooks_enabled` (:768-790).
+- Modify: `crates/egret-perm-compile/tests/golden_compile.rs:65` (`capture`). When `std::env::var("EGRET_GOLDEN_MECHANISM").as_deref() == Ok("opa")`, run `UPDATE policy.authz_services SET mechanism = 'opa' WHERE id = $1 AND type = 'trino'` on `tx` for each profile before its recompile.
 - Modify: `crates/egret-perm-ir/src/ep.rs` (`Mechanism::Opa`) and `src/matrix.rs` (the `OPA_TRINO` rows)
 - Modify: `crates/egret-perm-compile/src/ir_load.rs:160-168`. `load_ep` reads `svc.mechanism`.
 - Modify: `crates/egret-policy/src/store.rs`:
@@ -962,6 +1168,8 @@ fn two_masks_on_one_column_is_an_error_not_a_choice() {
 **Interfaces:**
 - Produces:
   - the column `policy.authz_services.mechanism text NOT NULL DEFAULT 'ranger'`;
+  - the column `engine_mgmt.engines.applied_mechanism text NULL` (`'ranger'`/`'opa'`, the mechanism the engine was last applied with; NULL for external engines and for engines not applied since this migration);
+  - `egret_config::Config::governance.opa.enabled: bool`;
   - `egret_perm_ir::ep::Mechanism::{Ranger, Opa}`;
   - `ServiceRow::mechanism`, `PolicyService::mechanism`, `ProfileDto::mechanism`, each `"ranger"` or `"opa"`;
   - `EpInput.kind.mechanism`, which equals the profile's mechanism.
@@ -986,6 +1194,15 @@ ALTER TABLE policy.authz_services
 ALTER TABLE policy.authz_services
     ADD CONSTRAINT authz_services_opa_is_trino_only
     CHECK (mechanism = 'ranger' OR type = 'trino');
+
+-- What each provisioned engine was last applied with. A switch is not atomic
+-- across engines (each coordinator restarts on its own apply), so egret keeps
+-- answering OPA for an engine still running the OPA plugin after its profile
+-- went back to Ranger, until that engine is re-applied. NULL: external, or not
+-- applied since this migration (treated as 'ranger').
+ALTER TABLE engine_mgmt.engines
+    ADD COLUMN applied_mechanism text NULL
+    CHECK (applied_mechanism IN ('ranger', 'opa'));
 ```
 
 - [ ] **Step 2: Write the failing tests.** In `crates/egret-policy/tests/store_services.rs`, using that file's existing DB helper:
@@ -1004,7 +1221,23 @@ async fn mechanism_defaults_to_ranger_and_opa_is_trino_only() {
 
   Fill the body with real arrange code, the act calls, and assertions with messages, as described in the comments.
 
-  Then add this test inline in `crates/egret-perm-ir/src/matrix.rs`:
+  In `crates/egret-config/src/lib.rs`'s test module, add `governance_opa_is_off_by_default`. It parses a TOML with no `[governance]` section and asserts `!config.governance.opa.enabled`.
+
+  Then add these two tests inline in `crates/egret-perm-ir/src/matrix.rs`. The first pins every row (I5); the second spot-checks answers:
+
+```rust
+#[test]
+fn every_trino_row_has_an_identical_opa_trino_row() {
+    let trino: Vec<_> = ENTRIES.iter().filter(|e| e.kind == TRINO).collect();
+    let opa: Vec<_> = ENTRIES.iter().filter(|e| e.kind == OPA_TRINO).collect();
+    assert_eq!(trino.len(), opa.len());
+    for t in &trino {
+        assert!(opa.iter().any(|o| o.capability == t.capability && o.versions == t.versions && o.answer == t.answer),
+                "no identical OPA_TRINO row for {}", t.capability);
+    }
+}
+```
+
 
 ```rust
 #[test]
@@ -1056,12 +1289,15 @@ CARGO_TARGET_DIR=$PWD/target-sp2b cargo run -p egret-bin -- openapi > openapi.js
 ```bash
 env -u EGRET_ALLOW_DB_SKIP CARGO_TARGET_DIR=$PWD/target-sp2b cargo test -p egret-policy --test store_services
 CARGO_TARGET_DIR=$PWD/target-sp2b cargo test -p egret-perm-ir
+CARGO_TARGET_DIR=$PWD/target-sp2b cargo test -p egret-config governance
 env -u EGRET_ALLOW_DB_SKIP CARGO_TARGET_DIR=$PWD/target-sp2b cargo test -p egret-perm-compile --features harness --test golden_compile
+env -u EGRET_ALLOW_DB_SKIP EGRET_GOLDEN_MECHANISM=opa CARGO_TARGET_DIR=$PWD/target-sp2b cargo test -p egret-perm-compile --features harness --test golden_compile
 CARGO_TARGET_DIR=$PWD/target-sp2b cargo test -p egret-server --lib committed_openapi_json_is_current
 git status --short crates/egret-perm-compile/tests/golden
 ```
 
-  Expected: PASS, and the last command prints nothing.
+  Expected: PASS, and the last command prints nothing. The second golden run is S8 pinned: every Trino fixture, compiled on an OPA profile, equals its blessed Ranger artifact byte for byte.
+- [ ] **Step 6b: Mutation check.** Delete one `OPA_TRINO` row (for example `PoliciesReachMetadataTables`). `every_trino_row_has_an_identical_opa_trino_row` must fail, and the `EGRET_GOLDEN_MECHANISM=opa` golden run must fail on a fixture with a deny. Restore.
 
 - [ ] **Step 7: Commit** `feat(policy): a profile's mechanism (migration 0213) and Mechanism::Opa`.
 
@@ -1078,56 +1314,72 @@ pub(crate) struct LoweredEp {
     /// Each family's lowering, in the order compile_desired emits them:
     /// grants, engine privileges, rules, withholds.
     pub families: Vec<egret_perm_ir::statement::Lowered>,
-    pub whole_tables: <type of WithholdLowered::whole_tables>,
+    pub whole_tables: Vec<egret_perm::TableCount>,
     pub view_guard: Vec<egret_perm_ir::lower::withhold::PendingGuard>,
 }
-pub(crate) async fn lower_ep_via(conn: &mut sqlx::PgConnection, service_id: i64) -> Result<Option<LoweredEp>, CompileError>;
+pub(crate) async fn lower_ep_via(conn: &mut sqlx::PgConnection, service_id: i64,
+    missing: crate::members::MissingUsername) -> Result<Option<LoweredEp>, CompileError>;
 ```
 
-  `compile_desired` calls `lower_ep_via`, then `crate::ranger::emit` once per family in the same order, and then runs the rest unchanged: the StarRocks clearance fold, `completion::complete`, `refuse_overlaps` and the counting. `emit` takes no connection, so emitting after all the reads changes nothing. The golden suite proves it.
+  - **The split.** `compile_desired` calls `lower_ep_via(conn, service_id, MissingUsername::Mint)`, then `crate::ranger::emit` once per family in the same order. It then runs the rest unchanged: the StarRocks clearance fold, `completion::complete`, `refuse_overlaps` and the counting. `emit` takes no connection, so emitting after all the reads changes nothing. The golden suite proves it.
+  - **Threading `missing` (I9).** Today the minting reads hard-code `MissingUsername::Mint`:
+    - `members.rs:877`, inside `expand_enumerated_principals`;
+    - `ir_load.rs:397`, inside `load_withhold_inputs`;
+    - the admin read inside `load_infra_inputs` (`ir_load.rs:540-560`).
+
+    Give `expand_enumerated_principals`, `load_ep`, `load_withhold_inputs` and `load_infra_inputs` a `missing: MissingUsername` parameter (`members.rs:484`). Every existing caller passes `Mint`, so the compile is unchanged; the snapshot build and explain pass `Omit`, which leaves an unnamed holder out and never writes.
 - Create: `crates/egret-perm-compile/src/opa/mod.rs` (`pub mod build; pub mod cache; pub mod wire; pub mod surface;`; declare only `build` in this task) and `src/opa/build.rs`.
 - Modify: `crates/egret-perm-compile/src/lib.rs` (`pub mod opa;`). Modify `Cargo.toml`: add `egret-perm-eval.workspace = true`.
+- Create: `crates/egret-perm-compile/tests/opa_support/fixtures_host.rs`. This is what `golden/fixtures.rs` needs from its includer as `crate::…`:
+  - `pub struct Names` and its `impl` (copied from `tests/golden_compile.rs:13-26`);
+  - `#[allow(dead_code)] pub async fn capture(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, profiles: &[(i64, Option<i64>)]) -> serde_json::Value { unreachable!("golden scenarios are not run from here") }`;
+  - `#[allow(dead_code)] pub fn compare_or_bless(_: &str, _: serde_json::Value, _: &Names) { unreachable!() }`, with the signatures of `tests/golden_compile.rs:65` and `:142`.
+
+  A test binary includes it at its crate root, with `include!("opa_support/fixtures_host.rs");` followed by `#[path = "golden/fixtures.rs"] mod fixtures;`.
 - Test: `crates/egret-perm-compile/tests/opa_snapshot.rs` (new, DB-gated)
 
 **Interfaces:**
 - Consumes:
   - `egret_perm_eval::{Snapshot, SnapshotInput, ClassifiedColumn}`;
   - `crate::ir_load::{load_ep, load_infra_inputs}`;
-  - `egret_perm_ir::lower::infra::lower_infra`.
+  - `egret_perm_ir::lower::infra::lower_infra`;
+  - `egret_policy::{catalogs_for_service_via, tag_assignments_for_catalogs_via}` (`crates/egret-policy/src/store.rs:1497`, `:1462`).
 - Produces:
 
 ```rust
 // crates/egret-perm-compile/src/opa/build.rs
 pub async fn load_classified_columns_via(conn: &mut sqlx::PgConnection, service_id: i64)
     -> Result<Vec<egret_perm_eval::ClassifiedColumn>, CompileError>;
+pub struct SnapshotParts {
+    pub key: (i64, i64),
+    /// grants, engine privileges, rules, withholds — everything but infrastructure.
+    pub data: Vec<egret_perm_ir::statement::Statement>,
+    pub infra: Vec<egret_perm_ir::statement::Statement>,
+    pub classified: Vec<egret_perm_eval::ClassifiedColumn>,
+}
+/// The infrastructure statements alone (`load_infra_inputs` + `lower_infra`), for the refresher's
+/// splice when the data lowering fails (C4). None: not trino/starrocks.
+pub async fn lower_infra_via(conn: &mut sqlx::PgConnection, service_id: i64,
+    missing: crate::members::MissingUsername) -> Result<Option<Vec<egret_perm_ir::statement::Statement>>, CompileError>;
 /// None: the service is not trino/starrocks. Reads at the caller's transaction.
-pub async fn build_snapshot_via(conn: &mut sqlx::PgConnection, service_id: i64)
-    -> Result<Option<egret_perm_eval::Snapshot>, CompileError>;
+pub async fn snapshot_parts_via(conn: &mut sqlx::PgConnection, service_id: i64,
+    missing: crate::members::MissingUsername) -> Result<Option<SnapshotParts>, CompileError>;
+/// `snapshot_parts_via` then `Snapshot::build` over data ++ infra.
+pub async fn build_snapshot_via(conn: &mut sqlx::PgConnection, service_id: i64,
+    missing: crate::members::MissingUsername) -> Result<Option<egret_perm_eval::Snapshot>, CompileError>;
 ```
 
-  - **`load_classified_columns_via`.** The query is the same join as `egret_policy::tag_assignments_for_service_via` (`crates/egret-policy/src/store.rs:2042`), with no tag-key filter, selecting `tags.name`:
+  - **`load_classified_columns_via`** writes **no new SQL** (C3). It calls `egret_policy::catalogs_for_service_via(conn, service_id)`, which `store.rs:1488-1496` names "the ONE spelling of the engine-reachability leg". It then calls `egret_policy::tag_assignments_for_catalogs_via(conn, &catalog_ids)`, the rows the tag download serves. Each row becomes `ClassifiedColumn { catalog, schema: schema_name, table: table_name, column, classification: tag_name }`, where:
+    - **`column_name == ""` maps to `column: None`.** Table-level assignments are stored with the `''` sentinel, never NULL (`migrations/0081_catalog_tag_targets.sql:14`, `column_name text NOT NULL DEFAULT ''`);
+    - any other value maps to `Some(column_name)`.
+  - **`snapshot_parts_via`:**
+    1. `lower_ep_via(conn, id, missing)`, collecting every family's `statements` into `data`;
+    2. `lower_infra_via(conn, id, missing)` into `infra`;
+    3. `load_classified_columns_via`;
+    4. `SELECT policy_version, tag_version FROM policy.authz_services WHERE id = $1` for `key`.
+  - **`build_snapshot_via`** maps a `SnapshotError` to `CompileError::Db(format!("OPA snapshot: {e}"))`.
 
-    ```sql
-    SELECT DISTINCT c.name AS catalog, a.schema_name, a.table_name, a.column_name, t.name AS classification
-      FROM catalog_tag_assignments a
-      JOIN tags t ON t.id = a.tag_id
-      JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id
-      JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id
-      JOIN engine_mgmt.engines e ON e.id = ea.engine_id
-     WHERE e.authz_service_id = $1
-     ORDER BY 1, 2, 3, 4, 5
-    ```
-
-    `column_name` is `NULL` for a table-level assignment. Check the column's nullability in `migrations/0177_catalog_tag_levels_are_present_and_literal.sql`, and map it to `ClassifiedColumn::column`.
-  - **`build_snapshot_via`** runs:
-    1. `lower_ep_via`;
-    2. it collects every family's `statements`;
-    3. `load_infra_inputs` → `lower_infra`, appended;
-    4. `load_classified_columns_via`;
-    5. it reads `SELECT policy_version, tag_version FROM policy.authz_services WHERE id = $1` for `key`;
-    6. `Snapshot::build`. A `SnapshotError` maps to `CompileError::Db(format!("OPA snapshot: {e}"))`.
-
-- [ ] **Step 1: Write the failing test** `tests/opa_snapshot.rs`. Build the store with the golden fixture builders: `#[path = "golden/fixtures.rs"] mod fixtures;`, plus the `pub struct Names` and `impl Names { id, text }` the fixtures import as `crate::Names`, copied from `tests/golden_compile.rs:13-26`. Each test opens a transaction, builds a state, and calls `egret_perm_compile::opa::build::build_snapshot_via(&mut tx, profile)`.
+- [ ] **Step 1: Write the failing test** `tests/opa_snapshot.rs`. At its crate root: `include!("opa_support/fixtures_host.rs");` and `#[path = "golden/fixtures.rs"] mod fixtures;`. Each test opens a transaction, builds a state with the fixture builders, and calls `egret_perm_compile::opa::build::build_snapshot_via(&mut tx, profile, MissingUsername::Omit)`. `MissingUsername` is `pub(crate)`, so add `pub fn build_snapshot_for_test(conn, id)` to `harness_support.rs` (feature `harness`); it passes `Omit`. The tests call that.
 
 ```rust
 #[tokio::test]
@@ -1137,12 +1389,19 @@ async fn the_snapshot_answers_what_the_store_says() {
     // {"trinoConfig":{"delegationMode":"open"}}), users ann and bob, grant Allow Read on
     // scope(lake) to ann, a path mask MASK_HASH on lake.s.t.email for public except bob,
     // tag "pii" on lake.s.t.ssn with gate(roles=["cleared_role"]) held by bob.
-    // Act: build_snapshot_via.
+    // Act: build_snapshot_for_test.
     // Assert: decide("ann","SelectFromColumns", Table{lake,s,t,[id]}) is Allow;
     //   decide("ann", …, [ssn]) is Deny{explicit:true} (withheld);
     //   decide("bob", …, [id]) is Deny (no grant);
     //   column_masks("ann", lake,s,t,[(email,varchar)]) has email;
     //   column_masks("bob", …) is empty; snapshot.key() equals the row's (policy_version, tag_version).
+}
+
+#[tokio::test]
+async fn a_table_level_classification_reaches_every_column_of_the_table() {
+    // Arrange: as above, plus tag_table(pii, wh, "s", "u") (stored with column_name = '').
+    // Assert: decide("ann","SelectFromColumns", Table{lake,s,u,["untagged"]}) is Deny{explicit:true};
+    //   load_classified_columns_via returns the row with column == None.
 }
 
 #[tokio::test]
@@ -1152,11 +1411,19 @@ async fn a_qualifying_engine_puts_the_infra_statements_in_the_snapshot() {
     //   decide("ann","KillQueryOwnedBy",User("bob")) Deny;
     //   decide(egret_core::engine_principals::DELEGATOR_PRINCIPAL,"ImpersonateUser",User("ann")) Allow.
 }
+
+#[tokio::test]
+async fn the_snapshot_build_never_mints_a_username() {
+    // Arrange: a role granted Read on lake whose one holder has users.username NULL.
+    // Act: build_snapshot_for_test, then roll back nothing: count users with NULL username before/after.
+    // Assert: the build succeeds, the holder is absent from the audience (decide for nobody else changes),
+    //   and the NULL-username count is unchanged (Omit wrote nothing).
+}
 ```
 
-  The split itself is proved by `golden_compile` staying byte-identical (Step 4); no third test.
+  The split itself is proved by `golden_compile` staying byte-identical (Step 4).
 
-  Fill each body completely, as described in its comments. Use the builder signatures in `tests/golden/fixtures.rs`: `profile`, `profile_with_config`, `warehouse`, `catalog`, `catalog_attached`, `engine_bound_spec`, `user`, `grant`, `rule`, `tag`, `tag_column`, `gate`, `platform_role` and `role_held`.
+  Fill each body completely, as described in its comments. Use the builder signatures in `tests/golden/fixtures.rs`: `profile`, `profile_with_config`, `warehouse`, `catalog`, `catalog_attached`, `engine_bound_spec`, `user` (pass `None` as `username` for the unnamed holder), `grant`, `rule`, `tag`, `tag_column`, `tag_table`, `gate`, `platform_role` and `role_held`.
 
 - [ ] **Step 2: Run** `env -u EGRET_ALLOW_DB_SKIP CARGO_TARGET_DIR=$PWD/target-sp2b cargo test -p egret-perm-compile --features harness --test opa_snapshot`. Expected: FAIL to compile.
 - [ ] **Step 3: Implement** the split and `opa/build.rs`.
@@ -1175,24 +1442,44 @@ git status --short crates/egret-perm-compile/tests/golden
 
 ---
 
-### Task 7: `SnapshotCache` and the refresher
+### Task 7: `SnapshotCache`, the refresher, and the stored-state checks
 
 **Files:**
 - Create: `crates/egret-perm-compile/src/opa/cache.rs`, and add `pub mod cache;` to `opa/mod.rs`
-- Test: `crates/egret-perm-compile/tests/opa_cache.rs` (new, DB-gated)
+- Create: `crates/egret-policy/src/opa_guard.rs`, and declare it from `lib.rs` with `pub mod opa_guard;`. It holds the stored-state checks that both the refresher (here) and the switch (Task 11) call, so there is one copy.
+- Test: `crates/egret-perm-compile/tests/opa_cache.rs` (new, DB-gated). Its crate root has `include!("opa_support/fixtures_host.rs"); #[path = "golden/fixtures.rs"] mod fixtures;` (Task 6).
 
 **Interfaces:**
-- Consumes: Task 6's `build_snapshot_via`, and `crate::compile_runs::record_compile_failure(pool: &PgPool, service_id: i64, error: &str)`.
+- Consumes:
+  - Task 6's `snapshot_parts_via` and `lower_infra_via`;
+  - Task 3's `Snapshot::build` and `Snapshot::with_infra`;
+  - `crate::compile_runs::record_compile_failure(pool: &PgPool, service_id: i64, error: &str)`;
+  - `crate::overlap::stored_overlaps_via(conn) -> Result<Vec<StoredOverlap>, CompileError>` (`overlap.rs:478`; `StoredOverlap { service_id, service_name, kind, coordinate, rules, .. }` at `:432`).
 - Produces:
 
 ```rust
+// crates/egret-policy/src/opa_guard.rs
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoredStateRefusal {
+    AllDefaults { count: i64 },
+    HandWritten { service: String, count: i64 },
+}
+impl StoredStateRefusal { pub fn message(&self) -> String; }
+/// The `all - …` rows of the profile, then the `managed_by = 'operator'` rows of the profile and of
+/// the tag service its `config_jsonb->>'tagService'` names. Empty: nothing stored the evaluator ignores.
+pub async fn stored_state_refusals_via(conn: &mut sqlx::PgConnection, service_id: i64)
+    -> Result<Vec<StoredStateRefusal>, crate::PolicyStoreError>;
+
+// crates/egret-perm-compile/src/opa/cache.rs
 pub enum Lookup { NotOpa, NotBuilt { error: Option<String> }, Ready(std::sync::Arc<egret_perm_eval::Snapshot>) }
 #[derive(Default)]
-pub struct SnapshotCache { /* std::sync::RwLock<HashMap<i64, CacheEntry>> */ }
+pub struct SnapshotCache { /* std::sync::RwLock<State { entries: HashMap<i64, CacheEntry>, bindings: HashMap<uuid::Uuid, i64> }> */ }
 #[derive(Debug, Default, PartialEq, Eq)]
-pub struct RefreshReport { pub rebuilt: Vec<i64>, pub failed: Vec<i64>, pub dropped: Vec<i64> }
+pub struct RefreshReport { pub rebuilt: Vec<i64>, pub spliced: Vec<i64>, pub failed: Vec<i64>, pub dropped: Vec<i64> }
 impl SnapshotCache {
     pub fn get(&self, service_id: i64) -> Lookup;
+    /// The profile an engine is bound to, as of the last refresh; None: unknown or bound to no served profile.
+    pub fn binding(&self, engine_id: uuid::Uuid) -> Option<i64>;
     pub async fn refresh_once(&self, pool: &sqlx::PgPool) -> Result<RefreshReport, sqlx::Error>;
 }
 pub fn spawn_snapshot_refresher(cache: std::sync::Arc<SnapshotCache>, pool: sqlx::PgPool,
@@ -1200,14 +1487,23 @@ pub fn spawn_snapshot_refresher(cache: std::sync::Arc<SnapshotCache>, pool: sqlx
     -> tokio::task::JoinHandle<()>;
 ```
 
+- **`StoredStateRefusal::message`, exactly:**
+  - `AllDefaults`: ``"the profile holds the `all - …` default policies ({count}); delete them first"``.
+  - `HandWritten`: `"{service} holds {count} hand-written policies, which OPA would ignore; delete them first"`.
+- **The `stored_state_refusals_via` queries:**
+  - `SELECT count(*) FROM policy.authz_policies WHERE service_id = $1 AND name LIKE 'all - %'`. This is migration 0180's shape; no `_` or `%` occurs in `'all - '`.
+  - `SELECT count(*) FROM policy.authz_policies WHERE service_id = $1 AND managed_by = 'operator'`, for the profile and for its tag service.
 - **`refresh_once`:**
-  - It reads `SELECT id, policy_version, tag_version FROM policy.authz_services WHERE mechanism = 'opa' ORDER BY id`.
-  - It removes cache entries whose id is not listed (`dropped`).
-  - For each listed id whose cached key differs, or which has no entry:
-    1. it begins a transaction and issues `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY`;
-    2. it calls `build_snapshot_via`;
-    3. on `Ok(Some(s))`, it stores `Arc::new(s)` with `s.key()` and clears the error (`rebuilt`);
-    4. on `Err(e)`, it keeps the previous snapshot, stores `e.to_string()`, logs `tracing::warn!(service_id, error = %e, "OPA snapshot build failed; serving the previous snapshot")`, calls `record_compile_failure(pool, id, &format!("OPA snapshot: {e}"))`, and records the key read, so the same failure is not rebuilt every second (`failed`).
+  1. **Which profiles.** It reads `SELECT s.id, s.policy_version, s.tag_version FROM policy.authz_services s WHERE s.mechanism = 'opa' OR EXISTS (SELECT 1 FROM engine_mgmt.engines e WHERE e.authz_service_id = s.id AND e.applied_mechanism = 'opa') ORDER BY s.id`. An engine not yet re-applied after a switch back to Ranger still runs the OPA plugin and must keep being answered (open question (a)).
+  2. **Bindings.** It reads `SELECT id, authz_service_id FROM engine_mgmt.engines WHERE authz_service_id = ANY($1)` over those ids, and replaces `bindings` with the result (I3: the surface never trusts a cached binding).
+  3. **Stale entries.** It removes cache entries whose id is not listed (`dropped`).
+  4. **Rebuilds.** For each listed id whose cached key differs, or which has no entry, it begins a transaction, issues `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY`, and then:
+     - (a) **The stored-state checks (C8, ruling on point 3).** It runs `egret_policy::opa_guard::stored_state_refusals_via(&mut tx, id)` and `crate::overlap::stored_overlaps_via(&mut tx)`, the latter filtered to `service_id == id`. Any hit sets the entry to `NotBuilt { error: Some(<first refusal message, or "the profile serves N mask/row-filter pairs whose winner the artifact does not express (see GET /perm/overlaps)">) }` and drops any previous snapshot. It calls `record_compile_failure(pool, id, &format!("OPA snapshot: {msg}"))` and counts the id in `failed`.
+     - (b) `snapshot_parts_via(&mut tx, id, MissingUsername::Omit)`. On `Ok(Some(parts))`, it builds `Snapshot::build` over `data ++ infra` and stores it with its key (`rebuilt`).
+     - (c) **On a data-lowering `Err(e)` (C4):** it runs `lower_infra_via(&mut tx, id, Omit)` alone.
+       - With `Ok(Some(infra))` and a previous snapshot, it stores `previous.with_infra(infra)` (`spliced`). So an admin disabled while the data lowering fails loses `WholeEp` within one refresh. It also stores `e.to_string()`, logs `tracing::warn!(service_id, error = %e, "OPA snapshot build failed; serving the previous data with fresh infrastructure")`, and calls `record_compile_failure`.
+       - With no previous snapshot, or an infrastructure-lowering error, the entry becomes `NotBuilt { error }` (`failed`).
+     - (d) In every outcome it records the key read, so the same failure is not retried every second.
 - **`get`:**
   - absent → `NotOpa`;
   - an entry with no snapshot → `NotBuilt { error }`;
@@ -1228,29 +1524,60 @@ async fn a_ranger_profile_is_not_cached_and_an_opa_profile_is_built_once_per_ver
 }
 
 #[tokio::test]
-async fn switching_back_to_ranger_drops_the_entry() {
-    // UPDATE mechanism='ranger'; refresh_once → dropped == [id]; get(id) is NotOpa.
+async fn switching_back_to_ranger_drops_the_entry_once_no_engine_runs_opa() {
+    // Bind an engine; set its applied_mechanism='opa'. UPDATE mechanism='ranger'; refresh_once →
+    //   the entry stays Ready (an engine still runs OPA). Then UPDATE applied_mechanism='ranger';
+    //   refresh_once → dropped == [id]; get(id) is NotOpa.
 }
 
 #[tokio::test]
-async fn a_failed_build_keeps_serving_the_previous_snapshot_and_reports_the_failure() {
-    // Arrange: build once (Ready). Then write, with the fixtures' `grant` builder (which inserts
-    //   by SQL and so bypasses the authoring checks), an Allow Read grant whose principal is
-    //   `user_ref("bad@ref")`. `egret_perm_ir::lower::grants::validate_user_ref` refuses a ref
-    //   containing '@' with `CompileError::UnusableUserRef`, which aborts the lowering.
-    //   Then `UPDATE policy.authz_services SET policy_version = policy_version + 1 WHERE id = $1`.
+async fn bindings_follow_the_engine_rows_every_refresh() {
+    // An engine bound to the OPA profile → binding(engine) == Some(id). UPDATE its authz_service_id to
+    //   NULL; refresh_once → binding(engine) == None.
+}
+
+#[tokio::test]
+async fn a_failed_build_still_drops_a_disabled_admins_all_access() {
+    // Arrange: one platform admin (fixtures `platform_role` + `role_held`, or the admin_policy_sync
+    //   helpers), a qualifying impersonate engine; build once → admin may CreateTable.
+    // Then break the data lowering: with the fixtures' `grant` builder (which inserts by SQL and
+    //   bypasses the authoring checks) add an Allow Read grant whose principal is `user_ref("bad@ref")`;
+    //   `egret_perm_ir::lower::grants::validate_user_ref` refuses '@' with `CompileError::UnusableUserRef`.
+    //   Disable the admin exactly as crates/egret-perm-compile/tests/admin_policy_sync.rs::
+    //   disabling_an_admin_does_not_depend_on_a_profile_compiling does (the kill switch converges infra
+    //   without a compile); then bump policy_version by hand if the kill switch did not.
     // Act: refresh_once.
-    // Assert: report.failed == [id]; get(id) is still Ready with the OLD key;
-    //   the perm.compile_runs row for id has outcome='error' and error LIKE 'OPA snapshot:%';
-    //   a second refresh_once reports failed == [] (the failing key is remembered).
+    // Assert: report.spliced == [id]; the admin may no longer CreateTable; a data grant decided before
+    //   still decides the same; perm.compile_runs.error LIKE 'OPA snapshot:%';
+    //   a second refresh_once reports nothing (the failing key is remembered).
+}
+
+#[tokio::test]
+async fn a_hand_written_tag_policy_added_after_the_switch_makes_the_profile_deny() {
+    // Arrange: OPA profile Ready. Insert a policy with managed_by='operator' into its tag service; bump
+    //   the tag service's policy_version (migration 0182's trigger bumps the profile).
+    // Act: refresh_once. Assert: report.failed == [id]; get(id) is NotBuilt with an error containing
+    //   "hand-written"; the compile_runs row names it.
+}
+
+#[tokio::test]
+async fn an_all_defaults_row_or_a_stored_overlap_makes_the_profile_deny() {
+    // Two cases, each from Ready: (1) insert an `all - catalog` row by SQL; (2) create a stored differing
+    //   mask pair the way crates/egret-perm-compile/tests/compile_runs.rs::overlapping_model does
+    //   (two path masks, then move one rule's column by SQL), and bump the version.
+    // Assert for each: get(id) is NotBuilt with the matching message.
 }
 ```
 
 - [ ] **Step 2: Run** `env -u EGRET_ALLOW_DB_SKIP CARGO_TARGET_DIR=$PWD/target-sp2b cargo test -p egret-perm-compile --features harness --test opa_cache`. Expected: FAIL.
-- [ ] **Step 3: Implement** `cache.rs`.
-- [ ] **Step 4: Run** the same command. Expected: PASS.
-- [ ] **Step 5: Mutation check.** Rebuild unconditionally (ignore the key). The first test must fail on "second report.rebuilt is empty". Restore it.
-- [ ] **Step 6: Commit** `feat(perm-compile): cache OPA snapshots per profile version`.
+- [ ] **Step 3: Implement** `opa_guard.rs` and `cache.rs`.
+- [ ] **Step 4: Run** the same command, then `env -u EGRET_ALLOW_DB_SKIP CARGO_TARGET_DIR=$PWD/target-sp2b cargo test -p egret-policy --lib`. Expected: PASS.
+- [ ] **Step 5: Mutation checks**, each failing the named test and then restored:
+  - (a) Rebuild unconditionally (ignore the key). This fails the first test on "second report.rebuilt is empty".
+  - (b) Keep the previous snapshot whole on a data failure. This fails `a_failed_build_still_drops_a_disabled_admins_all_access`.
+  - (c) Skip the stored-state checks. This fails both deny tests.
+  - (d) Load bindings once at the first refresh. This fails `bindings_follow_the_engine_rows_every_refresh`.
+- [ ] **Step 6: Commit** `feat(perm-compile): cache OPA snapshots per profile version, re-checking stored state`.
 
 ---
 
@@ -1280,11 +1607,13 @@ pub struct OpaRequest {
 }
 pub fn parse_request(body: &serde_json::Value) -> Result<OpaRequest, String>;
 /// FilterColumns arrives as ONE table resource with `columns`; expand to one Table per column.
-pub fn expand_filter_columns(req: &OpaRequest) -> Vec<Resource>;
+/// Err when `filterResources` holds anything but exactly one table: the index semantics would be ambiguous.
+pub fn expand_filter_columns(req: &OpaRequest) -> Result<Vec<Resource>, String>;
 pub fn allow_result(allowed: bool) -> serde_json::Value;                // {"result": bool}
 pub fn batch_result(indices: &[usize]) -> serde_json::Value;            // {"result": [..]}
 pub fn row_filters_result(filters: &[String]) -> serde_json::Value;     // {"result": [{"expression": ..}]}
 pub fn column_masks_result(masks: &[(usize, String)]) -> serde_json::Value; // {"result": [{"index": i, "viewExpression": {"expression": e}}]}
+pub fn column_mask_result(mask: Option<&str>) -> serde_json::Value;     // {"result": {"expression": e}} or {"result": null}
 ```
 
 - **Parsing rules** (from D1):
@@ -1305,21 +1634,12 @@ pub fn column_masks_result(masks: &[(usize, String)]) -> serde_json::Value; // {
   - Anything else is `Err("unrecognised resource: <keys>")`.
   - `Err` never contains the secret.
 
-- [ ] **Step 0: Confirm the FilterColumns and GetColumnMask shapes from the jar.**
+- [ ] **Step 0: Read the committed request shapes.** Open `crates/egret-perm-eval/tests/fixtures/trino-483-opa-request-shapes.txt` (Task 1) and Task 1's report. The tests below assume:
+  - `FilterColumns` puts exactly one `table` resource with `columns` into `filterResources`, and the result indices refer to `columns`;
+  - a batch `GetColumnMask` puts one `column` resource per column into `filterResources`;
+  - a single `GetColumnMask` puts one `column` resource into `resource`.
 
-```bash
-W=$(mktemp -d) && cid=$(docker create trinodb/trino:483@sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534) \
- && docker cp "$cid:/usr/lib/trino/plugin/opa/io.trino_trino-opa-483.jar" "$W/opa.jar" && docker rm "$cid" \
- && (cd "$W" && unzip -q opa.jar 'io/trino/plugin/opa/*') \
- && javap -c -p -constants "$W/io/trino/plugin/opa/OpaBatchAccessControl.class" | grep -n "lambda\$filterColumns\$0\|lambda\$batchRequestBuilder\$1" -A25 \
- && javap -c -p -constants "$W/io/trino/plugin/opa/OpaHighLevelClient.class" | grep -n "GetColumnMask" -B5 -A25; rm -rf "$W"
-```
-
-  Write down what you find in the task report:
-  - whether `FilterColumns` puts one `table` resource with `columns` into `filterResources`, with the result indices referring to `columns`;
-  - whether `GetColumnMask` on the batch URI puts one `column` resource per masked column in `filterResources`.
-
-  The tests below assume both. If the bytecode says otherwise, change `expand_filter_columns` and the tests to match it, and note it in the report.
+  If the fixture says otherwise, change `expand_filter_columns`, the parsing and the tests to match it, and say so in the task report.
 
 - [ ] **Step 1: Write the failing tests:**
 
@@ -1348,7 +1668,7 @@ mod tests {
     fn filter_columns_expands_to_one_resource_per_column() {
         let r = parse_request(&input(json!({"operation": "FilterColumns", "filterResources": [
             {"table": {"catalogName": "lake", "schemaName": "s", "tableName": "t", "columns": ["a", "b"]}}]}))).unwrap();
-        let x = expand_filter_columns(&r);
+        let x = expand_filter_columns(&r).unwrap();
         assert_eq!(x.len(), 2);
         assert_eq!(x[1], Resource::Table { catalog: "lake".into(), schema: "s".into(), table: "t".into(), columns: vec!["b".into()] });
     }
@@ -1373,6 +1693,15 @@ mod tests {
         assert_eq!(batch_result(&[0, 2]), json!({"result": [0, 2]}));
         assert_eq!(row_filters_result(&["(a) AND (b)".into()]), json!({"result": [{"expression": "(a) AND (b)"}]}));
         assert_eq!(column_masks_result(&[(1, "NULL".into())]), json!({"result": [{"index": 1, "viewExpression": {"expression": "NULL"}}]}));
+        assert_eq!(column_mask_result(Some("NULL")), json!({"result": {"expression": "NULL"}}));
+        assert_eq!(column_mask_result(None), json!({"result": null}));
+    }
+
+    #[test]
+    fn filter_columns_over_two_tables_is_refused_not_guessed() {
+        let t = |n: &str| json!({"table": {"catalogName": "lake", "schemaName": "s", "tableName": n, "columns": ["a"]}});
+        let r = parse_request(&input(json!({"operation": "FilterColumns", "filterResources": [t("t1"), t("t2")]}))).unwrap();
+        assert!(expand_filter_columns(&r).is_err());
     }
 }
 ```
@@ -1384,7 +1713,7 @@ mod tests {
 
 ---
 
-### Task 9: `opa_surface`, authentication and the credential cache
+### Task 9: `opa_surface`, authentication and the verification cache
 
 **Files:**
 - Create: `crates/egret-perm-compile/src/opa/surface.rs`, and add `pub mod surface;` to `opa/mod.rs`. Re-export `opa_surface`, `OpaState` and `OPA_SURFACE_PREFIX` from `lib.rs`.
@@ -1393,78 +1722,119 @@ mod tests {
 
 **Interfaces:**
 - Consumes:
-  - Task 7's `SnapshotCache` and `Lookup`;
+  - Task 7's `SnapshotCache`, `Lookup` and `SnapshotCache::binding`;
   - Task 8's wire functions;
   - `egret_engine_mgmt_api::credential::{EngineCredentialVerifier, EngineIdentity}`.
 - Produces:
 
 ```rust
 pub const OPA_SURFACE_PREFIX: &str = "/opa/v1/data/egret/trino";
+/// The largest request body accepted (M13): a FilterTables/FilterColumns batch for 10k objects.
+pub const OPA_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Clone)]
 pub struct OpaState {
     pub cache: std::sync::Arc<crate::opa::cache::SnapshotCache>,
     pub verifier: std::sync::Arc<dyn egret_engine_mgmt_api::credential::EngineCredentialVerifier>,
-    pub credentials: std::sync::Arc<CredentialCache>,
+    pub credentials: std::sync::Arc<VerifiedCache>,
 }
-pub struct CredentialCache { /* Mutex<HashMap<(Uuid, [u8; 32]), (Option<EngineIdentity>, Instant)>> */ }
-impl CredentialCache {
-    pub fn new(positive_ttl: Duration, negative_ttl: Duration) -> Self;
-    pub async fn verify(&self, v: &dyn EngineCredentialVerifier, engine: Uuid, secret: &str) -> Result<Option<EngineIdentity>, String>;
+/// Remembers only "this (engine, sha256(secret)) verified" (I3). Never the binding, never the secret.
+pub struct VerifiedCache { /* Mutex<HashMap<(Uuid, [u8; 32]), Instant>> */ }
+impl VerifiedCache {
+    pub fn new(ttl: Duration) -> Self;   // production: 5 s
+    /// true: verified now or within the TTL. Err only for an infrastructure failure of the verifier.
+    pub async fn verified(&self, v: &dyn EngineCredentialVerifier, engine: Uuid, secret: &str) -> Result<bool, String>;
 }
 pub fn opa_surface(state: OpaState) -> axum::Router;   // routes under OPA_SURFACE_PREFIX
 impl crate::opa::cache::SnapshotCache {
-    /// Test seam: insert a ready snapshot for a service.
+    /// Test seams.
     #[doc(hidden)] pub fn insert_for_test(&self, service_id: i64, snapshot: egret_perm_eval::Snapshot);
+    #[doc(hidden)] pub fn bind_for_test(&self, engine: uuid::Uuid, service_id: Option<i64>);
 }
 ```
 
-- **Routes** (`axum::routing::post`, JSON body `serde_json::Value`):
-  - `/allow` (`opa.policy.uri`);
-  - `/batch` (`opa.policy.batched-uri`);
-  - `/row_filters` (`opa.policy.row-filters-uri`);
-  - `/batch_column_masks` (`opa.policy.batch-column-masking-uri`).
+- **Routes** (`axum::routing::post`, JSON body `serde_json::Value`, `axum::extract::DefaultBodyLimit::max(OPA_BODY_LIMIT_BYTES)` on the router):
+
+| Route | Plugin setting | Refusal |
+|---|---|---|
+| `/allow` | `opa.policy.uri` | 200 `{"result": false}` |
+| `/batch` | `opa.policy.batched-uri` | 200 `{"result": []}` |
+| `/row_filters` | `opa.policy.row-filters-uri` | **403** `{"error": reason}` |
+| `/batch_column_masks` | `opa.policy.batch-column-masking-uri` | **403** `{"error": reason}` |
+| `/column_mask` | `opa.policy.column-masking-uri` | **403** `{"error": reason}` |
+
 - **Each handler:**
   1. `parse_request`. On error, the refusal "malformed input: {e}".
   2. `engine` must parse as a `Uuid`, and `secret` must be present. Otherwise, the refusal "no engine credential in opa.context-file".
-  3. `credentials.verify(...)`:
-     - `Ok(None)` → the refusal "engine credential refused";
-     - `Err(e)` → log `error!` and HTTP 500;
-     - an identity with `authz_service_id: None` → the refusal "engine is bound to no profile".
-  4. `cache.get(service_id)`:
+  3. `credentials.verified(...)`:
+     - `Ok(false)` → the refusal "engine credential refused";
+     - `Err(e)` → log `error!` and answer HTTP 500.
+  4. `cache.binding(engine)`. `None` → the refusal "engine is bound to no profile served on OPA". The binding is read from the refresher's per-second map, never from the verifier's `EngineIdentity` (I3).
+  5. `cache.get(service_id)`:
      - `NotOpa` → the refusal "profile is not on OPA";
-     - `NotBuilt { error }` → the refusal "no snapshot yet: {error or 'building'}";
+     - `NotBuilt { error }` → the refusal "no snapshot: {error or 'building'}";
      - `Ready(s)` → answer.
-  5. Answers:
+  6. Answers:
      - `/allow`: `s.decide(user, op, &resource)`.
-     - `/batch`: `s.filter(user, op, resources)`, where `resources` is `expand_filter_columns(&req)` for `FilterColumns` and `req.filter_resources` otherwise.
-     - `/row_filters`: `resource` must be a `Table`; `s.row_filters`.
-     - `/batch_column_masks`: every `filter_resources[i]` is a `Column`, grouped by table and passed to `s.column_masks`; returns `(i, expr)` for the masked ones.
-- **A refusal** is HTTP 200 with `allow_result(false)` on `/allow` and `{"result": []}` on the other three. It also logs `tracing::info!(target: "egret::opa", engine = %engine_or_dash, user = %user_or_dash, operation = %op_or_dash, resource = ?resource_or_none, reason = %reason, "opa: denied")`.
-- **Every `Decision::Deny`** logs the same line with its reason. Every allow increments `metrics::counter!("egret_opa_allow_total", "route" => route)`, and every deny increments `egret_opa_deny_total`. Add `metrics.workspace = true` to `Cargo.toml` if absent.
-- **`EvalError::TwoMasks`** → HTTP 500 with body `{"error": "two masks on one column"}`, logged at `error`.
-- **`CredentialCache`** keys on `(engine, sha256(secret))`. The secret itself is never stored. Positive entries live `positive_ttl` (production: 30 s) and negative entries `negative_ttl` (5 s). `sha2` is already a dependency.
+     - `/batch`: `s.filter(user, op, resources)`. For `FilterColumns`, `resources` is `expand_filter_columns(&req)`, and its `Err` is the refusal; otherwise it is `req.filter_resources`.
+     - `/row_filters`: `resource` must be a `Table`; anything else is the refusal "malformed resource for GetRowFilters". Answers `s.row_filters`.
+     - `/batch_column_masks`: every `filter_resources[i]` must be a `Column`, or the whole request is refused. Group them by table, pass them to `s.column_masks`, and return `(i, expr)` for the masked ones.
+     - `/column_mask`: `resource` must be a `Column`. Answers `column_mask_result(s.column_masks(...).get(column))`.
+- **C1: only an evaluation against a `Ready` snapshot answers 200 on the three value routes.** On those routes, every refusal above answers HTTP 403 `{"error": reason}`, because `[]`/`null` there means "no filter, no mask". `/allow` and `/batch` answer refusals with 200 `false`/`[]`.
+- **Logging (M9).** Every refusal and every `Decision::Deny` logs one line: `tracing::info!(target: "egret::opa", engine = %engine_or_dash, user = %user_or_dash, operation = %op_or_dash, resource = ?resource_or_none, reason = %reason, "opa: denied")`. A `/batch` request logs one summary line, with `denied = <count>` and the first denied resource, not one line per item.
+- **Metrics.** Every allow increments `metrics::counter!("egret_opa_allow_total", "route" => route)`, and every deny increments `egret_opa_deny_total` (a batch counts once). Add `metrics.workspace = true` to `Cargo.toml` if absent.
+- **`EvalError::TwoMasks`** → HTTP 500 with body `{"error": "two masks on one column"}`, logged at `error`. This is the last guard; Tasks 4, 7 and 11 keep such states out.
+- **`VerifiedCache`** keys on `(engine, sha256(secret))`; `sha2` is already a dependency.
+  - It stores only positive verifications, for `ttl`.
+  - A refused secret is not cached, so every refusal asks `DbVerifier` again. That verifier does constant work and is already exposed this way on the Ranger surface.
 
-- [ ] **Step 1: Write the failing tests** `tests/opa_surface.rs`, driving the router with `tower::ServiceExt::oneshot`. Add `tower` as a dev-dependency if absent; `crates/egret-server/Cargo.toml` uses `tower.workspace = true`. Fixtures:
-  - a `Stub` verifier that accepts `(GOOD, "right")` with `authz_service_id: Some(1)`, accepts `(UNBOUND, "right")` with `None`, and answers `Ok(None)` otherwise, counting calls in an `AtomicUsize`;
-  - a cache where service 1 holds a snapshot (built with `Snapshot::build` from one `Allow Read` statement for `ann` on `lake`, plus one `Mask MASK_NULL` on `lake.s.t.c` for everyone, plus one `RowFilter "x = 1"` on `lake.s.t`);
-  - service 2 is not inserted (a Ranger profile).
+- [ ] **Step 1: Write the failing tests** `tests/opa_surface.rs`, driving the router with `tower::ServiceExt::oneshot`. Add `tower` as a dev-dependency if absent; `crates/egret-server/Cargo.toml` uses `tower.workspace = true`.
 
-  Then, **for each of the four routes**, one test per case:
+  Fixtures, defined once at the top of the file:
+
+```rust
+const GOOD: uuid::Uuid = uuid::Uuid::from_u128(1);    // bound to service 1 (on OPA, Ready)
+const GOOD2: uuid::Uuid = uuid::Uuid::from_u128(2);   // bound to service 2 (not in the cache: a Ranger profile)
+const UNBOUND: uuid::Uuid = uuid::Uuid::from_u128(3); // verified, bound to nothing
+const RIGHT: &str = "right";
+struct Stub { calls: std::sync::atomic::AtomicUsize }
+#[async_trait::async_trait]
+impl egret_engine_mgmt_api::credential::EngineCredentialVerifier for Stub {
+    async fn verify(&self, id: uuid::Uuid, pw: &str) -> Result<Option<egret_engine_mgmt_api::credential::EngineIdentity>, String> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(([GOOD, GOOD2, UNBOUND].contains(&id) && pw == RIGHT)
+            .then_some(egret_engine_mgmt_api::credential::EngineIdentity { engine_id: id, authz_service_id: Some(99) }))
+    }
+}
+```
+
+  `authz_service_id: Some(99)` is deliberately wrong. The surface must ignore it and use the cache's binding. The cache has:
+  - `bind_for_test(GOOD, Some(1))`, `bind_for_test(GOOD2, Some(2))`, `bind_for_test(UNBOUND, None)`;
+  - service 1 holding a snapshot, built with `Snapshot::build` from one `Allow Read` statement for `ann` on `lake`, one `Mask MASK_NULL` on `lake.s.t.c` for everyone, and one `RowFilter "x = 1"` on `lake.s.t`.
+
+  The tests:
 
 ```rust
 async fn post(app: &axum::Router, route: &str, engine: &str, secret: &str, action: serde_json::Value) -> (u16, serde_json::Value);
 
 #[tokio::test] async fn right_secret_answers_from_the_snapshot_on_every_route() { /* allow→true for ann select lake.s.t[c];
     batch FilterCatalogs [x, lake]→[1]; row_filters lake.s.t→[{"expression":"(x = 1)"}];
-    batch_column_masks [column c]→[{"index":0,"viewExpression":{"expression":"NULL"}}] */ }
-#[tokio::test] async fn wrong_secret_is_a_200_denial_on_every_route() { /* allow→false; others→[] */ }
-#[tokio::test] async fn unknown_engine_is_a_200_denial_on_every_route() { /* random uuid */ }
-#[tokio::test] async fn a_ranger_profile_is_a_200_denial_on_every_route() { /* stub binds GOOD2 to service 2 */ }
-#[tokio::test] async fn an_unbound_engine_is_a_200_denial() {}
-#[tokio::test] async fn a_missing_context_property_is_a_200_denial() {}
+    batch_column_masks [column c]→[{"index":0,"viewExpression":{"expression":"NULL"}}];
+    column_mask column c→{"expression":"NULL"} */ }
+#[tokio::test] async fn the_binding_comes_from_the_cache_not_the_verifier() { /* GOOD answers from service 1 although the stub said 99;
+    after bind_for_test(GOOD, None) the next allow is false and the next row_filters is 403 */ }
+#[tokio::test] async fn wrong_secret_is_refused_on_every_route() { /* allow 200 false; batch 200 []; the three value routes 403 */ }
+#[tokio::test] async fn unknown_engine_is_refused_on_every_route() { /* random uuid; same statuses */ }
+#[tokio::test] async fn a_ranger_profile_is_refused_on_every_route() { /* GOOD2; same statuses */ }
+#[tokio::test] async fn an_unbound_engine_is_refused_on_every_route() { /* UNBOUND; same statuses */ }
+#[tokio::test] async fn a_missing_context_property_is_refused_on_every_route() {}
+#[tokio::test] async fn a_malformed_mask_request_is_not_an_empty_mask_list() {
+    /* batch_column_masks with filterResources [{"table": …}] → 403, never 200 [];
+       row_filters with resource {"catalog": …} → 403 */ }
 #[tokio::test] async fn two_masks_answer_500_so_the_plugin_fails_closed() {}
-#[tokio::test] async fn the_credential_cache_asks_the_verifier_once_within_the_ttl() {
-    /* two allow calls with the right secret → stub call count == 1; a wrong secret twice → 1 more call */ }
+#[tokio::test] async fn a_verified_secret_is_remembered_within_the_ttl_and_a_refused_one_is_not() {
+    /* two allow calls with RIGHT → stub calls == 1; WRONG twice → 2 more calls */ }
+#[tokio::test] async fn a_batch_logs_one_line_however_many_items_it_denies() {
+    /* FilterCatalogs over 100 catalogs, none allowed → exactly one "opa: denied" line captured */ }
 #[tokio::test] async fn no_log_or_body_carries_the_secret() {
     /* capture with tracing_subscriber's test writer (dev-dep `tracing-subscriber` with "fmt" if absent),
        send a wrong secret "s3cr3t-value"; assert the captured output and every body lack it */ }
@@ -1477,8 +1847,9 @@ async fn post(app: &axum::Router, route: &str, engine: &str, secret: &str, actio
 - [ ] **Step 4: Run.** Expected: PASS.
 - [ ] **Step 5: Mutation checks**, recorded in the report:
   - (a) Accept any secret when the engine is known.
-  - (b) Answer `NotOpa` from the snapshot of the engine's profile anyway.
-  - (c) Return `[]` on `TwoMasks`.
+  - (b) Use `EngineIdentity::authz_service_id` instead of `cache.binding`.
+  - (c) Return 200 `[]` on a value-route refusal.
+  - (d) Return `[]` on `TwoMasks`.
 - [ ] **Step 6: Commit** `feat(perm-compile): the OPA decision surface`.
 
 ---
@@ -1490,17 +1861,23 @@ async fn post(app: &axum::Router, route: &str, engine: &str, secret: &str, actio
   - `AppState` (:24) gains `pub opa: Option<egret_perm_compile::OpaState>`, with `None` in `AppState::without_db`;
   - after the Ranger merge at :321, add `if let Some(opa) = state.opa.clone() { router = router.merge(egret_perm_compile::opa_surface(opa)); }`.
 - Modify: `crates/egret-bin/src/main.rs`.
-  - Where `RangerState` is built (:1982), when the Ranger surface is enabled, build:
-    - `OpaState { cache, verifier, credentials: Arc::new(CredentialCache::new(Duration::from_secs(30), Duration::from_secs(5))) }`;
+  - Where `RangerState` is built (:1982), when the Ranger surface is enabled **and `config.governance.opa.enabled`** (Task 5's gate, default `false`), build:
+    - `OpaState { cache, verifier, credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))) }`;
     - `verifier` is a clone of the same `Arc<DbVerifier>`, bound to a variable so both states share it;
     - `cache` is `Arc::new(SnapshotCache::default())`.
-  - Spawn `spawn_snapshot_refresher(cache, db.pool.clone(), Duration::from_secs(1), <the shutdown future the other sweepers use>)` where `spawn_ranger_retire_sweeper` is spawned.
+  - Under the same condition, spawn `spawn_snapshot_refresher(cache, db.pool.clone(), Duration::from_secs(1), <the shutdown future spawn_ranger_retire_sweeper is given>)` next to `spawn_ranger_retire_sweeper`. With the gate off, `AppState::opa` is `None` and no refresher runs.
 - Test: `crates/egret-server/tests/opa_surface_mounted.rs` (new)
 
 **Interfaces:**
-- Consumes: `egret_perm_compile::{opa_surface, OpaState, OPA_SURFACE_PREFIX}`, `opa::cache::{SnapshotCache, spawn_snapshot_refresher}`, `opa::surface::CredentialCache`.
+- Consumes: `egret_perm_compile::{opa_surface, OpaState, OPA_SURFACE_PREFIX}`, `opa::cache::{SnapshotCache, spawn_snapshot_refresher}`, `opa::surface::VerifiedCache`, and `egret_config::Config::governance.opa.enabled` (Task 5).
 
-- [ ] **Step 1: Write the failing test.** Build `AppState::without_db()` with `opa: Some(...)`, using a stub verifier that rejects everything. Then `POST /opa/v1/data/egret/trino/allow` with a minimal valid body answers 200 `{"result": false}`, and `GET` on the same path answers 405. Also assert `/opa/v1/data/egret/trino/batch` exists (200, `{"result": []}`).
+- [ ] **Step 1: Write the failing tests.**
+  - Build `AppState::without_db()` with `opa: Some(...)`, using a stub verifier that rejects everything:
+    - `POST /opa/v1/data/egret/trino/allow` with a minimal valid body answers 200 `{"result": false}`;
+    - `GET` on the same path answers 405;
+    - `/opa/v1/data/egret/trino/batch` answers 200 `{"result": []}`;
+    - `/opa/v1/data/egret/trino/row_filters` answers 403.
+  - With `opa: None` (the gate off), `POST /opa/v1/data/egret/trino/allow` answers 404.
 - [ ] **Step 2: Run** `CARGO_TARGET_DIR=$PWD/target-sp2b cargo test -p egret-server --test opa_surface_mounted`. Expected: FAIL.
 - [ ] **Step 3: Implement** the mount and the wiring.
 - [ ] **Step 4: Run.**
@@ -1524,10 +1901,20 @@ CARGO_TARGET_DIR=$PWD/target-sp2b cargo test -p egret-server --lib
   - `KnownEngineImage` gains `pub opa_plugin: bool`. It is `true` for the `trinodb/trino` `483` row and `false` for the five StarRocks rows.
   - Add `pub fn ships_opa_plugin(engine_type: &str, image_ref: &str) -> bool`. It uses the file's private `parse` and is true only for a known image with `opa_plugin`, matched by repository and tag (a digest, when present, must equal the row's).
 - Modify: `crates/egret-policy/src/admin/reader.rs:12`. `EngineBinding` gains `pub image: Option<String>`. `crates/egret-bin/src/main.rs:440` fills it with `egret_perm::stored_engine_image(&e.r#type, &e.spec)`. Every test impl of `EngineBindingReader` sets `image: None`; `grep -rn "EngineBinding {" crates` lists them.
+- Modify: `crates/egret-policy/src/admin/mod.rs:115-124`. `ProfileRecompiler` gains a method, implemented by `egret_perm_compile::PermRecompiler` (`crates/egret-perm-compile/src/trigger.rs:2171`) over `crate::overlap::stored_overlaps_via(tx)`, filtered to `service_id`. Every test stub returns `Ok(vec![])`: `NoRecompile` in `crates/egret-policy/tests/admin_routes.rs:4229`, `policy_events.rs:52` and `generated_profile_guard.rs:1068`; `grep -rn "impl.*ProfileRecompiler for" crates` lists them. There is no default body, so a new implementor cannot forget it.
+
+  ```rust
+  async fn stored_overlaps_in_tx(&self, tx: &mut sqlx::Transaction<'static, sqlx::Postgres>, service_id: i64)
+      -> Result<Vec<String>, PolicyHttpError>;
+  ```
+
+  Each string is `"{kind} on {coordinate}: {rule names joined by ', '}"`, built from `StoredOverlap { kind, coordinate, rules }` (`overlap.rs:432`).
+- Modify: `crates/egret-policy/src/store.rs:2479` (`create_policy`). Before inserting, refuse when `service_id` is the tag service of a profile on OPA (C8). The check is `SELECT count(*) FROM policy.authz_services WHERE mechanism = 'opa' AND config_jsonb->>'tagService' = (SELECT name FROM policy.authz_services WHERE id = $1)`. The refusal is `PolicyStoreError::CompilerOwned(format!("{name} is the tag service of a profile on OPA; OPA would ignore a hand-written policy here"))`, which answers 409.
 - Create: `crates/egret-policy/src/admin/mechanism.rs`, declared from `admin/mod.rs`.
 - Test: `crates/egret-policy/tests/mechanism_switch.rs` (new, DB-gated)
 
 **Interfaces:**
+- Consumes: `crate::opa_guard::{stored_state_refusals_via, StoredStateRefusal}` (Task 7), which holds the `all - …` and hand-written queries and their messages.
 - Produces:
 
 ```rust
@@ -1536,45 +1923,58 @@ CARGO_TARGET_DIR=$PWD/target-sp2b cargo test -p egret-server --lib
 pub enum MechanismName { Ranger, Opa }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SwitchRefusal {
+    Disabled,
     NotTrino { r#type: String },
     NotGenerated,
     EngineImage { engine: String, image: Option<String> },
-    AllDefaults { count: i64 },
-    HandWritten { service: String, count: i64 },
+    Stored(crate::opa_guard::StoredStateRefusal),
+    StoredOverlaps { pairs: Vec<String> },
 }
 impl SwitchRefusal { pub fn message(&self) -> String; }
-/// Every condition, in this order; empty means the switch to OPA may proceed.
-pub async fn opa_switch_refusals(conn: &mut sqlx::PgConnection, svc: &crate::ServiceRow,
-    bindings: &[crate::EngineBinding]) -> Result<Vec<SwitchRefusal>, crate::PolicyStoreError>;
+pub struct SwitchCheck {
+    pub refusals: Vec<SwitchRefusal>,
+    /// External engines bound to the profile: not refused, listed (C6); their operator installs the plugin.
+    pub external_engines_unchanged: Vec<String>,
+}
+/// Every condition, in the enum's order; empty `refusals` means the switch to OPA may proceed.
+pub async fn opa_switch_check(tx: &mut sqlx::Transaction<'static, sqlx::Postgres>, opa_enabled: bool,
+    svc: &crate::ServiceRow, bindings: &[crate::EngineBinding], recompiler: &dyn crate::ProfileRecompiler)
+    -> Result<SwitchCheck, PolicyHttpError>;
 ```
 
 - **The messages, exactly:**
 
 | Refusal | Message |
 |---|---|
+| `Disabled` | `"OPA is not enabled on this installation ([governance.opa] enabled)"` |
 | `NotTrino` | `"only a Trino profile can use OPA; this profile is of type {type}"` |
 | `NotGenerated` | `"only a generated profile can use OPA: hand-written policies are Ranger JSON that OPA cannot evaluate"` |
 | `EngineImage` | `"engine {engine} runs {image or 'an unknown image'}, which does not ship the Trino OPA plugin; supported: trinodb/trino:483"` |
-| `AllDefaults` | `"the profile holds the `all - …` default policies ({count}); delete them first"` |
-| `HandWritten` | `"{service} holds {count} hand-written policies, which OPA would ignore; delete them first"` |
+| `Stored(r)` | `r.message()`, Task 7's texts: ``"the profile holds the `all - …` default policies ({count}); delete them first"`` and `"{service} holds {count} hand-written policies, which OPA would ignore; delete them first"` |
+| `StoredOverlaps` | `"the profile serves {n} mask/row-filter pairs whose winner the artifact does not express (see GET /perm/overlaps); resolve them first: {pairs joined by '; '}"` |
 
-- **The queries:**
-  - `AllDefaults`: `SELECT count(*) FROM policy.authz_policies WHERE service_id = $1 AND name LIKE 'all - %'`. This is the same shape migration 0180 matches; `_` and `%` do not appear in `'all - '`.
-  - `HandWritten`: `SELECT count(*) FROM policy.authz_policies WHERE service_id = $1 AND managed_by = 'operator'`, run for the profile and for its tag service (`config_jsonb->>'tagService'` resolved by name).
-- **Switching to `Ranger`** has no refusal.
+- **`EngineImage` applies only to bindings with `origin != "external"` (C6).** An external engine has no stored image (`egret_perm::stored_engine_image` reads the provisioning spec). It goes into `external_engines_unchanged`, because its operator installs the plugin config and must run Trino ≥ 483 with `plugin/opa`.
+- **Switching to `Ranger`** has no refusal, and the gate does not apply to it.
 
-- [ ] **Step 1: Write the failing tests.** One test per condition, each asserting `opa_switch_refusals` returns exactly that one refusal and its message, plus one that returns empty:
+- [ ] **Step 1: Write the failing tests.** One test per condition, each asserting `opa_switch_check` returns exactly that one refusal and its message, plus one that returns empty:
 
 ```rust
+#[tokio::test] async fn the_gate_off_is_refused_first() { /* opa_enabled = false → [Disabled] only */ }
 #[tokio::test] async fn a_starrocks_profile_is_refused_as_not_trino() {}
 #[tokio::test] async fn a_manual_profile_is_refused_as_not_generated() {}
-#[tokio::test] async fn an_engine_on_an_image_without_the_opa_plugin_is_refused_by_name() {
-    /* binding image Some("trinodb/trino:470") and one with None → two EngineImage refusals, in binding order */ }
+#[tokio::test] async fn a_provisioned_engine_on_an_image_without_the_opa_plugin_is_refused_by_name() {
+    /* provisioned bindings with image Some("trinodb/trino:470") and None → two EngineImage refusals, in binding order */ }
+#[tokio::test] async fn an_external_engine_is_listed_not_refused() {
+    /* origin "external", image None → refusals empty, external_engines_unchanged == [its name] */ }
 #[tokio::test] async fn all_defaults_are_refused_with_their_count() {
     /* seed_default_trino_policies on a manual trino profile (13 rows), then UPDATE origin='generated' */ }
 #[tokio::test] async fn a_hand_written_row_in_the_tag_service_is_refused() {
     /* insert a policy with managed_by='operator' into the tag service */ }
+#[tokio::test] async fn a_stored_overlap_is_refused_with_its_pairs() {
+    /* a recompiler stub whose stored_overlaps_in_tx returns ["mask on lake.s.t.email: perm-rule-a, perm-rule-b"] */ }
 #[tokio::test] async fn a_generated_trino_profile_on_483_switches() { /* empty */ }
+#[tokio::test] async fn a_hand_written_policy_in_an_opa_profiles_tag_service_is_refused_at_create() {
+    /* PolicyStore::create_policy on the tag service of a profile with mechanism='opa' → CompilerOwned */ }
 ```
 
   Also add an inline unit test in `engine_images.rs` for `ships_opa_plugin`:
@@ -1592,35 +1992,45 @@ CARGO_TARGET_DIR=$PWD/target-sp2b cargo test -p egret-perm ships_opa_plugin
 
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the same commands, then `cargo check --workspace --all-targets`. Expected: PASS.
-- [ ] **Step 5: Commit** `feat(policy): the conditions under which a profile may switch to OPA`.
+- [ ] **Step 5: Mutation checks (M12).** Delete each condition from `opa_switch_check` in turn: its named test must fail. Also delete the `create_policy` guard; `a_hand_written_policy_in_an_opa_profiles_tag_service_is_refused_at_create` must fail. Restore after each, and record the pairs in the report.
+- [ ] **Step 6: Commit** `feat(policy): the conditions under which a profile may switch to OPA`.
 
 ---
 
 ### Task 12: `PATCH /policies/services/{service}` with `mechanism`
 
 **Files:**
-- Modify: `crates/egret-policy/src/admin/mechanism.rs`. Add the handler `set_mechanism`, the body `SetMechanismBody { mechanism: MechanismName }` and the response `ProfileMechanism { name: String, mechanism: MechanismName, engines_reconfigured: Vec<String> }`.
+- Modify: `crates/egret-policy/src/admin/mechanism.rs`. Add:
+  - the handler `set_mechanism`;
+  - the body `SetMechanismBody { mechanism: MechanismName }`;
+  - the response `ProfileMechanism { name: String, mechanism: MechanismName, engines_reconfigured: Vec<String>, external_engines_unchanged: Vec<String> }`.
 - Modify: `crates/egret-policy/src/admin/mod.rs`:
   - route: `.route("/policies/services/{service}", axum::routing::delete(delete_profile).patch(mechanism::set_mechanism))` at :512;
   - add `set_mechanism` to `PolicyAdminApi` `paths(...)` (:2290);
   - add `SetMechanismBody`, `ProfileMechanism` and `MechanismName` to `components(schemas(...))` (:2307);
-  - add `pub reconfigurer: Arc<dyn ProfileEngineReconfigurer>` to `PolicyAdminState` (:80).
-- Modify: `crates/egret-audit` action constants. Add `action::PROFILE_MECHANISM = "profile.mechanism"` next to `PROFILE_TAG_SERVICE`; find it with `grep -rn "PROFILE_TAG_SERVICE" crates/egret-audit/src`.
-- Modify: every `PolicyAdminState { … }` construction. Tests get a `NoReconfigure` stub; `grep -rn "recompiler:" crates --include='*.rs'` lists them. `crates/egret-bin/src/main.rs` gets the real impl in Task 15; until then it wires `NoReconfigure`, which logs `warn!` and returns `Ok(vec![])`.
+  - `PolicyAdminState` (:80) gains `pub reconfigurer: Arc<dyn ProfileEngineReconfigurer>` and `pub opa_enabled: bool`. `egret-bin` sets `opa_enabled` from `config.governance.opa.enabled`.
+  - `PolicyHttpError` gains `ConflictBody { body: serde_json::Value }` (409, served as is, mirroring `BadRequestBody`).
+- Modify: `crates/egret-audit/src/governance.rs` (M1). Add `pub const PROFILE_MECHANISM: &str = "profile:mechanism";` next to `PROFILE_TAG_SERVICE` (:41). Add it to the family table (:140-160) in the `profile` family, and to `GOVERNANCE_ACTIONS` (:198-220).
+- Modify: every `PolicyAdminState { … }` construction. Tests get a `NoReconfigure` stub; `grep -rn "recompiler:" crates --include='*.rs'` lists them. `crates/egret-bin/src/main.rs` gets the real impl in Task 15; until then it wires `NoReconfigure`, which logs `warn!` and returns an empty report.
 - Test: `crates/egret-policy/tests/mechanism_switch.rs` (append)
 
 **Interfaces:**
 - Consumes:
-  - Task 11's `opa_switch_refusals`;
+  - Task 11's `opa_switch_check`;
   - `ProfileRecompiler::recompile_in_tx(&self, tx, &[i64])` (`admin/mod.rs:115`);
-  - `crate::store::lock_service_rows_via(conn, &[i64])` (store.rs:2306).
+  - `lock_unit_rows(conn, service_id)` (`admin/mod.rs:182`), which locks the profile **and** its tag service in ascending order, the order a recompile takes (M10).
 - Produces:
 
 ```rust
+// crates/egret-policy-api/src/dto.rs (so egret-engine-mgmt can build one; re-exported from egret_policy)
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ReconfigureReport { pub applied: Vec<String>, pub failed: Vec<(String, String)> }
+// crates/egret-policy/src/admin/mechanism.rs
 #[async_trait::async_trait]
 pub trait ProfileEngineReconfigurer: Send + Sync {
-    /// Re-apply every egret-provisioned engine bound to `service_id`; returns the engine names applied.
-    async fn reconfigure_bound_engines(&self, service_id: i64) -> Result<Vec<String>, String>;
+    /// Re-apply every egret-provisioned engine bound to `service_id`, each with the profile's
+    /// current mechanism. Never stops at the first failure: every engine is tried.
+    async fn reconfigure_bound_engines(&self, service_id: i64) -> ReconfigureReport;
 }
 ```
 
@@ -1630,28 +2040,44 @@ pub trait ProfileEngineReconfigurer: Send + Sync {
   1. `require(&*st.pdp, &p, "policy:update")`.
   2. `get_service(&service)`, which answers 404 when there is none.
   3. `st.engines.list_engine_bindings()`, filtered to `authz_service_id == Some(svc.id)`.
-  4. Begin a transaction and `lock_service_rows_via(&mut tx, &[svc.id])`.
-  5. Re-read the row under the lock. If `mechanism` already equals the requested one, commit and return 200 with `engines_reconfigured: []`. Nothing is written.
-  6. For `opa`, run `opa_switch_refusals`. If any refusal holds, answer **409** with body `{"error": <first message>, "code": "mechanism_refused", "refusals": [<every message>]}`, using `PolicyHttpError::Overlap`'s structured-body pattern or a new `ConflictBody { body }` variant mirroring `BadRequestBody`.
-  7. `UPDATE policy.authz_services SET mechanism = $2, policy_version = policy_version + 1, updated_at = now() WHERE id = $1`.
-  8. `st.recompiler.recompile_in_tx(&mut tx, &[svc.id])`.
-  9. Record the governance event `PROFILE_MECHANISM` with summary `{"before": old, "after": new}`.
-  10. Commit.
-  11. After the commit, call `st.reconfigurer.reconfigure_bound_engines(svc.id)`. An `Err(e)` answers **502** with `{"error": "the profile is now on {new}, but its engines were not reconfigured: {e}; retry with PUT /engines/{id} or restart them"}`. The switch stays committed: the Ranger artifact still compiles (S8), so the engines keep enforcing it until they restart.
-- **The utoipa description** of the 200 says: "The coordinator of every bound engine restarts to load the new access control; queries running on it fail."
+  4. Begin a transaction and `lock_unit_rows(&mut tx, svc.id)`.
+  5. Re-read the row under the lock.
+  6. For `opa`, run `opa_switch_check(&mut tx, st.opa_enabled, …)`. If any refusal holds, answer **409** `ConflictBody { body: {"error": <first message>, "code": "mechanism_refused", "refusals": [<every message>]} }`. Nothing is written.
+  7. If the stored mechanism differs from the requested one:
+     1. `UPDATE policy.authz_services SET mechanism = $2, policy_version = policy_version + 1, updated_at = now() WHERE id = $1`;
+     2. `st.recompiler.recompile_in_tx(&mut tx, &[svc.id])`;
+     3. record the governance event `PROFILE_MECHANISM` with summary `{"before": old, "after": new}`.
+
+     If it is the same, nothing is written. This is the retry path of open question (a).
+  8. Commit.
+  9. **After the commit, always** call `st.reconfigurer.reconfigure_bound_engines(svc.id)`, also when nothing was written. That is how a re-sent PATCH re-runs a failed reconfigure.
+  10. With an empty `failed`, answer 200 `ProfileMechanism { …, engines_reconfigured: report.applied, external_engines_unchanged }`.
+  11. With any `failed`, answer **502**:
+
+      ```json
+      {"error": "the profile is now on {new}; engines not reconfigured: {names}. Send the same PATCH again to retry.",
+       "engines_reconfigured": [..], "engines_failed": [{"engine": .., "error": ..}]}
+      ```
+
+      The switch stays committed. An engine still running OPA keeps being answered, because the refresher serves every profile with an engine whose `applied_mechanism = 'opa'` (Task 7). An engine still running Ranger keeps enforcing the Ranger artifact (S8).
+- **The utoipa description** of the 200 says: "The coordinator of every bound egret-provisioned engine restarts to load the new access control; queries running on it fail. External engines are listed in `external_engines_unchanged`: their operator installs the new plugin files and must run Trino 483 or later with `plugin/opa`."
 
 - [ ] **Step 1: Write the failing route tests.** Drive `policy_admin_router()` as `crates/egret-policy/tests/admin_routes.rs` does; reuse its auth helpers.
 
 ```rust
 #[tokio::test] async fn switching_a_ready_profile_to_opa_writes_recompiles_and_reconfigures() {
     /* 200; body.mechanism=="opa"; row reads opa; policy_version moved; recompiler stub saw [id];
-       reconfigurer stub saw id once; governance event row exists with action 'profile.mechanism' */ }
+       reconfigurer stub saw id once; governance event row exists with action 'profile:mechanism' */ }
 #[tokio::test] async fn each_refusal_is_a_409_that_names_its_condition_and_writes_nothing() {
-    /* for each Task 11 case: 409, body.refusals contains the message, row still 'ranger',
-       policy_version unchanged, reconfigurer never called */ }
-#[tokio::test] async fn switching_back_to_ranger_is_never_refused() {}
-#[tokio::test] async fn the_same_mechanism_again_is_a_no_op() { /* version unchanged, reconfigurer not called */ }
-#[tokio::test] async fn a_failed_reconfigure_is_a_502_and_the_switch_stays() {}
+    /* for each Task 11 case, the gate-off case included: 409, body.refusals contains the message,
+       row still 'ranger', policy_version unchanged, reconfigurer never called */ }
+#[tokio::test] async fn switching_back_to_ranger_is_never_refused_even_with_the_gate_off() {}
+#[tokio::test] async fn the_same_mechanism_again_writes_nothing_but_reconfigures() {
+    /* version unchanged, no event, reconfigurer called once */ }
+#[tokio::test] async fn a_partly_failed_reconfigure_is_a_502_naming_both_lists_and_the_switch_stays() {}
+#[tokio::test] async fn the_patch_locks_the_tag_service_row_too() {
+    /* hold `SELECT … FOR UPDATE` on the tag service row in another connection; the PATCH waits
+       (assert it has not answered after 300 ms, then release and it answers 200) */ }
 #[tokio::test] async fn without_policy_update_it_is_403() {}
 ```
 
@@ -1662,11 +2088,16 @@ pub trait ProfileEngineReconfigurer: Send + Sync {
 ```bash
 env -u EGRET_ALLOW_DB_SKIP CARGO_TARGET_DIR=$PWD/target-sp2b cargo test -p egret-policy --test mechanism_switch
 env -u EGRET_ALLOW_DB_SKIP CARGO_TARGET_DIR=$PWD/target-sp2b cargo test -p egret-policy --test admin_routes
+CARGO_TARGET_DIR=$PWD/target-sp2b cargo test -p egret-audit
 CARGO_TARGET_DIR=$PWD/target-sp2b cargo test -p egret-server --lib committed_openapi_json_is_current
 ```
 
   Expected: PASS.
-- [ ] **Step 5: Commit** `feat(policy): switch a profile between Ranger and OPA`.
+- [ ] **Step 5: Mutation checks.**
+  - (a) Return early on the same mechanism without reconfiguring. `the_same_mechanism_again_writes_nothing_but_reconfigures` must fail.
+  - (b) Lock only the profile row. `the_patch_locks_the_tag_service_row_too` must fail.
+  - (c) Skip the gate. The gate-off case must fail.
+- [ ] **Step 6: Commit** `feat(policy): switch a profile between Ranger and OPA`.
 
 ---
 
@@ -1679,7 +2110,7 @@ CARGO_TARGET_DIR=$PWD/target-sp2b cargo test -p egret-server --lib committed_ope
 - Modify: `crates/egret-engine-mgmt-api/src/lib.rs:407`. `RangerBinding` gains `pub mechanism: AccessMechanism`, defined in `opa_config.rs`:
   - `#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)] pub enum AccessMechanism { #[default] Ranger, Opa }`;
   - every `RangerBinding { … }` literal sets `mechanism: AccessMechanism::Ranger` (`grep -rn "RangerBinding {" crates`).
-- Modify: `crates/egret-policy/src/admin/mod.rs:1137-1164` (`trino_config`). For a profile whose `mechanism == "opa"`, the response files are `opa_plugin_files(PLACEHOLDER_ENGINE_ID, &st.engine_egret_url, PASSWORD_PLACEHOLDER)`, and `warnings` adds `OPA_LOG_REQUESTS_WARNING`. `TrinoConfigResponse` gains `pub mechanism: String`.
+- Modify: `crates/egret-policy/src/admin/mod.rs:1137-1164` (`trino_config`). For a profile whose `mechanism == "opa"`, the response files are `opa_plugin_files(PLACEHOLDER_ENGINE_ID, &st.engine_egret_url, PASSWORD_PLACEHOLDER)`, and `warnings` adds `OPA_LOG_REQUESTS_WARNING` and `OPA_EXTERNAL_ENGINE_NOTE`. `TrinoConfigResponse` gains `pub mechanism: String`.
 - Test: inline in `opa_config.rs`; `crates/egret-policy/tests/admin_routes.rs` (append one test)
 
 **Interfaces:**
@@ -1691,6 +2122,8 @@ pub const OPA_CONTEXT_PATH: &str = "/etc/trino/egret-opa-context.properties";
 pub const OPA_SURFACE_PREFIX: &str = "/opa/v1/data/egret/trino";   // equal to egret_perm_compile's; pinned by a test in Task 15
 pub const PLACEHOLDER_ENGINE_ID: &str = "REPLACE_WITH_THE_ENGINE_ID";
 pub const OPA_LOG_REQUESTS_WARNING: &str = "Do not enable opa.log-requests: every request carries egret.secret in input.context.properties, and the coordinator log would hold it.";
+/// C6: egret cannot see an external engine's image.
+pub const OPA_EXTERNAL_ENGINE_NOTE: &str = "The coordinator must run Trino 483 or later with plugin/opa; egret cannot check an external engine's image.";
 pub fn opa_plugin_files(engine_id: &str, egret_url: &str, secret: &str) -> crate::ranger_config::RangerPluginFiles;
 ```
 
@@ -1702,6 +2135,7 @@ opa.policy.uri=<base>/allow
 opa.policy.batched-uri=<base>/batch
 opa.policy.row-filters-uri=<base>/row_filters
 opa.policy.batch-column-masking-uri=<base>/batch_column_masks
+opa.policy.column-masking-uri=<base>/column_mask
 opa.allow-permission-management-operations=false
 opa.log-requests=false
 opa.log-responses=false
@@ -1720,6 +2154,8 @@ fn opa_files_point_every_uri_at_egret_and_pin_the_safe_settings() {
     assert!(ac.starts_with("access-control.name=opa\n"));
     assert!(ac.contains("opa.policy.uri=http://egret:8080/opa/v1/data/egret/trino/allow\n"));
     assert!(ac.contains("opa.policy.batch-column-masking-uri=http://egret:8080/opa/v1/data/egret/trino/batch_column_masks\n"));
+    assert!(ac.contains("opa.policy.column-masking-uri=http://egret:8080/opa/v1/data/egret/trino/column_mask\n"),
+            "both masking URIs, so neither mask path can fail open");
     assert!(ac.contains("opa.allow-permission-management-operations=false\n"));
     assert!(ac.contains("opa.log-requests=false\n"));
     assert!(ac.contains(&format!("opa.context-file={OPA_CONTEXT_PATH}\n")));
@@ -1752,14 +2188,14 @@ env -u EGRET_ALLOW_DB_SKIP CARGO_TARGET_DIR=$PWD/target-sp2b cargo test -p egret
   - `trino_ranger_secret` (:481). For OPA, `stringData` is `{ OPA_CONTEXT_FILE: <the context file rendered with the real credential> }`, instead of the XML. Same Secret name and labels.
   - `trino_deployment` (:674). For OPA, the `ranger-secret` volume mounts `{"mountPath": OPA_CONTEXT_PATH, "subPath": OPA_CONTEXT_FILE}` instead of the XML mount (:749-751).
 - Modify: `crates/egret-engine-mgmt-api/src/lib.rs:407`. `RangerBinding` gains `pub engine_id: String`, which is the `egret.engine` value (the engine's uuid). Set it in `crates/egret-engine-mgmt/src/engines.rs::ranger_binding` (:1008) from `engine.id.to_string()`, and in every other literal.
-- Modify: `crates/egret-provisioner/src/docker/plan.rs`. `file_mode` (:224) returns `0o600` for a path ending in `/egret-opa-context.properties` (add `OPA_CONTEXT_SUFFIX` next to `RANGER_SECURITY_XML_SUFFIX` at :236). `resolve_mounts` already maps `ranger-secret` sub-paths to the Secret's `stringData`, so the new mount needs no other change.
+- `crates/egret-provisioner/src/docker/plan.rs` needs **no change**: `resolve_mounts` (:296-309) already writes every `ranger-secret` sub-path from the Secret's `stringData` at mode `0o600`, so the context file is private once Task 14's mount exists. The Docker test below pins that.
 - Test: inline tests in `trino.rs` and `docker/plan.rs`
 
 **Interfaces:**
 - Consumes: Task 13's `opa_plugin_files`, `AccessMechanism`, `OPA_CONTEXT_FILE` and `OPA_CONTEXT_PATH`.
 - Produces: an `EngineSpec` whose `ranger.mechanism == Opa` renders an OPA coordinator. `config_checksum` (:530) already hashes the ConfigMap and the Secret, so a mechanism change rolls the pods. The Docker update recreates every container (`docker/provisioner.rs:231`).
 
-- [ ] **Step 1: Write the failing tests** in `trino.rs`'s test module. Base them on the existing spec builder those tests use (`grep -n "fn spec_with_ranger\|fn test_spec" crates/egret-provisioner/src/trino.rs`):
+- [ ] **Step 1: Write the failing tests** in `trino.rs`'s test module. Base them on the existing binding helpers `bound(credential)` and `bound_as(id, credential)` (`crates/egret-provisioner/src/trino.rs:1501-1516`) and the spec builder their tests use:
 
 ```rust
 #[test]
@@ -1801,43 +2237,58 @@ fn switching_mechanism_changes_the_pod_checksum() {
 
 **Files:**
 - Modify: `crates/egret-engine-mgmt/src/engines.rs`.
-  - Add `pub(crate) async fn resolve_profile_mechanism(st: &CpState, authz_service_id: Option<i64>) -> Result<AccessMechanism, CpError>`, reading `PolicyService::mechanism` from `st.authz.list_services()`, like `resolve_ranger_service_name` (:2838).
+  - Add `pub(crate) async fn resolve_profile_mechanism(st: &CpState, authz_service_id: Option<i64>) -> Result<AccessMechanism, CpError>`. It reads `PolicyService::mechanism` (Task 5) from `st.authz.list_services()`, like `resolve_ranger_service_name` (:2838); an unbound engine is `Ranger`.
   - `build_provision_req_with` (:749-770) passes it into `ranger_binding`, which sets `RangerBinding::mechanism`.
-- Modify: `crates/egret-engine-mgmt/src/store.rs`. Add `pub async fn list_engines_bound_to_authz_service(&self, service_id: i64) -> Result<Vec<Engine>, StoreError>`, next to `count_engines_bound_to_authz_service` (:401).
-- Modify: `crates/egret-engine-mgmt/src/engines.rs`. Add `pub async fn reapply_bound_engines(st: &CpState, service_id: i64) -> Result<Vec<String>, CpError>`. For each bound engine with `origin != "external"`:
-  1. `build_provision_req(st, &engine)`;
-  2. `apply_built(st, prov, &engine, &built, ApplyOp::Update)`;
-  3. collect its name.
-
-  It mirrors `catalog_apply::propagate` (`catalog_apply.rs:1442`). An `ApplyBuiltError` stops the loop and returns `CpError::BadRequest(format!("re-apply engine {name}: {e}"))`.
+  - **Image guard (I6).** In `build_provision_req_with`, when the engine is Trino, not external, and the mechanism is `Opa`, refuse with `CpError::Conflict(format!("engine {name} runs {image}, which does not ship the Trino OPA plugin, and its profile is on OPA; use trinodb/trino:483 or switch the profile to Ranger"))` unless `egret_perm::ships_opa_plugin("trino", &image)`, where `image` is `egret_perm::stored_engine_image("trino", &engine.spec)`. Every apply passes through this function, so a bind, an image change and a create are all refused before anything is rendered. If `CpError` has no `Conflict` variant, use the variant `external.rs` uses for its 409s (`grep -n "CpError::" crates/egret-engine-mgmt/src/external.rs | head`).
+  - **`applied_mechanism` (open question (a)).** After `apply_built` succeeds in each of its callers, run `UPDATE engine_mgmt.engines SET applied_mechanism = $2 WHERE id = $1`, with the mechanism of the built request. Put it inside `apply_built` (:899) itself, at the point where the provisioner accepted the request (`finish_apply`, :957), so no caller can forget it.
+- Modify: `crates/egret-engine-mgmt/src/store.rs`. Add `pub async fn list_engines_bound_to_authz_service(&self, service_id: i64) -> Result<Vec<Engine>, StoreError>`, next to `count_engines_bound_to_authz_service` (:401), ordered by `name`.
+- Modify: `crates/egret-engine-mgmt/src/engines.rs`. Add `pub async fn reapply_bound_engines(st: &CpState, service_id: i64) -> egret_policy_api::ReconfigureReport` (M4b).
+  - `prov` is `st.engine_provisioner.as_ref()`, as `catalog_apply::apply_trino` (`catalog_apply.rs:172-200`) takes it. If it is `None`, every engine is reported failed with "no engine provisioner is configured".
+  - For each bound engine, in name order:
+    - skip it when `origin == "external"`, or when `status == engine_status::DELETING` (`store.rs:19`);
+    - otherwise run `build_provision_req(st, &engine)` and then `apply_built(st, prov.clone(), &engine, &built, ApplyOp::Update)`;
+    - on `ApplyBuiltError::CredentialChanged`, re-read the engine and retry once, the way `catalog_apply::retry_apply` (`:1388`) re-reads before applying;
+    - record `applied` or `failed: (name, error)`, and **continue with the next engine**.
+  - `ReconfigureReport` is `egret_policy_api::ReconfigureReport` (Task 12).
 - Modify: `crates/egret-engine-mgmt/src/external.rs`:
   - add `.route("/engines/{id}/opa-plugin-config", get(opa_plugin_config))` (:179);
   - add `opa_plugin_config` to `ExternalEngineApi` `paths(...)` (:161).
   - The handler mirrors `ranger_plugin_config` (:847): `engine:read`, 409 unless external, 409 unless bound, and 409 with `"profile {name} is on Ranger; use /ranger-plugin-config"` unless the profile is on OPA. It returns `OpaPluginConfigDto { files: Vec<RangerPluginFileDto>, warnings: Vec<String>, admin_must_supply: Vec<String> }`, from `opa_plugin_files(&engine.id.to_string(), &st.engine_egret_url, PASSWORD_PLACEHOLDER)`:
-    - `warnings` = `[OPA_LOG_REQUESTS_WARNING]` + `download_url_warning(&st.engine_egret_url)`;
-    - `admin_must_supply` = `["egret.secret: the engine's Ranger plugin credential (rotate it with POST /api/control-plane/engines/{id}/rotate-ranger-credential to see it once)", "a Trino 483 coordinator: plugin/opa ships in trinodb/trino:483"]`.
-- Modify: `crates/egret-bin/src/main.rs`. Implement `egret_policy::ProfileEngineReconfigurer` for a `ReconfigurerImpl { cp: Arc<tokio::sync::OnceCell<egret_engine_mgmt::CpState>> }`. Its method fails with "engine management is not wired yet" when the cell is empty, and otherwise calls `egret_engine_mgmt::reapply_bound_engines`. Fill the cell right after the `CpState` is built (:3032). Replace Task 12's `NoReconfigure` in `PolicyAdminState` with it.
+    - `warnings` = `[OPA_LOG_REQUESTS_WARNING, OPA_EXTERNAL_ENGINE_NOTE]` + `download_url_warning(&st.engine_egret_url)`;
+    - `admin_must_supply` = `["egret.secret: the engine's Ranger plugin credential (rotate it with POST /api/control-plane/engines/{id}/rotate-ranger-credential to see it once)", "a Trino 483 or later coordinator with plugin/opa (it ships in trinodb/trino:483)"]`.
+- Modify: `crates/egret-bin/src/main.rs`. Implement `egret_policy::ProfileEngineReconfigurer` for a `ReconfigurerImpl { cp: Arc<tokio::sync::OnceCell<egret_engine_mgmt::CpState>> }`.
+  - When the cell is empty, its method reports every engine as failed with "engine management is not wired yet".
+  - Otherwise it calls `egret_engine_mgmt::reapply_bound_engines`.
+  - Fill the cell right after the `CpState` is built (:3032), and replace Task 12's `NoReconfigure` in `PolicyAdminState` with it.
 - Test: `crates/egret-engine-mgmt/tests/routes.rs` (append); `crates/egret-perm-compile/src/opa/surface.rs` (one inline test pinning the prefix constant)
 
 **Interfaces:**
 - Consumes:
-  - Task 12's `ProfileEngineReconfigurer`;
-  - Task 13's `opa_plugin_files`, `AccessMechanism` and `OPA_LOG_REQUESTS_WARNING`;
-  - Task 14's rendering.
+  - Task 12's `ProfileEngineReconfigurer` and `ReconfigureReport`;
+  - Task 13's `opa_plugin_files`, `AccessMechanism`, `OPA_LOG_REQUESTS_WARNING` and `OPA_EXTERNAL_ENGINE_NOTE`;
+  - Task 14's rendering;
+  - Task 11's `egret_perm::ships_opa_plugin`;
+  - Task 5's `engine_mgmt.engines.applied_mechanism`.
 - Produces:
   - `egret_engine_mgmt::reapply_bound_engines`, re-exported from `lib.rs`;
-  - `GET /api/control-plane/engines/{id}/opa-plugin-config`.
+  - `GET /api/control-plane/engines/{id}/opa-plugin-config`;
+  - `applied_mechanism` kept current on every provisioned apply.
 
-- [ ] **Step 1: Write the failing tests** in `routes.rs`, with that file's test state and provisioner fake (`grep -n "struct FakeProvisioner\|impl EngineProvisioningPort for" crates/egret-engine-mgmt/tests/routes.rs`):
+- [ ] **Step 1: Write the failing tests** in `routes.rs`, with that file's test state and its provisioner fake `FakeEnginePort` (`crates/egret-engine-mgmt/tests/routes.rs:820`; M4):
 
 ```rust
-#[tokio::test] async fn an_opa_profiles_engine_is_applied_with_the_opa_binding() {
-    /* bind a trino engine to a profile, UPDATE mechanism='opa', call reapply_bound_engines;
-       the fake provisioner's last `update` spec has ranger.mechanism == Opa and ranger.engine_id == engine id */ }
-#[tokio::test] async fn reapply_skips_external_engines_and_names_the_applied_ones() {}
+#[tokio::test] async fn an_opa_profiles_engine_is_applied_with_the_opa_binding_and_records_it() {
+    /* bind a trino engine on trinodb/trino:483 to a profile, UPDATE mechanism='opa', call reapply_bound_engines;
+       FakeEnginePort's last `update` spec has ranger.mechanism == Opa and ranger.engine_id == engine id;
+       the row's applied_mechanism == 'opa'; report.applied == [name] */ }
+#[tokio::test] async fn reapply_skips_external_and_deleting_engines_and_tries_every_other_one() {
+    /* two provisioned engines, the fake rejects the first: report.failed names it, report.applied names the second */ }
+#[tokio::test] async fn an_engine_on_an_image_without_the_opa_plugin_cannot_be_applied_on_an_opa_profile() {
+    /* engine spec imageVersion "470": build_provision_req → 409 naming the engine; nothing reached the fake */ }
 #[tokio::test] async fn opa_plugin_config_for_an_external_engine_on_an_opa_profile() {
     /* 200; files[0].name == "access-control.properties"; files[1].content contains
-       "egret.engine=<id>" and the PASSWORD_PLACEHOLDER; warnings[0] == OPA_LOG_REQUESTS_WARNING */ }
+       "egret.engine=<id>" and the PASSWORD_PLACEHOLDER; warnings[0] == OPA_LOG_REQUESTS_WARNING;
+       warnings[1] == OPA_EXTERNAL_ENGINE_NOTE */ }
 #[tokio::test] async fn opa_plugin_config_refuses_a_ranger_profile_with_409() {}
 #[tokio::test] async fn opa_plugin_config_refuses_a_provisioned_engine_with_409() {}
 ```
@@ -1855,7 +2306,11 @@ CARGO_TARGET_DIR=$PWD/target-sp2b cargo test -p egret-server --lib committed_ope
 ```
 
   Expected: PASS.
-- [ ] **Step 5: Commit** `feat(engine-mgmt): apply the profile's mechanism and serve the OPA plugin config`.
+- [ ] **Step 5: Mutation checks.**
+  - (a) Remove the image guard. The image test must fail.
+  - (b) Stop at the first failed engine. `reapply_skips_external_and_deleting_engines_and_tries_every_other_one` must fail.
+  - (c) Do not write `applied_mechanism`. The first test must fail.
+- [ ] **Step 6: Commit** `feat(engine-mgmt): apply the profile's mechanism and serve the OPA plugin config`.
 
 ---
 
@@ -1864,7 +2319,7 @@ CARGO_TARGET_DIR=$PWD/target-sp2b cargo test -p egret-server --lib committed_ope
 ### Task 16: `/perm/explain*` answers an OPA profile through the evaluator
 
 **Files:**
-- Modify: `crates/egret-perm-compile/src/routes.rs`:
+- Modify: `crates/egret-perm-compile/src/routes.rs` (and the `PermState` struct it uses: add `pub opa_cache: Option<Arc<crate::opa::cache::SnapshotCache>>`, set in `egret-bin` next to Task 10's cache, `None` in tests):
   - in `explain_users` (:2608), inside the per-profile loop after `engine_type_for` (:2687), branch on `svc.mechanism == "opa"`;
   - `ExplainProfile` (:694) gains `pub mechanism: WireMechanism` (always set) and `#[serde(skip_serializing_if = "Option::is_none")] pub opa: Option<ExplainOpa>`;
   - `ExplainAccess` gains `#[serde(skip_serializing_if = "Option::is_none")] pub ir_reason: Option<String>`.
@@ -1879,7 +2334,10 @@ CARGO_TARGET_DIR=$PWD/target-sp2b cargo test -p egret-server --lib committed_ope
   - Task 4's `row_filters` and `column_mask_choice`;
   - `render_mask`.
 - **The OPA branch, per profile:**
-  1. `let snap = crate::opa::build::build_snapshot_via(&mut *conn, service_id).await?` (in the explain's own read-only transaction; `None` cannot happen for a Trino profile).
+  1. Get the snapshot (M11, I9):
+     - `PermState` gains `pub opa_cache: Option<Arc<crate::opa::cache::SnapshotCache>>`, set by `egret-bin` to Task 10's cache when the gate is on.
+     - If the cache holds `Ready(s)` with `s.key()` equal to the row's `(policy_version, tag_version)`, use it.
+     - Otherwise build one with `crate::opa::build::build_snapshot_via(&mut *conn, service_id, MissingUsername::Omit)`, in the explain's own read-only transaction. `Omit` never mints, so the read-only transaction holds. `None` cannot happen for a Trino profile.
   2. Build `ObjectPath { catalog: catalog_name, schema: target.schema, table: target.table, column: target.column }`.
   3. Accesses:
      - `read` → one `ExplainAccess { access_type: "select" }`;
@@ -2011,10 +2469,10 @@ fn a_select_of_two_columns_is_two_asks() {
 
 **Interfaces:**
 - Consumes:
-  - `#[path = "golden/fixtures.rs"] mod fixtures;` (with `crate::Names` copied from `tests/golden_compile.rs:13-26`);
+  - at the crate root, `include!("opa_support/fixtures_host.rs");` then `#[path = "golden/fixtures.rs"] mod fixtures;` (Task 6: `Names`, `capture` and `compare_or_bless` stubs, I2);
   - `#[path = "../../egret-ranger-eval/tests/support/ranger_jvm.rs"] mod ranger_jvm;`;
   - `#[path = "opa_support/to_ranger.rs"] mod to_ranger;`;
-  - `egret_perm_compile::opa::build::build_snapshot_via`;
+  - `egret_perm_compile::harness_support::build_snapshot_for_test` (Task 6);
   - `harness_support::served_artifact_json_via`.
 - **The corpus.**
   - `const SEED: u64 = 0x5b2b_0000_0001` (override with `EGRET_OPA_DIFF_SEED`, hex); `const STATES: usize = 40`; `const QUESTIONS: usize = 50`; that is 2000 cases.
@@ -2026,16 +2484,26 @@ fn a_select_of_two_columns_is_two_asks() {
   - 0–2 engine grants (`trino.impersonate_user`, `trino.set_system_session_property`);
   - one engine bound with a spec drawn from `open`, `impersonate+auth` and `jwt`, so the infra statements vary;
   - 0–1 platform admin.
-- **No state may create two masks on one column for one user.** `refuse_overlaps` refuses that at compile; a refused state is redrawn and counted.
+- **Overlaps.**
+  - `refuse_overlaps` refuses a **differing** pair at compile. A refused state is redrawn and counted.
+  - It **admits agreeing ties**: two masks of one type with no expression on one column, or two identical filters (`crates/egret-policy/src/ambiguous_arbitration.rs:18-32`). The generator draws such ties on purpose, in at least 1 state in 10, and the run asserts that every tie case agrees with Ranger (I1).
 - **Each question** draws a user, an operation from `TRINO_483_OPERATIONS`, and a resource of that operation's shape over the state's vocabulary.
+  - At least 5 % of `SelectFromColumns` questions have an **empty column list** (C2: `count(*)`).
+  - Reach questions include objects with a withheld or denied descendant or ancestor.
 - **Ranger path:**
   1. `recompile_service`;
   2. `served_artifact_json_via`;
-  3. for each question, `to_ranger::ranger_asks`, with the request's `tags` filled from the state's own classifications (column tags `SELF`, table tags `ANCESTOR` on a column ask);
+  3. for each question, `to_ranger::ranger_asks`, with the request's `tags` filled from the state's own classifications:
+     - on a column ask, column tags are `SELF` and table tags `ANCESTOR`;
+     - on a table ask, table tags are `SELF` and the table's column tags `DESCENDANT`;
+     - on a schema or catalog `_any` ask, every tag below it is `DESCENDANT` (I7).
+
+     **This is a correlated oracle:** both sides read the state's own classifications. So Layer 1 does not measure classification resolution, for example the `''` table-level sentinel of C3. Layer 2 measures it (Task 21), and Task 6's DB test pins the sentinel;
   4. one `ask_ranger_json(payload, "2.8.0", "opa-l1")` call for all cases of all states.
 - **OPA path:** `build_snapshot_via` → `decide`/`filter`/`row_filters`/`column_mask_choice`.
 - **Compared:**
   - allow and deny (all asks must allow);
+  - a case where the evaluator returns `EvalError::TwoMasks` counts as "query fails" on the OPA side. It agrees only with a Ranger case the generator marked as a refused state, which cannot occur after redrawing, so any such case is an unexplained difference (I7);
   - row filter: Ranger `filterExpr` against the evaluator's single expression with the outer parentheses of a single filter removed;
   - mask: Ranger `maskType` and `maskedValue` against `column_mask_choice`.
 - **`explained.toml` format:**
@@ -2051,7 +2519,10 @@ right = "ranger" # or "egret" or "both"
 why = "..."
 ```
 
-  Each difference found is classified by `(operation, ranger_outcome, opa_outcome)` and matched to an entry by `operations`, plus a predicate function named after the `id` in the test file. The file starts empty. Every entry that is added states its mechanism, from a reading of the Ranger source or the measured case, never a guess.
+  - **Matching.** Each difference found is classified by `(operation, ranger_outcome, opa_outcome)`. It is matched to an entry by `operations`, plus a predicate function named after the `id` in the test file.
+  - **Pairing (I7).** The test also asserts that every `id` in the file has a predicate function (a `match id { … }` with no wildcard arm), and that every predicate has an `id`.
+  - **Writing entries.** The file starts empty. Every entry that is added states its mechanism, from a reading of the Ranger source or the measured case, never a guess.
+  - **Never explainable (ruling (b)).** A difference where **OPA allows and Ranger denies** (access, reach or filter visibility) **can never be explained**. The checker refuses any entry whose predicate matches such a case: it fails with "OPA allows what Ranger denies: fix the evaluator", whatever `explained.toml` says. Only differences where OPA is stricter, or where values differ in a way that does not widen access, may be listed.
 - **Failure messages** print the seed, the state index, the question, both outcomes and a reproducer command.
 
 - [ ] **Step 1: Write the test.** Gate it with `if std::env::var("EGRET_TEST_RANGER_E2E").as_deref() != Ok("1") { eprintln!("skipped: EGRET_TEST_RANGER_E2E unset"); return; }`, as the Ranger differential does. Then:
@@ -2069,7 +2540,12 @@ env -u EGRET_ALLOW_DB_SKIP EGRET_TEST_RANGER_E2E=1 CARGO_TARGET_DIR=$PWD/target-
   - a real semantic difference, written into `explained.toml` with its mechanism.
 
   Do not widen a predicate to cover a case you have not explained.
-- [ ] **Step 3: Mutation check.** Flip deny-wins in `egret-perm-eval` (Task 3, mutation a) and confirm `opa_differential` fails. Restore.
+- [ ] **Step 3: Mutation checks**, each restored afterwards:
+  - (a) Flip deny-wins in `egret-perm-eval` (Task 3, mutation a). `opa_differential` must fail.
+  - (b) Add a bogus `explained.toml` entry. The run must fail with "stale".
+  - (c) Delete a needed entry, if any exist. The run must fail with "unexplained".
+  - (d) Add an entry whose predicate matches an OPA-allows/Ranger-denies case (make one by applying Task 3's mutation h). The run must fail with "fix the evaluator", not pass as explained.
+  - (e) Treat an empty column list as allowed (Task 3, mutation g). `opa_differential` must fail.
 - [ ] **Step 4: Update** the matrix rows' `evidence` strings. Run `cargo test -p egret-perm-ir`.
 - [ ] **Step 5: Commit** `test(perm-compile): the OPA decision-level differential against real Ranger`.
 
@@ -2113,6 +2589,9 @@ env -u EGRET_ALLOW_DB_SKIP EGRET_TEST_RANGER_E2E=1 CARGO_TARGET_DIR=$PWD/target-
       # The operation table must still equal what the 483 jar sends.
       - name: Operation table covers the 483 plugin
         run: cargo test -p egret-perm-eval --no-fail-fast
+      # S8: every Trino golden fixture compiled on an OPA profile equals its blessed Ranger artifact.
+      - name: The Ranger artifact does not depend on the mechanism
+        run: env -u EGRET_ALLOW_DB_SKIP EGRET_GOLDEN_MECHANISM=opa cargo test -p egret-perm-compile --features harness --test golden_compile --no-fail-fast
       # 40 store states x 50 Trino questions, egret-perm-eval against real Ranger 2.8.0.
       # No `-q`: the surefire summary is asserted by name.
       - name: OPA decision-level differential
@@ -2128,42 +2607,67 @@ env -u EGRET_ALLOW_DB_SKIP EGRET_TEST_RANGER_E2E=1 CARGO_TARGET_DIR=$PWD/target-
 ### Task 20: Own compose stack and the live check (the controller runs this, not a subagent)
 
 **Files:**
-- Create: `deploy/opa-e2e/docker-compose.yml`, `deploy/opa-e2e/egret.env`, `scripts/opa-e2e/up.sh`, `scripts/opa-e2e/down.sh`, `scripts/opa-e2e/live-check.sh`
+- Create: `deploy/opa-e2e/docker-compose.yml`, `deploy/opa-e2e/egret.env`, `deploy/opa-e2e/trino-ranger/catalog/lake.properties.tmpl`, `scripts/opa-e2e/up.sh`, `scripts/opa-e2e/down.sh`, `scripts/opa-e2e/live-check.sh`
 
-**The stack:** compose project **`egret-opa-e2e`**, with `name: egret-opa-e2e` at the top of the file, so `docker compose -f deploy/opa-e2e/docker-compose.yml` can never act on another project. Services:
+**The stack (C6).** Compose project **`egret-opa-e2e`**, with `name: egret-opa-e2e` at the top of the file, so `docker compose -f deploy/opa-e2e/docker-compose.yml` can never act on another project. Services:
 - `postgres` (`postgres:16`);
 - `rustfs` (`rustfs/rustfs:1.0.1`);
-- `egret`, built from `deploy/docker/backend.Dockerfile`, image `egret-opa-e2e-backend:dev`, `EGRET_RANGER__ENABLED=true`;
-- `trino-opa` and `trino-ranger`, both `trinodb/trino:483@sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534`, with `/etc/trino` bind-mounted from `${WORK}/trino-opa/etc` and `${WORK}/trino-ranger/etc`.
+- `egret`, built from `deploy/docker/backend.Dockerfile`, image `egret-opa-e2e-backend:dev`. Its environment:
+  - `EGRET_RANGER__ENABLED=true`;
+  - `EGRET_GOVERNANCE__OPA__ENABLED=true` (the gate is on for this stack only);
+  - `EGRET_ENGINES__PROVISIONER=docker`;
+  - `EGRET_ENGINES__DOCKER__CALLBACK_URL=http://egret:8080`;
+  - `EGRET_ENGINES__DOCKER__ALLOWED_IMAGES='["trinodb/trino"]'`.
 
-  Host ports are `28080` (egret), `28081` (trino-opa) and `28082` (trino-ranger). The demo stack's 18080 is never used.
+  It also mounts the Docker socket through `tecnativa/docker-socket-proxy:0.3.0@sha256:9e4b9e7517a6b660f2cc903a19b257b1852d5b3344794e3ea334ff00ae677ac2`, copying that service and its `CONTAINERS/IMAGES/NETWORKS/POST` settings from `deploy/docker-compose.demo.yml:69`. Read `EnginesDockerConfig` (`crates/egret-config/src/lib.rs:597`) for the exact keys, and use those. The provisioner creates its containers on the compose network `egret-opa-e2e_default`; set the network key `EnginesDockerConfig` names.
+- `trino-ranger`: `trinodb/trino:483@sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534`, with `/etc/trino` bind-mounted from `${WORK}/trino-ranger/etc`. This is the **external** engine.
+- **`trino-opa` is not a compose service.** It is a **provisioned** engine that egret's Docker provisioner creates on the same network, which means:
+  - it qualifies for infrastructure (`qualifies_for_infra` requires `origin != external`, `crates/egret-core/src/engine_delegation.rs:86-88`);
+  - it carries the image `trinodb/trino:483`, which the switch checks;
+  - it exercises Task 14's Docker path.
+
+  The external `trino-ranger` on the same profile inherits the profile's infrastructure rows.
+
+Host ports: `28080` (egret) and `28082` (trino-ranger). The provisioned `trino-opa` is reached through `docker exec`. The demo stack's 18080 is never used.
 
 **`up.sh`** (idempotent):
 1. Build and start the stack, then wait for `GET /healthz` on 28080.
 2. Log in as the bootstrap admin from `egret.env`.
-3. Create warehouse `opa_e2e` and catalog `lake` via the catalog API. Copy the calls from `deploy/seed-demo-catalog.sh`.
+3. Create the warehouse `opa_e2e` and the catalog `lake` via the catalog API. Copy the calls from `deploy/seed-demo-catalog.sh`.
 4. Create the Trino profile `opa_e2e`.
-5. Register the two Trinos as **external** engines bound to it (`POST /api/control-plane/engines/external`, `rangerPluginVersion: "2.8.0"`).
-6. Rotate each engine's Ranger credential to read the password once (`POST …/rotate-ranger-credential`).
-7. Seed data through `trino-ranger` as the admin: `lake.s1.t1` and `lake.s1.t2`, 1000 rows.
-8. Make the profile generated by creating one grant. Then `PATCH /policies/services/opa_e2e {"mechanism":"opa"}`.
-9. Fetch `GET /engines/{opa-id}/opa-plugin-config` and `GET /engines/{ranger-id}/ranger-plugin-config`. Write their files into the two `etc` dirs, replacing the placeholders with the real passwords.
-10. Restart both Trinos.
+5. **Create `trino-opa`** through `POST /api/control-plane/engines`:
+   - `type: "trino"`, image version `483@sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534`;
+   - `trinoConfig: {"coordinator": {}, "delegationMode": "impersonate", "auth": {"password": {}}}`;
+   - bound to `opa_e2e`, with `lake` attached.
+6. **Register `trino-ranger`** as an external engine bound to `opa_e2e`, with `lake` in its `catalogs` (`POST /api/control-plane/engines/external`, `rangerPluginVersion: "2.8.0"`, `catalogs: [<lake id>]`). The `lake` attachment is what makes `catalogs_for_service_via` see the catalog; without it every grant is `TableNotInCatalog`.
+7. Rotate `trino-ranger`'s Ranger credential to read the password once (`POST …/rotate-ranger-credential`). Write its `access-control.properties` and `ranger-trino-security.xml` from `GET /engines/{id}/ranger-plugin-config`, with the placeholder replaced by the password.
+8. Write `catalog/lake.properties` for `trino-ranger` from `lake.properties.tmpl`: the Iceberg REST catalog at `http://egret:8080/catalog/v1`, warehouse `opa_e2e`, and the RustFS S3 endpoint. Read the provisioned engine's own catalog file (`docker exec <trino-opa> cat /etc/trino/catalog/lake.properties`) and copy its keys, so both engines read the same data.
+9. Restart `trino-ranger`.
+10. Seed `lake.s1.t1` and `lake.s1.t2` (1000 rows) through `trino-ranger` as the platform admin.
+11. Make the profile generated by creating one grant.
+12. `PATCH /policies/services/opa_e2e {"mechanism":"opa"}`. Expect 200, with `engines_reconfigured == ["trino-opa"]` and `external_engines_unchanged == ["trino-ranger"]`. The provisioned coordinator restarts on its own.
 
 **`live-check.sh`:**
-1. As admin, grant `ann` read on `lake`, mask `lake.s1.t1.email` with `MASK_HASH`, add a row filter `region = 'us'` on `lake.s1.t1`, and deny `ann` on `lake.s1.t2`.
+1. As admin:
+   - grant `ann` read on `lake.s1.t1` (not on `t2`);
+   - mask `lake.s1.t1.email` with `MASK_HASH`;
+   - add a row filter `region = 'us'` on `lake.s1.t1`;
+   - deny `ann` read on `lake.s1.t1.ssn`.
 2. Wait for egret's refresher (2 s).
-3. Then, through `trino-opa` as `ann` (with the `trino` CLI inside the container: `docker compose -p egret-opa-e2e exec trino-opa trino --user ann --execute …`):
+3. Then, through `trino-opa` as `ann` (`docker exec <trino-opa container> trino --user ann --execute …`):
    - `SELECT email FROM lake.s1.t1 LIMIT 1` returns a 64-hex string;
    - `SELECT DISTINCT region FROM lake.s1.t1` returns only `us`;
    - `SELECT * FROM lake.s1.t2` fails with `Access Denied`;
-   - `grep "opa: denied" <egret logs>` shows the deny with `reason=`.
-4. Then run the same three statements on `trino-ranger` and print both sides.
+   - **`SELECT count(*) FROM lake.s1.t2` fails with `Access Denied`** (C2);
+   - **`SHOW COLUMNS FROM lake.s1.t1` does not list `ssn`** (C5);
+   - **`SELECT column_name FROM lake.information_schema.columns WHERE table_name = 't1'` does not list `ssn`**, and `SELECT email FROM lake.s1.t1` stays masked (open question (c));
+   - `grep "opa: denied" <egret logs>` shows the denies with `reason=`.
+4. Run the same statements on `trino-ranger` and print both sides.
 
-- [ ] **Step 1: Write the five files.** Every `docker compose` invocation in them uses `-f deploy/opa-e2e/docker-compose.yml -p egret-opa-e2e`.
+- [ ] **Step 1: Write the six files.** Every `docker compose` invocation in them uses `-f deploy/opa-e2e/docker-compose.yml -p egret-opa-e2e`. `down.sh` also deletes the provisioned engine through `DELETE /api/control-plane/engines/{id}` before `docker compose … down -v`, so no container outlives the project.
 - [ ] **Step 2: Rebuild check.** After `up.sh` builds the image, run `docker run --rm --entrypoint sh egret-opa-e2e-backend:dev -c 'strings /usr/local/bin/egret | grep -c opa_surface'`. Expected: ≥ 1, so a stale build cache did not ship an old binary.
 - [ ] **Step 3: Run** `scripts/opa-e2e/up.sh && scripts/opa-e2e/live-check.sh`. Expected: every assertion prints PASS. Save the output in the PR body.
-- [ ] **Step 4: Run** `scripts/opa-e2e/down.sh` (`docker compose … down -v`). It removes only project `egret-opa-e2e`; `docker ps --filter label=com.docker.compose.project=egret-demo` must show the same containers before and after.
+- [ ] **Step 4: Run** `scripts/opa-e2e/down.sh`. It removes only project `egret-opa-e2e` and the engine egret provisioned for it. `docker ps --filter label=com.docker.compose.project=egret-demo` must show the same containers before and after.
 - [ ] **Step 5: Commit** `test(e2e): an own compose stack and the live check for Trino on OPA`.
 
 **This ends package 2b-1.** Open its PR with:
@@ -2172,7 +2676,10 @@ env -u EGRET_ALLOW_DB_SKIP EGRET_TEST_RANGER_E2E=1 CARGO_TARGET_DIR=$PWD/target-
 - the Layer 1 tally;
 - every `explained.toml` entry.
 
-The `egret-data/docs` PR for 2b-1 ships the page of Task 25 without its latency section.
+**The 2b-1 docs PR** in `egret-data/docs` ships a short "Trino on OPA (preview)" page, built from Task 25's items 1, 2, 5, 6, 7, 9 and 10, with:
+- the API only (`PATCH …/services/{service}`, `GET /engines/{id}/opa-plugin-config`);
+- the `[governance.opa] enabled` key and its default `false`;
+- no UI steps, no screenshots, and no latency numbers, which arrive in 2b-2 (I8).
 
 ---
 
@@ -2183,6 +2690,8 @@ The `egret-data/docs` PR for 2b-1 ships the page of Task 25 without its latency 
 **Files:**
 - Create: `scripts/opa-e2e/layer2.sh`, `scripts/opa-e2e/scenarios.sql.d/*.sql`, `scripts/opa-e2e/compare.py`
 - Modify: `.github/workflows/ci.yml` (job `opa-e2e`)
+- Modify: `crates/egret-perm-compile/tests/opa_differential.rs` (M14). Its TOML reader accepts the new optional `layer = [1, 2]` key, a missing key meaning `[1]`, and its stale-entry check counts only entries tagged with layer 1.
+- Modify: `crates/egret-perm-compile/tests/opa_differential/explained.toml`, for entries Layer 2 adds.
 
 **Interfaces:**
 - Consumes:
@@ -2197,7 +2706,7 @@ The `egret-data/docs` PR for 2b-1 ships the page of Task 25 without its latency 
   - `SHOW CATALOGS`, `SHOW SCHEMAS FROM lake`, `SHOW TABLES FROM lake.s1`, `SHOW COLUMNS FROM lake.s1.t1`;
   - `SELECT table_name, column_name FROM lake.information_schema.columns ORDER BY 1, 2`;
   - `SELECT count(*) FROM lake.s1."t1$files"`;
-  - impersonation: `trino --user egret-delegator --session-user ann`;
+  - impersonation: `trino --user egret_delegator --session-user ann` (`egret_core::engine_principals::DELEGATOR_PRINCIPAL`);
   - kill: `CALL system.runtime.kill_query(...)` against another user's query;
   - `SET SESSION query_max_run_time = '1m'`.
 - **`compare.py`** (run with `python3 -I`):
@@ -2205,7 +2714,7 @@ The `egret-data/docs` PR for 2b-1 ships the page of Task 25 without its latency 
   - writes `layer2-report.json`;
   - exits non-zero on any difference that matches no `explained.toml` entry, or on an entry tagged `layer = 2` that no case produced.
 
-  Add an optional `layer = [1, 2]` key to the TOML format; Task 18's reader treats a missing key as `[1]`.
+  It reads the optional `layer = [1, 2]` key; a missing key means `[1]`. `compare.py` applies the same never-explainable rule as Task 18: a case where `trino-opa` returns more rows, more columns or clearer values than `trino-ranger` is never explained, and fails.
 - **The CI job `opa-e2e`:**
   - runs on PRs whose diff touches `crates/egret-perm-*/**`, `crates/egret-perm-compile/**` or `deploy/opa-e2e/**` (a `dorny/paths-filter` output `opa`, added to the `changes` job);
   - `ubuntu-latest`, with the disk-reclaim step copied from the `rust` job;
@@ -2241,7 +2750,7 @@ The `egret-data/docs` PR for 2b-1 ships the page of Task 25 without its latency 
     - `SELECT count(*) FROM lake.information_schema.columns` (Trino #25628).
 
     Take them from `EXPLAIN ANALYZE` and `system.runtime.queries`.
-  - **Requests per query:** count the `egret_opa_allow_total + egret_opa_deny_total` delta from `GET /metrics` around each query. Run once with the batched URI and once with `opa.policy.batched-uri` removed from `trino-opa`'s config.
+  - **Requests per query:** count the `egret_opa_allow_total + egret_opa_deny_total` delta from `GET /metrics` around each query. Run once with the batched URI, and once without it: `docker exec <trino-opa> sed -i '/^opa.policy.batched-uri=/d' /etc/trino/access-control.properties`, then `docker restart <trino-opa>`. The Docker provisioner writes that file into the container (`docker/plan.rs`, `files_tar`), so the edit survives a restart. Afterwards, restore the file by re-sending `PATCH …/services/opa_e2e {"mechanism":"opa"}`, which re-applies the engine.
   - **Restart window:** run `SELECT 1` in a loop every 100 ms through `trino-opa`, `docker compose … restart egret`, and report the seconds between the first and last failure.
 - **The report** states:
   - the machine;
@@ -2277,11 +2786,12 @@ The `egret-data/docs` PR for 2b-1 ships the page of Task 25 without its latency 
   - Choosing the other value opens an `AlertDialog`:
     - title "Switch to OPA?" or "Switch to Ranger?";
     - body, verbatim: "Every engine bound to this profile restarts its coordinator to load the new access control. Queries running on it fail."
+    - when the profile has external engines (`dto.engines` with `origin === "external"`) and the target is OPA, a second paragraph, verbatim: "External engines are not restarted by egret. Their operator must install the new plugin files, and run Trino 483 or later with plugin/opa." (ruling C6);
     - buttons "Cancel" and "Switch".
   - On confirm, it calls the mutation with `{ service: profile.name, data: { mechanism } }`.
-    - **On success:** invalidate `getPolicyAdminListProfilesQueryKey()`, `toast.success("Switched to OPA.")` or `"Switched to Ranger."`, and show a `role="status"` line listing `engines_reconfigured`.
-    - **On 409:** show every string of the body's `refusals` in an `Alert variant="destructive"`, one per line, and keep the previous selection (FE-ACTION-3).
-    - **On 502:** show the server's `error`.
+    - **On success:** invalidate `getPolicyAdminListProfilesQueryKey()`, `toast.success("Switched to OPA.")` or `"Switched to Ranger."`, and show a `role="status"` line listing `engines_reconfigured` and, when non-empty, `external_engines_unchanged`.
+    - **On 409:** show every string of the body's `refusals` in an `Alert variant="destructive"`, one per line, and keep the previous selection (FE-ACTION-3). The gate-off refusal ("OPA is not enabled on this installation …") arrives this way too.
+    - **On 502:** show the server's `error`, the `engines_failed` list, and a "Retry" button that re-sends the same PATCH.
 
 - [ ] **Step 1: Write the failing tests:**
 
@@ -2296,6 +2806,8 @@ it("sends the switch on confirm and reports the reconfigured engines", async () 
 it("shows every refusal from a 409 and keeps Ranger selected", async () => {
   /* fail(409, …) with body {error, code:"mechanism_refused", refusals:["the profile holds the `all - …` default policies (13); delete them first", "…"]} */ });
 it("is read-only without policy:update and says why", async () => { /* READER */ });
+it("warns about external engines before switching to OPA", async () => { /* profileDto with an external engine */ });
+it("offers a retry after a 502 and re-sends the same PATCH", async () => {});
 ```
 
 - [ ] **Step 2: Run** `cd frontend && npx vitest run src/routes/governance/engines/__tests__/MechanismSection.test.tsx`. Expected: FAIL.
@@ -2315,7 +2827,7 @@ cd frontend && npm run lint && npx tsc -b && npx vitest run src/routes/governanc
 
 **Files:**
 - Modify: `frontend/src/components/policy/TrinoConfigDialog.tsx`. When `config.mechanism === "opa"`:
-  - the description reads "Install these two files on the Trino 483 coordinator: the OPA plugin ships in the image, and egret answers its requests.";
+  - the description reads "Install these two files on a Trino 483 or later coordinator with plugin/opa: egret answers its requests, and cannot check an external engine's image.";
   - the warnings, which include the server's OPA log warning, render as they do today;
   - each file renders as today.
 - Modify: `frontend/src/api/policies.ts:188-190`. `TrinoConfig` gains `mechanism`; reuse the generated type.
@@ -2349,24 +2861,47 @@ cd frontend && npm run lint && npx tsc -b && npx vitest run src/routes/governanc
 2. **Who can switch:**
    - a Trino profile;
    - that egret generates (it has grants or rules);
-   - whose bound engines run `trinodb/trino:483`;
+   - on an installation with `[governance.opa] enabled = true` (default `false` until this release; `EGRET_GOVERNANCE__OPA__ENABLED`);
+   - whose egret-provisioned engines run `trinodb/trino:483`. External engines are not checked: their operator must run Trino 483 or later with `plugin/opa`;
    - that holds no `all - …` default policies;
-   - whose profile and tag service hold no hand-written policies.
+   - whose profile and tag service hold no hand-written policies (after the switch, hand-written policies in the tag service are refused);
+   - that serves no stored differing mask or row-filter pair (`GET /perm/overlaps`).
 
    The page lists each refusal message verbatim (Task 11's table) with what to do.
 3. **How to switch.** Governance → Engines → the profile's Advanced tab → Access control → OPA → Switch. API: `PATCH /api/control-plane/policies/services/{service}` with `{"mechanism":"opa"}`, which needs `policy:update`.
 4. **What the switch does:**
    - it recompiles;
    - it restarts every bound egret-provisioned coordinator, and **queries running on it fail**;
-   - the Ranger policies keep compiling, so switching back is immediate.
+   - the Ranger policies keep compiling, so switching back is immediate;
+   - if an engine could not be re-applied, the answer is 502 with the engines that failed; send the same request again to retry. egret keeps answering OPA for an engine still running it.
 5. **External engines.** Download the two files from the engine page or `GET /api/control-plane/engines/{id}/opa-plugin-config`. Put the engine's Ranger credential in `egret.secret`; rotate it to see it once. Copy both files into `/etc/trino/`, and restart the coordinator.
 6. **Warning: never enable `opa.log-requests`.** Every request carries `egret.secret`.
-7. **When egret is unreachable,** Trino denies every query until egret is back. Give the measured restart window from Task 22's report. The 2b-1 docs PR says "measured in a later release" here.
-8. **Known differences from Ranger:** one row per `explained.toml` entry (`id`, what differs, which side is right).
-9. **Explain.** On an OPA profile, the Explain page answers from the same evaluator and shows its reason.
+7. **Fail-closed behaviour.** A refused request to the row-filter or mask endpoints answers 403, so the query fails rather than returning unmasked or unfiltered data. A profile whose stored state stops being expressible (a hand-written or `all - …` policy, a stored overlap) denies every query until it is fixed; the reason is on the Governance overview as a compile failure.
+8. **When egret is unreachable,** Trino denies every query until egret is back. Give the measured restart window from Task 22's report. The 2b-1 docs PR says "measured in a later release" here.
+9. **Known differences from Ranger:** one row per `explained.toml` entry (`id`, what differs, which side is right).
+10. **Explain.** On an OPA profile, the Explain page answers from the same evaluator and shows its reason.
 
 - [ ] **Step 1:** Write the page and the screenshots in a branch of `egret-data/docs`, and open its PR. Link it from this repo's PR body and tick the Docs box of the PR template.
 - [ ] **Step 2:** Check that every message quoted on the page equals the code's text. Grep each quoted sentence in this repo, for example `grep -rn "delete them first" crates/egret-policy/src/admin/mechanism.rs`.
+
+---
+
+### Task 26: Turn OPA on by default
+
+**Files:**
+- Modify: `crates/egret-config/src/lib.rs`. `OpaSettings::enabled` defaults to `true`: `#[serde(default = "default_true")]` on the field, with a `fn default_true() -> bool { true }` beside it. Rewrite its doc comment: "On by default since SP2b-2; an operator can still turn it off, and then the surface is not mounted and a switch to OPA is refused".
+- Modify: the test from Task 5, renamed `governance_opa_is_on_by_default`.
+- Modify: `deploy/helm` values, if the chart renders `EGRET_GOVERNANCE__OPA__ENABLED` (`grep -rn GOVERNANCE deploy/helm`). If it does not, add nothing.
+- Modify (in `egret-data/docs`): the "Trino on OPA" page's prerequisites say the key defaults to `true` from this release, and the release notes mention it.
+
+**Preconditions, checked by the controller before this task starts:**
+- Tasks 21–25 are merged;
+- `opa-e2e` is green on `main`;
+- the latency report (Task 22) concludes on S2.
+
+- [ ] **Step 1: Change the test first.** Run `CARGO_TARGET_DIR=$PWD/target-sp2b cargo test -p egret-config governance`. Expected: FAIL.
+- [ ] **Step 2: Flip the default.** Run the same command, then `CARGO_TARGET_DIR=$PWD/target-sp2b cargo test -p egret-server --lib`. Expected: PASS.
+- [ ] **Step 3: Commit** `feat(config): turn the OPA target on by default`.
 
 ---
 
@@ -2382,8 +2917,10 @@ cd frontend && npm run lint && npx tsc -b && npx vitest run src/routes/governanc
 | Explain IR path | 16 |
 | Endpoint routes | 9, 10 |
 | Authentication via the context file | 8, 9, 13 |
-| 200 refusals | 9 |
-| Snapshot cache keyed by version; no DB on the decision path | 7, 9 (credential cache, deviation 7) |
+| Refusals (200 on allow/batch, 403 on value routes, C1) | 9 |
+| Snapshot cache keyed by version; no DB on the decision path | 7, 9 (verification cache and binding map, deviation 7) |
+| Config gate (I8) | 5, 10, 11, 12, 26 |
+| Stored-state refusals, at the switch and on every build (C8, point 3) | 7, 11 |
 | Logging and metrics | 9 |
 | Migration and checks | 5 |
 | `Mechanism::Opa` | 5 |
@@ -2398,7 +2935,7 @@ cd frontend && npm run lint && npx tsc -b && npx vitest run src/routes/governanc
 | Infrastructure features (delegation, kill, `query_max_run_time`) | 3, 6, 18, 21 |
 | D-all | 11 |
 | UI | 23, 24 |
-| Docs | 25 |
+| Docs | 25, 26 |
 | Errors (egret down, failed build, unknown op) | 22, 7, 3 |
 | Layer 1 | 17, 18, 19 |
 | Layer 2 | 20, 21 |
@@ -2413,6 +2950,6 @@ cd frontend && npm run lint && npx tsc -b && npx vitest run src/routes/governanc
   - It refuses a generated profile first (`refuse_if_generated_pooled`), and it no-ops on any profile that already has policies.
   - So a generated profile holds `all - …` rows only if they were seeded while it was manual, before its first compile. The refusal is reachable and does not block the normal path.
 - **Risks to watch in review:**
-  - The reach semantics (D2) are the least certain rule. Layer 1's `_any` cases decide it, and Task 18 must not paper over them.
+  - The reach semantics (D2) are the conservative rule (ruling (b)). Layer 1 can only show OPA stricter than Ranger there, and Task 18's checker refuses to explain the other direction.
   - Task 6's split must leave `golden_compile` byte-identical.
-  - Task 12's 502 path leaves a profile on OPA while its engines still run Ranger. That is safe by S8, but the UI must say so (Task 23 shows the server's text).
+  - Task 12's 502 path leaves engines on the old mechanism. Both directions stay served (S8 for Ranger; `applied_mechanism` for OPA), and a re-sent PATCH retries (Tasks 7, 12, 15, 23).
