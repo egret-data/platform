@@ -406,6 +406,8 @@ pub struct CatalogSpec {
 /// Its `Debug` never prints the credential's password.
 #[derive(Clone, Debug)]
 pub struct RangerBinding {
+    /// The engine's own id (the `egret.engine` value of the OPA context file).
+    pub engine_id: String,
     /// `ranger.service.name` — the bound trino profile's name.
     pub service_name: String,
     /// egret's own URL; the plugin is configured with

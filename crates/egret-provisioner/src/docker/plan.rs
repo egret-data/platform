@@ -244,7 +244,7 @@ fn role_files(spec: &EngineSpec, role: Role) -> Result<Vec<PlanFile>, String> {
         .cloned()
         .unwrap_or_default();
     let tls = trino_tls_secret(spec);
-    let ranger = trino_ranger_secret(spec);
+    let ranger = trino_ranger_secret(spec).map_err(|e| e.to_string())?;
     resolve_mounts(
         &mounts,
         &trino_config_map(spec),
@@ -641,6 +641,7 @@ mod tests {
         let mut s = sample_spec();
         s.ranger = Some(RangerBinding {
             mechanism: egret_engine_mgmt_api::opa_config::AccessMechanism::Ranger,
+            engine_id: "engine-1".into(),
             service_name: "demo".into(),
             egret_url: "http://egret:8080".into(),
             poll_interval_ms: 30_000,
@@ -683,6 +684,24 @@ mod tests {
     }
 
     #[test]
+    fn an_opa_coordinator_gets_its_context_file_mode_0600() {
+        let mut s = rich_spec();
+        s.ranger.as_mut().unwrap().mechanism =
+            egret_engine_mgmt_api::opa_config::AccessMechanism::Opa;
+        let p = &plan(&s).unwrap()[0];
+        let ctx = file(p, "/etc/trino/egret-opa-context.properties");
+        assert_eq!(ctx.mode, 0o600);
+        assert!(String::from_utf8_lossy(&ctx.content).contains("egret.secret=s3cr3t-ranger-pass"));
+        assert!(!p
+            .files
+            .iter()
+            .any(|f| f.path == "/etc/trino/ranger-trino-security.xml"));
+        let ac = file(p, "/etc/trino/access-control.properties");
+        assert!(String::from_utf8_lossy(&ac.content).starts_with("access-control.name=opa\n"));
+        assert_eq!(ac.mode, 0o644);
+    }
+
+    #[test]
     fn plan_files_match_the_kubernetes_mounts() {
         let s = rich_spec();
         let p = &plan(&s).unwrap()[0];
@@ -703,7 +722,7 @@ mod tests {
         assert_eq!(file(p, "/etc/trino/auth/password/password.db").mode, 0o600);
         // The Ranger XML is the credential's Secret, verbatim, and private.
         let xml = file(p, "/etc/trino/ranger-trino-security.xml");
-        let secret = trino_ranger_secret(&s).unwrap();
+        let secret = trino_ranger_secret(&s).unwrap().unwrap();
         assert_eq!(
             xml.content,
             secret["stringData"]["ranger-trino-security.xml"]

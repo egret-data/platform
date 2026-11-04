@@ -1456,6 +1456,7 @@ mod tests {
         let mut spec = sample_sr_spec();
         spec.ranger = Some(RangerBinding {
             mechanism: egret_engine_mgmt_api::opa_config::AccessMechanism::Ranger,
+            engine_id: "engine-1".into(),
             service_name: "sr1".into(),
             egret_url: "http://host.docker.internal:8080".into(),
             poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
@@ -1511,6 +1512,7 @@ mod tests {
         let mut spec = sample_sr_spec();
         spec.ranger = Some(RangerBinding {
             mechanism: egret_engine_mgmt_api::opa_config::AccessMechanism::Ranger,
+            engine_id: "engine-1".into(),
             service_name: "sr1".into(),
             egret_url: "http://host.docker.internal:8080".into(),
             poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
@@ -1550,6 +1552,7 @@ mod tests {
         let mut spec = sample_sr_spec();
         spec.ranger = Some(RangerBinding {
             mechanism: egret_engine_mgmt_api::opa_config::AccessMechanism::Ranger,
+            engine_id: "engine-1".into(),
             service_name: "sr1".into(),
             egret_url: "http://host.docker.internal:8080".into(),
             poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
@@ -1642,6 +1645,7 @@ mod tests {
         let mut spec = sample_sr_spec();
         spec.ranger = Some(RangerBinding {
             mechanism: egret_engine_mgmt_api::opa_config::AccessMechanism::Ranger,
+            engine_id: "engine-1".into(),
             service_name: "sr1".into(),
             egret_url: "http://host.docker.internal:8080".into(),
             poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
@@ -2017,6 +2021,7 @@ mod tests {
         let mut spec = sample_sr_spec_with_tls();
         spec.ranger = Some(RangerBinding {
             mechanism: egret_engine_mgmt_api::opa_config::AccessMechanism::Ranger,
+            engine_id: "engine-1".into(),
             service_name: "sr1".into(),
             egret_url: "http://host.docker.internal:8080".into(),
             poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
@@ -2094,6 +2099,7 @@ mod tests {
         let mut spec = sample_sr_spec_with_tls();
         spec.ranger = Some(RangerBinding {
             mechanism: egret_engine_mgmt_api::opa_config::AccessMechanism::Ranger,
+            engine_id: "engine-1".into(),
             service_name: "sr1".into(),
             egret_url: "http://host.docker.internal:8080".into(),
             poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
@@ -2404,6 +2410,7 @@ mod tests {
             let mut spec = sample_sr_spec();
             spec.ranger = Some(RangerBinding {
                 mechanism: egret_engine_mgmt_api::opa_config::AccessMechanism::Ranger,
+                engine_id: "engine-1".into(),
                 service_name: svc.into(),
                 egret_url: "http://host.docker.internal:8080".into(),
                 poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
@@ -2464,6 +2471,7 @@ mod tests {
         let mut bound = sample_sr_spec();
         bound.ranger = Some(RangerBinding {
             mechanism: egret_engine_mgmt_api::opa_config::AccessMechanism::Ranger,
+            engine_id: "engine-1".into(),
             service_name: "sr1".into(),
             egret_url: "http://host.docker.internal:8080".into(),
             poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
@@ -2929,6 +2937,7 @@ mod tests {
         spec.name = "a".repeat(longest);
         spec.ranger = Some(RangerBinding {
             mechanism: egret_engine_mgmt_api::opa_config::AccessMechanism::Ranger,
+            engine_id: "engine-1".into(),
             service_name: "sr1".into(),
             egret_url: "http://host.docker.internal:8080".into(),
             poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,

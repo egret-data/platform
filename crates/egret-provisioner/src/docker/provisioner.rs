@@ -751,6 +751,7 @@ mod tests {
         let mut s = spec_with(name, workers);
         s.ranger = Some(crate::spec::RangerBinding {
             mechanism: egret_engine_mgmt_api::opa_config::AccessMechanism::Ranger,
+            engine_id: "engine-1".into(),
             service_name: name.into(),
             egret_url: "http://egret:8080".into(),
             poll_interval_ms: 30_000,
