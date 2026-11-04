@@ -307,6 +307,11 @@ pub async fn warehouse(tx: &mut Tx<'_>, role: &str, names: &mut Names) -> Uuid {
 
 /// An engine bound to `profile`. A StarRocks engine is pinned to `image`
 /// (egret's default when `None`), which decides its Ranger plugin version.
+///
+/// Neither spec qualifies for infrastructure policies (governance SP2a, D2):
+/// the StarRocks spec has no delegation block, and the Trino one is in
+/// `open` mode. A golden profile therefore holds no infra row unless its
+/// fixture binds a qualifying engine with [`engine_bound_spec`] (G16).
 pub async fn engine_bound(
     tx: &mut Tx<'_>,
     role: &str,
@@ -315,13 +320,26 @@ pub async fn engine_bound(
     image: Option<&str>,
     names: &mut Names,
 ) -> Uuid {
-    let id = uid(names, role);
     let spec = match engine {
         "starrocks" => json!({"starrocksConfig": {
             "feImage": image.unwrap_or(egret_perm::DEFAULT_ENGINE_IMAGES.starrocks_fe_image)
         }}),
-        _ => json!({}),
+        _ => json!({"trinoConfig": {"delegationMode": "open"}}),
     };
+    engine_bound_spec(tx, role, profile, engine, spec, names).await
+}
+
+/// An engine of type `engine` bound to `profile` with the stored `spec` as
+/// given.
+pub async fn engine_bound_spec(
+    tx: &mut Tx<'_>,
+    role: &str,
+    profile: i64,
+    engine: &str,
+    spec: Value,
+    names: &mut Names,
+) -> Uuid {
+    let id = uid(names, role);
     sqlx::query(
         "INSERT INTO engine_mgmt.engines (id, name, type, namespace, spec, authz_service_id) \
          VALUES ($1, $2, $3, 'egret', $4, $5)",
@@ -1683,14 +1701,31 @@ pub fn g16_hand_written_and_infra(db: &Db) -> Fut<'_> {
         user(&mut tx, "g16.alice", Some("g16_alice"), &mut names).await;
         // The admin set starts stale (one name that is no admin); the
         // recompile's chokepoint converges it to the engine admins.
-        egret_policy::default_policies::sync_admin_all_access_in_tx(
-            &mut tx,
-            tr,
+        for (name, body) in egret_policy::default_policies::admin_all_access_bodies(
+            "trino",
+            &tr_name,
             &["g16_stale".to_string()],
         )
-        .await
-        .expect("egret-admin");
+        .expect("egret-admin bodies")
+        {
+            stored_policy(&mut tx, tr, &name, body, "infra", true).await;
+        }
         delegator_policies(&mut tx, tr, &tr_name).await;
+        // A qualifying, delegator-impersonating Trino engine: the profile's
+        // infra rows above are exactly what convergence derives for it.
+        engine_bound_spec(
+            &mut tx,
+            "g16.engine",
+            tr,
+            "trino",
+            json!({"trinoConfig": {
+                "coordinator": {},
+                "delegationMode": "impersonate",
+                "auth": {"password": {}}
+            }}),
+            &mut names,
+        )
+        .await;
         stored_policy(&mut tx, tr, "g16 operator allow",
             json!({
                 "name": "g16 operator allow", "service": tr_name, "serviceType": "trino",
