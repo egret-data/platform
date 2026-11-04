@@ -81,6 +81,11 @@ egret-ranger-eval.workspace = true
 egret-policy-api.workspace = true
 # People & groups Task 3: a membership's `expiresAt` on the principal reads.
 chrono.workspace = true
+# Governance SP2b Task 9: the OPA surface verifies an engine's secret through
+# the same `EngineCredentialVerifier` the Ranger surface uses, and counts its
+# answers.
+egret-engine-mgmt-api.workspace = true
+metrics.workspace = true
 
 [features]
 # View governance Task 3: `harness_support`, the doc-hidden wrappers the
@@ -131,3 +136,6 @@ serde_json.workspace = true
 # apart independently. A leaf contract crate (no sqlx/axum), and dev-only —
 # nothing in `src/` depends on it.
 egret-query-api.workspace = true
+# Governance SP2b Task 9: `tests/opa_surface.rs` reads the surface's log lines
+# back (no secret, one line per batch).
+tracing-subscriber.workspace = true

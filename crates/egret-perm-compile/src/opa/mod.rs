@@ -4,4 +4,5 @@
 
 pub mod build;
 pub mod cache;
+pub mod surface;
 pub mod wire;

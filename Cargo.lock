@@ -3556,6 +3556,7 @@ dependencies = [
  "egret-auth",
  "egret-catalog-registry",
  "egret-core",
+ "egret-engine-mgmt-api",
  "egret-events",
  "egret-metastore",
  "egret-perm",
@@ -3569,6 +3570,7 @@ dependencies = [
  "egret-test-db",
  "hex",
  "http-body-util",
+ "metrics",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3577,6 +3579,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "tracing-subscriber",
  "utoipa",
  "uuid",
 ]

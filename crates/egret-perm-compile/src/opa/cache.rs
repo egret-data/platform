@@ -198,6 +198,49 @@ impl SnapshotCache {
         state.bindings.get(&engine_id).copied()
     }
 
+    /// Test seam: hold `snapshot` as `service_id`'s Ready entry.
+    #[doc(hidden)]
+    pub fn insert_for_test(&self, service_id: i64, snapshot: Snapshot) {
+        let key = Some(snapshot.key());
+        let mut state = self.state.write().unwrap_or_else(|p| p.into_inner());
+        state.entries.insert(
+            service_id,
+            CacheEntry {
+                key,
+                verified: key,
+                snapshot: Some(Arc::new(snapshot)),
+                error: None,
+                unread: 0,
+            },
+        );
+    }
+
+    /// Test seam: `service_id` is served over OPA but holds no snapshot.
+    #[doc(hidden)]
+    pub fn insert_not_built_for_test(&self, service_id: i64, error: Option<String>) {
+        let mut state = self.state.write().unwrap_or_else(|p| p.into_inner());
+        state.entries.insert(
+            service_id,
+            CacheEntry {
+                key: None,
+                verified: None,
+                snapshot: None,
+                error,
+                unread: 0,
+            },
+        );
+    }
+
+    /// Test seam: bind `engine` to `service_id` (None: unbind).
+    #[doc(hidden)]
+    pub fn bind_for_test(&self, engine: uuid::Uuid, service_id: Option<i64>) {
+        let mut state = self.state.write().unwrap_or_else(|p| p.into_inner());
+        match service_id {
+            Some(id) => state.bindings.insert(engine, id),
+            None => state.bindings.remove(&engine),
+        };
+    }
+
     pub async fn refresh_once(&self, pool: &PgPool) -> Result<RefreshReport, sqlx::Error> {
         let _one_at_a_time = self.refreshing.lock().await;
         let listed: Vec<(i64, i64, i64)> = sqlx::query_as(

@@ -170,6 +170,7 @@ pub use egret_perm_ir::lower::rules::validate_rule_shape;
 pub use group_membership::PermGroupRecompiler;
 pub use infra::{converge_infra_policy, InfraSync};
 pub use members::lock_compile_mints_in_tx;
+pub use opa::surface::{opa_surface, OpaState, OPA_SURFACE_PREFIX};
 pub use principal_refs::{mint_missing_usernames, UsernameRepair};
 pub use ranger::grants::compile_grant;
 pub use role_membership::{
