@@ -53,7 +53,7 @@ use egret_policy::admin::{
 };
 use egret_policy::COMPILER_HIDDEN_PREFIX;
 
-use crate::rules::PUBLIC_GROUP;
+use crate::ranger::rules::PUBLIC_GROUP;
 
 /// What follows [`COMPILER_HIDDEN_PREFIX`] in a metadata-table deny's name,
 /// before the source policy's name: `perm-hidden-meta-{source}`.

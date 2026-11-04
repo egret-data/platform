@@ -22,6 +22,8 @@ license.workspace = true
 # regular dependencies.
 [dependencies]
 egret-perm.workspace = true
+# Governance sub-project 1: the capability matrix and the neutral IR.
+egret-perm-ir.workspace = true
 # View governance Task 7: `lineage::ExplainRunner` is implemented by a runner in
 # `egret-query` and faked in tests, and is held as `dyn` by the commit hold.
 async-trait.workspace = true
@@ -83,9 +85,17 @@ chrono.workspace = true
 # Off in every production build; enabled only by `egret-ranger-eval`'s
 # dev-dependency and by `tests/gate_timing.rs` (`required-features`).
 harness = []
+# Governance sub-project 1: every recompile compiles a second time on the same
+# transaction and asserts the two agree (`src/shadow.rs`). Test-only.
+shadow-compile = []
 
 [[test]]
 name = "gate_timing"
+required-features = ["harness"]
+
+# Governance sub-project 1: the golden corpus of compiled Ranger artifacts.
+[[test]]
+name = "golden_compile"
 required-features = ["harness"]
 
 [dev-dependencies]

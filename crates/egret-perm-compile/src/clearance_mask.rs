@@ -4,7 +4,7 @@
 //! # Why a mask, beside the deny
 //!
 //! On StarRocks a clearance compiles to a per-column ACCESS deny
-//! ([`crate::clearance`]). That withholds the column from a DIRECT read, and
+//! (`egret_perm_ir::lower::withhold`, [`crate::ranger::withhold`]). That withholds the column from a DIRECT read, and
 //! nothing else: a plain view is an access boundary, so a reader holding the
 //! view grant reads the classified column straight through the base deny
 //! (measured on 4.1.4 and 4.1.6). A base-column data MASK, by contrast,
@@ -69,8 +69,9 @@ use egret_ranger_eval::model::ServicePolicySet;
 use egret_ranger_eval::resource::RequestResource;
 use egret_ranger_eval::servicedef::ServiceDef;
 
-use crate::grants::{resource_level_names, PolicyTarget};
-use crate::rules::{column_resources, stamp_service_type, TaggedColumn, PUBLIC_GROUP};
+use crate::ranger::grants::{resource_level_names, PolicyTarget};
+use crate::ranger::rules::{column_resources, stamp_service_type, PUBLIC_GROUP};
+use crate::rules::TaggedColumn;
 
 /// The clearance mask's type for everyone not cleared. Never `MASK_HASH`.
 pub(crate) const CLEARANCE_MASK_TYPE: &str = "MASK_NULL";
@@ -109,6 +110,17 @@ pub(crate) struct PendingMask {
     /// `column` is spelled as the catalog spells it (read from the column
     /// source), rather than as an assignment was typed.
     pub(crate) catalog_spelled: bool,
+}
+
+impl From<egret_perm_ir::lower::withhold::PendingGuard> for PendingMask {
+    fn from(g: egret_perm_ir::lower::withhold::PendingGuard) -> Self {
+        Self {
+            tag_id: g.classification_id,
+            column: g.column,
+            cleared: g.cleared,
+            catalog_spelled: g.catalog_spelled,
+        }
+    }
 }
 
 /// One mask per column. A column carrying several gated classifications gets
@@ -223,7 +235,7 @@ pub(crate) fn fold_clearance_mask(
             user: user.clone(),
             // No group provider and no role download on the engines egret
             // provisions: `public` is the only group that can match, and it
-            // matches regardless (`crate::clearance`'s D0 notes).
+            // matches regardless (`crate::ranger::withhold`'s D0 notes).
             groups: BTreeSet::new(),
             roles: BTreeSet::new(),
             access_type: "select".to_string(),
@@ -406,64 +418,34 @@ pub(crate) fn fold_at_versions(
     })
 }
 
-/// The plugin versions a profile's clearance masks can be folded at, or why
-/// none can.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum FoldVersions {
-    Modelled(Vec<PluginVersion>),
-    /// The skip reason, naming the engine and the remedy.
-    Unmodelled(String),
-}
-
-/// The Ranger plugin versions a profile's clearance masks are folded at: each
-/// distinct version of its bound engines, or — with no engine bound — the
-/// plugin of egret's default image for the engine type, which is the version
-/// `explain` evaluates an unbound profile at. An engine whose (type, version)
-/// pair the evaluator does not model makes the masks a SKIP for the profile,
-/// naming the engine (user ruling 2026-10-13): binding such an engine is not
-/// refused, and the per-column denies are still compiled.
-pub(crate) async fn fold_plugin_versions(
-    conn: &mut sqlx::PgConnection,
-    service_id: i64,
-    profile: &str,
-    engine: EngineType,
-) -> Result<FoldVersions, CompileError> {
-    let bound: Vec<crate::routes::BoundEngine> = sqlx::query_as(
-        "SELECT name, origin, type, ranger_plugin_version, spec FROM engine_mgmt.engines \
-          WHERE authz_service_id = $1 ORDER BY name",
-    )
-    .bind(service_id)
-    .fetch_all(&mut *conn)
-    .await
-    .map_err(CompileError::from_db)?;
-    let unmodelled = |name: &str, why: String| {
-        FoldVersions::Unmodelled(format!(
-            "view protection (clearance mask) not active for {profile}: engine {name} runs an \
-             image egret has not modelled — pin it to a known image (see \
-             docs/en/guides/engine-versions.md). {why}"
-        ))
-    };
-    let mut out: Vec<PluginVersion> = Vec::new();
-    for e in &bound {
-        match e.plugin_version() {
-            Ok(v) if !out.contains(&v) => out.push(v),
-            Ok(_) => {}
-            Err(why) => return Ok(unmodelled(&e.name, why)),
-        }
-    }
-    if out.is_empty() {
-        match crate::routes::default_image_plugin_version(crate::routes::ranger_engine(engine)) {
-            Ok(v) => out.push(v),
-            Err(why) => return Ok(unmodelled("(none bound; egret's default image)", why)),
-        }
-    }
-    Ok(FoldVersions::Modelled(out))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// M13: the view guard is lowered at exactly the StarRocks plugin versions
+    /// egret models, the ones `egret_perm_ir::lower::withhold::view_guard_versions`
+    /// accepts.
+    #[test]
+    fn matrix_view_guard_versions_equal_the_modelled_starrocks_plugins() {
+        use egret_perm_ir::matrix::{Versions, ENTRIES};
+        let guard: Vec<&[&str]> = ENTRIES
+            .iter()
+            .filter(|e| {
+                e.kind.engine == EngineType::StarRocks && e.capability == "WithholdThroughView"
+            })
+            .map(|e| match e.versions {
+                Versions::Exactly(list) => list,
+                Versions::Any => panic!("M13 must name its measured versions"),
+            })
+            .collect();
+        let modelled: Vec<&str> = egret_perm::MODELLED_RANGER_PLUGINS
+            .iter()
+            .filter(|(engine, _)| *engine == "starrocks")
+            .map(|(_, v)| *v)
+            .collect();
+        assert_eq!(guard, vec![modelled.as_slice()]);
+    }
 
     const SERVICE: &str = "sr_profile";
 

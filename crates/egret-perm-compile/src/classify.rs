@@ -387,10 +387,10 @@ fn level_warnings(
         .get("policyType")
         .and_then(Value::as_i64)
         .unwrap_or(0);
-    let all = crate::grants::resource_level_names(engine);
+    let all = crate::ranger::grants::resource_level_names(engine);
     let chain: &[&str] = match policy_type {
         0 | 1 => &all,
-        2 => &all[..crate::grants::ROW_FILTER_LEVELS],
+        2 => &all[..crate::ranger::grants::ROW_FILTER_LEVELS],
         _ => return Vec::new(),
     };
     let named = |name: &str| {

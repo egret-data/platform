@@ -10,7 +10,7 @@
 //! Ranger's: `Action` has two values and expands to a FIXED access-type set per
 //! engine (`egret_perm::actions::engine_accesses`), `Scope` names ONE catalog by
 //! registry UUID, `principals.exclude` emits exactly one exception item, and
-//! `grants.rs::level` hard-codes `is_excludes: false` and `is_recursive: false`.
+//! `ranger::grants::level` hard-codes `is_excludes: false` and `is_recursive: false`.
 //! Anything outside that is refused with a blocker that names it.
 //!
 //! **The subset rule is the whole point.** `Action::Write` is atomic: on Trino
@@ -34,7 +34,7 @@
 //! # The design oracle: this is the inverse of `compile_grant`
 //!
 //! Everything accepted here is written as a real permission and compiled back
-//! by [`crate::grants::compile_grant`]. So the rule for every field is: if the
+//! by [`crate::ranger::grants::compile_grant`]. So the rule for every field is: if the
 //! compiled-back body could decide differently from the body read here, the
 //! field is refused. `tests/grammar_access.rs`'s
 //! `every_accepted_body_compiles_back_to_what_it_came_from` checks that
@@ -101,11 +101,10 @@ use egret_ranger_eval::model::{
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::grants::{
-    level_is_a_wildcard_run, resource_level_names, validate_user_ref, PolicyTarget,
-    ROW_FILTER_LEVELS,
-};
-use crate::rules::{declared_mask_types, validate_rule_shape};
+use crate::ranger::grants::{resource_level_names, PolicyTarget, ROW_FILTER_LEVELS};
+use crate::ranger::rules::declared_mask_types;
+use egret_perm_ir::lower::grants::{level_is_a_wildcard_run, validate_user_ref};
+use egret_perm_ir::lower::rules::validate_rule_shape;
 
 /// Why one Ranger policy cannot become model objects. Each variant names the
 /// offending value where there is one, so Task 5 can render it as a sentence
@@ -196,7 +195,7 @@ pub enum Blocker {
     /// A tag-addressed ACCESS policy (`policyType` 0 with a `tag` resource).
     /// The only tag access policy the model has is a CLEARANCE, and its
     /// cleared set is the MEMBERSHIP of `required_roles`, enumerated at
-    /// compile time (`crate::clearance`): a hand-written list of users cannot
+    /// compile time (`crate::ir_load::load_withhold_inputs`): a hand-written list of users cannot
     /// be inverted into roles, and a tag ALLOW has no model at all. Clearance
     /// migration is therefore OUT OF SCOPE (user ruling, 2026-10-10).
     ClearanceNotExpressible,
@@ -231,7 +230,7 @@ pub enum Blocker {
     /// per-principal mask or filter the model has no shape for.
     NotAnExemption { index: usize },
     /// The exemption item names the `public` group, which would exempt
-    /// everyone (`rules::exempt_principals` refuses it).
+    /// everyone (`egret_perm_ir::lower::rules`' `exempt_audience` refuses it).
     PublicExemption,
     /// A tag-addressed policy for a StarRocks profile: StarRocks has no tag
     /// service, so a tag rule compiles there to one resource policy per
@@ -649,7 +648,7 @@ fn from_unmodelled(u: &Unmodelled) -> Blocker {
 /// grant only (0179): there it widens AUTHORITY, the measured escalation. On a
 /// rule it widens RESTRICTION and both plugins enforce it — product decision
 /// 2026-10-10, `migrations/0179`'s closing section, and the reason
-/// `rules::validate_rule_shape` does not call the grant-side guard either.
+/// `egret_perm_ir::lower::rules::validate_rule_shape` does not call the grant-side guard either.
 fn refuses_wildcard_over_named(target: PolicyTarget) -> bool {
     matches!(target, PolicyTarget::Access)
 }
@@ -935,7 +934,7 @@ fn actions(it: &PolicyItem, engine: EngineType, b: &mut Vec<Blocker>) -> Vec<Act
 /// [`Rule`]s it is equivalent to, or every reason it is not expressible.
 ///
 /// The design oracle is [`crate::rules::compile_rule`], exactly as
-/// [`crate::grants::compile_grant`] is for [`grants_from_access_policy`]: an
+/// [`crate::ranger::grants::compile_grant`] is for [`grants_from_access_policy`]: an
 /// accepted body, compiled back, must decide identically. What that compiler
 /// emits, and therefore the only shape accepted here:
 ///
@@ -1258,7 +1257,7 @@ fn rule_items(
     ))
 }
 
-/// What `rules::mask_items` / `rowfilter_items` put in the exemption item.
+/// What `ranger::rules::mask_items` / `rowfilter_items` put in the exemption item.
 fn lifts_the_control(kind: &RuleKind) -> bool {
     match kind {
         RuleKind::Mask {

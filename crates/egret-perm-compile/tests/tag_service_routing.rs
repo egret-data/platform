@@ -189,7 +189,7 @@ async fn a_trino_tag_rule_lands_in_the_tag_service_and_is_reaped_from_it_on_dele
     // (`UndecidableCause::TagPriorityArbitrationNotModelled`). That refusal was
     // accepted on the strength of "it costs nothing, because egret never emits a
     // non-zero priority on a tag policy" — a cost claim resting on three
-    // hard-coded `is_override: false`s (`clearance.rs`, and both arms of
+    // hard-coded `is_override: false`s (`ranger/withhold.rs`, and both arms of
     // `rules.rs::build_tag_body`) with no test between them and the claim.
     // `AccessPolicyInput.is_override` is a PUBLIC wire field (`isOverride`), so one
     // flag flip makes egret author a multi-priority tag block and turns that

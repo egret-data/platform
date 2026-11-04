@@ -42,7 +42,7 @@
 //! * a column-level assignment applies to that column; a table-level one to
 //!   every column of the table and to the table;
 //! * for row filters, a column-level assignment also applies to its TABLE —
-//!   conservative, and how StarRocks expands a tag row filter (`rules.rs`).
+//!   conservative, and how StarRocks expands a tag row filter (`egret-perm-ir`'s `lower/rules.rs`).
 //!
 //! "Covers" and "meets" are decided by the SAME may-intersect comparison the
 //! within-download rule uses ([`crate::ambiguous_arbitration`]'s

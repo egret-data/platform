@@ -1,0 +1,145 @@
+[
+  {
+    "desired": [
+      {
+        "service": "{g04.trino}",
+        "name": "perm-grant-{g04.assign_full}",
+        "body": {
+          "additionalResources": [],
+          "allowExceptions": [],
+          "denyExceptions": [],
+          "denyPolicyItems": [],
+          "description": "",
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-grant-{g04.assign_full}",
+          "policyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [],
+              "roles": [],
+              "users": [
+                "{g04.ann.username}",
+                "g04_newcomer"
+              ]
+            }
+          ],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g04_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            },
+            "schema": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            }
+          },
+          "service": "{g04.trino}",
+          "serviceType": "trino"
+        }
+      }
+    ],
+    "skipped": [
+      {
+        "kind": "Grant",
+        "id": "{g04.assign_empty}",
+        "reason": "the grant's principals name no engine principal (an empty include, or a workspace_members, role or group reference that expands to no member)"
+      }
+    ],
+    "served": [
+      {
+        "additionalResources": [],
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "description": "",
+        "id": 0,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "perm-grant-{g04.assign_full}",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g04.ann.username}",
+              "g04_newcomer"
+            ]
+          }
+        ],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g04_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g04.trino}",
+        "serviceType": "trino",
+        "version": 1
+      }
+    ]
+  }
+]

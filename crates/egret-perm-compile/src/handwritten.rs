@@ -50,7 +50,7 @@ use egret_ranger_eval::servicedef::ServiceDef;
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::grants::resource_level_names;
+use crate::ranger::grants::resource_level_names;
 use crate::trigger::engine_type_for;
 
 /// The Data object a request names: a catalog, and optionally a schema, a

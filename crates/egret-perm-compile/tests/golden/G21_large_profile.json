@@ -1,0 +1,10 @@
+[
+  {
+    "error": "recompiling profile \"{g21.starrocks}\" would total 1583 compiler-owned policies, over the profile-total ceiling of 1000",
+    "desiredBehindRefusal": {
+      "count": 1583,
+      "sha256": "fdf26492e0decbc693eba0dbe58cb665c18831a17e7f3fc1ded1ff52146dbde5",
+      "skipped": 0
+    }
+  }
+]

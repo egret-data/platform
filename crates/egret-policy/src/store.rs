@@ -75,7 +75,7 @@ fn is_unique_violation(e: &sqlx::Error) -> bool {
 }
 
 /// Name prefix every ACCESS policy SP4a's permission-model compiler
-/// (`egret-perm-compile::grants::compile_grant`) produces —
+/// (`egret-perm-compile`'s `ranger::grants::compile_grant`) produces —
 /// `format!("{COMPILER_GRANT_PREFIX}{}", grant.id)`.
 ///
 /// Defined HERE, not in `egret-perm-compile`, even though that crate is the
@@ -85,7 +85,7 @@ fn is_unique_violation(e: &sqlx::Error) -> bool {
 /// consumed by this crate's own guards. `egret-perm-compile`'s
 /// `trigger::apply_diff_in_tx` (the sweep that reaps any
 /// `policy.authz_policies` row under this prefix that its current compile no
-/// longer produces) and `grants.rs`'s name-builder both import THIS constant
+/// longer produces) and `ranger/grants.rs`'s name-builder both import THIS constant
 /// rather than keeping their own copy — see that crate's `trigger.rs` module
 /// doc. Two independent copies of this string would drift, and a drift makes
 /// a policy the sweep reaps look editable to the guards below, or the
@@ -96,7 +96,8 @@ pub const COMPILER_GRANT_PREFIX: &str = "perm-grant-";
 /// [`COMPILER_GRANT_PREFIX`].
 pub const COMPILER_RULE_PREFIX: &str = "perm-rule-";
 /// Name prefix every CLEARANCE policy the compiler
-/// (`egret-perm-compile::clearance::compile_clearance`) produces —
+/// (`egret-perm-compile::ranger::withhold`, rendering the IR's `withhold`
+/// effect) produces —
 /// `format!("{COMPILER_CLEARANCE_PREFIX}{tag_id}")`, one per gated tag. Same
 /// rationale for living here as [`COMPILER_GRANT_PREFIX`].
 ///
@@ -135,7 +136,7 @@ pub const COMPILER_ENGINE_GRANT_PREFIX: &str = "perm-engine-";
 pub const COMPILER_HIDDEN_PREFIX: &str = "perm-hidden-";
 
 /// Whether `name` identifies a policy the SP4a permission-model compiler
-/// owns (produced by `compile_grant`/`compile_rule`/`compile_clearance` and
+/// owns (produced by `compile_grant`/`compile_rule`/the clearance compile and
 /// reachable by `apply_diff_in_tx`'s existing-state sweep) — see
 /// [`COMPILER_GRANT_PREFIX`] / [`COMPILER_RULE_PREFIX`] /
 /// [`COMPILER_CLEARANCE_PREFIX`] / [`COMPILER_ENGINE_GRANT_PREFIX`].

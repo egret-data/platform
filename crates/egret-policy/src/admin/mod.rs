@@ -36,7 +36,7 @@ pub use ranger_json::{AccessItemInput, AccessPolicyInput, ResourceLevel};
 // is the first real caller of `compile_grant` outside this crate's own
 // tests, and `compile_grant` returns a typed `AccessPolicyInput`, never
 // rendered JSON (the compiler stays free of `serde_json` rendering choices —
-// see `egret-perm-compile/src/grants.rs`'s module doc). Something outside
+// see `egret-perm-compile/src/ranger/grants.rs`'s module doc). Something outside
 // `egret-policy` has to render it before it can be written to
 // `policy.authz_policies.policy_jsonb`, so `access_to_ranger_json` (the plain,
 // resource-addressed renderer) is re-exported here too.

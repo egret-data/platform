@@ -1,0 +1,602 @@
+{
+  "plain": [
+    {
+      "desired": [
+        {
+          "service": "{g05.trino}",
+          "name": "perm-grant-{g05.plain}",
+          "body": {
+            "additionalResources": [],
+            "allowExceptions": [],
+            "denyExceptions": [],
+            "denyPolicyItems": [],
+            "description": "",
+            "isDenyAllElse": false,
+            "isEnabled": true,
+            "name": "perm-grant-{g05.plain}",
+            "policyItems": [
+              {
+                "accesses": [
+                  {
+                    "isAllowed": true,
+                    "type": "select"
+                  }
+                ],
+                "delegateAdmin": false,
+                "groups": [],
+                "roles": [],
+                "users": [
+                  "{g05.carol.username}",
+                  "{g05.bob.username}"
+                ]
+              }
+            ],
+            "policyLabels": [],
+            "policyPriority": 0,
+            "policyType": 0,
+            "resources": {
+              "catalog": {
+                "isExcludes": false,
+                "isRecursive": false,
+                "values": [
+                  "gold_g05_cat"
+                ]
+              },
+              "column": {
+                "isExcludes": false,
+                "isRecursive": false,
+                "values": [
+                  "*"
+                ]
+              },
+              "schema": {
+                "isExcludes": false,
+                "isRecursive": false,
+                "values": [
+                  "*"
+                ]
+              },
+              "table": {
+                "isExcludes": false,
+                "isRecursive": false,
+                "values": [
+                  "*"
+                ]
+              }
+            },
+            "service": "{g05.trino}",
+            "serviceType": "trino"
+          }
+        }
+      ],
+      "skipped": [],
+      "served": [
+        {
+          "additionalResources": [],
+          "allowExceptions": [],
+          "denyExceptions": [],
+          "denyPolicyItems": [],
+          "description": "",
+          "id": 0,
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-grant-{g05.plain}",
+          "policyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [],
+              "roles": [],
+              "users": [
+                "{g05.carol.username}",
+                "{g05.bob.username}"
+              ]
+            }
+          ],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g05_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            },
+            "schema": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            }
+          },
+          "service": "{g05.trino}",
+          "serviceType": "trino",
+          "version": 1
+        }
+      ]
+    }
+  ],
+  "mixed": [
+    {
+      "desired": [
+        {
+          "service": "{g05.trino}",
+          "name": "perm-grant-{g05.plain}",
+          "body": {
+            "additionalResources": [],
+            "allowExceptions": [],
+            "denyExceptions": [],
+            "denyPolicyItems": [],
+            "description": "",
+            "isDenyAllElse": false,
+            "isEnabled": true,
+            "name": "perm-grant-{g05.plain}",
+            "policyItems": [
+              {
+                "accesses": [
+                  {
+                    "isAllowed": true,
+                    "type": "select"
+                  }
+                ],
+                "delegateAdmin": false,
+                "groups": [],
+                "roles": [],
+                "users": [
+                  "{g05.carol.username}",
+                  "{g05.bob.username}"
+                ]
+              }
+            ],
+            "policyLabels": [],
+            "policyPriority": 0,
+            "policyType": 0,
+            "resources": {
+              "catalog": {
+                "isExcludes": false,
+                "isRecursive": false,
+                "values": [
+                  "gold_g05_cat"
+                ]
+              },
+              "column": {
+                "isExcludes": false,
+                "isRecursive": false,
+                "values": [
+                  "*"
+                ]
+              },
+              "schema": {
+                "isExcludes": false,
+                "isRecursive": false,
+                "values": [
+                  "*"
+                ]
+              },
+              "table": {
+                "isExcludes": false,
+                "isRecursive": false,
+                "values": [
+                  "*"
+                ]
+              }
+            },
+            "service": "{g05.trino}",
+            "serviceType": "trino"
+          }
+        },
+        {
+          "service": "{g05.trino}",
+          "name": "perm-grant-{g05.public_deny}",
+          "body": {
+            "additionalResources": [],
+            "allowExceptions": [],
+            "denyExceptions": [
+              {
+                "accesses": [
+                  {
+                    "isAllowed": true,
+                    "type": "insert"
+                  },
+                  {
+                    "isAllowed": true,
+                    "type": "delete"
+                  }
+                ],
+                "delegateAdmin": false,
+                "groups": [],
+                "roles": [],
+                "users": [
+                  "{g05.erin.username}"
+                ]
+              }
+            ],
+            "denyPolicyItems": [
+              {
+                "accesses": [
+                  {
+                    "isAllowed": true,
+                    "type": "insert"
+                  },
+                  {
+                    "isAllowed": true,
+                    "type": "delete"
+                  }
+                ],
+                "delegateAdmin": false,
+                "groups": [
+                  "public"
+                ],
+                "roles": [],
+                "users": []
+              }
+            ],
+            "description": "",
+            "isDenyAllElse": false,
+            "isEnabled": true,
+            "name": "perm-grant-{g05.public_deny}",
+            "policyItems": [],
+            "policyLabels": [],
+            "policyPriority": 0,
+            "policyType": 0,
+            "resources": {
+              "catalog": {
+                "isExcludes": false,
+                "isRecursive": false,
+                "values": [
+                  "gold_g05_cat"
+                ]
+              },
+              "column": {
+                "isExcludes": false,
+                "isRecursive": false,
+                "values": [
+                  "*"
+                ]
+              },
+              "schema": {
+                "isExcludes": false,
+                "isRecursive": false,
+                "values": [
+                  "sales"
+                ]
+              },
+              "table": {
+                "isExcludes": false,
+                "isRecursive": false,
+                "values": [
+                  "ledger"
+                ]
+              }
+            },
+            "service": "{g05.trino}",
+            "serviceType": "trino"
+          }
+        },
+        {
+          "service": "{g05.trino}",
+          "name": "perm-grant-{g05.mixed}",
+          "body": {
+            "additionalResources": [],
+            "allowExceptions": [],
+            "denyExceptions": [],
+            "denyPolicyItems": [],
+            "description": "",
+            "isDenyAllElse": false,
+            "isEnabled": true,
+            "name": "perm-grant-{g05.mixed}",
+            "policyItems": [
+              {
+                "accesses": [
+                  {
+                    "isAllowed": true,
+                    "type": "select"
+                  },
+                  {
+                    "isAllowed": true,
+                    "type": "insert"
+                  },
+                  {
+                    "isAllowed": true,
+                    "type": "delete"
+                  }
+                ],
+                "delegateAdmin": false,
+                "groups": [],
+                "roles": [],
+                "users": [
+                  "{g05.bob.username}",
+                  "{g05.dan.username}",
+                  "{g05.erin.username}"
+                ]
+              }
+            ],
+            "policyLabels": [],
+            "policyPriority": 0,
+            "policyType": 0,
+            "resources": {
+              "catalog": {
+                "isExcludes": false,
+                "isRecursive": false,
+                "values": [
+                  "gold_g05_cat"
+                ]
+              },
+              "column": {
+                "isExcludes": false,
+                "isRecursive": false,
+                "values": [
+                  "*"
+                ]
+              },
+              "schema": {
+                "isExcludes": false,
+                "isRecursive": false,
+                "values": [
+                  "sales"
+                ]
+              },
+              "table": {
+                "isExcludes": false,
+                "isRecursive": false,
+                "values": [
+                  "*"
+                ]
+              }
+            },
+            "service": "{g05.trino}",
+            "serviceType": "trino"
+          }
+        }
+      ],
+      "skipped": [],
+      "served": [
+        {
+          "additionalResources": [],
+          "allowExceptions": [],
+          "denyExceptions": [],
+          "denyPolicyItems": [],
+          "description": "",
+          "id": 0,
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-grant-{g05.plain}",
+          "policyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [],
+              "roles": [],
+              "users": [
+                "{g05.carol.username}",
+                "{g05.bob.username}"
+              ]
+            }
+          ],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g05_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            },
+            "schema": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            }
+          },
+          "service": "{g05.trino}",
+          "serviceType": "trino",
+          "version": 1
+        },
+        {
+          "additionalResources": [],
+          "allowExceptions": [],
+          "denyExceptions": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "insert"
+                },
+                {
+                  "isAllowed": true,
+                  "type": "delete"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [],
+              "roles": [],
+              "users": [
+                "{g05.erin.username}"
+              ]
+            }
+          ],
+          "denyPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "insert"
+                },
+                {
+                  "isAllowed": true,
+                  "type": "delete"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "users": []
+            }
+          ],
+          "description": "",
+          "id": 1,
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-grant-{g05.public_deny}",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g05_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            },
+            "schema": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "ledger"
+              ]
+            }
+          },
+          "service": "{g05.trino}",
+          "serviceType": "trino",
+          "version": 1
+        },
+        {
+          "additionalResources": [],
+          "allowExceptions": [],
+          "denyExceptions": [],
+          "denyPolicyItems": [],
+          "description": "",
+          "id": 2,
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-grant-{g05.mixed}",
+          "policyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                },
+                {
+                  "isAllowed": true,
+                  "type": "insert"
+                },
+                {
+                  "isAllowed": true,
+                  "type": "delete"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [],
+              "roles": [],
+              "users": [
+                "{g05.bob.username}",
+                "{g05.dan.username}",
+                "{g05.erin.username}"
+              ]
+            }
+          ],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g05_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            },
+            "schema": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            }
+          },
+          "service": "{g05.trino}",
+          "serviceType": "trino",
+          "version": 1
+        }
+      ]
+    }
+  ]
+}

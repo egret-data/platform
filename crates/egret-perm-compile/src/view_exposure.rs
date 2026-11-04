@@ -2,9 +2,9 @@
 //! StarRocks engine reaches, so the control plane can find the materialized
 //! views that already read one of them.
 //!
-//! The A3 deny (`crate::clearance::mv_deny_inputs`) stops NEW materialized
-//! views. It cannot remove an existing one, and an existing one may hold a copy
-//! of the classified values. StarRocks keeps every materialized view in
+//! The A3 deny (`egret_perm_ir::lower::withhold`'s materialized-view guard)
+//! stops NEW materialized views. It cannot remove an existing one, and an
+//! existing one may hold a copy of the classified values. StarRocks keeps every materialized view in
 //! [`MV_CATALOG`] (measured, `docs/en/plans/2026-10-14-starrocks-mv-placement-
 //! measurement.md`), whatever catalog its base tables live in, so the control
 //! plane lists `information_schema.materialized_views` once per engine and
@@ -23,7 +23,7 @@ use uuid::Uuid;
 use egret_perm::CompileError;
 
 /// The only catalog StarRocks creates a materialized view in.
-pub use crate::clearance::MV_CATALOG;
+pub use crate::ranger::withhold::MV_CATALOG;
 
 /// A table with at least one column of the classification, as the engine names
 /// it: `catalog` is the registry catalog name the engine attaches it under.

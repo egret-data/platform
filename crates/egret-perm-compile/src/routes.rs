@@ -84,13 +84,13 @@ use crate::attribution::{attribute_policy_name, PolicyAttribution};
 use crate::explain_wire::{
     WireDecision, WireEngineType, WireMaskDecision, WireRowFilterDecision, WireUndecidableCause,
 };
-use crate::grants::validate_grant_shape;
 use crate::principal_refs::{resolve_principal_refs, still_stored};
-use crate::rules::validate_rule_shape;
 use crate::trigger::{
     affected_services_for_grant, affected_services_for_rule, engine_type_for, lock_services_in_tx,
     merge_service_ids, recompile_services_in_tx, CompileSummary, SkippedItem, SourceKind,
 };
+use egret_perm_ir::lower::grants::validate_grant_shape;
+use egret_perm_ir::lower::rules::validate_rule_shape;
 
 mod engine_grants;
 mod error;
@@ -912,7 +912,7 @@ pub enum ClearanceMaskGapReason {
 /// How many exempting principals [`ExplainExemption::via`] names (D1).
 pub const EXEMPTION_VIA_SHOWN: usize = 3;
 
-/// The mask type a rule's exempt item carries (`rules::mask_items`); an empty
+/// The mask type a rule's exempt item carries (`ranger::rules::mask_items`); an empty
 /// `filterExpr` is the row-filter equivalent.
 const EXEMPT_MASK_TYPE: &str = "MASK_NONE";
 
@@ -1293,7 +1293,7 @@ pub(crate) async fn write_grant(
     // **A grant with nothing in `principals.include` REVOKES, silently** (SP4b-1
     // review, I-2). `NewGrant.principals` is `#[serde(default)]`, so a body that
     // omits the field deserializes to an empty `PrincipalSet` — and
-    // `compile_desired` treats an empty include as a SKIP (`trigger.rs`, "the
+    // `compile_desired` treats an empty include as a SKIP (`egret_perm_ir::lower::grants`, "the
     // grant's principals name no engine principal"), which means the recompile
     // produces nothing for the grant and the sweep REAPS the policy it had.
     // Over a PATCH that is a 200 that quietly stops enforcing a live grant, and
@@ -3625,16 +3625,16 @@ pub(crate) async fn served_artifact_via(
 }
 
 /// [`artifact_via`] as the compiler serves the profile: on Trino, with the
-/// metadata-table denies of `crate::metadata_tables` its restricting policies
+/// metadata-table denies of `crate::ranger::completion::metadata_tables` its restricting policies
 /// get once it is compiled. The migration gate's BEFORE (see
-/// `crate::metadata_tables::with_denies_via`).
+/// `crate::ranger::completion::metadata_tables::with_denies_via`).
 pub(crate) async fn compiled_artifact_via(
     conn: &mut sqlx::PgConnection,
     svc: &ServiceRow,
 ) -> Result<ServicePolicySet, PermHttpError> {
     let mut envelope = envelope_via(conn, svc).await?;
     if svc.r#type == "trino" {
-        crate::metadata_tables::with_denies_via(conn, svc.id, &mut envelope)
+        crate::ranger::completion::metadata_tables::with_denies_via(conn, svc.id, &mut envelope)
             .await
             .map_err(PermHttpError::from)?;
     }

@@ -22,6 +22,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use egret_perm::eval::{glob_match, resource_level_matches};
 use egret_perm::model::{PrincipalKind, PrincipalSet, Rule, RuleKind, Selector};
+use egret_perm_ir::enforcement::{rule_enforcement, AttachedEngine, NotEnforcedReason};
+use egret_perm_ir::matrix::RuleEffectKind;
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -263,8 +265,8 @@ pub async fn rule_effect(
 
     let ids: Vec<Uuid> = reached.iter().map(|(id, _)| *id).collect();
     let attached = attached_engines(conn, &ids).await?;
-    let tag_rule = matches!(rule.selector, Selector::Tag { .. });
-    let (catalogs, enforced_by, not_enforced) = enforcement(&reached, &attached, tag_rule);
+    let (catalogs, enforced_by, not_enforced) =
+        enforcement(&reached, &attached, &rule.selector, &rule.kind);
 
     let (exempt_members, exempt_everyone) = count_exempt(conn, &rule.exempt).await?;
 
@@ -335,8 +337,8 @@ pub async fn rules_enforcement(
         .iter()
         .zip(&reached)
         .map(|(rule, reached)| {
-            let tag_rule = matches!(rule.selector, Selector::Tag { .. });
-            let (catalogs, enforced_by, not_enforced) = enforcement(reached, &attached, tag_rule);
+            let (catalogs, enforced_by, not_enforced) =
+                enforcement(reached, &attached, &rule.selector, &rule.kind);
             RuleEnforcement {
                 rule_id: rule.id,
                 enforced_by,
@@ -379,30 +381,37 @@ async fn reached_catalogs(
     }
 }
 
-/// An engine attached to a catalog: `(catalog id, engine id, engine name,
-/// engine type, bound to a policy profile, a classification rule compiles for
-/// that profile)`.
-///
-/// The last is what the compiler checks (`trigger.rs`, `tag_service`): a
-/// `trino`-typed profile hosts a tag rule only when its
-/// `config_jsonb.tagService` is a string naming an existing
-/// `policy.authz_services` row; any other profile type needs nothing more.
-type Attached = (Uuid, Uuid, String, String, bool, bool);
+/// One row of [`attached_engines`]: raw facts, no decision. Whether the
+/// engine enforces a rule is the capability matrix's answer
+/// ([`egret_perm_ir::enforcement::rule_enforcement`]).
+#[derive(sqlx::FromRow)]
+struct AttachedRow {
+    catalog_id: Uuid,
+    engine_id: Uuid,
+    engine_name: String,
+    engine_type: String,
+    bound: bool,
+    profile_type: Option<String>,
+    /// The profile's `config_jsonb.tagService` is a string naming an existing
+    /// `policy.authz_services` row (what the compiler checks, `trigger.rs`
+    /// `tag_service`). `None` with no profile.
+    channel: Option<bool>,
+}
 
 /// The engines attached to any of `catalog_ids`, in ONE query.
 async fn attached_engines(
     conn: &mut sqlx::PgConnection,
     catalog_ids: &[Uuid],
-) -> Result<Vec<Attached>, PermHttpError> {
+) -> Result<Vec<AttachedEngine>, PermHttpError> {
     if catalog_ids.is_empty() {
         return Ok(Vec::new());
     }
-    sqlx::query_as(
-        "SELECT a.catalog_id, e.id, e.name, e.type, e.authz_service_id IS NOT NULL, \
-                (s.type IS DISTINCT FROM 'trino' \
-                 OR (jsonb_typeof(s.config_jsonb -> 'tagService') = 'string' \
-                     AND EXISTS (SELECT 1 FROM policy.authz_services t \
-                                  WHERE t.name = s.config_jsonb ->> 'tagService'))) \
+    let rows: Vec<AttachedRow> = sqlx::query_as(
+        "SELECT a.catalog_id, e.id AS engine_id, e.name AS engine_name, e.type AS engine_type, \
+                e.authz_service_id IS NOT NULL AS bound, s.type AS profile_type, \
+                (jsonb_typeof(s.config_jsonb -> 'tagService') = 'string' \
+                 AND EXISTS (SELECT 1 FROM policy.authz_services t \
+                              WHERE t.name = s.config_jsonb ->> 'tagService')) AS channel \
            FROM registry.engine_catalog_attachments a \
            JOIN engine_mgmt.engines e ON e.id = a.engine_id \
            LEFT JOIN policy.authz_services s ON s.id = e.authz_service_id \
@@ -411,7 +420,24 @@ async fn attached_engines(
     .bind(catalog_ids)
     .fetch_all(&mut *conn)
     .await
-    .map_err(PermHttpError::db)
+    .map_err(PermHttpError::db)?;
+    Ok(rows
+        .into_iter()
+        .map(|r| AttachedEngine {
+            catalog_id: r.catalog_id,
+            engine_id: r.engine_id,
+            engine_name: r.engine_name,
+            engine_type: r.engine_type,
+            // A profile of a type no EP kind models is `Some(None)`: it counts
+            // as enforcing, as the SQL did (`s.type IS DISTINCT FROM 'trino'`).
+            profile: r.bound.then(|| {
+                r.profile_type
+                    .as_deref()
+                    .and_then(crate::trigger::engine_type_for)
+            }),
+            classification_channel: r.channel.unwrap_or(false),
+        })
+        .collect())
 }
 
 /// Why nothing enforces a catalog no policy profile serves (explain's C5 line):
@@ -429,67 +455,50 @@ pub(crate) async fn catalog_not_enforced(
 }
 
 /// Who enforces a rule that reaches `reached`, given the `attached` engines:
-/// per catalog, the distinct enforcing engines, and why none does. A
-/// `tag_rule` (classification selector) is enforced only by engines whose
-/// profile can host it (the last field of [`Attached`]).
+/// per catalog, the distinct enforcing engines, and why none does. Decided by
+/// [`egret_perm_ir::enforcement::rule_enforcement`] (the capability matrix
+/// plus the scope); this maps its answer onto the wire types.
 fn enforcement(
     reached: &[(Uuid, String)],
-    attached: &[Attached],
-    tag_rule: bool,
+    attached: &[AttachedEngine],
+    selector: &Selector,
+    kind: &RuleKind,
 ) -> (Vec<EffectCatalog>, u32, Option<NotEnforced>) {
-    let mut catalogs = Vec::with_capacity(reached.len());
-    let mut engine_ids = BTreeSet::new();
-    for (catalog_id, catalog_name) in reached {
-        let here: Vec<_> = attached.iter().filter(|a| a.0 == *catalog_id).collect();
-        let bound = here.iter().any(|a| a.4);
-        let engines: Vec<EffectEngine> = here
-            .iter()
-            .filter(|a| a.4 && (!tag_rule || a.5))
-            .map(|a| EffectEngine {
-                id: a.1,
-                name: a.2.clone(),
-                engine_type: a.3.clone(),
-            })
-            .collect();
-        engine_ids.extend(engines.iter().map(|e| e.id));
-        let not_enforced = if here.is_empty() {
-            Some(NotEnforced::NoEngine)
-        } else if !bound {
-            Some(NotEnforced::NoProfile)
-        } else if engines.is_empty() {
-            Some(NotEnforced::NoTagService)
-        } else {
-            None
-        };
-        catalogs.push(EffectCatalog {
-            catalog_id: *catalog_id,
-            catalog_name: catalog_name.clone(),
-            engines,
-            not_enforced,
-        });
-    }
-    let not_enforced = if catalogs.is_empty() {
-        Some(NotEnforced::NoAssignment)
-    } else if !engine_ids.is_empty() {
-        None
-    } else if catalogs
-        .iter()
-        .any(|c| c.not_enforced == Some(NotEnforced::NoTagService))
-    {
-        Some(NotEnforced::NoTagService)
-    } else if catalogs
-        .iter()
-        .any(|c| c.not_enforced == Some(NotEnforced::NoProfile))
-    {
-        Some(NotEnforced::NoProfile)
-    } else {
-        Some(NotEnforced::NoEngine)
+    let effect = match kind {
+        RuleKind::Mask { .. } => RuleEffectKind::Mask,
+        RuleKind::RowFilter { .. } => RuleEffectKind::RowFilter,
     };
-    (
-        catalogs,
-        u32::try_from(engine_ids.len()).unwrap_or(u32::MAX),
-        not_enforced,
-    )
+    let classification_selector = matches!(selector, Selector::Tag { .. });
+    let (catalogs, enforced_by, not_enforced) =
+        rule_enforcement(reached, attached, classification_selector, effect);
+    let catalogs = catalogs
+        .into_iter()
+        .map(|c| EffectCatalog {
+            catalog_id: c.catalog_id,
+            catalog_name: c.catalog_name,
+            engines: c
+                .engines
+                .into_iter()
+                .map(|(id, name, engine_type)| EffectEngine {
+                    id,
+                    name,
+                    engine_type,
+                })
+                .collect(),
+            not_enforced: c.not_enforced.map(wire),
+        })
+        .collect();
+    (catalogs, enforced_by, not_enforced.map(wire))
+}
+
+/// The wire spelling of a [`NotEnforcedReason`], 1:1.
+fn wire(r: NotEnforcedReason) -> NotEnforced {
+    match r {
+        NotEnforcedReason::NoAssignment => NotEnforced::NoAssignment,
+        NotEnforcedReason::NoEngine => NotEnforced::NoEngine,
+        NotEnforcedReason::NoProfile => NotEnforced::NoProfile,
+        NotEnforcedReason::NoClassificationChannel => NotEnforced::NoTagService,
+    }
 }
 
 /// A tag selector's reach (its catalogs come from [`reached_catalogs`]): every
