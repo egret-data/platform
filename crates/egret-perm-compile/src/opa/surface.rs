@@ -252,13 +252,7 @@ fn route_path(route: Route) -> String {
 /// exactly these; a test compares them, so a renamed route cannot silently
 /// break the engine.
 pub fn opa_route_paths() -> [String; 5] {
-    [
-        route_path(Route::Allow),
-        route_path(Route::Batch),
-        route_path(Route::RowFilters),
-        route_path(Route::BatchColumnMasks),
-        route_path(Route::ColumnMask),
-    ]
+    Route::ALL.map(route_path)
 }
 
 /// The routes, under [`OPA_SURFACE_PREFIX`].
@@ -286,6 +280,16 @@ enum Route {
 }
 
 impl Route {
+    /// Every route. A new variant must be added here AND to
+    /// [`Route::name`]; `all_covers_every_variant` fails when it is not.
+    const ALL: [Route; 5] = [
+        Route::Allow,
+        Route::Batch,
+        Route::RowFilters,
+        Route::BatchColumnMasks,
+        Route::ColumnMask,
+    ];
+
     fn name(self) -> &'static str {
         match self {
             Route::Allow => "allow",
@@ -669,6 +673,24 @@ async fn column_mask(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The match is exhaustive: a new `Route` variant fails to compile here
+    /// until it is given an index, and then `ALL` must hold it at that index.
+    #[test]
+    fn all_covers_every_variant() {
+        fn index(r: Route) -> usize {
+            match r {
+                Route::Allow => 0,
+                Route::Batch => 1,
+                Route::RowFilters => 2,
+                Route::BatchColumnMasks => 3,
+                Route::ColumnMask => 4,
+            }
+        }
+        for (i, r) in Route::ALL.into_iter().enumerate() {
+            assert_eq!(index(r), i);
+        }
+    }
 
     /// Carry 2: a builder `Err` is a 500 on both batch routes; `Ok` is the
     /// builder's own value. Not reachable through the router without an

@@ -1165,7 +1165,7 @@ async fn set_tag_service(
     tag = "policy-admin",
     params(("service" = String, Path, description = "Policy profile (Ranger service) name")),
     responses(
-        (status = 200, description = "The Trino coordinator config files for this profile's native ranger plugin, from the same renderer that writes the files egret mounts into its own engines (`access-control.properties` and `ranger-trino-security.xml`), and `warnings`: the same download-URL warning as the external engine's plugin configuration (a loopback or unparseable `[catalog] public_url`). Since SP4d-4 the security file also carries the policy source, cache directory and client timeouts, the properties file points at `/etc/trino/ranger-trino-security.xml`, and the poll interval is 30000 ms. Before KI-149 the body was the bare array of files", body = TrinoConfigResponse),
+        (status = 200, description = "The Trino coordinator config files for this profile's native ranger plugin (for a profile whose `mechanism` is `opa`: the OPA plugin's `access-control.properties` and `egret-opa-context.properties`, with the engine id and secret as placeholders, and `warnings` adding the log-requests warning and the Trino 483 note), from the same renderer that writes the files egret mounts into its own engines (`access-control.properties` and `ranger-trino-security.xml`), and `warnings`: the same download-URL warning as the external engine's plugin configuration (a loopback or unparseable `[catalog] public_url`). Since SP4d-4 the security file also carries the policy source, cache directory and client timeouts, the properties file points at `/etc/trino/ranger-trino-security.xml`, and the poll interval is 30000 ms. Before KI-149 the body was the bare array of files", body = TrinoConfigResponse),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read permission", body = ErrorBody),
         (status = 404, description = "No such policy profile", body = ErrorBody),
@@ -1189,6 +1189,7 @@ async fn trino_config(
             &st.engine_egret_url,
             egret_engine_mgmt_api::ranger_config::PASSWORD_PLACEHOLDER,
         )
+        .map_err(|e| PolicyHttpError::BadRequest(e.to_string()))?
     } else {
         egret_engine_mgmt_api::ranger_config::ranger_plugin_files(
             egret_engine_mgmt_api::EngineKind::Trino,

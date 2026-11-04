@@ -36,7 +36,7 @@ fn the_prefix_is_the_surfaces() {
 
 #[test]
 fn every_rendered_uri_is_a_mounted_route_and_every_route_is_rendered() {
-    let f = opa_plugin_files(PLACEHOLDER_ENGINE_ID, ORIGIN, "pw");
+    let f = opa_plugin_files(PLACEHOLDER_ENGINE_ID, ORIGIN, "pw").unwrap();
     let mut rendered = uris(f.get("access-control.properties").unwrap());
     let mut mounted: Vec<String> = opa_route_paths()
         .into_iter()
@@ -50,7 +50,7 @@ fn every_rendered_uri_is_a_mounted_route_and_every_route_is_rendered() {
 #[test]
 fn logging_is_off_and_the_secret_is_only_in_the_context_file() {
     let secret = "S3CRET-value_abc";
-    let f = opa_plugin_files("e-1", ORIGIN, secret);
+    let f = opa_plugin_files("e-1", ORIGIN, secret).unwrap();
     let ac = f.get("access-control.properties").unwrap();
     assert!(ac.contains("opa.log-requests=false\n"));
     assert!(ac.contains("opa.log-responses=false\n"));

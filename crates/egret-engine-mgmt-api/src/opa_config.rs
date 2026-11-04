@@ -34,10 +34,54 @@ pub enum AccessMechanism {
     Opa,
 }
 
+/// A value that cannot be written into a Java `.properties` line as is.
+/// Names the field, never the value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnrenderableOpaValue {
+    pub field: &'static str,
+}
+
+impl std::fmt::Display for UnrenderableOpaValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the OPA plugin's {} contains a character that is unsafe in a .properties file",
+            self.field
+        )
+    }
+}
+
+impl std::error::Error for UnrenderableOpaValue {}
+
+/// Refuses (never escapes) a value unsafe in a `.properties` line: an ASCII
+/// control character (a line break would inject a property) or `\`. With
+/// `strict`, also `=`, `:` and leading or trailing whitespace.
+fn check_properties_value(
+    field: &'static str,
+    value: &str,
+    strict: bool,
+) -> Result<(), UnrenderableOpaValue> {
+    let bad = value.chars().any(|c| c.is_ascii_control() || c == '\\')
+        || (strict && (value.contains(['=', ':']) || value.trim() != value));
+    if bad {
+        Err(UnrenderableOpaValue { field })
+    } else {
+        Ok(())
+    }
+}
+
 /// The two files of the OPA plugin, in order: the selector, then the context
-/// file. `secret` must not contain `\n`, `\r` or `\`; the caller refuses such
-/// a value (a `RenderableCredential` is URL-safe base64).
-pub fn opa_plugin_files(engine_id: &str, egret_url: &str, secret: &str) -> RangerPluginFiles {
+/// file. Nothing guarantees the secret's alphabet (`RenderableCredential` only
+/// rejects `<`, `&` and `--`), so every interpolated value is checked here and
+/// an unsafe one is refused ([`check_properties_value`]).
+pub fn opa_plugin_files(
+    engine_id: &str,
+    egret_url: &str,
+    secret: &str,
+) -> Result<RangerPluginFiles, UnrenderableOpaValue> {
+    check_properties_value("secret", secret, true)?;
+    check_properties_value("engine id", engine_id, false)?;
+    check_properties_value("egret URL", egret_url, false)?;
     let base = format!("{}{OPA_SURFACE_PREFIX}", egret_url.trim_end_matches('/'));
     let access_control = format!(
         "access-control.name=opa\n\
@@ -52,12 +96,12 @@ pub fn opa_plugin_files(engine_id: &str, egret_url: &str, secret: &str) -> Range
          opa.context-file={OPA_CONTEXT_PATH}\n"
     );
     let context = format!("egret.engine={engine_id}\negret.secret={secret}\n");
-    RangerPluginFiles {
+    Ok(RangerPluginFiles {
         files: vec![
             ("access-control.properties".to_string(), access_control),
             (OPA_CONTEXT_FILE.to_string(), context),
         ],
-    }
+    })
 }
 
 #[cfg(test)]
@@ -66,7 +110,7 @@ mod tests {
 
     #[test]
     fn opa_files_point_every_uri_at_egret_and_pin_the_safe_settings() {
-        let f = opa_plugin_files("e-1", "http://egret:8080/", "pw");
+        let f = opa_plugin_files("e-1", "http://egret:8080/", "pw").unwrap();
         let ac = f.get("access-control.properties").unwrap();
         assert!(ac.starts_with("access-control.name=opa\n"));
         assert!(ac.contains("opa.policy.uri=http://egret:8080/opa/v1/data/egret/trino/allow\n"));
@@ -84,7 +128,16 @@ mod tests {
         assert!(ac.contains("opa.allow-permission-management-operations=false\n"));
         assert!(ac.contains("opa.log-requests=false\n"));
         assert!(ac.contains("opa.log-responses=false\n"));
-        assert!(ac.contains(&format!("opa.context-file={OPA_CONTEXT_PATH}\n")));
+        assert!(ac.contains("opa.context-file=/etc/trino/egret-opa-context.properties\n"));
+        assert_eq!(OPA_CONTEXT_PATH, "/etc/trino/egret-opa-context.properties");
+        let b = "http://egret:8080/opa/v1/data/egret/trino";
+        assert_eq!(
+            ac,
+            &format!(
+                "access-control.name=opa\nopa.policy.uri={b}/allow\nopa.policy.batched-uri={b}/batch\nopa.policy.row-filters-uri={b}/row_filters\nopa.policy.batch-column-masking-uri={b}/batch_column_masks\nopa.policy.column-masking-uri={b}/column_mask\nopa.allow-permission-management-operations=false\nopa.log-requests=false\nopa.log-responses=false\nopa.context-file=/etc/trino/egret-opa-context.properties\n"
+            ),
+            "the whole file, so an appended contradictory line is caught"
+        );
         assert_eq!(
             f.get(OPA_CONTEXT_FILE).unwrap(),
             "egret.engine=e-1\negret.secret=pw\n"
@@ -99,8 +152,42 @@ mod tests {
 
     #[test]
     fn debug_of_the_rendered_files_never_shows_the_secret() {
-        let f = opa_plugin_files("e-1", "http://egret:8080", "s3cr3t-value");
+        let f = opa_plugin_files("e-1", "http://egret:8080", "s3cr3t-value").unwrap();
         assert!(!format!("{f:?}").contains("s3cr3t-value"));
+    }
+
+    #[test]
+    fn a_value_that_would_inject_a_property_is_refused() {
+        let url = "http://egret:8080";
+        for bad in [
+            "x\nopa.log-requests=true",
+            "x\ropa.log-requests=true",
+            "a\\b",
+            "a=b",
+            "a:b",
+            " lead",
+            "trail ",
+            "nul\0",
+        ] {
+            let e = opa_plugin_files("e-1", url, bad).unwrap_err();
+            assert_eq!(e.field, "secret", "{bad:?}");
+            assert!(
+                !e.to_string().contains(bad.trim()),
+                "the value is never echoed"
+            );
+        }
+        assert_eq!(
+            opa_plugin_files("e\n1", url, "pw").unwrap_err().field,
+            "engine id"
+        );
+        assert_eq!(
+            opa_plugin_files("e-1", "http://egret\nx=y", "pw")
+                .unwrap_err()
+                .field,
+            "egret URL"
+        );
+        // A real URL-safe base64 secret passes.
+        assert!(opa_plugin_files("e-1", url, "Ab-_09xyz").is_ok());
     }
 
     #[test]
