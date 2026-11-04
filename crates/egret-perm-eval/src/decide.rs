@@ -169,7 +169,7 @@ fn label(s: &Statement) -> String {
 
 /// D2: the statement applies to `user` when `include` names them or everyone,
 /// and `except` names neither. Usernames compare exactly.
-fn applies(a: &Audience, user: &str) -> bool {
+pub(crate) fn applies(a: &Audience, user: &str) -> bool {
     let names = |m: &MemberName| match m {
         MemberName::User(u) => u == user,
         MemberName::Everyone => true,
@@ -193,7 +193,7 @@ fn named_matches(p: &str, v: &str) -> bool {
 /// the pattern; an absent one matches only a statement covering the whole
 /// level: `Unnamed` or a run of `*` (Ranger's `SelfAndAllDescendants`; the
 /// compiler's own predicate, so `**` is the same as `*`).
-fn level_covers(level: &Level, value: Option<&str>) -> bool {
+pub(crate) fn level_covers(level: &Level, value: Option<&str>) -> bool {
     match (level, value) {
         (Level::Unnamed, _) => true,
         (Level::Named(p), Some(v)) => named_matches(p, v),
@@ -222,7 +222,7 @@ fn path_reaches(p: &Path, o: &Obj) -> bool {
 
 /// The levels a metadata-table restriction is looked for on: catalog, schema
 /// and table; any column.
-fn path_on_table(p: &Path, catalog: &str, schema: &str, table: &str) -> bool {
+pub(crate) fn path_on_table(p: &Path, catalog: &str, schema: &str, table: &str) -> bool {
     named_matches(&p.catalog, catalog)
         && level_covers(&p.schema, Some(schema))
         && level_covers(&p.table, Some(table))
@@ -597,7 +597,7 @@ impl Snapshot {
 
     /// Every statement that can match an object in `catalog` carrying
     /// `classes`, ascending (source order decides `by`).
-    fn candidates(&self, catalog: &str, classes: &BTreeSet<String>) -> Vec<usize> {
+    pub(crate) fn candidates(&self, catalog: &str, classes: &BTreeSet<String>) -> Vec<usize> {
         let mut out: Vec<usize> = self
             .index
             .by_catalog

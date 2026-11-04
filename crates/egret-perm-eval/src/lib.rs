@@ -7,6 +7,8 @@ pub mod decide;
 pub mod pattern;
 pub mod snapshot;
 pub mod trino_ops;
+pub mod values;
 
 pub use decide::{Decision, EvalError, ObjectPath, Resource};
 pub use snapshot::{ClassifiedColumn, Snapshot, SnapshotError, SnapshotInput};
+pub use values::{render_mask, TRINO_MASK_TRANSFORMERS};
