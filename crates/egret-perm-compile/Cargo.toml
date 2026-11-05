@@ -147,3 +147,6 @@ egret-query-api.workspace = true
 # Governance SP2b Task 9: `tests/opa_surface.rs` reads the surface's log lines
 # back (no secret, one line per batch).
 tracing-subscriber.workspace = true
+# SP2b Task 20F: `tests/opa_surface.rs` sends a body that records whether it
+# was ever read (`stream::poll_fn`).
+futures-util.workspace = true

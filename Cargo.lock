@@ -3568,6 +3568,7 @@ dependencies = [
  "egret-ranger-eval",
  "egret-secrets",
  "egret-test-db",
+ "futures-util",
  "hex",
  "http-body-util",
  "metrics",

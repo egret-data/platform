@@ -23,7 +23,7 @@ use axum::http::Request;
 use egret_engine_mgmt_api::credential::{EngineCredentialVerifier, EngineIdentity};
 use egret_perm_compile::opa::cache::SnapshotCache;
 use egret_perm_compile::opa::surface::{
-    ParseGate, VerifiedCache, MAX_VERDICTS, NEGATIVE_TTL, OPA_BODY_LIMIT_BYTES,
+    in_flight_gate, ParseGate, VerifiedCache, MAX_VERDICTS, NEGATIVE_TTL, OPA_BODY_LIMIT_BYTES,
     OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES, VERIFIED_TTL,
 };
 use egret_perm_compile::{opa_surface, OpaState, OPA_SURFACE_PREFIX};
@@ -229,6 +229,7 @@ fn app_with(credentials: VerifiedCache) -> App {
         verifier: stub.clone(),
         credentials: Arc::new(credentials),
         parses: Arc::new(ParseGate::default()),
+        in_flight: Arc::new(in_flight_gate()),
         batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
     });
     App {
@@ -795,6 +796,7 @@ async fn an_unreachable_verifier_answers_500_on_every_route() {
         verifier: Arc::new(Down),
         credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
         parses: Arc::new(ParseGate::default()),
+        in_flight: Arc::new(in_flight_gate()),
         batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
     });
     for (route, action) in every_route() {
@@ -1002,6 +1004,7 @@ async fn no_log_or_body_carries_the_secret() {
         verifier: stub.clone(),
         credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
         parses: Arc::new(ParseGate::default()),
+        in_flight: Arc::new(in_flight_gate()),
         batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
     });
 
@@ -1070,6 +1073,7 @@ async fn no_log_or_body_carries_the_secret() {
         verifier: Arc::new(Down),
         credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
         parses: Arc::new(ParseGate::default()),
+        in_flight: Arc::new(in_flight_gate()),
         batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
     });
     for (route, action) in every_route() {
@@ -1121,6 +1125,7 @@ async fn an_identity_for_another_engine_is_a_refusal() {
         verifier: Arc::new(Confused),
         credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
         parses: Arc::new(ParseGate::default()),
+        in_flight: Arc::new(in_flight_gate()),
         batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
     });
     // The verifier's answer is about GOOD: GOOD is admitted, GOOD2 is not.
@@ -1178,6 +1183,7 @@ async fn with_every_parse_permit_held_a_request_is_answered_503_on_every_route()
         verifier: stub,
         credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
         parses: Arc::clone(&parses),
+        in_flight: Arc::new(in_flight_gate()),
         batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
     });
     let held = parses.acquire().await.expect("the one permit");
@@ -1342,6 +1348,7 @@ async fn a_larger_body_takes_more_of_the_parse_budget() {
         verifier: Arc::new(Stub::standard()),
         credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
         parses: Arc::clone(&parses),
+        in_flight: Arc::new(in_flight_gate()),
         batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
     });
     let held = parses.acquire().await.expect("one unit");
@@ -1359,4 +1366,101 @@ async fn a_larger_body_takes_more_of_the_parse_budget() {
             .0,
         200
     );
+}
+
+/// A request body that records whether anything ever polled it, and then
+/// yields `raw` in one chunk.
+fn watched_body(raw: String, read: Arc<std::sync::atomic::AtomicBool>) -> Body {
+    let mut chunk = Some(axum::body::Bytes::from(raw));
+    Body::from_stream(futures_util::stream::poll_fn(move |_| {
+        read.store(true, Ordering::SeqCst);
+        std::task::Poll::Ready(chunk.take().map(Ok::<_, std::io::Error>))
+    }))
+}
+
+#[tokio::test]
+async fn over_the_in_flight_budget_a_request_is_503_and_its_body_is_never_read() {
+    // Arrange: an in-flight budget of N = 2 requests, both taken by requests
+    // whose bodies never finish arriving (stuck reading, before any parse).
+    logs();
+    let in_flight = Arc::new(ParseGate::new(2, Duration::from_millis(50)));
+    let router = opa_surface(OpaState {
+        cache: ready_cache(),
+        verifier: Arc::new(Stub::standard()),
+        credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
+        parses: Arc::new(ParseGate::default()),
+        in_flight: Arc::clone(&in_flight),
+        batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+    });
+    let stalled = || {
+        let router = router.clone();
+        tokio::spawn(async move {
+            let body = Body::from_stream(futures_util::stream::pending::<
+                Result<axum::body::Bytes, std::io::Error>,
+            >());
+            router
+                .oneshot(
+                    Request::post(format!("{OPA_SURFACE_PREFIX}/allow"))
+                        .header("content-type", "application/json")
+                        .body(body)
+                        .expect("request"),
+                )
+                .await
+        })
+    };
+    let first = stalled();
+    let second = stalled();
+    // Both are in flight once the budget is gone.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while in_flight.acquire_for(0).await.is_some() {
+        assert!(tokio::time::Instant::now() < deadline, "never in flight");
+        tokio::task::yield_now().await;
+    }
+
+    // Act: the N+1th request, on every route.
+    for (route, action) in every_route() {
+        let read = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let raw = body("ann", &GOOD.to_string(), RIGHT, action).to_string();
+        let res = router
+            .clone()
+            .oneshot(
+                Request::post(format!("{OPA_SURFACE_PREFIX}{route}"))
+                    .header("content-type", "application/json")
+                    .body(watched_body(raw, Arc::clone(&read)))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        // Assert: 503, and nothing read its body.
+        assert_eq!(res.status().as_u16(), 503, "{route}");
+        let bytes = res.into_body().collect().await.expect("body").to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap(),
+            json!({"error": "busy"}),
+            "{route}"
+        );
+        assert!(!read.load(Ordering::SeqCst), "{route}: body never read");
+    }
+    assert!(log_text().contains("too many requests in flight"));
+
+    // Released: the next request is read and answered.
+    first.abort();
+    second.abort();
+    let _ = (first.await, second.await);
+    let read = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (route, action) = every_route().remove(0);
+    let raw = body("ann", &GOOD.to_string(), RIGHT, action).to_string();
+    let res = router
+        .clone()
+        .oneshot(
+            Request::post(format!("{OPA_SURFACE_PREFIX}{route}"))
+                .header("content-type", "application/json")
+                .body(watched_body(raw, Arc::clone(&read)))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(res.status().as_u16(), 200);
+    assert!(read.load(Ordering::SeqCst));
 }

@@ -40,7 +40,7 @@ use std::time::Duration;
 use axum::body::Bytes;
 use axum::extract::rejection::BytesRejection;
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::Json;
@@ -77,7 +77,7 @@ pub const OPA_SURFACE_PREFIX: &str = "/opa/v1/data/egret/trino";
 /// rather than being answered. A parsed `Value` costs about ten times its
 /// bytes, so one parse of 4 MiB is about 40 MB.
 ///
-/// It is also the unit the [`ParseGate`] weighs a body in: a body takes one
+/// It is also the unit both [`ParseGate`]s weigh a body in: a body takes one
 /// permit per started 4 MiB, so a larger `/batch` body takes more of the
 /// same budget and the worst-case memory does not grow with the limit.
 pub const OPA_BODY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
@@ -96,13 +96,24 @@ pub const OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES: usize = 24 * 1024 * 1024;
 /// Trino's traffic), so 16 is not a throughput limit in practice.
 pub const OPA_MAX_CONCURRENT_PARSES: usize = 16;
 
+/// The in-flight budget, in [`OPA_BODY_LIMIT_BYTES`] units (SP2b Task 20F,
+/// T10): requests on the OPA routes admitted at once, BEFORE their body is
+/// read. A request reserves one unit per started 4 MiB of its declared
+/// `Content-Length` (its route's whole limit when it declares none), so the
+/// raw bodies buffered before authentication stay under 64 × 4 MiB = 256 MiB,
+/// and the parse budget above bounds what is parsed of them. Over it a request
+/// waits [`OPA_PARSE_WAIT`], then is answered 503 with its body unread.
+pub const OPA_MAX_IN_FLIGHT: usize = 64;
+
 /// How long a request waits for a parse permit before it is answered 503
 /// (the plugin fails the query: fail closed).
 pub const OPA_PARSE_WAIT: Duration = Duration::from_secs(1);
 
 /// A budget of permits, each worth [`OPA_BODY_LIMIT_BYTES`] of request body,
 /// with a bounded wait. Bounds the pre-authentication parses
-/// ([`OPA_MAX_CONCURRENT_PARSES`], [`OPA_PARSE_WAIT`] in production).
+/// ([`OPA_MAX_CONCURRENT_PARSES`]) and the requests in flight before their
+/// body is read ([`OPA_MAX_IN_FLIGHT`]), both with [`OPA_PARSE_WAIT`] in
+/// production.
 pub struct ParseGate {
     permits: tokio::sync::Semaphore,
     total: u32,
@@ -164,6 +175,8 @@ pub struct OpaState {
     pub verifier: Arc<dyn EngineCredentialVerifier>,
     pub credentials: Arc<VerifiedCache>,
     pub parses: Arc<ParseGate>,
+    /// Requests admitted before their body is read ([`OPA_MAX_IN_FLIGHT`]).
+    pub in_flight: Arc<ParseGate>,
     /// The `/batch` body limit (`[governance.opa] batch_body_limit_bytes`);
     /// every other route has [`OPA_BODY_LIMIT_BYTES`].
     pub batch_body_limit: usize,
@@ -171,14 +184,15 @@ pub struct OpaState {
 
 impl OpaState {
     /// The production state: credentials remembered for [`VERIFIED_TTL`],
-    /// parses bounded by [`ParseGate::default`], and the default `/batch`
-    /// limit.
+    /// parses bounded by [`ParseGate::default`], [`OPA_MAX_IN_FLIGHT`]
+    /// requests in flight, and the default `/batch` limit.
     pub fn new(cache: Arc<SnapshotCache>, verifier: Arc<dyn EngineCredentialVerifier>) -> Self {
         Self {
             cache,
             verifier,
             credentials: Arc::new(VerifiedCache::new(VERIFIED_TTL)),
             parses: Arc::new(ParseGate::default()),
+            in_flight: Arc::new(in_flight_gate()),
             batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
         }
     }
@@ -188,6 +202,11 @@ impl OpaState {
         self.batch_body_limit = bytes;
         self
     }
+}
+
+/// The production in-flight gate: [`OPA_MAX_IN_FLIGHT`] units, [`OPA_PARSE_WAIT`].
+pub fn in_flight_gate() -> ParseGate {
+    ParseGate::new(OPA_MAX_IN_FLIGHT, OPA_PARSE_WAIT)
 }
 
 /// `(engine, sha256(secret))`.
@@ -293,8 +312,10 @@ pub fn opa_route_paths() -> [String; 5] {
 }
 
 /// The routes, under [`OPA_SURFACE_PREFIX`]. `/batch` takes
-/// [`OpaState::batch_body_limit`], every other route [`OPA_BODY_LIMIT_BYTES`].
+/// [`OpaState::batch_body_limit`], every other route [`OPA_BODY_LIMIT_BYTES`];
+/// every route is admitted through [`bound_in_flight`] before its body is read.
 pub fn opa_surface(state: OpaState) -> axum::Router {
+    let in_flight = axum::middleware::from_fn_with_state(state.clone(), bound_in_flight);
     axum::Router::new()
         .route(&route_path(Route::Allow), post(allow))
         .route(
@@ -308,7 +329,45 @@ pub fn opa_surface(state: OpaState) -> axum::Router {
         )
         .route(&route_path(Route::ColumnMask), post(column_mask))
         .layer(DefaultBodyLimit::max(OPA_BODY_LIMIT_BYTES))
+        .route_layer(in_flight)
         .with_state(state)
+}
+
+/// Admits a request into [`OpaState::in_flight`] before anything reads its
+/// body (SP2b Task 20F, T10): the raw body is buffered before authentication,
+/// so the parse permits alone did not bound what unauthenticated callers make
+/// egret hold. A request reserves its declared `Content-Length` (capped at its
+/// route's limit, which refuses anything larger) or, declaring none, its
+/// route's whole limit. Without room within [`OPA_PARSE_WAIT`] it is answered
+/// 503 (the plugin fails the query) and its body is never read.
+async fn bound_in_flight(
+    State(state): State<OpaState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let route = Route::ALL
+        .into_iter()
+        .find(|r| req.uri().path() == route_path(*r))
+        .unwrap_or(Route::Allow);
+    let limit = match route {
+        Route::Batch => state.batch_body_limit,
+        _ => OPA_BODY_LIMIT_BYTES,
+    };
+    let declared = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok())
+        .map_or(limit, |n| n.min(limit));
+    let Some(_permit) = state.in_flight.acquire_for(declared).await else {
+        let who = Who {
+            route,
+            engine: None,
+            req: None,
+        };
+        return who.busy("too many requests in flight");
+    };
+    next.run(req).await
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

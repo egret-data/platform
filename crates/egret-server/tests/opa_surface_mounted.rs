@@ -19,7 +19,8 @@ use axum::http::Request;
 use egret_engine_mgmt_api::credential::{EngineCredentialVerifier, EngineIdentity};
 use egret_perm_compile::opa::cache::{SnapshotCache, MAX_UNREAD, REFRESH_PERIOD};
 use egret_perm_compile::opa::surface::{
-    ParseGate, VerifiedCache, OPA_BODY_LIMIT_BYTES, OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+    in_flight_gate, ParseGate, VerifiedCache, OPA_BODY_LIMIT_BYTES,
+    OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
 };
 use egret_perm_compile::{start_opa, OpaState, OPA_SURFACE_PREFIX};
 use egret_perm_eval::{Snapshot, SnapshotInput};
@@ -94,6 +95,7 @@ fn opa_state(verifier: Arc<dyn EngineCredentialVerifier>, engine: uuid::Uuid) ->
         verifier,
         credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
         parses: Arc::new(ParseGate::default()),
+        in_flight: Arc::new(in_flight_gate()),
         batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
     }
 }
