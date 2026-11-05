@@ -119,6 +119,11 @@ required-features = ["harness"]
 name = "opa_cache"
 required-features = ["harness"]
 
+# Governance SP2b Task 22 (T7 M1): the snapshot rebuild timing, `#[ignore]`d.
+[[test]]
+name = "opa_rebuild_timing"
+required-features = ["harness"]
+
 # Governance SP2b Task 18: the OPA decision-level differential against the
 # real Ranger engine (JVM; gated on EGRET_TEST_RANGER_E2E=1).
 [[test]]
