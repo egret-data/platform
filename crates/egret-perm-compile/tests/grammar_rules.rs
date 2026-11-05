@@ -897,9 +897,17 @@ fn a_mask_may_not_stop_above_the_column_or_skip_a_level() {
         .remove("column");
     assert_eq!(
         refused(&table_wide, EngineType::Trino),
-        vec![Blocker::MissingLevel {
+        vec![Blocker::MaskMissingLevel {
             level: "column".into()
         }]
+    );
+    // The operator reads what the policy does today and what to change.
+    let sentence = egret_perm_compile::classify::render_blocker(&Blocker::MaskMissingLevel {
+        level: "column".into(),
+    });
+    assert!(
+        sentence.contains("masks nothing") && sentence.contains("to `*` in the policy editor"),
+        "{sentence}"
     );
 
     let mut every_column = mask_policy(vec![everyone_mask("MASK_HASH")]);
@@ -929,7 +937,7 @@ fn a_mask_may_not_stop_above_the_column_or_skip_a_level() {
     gap["resources"].as_object_mut().unwrap().remove("schema");
     assert_eq!(
         refused(&gap, EngineType::Trino),
-        vec![Blocker::MissingLevel {
+        vec![Blocker::MaskMissingLevel {
             level: "schema".into()
         }]
     );

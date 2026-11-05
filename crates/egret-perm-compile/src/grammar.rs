@@ -160,6 +160,12 @@ pub enum Blocker {
     SecurityZone { zone: String },
     /// A level of the engine's hierarchy is absent (an absent level is not `*`).
     MissingLevel { level: String },
+    /// A MASKING policy's non-catalog level is absent. Its own variant because
+    /// the consequence and the remedy differ from an access policy's: every
+    /// `dataMaskDef` level is mandatory once Ranger merges the def, so such a
+    /// policy masks NOTHING today, while the rule it would become masks every
+    /// column below the path.
+    MaskMissingLevel { level: String },
     /// A resource key outside the engine's catalog/schema|database/table/column
     /// hierarchy.
     UnknownLevel { level: String },
@@ -746,8 +752,11 @@ fn scopes(
     // so accepting it would migrate an inert policy into one that masks.
     for (i, name) in names.iter().enumerate() {
         if absent[i] {
-            b.push(Blocker::MissingLevel {
-                level: (*name).to_string(),
+            let level = (*name).to_string();
+            b.push(if target == PolicyTarget::Mask && i > 0 {
+                Blocker::MaskMissingLevel { level }
+            } else {
+                Blocker::MissingLevel { level }
             });
         }
     }
@@ -945,7 +954,7 @@ fn actions(it: &PolicyItem, engine: EngineType, b: &mut Vec<Blocker>) -> Vec<Act
 /// - **Resources: as `scope_to_resources` renders them.** A mask always
 ///   renders all four levels (an unnamed one as `*`), so all four are required
 ///   — a mask body that stops above the column masks nothing on the plugin and
-///   is [`Blocker::MissingLevel`]; a row filter always renders catalog +
+///   is [`Blocker::MaskMissingLevel`]; a row filter always renders catalog +
 ///   schema|database + table, so all three are required and a `column` is
 ///   [`Blocker::UnknownLevel`]. Values are kept
 ///   verbatim, so a `*` above a named level is ACCEPTED here (product decision
