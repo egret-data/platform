@@ -154,6 +154,36 @@ pub(crate) fn level(value: String) -> ResourceLevel {
 /// [`scope_to_resources`] for why an ABSENT level is not the same thing.
 pub(crate) const WILDCARD: &str = "*";
 
+/// The schema (Trino) / database (StarRocks) every catalog carries for its own
+/// metadata. A catalog-scoped MASK excludes it ([`scope_to_resources`]),
+/// because both engines request column masks for its relations exactly as for
+/// a data table, and nothing in either plugin skips it:
+///
+/// * **Trino** (482, `trino/` at 280b81bbc4e): `StatementAnalyzer.visitTable`
+///   (`core/trino-main/.../sql/analyzer/StatementAnalyzer.java:2414`) calls
+///   `analyzeFiltersAndMasks` for every relation that is not a view or a
+///   materialized view, which calls `accessControl.getColumnMasks` (`:2498`);
+///   `AccessControlManager.getColumnMasks` (`security/AccessControlManager.java:1494-1510`)
+///   forwards to the system access control with no schema check, and the
+///   Ranger plugin's `getColumnMask` (`plugin/trino-ranger/.../RangerSystemAccessControl.java:804-806`)
+///   builds a `catalog/schema/table/column` request for whatever it is
+///   handed. `SHOW TABLES` / `SHOW COLUMNS` are rewritten into queries over
+///   `information_schema` (`sql/rewrite/ShowQueriesRewrite.java:472-484`).
+/// * **StarRocks** (4.1.7, `b81ff9cc`): an external catalog lists an
+///   `information_schema` database of its own
+///   (`connector/CatalogConnectorMetadata.java:109,123-124`); every relation
+///   of a statement is marked for policy rewrite (`qe/ConnectProcessor.java:664`),
+///   and `QueryAnalyzer` (`sql/analyzer/QueryAnalyzer.java:825`) calls
+///   `SecurityPolicyRewriteRule.buildView` → `getColumnMaskingPolicy`
+///   (`authorization/SecurityPolicyRewriteRule.java:57`,
+///   `ranger/starrocks/RangerStarRocksAccessController.java:451`) with no
+///   `information_schema` exception; the egret fork's patches add none.
+///
+/// `isExcludes` is legal on that level of both mask defs: `dataMaskDef`'s
+/// entry carries no `excludesSupported`, and `mergeResourceDef` keeps the
+/// access resource's `excludesSupported: true`.
+pub(crate) const INFORMATION_SCHEMA: &str = "information_schema";
+
 /// Which Ranger policy type a `resources` map is being rendered for. The
 /// three do not share one resource hierarchy: an ACCESS policy is matched
 /// against the full `catalog/schema/table/column` chain the service-def's
@@ -215,21 +245,47 @@ pub(crate) enum PolicyTarget {
 /// re-reads both service-defs and asserts the emitted map carries exactly the
 /// declared chain, so this cannot drift back.
 ///
-/// # A MASK or ROW_FILTER target keeps today's behaviour, deliberately
+/// # A MASK target fills unnamed levels with `*` too, down to the column
 ///
-/// The same live gate measured both of these paths WORKING as they are
-/// emitted today: T3b masked a column for real (`item` came back as `xxxx`)
-/// and T4 removed rows for real (4 → 2, and the excluded rows probed absent),
-/// both from a path selector that named every level down to its own target.
-/// Nothing measured says a masking or row-filter policy needs — or tolerates
-/// — a `*` at an unnamed level, and the design spec's own reading of Ranger
-/// (§1, "masking and row-filter policies take no wildcards and no
-/// multi-values": one column per policy item, items ordered, first match
-/// wins) says the opposite. Widening them here would be swapping one
-/// unverified assumption for another, in the direction that grants MORE than
-/// the model states. The fix is applied exactly where the measurement demands
-/// it and nowhere else; if a mask scoped above column level is ever wanted,
-/// it needs its own live measurement first.
+/// This section used to say the opposite: that a mask "renders only the levels
+/// its scope names", on the strength of the live gate measuring T3b (a mask
+/// that named every level down to its column) working. That measurement never
+/// covered a mask scoped ABOVE the column — and that is the shape the product
+/// makes the default: a table's Rules tab seeds a table-path mask with the
+/// column left empty, a catalog or schema tab seeds one on that path, and the
+/// dialog says "Leave Column empty to mask every column of the table". Such a
+/// mask compiled to a body with no `column` resource (and, above the table, no
+/// `table` or `schema` either), and **the real Ranger engine masks nothing for
+/// it**: `dataMaskDef.resources` declares `catalog`, `schema`|`database`,
+/// `table` and `column` on both engines, and Ranger's
+/// `ServiceDefUtil.normalizeDataMaskDef` merges each entry onto the access
+/// resource of the same name — which keeps the access def's
+/// `"mandatory": true` on all four and clears `isValidLeaf`, so the only mask
+/// hierarchy is the full four-level chain. A body missing any of those levels
+/// matches no column request. (`mergeResourceDef` starts from a copy of the
+/// access resource and overwrites `mandatory` only when the `dataMaskDef`
+/// entry itself says `true`; the entries carry no `mandatory` at all.)
+/// Measured on the real 2.8.0 and 2.9.0 jars, before and after, by
+/// `egret-ranger-eval`'s
+/// `a_path_mask_naming_no_column_masks_every_column_beneath_it_on_the_real_jars`.
+///
+/// So a mask now renders the same `wildcard_from_here` chain as an access
+/// policy: a table-path mask is `column: *`, a schema-path mask is
+/// `table: *, column: *`, a catalog-path mask `*` at every level below the
+/// catalog. `*` is legal in a masking policy — `dataMaskDef` declares
+/// `wildCard: true` at every level, and the clearance fold's whole-table
+/// wildcard mask is measured on the same jars. `tests/compile_rules.rs`'
+/// `the_mask_resource_map_matches_what_the_service_def_declares` re-reads both
+/// service-defs and pins this.
+///
+/// One exception: a CATALOG-scoped mask's schema level is
+/// `{values: ["information_schema"], isExcludes: true}` rather than `*`, so the
+/// mask does not reach the catalog's own metadata relations — see
+/// [`INFORMATION_SCHEMA`] for the engine source that requests masks there.
+///
+/// A level the scope NAMES is still copied verbatim (a `*` an author typed
+/// above a named level stays a `*`, product decision 2026-10-10), so this
+/// changes nothing for a mask that names its column.
 pub(crate) fn scope_to_resources(
     scope: &Scope,
     catalog_name: &str,
@@ -246,9 +302,12 @@ pub(crate) fn scope_to_resources(
 
     let mut map = BTreeMap::new();
     match target {
-        PolicyTarget::Access => {
+        PolicyTarget::Access | PolicyTarget::Mask => {
             // Once a level is unnamed every level below it is unnamed too:
             // `*` from there down, never a named leaf hanging under a gap.
+            // For a mask this is what makes "column left empty" mean "every
+            // column": `dataMaskDef` makes all four levels mandatory, so an
+            // omitted level matched no column at all (see the doc above).
             let mut wildcard_from_here = false;
             for (i, name) in names.iter().enumerate() {
                 let value = match named[i] {
@@ -260,12 +319,21 @@ pub(crate) fn scope_to_resources(
                 };
                 map.insert((*name).to_string(), level(value));
             }
-        }
-        PolicyTarget::Mask => {
-            for (i, name) in names.iter().enumerate() {
-                if let Some(v) = named[i] {
-                    map.insert((*name).to_string(), level(v.to_string()));
-                }
+            // A CATALOG-scoped mask must not reach the catalog's
+            // `information_schema`: both engines ask the plugin for column
+            // masks on it like on any table (see [`INFORMATION_SCHEMA`]), so
+            // `schema: *` would hash the names `SHOW TABLES`, `SHOW COLUMNS`,
+            // `DESCRIBE` and every JDBC metadata call return. Its schema level
+            // is "every schema except `information_schema`" instead.
+            if target == PolicyTarget::Mask && named[1].is_none() {
+                map.insert(
+                    names[1].to_string(),
+                    ResourceLevel {
+                        values: vec![INFORMATION_SCHEMA.to_string()],
+                        is_excludes: true,
+                        is_recursive: false,
+                    },
+                );
             }
         }
         PolicyTarget::RowFilter => {
@@ -276,10 +344,10 @@ pub(crate) fn scope_to_resources(
             // and declares no `column` at all — re-read from both service-def
             // files by `tests/compile_rules.rs`'s
             // `the_row_filter_resource_map_matches_what_the_service_def_declares`,
-            // not taken from this comment. So neither of the two things the
-            // `Mask` arm above does is legal here: emitting a `column` adds a
-            // resource the def cannot match, and omitting an unnamed `schema`
-            // or `table` drops a level the def marks mandatory. Both compile,
+            // not taken from this comment. So emitting a `column` (as the
+            // `Access | Mask` arm above does) adds a resource the def cannot
+            // match, and omitting an unnamed `schema` or `table` drops a level
+            // the def marks mandatory. Both compile,
             // deploy and are listed live, and both filter NOTHING — every row
             // comes back, on a control whose whole purpose is to withhold
             // rows.

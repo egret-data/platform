@@ -2965,6 +2965,51 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             }
         });
     }
+    // fix/ranger-table-mask-column: a path mask that names no column (a whole
+    // table, schema or catalog) used to compile without a `column` resource and
+    // masked nothing on Ranger; the compiler now renders it as `*`. Recompile
+    // the profiles such rules reach so they serve the fixed artifact without
+    // waiting for an unrelated write. One transaction per profile, idempotent;
+    // a refusal is logged and recorded, and the next boot retries.
+    {
+        let pool = db.pool.clone();
+        tokio::spawn(async move {
+            match egret_perm_compile::recompile_path_mask_profiles(&pool).await {
+                Ok(r) => {
+                    tracing::info!(
+                        compiled = r.compiled.len(),
+                        refused = r.refused.len(),
+                        failed = r.failed.len(),
+                        "profiles with whole-table, schema or catalog masks compiled at boot"
+                    );
+                    if !r.failed.is_empty() {
+                        tracing::error!(
+                            failed = r.failed.len(),
+                            profiles = ?r.failed.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                            "the boot recompile of profiles with whole-table, schema or catalog \
+                             masks FAILED for some profiles: their masks stay inert until it \
+                             succeeds; the next boot retries"
+                        );
+                    }
+                    if !r.refused.is_empty() {
+                        tracing::error!(
+                            refused = r.refused.len(),
+                            profiles = ?r.refused.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                            "the boot recompile of profiles with whole-table, schema or catalog \
+                             masks was REFUSED for some profiles: their masks stay inert and \
+                             every write that recompiles them is refused until a steward \
+                             resolves the overlapping rules (Governance overview, or GET \
+                             /api/control-plane/perm/overlaps)"
+                        );
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "the boot compile of whole-table, schema or catalog masks did not run"
+                ),
+            }
+        });
+    }
     // Migration 0207 renamed classifications that shared a name; their
     // compiled tag policies still name the old one until this recompiles them
     // (see `TagRepo::recompile_queued_renames`). Off the boot path: until it

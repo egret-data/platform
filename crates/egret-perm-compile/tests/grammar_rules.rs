@@ -881,31 +881,127 @@ fn a_tag_resource_names_one_tag_and_nothing_else() {
 
 // ── Levels ─────────────────────────────────────────────────────────────────
 
-/// The missing-level answer for rules: a MASK renders only the levels its
-/// scope names, so an absent TRAILING level is exactly `None` and is accepted
-/// (unlike a grant, whose compiler always emits all four). A gap above a
-/// named level is still refused — `Scope` cannot skip a level.
+/// The missing-level answer for rules: a MASK now renders all four levels
+/// (an unnamed one as `*`), so an absent level is refused like a grant's. A
+/// hand-written mask that stops above the column masks NOTHING on the plugin
+/// (every `dataMaskDef` level is mandatory once Ranger merges it onto the
+/// access def) — accepting it would migrate an inert policy into a rule that
+/// masks every column. The same body WITH `column: *` is accepted, and
+/// compiles back to exactly itself. A gap above a named level is refused too.
 #[test]
-fn a_mask_may_stop_above_the_column_but_may_not_skip_a_level() {
+fn a_mask_may_not_stop_above_the_column_or_skip_a_level() {
     let mut table_wide = mask_policy(vec![everyone_mask("MASK_HASH")]);
     table_wide["resources"]
         .as_object_mut()
         .unwrap()
         .remove("column");
-    let got = accept(&table_wide, EngineType::Trino);
+    assert_eq!(
+        refused(&table_wide, EngineType::Trino),
+        vec![Blocker::MaskMissingLevel {
+            level: "column".into(),
+            named_below: None,
+        }]
+    );
+    // The operator reads what the policy does today and what to change.
+    let sentence = egret_perm_compile::classify::render_blocker(&Blocker::MaskMissingLevel {
+        level: "column".into(),
+        named_below: None,
+    });
+    assert!(
+        sentence.contains("masks nothing") && sentence.contains("to `*` in the policy editor"),
+        "{sentence}"
+    );
+
+    let mut every_column = mask_policy(vec![everyone_mask("MASK_HASH")]);
+    every_column["resources"]["column"] = level(&["*"]);
+    let got = accept(&every_column, EngineType::Trino);
     let Selector::Path(scope) = &got.rules[0].selector else {
         panic!()
     };
     assert_eq!(scope.table.as_deref(), Some("orders"));
-    assert_eq!(scope.column, None);
+    assert_eq!(scope.column.as_deref(), Some("*"));
+    let back = compile_rule(
+        &got.rules[0],
+        EngineType::Trino,
+        "svc",
+        None,
+        &ResolvedNames {
+            catalog_name: "wh",
+            tag_name: None,
+        },
+        &[],
+        100,
+    )
+    .expect("a whole-table mask compiles");
+    assert_eq!(back[0]["resources"], every_column["resources"]);
 
     let mut gap = mask_policy(vec![everyone_mask("MASK_HASH")]);
     gap["resources"].as_object_mut().unwrap().remove("schema");
     assert_eq!(
         refused(&gap, EngineType::Trino),
-        vec![Blocker::MissingLevel {
-            level: "schema".into()
+        vec![Blocker::MaskMissingLevel {
+            level: "schema".into(),
+            named_below: Some("table".into()),
         }]
+    );
+    // A GAP must never be advised away by widening what the policy names:
+    // name the missing level, or set only it to `*`.
+    let sentence =
+        egret_perm_compile::classify::render_blocker(&refused(&gap, EngineType::Trino)[0]);
+    assert!(
+        sentence.contains("names `table` but no `schema`")
+            && sentence.contains("set only `schema` to `*`")
+            && !sentence.contains("every level under it"),
+        "{sentence}"
+    );
+    // Every gap shape names the level below it: no table under a named
+    // schema and column, and both middle levels missing above a column.
+    let mut no_table = mask_policy(vec![everyone_mask("MASK_HASH")]);
+    no_table["resources"]
+        .as_object_mut()
+        .unwrap()
+        .remove("table");
+    assert_eq!(
+        refused(&no_table, EngineType::Trino),
+        vec![Blocker::MaskMissingLevel {
+            level: "table".into(),
+            named_below: Some("column".into()),
+        }]
+    );
+    let mut only_column = mask_policy(vec![everyone_mask("MASK_HASH")]);
+    let r = only_column["resources"].as_object_mut().unwrap();
+    r.remove("schema");
+    r.remove("table");
+    assert_eq!(
+        refused(&only_column, EngineType::Trino),
+        vec![
+            Blocker::MaskMissingLevel {
+                level: "schema".into(),
+                named_below: Some("column".into()),
+            },
+            Blocker::MaskMissingLevel {
+                level: "table".into(),
+                named_below: Some("column".into()),
+            },
+        ]
+    );
+    // A trailing run (stops at schema) keeps the "every level under it" advice.
+    let mut schema_wide = mask_policy(vec![everyone_mask("MASK_HASH")]);
+    let r = schema_wide["resources"].as_object_mut().unwrap();
+    r.remove("table");
+    r.remove("column");
+    assert_eq!(
+        refused(&schema_wide, EngineType::Trino),
+        vec![
+            Blocker::MaskMissingLevel {
+                level: "table".into(),
+                named_below: None,
+            },
+            Blocker::MaskMissingLevel {
+                level: "column".into(),
+                named_below: None,
+            },
+        ]
     );
     let mut no_catalog = mask_policy(vec![everyone_mask("MASK_HASH")]);
     no_catalog["resources"]
@@ -1097,11 +1193,11 @@ fn every_blocker_is_collected_not_just_the_first() {
 fn every_accepted_body_compiles_back_to_what_it_came_from() {
     // (The `*`-above-a-named-level shape is compiled back in
     // `a_wildcard_above_a_named_level_is_accepted_on_a_rule_and_refused_on_a_grant`.)
+    // A whole-table mask names `column: *`: one that OMITS the column masks
+    // nothing on the plugin and is refused
+    // (`a_mask_may_not_stop_above_the_column_or_skip_a_level`).
     let mut table_wide = mask_policy(vec![everyone_mask("MASK_NULL")]);
-    table_wide["resources"]
-        .as_object_mut()
-        .unwrap()
-        .remove("column");
+    table_wide["resources"]["column"] = level(&["*"]);
     let mut custom = mask_policy(vec![everyone_mask("CUSTOM")]);
     set(
         &mut custom,
