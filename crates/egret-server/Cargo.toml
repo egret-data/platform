@@ -82,3 +82,11 @@ egret-test-db.workspace = true
 # hand (with a `MemStore` test-only fixture), mirroring `egret-apps`'s own HTTP
 # tests. The `test-util` feature enables `egret_storage::MemStore`.
 egret-storage = { workspace = true, features = ["test-util"] }
+# Governance SP2b Task 10: `opa_surface_mounted.rs` drives the composed router's
+# OPA surface with a stub `EngineCredentialVerifier` and a hand-built evaluator
+# snapshot, and once through the real `DbVerifier` with a minted credential
+# (which needs the secret store).
+egret-engine-mgmt-api.workspace = true
+egret-perm-eval.workspace = true
+egret-perm-ir.workspace = true
+egret-secrets.workspace = true

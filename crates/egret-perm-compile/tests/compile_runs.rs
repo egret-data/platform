@@ -85,6 +85,7 @@ async fn env() -> Option<Env> {
         .expect("session")
         .token;
     let app = perm_router().with_state(PermState {
+        opa_cache: None,
         perm: perm.clone(),
         policy: policy.clone(),
         sessions,

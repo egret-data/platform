@@ -306,3 +306,43 @@ async fn the_loader_reads_the_ep_as_the_compiler_does() {
     assert!(l.ep.catalogs.contains_key(&f.catalog_id));
     assert_eq!(l.sweep.len(), 2, "profile plus tag service");
 }
+
+/// Governance SP2b Task 5: `load_ep` reads the profile's mechanism (migration
+/// 0213) into `EpInput.kind.mechanism`, rather than naming Ranger itself.
+#[cfg(feature = "harness")]
+#[tokio::test]
+async fn the_loader_reads_the_profiles_mechanism() {
+    use egret_perm_ir::ep::Mechanism;
+    let Some(db) = test_db().await else { return };
+    let f = trino_fixture(&db).await;
+    let mut conn = db.pool.acquire().await.unwrap();
+    assert_eq!(
+        loaded_mechanism(&mut conn, f.service_id).await,
+        Mechanism::Ranger,
+        "the default"
+    );
+    sqlx::query("UPDATE policy.authz_services SET mechanism = 'opa' WHERE id = $1")
+        .bind(f.service_id)
+        .execute(&mut *conn)
+        .await
+        .expect("switch to opa");
+    assert_eq!(
+        loaded_mechanism(&mut conn, f.service_id).await,
+        Mechanism::Opa,
+        "an opa profile loads as Mechanism::Opa"
+    );
+}
+
+#[cfg(feature = "harness")]
+async fn loaded_mechanism(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> egret_perm_ir::ep::Mechanism {
+    egret_perm_compile::harness_support::load_ep_for_test(conn, service_id)
+        .await
+        .unwrap()
+        .expect("a trino profile")
+        .ep
+        .kind
+        .mechanism
+}

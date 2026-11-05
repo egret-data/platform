@@ -23,6 +23,13 @@ egret-audit.workspace = true
 # same hierarchy, so the walker lives in the pure evaluator crate and this one
 # calls it.
 egret-ranger-eval.workspace = true
+# Governance SP2b Task 11: which engine image ships Trino's OPA plugin
+# (`egret_perm::ships_opa_plugin`), the one exact-image table. `egret-perm`
+# carries no `egret-policy` dependency, so no cycle.
+egret-perm.workspace = true
+# SP2b Task 18: `lineage_transform` keeps what `egret_perm_ir::lineage` says, the
+# one source the OPA evaluator reads too. A pure crate; no cycle.
+egret-perm-ir.workspace = true
 async-trait.workspace = true
 # HTTP Basic decoding of engine plugin credentials on the Ranger surface.
 base64.workspace = true

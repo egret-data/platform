@@ -57,6 +57,13 @@ impl egret_policy::ProfileRecompiler for NoRecompile {
     ) -> Result<(), egret_policy::PolicyHttpError> {
         Ok(())
     }
+    async fn stored_overlaps_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+        _service_id: i64,
+    ) -> Result<Vec<String>, egret_policy::PolicyHttpError> {
+        Ok(vec![])
+    }
 }
 
 struct Fixture {
@@ -130,6 +137,8 @@ async fn setup() -> Option<Fixture> {
         engine_egret_url: "http://egret:8080".into(),
         pdp,
         recompiler: Arc::new(NoRecompile),
+        reconfigurer: std::sync::Arc::new(egret_policy::NoReconfigure),
+        opa_enabled: false,
     });
     Some(Fixture {
         db,

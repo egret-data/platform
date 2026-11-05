@@ -7,6 +7,7 @@
 //! 2 = row-filter (`rowFilterPolicyItems`).
 
 mod error;
+pub mod mechanism;
 mod ranger_json;
 mod reader;
 
@@ -97,6 +98,13 @@ pub struct PolicyAdminState {
     /// of its data masks (final review I-3). Not optional: an editor without
     /// it would leave the clearance-mask fold stale.
     pub recompiler: Arc<dyn ProfileRecompiler>,
+    /// Re-applies a profile's bound egret-provisioned engines after its
+    /// mechanism is set (governance SP2b Task 12;
+    /// [`mechanism::NoReconfigure`] until the engine seam provides one).
+    pub reconfigurer: Arc<dyn mechanism::ProfileEngineReconfigurer>,
+    /// `[governance.opa] enabled`: while false, the switch to OPA is refused
+    /// (switching back to Ranger never is).
+    pub opa_enabled: bool,
 }
 
 /// Recompiles policy profiles on the caller's open transaction — the seam
@@ -121,6 +129,17 @@ pub trait ProfileRecompiler: Send + Sync {
         tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
         service_ids: &[i64],
     ) -> Result<(), PolicyHttpError>;
+
+    /// The mask/row-filter pairs already stored in profile `service_id`'s
+    /// download whose winner the compiled artifact does not express, one
+    /// `"{kind} on {coordinate}: {rule names joined by ', '}"` each — the
+    /// same pairs the OPA snapshot refresher refuses to build over. The switch
+    /// to OPA refuses while any remain ([`mechanism::opa_switch_check`]).
+    async fn stored_overlaps_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+        service_id: i64,
+    ) -> Result<Vec<String>, PolicyHttpError>;
 }
 
 /// Whether a write to `body` under `service_id` changes what a StarRocks
@@ -476,6 +495,9 @@ pub struct ProfileDto {
     /// field the editor cannot tell an operator which half they are looking
     /// at, and the first thing they learn is the 409 on save.
     pub origin: String,
+    /// How the profile's engines are asked: `"ranger"` or `"opa"` (Trino only;
+    /// migration 0213).
+    pub mechanism: String,
     /// Policies by owner, the profile's own plus its `tag_service`'s (DG #4a
     /// Q1): `compiler` (egret-compiled), `infra` (egret-seeded), `operator`
     /// (hand-written). `policy_count` stays the profile's own total.
@@ -521,7 +543,7 @@ pub fn router() -> Router<PolicyAdminState> {
         )
         .route(
             "/policies/services/{service}",
-            axum::routing::delete(delete_profile),
+            axum::routing::delete(delete_profile).patch(mechanism::set_mechanism),
         )
         .route(
             "/policies/services/{service}/trino-config",
@@ -865,6 +887,7 @@ async fn list_profiles(
                 policy_version: s.policy_version,
                 tag_service,
                 origin: s.origin,
+                mechanism: s.mechanism,
             }
         })
         .collect();
@@ -1016,6 +1039,10 @@ pub struct TrinoConfigResponse {
     /// configuration gives (`egret_engine_mgmt_api::ranger_config::download_url_warning`):
     /// a loopback or unparseable URL no engine can reach. Empty when none.
     pub warnings: Vec<String>,
+    /// `"ranger"` or `"opa"`: which plugin the files configure. An OPA
+    /// profile's files are the plugin selector and the context file that
+    /// carries the engine id and secret (both shown as placeholders).
+    pub mechanism: String,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -1138,7 +1165,7 @@ async fn set_tag_service(
     tag = "policy-admin",
     params(("service" = String, Path, description = "Policy profile (Ranger service) name")),
     responses(
-        (status = 200, description = "The Trino coordinator config files for this profile's native ranger plugin, from the same renderer that writes the files egret mounts into its own engines (`access-control.properties` and `ranger-trino-security.xml`), and `warnings`: the same download-URL warning as the external engine's plugin configuration (a loopback or unparseable `[catalog] public_url`). Since SP4d-4 the security file also carries the policy source, cache directory and client timeouts, the properties file points at `/etc/trino/ranger-trino-security.xml`, and the poll interval is 30000 ms. Before KI-149 the body was the bare array of files", body = TrinoConfigResponse),
+        (status = 200, description = "The Trino coordinator config files for this profile's native ranger plugin (for a profile whose `mechanism` is `opa`: the OPA plugin's `access-control.properties` and `egret-opa-context.properties`, with the engine id and secret as placeholders, and `warnings` adding the log-requests warning and the Trino 483 note), from the same renderer that writes the files egret mounts into its own engines (`access-control.properties` and `ranger-trino-security.xml`), and `warnings`: the same download-URL warning as the external engine's plugin configuration (a loopback or unparseable `[catalog] public_url`). Since SP4d-4 the security file also carries the policy source, cache directory and client timeouts, the properties file points at `/etc/trino/ranger-trino-security.xml`, and the poll interval is 30000 ms. Before KI-149 the body was the bare array of files", body = TrinoConfigResponse),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read permission", body = ErrorBody),
         (status = 404, description = "No such policy profile", body = ErrorBody),
@@ -1151,25 +1178,42 @@ async fn trino_config(
     Path(service): Path<String>,
 ) -> Result<Json<TrinoConfigResponse>, PolicyHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
-    let _ = st.store.get_service(&service).await?; // 404 if the profile doesn't exist
+    let profile = st.store.get_service(&service).await?; // 404 if the profile doesn't exist
+    let opa = profile.mechanism == "opa";
 
     // ONE renderer: the same code that writes the files egret mounts into its own
     // engines (SP4d-4 Task 9). The poll interval is the one shared constant.
-    let rendered = egret_engine_mgmt_api::ranger_config::ranger_plugin_files(
-        egret_engine_mgmt_api::EngineKind::Trino,
-        &service,
-        &st.engine_egret_url,
-        egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS.into(),
-        None,
-    );
+    let rendered = if opa {
+        egret_engine_mgmt_api::opa_config::opa_plugin_files(
+            egret_engine_mgmt_api::opa_config::PLACEHOLDER_ENGINE_ID,
+            &st.engine_egret_url,
+            egret_engine_mgmt_api::ranger_config::PASSWORD_PLACEHOLDER,
+        )
+        .map_err(|e| PolicyHttpError::BadRequest(e.to_string()))?
+    } else {
+        egret_engine_mgmt_api::ranger_config::ranger_plugin_files(
+            egret_engine_mgmt_api::EngineKind::Trino,
+            &service,
+            &st.engine_egret_url,
+            egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS.into(),
+            None,
+        )
+    };
+    let mut warnings: Vec<String> =
+        egret_engine_mgmt_api::ranger_config::download_url_warning(&st.engine_egret_url)
+            .into_iter()
+            .collect();
+    if opa {
+        warnings.push(egret_engine_mgmt_api::opa_config::OPA_LOG_REQUESTS_WARNING.to_string());
+        warnings.push(egret_engine_mgmt_api::opa_config::OPA_EXTERNAL_ENGINE_NOTE.to_string());
+    }
     Ok(Json(TrinoConfigResponse {
+        mechanism: profile.mechanism,
+        warnings,
         files: rendered
             .files
             .into_iter()
             .map(|(name, content)| ConfigFile { name, content })
-            .collect(),
-        warnings: egret_engine_mgmt_api::ranger_config::download_url_warning(&st.engine_egret_url)
-            .into_iter()
             .collect(),
     }))
 }
@@ -2308,6 +2352,7 @@ async fn set_policy_enabled(
         list_profiles,
         create_profile,
         delete_profile,
+        mechanism::set_mechanism,
         trino_config,
         set_tag_service,
         seed_defaults,
@@ -2326,6 +2371,9 @@ async fn set_policy_enabled(
         TrinoConfigResponse,
         SetTagServiceBody,
         ProfileTagService,
+        mechanism::SetMechanismBody,
+        mechanism::ProfileMechanism,
+        mechanism::MechanismName,
         Principal,
         EnabledBody,
         CreatedPolicyId,

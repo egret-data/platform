@@ -175,6 +175,117 @@ pub(crate) fn effect_lines(input: &EffectInput<'_>) -> Vec<ExplainEffectLine> {
     }
 }
 
+/// An OPA profile's lines (governance SP2b Task 16), from the IR evaluator's
+/// verdicts and values on `profile` and nothing else:
+///
+/// - one `access` line per access, `allowed` or `refused`, reading
+///   `"{subject} {is|is not} allowed to {access_type} {target}: {ir_reason}"`;
+/// - for a `read` every access allows, the column line (`masked`, with the
+///   expression as code, or `real_value`) when a column is named, and the
+///   rows line (`filtered`, with the filter as code, or `all_rows`) when a
+///   table is. A refused read gets neither, as on the Ranger path.
+pub fn opa_effect_lines(
+    subject: &str,
+    action: Action,
+    target: &Scope,
+    profile: &ExplainProfile,
+) -> Vec<ExplainEffectLine> {
+    let object = [
+        target.schema.as_deref(),
+        target.table.as_deref(),
+        target.column.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(".");
+    let object = if object.is_empty() {
+        "the catalog".to_string()
+    } else {
+        object
+    };
+    let mut lines = Vec::new();
+    let mut all_allowed = true;
+    for a in &profile.accesses {
+        let allowed = matches!(a.decision, WireDecision::Allowed { .. });
+        all_allowed &= allowed;
+        let mut l = Line::default();
+        l.push(EffectPart::Subject {
+            text: subject.to_string(),
+        });
+        l.text(" is ");
+        l.strong(if allowed { "allowed" } else { "not allowed" });
+        l.text(format!(" to {} ", a.access_type));
+        l.code(object.clone());
+        l.text(format!(": {}", a.ir_reason.as_deref().unwrap_or_default()));
+        lines.push(l.finish(
+            EffectAbout::Access,
+            if allowed {
+                EffectOutcome::Allowed
+            } else {
+                EffectOutcome::Refused
+            },
+        ));
+    }
+    let Some(opa) = profile.opa.as_ref() else {
+        return lines;
+    };
+    if action != Action::Read || !all_allowed {
+        return lines;
+    }
+    if let Some(column) = &target.column {
+        let mut l = Line::default();
+        l.push(EffectPart::Subject {
+            text: subject.to_string(),
+        });
+        let outcome = match (&opa.column_mask_type, &opa.column_mask) {
+            (Some(mask_type), Some(expr)) => {
+                l.text(" sees ");
+                l.code(column.clone());
+                l.text(" ");
+                l.strong(format!("masked by {mask_type}"));
+                l.text(": ");
+                l.code(expr.clone());
+                EffectOutcome::Masked
+            }
+            _ => {
+                l.text(" sees the ");
+                l.strong("real value");
+                l.text(" of ");
+                l.code(column.clone());
+                EffectOutcome::RealValue
+            }
+        };
+        lines.push(l.finish(EffectAbout::Column, outcome));
+    }
+    if let Some(table) = &target.table {
+        let mut l = Line::default();
+        l.push(EffectPart::Subject {
+            text: subject.to_string(),
+        });
+        let outcome = match &opa.row_filter {
+            Some(filter) => {
+                l.text(" sees ");
+                l.strong("only the rows");
+                l.text(" of ");
+                l.code(table.clone());
+                l.text(" where ");
+                l.code(filter.clone());
+                EffectOutcome::Filtered
+            }
+            None => {
+                l.text(" sees ");
+                l.strong("every row");
+                l.text(" of ");
+                l.code(table.clone());
+                EffectOutcome::AllRows
+            }
+        };
+        lines.push(l.finish(EffectAbout::Rows, outcome));
+    }
+    lines
+}
+
 /// C5: the line for `no_profile_serves_the_catalog`.
 pub(crate) fn not_enforced_line(
     catalog_id: Uuid,
@@ -1030,6 +1141,8 @@ mod tests {
             service_id: 1,
             service_name: "p".into(),
             engine,
+            mechanism: crate::explain_wire::WireMechanism::Ranger,
+            opa: None,
             accesses: vec![allowed()],
             tags: Vec::new(),
             tag_policies_in_download: 0,
@@ -1050,6 +1163,7 @@ mod tests {
                 policy_name: "perm-grant-x".into(),
             },
             attribution: None,
+            ir_reason: None,
         }
     }
 
@@ -1066,6 +1180,7 @@ mod tests {
                 reason,
             },
             attribution,
+            ir_reason: None,
         }
     }
 

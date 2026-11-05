@@ -9,6 +9,7 @@ pub mod default_policies;
 pub mod error;
 // View governance R5 (Task 7 fix round 1): the `egret-lineage` download transform.
 pub mod lineage_transform;
+pub mod opa_guard;
 mod plugin_downloads;
 mod port_impl;
 pub mod ranger;
@@ -16,6 +17,10 @@ pub mod service_def;
 pub mod store;
 pub mod unit_overlap;
 pub mod unreadable_table_mask;
+pub use admin::mechanism::{
+    opa_switch_check, MechanismName, NoReconfigure, ProfileEngineReconfigurer, ProfileMechanism,
+    ReconfigureReport, SetMechanismBody, SwitchCheck, SwitchRefusal,
+};
 pub use admin::{
     policy_admin_router, EngineBinding, EngineBindingReader, EngineReadError, PolicyAdminState,
     PolicyHttpError, ProfileRecompiler,

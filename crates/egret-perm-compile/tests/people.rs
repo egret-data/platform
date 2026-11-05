@@ -158,6 +158,7 @@ async fn env() -> Option<Env> {
             .expect("build CedarPdp"),
     );
     let app = perm_router().with_state(PermState {
+        opa_cache: None,
         perm: PermStore::new(db.pool.clone()),
         policy: PolicyStore::new(db.clone()),
         sessions,

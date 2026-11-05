@@ -8,7 +8,7 @@ pub mod infra_bodies;
 pub mod infra_names;
 pub mod port;
 
-pub use dto::{PolicyService, ServicePolicies, ServiceTags, TagAssignment};
+pub use dto::{PolicyService, ReconfigureReport, ServicePolicies, ServiceTags, TagAssignment};
 pub use port::{PolicyError, PolicyPort};
 
 /// The `policy.authz_services.config_jsonb` key linking a resource profile to the

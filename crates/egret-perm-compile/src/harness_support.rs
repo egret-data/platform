@@ -140,10 +140,39 @@ pub async fn load_ep_for_test(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
 ) -> Result<Option<LoadedForTest>, CompileError> {
-    Ok(crate::ir_load::load_ep(conn, service_id)
-        .await?
-        .map(|l| LoadedForTest {
-            ep: l.ep,
-            sweep: l.sweep,
-        }))
+    Ok(
+        crate::ir_load::load_ep(conn, service_id, crate::members::MissingUsername::Mint)
+            .await?
+            .map(|l| LoadedForTest {
+                ep: l.ep,
+                sweep: l.sweep,
+            }),
+    )
+}
+
+/// The OPA snapshot of `service_id` as the refresher builds it: lowered with
+/// `MissingUsername::Omit`, so nothing is minted (governance SP2b Task 6).
+pub async fn build_snapshot_for_test(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<Option<egret_perm_eval::Snapshot>, CompileError> {
+    crate::opa::build::build_snapshot_via(conn, service_id, crate::members::MissingUsername::Omit)
+        .await
+}
+
+/// The policy download `routes::served_artifact_via` evaluates for explain, as
+/// the JSON the plugin receives: `tagPolicies` included, and the lineage
+/// transform applied when the profile's first engine is eligible (governance
+/// SP2b Task 18, the OPA differential's Ranger side).
+pub async fn served_artifact_json_via(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<Value, CompileError> {
+    let svc = egret_policy::get_service_by_id_via(conn, service_id)
+        .await
+        .map_err(crate::db_error::from_store)?;
+    let envelope = crate::routes::served_envelope_via(conn, &svc)
+        .await
+        .map_err(|e| CompileError::Db(format!("served artifact: {e}")))?;
+    serde_json::to_value(&envelope).map_err(|e| CompileError::Db(format!("served artifact: {e}")))
 }

@@ -68,6 +68,7 @@ pub(crate) struct Loaded {
 pub(crate) async fn load_ep(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
+    missing: crate::members::MissingUsername,
 ) -> Result<Option<Loaded>, CompileError> {
     let svc = get_service_by_id_via(conn, service_id)
         .await
@@ -155,15 +156,24 @@ pub(crate) async fn load_ep(
     let engine_grants = list_engine_grants_for_profile_via(conn, service_id)
         .await
         .map_err(CompileError::from_perm)?;
-    let directory =
-        crate::members::expand_enumerated_principals(conn, &grants, &rules, &engine_grants).await?;
+    let directory = crate::members::expand_enumerated_principals(
+        conn,
+        &grants,
+        &rules,
+        &engine_grants,
+        missing,
+    )
+    .await?;
 
     let ep = EpInput {
         profile_id: service_id,
         profile_name: svc.name.clone(),
         kind: EpKind {
             engine,
-            mechanism: Mechanism::Ranger,
+            mechanism: match svc.mechanism.as_str() {
+                "opa" => Mechanism::Opa,
+                _ => Mechanism::Ranger,
+            },
         },
         engines: Vec::new(),
         default_version: Err(NOT_READ.to_string()),
@@ -352,7 +362,7 @@ struct GateRow {
 /// 1. every `classification_policies` row joined to its tag, by `tag_id`
 ///    (no gate: nothing else is read);
 /// 2. the holders of every role any gate names, in one query, a holder with
-///    no username minted (`MissingUsername::Mint`, 2026-10-18 design R5, R6:
+///    no username minted under `MissingUsername::Mint` (2026-10-18 design R5, R6:
 ///    a clearing-role holder is excepted now, not after the recompile that
 ///    follows their first query). This runs after the model expansion's
 ///    mints ([`load_ep`]), as it always has;
@@ -369,6 +379,7 @@ pub(crate) async fn load_withhold_inputs(
     conn: &mut sqlx::PgConnection,
     ep: &EpInput,
     service_id: i64,
+    missing: crate::members::MissingUsername,
 ) -> Result<Vec<Gate>, CompileError> {
     use egret_ranger_eval::resource::fold_identifier as fold;
 
@@ -393,9 +404,7 @@ pub(crate) async fn load_withhold_inputs(
         .collect::<std::collections::BTreeSet<String>>()
         .into_iter()
         .collect();
-    let members =
-        crate::members::role_usernames(conn, &wanted, crate::members::MissingUsername::Mint)
-            .await?;
+    let members = crate::members::role_usernames(conn, &wanted, missing).await?;
 
     let mut gates: Vec<Gate> = Vec::with_capacity(rows.len());
     // Each gate's targets with their warehouse, which the catalog reads need.
@@ -545,11 +554,14 @@ pub(crate) struct LoadedInfra {
 /// compiler targets (see [`crate::trigger::engine_type_for`]).
 ///
 /// The engine admins are read only when some bound engine qualifies: an
-/// admin's missing username is minted on that read, and a profile that gets no
-/// `egret-admin` row must not mint one.
+/// admin's missing username is minted on that read under
+/// [`MissingUsername::Mint`](crate::members::MissingUsername::Mint) (left out
+/// under `Omit`, the OPA snapshot), and a profile that gets no `egret-admin`
+/// row must not mint one.
 pub(crate) async fn load_infra_inputs(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
+    missing: crate::members::MissingUsername,
 ) -> Result<Option<LoadedInfra>, CompileError> {
     use egret_core::engine_delegation::{delegator_impersonates, qualifies_for_infra};
 
@@ -581,7 +593,7 @@ pub(crate) async fn load_infra_inputs(
         .iter()
         .any(|(t, _, spec)| delegator_impersonates(t, spec));
     let admins = if delegating {
-        crate::members::engine_admin_usernames_via(conn).await?
+        crate::members::engine_admin_usernames_via(conn, missing).await?
     } else {
         Vec::new()
     };

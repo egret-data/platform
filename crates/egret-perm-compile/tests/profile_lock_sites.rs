@@ -37,6 +37,13 @@ const SITES: &[(&str, usize, &str)] = &[
          `delete_service` and `set_tag_service_via` are admin routes that take no mint lock",
     ),
     (
+        "crates/egret-policy/src/admin/mechanism.rs",
+        1,
+        "`set_mechanism` (governance SP2b) writes `mechanism` and bumps `policy_version` on the \
+         profile it locked first through `lock_unit_rows` (the profile and its tag service), and \
+         before `recompile_in_tx` takes the mint lock; the switch checks in between only read",
+    ),
+    (
         "crates/egret-catalog-registry/src/tag_version.rs",
         2,
         "`bump_tag_versions_for_warehouses` runs after the mint lock only in \

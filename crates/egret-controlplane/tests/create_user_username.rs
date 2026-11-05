@@ -182,6 +182,7 @@ async fn env() -> Option<Env> {
         ),
     });
     let perm = perm_router().with_state(PermState {
+        opa_cache: None,
         perm: PermStore::new(pool.clone()),
         policy: PolicyStore::new(db.clone()),
         sessions: sessions(&db),

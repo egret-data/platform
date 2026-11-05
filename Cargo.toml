@@ -26,6 +26,7 @@ egret-policy = { path = "crates/egret-policy" }
 egret-perm = { path = "crates/egret-perm" }
 egret-perm-compile = { path = "crates/egret-perm-compile" }
 egret-perm-ir = { path = "crates/egret-perm-ir" }
+egret-perm-eval = { path = "crates/egret-perm-eval" }
 egret-ranger-eval = { path = "crates/egret-ranger-eval" }
 egret-secrets = { path = "crates/egret-secrets" }
 egret-query-api = { path = "crates/egret-query-api" }
@@ -94,6 +95,9 @@ anyhow = "1"
 # `runtime-tokio-rustls` feature into `runtime-tokio` + `tls-rustls`.
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "migrate", "uuid", "chrono"] }
 figment = { version = "0.10", features = ["toml", "env"] }
+# SP2b Task 18: `explained.toml` of the OPA differential. Pinned to the version
+# figment already resolves in `Cargo.lock`, so this adds no new build.
+toml = "0.8.23"
 # Reports the config keys serde skips, for the start-time unknown-key warning (KI-140).
 serde_ignored = "0.1.14"
 clap = { version = "4", features = ["derive", "env"] }

@@ -275,6 +275,7 @@ async fn route_a_reach_agrees_with_explain() {
             .unwrap(),
     );
     let app = perm_router().with_state(PermState {
+        opa_cache: None,
         perm: PermStore::new(pool.clone()),
         policy: policy.clone(),
         sessions,

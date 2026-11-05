@@ -38,6 +38,7 @@ import type {
   EngineWorkspaceDto,
   ErrorBody,
   ModelledRangerPluginDto,
+  OpaPluginConfigDto,
   PodLogsDto,
   QueryDetailDto,
   QueryDto,
@@ -1624,7 +1625,146 @@ export const useControlPlaneEnginesUpdateExternalEngine = <TError = ErrorBody,
       > => {
       return useMutation(getControlPlaneEnginesUpdateExternalEngineMutationOptions(options), queryClient);
     }
-    export type controlPlaneEnginesPodExecResponse101 = {
+    export type controlPlaneEnginesOpaPluginConfigResponse200 = {
+  data: OpaPluginConfigDto
+  status: 200
+}
+
+export type controlPlaneEnginesOpaPluginConfigResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneEnginesOpaPluginConfigResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneEnginesOpaPluginConfigResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneEnginesOpaPluginConfigResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneEnginesOpaPluginConfigResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneEnginesOpaPluginConfigResponseSuccess = (controlPlaneEnginesOpaPluginConfigResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneEnginesOpaPluginConfigResponseError = (controlPlaneEnginesOpaPluginConfigResponse401 | controlPlaneEnginesOpaPluginConfigResponse403 | controlPlaneEnginesOpaPluginConfigResponse404 | controlPlaneEnginesOpaPluginConfigResponse409 | controlPlaneEnginesOpaPluginConfigResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneEnginesOpaPluginConfigResponse = (controlPlaneEnginesOpaPluginConfigResponseSuccess | controlPlaneEnginesOpaPluginConfigResponseError)
+
+export const getControlPlaneEnginesOpaPluginConfigUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/engines/${encodeURIComponent(id)}/opa-plugin-config`
+}
+
+/**
+ * @summary `GET /api/control-plane/engines/{id}/opa-plugin-config`.
+ */
+export const controlPlaneEnginesOpaPluginConfig = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneEnginesOpaPluginConfigResponse> => {
+
+  return customInstance<controlPlaneEnginesOpaPluginConfigResponse>(getControlPlaneEnginesOpaPluginConfigUrl(id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneEnginesOpaPluginConfigQueryKey = (id: string,) => {
+    return [
+    `/api/control-plane/engines/${encodeURIComponent(id)}/opa-plugin-config`
+    ] as const;
+    }
+
+
+export const getControlPlaneEnginesOpaPluginConfigQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneEnginesOpaPluginConfig>>, TError = ErrorBody>(id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesOpaPluginConfig>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneEnginesOpaPluginConfigQueryKey(id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneEnginesOpaPluginConfig>>> = ({ signal }) => controlPlaneEnginesOpaPluginConfig(id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesOpaPluginConfig>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneEnginesOpaPluginConfigQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesOpaPluginConfig>>>
+export type ControlPlaneEnginesOpaPluginConfigQueryError = ErrorBody
+
+
+export function useControlPlaneEnginesOpaPluginConfig<TData = Awaited<ReturnType<typeof controlPlaneEnginesOpaPluginConfig>>, TError = ErrorBody>(
+ id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesOpaPluginConfig>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneEnginesOpaPluginConfig>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneEnginesOpaPluginConfig>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneEnginesOpaPluginConfig<TData = Awaited<ReturnType<typeof controlPlaneEnginesOpaPluginConfig>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesOpaPluginConfig>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneEnginesOpaPluginConfig>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneEnginesOpaPluginConfig>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneEnginesOpaPluginConfig<TData = Awaited<ReturnType<typeof controlPlaneEnginesOpaPluginConfig>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesOpaPluginConfig>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary `GET /api/control-plane/engines/{id}/opa-plugin-config`.
+ */
+
+export function useControlPlaneEnginesOpaPluginConfig<TData = Awaited<ReturnType<typeof controlPlaneEnginesOpaPluginConfig>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesOpaPluginConfig>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneEnginesOpaPluginConfigQueryOptions(id,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type controlPlaneEnginesPodExecResponse101 = {
   data: void
   status: 101
 }

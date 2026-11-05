@@ -367,30 +367,48 @@ pub(crate) fn body_name(body: &Value, what: &str) -> Result<String, CompileError
         })
 }
 
-/// Compile `service_id`'s desired policy set from the CURRENT `perm` model
-/// (every read against `conn`, so a caller running this inside its own open
-/// transaction sees its own uncommitted writes). `None` means `service_id`
-/// names something this compiler doesn't target (see [`engine_type_for`]) —
-/// nothing to diff, nothing to write.
-pub(crate) async fn compile_desired(
+/// One enforcement point lowered: what [`crate::ir_load::load_ep`] read, and
+/// each statement family's IR lowering, before anything is rendered.
+/// Governance SP2b Task 6: shared by the Ranger compile ([`compile_desired`],
+/// which renders it) and the OPA snapshot (`crate::opa::build`, which
+/// evaluates it), so the two answer from one lowering.
+pub(crate) struct LoweredEp {
+    pub loaded: crate::ir_load::Loaded,
+    /// Each family's lowering, in the order compile_desired emits them:
+    /// grants, engine privileges, rules, withholds.
+    pub families: Vec<egret_perm_ir::statement::Lowered>,
+    pub whole_tables: Vec<egret_perm::TableCount>,
+    pub view_guard: Vec<egret_perm_ir::lower::withhold::PendingGuard>,
+}
+
+/// Read and lower the four statement families of profile `service_id`, every
+/// read against `conn`. `None` means `service_id` names something this
+/// compiler doesn't target (see [`engine_type_for`]). `missing` is
+/// [`MissingUsername::Mint`](crate::members::MissingUsername::Mint) for a
+/// compile and `Omit` for a read that must not write (SP2b I9).
+///
+/// The reads are the ones the per-family compile always made, in the same
+/// order; the lowerings between them do no I/O, and neither does
+/// `crate::ranger::emit`, so rendering after all the reads changes nothing.
+pub(crate) async fn lower_ep_via(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
-) -> Result<Option<Compiled>, CompileError> {
+    missing: crate::members::MissingUsername,
+) -> Result<Option<LoweredEp>, CompileError> {
     // Load: every read the lowerings need up to the grant family, and the
     // directory every audience is expanded against.
-    let Some(mut l) = crate::ir_load::load_ep(conn, service_id).await? else {
+    let Some(l) = crate::ir_load::load_ep(conn, service_id, missing).await? else {
         return Ok(None);
     };
     let engine = l.ep.kind.engine;
-    let mut desired: BTreeMap<PolicyKey, DesiredPolicy> = BTreeMap::new();
-    let mut skipped: Vec<SkippedItem> = Vec::new();
+    let mut families = Vec::with_capacity(4);
 
-    // Lower, then render: each family is decided by its IR lowering
-    // (`egret_perm_ir::lower`) and only rendered by `crate::ranger`.
-    //
     // Grants (Task 5).
-    let lowered = egret_perm_ir::lower::grants::lower_grants(&l.ep, &l.grants, &l.directory)?;
-    crate::ranger::emit(&l, lowered, &mut desired, &mut skipped)?;
+    families.push(egret_perm_ir::lower::grants::lower_grants(
+        &l.ep,
+        &l.grants,
+        &l.directory,
+    )?);
 
     // Engine grants (F11, spec §4.2; Task 9), checked by the loader. A grant
     // with no grantee left, or whose impersonation target can no longer be
@@ -407,17 +425,18 @@ pub(crate) async fn compile_desired(
         &l.directory,
     )
     .await?;
-    let lowered = egret_perm_ir::lower::engine_privileges::lower_engine_privileges(
-        &l.engine_grants,
-        &l.directory,
-        &checks,
-    )?;
-    crate::ranger::emit(&l, lowered, &mut desired, &mut skipped)?;
+    families.push(
+        egret_perm_ir::lower::engine_privileges::lower_engine_privileges(
+            &l.engine_grants,
+            &l.directory,
+            &checks,
+        )?,
+    );
 
     // Rules, masks and row filters (Task 6). The loader makes the
     // classification reads the old per-rule loop made, in the same order.
     let (rule_inputs, read_skips) = crate::ir_load::load_rule_inputs(conn, &l.ep, &l.rules).await?;
-    let lowered = egret_perm_ir::lower::rules::lower_rules(
+    families.push(egret_perm_ir::lower::rules::lower_rules(
         &l.ep,
         &l.rules,
         &l.directory,
@@ -425,8 +444,7 @@ pub(crate) async fn compile_desired(
         read_skips,
         DEFAULT_EXPANSION_CEILING,
         &l.leaving,
-    )?;
-    crate::ranger::emit(&l, lowered, &mut desired, &mut skipped)?;
+    )?);
 
     // **SP4c Task 2: a classification's CLEARANCE, which AMENDS SP4a's D2**
     // ("tags drive rules only, never access") — the argument is at the site,
@@ -436,7 +454,7 @@ pub(crate) async fn compile_desired(
     //
     // Governance sub-project 1 Task 7: decided by the IR lowering
     // (`egret_perm_ir::lower::withhold`, the `withhold` effect) and only
-    // rendered here. **Installation-wide on Trino, service-scoped on
+    // rendered by the caller. **Installation-wide on Trino, service-scoped on
     // StarRocks** (SP4c Task 2d): a Trino clearance is one TAG policy carrying
     // no catalog resource, so it compiles identically into every Trino profile
     // with a tag service; a StarRocks clearance expands to one ACCESS deny per
@@ -444,7 +462,7 @@ pub(crate) async fn compile_desired(
     // `tag_assignments_for_service_via` expansion a tag-selected rule uses
     // above. The loader makes the reads the clearance compile always made, at
     // the same point and in the same order.
-    let gates = crate::ir_load::load_withhold_inputs(conn, &l.ep, service_id).await?;
+    let gates = crate::ir_load::load_withhold_inputs(conn, &l.ep, service_id, missing).await?;
     let withheld = egret_perm_ir::lower::withhold::lower_withholds(
         &l.ep,
         &gates,
@@ -452,10 +470,44 @@ pub(crate) async fn compile_desired(
         DEFAULT_EXPANSION_CEILING,
         &l.leaving,
     )?;
-    crate::ranger::emit(&l, withheld.lowered, &mut desired, &mut skipped)?;
-    let whole_tables = withheld.whole_tables;
-    let view_guard: Vec<crate::clearance_mask::PendingMask> = withheld
-        .view_guard
+    families.push(withheld.lowered);
+
+    Ok(Some(LoweredEp {
+        loaded: l,
+        families,
+        whole_tables: withheld.whole_tables,
+        view_guard: withheld.view_guard,
+    }))
+}
+
+/// Compile `service_id`'s desired policy set from the CURRENT `perm` model
+/// (every read against `conn`, so a caller running this inside its own open
+/// transaction sees its own uncommitted writes). `None` means `service_id`
+/// names something this compiler doesn't target (see [`engine_type_for`]) —
+/// nothing to diff, nothing to write.
+pub(crate) async fn compile_desired(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<Option<Compiled>, CompileError> {
+    // Lower every family (`lower_ep_via`), then render: each family is
+    // decided by its IR lowering (`egret_perm_ir::lower`) and only rendered by
+    // `crate::ranger`, in the order grants, engine grants, rules, withholds.
+    let Some(LoweredEp {
+        loaded: mut l,
+        families,
+        whole_tables,
+        view_guard,
+    }) = lower_ep_via(conn, service_id, crate::members::MissingUsername::Mint).await?
+    else {
+        return Ok(None);
+    };
+    let engine = l.ep.kind.engine;
+    let mut desired: BTreeMap<PolicyKey, DesiredPolicy> = BTreeMap::new();
+    let mut skipped: Vec<SkippedItem> = Vec::new();
+    for lowered in families {
+        crate::ranger::emit(&l, lowered, &mut desired, &mut skipped)?;
+    }
+    let view_guard: Vec<crate::clearance_mask::PendingMask> = view_guard
         .into_iter()
         .map(crate::clearance_mask::PendingMask::from)
         .collect();
@@ -2364,6 +2416,30 @@ impl egret_policy::ProfileRecompiler for PermRecompiler {
             }),
         }
     }
+
+    /// [`crate::overlap::stored_overlaps_of_via`], the predicate the OPA
+    /// snapshot refresher re-checks, one line per pair.
+    async fn stored_overlaps_in_tx(
+        &self,
+        tx: &mut Transaction<'static, Postgres>,
+        service_id: i64,
+    ) -> Result<Vec<String>, egret_policy::PolicyHttpError> {
+        let pairs = crate::overlap::stored_overlaps_of_via(tx, service_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, service_id, "switch to OPA: stored overlaps unreadable");
+                egret_policy::PolicyHttpError::Internal
+            })?;
+        Ok(pairs.iter().map(opa_switch_pair_line).collect())
+    }
+}
+
+/// `"{kind} on {coordinate}: {rule names joined by ', '}"`, how the switch to
+/// OPA names a stored pair. The names are those `GET /perm/overlaps` shows the
+/// profile's admin.
+fn opa_switch_pair_line(o: &crate::overlap::StoredOverlap) -> String {
+    let names: Vec<&str> = o.rules.iter().map(|m| m.name.as_str()).collect();
+    format!("{} on {}: {}", o.kind, o.coordinate, names.join(", "))
 }
 
 /// Recompile every service in `service_ids` on the CALLER's open transaction.

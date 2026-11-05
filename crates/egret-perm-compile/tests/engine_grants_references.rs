@@ -100,6 +100,7 @@ async fn env() -> Option<Env> {
     .expect("engine");
 
     let app = perm_router().with_state(PermState {
+        opa_cache: None,
         perm: PermStore::new(pool.clone()),
         policy: policy.clone(),
         sessions,

@@ -233,6 +233,7 @@ const EXPECTED: &[(&str, &str, Family)] = &[
         "policy_profile",
         Family::Policy,
     ),
+    (action::PROFILE_MECHANISM, "policy_profile", Family::Policy),
     (action::ENGINE_GRANT_CREATE, "engine_grant", Family::Policy),
     (action::ENGINE_GRANT_UPDATE, "engine_grant", Family::Policy),
     (action::ENGINE_GRANT_DELETE, "engine_grant", Family::Policy),

@@ -1,0 +1,174 @@
+# Every accepted difference between egret-perm-eval and real Ranger on the Layer 1 corpus.
+# A difference with no entry fails CI; an entry no case produces fails CI too.
+# A difference where OPA allows, shows or unmasks what Ranger refuses is never
+# listed here: the test fails it "fix the evaluator" whatever this file says.
+#
+# Every entry is produced by an anchor of opa_differential.rs (`anchors()`):
+# a hand-built state asked after the seeded corpus, independent of the seed,
+# so no entry can go stale when the corpus changes. "Measured" below names the
+# anchor; the seeded corpus (seed 0x5b2b00000001) adds further cases.
+
+[[difference]]
+id = "egret-lineage-is-served-only-by-ranger"
+operations = ["AccessCatalog", "ShowSchemas", "ShowTables", "ShowColumns", "ShowFunctions", "FilterCatalogs", "FilterSchemas", "FilterTables", "FilterColumns", "SelectFromColumns", "CreateViewWithSelectFromColumns", "GetColumnMask", "GetRowFilters"]
+mechanism = """
+egret_policy::lineage_transform::apply_lineage_transform, called by
+routes::served_envelope_via when lineage_catalogs_for_poll_via finds the
+profile's first engine eligible (a JWT-mode Trino engine egret provisions),
+rewrites the Ranger download for the `egret-lineage` principal: it appends
+`egret-lineage-read-<catalog>` (use + select on catalog/*/*/*), puts a leading
+egret-lineage item (MASK_NONE, or an empty filter) in every data-mask and
+row-filter policy, and adds egret-lineage to every deny's denyExceptions for
+select and use. The OPA snapshot carries no statement for egret-lineage: the
+evaluator gives it reads and reach only through grants that name it (or
+everyone), and applies to it every mask and filter that applies to public.
+Measured: anchor lineage-jwt-read (a JWT engine, no grant): egret-lineage
+SelectFromColumns is allowed by `egret-lineage-read-lake` and refused by OPA."""
+right = "ranger"
+why = """
+The lineage principal exists for view-lineage EXPLAIN on JWT-mode Trino
+engines. The OPA target does not serve its reads or unmasking (carry 1): a
+lineage EXPLAIN on an OPA engine fails closed, so lineage capture is a gap on
+OPA (a follow-up for the Task 25 docs)."""
+
+[[difference]]
+id = "mask-none-is-no-mask"
+operations = ["GetColumnMask"]
+mechanism = """
+The compile writes a mask rule's exempt principals (and egret-lineage, and a
+clearance's cleared users) as leading data-mask items of type MASK_NONE
+(measured: anchor masks: [u1 → MASK_NONE, public → MASK]
+on lake.s1.t1.email), so RangerAccessResult.getMaskType answers MASK_NONE for
+u1. The Trino plugin's getColumnMask returns Optional.empty() unless
+isDataMaskEnabled, which is RangerAccessResult.isMaskEnabled: maskType
+non-empty and not equal, ignoring case, to MASK_NONE (javap,
+ranger-plugins-common 2.8.0). egret-perm-eval answers no mask for the exempt
+user. Neither side masks the column."""
+right = "both"
+why = "The engine does the same; only the spelling of \"no mask\" differs."
+
+[[difference]]
+id = "reach-any-is-answered-by-another-access-type"
+operations = ["AccessCatalog", "ShowSchemas", "ShowTables", "ShowColumns", "ShowFunctions", "FilterCatalogs", "FilterSchemas", "FilterTables", "FilterColumns"]
+mechanism = """
+Ranger 2.8.0 answers `_any` allowed whenever some allow covers the object or
+a descendant, through a deny on the object: RangerDefaultPolicyEvaluator.evaluatePolicyItems
+evaluates `_any` per access type (RangerAccessRequestUtil.getAllRequestedAccessTypes,
+a RangerAccessRequestWrapper per type, RangerAccessRequestWrapper.ignoreDescendantDeny)
+and folds them with getCompositeAccessResult. Measured on three anchors:
+reach-any — u0 denied select on lake/*/*/* and allowed insert/delete on it is
+allowed AccessCatalog, ShowSchemas and FilterSchemas; u1 allowed select on
+lake/*/*/* and denied select on lake.s1.*.* is allowed FilterSchemas(s1);
+withheld-table — u0 allowed select on lake/*/*/*, not cleared for the
+table-level classification of lake.s1.t1 (a SELF tag whose clearance denies
+select, insert, delete), is allowed FilterTables, ShowColumns and
+FilterColumns on it. egret-perm-eval's check_reach (decide.rs) refuses reach
+when any deny or withhold that carries any privilege covers the object or an
+ancestor, D2's conservative `_any`."""
+right = "egret"
+why = """
+D2 chose a conservative reach: an object a deny or withhold reaches is hidden
+from listings and catalog access. OPA is stricter, never looser. The
+withheld-table anchor also catches Task 3's mutation h (classification
+withholds dropped from reach), which makes those cases agree."""
+
+[[difference]]
+id = "a-metadata-table-is-reached-in-ranger"
+operations = ["ShowColumns", "FilterTables", "FilterColumns"]
+mechanism = """
+M17 (decide.rs metadata_refusal) refuses every check on `t$…`, reach included,
+to a user restricted on any column of the base table `t`. In the Ranger
+download the metadata-table denies (ranger::completion::metadata_tables,
+policies `perm-hidden-meta-*` on `t$*`) deny `select` only, and a
+classification on `t` reaches `t$files` only through tags on `t$files` itself;
+`_any` on `t3$files` is then answered by an allow (see
+reach-any-is-answered-by-another-access-type). Measured: anchor metadata —
+u0, allowed insert/delete on lake.s1.*.* and restricted on t3 by a MASK rule
+on lake.s1.t3.email, is allowed ShowColumns, FilterTables and FilterColumns
+on lake.s1.t3$files by Ranger and refused them by OPA."""
+right = "egret"
+why = """
+Carry 2: egret's own `$` rule hides a metadata table from listings as well as
+from reads, for a user restricted on its base table. OPA is stricter."""
+
+[[difference]]
+id = "egret-lineage-is-refused-on-every-engine"
+operations = [
+  "AccessCatalog",
+  "AddColumn",
+  "AlterColumn",
+  "CreateCatalog",
+  "CreateFunction",
+  "CreateMaterializedView",
+  "CreateSchema",
+  "CreateTable",
+  "CreateView",
+  "CreateViewWithExecuteFunction",
+  "DeleteFromTable",
+  "DropCatalog",
+  "DropColumn",
+  "DropFunction",
+  "DropMaterializedView",
+  "DropSchema",
+  "DropTable",
+  "DropView",
+  "ExecuteFunction",
+  "ExecuteProcedure",
+  "ExecuteTableProcedure",
+  "FilterCatalogs",
+  "FilterColumns",
+  "FilterFunctions",
+  "FilterSchemas",
+  "FilterTables",
+  "FilterViewQueryOwnedBy",
+  "ImpersonateUser",
+  "InsertIntoTable",
+  "KillQueryOwnedBy",
+  "ReadSystemInformation",
+  "RefreshMaterializedView",
+  "RenameColumn",
+  "RenameMaterializedView",
+  "RenameSchema",
+  "RenameTable",
+  "RenameView",
+  "SetCatalogSessionProperty",
+  "SetColumnComment",
+  "SetMaterializedViewProperties",
+  "SetSchemaAuthorization",
+  "SetSystemSessionProperty",
+  "SetTableAuthorization",
+  "SetTableComment",
+  "SetTableProperties",
+  "SetViewAuthorization",
+  "SetViewComment",
+  "ShowColumns",
+  "ShowCreateFunction",
+  "ShowCreateSchema",
+  "ShowCreateTable",
+  "ShowFunctions",
+  "ShowSchemas",
+  "ShowTables",
+  "TruncateTable",
+  "UpdateTableColumns",
+  "ViewQueryOwnedBy",
+  "WriteSystemInformation",
+]
+mechanism = """
+On OPA, egret-perm-eval refuses the reserved lineage principal
+(SnapshotInput::lineage_principal, filled by egret-perm-compile's
+opa::build::lineage_principal from LINEAGE_PRINCIPAL) every access that
+egret_perm_ir::lineage::kept_accesses / kept_only_on does not keep — the
+same table the Ranger lineage transform's override-priority deny is built
+from — and its reach counts only Read allows (decide.rs lineage_refuses,
+check_reach). Ranger applies that transform only when lineage_catalogs_for_poll_via
+finds the profile's engine eligible (a JWT-mode Trino engine); on any other
+engine the download is unchanged, and a user named egret-lineage gets what
+the grants give it. Measured: anchor lineage-open (an open-mode engine, a
+public Write grant on the catalog): egret-lineage TruncateTable and
+InsertIntoTable are allowed by Ranger (the grant) and refused by OPA. On a
+JWT engine both refuse them (anchor lineage-jwt, which agrees)."""
+right = "egret"
+why = """
+The controller's ruling on Task 18's blocking case: on OPA the reserved
+principal is refused what the lineage transform denies, whatever the
+engine's delegation mode. OPA is stricter on non-JWT engines."""

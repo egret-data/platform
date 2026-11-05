@@ -1138,3 +1138,43 @@ impl From<&RowFilterDecision> for WireRowFilterDecision {
         }
     }
 }
+
+// ── Mechanism (governance SP2b Task 16) ───────────────────────────────────
+
+/// How a profile's engines are asked (`policy.authz_services.mechanism`,
+/// migration 0213), and so which evaluator answered an explain profile:
+/// `egret-ranger-eval` over the served Ranger download, or the IR evaluator
+/// (`egret-perm-eval`) over the profile's OPA snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum WireMechanism {
+    Ranger,
+    Opa,
+}
+
+impl From<egret_perm_ir::ep::Mechanism> for WireMechanism {
+    fn from(m: egret_perm_ir::ep::Mechanism) -> Self {
+        // No wildcard arm, for the reason in the module doc.
+        match m {
+            egret_perm_ir::ep::Mechanism::Ranger => WireMechanism::Ranger,
+            egret_perm_ir::ep::Mechanism::Opa => WireMechanism::Opa,
+        }
+    }
+}
+
+/// What the IR evaluator answers for an OPA profile's `read` beyond access:
+/// the rendered column mask (for a column target) and the AND of the row
+/// filters (for a target naming a table). `None` means nothing applies.
+///
+/// The column's type is not known to explain, so a mask is rendered with
+/// `varchar` where the engine substitutes the column's own type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct ExplainOpa {
+    /// The SQL the plugin would apply to the column, rendered with `varchar`.
+    pub column_mask: Option<String>,
+    /// The mask type the evaluator chose (`MASK_HASH`, `MASK_NULL`, ...):
+    /// present exactly when `column_mask` is.
+    pub column_mask_type: Option<String>,
+    /// The AND of every applying row filter on the target's table.
+    pub row_filter: Option<String>,
+}

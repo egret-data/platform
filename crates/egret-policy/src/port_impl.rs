@@ -13,6 +13,7 @@ impl From<ServiceRow> for PolicyService {
             id: r.id,
             name: r.name,
             r#type: r.r#type,
+            mechanism: r.mechanism,
         }
     }
 }

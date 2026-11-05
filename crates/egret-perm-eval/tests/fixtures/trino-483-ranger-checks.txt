@@ -1,0 +1,78 @@
+checkCanAddColumn: ALTER
+checkCanAlterColumn: ALTER
+checkCanCreateCatalog: CREATE
+checkCanCreateFunction: CREATE
+checkCanCreateMaterializedView: CREATE
+checkCanCreateRole:
+checkCanCreateSchema: CREATE
+checkCanCreateTable: CREATE
+checkCanCreateView: CREATE
+checkCanCreateViewWithSelectFromColumns: SELECT
+checkCanDeleteFromTable: DELETE
+checkCanDenyEntityPrivilege:
+checkCanDenySchemaPrivilege:
+checkCanDenyTablePrivilege:
+checkCanDropCatalog: DROP
+checkCanDropColumn: ALTER
+checkCanDropFunction: DROP
+checkCanDropMaterializedView: DROP
+checkCanDropRole:
+checkCanDropSchema: DROP
+checkCanDropTable: DROP
+checkCanDropView: DROP
+checkCanExecuteProcedure: EXECUTE
+checkCanExecuteQuery: EXECUTE
+checkCanExecuteTableProcedure: ALTER
+checkCanGrantEntityPrivilege:
+checkCanGrantRoles:
+checkCanGrantSchemaPrivilege:
+checkCanGrantTablePrivilege:
+checkCanImpersonateUser: IMPERSONATE
+checkCanInsertIntoTable: INSERT
+checkCanKillQueryOwnedBy: IMPERSONATE
+checkCanReadSystemInformation: READ_SYSINFO
+checkCanRefreshMaterializedView: ALTER
+checkCanRenameColumn: ALTER
+checkCanRenameMaterializedView: ALTER
+checkCanRenameSchema: ALTER
+checkCanRenameTable: ALTER
+checkCanRenameView: ALTER
+checkCanRevokeEntityPrivilege:
+checkCanRevokeRoles:
+checkCanRevokeSchemaPrivilege:
+checkCanRevokeTablePrivilege:
+checkCanSelectFromColumns: SELECT
+checkCanSetCatalogSessionProperty: ALTER
+checkCanSetColumnComment: ALTER
+checkCanSetMaterializedViewProperties: ALTER
+checkCanSetSchemaAuthorization: ALTER
+checkCanSetSystemSessionProperty: ALTER _ANY
+checkCanSetTableAuthorization: ALTER
+checkCanSetTableComment: ALTER
+checkCanSetTableProperties: ALTER
+checkCanSetUser: IMPERSONATE
+checkCanSetViewAuthorization: ALTER
+checkCanSetViewComment: ALTER
+checkCanShowColumns: _ANY
+checkCanShowCreateFunction: SHOW
+checkCanShowCreateSchema: SHOW
+checkCanShowCreateTable: SHOW
+checkCanShowCurrentRoles:
+checkCanShowFunctions: _ANY EXECUTE
+checkCanShowRoleGrants:
+checkCanShowRoles:
+checkCanShowSchemas: _ANY
+checkCanShowTables: _ANY
+checkCanTruncateTable: DELETE
+checkCanUpdateTableColumns: INSERT
+checkCanViewQueryOwnedBy: IMPERSONATE
+checkCanWriteSystemInformation: WRITE_SYSINFO
+filterCatalogs: _ANY
+filterColumns: _ANY
+filterFunctions: _ANY
+filterSchemas: _ANY
+filterTables: _ANY
+filterViewQueryOwnedBy: IMPERSONATE
+getColumnMask: SELECT
+getEventListeners:
+getRowFilters: SELECT

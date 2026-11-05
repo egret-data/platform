@@ -10,6 +10,9 @@ pub struct KnownEngineImage {
     pub tag: &'static str,
     pub digest: &'static str,
     pub plugin_version: &'static str,
+    /// Whether the image ships Trino's OPA access-control plugin
+    /// (`plugin/opa`), which governance SP2b's OPA mechanism needs.
+    pub opa_plugin: bool,
 }
 
 /// Measured: each row's plugin jar was read out of the image itself.
@@ -20,6 +23,7 @@ pub const KNOWN_ENGINE_IMAGES: [KnownEngineImage; 6] = [
         tag: "483",
         digest: "sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534",
         plugin_version: "2.8.0",
+        opa_plugin: true,
     },
     KnownEngineImage {
         engine_type: "starrocks",
@@ -27,6 +31,7 @@ pub const KNOWN_ENGINE_IMAGES: [KnownEngineImage; 6] = [
         tag: "4.1.4",
         digest: "sha256:0b9099483e52ee66f9ee0244799bd32f3ccb491492857c59ada622ceb15b914b",
         plugin_version: "2.8.0",
+        opa_plugin: false,
     },
     KnownEngineImage {
         engine_type: "starrocks",
@@ -34,6 +39,7 @@ pub const KNOWN_ENGINE_IMAGES: [KnownEngineImage; 6] = [
         tag: "4.1.6",
         digest: "sha256:d07aa750be77625a09866a76dbfe0ee032baeb5e48fe0e952d30cb525329dc31",
         plugin_version: "2.9.0",
+        opa_plugin: false,
     },
     // StarRocks 4.1.7 with egret's security patches (github.com/egret-data/egret-starrocks),
     // the official 4.1.7 FE image with fe-core and fe-spi rebuilt, so it ships the official
@@ -46,6 +52,7 @@ pub const KNOWN_ENGINE_IMAGES: [KnownEngineImage; 6] = [
         tag: "4.1.7-egret.1",
         digest: "sha256:da948dad19e98a5a43b0073ec48f87c9e7429246ce4581a000c0955c742af250",
         plugin_version: "2.9.0",
+        opa_plugin: false,
     },
     // egret.3 (patches 0001-0007): also `_file`/`_pos` stay out of `SELECT *` under a policy;
     // the HTTP SQL API and Arrow Flight SQL apply masks and row filters; SHOW CREATE CATALOG
@@ -57,6 +64,7 @@ pub const KNOWN_ENGINE_IMAGES: [KnownEngineImage; 6] = [
         tag: "4.1.7-egret.3",
         digest: "sha256:5c74c820f9b741bc8054247f47f3d54dd9e526710b6fc2b5a7873cae6bb2d2b0",
         plugin_version: "2.9.0",
+        opa_plugin: false,
     },
     // egret.4 (patches 0001-0009 and the AuditLoader plugin): also EXPLAIN COSTS is refused
     // under a mask or row filter; BROKER LOAD, EXPORT, INTO OUTFILE and FILE tables without
@@ -67,6 +75,7 @@ pub const KNOWN_ENGINE_IMAGES: [KnownEngineImage; 6] = [
         tag: "4.1.7-egret.4",
         digest: "sha256:55ec35ecf6df85320557f017e0c3c16056d82a258cf4a4e79a80a6565ac6fdc5",
         plugin_version: "2.9.0",
+        opa_plugin: false,
     },
 ];
 
@@ -184,6 +193,20 @@ pub fn unsupported_engine_image(engine_type: &str, image_ref: &str) -> Option<St
          the floor is {MIN_SUPPORTED_RANGER_PLUGIN}; use one of: {}",
         known_image_refs(engine_type).join(", ")
     ))
+}
+
+/// Whether `image_ref` is a known `engine_type` image that ships Trino's OPA
+/// plugin, matched by repository and tag; a digest, when present, must be the
+/// row's. Anything unmeasured is `false`.
+pub fn ships_opa_plugin(engine_type: &str, image_ref: &str) -> bool {
+    let (repo, tag, digest) = parse(image_ref.trim());
+    KNOWN_ENGINE_IMAGES.iter().any(|k| {
+        k.opa_plugin
+            && k.engine_type == engine_type
+            && k.repository == repo
+            && Some(k.tag) == tag
+            && digest.is_none_or(|d| d == k.digest)
+    })
 }
 
 pub fn plugin_version_for_image(
@@ -509,6 +532,30 @@ mod tests {
             ("starrocks", ""),
         ] {
             assert!(plugin_version_for_image(t, image).is_err(), "{t} {image:?}");
+        }
+    }
+
+    #[test]
+    fn ships_opa_plugin_only_for_the_measured_trino_image() {
+        // Arrange
+        let pinned = "trinodb/trino:483@sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534";
+
+        // Act / Assert
+        assert!(ships_opa_plugin("trino", "trinodb/trino:483"));
+        assert!(ships_opa_plugin("trino", pinned));
+        assert!(!ships_opa_plugin("trino", "trinodb/trino:470"));
+        assert!(!ships_opa_plugin("trino", "trinodb/trino:483@sha256:0000"));
+        assert!(!ships_opa_plugin("starrocks", "trinodb/trino:483"));
+        for k in KNOWN_ENGINE_IMAGES
+            .iter()
+            .filter(|k| k.engine_type == "starrocks")
+        {
+            let bare = format!("{}:{}", k.repository, k.tag);
+            assert!(!ships_opa_plugin(k.engine_type, &bare), "{bare}");
+            assert!(
+                !ships_opa_plugin(k.engine_type, &format!("{bare}@{}", k.digest)),
+                "{bare}"
+            );
         }
     }
 

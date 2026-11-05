@@ -13,6 +13,8 @@ pub struct PolicyService {
     pub id: i64,
     pub name: String,
     pub r#type: String,
+    /// `"ranger"` or `"opa"` (migration 0213).
+    pub mechanism: String,
 }
 
 /// The download payload the Trino Ranger plugin consumes (`@JsonInclude(NON_EMPTY)`, camelCase).
@@ -228,6 +230,17 @@ impl ServiceTags {
     }
 }
 
+/// What re-applying a profile's bound egret-provisioned engines did
+/// (governance SP2b Task 12): the engines that now run the profile's current
+/// mechanism, and each one that did not with why. Declared here so the engine
+/// seam (`egret-engine-mgmt`) can build one; re-exported from `egret_policy`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ReconfigureReport {
+    pub applied: Vec<String>,
+    /// `(engine name, error)`, one per engine that was tried and failed.
+    pub failed: Vec<(String, String)>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,10 +345,12 @@ mod tests {
             id: 7,
             name: "trino_prod".into(),
             r#type: "trino".into(),
+            mechanism: "ranger".into(),
         };
         let j = serde_json::to_value(&s).unwrap();
         assert_eq!(j["id"], 7);
         assert_eq!(j["name"], "trino_prod");
         assert_eq!(j["type"], "trino");
+        assert_eq!(j["mechanism"], "ranger");
     }
 }

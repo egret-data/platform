@@ -85,6 +85,7 @@ async fn env() -> Option<Env> {
         .expect("starrocks def");
     egret_policy::seed_tag(&policy).await.expect("tag def");
     let app = perm_router().with_state(PermState {
+        opa_cache: None,
         perm: PermStore::new(db.pool.clone()),
         policy: policy.clone(),
         sessions,

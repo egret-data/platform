@@ -105,6 +105,12 @@ const STARROCKS: EpKind = EpKind {
     engine: EngineType::StarRocks,
     mechanism: Mechanism::Ranger,
 };
+/// A Trino profile whose engines egret answers through Trino's OPA plugin
+/// (governance SP2b). Its rows are the `TRINO` rows, answer for answer (I5).
+const OPA_TRINO: EpKind = EpKind {
+    engine: EngineType::Trino,
+    mechanism: Mechanism::Opa,
+};
 
 /// The mask types each service-def declares (`service-defs/{trino,starrocks}.json`
 /// `dataMaskDef.maskTypes`); pinned to the file by
@@ -334,6 +340,95 @@ pub const ENTRIES: &[Entry] = &[
         answer: Answer::Native,
         evidence: "rules.rs:825-865",
     },
+    // SP2b: one OPA_TRINO row per TRINO row (I5).
+    Entry {
+        kind: OPA_TRINO,
+        versions: Versions::Any,
+        capability: "ClassificationSelector(Mask)",
+        key: Key::Fixed(|c| *c == Capability::ClassificationSelector(RuleEffectKind::Mask)),
+        answer: Answer::NativeWithChannel,
+        evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (tag mask rules, asked by GetColumnMask)",
+    },
+    Entry {
+        kind: OPA_TRINO,
+        versions: Versions::Any,
+        capability: "ClassificationSelector(RowFilter)",
+        key: Key::Fixed(|c| *c == Capability::ClassificationSelector(RuleEffectKind::RowFilter)),
+        answer: Answer::NativeWithChannel,
+        evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (tag row-filter rules, asked by GetRowFilters)",
+    },
+    Entry {
+        kind: OPA_TRINO,
+        versions: Versions::Any,
+        capability: "ClassificationRowFilterOnColumnAttachment",
+        key: Key::Fixed(|c| *c == Capability::ClassificationRowFilterOnColumnAttachment),
+        answer: Answer::Lowered(LoweringKind::ExpandColumnOnlyTablesPerTable),
+        evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (tag row filters over column-only classified tables, asked by GetRowFilters)",
+    },
+    Entry {
+        kind: OPA_TRINO,
+        versions: Versions::Any,
+        capability: "WithholdByClassification",
+        key: Key::Fixed(|c| *c == Capability::WithholdByClassification),
+        answer: Answer::NativeWithChannel,
+        evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (role-gated classifications, asked by the data and reach operations)",
+    },
+    Entry {
+        kind: OPA_TRINO,
+        versions: Versions::Any,
+        capability: "GroupPrincipal",
+        key: Key::Fixed(|c| *c == Capability::GroupPrincipal),
+        answer: Answer::Lowered(LoweringKind::ExpandToUsers),
+        evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (grants to a group and to public)",
+    },
+    Entry {
+        kind: OPA_TRINO,
+        versions: Versions::Any,
+        capability: "RolePrincipal",
+        key: Key::Fixed(|c| *c == Capability::RolePrincipal),
+        answer: Answer::Lowered(LoweringKind::ExpandToUsers),
+        evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (grants to a platform role)",
+    },
+    Entry {
+        kind: OPA_TRINO,
+        versions: Versions::Any,
+        capability: "WithholdExemptionByGroup",
+        key: Key::Fixed(|c| *c == Capability::WithholdExemptionByGroup),
+        answer: Answer::Missing(ReasonCode::WithholdExemptionByGroupOnly),
+        evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (group-only clearance gates, which neither side withholds)",
+    },
+    Entry {
+        kind: OPA_TRINO,
+        versions: Versions::Any,
+        capability: "WithholdPrivilege(Read)",
+        key: Key::Fixed(|c| *c == Capability::WithholdPrivilege(Privilege::Read)),
+        answer: Answer::Native,
+        evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (role-gated classifications, asked by SelectFromColumns and reach)",
+    },
+    Entry {
+        kind: OPA_TRINO,
+        versions: Versions::Any,
+        capability: "WithholdPrivilege(Write)",
+        key: Key::Fixed(|c| *c == Capability::WithholdPrivilege(Privilege::Write)),
+        answer: Answer::Native,
+        evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (role-gated classifications, asked by the write operations)",
+    },
+    Entry {
+        kind: OPA_TRINO,
+        versions: Versions::Any,
+        capability: "PoliciesReachMetadataTables",
+        key: Key::Fixed(|c| *c == Capability::PoliciesReachMetadataTables),
+        answer: Answer::Lowered(LoweringKind::DenyMetadataTables),
+        evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (questions on t3$files under restrictions on t3)",
+    },
+    Entry {
+        kind: OPA_TRINO,
+        versions: Versions::Any,
+        capability: "MaskType(name)",
+        key: Key::MaskTypes(TRINO_MASK_TYPES),
+        answer: Answer::Native,
+        evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (MASK, MASK_HASH, MASK_NULL, MASK_NONE and CUSTOM masks, asked by GetColumnMask)",
+    },
 ];
 
 fn version_matches(v: Versions, version: Option<&str>) -> bool {
@@ -521,6 +616,59 @@ mod tests {
                 "{:?} has no evidence",
                 e.capability
             );
+        }
+    }
+
+    /// I5: an OPA Trino profile is answered from the same lowered statements,
+    /// so every Trino row has an OPA twin that answers the same.
+    #[test]
+    fn every_trino_row_has_an_identical_opa_trino_row() {
+        let trino: Vec<_> = ENTRIES.iter().filter(|e| e.kind == TRINO).collect();
+        let opa: Vec<_> = ENTRIES.iter().filter(|e| e.kind == OPA_TRINO).collect();
+        assert_eq!(trino.len(), opa.len());
+        for t in &trino {
+            assert!(
+                opa.iter().any(|o| o.capability == t.capability
+                    && o.versions == t.versions
+                    && o.answer == t.answer),
+                "no identical OPA_TRINO row for {}",
+                t.capability
+            );
+        }
+    }
+
+    #[test]
+    fn opa_trino_rows_answer_like_the_ranger_trino_rows() {
+        let ranger = EpKind {
+            engine: EngineType::Trino,
+            mechanism: Mechanism::Ranger,
+        };
+        let opa = EpKind {
+            engine: EngineType::Trino,
+            mechanism: Mechanism::Opa,
+        };
+        let caps = [
+            Capability::ClassificationSelector(RuleEffectKind::Mask),
+            Capability::ClassificationSelector(RuleEffectKind::RowFilter),
+            Capability::ClassificationRowFilterOnColumnAttachment,
+            Capability::WithholdByClassification,
+            Capability::GroupPrincipal,
+            Capability::RolePrincipal,
+            Capability::WithholdExemptionByGroup,
+            Capability::WithholdPrivilege(Privilege::Read),
+            Capability::WithholdPrivilege(Privilege::Write),
+            Capability::PoliciesReachMetadataTables,
+            Capability::MaskType("MASK_HASH".into()),
+            Capability::MaskType("CUSTOM".into()),
+        ];
+        for channel in [true, false] {
+            for c in &caps {
+                assert_eq!(
+                    support_for_kind(opa, Some("2.8.0"), channel, c),
+                    support_for_kind(ranger, Some("2.8.0"), channel, c),
+                    "{c:?} channel={channel}"
+                );
+            }
         }
     }
 

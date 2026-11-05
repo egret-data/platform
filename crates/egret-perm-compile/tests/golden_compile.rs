@@ -66,8 +66,21 @@ pub async fn capture(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     profiles: &[(i64, Option<i64>)],
 ) -> Value {
+    // S8: an OPA profile's Ranger artifact is the oracle, so the whole suite
+    // runs again with every Trino profile switched to OPA and must equal the
+    // same blessed files.
+    let opa = std::env::var("EGRET_GOLDEN_MECHANISM").as_deref() == Ok("opa");
     let mut out = Vec::new();
     for &(sid, tag_sid) in profiles {
+        if opa {
+            sqlx::query(
+                "UPDATE policy.authz_services SET mechanism = 'opa' WHERE id = $1 AND type = 'trino'",
+            )
+            .bind(sid)
+            .execute(&mut **tx)
+            .await
+            .expect("switch the profile to opa");
+        }
         let compile = egret_perm_compile::recompile_service_in_tx(tx, sid).await;
         let mut entry = serde_json::Map::new();
         match compile {

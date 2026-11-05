@@ -746,6 +746,11 @@ pub(crate) async fn build_provision_req_with(
     // without a `password.db` the delegator can't basic-auth, so impersonate
     // delegation is meaningless (and `inject_delegator_user` no-ops). Its
     // impersonate policy is not written here: convergence below derives it.
+    // The bound profile's mechanism, as committed now (SP2b Task 15). Every
+    // apply builds here, so a bind, an image change and a create onto an OPA
+    // profile are all judged against the image before anything is rendered.
+    let mechanism = resolve_profile_mechanism(st, authz_service_id).await?;
+    refuse_opa_without_the_plugin(engine, mechanism)?;
     let ranger_service_name = resolve_ranger_service_name(st, authz_service_id).await?;
     if config.auth.is_some() && engine.is_impersonate_delegation() {
         let (_secret_id, pw) = ensure_delegator_secret(st, engine).await?;
@@ -771,6 +776,7 @@ pub(crate) async fn build_provision_req_with(
         st,
         engine,
         ranger_service_name.clone(),
+        mechanism,
         opts.rotate_ranger_credential,
     )
     .await?;
@@ -980,6 +986,22 @@ async fn finish_apply(
             }
         }
     }
+    // The provisioner accepted it: this engine now runs this mechanism (SP2b
+    // Task 15, open question (a)). Recorded here so no caller can forget it.
+    if res.is_ok() {
+        let mechanism = match built.req.ranger.as_ref().map(|r| r.mechanism) {
+            Some(egret_engine_mgmt_api::opa_config::AccessMechanism::Opa) => "opa",
+            _ => "ranger",
+        };
+        if let Err(e) = st
+            .engine_mgmt
+            .set_applied_mechanism(engine.id, mechanism)
+            .await
+        {
+            tracing::error!(engine = %engine.name, error = %e, mechanism,
+                "applied, but the applied mechanism could not be recorded");
+        }
+    }
     if let Some(secrets) = &built.internal {
         let superseded = if res.is_ok() {
             Supersede::Delete
@@ -993,6 +1015,150 @@ async fn finish_apply(
         }
     }
     res.map_err(ApplyBuiltError::Failed)
+}
+
+/// The access mechanism of the profile `authz_service_id` names, read from the
+/// committed row (`PolicyService::mechanism`); an unbound engine is `Ranger`.
+/// A bound id with no row is the same corruption
+/// [`resolve_ranger_service_name`] refuses.
+pub(crate) async fn resolve_profile_mechanism(
+    st: &CpState,
+    authz_service_id: Option<i64>,
+) -> Result<egret_engine_mgmt_api::opa_config::AccessMechanism, CpError> {
+    use egret_engine_mgmt_api::opa_config::AccessMechanism;
+    let Some(sid) = authz_service_id else {
+        return Ok(AccessMechanism::Ranger);
+    };
+    let services = st
+        .authz
+        .list_services()
+        .await
+        .map_err(|e| CpError::BadRequest(format!("list policy profiles: {e}")))?;
+    match services.into_iter().find(|s| s.id == sid) {
+        Some(svc) if svc.mechanism == "opa" => Ok(AccessMechanism::Opa),
+        Some(svc) if svc.mechanism == "ranger" => Ok(AccessMechanism::Ranger),
+        Some(svc) => {
+            tracing::error!(service_id = sid, mechanism = %svc.mechanism,
+                "policy profile has an unknown mechanism");
+            Err(CpError::Internal)
+        }
+        None => {
+            tracing::error!(
+                service_id = sid,
+                "engine is bound to authz_service_id {sid} but no such policy profile row exists"
+            );
+            Err(CpError::Internal)
+        }
+    }
+}
+
+/// I6: a provisioned Trino engine on an OPA profile must run an image that
+/// ships Trino's OPA plugin. The switch checks this once; this check runs on
+/// every apply, so a later bind, image change or create cannot get past it.
+fn refuse_opa_without_the_plugin(
+    engine: &Engine,
+    mechanism: egret_engine_mgmt_api::opa_config::AccessMechanism,
+) -> Result<(), CpError> {
+    if engine.r#type != "trino"
+        || crate::external::is_external(engine)
+        || mechanism != egret_engine_mgmt_api::opa_config::AccessMechanism::Opa
+    {
+        return Ok(());
+    }
+    let image = egret_perm::stored_engine_image("trino", &engine.spec);
+    if image
+        .as_deref()
+        .is_some_and(|i| egret_perm::ships_opa_plugin("trino", i))
+    {
+        return Ok(());
+    }
+    let name = &engine.name;
+    let image = image.as_deref().unwrap_or("an unknown image");
+    Err(CpError::Conflict(format!(
+        "engine {name} runs {image}, which does not ship the Trino OPA plugin, and its profile \
+         is on OPA; use trinodb/trino:483 or switch the profile to Ranger"
+    )))
+}
+
+/// Re-apply every egret-provisioned engine bound to the profile `service_id`,
+/// each with the profile's mechanism as committed now (a mechanism switch,
+/// M4b). External engines (their operator installs the plugin) and engines
+/// being deleted are skipped. Every other engine is tried, in name order: one
+/// failure is recorded and the next engine is still applied.
+pub async fn reapply_bound_engines(
+    st: &CpState,
+    service_id: i64,
+) -> egret_policy_api::ReconfigureReport {
+    let mut report = egret_policy_api::ReconfigureReport::default();
+    let engines = match st
+        .engine_mgmt
+        .list_engines_bound_to_authz_service(service_id)
+        .await
+    {
+        Ok(engines) => engines,
+        Err(e) => {
+            tracing::error!(service_id, error = %e, "listing the profile's engines failed");
+            report.failed.push((
+                format!("policy profile {service_id}"),
+                format!("its engines could not be listed: {e}"),
+            ));
+            return report;
+        }
+    };
+    let engines = engines
+        .into_iter()
+        .filter(|e| !crate::external::is_external(e) && e.status != crate::engine_status::DELETING);
+    let Some(prov) = st.engine_provisioner.as_ref() else {
+        report
+            .failed
+            .extend(engines.map(|e| (e.name, "no engine provisioner is configured".to_string())));
+        return report;
+    };
+    for engine in engines {
+        match reapply_one(st, prov.clone(), engine.clone()).await {
+            Ok(()) => report.applied.push(engine.name),
+            Err(why) => {
+                tracing::warn!(engine = %engine.name, service_id, error = %why,
+                    "re-applying an engine after a mechanism switch failed");
+                report.failed.push((engine.name, why));
+            }
+        }
+    }
+    report
+}
+
+/// One engine of [`reapply_bound_engines`]; a rotation that lands while the
+/// request is built is retried once against the re-read row.
+async fn reapply_one(
+    st: &CpState,
+    prov: std::sync::Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>,
+    mut engine: Engine,
+) -> Result<(), String> {
+    let mut retried = false;
+    loop {
+        let built = build_provision_req(st, &engine)
+            .await
+            .map_err(|e| e.to_string())?;
+        match apply_built(st, prov.clone(), &engine, &built, ApplyOp::Update).await {
+            Ok(()) => return Ok(()),
+            Err(ApplyBuiltError::CredentialChanged) if !retried => {
+                retried = true;
+                engine = st
+                    .engine_mgmt
+                    .get_engine(engine.id)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "the engine was deleted".to_string())?;
+            }
+            Err(ApplyBuiltError::CredentialChanged) => {
+                return Err(RANGER_CREDENTIAL_CHANGED.to_string())
+            }
+            Err(ApplyBuiltError::Conflict) => {
+                return Err("the engine was deleted, or is being deleted".to_string())
+            }
+            Err(ApplyBuiltError::Failed(m)) => return Err(m),
+        }
+    }
 }
 
 /// The Ranger binding of an engine bound to `service_name` (`None`: unbound,
@@ -1009,6 +1175,7 @@ async fn ranger_binding(
     st: &CpState,
     engine: &Engine,
     service_name: Option<String>,
+    mechanism: egret_engine_mgmt_api::opa_config::AccessMechanism,
     rotate: bool,
 ) -> Result<Option<egret_engine_mgmt_api::RangerBinding>, CpError> {
     let Some(service_name) = service_name else {
@@ -1037,6 +1204,8 @@ async fn ranger_binding(
             ))
         })?;
     Ok(Some(egret_engine_mgmt_api::RangerBinding {
+        mechanism,
+        engine_id: engine.id.to_string(),
         service_name,
         egret_url: st.engine_egret_url.clone(),
         poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
@@ -3754,10 +3923,12 @@ async fn build_starrocks_provision_req_with(
         check_starrocks_engine_name(&engine.name)?;
     }
     // Last fallible step: a refused rotation (409) leaves nothing half-done.
+    // A StarRocks profile is always on Ranger (migration 0213's CHECK).
     let ranger = ranger_binding(
         st,
         engine,
         ranger_service_name.clone(),
+        egret_engine_mgmt_api::opa_config::AccessMechanism::Ranger,
         rotate_ranger_credential,
     )
     .await?;
@@ -13044,6 +13215,8 @@ mod tests {
             .expect("build request");
         let render = |built: &mut BuiltReq, id: String| {
             built.req.ranger = Some(egret_engine_mgmt_api::RangerBinding {
+                mechanism: egret_engine_mgmt_api::opa_config::AccessMechanism::Ranger,
+                engine_id: "engine-1".into(),
                 service_name: "p".into(),
                 egret_url: "http://egret:8080".into(),
                 poll_interval_ms: 30_000,

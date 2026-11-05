@@ -126,6 +126,7 @@ async fn env() -> Option<Env> {
         .await
         .expect("starrocks def");
     let app = perm_router().with_state(PermState {
+        opa_cache: None,
         perm: PermStore::new(db.pool.clone()),
         policy: policy.clone(),
         sessions,

@@ -47,6 +47,11 @@ export interface ProfileDto {
      */
   origin: string;
   /**
+     * How the profile's engines are asked: `"ranger"` or `"opa"` (Trino only;
+     * migration 0213).
+     */
+  mechanism: string;
+  /**
      * Policies by owner, the profile's own plus its `tag_service`'s (DG #4a
      * Q1): `compiler` (egret-compiled), `infra` (egret-seeded), `operator`
      * (hand-written). `policy_count` stays the profile's own total.

@@ -5048,6 +5048,89 @@
         }
       }
     },
+    "/api/control-plane/engines/{id}/opa-plugin-config": {
+      "get": {
+        "tags": [
+          "control-plane-engines"
+        ],
+        "summary": "`GET /api/control-plane/engines/{id}/opa-plugin-config`.",
+        "operationId": "opa_plugin_config",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Engine id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The Trino OPA plugin files to install on this external engine, rendered by the same code that renders the files egret mounts into its own engines. The context file carries the engine's id and a placeholder in place of its secret: the secret (the engine's Ranger plugin credential) was shown once and is never returned here. Nothing is minted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpaPluginConfigDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing engine:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The engine is provisioned (egret mounts these files itself), it is bound to no policy profile (bind one first), or its profile is on Ranger (use /ranger-plugin-config)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/engines/{id}/pods/{pod}/exec": {
       "get": {
         "tags": [
@@ -11012,6 +11095,107 @@
             }
           }
         }
+      },
+      "patch": {
+        "tags": [
+          "policy-admin"
+        ],
+        "summary": "PATCH /policies/services/{service} — switch a profile between Ranger and\nOPA (`policy.authz_services.mechanism`).",
+        "description": "Under the row locks of the profile **and** its tag service, taken in the\norder a recompile takes them, the switch to OPA re-checks every condition\n(the profile is a generated Trino profile, OPA is enabled, every bound\negret-provisioned engine runs an image with the OPA plugin, no `all - …`\ndefaults, no hand-written policies, no stored mask/row-filter pairs) in\nthe same transaction that writes, so an operator insert into the tag\nservice cannot slip between the check and the write. Switching to Ranger\nhas no condition and skips the check (the gate included). A change writes\n`mechanism`, recompiles the profile's Ranger artifact (which every profile\nkeeps, whatever its mechanism) and records `profile:mechanism`. It bumps\n`policy_version` at least once, plus once more if the Ranger recompile\nwrites. The same mechanism again writes nothing.\n\nAfter the commit the bound engines are always reconfigured, also when\nnothing was written: re-sending the PATCH is how a failed reconfigure is\nretried.",
+        "operationId": "set_mechanism",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "path",
+            "description": "Policy profile (Ranger service) name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetMechanismBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The coordinator of every bound egret-provisioned engine restarts to load the new access control; queries running on it fail. External engines are listed in `external_engines_unchanged`: their operator installs the new plugin files and must run Trino 483 or later with `plugin/opa`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileMechanism"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such policy profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The switch to OPA is refused: `{error, code: \"mechanism_refused\", refusals}`, `refusals` naming every condition that holds (`error` is the first). Nothing is written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The switch is committed, but some bound engines were not reconfigured: `{error, engines_reconfigured, engines_failed: [{engine, error}]}`. Send the same PATCH again to retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/control-plane/policies/services/{service}/seed-defaults": {
@@ -11230,7 +11414,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The Trino coordinator config files for this profile's native ranger plugin, from the same renderer that writes the files egret mounts into its own engines (`access-control.properties` and `ranger-trino-security.xml`), and `warnings`: the same download-URL warning as the external engine's plugin configuration (a loopback or unparseable `[catalog] public_url`). Since SP4d-4 the security file also carries the policy source, cache directory and client timeouts, the properties file points at `/etc/trino/ranger-trino-security.xml`, and the poll interval is 30000 ms. Before KI-149 the body was the bare array of files",
+            "description": "The Trino coordinator config files for this profile's native ranger plugin (for a profile whose `mechanism` is `opa`: the OPA plugin's `access-control.properties` and `egret-opa-context.properties`, with the engine id and secret as placeholders, and `warnings` adding the log-requests warning and the Trino 483 note), from the same renderer that writes the files egret mounts into its own engines (`access-control.properties` and `ranger-trino-security.xml`), and `warnings`: the same download-URL warning as the external engine's plugin configuration (a loopback or unparseable `[catalog] public_url`). Since SP4d-4 the security file also carries the policy source, cache directory and client timeouts, the properties file points at `/etc/trino/ranger-trino-security.xml`, and the poll interval is 30000 ms. Before KI-149 the body was the bare array of files",
             "content": {
               "application/json": {
                 "schema": {
@@ -45755,6 +45939,13 @@
                 "description": "The deciding policy's `perm` model object, or `None` — see\n[`ExplainAttribution`]. Always `None` for `Undecidable`, which has no\nsingle deciding policy."
               }
             ]
+          },
+          "ir_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An OPA profile only (governance SP2b Task 16): the IR evaluator's own\nwords for the verdict — the deciding statement's source on an allow\n(`grant …`, `rule …`), the reason on a deny (`withhold pii`), or why\nthe profile's snapshot could not be built. Absent on a Ranger profile."
           }
         }
       },
@@ -46104,6 +46295,33 @@
           }
         }
       },
+      "ExplainOpa": {
+        "type": "object",
+        "description": "What the IR evaluator answers for an OPA profile's `read` beyond access:\nthe rendered column mask (for a column target) and the AND of the row\nfilters (for a target naming a table). `None` means nothing applies.\n\nThe column's type is not known to explain, so a mask is rendered with\n`varchar` where the engine substitutes the column's own type.",
+        "properties": {
+          "column_mask": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The SQL the plugin would apply to the column, rendered with `varchar`."
+          },
+          "column_mask_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The mask type the evaluator chose (`MASK_HASH`, `MASK_NULL`, ...):\npresent exactly when `column_mask` is."
+          },
+          "row_filter": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The AND of every applying row filter on the target's table."
+          }
+        }
+      },
       "ExplainOutcome": {
         "type": "string",
         "description": "Which of `explain`'s two shapes a response carries.\n\n**\"No engine serves this catalog\" is not a refusal.** Collapsing it into a\n`Denied` would tell a steward the model is withholding an access when in\nfact no plugin is ever consulted about the resource — nothing is enforcing,\nwhich is a different fact. `profiles` is empty for exactly this outcome,\nand this discriminator exists so a client never has to infer a\nsecurity-relevant fact from the absence of data (an empty list also reads\nas \"we did not look\").",
@@ -46196,6 +46414,7 @@
           "service_id",
           "service_name",
           "engine",
+          "mechanism",
           "accesses",
           "tags",
           "tag_policies_in_download",
@@ -46213,6 +46432,21 @@
           },
           "engine": {
             "$ref": "#/components/schemas/WireEngineType"
+          },
+          "mechanism": {
+            "$ref": "#/components/schemas/WireMechanism",
+            "description": "How this profile's engines are asked, and so which evaluator answered:\n`ranger` evaluates the served Ranger download with `egret-ranger-eval`,\n`opa` evaluates the profile's IR snapshot with `egret-perm-eval`\n(governance SP2b Task 16). An OPA profile carries no Ranger-only\nfields (`mask`, `row_filter`, `tags`); its values are in `opa`."
+          },
+          "opa": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExplainOpa",
+                "description": "An OPA profile's `read` of a table or column: the rendered column mask\nand the row filter. Absent on a Ranger profile, on a `write`, on a\ntarget above the table, and when the snapshot could not be built."
+              }
+            ]
           },
           "accesses": {
             "type": "array",
@@ -48808,6 +49042,14 @@
           }
         }
       },
+      "MechanismName": {
+        "type": "string",
+        "description": "How a profile's engines are asked (`policy.authz_services.mechanism`).",
+        "enum": [
+          "ranger",
+          "opa"
+        ]
+      },
       "MemberDto": {
         "type": "object",
         "required": [
@@ -50459,6 +50701,37 @@
           }
         }
       },
+      "OpaPluginConfigDto": {
+        "type": "object",
+        "description": "The Trino OPA plugin configuration an external engine's admin installs.",
+        "required": [
+          "files",
+          "warnings",
+          "adminMustSupply"
+        ],
+        "properties": {
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RangerPluginFileDto"
+            },
+            "description": "`access-control.properties`, then the context file; the context file\ncarries a placeholder in place of the engine's secret."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "adminMustSupply": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What the admin supplies that egret cannot."
+          }
+        }
+      },
       "OrderBy": {
         "type": "object",
         "required": [
@@ -51542,6 +51815,7 @@
           "policy_count",
           "engines",
           "origin",
+          "mechanism",
           "policy_counts"
         ],
         "properties": {
@@ -51580,6 +51854,10 @@
             "type": "string",
             "description": "`\"manual\"` (hand-authored, fully editable) or `\"generated\"` (compiled\nby the SP4a permission model from its grants and rules).\n\n**Exposed because D4's requirement is that the profile says so BEFORE\nan edit is overwritten, not after** (whole-branch review, Important 4).\nThe raw-JSON policy editor still ships in SP4a and is still the only\npolicy UI, and a `'generated'` profile is now only PARTLY frozen — its\n`perm-*` policies are compiler-owned and refuse an edit with a 409,\nwhile foreign policies in the same profile stay editable. Without this\nfield the editor cannot tell an operator which half they are looking\nat, and the first thing they learn is the 409 on save."
           },
+          "mechanism": {
+            "type": "string",
+            "description": "How the profile's engines are asked: `\"ranger\"` or `\"opa\"` (Trino only;\nmigration 0213)."
+          },
           "policy_counts": {
             "$ref": "#/components/schemas/PolicyCounts",
             "description": "Policies by owner, the profile's own plus its `tag_service`'s (DG #4a\nQ1): `compiler` (egret-compiled), `infra` (egret-seeded), `operator`\n(hand-written). `policy_count` stays the profile's own total."
@@ -51613,6 +51891,38 @@
           "type": {
             "type": "string",
             "description": "The engine type: `trino`, `starrocks`, … (DG #4a Q1)."
+          }
+        }
+      },
+      "ProfileMechanism": {
+        "type": "object",
+        "description": "The profile's mechanism after the switch, and what happened to its engines.",
+        "required": [
+          "name",
+          "mechanism",
+          "engines_reconfigured",
+          "external_engines_unchanged"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "mechanism": {
+            "$ref": "#/components/schemas/MechanismName"
+          },
+          "engines_reconfigured": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The bound egret-provisioned engines re-applied with the new mechanism."
+          },
+          "external_engines_unchanged": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The bound external engines: egret does not configure them; their\noperator installs the new plugin files."
           }
         }
       },
@@ -54897,6 +55207,17 @@
           }
         }
       },
+      "SetMechanismBody": {
+        "type": "object",
+        "required": [
+          "mechanism"
+        ],
+        "properties": {
+          "mechanism": {
+            "$ref": "#/components/schemas/MechanismName"
+          }
+        }
+      },
       "SetPermissionsInput": {
         "type": "object",
         "required": [
@@ -56961,7 +57282,8 @@
         "description": "What `trino-config` answers: the files, and what makes them not work as\nrendered (KI-149).",
         "required": [
           "files",
-          "warnings"
+          "warnings",
+          "mechanism"
         ],
         "properties": {
           "files": {
@@ -56976,6 +57298,10 @@
               "type": "string"
             },
             "description": "The same download-URL warning the external engine's plugin\nconfiguration gives (`egret_engine_mgmt_api::ranger_config::download_url_warning`):\na loopback or unparseable URL no engine can reach. Empty when none."
+          },
+          "mechanism": {
+            "type": "string",
+            "description": "`\"ranger\"` or `\"opa\"`: which plugin the files configure. An OPA\nprofile's files are the plugin selector and the context file that\ncarries the engine id and secret (both shown as placeholders)."
           }
         }
       },
@@ -59063,6 +59389,14 @@
             ]
           }
         }
+      },
+      "WireMechanism": {
+        "type": "string",
+        "description": "How a profile's engines are asked (`policy.authz_services.mechanism`,\nmigration 0213), and so which evaluator answered an explain profile:\n`egret-ranger-eval` over the served Ranger download, or the IR evaluator\n(`egret-perm-eval`) over the profile's OPA snapshot.",
+        "enum": [
+          "ranger",
+          "opa"
+        ]
       },
       "WirePluginVersion": {
         "type": "string",

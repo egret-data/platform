@@ -35,6 +35,7 @@ export function profile(name: string, engines: { id: string; name: string }[] = 
     name,
     type: "trino",
     origin: "manual",
+    mechanism: "ranger",
     policy_version: 1,
     policy_count: 0,
     policy_counts: { compiler: 0, infra: 0, operator: 0 },

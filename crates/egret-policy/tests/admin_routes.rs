@@ -113,6 +113,8 @@ impl Fixture {
             engine_egret_url: "http://egret:8080".into(),
             pdp: self.pdp.clone(),
             recompiler: std::sync::Arc::new(NoRecompile),
+            reconfigurer: std::sync::Arc::new(egret_policy::NoReconfigure),
+            opa_enabled: false,
         })
     }
     /// Router with no bound engines (the common case).
@@ -130,6 +132,8 @@ impl Fixture {
             engine_egret_url: url.into(),
             pdp: self.pdp.clone(),
             recompiler: std::sync::Arc::new(NoRecompile),
+            reconfigurer: std::sync::Arc::new(egret_policy::NoReconfigure),
+            opa_enabled: false,
         })
     }
 }
@@ -840,6 +844,7 @@ async fn list_profiles_shows_bound_engines_from_reader() {
             status: "Running".into(),
             authz_service_id: Some(svc_id),
             warehouse_ids: Vec::new(),
+            image: None,
             origin: "provisioned".into(),
             r#type: "trino".into(),
         }],
@@ -1126,6 +1131,7 @@ async fn delete_profile_refused_while_engine_bound() {
             status: "Running".into(),
             authz_service_id: Some(svc_id),
             warehouse_ids: Vec::new(),
+            image: None,
             origin: "provisioned".into(),
             r#type: "trino".into(),
         }],
@@ -1181,6 +1187,7 @@ async fn resource_lookup_suggests_live_catalog_metadata() {
             status: "Running".into(),
             authz_service_id: Some(svc_id),
             warehouse_ids: vec![wh],
+            image: None,
             origin: "provisioned".into(),
             r#type: "trino".into(),
         }],
@@ -1261,6 +1268,7 @@ async fn resource_lookup_suggests_every_warehouse_the_engine_reads() {
             status: "Running".into(),
             authz_service_id: Some(svc_id),
             warehouse_ids: vec![primary_wh, second_wh],
+            image: None,
             origin: "provisioned".into(),
             r#type: "trino".into(),
         }],
@@ -4234,6 +4242,13 @@ impl egret_policy::ProfileRecompiler for NoRecompile {
     ) -> Result<(), egret_policy::PolicyHttpError> {
         Ok(())
     }
+    async fn stored_overlaps_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+        _service_id: i64,
+    ) -> Result<Vec<String>, egret_policy::PolicyHttpError> {
+        Ok(vec![])
+    }
 }
 
 // ── DG #4a Q1: origin, type and per-owner counts on `GET /policies/services` ──
@@ -4277,6 +4292,7 @@ async fn list_profiles_shows_each_engines_origin_and_type() {
                 status: "running".into(),
                 authz_service_id: Some(svc_id),
                 warehouse_ids: Vec::new(),
+                image: None,
                 origin: "provisioned".into(),
                 r#type: "trino".into(),
             },
@@ -4286,6 +4302,7 @@ async fn list_profiles_shows_each_engines_origin_and_type() {
                 status: "running".into(),
                 authz_service_id: Some(svc_id),
                 warehouse_ids: Vec::new(),
+                image: None,
                 origin: "external".into(),
                 r#type: "starrocks".into(),
             },
@@ -4466,6 +4483,57 @@ async fn trino_config_warns_when_the_download_url_is_loopback() {
     assert!(
         body["files"].to_string().contains("http://localhost:8080"),
         "body={body}"
+    );
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+#[tokio::test]
+async fn trino_config_of_an_opa_profile_shows_the_opa_files_and_the_log_warning() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cfg_opa", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    sqlx::query("UPDATE policy.authz_services SET mechanism = 'opa' WHERE id = $1")
+        .bind(svc_id)
+        .execute(&f.db.pool)
+        .await
+        .expect("set mechanism");
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "GET",
+                &format!("/policies/services/{svc_name}/trino-config"),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(body["mechanism"], "opa", "body={body}");
+    let files = body["files"].as_array().expect("files");
+    let names: Vec<&str> = files.iter().map(|x| x["name"].as_str().unwrap()).collect();
+    assert_eq!(
+        names,
+        ["access-control.properties", "egret-opa-context.properties"]
+    );
+    let ctx = files[1]["content"].as_str().unwrap();
+    assert!(
+        ctx.contains(egret_engine_mgmt_api::ranger_config::PASSWORD_PLACEHOLDER),
+        "{ctx}"
+    );
+    let warnings: Vec<&str> = body["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w.as_str().unwrap())
+        .collect();
+    assert!(
+        warnings.contains(&egret_engine_mgmt_api::opa_config::OPA_LOG_REQUESTS_WARNING),
+        "{warnings:?}"
     );
     f.store.delete_service(svc_id).await.expect("cleanup");
 }
@@ -4697,6 +4765,7 @@ async fn set_tag_service_refuses_a_bound_or_generated_profile() {
             status: "Running".into(),
             authz_service_id: Some(svc_id),
             warehouse_ids: Vec::new(),
+            image: None,
             origin: "external".into(),
             r#type: "trino".into(),
         }],

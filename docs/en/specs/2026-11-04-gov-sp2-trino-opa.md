@@ -16,7 +16,7 @@ A Trino engine runs on OPA behind a per-profile switch. Acceptance, from the umb
 | # | Decision | Why |
 |---|---|---|
 | S1 | egret itself answers the OPA REST protocol (`POST …` `{"input": …}` → `{"result": …}`). There is no OPA binary and no Rego. | One evaluator serves Trino and `explain`; no second policy language to keep in step with the IR. |
-| S2 | The decision endpoint runs inside `egret-server`, next to `ranger_surface()`. The evaluator is its own pure crate, so it can move into a sidecar later. | Simplest delivery. Whether a sidecar is needed is decided by the latency and restart numbers this sub-project measures, not in advance. |
+| S2 | The decision endpoint runs inside the egret server process, mounted by `egret-server` next to `ranger_surface()`. Its router, `opa_surface()`, lives in `egret-perm-compile`, which holds the loaders the snapshot build needs (amended 2026-11-04 at plan review). The evaluator is its own pure crate, so it can move into a sidecar later. | Simplest delivery. Whether a sidecar is needed is decided by the latency and restart numbers this sub-project measures, not in advance. |
 | S3 | Infrastructure policies move into the IR in this sub-project, for both Ranger and OPA. | Trino asks OPA about impersonation, query execution, kill and session properties on every query; they cannot stay stored Ranger JSON. One source keeps both targets equal. |
 | S4 | One spec, two plans, two PRs in order: **2a** infrastructure in the IR (Ranger output byte-identical), then **2b** the OPA target. | 2a is internal and proven by the golden fixtures; it lands without waiting on 2b's risks. |
 | S5 | Trino authenticates to egret with the engine secret carried in `opa.context-file`, which the plugin copies into `input.context.properties` of every request. | Measured on `trino-opa-483.jar`: the plugin has no setting for an `Authorization` header (its HTTP client offers only TLS key and trust stores). The context file gives the same trust as today's Ranger Basic auth without a TLS listener on egret. |
@@ -171,7 +171,7 @@ The crate is pure: no sqlx, tokio, network or filesystem, like `egret-ranger-eva
   An operation missing from the table is denied with the reason "operation not modelled" (umbrella D7). A test asserts that the table covers every operation name in the 483 plugin.
 - `explain` gains an IR path: for an OPA profile, `/perm/explain*` answers through `egret-perm-eval` and returns the evaluator's reason. A Ranger profile keeps `egret-ranger-eval`, which also stays the test oracle.
 
-### Endpoint: `opa_surface()` in `egret-server`
+### Endpoint: `opa_surface()`, in `egret-perm-compile`, mounted by `egret-server`
 
 | Route | Plugin setting |
 |---|---|
@@ -179,23 +179,39 @@ The crate is pure: no sqlx, tokio, network or filesystem, like `egret-ranger-eva
 | `POST /opa/v1/data/egret/trino/batch` | `opa.policy.batched-uri` |
 | `POST /opa/v1/data/egret/trino/row_filters` | `opa.policy.row-filters-uri` |
 | `POST /opa/v1/data/egret/trino/batch_column_masks` | `opa.policy.batch-column-masking-uri` |
+| `POST /opa/v1/data/egret/trino/column_mask` | `opa.policy.column-masking-uri` |
 
-- **Authentication.** `input.context.properties` carries `egret.engine` (the engine id) and `egret.secret`. egret checks the secret with the same constant-time engine-secret check the Ranger surface uses. It then reads which profile the engine is bound to.
-- **Refusal.** An unknown engine, a wrong secret, or a profile that is not on OPA all get HTTP 200 with a denying result (`false`, `[]`), plus a log line that names the reason. The plugin would turn a 4xx into the same denial but without a reason.
-- **Snapshot cache.** egret keeps one `Arc<Snapshot>` per service, keyed by `(policy_version, tag_version)`. When the version moves, one task rebuilds the snapshot while in-flight requests keep the old one. The decision path never touches the database.
+- **Configuration gate.** The surface, its snapshot refresher, and a switch to OPA exist only with `[governance.opa] enabled = true` (env `EGRET_GOVERNANCE__OPA__ENABLED`). It defaults to `false` until 2b-2 lands, whose last task makes `true` the default. Switching back to Ranger is always allowed. *(Amended 2026-11-04 at plan review.)*
+
+- **Authentication.** `input.context.properties` carries `egret.engine` (the engine id) and `egret.secret`. egret checks the secret with the same constant-time engine-secret check the Ranger surface uses. It then reads which profile the engine is bound to, from a binding map the snapshot refresher reloads every second, never from a cached credential.
+- **Refusal.** An unknown engine, a wrong secret, a malformed request, an engine bound to no OPA profile, or a profile with no usable snapshot is refused, and a log line names the reason. *(Amended 2026-11-04 at plan review.)*
+  - On `allow` and `batch`, a refusal is HTTP 200 with a denying result (`false`, `[]`).
+  - On the three value routes (`row_filters`, `batch_column_masks`, `column_mask`), a refusal is **HTTP 403**. There, `[]` or `null` means "no filter, no mask", so a 200 refusal would fail open. Only an evaluation against a ready snapshot answers 200.
+  - An internal evaluator error answers 500 on any route. The plugin turns every non-2xx into a failed query.
+- **Snapshot cache.** egret keeps one `Arc<Snapshot>` per service, keyed by `(policy_version, tag_version)`. When the version moves, one task rebuilds the snapshot while in-flight requests keep the old one.
+  - The decision path never touches the database, except on a miss of a 5-second credential-verification cache.
+  - Every rebuild re-checks the stored-state refusals listed under the switch below. A hit makes the profile deny everything, with the reason reported as a compile failure.
+  - If only the data lowering fails, fresh infrastructure statements are spliced into the previous snapshot, so the 2a kill switch still holds.
+  - A profile keeps being served while any of its engines was last applied with OPA. *(Amended 2026-11-04 at plan review.)*
 - **Logging.** Every denial is logged at `info` with the engine, user, operation, resource and reason. Allows are counted in metrics.
 
 ### Per-profile switch
 
-- **Migration.** `policy.authz_services` gains `mechanism TEXT NOT NULL DEFAULT 'ranger' CHECK (mechanism IN ('ranger','opa'))`, plus a CHECK that `opa` requires `type='trino'`. The migration number is chosen at plan time, above `main` and every open PR.
+- **Migration `0213`.** `policy.authz_services` gains `mechanism TEXT NOT NULL DEFAULT 'ranger' CHECK (mechanism IN ('ranger','opa'))`, plus a CHECK that `opa` requires `type='trino'`. `engine_mgmt.engines` gains `applied_mechanism`, the mechanism each provisioned engine was last applied with.
 - **IR.** `Mechanism::Opa` is added, and `ir_load.rs` reads the mechanism from the profile.
 - **Matrix.** `opa(trino)` rows are filled from the differential's measurements. An absent row still reads `Missing(NotMeasured)`.
-- **`PATCH /policies/services/{id}` with `{ "mechanism": "opa" | "ranger" }`.**
-  - egret refuses the switch, with the failing condition named, unless all of these hold:
+- **`PATCH /policies/services/{service}` with `{ "mechanism": "opa" | "ranger" }`.** `{service}` is the profile name, like every other profile route.
+  - egret refuses the switch, with the failing condition named, unless all of these hold *(amended 2026-11-04 at plan review)*:
+    - OPA is enabled on the installation (the configuration gate);
     - the profile is Trino;
     - the profile is generated (S6);
-    - every bound engine runs an image in `KNOWN_ENGINE_IMAGES` that ships `plugin/opa` (today: Trino 483).
-  - On success egret recompiles, bumps the version, and reconfigures every bound engine.
+    - every bound **egret-provisioned** engine runs an image in `KNOWN_ENGINE_IMAGES` that ships `plugin/opa` (today: Trino 483). External engines are not checked, because egret cannot see their image. The response lists them, and the dialog and the docs say their operator must run Trino ≥ 483 with `plugin/opa`;
+    - the profile holds no `all - …` default policy (decision D-all, below);
+    - neither the profile nor its tag service holds a hand-written (`managed_by = 'operator'`) policy;
+    - the profile serves no stored differing mask or row-filter pair (`GET /perm/overlaps`).
+
+    The last three are stored state the evaluator cannot express. While a profile is on OPA, a hand-written policy in its tag service is refused at write time.
+  - On success egret recompiles, bumps the version, and reconfigures every bound provisioned engine. If an engine cannot be re-applied, the answer is 502, naming the engines applied and the engines that failed; the switch stays committed. Re-sending the same request re-runs the reconfigure.
 
 ### Engine configuration
 
@@ -208,6 +224,7 @@ The crate is pure: no sqlx, tokio, network or filesystem, like `egret-ranger-eva
     opa.policy.batched-uri=<egret>/opa/v1/data/egret/trino/batch
     opa.policy.row-filters-uri=<egret>/opa/v1/data/egret/trino/row_filters
     opa.policy.batch-column-masking-uri=<egret>/opa/v1/data/egret/trino/batch_column_masks
+    opa.policy.column-masking-uri=<egret>/opa/v1/data/egret/trino/column_mask
     opa.allow-permission-management-operations=false
     opa.log-requests=false
     opa.log-responses=false
@@ -228,7 +245,7 @@ Each of these is answered by an infrastructure statement from 2a, and each is co
 - the monitor's kill: `KillQueryOwnedBy` and `ExecuteQuery`;
 - `query_max_run_time`: `SetSystemSessionProperty`.
 
-The `all - …` defaults are not in the IR (2a), so the OPA evaluator does not see them. The 2b plan must decide how an OPA profile treats a profile that holds them: refuse the switch, or lower them too.
+The `all - …` defaults are not in the IR (2a), so the OPA evaluator does not see them. **Decided (D-all, 2026-11-04): the switch is refused while the profile holds any of them, with the condition named.** They are not lowered. This is reachable: only the manual seed-defaults route writes them, and it refuses a generated profile.
 
 ### UI and docs
 

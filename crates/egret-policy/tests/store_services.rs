@@ -528,3 +528,108 @@ async fn create_service_refuses_a_tag_service_that_is_not_a_tag_profile() {
     s.delete_service(tag.id).await.unwrap();
     s.delete_service(trino_as_tag.id).await.unwrap();
 }
+
+/// Governance SP2b Task 5 — migration 0213: every profile reads `ranger` until
+/// told otherwise, and `opa` is writable on a Trino profile only. The refusals
+/// must name their CHECK, so a typo in a column name cannot pass for them.
+#[tokio::test]
+async fn mechanism_defaults_to_ranger_and_opa_is_trino_only() {
+    let Some((s, db)) = store_and_db().await else {
+        eprintln!("skip");
+        return;
+    };
+    // Arrange: one Trino and one StarRocks profile.
+    seed_trino(&s).await.unwrap();
+    egret_policy::seed_starrocks(&s).await.unwrap();
+    let trino_name = uniq("mech_trino");
+    let trino = s
+        .create_service(&trino_name, "trino", &json!({}))
+        .await
+        .unwrap();
+    let sr_name = uniq("mech_sr");
+    let sr = s
+        .create_service(&sr_name, "starrocks", &json!({}))
+        .await
+        .unwrap();
+
+    // Assert: both read `ranger`, from create's RETURNING and from get_service.
+    assert_eq!(
+        trino.mechanism, "ranger",
+        "create_service returns the default"
+    );
+    for name in [&trino_name, &sr_name] {
+        assert_eq!(
+            s.get_service(name).await.unwrap().mechanism,
+            "ranger",
+            "{name}: a new profile defaults to ranger"
+        );
+    }
+
+    // Act/Assert: a Trino profile switches to `opa`, and reads it back.
+    sqlx::query("UPDATE policy.authz_services SET mechanism = 'opa' WHERE id = $1")
+        .bind(trino.id)
+        .execute(&db.pool)
+        .await
+        .expect("a trino profile may switch to opa");
+    assert_eq!(
+        s.get_service(&trino_name).await.unwrap().mechanism,
+        "opa",
+        "get_service reads the stored mechanism"
+    );
+    assert_eq!(
+        s.get_service_by_id(trino.id).await.unwrap().mechanism,
+        "opa",
+        "get_service_by_id reads the stored mechanism"
+    );
+    assert!(
+        s.list_services()
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.id == trino.id && r.mechanism == "opa"),
+        "list_services reads the stored mechanism"
+    );
+
+    // A StarRocks profile cannot.
+    let e = sqlx::query("UPDATE policy.authz_services SET mechanism = 'opa' WHERE id = $1")
+        .bind(sr.id)
+        .execute(&db.pool)
+        .await
+        .expect_err("a starrocks profile must not switch to opa");
+    assert_named_check(&e, "authz_services_opa_is_trino_only", "opa on starrocks");
+
+    // An OPA Trino profile cannot become StarRocks either (the other direction).
+    let e = sqlx::query("UPDATE policy.authz_services SET type = 'starrocks' WHERE id = $1")
+        .bind(trino.id)
+        .execute(&db.pool)
+        .await
+        .expect_err("an opa profile must not flip to starrocks");
+    assert_named_check(
+        &e,
+        "authz_services_opa_is_trino_only",
+        "type flip of an opa profile",
+    );
+
+    // An unknown mechanism is refused on any type.
+    let e = sqlx::query("UPDATE policy.authz_services SET mechanism = 'kafka' WHERE id = $1")
+        .bind(trino.id)
+        .execute(&db.pool)
+        .await
+        .expect_err("an unknown mechanism must be refused");
+    assert_named_check(&e, "authz_services_mechanism_is_known", "mechanism kafka");
+
+    s.delete_service(trino.id).await.unwrap();
+    s.delete_service(sr.id).await.unwrap();
+}
+
+fn assert_named_check(e: &sqlx::Error, name: &str, what: &str) {
+    let got = match e {
+        sqlx::Error::Database(d) => d.constraint().map(str::to_string),
+        _ => None,
+    };
+    assert_eq!(
+        got.as_deref(),
+        Some(name),
+        "{what}: expected CHECK {name:?} to refuse, got: {e}"
+    );
+}

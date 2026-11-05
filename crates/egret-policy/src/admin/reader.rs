@@ -31,6 +31,10 @@ pub struct EngineBinding {
     /// primary's. Empty for an engine that attaches no egret warehouse catalog
     /// (a Trino reading only jdbc catalogs, say).
     pub warehouse_ids: Vec<uuid::Uuid>,
+    /// The image the engine's stored provisioning spec runs
+    /// (`egret_perm::stored_engine_image`); `None` for an external engine or
+    /// a spec that names none. The switch to OPA judges it (C6).
+    pub image: Option<String>,
 }
 
 /// Transport-neutral read error (no engine-seam error type leaks across).

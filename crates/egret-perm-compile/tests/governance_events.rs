@@ -159,6 +159,7 @@ async fn setup() -> Option<Fixture> {
             .expect("build CedarPdp"),
     );
     let app = perm_router().with_state(PermState {
+        opa_cache: None,
         perm,
         policy,
         sessions,

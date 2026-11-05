@@ -575,6 +575,32 @@ pub struct Config {
     /// `apps`: a deployment's TOML predates the section.
     #[serde(default)]
     pub engines: EnginesConfig,
+    /// Governance enforcement switches. Serde-defaulted like `engines`: a
+    /// deployment's TOML predates the section.
+    #[serde(default)]
+    pub governance: GovernanceConfig,
+}
+
+/// `[governance]` — deployment-level switches for how egret enforces policy.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GovernanceConfig {
+    #[serde(default)]
+    pub opa: OpaSettings,
+}
+
+/// `[governance.opa]` — egret answering Trino's OPA plugin (governance SP2b).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpaSettings {
+    /// **The exposure lever for the OPA surface, and it defaults to `false`**
+    /// until SP2b-2 (Task 26) — modelled on
+    /// [`WorkflowConfig::webhooks_enabled`]. Key `[governance.opa] enabled`,
+    /// env `EGRET_GOVERNANCE__OPA__ENABLED=true`.
+    ///
+    /// While it is false the OPA routes are not mounted, the snapshot
+    /// refresher does not run, and a profile cannot be switched to
+    /// `mechanism = "opa"` (switching back to Ranger always works).
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 /// Which backend provisions engines (`[engines] provisioner`, env
@@ -2016,6 +2042,7 @@ impl Default for Config {
             starrocks: default_starrocks(),
             apps: default_apps(),
             engines: EnginesConfig::default(),
+            governance: GovernanceConfig::default(),
             audit: AuditConfig {
                 enabled: true,
                 retention_days: 90,
@@ -4243,6 +4270,28 @@ values = { allowed-images = [] }
     /// helm, which renders a Go bool as lowercase `true`/`false` — asserted
     /// below against the chart itself, because "the chart can only emit a legal
     /// spelling" is the sentence that makes refusing everything else safe.
+    /// Governance SP2b: the OPA surface is off until an operator turns it on
+    /// (`[governance.opa] enabled`, env `EGRET_GOVERNANCE__OPA__ENABLED`).
+    #[test]
+    fn governance_opa_is_off_by_default() {
+        figment::Jail::expect_with(|jail| {
+            // A TOML with no `[governance]` section at all.
+            jail.create_file("egret.toml", "[workflow]\nwebhooks_enabled = false\n")?;
+            let c: Config = Config::figment().extract().expect("defaults");
+            assert!(
+                !c.governance.opa.enabled,
+                "OPA must default to OFF when the section is absent"
+            );
+            Ok(())
+        });
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_GOVERNANCE__OPA__ENABLED", "true");
+            let c: Config = Config::figment().extract().expect("env");
+            assert!(c.governance.opa.enabled, "the env spelling turns it on");
+            Ok(())
+        });
+    }
+
     #[test]
     fn the_webhook_lever_defaults_off_and_refuses_what_it_cannot_parse() {
         // **Every arm below counts its own iterations and the counts are
