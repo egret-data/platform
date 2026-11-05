@@ -7364,12 +7364,14 @@ fn mig_check_pins(
         "mask shape stops at table",
         Blocker::MaskMissingLevel {
             level: "column".to_string(),
+            named_below: None,
         },
     );
     refused_naming(
         "mask shape stops at schema",
         Blocker::MaskMissingLevel {
             level: "table".to_string(),
+            named_below: None,
         },
     );
     // Every non-catalog hierarchy is reached and refused.

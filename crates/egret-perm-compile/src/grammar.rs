@@ -11,6 +11,11 @@
 //! engine (`egret_perm::actions::engine_accesses`), `Scope` names ONE catalog by
 //! registry UUID, `principals.exclude` emits exactly one exception item, and
 //! `ranger::grants::level` hard-codes `is_excludes: false` and `is_recursive: false`.
+//! (The compiler's one `isExcludes` — a catalog-scoped mask's
+//! `information_schema` exclusion, `ranger::grants::INFORMATION_SCHEMA` — has
+//! no scope that renders it from a hand-written body, so the grammar still
+//! refuses every `isExcludes`; a hand-written catalog mask with `schema: *`
+//! migrates verbatim and keeps covering `information_schema`.)
 //! Anything outside that is refused with a blocker that names it.
 //!
 //! **The subset rule is the whole point.** `Action::Write` is atomic: on Trino
@@ -165,7 +170,15 @@ pub enum Blocker {
     /// `dataMaskDef` level is mandatory once Ranger merges the def, so such a
     /// policy masks NOTHING today, while the rule it would become masks every
     /// column below the path.
-    MaskMissingLevel { level: String },
+    ///
+    /// `named_below` is the first level BELOW the missing one that the policy
+    /// does name, if any: then the policy has a GAP, and the remedy is to name
+    /// the missing level (or set only it to `*`) — never to widen the named
+    /// levels under it.
+    MaskMissingLevel {
+        level: String,
+        named_below: Option<String>,
+    },
     /// A resource key outside the engine's catalog/schema|database/table/column
     /// hierarchy.
     UnknownLevel { level: String },
@@ -754,7 +767,12 @@ fn scopes(
         if absent[i] {
             let level = (*name).to_string();
             b.push(if target == PolicyTarget::Mask && i > 0 {
-                Blocker::MaskMissingLevel { level }
+                Blocker::MaskMissingLevel {
+                    level,
+                    named_below: (i + 1..names.len())
+                        .find(|j| !absent[*j])
+                        .map(|j| names[j].to_string()),
+                }
             } else {
                 Blocker::MissingLevel { level }
             });

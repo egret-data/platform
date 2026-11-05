@@ -898,12 +898,14 @@ fn a_mask_may_not_stop_above_the_column_or_skip_a_level() {
     assert_eq!(
         refused(&table_wide, EngineType::Trino),
         vec![Blocker::MaskMissingLevel {
-            level: "column".into()
+            level: "column".into(),
+            named_below: None,
         }]
     );
     // The operator reads what the policy does today and what to change.
     let sentence = egret_perm_compile::classify::render_blocker(&Blocker::MaskMissingLevel {
         level: "column".into(),
+        named_below: None,
     });
     assert!(
         sentence.contains("masks nothing") && sentence.contains("to `*` in the policy editor"),
@@ -938,8 +940,68 @@ fn a_mask_may_not_stop_above_the_column_or_skip_a_level() {
     assert_eq!(
         refused(&gap, EngineType::Trino),
         vec![Blocker::MaskMissingLevel {
-            level: "schema".into()
+            level: "schema".into(),
+            named_below: Some("table".into()),
         }]
+    );
+    // A GAP must never be advised away by widening what the policy names:
+    // name the missing level, or set only it to `*`.
+    let sentence =
+        egret_perm_compile::classify::render_blocker(&refused(&gap, EngineType::Trino)[0]);
+    assert!(
+        sentence.contains("names `table` but no `schema`")
+            && sentence.contains("set only `schema` to `*`")
+            && !sentence.contains("every level under it"),
+        "{sentence}"
+    );
+    // Every gap shape names the level below it: no table under a named
+    // schema and column, and both middle levels missing above a column.
+    let mut no_table = mask_policy(vec![everyone_mask("MASK_HASH")]);
+    no_table["resources"]
+        .as_object_mut()
+        .unwrap()
+        .remove("table");
+    assert_eq!(
+        refused(&no_table, EngineType::Trino),
+        vec![Blocker::MaskMissingLevel {
+            level: "table".into(),
+            named_below: Some("column".into()),
+        }]
+    );
+    let mut only_column = mask_policy(vec![everyone_mask("MASK_HASH")]);
+    let r = only_column["resources"].as_object_mut().unwrap();
+    r.remove("schema");
+    r.remove("table");
+    assert_eq!(
+        refused(&only_column, EngineType::Trino),
+        vec![
+            Blocker::MaskMissingLevel {
+                level: "schema".into(),
+                named_below: Some("column".into()),
+            },
+            Blocker::MaskMissingLevel {
+                level: "table".into(),
+                named_below: Some("column".into()),
+            },
+        ]
+    );
+    // A trailing run (stops at schema) keeps the "every level under it" advice.
+    let mut schema_wide = mask_policy(vec![everyone_mask("MASK_HASH")]);
+    let r = schema_wide["resources"].as_object_mut().unwrap();
+    r.remove("table");
+    r.remove("column");
+    assert_eq!(
+        refused(&schema_wide, EngineType::Trino),
+        vec![
+            Blocker::MaskMissingLevel {
+                level: "table".into(),
+                named_below: None,
+            },
+            Blocker::MaskMissingLevel {
+                level: "column".into(),
+                named_below: None,
+            },
+        ]
     );
     let mut no_catalog = mask_policy(vec![everyone_mask("MASK_HASH")]);
     no_catalog["resources"]

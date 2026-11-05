@@ -604,7 +604,22 @@ pub fn render_blocker(b: &Blocker) -> String {
              is evaluated first, not the more specific one), so do it only if that is what the \
              policy is meant to grant."
         ),
-        Blocker::MaskMissingLevel { level } => format!(
+        Blocker::MaskMissingLevel {
+            level,
+            named_below: Some(below),
+        } => format!(
+            "This masking policy names `{below}` but no `{level}` level above it, so it masks \
+             nothing on Trino or StarRocks today: Ranger applies a masking policy only when it \
+             names every level down to `column`. It cannot be migrated as it stands. In the \
+             policy editor, name the `{level}` it is meant for, or set only `{level}` to `*` if \
+             it is meant for every `{level}` — that takes effect at once, and the levels it \
+             already names stay as they are. Then migrate it, or delete it or leave it \
+             hand-written to keep it masking nothing."
+        ),
+        Blocker::MaskMissingLevel {
+            level,
+            named_below: None,
+        } => format!(
             "This masking policy names no `{level}` level, so it masks nothing on Trino or \
              StarRocks today: Ranger applies a masking policy only when it names every level \
              down to `column`. Migrated as it stands it would become a rule that masks every \
