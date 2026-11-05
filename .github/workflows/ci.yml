@@ -69,13 +69,37 @@ jobs:
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: opa
         with:
-          # What decides the end-to-end OPA differential (opa-e2e): the IR, the evaluator, the
-          # compile (the Ranger oracle and the OPA surface), and the stack and its scripts.
+          # What the end-to-end OPA differential (opa-e2e) runs through. The OPA path: the IR,
+          # evaluator and compile (egret-perm-*, the surface and refresher in
+          # egret-perm-compile/src/opa/), its mount (egret-server, egret-bin), its config
+          # (egret-config) and the OPA plugin files the provisioner writes
+          # (egret-engine-mgmt-api's opa_config.rs, egret-engine-mgmt, egret-provisioner). The
+          # Ranger path, the oracle: the policy and tag downloads and the mechanism switch
+          # (egret-policy). The setup the scenarios drive: users, groups, roles and clearances
+          # (egret-controlplane), classifications and resource tags (egret-bi), warehouses and
+          # renames (egret-catalog-engine), reserved principals (egret-core); the schema
+          # (migrations/); the image (deploy/docker/backend.Dockerfile, Cargo.lock); and the job
+          # itself.
           filters: |
             opa:
               - 'crates/egret-perm-*/**'
+              - 'crates/egret-policy/**'
+              - 'crates/egret-engine-mgmt/**'
+              - 'crates/egret-engine-mgmt-api/**'
+              - 'crates/egret-provisioner/**'
+              - 'crates/egret-server/**'
+              - 'crates/egret-bin/**'
+              - 'crates/egret-config/**'
+              - 'crates/egret-core/**'
+              - 'crates/egret-controlplane/**'
+              - 'crates/egret-bi/**'
+              - 'crates/egret-catalog-engine/**'
+              - 'migrations/**'
+              - 'Cargo.lock'
+              - 'deploy/docker/backend.Dockerfile'
               - 'deploy/opa-e2e/**'
               - 'scripts/opa-e2e/**'
+              - '.github/workflows/ci.yml'
 
   rust:
     needs: changes
@@ -311,6 +335,8 @@ jobs:
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.opa == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    permissions:
+      contents: read
     env:
       WORK: ${{ runner.temp }}/egret-opa-e2e
       LAYER2_REPORT: ${{ github.workspace }}/layer2-report.json
@@ -331,6 +357,12 @@ jobs:
         run: scripts/opa-e2e/up.sh
       - name: Layer 2 differential
         run: scripts/opa-e2e/layer2.sh
+      - name: Collect the stack's logs
+        if: failure()
+        run: |
+          mkdir -p opa-e2e-logs
+          docker compose -f deploy/opa-e2e/docker-compose.yml -p egret-opa-e2e logs --no-color > opa-e2e-logs/compose.log 2>&1 || true
+          docker logs egret-engine-egret-engines-trino-opa-coordinator > opa-e2e-logs/trino-opa.log 2>&1 || true
       - name: Tear down
         if: always()
         run: scripts/opa-e2e/down.sh
@@ -338,10 +370,11 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: layer2-report
+          name: opa-e2e-report
           path: |
             layer2-report.json
             layer2-results.jsonl
+            opa-e2e-logs/
           if-no-files-found: warn
 
   frontend:
