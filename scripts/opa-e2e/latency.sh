@@ -55,6 +55,12 @@ ADMIN_USER=$(api "$BASE/api/control-plane/users" | jget "next((u['username'] for
 RANGER_CONTAINER=$("${COMPOSE[@]}" ps -q trino-ranger)
 [ -n "$RANGER_CONTAINER" ] || die "trino-ranger is not running"
 docker exec "$OPA_CONTAINER" true || die "$OPA_CONTAINER is not running"
+# This script runs `sed` and `docker restart` on that container: act only on the engine egret's
+# Docker provisioner made for THIS stack (label egret.project, EGRET_ENGINES__DOCKER__PROJECT).
+[ "$(docker inspect -f '{{index .Config.Labels "egret.project"}}' "$OPA_CONTAINER")" = egret-opa-e2e ] \
+  || die "$OPA_CONTAINER does not carry egret.project=egret-opa-e2e: refusing to touch it"
+[ "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$RANGER_CONTAINER")" = egret-opa-e2e ] \
+  || die "trino-ranger is not in compose project egret-opa-e2e"
 
 # --- policies (idempotent) ------------------------------------------------------------------
 grants=$(api "$BASE/api/control-plane/perm/grants")
@@ -331,8 +337,17 @@ def measure(engine, container, mode, count_requests):
                 say(f"   requests by kind:route, {v} run(s): {k}")
 
 
+def own_engine():
+    """The trino-opa container egret provisioned for THIS stack, checked before every mutation."""
+    p = subprocess.run(["docker", "inspect", "-f", '{{index .Config.Labels "egret.project"}}', OPA],
+                       capture_output=True, text=True)
+    if p.stdout.strip() != "egret-opa-e2e":
+        sys.exit(f"latency.sh: {OPA} does not carry egret.project=egret-opa-e2e: refusing to touch it")
+
+
 def set_batched(on):
     path = "/etc/trino/access-control.properties"
+    own_engine()
     if not on:
         subprocess.run(["docker", "exec", OPA, "sed", "-i", "/^opa.policy.batched-uri=/d", path], check=True)
         subprocess.run(["docker", "restart", OPA], check=True, capture_output=True)
@@ -354,12 +369,13 @@ def set_batched(on):
 # --- 4. restart window ---------------------------------------------------------------------
 def restart_window():
     procs = {}
+    before = 10  # seconds the loops run before the restart begins
     for name, c in (("trino-opa", OPA), ("trino-ranger", RANGER)):
         f = open(f"{OUT}/restart-{name}.txt", "w")
         procs[name] = (subprocess.Popen(
             ["docker", "exec", c, "sh", "-c", SCRIPT, "latency-run", "loop", "ann", "SELECT 1",
              str(RESTART_SECONDS), "0.1"], stdout=f), f)
-    time.sleep(10)
+    time.sleep(before)
     t0 = time.time()
     p = subprocess.run(COMPOSE + ["restart", "egret"], capture_output=True, text=True)
     t1 = time.time()
@@ -381,7 +397,12 @@ def restart_window():
         rows = [l.split() for l in open(f"{OUT}/restart-{name}.txt") if l.strip()]
         rows = [(int(a), s, int(b)) for a, s, b in rows]
         fails = [r for r in rows if r[1] == "fail"]
-        gaps = [(rows[i + 1][0] - rows[i][0]) / 1e6 for i in range(len(rows) - 1)]
+        # Gaps only among statements that started after the restart began: the first statement
+        # of a loop is a cold start (measured 1591 ms once) and says nothing about the restart.
+        # The container's line 1 starts after `docker exec` launches, so a statement starting
+        # `before - 1` s after it is already inside the restart window or later.
+        win = [r for r in rows if rows and (r[0] - rows[0][0]) / 1e9 >= before - 1]
+        gaps = [(win[i + 1][0] - win[i][0]) / 1e6 for i in range(len(win) - 1)]
         line = f"   {name}: {len(rows)} statements, {len(fails)} failed"
         res = {"statements": len(rows), "failed": len(fails),
                "start_gap_ms": {"p50": gaps and statistics.median(gaps), "max": gaps and max(gaps)}}
@@ -398,7 +419,7 @@ def restart_window():
                      f"end of last ok before -> start of first ok after: "
                      + (f"{res['last_ok_before_to_first_ok_after_s']:.2f} s" if after and before else "n/a"))
         if gaps:
-            line += f"; start-to-start gap p50 {statistics.median(gaps):.0f} ms, max {max(gaps):.0f} ms"
+            line += f"; start-to-start gap after the restart began p50 {statistics.median(gaps):.0f} ms, max {max(gaps):.0f} ms"
         say(line)
         out[name] = res
     RESULTS["restart"] = out
@@ -410,9 +431,12 @@ if "batched" in PHASES:
     measure("trino-ranger", RANGER, "Ranger plugin", False)
     measure("trino-opa", OPA, "batched-uri on", True)
 if "unbatched" in PHASES:
-    set_batched(False)
-    measure("trino-opa", OPA, "batched-uri off", True)
-    set_batched(True)
+    try:
+        set_batched(False)
+        measure("trino-opa", OPA, "batched-uri off", True)
+    finally:
+        # Restore whatever failed: the stack must never be left without the batched URI.
+        set_batched(True)
 if "restart" in PHASES:
     restart_window()
 json.dump(RESULTS, open(f"{OUT}/latency.json", "w"), indent=1)

@@ -14,10 +14,11 @@ numbers. The commands re-run on any `egret-opa-e2e` stack.
 
 **No sidecar is needed.** Two measurements decide it:
 
-1. **Latency.** Inside the egret process, the OPA path costs about as much as Ranger's
-   in-JVM plugin. On `SHOW TABLES` over 1 003 tables, analysis takes 19.0 ms p50 on OPA and
-   10.5 ms on Ranger. Wall time is 292.6 ms against 274.5 ms. On the other two statements,
-   the wall times are within the run-to-run spread.
+1. **Latency.** On `SHOW TABLES` over 1 003 tables, analysis takes 19.0 ms p50 on OPA and
+   10.5 ms on Ranger's in-JVM plugin: about 8 ms more, or 1.8 times as long. That is inside
+   the wall-time spread: wall p50 is 292.6 ms against 274.5 ms, and Ranger's own wall time
+   runs from 258.3 ms to 339.8 ms. On the other two statements, the wall times are within
+   the run-to-run spread.
 2. **Restart window.** A restart of egret cost trino-opa at most **one** failed statement in
    each of three runs (1, 0 and 1). The gap from the last success to the next success was
    0.30 s and 0.29 s. egret's `/healthz` answered again 1.42 s, 1.31 s and 1.17 s after the
@@ -48,11 +49,12 @@ From `RAW/machine.txt` (`sysctl -n machdep.cpu.brand_string hw.ncpu hw.perflevel
 | trino-opa | provisioned by egret: `cpuMax` 2, `memory` 2Gi, coordinator only (`scripts/opa-e2e/up.sh`) |
 | trino-ranger | compose Trino 483, `JAVA_TOOL_OPTIONS=-Xmx1g` (`deploy/opa-e2e/docker-compose.yml`) |
 
-**Quiet machine.** No other test suite or build ran during the benches or the end-to-end
-run. Other people's compose projects (`egret-demo`, `egret-dev-*`, the docs Trino) stayed up,
-as the Docker rules require. `docker stats --no-stream` before the runs showed their largest
-CPU use at 11.72 % (the docs Trino coordinator). The Docker VM process itself was at
-189.1 % CPU in `ps` at that moment.
+**Conditions: not an idle machine.** No other test suite or build of mine ran during the
+benches or the end-to-end run. Other projects' compose stacks (`egret-demo`, `egret-dev-*`,
+the docs Trino coordinator) were running the whole time, as the Docker rules require; their
+load was not recorded. Ranger and OPA ran back to back under those same conditions, so
+compare them with each other, and treat the absolute times as this machine's under that
+background load.
 
 **The image.** `egret-opa-e2e-backend:dev` is `sha256:2c39814c…`, created
 2026-11-05T18:15:35Z. That is after `ff0224ce` (01:02 +07), and no Rust under `crates/`,
@@ -80,8 +82,9 @@ added. The bench printed these statement counts:
 - `one_catalog` puts the same tables in one catalog, so every statement is a candidate. That
   is the shape of an installation with one big lakehouse catalog.
 
-Every bench asks about the same objects at both sizes. The value shown is criterion's middle
-estimate, with its interval in brackets.
+Every bench asks about the same objects at both sizes. **The bench IDs' `/1000` and `/10000`
+are table counts, not statement counts** (1 106 and 11 006 statements, above). The value shown
+is criterion's middle estimate, with its interval in brackets.
 
 | Bench | 1 000 tables | 10 000 tables |
 |---|---|---|
@@ -197,8 +200,10 @@ deny, whatever a `/batch` holds.
 | `SELECT * FROM … wide LIMIT 1` | **7**: allow 5, batch_column_masks 1, row_filters 1 | **7** (the same) |
 | `SELECT count(*) FROM … information_schema.columns` | **1 024**: allow 3, batch 1 018 (+1 denied), batch_column_masks 1, row_filters 1 | between **6 229** and **7 108** (p50 6 921), then the query **failed**, see 2.3 |
 
-The 500 columns of `wide` cost one `/batch_column_masks` request, not 500. The 1 018
-`/batch` requests on `information_schema.columns` are one `FilterColumns` per table.
+The 500 columns of `wide` cost one `/batch_column_masks` request, not 500. On
+`information_schema.columns`, `/batch` took 1 019 requests (1 018 allowed, 1 denied) for a
+catalog whose `lake.s1` holds 1 003 tables. That they are one `FilterColumns` per table is an
+inference; nothing here maps requests to tables.
 
 ### 2.3 Without the batched URI
 
@@ -226,8 +231,12 @@ pool=…MultiplexConnectionPool…[…c=0/20/20,a=20,i=0,q=1017…]
 
 The failure is in **the plugin's own HTTP client**, not in egret:
 - the client has 20 connections and queues at most 1 024 requests per destination;
-- egret answered every request it received: no `busy`, `in flight` or `being parsed` line
-  in its log, and `egret_opa_error_total` and `egret_opa_unread_total` stayed absent;
+- egret refused at most one request per run. In every failing run, the `/metrics` delta
+  (`RAW/latency.out`, "requests by kind:route") holds exactly one deny (`deny:allow: 1`) and
+  no `error` or `unread` key. A 503 `busy` would be counted as a deny, so egret answered
+  every other request. The batched runs show the same single deny, on `/batch`
+  (`deny:batch: 1`). egret's log was not kept: the stack is gone, so the log is not evidence
+  here;
 - the plugin sent between 6 229 and 7 108 requests per run (allow+deny delta, almost all
   `/allow`) before its queue overflowed; those failing runs had an elapsed p50 of 4295.0 ms.
 
@@ -254,13 +263,20 @@ statements start every 234 to 242 ms at p50 (below), not every 100 ms.
 | 2 | 0.75 s | 1.31 s | 233 / **0** | n/a | 254 / 0 |
 | 3 | 0.79 s | 1.17 s | 249 / **1** | 0.29 s | 256 / 0 |
 
-Start-to-start gaps:
+Start-to-start gaps, counted only among statements that started at least 9 s after the
+loop's first statement. The loops run 10 s before the restart begins, and the first statement
+of a loop is a cold start: in run 2 it took 1591 ms. Recomputed by
+`python3 -I RAW/restart_gaps.py RAW` into `RAW/restart-gaps-recomputed.txt`:
 
 | Run | trino-opa p50 | trino-opa max | trino-ranger p50 | trino-ranger max |
 |---|---|---|---|---|
-| 1 | 241 ms | 1273 ms | 235 ms | 307 ms |
-| 2 | 242 ms | 1700 ms | 233 ms | 426 ms |
+| 1 | 240 ms | 1273 ms | 235 ms | 303 ms |
+| 2 | 241 ms | 1339 ms | 233 ms | 426 ms |
 | 3 | 234 ms | 1224 ms | 233 ms | 291 ms |
+
+The figures `latency.sh` printed at run time counted every statement, the cold first one
+included: run 2's trino-opa max of 1700 ms was that first statement. `latency.sh` now leaves
+out the statements before the restart.
 
 "First to last failure" is 0.00 s whenever there was a failure: only one statement failed.
 The failed statement failed within 86 ms and 76 ms. In trino-opa's log of run 1
@@ -268,10 +284,12 @@ The failed statement failed within 86 ms and 76 ms. In trino-opa's log of run 1
 `Server refused connection: http://egret:8080/opa/v1/data/egret/trino/allow` with
 `java.net.ConnectException: Connection refused`.
 
-The statement after it took 1160 ms and 1116 ms. In run 2 no statement failed, but two took
-1591 ms and 1234 ms (from `awk` over `RAW/*/restart-trino-opa.txt`). So egret's restart shows up
-as one refused statement, or as a stalled one (1591 ms). trino-ranger, whose plugin
-evaluates its own cached policies, saw neither.
+The statement after it took 1160 ms (run 1, line 42) and 1116 ms (run 3, line 45). In run 2
+no statement failed, but line 35, started 10.32 s into the loop, took 1234 ms. Line 1 of run 2
+(1591 ms) is the cold start, not the restart. All of these are from
+`RAW/restart-gaps-recomputed.txt`. So egret's restart shows up as one refused statement, or as
+a stalled one (1234 ms). trino-ranger, whose plugin evaluates its own cached policies, saw
+neither.
 
 **What this does not cover.** The stack's database is small. After a restart, the refresher
 builds each OPA snapshot on its first tick, and every request is refused until that build

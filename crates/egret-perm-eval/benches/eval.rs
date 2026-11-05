@@ -11,6 +11,8 @@
 //! On 5 % of the tables (every 20th): a `MASK_HASH` on `email` and a row
 //! filter. Plus one deny and the Trino infrastructure set (`lower_infra`).
 //! The statement count of each snapshot is printed before its benches run.
+//! The bench IDs' `/1000` and `/10000` are those TABLE counts (1 106 and 11 006
+//! statements).
 //!
 //! Every bench asks about objects inside `c000`–`c009`, so both sizes answer
 //! the same question; what differs is how many statements the snapshot holds.
