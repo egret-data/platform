@@ -13,6 +13,10 @@
 -- setup: POST /api/control-plane/perm/rules {"name":"l2-g14-mask","kind":{"type":"mask","mask_type":"MASK_NULL"},"selector":{"type":"path","catalog_id":"@CAT@","schema":"s1","table":"t1","column":"email"},"exempt":{"include":[{"kind":"user","ref":"ann"}],"exclude":[]}}
 -- setup: POST /api/control-plane/perm/rules {"name":"l2-g14-filter","kind":{"type":"row_filter","filter_expr":"id < 100"},"selector":{"type":"path","catalog_id":"@CAT@","schema":"s1","table":"t2"},"exempt":{"include":[],"exclude":[]}}
 -- setup: POST /api/control-plane/perm/rules {"name":"l2-g14-tagmask","kind":{"type":"mask","mask_type":"MASK_HASH"},"selector":{"type":"tag","key":"l2-pii"},"exempt":{"include":[],"exclude":[]}}
+-- expect: bob | SELECT count(*) FROM lake.s1.t2 | [[99]]
+-- expect: bob | SELECT salary FROM lake.s2.t3 WHERE id = 1 | [[100]]
+-- expect: carol | SELECT salary FROM lake.s2.t3 WHERE id = 1 | denied
+-- expect: carol | SELECT email FROM lake.s1.t1 WHERE id = 1 | [[null]]
 SELECT count(*) FROM lake.s1."t2$files"
 SELECT count(*) FROM lake.s2."t3$files"
 SELECT count(*) FROM lake.s2."w$snapshots"

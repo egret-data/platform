@@ -9,7 +9,9 @@
 -- setup: PUT /api/control-plane/warehouses/@WH@/resource-tags {"schema":"s2","table":"t3","tag_id":"@T_CONF@"}
 -- setup: POST /api/control-plane/perm/grants {"effect":"allow","actions":["read"],"scope":{"catalog_id":"@CAT@"},"principals":{"include":[{"kind":"group","ref":"public"}],"exclude":[]}}
 -- setup: POST /api/control-plane/perm/rules {"name":"l2-g08-mask","kind":{"type":"mask","mask_type":"MASK_HASH"},"selector":{"type":"tag","key":"l2-pii"},"exempt":{"include":[{"kind":"user","ref":"ann"}],"exclude":[]}}
--- refused: PUT /api/control-plane/warehouses/@WH@/resource-tags {"schema":"s2","table":"t3","tag_id":"@T_PII@"}
+-- refused 400: PUT /api/control-plane/warehouses/@WH@/resource-tags {"schema":"s2","table":"t3","tag_id":"@T_PII@"}
+-- expect: bob | SELECT email FROM lake.s1.t1 WHERE id = 1 | [["B36A83701F1C3191E19722D6F90274BC1B5501FE69EBF33313E440FE4B0FE210"]]
+-- expect: ann | SELECT email FROM lake.s1.t1 WHERE id = 1 | [["user1@example.com"]]
 SELECT id, email, name FROM lake.s1.t1 ORDER BY id LIMIT 3
 SELECT count(DISTINCT email) FROM lake.s1.t1
 SELECT id, salary, dept FROM lake.s2.t3 ORDER BY id LIMIT 3

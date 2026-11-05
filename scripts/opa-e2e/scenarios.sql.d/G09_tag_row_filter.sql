@@ -6,6 +6,9 @@
 -- setup: PUT /api/control-plane/warehouses/@WH@/resource-tags {"schema":"s2","table":"t3","tag_id":"@T_REGION@"}
 -- setup: POST /api/control-plane/perm/grants {"effect":"allow","actions":["read"],"scope":{"catalog_id":"@CAT@"},"principals":{"include":[{"kind":"group","ref":"public"}],"exclude":[]}}
 -- setup: POST /api/control-plane/perm/rules {"name":"l2-g09-rf","kind":{"type":"row_filter","filter_expr":"id % 2 = 0"},"selector":{"type":"tag","key":"l2-region"},"exempt":{"include":[{"kind":"user","ref":"ann"}],"exclude":[]}}
+-- expect: bob | SELECT count(*) FROM lake.s1.t1 | [[500]]
+-- expect: bob | SELECT count(*) FROM lake.s2.t3 | [[50]]
+-- expect: ann | SELECT count(*) FROM lake.s2.t3 | [[100]]
 SELECT count(*) FROM lake.s1.t1
 SELECT count(*) FROM lake.s2.t3
 SELECT count(*) FROM lake.s1.t2

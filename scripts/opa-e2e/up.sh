@@ -85,7 +85,9 @@ log "catalog $CATALOG = $CAT_ID"
 # G10), on Ranger and OPA alike, and Layer 2 (Task 21) would measure no classification at all.
 # The tag service can only be named at create time: PUT .../tag-service refuses a profile an
 # engine binds or the permission model compiles (409).
-services() { api "$BASE/api/control-plane/policies/services"; }
+# The profile list, as a JSON list whether the route answers a list or {services|items: [...]}.
+services() { api "$BASE/api/control-plane/policies/services" | python3 -c \
+  "import sys,json; d=json.load(sys.stdin); print(json.dumps(d if isinstance(d,list) else d.get('services', d.get('items', []))))"; }
 if [ -z "$(services | jget "next((p['id'] for p in d if p['name']=='$TAG_PROFILE'), None)")" ]; then
   log "tag profile $TAG_PROFILE"
   api -X POST "$BASE/api/control-plane/policies/services" -d "{\"name\":\"$TAG_PROFILE\",\"type\":\"tag\"}" >/dev/null

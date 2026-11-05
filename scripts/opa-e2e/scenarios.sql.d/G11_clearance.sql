@@ -20,6 +20,11 @@
 -- setup: PUT /api/control-plane/tags/@T_UNHELD@/access-policy {"required_roles":["l2_unheld"],"required_groups":[]}
 -- setup: POST /api/control-plane/perm/grants {"effect":"allow","actions":["read"],"scope":{"catalog_id":"@CAT@"},"principals":{"include":[{"kind":"group","ref":"public"}],"exclude":[]}}
 -- setup: POST /api/control-plane/perm/rules {"name":"l2-g11-last4","kind":{"type":"mask","mask_type":"MASK_SHOW_LAST_4"},"selector":{"type":"path","catalog_id":"@CAT@","schema":"s1","table":"t1","column":"ssn"},"exempt":{"include":[],"exclude":[]}}
+-- expect: ann | SELECT ssn FROM lake.s1.t1 WHERE id = 1 | [["XXXXX0001"]]
+-- expect: ann | SELECT count(*) FROM lake.s2.t3 | [[100]]
+-- expect: bob | SELECT ssn FROM lake.s1.t1 WHERE id = 1 | denied
+-- expect: bob | SELECT count(*) FROM lake.s2.t3 | denied
+-- expect: ann | SELECT name FROM lake.s1.t1 WHERE id = 1 | denied
 SELECT id, ssn FROM lake.s1.t1 ORDER BY id LIMIT 3
 SELECT id, email FROM lake.s1.t1 ORDER BY id LIMIT 3
 SELECT id, name FROM lake.s1.t1 ORDER BY id LIMIT 3
