@@ -736,3 +736,50 @@ async fn the_switch_and_the_refresher_agree() {
          (see GET /perm/overlaps)"
     );
 }
+
+/// Task 18 fix round 1 (I1): the snapshot the refresher serves (built by
+/// `cache.rs`'s `outcome_from_parts`, not `build_snapshot_via`) names the
+/// reserved lineage principal, so a `public` write grant does not let
+/// egret-lineage write, while it lets everyone else.
+#[tokio::test]
+async fn the_served_snapshot_refuses_the_lineage_principal_a_public_write() {
+    // Arrange
+    let _serial = SERIAL.lock().await;
+    let db = db().await;
+    let mut names = Names::default();
+    let st = store(&db, "oc12", open(), &mut names).await;
+    let mut tx = db.pool.begin().await.expect("tx");
+    grant(
+        &mut tx,
+        "oc12.public_write",
+        Effect::Allow,
+        &[Action::Write],
+        scope(st.catalog, None, None, None),
+        set(&[group_ref("public")], &[]),
+        &mut names,
+    )
+    .await;
+    tx.commit().await.expect("commit");
+    recompile(&db, st.profile).await;
+    set_mechanism(&db, st.profile, "opa").await;
+    let cache = SnapshotCache::default();
+
+    // Act
+    let report = refresh(&cache, &db).await;
+
+    // Assert
+    assert_eq!(listed(&report, st.profile), vec!["rebuilt"], "{report:?}");
+    let snap = ready(&cache, st.profile);
+    let lineage = egret_core::engine_principals::LINEAGE_PRINCIPAL;
+    assert_eq!(snap.lineage_principal(), lineage);
+    let t = table(&st.lake, "t", &[]);
+    for op in ["TruncateTable", "InsertIntoTable"] {
+        let d = snap.decide(lineage, op, &t);
+        assert!(
+            matches!(&d, Decision::Deny { explicit: true, reason } if reason.contains("lineage principal")),
+            "{op}: {d:?}"
+        );
+        let d = snap.decide(&st.ann, op, &t);
+        assert!(is_allow(&d), "{op} by ann through the public grant: {d:?}");
+    }
+}

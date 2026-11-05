@@ -656,7 +656,7 @@ async fn the_cached_snapshot_is_used_only_at_the_profiles_current_key() {
             key,
             statements: Vec::new(),
             classified: Vec::new(),
-            lineage_principal: None,
+            lineage_principal: "egret-lineage".into(),
         })
         .expect("empty snapshot")
     };

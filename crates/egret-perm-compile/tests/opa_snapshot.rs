@@ -511,7 +511,7 @@ async fn the_snapshot_names_the_lineage_principal() {
 
     // Assert
     let lineage = egret_core::engine_principals::LINEAGE_PRINCIPAL;
-    assert_eq!(snap.lineage_principal(), Some(lineage));
+    assert_eq!(snap.lineage_principal(), lineage);
     let t = table(&st.lake, "t", &[]);
     assert!(is_allow(&snap.decide(&st.ann, "TruncateTable", &t)));
     let d = snap.decide(lineage, "TruncateTable", &t);

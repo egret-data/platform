@@ -15,7 +15,7 @@ use egret_perm_ir::statement::{
 
 use crate::pattern;
 use crate::snapshot::Snapshot;
-use crate::trino_ops::{row, DataPrivilege, OpClass, OpRow};
+use crate::trino_ops::{row, DataPrivilege, OpClass};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resource {
@@ -179,25 +179,26 @@ fn label(s: &Statement) -> String {
     }
 }
 
-/// Whether the lineage principal is refused `op` on `resource`: the access
-/// the operation's plugin check asks is not one `egret_perm_ir::lineage`
-/// keeps on its leaf, or is kept only on another value. An `_any` check is
-/// refused only on a leaf that keeps nothing; on the data chain it follows the
-/// grants (`check_reach` counts only Read allows for the principal).
-fn lineage_refuses(op: &OpRow, user: &str, resource: &Resource) -> bool {
-    let kept = kept_accesses(op.leaf);
-    if op.access == "_any" {
+/// Whether the lineage principal is refused `access` on `leaf` (for a
+/// narrowed access, on `resource`): the access is not one
+/// `egret_perm_ir::lineage` keeps on the leaf, or is kept only on another
+/// value. An `_any` check is refused only on a leaf that keeps nothing; on
+/// the data chain it follows the grants (`check_reach` counts only Read
+/// allows for the principal).
+fn lineage_refuses(leaf: &str, access: &str, user: &str, resource: Option<&Resource>) -> bool {
+    let kept = kept_accesses(leaf);
+    if access == "_any" {
         return kept.is_empty();
     }
-    if !kept.contains(&op.access) {
+    if !kept.contains(&access) {
         return true;
     }
-    match kept_only_on(op.leaf) {
-        Some((access, KeptOn::Itself)) if access == op.access => {
-            !matches!(resource, Resource::User(target) if target == user)
+    match kept_only_on(leaf) {
+        Some((a, KeptOn::Itself)) if a == access => {
+            !matches!(resource, Some(Resource::User(target)) if target == user)
         }
-        Some((access, KeptOn::Value(v))) if access == op.access => {
-            !matches!(resource, Resource::SystemProperty(p) if eq_ci(p, v))
+        Some((a, KeptOn::Value(v))) if a == access => {
+            !matches!(resource, Some(Resource::SystemProperty(p)) if eq_ci(p, v))
         }
         _ => false,
     }
@@ -290,11 +291,8 @@ impl Snapshot {
         let Some(op) = row(operation) else {
             return deny(format!("operation not modelled: {operation}"));
         };
-        if self.lineage_principal.as_deref() == Some(user) && lineage_refuses(op, user, resource) {
-            return refused(format!(
-                "{operation} asks {} on {}, which the lineage principal {user} is never allowed",
-                op.access, op.leaf
-            ));
+        if let Some(d) = self.lineage_gate(user, operation, op.leaf, &[op.access], Some(resource)) {
+            return d;
         }
         match op.class {
             OpClass::Data(p) => self.decide_data(user, operation, p, resource),
@@ -397,6 +395,27 @@ impl Snapshot {
             Some(o) => self.check_data(user, privilege_of_data(privilege), &o),
             None => deny("malformed object path: a level is named below an absent one".into()),
         }
+    }
+
+    /// The lineage gate of `decide`: refused when any of `accesses` on `leaf`
+    /// is one the reserved principal is never allowed.
+    fn lineage_gate(
+        &self,
+        user: &str,
+        what: &str,
+        leaf: &str,
+        accesses: &[&str],
+        resource: Option<&Resource>,
+    ) -> Option<Decision> {
+        if self.lineage_principal != user {
+            return None;
+        }
+        let a = accesses
+            .iter()
+            .find(|a| lineage_refuses(leaf, a, user, resource))?;
+        Some(refused(format!(
+            "{what} asks {a} on {leaf}, which the lineage principal {user} is never allowed"
+        )))
     }
 
     fn decide_data(&self, user: &str, op: &str, p: DataPrivilege, resource: &Resource) -> Decision {
@@ -542,7 +561,7 @@ impl Snapshot {
         // The lineage principal keeps only `select` and `use` on the data
         // chain (`egret_perm_ir::lineage::kept_accesses`), so only a Read
         // allow reaches for it, and no engine capability does.
-        let lineage = self.lineage_principal.as_deref() == Some(user);
+        let lineage = self.lineage_principal == user;
         let classes = self.classes_of(o);
         let candidates = self.candidates(o.catalog, &classes);
         let mut allow = None;

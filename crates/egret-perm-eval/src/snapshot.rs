@@ -31,9 +31,11 @@ pub struct SnapshotInput {
     /// (`egret_core::engine_principals::LINEAGE_PRINCIPAL`, filled by
     /// `egret-perm-compile`). It is refused every access
     /// `egret_perm_ir::lineage` does not keep, whatever the grants say,
-    /// exactly as the Ranger download's lineage transform denies it. `None`:
-    /// no principal is reserved.
-    pub lineage_principal: Option<String>,
+    /// exactly as the Ranger download's lineage transform denies it.
+    /// Required: an empty name fails the build (`NoLineagePrincipal`), so a
+    /// builder that forgets it serves nothing rather than a snapshot that
+    /// lets the principal do what the grants allow (fail closed).
+    pub lineage_principal: String,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -42,6 +44,8 @@ pub enum SnapshotError {
     UnexpandedMember { index: usize, principal: String },
     #[error("statement {index} has a path Ranger would read wider than written: {reason}")]
     MalformedPath { index: usize, reason: &'static str },
+    #[error("the snapshot names no reserved lineage principal")]
+    NoLineagePrincipal,
 }
 
 /// The classifications of one table: on the table itself, and per column.
@@ -75,12 +79,15 @@ pub struct Snapshot {
     key: (i64, i64),
     pub(crate) statements: Vec<Statement>,
     classified: Vec<ClassifiedColumn>,
-    pub(crate) lineage_principal: Option<String>,
+    pub(crate) lineage_principal: String,
     pub(crate) index: Index,
 }
 
 impl Snapshot {
     pub fn build(input: SnapshotInput) -> Result<Snapshot, SnapshotError> {
+        if input.lineage_principal.trim().is_empty() {
+            return Err(SnapshotError::NoLineagePrincipal);
+        }
         let mut index = Index::default();
         for (i, s) in input.statements.iter().enumerate() {
             check_expanded(i, &s.audience)?;
@@ -153,9 +160,9 @@ impl Snapshot {
         })
     }
 
-    /// The reserved lineage principal, if any (see [`SnapshotInput`]).
-    pub fn lineage_principal(&self) -> Option<&str> {
-        self.lineage_principal.as_deref()
+    /// The reserved lineage principal (see [`SnapshotInput`]).
+    pub fn lineage_principal(&self) -> &str {
+        &self.lineage_principal
     }
 
     pub fn service_id(&self) -> i64 {

@@ -57,7 +57,7 @@ fn snap(statements: Vec<Statement>, classified: Vec<ClassifiedColumn>) -> Snapsh
         key: (1, 1),
         statements,
         classified,
-        lineage_principal: None,
+        lineage_principal: "egret-lineage".into(),
     })
     .unwrap()
 }
@@ -553,7 +553,7 @@ fn an_unexpanded_member_fails_the_build() {
         service_id: 1,
         key: (1, 1),
         classified: vec![],
-        lineage_principal: None,
+        lineage_principal: "egret-lineage".into(),
         statements: vec![st(
             1,
             a,
@@ -1213,7 +1213,7 @@ fn value_questions_and_the_snapshot_accessors() {
         service_id: 7,
         key: (3, 4),
         classified: vec![],
-        lineage_principal: None,
+        lineage_principal: "egret-lineage".into(),
         statements: vec![infra(
             InfraKind::AdminAllAccess,
             who(&["root"], &[]),
@@ -1274,7 +1274,7 @@ fn an_unexpanded_except_member_fails_the_build_with_its_index() {
         service_id: 1,
         key: (1, 1),
         classified: vec![],
-        lineage_principal: None,
+        lineage_principal: "egret-lineage".into(),
         statements: vec![ok, bad],
     });
     assert_eq!(
@@ -1547,7 +1547,7 @@ fn build_err(p: Target) -> bool {
         service_id: 1,
         key: (1, 1),
         classified: vec![],
-        lineage_principal: None,
+        lineage_principal: "egret-lineage".into(),
         statements: vec![st(
             1,
             who(&["ann"], &[]),
@@ -1692,18 +1692,18 @@ fn the_lineage_principal_is_refused_what_the_lineage_transform_denies() {
             "impersonate",
         ),
     ];
-    let build = |statements: Vec<Statement>, lp: Option<&str>| {
+    let build = |statements: Vec<Statement>, lp: &str| {
         Snapshot::build(SnapshotInput {
             service_id: 1,
             key: (1, 1),
             statements,
             classified: vec![],
-            lineage_principal: lp.map(str::to_string),
+            lineage_principal: lp.to_string(),
         })
         .unwrap()
     };
-    let with = |lp: Option<&str>| build(statements.clone(), lp);
-    let s = with(Some(LP));
+    let with = |lp: &str| build(statements.clone(), lp);
+    let s = with(LP);
     let table = cols("lake", "s", "t", &[]);
     let user = |u: &str| Resource::User(u.into());
     let prop = |p: &str| Resource::SystemProperty(p.into());
@@ -1765,7 +1765,7 @@ fn the_lineage_principal_is_refused_what_the_lineage_transform_denies() {
             .filter(|s| s.target != Target::Infra(InfraObject::WholeEp))
             .cloned()
             .collect(),
-        Some(LP),
+        LP,
     );
     let w = Resource::Catalog("w".into());
     assert!(!allowed(&no_admin.decide(LP, "ShowSchemas", &w)));
@@ -1776,7 +1776,30 @@ fn the_lineage_principal_is_refused_what_the_lineage_transform_denies() {
         &Resource::Catalog("lake".into())
     )));
     assert!(allowed(&s.decide("ann", "TruncateTable", &table)));
-    // With no reserved principal the name is an ordinary user.
-    assert!(allowed(&with(None).decide(LP, "TruncateTable", &table)));
-    assert_eq!(s.lineage_principal(), Some(LP));
+    // Another reserved name: this one is an ordinary user.
+    assert!(allowed(&with("lineage-elsewhere").decide(
+        LP,
+        "TruncateTable",
+        &table
+    )));
+    assert_eq!(s.lineage_principal(), LP);
+}
+
+/// Task 18 fix round 1 (I1): a builder that forgets the reserved principal
+/// gets no snapshot, never one that lets the principal do what the grants
+/// allow.
+#[test]
+fn a_snapshot_without_the_lineage_principal_is_refused() {
+    use egret_perm_eval::SnapshotError;
+    for name in ["", "  "] {
+        let e = Snapshot::build(SnapshotInput {
+            service_id: 1,
+            key: (1, 1),
+            statements: vec![],
+            classified: vec![],
+            lineage_principal: name.into(),
+        })
+        .err();
+        assert_eq!(e, Some(SnapshotError::NoLineagePrincipal), "{name:?}");
+    }
 }

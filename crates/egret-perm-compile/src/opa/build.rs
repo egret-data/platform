@@ -42,8 +42,8 @@ pub use crate::members::MissingUsername;
 /// `SnapshotInput::lineage_principal`: every snapshot the refresher and
 /// explain build refuses it what `egret_perm_ir::lineage` does not keep
 /// (governance SP2b Task 18), whatever the engine's delegation mode.
-pub fn lineage_principal() -> Option<String> {
-    Some(egret_core::engine_principals::LINEAGE_PRINCIPAL.to_string())
+pub fn lineage_principal() -> String {
+    egret_core::engine_principals::LINEAGE_PRINCIPAL.to_string()
 }
 
 /// What one snapshot is built from, before `Snapshot::build`.

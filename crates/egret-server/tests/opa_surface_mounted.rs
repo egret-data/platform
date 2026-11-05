@@ -77,7 +77,7 @@ fn snapshot() -> Snapshot {
             derivation: Derivation::AsDeclared,
         }],
         classified: vec![],
-        lineage_principal: None,
+        lineage_principal: "egret-lineage".into(),
     })
     .expect("snapshot")
 }
