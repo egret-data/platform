@@ -591,6 +591,12 @@ pub struct GovernanceConfig {
 /// The default of [`OpaSettings::batch_body_limit_bytes`]: 24 MiB.
 pub const DEFAULT_OPA_BATCH_BODY_LIMIT_BYTES: usize = 24 * 1024 * 1024;
 
+/// The smallest [`OpaSettings::batch_body_limit_bytes`] accepted: 4 MiB, the
+/// limit of every other OPA route. A smaller value would refuse (413) a
+/// `FilterTables` body the other routes' limit allows, failing SHOW TABLES and
+/// `information_schema` reads of ordinary schemas.
+pub const MIN_OPA_BATCH_BODY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
+
 /// The largest [`OpaSettings::batch_body_limit_bytes`] accepted: 64 MiB, the
 /// whole parse budget of the OPA surface (16 units of 4 MiB,
 /// `egret_perm_compile::opa::surface::{OPA_MAX_CONCURRENT_PARSES,
@@ -637,10 +643,10 @@ pub struct OpaSettings {
     /// 210 000 at 20- to 30-character names). A larger body is answered 413,
     /// which fails the query (SHOW TABLES, `information_schema` reads).
     ///
-    /// Accepted range: 1 to 67 108 864 (64 MiB,
+    /// Accepted range: 4 194 304 (4 MiB, [`MIN_OPA_BATCH_BODY_LIMIT_BYTES`],
+    /// the other routes' limit) to 67 108 864 (64 MiB,
     /// [`MAX_OPA_BATCH_BODY_LIMIT_BYTES`]); anything else is refused at
-    /// startup ([`Config::validate`]). A value under 4 MiB works, but refuses
-    /// schemas the other routes' limit would allow.
+    /// startup ([`Config::validate`]).
     ///
     /// Memory: the surface admits request bodies and their parses by size, in
     /// 4 MiB units: at most 64 units (256 MiB) of raw body in flight before
@@ -673,9 +679,10 @@ impl OpaSettings {
     /// Refuses a value outside its accepted range, naming the key.
     pub fn validate(&self) -> Result<(), String> {
         let limit = self.batch_body_limit_bytes;
-        if !(1..=MAX_OPA_BATCH_BODY_LIMIT_BYTES).contains(&limit) {
+        if !(MIN_OPA_BATCH_BODY_LIMIT_BYTES..=MAX_OPA_BATCH_BODY_LIMIT_BYTES).contains(&limit) {
             return Err(format!(
-                "governance.opa.batch_body_limit_bytes must be between 1 and \
+                "governance.opa.batch_body_limit_bytes must be between \
+                 {MIN_OPA_BATCH_BODY_LIMIT_BYTES} (4 MiB) and \
                  {MAX_OPA_BATCH_BODY_LIMIT_BYTES} (64 MiB), got {limit}"
             ));
         }
@@ -4390,8 +4397,8 @@ values = { allowed-images = [] }
         });
     }
 
-    /// SP2b Task 20F fix round 1 (I2): the `/batch` limit is refused outside
-    /// 1..=64 MiB, and the body-read timeout outside 1..=60 000 ms, at
+    /// SP2b Task 20F fix rounds 1 and 2 (I2, r1): the `/batch` limit is
+    /// refused outside 4 MiB..=64 MiB, and the body-read timeout outside 1..=60 000 ms, at
     /// `Config::validate`, naming the key and the range.
     #[test]
     fn governance_opa_limits_are_refused_outside_their_range() {
@@ -4401,29 +4408,25 @@ values = { allowed-images = [] }
             body_read_timeout_ms: timeout,
         };
         let max = 64 * 1024 * 1024;
+        let min = 4 * 1024 * 1024;
         assert_eq!(MAX_OPA_BATCH_BODY_LIMIT_BYTES, max);
+        assert_eq!(MIN_OPA_BATCH_BODY_LIMIT_BYTES, min);
         // Accepted: both ends of each range, and the defaults.
-        for (limit, timeout) in [(1, 1), (max, 60_000), (24 * 1024 * 1024, 5_000)] {
+        for (limit, timeout) in [(min, 1), (max, 60_000), (24 * 1024 * 1024, 5_000)] {
             assert_eq!(with(limit, timeout).validate(), Ok(()), "{limit} {timeout}");
         }
         assert_eq!(OpaSettings::default().validate(), Ok(()));
         // Refused: just outside each end.
-        assert_eq!(
-            with(0, 5_000).validate(),
-            Err(
-                "governance.opa.batch_body_limit_bytes must be between 1 and 67108864 \
-                 (64 MiB), got 0"
-                    .to_string()
-            )
-        );
-        assert_eq!(
-            with(max + 1, 5_000).validate(),
-            Err(
-                "governance.opa.batch_body_limit_bytes must be between 1 and 67108864 \
-                 (64 MiB), got 67108865"
-                    .to_string()
-            )
-        );
+        let refused = |got: usize| {
+            Err(format!(
+                "governance.opa.batch_body_limit_bytes must be between 4194304 (4 MiB) and \
+                 67108864 (64 MiB), got {got}"
+            ))
+        };
+        assert_eq!(with(0, 5_000).validate(), refused(0));
+        assert_eq!(with(1, 5_000).validate(), refused(1));
+        assert_eq!(with(min - 1, 5_000).validate(), refused(min - 1));
+        assert_eq!(with(max + 1, 5_000).validate(), refused(max + 1));
         assert_eq!(
             with(max, 0).validate(),
             Err(

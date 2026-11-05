@@ -1607,3 +1607,148 @@ async fn the_in_flight_gate_weighs_an_unlengthed_batch_by_the_batch_limit() {
         .expect("response");
     assert_eq!(res.status().as_u16(), 200);
 }
+
+// ---- SP2b Task 20F fix round 2 ----
+
+/// The surface with an in-flight budget of `units`, waiting 50 ms for it.
+fn with_in_flight(units: usize) -> (axum::Router, Arc<ParseGate>) {
+    logs();
+    let in_flight = Arc::new(ParseGate::new(units, Duration::from_millis(50)));
+    let router = opa_surface(OpaState {
+        cache: ready_cache(),
+        verifier: Arc::new(Stub::standard()),
+        credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
+        parses: Arc::new(ParseGate::default()),
+        in_flight: Arc::clone(&in_flight),
+        batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+        body_read_timeout: OPA_DEFAULT_BODY_READ_TIMEOUT,
+    });
+    (router, in_flight)
+}
+
+/// I3-r: a declared `Content-Length` reserves one unit per started 4 MiB.
+#[tokio::test]
+async fn a_declared_length_reserves_its_own_units() {
+    // Arrange: 6 units, 5 of them held, so 1 is free.
+    let (router, in_flight) = with_in_flight(6);
+    let _held = in_flight
+        .acquire_for(5 * OPA_BODY_LIMIT_BYTES)
+        .await
+        .expect("five units");
+    assert_eq!(in_flight.available(), 1);
+
+    // Act + Assert: a /batch declaring 5 MiB needs 2 units: 503, body unread.
+    let big = padded_batch(OPA_BODY_LIMIT_BYTES + 1024 * 1024);
+    let read = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let res = router
+        .clone()
+        .oneshot(request(
+            "/batch",
+            Some(big.len()),
+            watched_body(big, Arc::clone(&read)),
+        ))
+        .await
+        .expect("response");
+    assert_eq!(res.status().as_u16(), 503);
+    assert!(!read.load(Ordering::SeqCst), "body never read");
+
+    // A /batch declaring 1 KiB needs 1 unit: answered.
+    let small = padded_batch(1024);
+    let res = router
+        .clone()
+        .oneshot(request("/batch", Some(small.len()), Body::from(small)))
+        .await
+        .expect("response");
+    assert_eq!(res.status().as_u16(), 200);
+}
+
+/// A body whose stream fails after its first poll: unreadable.
+fn broken_body() -> Body {
+    Body::from_stream(futures_util::stream::iter([Err::<axum::body::Bytes, _>(
+        std::io::Error::other("connection reset"),
+    )]))
+}
+
+/// r3: a 413 and a 400 release their units; r2: neither the 400 nor the 408
+/// is counted or logged as a denial.
+#[tokio::test]
+async fn a_413_and_a_400_release_their_units_and_unread_is_not_a_denial() {
+    // Arrange: a budget of exactly one unit.
+    let (router, in_flight) = with_in_flight(1);
+    let (_, allow) = every_route().remove(0);
+    let ok = || body("ann", &GOOD.to_string(), RIGHT, allow.clone()).to_string();
+
+    // Act + Assert: one byte over the /allow limit is 413 ...
+    let mut over = ok();
+    over.push_str(&" ".repeat(OPA_BODY_LIMIT_BYTES + 1 - over.len()));
+    let res = router
+        .clone()
+        .oneshot(request("/allow", None, Body::from(over)))
+        .await
+        .expect("response");
+    assert_eq!(res.status().as_u16(), 413);
+    // ... and the one unit is free again: the next request is answered.
+    let res = router
+        .clone()
+        .oneshot(request("/allow", None, Body::from(ok())))
+        .await
+        .expect("response");
+    assert_eq!(res.status().as_u16(), 200, "the 413 released its unit");
+
+    // An unreadable body is 400 ...
+    let res = router
+        .clone()
+        .oneshot(request("/allow", None, broken_body()))
+        .await
+        .expect("response");
+    assert_eq!(res.status().as_u16(), 400);
+    // ... and released its unit too.
+    let res = router
+        .clone()
+        .oneshot(request("/allow", None, Body::from(ok())))
+        .await
+        .expect("response");
+    assert_eq!(res.status().as_u16(), 200, "the 400 released its unit");
+    // The full budget is usable again.
+    assert_eq!(in_flight.available(), 1);
+    assert!(in_flight.acquire_for(OPA_BODY_LIMIT_BYTES).await.is_some());
+
+    // The 400 was logged as unread, never as a denial.
+    let text = log_text();
+    let line = text
+        .lines()
+        .find(|l| l.contains("request body unreadable"))
+        .expect("the 400 is logged");
+    assert!(line.contains("opa: request body not read"), "{line}");
+    assert!(!line.contains("opa: denied"), "{line}");
+}
+
+/// r2: the 408 is logged as unread, never as a denial.
+#[tokio::test]
+async fn a_body_deadline_is_logged_as_unread_not_as_a_denial() {
+    // Arrange: a 50 ms deadline.
+    logs();
+    let router = opa_surface(
+        OpaState::new(ready_cache(), Arc::new(Stub::standard()))
+            .with_body_read_timeout(Duration::from_millis(50)),
+    );
+    let stalled = Body::from_stream(futures_util::stream::pending::<
+        Result<axum::body::Bytes, std::io::Error>,
+    >());
+
+    // Act
+    let res = router
+        .oneshot(request("/row_filters", Some(10), stalled))
+        .await
+        .expect("response");
+
+    // Assert
+    assert_eq!(res.status().as_u16(), 408);
+    let text = log_text();
+    let line = text
+        .lines()
+        .find(|l| l.contains("request body not received in time") && l.contains("row_filters"))
+        .expect("the 408 is logged");
+    assert!(line.contains("opa: request body not read"), "{line}");
+    assert!(!line.contains("opa: denied"), "{line}");
+}

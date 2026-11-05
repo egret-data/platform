@@ -370,7 +370,8 @@ pub fn opa_surface(state: OpaState) -> axum::Router {
 /// (default [`OPA_DEFAULT_BODY_READ_TIMEOUT`]); past it the request is
 /// answered 408 with `Connection: close`, and its units are released. A body
 /// over the route's limit is 413, an unreadable one 400, both closing the
-/// connection too. Only then does the handler see the request, its body
+/// connection too. 408 and 400 are logged as `opa: request body not read` and
+/// counted in `egret_opa_unread_total`, not as denials: nothing was decided. Only then does the handler see the request, its body
 /// already buffered.
 async fn bound_in_flight(
     State(state): State<OpaState>,
@@ -411,16 +412,19 @@ async fn bound_in_flight(
         Ok(Err(e)) => {
             let too_large = std::error::Error::source(&e)
                 .is_some_and(|s| s.is::<http_body_util::LengthLimitError>());
-            who.denied(None, &format!("request body refused: {e}"));
+            // Over the limit is a refusal like any other (413, as before);
+            // a body that could not be read was never decided (400).
             let status = if too_large {
+                who.denied(None, &format!("request body refused: {e}"));
                 StatusCode::PAYLOAD_TOO_LARGE
             } else {
+                who.unread(&format!("request body unreadable: {e}"));
                 StatusCode::BAD_REQUEST
             };
             return closing(status, "request body refused");
         }
         Err(_) => {
-            who.denied(None, "request body not received in time");
+            who.unread("request body not received in time");
             return closing(
                 StatusCode::REQUEST_TIMEOUT,
                 "request body not received in time",
@@ -520,6 +524,20 @@ impl Who<'_> {
             "opa: denied"
         );
         metrics::counter!("egret_opa_deny_total", "route" => self.route.name()).increment(1);
+    }
+
+    /// A request answered before any decision because its body never arrived
+    /// whole (408 deadline, 400 unreadable): logged, and counted apart from
+    /// the denials (`egret_opa_unread_total`), so a dashboard of denials
+    /// counts only requests that were decided.
+    fn unread(&self, reason: &str) {
+        tracing::info!(
+            target: "egret::opa",
+            route = self.route.name(),
+            reason = %reason,
+            "opa: request body not read"
+        );
+        metrics::counter!("egret_opa_unread_total", "route" => self.route.name()).increment(1);
     }
 
     fn allowed(&self) {
