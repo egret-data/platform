@@ -653,22 +653,13 @@ fn refuses_wildcard_over_named(target: PolicyTarget) -> bool {
     matches!(target, PolicyTarget::Access)
 }
 
-/// Whether a scope may stop above the deepest level by OMITTING the rest. Only
-/// a mask: `scope_to_resources`' `Mask` arm renders exactly the levels a scope
-/// names, so an absent trailing level is `None` and compiles back absent. A
-/// grant's and a row filter's renderers emit every level of their hierarchy,
-/// so for them an absent level is a body the compiler cannot produce.
-fn may_stop_short(target: PolicyTarget) -> bool {
-    matches!(target, PolicyTarget::Mask)
-}
-
 /// The resources map → one [`Scope`] per registered catalog value, read
 /// against the hierarchy `target` renders into (four levels; three for a row
 /// filter, which `rowFilterDef` stops at `table`).
 ///
 /// Values are carried as the compiler renders them back: on a grant a wildcard
 /// run is "unnamed" (`None`, rendered `*`); on a rule every present value is
-/// kept VERBATIM (`Some("*")` renders `*`, and `None` renders absent on a mask).
+/// kept VERBATIM (`Some("*")` renders `*`).
 fn scopes(
     resources: &std::collections::BTreeMap<String, ResourceLevel>,
     engine: EngineType,
@@ -744,12 +735,17 @@ fn scopes(
         raw[i - 1] = Some(level.values[0].clone());
     }
 
-    // An absent level is refused unless it is part of a trailing run a mask is
-    // allowed to omit. The catalog is never optional (`Scope.catalog_id`).
+    // An absent level is refused for every target: each renderer emits every
+    // level of its hierarchy (`scope_to_resources` fills an unnamed one with
+    // `*`), so an absent level is a body the compiler cannot produce.
+    //
+    // ⚠ A MASK used to be allowed to omit a trailing run, because its renderer
+    // used to omit it too. That body masks NOTHING on the real plugin (every
+    // `dataMaskDef` level is mandatory once Ranger merges it onto the access
+    // def), while the same scope now compiles to `*` and masks every column —
+    // so accepting it would migrate an inert policy into one that masks.
     for (i, name) in names.iter().enumerate() {
-        let omissible =
-            may_stop_short(target) && i > 0 && absent[i..names.len()].iter().all(|a| *a);
-        if absent[i] && !omissible {
+        if absent[i] {
             b.push(Blocker::MissingLevel {
                 level: (*name).to_string(),
             });
@@ -946,10 +942,12 @@ fn actions(it: &PolicyItem, engine: EngineType, b: &mut Vec<Blocker>) -> Vec<Act
 ///   named principals only, two different masks, an exemption after the
 ///   everyone item — is a per-principal control a [`Rule`] cannot hold.
 /// - **Accesses: exactly `select`** on every item.
-/// - **Resources: as `scope_to_resources` renders them.** A mask renders only
-///   the levels its scope names, so it may stop above the column; a row filter
-///   always renders catalog + schema|database + table, so all three are
-///   required and a `column` is [`Blocker::UnknownLevel`]. Values are kept
+/// - **Resources: as `scope_to_resources` renders them.** A mask always
+///   renders all four levels (an unnamed one as `*`), so all four are required
+///   — a mask body that stops above the column masks nothing on the plugin and
+///   is [`Blocker::MissingLevel`]; a row filter always renders catalog +
+///   schema|database + table, so all three are required and a `column` is
+///   [`Blocker::UnknownLevel`]. Values are kept
 ///   verbatim, so a `*` above a named level is ACCEPTED here (product decision
 ///   2026-10-10) — the asymmetry with the grant grammar is
 ///   [`refuses_wildcard_over_named`].

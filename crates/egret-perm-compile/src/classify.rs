@@ -596,7 +596,8 @@ pub fn render_blocker(b: &Blocker) -> String {
             "The policy names no `{level}` level, so it stops above `{level}`, and Ranger does \
              not apply it to `{level}`-level requests (measured: {LEVELS_RESULT_DOC}). Today it \
              grants only the checks made at the depth it stops at (for example INSERT, DELETE \
-             and UPDATE, and Trino's `count(*)`) — not reading `{level}`-level data. Ranger does \
+             and UPDATE, and Trino's `count(*)`) — not reading `{level}`-level data; a masking \
+             policy that stops there masks nothing at all. Ranger does \
              not read an absent level as `*`, so it cannot be migrated as it stands; see the \
              policy's warnings. Setting `{level}` to `*` in the editor makes it expressible, but \
              that extends the policy to every `{level}` under what it names and also moves it \

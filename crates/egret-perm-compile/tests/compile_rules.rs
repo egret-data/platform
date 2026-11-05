@@ -986,6 +986,118 @@ fn the_row_filter_resource_map_matches_what_the_service_def_declares() {
     }
 }
 
+/// The `dataMaskDef` levels after Ranger's own normalisation, root first, with
+/// whether each is mandatory and whether it takes a wildcard.
+///
+/// `dataMaskDef.resources` entries carry neither `mandatory` nor `parent`:
+/// `ServiceDefUtil.normalizeDataMaskDef` merges each onto the access resource
+/// of the same name (`mergeResourceDef`), which starts from a COPY of the access
+/// resource and overwrites `mandatory` only when the mask entry itself says
+/// `true` (2.8.0 bytecode, offsets 9-27). So the effective flag is the access
+/// def's — read here from the file rather than assumed. `wildCard` is the mask
+/// entry's own `matcherOptions` when it carries one, else the access def's.
+fn effective_mask_levels(engine: EngineType) -> Vec<(String, bool, bool)> {
+    let def = service_def(engine);
+    let access = def["resources"].as_array().expect("resources");
+    let truthy = |v: &serde_json::Value| v.as_bool() == Some(true) || v.as_str() == Some("true");
+    def["dataMaskDef"]["resources"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{engine:?}'s service-def declares no dataMaskDef.resources"))
+        .iter()
+        .map(|m| {
+            let name = m["name"].as_str().unwrap().to_string();
+            let base = access
+                .iter()
+                .find(|r| r["name"] == m["name"])
+                .unwrap_or_else(|| panic!("{engine:?}: no access resource named {name}"));
+            let mandatory = truthy(&m["mandatory"]) || truthy(&base["mandatory"]);
+            let wild = &m["matcherOptions"]["wildCard"];
+            let wild_card = if wild.is_null() {
+                truthy(&base["matcherOptions"]["wildCard"])
+            } else {
+                truthy(wild)
+            };
+            (name, mandatory, wild_card)
+        })
+        .collect()
+}
+
+/// **The mask twin of the row-filter test above.** A path mask whose scope
+/// stops above the column — the Rules tab's default, "leave Column empty to
+/// mask every column" — compiled to a body with no `column` (and above the
+/// table, no `table`/`schema` either). Every `dataMaskDef` level is mandatory
+/// once Ranger normalises the def, so that body matched no column request and
+/// masked nothing; the real jars confirm it
+/// (`egret-ranger-eval`'s
+/// `a_path_mask_naming_no_column_masks_every_column_beneath_it_on_the_real_jars`).
+///
+/// The expectation is derived from the service-def files, so this fails if the
+/// emission drifts, if a def stops declaring a level mandatory, or if a def
+/// stops admitting `*` at a level the compiler fills with it.
+#[test]
+fn the_mask_resource_map_matches_what_the_service_def_declares() {
+    for engine in [EngineType::Trino, EngineType::StarRocks] {
+        let levels = effective_mask_levels(engine);
+        let mut expected: Vec<String> = levels.iter().map(|(n, ..)| n.clone()).collect();
+        assert_eq!(
+            expected.last().map(String::as_str),
+            Some("column"),
+            "{engine:?}: dataMaskDef is expected to end at column"
+        );
+        assert!(
+            levels.iter().all(|(_, mandatory, _)| *mandatory),
+            "{engine:?}: every dataMaskDef level is expected to be mandatory after Ranger's \
+             merge — if that stops being true, the wildcard fill needs re-deciding: {levels:?}"
+        );
+        assert!(
+            levels.iter().all(|(_, _, wild)| *wild),
+            "{engine:?}: every dataMaskDef level must take `*`, or the fill is a value the \
+             plugin reads literally: {levels:?}"
+        );
+        expected.sort();
+
+        // (scope, the levels that must carry `*`)
+        let cases: [(Scope, &[usize]); 4] = [
+            (
+                scope_of(Some("sales"), Some("orders"), Some("customer_email")),
+                &[],
+            ),
+            (scope_of(Some("sales"), Some("orders"), None), &[3]),
+            (scope_of(Some("sales"), None, None), &[2, 3]),
+            (scope_of(None, None, None), &[1, 2, 3]),
+        ];
+        for (scope, wild) in cases {
+            let r = mask_rule_on_path(scope.clone(), "MASK_HASH");
+            let out =
+                compile_rule(&r, engine, "svc", None, &resolved("wh", None), &[], 100).unwrap();
+            assert_eq!(out.len(), 1);
+            assert_eq!(
+                resource_keys(&out[0]),
+                expected,
+                "{engine:?} {scope:?}: a path mask must name every mandatory dataMaskDef level"
+            );
+            let named = [
+                Some("wh"),
+                scope.schema.as_deref(),
+                scope.table.as_deref(),
+                scope.column.as_deref(),
+            ];
+            for (i, (name, ..)) in levels.iter().enumerate() {
+                let want = if wild.contains(&i) {
+                    "*"
+                } else {
+                    named[i].expect("a level not filled is named")
+                };
+                assert_eq!(
+                    out[0]["resources"][name]["values"],
+                    serde_json::json!([want]),
+                    "{engine:?} {scope:?}: level {name}"
+                );
+            }
+        }
+    }
+}
+
 /// C1's third shape, and the reason it is a recurring class rather than a
 /// one-off: `column_resources` (the StarRocks tag expansion) emitted all four
 /// levels unconditionally while its sibling `scope_to_resources` already

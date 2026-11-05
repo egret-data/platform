@@ -6876,8 +6876,8 @@ fn mig_probes(profile: &Profile, access_types: &[String], policy: &MigPolicy) ->
             }
             1 => {
                 // A column, a sibling at every level, and the table and schema
-                // themselves — a mask may stop above the column, and then only
-                // a request at its own depth reaches it.
+                // themselves — a hand-written mask with `*` levels reaches every
+                // column below them, and a request at its own depth too.
                 let mut coords: Vec<Vec<(String, String)>> = std::iter::once(None)
                     .chain((0..4).map(Some))
                     .map(|sibling| mig_coord(profile, &values, 4, sibling))
@@ -7110,8 +7110,6 @@ const MIG_ACCEPTED_TRINO: &[&str] = &[
     "mask MASK_DATE_SHOW_YEAR with exemption",
     "mask CUSTOM",
     "mask CUSTOM with exemption",
-    "mask shape stops at table",
-    "mask shape stops at schema",
     "mask shape schema-wide",
     "mask shape wildcard over named",
     "mask shape two catalogs",
@@ -7180,8 +7178,6 @@ const MIG_ACCEPTED_STARROCKS: &[&str] = &[
     "mask MASK_DATE_SHOW_YEAR with exemption",
     "mask CUSTOM",
     "mask CUSTOM with exemption",
-    "mask shape stops at table",
-    "mask shape stops at schema",
     "mask shape schema-wide",
     "mask shape wildcard over named",
     "mask shape two catalogs",
@@ -7360,6 +7356,22 @@ fn mig_check_pins(
             },
         );
     }
+    // A mask that stops above the column masks NOTHING on the plugin (every
+    // `dataMaskDef` level is mandatory once Ranger merges it onto the access
+    // def), while the same scope compiles to `*` and masks every column — so
+    // it is refused rather than migrated into a mask (fix/ranger-table-mask-column).
+    refused_naming(
+        "mask shape stops at table",
+        Blocker::MissingLevel {
+            level: "column".to_string(),
+        },
+    );
+    refused_naming(
+        "mask shape stops at schema",
+        Blocker::MissingLevel {
+            level: "table".to_string(),
+        },
+    );
     // Every non-catalog hierarchy is reached and refused.
     for path in mig_hierarchy_paths(def_json) {
         if path[0] != "catalog" {
@@ -9632,6 +9644,239 @@ fn engine_capability_policies_decide_identically_on_the_real_jars() {
     eprintln!("engine capability differential: {asked} cases in {elapsed:.2} s");
     // Trino (13 cases) once at 2.8.0; StarRocks (9) at 2.8.0 and 2.9.0.
     assert_eq!(asked, 13 + 2 * 9, "every case was asked");
+    assert!(
+        elapsed > 1.0,
+        "a real-jar run takes seconds, not {elapsed:.2} s — vacuous"
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+// ── A path mask that names no column, on the real jars ───────────────────────
+//
+// A mask rule scoped to a whole table, schema or catalog — the column left
+// empty, which is what the Rules tab seeds and what the dialog describes as
+// "mask every column of the table" — used to compile to a data-mask policy
+// with NO `column` resource. `dataMaskDef.resources` declares `column`, and
+// its levels inherit `mandatory: true` from the access hierarchy once Ranger
+// normalises the def, so that body matched no column request and masked
+// nothing. The compiler now renders every unnamed level down to the column as
+// `*`.
+//
+// The bodies under test come from `compile_rule` itself, one rule per policy
+// set. Each is asked, at every plugin version the two engines run, what a
+// column-level `select` receives — inside the rule's path and outside it — and
+// Java must answer what the rule MEANS, and this crate's evaluator must answer
+// what Java answers.
+
+/// `(label, schema, table, column)`: one path-mask scope.
+type PmScope = (
+    &'static str,
+    Option<&'static str>,
+    Option<&'static str>,
+    Option<&'static str>,
+);
+
+const PM_EXEMPT: &str = "ann";
+const PM_READER: &str = "eve";
+
+fn pm_rule(schema: Option<&str>, table: Option<&str>, column: Option<&str>) -> Rule {
+    Rule {
+        id: Uuid::from_u128(0x6d61_736b),
+        name: "path-mask".to_string(),
+        kind: egret_perm::RuleKind::Mask {
+            mask_type: "MASK_HASH".to_string(),
+            value_expr: None,
+        },
+        selector: Selector::Path(egret_perm::Scope {
+            catalog_id: MIG_WH,
+            schema: schema.map(str::to_string),
+            table: table.map(str::to_string),
+            column: column.map(str::to_string),
+        }),
+        exempt: egret_perm::PrincipalSet {
+            include: vec![egret_perm::Principal {
+                kind: egret_perm::PrincipalKind::User,
+                r#ref: PM_EXEMPT.to_string(),
+            }],
+            exclude: Vec::new(),
+        },
+    }
+}
+
+#[test]
+fn a_path_mask_naming_no_column_masks_every_column_beneath_it_on_the_real_jars() {
+    if std::env::var("EGRET_TEST_RANGER_E2E").ok().as_deref() != Some("1") {
+        eprintln!("EGRET_TEST_RANGER_E2E != 1 — skipping the path-mask scope differential");
+        return;
+    }
+    let started = std::time::Instant::now();
+    let tag_def_json = load_tag_def();
+    let mut failures: Vec<String> = Vec::new();
+    let mut asked = 0usize;
+
+    // (label, rule scope)
+    let scopes: [PmScope; 4] = [
+        ("column", Some("sales"), Some("orders"), Some("email")),
+        ("table", Some("sales"), Some("orders"), None),
+        ("schema", Some("sales"), None, None),
+        ("catalog", None, None, None),
+    ];
+    // (label, coordinate, the scopes that must mask it)
+    let coords: [(&str, [&str; 4], &[&str]); 5] = [
+        (
+            "the named column",
+            ["wh", "sales", "orders", "email"],
+            &["column", "table", "schema", "catalog"],
+        ),
+        (
+            "a sibling column",
+            ["wh", "sales", "orders", "phone"],
+            &["table", "schema", "catalog"],
+        ),
+        (
+            "a sibling table",
+            ["wh", "sales", "shipments", "recipient"],
+            &["schema", "catalog"],
+        ),
+        (
+            "a sibling schema",
+            ["wh", "hr", "staff", "salary"],
+            &["catalog"],
+        ),
+        ("another catalog", ["lake", "sales", "orders", "email"], &[]),
+    ];
+
+    // Trino at 2.8.0 only: at 2.5.0 `mvn test` fails in `EgretPluginAuthTest`,
+    // which this harness cannot skip, so the 2.5.0 half was measured by hand
+    // (`EgretCaseRunner` alone) — see the fix's report.
+    for profile in [trino(), starrocks(), starrocks_2_9_0()] {
+        let service_type = profile.engine.service_def_name();
+        let version = profile.ranger_version;
+        let (def_json, def, engine) = load_engine(&profile);
+
+        // (label, request, designed maskType — "" for none)
+        let mut probes: Vec<(String, AccessRequest, &'static str)> = Vec::new();
+        let mut payload: Vec<Value> = Vec::new();
+        let mut sets: Vec<Value> = Vec::new();
+        for (scope_label, schema, table, column) in scopes {
+            let rule = pm_rule(schema, table, column);
+            let bodies = compile_rule(
+                &rule,
+                mig_perm_engine(&profile),
+                profile.service_name,
+                Some(profile.tag_service_name),
+                &ResolvedNames {
+                    catalog_name: "wh",
+                    tag_name: None,
+                },
+                &[],
+                100,
+            )
+            .unwrap_or_else(|e| panic!("compile_rule refused the {scope_label} mask: {e:?}"));
+            assert_eq!(bodies.len(), 1, "one body per path mask: {bodies:?}");
+            let mut body = bodies[0].clone();
+            body["id"] = json!(10);
+            eprintln!(
+                "path mask [{service_type} @ {version}] {scope_label}: resources {}",
+                body["resources"]
+            );
+            let set_json = mig_envelope(&profile, &def_json, &tag_def_json, vec![body], None);
+
+            for (coord_label, coord, masked_by) in coords {
+                for user in [PM_READER, PM_EXEMPT] {
+                    let want = match (masked_by.contains(&scope_label), user) {
+                        (false, _) => "",
+                        (true, PM_EXEMPT) => "MASK_NONE",
+                        (true, _) => "MASK_HASH",
+                    };
+                    let request = vg_request(&profile, user, "select", &coord);
+                    let label = format!(
+                        "{scope_label}-scoped mask, {user} reads {coord_label} {}",
+                        coord.join(".")
+                    );
+                    payload.push(
+                        lv_case(
+                            format!("pm-{}", probes.len()),
+                            1,
+                            set_json.clone(),
+                            request.clone(),
+                        )
+                        .to_json(service_type),
+                    );
+                    probes.push((label, request, want));
+                }
+            }
+            sets.push(set_json);
+        }
+
+        let sent = payload.len();
+        let verdicts = ask_ranger_json(payload, version, &format!("pm-{service_type}"));
+        assert_eq!(verdicts.len(), sent);
+        // Each probe carries its own set; re-parse it for this crate's half.
+        let mut masked_by_java = 0usize;
+        for ((label, _, want), v) in probes.iter().zip(&verdicts) {
+            asked += 1;
+            if !v["error"].is_null() {
+                failures.push(format!(
+                    "[{service_type} @ {version}] ranger threw on `{label}`: {}",
+                    v["error"]
+                ));
+                continue;
+            }
+            let java = java_outcome(1, v);
+            let Outcome::Mask { mask_type, .. } = &java else {
+                unreachable!("java_outcome(1, _) is a Mask");
+            };
+            let got = mask_type.as_deref().unwrap_or("");
+            if !got.is_empty() {
+                masked_by_java += 1;
+            }
+            if got != *want {
+                failures.push(format!(
+                    "[{service_type} @ {version}] `{label}`: java maskType {got:?}, designed {want:?}"
+                ));
+            }
+        }
+        // The evaluator half: the same sets, the same requests.
+        let mut i = 0usize;
+        for ((scope_label, ..), set_json) in scopes.iter().zip(sets) {
+            let set: ServicePolicySet = serde_json::from_value(set_json).expect("parse set");
+            for _ in 0..coords.len() * 2 {
+                let (label, request, _) = &probes[i];
+                let java = java_outcome(1, &verdicts[i]);
+                i += 1;
+                let mine = match evaluate_data_mask(&set, request, &def, &engine) {
+                    MaskDecision::NoMask => Outcome::Mask {
+                        mask_type: None,
+                        masked_value: None,
+                        mask_condition: None,
+                    },
+                    MaskDecision::Masked(m) => Outcome::Mask {
+                        mask_type: m.mask_type,
+                        masked_value: m.masked_value,
+                        mask_condition: m.mask_condition,
+                    },
+                    MaskDecision::Undecidable { why } => Outcome::Refused(format!("{why:?}")),
+                };
+                if java != mine {
+                    failures.push(format!(
+                        "CRITICAL [{service_type} @ {version}] {scope_label} `{label}`: java \
+                         {java:?}, evaluator {mine:?}"
+                    ));
+                }
+            }
+        }
+        eprintln!(
+            "path mask [{service_type} @ ranger {version}]: {sent} probes, {masked_by_java} masked by java"
+        );
+    }
+    let elapsed = started.elapsed().as_secs_f64();
+    eprintln!(
+        "path-mask scope differential: {asked} probes, {} failures, {elapsed:.2} s",
+        failures.len()
+    );
+    // 3 profiles × 4 scopes × 5 coordinates × 2 users.
+    assert_eq!(asked, 3 * 4 * 5 * 2, "every probe was asked");
     assert!(
         elapsed > 1.0,
         "a real-jar run takes seconds, not {elapsed:.2} s — vacuous"

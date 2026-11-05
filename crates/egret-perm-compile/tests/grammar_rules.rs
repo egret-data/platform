@@ -881,23 +881,49 @@ fn a_tag_resource_names_one_tag_and_nothing_else() {
 
 // ── Levels ─────────────────────────────────────────────────────────────────
 
-/// The missing-level answer for rules: a MASK renders only the levels its
-/// scope names, so an absent TRAILING level is exactly `None` and is accepted
-/// (unlike a grant, whose compiler always emits all four). A gap above a
-/// named level is still refused — `Scope` cannot skip a level.
+/// The missing-level answer for rules: a MASK now renders all four levels
+/// (an unnamed one as `*`), so an absent level is refused like a grant's. A
+/// hand-written mask that stops above the column masks NOTHING on the plugin
+/// (every `dataMaskDef` level is mandatory once Ranger merges it onto the
+/// access def) — accepting it would migrate an inert policy into a rule that
+/// masks every column. The same body WITH `column: *` is accepted, and
+/// compiles back to exactly itself. A gap above a named level is refused too.
 #[test]
-fn a_mask_may_stop_above_the_column_but_may_not_skip_a_level() {
+fn a_mask_may_not_stop_above_the_column_or_skip_a_level() {
     let mut table_wide = mask_policy(vec![everyone_mask("MASK_HASH")]);
     table_wide["resources"]
         .as_object_mut()
         .unwrap()
         .remove("column");
-    let got = accept(&table_wide, EngineType::Trino);
+    assert_eq!(
+        refused(&table_wide, EngineType::Trino),
+        vec![Blocker::MissingLevel {
+            level: "column".into()
+        }]
+    );
+
+    let mut every_column = mask_policy(vec![everyone_mask("MASK_HASH")]);
+    every_column["resources"]["column"] = level(&["*"]);
+    let got = accept(&every_column, EngineType::Trino);
     let Selector::Path(scope) = &got.rules[0].selector else {
         panic!()
     };
     assert_eq!(scope.table.as_deref(), Some("orders"));
-    assert_eq!(scope.column, None);
+    assert_eq!(scope.column.as_deref(), Some("*"));
+    let back = compile_rule(
+        &got.rules[0],
+        EngineType::Trino,
+        "svc",
+        None,
+        &ResolvedNames {
+            catalog_name: "wh",
+            tag_name: None,
+        },
+        &[],
+        100,
+    )
+    .expect("a whole-table mask compiles");
+    assert_eq!(back[0]["resources"], every_column["resources"]);
 
     let mut gap = mask_policy(vec![everyone_mask("MASK_HASH")]);
     gap["resources"].as_object_mut().unwrap().remove("schema");
@@ -1097,11 +1123,11 @@ fn every_blocker_is_collected_not_just_the_first() {
 fn every_accepted_body_compiles_back_to_what_it_came_from() {
     // (The `*`-above-a-named-level shape is compiled back in
     // `a_wildcard_above_a_named_level_is_accepted_on_a_rule_and_refused_on_a_grant`.)
+    // A whole-table mask names `column: *`: one that OMITS the column masks
+    // nothing on the plugin and is refused
+    // (`a_mask_may_not_stop_above_the_column_or_skip_a_level`).
     let mut table_wide = mask_policy(vec![everyone_mask("MASK_NULL")]);
-    table_wide["resources"]
-        .as_object_mut()
-        .unwrap()
-        .remove("column");
+    table_wide["resources"]["column"] = level(&["*"]);
     let mut custom = mask_policy(vec![everyone_mask("CUSTOM")]);
     set(
         &mut custom,
