@@ -32,33 +32,12 @@ lineage EXPLAIN on an OPA engine fails closed, so lineage capture is a gap on
 OPA (a follow-up for the Task 25 docs)."""
 
 [[difference]]
-id = "a-table-mask-rule-masks-no-column-in-ranger"
-operations = ["GetColumnMask"]
-mechanism = """
-A path mask rule scoped to a whole table compiles to a data-mask policy whose
-resources are catalog/schema/table with no `column` key (measured: anchor
-masks, perm-rule-50e319a4… on lake.s1.t2, MASK_HASH; Ranger answers no mask for
-u0 on lake.s1.t2.id). RangerDefaultPolicyEvaluator.evaluate
-(ranger-plugins-common 2.8.0) applies a policy to a non-`_any` request without
-SELF_OR_DESCENDANTS only on a SELF or SELF_AND_ALL_DESCENDANTS resource match;
-ANCESTOR counts only for a RangerTagAccessRequest. The plugin's getColumnMask
-asks at catalog/schema/table/column (RangerTrinoResource.forColumn), an
-ANCESTOR match for that policy, so Ranger masks nothing. egret-perm-eval reads
-the unnamed column level as every column (values.rs column_mask_choice →
-level_covers(Level::Unnamed, _) = true) and masks each column."""
-right = "egret"
-why = """
-OPA masks what the rule says. The Ranger target silently ignores a mask rule
-written on a table; that is a defect of the Ranger compile (a possible
-Ranger-side leak, handled outside Task 18), not of the evaluator."""
-
-[[difference]]
 id = "mask-none-is-no-mask"
 operations = ["GetColumnMask"]
 mechanism = """
 The compile writes a mask rule's exempt principals (and egret-lineage, and a
 clearance's cleared users) as leading data-mask items of type MASK_NONE
-(measured: anchor masks, perm-rule-017ee3d9…: [u1 → MASK_NONE, public → MASK]
+(measured: anchor masks: [u1 → MASK_NONE, public → MASK]
 on lake.s1.t1.email), so RangerAccessResult.getMaskType answers MASK_NONE for
 u1. The Trino plugin's getColumnMask returns Optional.empty() unless
 isDataMaskEnabled, which is RangerAccessResult.isMaskEnabled: maskType

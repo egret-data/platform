@@ -314,7 +314,7 @@ fn draw_state(rng: &mut Rng, tie_state: bool) -> StateSpec {
     let mut rules = Vec::new();
     for _ in 0..rng.below(4) {
         let by_tag = !used.is_empty() && rng.chance(1, 3);
-        let filter = rng.chance(1, 3);
+        let filter = rng.chance(2, 5);
         let effect = if filter {
             RuleEffect::Filter(format!("region = '{}'", rng.pick(&REGIONS)))
         } else {
@@ -330,8 +330,14 @@ fn draw_state(rng: &mut Rng, tie_state: bool) -> StateSpec {
         } else if filter {
             RuleTarget::Path(draw_scope(rng, 1, 2))
         } else {
-            // Mostly on one column; sometimes on a whole table.
-            let min = if rng.chance(4, 5) { 3 } else { 2 };
+            // Mostly on one column; sometimes on a whole table, schema or
+            // catalog (a mask naming no column, PR #837).
+            let min = match rng.below(20) {
+                0 => 0,
+                1 => 1,
+                2..=4 => 2,
+                _ => 3,
+            };
             RuleTarget::Path(draw_scope(rng, min, 3))
         };
         let exempt = if rng.chance(1, 2) {
@@ -825,11 +831,6 @@ fn anchors() -> Vec<Anchor> {
     };
     masks.rules = vec![
         RuleSpec {
-            effect: mask("MASK_HASH"),
-            target: RuleTarget::Path(at(Some("s1"), Some("t2"), None)),
-            exempt: vec![],
-        },
-        RuleSpec {
             effect: mask("MASK"),
             target: RuleTarget::Path(at(Some("s1"), Some("t1"), Some("email"))),
             exempt: vec![1],
@@ -841,7 +842,54 @@ fn anchors() -> Vec<Anchor> {
         },
     ];
 
+    // Masks naming no column (PR #837): a table mask, and a catalog mask,
+    // which Ranger renders with `information_schema` excluded and the
+    // evaluator excludes alike.
+    let mut table_mask = empty_spec("open");
+    table_mask.rules = vec![RuleSpec {
+        effect: mask("MASK_HASH"),
+        target: RuleTarget::Path(at(Some("s1"), Some("t2"), None)),
+        exempt: vec![],
+    }];
+    let mut catalog_mask = empty_spec("open");
+    catalog_mask.rules = vec![RuleSpec {
+        effect: mask("MASK"),
+        target: RuleTarget::Path(at(None, None, None)),
+        exempt: vec![],
+    }];
+
     vec![
+        Anchor {
+            name: "table-mask",
+            spec: table_mask,
+            questions: vec![
+                (ask("u0", "GetColumnMask", column("s1", "t2", "id")), Agree),
+                (ask("u0", "GetColumnMask", column("s1", "t1", "id")), Agree),
+            ],
+        },
+        Anchor {
+            name: "catalog-mask",
+            spec: catalog_mask,
+            questions: vec![
+                (ask("u0", "GetColumnMask", column("s1", "t2", "id")), Agree),
+                (
+                    ask(
+                        "u0",
+                        "GetColumnMask",
+                        column("information_schema", "tables", "table_name"),
+                    ),
+                    Agree,
+                ),
+                (
+                    ask(
+                        "u0",
+                        "GetColumnMask",
+                        column("information_schema", "columns", "column_name"),
+                    ),
+                    Agree,
+                ),
+            ],
+        },
         Anchor {
             name: "reach-any",
             spec: reach,
@@ -940,10 +988,6 @@ fn anchors() -> Vec<Anchor> {
             name: "masks",
             spec: masks,
             questions: vec![
-                (
-                    ask("u0", "GetColumnMask", column("s1", "t2", "id")),
-                    Entry("a-table-mask-rule-masks-no-column-in-ranger"),
-                ),
                 (
                     ask("u1", "GetColumnMask", column("s1", "t1", "email")),
                     Entry("mask-none-is-no-mask"),
@@ -1541,10 +1585,6 @@ const PREDICATES: &[(&str, Predicate)] = &[
         "egret-lineage-is-served-only-by-ranger",
         egret_lineage_is_served_only_by_ranger,
     ),
-    (
-        "a-table-mask-rule-masks-no-column-in-ranger",
-        a_table_mask_rule_masks_no_column_in_ranger,
-    ),
     ("mask-none-is-no-mask", mask_none_is_no_mask),
     (
         "egret-lineage-is-refused-on-every-engine",
@@ -1648,24 +1688,6 @@ fn egret_lineage_is_refused_on_every_engine(d: &Diff) -> bool {
         && d.spec.spec != "jwt"
         && d.ranger == Outcome::Allow
         && d.opa == Outcome::Deny
-}
-
-/// A path mask rule on a whole table (no column) that applies to the user,
-/// of the type OPA answered, on the question's table.
-fn a_table_mask_rule_masks_no_column_in_ranger(d: &Diff) -> bool {
-    let (Resource::Column { schema, table, .. }, Outcome::Mask(None), Outcome::Mask(Some((t, _)))) =
-        (&d.q.resource, &d.ranger, &d.opa)
-    else {
-        return false;
-    };
-    d.spec.rules.iter().any(|r| {
-        matches!(&r.effect, RuleEffect::Mask { mask_type, .. } if mask_type == t)
-            && !r.exempt.iter().any(|u| USERS[*u] == d.q.user)
-            && matches!(&r.target, RuleTarget::Path(s)
-                if s.column.is_none()
-                    && s.schema.as_deref() == Some(schema.as_str())
-                    && s.table.as_deref() == Some(table.as_str()))
-    })
 }
 
 /// Ranger answers `MASK_NONE`, the evaluator no mask: the plugin masks
