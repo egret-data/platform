@@ -20,7 +20,8 @@ use surface::OpaState;
 /// credential `verifier` exists; otherwise `None`, and nothing is spawned and
 /// no connection is opened (the gate off means the routes are not mounted and
 /// no refresher runs). `batch_body_limit` is `[governance.opa]
-/// batch_body_limit_bytes`, the `/batch` route's body limit.
+/// batch_body_limit_bytes`, the `/batch` route's body limit;
+/// `body_read_timeout` is `[governance.opa] body_read_timeout_ms`.
 ///
 /// The verifier is the one the Ranger surface checks engine credentials with:
 /// an engine authenticates to both surfaces with the same secret. The
@@ -29,6 +30,7 @@ use surface::OpaState;
 pub fn start_opa(
     enabled: bool,
     batch_body_limit: usize,
+    body_read_timeout: std::time::Duration,
     verifier: Option<Arc<dyn EngineCredentialVerifier>>,
     pool: PgPool,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
@@ -48,7 +50,9 @@ pub fn start_opa(
     let cache = Arc::new(SnapshotCache::default());
     let refresher = spawn_snapshot_refresher(Arc::clone(&cache), pool, REFRESH_PERIOD, shutdown);
     Some((
-        OpaState::new(cache, verifier).with_batch_body_limit(batch_body_limit),
+        OpaState::new(cache, verifier)
+            .with_batch_body_limit(batch_body_limit)
+            .with_body_read_timeout(body_read_timeout),
         refresher,
     ))
 }

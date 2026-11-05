@@ -591,8 +591,25 @@ pub struct GovernanceConfig {
 /// The default of [`OpaSettings::batch_body_limit_bytes`]: 24 MiB.
 pub const DEFAULT_OPA_BATCH_BODY_LIMIT_BYTES: usize = 24 * 1024 * 1024;
 
+/// The largest [`OpaSettings::batch_body_limit_bytes`] accepted: 64 MiB, the
+/// whole parse budget of the OPA surface (16 units of 4 MiB,
+/// `egret_perm_compile::opa::surface::{OPA_MAX_CONCURRENT_PARSES,
+/// OPA_BODY_LIMIT_BYTES}`). Up to it, a body never needs more units than the
+/// budget holds, so the surface's memory bound holds exactly.
+pub const MAX_OPA_BATCH_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+
 fn default_opa_batch_body_limit_bytes() -> usize {
     DEFAULT_OPA_BATCH_BODY_LIMIT_BYTES
+}
+
+/// The default of [`OpaSettings::body_read_timeout_ms`]: 5 s.
+pub const DEFAULT_OPA_BODY_READ_TIMEOUT_MS: u64 = 5_000;
+
+/// The largest [`OpaSettings::body_read_timeout_ms`] accepted: 60 s.
+pub const MAX_OPA_BODY_READ_TIMEOUT_MS: u64 = 60_000;
+
+fn default_opa_body_read_timeout_ms() -> u64 {
+    DEFAULT_OPA_BODY_READ_TIMEOUT_MS
 }
 
 /// `[governance.opa]` — egret answering Trino's OPA plugin (governance SP2b).
@@ -620,13 +637,57 @@ pub struct OpaSettings {
     /// 210 000 at 20- to 30-character names). A larger body is answered 413,
     /// which fails the query (SHOW TABLES, `information_schema` reads).
     ///
+    /// Accepted range: 1 to 67 108 864 (64 MiB,
+    /// [`MAX_OPA_BATCH_BODY_LIMIT_BYTES`]); anything else is refused at
+    /// startup ([`Config::validate`]). A value under 4 MiB works, but refuses
+    /// schemas the other routes' limit would allow.
+    ///
     /// Memory: the surface admits request bodies and their parses by size, in
-    /// 4 MiB units against fixed budgets, so raising this limit does not raise
-    /// the worst-case memory; a larger body only takes more of the budget, and
-    /// waits (then 503) while it is used up. A value under 4 MiB still works,
-    /// but refuses schemas the other routes' limit would allow.
+    /// 4 MiB units: at most 64 units (256 MiB) of raw body in flight before
+    /// authentication, and at most 16 units (64 MiB) of body being parsed at
+    /// once, which is about 640 MB of parsed JSON at the estimated tenfold
+    /// cost. Within the accepted range a body never needs more units than the
+    /// parse budget holds, so these bounds hold for every accepted value: a
+    /// larger limit only lets one body take more of the same budget (a 64 MiB
+    /// body takes all of it), and other requests wait (then 503) meanwhile.
     #[serde(default = "default_opa_batch_body_limit_bytes")]
     pub batch_body_limit_bytes: usize,
+    /// How long the OPA surface waits for a request's whole body once it has
+    /// admitted the request, in milliseconds. Key `[governance.opa]
+    /// body_read_timeout_ms`, env `EGRET_GOVERNANCE__OPA__BODY_READ_TIMEOUT_MS`.
+    /// Default 5 000 ([`DEFAULT_OPA_BODY_READ_TIMEOUT_MS`]); accepted range 1
+    /// to 60 000 ([`MAX_OPA_BODY_READ_TIMEOUT_MS`]).
+    ///
+    /// An admitted request holds part of the surface's in-flight budget while
+    /// its body arrives, so a caller that sends headers and then stalls would
+    /// hold that share for as long as its connection stays open. Past this
+    /// deadline the request is answered 408, its share is released and its
+    /// connection closed. 5 s covers the largest default `/batch` body (24 MiB)
+    /// at about 40 Mbit/s, while a Trino coordinator on a LAN sends its body
+    /// in milliseconds; a stalled caller holds its share for 5 s at most.
+    #[serde(default = "default_opa_body_read_timeout_ms")]
+    pub body_read_timeout_ms: u64,
+}
+
+impl OpaSettings {
+    /// Refuses a value outside its accepted range, naming the key.
+    pub fn validate(&self) -> Result<(), String> {
+        let limit = self.batch_body_limit_bytes;
+        if !(1..=MAX_OPA_BATCH_BODY_LIMIT_BYTES).contains(&limit) {
+            return Err(format!(
+                "governance.opa.batch_body_limit_bytes must be between 1 and \
+                 {MAX_OPA_BATCH_BODY_LIMIT_BYTES} (64 MiB), got {limit}"
+            ));
+        }
+        let timeout = self.body_read_timeout_ms;
+        if !(1..=MAX_OPA_BODY_READ_TIMEOUT_MS).contains(&timeout) {
+            return Err(format!(
+                "governance.opa.body_read_timeout_ms must be between 1 and \
+                 {MAX_OPA_BODY_READ_TIMEOUT_MS}, got {timeout}"
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Default for OpaSettings {
@@ -634,6 +695,7 @@ impl Default for OpaSettings {
         Self {
             enabled: false,
             batch_body_limit_bytes: DEFAULT_OPA_BATCH_BODY_LIMIT_BYTES,
+            body_read_timeout_ms: DEFAULT_OPA_BODY_READ_TIMEOUT_MS,
         }
     }
 }
@@ -2195,6 +2257,7 @@ impl Config {
         }
         self.workflow.storage.validate()?;
         self.workflow.http.validate()?;
+        self.governance.opa.validate()?;
         if self.workflow.kill_poll_ms < MIN_KILL_POLL_MS {
             return Err(format!(
                 "workflow.kill_poll_ms: {} is below the minimum {MIN_KILL_POLL_MS} \
@@ -4323,6 +4386,74 @@ values = { allowed-images = [] }
             jail.set_env("EGRET_GOVERNANCE__OPA__ENABLED", "true");
             let c: Config = Config::figment().extract().expect("env");
             assert!(c.governance.opa.enabled, "the env spelling turns it on");
+            Ok(())
+        });
+    }
+
+    /// SP2b Task 20F fix round 1 (I2): the `/batch` limit is refused outside
+    /// 1..=64 MiB, and the body-read timeout outside 1..=60 000 ms, at
+    /// `Config::validate`, naming the key and the range.
+    #[test]
+    fn governance_opa_limits_are_refused_outside_their_range() {
+        let with = |limit: usize, timeout: u64| OpaSettings {
+            enabled: true,
+            batch_body_limit_bytes: limit,
+            body_read_timeout_ms: timeout,
+        };
+        let max = 64 * 1024 * 1024;
+        assert_eq!(MAX_OPA_BATCH_BODY_LIMIT_BYTES, max);
+        // Accepted: both ends of each range, and the defaults.
+        for (limit, timeout) in [(1, 1), (max, 60_000), (24 * 1024 * 1024, 5_000)] {
+            assert_eq!(with(limit, timeout).validate(), Ok(()), "{limit} {timeout}");
+        }
+        assert_eq!(OpaSettings::default().validate(), Ok(()));
+        // Refused: just outside each end.
+        assert_eq!(
+            with(0, 5_000).validate(),
+            Err(
+                "governance.opa.batch_body_limit_bytes must be between 1 and 67108864 \
+                 (64 MiB), got 0"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            with(max + 1, 5_000).validate(),
+            Err(
+                "governance.opa.batch_body_limit_bytes must be between 1 and 67108864 \
+                 (64 MiB), got 67108865"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            with(max, 0).validate(),
+            Err(
+                "governance.opa.body_read_timeout_ms must be between 1 and 60000, got 0"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            with(max, 60_001).validate(),
+            Err(
+                "governance.opa.body_read_timeout_ms must be between 1 and 60000, got 60001"
+                    .to_string()
+            )
+        );
+        // `Config::validate` runs it.
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_GOVERNANCE__OPA__BATCH_BODY_LIMIT_BYTES", "0");
+            let c: Config = Config::figment().extract().expect("env");
+            let err = c.validate().expect_err("0 is refused at load");
+            assert!(
+                err.contains("governance.opa.batch_body_limit_bytes"),
+                "{err}"
+            );
+            Ok(())
+        });
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_GOVERNANCE__OPA__BODY_READ_TIMEOUT_MS", "2500");
+            let c: Config = Config::figment().extract().expect("env");
+            assert_eq!(c.governance.opa.body_read_timeout_ms, 2_500);
+            c.governance.opa.validate().expect("2500 is accepted");
             Ok(())
         });
     }

@@ -105,6 +105,12 @@ pub const OPA_MAX_CONCURRENT_PARSES: usize = 16;
 /// waits [`OPA_PARSE_WAIT`], then is answered 503 with its body unread.
 pub const OPA_MAX_IN_FLIGHT: usize = 64;
 
+/// The default deadline for a request's whole body once it holds its
+/// in-flight units (`[governance.opa] body_read_timeout_ms`,
+/// `egret_config::DEFAULT_OPA_BODY_READ_TIMEOUT_MS`): 5 s. See
+/// [`bound_in_flight`].
+pub const OPA_DEFAULT_BODY_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// How long a request waits for a parse permit before it is answered 503
 /// (the plugin fails the query: fail closed).
 pub const OPA_PARSE_WAIT: Duration = Duration::from_secs(1);
@@ -127,6 +133,11 @@ impl ParseGate {
             total: u32::try_from(permits).unwrap_or(u32::MAX),
             wait,
         }
+    }
+
+    /// The units free right now.
+    pub fn available(&self) -> usize {
+        self.permits.available_permits()
     }
 
     /// One permit, or `None` once the wait has passed without one.
@@ -180,6 +191,9 @@ pub struct OpaState {
     /// The `/batch` body limit (`[governance.opa] batch_body_limit_bytes`);
     /// every other route has [`OPA_BODY_LIMIT_BYTES`].
     pub batch_body_limit: usize,
+    /// How long an admitted request's body may take to arrive
+    /// (`[governance.opa] body_read_timeout_ms`).
+    pub body_read_timeout: Duration,
 }
 
 impl OpaState {
@@ -194,12 +208,19 @@ impl OpaState {
             parses: Arc::new(ParseGate::default()),
             in_flight: Arc::new(in_flight_gate()),
             batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+            body_read_timeout: OPA_DEFAULT_BODY_READ_TIMEOUT,
         }
     }
 
     /// This state with `/batch` limited to `bytes`.
     pub fn with_batch_body_limit(mut self, bytes: usize) -> Self {
         self.batch_body_limit = bytes;
+        self
+    }
+
+    /// This state with bodies given `timeout` to arrive.
+    pub fn with_body_read_timeout(mut self, timeout: Duration) -> Self {
+        self.body_read_timeout = timeout;
         self
     }
 }
@@ -340,6 +361,17 @@ pub fn opa_surface(state: OpaState) -> axum::Router {
 /// route's limit, which refuses anything larger) or, declaring none, its
 /// route's whole limit. Without room within [`OPA_PARSE_WAIT`] it is answered
 /// 503 (the plugin fails the query) and its body is never read.
+///
+/// **The body is read here, under a deadline** (Task 20F fix round 1, I1).
+/// Units are held while the body arrives, so a caller that sends headers and
+/// then nothing would otherwise hold its share for as long as it keeps the
+/// connection open, and a few such connections would starve every engine's
+/// requests. The whole body must arrive within [`OpaState::body_read_timeout`]
+/// (default [`OPA_DEFAULT_BODY_READ_TIMEOUT`]); past it the request is
+/// answered 408 with `Connection: close`, and its units are released. A body
+/// over the route's limit is 413, an unreadable one 400, both closing the
+/// connection too. Only then does the handler see the request, its body
+/// already buffered.
 async fn bound_in_flight(
     State(state): State<OpaState>,
     req: axum::extract::Request,
@@ -367,7 +399,50 @@ async fn bound_in_flight(
         };
         return who.busy("too many requests in flight");
     };
-    next.run(req).await
+    let who = Who {
+        route,
+        engine: None,
+        req: None,
+    };
+    let (parts, body) = req.into_parts();
+    let read = tokio::time::timeout(state.body_read_timeout, axum::body::to_bytes(body, limit));
+    let bytes = match read.await {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(e)) => {
+            let too_large = std::error::Error::source(&e)
+                .is_some_and(|s| s.is::<http_body_util::LengthLimitError>());
+            who.denied(None, &format!("request body refused: {e}"));
+            let status = if too_large {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            return closing(status, "request body refused");
+        }
+        Err(_) => {
+            who.denied(None, "request body not received in time");
+            return closing(
+                StatusCode::REQUEST_TIMEOUT,
+                "request body not received in time",
+            );
+        }
+    };
+    next.run(axum::extract::Request::from_parts(
+        parts,
+        axum::body::Body::from(bytes),
+    ))
+    .await
+}
+
+/// A refusal of a request whose body was not (fully) read: the connection is
+/// closed with it, so its unread bytes are never taken as a next request.
+fn closing(status: StatusCode, error: &str) -> Response {
+    (
+        status,
+        [(header::CONNECTION, "close")],
+        Json(json!({ "error": error })),
+    )
+        .into_response()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

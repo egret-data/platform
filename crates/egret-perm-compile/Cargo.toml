@@ -55,6 +55,9 @@ tracing.workspace = true
 # transaction as its write — and `egret-perm` depending on this crate would
 # be a dependency cycle. Same shape `egret-policy` already has (store plus
 # admin router in one crate).
+# SP2b Task 20F fix round 1: the OPA surface reads a body under a deadline
+# and tells an over-limit body (413) from a broken one (400).
+http-body-util = "0.1"
 axum.workspace = true
 egret-auth.workspace = true
 egret-core.workspace = true

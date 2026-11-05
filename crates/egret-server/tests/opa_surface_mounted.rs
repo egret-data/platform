@@ -20,7 +20,7 @@ use egret_engine_mgmt_api::credential::{EngineCredentialVerifier, EngineIdentity
 use egret_perm_compile::opa::cache::{SnapshotCache, MAX_UNREAD, REFRESH_PERIOD};
 use egret_perm_compile::opa::surface::{
     in_flight_gate, ParseGate, VerifiedCache, OPA_BODY_LIMIT_BYTES,
-    OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+    OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES, OPA_DEFAULT_BODY_READ_TIMEOUT,
 };
 use egret_perm_compile::{start_opa, OpaState, OPA_SURFACE_PREFIX};
 use egret_perm_eval::{Snapshot, SnapshotInput};
@@ -97,6 +97,7 @@ fn opa_state(verifier: Arc<dyn EngineCredentialVerifier>, engine: uuid::Uuid) ->
         parses: Arc::new(ParseGate::default()),
         in_flight: Arc::new(in_flight_gate()),
         batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+        body_read_timeout: OPA_DEFAULT_BODY_READ_TIMEOUT,
     }
 }
 
@@ -274,6 +275,7 @@ async fn with_the_gate_off_nothing_starts_and_no_connection_is_opened() {
     let started = start_opa(
         false,
         OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+        OPA_DEFAULT_BODY_READ_TIMEOUT,
         stub(),
         pool.clone(),
         std::future::pending(),
@@ -301,6 +303,7 @@ async fn with_the_gate_on_the_refresher_reads_the_database() {
     let (_state, handle) = start_opa(
         true,
         OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+        OPA_DEFAULT_BODY_READ_TIMEOUT,
         stub(),
         pool.clone(),
         async {
@@ -328,6 +331,7 @@ async fn without_the_ranger_verifier_nothing_starts() {
     let started = start_opa(
         true,
         OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+        OPA_DEFAULT_BODY_READ_TIMEOUT,
         None,
         unreachable_pool(),
         std::future::pending(),
@@ -344,6 +348,7 @@ async fn a_failing_refresh_never_stops_the_refresher_but_shutdown_does() {
     let (_state, handle) = start_opa(
         true,
         OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+        OPA_DEFAULT_BODY_READ_TIMEOUT,
         stub(),
         unreachable_pool(),
         async {

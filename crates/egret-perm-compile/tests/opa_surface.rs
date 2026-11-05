@@ -24,7 +24,7 @@ use egret_engine_mgmt_api::credential::{EngineCredentialVerifier, EngineIdentity
 use egret_perm_compile::opa::cache::SnapshotCache;
 use egret_perm_compile::opa::surface::{
     in_flight_gate, ParseGate, VerifiedCache, MAX_VERDICTS, NEGATIVE_TTL, OPA_BODY_LIMIT_BYTES,
-    OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES, VERIFIED_TTL,
+    OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES, OPA_DEFAULT_BODY_READ_TIMEOUT, VERIFIED_TTL,
 };
 use egret_perm_compile::{opa_surface, OpaState, OPA_SURFACE_PREFIX};
 use egret_perm_eval::{Snapshot, SnapshotInput};
@@ -231,6 +231,7 @@ fn app_with(credentials: VerifiedCache) -> App {
         parses: Arc::new(ParseGate::default()),
         in_flight: Arc::new(in_flight_gate()),
         batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+        body_read_timeout: OPA_DEFAULT_BODY_READ_TIMEOUT,
     });
     App {
         router,
@@ -798,6 +799,7 @@ async fn an_unreachable_verifier_answers_500_on_every_route() {
         parses: Arc::new(ParseGate::default()),
         in_flight: Arc::new(in_flight_gate()),
         batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+        body_read_timeout: OPA_DEFAULT_BODY_READ_TIMEOUT,
     });
     for (route, action) in every_route() {
         let (status, _) = post(&router, route, &GOOD.to_string(), RIGHT, action).await;
@@ -1006,6 +1008,7 @@ async fn no_log_or_body_carries_the_secret() {
         parses: Arc::new(ParseGate::default()),
         in_flight: Arc::new(in_flight_gate()),
         batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+        body_read_timeout: OPA_DEFAULT_BODY_READ_TIMEOUT,
     });
 
     let mut answers = Vec::new();
@@ -1075,6 +1078,7 @@ async fn no_log_or_body_carries_the_secret() {
         parses: Arc::new(ParseGate::default()),
         in_flight: Arc::new(in_flight_gate()),
         batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+        body_read_timeout: OPA_DEFAULT_BODY_READ_TIMEOUT,
     });
     for (route, action) in every_route() {
         bodies.push(
@@ -1127,6 +1131,7 @@ async fn an_identity_for_another_engine_is_a_refusal() {
         parses: Arc::new(ParseGate::default()),
         in_flight: Arc::new(in_flight_gate()),
         batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+        body_read_timeout: OPA_DEFAULT_BODY_READ_TIMEOUT,
     });
     // The verifier's answer is about GOOD: GOOD is admitted, GOOD2 is not.
     let (route, action) = every_route().remove(0);
@@ -1185,6 +1190,7 @@ async fn with_every_parse_permit_held_a_request_is_answered_503_on_every_route()
         parses: Arc::clone(&parses),
         in_flight: Arc::new(in_flight_gate()),
         batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+        body_read_timeout: OPA_DEFAULT_BODY_READ_TIMEOUT,
     });
     let held = parses.acquire().await.expect("the one permit");
 
@@ -1350,6 +1356,7 @@ async fn a_larger_body_takes_more_of_the_parse_budget() {
         parses: Arc::clone(&parses),
         in_flight: Arc::new(in_flight_gate()),
         batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+        body_read_timeout: OPA_DEFAULT_BODY_READ_TIMEOUT,
     });
     let held = parses.acquire().await.expect("one unit");
 
@@ -1391,6 +1398,7 @@ async fn over_the_in_flight_budget_a_request_is_503_and_its_body_is_never_read()
         parses: Arc::new(ParseGate::default()),
         in_flight: Arc::clone(&in_flight),
         batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+        body_read_timeout: OPA_DEFAULT_BODY_READ_TIMEOUT,
     });
     let stalled = || {
         let router = router.clone();
@@ -1463,4 +1471,139 @@ async fn over_the_in_flight_budget_a_request_is_503_and_its_body_is_never_read()
         .expect("response");
     assert_eq!(res.status().as_u16(), 200);
     assert!(read.load(Ordering::SeqCst));
+}
+
+// ---- SP2b Task 20F fix round 1 ----
+
+/// A POST to `route` whose body is `body`, with `Content-Length` when given.
+fn request(route: &str, content_length: Option<usize>, body: Body) -> Request<Body> {
+    let mut b = Request::post(format!("{OPA_SURFACE_PREFIX}{route}"))
+        .header("content-type", "application/json");
+    if let Some(n) = content_length {
+        b = b.header("content-length", n.to_string());
+    }
+    b.body(body).expect("request")
+}
+
+/// I1: N callers that declare a body and then send nothing hold the in-flight
+/// budget only until the body-read deadline; a real request waiting behind
+/// them is then admitted, and the units come back.
+#[tokio::test]
+async fn stalled_bodies_are_cut_off_at_the_deadline_and_free_the_budget() {
+    // Arrange: a budget of N = 2, a real request willing to wait 2 s, and a
+    // 200 ms deadline on body arrival.
+    logs();
+    let in_flight = Arc::new(ParseGate::new(2, Duration::from_secs(2)));
+    let router = opa_surface(OpaState {
+        cache: ready_cache(),
+        verifier: Arc::new(Stub::standard()),
+        credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
+        parses: Arc::new(ParseGate::default()),
+        in_flight: Arc::clone(&in_flight),
+        batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+        body_read_timeout: Duration::from_millis(200),
+    });
+    let stalled = || {
+        let router = router.clone();
+        tokio::spawn(async move {
+            let body = Body::from_stream(futures_util::stream::pending::<
+                Result<axum::body::Bytes, std::io::Error>,
+            >());
+            router
+                .oneshot(request("/allow", Some(1000), body))
+                .await
+                .expect("response")
+        })
+    };
+    let first = stalled();
+    let second = stalled();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while in_flight.available() > 0 {
+        assert!(tokio::time::Instant::now() < deadline, "never in flight");
+        tokio::task::yield_now().await;
+    }
+    let started = tokio::time::Instant::now();
+
+    // Act: a real /allow while both units are held by stalled bodies.
+    let (route, action) = every_route().remove(0);
+    let answer = post(&router, route, &GOOD.to_string(), RIGHT, action).await;
+
+    // Assert: answered once the stalled ones were cut off, well within its wait.
+    assert_eq!(answer, (200, json!({"result": true})));
+    assert!(started.elapsed() < Duration::from_secs(2), "not starved");
+    for stalled in [first, second] {
+        let res = stalled.await.expect("joined");
+        assert_eq!(res.status().as_u16(), 408);
+        assert_eq!(
+            res.headers().get("connection").map(|v| v.to_str().unwrap()),
+            Some("close")
+        );
+    }
+    assert!(log_text().contains("request body not received in time"));
+    // Both units are back.
+    let back = in_flight.acquire_for(2 * OPA_BODY_LIMIT_BYTES).await;
+    assert!(back.is_some(), "the units came back");
+}
+
+/// I3: the in-flight gate weighs a request by its declared length, and one
+/// that declares none by its route's whole limit (`/batch`: 24 MiB = 6 units).
+#[tokio::test]
+async fn the_in_flight_gate_weighs_an_unlengthed_batch_by_the_batch_limit() {
+    // Arrange: a budget of 6 units with one held, so 5 are free.
+    logs();
+    let in_flight = Arc::new(ParseGate::new(6, Duration::from_millis(50)));
+    let router = opa_surface(OpaState {
+        cache: ready_cache(),
+        verifier: Arc::new(Stub::standard()),
+        credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
+        parses: Arc::new(ParseGate::default()),
+        in_flight: Arc::clone(&in_flight),
+        batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+        body_read_timeout: OPA_DEFAULT_BODY_READ_TIMEOUT,
+    });
+    let _held = in_flight.acquire().await.expect("one unit");
+    let small_batch = padded_batch(1024);
+
+    // Act + Assert: an unlengthed /batch needs 6 units: 503, body unread.
+    let read = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let res = router
+        .clone()
+        .oneshot(request(
+            "/batch",
+            None,
+            watched_body(small_batch.clone(), Arc::clone(&read)),
+        ))
+        .await
+        .expect("response");
+    assert_eq!(res.status().as_u16(), 503);
+    assert!(!read.load(Ordering::SeqCst), "body never read");
+
+    // The same body declaring its length needs 1 unit: answered.
+    let len = small_batch.len();
+    let res = router
+        .clone()
+        .oneshot(request("/batch", Some(len), Body::from(small_batch)))
+        .await
+        .expect("response");
+    assert_eq!(res.status().as_u16(), 200);
+
+    // A declared 5 MiB /batch needs 2 units: answered.
+    let big = padded_batch(OPA_BODY_LIMIT_BYTES + 1024 * 1024);
+    let len = big.len();
+    let res = router
+        .clone()
+        .oneshot(request("/batch", Some(len), Body::from(big)))
+        .await
+        .expect("response");
+    assert_eq!(res.status().as_u16(), 200);
+
+    // An unlengthed /allow needs its route's 4 MiB, 1 unit: answered.
+    let (_, action) = every_route().remove(0);
+    let raw = body("ann", &GOOD.to_string(), RIGHT, action).to_string();
+    let res = router
+        .clone()
+        .oneshot(request("/allow", None, Body::from(raw)))
+        .await
+        .expect("response");
+    assert_eq!(res.status().as_u16(), 200);
 }
