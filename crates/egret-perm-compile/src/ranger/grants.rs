@@ -154,6 +154,36 @@ pub(crate) fn level(value: String) -> ResourceLevel {
 /// [`scope_to_resources`] for why an ABSENT level is not the same thing.
 pub(crate) const WILDCARD: &str = "*";
 
+/// The schema (Trino) / database (StarRocks) every catalog carries for its own
+/// metadata. A catalog-scoped MASK excludes it ([`scope_to_resources`]),
+/// because both engines request column masks for its relations exactly as for
+/// a data table, and nothing in either plugin skips it:
+///
+/// * **Trino** (482, `trino/` at 280b81bbc4e): `StatementAnalyzer.visitTable`
+///   (`core/trino-main/.../sql/analyzer/StatementAnalyzer.java:2414`) calls
+///   `analyzeFiltersAndMasks` for every relation that is not a view or a
+///   materialized view, which calls `accessControl.getColumnMasks` (`:2498`);
+///   `AccessControlManager.getColumnMasks` (`security/AccessControlManager.java:1494-1510`)
+///   forwards to the system access control with no schema check, and the
+///   Ranger plugin's `getColumnMask` (`plugin/trino-ranger/.../RangerSystemAccessControl.java:804-806`)
+///   builds a `catalog/schema/table/column` request for whatever it is
+///   handed. `SHOW TABLES` / `SHOW COLUMNS` are rewritten into queries over
+///   `information_schema` (`sql/rewrite/ShowQueriesRewrite.java:472-484`).
+/// * **StarRocks** (4.1.7, `b81ff9cc`): an external catalog lists an
+///   `information_schema` database of its own
+///   (`connector/CatalogConnectorMetadata.java:109,123-124`); every relation
+///   of a statement is marked for policy rewrite (`qe/ConnectProcessor.java:664`),
+///   and `QueryAnalyzer` (`sql/analyzer/QueryAnalyzer.java:825`) calls
+///   `SecurityPolicyRewriteRule.buildView` → `getColumnMaskingPolicy`
+///   (`authorization/SecurityPolicyRewriteRule.java:57`,
+///   `ranger/starrocks/RangerStarRocksAccessController.java:451`) with no
+///   `information_schema` exception; the egret fork's patches add none.
+///
+/// `isExcludes` is legal on that level of both mask defs: `dataMaskDef`'s
+/// entry carries no `excludesSupported`, and `mergeResourceDef` keeps the
+/// access resource's `excludesSupported: true`.
+pub(crate) const INFORMATION_SCHEMA: &str = "information_schema";
+
 /// Which Ranger policy type a `resources` map is being rendered for. The
 /// three do not share one resource hierarchy: an ACCESS policy is matched
 /// against the full `catalog/schema/table/column` chain the service-def's
@@ -248,6 +278,11 @@ pub(crate) enum PolicyTarget {
 /// `the_mask_resource_map_matches_what_the_service_def_declares` re-reads both
 /// service-defs and pins this.
 ///
+/// One exception: a CATALOG-scoped mask's schema level is
+/// `{values: ["information_schema"], isExcludes: true}` rather than `*`, so the
+/// mask does not reach the catalog's own metadata relations — see
+/// [`INFORMATION_SCHEMA`] for the engine source that requests masks there.
+///
 /// A level the scope NAMES is still copied verbatim (a `*` an author typed
 /// above a named level stays a `*`, product decision 2026-10-10), so this
 /// changes nothing for a mask that names its column.
@@ -283,6 +318,22 @@ pub(crate) fn scope_to_resources(
                     }
                 };
                 map.insert((*name).to_string(), level(value));
+            }
+            // A CATALOG-scoped mask must not reach the catalog's
+            // `information_schema`: both engines ask the plugin for column
+            // masks on it like on any table (see [`INFORMATION_SCHEMA`]), so
+            // `schema: *` would hash the names `SHOW TABLES`, `SHOW COLUMNS`,
+            // `DESCRIBE` and every JDBC metadata call return. Its schema level
+            // is "every schema except `information_schema`" instead.
+            if target == PolicyTarget::Mask && named[1].is_none() {
+                map.insert(
+                    names[1].to_string(),
+                    ResourceLevel {
+                        values: vec![INFORMATION_SCHEMA.to_string()],
+                        is_excludes: true,
+                        is_recursive: false,
+                    },
+                );
             }
         }
         PolicyTarget::RowFilter => {

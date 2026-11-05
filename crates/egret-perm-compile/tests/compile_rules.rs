@@ -1054,6 +1054,33 @@ fn the_mask_resource_map_matches_what_the_service_def_declares() {
             "{engine:?}: every dataMaskDef level must take `*`, or the fill is a value the \
              plugin reads literally: {levels:?}"
         );
+        // The catalog-scoped mask's schema level is an exclusion
+        // (`information_schema`): `mergeResourceDef` keeps the access def's
+        // `excludesSupported` unless the mask entry sets one.
+        let def = service_def(engine);
+        let second = &levels[1].0;
+        let mask_entry = def["dataMaskDef"]["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| &r["name"] == second)
+            .unwrap();
+        let base = def["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| &r["name"] == second)
+            .unwrap();
+        let excludes_supported = if mask_entry["excludesSupported"].is_null() {
+            base["excludesSupported"].as_bool() == Some(true)
+        } else {
+            mask_entry["excludesSupported"].as_bool() == Some(true)
+        };
+        assert!(
+            excludes_supported,
+            "{engine:?}: dataMaskDef {second} must support isExcludes for the information_schema \
+             exclusion"
+        );
         expected.sort();
 
         // (scope, the levels that must carry `*`)
@@ -1083,14 +1110,33 @@ fn the_mask_resource_map_matches_what_the_service_def_declares() {
                 scope.column.as_deref(),
             ];
             for (i, (name, ..)) in levels.iter().enumerate() {
+                let level = &out[0]["resources"][name];
+                // A catalog-scoped mask's schema level excludes the catalog's
+                // `information_schema` instead of being `*`.
+                if i == 1 && scope.schema.is_none() {
+                    assert_eq!(
+                        (&level["values"], &level["isExcludes"]),
+                        (
+                            &serde_json::json!(["information_schema"]),
+                            &serde_json::json!(true)
+                        ),
+                        "{engine:?} {scope:?}: a catalog mask must exclude information_schema"
+                    );
+                    continue;
+                }
                 let want = if wild.contains(&i) {
                     "*"
                 } else {
                     named[i].expect("a level not filled is named")
                 };
                 assert_eq!(
-                    out[0]["resources"][name]["values"],
+                    level["values"],
                     serde_json::json!([want]),
+                    "{engine:?} {scope:?}: level {name}"
+                );
+                assert_eq!(
+                    level["isExcludes"],
+                    serde_json::json!(false),
                     "{engine:?} {scope:?}: level {name}"
                 );
             }

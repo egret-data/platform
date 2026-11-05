@@ -7362,13 +7362,13 @@ fn mig_check_pins(
     // it is refused rather than migrated into a mask (fix/ranger-table-mask-column).
     refused_naming(
         "mask shape stops at table",
-        Blocker::MissingLevel {
+        Blocker::MaskMissingLevel {
             level: "column".to_string(),
         },
     );
     refused_naming(
         "mask shape stops at schema",
-        Blocker::MissingLevel {
+        Blocker::MaskMissingLevel {
             level: "table".to_string(),
         },
     );
@@ -9722,7 +9722,7 @@ fn a_path_mask_naming_no_column_masks_every_column_beneath_it_on_the_real_jars()
         ("catalog", None, None, None),
     ];
     // (label, coordinate, the scopes that must mask it)
-    let coords: [(&str, [&str; 4], &[&str]); 5] = [
+    let coords: [(&str, [&str; 4], &[&str]); 6] = [
         (
             "the named column",
             ["wh", "sales", "orders", "email"],
@@ -9744,6 +9744,14 @@ fn a_path_mask_naming_no_column_masks_every_column_beneath_it_on_the_real_jars()
             &["catalog"],
         ),
         ("another catalog", ["lake", "sales", "orders", "email"], &[]),
+        // Both engines ask for masks on the catalog's own metadata relations;
+        // a catalog-scoped mask excludes them (`isExcludes` on the schema
+        // level), so `SHOW TABLES` / `SHOW COLUMNS` keep real names.
+        (
+            "the catalog's information_schema",
+            ["wh", "information_schema", "columns", "column_name"],
+            &[],
+        ),
     ];
 
     // Trino at 2.8.0 only: at 2.5.0 `mvn test` fails in `EgretPluginAuthTest`,
@@ -9875,8 +9883,8 @@ fn a_path_mask_naming_no_column_masks_every_column_beneath_it_on_the_real_jars()
         "path-mask scope differential: {asked} probes, {} failures, {elapsed:.2} s",
         failures.len()
     );
-    // 3 profiles × 4 scopes × 5 coordinates × 2 users.
-    assert_eq!(asked, 3 * 4 * 5 * 2, "every probe was asked");
+    // 3 profiles × 4 scopes × 6 coordinates × 2 users.
+    assert_eq!(asked, 3 * 4 * 6 * 2, "every probe was asked");
     assert!(
         elapsed > 1.0,
         "a real-jar run takes seconds, not {elapsed:.2} s — vacuous"
