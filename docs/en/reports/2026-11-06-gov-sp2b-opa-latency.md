@@ -379,3 +379,146 @@ The cheaper fixes for what was measured are:
 | `crates/egret-perm-compile/tests/opa_rebuild_timing.rs` | T7 M1, `#[ignore]`d |
 | `scripts/opa-e2e/latency.sh` | setup, timed sets, request counts, unbatched run, restart window |
 | `scripts/opa-e2e/latency-run.sh` | runs inside each Trino container: one statement, or the restart loop |
+
+## 22F: after the evaluator index and the scoped overlap scan (2026-11-06)
+
+Task 22F fixed the two costs that sections 1 and 4 measured:
+
+- **The path index.** The snapshot now indexes path statements by catalog, schema and table
+  (`egret-perm-eval`, commit `1765e77d`). Before, it indexed them by catalog only.
+- **The scoped overlap scan.** The refresher's stored-overlap re-check now reads only the
+  units of the profile and of its tag service (`stored_overlaps_of_via`, commit `b1df6ee5`).
+  Before, it read every service's units.
+
+The raw outputs are in the measuring session's scratchpad,
+`/private/tmp/claude-501/-Users-1pro-l4r8-Documents-github-data-portal/739fff40-b4cd-44a8-8f4d-649cbeb36373/scratchpad/latency-22F/`
+(named `RAW22F/` below). Every "before" figure is Task 22's, from `RAW/`.
+
+**Conditions.** The machine was not idle. The `egret-demo` and `egret-dev-*` stacks and the
+docs Trino ran throughout, as the Docker rules require. `ps` showed Docker's VM process at
+74.5 % to 82.5 % of a core, and the load average was 4.73 when the benches started
+(`RAW22F/conditions-bench.txt`, `RAW22F/conditions-rebuild.txt`). No other build or test
+suite of mine ran during either measurement.
+
+### 22F.1 Microbenchmarks
+
+Command: `CARGO_TARGET_DIR=$PWD/target-sp2b cargo bench -p egret-perm-eval --bench eval -- --baseline sp2b`
+at `b1df6ee5`. Output: `RAW22F/criterion.out`. The bench and its generator are unchanged,
+and so are the statement counts it printed (1 106 and 11 006). Each value is criterion's
+middle estimate. The change column is criterion's own comparison with the `sp2b` baseline.
+
+| Bench | tables | before (`RAW/criterion.out`) | after | criterion's change |
+|---|---|---|---|---|
+| `build/snapshot` | 1 000 | 87.418 µs | 288.94 µs | +232.47 % |
+| | 10 000 | 1.4937 ms | 3.1946 ms | +113.87 % |
+| `decide/select_8_columns` | 1 000 | 227.49 µs | 9.0885 µs | −95.928 % |
+| | 10 000 | 221.91 µs | 9.1735 µs | −95.843 % |
+| `filter/FilterTables_1000` | 1 000 | 18.911 ms | 1.1925 ms | −93.663 % |
+| | 10 000 | 19.019 ms | 1.1953 ms | −93.693 % |
+| `column_masks/500_columns` | 1 000 | 1.7343 ms | 733.95 µs | −57.987 % |
+| | 10 000 | 1.7951 ms | 729.73 µs | −58.260 % |
+| `build/snapshot_one_catalog` | 1 000 | 58.655 µs | 297.61 µs | +412.31 % |
+| | 10 000 | 694.56 µs | 3.4863 ms | +401.94 % |
+| `decide/select_8_columns_one_catalog` | 1 000 | 2.6550 ms | 9.1431 µs | −99.641 % |
+| | 10 000 | 4.1363 ms | 9.2305 µs | −99.775 % |
+| `filter/FilterTables_1000_one_catalog` | 1 000 | 185.10 ms | 1.2592 ms | −99.331 % |
+| | 10 000 | 361.10 ms | 1.2070 ms | −99.668 % |
+| `column_masks/500_columns_one_catalog` | 1 000 | 13.603 ms | 742.71 µs | −94.576 % |
+| | 10 000 | 139.34 ms | 742.18 µs | −99.470 % |
+
+What this shows:
+
+- **Every question now costs the same at both sizes and in both layouts.** A `FilterTables`
+  of 1 000 tables costs about 1.2 ms. In one catalog it cost 185.10 ms at 1 106 statements
+  and 361.10 ms at 11 006. A 500-column mask question costs about 0.74 ms; it was 13.603 ms
+  and 139.34 ms.
+- **The grid also got faster.** There, each question used to scan every statement of its
+  catalog.
+- **Building the snapshot costs more.** It now takes 3.1946 ms at 11 006 statements (grid),
+  up from 1.4937 ms, and 3.4863 ms in one catalog. A build runs once for each key that moves,
+  and a rebuild takes at least 58.1 ms (22F.2). The extra build time is under 3 ms of that.
+
+### 22F.2 Snapshot rebuild (T7 M1)
+
+Command, at `b1df6ee5`, with no stack up:
+
+```bash
+env -u EGRET_ALLOW_DB_SKIP DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test \
+  cargo test -p egret-perm-compile --release --features harness --test opa_rebuild_timing \
+  -- --ignored --nocapture
+```
+
+Output: `RAW22F/rebuild-timing.out`. The test now does three more things:
+
+- it times the scan a build now runs (`overlap_scan_profile`) beside the all-services scan
+  (`overlap_scan`);
+- it prints every rebuild sample, in run order;
+- it prints `pg_stat_user_tables` for `policy.authz_policies` before and after each step.
+
+It also has a fifth step, `1k_beside_10_profiles_again`: the 1k measurement, repeated after
+the 10k one.
+
+Rebuild p50, with min to max in brackets:
+
+| Step | services | before (`RAW/rebuild-timing.out`) | after |
+|---|---|---|---|
+| `1k_alone` (902 statements) | 2 | 60.2 ms (57.3–101.0) | 71.7 ms (58.1–83.4) |
+| `10k_uncompiled` (11 000) | 4 | 138.2 ms (127.5–151.9) | 106.9 ms (89.8–115.2) |
+| `1k_beside_10_profiles` | 22 | 1044.8 ms (497.3–1152.3) | 739.9 ms (170.5–810.3), see 22F.3 |
+| `10k_beside_10_profiles` | 22 | 505.6 ms (469.1–538.0) | 162.9 ms (145.3–197.5) |
+| `1k_beside_10_profiles_again` | 22 | not run | 189.5 ms (164.4–369.9) |
+
+The scan, timed alone, p50:
+
+| Step | services | all services (the scan before 22F) | the profile's units (22F) |
+|---|---|---|---|
+| `1k_alone` | 2 | 34.8 ms | 31.4 ms |
+| `10k_uncompiled` | 4 | 39.7 ms | 7.8 ms |
+| `1k_beside_10_profiles` | 22 | 351.9 ms | 36.2 ms |
+| `10k_beside_10_profiles` | 22 | 364.4 ms | 9.3 ms |
+| `1k_beside_10_profiles_again` | 22 | 344.3 ms | 35.1 ms |
+
+What this shows:
+
+- **The scan no longer grows with the database.** At 22 services it takes 36.2 ms for the
+  compiled profile and 9.3 ms for the uncompiled one. The all-services scan still measures
+  351.9 ms and 364.4 ms, the same as Task 22's 351.5 ms and 371.7 ms.
+- **A rebuild at 22 services** now takes 162.9 ms p50 for the 11 000-statement profile,
+  against 505.6 ms before. For the 902-statement profile it takes 189.5 ms once Postgres has
+  analyzed the table (22F.3), against 1044.8 ms before.
+- **A moved key now stays inside the 1 s refresh period.** The largest sample was 810.3 ms,
+  in the stale-statistics window of 22F.3. After that window, the largest was 369.9 ms.
+- **The 2-service step did not get faster** (60.2 ms before, 71.7 ms after). Alone, the
+  profile's units are almost all the units there are.
+
+### 22F.3 The 902-statement profile rebuilt slower than the 11 000 one
+
+Task 22 left this unexplained: at 22 services, the compiled 902-statement profile rebuilt at
+1044.8 ms p50, with bimodal samples, while the uncompiled 11 000-statement profile rebuilt at
+505.6 ms.
+
+The new samples, in run order (`RAW22F/rebuild-timing.out`, line 28):
+`810.3 772.3 747.0 710.7 739.9 742.5 172.7 170.5 175.2 211.2` ms.
+
+- **Before that step**, `policy.authz_policies` had `n_mod_since_analyze=9840` and had never
+  been analyzed (`last_autoanalyze=None`). The nine profiles arranged just before had
+  inserted 9 × 984 policies.
+- **After that step**, it had `n_mod_since_analyze=0` and
+  `last_autoanalyze=2026-11-05 22:30:11.910619+00`. Autoanalyze ran during the step, and the
+  samples fell from about 750 ms to about 170 ms at that point.
+- **The two later steps both started on analyzed statistics.** The 11 000-statement profile
+  measured 162.9 ms p50, and the repeated 902-statement step measured 189.5 ms p50.
+
+**Finding.** The slow mode is the order the test runs in, not the profile's shape. The
+902-statement step was the first step after a bulk insert of 9 840 policies, and it ran on
+planner statistics that had never been taken. Once autoanalyze ran, it rebuilt at a speed
+comparable to the 11 000-statement profile. Task 22's 11 000 step ran second, as it does
+here, so it never met the stale statistics.
+
+**Not measured.** I did not find which query's plan changes, and I did not run the step
+with a forced `ANALYZE`. The evidence is the time course, and a correlation in time is not a
+proof of mechanism.
+
+**What it means for production.** A bulk write, such as a migration or a large import, can
+leave the refresher on stale statistics until autoanalyze runs. In this run, one rebuild
+then cost up to 810.3 ms.
