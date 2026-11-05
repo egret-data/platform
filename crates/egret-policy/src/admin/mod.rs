@@ -1206,6 +1206,7 @@ async fn trino_config(
     if opa {
         warnings.push(egret_engine_mgmt_api::opa_config::OPA_LOG_REQUESTS_WARNING.to_string());
         warnings.push(egret_engine_mgmt_api::opa_config::OPA_EXTERNAL_ENGINE_NOTE.to_string());
+        warnings.push(egret_engine_mgmt_api::opa_config::OPA_BATCHED_URI_WARNING.to_string());
     }
     Ok(Json(TrinoConfigResponse {
         mechanism: profile.mechanism,

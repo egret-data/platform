@@ -52,6 +52,7 @@ import type {
   PolicyAdminUpdatePolicyBody,
   ProfileDto,
   ProfileEngine,
+  TrinoConfigResponse,
 } from "./generated/model";
 import { ApiError } from "./client";
 
@@ -185,7 +186,7 @@ export type PolicyInput = (AccessPolicyInput & { kind: "access" }) | MaskingPoli
 
 export interface ConfigFile { name: string; content: string; }
 /** The coordinator files, and what makes them not work as rendered (KI-149). */
-export interface TrinoConfig { files: ConfigFile[]; warnings: string[]; }
+export type TrinoConfig = TrinoConfigResponse;
 export async function getTrinoConfig(service: string): Promise<TrinoConfig> {
   return (await policyAdminTrinoConfig(service)).data as TrinoConfig;
 }

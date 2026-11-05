@@ -211,6 +211,34 @@ describe("EngineDetail for an external engine", () => {
     expect(document.body.textContent).not.toContain("tok-must-never-render");
   });
 
+  test("Plugin config on an OPA profile asks the OPA route, not the Ranger one, and shows the files, warnings and what to supply", async () => {
+    const calls = stubFetch(
+      routes({
+        "GET /api/control-plane/policies/services": {
+          body: BOUND_PROFILES.map((p) => (p.id === 11 ? { ...p, mechanism: "opa" } : p)),
+        },
+        "GET /api/control-plane/engines/x1/opa-plugin-config": {
+          body: {
+            files: [
+              { name: "access-control.properties", content: "access-control.name=opa\n" },
+              { name: "egret-opa-context.properties", content: "egret.engine=x1\negret.secret=REPLACE\n" },
+            ],
+            warnings: ["Keep opa.policy.batched-uri in access-control.properties: without it, queries on information_schema.columns fail."],
+            adminMustSupply: ["egret.secret: the engine's Ranger plugin credential"],
+          },
+        },
+      }),
+    );
+    renderDetail(ADMIN, "/control-plane/engines/x1?tab=plugin-config");
+
+    expect(await screen.findByText("egret-opa-context.properties")).toBeInTheDocument();
+    expect(screen.getByText("access-control.properties")).toBeInTheDocument();
+    expect(screen.getByText(/Keep opa\.policy\.batched-uri/)).toBeInTheDocument();
+    expect(screen.getByText("egret.secret: the engine's Ranger plugin credential")).toBeInTheDocument();
+    expect(calls.some((c) => c.method === "GET" && c.path.endsWith("/engines/x1/opa-plugin-config"))).toBe(true);
+    expect(calls.some((c) => c.path.endsWith("/engines/x1/ranger-plugin-config"))).toBe(false);
+  });
+
   test("Plugin config with no profile bound says why in a sentence and offers Settings (KI-204)", async () => {
     stubFetch(
       routes({

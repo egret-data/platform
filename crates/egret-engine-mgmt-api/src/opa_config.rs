@@ -24,6 +24,9 @@ pub const OPA_LOG_REQUESTS_WARNING: &str = "Do not enable opa.log-requests: ever
 /// C6: egret cannot see an external engine's image.
 pub const OPA_EXTERNAL_ENGINE_NOTE: &str = "The coordinator must run Trino 483 or later with plugin/opa; egret cannot check an external engine's image.";
 
+/// Task 22: without `opa.policy.batched-uri`, `information_schema.columns` fails every time.
+pub const OPA_BATCHED_URI_WARNING: &str = "Keep opa.policy.batched-uri in access-control.properties: without it, queries on information_schema.columns fail.";
+
 /// How an engine's access decisions are made.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AccessMechanism {

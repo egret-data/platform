@@ -20,7 +20,7 @@ const FILES = [
 
 const WARNING =
   "The download URL (http://localhost:8080) is a loopback or unspecified address: no engine can reach it.";
-const getTrinoConfig = vi.fn(() => Promise.resolve({ files: FILES, warnings: [] as string[] }));
+const getTrinoConfig = vi.fn(() => Promise.resolve({ mechanism: "ranger", files: FILES, warnings: [] as string[] }));
 vi.mock("@/api/policies", () => ({ getTrinoConfig: () => getTrinoConfig() }));
 
 describe("TrinoConfigDialog", () => {
@@ -50,7 +50,7 @@ describe("TrinoConfigDialog", () => {
 
   // KI-149: the same warning the external engine's plugin configuration shows.
   it("shows the server's warnings above the files", async () => {
-    getTrinoConfig.mockResolvedValueOnce({ files: FILES, warnings: [WARNING] });
+    getTrinoConfig.mockResolvedValueOnce({ mechanism: "ranger", files: FILES, warnings: [WARNING] });
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={qc}>
@@ -59,5 +59,44 @@ describe("TrinoConfigDialog", () => {
     );
     expect(await screen.findByRole("alert")).toHaveTextContent(WARNING);
     expect(screen.getByText("ranger-trino-security.xml")).toBeInTheDocument();
+  });
+
+  it("for an OPA profile shows both OPA files, the plugin/opa description and the warnings verbatim", async () => {
+    const LOG = "Do not enable opa.log-requests: every request carries egret.secret in input.context.properties, and the coordinator log would hold it.";
+    const KEEP = "Keep opa.policy.batched-uri in access-control.properties: without it, queries on information_schema.columns fail.";
+    getTrinoConfig.mockResolvedValueOnce({
+      mechanism: "opa",
+      files: [
+        { name: "access-control.properties", content: "access-control.name=opa\n" },
+        { name: "egret-opa-context.properties", content: "egret.engine=REPLACE\n" },
+      ],
+      warnings: [LOG, KEEP],
+    });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <TrinoConfigDialog open service="p-opa" onOpenChange={() => {}} />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("egret-opa-context.properties")).toBeInTheDocument();
+    expect(screen.getByText("access-control.properties")).toBeInTheDocument();
+    expect(screen.getByText(LOG)).toBeInTheDocument();
+    expect(screen.getByText(KEEP)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Install these two files on a Trino 483 or later coordinator with plugin\/opa/),
+    ).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/native ranger plugin/);
+  });
+
+  it("for a Ranger profile keeps the Ranger description", async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <TrinoConfigDialog open service="p3" onOpenChange={() => {}} />
+      </QueryClientProvider>,
+    );
+    await screen.findByText("ranger-trino-security.xml");
+    expect(document.body.textContent).toMatch(/native ranger plugin/);
+    expect(document.body.textContent).not.toMatch(/plugin\/opa/);
   });
 });

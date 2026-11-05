@@ -4,7 +4,9 @@ import { toast } from "sonner";
 
 import { ApiError } from "@/api/client";
 import {
+  type controlPlaneEnginesOpaPluginConfigResponse,
   type controlPlaneEnginesRangerPluginConfigResponse,
+  useControlPlaneEnginesOpaPluginConfig,
   useControlPlaneEnginesRangerPluginConfig,
 } from "@/api/generated/control-plane-engines/control-plane-engines";
 import type { RangerPluginFileDto } from "@/api/generated/model";
@@ -64,7 +66,97 @@ function FileBlock({ file }: { file: RangerPluginFileDto }) {
  * documented fields are rendered, so a credential can never reach the screen: the
  * server sends none, and this component reads none.
  */
-export function EnginePluginConfig({ engineId, onOpenSettings }: { engineId: string; onOpenSettings: () => void }) {
+export function EnginePluginConfig({
+  engineId,
+  mechanism,
+  onOpenSettings,
+}: {
+  engineId: string;
+  /** The bound profile's mechanism; `opa` shows the OPA plugin's files instead of Ranger's. */
+  mechanism?: string;
+  onOpenSettings: () => void;
+}) {
+  return mechanism === "opa" ? (
+    <OpaEnginePluginConfig engineId={engineId} onOpenSettings={onOpenSettings} />
+  ) : (
+    <RangerEnginePluginConfig engineId={engineId} onOpenSettings={onOpenSettings} />
+  );
+}
+
+function NoProfileBound({ onOpenSettings, what }: { onOpenSettings: () => void; what: string }) {
+  return (
+    <Alert data-testid="plugin-config-no-profile">
+      <AlertDescription className="space-y-2">
+        <p>No policy profile is bound to this engine yet. {what}, so bind a profile first.</p>
+        <Button size="sm" variant="outline" onClick={onOpenSettings}>
+          Open Settings
+        </Button>
+      </AlertDescription>
+    </Alert>
+  );
+}
+
+function OpaEnginePluginConfig({ engineId, onOpenSettings }: { engineId: string; onOpenSettings: () => void }) {
+  const q = useControlPlaneEnginesOpaPluginConfig<controlPlaneEnginesOpaPluginConfigResponse, ApiError>(engineId, {
+    query: { retry: false },
+  });
+  if (q.isError && q.error?.status === 409)
+    return <NoProfileBound onOpenSettings={onOpenSettings} what="The plugin configuration is the bound profile's" />;
+  if (q.isError)
+    return (
+      <Alert variant="destructive" data-testid="plugin-config-error">
+        <AlertDescription>{q.error?.message ?? "Could not read the plugin configuration."}</AlertDescription>
+      </Alert>
+    );
+  if (q.isLoading || !q.data) return <ListSkeleton rows={4} cols={2} />;
+  if (q.data.status !== 200)
+    return (
+      <Alert variant="destructive">
+        <AlertDescription>The plugin configuration could not be read. Reload the page to try again.</AlertDescription>
+      </Alert>
+    );
+  const cfg = q.data.data;
+  return (
+    <div className="space-y-4" data-testid="opa-plugin-config">
+      <section className="space-y-2 rounded-lg border p-4">
+        <h2 className="text-base font-semibold">Install on your engine</h2>
+        <p className="text-sm text-muted-foreground">
+          Install these two files on a Trino 483 or later coordinator with plugin/opa. egret answers the plugin&apos;s
+          requests per decision; nothing is downloaded.
+        </p>
+      </section>
+
+      {cfg.warnings.length > 0 && (
+        <div className="space-y-2" data-testid="plugin-config-warnings">
+          {cfg.warnings.map((w) => (
+            <WarningCallout key={w}>{w}</WarningCallout>
+          ))}
+        </div>
+      )}
+
+      {cfg.adminMustSupply.length > 0 && (
+        <section className="space-y-1.5 rounded-lg border p-4">
+          <h2 className="text-base font-semibold">You must supply</h2>
+          <p className="text-sm text-muted-foreground">egret renders no credential and invents none.</p>
+          <ul className="list-disc space-y-1 pl-5 text-sm">
+            {cfg.adminMustSupply.map((s) => (
+              <li key={s}>{s}</li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      <section className="space-y-2">
+        <h2 className="text-base font-semibold">Files</h2>
+        {cfg.files.map((f) => (
+          <FileBlock key={f.name} file={f} />
+        ))}
+      </section>
+    </div>
+  );
+}
+
+function RangerEnginePluginConfig({ engineId, onOpenSettings }: { engineId: string; onOpenSettings: () => void }) {
   const q = useControlPlaneEnginesRangerPluginConfig<controlPlaneEnginesRangerPluginConfigResponse, ApiError>(
     engineId,
     { query: { retry: false } },

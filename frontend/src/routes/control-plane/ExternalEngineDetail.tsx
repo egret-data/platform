@@ -14,6 +14,7 @@ import {
   useControlPlaneCatalogRegistryRegistryAttachCatalog,
 } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import {
+  getControlPlaneEnginesOpaPluginConfigQueryKey,
   getControlPlaneEnginesRangerPluginConfigQueryKey,
   useControlPlaneEnginesUpdateExternalEngine,
 } from "@/api/generated/control-plane-engines/control-plane-engines";
@@ -154,7 +155,16 @@ export default function ExternalEngineDetail({ engine }: { engine: ExternalEngin
           <DeclaredCatalogs engine={engine} />
         </TabsContent>
         <TabsContent value="plugin-config">
-          <EnginePluginConfig engineId={engine.id} onOpenSettings={() => setTab("settings")} />
+          {/* Wait for the profiles: the bound profile's mechanism picks which plugin's files to ask for. */}
+          {profilesQ.isLoading ? (
+            <ListSkeleton rows={4} cols={2} />
+          ) : (
+            <EnginePluginConfig
+              engineId={engine.id}
+              mechanism={bound?.mechanism}
+              onOpenSettings={() => setTab("settings")}
+            />
+          )}
         </TabsContent>
         <TabsContent value="settings">
           <ExternalSettings engine={engine} profilesQ={profilesQ} bound={bound} />
@@ -538,6 +548,9 @@ function SettingsForm({
         void queryClient.invalidateQueries({ queryKey: profilesQueryKey });
         void queryClient.invalidateQueries({
           queryKey: getControlPlaneEnginesRangerPluginConfigQueryKey(engine.id),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: getControlPlaneEnginesOpaPluginConfigQueryKey(engine.id),
         });
         toast.success("Saved.");
       },
