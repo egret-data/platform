@@ -83,16 +83,6 @@ impl PolicyPort for PolicyStore {
         Ok(())
     }
 
-    async fn create_infra_policy(
-        &self,
-        service_id: i64,
-        name: &str,
-        policy: &Value,
-    ) -> Result<(), PolicyError> {
-        self.create_infra_policy(service_id, name, policy).await?;
-        Ok(())
-    }
-
     async fn upsert_infra_policy(
         &self,
         service_id: i64,
@@ -101,17 +91,5 @@ impl PolicyPort for PolicyStore {
     ) -> Result<(), PolicyError> {
         self.upsert_infra_policy(service_id, name, policy).await?;
         Ok(())
-    }
-
-    async fn seed_admin_all_access(
-        &self,
-        service_id: i64,
-        service_name: &str,
-        service_type: &str,
-        users: &[String],
-    ) -> Result<usize, PolicyError> {
-        Ok(self
-            .seed_admin_all_access(service_id, service_name, service_type, users)
-            .await?)
     }
 }

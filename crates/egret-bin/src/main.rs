@@ -152,7 +152,7 @@ async fn init(config: Config, force: bool) -> anyhow::Result<()> {
     // Username takeover (spec 2026-10-23 §4.2): with `--force` on an install
     // that already has engines, the new admin joins every `egret-admin` set
     // now rather than at the next boot.
-    if let Err(e) = egret_perm_compile::sync_admin_policies(&db.pool).await {
+    if let Err(e) = egret_perm_compile::converge_infra_policies(&db.pool).await {
         tracing::warn!(error = %e, "could not add the new admin to the engines' egret-admin \
             policies; the boot pass will");
     }
@@ -300,6 +300,12 @@ async fn recompile_one_profile(
 impl egret_engine_mgmt::ProfileCompilerPort for ProfileCompilerImpl {
     async fn recompile_profile(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
         egret_perm_compile::recompile_service(&self.perm, &self.policy, service_id)
+            .await
+            .map(|_| ())
+    }
+
+    async fn converge_infra(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
+        egret_perm_compile::converge_infra_policy(self.perm.pool(), service_id)
             .await
             .map(|_| ())
     }
@@ -2903,17 +2909,18 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             }
         });
     }
-    // Username takeover (spec 2026-10-23 §4.2): converge every `egret-admin`
-    // set to the active platform admins, repairing bodies written before the
-    // fix. Best-effort; a failure is logged and never blocks boot.
+    // Username takeover (spec 2026-10-23 §4.2) and governance SP2a (D4):
+    // converge every profile's infrastructure policies, so `egret-admin` names
+    // the active platform admins and bodies written before the fix are
+    // repaired. Best-effort; a failure is logged and never blocks boot.
     {
         let pool = db.pool.clone();
         tokio::spawn(async move {
-            match egret_perm_compile::sync_admin_policies(&pool).await {
-                Ok(n) => tracing::info!(services = n, "egret-admin policies synced at boot"),
+            match egret_perm_compile::converge_infra_policies(&pool).await {
+                Ok(n) => tracing::info!(services = n, "infrastructure policies converged at boot"),
                 Err(e) => tracing::warn!(
                     error = %e,
-                    "the boot sync of the egret-admin policies did not run"
+                    "the boot convergence of the infrastructure policies did not run"
                 ),
             }
         });
@@ -3074,25 +3081,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         catalog_assignment_compiler: Some(profile_compiler.clone()
             as std::sync::Arc<dyn egret_catalog_registry::CatalogAssignmentCompiler>),
     });
-
-    // DG Task 7: bring every existing delegating Trino engine's Ranger profile
-    // up to the per-user baseline Trino 483 checks on every session. An apply
-    // seeds it too; this pass is what reaches engines deployed before the
-    // baseline existed, with no reapply (each plugin picks the rows up on its
-    // next policy poll). Best-effort: a failing profile is logged, not fatal.
-    //
-    // Not gated on `config.ranger.enabled` (final review F6): the apply path
-    // seeds any engine bound to a profile whatever that flag says, and an
-    // engine bound while it was on keeps its profile after it is turned off.
-    // `seed_engine_user_baseline` skips every engine bound to no profile.
-    {
-        let st = engine_mgmt
-            .as_ref()
-            .expect("engine-mgmt state is built just above");
-        let (seeded, failed) =
-            egret_engine_mgmt::seed_user_baselines_for_existing_engines(st).await;
-        tracing::info!(seeded, failed, "per-user Ranger baseline pass");
-    }
 
     // Spec 2026-10-20-ranger-surface-auth A10 (Task 6b): a provisioned engine's
     // previous Ranger credential is retired only once the rollout of the

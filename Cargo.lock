@@ -3625,6 +3625,7 @@ name = "egret-policy-api"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "egret-core",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -3713,6 +3714,7 @@ dependencies = [
  "egret-perm",
  "egret-perm-compile",
  "egret-policy",
+ "egret-policy-api",
  "serde",
  "serde_json",
  "uuid",

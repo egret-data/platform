@@ -150,11 +150,11 @@ async fn a_human_cannot_create_or_rename_into_an_infra_name_but_the_infra_writer
         .await
         .expect("a near-miss operator name is still a legal rename");
 
-    // ALLOWED — the explicit infra writers still create an infra name, stamped infra.
+    // ALLOWED — the explicit infra writer still writes an infra name, stamped infra.
     store
-        .create_infra_policy(service_id, "egret-query-timeout", &body)
+        .upsert_infra_policy(service_id, "egret-query-timeout", &body)
         .await
-        .expect("the infra creator is not subject to the human reservation");
+        .expect("the infra upserter is not subject to the human reservation");
     store
         .upsert_infra_policy(service_id, "all - catalog, schema, table", &body)
         .await

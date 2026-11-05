@@ -50,7 +50,7 @@ use crate::engines::EngineDto;
 use crate::state::RangerSurfaceMode;
 use crate::{Engine, EngineHttpError as CpError, EngineMgmtState as CpState};
 
-pub const ORIGIN_EXTERNAL: &str = "external";
+pub use egret_core::engine_delegation::ORIGIN_EXTERNAL;
 pub const ORIGIN_PROVISIONED: &str = "provisioned";
 
 /// The Ranger releases an operator may declare as installed on an external

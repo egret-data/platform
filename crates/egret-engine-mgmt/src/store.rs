@@ -154,16 +154,7 @@ impl Engine {
     /// StarRocks: has no `trinoConfig.auth.jwt` concept — jwt-capability is
     /// simply "the stored delegation mode is `jwt`" (see [`Self::delegation_mode`]).
     pub fn supports_jwt_delegation(&self) -> bool {
-        if self.is_starrocks() {
-            self.is_jwt_delegation()
-        } else {
-            self.spec
-                .get("trinoConfig")
-                .and_then(|tc| tc.get("auth"))
-                .and_then(|a| a.get("jwt"))
-                .map(|j| j.is_object())
-                .unwrap_or(false)
-        }
+        egret_core::engine_delegation::supports_jwt_delegation(&self.r#type, &self.spec)
     }
 
     /// Delegation mode from the stored spec.
@@ -181,20 +172,7 @@ impl Engine {
     /// Absent/unset delegation on a StarRocks engine reports `"none"`, which
     /// none of `is_impersonate_delegation`/`is_jwt_delegation` match.
     pub fn delegation_mode(&self) -> &str {
-        if self.is_starrocks() {
-            self.spec
-                .get("starrocksConfig")
-                .and_then(|c| c.get("delegation"))
-                .and_then(|d| d.get("mode"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("none")
-        } else {
-            self.spec
-                .get("trinoConfig")
-                .and_then(|t| t.get("delegationMode"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("impersonate")
-        }
+        egret_core::engine_delegation::delegation_mode(&self.r#type, &self.spec)
     }
 
     /// True when delegated queries run via basic-auth service-user impersonation.
@@ -213,7 +191,7 @@ impl Engine {
     /// `false` (see [`Self::delegation_mode`]'s doc) rather than silently
     /// defaulting to impersonate.
     pub fn supports_delegation(&self) -> bool {
-        self.is_impersonate_delegation() || self.supports_jwt_delegation()
+        egret_core::engine_delegation::supports_delegation(&self.r#type, &self.spec)
     }
 }
 

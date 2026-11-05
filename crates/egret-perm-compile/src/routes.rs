@@ -1171,6 +1171,7 @@ impl From<SkippedItem> for SkipReport {
                 // F11: an engine grant with no grantee left, or whose
                 // impersonation target can no longer be compiled.
                 SourceKind::EngineGrant => "engine_grant".into(),
+                SourceKind::Infra => "infra".into(),
             },
             id: sk.id,
             reason: sk.reason,

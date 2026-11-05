@@ -58,37 +58,93 @@ From the code at `origin/main` 06331547:
 
 ## 2a — infrastructure in the IR
 
+> **As built (2026-11-04).** This section describes 2a as implemented by the SP2a plan
+> (`docs/en/plans/2026-11-04-gov-sp2a-infra-in-ir.md`). It replaces the first draft, which
+> put the `all - …` defaults in the IR, used `Target::WholeEp`/`Effect::AllAccess`/`EngineValue`,
+> wrote through `apply_diff_in_tx`, and promised a byte-identical demo stack.
+
+### Which rows the IR owns
+
+- The IR owns exactly two name shapes:
+  - the `egret-admin - …` rows, one per service-def hierarchy, Trino or StarRocks;
+  - four fixed Trino names: `egret-delegator-impersonate`, `egret-user-impersonate-self`, `egret-user-execute-query` and `egret-query-timeout`.
+- **The `all - …` defaults stay outside the IR.** Their route (`POST …/seed-defaults`), `seed_default_trino_policies` and `upsert_infra_policy` are unchanged. Convergence never reads, writes or deletes an `all - …` row.
+
+### When each family is wanted
+
+- A **qualifying engine** of a profile is bound to it, is not `origin = 'external'`, and delegates (`egret_core::engine_delegation::supports_delegation`). For Trino, that means `trinoConfig.delegationMode` is `impersonate` (the default when absent) or `trinoConfig.auth.jwt` is an object. For StarRocks, it means `starrocksConfig.delegation.mode` is `impersonate` or `jwt`.
+- A **delegator-impersonating engine** is a qualifying Trino engine in `impersonate` mode whose `trinoConfig.auth` is an object.
+
+| Family | Wanted when |
+|---|---|
+| `egret-admin - …` | ≥ 1 qualifying engine **and** ≥ 1 engine admin |
+| `egret-user-impersonate-self`, `egret-user-execute-query`, `egret-query-timeout` | Trino profile with ≥ 1 qualifying engine |
+| `egret-delegator-impersonate` | Trino profile with ≥ 1 delegator-impersonating engine |
+
 ### IR
 
-- `Source::Infra { kind: InfraKind }`, where `InfraKind` is one of `AdminAllAccess`, `DefaultAllAccess`, `DelegatorImpersonate`, `SelfImpersonate`, `ExecuteQuery` or `QueryTimeout`.
-- All-access is one neutral statement: "this audience holds every privilege on the whole EP". It gets a new target, `Target::WholeEp`, and a new effect, `Effect::AllAccess`.
-- The engine-level families reuse `Target::EngineObject` and `Effect::EnginePrivilege`, the same shapes engine grants use. Their capabilities are `trinouser`/`impersonate`, `queryid`/`execute`, and `systemproperty`/`alter`.
-- "The session user themself" is a neutral value, `EngineValue::SessionUser`, not Ranger's `{USER}` macro. The Ranger target renders it as `{USER}`; the evaluator compares it with the session user.
-- `lower_infra(&InfraInputs) -> Lowered` is pure, like the four lowerings of sub-project 1. `InfraInputs` holds:
-  - the profile's type, name and admin principal;
-  - for each bound engine, its delegator username and delegation mode.
+- `Source::Infra { kind: InfraKind }`, where `InfraKind` is one of `AdminAllAccess`, `DelegatorImpersonate`, `SelfImpersonate`, `ExecuteQuery` or `QueryTimeout`.
+- `Target::Infra(InfraObject)`, where `InfraObject` is one of:
+  - `WholeEp`: every object the EP has (all-access);
+  - `AnyUser` and `SessionUser`: the object of impersonation;
+  - `AnyQuery`;
+  - `SystemProperty(name)`.
+- `SessionUser` is neutral. The Ranger target renders it as `{USER}`, and an evaluator compares it with the session user.
+- The effect is `Effect::EnginePrivilege { capability }`, with `capability` one of `all`, `impersonate`, `execute` or `alter`. The audience is the admins, the delegator principal, or every user (`MemberName::Everyone`, which the Ranger target renders as `users: ["{USER}"]`, `groups: []`). It is not the Ranger `public` group.
+- `egret_perm_ir::lower::infra::lower_infra(&InfraInputs) -> Vec<Statement>` is pure. `InfraInputs` holds:
+  - the engine type;
+  - the sorted, deduped engine admins;
+  - `delegating`: whether ≥ 1 qualifying engine is bound;
+  - `delegator_impersonates`.
 
 ### Ranger target
 
-- `egret-perm-compile/src/ranger/infra.rs` renders the infrastructure statements. It owns the expansion of all-access over the service-def's hierarchies.
-- The JSON builders move here from `default_policies.rs` and `delegator_policy.rs`, and those two files lose them. The hierarchy walk stays in `egret-ranger-eval::servicedef`, which has one walker.
+- `egret-perm-compile/src/ranger/infra.rs::render` renders each statement into `(name, policy JSON)` pairs. All-access expands over the service-def's hierarchies.
+- The JSON body builders live in one place, `egret-policy-api/src/infra_bodies.rs`, plus `default_policies::admin_all_access_bodies`. They moved from `delegator_policy.rs` and `write_admin_all_access_in_tx`. They live in `egret-policy-api`, not in `ranger/`, because moving them there would create a crate cycle.
 
-### Write path
+### Write path: convergence
 
-- The compiler reconciles a profile's `managed_by='infra'` rows **by name**:
-  - it updates a row in place when the content changed;
-  - it inserts a missing row;
-  - it deletes a row that is no longer desired.
-- Policy ids survive this, so the download artifact stays byte-identical.
-- The infrastructure part compiles for **every** profile, hand-written ones included. The rest of a hand-written profile stays uncompiled, as today.
-- Today's writers ask for a recompile instead of writing rows. The writers are profile creation, engine creation, and the boot seeder.
-- A recompile whose result equals the stored rows writes nothing and does not bump `policy_version`. This removes the +3 bump on every boot.
+- `egret_perm_compile::infra::converge_infra_in_tx(tx, service_id)` loads the inputs, lowers, renders, and reconciles by name:
+  - it updates a row in place when the content changed, so the policy id is kept;
+  - it inserts a missing row, in render order;
+  - it deletes every IR-owned row that is not wanted.
+- It bumps `policy_version` once, and only if something changed. Converging twice is a no-op. This removes the +3 bump on every boot.
+- Convergence is its **own path**, separate from `apply_diff_in_tx`. That function's compiler-prefix reconciliation and `origin = 'generated'` stamp are unchanged. Keeping them separate means the kill switch does not depend on a full compile: disabling a platform admin removes them from `egret-admin` even when the profile's compile fails.
+- Convergence runs under the locks its callers already take (profile row lock, then mint lock), with no new lock site. It runs:
+  - at the recompile chokepoint, before the compile, for every profile, hand-written ones included;
+  - on the kill switch (`set_user_status_and_recompile_in_tx`);
+  - in the boot pass and `egret init` (`converge_infra_policies`);
+  - at Trino and StarRocks engine apply, through `ProfileCompilerPort::converge_infra`;
+  - after an engine delete.
+- These old writers are deleted:
+  - `seed_admin_all_access` and `write_admin_all_access_in_tx`;
+  - `seed_delegator_policies`, `seed_user_baseline`, `seed_engine_user_baseline`;
+  - the boot seeder `seed_user_baselines_for_existing_engines`;
+  - `sync_admin_policy_in_tx`.
+
+### Accepted differences (D5)
+
+Convergence deletes rows that the old writers left behind:
+
+- (a) `version`, `policyVersion` and `policyUpdateTime` move when a row changes;
+- (b) a stale `egret-delegator-impersonate` row after an engine switches from impersonate to jwt;
+- (c) every IR-owned row on a profile that no qualifying engine is bound to, for example after unbinding or deleting its last engine;
+- (d) `egret-admin - …` rows for hierarchies the service-def no longer builds;
+- (e) `egret-admin - …` rows when there are no engine admins.
 
 ### Proof
 
-- The golden fixtures stay byte-identical (22 of 22).
-- A new golden scenario covers create profile → create engine → restart egret → restart again. It asserts the policy ids, the content, and that `policy_version` does not move on the restarts.
-- Unit and shape tests cover `lower_infra`. Mutation tests show each test fails when its lowering rule is broken.
+- **Byte-identical means:** every existing golden file under `crates/egret-perm-compile/tests/golden/` is unchanged. A demo-stack download before and after the upgrade is identical, ignoring D5 (a)–(e).
+- New goldens:
+  - `G22_infra_fresh_trino_and_starrocks` covers a fresh Trino profile and a fresh StarRocks profile, which get 13 + 4 rows and 13 rows;
+  - `G23_infra_stale_rows_removed` covers a jwt engine losing the delegator row, and an unbound profile losing its baseline rows.
+- Integration tests (`tests/infra_converge.rs`, `tests/admin_policy_sync.rs`) cover:
+  - convergence idempotence;
+  - the kill switch;
+  - unbind and delete;
+  - the chokepoint order: convergence runs before the compile reads the profile.
+- Mutation checks show each of those tests fails when its rule is broken.
+- The live check restarts egret twice. After the second restart the download is unchanged and `policy_version` has not moved.
 
 ## 2b — the OPA target
 
@@ -171,6 +227,8 @@ Each of these is answered by an infrastructure statement from 2a, and each is co
 - delegation (Jwt, Impersonate, Open): `ImpersonateUser`;
 - the monitor's kill: `KillQueryOwnedBy` and `ExecuteQuery`;
 - `query_max_run_time`: `SetSystemSessionProperty`.
+
+The `all - …` defaults are not in the IR (2a), so the OPA evaluator does not see them. The 2b plan must decide how an OPA profile treats a profile that holds them: refuse the switch, or lower them too.
 
 ### UI and docs
 

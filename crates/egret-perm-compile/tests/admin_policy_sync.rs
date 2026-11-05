@@ -18,17 +18,21 @@
 #[path = "support/engine_eval.rs"]
 mod engine_eval;
 
+#[path = "support/admin_rows.rs"]
+mod admin_rows;
 use egret_auth::groups::{GroupRepo, ReferenceDetail};
 use egret_auth::roles::engine_admin_user_ids_via;
 use egret_auth::users::UserRepo;
 use egret_core::UserId;
 use egret_metastore::Db;
 use egret_perm::PermStore;
+use egret_perm_compile::infra::infra_services;
 use egret_perm_compile::{
-    assign_platform_role_and_recompile, recompile_service, set_user_status_and_recompile,
-    sync_admin_policies, unassign_platform_role_and_recompile, PermGroupRecompiler,
+    assign_platform_role_and_recompile, converge_infra_policies, converge_infra_policy,
+    recompile_service, set_user_status_and_recompile, unassign_platform_role_and_recompile,
+    PermGroupRecompiler,
 };
-use egret_policy::default_policies::{admin_policy_services_via, sync_admin_all_access_in_tx};
+use egret_policy::default_policies::admin_all_access_bodies;
 use egret_policy::PolicyStore;
 use engine_eval::{allowed, starrocks_decides, trino_decides};
 use serde_json::Value;
@@ -163,8 +167,38 @@ async fn set_status(db: &Db, user: Uuid, status: &str) {
 }
 
 /// A Trino or StarRocks profile with `egret-admin` seeded for `users`, as
-/// engine apply seeds it.
+/// engine apply seeds it, and a qualifying engine bound to it (convergence
+/// keeps `egret-admin` only on such a profile, governance SP2a D2).
 async fn seeded_service(db: &Db, service_type: &str, users: &[String]) -> i64 {
+    let svc = seeded_rows_only(db, service_type, users).await;
+    bind_qualifying_engine(db, svc, service_type).await;
+    svc
+}
+
+/// A provisioned engine of `service_type` that qualifies for infrastructure
+/// policies (a Trino one in the default impersonate mode, a StarRocks one in
+/// impersonate mode), bound to `svc`.
+async fn bind_qualifying_engine(db: &Db, svc: i64, service_type: &str) {
+    let spec = if service_type == "starrocks" {
+        serde_json::json!({"starrocksConfig": {"delegation": {"mode": "impersonate"}}})
+    } else {
+        serde_json::json!({})
+    };
+    sqlx::query(
+        "INSERT INTO engine_mgmt.engines (id, name, type, namespace, spec, authz_service_id) \
+         VALUES (gen_random_uuid(), $1, $2, 'egret', $3, $4)",
+    )
+    .bind(unique("aps-engine").replace('_', "-"))
+    .bind(service_type)
+    .bind(spec)
+    .bind(svc)
+    .execute(&db.pool)
+    .await
+    .expect("engine");
+}
+
+/// [`seeded_service`] without the engine.
+async fn seeded_rows_only(db: &Db, service_type: &str, users: &[String]) -> i64 {
     let policy = PolicyStore::new(db.clone());
     if service_type == "starrocks" {
         egret_policy::seed_starrocks(&policy).await.expect("def");
@@ -176,10 +210,7 @@ async fn seeded_service(db: &Db, service_type: &str, users: &[String]) -> i64 {
         .create_service(&name, service_type, &serde_json::json!({}))
         .await
         .expect("service");
-    let n = policy
-        .seed_admin_all_access(svc.id, &name, service_type, users)
-        .await
-        .expect("seed");
+    let n = admin_rows::write_admin_rows(&db.pool, svc.id, &name, service_type, users).await;
     assert!(n > 0, "the seed wrote the egret-admin set");
     svc.id
 }
@@ -283,7 +314,7 @@ async fn the_engine_admin_set_excludes_disabled_admins() {
 }
 
 #[tokio::test]
-async fn an_empty_admin_set_clears_the_body() {
+async fn an_empty_admin_set_removes_the_rows() {
     let _serial = SERIAL.lock().await;
     let Some(db) = test_db().await else { return };
     let zed = unique("zed");
@@ -292,19 +323,26 @@ async fn an_empty_admin_set_clears_the_body() {
     assert!(trino_can_select(&db, trino, &zed).await, "the arrangement");
     assert!(starrocks_can_select(&db, sr, &zed).await, "the arrangement");
 
+    // No one is an admin (`test_db` demoted them all).
     for svc in [trino, sr] {
-        let (v0, _) = version_and_updated(&db, svc).await;
-        let mut tx = db.pool.begin().await.unwrap();
-        let sync = sync_admin_all_access_in_tx(&mut tx, svc, &[])
+        let seeded: Vec<String> = admin_bodies(&db, svc)
             .await
-            .expect("sync");
-        tx.commit().await.unwrap();
-        assert_eq!(sync.removed, vec![zed.clone()]);
-        let bodies = admin_bodies(&db, svc).await;
-        assert!(!bodies.is_empty());
-        for (name, body) in &bodies {
-            assert!(named(body).is_empty(), "{name} still names someone: {body}");
-        }
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert!(!seeded.is_empty(), "the arrangement");
+        let (v0, _) = version_and_updated(&db, svc).await;
+        let sync = converge_infra_policy(&db.pool, svc)
+            .await
+            .expect("converge");
+        assert_eq!(
+            sync.removed, seeded,
+            "every egret-admin row goes when there are no admins (D5 (e))"
+        );
+        assert!(
+            admin_bodies(&db, svc).await.is_empty(),
+            "an egret-admin row survived an empty admin set"
+        );
         assert_eq!(version_and_updated(&db, svc).await.0, v0 + 1, "bumped once");
     }
     assert!(
@@ -322,43 +360,58 @@ async fn an_unchanged_set_writes_nothing() {
     let _serial = SERIAL.lock().await;
     let Some(db) = test_db().await else { return };
     let ann = unique("ann");
+    let ann_id = new_user(&db, Some(&ann)).await;
+    make_admin_directly(&db, ann_id).await;
     let svc = seeded_service(&db, "trino", std::slice::from_ref(&ann)).await;
-    let before = version_and_updated(&db, svc).await;
-    let mut tx = db.pool.begin().await.unwrap();
-    let sync = sync_admin_all_access_in_tx(&mut tx, svc, std::slice::from_ref(&ann))
+    // The arrangement: the first convergence adds the delegation baseline.
+    converge_infra_policy(&db.pool, svc)
         .await
-        .expect("sync");
-    tx.commit().await.unwrap();
+        .expect("first convergence");
+    let before = version_and_updated(&db, svc).await;
+    let sync = converge_infra_policy(&db.pool, svc)
+        .await
+        .expect("converge");
     assert!(!sync.changed);
     assert_eq!(version_and_updated(&db, svc).await, before);
 }
 
 #[tokio::test]
-async fn admin_policy_services_are_the_seeded_ones() {
+async fn infra_services_are_the_seeded_and_the_qualifying_ones() {
     let _serial = SERIAL.lock().await;
     let Some(db) = test_db().await else { return };
     let seeded = seeded_service(&db, "trino", &[unique("x")]).await;
+    let rows_only = seeded_rows_only(&db, "trino", &[unique("y")]).await;
     let policy = PolicyStore::new(db.clone());
+    let engine_only = policy
+        .create_service(&unique("aps_engine_only"), "trino", &serde_json::json!({}))
+        .await
+        .expect("service")
+        .id;
+    bind_qualifying_engine(&db, engine_only, "trino").await;
     let bare = policy
         .create_service(&unique("aps_bare"), "trino", &serde_json::json!({}))
         .await
         .expect("service")
         .id;
-    let mut conn = db.pool.acquire().await.unwrap();
-    let ids = admin_policy_services_via(&mut conn)
-        .await
-        .expect("services");
-    assert!(ids.contains(&seeded));
-    assert!(!ids.contains(&bare));
-    assert!(ids.is_sorted());
+    let ids = infra_services(&db.pool).await.expect("services");
+    assert!(ids.contains(&seeded), "a seeded profile with an engine");
+    assert!(ids.contains(&rows_only), "a profile holding infra rows");
+    assert!(
+        ids.contains(&engine_only),
+        "a profile with a qualifying engine"
+    );
+    assert!(!ids.contains(&bare), "a bare profile");
+    assert!(ids.is_sorted(), "ascending: callers lock in this order");
+    let mut deduped = ids.clone();
+    deduped.dedup();
+    assert_eq!(deduped, ids, "deduped");
 }
 
 // ── part 2: every admin change converges egret-admin in its own commit (Task 4) ──
 //
-// Each test seeds `egret-admin` on a Trino profile with no engine (one the
-// compiler does not target: the sync must run before that early return), makes
-// the change through the production entry point, and asks the engine as the
-// demoted principal, with no recompile in between.
+// Each test seeds `egret-admin` on a Trino profile with a qualifying engine
+// bound, makes the change through the production entry point, and asks the
+// engine as the demoted principal, with no recompile in between.
 
 /// An admin with a username and a Trino profile whose `egret-admin` names
 /// them. Returns `(admin id, admin username, service id)`.
@@ -491,36 +544,122 @@ async fn deleting_an_admin_drops_them() {
     );
 }
 
+/// The chokepoint converges BEFORE the compile reads the profile.
+///
+/// `compile_desired` returns early only for a profile type this compiler does
+/// not target, where convergence has nothing to do either, so the ordering
+/// that matters is the one the compile can see: the engine-grant loader's
+/// near-root check scans the profile's stored policies, `egret-admin`
+/// included. An impersonation grant whose target a stale `egret-admin` row
+/// still names (ALL access) compiles only if that row was converged first;
+/// converged after the compile, the target reads as near-root and the grant is
+/// skipped.
 #[tokio::test]
-async fn a_recompile_of_an_untargeted_profile_still_syncs() {
+async fn a_recompile_converges_egret_admin_before_it_compiles() {
     let _serial = SERIAL.lock().await;
     let Some(db) = test_db().await else { return };
+    let admin = unique("adm");
+    let admin_id = new_user(&db, Some(&admin)).await;
+    make_admin_directly(&db, admin_id).await;
     let stale = unique("stale");
+    let stale_id = new_user(&db, Some(&stale)).await;
+    let grantee = unique("ua");
+    new_user(&db, Some(&grantee)).await;
     // Seeded for someone who is no admin at all, as an old apply left it.
     let svc = seeded_service(&db, "trino", std::slice::from_ref(&stale)).await;
     assert!(trino_can_select(&db, svc, &stale).await, "the arrangement");
-    recompile_service(
+    let engine: Uuid =
+        sqlx::query_scalar("SELECT id FROM engine_mgmt.engines WHERE authz_service_id = $1")
+            .bind(svc)
+            .fetch_one(&db.pool)
+            .await
+            .expect("the bound engine");
+    let grant = {
+        let g = egret_perm::EngineGrant {
+            id: Uuid::nil(),
+            engine_id: engine,
+            capability: "trino.impersonate_user".into(),
+            values: vec![],
+            target_user_id: Some(stale_id),
+            principals: egret_perm::PrincipalSet {
+                include: vec![egret_perm::Principal {
+                    kind: egret_perm::PrincipalKind::User,
+                    r#ref: grantee.clone(),
+                }],
+                exclude: vec![],
+            },
+        };
+        let mut tx = db.pool.begin().await.unwrap();
+        let id = egret_perm::create_engine_grant_in_tx(&mut tx, &g)
+            .await
+            .expect("engine grant");
+        tx.commit().await.unwrap();
+        id
+    };
+
+    let summary = recompile_service(
         &PermStore::new(db.pool.clone()),
         &PolicyStore::new(db.clone()),
         svc,
     )
     .await
     .expect("recompile");
+
+    assert!(
+        !summary.skipped.iter().any(|s| s.id == grant),
+        "the compile read the stale egret-admin body (its target near-root), so convergence \
+         ran after it: {summary:?}"
+    );
+    let compiled: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
+    )
+    .bind(svc)
+    .bind(format!("perm-engine-{grant}"))
+    .fetch_optional(&db.pool)
+    .await
+    .unwrap();
+    assert!(
+        compiled.is_some(),
+        "the impersonation grant did not compile"
+    );
     assert!(
         !trino_can_select(&db, svc, &stale).await,
-        "a profile the compiler does not target keeps a stale egret-admin body"
+        "a recompile kept a stale egret-admin body"
+    );
+    assert!(
+        trino_can_select(&db, svc, &admin).await,
+        "the recompile's convergence did not name the real admin"
     );
 }
 
-/// Seed `egret-admin` for `names` directly, as an apply would have.
+/// Write `egret-admin` for `names` directly, as an apply would have: the
+/// bodies of the service's own def, upserted `managed_by = 'infra'`.
 async fn reseed(db: &Db, svc: i64, names: &[String]) {
     let mut names = names.to_vec();
     names.sort();
-    let mut tx = db.pool.begin().await.unwrap();
-    sync_admin_all_access_in_tx(&mut tx, svc, &names)
+    let (service_name, service_type): (String, String) =
+        sqlx::query_as("SELECT name, type FROM policy.authz_services WHERE id = $1")
+            .bind(svc)
+            .fetch_one(&db.pool)
+            .await
+            .expect("service");
+    for (name, body) in
+        admin_all_access_bodies(&service_type, &service_name, &names).expect("bodies")
+    {
+        sqlx::query(
+            "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, managed_by) \
+             VALUES ($1, $2, $3, 'infra') \
+             ON CONFLICT (service_id, name) DO UPDATE \
+               SET policy_jsonb = EXCLUDED.policy_jsonb, managed_by = 'infra', \
+                   version = policy.authz_policies.version + 1, updated_at = now()",
+        )
+        .bind(svc)
+        .bind(&name)
+        .bind(&body)
+        .execute(&db.pool)
         .await
         .expect("seed");
-    tx.commit().await.unwrap();
+    }
 }
 
 fn deleter() -> egret_core::Principal {
@@ -606,7 +745,7 @@ async fn the_boot_pass_repairs_a_stale_body() {
         "the arrangement"
     );
 
-    assert!(sync_admin_policies(&db.pool).await.expect("boot pass") >= 1);
+    assert!(converge_infra_policies(&db.pool).await.expect("boot pass") >= 1);
     assert!(
         !trino_can_select(&db, svc, &stranger).await,
         "the boot pass left a non-admin in egret-admin"
@@ -617,7 +756,7 @@ async fn the_boot_pass_repairs_a_stale_body() {
     );
 
     let before = version_and_updated(&db, svc).await;
-    sync_admin_policies(&db.pool)
+    converge_infra_policies(&db.pool)
         .await
         .expect("boot pass again");
     assert_eq!(
@@ -669,7 +808,7 @@ async fn the_boot_pass_repairs_healthy_engines_when_one_cannot_compile() {
     new_user(&db, Some(&stranger)).await;
     let healthy = seeded_service(&db, "trino", &[name.clone(), stranger.clone()]).await;
 
-    sync_admin_policies(&db.pool).await.expect("boot pass");
+    converge_infra_policies(&db.pool).await.expect("boot pass");
     assert!(
         !trino_can_select(&db, healthy, &stranger).await,
         "one broken profile kept a healthy engine's stale egret-admin"
@@ -743,15 +882,18 @@ async fn a_disable_racing_an_admin_grant_leaves_them_out_of_egret_admin() {
 }
 
 #[tokio::test]
-async fn the_sync_rewrites_egret_admin_rows_its_def_no_longer_builds() {
+async fn convergence_deletes_egret_admin_rows_its_def_no_longer_builds() {
     let _serial = SERIAL.lock().await;
     let Some(db) = test_db().await else { return };
     let admin = unique("adm");
+    let admin_id = new_user(&db, Some(&admin)).await;
+    make_admin_directly(&db, admin_id).await;
     let stranger = unique("strg");
     // A Trino row carrying StarRocks-shaped `egret-admin` bodies (an engine
     // adopted through the StarRocks path, or an older def's hierarchies).
     let policy = PolicyStore::new(db.clone());
     egret_policy::seed_trino(&policy).await.expect("def");
+    egret_policy::seed_starrocks(&policy).await.expect("def");
     let name = unique("aps_foreign");
     let svc = policy
         .create_service(&name, "trino", &serde_json::json!({}))
@@ -760,15 +902,30 @@ async fn the_sync_rewrites_egret_admin_rows_its_def_no_longer_builds() {
         .id;
     let mut both = vec![admin.clone(), stranger.clone()];
     both.sort();
-    policy
-        .seed_admin_all_access(svc, &name, "starrocks", &both)
-        .await
-        .expect("foreign seed");
+    admin_rows::write_admin_rows(&db.pool, svc, &name, "starrocks", &both).await;
+    bind_qualifying_engine(&db, svc, "trino").await;
 
-    reseed(&db, svc, std::slice::from_ref(&admin)).await;
+    converge_infra_policy(&db.pool, svc)
+        .await
+        .expect("converge");
+    let mut want: Vec<String> = admin_all_access_bodies("trino", &name, &[])
+        .expect("trino bodies")
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    want.sort();
     let bodies = admin_bodies(&db, svc).await;
-    assert!(!bodies.is_empty());
+    assert_eq!(
+        bodies.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
+        want,
+        "a row the Trino def does not build survived convergence (D5 (d))"
+    );
     for (policy_name, body) in &bodies {
         assert_eq!(named(body), vec![admin.clone()], "{policy_name}");
+        assert_eq!(body["serviceType"], "trino", "{policy_name}");
     }
+    assert!(
+        !trino_can_select(&db, svc, &stranger).await,
+        "a stranger named by a foreign egret-admin row keeps ALL access"
+    );
 }

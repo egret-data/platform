@@ -219,6 +219,8 @@ pub enum SourceKind {
     Rule,
     Clearance,
     EngineGrant,
+    /// An infrastructure statement; converged outside the compile.
+    Infra,
 }
 
 impl SourceKind {
@@ -228,6 +230,7 @@ impl SourceKind {
             SourceKind::Rule => "rule",
             SourceKind::Clearance => "clearance",
             SourceKind::EngineGrant => "engine_grant",
+            SourceKind::Infra => "infra",
         }
     }
 }
@@ -504,7 +507,7 @@ pub(crate) async fn compile_desired(
     let follows_classifications = |dp: &DesiredPolicy| match dp.source_kind {
         SourceKind::Clearance => true,
         SourceKind::Rule => dp.rule_id.is_some_and(|id| tag_rules.contains(&id)),
-        SourceKind::Grant | SourceKind::EngineGrant => false,
+        SourceKind::Grant | SourceKind::EngineGrant | SourceKind::Infra => false,
     };
     let uncounted = desired
         .iter()
@@ -1039,7 +1042,7 @@ async fn apply_diff_in_tx(
     Ok(summary)
 }
 
-async fn bump_policy_version(
+pub(crate) async fn bump_policy_version(
     tx: &mut Transaction<'_, Postgres>,
     service_id: i64,
 ) -> Result<(), CompileError> {
@@ -1085,7 +1088,7 @@ async fn record_compiled(
     // (`perm-engine-{id}`) already carries its id.
     if matches!(
         dp.source_kind,
-        SourceKind::Clearance | SourceKind::EngineGrant
+        SourceKind::Clearance | SourceKind::EngineGrant | SourceKind::Infra
     ) {
         return Ok(());
     }
@@ -1180,18 +1183,19 @@ pub async fn recompile_service_in_tx(
 /// [`recompile_service_in_tx`] without its lock and pre-mint, for a caller
 /// that has already taken both over a whole set ([`recompile_services_in_tx`]).
 ///
-/// **The `egret-admin` chokepoint (username-takeover spec 2026-10-23 §4.2,
-/// D2).** Every recompile path ends here, so the profile's `egret-admin - …`
-/// policies are converged to the current engine-admin set first: before the
-/// early return (a profile the compiler does not target still carries them)
-/// and before the compile (the impersonation near-root check reads the fresh
-/// body). A path that changes who is an admin therefore only has to put the
-/// admin-policy services in the set it locks ([`admin_policy_services_in`]).
+/// **The infrastructure chokepoint (username-takeover spec 2026-10-23 §4.2,
+/// D2; governance SP2a, D4).** Every recompile path ends here, so the
+/// profile's IR-owned infrastructure policies (the `egret-admin - …` set,
+/// which names the current engine admins, and the delegation baseline) are
+/// converged first ([`crate::infra::converge_infra_in_tx`]): before the
+/// compile, whose impersonation near-root check reads the fresh body. A path
+/// that changes who is an admin therefore only has to put the infra services
+/// in the set it locks ([`admin_policy_services_in`]).
 async fn recompile_locked_service_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     service_id: i64,
 ) -> Result<CompileSummary, CompileError> {
-    sync_admin_policy_in_tx(tx, service_id).await?;
+    crate::infra::converge_infra_in_tx(tx, service_id).await?;
     let Some(compiled) = compile_desired(tx, service_id).await? else {
         return Ok(CompileSummary::default());
     };
@@ -1215,48 +1219,14 @@ async fn recompile_locked_service_in_tx(
     Ok(summary)
 }
 
-/// Rewrite `service_id`'s `egret-admin - …` policies to name exactly the
-/// engine admins (`egret_auth::roles::engine_admin_user_ids_via`), when the
-/// service holds any. The caller holds the profile lock; the usernames were
-/// minted by `premint_model_usernames`, and one still missing is minted here
-/// under the same mint lock. Writes nothing when the body is current.
-pub(crate) async fn sync_admin_policy_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    service_id: i64,
-) -> Result<(), CompileError> {
-    if !egret_policy::default_policies::admin_policy_services_via(tx)
-        .await
-        .map_err(crate::db_error::from_store)?
-        .contains(&service_id)
-    {
-        return Ok(());
-    }
-    let users = crate::members::engine_admin_usernames_via(tx).await?;
-    let sync = egret_policy::default_policies::sync_admin_all_access_in_tx(tx, service_id, &users)
-        .await
-        .map_err(crate::db_error::from_store)?;
-    if sync.changed {
-        tracing::info!(
-            service_id,
-            removed = ?sync.removed,
-            added = ?sync.added,
-            "egret-admin now names exactly the engine admins"
-        );
-    }
-    Ok(())
-}
-
-/// The services holding `egret-admin` policies, appended to an affected set
-/// whose change can alter who is an engine admin.
+/// The infra services ([`crate::infra::infra_services_via`]: those holding an
+/// IR-owned infra row or bound to a qualifying engine), appended to an
+/// affected set whose change can alter who is an engine admin.
 async fn admin_policy_services_in(
     conn: &mut sqlx::PgConnection,
     ids: &mut Vec<i64>,
 ) -> Result<(), CompileError> {
-    ids.extend(
-        egret_policy::default_policies::admin_policy_services_via(conn)
-            .await
-            .map_err(crate::db_error::from_store)?,
-    );
+    ids.extend(crate::infra::infra_services_via(conn).await?);
     Ok(())
 }
 
@@ -2164,9 +2134,9 @@ pub(crate) async fn lock_profile_rows_in_tx(
 
 /// Whether a recompile of `service_ids` can mint a username at all (#791):
 /// some id is a profile this compiler targets ([`engine_type_for`]), whose
-/// passes expand principals, or holds an `egret-admin` set, whose sync names
-/// the engine admins (`sync_admin_policy_in_tx`, which runs even for a profile
-/// the compiler does not target). When neither holds, the pre-mint sweep is
+/// passes expand principals, or is an infra service, whose convergence names
+/// the engine admins ([`crate::infra::converge_infra_in_tx`]). When neither
+/// holds, the pre-mint sweep is
 /// skipped, and with it the installation-wide compile-mint lock it takes when
 /// anyone in the model is unnamed.
 async fn recompile_can_mint(
@@ -2185,10 +2155,8 @@ async fn recompile_can_mint(
     if types.iter().any(|t| engine_type_for(t).is_some()) {
         return Ok(true);
     }
-    let admin = egret_policy::default_policies::admin_policy_services_via(conn)
-        .await
-        .map_err(crate::db_error::from_store)?;
-    Ok(service_ids.iter().any(|id| admin.contains(id)))
+    let infra = crate::infra::infra_services_via(conn).await?;
+    Ok(service_ids.iter().any(|id| infra.contains(id)))
 }
 
 /// The policy editor's recompile seam (final review I-3): an editor write that

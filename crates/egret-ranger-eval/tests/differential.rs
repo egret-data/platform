@@ -9261,8 +9261,7 @@ fn engine_grant_body(
 
 fn trino_capability_cases(p: &Profile) -> Vec<CapCase> {
     let imp = engine_grant_body(p, 1, "trino.impersonate_user", &[], Some("bob"), "alice");
-    let mut execute_query =
-        egret_engine_mgmt::delegator_policy::execute_query_policy(p.service_name);
+    let mut execute_query = egret_policy_api::infra_bodies::execute_query_policy(p.service_name);
     execute_query["id"] = json!(2);
     let sys = engine_grant_body(
         p,

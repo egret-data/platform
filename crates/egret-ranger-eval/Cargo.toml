@@ -46,4 +46,5 @@ egret-engine-mgmt.workspace = true
 egret-perm.workspace = true
 egret-perm-compile = { workspace = true, features = ["harness"] }
 egret-policy.workspace = true
+egret-policy-api.workspace = true
 uuid.workspace = true

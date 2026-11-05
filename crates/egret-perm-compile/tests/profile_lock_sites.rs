@@ -23,7 +23,9 @@ const SITES: &[(&str, usize, &str)] = &[
         "crates/egret-perm-compile/src/trigger.rs",
         2,
         "`origin = 'generated'` and `bump_policy_version` write only a profile of the sweep, \
-         which `apply_diff_in_tx` locked through the guard first",
+         which `apply_diff_in_tx` locked through the guard first; `infra::converge_infra_in_tx` \
+         bumps through `bump_policy_version` only the profile its caller locked (the compile's \
+         own, or `lock_for_admin_sync_in_tx`)",
     ),
     (
         "crates/egret-policy/src/store.rs",
@@ -33,12 +35,6 @@ const SITES: &[(&str, usize, &str)] = &[
          policy's own profile, which every caller holds (the compiler's sweep, the `egret-admin` \
          sync of a locked profile, the migration undo of the route's own locked profile); \
          `delete_service` and `set_tag_service_via` are admin routes that take no mint lock",
-    ),
-    (
-        "crates/egret-policy/src/default_policies.rs",
-        1,
-        "the `egret-admin` sync bumps the profile it syncs, which its caller locked \
-         (`lock_services_in_tx` / `lock_for_admin_sync_in_tx`)",
     ),
     (
         "crates/egret-catalog-registry/src/tag_version.rs",

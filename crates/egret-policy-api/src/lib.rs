@@ -1,7 +1,10 @@
 //! Policy/Ranger seam contract (E2 contract-crate seed): the engine-facing wire
 //! DTOs + the `PolicyPort` trait that cross-seam callers depend on instead of the
-//! concrete `PolicyStore`. Leaf crate — serde-only, no sqlx/axum/egret-* deps.
+//! concrete `PolicyStore`. Leaf crate — no sqlx/axum; its one egret-* dep is
+//! `egret-core` (a pure-domain leaf), for the delegator principal
+//! `infra_bodies` names.
 pub mod dto;
+pub mod infra_bodies;
 pub mod infra_names;
 pub mod port;
 

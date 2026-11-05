@@ -168,7 +168,7 @@ pub fn is_compiler_owned_policy_name(name: &str) -> bool {
 /// Deliberately does not require `origin = 'generated'`: a `manual` profile
 /// is exactly the case the round-2 report showed getting silently
 /// steamrolled, so gating this on `origin` would reopen the same hole.
-pub(crate) fn refuse_reserved_name(name: &str) -> Result<(), PolicyStoreError> {
+pub fn refuse_reserved_name(name: &str) -> Result<(), PolicyStoreError> {
     if is_compiler_owned_policy_name(name) {
         return Err(PolicyStoreError::CompilerOwned(format!(
             "policy name {name:?} starts with a prefix reserved for the SP4a permission model \
@@ -200,7 +200,7 @@ async fn service_type_of(
 /// of `service_type`. A hard error, not a `debug_assert`, so the writer cannot
 /// drift from the predicate. This is also what refuses a Trino-shaped
 /// `all - …` name aimed at a StarRocks profile.
-pub(crate) fn refuse_non_infrastructure_name(
+pub fn refuse_non_infrastructure_name(
     service_type: &str,
     name: &str,
 ) -> Result<(), PolicyStoreError> {
@@ -2483,22 +2483,6 @@ impl PolicyStore {
         policy: &Value,
     ) -> Result<i64, PolicyStoreError> {
         self.insert_policy_owned_by(service_id, name, policy, "operator")
-            .await
-    }
-
-    /// [`create_policy`](Self::create_policy) for egret's OWN infrastructure
-    /// policies (the delegator's two): same guards and errors, but the row is
-    /// stamped `managed_by = 'infra'`. Refuses a name that
-    /// [`is_egret_infrastructure_policy`] does not recognise on the profile's
-    /// type, so this writer cannot drift from the predicate that defines the
-    /// owner.
-    pub async fn create_infra_policy(
-        &self,
-        service_id: i64,
-        name: &str,
-        policy: &Value,
-    ) -> Result<i64, PolicyStoreError> {
-        self.insert_policy_owned_by(service_id, name, policy, "infra")
             .await
     }
 

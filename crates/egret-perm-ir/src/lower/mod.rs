@@ -4,5 +4,6 @@
 
 pub mod engine_privileges;
 pub mod grants;
+pub mod infra;
 pub mod rules;
 pub mod withhold;

@@ -117,6 +117,14 @@ pub const ALL: &[Fixture] = &[
         name: "G21",
         run: g21_large_profile,
     },
+    Fixture {
+        name: "G22",
+        run: g22_infra_fresh,
+    },
+    Fixture {
+        name: "G23",
+        run: g23_infra_stale,
+    },
 ];
 
 // ── ids and names ───────────────────────────────────────────────────────────
@@ -307,6 +315,11 @@ pub async fn warehouse(tx: &mut Tx<'_>, role: &str, names: &mut Names) -> Uuid {
 
 /// An engine bound to `profile`. A StarRocks engine is pinned to `image`
 /// (egret's default when `None`), which decides its Ranger plugin version.
+///
+/// Neither spec qualifies for infrastructure policies (governance SP2a, D2):
+/// the StarRocks spec has no delegation block, and the Trino one is in
+/// `open` mode. A golden profile therefore holds no infra row unless its
+/// fixture binds a qualifying engine with [`engine_bound_spec`] (G16).
 pub async fn engine_bound(
     tx: &mut Tx<'_>,
     role: &str,
@@ -315,13 +328,26 @@ pub async fn engine_bound(
     image: Option<&str>,
     names: &mut Names,
 ) -> Uuid {
-    let id = uid(names, role);
     let spec = match engine {
         "starrocks" => json!({"starrocksConfig": {
             "feImage": image.unwrap_or(egret_perm::DEFAULT_ENGINE_IMAGES.starrocks_fe_image)
         }}),
-        _ => json!({}),
+        _ => json!({"trinoConfig": {"delegationMode": "open"}}),
     };
+    engine_bound_spec(tx, role, profile, engine, spec, names).await
+}
+
+/// An engine of type `engine` bound to `profile` with the stored `spec` as
+/// given.
+pub async fn engine_bound_spec(
+    tx: &mut Tx<'_>,
+    role: &str,
+    profile: i64,
+    engine: &str,
+    spec: Value,
+    names: &mut Names,
+) -> Uuid {
+    let id = uid(names, role);
     sqlx::query(
         "INSERT INTO engine_mgmt.engines (id, name, type, namespace, spec, authz_service_id) \
          VALUES ($1, $2, $3, 'egret', $4, $5)",
@@ -1683,14 +1709,31 @@ pub fn g16_hand_written_and_infra(db: &Db) -> Fut<'_> {
         user(&mut tx, "g16.alice", Some("g16_alice"), &mut names).await;
         // The admin set starts stale (one name that is no admin); the
         // recompile's chokepoint converges it to the engine admins.
-        egret_policy::default_policies::sync_admin_all_access_in_tx(
-            &mut tx,
-            tr,
+        for (name, body) in egret_policy::default_policies::admin_all_access_bodies(
+            "trino",
+            &tr_name,
             &["g16_stale".to_string()],
         )
-        .await
-        .expect("egret-admin");
+        .expect("egret-admin bodies")
+        {
+            stored_policy(&mut tx, tr, &name, body, "infra", true).await;
+        }
         delegator_policies(&mut tx, tr, &tr_name).await;
+        // A qualifying, delegator-impersonating Trino engine: the profile's
+        // infra rows above are exactly what convergence derives for it.
+        engine_bound_spec(
+            &mut tx,
+            "g16.engine",
+            tr,
+            "trino",
+            json!({"trinoConfig": {
+                "coordinator": {},
+                "delegationMode": "impersonate",
+                "auth": {"password": {}}
+            }}),
+            &mut names,
+        )
+        .await;
         stored_policy(&mut tx, tr, "g16 operator allow",
             json!({
                 "name": "g16 operator allow", "service": tr_name, "serviceType": "trino",
@@ -1953,5 +1996,83 @@ pub fn g21_large_profile(db: &Db) -> Fut<'_> {
         let captured = crate::capture(&mut tx, &[(sr, None)]).await;
         tx.rollback().await.expect("rollback");
         crate::compare_or_bless("G21_large_profile", captured, &names);
+    })
+}
+
+/// G22: one platform admin; a Trino profile (impersonate + auth) and a StarRocks
+/// profile (impersonate), both with no infra rows. The recompile's convergence
+/// writes them.
+pub fn g22_infra_fresh(db: &Db) -> Fut<'_> {
+    Box::pin(async move {
+        let mut names = Names::default();
+        let (tr, _, _) = profile(db, "g22", "trino", false, &mut names).await;
+        let (sr, _, _) = profile(db, "g22", "starrocks", false, &mut names).await;
+        let mut tx = db.pool.begin().await.expect("tx");
+        let admin = user(&mut tx, "g22.admin", Some("g22_admin"), &mut names).await;
+        role_held(&mut tx, admin, "platform_admin").await;
+        engine_bound_spec(
+            &mut tx,
+            "g22.trino",
+            tr,
+            "trino",
+            json!({"trinoConfig": {"delegationMode": "impersonate", "auth": {"password": {}}}}),
+            &mut names,
+        )
+        .await;
+        engine_bound_spec(
+            &mut tx,
+            "g22.starrocks",
+            sr,
+            "starrocks",
+            json!({"starrocksConfig": {"delegation": {"mode": "impersonate"}}}),
+            &mut names,
+        )
+        .await;
+        let captured = crate::capture(&mut tx, &[(tr, None), (sr, None)]).await;
+        tx.rollback().await.expect("rollback");
+        crate::compare_or_bless("G22_infra_fresh_trino_and_starrocks", captured, &names);
+    })
+}
+
+/// G23: stale infra rows. Profile A carries all 17 of today's Trino rows but
+/// its engine is jwt (no delegator row wanted); profile B carries the 3
+/// baseline rows with no engine bound (none wanted).
+pub fn g23_infra_stale(db: &Db) -> Fut<'_> {
+    Box::pin(async move {
+        let mut names = Names::default();
+        let (a, _, a_name) = profile(db, "g23.a", "trino", false, &mut names).await;
+        let (b, _, b_name) = profile(db, "g23.b", "trino", false, &mut names).await;
+        let mut tx = db.pool.begin().await.expect("tx");
+        let admin = user(&mut tx, "g23.admin", Some("g23_admin"), &mut names).await;
+        role_held(&mut tx, admin, "platform_admin").await;
+        for (name, body) in egret_policy::default_policies::admin_all_access_bodies(
+            "trino",
+            &a_name,
+            &["g23_admin".to_string()],
+        )
+        .expect("egret-admin bodies")
+        {
+            stored_policy(&mut tx, a, &name, body, "infra", true).await;
+        }
+        delegator_policies(&mut tx, a, &a_name).await;
+        delegator_policies(&mut tx, b, &b_name).await;
+        sqlx::query("DELETE FROM policy.authz_policies WHERE service_id = $1 AND name = $2")
+            .bind(b)
+            .bind(egret_policy::infra_names::IMPERSONATE_POLICY_NAME)
+            .execute(&mut *tx)
+            .await
+            .expect("keep only the baseline rows");
+        engine_bound_spec(
+            &mut tx,
+            "g23.a.engine",
+            a,
+            "trino",
+            json!({"trinoConfig": {"delegationMode": "jwt", "auth": {"jwt": {}}}}),
+            &mut names,
+        )
+        .await;
+        let captured = crate::capture(&mut tx, &[(a, None), (b, None)]).await;
+        tx.rollback().await.expect("rollback");
+        crate::compare_or_bless("G23_infra_stale_rows_removed", captured, &names);
     })
 }

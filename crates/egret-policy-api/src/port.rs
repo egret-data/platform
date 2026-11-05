@@ -79,41 +79,20 @@ pub trait PolicyPort: Send + Sync {
         policy: &Value,
     ) -> Result<(), PolicyError>;
 
-    /// [`create_policy`](Self::create_policy) for egret's OWN infrastructure
-    /// policies: same semantics (`AlreadyExists` on a clash), but the row is
-    /// stamped `managed_by = 'infra'`. Errors `Backend` for a name that
-    /// `infra_names::is_egret_infrastructure_policy` does not recognise on the profile's type.
-    /// Used by engine provisioning for the delegator's two fixed policies.
-    async fn create_infra_policy(
-        &self,
-        service_id: i64,
-        name: &str,
-        policy: &Value,
-    ) -> Result<(), PolicyError>;
-
     /// Insert-or-replace one of egret's OWN infrastructure policies, stamped
     /// `managed_by = 'infra'` (re-stamping a row an operator pre-created under
-    /// that name). Unlike [`create_infra_policy`](Self::create_infra_policy) it
+    /// that name). Unlike [`create_policy`](Self::create_policy) it
     /// is NOT refused on a profile the SP4a compiler has claimed
     /// (`origin = 'generated'`): that guard is for hand-written policies, and
     /// egret's plumbing must land on a compiled profile too. Errors `Backend`
     /// for a name `infra_names::is_egret_infrastructure_policy` does not
-    /// recognise on the profile's type. Used by engine provisioning for the
-    /// delegator grant and the per-user baseline.
+    /// recognise on the profile's type. The infrastructure rows the IR owns
+    /// (`egret-admin - …`, the delegator grant, the per-user baseline) are
+    /// written by convergence (`egret_perm_compile::infra`), not through this.
     async fn upsert_infra_policy(
         &self,
         service_id: i64,
         name: &str,
         policy: &Value,
     ) -> Result<(), PolicyError>;
-
-    /// Seed idempotent admin all-access policies for `users` on the given
-    /// service type ("trino"/"starrocks"). Returns the count written.
-    async fn seed_admin_all_access(
-        &self,
-        service_id: i64,
-        service_name: &str,
-        service_type: &str,
-        users: &[String],
-    ) -> Result<usize, PolicyError>;
 }
