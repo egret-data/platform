@@ -73,11 +73,9 @@ pub const LINEAGE_READ_ACCESSES: [&str; 2] = ["select", "use"];
 
 /// The one system session property egret's client sets on every statement
 /// (`egret_query`'s Trino connector). The lineage EXPLAIN is refused without
-/// `alter` on it (live result §2.6 I2). The transform allows it, and only it,
-/// so the served lineage set does not depend on the stored set: since DG
-/// Task 7 the `egret-query-timeout` seed is on every delegating Trino engine
-/// (JWT included), but this download is built to stand on its own.
-pub const LINEAGE_SYSTEM_PROPERTY: &str = "query_max_run_time";
+/// `alter` on it (live result §2.6 I2). Defined with [`kept_accesses`] in
+/// `egret_perm_ir::lineage`, the one source the OPA evaluator reads too.
+pub use egret_perm_ir::lineage::LINEAGE_SYSTEM_PROPERTY;
 
 /// Name prefix of the policies the transform appends. They exist only in a
 /// download, never in `policy.authz_policies`.
@@ -87,31 +85,15 @@ pub const LINEAGE_POLICY_PREFIX: &str = "egret-lineage-";
 /// and deterministic, so the same envelope always serves the same bytes.
 const LINEAGE_POLICY_ID_BASE: i64 = 9_100_000_000_000_000_000;
 
-/// What EXPLAIN needs on a leaf resource of Trino's service-def, never denied.
-///
-/// - the catalog chain: `use` on the catalog, `select` on every referenced
-///   column (live result §1 Q3, the measured minimum);
-/// - `trinouser`: `impersonate`, which Trino 483 checks for the session user
-///   on every query (the Q3 baseline policies);
-/// - `queryid`: `execute`, likewise;
-/// - `systemproperty`: `alter`, because egret's client sets the system session
-///   property `query_max_run_time` on every statement.
-///
-/// Everything else on every hierarchy is denied.
-pub fn kept_accesses(leaf: &str) -> &'static [&'static str] {
-    match leaf {
-        // The data chain, at whatever level a hierarchy stops (Trino's
-        // service-def lets a policy stop at the catalog, schema or table).
-        "catalog" | "schema" | "table" | "column" => &["select", "use"],
-        "trinouser" => &["impersonate"],
-        "queryid" => &["execute"],
-        "systemproperty" => &["alter"],
-        _ => &[],
-    }
-}
+/// What EXPLAIN needs on a leaf resource of Trino's service-def, never
+/// denied; everything else on every hierarchy is denied. Defined in
+/// `egret_perm_ir::lineage` so the OPA evaluator refuses exactly what this
+/// transform denies (governance SP2b Task 18).
+pub use egret_perm_ir::lineage::kept_accesses;
 
 /// A kept access that is kept only on some VALUES of its resource (fix round
-/// 2, N2), as `(access, the values it stays allowed on)`. A second
+/// 2, N2), as `(access, the one value it stays allowed on)`, from
+/// `egret_perm_ir::lineage::kept_only_on`. A second
 /// override-priority deny withholds `access` on every other value, through
 /// `isExcludes: true`.
 ///
@@ -123,12 +105,15 @@ pub fn kept_accesses(leaf: &str) -> &'static [&'static str] {
 ///
 /// `queryid` keeps `execute` on every value: its value is the id of the query
 /// being run, which egret cannot know before the engine assigns it.
-fn narrowed(leaf: &str) -> Option<(&'static str, &'static [&'static str])> {
-    match leaf {
-        "trinouser" => Some(("impersonate", &[LINEAGE_PRINCIPAL])),
-        "systemproperty" => Some(("alter", &[LINEAGE_SYSTEM_PROPERTY])),
-        _ => None,
-    }
+fn narrowed(leaf: &str) -> Option<(&'static str, &'static str)> {
+    use egret_perm_ir::lineage::{kept_only_on, KeptOn};
+    kept_only_on(leaf).map(|(access, on)| {
+        let value = match on {
+            KeptOn::Itself => LINEAGE_PRINCIPAL,
+            KeptOn::Value(v) => v,
+        };
+        (access, value)
+    })
 }
 
 /// An access type as written in an item, without a tag service's
@@ -379,7 +364,7 @@ fn appended_policies(service: &str, service_def: &Value, catalogs: &[String]) ->
             let mut narrow = res.clone();
             narrow.insert(
                 leaf.name.clone(),
-                json!({"values": only, "isExcludes": true, "isRecursive": false}),
+                json!({"values": [only], "isExcludes": true, "isRecursive": false}),
             );
             out.push(appended_policy(
                 id,

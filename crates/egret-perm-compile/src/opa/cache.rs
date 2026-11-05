@@ -530,6 +530,7 @@ fn outcome_from_parts(
         key: parts.key,
         statements,
         classified: parts.classified,
+        lineage_principal: crate::opa::build::lineage_principal(),
     }) {
         Ok(s) => Built {
             key: Some(key),
@@ -800,6 +801,7 @@ mod tests {
                 key: (1, 1),
                 statements: vec![grant_read("ann", "lake"), root()],
                 classified: vec![],
+                lineage_principal: crate::opa::build::lineage_principal(),
             })
             .expect("the previous snapshot"),
         )

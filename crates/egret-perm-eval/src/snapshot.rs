@@ -27,6 +27,13 @@ pub struct SnapshotInput {
     pub key: (i64, i64),
     pub statements: Vec<Statement>,
     pub classified: Vec<ClassifiedColumn>,
+    /// The reserved principal view-lineage EXPLAIN runs as
+    /// (`egret_core::engine_principals::LINEAGE_PRINCIPAL`, filled by
+    /// `egret-perm-compile`). It is refused every access
+    /// `egret_perm_ir::lineage` does not keep, whatever the grants say,
+    /// exactly as the Ranger download's lineage transform denies it. `None`:
+    /// no principal is reserved.
+    pub lineage_principal: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -68,6 +75,7 @@ pub struct Snapshot {
     key: (i64, i64),
     pub(crate) statements: Vec<Statement>,
     classified: Vec<ClassifiedColumn>,
+    pub(crate) lineage_principal: Option<String>,
     pub(crate) index: Index,
 }
 
@@ -121,6 +129,7 @@ impl Snapshot {
             key: input.key,
             statements: input.statements,
             classified: input.classified,
+            lineage_principal: input.lineage_principal,
             index,
         })
     }
@@ -140,7 +149,13 @@ impl Snapshot {
             key: self.key,
             statements,
             classified: self.classified.clone(),
+            lineage_principal: self.lineage_principal.clone(),
         })
+    }
+
+    /// The reserved lineage principal, if any (see [`SnapshotInput`]).
+    pub fn lineage_principal(&self) -> Option<&str> {
+        self.lineage_principal.as_deref()
     }
 
     pub fn service_id(&self) -> i64 {

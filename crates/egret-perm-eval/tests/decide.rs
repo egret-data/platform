@@ -57,6 +57,7 @@ fn snap(statements: Vec<Statement>, classified: Vec<ClassifiedColumn>) -> Snapsh
         key: (1, 1),
         statements,
         classified,
+        lineage_principal: None,
     })
     .unwrap()
 }
@@ -552,6 +553,7 @@ fn an_unexpanded_member_fails_the_build() {
         service_id: 1,
         key: (1, 1),
         classified: vec![],
+        lineage_principal: None,
         statements: vec![st(
             1,
             a,
@@ -1211,6 +1213,7 @@ fn value_questions_and_the_snapshot_accessors() {
         service_id: 7,
         key: (3, 4),
         classified: vec![],
+        lineage_principal: None,
         statements: vec![infra(
             InfraKind::AdminAllAccess,
             who(&["root"], &[]),
@@ -1271,6 +1274,7 @@ fn an_unexpanded_except_member_fails_the_build_with_its_index() {
         service_id: 1,
         key: (1, 1),
         classified: vec![],
+        lineage_principal: None,
         statements: vec![ok, bad],
     });
     assert_eq!(
@@ -1543,6 +1547,7 @@ fn build_err(p: Target) -> bool {
         service_id: 1,
         key: (1, 1),
         classified: vec![],
+        lineage_principal: None,
         statements: vec![st(
             1,
             who(&["ann"], &[]),
@@ -1626,4 +1631,152 @@ fn a_star_or_empty_request_value_matches_only_match_any() {
         "SelectFromColumns",
         &cols("lake", "s", "u", &[""])
     )));
+}
+
+/// Task 18 (opa_differential, seed 0x5b2b00000001 state 13 question 2): on a
+/// JWT engine Ranger denied `egret-lineage` `TruncateTable` through the
+/// lineage transform's override deny, while the evaluator allowed it by a
+/// `public` write grant. The reserved lineage principal is now refused every
+/// access `egret_perm_ir::lineage` does not keep, whatever the grants say;
+/// what it keeps (select, use, its own impersonation, `query_max_run_time`,
+/// `execute` on a query) follows the grants as for anyone.
+#[test]
+fn the_lineage_principal_is_refused_what_the_lineage_transform_denies() {
+    const LP: &str = "egret-lineage";
+    let everyone = || who(&["*"], &[]);
+    let statements = vec![
+        st(
+            1,
+            everyone(),
+            path("lake", None, None, None),
+            Effect::Allow {
+                privileges: vec![Privilege::Read, Privilege::Write],
+            },
+        ),
+        st(
+            2,
+            everyone(),
+            path("w", None, None, None),
+            Effect::Allow {
+                privileges: vec![Privilege::Write],
+            },
+        ),
+        infra(
+            InfraKind::AdminAllAccess,
+            everyone(),
+            InfraObject::WholeEp,
+            "all",
+        ),
+        infra(
+            InfraKind::SelfImpersonate,
+            everyone(),
+            InfraObject::SessionUser,
+            "impersonate",
+        ),
+        infra(
+            InfraKind::ExecuteQuery,
+            everyone(),
+            InfraObject::AnyQuery,
+            "execute",
+        ),
+        infra(
+            InfraKind::QueryTimeout,
+            everyone(),
+            InfraObject::SystemProperty("query_max_run_time".into()),
+            "alter",
+        ),
+        infra(
+            InfraKind::DelegatorImpersonate,
+            everyone(),
+            InfraObject::AnyUser,
+            "impersonate",
+        ),
+    ];
+    let build = |statements: Vec<Statement>, lp: Option<&str>| {
+        Snapshot::build(SnapshotInput {
+            service_id: 1,
+            key: (1, 1),
+            statements,
+            classified: vec![],
+            lineage_principal: lp.map(str::to_string),
+        })
+        .unwrap()
+    };
+    let with = |lp: Option<&str>| build(statements.clone(), lp);
+    let s = with(Some(LP));
+    let table = cols("lake", "s", "t", &[]);
+    let user = |u: &str| Resource::User(u.into());
+    let prop = |p: &str| Resource::SystemProperty(p.into());
+    let f = Resource::Function {
+        catalog: "lake".into(),
+        schema: "s".into(),
+        function: "f".into(),
+    };
+    let refused = |op: &str, r: &Resource| {
+        let d = s.decide(LP, op, r);
+        assert!(
+            matches!(&d, Decision::Deny { explicit: true, reason } if reason.contains("lineage")),
+            "{op}: {d:?}"
+        );
+    };
+    // Kept: reads, reach through a Read grant, its own impersonation, the
+    // query timeout property, running a query.
+    assert!(allowed(&s.decide(
+        LP,
+        "SelectFromColumns",
+        &cols("lake", "s", "t", &["a"])
+    )));
+    assert!(allowed(&s.decide(LP, "SelectFromColumns", &table)));
+    assert!(allowed(&s.decide(
+        LP,
+        "ShowSchemas",
+        &Resource::Catalog("lake".into())
+    )));
+    assert!(allowed(&s.decide(LP, "ImpersonateUser", &user(LP))));
+    assert!(allowed(&s.decide(
+        LP,
+        "SetSystemSessionProperty",
+        &prop("query_max_run_time")
+    )));
+    assert!(allowed(&s.decide(LP, "ExecuteQuery", &Resource::None)));
+    // Refused whatever the grants say: write, admin, others' queries and
+    // impersonation, other properties, every engine capability.
+    for op in [
+        "InsertIntoTable",
+        "TruncateTable",
+        "DeleteFromTable",
+        "CreateTable",
+        "DropTable",
+    ] {
+        refused(op, &table);
+    }
+    refused("ImpersonateUser", &user("ann"));
+    refused("KillQueryOwnedBy", &user("ann"));
+    refused("SetSystemSessionProperty", &prop("query_max_memory"));
+    refused("ReadSystemInformation", &Resource::None);
+    for op in ["ExecuteFunction", "FilterFunctions", "ExecuteProcedure"] {
+        refused(op, &f);
+    }
+    // A Write-only grant does not reach for the principal (it keeps only
+    // select and use), while it does for anyone else.
+    let no_admin = build(
+        statements
+            .iter()
+            .filter(|s| s.target != Target::Infra(InfraObject::WholeEp))
+            .cloned()
+            .collect(),
+        Some(LP),
+    );
+    let w = Resource::Catalog("w".into());
+    assert!(!allowed(&no_admin.decide(LP, "ShowSchemas", &w)));
+    assert!(allowed(&no_admin.decide("ann", "ShowSchemas", &w)));
+    assert!(allowed(&no_admin.decide(
+        LP,
+        "ShowSchemas",
+        &Resource::Catalog("lake".into())
+    )));
+    assert!(allowed(&s.decide("ann", "TruncateTable", &table)));
+    // With no reserved principal the name is an ordinary user.
+    assert!(allowed(&with(None).decide(LP, "TruncateTable", &table)));
+    assert_eq!(s.lineage_principal(), Some(LP));
 }

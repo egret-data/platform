@@ -3620,6 +3620,7 @@ dependencies = [
  "egret-events",
  "egret-metastore",
  "egret-perm",
+ "egret-perm-ir",
  "egret-policy-api",
  "egret-ranger-eval",
  "egret-secrets",

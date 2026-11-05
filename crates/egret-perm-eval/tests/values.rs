@@ -47,6 +47,7 @@ fn snap(statements: Vec<Statement>, classified: Vec<ClassifiedColumn>) -> Snapsh
         key: (1, 1),
         statements,
         classified,
+        lineage_principal: None,
     })
     .unwrap()
 }

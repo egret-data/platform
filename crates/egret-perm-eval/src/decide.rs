@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use egret_perm_ir::audience::{Audience, MemberName};
+use egret_perm_ir::lineage::{kept_accesses, kept_only_on, KeptOn};
 use egret_perm_ir::lower::grants::level_is_a_wildcard_run;
 use egret_perm_ir::statement::{
     Effect, InfraObject, Level, Path, Privilege, Source, Statement, Target,
@@ -14,7 +15,7 @@ use egret_perm_ir::statement::{
 
 use crate::pattern;
 use crate::snapshot::Snapshot;
-use crate::trino_ops::{classify, DataPrivilege, OpClass};
+use crate::trino_ops::{row, DataPrivilege, OpClass, OpRow};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resource {
@@ -178,6 +179,30 @@ fn label(s: &Statement) -> String {
     }
 }
 
+/// Whether the lineage principal is refused `op` on `resource`: the access
+/// the operation's plugin check asks is not one `egret_perm_ir::lineage`
+/// keeps on its leaf, or is kept only on another value. An `_any` check is
+/// refused only on a leaf that keeps nothing; on the data chain it follows the
+/// grants (`check_reach` counts only Read allows for the principal).
+fn lineage_refuses(op: &OpRow, user: &str, resource: &Resource) -> bool {
+    let kept = kept_accesses(op.leaf);
+    if op.access == "_any" {
+        return kept.is_empty();
+    }
+    if !kept.contains(&op.access) {
+        return true;
+    }
+    match kept_only_on(op.leaf) {
+        Some((access, KeptOn::Itself)) if access == op.access => {
+            !matches!(resource, Resource::User(target) if target == user)
+        }
+        Some((access, KeptOn::Value(v))) if access == op.access => {
+            !matches!(resource, Resource::SystemProperty(p) if eq_ci(p, v))
+        }
+        _ => false,
+    }
+}
+
 /// D2: the statement applies to `user` when `include` names them or everyone,
 /// and `except` names neither. Usernames compare exactly.
 pub(crate) fn applies(a: &Audience, user: &str) -> bool {
@@ -262,10 +287,16 @@ fn restricts(e: &Effect) -> bool {
 
 impl Snapshot {
     pub fn decide(&self, user: &str, operation: &str, resource: &Resource) -> Decision {
-        let Some(class) = classify(operation) else {
+        let Some(op) = row(operation) else {
             return deny(format!("operation not modelled: {operation}"));
         };
-        match class {
+        if self.lineage_principal.as_deref() == Some(user) && lineage_refuses(op, user, resource) {
+            return refused(format!(
+                "{operation} asks {} on {}, which the lineage principal {user} is never allowed",
+                op.access, op.leaf
+            ));
+        }
+        match op.class {
             OpClass::Data(p) => self.decide_data(user, operation, p, resource),
             OpClass::Reach => self.decide_reach(user, operation, resource),
             OpClass::AdminOnly => match self.whole_ep(user) {
@@ -508,6 +539,10 @@ impl Snapshot {
     /// D2's conservative `_any`: some allow on the object or below it, and no
     /// deny or withhold carrying any privilege on the object or above it.
     fn check_reach(&self, user: &str, o: &Obj) -> Decision {
+        // The lineage principal keeps only `select` and `use` on the data
+        // chain (`egret_perm_ir::lineage::kept_accesses`), so only a Read
+        // allow reaches for it, and no engine capability does.
+        let lineage = self.lineage_principal.as_deref() == Some(user);
         let classes = self.classes_of(o);
         let candidates = self.candidates(o.catalog, &classes);
         let mut allow = None;
@@ -522,7 +557,12 @@ impl Snapshot {
                 }
             }
             if let (Effect::Allow { privileges }, Target::Path(path)) = (&s.effect, &s.target) {
-                if allow.is_none() && !privileges.is_empty() && path_reaches(path, o) {
+                let reaches = if lineage {
+                    privileges.contains(&Privilege::Read)
+                } else {
+                    !privileges.is_empty()
+                };
+                if allow.is_none() && reaches && path_reaches(path, o) {
                     allow = Some(label(s));
                 }
             }
@@ -532,7 +572,7 @@ impl Snapshot {
         }
         match allow
             .or_else(|| self.whole_ep(user))
-            .or_else(|| self.engine_reach(user, o))
+            .or_else(|| (!lineage).then(|| self.engine_reach(user, o)).flatten())
         {
             Some(by) => Decision::Allow { by },
             None => deny(format!("nothing on or below {o} is granted to {user}")),

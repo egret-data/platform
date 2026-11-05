@@ -204,6 +204,7 @@ fn snapshot(service_id: i64, extra: Vec<Statement>) -> Snapshot {
         key: (1, 1),
         statements,
         classified: vec![],
+        lineage_principal: None,
     })
     .expect("snapshot")
 }

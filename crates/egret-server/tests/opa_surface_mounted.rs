@@ -77,6 +77,7 @@ fn snapshot() -> Snapshot {
             derivation: Derivation::AsDeclared,
         }],
         classified: vec![],
+        lineage_principal: None,
     })
     .expect("snapshot")
 }

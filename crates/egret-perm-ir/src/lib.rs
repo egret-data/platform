@@ -18,6 +18,7 @@
 pub mod audience;
 pub mod enforcement;
 pub mod ep;
+pub mod lineage;
 pub mod lower;
 pub mod matrix;
 pub mod statement;

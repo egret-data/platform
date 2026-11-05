@@ -38,6 +38,14 @@ use egret_perm_ir::statement::Statement;
 
 pub use crate::members::MissingUsername;
 
+/// The reserved principal view-lineage EXPLAIN runs as, for
+/// `SnapshotInput::lineage_principal`: every snapshot the refresher and
+/// explain build refuses it what `egret_perm_ir::lineage` does not keep
+/// (governance SP2b Task 18), whatever the engine's delegation mode.
+pub fn lineage_principal() -> Option<String> {
+    Some(egret_core::engine_principals::LINEAGE_PRINCIPAL.to_string())
+}
+
 /// What one snapshot is built from, before `Snapshot::build`.
 pub struct SnapshotParts {
     pub key: (i64, i64),
@@ -151,6 +159,7 @@ pub async fn build_snapshot_via(
         key: parts.key,
         statements,
         classified: parts.classified,
+        lineage_principal: lineage_principal(),
     })
     .map(Some)
     .map_err(|e| CompileError::Db(format!("OPA snapshot: {e}")))

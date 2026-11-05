@@ -478,3 +478,43 @@ async fn an_unnamed_deny_holder_is_denied_once_a_recompile_names_them() {
     assert!(is_allow(&d), "public still reads: {d:?}");
     tx.rollback().await.expect("rollback");
 }
+
+/// SP2b Task 18: every snapshot the profile builds names the reserved
+/// lineage principal (`egret_core::engine_principals::LINEAGE_PRINCIPAL`),
+/// so the evaluator refuses it what the lineage transform denies on Ranger,
+/// even where a `public` grant allows everyone else.
+#[tokio::test]
+async fn the_snapshot_names_the_lineage_principal() {
+    // Arrange
+    let db = db().await;
+    let mut names = Names::default();
+    let mut tx = db.pool.begin().await.expect("tx");
+    let st = store(&db, "opa9", &mut names, &mut tx).await;
+    let cat: Uuid = sqlx::query_scalar("SELECT id FROM registry.catalogs WHERE name = $1")
+        .bind(&st.lake)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("catalog id");
+    grant(
+        &mut tx,
+        "opa9.public_write",
+        Effect::Allow,
+        &[Action::Write],
+        scope(cat, None, None, None),
+        set(&[group_ref("public")], &[]),
+        &mut names,
+    )
+    .await;
+
+    // Act
+    let snap = build(&mut tx, st.profile).await;
+
+    // Assert
+    let lineage = egret_core::engine_principals::LINEAGE_PRINCIPAL;
+    assert_eq!(snap.lineage_principal(), Some(lineage));
+    let t = table(&st.lake, "t", &[]);
+    assert!(is_allow(&snap.decide(&st.ann, "TruncateTable", &t)));
+    let d = snap.decide(lineage, "TruncateTable", &t);
+    assert!(is_explicit_deny(&d), "{d:?}");
+    tx.rollback().await.expect("rollback");
+}
