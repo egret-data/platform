@@ -36,7 +36,15 @@
 //!
 //! Each step: `RUNS` times `policy_version + 1` then `refresh_once` (asserting
 //! the profile was rebuilt), and `RUNS` times `stored_overlaps_via` alone in a
-//! `REPEATABLE READ, READ ONLY` transaction, as a build runs it.
+//! `REPEATABLE READ, READ ONLY` transaction, as a build ran it before Task 22F.
+//!
+//! Task 22F: a build now runs `stored_overlaps_of_via`, which reads only the
+//! profile's own units; each step also times it alone (`overlap_scan_profile`),
+//! prints every rebuild sample in run order, and prints how many rows of
+//! `policy.authz_policies` changed since Postgres last analyzed it. A last step,
+//! `1k_beside_10_profiles_again`, repeats the 1k measurement after the 10k one,
+//! to tell the profile's shape from the order the steps ran in (Task 22's
+//! unexplained 1k-slower-than-10k result).
 include!("opa_support/fixtures_host.rs");
 #[allow(dead_code)]
 #[path = "golden/fixtures.rs"]
@@ -47,7 +55,7 @@ use std::time::{Duration, Instant};
 use egret_metastore::Db;
 use egret_perm::{Action, Effect, PermStore};
 use egret_perm_compile::opa::cache::{Lookup, SnapshotCache};
-use egret_perm_compile::overlap::stored_overlaps_via;
+use egret_perm_compile::overlap::{stored_overlaps_of_via, stored_overlaps_via};
 use egret_perm_compile::recompile_service;
 use egret_policy::PolicyStore;
 use fixtures::*;
@@ -184,7 +192,21 @@ async fn services(db: &Db) -> i64 {
         .expect("count")
 }
 
+/// `policy.authz_policies`'s rows changed since its last analyze, and when
+/// that analyze ran.
+async fn analyze_state(db: &Db) -> String {
+    let (changed, auto, manual): (i64, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT n_mod_since_analyze, last_autoanalyze::text, last_analyze::text \
+           FROM pg_stat_user_tables WHERE schemaname = 'policy' AND relname = 'authz_policies'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("pg_stat_user_tables");
+    format!("n_mod_since_analyze={changed} last_autoanalyze={auto:?} last_analyze={manual:?}")
+}
+
 async fn measure(db: &Db, label: &str, p: &Profile, cache: &SnapshotCache) {
+    println!("{label} before: {}", analyze_state(db).await);
     let mut rebuild = Vec::new();
     for _ in 0..RUNS {
         sqlx::query(
@@ -199,6 +221,14 @@ async fn measure(db: &Db, label: &str, p: &Profile, cache: &SnapshotCache) {
         rebuild.push(t.elapsed());
         assert!(report.rebuilt.contains(&p.id), "{report:?}");
     }
+    let samples: Vec<String> = rebuild
+        .iter()
+        .map(|d| format!("{:.1}", d.as_secs_f64() * 1e3))
+        .collect();
+    println!(
+        "{label} rebuild samples in run order (ms): {}",
+        samples.join(" ")
+    );
     let statements = match cache.get(p.id) {
         Lookup::Ready(s) => s.len(),
         other => panic!("not ready: {other:?}"),
@@ -215,13 +245,30 @@ async fn measure(db: &Db, label: &str, p: &Profile, cache: &SnapshotCache) {
         found = stored_overlaps_via(&mut tx).await.expect("scan").len();
         scan.push(t.elapsed());
     }
+    let mut scoped = Vec::new();
+    let mut found_scoped = 0;
+    for _ in 0..RUNS {
+        let mut tx = db.pool.begin().await.expect("tx");
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *tx)
+            .await
+            .expect("iso");
+        let t = Instant::now();
+        found_scoped = stored_overlaps_of_via(&mut tx, p.id)
+            .await
+            .expect("scoped scan")
+            .len();
+        scoped.push(t.elapsed());
+    }
     println!(
-        "{label} tables={} statements={statements} services_in_db={} rebuild {} | overlap_scan {} (pairs={found})",
+        "{label} tables={} statements={statements} services_in_db={} rebuild {} | overlap_scan {} (pairs={found}) | overlap_scan_profile {} (pairs={found_scoped})",
         p.tables,
         services(db).await,
         line(&mut rebuild),
         line(&mut scan),
+        line(&mut scoped),
     );
+    println!("{label} after: {}", analyze_state(db).await);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -256,4 +303,5 @@ async fn opa_snapshot_rebuild_time_at_1k_and_10k_statements() {
     }
     measure(&db, "1k_beside_10_profiles", &small, &cache).await;
     measure(&db, "10k_beside_10_profiles", &large, &cache).await;
+    measure(&db, "1k_beside_10_profiles_again", &small, &cache).await;
 }
