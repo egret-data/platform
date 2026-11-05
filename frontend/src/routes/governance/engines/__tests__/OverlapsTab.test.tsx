@@ -87,6 +87,12 @@ describe("the Overlaps tab (spec §6.3)", () => {
     const items = await pairs();
     expect(items).toHaveLength(2);
     expect(screen.queryByText(/elsewhere/)).not.toBeInTheDocument();
+    // The intro must not promise that every stored pair is harmless: a pair
+    // with a column-less mask blocks writes once the mask renders `column: *`.
+    expect(screen.getByText(/one mask names no column/)).toHaveTextContent(
+      /blocks every write that recompiles this profile, and that mask stays inert, until the pair is broken/,
+    );
+    expect(screen.queryByText(/so they block nothing/)).not.toBeInTheDocument();
 
     const first = items.find((i) => i.textContent?.includes("mask emails"))!;
     expect(within(first).getByText("Mask")).toBeInTheDocument();

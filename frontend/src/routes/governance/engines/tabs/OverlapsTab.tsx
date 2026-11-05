@@ -53,9 +53,10 @@ export function OverlapsTab({ ctx }: { ctx: TabContext }) {
   return (
     <div className="space-y-3">
       <p className="text-sm text-muted-foreground">
-        Each pair can decide one request two different ways. They were stored before overlaps were refused, so they
-        block nothing, but the engine&apos;s choice between them is not something either one says. Break each pair to
-        fix it.
+        Each pair can decide one request two different ways, and the engine&apos;s choice between them is not
+        something either one says. They were stored before overlaps were refused. A pair in which one mask names no
+        column (a mask on a whole table, schema or catalog) blocks every write that recompiles this profile, and that
+        mask stays inert, until the pair is broken; other stored pairs block nothing. Break each pair to fix it.
       </p>
       <ul role="list" className="space-y-3">
         {pairs.map((o) => (
