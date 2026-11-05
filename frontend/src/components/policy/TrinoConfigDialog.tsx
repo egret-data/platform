@@ -36,7 +36,13 @@ export function TrinoConfigDialog({ open, service, onOpenChange }: Props) {
       <DialogContent className="max-w-2xl" bodyClassName="grid-cols-[minmax(0,1fr)]">
         <DialogHeader>
           <DialogTitle>Trino config — {service}</DialogTitle>
-          {cfg.data?.mechanism === "opa" ? (
+          {!cfg.data ? (
+            <DialogDescription>
+              {cfg.isError
+                ? "The configuration could not be read. Close this dialog and open it again to retry."
+                : "Loading the configuration files."}
+            </DialogDescription>
+          ) : cfg.data.mechanism === "opa" ? (
             <DialogDescription>
               Install these two files on a Trino 483 or later coordinator with plugin/opa: egret answers its requests,
               and cannot check an external engine&apos;s image.

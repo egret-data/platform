@@ -155,16 +155,12 @@ export default function ExternalEngineDetail({ engine }: { engine: ExternalEngin
           <DeclaredCatalogs engine={engine} />
         </TabsContent>
         <TabsContent value="plugin-config">
-          {/* Wait for the profiles: the bound profile's mechanism picks which plugin's files to ask for. */}
-          {profilesQ.isLoading ? (
-            <ListSkeleton rows={4} cols={2} />
-          ) : (
-            <EnginePluginConfig
-              engineId={engine.id}
-              mechanism={bound?.mechanism}
-              onOpenSettings={() => setTab("settings")}
-            />
-          )}
+          <PluginConfigTab
+            engineId={engine.id}
+            profilesQ={profilesQ}
+            bound={bound}
+            onOpenSettings={() => setTab("settings")}
+          />
         </TabsContent>
         <TabsContent value="settings">
           <ExternalSettings engine={engine} profilesQ={profilesQ} bound={bound} />
@@ -294,6 +290,61 @@ function Overview({
       {engine.rangerPluginVersionModelled === false && <UnmodelledVersionNote />}
     </>
   );
+}
+
+// ── Plugin config ────────────────────────────────────────────────────────────
+
+/**
+ * The bound profile's mechanism picks which plugin's files to ask for, so neither request is
+ * made until the profiles have been read and the engine's profile is among them: a guess would
+ * show Ranger files for an OPA engine (FE-STATE-1: an error never renders as something else).
+ */
+function PluginConfigTab({
+  engineId,
+  profilesQ,
+  bound,
+  onOpenSettings,
+}: {
+  engineId: string;
+  profilesQ: { isLoading: boolean; isError: boolean; error: ApiError | null; refetch: () => unknown };
+  bound: Profile | undefined;
+  onOpenSettings: () => void;
+}) {
+  if (profilesQ.isError)
+    return (
+      <Alert variant="destructive" data-testid="plugin-config-profiles-error">
+        <AlertDescription className="space-y-2">
+          <p>
+            Could not read the policy profiles, so egret cannot tell which plugin this engine uses:{" "}
+            {profilesQ.error?.message ?? "the request failed"}. Try again.
+          </p>
+          <Button size="sm" variant="outline" onClick={() => void profilesQ.refetch()}>
+            Retry
+          </Button>
+        </AlertDescription>
+      </Alert>
+    );
+  if (profilesQ.isLoading) return <ListSkeleton rows={4} cols={2} />;
+  if (!bound)
+    return (
+      <Alert data-testid="plugin-config-no-profile">
+        <AlertDescription className="space-y-2">
+          <p>
+            No policy profile is bound to this engine yet, or this account cannot see the one that is. The plugin
+            configuration comes from the bound profile, so bind a profile in Settings first.
+          </p>
+          <div className="flex gap-2">
+            <Button size="sm" variant="outline" onClick={onOpenSettings}>
+              Open Settings
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => void profilesQ.refetch()}>
+              Reload profiles
+            </Button>
+          </div>
+        </AlertDescription>
+      </Alert>
+    );
+  return <EnginePluginConfig engineId={engineId} mechanism={bound.mechanism} onOpenSettings={onOpenSettings} />;
 }
 
 // ── Declared catalogs ────────────────────────────────────────────────────────

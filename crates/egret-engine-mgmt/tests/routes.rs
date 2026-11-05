@@ -16956,11 +16956,10 @@ async fn opa_plugin_config_for_an_external_engine_on_an_opa_profile() {
         warnings[1],
         egret_engine_mgmt_api::opa_config::OPA_EXTERNAL_ENGINE_NOTE
     );
-    assert!(
-        warnings.contains(&serde_json::json!(
-            egret_engine_mgmt_api::opa_config::OPA_BATCHED_URI_WARNING
-        )),
-        "{warnings:?}"
+    assert_eq!(
+        warnings[2],
+        egret_engine_mgmt_api::opa_config::OPA_BATCHED_URI_WARNING,
+        "right after the two fixed warnings"
     );
     assert_eq!(
         j["adminMustSupply"],

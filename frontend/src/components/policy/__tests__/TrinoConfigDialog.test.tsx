@@ -63,7 +63,7 @@ describe("TrinoConfigDialog", () => {
 
   it("for an OPA profile shows both OPA files, the plugin/opa description and the warnings verbatim", async () => {
     const LOG = "Do not enable opa.log-requests: every request carries egret.secret in input.context.properties, and the coordinator log would hold it.";
-    const KEEP = "Keep opa.policy.batched-uri in access-control.properties: without it, queries on information_schema.columns fail.";
+    const KEEP = "Do not remove opa.policy.batched-uri from access-control.properties: without it Trino sends one request per object.";
     getTrinoConfig.mockResolvedValueOnce({
       mechanism: "opa",
       files: [
@@ -98,5 +98,27 @@ describe("TrinoConfigDialog", () => {
     await screen.findByText("ranger-trino-security.xml");
     expect(document.body.textContent).toMatch(/native ranger plugin/);
     expect(document.body.textContent).not.toMatch(/plugin\/opa/);
+  });
+
+  it("claims no plugin while loading and says what to do when the read fails", async () => {
+    getTrinoConfig.mockImplementationOnce(() => new Promise(() => {}));
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { unmount } = render(
+      <QueryClientProvider client={qc}>
+        <TrinoConfigDialog open service="p-load" onOpenChange={() => {}} />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("Loading the configuration files.")).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/ranger plugin/i);
+    unmount();
+
+    getTrinoConfig.mockRejectedValueOnce(new Error("boom"));
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <TrinoConfigDialog open service="p-err" onOpenChange={() => {}} />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText(/could not be read\. Close this dialog and open it again/)).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/native ranger plugin/);
   });
 });
