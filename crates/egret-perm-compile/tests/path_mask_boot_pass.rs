@@ -423,6 +423,10 @@ async fn a_refused_boot_recompile_is_recorded_reported_and_leaves_the_old_artifa
     let refused: Vec<i64> = run.refused.iter().map(|(id, _)| *id).collect();
     assert_eq!(refused, vec![svc], "the pass returns the refusal: {run:?}");
     assert!(
+        run.failed.is_empty(),
+        "an overlap is a refusal, not a failure: {run:?}"
+    );
+    assert!(
         run.compiled.contains(&other) && !run.compiled.contains(&svc),
         "one transaction per profile: the other profile still compiles: {run:?}"
     );

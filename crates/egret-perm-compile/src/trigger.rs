@@ -1426,6 +1426,11 @@ pub struct PathMaskRepair {
     /// that recompiles it is refused the same way until a steward resolves
     /// what the refusal names. Retried at every boot.
     pub refused: Vec<(i64, String)>,
+    /// Profiles whose recompile FAILED for a reason that is not a refusal of
+    /// the model (a database error, a lock timeout, a ceiling): each keeps its
+    /// previous compile, and the next boot retries it. Nothing here says a
+    /// write to the profile is refused, because nothing showed that it is.
+    pub failed: Vec<(i64, String)>,
 }
 
 /// The `perm.compile_runs` / log prefix a refused boot recompile carries. On
@@ -1434,6 +1439,38 @@ pub struct PathMaskRepair {
 pub const PATH_MASK_REFUSAL_PREFIX: &str = "Refused at boot: masks with no column stay inert \
      (previous compile served); writes recompiling this profile are refused until these rules \
      are resolved. ";
+
+/// The prefix for a boot recompile that failed for any OTHER reason (a
+/// database error, a lock timeout, an expansion ceiling): accurate about the
+/// masks, and makes no claim about writes or rules it has not seen.
+pub const PATH_MASK_FAILURE_PREFIX: &str = "Boot recompile failed: masks with no column stay \
+     inert (previous compile served); the next boot retries. ";
+
+/// Whether `e` is a refusal of the MODEL — a pair of rules the compile will
+/// not serve together — rather than a failure of the run. Only a refusal
+/// recurs on every write that recompiles the profile until a steward changes
+/// the rules; everything else (a database error, a lock timeout, a ceiling)
+/// says nothing about the rules and may pass on the next try.
+pub fn is_rule_refusal(e: &CompileError) -> bool {
+    matches!(
+        e,
+        CompileError::AmbiguousMaskOrFilterArbitration { .. }
+            | CompileError::ClearanceMaskUndecidable { .. }
+    )
+}
+
+/// The `perm.compile_runs` error a failed boot recompile of a path-mask
+/// profile records: [`PATH_MASK_REFUSAL_PREFIX`] for a refusal of the rules
+/// ([`is_rule_refusal`]), [`PATH_MASK_FAILURE_PREFIX`] otherwise, then the
+/// error itself (whose quoted rule names the Overview links).
+pub fn path_mask_boot_error(e: &CompileError) -> String {
+    let prefix = if is_rule_refusal(e) {
+        PATH_MASK_REFUSAL_PREFIX
+    } else {
+        PATH_MASK_FAILURE_PREFIX
+    };
+    format!("{prefix}{e}")
+}
 
 /// The boot pass for fix/ranger-table-mask-column: recompile every profile
 /// that still SERVES a compiled path mask with a missing level.
@@ -1470,8 +1507,8 @@ pub const PATH_MASK_REFUSAL_PREFIX: &str = "Refused at boot: masks with no colum
 pub async fn recompile_path_mask_profiles(
     pool: &sqlx::PgPool,
 ) -> Result<PathMaskRepair, CompileError> {
-    let profiles: Vec<i64> = sqlx::query_scalar(
-        "SELECT DISTINCT p.service_id \
+    let profiles: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT DISTINCT p.service_id, s.name \
            FROM policy.authz_policies p \
            JOIN policy.authz_services s ON s.id = p.service_id \
           WHERE s.type IN ('trino', 'starrocks') \
@@ -1486,49 +1523,65 @@ pub async fn recompile_path_mask_profiles(
     .await
     .map_err(db_err)?;
     let mut out = PathMaskRepair::default();
-    for service_id in profiles {
+    for (service_id, profile) in profiles {
         let result = async {
             let mut tx = pool.begin().await.map_err(db_err)?;
             recompile_service_in_tx(&mut tx, service_id).await?;
             tx.commit().await.map_err(db_err)
         }
         .await;
-        match result {
-            Ok(()) => out.compiled.push(service_id),
-            Err(e) => {
-                let rules = match &e {
-                    CompileError::AmbiguousMaskOrFilterArbitration { rules, .. } => rules
-                        .iter()
-                        .map(|r| match r.id {
-                            Some(id) => format!("{} ({id})", r.name),
-                            None => r.name.clone(),
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    _ => String::new(),
-                };
-                tracing::error!(
-                    service_id,
-                    rules = %rules,
-                    error = %e,
-                    "the boot recompile of a profile with a whole-table, schema or catalog mask \
-                     was REFUSED: its previous compile keeps serving, so those masks stay inert \
-                     (they mask no column), and every write that recompiles this profile is \
-                     refused until a steward resolves the rules named here (see GET \
-                     /api/control-plane/perm/overlaps)"
-                );
-                let recorded = format!("{PATH_MASK_REFUSAL_PREFIX}{e}");
-                if let Err(w) =
-                    crate::compile_runs::record_compile_failure(pool, service_id, &recorded).await
-                {
-                    tracing::warn!(
-                        service_id,
-                        error = %w,
-                        "could not record a failed compile in perm.compile_runs"
-                    );
-                }
-                out.refused.push((service_id, e.to_string()));
-            }
+        let Err(e) = result else {
+            out.compiled.push(service_id);
+            continue;
+        };
+        let refusal = is_rule_refusal(&e);
+        if refusal {
+            let rules = match &e {
+                CompileError::AmbiguousMaskOrFilterArbitration { rules, .. } => rules
+                    .iter()
+                    .map(|r| match r.id {
+                        Some(id) => format!("{} ({id})", r.name),
+                        None => r.name.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                _ => String::new(),
+            };
+            tracing::error!(
+                service_id,
+                profile = %profile,
+                rules = %rules,
+                error = %e,
+                "the boot recompile of a profile with a whole-table, schema or catalog mask \
+                 was REFUSED: its previous compile keeps serving, so those masks stay inert \
+                 (they mask no column), and every write that recompiles this profile is \
+                 refused until a steward resolves the rules named here (see GET \
+                 /api/control-plane/perm/overlaps)"
+            );
+        } else {
+            tracing::error!(
+                service_id,
+                profile = %profile,
+                error = %e,
+                "the boot recompile of a profile with a whole-table, schema or catalog mask \
+                 FAILED: its previous compile keeps serving, so those masks stay inert until \
+                 it succeeds; the next boot retries"
+            );
+        }
+        let recorded = path_mask_boot_error(&e);
+        if let Err(w) =
+            crate::compile_runs::record_compile_failure(pool, service_id, &recorded).await
+        {
+            tracing::warn!(
+                service_id,
+                error = %w,
+                "could not record a failed compile in perm.compile_runs"
+            );
+        }
+        if refusal {
+            out.refused.push((service_id, e.to_string()));
+        } else {
+            out.failed.push((service_id, e.to_string()));
         }
     }
     Ok(out)
@@ -2354,4 +2407,48 @@ pub async fn recompile_services_in_tx(
         out.push(summary);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod path_mask_boot_tests {
+    use super::*;
+    use egret_perm::{OverlapKind, OverlapRule};
+
+    /// Only a refusal of the rules carries "writes are refused until these
+    /// rules are resolved"; a database error, a lock timeout or a ceiling gets
+    /// the accurate "the next boot retries".
+    #[test]
+    fn only_a_rule_refusal_says_writes_are_refused() {
+        let overlap = CompileError::AmbiguousMaskOrFilterArbitration {
+            profile: "p".into(),
+            refusal: "rule \"a\" and rule \"b\"".into(),
+            kind: OverlapKind::Mask,
+            coordinate: "c".into(),
+            rules: vec![OverlapRule {
+                id: None,
+                name: "a".into(),
+            }],
+        };
+        let tie = CompileError::ClearanceMaskUndecidable {
+            column: "c".into(),
+            user: "u".into(),
+        };
+        for e in [&overlap, &tie] {
+            assert!(is_rule_refusal(e), "{e}");
+            assert!(path_mask_boot_error(e).starts_with(PATH_MASK_REFUSAL_PREFIX));
+        }
+        for e in [
+            CompileError::Db("canceling statement due to lock timeout".into()),
+            CompileError::Db("connection reset".into()),
+        ] {
+            assert!(!is_rule_refusal(&e), "{e}");
+            let recorded = path_mask_boot_error(&e);
+            assert!(recorded.starts_with(PATH_MASK_FAILURE_PREFIX), "{recorded}");
+            assert!(
+                !recorded.contains("refused"),
+                "a failure must not claim writes are refused: {recorded}"
+            );
+        }
+        assert!(PATH_MASK_FAILURE_PREFIX.chars().count() < 200);
+    }
 }

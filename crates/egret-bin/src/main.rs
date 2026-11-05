@@ -2979,8 +2979,18 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                     tracing::info!(
                         compiled = r.compiled.len(),
                         refused = r.refused.len(),
+                        failed = r.failed.len(),
                         "profiles with whole-table, schema or catalog masks compiled at boot"
                     );
+                    if !r.failed.is_empty() {
+                        tracing::error!(
+                            failed = r.failed.len(),
+                            profiles = ?r.failed.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                            "the boot recompile of profiles with whole-table, schema or catalog \
+                             masks FAILED for some profiles: their masks stay inert until it \
+                             succeeds; the next boot retries"
+                        );
+                    }
                     if !r.refused.is_empty() {
                         tracing::error!(
                             refused = r.refused.len(),
