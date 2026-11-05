@@ -2965,6 +2965,27 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             }
         });
     }
+    // fix/ranger-table-mask-column: a path mask that names no column (a whole
+    // table, schema or catalog) used to compile without a `column` resource and
+    // masked nothing on Ranger; the compiler now renders it as `*`. Recompile
+    // the profiles such rules reach so they serve the fixed artifact without
+    // waiting for an unrelated write. One transaction per profile, idempotent;
+    // a refusal is logged and recorded, and the next boot retries.
+    {
+        let pool = db.pool.clone();
+        tokio::spawn(async move {
+            match egret_perm_compile::recompile_path_mask_profiles(&pool).await {
+                Ok(n) => tracing::info!(
+                    profiles = n,
+                    "profiles with whole-table, schema or catalog masks compiled at boot"
+                ),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "the boot compile of whole-table, schema or catalog masks did not run"
+                ),
+            }
+        });
+    }
     // Migration 0207 renamed classifications that shared a name; their
     // compiled tag policies still name the old one until this recompiles them
     // (see `TagRepo::recompile_queued_renames`). Off the boot path: until it

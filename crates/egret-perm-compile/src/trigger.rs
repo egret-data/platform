@@ -1415,6 +1415,69 @@ pub async fn recompile_table_classified_profiles(
     Ok(compiled)
 }
 
+/// The boot pass for fix/ranger-table-mask-column: recompile every profile
+/// bound to a catalog that a path MASK rule naming no column selects.
+///
+/// Until that fix `scope_to_resources` rendered such a mask (a whole table,
+/// schema or catalog — the Rules tab's default) without a `column` resource,
+/// and every `dataMaskDef` level is mandatory once Ranger merges the def, so
+/// the stored body masked NOTHING. The compiler now renders the unnamed levels
+/// as `*`, but a stored body changes only when its profile recompiles, and
+/// nothing about a deploy recompiles one. This pass does, so every profile
+/// serves the fixed artifact once the new binary boots, without waiting for an
+/// unrelated write. No migration: the rows in `perm.rules` were always right;
+/// only the compiled artifact was wrong, and a migration cannot run the
+/// compiler.
+///
+/// The same shape as [`recompile_table_classified_profiles`]: one transaction
+/// per profile, so one refusal does not block the others — a refused profile
+/// keeps its previous compile, and the refusal is logged and recorded in
+/// `perm.compile_runs` (the Governance Overview's `compile_failed` finding).
+/// The refusal this fix can newly provoke is the overlap guard's
+/// (`crate::overlap::refuse_created_by_compile_via`): a stored pair of mask
+/// policies whose coordinate changes because one of them now names `column:
+/// *` reads as a pair the compile CREATES. Idempotent: an unchanged profile
+/// writes nothing and bumps no `policy_version`, so it runs on every boot with
+/// no record of having run. Returns how many profiles compiled.
+pub async fn recompile_path_mask_profiles(pool: &sqlx::PgPool) -> Result<usize, CompileError> {
+    let profiles: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT e.authz_service_id \
+           FROM perm.rules r \
+           JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = r.catalog_id \
+           JOIN engine_mgmt.engines e ON e.id = ea.engine_id \
+          WHERE e.authz_service_id IS NOT NULL \
+            AND r.kind = 'mask' AND r.selector_kind = 'path' \
+            AND r.column_name IS NULL \
+          ORDER BY 1",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?;
+    let mut compiled = 0;
+    for service_id in profiles {
+        let result = async {
+            let mut tx = pool.begin().await.map_err(db_err)?;
+            recompile_service_in_tx(&mut tx, service_id).await?;
+            tx.commit().await.map_err(db_err)
+        }
+        .await;
+        match result {
+            Ok(()) => compiled += 1,
+            Err(e) => {
+                tracing::warn!(
+                    service_id,
+                    error = %e,
+                    "the boot recompile of a profile with a whole-table, schema or catalog \
+                     mask was refused; it keeps its previous compile, which masks nothing \
+                     for those rules"
+                );
+                record_failure_logged(pool, service_id, &e).await;
+            }
+        }
+    }
+    Ok(compiled)
+}
+
 /// The services a create/delete of `g` can change the compiled output of —
 /// the profiles bound to the grant's own catalog. See this module's Task 9
 /// section for the derivation.
