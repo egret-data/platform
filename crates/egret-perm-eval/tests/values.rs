@@ -936,3 +936,59 @@ fn a_tagged_column_is_masked_whatever_case_the_request_uses() {
         Some("NULL")
     );
 }
+
+/// Post-#837: a catalog-scoped path mask does not reach the catalog's
+/// `information_schema` (Ranger renders its schema level as
+/// `information_schema` excluded), while a mask whose author named the schema,
+/// even as `*`, and a classification mask still do. Measured against Ranger by
+/// the differential's `catalog-mask` anchor (seed 0x5b2b00000001 state 41,
+/// before this fix: Ranger no mask, OPA MASK).
+#[test]
+fn a_catalog_mask_does_not_reach_information_schema() {
+    let catalog_mask = st(
+        1,
+        who(&["*"], &[]),
+        path("lake", None, None, None),
+        mask("MASK", None),
+    );
+    let s = snap(vec![catalog_mask.clone()], vec![]);
+    let choice = |s: &Snapshot, schema: &str, table: &str, column: &str| {
+        s.column_mask_choice("ann", "lake", schema, table, column)
+            .unwrap()
+    };
+    assert_eq!(
+        choice(&s, "information_schema", "tables", "table_name"),
+        None
+    );
+    assert_eq!(
+        choice(&s, "INFORMATION_SCHEMA", "columns", "column_name"),
+        None
+    );
+    assert_eq!(choice(&s, "s", "t", "a"), Some(("MASK".to_string(), None)));
+    // A schema the author named, even `*`, is copied verbatim by Ranger.
+    let star = st(
+        2,
+        who(&["*"], &[]),
+        path("lake", Some("*"), None, None),
+        mask("MASK", None),
+    );
+    let s = snap(vec![star], vec![]);
+    assert_eq!(
+        choice(&s, "information_schema", "tables", "table_name"),
+        Some(("MASK".to_string(), None))
+    );
+    // A row filter's scope is unchanged.
+    let f = st(
+        3,
+        who(&["*"], &[]),
+        path("lake", Some("*"), Some("*"), None),
+        filter("x = 1"),
+    );
+    let s = snap(vec![catalog_mask, f], vec![]);
+    assert_eq!(
+        s.row_filters("ann", "lake", "information_schema", "tables")
+            .unwrap()
+            .len(),
+        1
+    );
+}

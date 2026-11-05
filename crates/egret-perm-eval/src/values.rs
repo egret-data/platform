@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use egret_perm_ir::statement::{Effect, Statement, Target};
+use egret_perm_ir::statement::{Effect, Level, Statement, Target};
 
 use crate::decide::{applies, level_covers, path_on_table, EvalError};
 use crate::snapshot::Snapshot;
@@ -34,6 +34,17 @@ pub const TRINO_MASK_TRANSFORMERS: &[(&str, &str)] = &[
     ),
     ("MASK_DATE_SHOW_YEAR", "date_trunc('year', {col})"),
 ];
+
+/// The schema every Trino catalog carries for its own metadata. A
+/// catalog-scoped path mask (schema level unnamed) does not reach it: the
+/// Ranger compile renders that mask's schema level as
+/// `{values: ["information_schema"], isExcludes: true}`
+/// (`egret-perm-compile` `ranger::grants::scope_to_resources`, PR #837),
+/// because Trino asks for column masks on its relations like any table and a
+/// mask there would hash what `SHOW TABLES`, `SHOW COLUMNS` and `DESCRIBE`
+/// return. The OPA plugin asks the same `GetColumnMask` questions, so the
+/// evaluator excludes it alike.
+const INFORMATION_SCHEMA: &str = "information_schema";
 
 const MASK_NULL: &str = "MASK_NULL";
 const MASK_NONE: &str = "MASK_NONE";
@@ -165,11 +176,16 @@ impl Snapshot {
             if !applies(&s.audience, user) {
                 continue;
             }
-            // An unnamed column covers every column of the tables named.
+            // An unnamed column covers every column of the tables named. A
+            // rule mask whose schema is unnamed (catalog-scoped) skips
+            // `information_schema`, as the Ranger artifact does.
             let hit = match &s.target {
                 Target::Path(p) => {
                     path_on_table(p, catalog, schema, table)
                         && level_covers(&p.column, Some(column))
+                        && !(matches!(s.effect, Effect::Mask { .. })
+                            && p.schema == Level::Unnamed
+                            && schema.eq_ignore_ascii_case(INFORMATION_SCHEMA))
                 }
                 Target::Classification { name } => classes.contains(&name.to_lowercase()),
                 Target::EngineObject { .. } | Target::Infra(_) => false,
