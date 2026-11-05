@@ -11126,7 +11126,7 @@
         },
         "responses": {
           "200": {
-            "description": "The coordinator of every bound egret-provisioned engine restarts to load the new access control; queries running on it fail. External engines are listed in `external_engines_unchanged`: their operator installs the new plugin files and must run Trino 483 or later with `plugin/opa`.",
+            "description": "The coordinator of every bound egret-provisioned engine restarts to load the new access control; queries running on it fail. External engines are listed in `external_engines_unchanged`, and `external_engines_warning` says what their operator must do: after a switch to OPA they keep enforcing the Ranger policies until the OPA plugin files are installed (Trino 483 or later with `plugin/opa`); after a switch to Ranger every query on them fails until the Ranger plugin files are re-installed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -11186,7 +11186,7 @@
             }
           },
           "502": {
-            "description": "The switch is committed, but some bound engines were not reconfigured: `{error, engines_reconfigured, engines_failed: [{engine, error}]}`. Send the same PATCH again to retry",
+            "description": "The switch is committed, but some bound engines were not reconfigured: `{error, engines_reconfigured, engines_failed: [{engine, error}], external_engines_unchanged, external_engines_warning?}`. Send the same PATCH again to retry",
             "content": {
               "application/json": {
                 "schema": {
@@ -51923,6 +51923,13 @@
               "type": "string"
             },
             "description": "The bound external engines: egret does not configure them; their\noperator installs the new plugin files."
+          },
+          "external_engines_warning": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the operator of each external engine must do now, for this\ndirection ([`external_engines_warning`]). Absent when no external\nengine is bound."
           }
         }
       },
