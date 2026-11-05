@@ -304,13 +304,24 @@ pub fn summarize_policy(
     // present. A service names its second level `schema` (Trino) or `database` (StarRocks),
     // never both, so listing both keeps either in position.
     let res = body.get("resources").and_then(Value::as_object);
+    // An `isExcludes` level is "every value BUT these", so it is shown with a
+    // leading `!` (as `ambiguous_arbitration::render_resources` and the
+    // StarRocks completion's `Selected::text` do): a catalog-scoped mask, which
+    // excludes the catalog's `information_schema`, lists as
+    // `wh.!information_schema.*.*` and never as the one schema it skips.
     let level = |k: &str| -> Option<String> {
-        res.and_then(|r| r.get(k))
-            .and_then(|v| v.get("values"))
+        let lvl = res.and_then(|r| r.get(k))?;
+        let first = lvl
+            .get("values")
             .and_then(Value::as_array)
             .and_then(|a| a.first())
-            .and_then(Value::as_str)
-            .map(str::to_string)
+            .and_then(Value::as_str)?;
+        let excludes = lvl.get("isExcludes").and_then(Value::as_bool) == Some(true);
+        Some(if excludes {
+            format!("!{first}")
+        } else {
+            first.to_string()
+        })
     };
     let mut resource_path = ["catalog", "schema", "database", "table", "column"]
         .iter()
@@ -2337,6 +2348,30 @@ pub struct PolicyAdminApi;
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// An `isExcludes` level is listed with `!`: the catalog-scoped mask the
+    /// compiler emits (every schema but `information_schema`) must not read as
+    /// a mask on `information_schema` only.
+    #[test]
+    fn summarize_marks_an_excluded_level() {
+        let body = json!({
+            "name": "perm-rule-x",
+            "policyType": 1,
+            "isEnabled": true,
+            "resources": {
+                "catalog": {"values": ["wh"], "isExcludes": false},
+                "schema":  {"values": ["information_schema"], "isExcludes": true},
+                "table":   {"values": ["*"], "isExcludes": false},
+                "column":  {"values": ["*"], "isExcludes": false}
+            },
+            "dataMaskPolicyItems": [
+                {"groups": ["public"], "accesses": [{"type": "select"}],
+                 "dataMaskInfo": {"dataMaskType": "MASK_HASH"}}
+            ]
+        });
+        let s = summarize_policy(1, "trino", true, "compiler", &body);
+        assert_eq!(s.resource_path, "wh.!information_schema.*.*");
+    }
 
     #[test]
     fn summarize_access_policy() {

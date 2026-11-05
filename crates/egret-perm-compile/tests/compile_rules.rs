@@ -1109,6 +1109,16 @@ fn the_mask_resource_map_matches_what_the_service_def_declares() {
                 scope.table.as_deref(),
                 scope.column.as_deref(),
             ];
+            if scope.schema.is_none() {
+                // The Policies list (`summarize_policy`) must show the
+                // exclusion, not the one schema the mask skips.
+                let listed =
+                    egret_policy::admin::summarize_policy(1, "svc", true, "compiler", &out[0]);
+                assert_eq!(
+                    listed.resource_path, "wh.!information_schema.*.*",
+                    "{engine:?}: a catalog-wide mask lists as every schema but information_schema"
+                );
+            }
             for (i, (name, ..)) in levels.iter().enumerate() {
                 let level = &out[0]["resources"][name];
                 // A catalog-scoped mask's schema level excludes the catalog's
