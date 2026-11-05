@@ -1,0 +1,144 @@
+# E2E ONLY: Trino 483 on egret's OPA surface (governance SP2b, Task 20).
+# Driven by scripts/opa-e2e/{up,live-check,down}.sh. Public development secrets.
+# Every command names this file AND `-p egret-opa-e2e`; the `name:` below is the second guard.
+name: egret-opa-e2e
+
+x-e2e-env: &e2e-env
+  env_file: [egret.env]
+
+services:
+  postgres:
+    image: postgres:16
+    <<: *e2e-env
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  rustfs:
+    # STS AssumeRole is required: the embedded catalog vends credentials through it.
+    image: rustfs/rustfs:1.0.1
+    environment:
+      RUSTFS_ACCESS_KEY: egret
+      RUSTFS_SECRET_KEY: egretsecret
+    volumes:
+      - rustfsdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  rustfs-init:
+    image: amazon/aws-cli:2.37.9
+    <<: *e2e-env
+    depends_on:
+      rustfs: { condition: service_healthy }
+    restart: "no"
+    environment:
+      AWS_ACCESS_KEY_ID: egret
+      AWS_SECRET_ACCESS_KEY: egretsecret
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://rustfs:9000
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        aws s3api head-bucket --bucket "$${S3_BUCKET}" 2>/dev/null \
+          || aws s3api create-bucket --bucket "$${S3_BUCKET}"
+        echo "bucket $${S3_BUCKET} ready"
+
+  # Narrow door to the Docker API for egret's engine provisioner (copied from
+  # deploy/docker-compose.demo.yml). Not published to the host.
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0@sha256:9e4b9e7517a6b660f2cc903a19b257b1852d5b3344794e3ea334ff00ae677ac2
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      CONTAINERS: "1"
+      IMAGES: "1"
+      NETWORKS: "1"
+      POST: "1"
+      INFO: "1"
+      PING: "1"
+      EXEC: "0"
+      VOLUMES: "0"
+      SERVICES: "0"
+      SWARM: "0"
+      SECRETS: "0"
+      CONFIGS: "0"
+      NODES: "0"
+      BUILD: "0"
+      COMMIT: "0"
+      PLUGINS: "0"
+      SYSTEM: "0"
+      AUTH: "0"
+      SESSION: "0"
+      DISTRIBUTION: "0"
+      TASKS: "0"
+
+  egret:
+    image: egret-opa-e2e-backend:dev
+    init: true
+    build:
+      context: ../..
+      dockerfile: deploy/docker/backend.Dockerfile
+    <<: *e2e-env
+    depends_on:
+      postgres: { condition: service_healthy }
+      rustfs-init: { condition: service_completed_successfully }
+      docker-proxy: { condition: service_started }
+    entrypoint: ["/bin/sh", "-c", "egret migrate && egret init && exec egret serve"]
+    ports:
+      - "127.0.0.1:${EGRET_OPA_E2E_PORT:-28081}:8080"
+    environment:
+      EGRET_SERVER__HOST: 0.0.0.0
+      EGRET_SERVER__PORT: "8080"
+      EGRET_DATABASE__URL: postgres://egret:egret@postgres:5432/egret
+      EGRET_STORAGE__ENDPOINT: http://rustfs:9000
+      EGRET_STORAGE__BUCKET: warehouse
+      EGRET_STORAGE__REGION: us-east-1
+      EGRET_STORAGE__PATH_STYLE: "true"
+      EGRET_STORAGE__ACCESS_KEY: egret
+      EGRET_STORAGE__SECRET_KEY: egretsecret
+      EGRET_CATALOG__ENABLED: "true"
+      EGRET_CATALOG__WAREHOUSE: s3://warehouse
+      EGRET_CATALOG__PUBLIC_URL: http://egret:8080
+      EGRET_RANGER__ENABLED: "true"
+      EGRET_RANGER__AUTH_TOKEN: ""
+      # The OPA gate is on for THIS stack only (default false).
+      EGRET_GOVERNANCE__OPA__ENABLED: "true"
+      EGRET_ENGINES__PROVISIONER: docker
+      EGRET_ENGINES__DOCKER__HOST: tcp://docker-proxy:2375
+      EGRET_ENGINES__DOCKER__NETWORK: egret-opa-e2e_default
+      EGRET_ENGINES__DOCKER__PROJECT: egret-opa-e2e
+      EGRET_ENGINES__DOCKER__CALLBACK_URL: http://egret:8080
+      EGRET_ENGINES__DOCKER__ALLOWED_IMAGES: '["trinodb/trino"]'
+      EGRET_LOG__FILTER: info,egret=debug
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080 && printf \"GET /readyz HTTP/1.0\\r\\n\\r\\n\" >&3 && head -1 <&3 | grep -q 200'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  # The EXTERNAL engine, on the Ranger plugin. up.sh writes its /etc/trino under ${WORK}.
+  trino-ranger:
+    image: trinodb/trino:483@sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534
+    environment:
+      JAVA_TOOL_OPTIONS: "-Xmx1g"
+    volumes:
+      - ${WORK:?WORK must be set by scripts/opa-e2e/up.sh}/trino-ranger/etc:/etc/trino
+    ports:
+      - "127.0.0.1:${TRINO_RANGER_PORT:-28082}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/v1/info | grep -q '\"starting\":false'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  pgdata:
+  rustfsdata:
