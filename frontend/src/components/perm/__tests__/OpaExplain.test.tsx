@@ -57,6 +57,19 @@ describe("ExplainResultView — an OPA profile", () => {
     expect(screen.getByTestId("explain-mechanism")).toHaveTextContent("OPA");
   });
 
+  test("names the engines not yet re-applied to the profile's mechanism", async () => {
+    await renderOpen(one(opaProfile({ engines_not_reapplied: ["trino-a", "trino-b"] })));
+    expect(screen.getByTestId("explain-not-reapplied")).toHaveTextContent(
+      "Not re-applied yet: trino-a, trino-b still run the previous plugin, so they may answer " +
+        "differently from this OPA explanation until re-applied (send the switch again).",
+    );
+  });
+
+  test("says nothing about re-applying when every engine is on the mechanism", async () => {
+    await renderOpen(one(opaProfile()));
+    expect(screen.queryByTestId("explain-not-reapplied")).toBeNull();
+  });
+
   test("a Ranger profile's header says Ranger", async () => {
     await renderOpen(one(opaProfile({ mechanism: "ranger", opa: undefined })));
     expect(screen.getByTestId("explain-mechanism")).toHaveTextContent("Ranger");

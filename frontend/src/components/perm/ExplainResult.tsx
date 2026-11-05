@@ -930,6 +930,18 @@ function ProfileBlock({
         </Badge>
         <span className="text-xs text-muted-foreground">service id {profile.service_id}</span>
       </div>
+      {/* Governance SP2b Task 20F (T16 M1): explain follows the profile's
+          mechanism; an engine a switch has not re-applied yet still runs the
+          other plugin, so it may answer differently. */}
+      {profile.engines_not_reapplied && profile.engines_not_reapplied.length > 0 && (
+        <p data-testid="explain-not-reapplied" className="text-xs text-muted-foreground">
+          Not re-applied yet: {profile.engines_not_reapplied.join(", ")} still{" "}
+          {profile.engines_not_reapplied.length === 1 ? "runs" : "run"} the previous plugin, so{" "}
+          {profile.engines_not_reapplied.length === 1 ? "it" : "they"} may answer differently from
+          this {MECHANISM_LABEL[profile.mechanism]} explanation until re-applied (send the switch
+          again).
+        </p>
+      )}
       {/* Spec §5.10: the answer in sentences first, built by the server (C1);
           the verdicts they were built from fold below. */}
       {profile.effect_lines.length > 0 && (

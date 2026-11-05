@@ -1143,6 +1143,7 @@ mod tests {
             engine,
             mechanism: crate::explain_wire::WireMechanism::Ranger,
             opa: None,
+            engines_not_reapplied: Vec::new(),
             accesses: vec![allowed()],
             tags: Vec::new(),
             tag_policies_in_download: 0,

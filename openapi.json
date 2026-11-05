@@ -46448,6 +46448,13 @@
               }
             ]
           },
+          "engines_not_reapplied": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The engines bound to this profile that still run the OTHER mechanism:\ntheir recorded `applied_mechanism` differs from the profile's, because\na switch's re-apply has not reached them yet (governance SP2b Task 20F,\nfinal review T16 M1). This explanation follows the profile's mechanism,\nso those engines may answer differently until they are re-applied\n(re-send the switch). Absent when every bound engine is on it, and\nnever lists an external engine (egret records nothing for one)."
+          },
           "accesses": {
             "type": "array",
             "items": {

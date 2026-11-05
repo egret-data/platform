@@ -43,6 +43,16 @@ export interface ExplainProfile {
      */
   mechanism: WireMechanism;
   opa?: null | ExplainOpa;
+  /**
+     * The engines bound to this profile that still run the OTHER mechanism:
+     * their recorded `applied_mechanism` differs from the profile's, because
+     * a switch's re-apply has not reached them yet (governance SP2b Task 20F,
+     * final review T16 M1). This explanation follows the profile's mechanism,
+     * so those engines may answer differently until they are re-applied
+     * (re-send the switch). Absent when every bound engine is on it, and
+     * never lists an external engine (egret records nothing for one).
+     */
+  engines_not_reapplied?: string[];
   accesses: ExplainAccess[];
   /**
      * The tag set **this profile's** verdicts could have been decided by.

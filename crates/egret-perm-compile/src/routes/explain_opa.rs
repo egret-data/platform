@@ -290,6 +290,7 @@ pub(super) fn opa_profile(i: &OpaProfileInput<'_>) -> ExplainProfile {
         engine: WireEngineType::from(ranger_engine(i.engine)),
         mechanism: WireMechanism::Opa,
         opa,
+        engines_not_reapplied: Vec::new(),
         accesses,
         tags: Vec::new(),
         tag_policies_in_download: 0,
