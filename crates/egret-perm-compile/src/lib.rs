@@ -184,7 +184,8 @@ pub use trigger::{
     affected_services_for_workspace_members, affected_starrocks_profiles_for_tables,
     group_references_via, lock_services_in_tx, merge_service_ids, recompile_path_mask_profiles,
     recompile_service, recompile_service_in_tx, recompile_services_in_tx,
-    recompile_table_classified_profiles, CompileSummary, PermRecompiler, SkippedItem, SourceKind,
-    DEFAULT_EXPANSION_CEILING, PROFILE_EXPANSION_CEILING,
+    recompile_table_classified_profiles, CompileSummary, PathMaskRepair, PermRecompiler,
+    SkippedItem, SourceKind, DEFAULT_EXPANSION_CEILING, PATH_MASK_REFUSAL_PREFIX,
+    PROFILE_EXPANSION_CEILING,
 };
 pub use view_tags::{dependent_view_warehouses, retag_view_in_tx, RetagSummary, ViewRetag};
