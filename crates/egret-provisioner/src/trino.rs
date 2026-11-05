@@ -500,8 +500,8 @@ const TRINO_RANGER_SECURITY_XML: &str = crate::ranger_config::TRINO_SECURITY_XML
 ///
 /// For an OPA profile the Secret holds the OPA context file (with the real
 /// secret) instead of the XML; a value that cannot be written into it is an
-/// error naming the field only. An OPA binding without a credential renders an
-/// empty secret, which egret's OPA surface refuses.
+/// error naming the field only. An OPA binding without a credential is refused
+/// by name, never rendered with an empty secret.
 pub fn trino_ranger_secret(spec: &EngineSpec) -> Result<Option<Value>, UnrenderableOpaValue> {
     let Some(r) = spec.ranger.as_ref() else {
         return Ok(None);

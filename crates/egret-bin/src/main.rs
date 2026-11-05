@@ -2870,7 +2870,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             cp: engine_mgmt_cell.clone(),
             store: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
         }),
-        opa_enabled: config.governance.opa.enabled,
+        // Final review I1: the switch to OPA is allowed only when the OPA surface
+        // actually runs, which `start_opa` also requires the Ranger surface (and
+        // so its credential verifier) for. With `ranger.enabled` off the PATCH is
+        // refused (`Disabled`) instead of answering 200 to engines left on 404s.
+        opa_enabled: config.governance.opa.enabled && engine_credential_verifier.is_some(),
     });
 
     // Data-permission model surface (SP4a Task 9): grants/rules/explain, plus

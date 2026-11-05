@@ -1545,7 +1545,9 @@ fn widens(ranger: &Outcome, opa: &Outcome) -> bool {
         (Outcome::Filter(Some(r)), Outcome::Filter(o)) => {
             o.as_ref().is_none_or(|o| !conjuncts(o).contains(r))
         }
-        (Outcome::Mask(r), Outcome::Mask(o)) => masks(r) && !masks(o),
+        // Final review: any other mask than the one Ranger applies may be weaker
+        // (MASK_SHOW_LAST_4 for MASK_HASH), so a different mask is never explainable.
+        (Outcome::Mask(r), Outcome::Mask(o)) => masks(r) && o != r,
         _ => false,
     }
 }
