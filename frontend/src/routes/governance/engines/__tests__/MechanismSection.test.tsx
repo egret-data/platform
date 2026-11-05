@@ -177,23 +177,31 @@ describe("the Ranger | OPA selector (SP2b Task 23)", () => {
     expect(screen.queryByText(EXTERNAL)).toBeNull();
   });
 
-  it("offers a retry after a 502 and re-sends the same PATCH", async () => {
-    const served = serve(
-      answers(
-        {},
-        {
-          [PATCH]: {
-            status: 502,
-            body: {
-              error: "the profile is now on opa; engines not reconfigured: trino-b. Send the same PATCH again to retry.",
-              engines_reconfigured: ["trino-a"],
-              engines_failed: [{ engine: "trino-b", error: "timeout" }],
-              external_engines_unchanged: [],
-            },
+  it("offers a retry after a 502, moves the selection to OPA, and re-sends the same PATCH", async () => {
+    let committed = false;
+    const table = answers({}, {});
+    Object.defineProperty(table, "/policies/services", {
+      enumerable: true,
+      get: () =>
+        ok([profileDto("lake-tr", { id: 2, origin: "generated", mechanism: committed ? "opa" : "ranger", engines: [PROVISIONED] })]),
+    });
+    Object.defineProperty(table, PATCH, {
+      enumerable: true,
+      get: () => {
+        committed = true;
+        return {
+          status: 502,
+          body: {
+            error: "the profile is now on opa; engines not reconfigured: trino-b. Send the same PATCH again to retry.",
+            engines_reconfigured: ["trino-a"],
+            engines_failed: [{ engine: "trino-b", error: "timeout" }],
+            external_engines_unchanged: [],
+            external_engines_warning: "ext-trino keeps enforcing Ranger until its OPA plugin files are installed.",
           },
-        },
-      ),
-    );
+        };
+      },
+    });
+    const served = serve(table);
     const user = userEvent.setup();
     open();
     await chooseOpa(user);
@@ -201,7 +209,58 @@ describe("the Ranger | OPA selector (SP2b Task 23)", () => {
     const s = await section();
     expect(await s.findByText(/engines not reconfigured: trino-b/, {}, T)).toBeVisible();
     expect(s.getByText(/trino-b/, { selector: "li" })).toHaveTextContent("timeout");
+    expect(s.getByText(/ext-trino keeps enforcing Ranger/)).toBeVisible();
+    // The list was refetched, the selection follows the committed switch, the alert stays.
+    await waitFor(() => expect(s.getByLabelText("OPA")).toBeChecked());
+    expect(served.asked.filter((k) => k === "GET /policies/services").length).toBeGreaterThan(1);
+    expect(s.getByRole("button", { name: "Retry" })).toBeVisible();
+    expect(s.getByText(/engines not reconfigured: trino-b/)).toBeVisible();
     await user.click(s.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(served.bodies[PATCH]).toEqual([{ mechanism: "opa" }, { mechanism: "opa" }]));
+  });
+
+  describe("from OPA back to Ranger", () => {
+    const opa = (engines = [PROVISIONED, EXTERNAL_ENGINE]) => answers({ mechanism: "opa", engines });
+
+    it("shows OPA selected and asks before switching to Ranger, without the external paragraph", async () => {
+      serve(opa());
+      const user = userEvent.setup();
+      open();
+      const s = await section();
+      expect(await s.findByLabelText("OPA", {}, T)).toBeChecked();
+      expect(s.getByLabelText("Ranger")).not.toBeChecked();
+      await user.click(s.getByLabelText("Ranger"));
+      const d = within(await dialog());
+      expect(d.getByText("Switch to Ranger?")).toBeVisible();
+      expect(d.getByText(RESTART)).toBeVisible();
+      expect(screen.queryByText(EXTERNAL)).toBeNull();
+    });
+
+    it("sends ranger on confirm and toasts", async () => {
+      const served = serve(
+        answers(
+          { mechanism: "opa" },
+          { [PATCH]: ok({ name: "lake-tr", mechanism: "ranger", engines_reconfigured: ["trino-a"], external_engines_unchanged: [] }) },
+        ),
+      );
+      const user = userEvent.setup();
+      open();
+      const s = await section();
+      await user.click(await s.findByLabelText("Ranger", {}, T));
+      await user.click(within(await dialog()).getByRole("button", { name: "Switch" }));
+      await waitFor(() => expect(served.bodies[PATCH]).toEqual([{ mechanism: "ranger" }]));
+      await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Switched to Ranger."));
+      expect(await s.findByRole("status")).toHaveTextContent("Switched to Ranger.");
+    });
+  });
+
+  it("shows Unknown for a mechanism it does not know and offers no switch", async () => {
+    serve(answers({ mechanism: "zeta" }));
+    open();
+    const s = await section();
+    expect(await s.findByText(/Current mechanism: Unknown/, {}, T)).toBeVisible();
+    expect(s.getByLabelText("Ranger")).not.toBeChecked();
+    expect(s.getByLabelText("OPA")).not.toBeChecked();
+    expect(s.getByLabelText("OPA")).toBeDisabled();
   });
 });

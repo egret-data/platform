@@ -37,6 +37,8 @@ const LABEL: Record<MechanismName, string> = { ranger: "Ranger", opa: "OPA" };
 /** What the server wrote on a 502: the switch is committed, some engines were not reconfigured. */
 interface PartialSwitch {
   error: string;
+  reconfigured: string[];
+  unchanged: string[];
   failed: Array<{ engine: string; error: string }>;
   warning: string | null;
 }
@@ -51,14 +53,21 @@ function refusalsOf(e: unknown): string[] | null {
 function partialOf(e: unknown): PartialSwitch {
   const err = e as unknown as ApiError;
   const body = (err.body ?? {}) as {
+    engines_reconfigured?: string[];
+    external_engines_unchanged?: string[];
     engines_failed?: Array<{ engine: string; error: string }>;
     external_engines_warning?: string | null;
   };
-  return { error: err.message, failed: body.engines_failed ?? [], warning: body.external_engines_warning || null };
+  return {
+    error: err.message,
+    reconfigured: body.engines_reconfigured ?? [],
+    unchanged: body.external_engines_unchanged ?? [],
+    failed: body.engines_failed ?? [], warning: body.external_engines_warning || null,
+  };
 }
 
 function doneLines(res: ProfileMechanism): string[] {
-  const lines: string[] = [];
+  const lines: string[] = [`Switched to ${LABEL[res.mechanism]}.`];
   if (res.engines_reconfigured.length > 0) lines.push(`Reconfigured: ${res.engines_reconfigured.join(", ")}.`);
   if (res.external_engines_unchanged.length > 0) {
     lines.push(`Not restarted (external): ${res.external_engines_unchanged.join(", ")}.`);
@@ -86,9 +95,10 @@ export function MechanismSection({ profile }: { profile: FrameProfile }) {
   const [done, setDone] = useState<string[]>([]);
 
   const dto = profile.dto;
-  // The stored value is a plain string on the wire; anything but "opa" is Ranger.
-  const current: MechanismName = dto?.mechanism === MechanismName.opa ? MechanismName.opa : MechanismName.ranger;
-  const editable = !!dto && can("policy:update");
+  // The stored value is a plain string on the wire (T5 m6); a value that is neither is shown as Unknown.
+  const current: MechanismName | null =
+    dto?.mechanism === MechanismName.opa ? MechanismName.opa : dto?.mechanism === MechanismName.ranger ? MechanismName.ranger : null;
+  const editable = !!dto && current !== null && can("policy:update");
   const hasExternal = (dto?.engines ?? []).some((e) => e.origin === "external");
 
   const send = (mechanism: MechanismName) => {
@@ -133,7 +143,7 @@ export function MechanismSection({ profile }: { profile: FrameProfile }) {
         </p>
         <RadioGroup
           aria-labelledby="mechanism-label"
-          value={current}
+          value={current ?? ""}
           disabled={!editable || setMechanism.isPending}
           onValueChange={(v) => {
             if (v !== current) setTarget(v as MechanismName);
@@ -146,7 +156,13 @@ export function MechanismSection({ profile }: { profile: FrameProfile }) {
             </div>
           ))}
         </RadioGroup>
-        {!editable && dto ? <p className="text-sm text-muted-foreground">{MECHANISM_NEEDS_UPDATE}</p> : null}
+        {!dto ? <p className="text-sm text-muted-foreground">The profile has not loaded yet.</p> : null}
+        {dto && current === null ? (
+          <p className="text-sm text-muted-foreground">Current mechanism: Unknown ({dto.mechanism}).</p>
+        ) : null}
+        {dto && current !== null && !editable ? (
+          <p className="text-sm text-muted-foreground">{MECHANISM_NEEDS_UPDATE}</p>
+        ) : null}
         {setMechanism.isPending ? <Loader2 className="h-4 w-4 animate-spin" aria-label="Switching" /> : null}
         {/* Rendered only with content: the seed line above it on this tab is the page's one other status. */}
         {done.length > 0 ? (
@@ -181,6 +197,12 @@ export function MechanismSection({ profile }: { profile: FrameProfile }) {
                   </li>
                 ))}
               </ul>
+              {failure.partial.reconfigured.length > 0 ? (
+                <p>Reconfigured: {failure.partial.reconfigured.join(", ")}.</p>
+              ) : null}
+              {failure.partial.unchanged.length > 0 ? (
+                <p>Not restarted (external): {failure.partial.unchanged.join(", ")}.</p>
+              ) : null}
               {failure.partial.warning ? <p>{failure.partial.warning}</p> : null}
               <Button size="sm" variant="outline" disabled={setMechanism.isPending} onClick={() => send(failure.target)}>
                 Retry
