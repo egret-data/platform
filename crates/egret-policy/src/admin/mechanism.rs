@@ -192,9 +192,8 @@ pub struct ProfileMechanism {
     /// The bound external engines: egret does not configure them; their
     /// operator installs the new plugin files.
     pub external_engines_unchanged: Vec<String>,
-    /// What the operator of each external engine must do now, for this
-    /// direction ([`external_engines_warning`]). Absent when no external
-    /// engine is bound.
+    /// What the operator of each external engine must do now, for the
+    /// direction of this switch. Absent when no external engine is bound.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_engines_warning: Option<String>,
 }
@@ -202,9 +201,10 @@ pub struct ProfileMechanism {
 /// What an external engine's operator must do after the profile moved to
 /// `mechanism`, or `None` when `engines` is empty (SP2b Task 20F, T15 M7).
 /// egret does not configure an external engine, so after Ranger→OPA it keeps
-/// enforcing the Ranger artifact (still compiled), and after OPA→Ranger it
-/// asks an OPA surface that no longer serves its profile, so it fails every
-/// query until its Ranger plugin is back.
+/// enforcing the Ranger artifact (still compiled). After OPA→Ranger, one whose
+/// operator installed the OPA plugin asks an OPA surface that no longer
+/// serves its profile, so it fails every query until its Ranger plugin is
+/// back; one still on the Ranger plugin is unaffected.
 pub fn external_engines_warning(mechanism: MechanismName, engines: &[String]) -> Option<String> {
     if engines.is_empty() {
         return None;
@@ -218,9 +218,10 @@ pub fn external_engines_warning(mechanism: MechanismName, engines: &[String]) ->
              with plugin/opa)."
         ),
         MechanismName::Ranger => format!(
-            "external engines not reconfigured: {names}. Every query on them fails until \
-             their operator re-installs the Ranger plugin files from \
-             GET /api/control-plane/engines/{{id}}/ranger-plugin-config."
+            "external engines not reconfigured: {names}. Any of them running the OPA \
+             plugin fails every query until its operator re-installs the Ranger plugin \
+             files from GET /api/control-plane/engines/{{id}}/ranger-plugin-config; one \
+             still running the Ranger plugin is unaffected."
         ),
     })
 }
@@ -260,7 +261,7 @@ impl MechanismName {
     params(("service" = String, Path, description = "Policy profile (Ranger service) name")),
     request_body = SetMechanismBody,
     responses(
-        (status = 200, description = "The coordinator of every bound egret-provisioned engine restarts to load the new access control; queries running on it fail. External engines are listed in `external_engines_unchanged`, and `external_engines_warning` says what their operator must do: after a switch to OPA they keep enforcing the Ranger policies until the OPA plugin files are installed (Trino 483 or later with `plugin/opa`); after a switch to Ranger every query on them fails until the Ranger plugin files are re-installed.", body = ProfileMechanism),
+        (status = 200, description = "The coordinator of every bound egret-provisioned engine restarts to load the new access control; queries running on it fail. External engines are listed in `external_engines_unchanged`, and `external_engines_warning` says what their operator must do: after a switch to OPA they keep enforcing the Ranger policies until the OPA plugin files are installed (Trino 483 or later with `plugin/opa`); after a switch to Ranger, those running the OPA plugin fail every query until the Ranger plugin files are re-installed.", body = ProfileMechanism),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such policy profile", body = ErrorBody),

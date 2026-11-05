@@ -1083,9 +1083,11 @@ mod route {
             },
             ..Default::default()
         });
-        let warning = "external engines not reconfigured: ext-1, ext-2. Every query on them \
-                       fails until their operator re-installs the Ranger plugin files from \
-                       GET /api/control-plane/engines/{id}/ranger-plugin-config.";
+        let warning = "external engines not reconfigured: ext-1, ext-2. Any of them running \
+                       the OPA plugin fails every query until its operator re-installs the \
+                       Ranger plugin files from \
+                       GET /api/control-plane/engines/{id}/ranger-plugin-config; one still \
+                       running the Ranger plugin is unaffected.";
 
         // Act
         let (status, body) = h.patch(&svc.name, "ranger").await;

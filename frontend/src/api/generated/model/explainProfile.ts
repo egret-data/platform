@@ -49,8 +49,9 @@ export interface ExplainProfile {
      * a switch's re-apply has not reached them yet (governance SP2b Task 20F,
      * final review T16 M1). This explanation follows the profile's mechanism,
      * so those engines may answer differently until they are re-applied
-     * (re-send the switch). Absent when every bound engine is on it, and
-     * never lists an external engine (egret records nothing for one).
+     * (re-send the switch). Absent when every bound engine is on it. Lists
+     * only engines a re-sent switch re-applies: never an external engine,
+     * nor one being deleted.
      */
   engines_not_reapplied?: string[];
   accesses: ExplainAccess[];

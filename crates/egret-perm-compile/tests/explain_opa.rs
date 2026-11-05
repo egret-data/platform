@@ -1067,4 +1067,42 @@ async fn an_engine_not_yet_reapplied_to_the_profiles_mechanism_is_named() {
     let p = only_profile(&body);
     assert_eq!(p["mechanism"], "ranger", "{p}");
     assert_eq!(p["engines_not_reapplied"], json!([engine]), "{p}");
+
+    // Fix round 1: an engine a re-sent switch would not re-apply is never
+    // named, as `reapply_bound_engines` skips it: one being deleted ...
+    let set_engine = |sql: &'static str| {
+        let pool = db.pool.clone();
+        let profile = st.profile;
+        async move {
+            sqlx::query(sql)
+                .bind(profile)
+                .execute(&pool)
+                .await
+                .expect("engine row");
+        }
+    };
+    set_engine("UPDATE engine_mgmt.engines SET status = 'deleting' WHERE authz_service_id = $1")
+        .await;
+    let (_, body, _) = explain(&app, &token, &st.bob, "read", col()).await;
+    assert!(
+        only_profile(&body).get("engines_not_reapplied").is_none(),
+        "deleting: {body}"
+    );
+    // ... and an external one.
+    set_engine(
+        "UPDATE engine_mgmt.engines SET status = 'running', origin = 'external', \
+                external_host = 'trino.example', external_port = 8080, \
+                ranger_plugin_version = '2.5.0', namespace = '', spec = '{}'::jsonb \
+         WHERE authz_service_id = $1",
+    )
+    .await;
+    // On OPA (the Ranger path would judge the external engine's plugin), with
+    // the record on the other mechanism.
+    set_mechanism(&db, st.profile, "opa").await;
+    set_applied(Some("ranger")).await;
+    let (_, body, _) = explain(&app, &token, &st.bob, "read", col()).await;
+    assert!(
+        only_profile(&body).get("engines_not_reapplied").is_none(),
+        "external: {body}"
+    );
 }

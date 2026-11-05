@@ -11126,7 +11126,7 @@
         },
         "responses": {
           "200": {
-            "description": "The coordinator of every bound egret-provisioned engine restarts to load the new access control; queries running on it fail. External engines are listed in `external_engines_unchanged`, and `external_engines_warning` says what their operator must do: after a switch to OPA they keep enforcing the Ranger policies until the OPA plugin files are installed (Trino 483 or later with `plugin/opa`); after a switch to Ranger every query on them fails until the Ranger plugin files are re-installed.",
+            "description": "The coordinator of every bound egret-provisioned engine restarts to load the new access control; queries running on it fail. External engines are listed in `external_engines_unchanged`, and `external_engines_warning` says what their operator must do: after a switch to OPA they keep enforcing the Ranger policies until the OPA plugin files are installed (Trino 483 or later with `plugin/opa`); after a switch to Ranger, those running the OPA plugin fail every query until the Ranger plugin files are re-installed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -46453,7 +46453,7 @@
             "items": {
               "type": "string"
             },
-            "description": "The engines bound to this profile that still run the OTHER mechanism:\ntheir recorded `applied_mechanism` differs from the profile's, because\na switch's re-apply has not reached them yet (governance SP2b Task 20F,\nfinal review T16 M1). This explanation follows the profile's mechanism,\nso those engines may answer differently until they are re-applied\n(re-send the switch). Absent when every bound engine is on it, and\nnever lists an external engine (egret records nothing for one)."
+            "description": "The engines bound to this profile that still run the OTHER mechanism:\ntheir recorded `applied_mechanism` differs from the profile's, because\na switch's re-apply has not reached them yet (governance SP2b Task 20F,\nfinal review T16 M1). This explanation follows the profile's mechanism,\nso those engines may answer differently until they are re-applied\n(re-send the switch). Absent when every bound engine is on it. Lists\nonly engines a re-sent switch re-applies: never an external engine,\nnor one being deleted."
           },
           "accesses": {
             "type": "array",
@@ -51936,7 +51936,7 @@
               "string",
               "null"
             ],
-            "description": "What the operator of each external engine must do now, for this\ndirection ([`external_engines_warning`]). Absent when no external\nengine is bound."
+            "description": "What the operator of each external engine must do now, for the\ndirection of this switch. Absent when no external engine is bound."
           }
         }
       },

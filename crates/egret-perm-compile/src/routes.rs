@@ -729,8 +729,9 @@ pub struct ExplainProfile {
     /// a switch's re-apply has not reached them yet (governance SP2b Task 20F,
     /// final review T16 M1). This explanation follows the profile's mechanism,
     /// so those engines may answer differently until they are re-applied
-    /// (re-send the switch). Absent when every bound engine is on it, and
-    /// never lists an external engine (egret records nothing for one).
+    /// (re-send the switch). Absent when every bound engine is on it. Lists
+    /// only engines a re-sent switch re-applies: never an external engine,
+    /// nor one being deleted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub engines_not_reapplied: Vec<String>,
     pub accesses: Vec<ExplainAccess>,
@@ -3692,8 +3693,10 @@ pub(crate) async fn served_artifact_via(
 /// the profile's first engine is eligible. The OPA differential (SP2b
 /// Task 18) hands this, as JSON, to the real Ranger engine.
 /// The engines bound to `service_id` whose recorded `applied_mechanism` is not
-/// `mechanism` (see [`ExplainProfile::engines_not_reapplied`]). An engine with
-/// no record (external, or never applied) is not listed.
+/// `mechanism` (see [`ExplainProfile::engines_not_reapplied`]). Only the
+/// engines a re-sent switch re-applies are listed, by the same filter as
+/// `egret_engine_mgmt::reapply_bound_engines`: never an external engine, nor
+/// one being deleted. An engine with no record (never applied) is not listed.
 async fn engines_not_reapplied_via(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
@@ -3701,8 +3704,8 @@ async fn engines_not_reapplied_via(
 ) -> Result<Vec<String>, PermHttpError> {
     sqlx::query_scalar(
         "SELECT name FROM engine_mgmt.engines \
-          WHERE authz_service_id = $1 AND applied_mechanism IS NOT NULL \
-            AND applied_mechanism <> $2 \
+          WHERE authz_service_id = $1 AND applied_mechanism <> $2 \
+            AND origin <> 'external' AND status <> 'deleting' \
           ORDER BY name",
     )
     .bind(service_id)
