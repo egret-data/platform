@@ -159,3 +159,20 @@ pub async fn build_snapshot_for_test(
     crate::opa::build::build_snapshot_via(conn, service_id, crate::members::MissingUsername::Omit)
         .await
 }
+
+/// The policy download `routes::served_artifact_via` evaluates for explain, as
+/// the JSON the plugin receives: `tagPolicies` included, and the lineage
+/// transform applied when the profile's first engine is eligible (governance
+/// SP2b Task 18, the OPA differential's Ranger side).
+pub async fn served_artifact_json_via(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<Value, CompileError> {
+    let svc = egret_policy::get_service_by_id_via(conn, service_id)
+        .await
+        .map_err(crate::db_error::from_store)?;
+    let envelope = crate::routes::served_envelope_via(conn, &svc)
+        .await
+        .map_err(|e| CompileError::Db(format!("served artifact: {e}")))?;
+    serde_json::to_value(&envelope).map_err(|e| CompileError::Db(format!("served artifact: {e}")))
+}

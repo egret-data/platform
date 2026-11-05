@@ -111,8 +111,6 @@ const OPA_TRINO: EpKind = EpKind {
     engine: EngineType::Trino,
     mechanism: Mechanism::Opa,
 };
-/// The evidence every `OPA_TRINO` row names.
-const OPA_EVIDENCE: &str = "SP2b: the OPA evaluator answers from the same lowered statements; measured by crates/egret-perm-compile/tests/opa_differential.rs";
 
 /// The mask types each service-def declares (`service-defs/{trino,starrocks}.json`
 /// `dataMaskDef.maskTypes`); pinned to the file by
@@ -349,7 +347,7 @@ pub const ENTRIES: &[Entry] = &[
         capability: "ClassificationSelector(Mask)",
         key: Key::Fixed(|c| *c == Capability::ClassificationSelector(RuleEffectKind::Mask)),
         answer: Answer::NativeWithChannel,
-        evidence: OPA_EVIDENCE,
+        evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (tag mask rules, asked by GetColumnMask)",
     },
     Entry {
         kind: OPA_TRINO,
@@ -357,7 +355,7 @@ pub const ENTRIES: &[Entry] = &[
         capability: "ClassificationSelector(RowFilter)",
         key: Key::Fixed(|c| *c == Capability::ClassificationSelector(RuleEffectKind::RowFilter)),
         answer: Answer::NativeWithChannel,
-        evidence: OPA_EVIDENCE,
+        evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (tag row-filter rules, asked by GetRowFilters)",
     },
     Entry {
         kind: OPA_TRINO,
@@ -365,7 +363,7 @@ pub const ENTRIES: &[Entry] = &[
         capability: "ClassificationRowFilterOnColumnAttachment",
         key: Key::Fixed(|c| *c == Capability::ClassificationRowFilterOnColumnAttachment),
         answer: Answer::Lowered(LoweringKind::ExpandColumnOnlyTablesPerTable),
-        evidence: OPA_EVIDENCE,
+        evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (tag row filters over column-only classified tables, asked by GetRowFilters)",
     },
     Entry {
         kind: OPA_TRINO,
@@ -373,7 +371,7 @@ pub const ENTRIES: &[Entry] = &[
         capability: "WithholdByClassification",
         key: Key::Fixed(|c| *c == Capability::WithholdByClassification),
         answer: Answer::NativeWithChannel,
-        evidence: OPA_EVIDENCE,
+        evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (role-gated classifications, asked by the data and reach operations)",
     },
     Entry {
         kind: OPA_TRINO,
@@ -381,7 +379,7 @@ pub const ENTRIES: &[Entry] = &[
         capability: "GroupPrincipal",
         key: Key::Fixed(|c| *c == Capability::GroupPrincipal),
         answer: Answer::Lowered(LoweringKind::ExpandToUsers),
-        evidence: OPA_EVIDENCE,
+        evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (grants to a group and to public)",
     },
     Entry {
         kind: OPA_TRINO,
@@ -389,7 +387,7 @@ pub const ENTRIES: &[Entry] = &[
         capability: "RolePrincipal",
         key: Key::Fixed(|c| *c == Capability::RolePrincipal),
         answer: Answer::Lowered(LoweringKind::ExpandToUsers),
-        evidence: OPA_EVIDENCE,
+        evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (grants to a platform role)",
     },
     Entry {
         kind: OPA_TRINO,
@@ -397,7 +395,7 @@ pub const ENTRIES: &[Entry] = &[
         capability: "WithholdExemptionByGroup",
         key: Key::Fixed(|c| *c == Capability::WithholdExemptionByGroup),
         answer: Answer::Missing(ReasonCode::WithholdExemptionByGroupOnly),
-        evidence: OPA_EVIDENCE,
+        evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (group-only clearance gates, which neither side withholds)",
     },
     Entry {
         kind: OPA_TRINO,
@@ -405,7 +403,7 @@ pub const ENTRIES: &[Entry] = &[
         capability: "WithholdPrivilege(Read)",
         key: Key::Fixed(|c| *c == Capability::WithholdPrivilege(Privilege::Read)),
         answer: Answer::Native,
-        evidence: OPA_EVIDENCE,
+        evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (role-gated classifications, asked by SelectFromColumns and reach)",
     },
     Entry {
         kind: OPA_TRINO,
@@ -413,7 +411,7 @@ pub const ENTRIES: &[Entry] = &[
         capability: "WithholdPrivilege(Write)",
         key: Key::Fixed(|c| *c == Capability::WithholdPrivilege(Privilege::Write)),
         answer: Answer::Native,
-        evidence: OPA_EVIDENCE,
+        evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (role-gated classifications, asked by the write operations)",
     },
     Entry {
         kind: OPA_TRINO,
@@ -421,7 +419,7 @@ pub const ENTRIES: &[Entry] = &[
         capability: "PoliciesReachMetadataTables",
         key: Key::Fixed(|c| *c == Capability::PoliciesReachMetadataTables),
         answer: Answer::Lowered(LoweringKind::DenyMetadataTables),
-        evidence: OPA_EVIDENCE,
+        evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (questions on t3$files under restrictions on t3)",
     },
     Entry {
         kind: OPA_TRINO,
@@ -429,7 +427,7 @@ pub const ENTRIES: &[Entry] = &[
         capability: "MaskType(name)",
         key: Key::MaskTypes(TRINO_MASK_TYPES),
         answer: Answer::Native,
-        evidence: OPA_EVIDENCE,
+        evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (MASK, MASK_HASH, MASK_NULL, MASK_NONE and CUSTOM masks, asked by GetColumnMask)",
     },
 ];
 
@@ -614,9 +612,7 @@ mod tests {
     fn every_entry_names_its_evidence() {
         for e in ENTRIES {
             assert!(
-                e.evidence.contains(".rs:")
-                    || e.evidence.contains(".tsx")
-                    || (e.kind == OPA_TRINO && e.evidence == OPA_EVIDENCE),
+                e.evidence.contains(".rs:") || e.evidence.contains(".tsx"),
                 "{:?} has no evidence",
                 e.capability
             );

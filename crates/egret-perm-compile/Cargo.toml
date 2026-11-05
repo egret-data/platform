@@ -116,7 +116,15 @@ required-features = ["harness"]
 name = "opa_cache"
 required-features = ["harness"]
 
+# Governance SP2b Task 18: the OPA decision-level differential against the
+# real Ranger engine (JVM; gated on EGRET_TEST_RANGER_E2E=1).
+[[test]]
+name = "opa_differential"
+required-features = ["harness"]
+
 [dev-dependencies]
+# SP2b Task 18: `tests/opa_differential/explained.toml`.
+toml.workspace = true
 egret-metastore.workspace = true
 egret-test-db.workspace = true
 # #787: `start_paused` drives the boot repair's backoff without waiting it out.

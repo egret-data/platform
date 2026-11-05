@@ -3670,6 +3670,17 @@ pub(crate) async fn served_artifact_via(
     conn: &mut sqlx::PgConnection,
     svc: &ServiceRow,
 ) -> Result<ServicePolicySet, PermHttpError> {
+    to_policy_set(&served_envelope_via(conn, svc).await?)
+}
+
+/// The envelope [`served_artifact_via`] reads, before it is parsed: the
+/// plugin download, `tagPolicies` included, with the lineage transform when
+/// the profile's first engine is eligible. The OPA differential (SP2b
+/// Task 18) hands this, as JSON, to the real Ranger engine.
+pub(crate) async fn served_envelope_via(
+    conn: &mut sqlx::PgConnection,
+    svc: &ServiceRow,
+) -> Result<ServicePolicies, PermHttpError> {
     use egret_policy::lineage_transform as lt;
     let mut envelope = envelope_via(conn, svc).await?;
     // Fix round 2, N4: the download's own per-poller decision, asked for a
@@ -3690,7 +3701,7 @@ pub(crate) async fn served_artifact_via(
             lt::apply_lineage_transform(&mut envelope, &catalogs);
         }
     }
-    to_policy_set(&envelope)
+    Ok(envelope)
 }
 
 /// [`artifact_via`] as the compiler serves the profile: on Trino, with the
