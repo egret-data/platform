@@ -32,9 +32,11 @@ the error class (`errorName`) and the normalised message (norm_error()). Kinds:
   never explainable (OPA shows more; fails whatever explained.toml says)
     opa-serves           OPA serves what Ranger refuses
     opa-more-columns     OPA returns a column Ranger does not
-    opa-more-rows        OPA returns more rows than Ranger
+    opa-more-rows        OPA returns more rows than Ranger, or a larger count(...) for the same
+                         group (counts_more())
     opa-clearer-values   some column holds a value on OPA that Ranger masks or does not return
-                         (shows_more_values(): checked on every path, whatever the row counts)
+                         (shows_more_values(): the reference test AND the value-shape tests,
+                         on every path, whatever the row counts)
 
 A never-explainable difference is an evaluator or a harness bug (the Task 18 rule). An entry of
 explained.toml tagged with layer 2 (`layer = [.., 2]`; a missing `layer` means `[1]`) explains a
@@ -118,12 +120,15 @@ def column(res: dict, name: str) -> list:
 def shows_more_values(opa: dict, rgr: dict, ref: dict | None) -> tuple[str, str] | None:
     """(column, why) where OPA holds a value Ranger masks or does not return; else None.
 
-    With the policy-free reference: a value counts as clear when the reference column holds it;
-    OPA shows more when it returns a clear value more often than Ranger does. That catches a
-    CUSTOM or other distinctness-keeping mask, a dropped mask on fewer rows, and a column OPA
-    keeps clear next to one it hides. Without a reference (the statement failed there, or it
-    is no SELECT) the value-shape tests: Ranger all NULL where OPA is not; more distinct values
-    on OPA; Ranger all 64-hex hashes where OPA is not.
+    Both kinds of test run on every shared column whose values differ; either one fails the case.
+
+    - The reference test (when the policy-free reference has the column): a value counts as clear
+      when the reference holds it, and OPA shows more when it returns a clear value more often
+      than Ranger. That catches a CUSTOM or other distinctness-keeping mask, a dropped mask on
+      fewer rows, and a column OPA keeps clear next to one it hides.
+    - The value-shape tests, always, because the reference only knows FULLY clear values and a
+      weaker mask is not one: Ranger all NULL where OPA is not (last-4 or a hash on OPA, NULL on
+      Ranger); more distinct values on OPA; Ranger all 64-hex hashes where OPA is not.
     """
     shared = [c for c in rgr["columns"] if c in opa["columns"]]
     ref_ok = ref is not None and ref.get("ok")
@@ -137,7 +142,6 @@ def shows_more_values(opa: dict, rgr: dict, ref: dict | None) -> tuple[str, str]
             extra = [v for v in co if v in clear and co[v] > cr[v]]
             if extra:
                 return c, f"OPA returns the clear value {extra[0]} {co[extra[0]]}x, Ranger {cr[extra[0]]}x"
-            continue
         if r and all(v is None for v in r) and any(v is not None for v in o):
             return c, "Ranger is all NULL and OPA is not"
         do, dr = len(set(map(canon, o))), len(set(map(canon, r)))
@@ -151,7 +155,67 @@ def shows_more_values(opa: dict, rgr: dict, ref: dict | None) -> tuple[str, str]
     return None
 
 
-def classify(opa: dict, rgr: dict, ref: dict | None) -> dict:
+def select_list(statement: str) -> list[str] | None:
+    """The top-level expressions of a statement's SELECT list, or None if it has none."""
+    m = re.search(r"(?is)\bSELECT\s+(.*?)\s+FROM\s", statement)
+    if not m:
+        return None
+    out, depth, cur = [], 0, ""
+    for ch in m.group(1):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == "," and depth == 0:
+            out.append(cur.strip())
+            cur = ""
+        else:
+            cur += ch
+    out.append(cur.strip())
+    return out
+
+
+def counts_more(opa: dict, rgr: dict, statement: str) -> tuple[str, str] | None:
+    """(column, why) where a `count(...)` is larger on OPA than on Ranger for the same group.
+
+    A count is monotone in the rows it sees: a looser row filter (or a clear value where Ranger
+    masks, under count(DISTINCT ...)) makes it larger, so a larger count on OPA is OPA showing
+    more, whatever explained.toml says. Other aggregates (min, max, sum of signed values) are
+    not monotone and are not judged here. Rows are matched on the non-count columns; a statement
+    whose SELECT list does not line up with the result's columns is skipped.
+    """
+    exprs = select_list(statement)
+    if not exprs or len(exprs) != len(opa["columns"]) or opa["columns"] != rgr["columns"]:
+        return None
+    counted = [i for i, e in enumerate(exprs) if re.match(r"(?i)count\s*\(", e)]
+    if not counted:
+        return None
+    keys = [i for i in range(len(exprs)) if i not in counted]
+
+    def by_key(res: dict) -> dict | None:
+        d = {}
+        for row in res["rows"]:
+            k = canon([row[i] for i in keys])
+            if k in d:
+                return None
+            d[k] = row
+        return d
+
+    o, r = by_key(opa), by_key(rgr)
+    if o is None or r is None:
+        return None
+    for k, orow in o.items():
+        rrow = r.get(k)
+        if rrow is None:
+            continue
+        for i in counted:
+            ov, rv = orow[i], rrow[i]
+            if isinstance(ov, int) and isinstance(rv, int) and ov > rv:
+                return opa["columns"][i], f"{exprs[i]} is {ov} on OPA, {rv} on Ranger"
+    return None
+
+
+def classify(opa: dict, rgr: dict, ref: dict | None, statement: str = "") -> dict:
     """The verdict of one case: {"kind": "same" | <kind>, "columns": [...], "detail": str}."""
     if opa["ok"] and rgr["ok"]:
         oc, rc = opa["columns"], rgr["columns"]
@@ -163,6 +227,9 @@ def classify(opa: dict, rgr: dict, ref: dict | None) -> dict:
         n_o, n_r = len(opa["rows"]), len(rgr["rows"])
         if n_o > n_r:
             return {"kind": "opa-more-rows", "columns": [], "detail": f"OPA {n_o} rows, Ranger {n_r}"}
+        counted = counts_more(opa, rgr, statement)
+        if counted:
+            return {"kind": "opa-more-rows", "columns": [counted[0]], "detail": counted[1]}
         more = shows_more_values(opa, rgr, ref)
         if more:
             return {"kind": "opa-clearer-values", "columns": [more[0]], "detail": more[1]}
@@ -259,7 +326,7 @@ def main(argv: list[str] | None = None) -> int:
         if "opa" not in sides or "ranger" not in sides:
             incomplete.append({"case": list(key), "has": sorted(sides)})
             continue
-        v = classify(sides["opa"], sides["ranger"], sides.get("ref"))
+        v = classify(sides["opa"], sides["ranger"], sides.get("ref"), sides["opa"]["statement"])
         cases.append({
             "scenario": key[0],
             "user": key[1],

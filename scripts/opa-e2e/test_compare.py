@@ -124,6 +124,66 @@ class CompareTest(unittest.TestCase):
         code, report, _ = self.go([opa, rgr, ref], entry("c", ("*", "*", ".*", "values-differ")))
         self.assertEqual([c["kind"] for c in report["forbidden"]], ["opa-clearer-values"])
 
+    # --- a weaker mask or a looser filter, with a reference present (re-review R1) -------------
+    def test_last_four_on_opa_where_ranger_nulls_is_forbidden_with_a_reference(self):
+        # One row: the distinct-count test cannot see it, only "Ranger is all NULL" can.
+        opa = run("opa", ["ssn"], [["XXXXX0001"]])
+        rgr = run("ranger", ["ssn"], [[None]])
+        ref = run("ref", ["ssn"], [["000000001"]])
+        code, report, _ = self.go([opa, rgr, ref], entry("c", ("*", "*", ".*", "values-differ")))
+        self.assertEqual(code, 1)
+        self.assertEqual([(c["kind"], c["columns"]) for c in report["forbidden"]],
+                         [("opa-clearer-values", ["ssn"])])
+
+    def test_a_hash_on_opa_where_ranger_nulls_is_forbidden_with_a_reference(self):
+        opa = run("opa", ["email"], [["B36A83701F1C3191E19722D6F90274BC1B5501FE69EBF33313E440FE4B0FE210"]])
+        rgr = run("ranger", ["email"], [[None]])
+        ref = run("ref", ["email"], [["user1@example.com"]])
+        code, report, _ = self.go([opa, rgr, ref], entry("c", ("*", "*", ".*", "values-differ")))
+        self.assertEqual([c["kind"] for c in report["forbidden"]], ["opa-clearer-values"])
+
+    def test_clear_on_opa_where_ranger_hashes_is_forbidden_with_a_reference_lacking_the_column(self):
+        # Distinct hashes: as many distinct values as OPA, so only the hash test can see it.
+        opa = run("opa", ["email"], [["a@x"], ["b@x"]])
+        rgr = run("ranger", ["email"], [[HASH], ["B36A83701F1C3191E19722D6F90274BC1B5501FE69EBF33313E440FE4B0FE210"]])
+        ref = run("ref", ["id"], [[1], [2]])
+        code, report, _ = self.go([opa, rgr, ref], entry("c", ("*", "*", ".*", "values-differ")))
+        self.assertEqual([c["kind"] for c in report["forbidden"]], ["opa-clearer-values"])
+
+    def test_more_distinct_values_on_opa_than_a_constant_mask_is_forbidden(self):
+        # Ranger masks to a constant (neither NULL nor a hash); no reference column for it.
+        opa = run("opa", ["name"], [["name1"], ["name2"]])
+        rgr = run("ranger", ["name"], [["xxxx"], ["xxxx"]])
+        code, report, _ = self.go([opa, rgr], entry("c", ("*", "*", ".*", "values-differ")))
+        self.assertEqual([c["kind"] for c in report["forbidden"]], ["opa-clearer-values"])
+
+    def test_a_larger_count_on_opa_is_a_looser_filter(self):
+        stmt = "SELECT count(*) FROM lake.s2.t3"
+        opa = run("opa", ["_col0"], [[500]], stmt=stmt)
+        rgr = run("ranger", ["_col0"], [[50]], stmt=stmt)
+        ref = run("ref", ["_col0"], [[1000]], stmt=stmt)
+        code, report, _ = self.go([opa, rgr, ref], entry("c", ("*", "*", ".*", "values-differ")))
+        self.assertEqual(code, 1)
+        self.assertEqual([(c["kind"], c["columns"]) for c in report["forbidden"]],
+                         [("opa-more-rows", ["_col0"])])
+
+    def test_a_larger_count_per_group_is_a_looser_filter(self):
+        stmt = "SELECT region, count(*) FROM lake.s1.t1 GROUP BY region ORDER BY region"
+        opa = run("opa", ["region", "_col1"], [["us", 500]], stmt=stmt)
+        rgr = run("ranger", ["region", "_col1"], [["us", 250]], stmt=stmt)
+        code, report, _ = self.go([opa, rgr], entry("c", ("*", "*", ".*", "values-differ")))
+        self.assertEqual([c["kind"] for c in report["forbidden"]], ["opa-more-rows"])
+
+    def test_a_smaller_count_or_another_min_is_not_forbidden(self):
+        # min() is not monotone in the rows: a stricter filter on OPA can raise it.
+        stmt = "SELECT count(*), min(id) FROM lake.s2.t3"
+        opa = run("opa", ["_col0", "_col1"], [[50, 2]], stmt=stmt)
+        rgr = run("ranger", ["_col0", "_col1"], [[100, 1]], stmt=stmt)
+        ref = run("ref", ["_col0", "_col1"], [[100, 1]], stmt=stmt)
+        code, report, _ = self.go([opa, rgr, ref])
+        self.assertEqual(report["forbidden"], [])
+        self.assertEqual(report["unexplained"][0]["kind"], "values-differ")
+
     def test_more_rows_more_columns_and_serving_a_refusal_are_forbidden(self):
         records = [
             run("opa", ["region"], [["us"], ["eu"]], sid="a"),
