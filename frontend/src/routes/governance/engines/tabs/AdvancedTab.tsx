@@ -25,6 +25,7 @@ import { editorUrl } from "@/routes/governance/engines/engineUrl";
 import type { TabContext } from "@/routes/governance/engines/PageFrame";
 import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
 import { cn } from "@/lib/utils";
+import { MechanismSection } from "@/routes/governance/engines/tabs/MechanismSection";
 import { TagServiceSection } from "@/routes/governance/engines/tabs/TagServiceSection";
 
 export const ADVANCED_WARNING =
@@ -182,6 +183,7 @@ export function AdvancedTab({ ctx }: { ctx: TabContext }) {
         </Alert>
       ) : null}
       <Section title="Manual policies">{list}</Section>
+      {profile.type === "trino" ? <MechanismSection profile={profile} /> : null}
       {profile.type === "trino" ? <TagServiceSection profile={profile} /> : null}
     </div>
   );
