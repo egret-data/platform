@@ -204,6 +204,26 @@ fn lineage_refuses(leaf: &str, access: &str, user: &str, resource: Option<&Resou
     }
 }
 
+/// The access types a data privilege compiles to on Trino
+/// (`egret_perm::engine_accesses`): what the lineage gate checks for
+/// `decide_privilege`.
+fn data_accesses(p: DataPrivilege) -> &'static [&'static str] {
+    match p {
+        DataPrivilege::Read => &["select"],
+        DataPrivilege::Write => &["insert", "delete"],
+    }
+}
+
+/// The leaf a data object asks at: its deepest present level.
+fn data_leaf(o: &ObjectPath) -> &'static str {
+    match (&o.schema, &o.table, &o.column) {
+        (_, _, Some(_)) => "column",
+        (_, Some(_), None) => "table",
+        (Some(_), None, None) => "schema",
+        (None, None, None) => "catalog",
+    }
+}
+
 /// D2: the statement applies to `user` when `include` names them or everyone,
 /// and `except` names neither. Usernames compare exactly.
 pub(crate) fn applies(a: &Audience, user: &str) -> bool {
@@ -392,13 +412,20 @@ impl Snapshot {
             object.table.as_deref(),
             object.column.as_deref(),
         ) {
-            Some(o) => self.check_data(user, privilege_of_data(privilege), &o),
+            Some(o) => {
+                let what = format!("{privilege:?}");
+                let accesses = data_accesses(privilege);
+                self.lineage_gate(user, &what, data_leaf(object), accesses, None)
+                    .unwrap_or_else(|| self.check_data(user, privilege_of_data(privilege), &o))
+            }
             None => deny("malformed object path: a level is named below an absent one".into()),
         }
     }
 
-    /// The lineage gate of `decide`: refused when any of `accesses` on `leaf`
-    /// is one the reserved principal is never allowed.
+    /// **The one lineage gate** `decide` (the OPA surface) and
+    /// `decide_privilege` (explain) both go through, so the two cannot answer
+    /// the reserved principal differently: refused when any of `accesses` on
+    /// `leaf` is one it is never allowed.
     fn lineage_gate(
         &self,
         user: &str,

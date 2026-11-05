@@ -1803,3 +1803,55 @@ fn a_snapshot_without_the_lineage_principal_is_refused() {
         assert_eq!(e, Some(SnapshotError::NoLineagePrincipal), "{name:?}");
     }
 }
+
+/// Task 18 fix round 1 (I2): explain's `decide_privilege` and the surface's
+/// `decide` go through one lineage gate: Write is refused to the principal
+/// on both, naming the lineage rule; Read follows the grants on both.
+#[test]
+fn explain_and_the_surface_refuse_the_lineage_principal_alike() {
+    use egret_perm_eval::trino_ops::DataPrivilege;
+    use egret_perm_eval::ObjectPath;
+    const LP: &str = "egret-lineage";
+    let s = snap(
+        vec![st(
+            1,
+            who(&["*"], &[]),
+            path("lake", None, None, None),
+            Effect::Allow {
+                privileges: vec![Privilege::Read, Privilege::Write],
+            },
+        )],
+        vec![],
+    );
+    let object = |column: Option<&str>| ObjectPath {
+        catalog: "lake".into(),
+        schema: Some("s".into()),
+        table: Some("t".into()),
+        column: column.map(str::to_string),
+    };
+    let w = s.decide_privilege(LP, DataPrivilege::Write, &object(None));
+    assert!(
+        matches!(&w, Decision::Deny { explicit: true, reason } if reason.contains("lineage principal")),
+        "{w:?}"
+    );
+    assert!(!allowed(&s.decide(
+        LP,
+        "InsertIntoTable",
+        &cols("lake", "s", "t", &[])
+    )));
+    assert!(allowed(&s.decide_privilege(
+        LP,
+        DataPrivilege::Read,
+        &object(Some("a"))
+    )));
+    assert!(allowed(&s.decide(
+        LP,
+        "SelectFromColumns",
+        &cols("lake", "s", "t", &["a"])
+    )));
+    assert!(allowed(&s.decide_privilege(
+        "ann",
+        DataPrivilege::Write,
+        &object(None)
+    )));
+}

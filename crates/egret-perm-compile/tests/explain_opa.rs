@@ -208,6 +208,18 @@ async fn store(db: &Db, prefix: &str, extra: Extra) -> Store {
     gate(&mut tx, pii, &[cleared.as_str()], &[]).await;
     match extra {
         Extra::None => {}
+        Extra::PublicWrite => {
+            grant(
+                &mut tx,
+                &format!("{prefix}.public_write"),
+                Effect::Allow,
+                &[Action::Write],
+                scope(cat, None, None, None),
+                set(&[group_ref("public")], &[]),
+                &mut names,
+            )
+            .await;
+        }
         Extra::MaskAndFilter => {
             rule(
                 &mut tx,
@@ -276,6 +288,7 @@ const LEAKED_REF: &str = "someone.else@private.example";
 #[derive(Clone, Copy)]
 enum Extra {
     None,
+    PublicWrite,
     MaskAndFilter,
     UnusableGrant,
     TwoMasks,
@@ -951,4 +964,38 @@ async fn a_failed_data_lowering_is_answered_from_the_previous_snapshot_as_the_su
     assert!(!raw.contains(LEAKED_REF), "{raw}");
     // With no previous snapshot there is nothing to splice into.
     assert_refused(&no_previous, "UnusableUserRef");
+}
+
+/// Task 18 fix round 1 (I2): explain answers the reserved lineage principal
+/// as the OPA surface does. A `public` write grant lets carol write but not
+/// egret-lineage, whose insert and delete are refused naming the lineage
+/// rule; its read follows the grants, as anyone's.
+#[tokio::test]
+async fn explain_refuses_the_lineage_principal_a_public_write_as_the_surface_does() {
+    // Arrange
+    let db = db().await;
+    let st = store(&db, &prefix("xo10"), Extra::PublicWrite).await;
+    set_mechanism(&db, st.profile, "opa").await;
+    let (app, token) = app(&db, None).await;
+    let lineage = egret_core::engine_principals::LINEAGE_PRINCIPAL;
+    let t = target(st.cat, Some("t"), None);
+
+    // Act
+    let (s_lp, lp, _) = explain(&app, &token, lineage, "write", t.clone()).await;
+    let (s_carol, carol, _) = explain(&app, &token, &st.carol, "write", t).await;
+
+    // Assert
+    assert_eq!(s_lp, StatusCode::OK, "{lp}");
+    assert_eq!(s_carol, StatusCode::OK, "{carol}");
+    for access_type in ["insert", "delete"] {
+        let a = access(only_profile(&lp), access_type);
+        assert_eq!(a["decision"]["kind"], "denied", "{a}");
+        let reason = a["ir_reason"].as_str().expect("ir_reason");
+        assert!(
+            reason.contains("lineage principal") && reason.contains(lineage),
+            "{reason}"
+        );
+        let a = access(only_profile(&carol), access_type);
+        assert_eq!(a["decision"]["kind"], "allowed", "{a}");
+    }
 }
