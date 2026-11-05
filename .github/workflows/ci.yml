@@ -241,6 +241,46 @@ jobs:
       - name: Ranger differential corpus
         run: EGRET_TEST_RANGER_E2E=1 cargo test -p egret-ranger-eval --test differential --no-fail-fast -- --nocapture
 
+  # SP2b. egret's OPA evaluator (`egret-perm-eval`) against the Ranger artifact and real
+  # Ranger 2.8.0. Java 17 and the maven cache match `ranger-differential`. Like it, no
+  # `continue-on-error` and no `-q`: the surefire summary is asserted by name.
+  opa-differential:
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: egret
+          POSTGRES_PASSWORD: egret
+          POSTGRES_DB: egret_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U egret"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - uses: Swatinem/rust-cache@v2
+      # The operation table must still equal what the 483 jar sends.
+      - name: Operation table covers the 483 plugin
+        run: cargo test -p egret-perm-eval --no-fail-fast
+      # S8: every Trino golden fixture compiled on an OPA profile equals its blessed Ranger artifact.
+      - name: The Ranger artifact does not depend on the mechanism
+        run: env -u EGRET_ALLOW_DB_SKIP EGRET_GOLDEN_MECHANISM=opa cargo test -p egret-perm-compile --features harness --test golden_compile --no-fail-fast
+      # 40 store states x 50 Trino questions, egret-perm-eval against real Ranger 2.8.0.
+      - name: OPA decision-level differential
+        run: env -u EGRET_ALLOW_DB_SKIP EGRET_TEST_RANGER_E2E=1 cargo test -p egret-perm-compile --features harness --test opa_differential --no-fail-fast -- --nocapture
+
   frontend:
     needs: changes
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.code == 'true' || needs.changes.outputs.frontend_docs == 'true') }}
