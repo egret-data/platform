@@ -42,6 +42,7 @@ jobs:
     outputs:
       code: ${{ steps.code.outputs.code }}
       frontend_docs: ${{ steps.frontend_docs.outputs.frontend_docs }}
+      opa: ${{ steps.opa.outputs.opa }}
     steps:
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: code
@@ -65,6 +66,16 @@ jobs:
               - 'docs/en/frontend-rules.md'
               - 'docs/vi/frontend-rules.md'
               - 'docs/en/ui-conventions.md'
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: opa
+        with:
+          # What decides the end-to-end OPA differential (opa-e2e): the IR, the evaluator, the
+          # compile (the Ranger oracle and the OPA surface), and the stack and its scripts.
+          filters: |
+            opa:
+              - 'crates/egret-perm-*/**'
+              - 'deploy/opa-e2e/**'
+              - 'scripts/opa-e2e/**'
 
   rust:
     needs: changes
@@ -289,6 +300,49 @@ jobs:
       # 40 store states x 50 Trino questions, egret-perm-eval against real Ranger 2.8.0.
       - name: OPA decision-level differential
         run: env -u EGRET_ALLOW_DB_SKIP EGRET_TEST_RANGER_E2E=1 cargo test -p egret-perm-compile --features harness --test opa_differential --no-fail-fast -- --nocapture
+
+  # SP2b Task 21, Layer 2: Trino-on-OPA against Trino-on-Ranger, end to end. Brings up compose
+  # project egret-opa-e2e (egret built from this tree, a provisioned trino-opa on the OPA plugin, a
+  # trino-ranger on the same profile's Ranger download), runs every scenario of
+  # scripts/opa-e2e/scenarios.sql.d on both, and fails on any difference explained.toml does not
+  # explain, or on any case where trino-opa shows more than trino-ranger.
+  opa-e2e:
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.opa == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      WORK: ${{ runner.temp }}/egret-opa-e2e
+      LAYER2_REPORT: ${{ github.workspace }}/layer2-report.json
+    steps:
+      - uses: actions/checkout@v4
+      # The backend image build links egret-bin like the `rust` job does; same reclaim.
+      - name: Reclaim runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/.ghcup /usr/local/share/boost \
+                      /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force > /dev/null 2>&1 || true
+          df -h /
+      - name: compare.py unit tests
+        run: python3 -I -m unittest discover -s scripts/opa-e2e -p test_compare.py -v
+      - name: Bring up the stack
+        run: scripts/opa-e2e/up.sh
+      - name: Layer 2 differential
+        run: scripts/opa-e2e/layer2.sh
+      - name: Tear down
+        if: always()
+        run: scripts/opa-e2e/down.sh
+      - name: Upload the Layer 2 report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: layer2-report
+          path: |
+            layer2-report.json
+            layer2-results.jsonl
+          if-no-files-found: warn
 
   frontend:
     needs: changes
