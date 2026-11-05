@@ -32,7 +32,10 @@ fn unreachable_pool() -> sqlx::PgPool {
 
 fn gate(enabled: bool) -> GovernanceConfig {
     GovernanceConfig {
-        opa: OpaSettings { enabled },
+        opa: OpaSettings {
+            enabled,
+            ..OpaSettings::default()
+        },
     }
 }
 
@@ -83,4 +86,28 @@ async fn the_gate_on_without_the_ranger_verifier_starts_nothing() {
 
     // Assert
     assert!(started.is_none());
+}
+
+/// SP2b Task 20F: `[governance.opa] batch_body_limit_bytes` reaches the
+/// surface, and the config's default is the surface's.
+#[tokio::test]
+async fn the_configured_batch_body_limit_reaches_the_surface() {
+    assert_eq!(
+        egret_config::DEFAULT_OPA_BATCH_BODY_LIMIT_BYTES,
+        egret_perm_compile::opa::surface::OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES
+    );
+    let cancel = CancellationToken::new();
+    let config = GovernanceConfig {
+        opa: OpaSettings {
+            enabled: true,
+            batch_body_limit_bytes: 7 * 1024 * 1024,
+        },
+    };
+
+    let (state, handle) = start_opa_from_config(&config, verifier(), unreachable_pool(), &cancel)
+        .expect("the gate is on");
+    cancel.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+
+    assert_eq!(state.batch_body_limit, 7 * 1024 * 1024);
 }

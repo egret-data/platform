@@ -588,8 +588,15 @@ pub struct GovernanceConfig {
     pub opa: OpaSettings,
 }
 
+/// The default of [`OpaSettings::batch_body_limit_bytes`]: 24 MiB.
+pub const DEFAULT_OPA_BATCH_BODY_LIMIT_BYTES: usize = 24 * 1024 * 1024;
+
+fn default_opa_batch_body_limit_bytes() -> usize {
+    DEFAULT_OPA_BATCH_BODY_LIMIT_BYTES
+}
+
 /// `[governance.opa]` — egret answering Trino's OPA plugin (governance SP2b).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpaSettings {
     /// **The exposure lever for the OPA surface, and it defaults to `false`**
     /// until SP2b-2 (Task 26) — modelled on
@@ -601,6 +608,34 @@ pub struct OpaSettings {
     /// `mechanism = "opa"` (switching back to Ranger always works).
     #[serde(default)]
     pub enabled: bool,
+    /// The largest request body the OPA surface's `/batch` route accepts, in
+    /// bytes. Key `[governance.opa] batch_body_limit_bytes`, env
+    /// `EGRET_GOVERNANCE__OPA__BATCH_BODY_LIMIT_BYTES`. Default 24 MiB
+    /// ([`DEFAULT_OPA_BATCH_BODY_LIMIT_BYTES`]); every other OPA route keeps
+    /// its fixed 4 MiB.
+    ///
+    /// Trino 483's plugin sends `FilterTables` for a whole schema in one
+    /// `/batch` request, measured at about 73 bytes per table with short
+    /// names. The default holds about 340 000 such tables (170 000 to
+    /// 210 000 at 20- to 30-character names). A larger body is answered 413,
+    /// which fails the query (SHOW TABLES, `information_schema` reads).
+    ///
+    /// Memory: the surface admits request bodies and their parses by size, in
+    /// 4 MiB units against fixed budgets, so raising this limit does not raise
+    /// the worst-case memory; a larger body only takes more of the budget, and
+    /// waits (then 503) while it is used up. A value under 4 MiB still works,
+    /// but refuses schemas the other routes' limit would allow.
+    #[serde(default = "default_opa_batch_body_limit_bytes")]
+    pub batch_body_limit_bytes: usize,
+}
+
+impl Default for OpaSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            batch_body_limit_bytes: DEFAULT_OPA_BATCH_BODY_LIMIT_BYTES,
+        }
+    }
 }
 
 /// Which backend provisions engines (`[engines] provisioner`, env
@@ -4288,6 +4323,36 @@ values = { allowed-images = [] }
             jail.set_env("EGRET_GOVERNANCE__OPA__ENABLED", "true");
             let c: Config = Config::figment().extract().expect("env");
             assert!(c.governance.opa.enabled, "the env spelling turns it on");
+            Ok(())
+        });
+    }
+
+    /// SP2b Task 20F: `/batch` has its own body limit, 24 MiB unless set.
+    #[test]
+    fn governance_opa_batch_body_limit_defaults_to_24_mib_and_is_configurable() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("egret.toml", "[governance.opa]\nenabled = true\n")?;
+            let c: Config = Config::figment().extract().expect("defaults");
+            assert_eq!(c.governance.opa.batch_body_limit_bytes, 24 * 1024 * 1024);
+            assert_eq!(
+                OpaSettings::default().batch_body_limit_bytes,
+                24 * 1024 * 1024
+            );
+            Ok(())
+        });
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "egret.toml",
+                "[governance.opa]\nbatch_body_limit_bytes = 33554432\n",
+            )?;
+            let c: Config = Config::figment().extract().expect("toml");
+            assert_eq!(c.governance.opa.batch_body_limit_bytes, 32 * 1024 * 1024);
+            Ok(())
+        });
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_GOVERNANCE__OPA__BATCH_BODY_LIMIT_BYTES", "8388608");
+            let c: Config = Config::figment().extract().expect("env");
+            assert_eq!(c.governance.opa.batch_body_limit_bytes, 8 * 1024 * 1024);
             Ok(())
         });
     }

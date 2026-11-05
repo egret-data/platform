@@ -18,7 +18,9 @@ use axum::body::Body;
 use axum::http::Request;
 use egret_engine_mgmt_api::credential::{EngineCredentialVerifier, EngineIdentity};
 use egret_perm_compile::opa::cache::{SnapshotCache, MAX_UNREAD, REFRESH_PERIOD};
-use egret_perm_compile::opa::surface::{ParseGate, VerifiedCache, OPA_BODY_LIMIT_BYTES};
+use egret_perm_compile::opa::surface::{
+    ParseGate, VerifiedCache, OPA_BODY_LIMIT_BYTES, OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+};
 use egret_perm_compile::{start_opa, OpaState, OPA_SURFACE_PREFIX};
 use egret_perm_eval::{Snapshot, SnapshotInput};
 use egret_perm_ir::audience::{Audience, Member, MemberName, Via};
@@ -92,6 +94,7 @@ fn opa_state(verifier: Arc<dyn EngineCredentialVerifier>, engine: uuid::Uuid) ->
         verifier,
         credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
         parses: Arc::new(ParseGate::default()),
+        batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
     }
 }
 
@@ -266,7 +269,13 @@ async fn with_the_gate_off_nothing_starts_and_no_connection_is_opened() {
         .expect("lazy pool");
 
     // Act
-    let started = start_opa(false, stub(), pool.clone(), std::future::pending());
+    let started = start_opa(
+        false,
+        OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+        stub(),
+        pool.clone(),
+        std::future::pending(),
+    );
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Assert
@@ -287,9 +296,15 @@ async fn with_the_gate_on_the_refresher_reads_the_database() {
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
 
     // Act
-    let (_state, handle) = start_opa(true, stub(), pool.clone(), async {
-        let _ = stopped.await;
-    })
+    let (_state, handle) = start_opa(
+        true,
+        OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+        stub(),
+        pool.clone(),
+        async {
+            let _ = stopped.await;
+        },
+    )
     .expect("the gate is on");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while pool.size() == 0 && tokio::time::Instant::now() < deadline {
@@ -308,7 +323,13 @@ async fn with_the_gate_on_the_refresher_reads_the_database() {
 #[tokio::test]
 async fn without_the_ranger_verifier_nothing_starts() {
     // Act: the gate on, but the Ranger surface (whose verifier OPA shares) off.
-    let started = start_opa(true, None, unreachable_pool(), std::future::pending());
+    let started = start_opa(
+        true,
+        OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+        None,
+        unreachable_pool(),
+        std::future::pending(),
+    );
 
     // Assert
     assert!(started.is_none());
@@ -318,9 +339,15 @@ async fn without_the_ranger_verifier_nothing_starts() {
 async fn a_failing_refresh_never_stops_the_refresher_but_shutdown_does() {
     // Arrange
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let (_state, handle) = start_opa(true, stub(), unreachable_pool(), async {
-        let _ = stopped.await;
-    })
+    let (_state, handle) = start_opa(
+        true,
+        OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+        stub(),
+        unreachable_pool(),
+        async {
+            let _ = stopped.await;
+        },
+    )
     .expect("the gate is on");
 
     // Act: the first refresh (at once) fails within its 200 ms acquire timeout.

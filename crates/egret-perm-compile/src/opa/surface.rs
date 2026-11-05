@@ -56,7 +56,8 @@ use super::wire::{self, OpaRequest, FILTER_COLUMNS};
 
 pub const OPA_SURFACE_PREFIX: &str = "/opa/v1/data/egret/trino";
 
-/// The largest request body accepted: 4 MiB. A larger body is refused with
+/// The largest request body accepted on every route but `/batch` (which has
+/// [`OpaState::batch_body_limit`]): 4 MiB. A larger body is refused with
 /// 413 (a non-2xx, so the plugin fails the query) before any parse, and the
 /// refusal is logged and counted like every other one. The body is parsed
 /// into a `serde_json::Value` BEFORE the engine's credential is checked, so
@@ -68,16 +69,29 @@ pub const OPA_SURFACE_PREFIX: &str = "/opa/v1/data/egret/trino";
 /// `{"table":{"catalogName","schemaName","tableName"}}` object per table: 59
 /// bytes of JSON plus the three names, so 120 to 150 bytes with 20- to
 /// 30-character names. 4 MiB holds 28 000 to 35 000 tables in one schema,
-/// three times the plan's 10 000-table figure. `FilterColumns` carries one
+/// three times the plan's 10 000-table figure. The Task 20 measurement
+/// found the plugin does not chunk `FilterTables` (73 bytes per table with
+/// short names), so `/batch` alone takes a larger, configurable limit
+/// ([`OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES`]). `FilterColumns` carries one
 /// table and about 25 bytes per column. A larger listing fails the query
 /// rather than being answered. A parsed `Value` costs about ten times its
-/// bytes, so one parse at the limit is about 40 MB; [`OPA_MAX_CONCURRENT_PARSES`]
-/// bounds how many run at once.
+/// bytes, so one parse of 4 MiB is about 40 MB.
+///
+/// It is also the unit the [`ParseGate`] weighs a body in: a body takes one
+/// permit per started 4 MiB, so a larger `/batch` body takes more of the
+/// same budget and the worst-case memory does not grow with the limit.
 pub const OPA_BODY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 
-/// The most request bodies parsed at once, before authentication. At the
-/// body limit a parse holds about 40 MB, so 16 bound the transient pre-auth
-/// parse memory near 640 MB. A permit is held only while the body is parsed
+/// The default `/batch` body limit, `[governance.opa] batch_body_limit_bytes`
+/// (`egret_config::DEFAULT_OPA_BATCH_BODY_LIMIT_BYTES`, the same number): 24
+/// MiB, about 340 000 tables of one schema at the measured 73 bytes each.
+pub const OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES: usize = 24 * 1024 * 1024;
+
+/// The parse budget, in [`OPA_BODY_LIMIT_BYTES`] units: 16 bodies of up to 4
+/// MiB parsed at once before authentication, or fewer larger ones (a 24 MiB
+/// `/batch` body takes 6). A 4 MiB parse holds about 40 MB, so the budget
+/// bounds the transient pre-auth parse memory near 640 MB whatever the
+/// `/batch` limit is. A permit is held only while the body is parsed
 /// (microseconds for the small `/allow` bodies that make up nearly all of
 /// Trino's traffic), so 16 is not a throughput limit in practice.
 pub const OPA_MAX_CONCURRENT_PARSES: usize = 16;
@@ -86,10 +100,12 @@ pub const OPA_MAX_CONCURRENT_PARSES: usize = 16;
 /// (the plugin fails the query: fail closed).
 pub const OPA_PARSE_WAIT: Duration = Duration::from_secs(1);
 
-/// Bounds the pre-authentication parses ([`OPA_MAX_CONCURRENT_PARSES`],
-/// [`OPA_PARSE_WAIT`] in production).
+/// A budget of permits, each worth [`OPA_BODY_LIMIT_BYTES`] of request body,
+/// with a bounded wait. Bounds the pre-authentication parses
+/// ([`OPA_MAX_CONCURRENT_PARSES`], [`OPA_PARSE_WAIT`] in production).
 pub struct ParseGate {
     permits: tokio::sync::Semaphore,
+    total: u32,
     wait: Duration,
 }
 
@@ -97,13 +113,23 @@ impl ParseGate {
     pub fn new(permits: usize, wait: Duration) -> Self {
         Self {
             permits: tokio::sync::Semaphore::new(permits),
+            total: u32::try_from(permits).unwrap_or(u32::MAX),
             wait,
         }
     }
 
-    /// A permit, or `None` once the wait has passed without one.
+    /// One permit, or `None` once the wait has passed without one.
     pub async fn acquire(&self) -> Option<tokio::sync::SemaphorePermit<'_>> {
-        tokio::time::timeout(self.wait, self.permits.acquire())
+        self.acquire_for(0).await
+    }
+
+    /// The permits a body of `bytes` takes (one per started
+    /// [`OPA_BODY_LIMIT_BYTES`], at least one, at most the whole budget), or
+    /// `None` once the wait has passed without them.
+    pub async fn acquire_for(&self, bytes: usize) -> Option<tokio::sync::SemaphorePermit<'_>> {
+        let units = bytes.div_ceil(OPA_BODY_LIMIT_BYTES).max(1);
+        let units = u32::try_from(units).unwrap_or(u32::MAX).min(self.total);
+        tokio::time::timeout(self.wait, self.permits.acquire_many(units))
             .await
             .ok()
             .and_then(Result::ok)
@@ -138,18 +164,29 @@ pub struct OpaState {
     pub verifier: Arc<dyn EngineCredentialVerifier>,
     pub credentials: Arc<VerifiedCache>,
     pub parses: Arc<ParseGate>,
+    /// The `/batch` body limit (`[governance.opa] batch_body_limit_bytes`);
+    /// every other route has [`OPA_BODY_LIMIT_BYTES`].
+    pub batch_body_limit: usize,
 }
 
 impl OpaState {
     /// The production state: credentials remembered for [`VERIFIED_TTL`],
-    /// parses bounded by [`ParseGate::default`].
+    /// parses bounded by [`ParseGate::default`], and the default `/batch`
+    /// limit.
     pub fn new(cache: Arc<SnapshotCache>, verifier: Arc<dyn EngineCredentialVerifier>) -> Self {
         Self {
             cache,
             verifier,
             credentials: Arc::new(VerifiedCache::new(VERIFIED_TTL)),
             parses: Arc::new(ParseGate::default()),
+            batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
         }
+    }
+
+    /// This state with `/batch` limited to `bytes`.
+    pub fn with_batch_body_limit(mut self, bytes: usize) -> Self {
+        self.batch_body_limit = bytes;
+        self
     }
 }
 
@@ -255,11 +292,15 @@ pub fn opa_route_paths() -> [String; 5] {
     Route::ALL.map(route_path)
 }
 
-/// The routes, under [`OPA_SURFACE_PREFIX`].
+/// The routes, under [`OPA_SURFACE_PREFIX`]. `/batch` takes
+/// [`OpaState::batch_body_limit`], every other route [`OPA_BODY_LIMIT_BYTES`].
 pub fn opa_surface(state: OpaState) -> axum::Router {
     axum::Router::new()
         .route(&route_path(Route::Allow), post(allow))
-        .route(&route_path(Route::Batch), post(batch))
+        .route(
+            &route_path(Route::Batch),
+            post(batch).layer(DefaultBodyLimit::max(state.batch_body_limit)),
+        )
         .route(&route_path(Route::RowFilters), post(row_filters))
         .route(
             &route_path(Route::BatchColumnMasks),
@@ -351,9 +392,10 @@ impl Who<'_> {
         metrics::counter!("egret_opa_allow_total", "route" => self.route.name()).increment(1);
     }
 
-    /// Too many bodies being parsed: 503, so the plugin fails the query.
-    fn busy(&self) -> Response {
-        self.denied(None, "too many requests being parsed");
+    /// Too many bodies in flight or being parsed: 503, so the plugin fails
+    /// the query.
+    fn busy(&self, why: &str) -> Response {
+        self.denied(None, why);
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": "busy" })),
@@ -449,8 +491,8 @@ async fn admit(
         }
     };
     let parsed = {
-        let Some(_permit) = state.parses.acquire().await else {
-            return Err(who.busy().into());
+        let Some(_permit) = state.parses.acquire_for(body.len()).await else {
+            return Err(who.busy("too many requests being parsed").into());
         };
         serde_json::from_slice::<Value>(&body)
             .map_err(|_| "body is not JSON".to_string())

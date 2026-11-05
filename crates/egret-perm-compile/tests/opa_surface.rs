@@ -23,7 +23,8 @@ use axum::http::Request;
 use egret_engine_mgmt_api::credential::{EngineCredentialVerifier, EngineIdentity};
 use egret_perm_compile::opa::cache::SnapshotCache;
 use egret_perm_compile::opa::surface::{
-    ParseGate, VerifiedCache, MAX_VERDICTS, NEGATIVE_TTL, OPA_BODY_LIMIT_BYTES, VERIFIED_TTL,
+    ParseGate, VerifiedCache, MAX_VERDICTS, NEGATIVE_TTL, OPA_BODY_LIMIT_BYTES,
+    OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES, VERIFIED_TTL,
 };
 use egret_perm_compile::{opa_surface, OpaState, OPA_SURFACE_PREFIX};
 use egret_perm_eval::{Snapshot, SnapshotInput};
@@ -228,6 +229,7 @@ fn app_with(credentials: VerifiedCache) -> App {
         verifier: stub.clone(),
         credentials: Arc::new(credentials),
         parses: Arc::new(ParseGate::default()),
+        batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
     });
     App {
         router,
@@ -793,6 +795,7 @@ async fn an_unreachable_verifier_answers_500_on_every_route() {
         verifier: Arc::new(Down),
         credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
         parses: Arc::new(ParseGate::default()),
+        batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
     });
     for (route, action) in every_route() {
         let (status, _) = post(&router, route, &GOOD.to_string(), RIGHT, action).await;
@@ -999,6 +1002,7 @@ async fn no_log_or_body_carries_the_secret() {
         verifier: stub.clone(),
         credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
         parses: Arc::new(ParseGate::default()),
+        batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
     });
 
     let mut answers = Vec::new();
@@ -1066,6 +1070,7 @@ async fn no_log_or_body_carries_the_secret() {
         verifier: Arc::new(Down),
         credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
         parses: Arc::new(ParseGate::default()),
+        batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
     });
     for (route, action) in every_route() {
         bodies.push(
@@ -1116,6 +1121,7 @@ async fn an_identity_for_another_engine_is_a_refusal() {
         verifier: Arc::new(Confused),
         credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
         parses: Arc::new(ParseGate::default()),
+        batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
     });
     // The verifier's answer is about GOOD: GOOD is admitted, GOOD2 is not.
     let (route, action) = every_route().remove(0);
@@ -1172,6 +1178,7 @@ async fn with_every_parse_permit_held_a_request_is_answered_503_on_every_route()
         verifier: stub,
         credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
         parses: Arc::clone(&parses),
+        batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
     });
     let held = parses.acquire().await.expect("the one permit");
 
@@ -1219,5 +1226,137 @@ async fn an_oversize_body_is_refused_413_and_logged() {
         text.lines()
             .any(|l| l.contains("opa: denied") && l.contains("request body refused")),
         "the 413 is logged as a denial"
+    );
+}
+
+// ---- SP2b Task 20F: the /batch body limit and the in-flight bound ----
+
+/// A well-formed `/batch` request for `ann` on GOOD, padded with whitespace
+/// to exactly `len` bytes.
+fn padded_batch(len: usize) -> String {
+    let (_, action) = every_route().remove(1);
+    let mut raw = body("ann", &GOOD.to_string(), RIGHT, action).to_string();
+    raw.push_str(&" ".repeat(len - raw.len()));
+    raw
+}
+
+async fn send_raw(app: &axum::Router, route: &str, raw: String) -> (u16, Value) {
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post(format!("{OPA_SURFACE_PREFIX}{route}"))
+                .header("content-type", "application/json")
+                .body(Body::from(raw))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let status = res.status().as_u16();
+    let bytes = res.into_body().collect().await.expect("body").to_bytes();
+    let v = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()));
+    (status, v)
+}
+
+#[tokio::test]
+async fn batch_takes_its_own_larger_body_limit_and_every_other_route_keeps_4_mib() {
+    // Arrange: the production state, so the production default limit.
+    assert_eq!(OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES, 24 * 1024 * 1024);
+    logs();
+    let router = opa_surface(OpaState::new(ready_cache(), Arc::new(Stub::standard())));
+    let (_, small) = post(
+        &router,
+        "/batch",
+        &GOOD.to_string(),
+        RIGHT,
+        every_route()[1].1.clone(),
+    )
+    .await;
+    let between = OPA_BODY_LIMIT_BYTES + 1024 * 1024;
+
+    // Act + Assert: between the old and the new limit, /batch answers ...
+    assert_eq!(
+        send_raw(&router, "/batch", padded_batch(between)).await,
+        (200, small),
+        "a 5 MiB /batch body is answered"
+    );
+    // ... and /allow refuses the same size.
+    let (_, allow) = every_route().remove(0);
+    let mut raw = body("ann", &GOOD.to_string(), RIGHT, allow).to_string();
+    raw.push_str(&" ".repeat(between - raw.len()));
+    assert_eq!(send_raw(&router, "/allow", raw).await.0, 413);
+    // At the new limit /batch still answers; one byte over it is 413.
+    assert_eq!(
+        send_raw(
+            &router,
+            "/batch",
+            padded_batch(OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES)
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        send_raw(
+            &router,
+            "/batch",
+            padded_batch(OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES + 1)
+        )
+        .await
+        .0,
+        413
+    );
+}
+
+#[tokio::test]
+async fn the_batch_limit_is_the_one_the_state_carries() {
+    // Arrange: a 6 MiB limit.
+    logs();
+    let router = opa_surface(
+        OpaState::new(ready_cache(), Arc::new(Stub::standard()))
+            .with_batch_body_limit(6 * 1024 * 1024),
+    );
+
+    // Act + Assert
+    assert_eq!(
+        send_raw(&router, "/batch", padded_batch(6 * 1024 * 1024))
+            .await
+            .0,
+        200
+    );
+    assert_eq!(
+        send_raw(&router, "/batch", padded_batch(6 * 1024 * 1024 + 1))
+            .await
+            .0,
+        413
+    );
+}
+
+#[tokio::test]
+async fn a_larger_body_takes_more_of_the_parse_budget() {
+    // Arrange: a parse budget of two 4 MiB units, one held by the test.
+    logs();
+    let parses = Arc::new(ParseGate::new(2, Duration::from_millis(50)));
+    let router = opa_surface(OpaState {
+        cache: ready_cache(),
+        verifier: Arc::new(Stub::standard()),
+        credentials: Arc::new(VerifiedCache::new(Duration::from_secs(5))),
+        parses: Arc::clone(&parses),
+        batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+    });
+    let held = parses.acquire().await.expect("one unit");
+
+    // Act + Assert: a small body fits the free unit; a 5 MiB one needs two.
+    assert_eq!(send_raw(&router, "/batch", padded_batch(1024)).await.0, 200);
+    assert_eq!(
+        send_raw(&router, "/batch", padded_batch(OPA_BODY_LIMIT_BYTES + 1)).await,
+        (503, json!({"error": "busy"}))
+    );
+    drop(held);
+    assert_eq!(
+        send_raw(&router, "/batch", padded_batch(OPA_BODY_LIMIT_BYTES + 1))
+            .await
+            .0,
+        200
     );
 }
