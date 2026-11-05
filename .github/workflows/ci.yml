@@ -69,31 +69,14 @@ jobs:
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: opa
         with:
-          # What the end-to-end OPA differential (opa-e2e) runs through. The OPA path: the IR,
-          # evaluator and compile (egret-perm-*, the surface and refresher in
-          # egret-perm-compile/src/opa/), its mount (egret-server, egret-bin), its config
-          # (egret-config) and the OPA plugin files the provisioner writes
-          # (egret-engine-mgmt-api's opa_config.rs, egret-engine-mgmt, egret-provisioner). The
-          # Ranger path, the oracle: the policy and tag downloads and the mechanism switch
-          # (egret-policy). The setup the scenarios drive: users, groups, roles and clearances
-          # (egret-controlplane), classifications and resource tags (egret-bi), warehouses and
-          # renames (egret-catalog-engine), reserved principals (egret-core); the schema
-          # (migrations/); the image (deploy/docker/backend.Dockerfile, Cargo.lock); and the job
-          # itself.
+          # What can change the end-to-end OPA differential (opa-e2e). Every crate, by inclusion
+          # rather than a list: the OPA and Ranger paths run through the compile's own
+          # dependencies (egret-ranger-eval, egret-policy-api, egret-auth, the catalog registry
+          # ...), and a hand-picked list drifts the day one is added (review R2). Then the
+          # schema, the lock file, the image, the stack, its scripts and this workflow.
           filters: |
             opa:
-              - 'crates/egret-perm-*/**'
-              - 'crates/egret-policy/**'
-              - 'crates/egret-engine-mgmt/**'
-              - 'crates/egret-engine-mgmt-api/**'
-              - 'crates/egret-provisioner/**'
-              - 'crates/egret-server/**'
-              - 'crates/egret-bin/**'
-              - 'crates/egret-config/**'
-              - 'crates/egret-core/**'
-              - 'crates/egret-controlplane/**'
-              - 'crates/egret-bi/**'
-              - 'crates/egret-catalog-engine/**'
+              - 'crates/**'
               - 'migrations/**'
               - 'Cargo.lock'
               - 'deploy/docker/backend.Dockerfile'

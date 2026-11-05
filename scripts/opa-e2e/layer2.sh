@@ -11,9 +11,9 @@
 #     base table must be what the seed wrote, on both engines; and every SELECT of the scenario
 #     is run by the admin on trino-ranger as the clear reference compare.py judges values by;
 #  3. setup through egret's API; wait until both engines serve it;
-#  4. every statement as every scenario user on both engines, plus the scenario's `-- expect:`
-#     positive controls, which must hold on both engines (a broken RustFS, catalog or policy
-#     path cannot pass as "both sides agree");
+#  4. the scenario's `-- expect:` positive controls first (a freshness barrier), then every
+#     statement as every scenario user, on both engines; the controls must hold on both (a
+#     broken RustFS, catalog or policy path cannot pass as "both sides agree");
 #  5. compare.py compares the two sides and writes layer2-report.json. Exit = compare.py's.
 # Any setup failure, failed control or harness error stops the run and names the scenario.
 #
@@ -407,8 +407,14 @@ for f in "$HERE"/scenarios.sql.d/*.sql; do
   [ -n "$SETUP_ONLY" ] && continue
   [ -s "$dir/post.expect.tsv" ] || die "$f has no '-- expect:' positive control"
 
-  # 4. the compared statements and the scenario's positive controls, in one batch per side.
-  cat "$dir/post.opa.jobs" >>"$dir/opa.jobs"; cat "$dir/post.ranger.jobs" >>"$dir/ranger.jobs"
+  # 4. the scenario's positive controls FIRST, then the compared statements, in one batch per
+  # side: the controls fail on the pre-setup state, and a snapshot only moves forward, so
+  # controls that hold at the start of the batch prove both engines serve the scenario for every
+  # compared statement after them (a freshness barrier).
+  for eng in opa ranger; do
+    cat "$dir/post.$eng.jobs" "$dir/$eng.jobs" >"$dir/$eng.jobs.ordered"
+    mv "$dir/$eng.jobs.ordered" "$dir/$eng.jobs"
+  done
   wait_synced
   run_pair "$dir" ""
   for eng in opa ranger; do cp "$dir/$eng.out" "$dir/post.$eng.out"; done
