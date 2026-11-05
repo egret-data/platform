@@ -48,8 +48,13 @@ mod equivalence {
     const USERS: &[&str] = &["ann", "bob", LINEAGE];
 
     /// Statement values: literals in several cases, wildcard patterns and
-    /// wildcard runs (`**`), `$` tables and `information_schema`.
-    const S_CATALOGS: &[&str] = &["lake", "LAKE", "Lake", "hive", "*", "l*", "la?e", "**"];
+    /// wildcard runs (`**`), `$` tables and `information_schema`. Non-ASCII
+    /// names whose case folding differs from ASCII folding: `É`/`é`, `ß` and
+    /// the capital `ẞ` (which lowercases to `ß`), and Turkish dotted `İ`
+    /// (which lowercases to `i` plus a combining dot) and dotless `ı`.
+    const S_CATALOGS: &[&str] = &[
+        "lake", "LAKE", "Lake", "hive", "*", "l*", "la?e", "**", "café", "CAFÉ", "caf?",
+    ];
     const S_SCHEMAS: &[&str] = &[
         "s1",
         "S1",
@@ -60,13 +65,30 @@ mod equivalence {
         "**",
         "s?",
         "s*",
+        "straße",
+        "STRAẞE",
+        "STRASSE",
     ];
-    const S_TABLES: &[&str] = &["t", "T", "t$files", "orders", "*", "t*", "**", "?"];
+    const S_TABLES: &[&str] = &[
+        "t",
+        "T",
+        "t$files",
+        "orders",
+        "*",
+        "t*",
+        "**",
+        "?",
+        "İndex",
+        "ındex",
+        "INDEX",
+        "Éclair",
+        "éclair$files",
+    ];
     const S_COLUMNS: &[&str] = &["a", "A", "email", "*", "e*", "**"];
 
     /// Request values: the same literals in other cases, names nothing
     /// matches literally, `$` metadata tables, and `*` or empty.
-    const R_CATALOGS: &[&str] = &["lake", "LaKe", "hive", "HIVE", "other", "*"];
+    const R_CATALOGS: &[&str] = &["lake", "LaKe", "hive", "HIVE", "other", "*", "Café", "CAFÉ"];
     const R_SCHEMAS: &[&str] = &[
         "s1",
         "S1",
@@ -76,6 +98,9 @@ mod equivalence {
         "x",
         "*",
         "",
+        "Straße",
+        "strasse",
+        "STRAẞE",
     ];
     const R_TABLES: &[&str] = &[
         "t",
@@ -87,6 +112,12 @@ mod equivalence {
         "x",
         "*",
         "",
+        "i̇ndex",
+        "İNDEX",
+        "index",
+        "ıNDEX",
+        "ÉCLAIR",
+        "Éclair$Files",
     ];
     const R_COLUMNS: &[&str] = &["a", "A", "email", "Email", "b", "*"];
 

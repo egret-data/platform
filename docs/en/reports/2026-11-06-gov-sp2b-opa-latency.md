@@ -513,7 +513,9 @@ The new samples, in run order (`RAW22F/rebuild-timing.out`, line 28):
 902-statement step was the first step after a bulk insert of 9 840 policies, and it ran on
 planner statistics that had never been taken. Once autoanalyze ran, it rebuilt at a speed
 comparable to the 11 000-statement profile. Task 22's 11 000 step ran second, as it does
-here, so it never met the stale statistics.
+here, so it probably never met the stale statistics. That part is an inference: Task 22's
+test did not print `pg_stat_user_tables`, so the statistics state of its run was not
+recorded, only its bimodal samples (min 497.3 ms, p50 1044.8 ms).
 
 **Not measured.** I did not find which query's plan changes, and I did not run the step
 with a forced `ANALYZE`. The evidence is the time course, and a correlation in time is not a

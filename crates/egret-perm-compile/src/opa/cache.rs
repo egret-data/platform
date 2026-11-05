@@ -10,8 +10,10 @@
 //!
 //! 1. **re-checks the stored state** (C8): a profile holding a row the
 //!    evaluator would ignore (`egret_policy::opa_guard`) or a stored pair of
-//!    mask/row-filter policies whose winner the IR does not express
-//!    ([`crate::overlap::stored_overlaps_via`]) is **not built**, and every
+//!    mask/row-filter policies whose winner the IR does not express, in a
+//!    unit the profile's download serves
+//!    ([`crate::overlap::stored_overlaps_of_via`], which reads only the
+//!    profile's own units and its tag service's) is **not built**, and every
 //!    request on it is denied. No previous snapshot is kept: the stored state
 //!    is the problem, not the build.
 //! 2. builds data ++ infrastructure into a fresh snapshot;

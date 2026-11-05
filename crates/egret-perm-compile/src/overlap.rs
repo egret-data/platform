@@ -485,6 +485,12 @@ fn how_to_fix(o: &UnitOverlap, hand_written: bool) -> String {
 /// So every unit the filter keeps comes from those services, and the filter
 /// then keeps exactly the pairs the scan of every service kept, in the same
 /// order (the units are ordered, and the final sort is stable).
+///
+/// **The read-error blast radius is narrower.** Before Task 22F, a unit of
+/// ANY service that failed to load failed this call, so one unreadable
+/// profile left every OPA profile's build `Unread`. Now only a failure in the
+/// units read here (this profile's, and its tag service's) fails it; a broken
+/// unit elsewhere affects only the profiles that read it.
 pub async fn stored_overlaps_of_via(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
