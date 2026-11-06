@@ -525,6 +525,38 @@ async fn count_is_the_total_and_the_sample_is_the_first_five() {
 }
 
 #[tokio::test]
+async fn a_failed_compile_on_an_opa_profile_says_every_query_is_denied() {
+    let _serial = SERIAL.lock().await;
+    let Some(f) = setup().await else { return };
+    let sid = profile(&f, "k_opa_broken", "trino").await;
+    sqlx::query("UPDATE policy.authz_services SET mechanism = 'opa' WHERE id = $1")
+        .bind(sid)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO perm.compile_runs (service_id, outcome, attempted_at, error) \
+         VALUES ($1, 'error', now(), 'rule overlap: a and b')",
+    )
+    .bind(sid)
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    let st = state(&f).await;
+    let (_, body) = attention(&st, &session(&f, &["platform_admin"]).await).await;
+    let c = finding(&body, "compile_failed").expect("compile_failed");
+    let sentence = c["sentence"].as_str().unwrap();
+    assert!(
+        sentence.contains("on OPA no snapshot is built, so every query on the engines is denied"),
+        "{sentence}"
+    );
+    assert!(
+        !sentence.contains("keep the previous compile"),
+        "{sentence}"
+    );
+}
+
+#[tokio::test]
 async fn compile_failures_lineage_attachments_tags_and_catalogs_each_have_a_finding() {
     let _serial = SERIAL.lock().await;
     let Some(f) = setup().await else { return };

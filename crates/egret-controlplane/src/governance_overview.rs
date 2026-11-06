@@ -1026,6 +1026,35 @@ async fn rules_named_in(
     .await?)
 }
 
+/// How many of the profiles are on the OPA mechanism.
+async fn count_on_opa(c: &mut PgConnection, ids: &[i64]) -> Result<usize, SourceError> {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM policy.authz_services WHERE id = ANY($1) AND mechanism = 'opa'",
+    )
+    .bind(ids)
+    .fetch_one(&mut *c)
+    .await?;
+    Ok(usize::try_from(n).unwrap_or(0))
+}
+
+/// What a failed compile means depends on the mechanism: a Ranger engine keeps the policy set it
+/// downloaded last, but on OPA no snapshot is built from a model that does not compile, so egret
+/// denies every query of the profile's engines.
+fn compile_failed_sentence(n: usize, opa: usize, names: &str) -> String {
+    let profiles = plural(n, "profile", "profiles");
+    let effect = if opa == 0 {
+        "engines keep the previous compile.".to_string()
+    } else if opa == n {
+        "on OPA no snapshot is built, so every query on the engines is denied until it compiles."
+            .to_string()
+    } else {
+        "Ranger engines keep the previous compile; on OPA no snapshot is built, so every query on \
+         the engines of an OPA profile is denied until it compiles."
+            .to_string()
+    };
+    format!("The last compile of {profiles} failed; {effect}{names}")
+}
+
 async fn compile_failed(c: &mut PgConnection) -> Result<Option<Finding>, SourceError> {
     let runs = egret_perm_compile::compile_runs::failed_compile_runs_via(c).await?;
     let mut sample = Vec::new();
@@ -1063,6 +1092,8 @@ async fn compile_failed(c: &mut PgConnection) -> Result<Option<Finding>, SourceE
         }
     }
     let n = runs.len();
+    let ids: Vec<i64> = runs.iter().map(|r| r.service_id).collect();
+    let opa = count_on_opa(c, &ids).await?;
     let r#ref = match runs.as_slice() {
         [one] => Some(Ref::Profile {
             name: one.service_name.clone(),
@@ -1083,10 +1114,7 @@ async fn compile_failed(c: &mut PgConnection) -> Result<Option<Finding>, SourceE
         "compile_failed",
         Severity::Critical,
         n,
-        format!(
-            "The last compile of {} failed; engines keep the previous compile.{names}",
-            plural(n, "profile", "profiles")
-        ),
+        compile_failed_sentence(n, opa, &names),
         sample,
         r#ref,
     ))
@@ -2437,6 +2465,29 @@ async fn catalogs_without_engine(c: &mut PgConnection) -> Result<Option<Finding>
         sample,
         Some(Ref::Data),
     ))
+}
+
+#[cfg(test)]
+mod compile_failed_sentence_tests {
+    use super::compile_failed_sentence;
+
+    #[test]
+    fn the_effect_follows_the_mechanism() {
+        assert_eq!(
+            compile_failed_sentence(2, 0, " X."),
+            "The last compile of 2 profiles failed; engines keep the previous compile. X."
+        );
+        assert_eq!(
+            compile_failed_sentence(1, 1, ""),
+            "The last compile of 1 profile failed; on OPA no snapshot is built, so every query on the engines is denied until it compiles."
+        );
+        let mixed = compile_failed_sentence(3, 1, "");
+        assert!(
+            mixed.contains("Ranger engines keep the previous compile"),
+            "{mixed}"
+        );
+        assert!(mixed.contains("on OPA no snapshot is built"), "{mixed}");
+    }
 }
 
 #[cfg(test)]
