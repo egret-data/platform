@@ -242,6 +242,48 @@ describe("EngineDetail for an external engine", () => {
     expect(document.body.textContent).not.toContain("real-secret-must-never-render");
   });
 
+  test("an OPA route 409 says the profile is no longer on OPA and Reload re-reads the profiles", async () => {
+    const calls = stubFetch(
+      routes({
+        "GET /api/control-plane/policies/services": {
+          body: BOUND_PROFILES.map((p) => (p.id === 11 ? { ...p, mechanism: "opa" } : p)),
+        },
+        "GET /api/control-plane/engines/x1/opa-plugin-config": {
+          status: 409,
+          body: { error: "conflict: profile is not on OPA" },
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    renderDetail(ADMIN, "/control-plane/engines/x1?tab=plugin-config");
+    const note = await screen.findByTestId("plugin-config-not-opa");
+    expect(note).toHaveTextContent(/no longer on OPA/);
+    expect(note).toHaveTextContent(/Reload/);
+    expect(document.body.textContent).not.toContain("No policy profile is bound");
+    expect(document.body.textContent).not.toContain("conflict:");
+    const before = calls.filter((c) => c.path.endsWith("/policies/services")).length;
+    await user.click(screen.getByRole("button", { name: "Reload" }));
+    await waitFor(() =>
+      expect(calls.filter((c) => c.path.endsWith("/policies/services")).length).toBeGreaterThan(before),
+    );
+  });
+
+  test("a Ranger route 409 says the server and the page disagree, not that nothing was ever bound", async () => {
+    stubFetch(
+      routes({
+        "GET /api/control-plane/engines/x1/ranger-plugin-config": {
+          status: 409,
+          body: { error: "conflict: engine legacy-trino is bound to no policy profile" },
+        },
+      }),
+    );
+    renderDetail(ADMIN, "/control-plane/engines/x1?tab=plugin-config");
+    const note = await screen.findByTestId("plugin-config-no-profile");
+    expect(note).toHaveTextContent(/differs from this page's profile list/);
+    expect(note).toHaveTextContent(/Reload to check, or bind a profile in Settings/);
+    expect(document.body.textContent).not.toContain("conflict:");
+  });
+
   test("Plugin config with the profiles unreadable shows the error and requests neither plugin route", async () => {
     const calls = stubFetch(
       routes({

@@ -70,38 +70,63 @@ export function EnginePluginConfig({
   engineId,
   mechanism,
   onOpenSettings,
+  onReload,
 }: {
+  onReload: () => void;
   engineId: string;
   /** The bound profile's mechanism; `opa` shows the OPA plugin's files instead of Ranger's. */
   mechanism?: string;
   onOpenSettings: () => void;
 }) {
   return mechanism === "opa" ? (
-    <OpaEnginePluginConfig engineId={engineId} onOpenSettings={onOpenSettings} />
+    <OpaEnginePluginConfig engineId={engineId} onReload={onReload} />
   ) : (
-    <RangerEnginePluginConfig engineId={engineId} onOpenSettings={onOpenSettings} />
+    <RangerEnginePluginConfig engineId={engineId} onOpenSettings={onOpenSettings} onReload={onReload} />
   );
 }
 
-function NoProfileBound({ onOpenSettings, what }: { onOpenSettings: () => void; what: string }) {
+/** A 409 from either plugin-config route: the page's profile list and the server disagree (a race, or a switch just made). */
+function Disagreement({
+  testId,
+  children,
+  onReload,
+  onOpenSettings,
+}: {
+  testId: string;
+  children: string;
+  onReload: () => void;
+  onOpenSettings?: () => void;
+}) {
   return (
-    <Alert data-testid="plugin-config-no-profile">
+    <Alert data-testid={testId}>
       <AlertDescription className="space-y-2">
-        <p>No policy profile is bound to this engine yet. {what}, so bind a profile first.</p>
-        <Button size="sm" variant="outline" onClick={onOpenSettings}>
-          Open Settings
-        </Button>
+        <p>{children}</p>
+        <div className="flex gap-2">
+          <Button size="sm" variant="outline" onClick={onReload}>
+            Reload
+          </Button>
+          {onOpenSettings && (
+            <Button size="sm" variant="ghost" onClick={onOpenSettings}>
+              Open Settings
+            </Button>
+          )}
+        </div>
       </AlertDescription>
     </Alert>
   );
 }
 
-function OpaEnginePluginConfig({ engineId, onOpenSettings }: { engineId: string; onOpenSettings: () => void }) {
+function OpaEnginePluginConfig({ engineId, onReload }: { engineId: string; onReload: () => void }) {
   const q = useControlPlaneEnginesOpaPluginConfig<controlPlaneEnginesOpaPluginConfigResponse, ApiError>(engineId, {
     query: { retry: false },
   });
   if (q.isError && q.error?.status === 409)
-    return <NoProfileBound onOpenSettings={onOpenSettings} what="The plugin configuration is the bound profile's" />;
+    return (
+      <Disagreement testId="plugin-config-not-opa" onReload={onReload}>
+        This engine&apos;s profile is no longer on OPA: its mechanism was changed after this page loaded. Reload to
+        see the plugin configuration for the current mechanism.
+      </Disagreement>
+    );
   if (q.isError)
     return (
       <Alert variant="destructive" data-testid="plugin-config-error">
@@ -156,7 +181,7 @@ function OpaEnginePluginConfig({ engineId, onOpenSettings }: { engineId: string;
   );
 }
 
-function RangerEnginePluginConfig({ engineId, onOpenSettings }: { engineId: string; onOpenSettings: () => void }) {
+function RangerEnginePluginConfig({ engineId, onOpenSettings, onReload }: { engineId: string; onOpenSettings: () => void; onReload: () => void }) {
   const q = useControlPlaneEnginesRangerPluginConfig<controlPlaneEnginesRangerPluginConfigResponse, ApiError>(
     engineId,
     { query: { retry: false } },
@@ -168,17 +193,10 @@ function RangerEnginePluginConfig({ engineId, onOpenSettings }: { engineId: stri
   // not the server's `conflict: …` text.
   if (q.isError && q.error?.status === 409)
     return (
-      <Alert data-testid="plugin-config-no-profile">
-        <AlertDescription className="space-y-2">
-          <p>
-            No policy profile is bound to this engine yet. The plugin configuration names the profile&apos;s Ranger
-            service, so bind a profile first.
-          </p>
-          <Button size="sm" variant="outline" onClick={onOpenSettings}>
-            Open Settings
-          </Button>
-        </AlertDescription>
-      </Alert>
+      <Disagreement testId="plugin-config-no-profile" onReload={onReload} onOpenSettings={onOpenSettings}>
+        egret reports no policy profile bound to this engine, which differs from this page&apos;s profile list. Reload
+        to check, or bind a profile in Settings.
+      </Disagreement>
     );
   if (q.isError)
     return (
