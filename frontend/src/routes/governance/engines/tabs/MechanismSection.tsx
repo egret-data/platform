@@ -2,10 +2,7 @@ import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
-import {
-  getPolicyAdminListProfilesQueryKey,
-  usePolicyAdminSetMechanism,
-} from "@/api/generated/policy-admin/policy-admin";
+import { usePolicyAdminSetMechanism } from "@/api/generated/policy-admin/policy-admin";
 import { MechanismName, type ProfileMechanism } from "@/api/generated/model";
 import type { ApiError } from "@/api/client";
 import {
@@ -23,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { refusalMessage, usePolicyPermissions } from "@/routes/governance/policyWrites";
+import { invalidateAfterMechanismSwitch } from "@/routes/control-plane/externalEngine";
 import { Section } from "@/routes/governance/tabParts";
 import type { FrameProfile } from "@/routes/governance/engines/PageFrame";
 
@@ -110,7 +108,7 @@ export function MechanismSection({ profile }: { profile: FrameProfile }) {
       { service: profile.name, data: { mechanism } },
       {
         onSuccess: (res) => {
-          void qc.invalidateQueries({ queryKey: getPolicyAdminListProfilesQueryKey() });
+          invalidateAfterMechanismSwitch(qc);
           toast.success(`Switched to ${LABEL[mechanism]}.`);
           if (res.status === 200) setDone(doneLines(res.data));
         },
@@ -120,7 +118,7 @@ export function MechanismSection({ profile }: { profile: FrameProfile }) {
             setRefusals(refusalsOf(e) ?? [err.message]);
           } else if (err.status === 502) {
             // The switch is committed: the list shows the new mechanism.
-            void qc.invalidateQueries({ queryKey: getPolicyAdminListProfilesQueryKey() });
+            invalidateAfterMechanismSwitch(qc);
             setFailure({ target: mechanism, partial: partialOf(e) });
           } else {
             setOtherError(refusalMessage(e, "policy:update", "The access control could not be changed."));

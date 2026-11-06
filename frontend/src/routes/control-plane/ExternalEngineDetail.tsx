@@ -64,6 +64,7 @@ import {
   PolicyProfileLink,
   ServerRefusal,
   UnmodelledVersionNote,
+  invalidateAfterMechanismSwitch,
   profilesQueryKey,
   noTagService,
   NO_TAG_SERVICE_SUFFIX,
@@ -310,6 +311,7 @@ function PluginConfigTab({
   bound: Profile | undefined;
   onOpenSettings: () => void;
 }) {
+  const queryClient = useQueryClient();
   if (profilesQ.isError)
     return (
       <Alert variant="destructive" data-testid="plugin-config-profiles-error">
@@ -344,7 +346,14 @@ function PluginConfigTab({
         </AlertDescription>
       </Alert>
     );
-  return <EnginePluginConfig engineId={engineId} mechanism={bound.mechanism} onOpenSettings={onOpenSettings} />;
+  return (
+    <EnginePluginConfig
+      engineId={engineId}
+      mechanism={bound.mechanism}
+      onOpenSettings={onOpenSettings}
+      onReload={() => invalidateAfterMechanismSwitch(queryClient)}
+    />
+  );
 }
 
 // ── Declared catalogs ────────────────────────────────────────────────────────
