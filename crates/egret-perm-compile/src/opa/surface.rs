@@ -527,7 +527,8 @@ impl Who<'_> {
     }
 
     /// A request answered before any decision because its body never arrived
-    /// whole (408 deadline, 400 unreadable): logged, and counted apart from
+    /// whole (408 deadline, 400 unreadable) or egret had no room to read it
+    /// (503 busy): logged, and counted apart from
     /// the denials (`egret_opa_unread_total`), so a dashboard of denials
     /// counts only requests that were decided.
     fn unread(&self, reason: &str) {
@@ -545,9 +546,10 @@ impl Who<'_> {
     }
 
     /// Too many bodies in flight or being parsed: 503, so the plugin fails
-    /// the query.
+    /// the query. Nothing was decided for this request, so it is counted with
+    /// the unread ones (`egret_opa_unread_total`), never as a denial.
     fn busy(&self, why: &str) -> Response {
-        self.denied(None, why);
+        self.unread(why);
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": "busy" })),

@@ -1177,6 +1177,17 @@ async fn the_production_state_remembers_a_verified_secret_for_five_seconds() {
     assert_eq!(calls(), 2, "asked again past the TTL");
 }
 
+/// M1: a 503 busy decided nothing, so it is logged (and counted) as unread, never as a denial.
+fn assert_busy_is_unread_not_denied(reason: &str) {
+    let text = log_text();
+    let lines: Vec<&str> = text.lines().filter(|l| l.contains(reason)).collect();
+    assert!(!lines.is_empty(), "{reason} is logged");
+    for line in lines {
+        assert!(line.contains("opa: request body not read"), "{line}");
+        assert!(!line.contains("opa: denied"), "{line}");
+    }
+}
+
 #[tokio::test]
 async fn with_every_parse_permit_held_a_request_is_answered_503_on_every_route() {
     // Arrange: one permit, held by the test.
@@ -1199,7 +1210,7 @@ async fn with_every_parse_permit_held_a_request_is_answered_503_on_every_route()
         let busy = post(&router, route, &GOOD.to_string(), RIGHT, action).await;
         assert_eq!(busy, (503, json!({"error": "busy"})), "{route}");
     }
-    assert!(log_text().contains("too many requests being parsed"));
+    assert_busy_is_unread_not_denied("too many requests being parsed");
 
     // Released: answered again.
     drop(held);
@@ -1450,7 +1461,7 @@ async fn over_the_in_flight_budget_a_request_is_503_and_its_body_is_never_read()
         );
         assert!(!read.load(Ordering::SeqCst), "{route}: body never read");
     }
-    assert!(log_text().contains("too many requests in flight"));
+    assert_busy_is_unread_not_denied("too many requests in flight");
 
     // Released: the next request is read and answered.
     first.abort();
