@@ -25,7 +25,6 @@ with an error in the body.
 | 7 | coordinator `GET /v1/info/state`, `X-Trino-User: admin`, no credential (NOT the preStop, see row 10) | 200 `"ACTIVE"` | 200 `"ACTIVE"` (unchanged) |
 | 8 | `SELECT count(*) FROM system.runtime.nodes` over HTTPS 8443, Basic `egret_delegator`, `X-Trino-Original-User: egret_delegator`, `X-Trino-User: ann` | 200, `2` | 200, `2` (worker registered over `http://coordinator:8080`) |
 | 9 | `SELECT current_user`, same as 8 | `ann` | `ann` |
-
 | 10 | the real preStop: on the WORKER, `curl -s -X PUT -d '"SHUTTING_DOWN"' -H 'Content-type: application/json' -H 'X-Trino-User: admin' http://localhost:8080/v1/info/state` (worker rendered as egret does: no authentication type, no access-control config) | **403** `Error 403 Forbidden: Management only resource`; worker stays `ACTIVE` | **403**, same text, worker stays `ACTIVE` |
 | 10s | row 10 with a worker given file access control allowing `admin` system_information read+write (supplemental) | 200, worker `SHUTTING_DOWN` | 200, worker `SHUTTING_DOWN` |
 
@@ -127,3 +126,15 @@ user carol|root|bob`), so authenticating as the delegator does not change what t
 
 The delegator password came from the stack's Postgres, opened with the public dev master key in
 `deploy/opa-e2e/egret.env` (`scripts/opa-e2e/trino-auth.sh`); the 200 rows above prove it.
+
+## Notes for Task 26 (recorded by the final review of PR A)
+
+- Every Layer 2 and latency job now authenticates as the delegator and impersonates the scenario
+  user. M5 latency numbers taken before Task A5 measured a different request and are not
+  comparable with numbers taken after it.
+- Layer 2 "direct" and "impersonate" jobs are now the same request, so a session whose principal
+  equals the user (the jwt shape) is no longer covered by Layer 2. This is a known gap.
+- PR B's B5 automatic re-apply depends on the final-review fix of PR A that re-materializes
+  workspace connections after every successful Trino apply and backfills the stored auth block
+  (migration 0215): without it, a re-apply that does not go through PUT left an impersonate
+  engine's workspace connection bound to no delegator secret.

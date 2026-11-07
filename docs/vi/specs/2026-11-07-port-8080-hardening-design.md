@@ -38,6 +38,11 @@ Hai lỗi chung một gốc: cổng 8080 cho quá nhiều bên gọi tới, nhi�
   - Worker vẫn dùng shared secret.
 - **A3.** Các đường của egret vẫn chạy: monitor, truy vấn ủy quyền qua 8443, client qua ingress, readiness probe, `preStop`. Probe và `preStop` sẽ được kiểm trên engine thật; nếu bị từ chối thì chúng dùng credential của monitor.
 - **A4.** Kiểm trên engine thật trước khi viết code, với một engine Ranger và một engine OPA. Kết quả ghi vào `docs/en/plans/2026-11-07-port-8080-hardening-live-result.md`.
+
+  **Theo đo đạc, 2026-11-08.** Kết quả đo không ủng hộ ba lời hứa ở A3/A4 (`docs/en/plans/2026-11-07-port-8080-hardening-live-result.md`):
+  - Cờ được đo trên một Trino 483 độc lập (Task A1), không phải trên engine do egret provision với profile Ranger và OPA. Kiểm tra danh tính end-to-end trên stack `opa-e2e` (`scripts/opa-e2e/identity-check.sh`, cả hai cơ chế) là lần chạy chính thức cho engine được provision; job CI `opa-e2e` là lần chạy đó.
+  - `preStop` của worker bị từ chối 403 (`Management only resource`) ở cả hai giá trị cờ (dòng 10 và 10s). Lỗi này có từ trước và không phụ thuộc cờ, nên nằm ngoài phạm vi ở đây và để lại làm việc tiếp theo.
+  - `preStop` bị từ chối chưa được cấp credential của monitor. Probe (`GET /v1/info`) là tài nguyên công khai và trả 200 sau khi bật cờ.
 - **A5.** Sửa comment ở `trino.rs`, và ghi chú đính chính vào spec 2026-07-15.
 
 **Phần B:**

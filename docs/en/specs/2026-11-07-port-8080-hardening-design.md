@@ -73,6 +73,11 @@ A per-peer limit was rejected:
   - the monitor, the probe, `preStop`, worker registration and a delegated query all work after.
 
   Results go in `docs/en/plans/2026-11-07-port-8080-hardening-live-result.md`.
+
+  **As measured, 2026-11-08.** The measurement does not support three of the promises above (`docs/en/plans/2026-11-07-port-8080-hardening-live-result.md`):
+  - The flag was measured on a standalone Trino 483 (Task A1), not on engines egret provisioned on a Ranger and an OPA profile. The end-to-end identity check on the `opa-e2e` stack (`scripts/opa-e2e/identity-check.sh`, both mechanisms) is the run of record for provisioned engines; the CI `opa-e2e` job is that run.
+  - The worker `preStop` is refused 403 (`Management only resource`) at both flag values (rows 10 and 10s). That is pre-existing and does not depend on the flag, so it is out of scope here and left as a follow-up.
+  - A refused `preStop` was not given the monitor credential. The probe (`GET /v1/info`) is a public resource and answers 200 after the flag.
 - **A5.** Fix the `trino.rs:144-146` comment, and add an "as corrected" note to `2026-07-15-delegated-jwt-tls-mode-design.md`.
 
 **Part B: the OPA listener**
