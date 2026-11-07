@@ -17399,3 +17399,97 @@ async fn a_lost_applied_mechanism_write_answers_502_by_name_and_a_resend_records
     assert_eq!(port.updated.lock().unwrap().len(), updates_before + 2);
     assert_eq!(applied_mechanism(&f, id).await.as_deref(), Some("ranger"));
 }
+
+// ---------------------------------------------------------------------------
+// Port-8080 hardening A4: the security revision an engine was applied with.
+// ---------------------------------------------------------------------------
+
+async fn security_reapply_needed(f: &Fixture, token: &str, id: Uuid) -> serde_json::Value {
+    let (status, j) = call(f, "GET", &format!("/engines/{id}"), token, None).await;
+    assert_eq!(status, StatusCode::OK, "get engine; body={j}");
+    j["securityReapplyNeeded"].clone()
+}
+
+#[tokio::test]
+async fn a_trino_engine_applied_before_the_hardening_asks_to_be_re_applied_until_it_is() {
+    // Arrange
+    let Some((f, _port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sec_rev_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = engine_name("sec-rev");
+    let id = create_trino(&f, &token, &name, wh_id, "483", None).await;
+    assert_eq!(
+        security_reapply_needed(&f, &token, id).await,
+        false,
+        "creating an engine applies it with the current revision"
+    );
+
+    // Act: the engine as it was before the hardening (revision 0).
+    sqlx::query("UPDATE engine_mgmt.engines SET applied_security_rev = 0 WHERE id = $1")
+        .bind(id)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+
+    // Assert
+    assert_eq!(security_reapply_needed(&f, &token, id).await, true);
+    let (_, list) = call(&f, "GET", "/engines", &token, None).await;
+    let listed = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == id.to_string())
+        .expect("listed");
+    assert_eq!(
+        listed["securityReapplyNeeded"], true,
+        "the list says so too"
+    );
+
+    // Act: re-apply it.
+    let (status, j) = call(
+        &f,
+        "PUT",
+        &format!("/engines/{id}"),
+        &token,
+        Some(trino_body(&name, wh_id, "483", None)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "update; body={j}");
+
+    // Assert
+    assert_eq!(
+        security_reapply_needed(&f, &token, id).await,
+        false,
+        "a successful apply records the current revision"
+    );
+}
+
+#[tokio::test]
+async fn external_and_starrocks_engines_never_ask_to_be_re_applied() {
+    // Arrange
+    let Some((f, _port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sec_rev_other_admin", true).await;
+    let (external, _) = register_external(&f, &token, "trino", "2.8.0", None, &[]).await;
+    let sr_id = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone())
+        .create_engine(
+            &engine_name("sec-rev-sr"),
+            "starrocks",
+            "egret-engines",
+            &serde_json::json!({ "starrocksConfig": {} }),
+            None,
+        )
+        .await
+        .unwrap()
+        .id;
+
+    // Act / Assert: both rows carry revision 0 and are still not flagged.
+    for id in [external, sr_id] {
+        assert_eq!(security_reapply_needed(&f, &token, id).await, false, "{id}");
+    }
+}

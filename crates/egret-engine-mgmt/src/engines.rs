@@ -294,6 +294,12 @@ struct EngineSpecDto {
     starrocks_config: Option<serde_json::Value>,
 }
 
+/// The Trino security render egret writes. Bump it when a render change makes
+/// an already-applied engine unsafe until re-applied; engines recorded below
+/// it show "Re-apply needed" (`EngineDto::security_reapply_needed`).
+/// 1 = `allow-insecure-over-http=false`, authentication on every engine.
+pub const TRINO_SECURITY_REV: i16 = 1;
+
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct EngineDto {
@@ -360,6 +366,10 @@ pub(crate) struct EngineDto {
     /// by the reads (`GET /engines`, `GET /engines/{id}`).
     #[serde(skip_serializing_if = "Option::is_none")]
     runtime: Option<crate::state::EngineRuntime>,
+    /// Provisioned Trino only: `true` when the engine was last applied before
+    /// the current security render (or never applied), so it may still accept
+    /// unauthenticated requests on port 8080. Re-applying it clears this.
+    security_reapply_needed: bool,
 }
 
 impl EngineDto {
@@ -391,6 +401,9 @@ impl From<Engine> for EngineDto {
             &e.spec,
         );
         let endpoint = e.client_endpoint();
+        let security_reapply_needed = !crate::external::is_external(&e)
+            && !e.is_starrocks()
+            && e.applied_security_rev < TRINO_SECURITY_REV;
         let spec = serde_json::from_value(e.spec).unwrap_or_default();
         EngineDto {
             id: e.id,
@@ -410,6 +423,7 @@ impl From<Engine> for EngineDto {
             ranger_credential_id: e.ranger_secret_id,
             endpoint,
             runtime: None,
+            security_reapply_needed,
         }
     }
 }
@@ -1030,6 +1044,23 @@ async fn finish_apply(
             mechanism_not_recorded = Some(format!(
                 "applied, but the applied mechanism ({mechanism}) could not be recorded: {e}"
             ));
+        }
+    }
+    if res.is_ok() && !engine.is_starrocks() {
+        if let Err(e) = st
+            .engine_mgmt
+            .set_applied_security_rev(engine.id, TRINO_SECURITY_REV)
+            .await
+        {
+            tracing::error!(engine = %engine.name, error = %e,
+                "applied, but the security revision could not be recorded");
+            let note = format!(
+                "applied, but the security revision ({TRINO_SECURITY_REV}) could not be recorded: {e}"
+            );
+            mechanism_not_recorded = Some(match mechanism_not_recorded {
+                Some(prev) => format!("{prev}; {note}"),
+                None => note,
+            });
         }
     }
     if let Some(secrets) = &built.internal {
@@ -8045,6 +8076,7 @@ mod tests {
             monitor_secret_id: None,
             ranger_secret_id: None,
             ranger_secret_prev_id: None,
+            applied_security_rev: 0,
             created_at: chrono::Utc::now(),
             origin: origin.into(),
             external_host: None,
@@ -8060,6 +8092,7 @@ mod tests {
         let mut e = Engine {
             ranger_secret_id: Some(current),
             ranger_secret_prev_id: Some(prev),
+            applied_security_rev: 0,
             ..dto_engine("trino", "external")
         };
         let j = serde_json::to_value(EngineDto::from(e.clone())).unwrap();
@@ -9166,6 +9199,7 @@ mod tests {
             monitor_secret_id: None,
             ranger_secret_id: None,
             ranger_secret_prev_id: None,
+            applied_security_rev: 0,
             created_at: chrono::Utc::now(),
             origin: "provisioned".into(),
             external_host: None,

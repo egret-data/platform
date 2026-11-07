@@ -90,4 +90,10 @@ export interface EngineDto {
      */
   endpoint: string;
   runtime?: null | EngineRuntime;
+  /**
+     * Provisioned Trino only: `true` when the engine was last applied before
+     * the current security render (or never applied), so it may still accept
+     * unauthenticated requests on port 8080. Re-applying it clears this.
+     */
+  securityReapplyNeeded: boolean;
 }

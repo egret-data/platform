@@ -272,7 +272,22 @@ function EngineTable({
       key: "status",
       label: "Status",
       // An external engine is not monitored: a chip stands where the status would be.
-      cell: (e) => (isExternal(e) ? <ExternalChip /> : <EngineStatusBadge id={e.id} fallback={e.status} />),
+      cell: (e) =>
+        isExternal(e) ? (
+          <ExternalChip />
+        ) : (
+          <span className="flex flex-wrap items-center gap-1.5">
+            <EngineStatusBadge id={e.id} fallback={e.status} />
+            {e.securityReapplyNeeded && (
+              <StatusBadge
+                tone="highlight"
+                title="This engine still accepts unauthenticated requests on port 8080. Re-apply it to turn on authentication."
+              >
+                Re-apply needed
+              </StatusBadge>
+            )}
+          </span>
+        ),
     },
     {
       key: "actions",
