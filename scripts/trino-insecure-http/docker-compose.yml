@@ -9,7 +9,7 @@ services:
       ALLOW_INSECURE: ${ALLOW_INSECURE:-true}
       TRINO_INTERNAL_SECRET: ${TRINO_INTERNAL_SECRET}
     volumes:
-      - ./etc/coordinator.config.properties:/etc/trino/config.properties:ro
+      - ./etc/${COORD_CONF:-coordinator.config.properties}:/etc/trino/config.properties:ro
       - ./etc/jvm.config:/etc/trino/jvm.config:ro
       - ./etc/password-authenticator.properties:/etc/trino/password-authenticator.properties:ro
       - ./etc/access-control.properties:/etc/trino/access-control.properties:ro

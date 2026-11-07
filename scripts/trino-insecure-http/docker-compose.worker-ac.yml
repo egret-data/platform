@@ -1,0 +1,8 @@
+# Override used only by check.sh's supplemental pass: gives the worker file access control.
+# (Trino auto-loads etc/access-control.properties, so mounting it is enough.)
+services:
+  worker:
+    volumes:
+      - ./etc/worker.config.properties:/etc/trino/config.properties:ro
+      - ./etc/access-control.properties:/etc/trino/access-control.properties:ro
+      - ./etc/rules-worker.json:/etc/trino/rules.json:ro

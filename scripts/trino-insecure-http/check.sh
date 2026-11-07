@@ -19,21 +19,64 @@ H=http://localhost:18080; S=https://localhost:18443
 run() { python3 -I ./query.py "$@"; }
 cli() { docker exec trino-insecure-http-coordinator-1 trino --server "$1" "${@:2}" 2>&1 | tr '\n' ' ' | cut -c1-300; echo; }
 
-for flag in true false; do
-  echo "=== allow-insecure-over-http=$flag ==="
-  ALLOW_INSECURE=$flag docker compose -p trino-insecure-http up -d --force-recreate >/dev/null 2>&1
-  for _ in $(seq 90); do curl -s $H/v1/info 2>/dev/null | grep -q '"starting":false' && break; sleep 2; done
+FAILED=0
+CNAME=trino-insecure-http-coordinator-1; WNAME=trino-insecure-http-worker-1
+wait_ready() { # fatal unless $1=soft
+  for _ in $(seq 90); do curl -s $H/v1/info 2>/dev/null | grep -q '"starting":false' && return 0; sleep 2; done
+  return 1
+}
+wait_nodes() { # $1.. = query.py auth args over $B
   for _ in $(seq 60); do
-    n=$(run $S "SELECT count(*) FROM system.runtime.nodes" -u "egret_delegator:$DELEG_PW" -H 'X-Trino-User: egret_delegator' 2>/dev/null)
-    case $n in *"[[2]]"*) break;; esac; sleep 2; done
-  echo "1 plain http, X-Trino-User bob:           $(run $H 'SELECT current_user' -H 'X-Trino-User: bob')"
-  echo "2 CLI --user ann --session-user bob:      $(cli http://localhost:8080 --user ann --session-user bob --execute 'SELECT current_user')"
-  echo "3 fwd https, no credential:               $(run $H 'SELECT current_user' -H 'X-Trino-User: bob' -H 'X-Forwarded-Proto: https')"
-  echo "4 fwd https, monitor as itself:           $(run $H 'SELECT current_user' -u "egret-monitor:$MON_PW" -H 'X-Trino-User: egret-monitor' -H 'X-Forwarded-Proto: https')"
-  echo "5 fwd https, monitor claiming bob:        $(run $H 'SELECT current_user' -u "egret-monitor:$MON_PW" -H 'X-Trino-User: bob' -H 'X-Forwarded-Proto: https')"
-  echo "6 GET /v1/info:                           $(curl -s -w ' HTTP %{http_code}' $H/v1/info)"
-  echo "7 GET /v1/info/state as admin:            $(curl -s -w ' HTTP %{http_code}' -H 'X-Trino-User: admin' $H/v1/info/state)"
-  echo "8 nodes over https as delegator->ann:     $(run $S 'SELECT count(*) FROM system.runtime.nodes' -u "egret_delegator:$DELEG_PW" -H 'X-Trino-Original-User: egret_delegator' -H 'X-Trino-User: ann')"
-  echo "9 current_user over https delegator->ann: $(run $S 'SELECT current_user' -u "egret_delegator:$DELEG_PW" -H 'X-Trino-Original-User: egret_delegator' -H 'X-Trino-User: ann')"
-  docker compose -p trino-insecure-http logs worker 2>&1 | grep -ci 'error' | sed 's/^/worker log lines with error: /'
+    case $(run "$@" 2>/dev/null) in *"[[2]]"*) return 0;; esac; sleep 2; done
+  return 1
+}
+for cfg in tls notls; do
+  conf=coordinator.config.properties; [ $cfg = notls ] && conf=coordinator-notls.config.properties
+  for flag in true false; do
+    echo "=== config=$cfg (https listener: $([ $cfg = tls ] && echo yes || echo NO)) allow-insecure-over-http=$flag ==="
+    COORD_CONF=$conf ALLOW_INSECURE=$flag docker compose -p trino-insecure-http up -d --force-recreate >/dev/null 2>&1
+    if ! wait_ready; then
+      echo "COORDINATOR DID NOT REACH starting:false within 180s (state: $(docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}}' $CNAME))"
+      docker logs $CNAME 2>&1 | grep -E 'ERROR|Exception|must|not ' | head -8 | cut -c1-300
+      [ $cfg = tls ] && FAILED=1
+      continue
+    fi
+    if [ $cfg = tls ]; then
+      wait_nodes $S "SELECT count(*) FROM system.runtime.nodes" -u "egret_delegator:$DELEG_PW" -H 'X-Trino-User: egret_delegator' || { echo "TIMEOUT waiting for 2 nodes"; FAILED=1; }
+    else
+      wait_nodes $H "SELECT count(*) FROM system.runtime.nodes" -u "egret-monitor:$MON_PW" -H 'X-Trino-User: egret-monitor' -H 'X-Forwarded-Proto: https' || echo "TIMEOUT waiting for 2 nodes (notls)"
+    fi
+    echo "1 plain http, X-Trino-User bob:           $(run $H 'SELECT current_user' -H 'X-Trino-User: bob')"
+    [ $cfg = tls ] && echo "2 CLI --user ann --session-user bob:      $(cli http://localhost:8080 --user ann --session-user bob --execute 'SELECT current_user')"
+    echo "3 fwd https, no credential:               $(run $H 'SELECT current_user' -H 'X-Trino-User: bob' -H 'X-Forwarded-Proto: https')"
+    echo "4 fwd https, monitor as itself:           $(run $H 'SELECT current_user' -u "egret-monitor:$MON_PW" -H 'X-Trino-User: egret-monitor' -H 'X-Forwarded-Proto: https')"
+    echo "5 fwd https, monitor claiming bob:        $(run $H 'SELECT current_user' -u "egret-monitor:$MON_PW" -H 'X-Trino-User: bob' -H 'X-Forwarded-Proto: https')"
+    echo "6 coordinator GET /v1/info:               $(curl -s -w ' HTTP %{http_code}' $H/v1/info)"
+    echo "7 coordinator GET /v1/info/state (admin): $(curl -s -w ' HTTP %{http_code}' -H 'X-Trino-User: admin' $H/v1/info/state)"
+    if [ $cfg = tls ]; then
+      echo "8 nodes over https as delegator->ann:     $(run $S 'SELECT count(*) FROM system.runtime.nodes' -u "egret_delegator:$DELEG_PW" -H 'X-Trino-Original-User: egret_delegator' -H 'X-Trino-User: ann')"
+      echo "9 current_user over https delegator->ann: $(run $S 'SELECT current_user' -u "egret_delegator:$DELEG_PW" -H 'X-Trino-Original-User: egret_delegator' -H 'X-Trino-User: ann')"
+    else
+      echo "8 nodes over http as monitor (fwd https): $(run $H 'SELECT count(*) FROM system.runtime.nodes' -u "egret-monitor:$MON_PW" -H 'X-Trino-User: egret-monitor' -H 'X-Forwarded-Proto: https')"
+    fi
+    echo "worker log ERROR/Exception lines:         $(docker logs $WNAME 2>&1 | grep -cE ' ERROR |Exception')"
+    docker logs $WNAME 2>&1 | grep -E ' ERROR |Exception' | head -5 | cut -c1-200
+    echo "worker log lines matching 'error' (case-insens): $(docker logs $WNAME 2>&1 | grep -ci error), config-table lines among them: $(docker logs $WNAME 2>&1 | grep -i error | grep -c 'io.trino.bootstrap.engine')"
+    # real preStop (crates/egret-provisioner/src/trino.rs): PUT on the WORKER's localhost:8080; run last, it shuts the worker down
+    echo "10 worker preStop PUT SHUTTING_DOWN:      $(docker exec $WNAME curl -s -w ' HTTP %{http_code}' -X PUT -d '"SHUTTING_DOWN"' -H 'Content-type: application/json' -H 'X-Trino-User: admin' http://localhost:8080/v1/info/state)"
+    echo "10b worker state afterwards:              $(docker exec $WNAME curl -s -w ' HTTP %{http_code}' http://localhost:8080/v1/info/state)"
+  done
 done
+# Supplemental: the worker as rendered has no access-control config, so the preStop PUT is refused at
+# BOTH flag values above. Re-measure it with a worker that has file access control allowing `admin`
+# system_information read+write, to see whether the flag changes the PUT.
+for flag in true false; do
+  echo "=== supplemental: worker WITH access control (admin may write system information), allow-insecure-over-http=$flag ==="
+  ALLOW_INSECURE=$flag docker compose -p trino-insecure-http -f docker-compose.yml -f docker-compose.worker-ac.yml up -d --force-recreate >/dev/null 2>&1
+  wait_ready || { echo "TIMEOUT waiting for coordinator"; FAILED=1; continue; }
+  wait_nodes $S "SELECT count(*) FROM system.runtime.nodes" -u "egret_delegator:$DELEG_PW" -H 'X-Trino-User: egret_delegator' || { echo "TIMEOUT waiting for 2 nodes"; FAILED=1; }
+  echo "10 worker preStop PUT SHUTTING_DOWN:      $(docker exec $WNAME curl -s -w ' HTTP %{http_code}' -X PUT -d '"SHUTTING_DOWN"' -H 'Content-type: application/json' -H 'X-Trino-User: admin' http://localhost:8080/v1/info/state)"
+  sleep 3
+  echo "10b worker state afterwards:              $(docker exec $WNAME curl -s -w ' HTTP %{http_code}' http://localhost:8080/v1/info/state)"
+done
+exit $FAILED

@@ -1,0 +1,4 @@
+{
+  "catalogs": [{"allow": "all"}],
+  "system_information": [{"user": "admin", "allow": ["read", "write"]}]
+}

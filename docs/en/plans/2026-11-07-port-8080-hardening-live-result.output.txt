@@ -1,0 +1,58 @@
+=== config=tls (https listener: yes) allow-insecure-over-http=true ===
+1 plain http, X-Trino-User bob:           HTTP 200 | [["bob"]]
+2 CLI --user ann --session-user bob:      "bob" 
+3 fwd https, no credential:               HTTP 401 | Unauthorized
+4 fwd https, monitor as itself:           HTTP 200 | [["egret-monitor"]]
+5 fwd https, monitor claiming bob:        HTTP 200 | Access Denied: User egret-monitor cannot impersonate user bob
+6 coordinator GET /v1/info:               {"nodeId":"coordinator","state":"ACTIVE","nodeVersion":{"version":"483"},"environment":"docker","coordinator":true,"coordinatorId":"u8isa","starting":false,"uptime":"28.63s"} HTTP 200
+7 coordinator GET /v1/info/state (admin): "ACTIVE" HTTP 200
+8 nodes over https as delegator->ann:     HTTP 200 | [[2]]
+9 current_user over https delegator->ann: HTTP 200 | [["ann"]]
+worker log ERROR/Exception lines:         0
+worker log lines matching 'error' (case-insens): 4, config-table lines among them: 4
+10 worker preStop PUT SHUTTING_DOWN:      Error 403 Forbidden: Management only resource HTTP 403
+10b worker state afterwards:              "ACTIVE" HTTP 200
+=== config=tls (https listener: yes) allow-insecure-over-http=false ===
+1 plain http, X-Trino-User bob:           HTTP 403 | Error 403 Forbidden: Authentication over HTTP is not enabled
+2 CLI --user ann --session-user bob:      Error starting query at http://localhost:8080/v1/statement returned an invalid response: JsonResponse{statusCode=403, headers={content-type=[text/plain;charset=iso-8859-1], date=[Sat, 07 Nov 2026 17:26:39 GMT], transfer-encoding=[chunked], vary=[Accept-Encoding]}, hasValue=false} [Error: Error 403 F
+3 fwd https, no credential:               HTTP 401 | Unauthorized
+4 fwd https, monitor as itself:           HTTP 200 | [["egret-monitor"]]
+5 fwd https, monitor claiming bob:        HTTP 200 | Access Denied: User egret-monitor cannot impersonate user bob
+6 coordinator GET /v1/info:               {"nodeId":"coordinator","state":"ACTIVE","nodeVersion":{"version":"483"},"environment":"docker","coordinator":true,"coordinatorId":"ycx5e","starting":false,"uptime":"28.34s"} HTTP 200
+7 coordinator GET /v1/info/state (admin): "ACTIVE" HTTP 200
+8 nodes over https as delegator->ann:     HTTP 200 | [[2]]
+9 current_user over https delegator->ann: HTTP 200 | [["ann"]]
+worker log ERROR/Exception lines:         0
+worker log lines matching 'error' (case-insens): 4, config-table lines among them: 4
+10 worker preStop PUT SHUTTING_DOWN:      Error 403 Forbidden: Management only resource HTTP 403
+10b worker state afterwards:              "ACTIVE" HTTP 200
+=== config=notls (https listener: NO) allow-insecure-over-http=true ===
+1 plain http, X-Trino-User bob:           HTTP 200 | [["bob"]]
+3 fwd https, no credential:               HTTP 401 | Unauthorized
+4 fwd https, monitor as itself:           HTTP 200 | [["egret-monitor"]]
+5 fwd https, monitor claiming bob:        HTTP 200 | Access Denied: User egret-monitor cannot impersonate user bob
+6 coordinator GET /v1/info:               {"nodeId":"coordinator","state":"ACTIVE","nodeVersion":{"version":"483"},"environment":"docker","coordinator":true,"coordinatorId":"nzq3a","starting":false,"uptime":"22.05s"} HTTP 200
+7 coordinator GET /v1/info/state (admin): "ACTIVE" HTTP 200
+8 nodes over http as monitor (fwd https): HTTP 200 | [[2]]
+worker log ERROR/Exception lines:         0
+worker log lines matching 'error' (case-insens): 4, config-table lines among them: 4
+10 worker preStop PUT SHUTTING_DOWN:      Error 403 Forbidden: Management only resource HTTP 403
+10b worker state afterwards:              "ACTIVE" HTTP 200
+=== config=notls (https listener: NO) allow-insecure-over-http=false ===
+1 plain http, X-Trino-User bob:           HTTP 403 | Error 403 Forbidden: Authentication over HTTP is not enabled
+3 fwd https, no credential:               HTTP 401 | Unauthorized
+4 fwd https, monitor as itself:           HTTP 200 | [["egret-monitor"]]
+5 fwd https, monitor claiming bob:        HTTP 200 | Access Denied: User egret-monitor cannot impersonate user bob
+6 coordinator GET /v1/info:               {"nodeId":"coordinator","state":"ACTIVE","nodeVersion":{"version":"483"},"environment":"docker","coordinator":true,"coordinatorId":"5khjp","starting":false,"uptime":"21.79s"} HTTP 200
+7 coordinator GET /v1/info/state (admin): "ACTIVE" HTTP 200
+8 nodes over http as monitor (fwd https): HTTP 200 | [[2]]
+worker log ERROR/Exception lines:         0
+worker log lines matching 'error' (case-insens): 4, config-table lines among them: 4
+10 worker preStop PUT SHUTTING_DOWN:      Error 403 Forbidden: Management only resource HTTP 403
+10b worker state afterwards:              "ACTIVE" HTTP 200
+=== supplemental: worker WITH access control (admin may write system information), allow-insecure-over-http=true ===
+10 worker preStop PUT SHUTTING_DOWN:       HTTP 200
+10b worker state afterwards:              "SHUTTING_DOWN" HTTP 200
+=== supplemental: worker WITH access control (admin may write system information), allow-insecure-over-http=false ===
+10 worker preStop PUT SHUTTING_DOWN:       HTTP 200
+10b worker state afterwards:              "SHUTTING_DOWN" HTTP 200
