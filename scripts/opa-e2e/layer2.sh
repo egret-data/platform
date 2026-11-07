@@ -76,6 +76,8 @@ docker exec "$OPA_CONTAINER" grep -q '^access-control.name=opa' /etc/trino/acces
 # check while trino-opa was on the Ranger plugin.
 . "$HERE/trino-auth.sh"
 TRINO_DELEGATOR_PASSWORD=$(delegator_password trino-opa) || die "reading trino-opa's delegator password"
+# Mask it in CI logs, so a future `set -x` cannot print it.
+if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::add-mask::$TRINO_DELEGATOR_PASSWORD"; fi
 export TRINO_DELEGATOR_PASSWORD
 identity_check "$OPA_CONTAINER" trino-opa/opa || die "identity check failed on trino-opa (OPA plugin)"
 identity_check "$RANGER_CONTAINER" trino-ranger || die "identity check failed on trino-ranger"

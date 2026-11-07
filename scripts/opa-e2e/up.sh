@@ -131,6 +131,8 @@ wait_opa_ready() {
 }
 wait_opa_ready
 TRINO_DELEGATOR_PASSWORD=$(delegator_password "$OPA_ENGINE") || die "reading $OPA_ENGINE's delegator password"
+# Mask it in CI logs, so a future `set -x` cannot print it.
+if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::add-mask::$TRINO_DELEGATOR_PASSWORD"; fi
 export TRINO_DELEGATOR_PASSWORD
 
 # --- 6/7. trino-ranger: the Ranger plugin on THIS profile's Ranger download ----------------

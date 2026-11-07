@@ -86,6 +86,8 @@ sleep "${LIVE_CHECK_WAIT:-35}"
 # the delegator impersonating the user, as egret's own query path does (trino-auth.sh).
 . "$REPO/scripts/opa-e2e/trino-auth.sh"
 TRINO_DELEGATOR_PASSWORD=$(delegator_password trino-opa) || { echo "cannot read trino-opa's delegator password" >&2; exit 1; }
+# Mask it in CI logs, so a future `set -x` cannot print it.
+if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::add-mask::$TRINO_DELEGATOR_PASSWORD"; fi
 export TRINO_DELEGATOR_PASSWORD
 RANGER_CONTAINER=$("${COMPOSE[@]}" ps -q trino-ranger)
 q() { # $1 = opa|ranger, $2 = user, $3 = sql  -> rows as TSV, or the CLI's error line

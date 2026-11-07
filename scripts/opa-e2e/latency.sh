@@ -100,6 +100,8 @@ fi
 # Both engines refuse plain-HTTP authentication: latency-run.sh authenticates as the delegator.
 . "$REPO/scripts/opa-e2e/trino-auth.sh"
 TRINO_DELEGATOR_PASSWORD=$(delegator_password trino-opa) || die "reading trino-opa's delegator password"
+# Mask it in CI logs, so a future `set -x` cannot print it.
+if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::add-mask::$TRINO_DELEGATOR_PASSWORD"; fi
 export TRINO_DELEGATOR_PASSWORD
 export REPO OUT BASE OPA_CONTAINER RANGER_CONTAINER ADMIN_USER JAR CSRF CATALOG
 COMPOSE_JSON=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "${COMPOSE[@]}")
