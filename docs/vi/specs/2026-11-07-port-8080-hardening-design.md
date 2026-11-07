@@ -31,7 +31,7 @@ Hai lỗi chung một gốc: cổng 8080 cho quá nhiều bên gọi tới, nhi�
 - **Ngoài phạm vi:** StarRocks cổng 9030 cho `root` đăng nhập không password. Việc này là follow-up riêng.
 
 **Phần A:**
-- **A1.** Spec không có `trinoConfig.auth` được coi như có `"auth": {"password": {}}`. Delegator và `egret-monitor` được thêm vào như hiện nay. Spec lưu cũng được chuẩn hoá theo; request xoá khối auth sẽ bị chuẩn hoá lại chứ không bị từ chối. Engine cũ được bổ sung auth ở lần apply tới, và danh sách engine đánh dấu chúng cho tới khi được re-apply.
+- **A1.** Spec không có `trinoConfig.auth` được coi như có `"auth": {"password": {}}`. Delegator và `egret-monitor` được thêm vào như hiện nay. Spec lưu cũng được chuẩn hoá theo; request xoá khối auth sẽ bị chuẩn hoá lại chứ không bị từ chối. Engine cũ được bổ sung auth và cờ mới ở lần apply tới. Migration **0215** thêm cột `applied_security_rev`; mỗi lần apply thành công egret ghi revision hiện tại (`TRINO_SECURITY_REV = 1`). API của engine có thêm trường `security_reapply_needed`, và danh sách engine hiện dấu này cho tới khi engine được re-apply.
 - **A2.** Ghi `allow-insecure-over-http=false` cho mọi engine.
   - Request HTTP thường không kèm `X-Forwarded-Proto: https` bị từ chối, trừ các resource public của Trino.
   - Request kèm header đó bị coi là bảo mật, nên phải có password hoặc JWT hợp lệ.
@@ -48,7 +48,7 @@ Hai lỗi chung một gốc: cổng 8080 cho quá nhiều bên gọi tới, nhi�
   - Thêm `networkpolicy-egret.yaml` chọn pod `app: egret`. Cổng 8080 và 8081 nhận từ mọi nơi; cổng 8082 chỉ nhận từ `engineNamespace` và `opa.extraFrom`.
   - Policy này bật cùng với policy của engine.
 - **B4.** Compose: engine trỏ tới `http://egret:8082`.
-- **B5.** Migration **0215** thêm cột `engine_mgmt.engines.applied_opa_url`.
+- **B5.** Migration **0216** thêm cột `engine_mgmt.engines.applied_opa_url`.
   - Mỗi lần apply sinh file plugin OPA, egret ghi lại URL đã dùng.
   - Khi khởi động, nếu OPA đang bật, egret re-apply những engine provisioned trên profile OPA có URL cũ. Engine đã có URL đúng thì không bị đụng tới.
   - Lỗi được ghi theo từng engine và không làm dừng server.
@@ -57,7 +57,7 @@ Hai lỗi chung một gốc: cổng 8080 cho quá nhiều bên gọi tới, nhi�
 
 Xem bản tiếng Anh §3–§5. Tóm tắt:
 - **PR A:** render, chuẩn hoá spec, kết quả đo trên engine thật, dấu cần re-apply trong danh sách engine, docs.
-- **PR B:** khoá cấu hình, listener, tách router, URL plugin, migration 0215 và lượt re-apply khi khởi động, Helm, compose, `opa-e2e`, docs.
+- **PR B:** khoá cấu hình, listener, tách router, URL plugin, migration 0216 và lượt re-apply khi khởi động, Helm, compose, `opa-e2e`, docs.
 - **Test:**
   - unit test cho render, kèm mutant;
   - kịch bản `opa-e2e` chứng minh `--session-user` bị từ chối trên cả hai engine;

@@ -54,7 +54,7 @@ A per-peer limit was rejected:
 - **A1. Authentication is always on.** The engine apply path treats a Trino spec without `trinoConfig.auth` as `"auth": {"password": {}}`.
   - The delegator (impersonate mode) and `egret-monitor` are injected as today (`crates/egret-engine-mgmt/src/engines.rs:743-794`).
   - The stored spec is normalised the same way, so the console shows the block. A request that removes it is normalised back, not refused.
-  - An existing engine without auth gains it on its next apply. The PR A upgrade note tells operators to re-apply such engines, and the engine list marks them until they are re-applied.
+  - An existing engine gains it, and the new flag (A2), on its next apply. Migration **0215** adds `engine_mgmt.engines.applied_security_rev smallint NOT NULL DEFAULT 0`; every successful apply of a Trino engine records the current revision (`TRINO_SECURITY_REV = 1`). The engine API carries `security_reapply_needed` (a provisioned Trino engine whose recorded revision is below the current one), the engine list shows it, and the PR A upgrade note tells operators to re-apply those engines.
 - **A2. Insecure HTTP is off on every engine.** `allow-insecure-over-http=false` is rendered whenever an authenticator is configured, which after A1 means always. Requests then behave as follows:
   - A plain-HTTP request to 8080 without `X-Forwarded-Proto: https` is refused, except for Trino's public resources.
   - With `process-forwarded=true`, which is unchanged, a request carrying `X-Forwarded-Proto: https` is treated as secure, so it must carry a valid password or JWT. The header alone does not let a peer claim a user.
@@ -100,7 +100,7 @@ A per-peer limit was rejected:
   - Engines get `http://egret:8082/opa/...`.
   - Ports are not published to the host.
 - **B5. Transition.**
-  - Migration **0215** adds `engine_mgmt.engines.applied_opa_url text` (nullable).
+  - Migration **0216** adds `engine_mgmt.engines.applied_opa_url text` (nullable).
   - Every apply that renders OPA plugin files records the base URL it rendered. Other applies clear it.
   - At start, when OPA is enabled, a one-shot pass re-applies every provisioned engine on an OPA profile whose `applied_opa_url` differs from the current one. An engine whose URL is current is not touched, so a restart of egret restarts no engine.
   - A failure is logged and reported by engine, as `reapply_bound_engines` does, and does not stop the server.
@@ -116,7 +116,7 @@ A per-peer limit was rejected:
   - config keys (`egret-config`);
   - the listener (`egret-bin`) and router split (`egret-server`);
   - `opa_plugin_files` and the plugin-config route;
-  - migration 0215 and the start pass;
+  - migration 0216 and the start pass;
   - Helm templates and values;
   - compose stacks and the `opa-e2e` scripts;
   - docs: Trino on OPA page, configuration keys, Helm values, upgrade note.
