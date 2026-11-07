@@ -776,6 +776,74 @@ mod tests {
         String::from_utf8(raw).expect("valid utf8")
     }
 
+    /// A minter that hands out one fixed token, so a Bearer header is checkable.
+    struct FixedMinter;
+
+    #[async_trait::async_trait]
+    impl egret_analytics_api::engine_token::EngineTokenMinter for FixedMinter {
+        async fn mint(
+            &self,
+            _user_id: Uuid,
+        ) -> Result<
+            egret_analytics_api::engine_token::EngineToken,
+            egret_analytics_api::engine_token::BrokerError,
+        > {
+            Ok(egret_analytics_api::engine_token::EngineToken {
+                access_token: "fixed-engine-token".into(),
+                expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+            })
+        }
+    }
+
+    /// Port-8080 hardening (A3): the monitor's credential follows what the
+    /// coordinator renders, not the delegation mode alone. A jwt-only
+    /// coordinator (jwt mode AND an `auth.jwt` block) gets the caller's engine
+    /// token; a jwt-mode engine WITHOUT a jwt block renders PASSWORD, so it gets
+    /// Basic `egret-monitor` plus `X-Forwarded-Proto: https`, like any other.
+    #[tokio::test]
+    async fn monitor_headers_follow_the_rendered_authenticator_not_the_mode() {
+        let Some(mut st) = test_state().await else {
+            eprintln!(
+                "skipping monitor_headers_follow_the_rendered_authenticator_not_the_mode: DATABASE_URL not set"
+            );
+            return;
+        };
+        st.engine_token_minter = Some(std::sync::Arc::new(FixedMinter));
+
+        let jwt_only = engine_with_spec(json!({
+            "trinoConfig": { "delegationMode": "jwt", "auth": { "jwt": {} } }
+        }));
+        let headers = monitor_headers(&st, &jwt_only, UserId(Uuid::nil()))
+            .await
+            .expect("headers");
+        assert!(
+            headers
+                .iter()
+                .any(|(k, v)| k == "Authorization" && v == "Bearer fixed-engine-token"),
+            "a jwt-only coordinator must get the caller's engine token: {headers:?}"
+        );
+
+        let jwt_mode_password = engine_with_spec(json!({
+            "trinoConfig": { "delegationMode": "jwt", "auth": { "password": {} } }
+        }));
+        let headers = monitor_headers(&st, &jwt_mode_password, UserId(Uuid::nil()))
+            .await
+            .expect("headers");
+        assert_eq!(
+            decoded_basic_credential(&headers),
+            format!(
+                "egret-monitor:{}",
+                crate::engines::legacy_monitor_password(jwt_mode_password.id)
+            )
+        );
+        assert!(
+            headers
+                .iter()
+                .any(|(k, v)| k == "X-Forwarded-Proto" && v == "https"),
+            "Basic auth over the proxied hop needs X-Forwarded-Proto: https"
+        );
+    }
+
     /// I3 (SP1 Part B final review): `monitor_headers` is the only consumer of
     /// the rotated monitor password — nothing pinned the credential it actually
     /// builds, so reverting it to always use `legacy_monitor_password(engine.id)`
