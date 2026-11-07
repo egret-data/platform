@@ -999,3 +999,110 @@ async fn explain_refuses_the_lineage_principal_a_public_write_as_the_surface_doe
         assert_eq!(a["decision"]["kind"], "allowed", "{a}");
     }
 }
+
+/// SP2b Task 20F (final review T16 M1): explain follows the profile's
+/// mechanism, so it says which bound engines still run the other one.
+#[tokio::test]
+async fn an_engine_not_yet_reapplied_to_the_profiles_mechanism_is_named() {
+    // Arrange: an OPA profile whose bound engine is recorded on Ranger.
+    let db = db().await;
+    let st = store(&db, &prefix("xo11"), Extra::None).await;
+    set_mechanism(&db, st.profile, "opa").await;
+    let set_applied = |mechanism: Option<&'static str>| {
+        let pool = db.pool.clone();
+        let profile = st.profile;
+        async move {
+            sqlx::query(
+                "UPDATE engine_mgmt.engines SET applied_mechanism = $2 \
+                 WHERE authz_service_id = $1",
+            )
+            .bind(profile)
+            .bind(mechanism)
+            .execute(&pool)
+            .await
+            .expect("applied_mechanism");
+        }
+    };
+    let engine: String =
+        sqlx::query_scalar("SELECT name FROM engine_mgmt.engines WHERE authz_service_id = $1")
+            .bind(st.profile)
+            .fetch_one(&db.pool)
+            .await
+            .expect("the bound engine");
+    let (app, token) = app(&db, None).await;
+    let col = || target(st.cat, Some("t"), Some("id"));
+
+    // Act + Assert: on Ranger while the profile is on OPA, it is named.
+    set_applied(Some("ranger")).await;
+    let (s, body, _) = explain(&app, &token, &st.bob, "read", col()).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(
+        only_profile(&body)["engines_not_reapplied"],
+        json!([engine]),
+        "{body}"
+    );
+
+    // Re-applied: nothing to say.
+    set_applied(Some("opa")).await;
+    let (_, body, _) = explain(&app, &token, &st.bob, "read", col()).await;
+    assert!(
+        only_profile(&body).get("engines_not_reapplied").is_none(),
+        "{body}"
+    );
+
+    // No record (never applied, or external): not named either.
+    set_applied(None).await;
+    let (_, body, _) = explain(&app, &token, &st.bob, "read", col()).await;
+    assert!(
+        only_profile(&body).get("engines_not_reapplied").is_none(),
+        "{body}"
+    );
+
+    // And back on Ranger with the engine still recorded on OPA: named on the
+    // Ranger profile too.
+    set_mechanism(&db, st.profile, "ranger").await;
+    set_applied(Some("opa")).await;
+    let (s, body, _) = explain(&app, &token, &st.bob, "read", col()).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let p = only_profile(&body);
+    assert_eq!(p["mechanism"], "ranger", "{p}");
+    assert_eq!(p["engines_not_reapplied"], json!([engine]), "{p}");
+
+    // Fix round 1: an engine a re-sent switch would not re-apply is never
+    // named, as `reapply_bound_engines` skips it: one being deleted ...
+    let set_engine = |sql: &'static str| {
+        let pool = db.pool.clone();
+        let profile = st.profile;
+        async move {
+            sqlx::query(sql)
+                .bind(profile)
+                .execute(&pool)
+                .await
+                .expect("engine row");
+        }
+    };
+    set_engine("UPDATE engine_mgmt.engines SET status = 'deleting' WHERE authz_service_id = $1")
+        .await;
+    let (_, body, _) = explain(&app, &token, &st.bob, "read", col()).await;
+    assert!(
+        only_profile(&body).get("engines_not_reapplied").is_none(),
+        "deleting: {body}"
+    );
+    // ... and an external one.
+    set_engine(
+        "UPDATE engine_mgmt.engines SET status = 'running', origin = 'external', \
+                external_host = 'trino.example', external_port = 8080, \
+                ranger_plugin_version = '2.5.0', namespace = '', spec = '{}'::jsonb \
+         WHERE authz_service_id = $1",
+    )
+    .await;
+    // On OPA (the Ranger path would judge the external engine's plugin), with
+    // the record on the other mechanism.
+    set_mechanism(&db, st.profile, "opa").await;
+    set_applied(Some("ranger")).await;
+    let (_, body, _) = explain(&app, &token, &st.bob, "read", col()).await;
+    assert!(
+        only_profile(&body).get("engines_not_reapplied").is_none(),
+        "external: {body}"
+    );
+}

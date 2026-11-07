@@ -724,6 +724,16 @@ pub struct ExplainProfile {
     /// target above the table, and when the snapshot could not be built.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub opa: Option<ExplainOpa>,
+    /// The engines bound to this profile that still run the OTHER mechanism:
+    /// their recorded `applied_mechanism` differs from the profile's, because
+    /// a switch's re-apply has not reached them yet (governance SP2b Task 20F,
+    /// final review T16 M1). This explanation follows the profile's mechanism,
+    /// so those engines may answer differently until they are re-applied
+    /// (re-send the switch). Absent when every bound engine is on it. Lists
+    /// only engines a re-sent switch re-applies: never an external engine,
+    /// nor one being deleted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub engines_not_reapplied: Vec<String>,
     pub accesses: Vec<ExplainAccess>,
     /// The tag set **this profile's** verdicts could have been decided by.
     ///
@@ -2708,6 +2718,8 @@ pub(crate) async fn explain_users(
         // plugin, and its engines' images say nothing about one. The catalog
         // lookup is the Ranger path's own, below, repeated here so that path's
         // order (and so its refusals) stays exactly as it was.
+        let not_reapplied =
+            engines_not_reapplied_via(&mut *conn, service_id, &svc.mechanism).await?;
         if svc.mechanism == "opa" {
             let Some(catalog_name) = catalogs_for_service_via(&mut *conn, service_id)
                 .await?
@@ -2725,7 +2737,7 @@ pub(crate) async fn explain_users(
             )
             .await?;
             for (i, user) in users.iter().enumerate() {
-                per_user[i].push(opa_profile(&OpaProfileInput {
+                let mut profile = opa_profile(&OpaProfileInput {
                     snapshot: &snapshot,
                     service_id,
                     service_name: &svc.name,
@@ -2734,7 +2746,9 @@ pub(crate) async fn explain_users(
                     user,
                     action,
                     target,
-                }));
+                });
+                profile.engines_not_reapplied = not_reapplied.clone();
+                per_user[i].push(profile);
             }
             continue;
         }
@@ -3034,6 +3048,7 @@ pub(crate) async fn explain_users(
                 engine: WireEngineType::from(ranger_engine(engine)),
                 mechanism: WireMechanism::Ranger,
                 opa: None,
+                engines_not_reapplied: not_reapplied.clone(),
                 accesses,
                 tags: tags_for_profile(&resolved_for_display, tag_policies_in_download),
                 tag_policies_in_download,
@@ -3677,6 +3692,29 @@ pub(crate) async fn served_artifact_via(
 /// plugin download, `tagPolicies` included, with the lineage transform when
 /// the profile's first engine is eligible. The OPA differential (SP2b
 /// Task 18) hands this, as JSON, to the real Ranger engine.
+/// The engines bound to `service_id` whose recorded `applied_mechanism` is not
+/// `mechanism` (see [`ExplainProfile::engines_not_reapplied`]). Only the
+/// engines a re-sent switch re-applies are listed, by the same filter as
+/// `egret_engine_mgmt::reapply_bound_engines`: never an external engine, nor
+/// one being deleted. An engine with no record (never applied) is not listed.
+async fn engines_not_reapplied_via(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+    mechanism: &str,
+) -> Result<Vec<String>, PermHttpError> {
+    sqlx::query_scalar(
+        "SELECT name FROM engine_mgmt.engines \
+          WHERE authz_service_id = $1 AND applied_mechanism <> $2 \
+            AND origin <> 'external' AND status <> 'deleting' \
+          ORDER BY name",
+    )
+    .bind(service_id)
+    .bind(mechanism)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(PermHttpError::db)
+}
+
 pub(crate) async fn served_envelope_via(
     conn: &mut sqlx::PgConnection,
     svc: &ServiceRow,

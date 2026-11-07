@@ -36,10 +36,23 @@ export function TrinoConfigDialog({ open, service, onOpenChange }: Props) {
       <DialogContent className="max-w-2xl" bodyClassName="grid-cols-[minmax(0,1fr)]">
         <DialogHeader>
           <DialogTitle>Trino config — {service}</DialogTitle>
-          <DialogDescription>
-            Drop these into the Trino coordinator&apos;s <code>etc/</code>. The native ranger plugin then enforces
-            this profile. (Assumes anonymous <code>/service</code>; a Ranger auth token needs extra proxy setup.)
-          </DialogDescription>
+          {!cfg.data ? (
+            <DialogDescription>
+              {cfg.isError
+                ? "The configuration could not be read. Close this dialog and open it again to retry."
+                : "Loading the configuration files."}
+            </DialogDescription>
+          ) : cfg.data.mechanism === "opa" ? (
+            <DialogDescription>
+              Install these two files on a Trino 483 or later coordinator with plugin/opa: egret answers its requests,
+              and cannot check an external engine&apos;s image.
+            </DialogDescription>
+          ) : (
+            <DialogDescription>
+              Drop these into the Trino coordinator&apos;s <code>etc/</code>. The native ranger plugin then enforces
+              this profile. (Assumes anonymous <code>/service</code>; a Ranger auth token needs extra proxy setup.)
+            </DialogDescription>
+          )}
         </DialogHeader>
         {(cfg.data?.warnings ?? []).map((w) => (
           <Alert key={w}>

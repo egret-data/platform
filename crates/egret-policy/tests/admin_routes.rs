@@ -4535,6 +4535,10 @@ async fn trino_config_of_an_opa_profile_shows_the_opa_files_and_the_log_warning(
         warnings.contains(&egret_engine_mgmt_api::opa_config::OPA_LOG_REQUESTS_WARNING),
         "{warnings:?}"
     );
+    assert!(
+        warnings.contains(&egret_engine_mgmt_api::opa_config::OPA_BATCHED_URI_WARNING),
+        "{warnings:?}"
+    );
     f.store.delete_service(svc_id).await.expect("cleanup");
 }
 

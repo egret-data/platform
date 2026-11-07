@@ -2,8 +2,9 @@
 //! IR evaluator (`egret-perm-eval`) over the profile's snapshot — the same
 //! evaluator, over the same snapshot, the OPA surface answers Trino from.
 //!
-//! **The snapshot is chosen exactly as the refresher chooses it** (review
-//! I1/I2), because explain must answer what the surface answers:
+//! **The snapshot is chosen as the refresher chooses it** (review I1/I2), so
+//! that explain answers what the surface answers, with the one exception
+//! below:
 //!
 //! - the cache's `Ready` snapshot when its entry was decided at the profile's
 //!   current `(policy_version, tag_version)` (read in explain's own read-only
@@ -20,6 +21,19 @@
 //!
 //! A spliced snapshot answers from the previous data, and every `ir_reason`
 //! says so.
+//!
+//! **The dropped-snapshot window (final review T16 m-R1).** Explain cannot
+//! see a snapshot the refresher dropped. When the profile's key has moved and
+//! the refresher's next read then fails (`Outcome::Unread`, a transient
+//! database error), the refresher drops the held snapshot because it no
+//! longer describes the store, and the surface refuses every request of that
+//! profile: fail closed. That entry is decided at no key, so explain does not
+//! take it as the surface's answer; it runs its own build instead, which can
+//! succeed, and then shows `Allowed` where the engine is refused. The window
+//! lasts until the refresher's next good build, normally the next period
+//! (`REFRESH_PERIOD`, 1 s). It is not an enforcement gap: in it explain can
+//! only be looser than the engine, never the engine looser than egret's
+//! model.
 //!
 //! **A profile whose snapshot cannot be built is refused, never a 500.** Every
 //! access is `Denied` and its `ir_reason` names the refusal class (the
@@ -276,6 +290,7 @@ pub(super) fn opa_profile(i: &OpaProfileInput<'_>) -> ExplainProfile {
         engine: WireEngineType::from(ranger_engine(i.engine)),
         mechanism: WireMechanism::Opa,
         opa,
+        engines_not_reapplied: Vec::new(),
         accesses,
         tags: Vec::new(),
         tag_policies_in_download: 0,

@@ -20,4 +20,10 @@ export interface ProfileMechanism {
      * operator installs the new plugin files.
      */
   external_engines_unchanged: string[];
+  /**
+     * What the operator of each external engine must do now, for the
+     * direction of this switch. Absent when no external engine is bound.
+     * @nullable
+     */
+  external_engines_warning?: string | null;
 }

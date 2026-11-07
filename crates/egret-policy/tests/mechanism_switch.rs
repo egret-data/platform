@@ -771,6 +771,10 @@ mod route {
                 "mechanism": "opa",
                 "engines_reconfigured": ["trino-483"],
                 "external_engines_unchanged": ["their-trino"],
+                "external_engines_warning": "external engines not reconfigured: their-trino. \
+                    They keep enforcing the Ranger policies until their operator installs the \
+                    OPA plugin files from GET /api/control-plane/engines/{id}/opa-plugin-config \
+                    (Trino 483 or later with plugin/opa).",
             })
         );
         assert_eq!(
@@ -1044,6 +1048,7 @@ mod route {
                           Send the same PATCH again to retry.",
                 "engines_reconfigured": ["trino-a"],
                 "engines_failed": [{"engine": "trino-b", "error": "the rollout timed out"}],
+                "external_engines_unchanged": [],
             })
         );
         assert_eq!(
@@ -1052,6 +1057,88 @@ mod route {
             "the switch stays committed"
         );
         assert_eq!(h.events(svc.id).await.len(), 1);
+    }
+
+    /// SP2b Task 20F (T15 M7 + m3): after OPA→Ranger an external engine fails
+    /// every query until its operator re-installs the Ranger plugin; the 200
+    /// says so, and so does a 502, which also lists the external engines.
+    #[tokio::test]
+    async fn switching_back_to_ranger_warns_that_external_engines_fail_until_reinstalled() {
+        // Arrange
+        let Some(mut h) = harness().await else {
+            eprintln!("skip: DATABASE_URL not set");
+            return;
+        };
+        let (svc, _) = trino_profile(&h.db, &h.store, true).await;
+        h.set_mechanism(svc.id, "opa").await;
+        h.bindings = vec![
+            binding(svc.id, "trino-a", "provisioned", Some(IMAGE_483)),
+            binding(svc.id, "ext-1", "external", None),
+            binding(svc.id, "ext-2", "external", None),
+        ];
+        h.reconfigures = Arc::new(Reconfigures {
+            report: ReconfigureReport {
+                applied: vec!["trino-a".into()],
+                failed: vec![],
+            },
+            ..Default::default()
+        });
+        let warning = "external engines not reconfigured: ext-1, ext-2. Any of them running \
+                       the OPA plugin fails every query until its operator re-installs the \
+                       Ranger plugin files from \
+                       GET /api/control-plane/engines/{id}/ranger-plugin-config; one still \
+                       running the Ranger plugin is unaffected.";
+
+        // Act
+        let (status, body) = h.patch(&svc.name, "ranger").await;
+
+        // Assert
+        assert_eq!(status, StatusCode::OK, "body={body}");
+        assert_eq!(
+            body["external_engines_unchanged"],
+            json!(["ext-1", "ext-2"])
+        );
+        assert_eq!(body["external_engines_warning"], warning, "body={body}");
+
+        // Arrange: the same switch, the provisioned engine failing.
+        h.reconfigures = Arc::new(Reconfigures {
+            report: ReconfigureReport {
+                applied: vec![],
+                failed: vec![("trino-a".into(), "the rollout timed out".into())],
+            },
+            ..Default::default()
+        });
+
+        // Act
+        let (status, body) = h.patch(&svc.name, "ranger").await;
+
+        // Assert: the 502 carries both external fields too.
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "body={body}");
+        assert_eq!(
+            body["external_engines_unchanged"],
+            json!(["ext-1", "ext-2"])
+        );
+        assert_eq!(body["external_engines_warning"], warning, "body={body}");
+    }
+
+    #[tokio::test]
+    async fn without_an_external_engine_the_200_carries_no_warning() {
+        let Some(mut h) = harness().await else {
+            eprintln!("skip: DATABASE_URL not set");
+            return;
+        };
+        let (svc, _) = trino_profile(&h.db, &h.store, true).await;
+        h.set_mechanism(svc.id, "opa").await;
+        h.bindings = vec![binding(svc.id, "trino-a", "provisioned", Some(IMAGE_483))];
+
+        let (status, body) = h.patch(&svc.name, "ranger").await;
+
+        assert_eq!(status, StatusCode::OK, "body={body}");
+        assert_eq!(body["external_engines_unchanged"], json!([]));
+        assert!(
+            body.get("external_engines_warning").is_none(),
+            "body={body}"
+        );
     }
 
     #[tokio::test]

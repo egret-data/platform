@@ -166,6 +166,7 @@ struct Store {
     profile: i64,
     tag_service: i64,
     engine: Uuid,
+    wh: Uuid,
     catalog: Uuid,
     lake: String,
     ann: String,
@@ -202,6 +203,7 @@ async fn store(db: &Db, prefix: &str, spec: serde_json::Value, names: &mut Names
         profile,
         tag_service: tag_service.expect("a tag service"),
         engine,
+        wh,
         catalog: cat,
         lake: catalog_name(db, cat).await,
         ann,
@@ -735,6 +737,165 @@ async fn the_switch_and_the_refresher_agree() {
         "the profile serves 1 mask/row-filter pairs whose winner the artifact does not express \
          (see GET /perm/overlaps)"
     );
+}
+
+/// `profile`'s stored pairs as the refresher counts them
+/// (`stored_overlaps_of_via`), one line each.
+async fn stored_pairs_of(db: &Db, profile: i64) -> Vec<String> {
+    let mut conn = db.pool.acquire().await.expect("conn");
+    egret_perm_compile::overlap::stored_overlaps_of_via(&mut conn, profile)
+        .await
+        .expect("the stored pairs read")
+        .into_iter()
+        .map(|o| format!("{} {} {}", o.service_name, o.kind, o.coordinate))
+        .collect()
+}
+
+/// Point `profile`'s `tagService` at the service named `tag_service`.
+async fn set_tag_service(db: &Db, profile: i64, tag_service: &str) {
+    sqlx::query(
+        "UPDATE policy.authz_services \
+            SET config_jsonb = jsonb_set(config_jsonb, '{tagService}', to_jsonb($2::text)) \
+          WHERE id = $1",
+    )
+    .bind(profile)
+    .bind(tag_service)
+    .execute(&db.pool)
+    .await
+    .expect("tagService");
+}
+
+async fn service_name(db: &Db, id: i64) -> String {
+    sqlx::query_scalar("SELECT name FROM policy.authz_services WHERE id = $1")
+        .bind(id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("service name")
+}
+
+/// Task 22F: the C8 re-check reads only the units the profile's download
+/// serves. A pair stored in another profile, even one in the same scope (it
+/// shares the tag service), leaves this profile Ready; a pair in this
+/// profile's own tag service makes it NotBuilt, also when another profile
+/// names this one as its tag service, so that its own unit is reached only
+/// through its tag service.
+#[tokio::test]
+async fn a_stored_overlap_counts_only_in_the_profile_whose_download_serves_it() {
+    let _serial = SERIAL.lock().await;
+    let db = db().await;
+    let mut names = Names::default();
+    let cache = SnapshotCache::default();
+
+    // Arrange: A with two tag masks on distinct columns, on OPA and Ready.
+    let a = store(&db, "oc12a", open(), &mut names).await;
+    let mut tx = db.pool.begin().await.expect("tx");
+    let t1 = tag(&mut tx, "oc12.t1", &mut names).await;
+    let t2 = tag(&mut tx, "oc12.t2", &mut names).await;
+    tag_column(&mut tx, t1, a.wh, "s", "t", "email").await;
+    tag_column(&mut tx, t2, a.wh, "s", "t", "phone").await;
+    for (name, mask_type, key) in [
+        ("oc12a.mask_1", "MASK", "oc12.t1"),
+        ("oc12a.mask_2", "MASK_NULL", "oc12.t2"),
+    ] {
+        rule(
+            &mut tx,
+            name,
+            mask(mask_type, None),
+            by_tag(key),
+            set(&[], &[]),
+            &mut names,
+        )
+        .await;
+    }
+    tx.commit().await.expect("commit");
+    recompile(&db, a.profile).await;
+    set_mechanism(&db, a.profile, "opa").await;
+    let report = refresh(&cache, &db).await;
+    assert_eq!(listed(&report, a.profile), vec!["rebuilt"], "{report:?}");
+    assert_eq!(stored_pairs_of(&db, a.profile).await, Vec::<String>::new());
+
+    // Arrange: B stores a pair of differing path masks on one column, and
+    // shares A's tag service, so B's unit is one A's scan reads.
+    let b = store(&db, "oc12b", open(), &mut names).await;
+    let mut tx = db.pool.begin().await.expect("tx");
+    rule(
+        &mut tx,
+        "oc12b.mask_a",
+        mask("MASK", None),
+        Selector::Path(scope(b.catalog, Some("s"), Some("t"), Some("email"))),
+        set(&[], &[]),
+        &mut names,
+    )
+    .await;
+    let moved_rule = rule(
+        &mut tx,
+        "oc12b.mask_b",
+        mask("MASK_NULL", None),
+        Selector::Path(scope(b.catalog, Some("s"), Some("t"), Some("phone"))),
+        set(&[], &[]),
+        &mut names,
+    )
+    .await;
+    tx.commit().await.expect("commit");
+    recompile(&db, b.profile).await;
+    let moved = sqlx::query(
+        "UPDATE policy.authz_policies \
+            SET policy_jsonb = jsonb_set(policy_jsonb, '{resources,column,values}', \
+                                         to_jsonb(ARRAY['email'::text])) \
+          WHERE name LIKE $1",
+    )
+    .bind(format!("perm-rule-{moved_rule}%"))
+    .execute(&db.pool)
+    .await
+    .expect("move the compiled body")
+    .rows_affected();
+    assert!(moved >= 1, "the rule's compiled policy was moved");
+    let a_tag = service_name(&db, a.tag_service).await;
+    set_tag_service(&db, b.profile, &a_tag).await;
+    bump(&db, b.profile).await;
+    bump(&db, a.profile).await;
+
+    // Act
+    let report = refresh(&cache, &db).await;
+
+    // Assert: B's pair is B's; A rebuilds.
+    assert_eq!(stored_pairs_of(&db, b.profile).await.len(), 1);
+    assert_eq!(stored_pairs_of(&db, a.profile).await, Vec::<String>::new());
+    assert_eq!(listed(&report, a.profile), vec!["rebuilt"], "{report:?}");
+    ready(&cache, a.profile);
+
+    // Arrange: t2 also on `email`, so A's tag service serves MASK and
+    // MASK_NULL on one column.
+    let mut tx = db.pool.begin().await.expect("tx");
+    tag_column(&mut tx, t2, a.wh, "s", "t", "email").await;
+    tx.commit().await.expect("commit");
+    bump(&db, a.profile).await;
+
+    // Act
+    let report = refresh(&cache, &db).await;
+
+    // Assert
+    assert_eq!(stored_pairs_of(&db, a.profile).await.len(), 1);
+    assert_eq!(listed(&report, a.profile), vec!["failed"], "{report:?}");
+    assert_eq!(
+        not_built_error(&cache, a.profile),
+        "the profile serves 1 mask/row-filter pairs whose winner the artifact does not express \
+         (see GET /perm/overlaps)"
+    );
+
+    // Arrange: B now names A itself as its tag service. A's own unit (A with
+    // its tag service) is then listed only from A's tag service.
+    let a_name = service_name(&db, a.profile).await;
+    set_tag_service(&db, b.profile, &a_name).await;
+    bump(&db, a.profile).await;
+
+    // Act
+    let report = refresh(&cache, &db).await;
+
+    // Assert: still A's pair, still NotBuilt.
+    assert_eq!(stored_pairs_of(&db, a.profile).await.len(), 1);
+    assert_eq!(listed(&report, a.profile), vec!["failed"], "{report:?}");
+    not_built_error(&cache, a.profile);
 }
 
 /// Task 18 fix round 1 (I1): the snapshot the refresher serves (built by

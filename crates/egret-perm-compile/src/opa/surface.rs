@@ -40,7 +40,7 @@ use std::time::Duration;
 use axum::body::Bytes;
 use axum::extract::rejection::BytesRejection;
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::Json;
@@ -56,7 +56,8 @@ use super::wire::{self, OpaRequest, FILTER_COLUMNS};
 
 pub const OPA_SURFACE_PREFIX: &str = "/opa/v1/data/egret/trino";
 
-/// The largest request body accepted: 4 MiB. A larger body is refused with
+/// The largest request body accepted on every route but `/batch` (which has
+/// [`OpaState::batch_body_limit`]): 4 MiB. A larger body is refused with
 /// 413 (a non-2xx, so the plugin fails the query) before any parse, and the
 /// refusal is logged and counted like every other one. The body is parsed
 /// into a `serde_json::Value` BEFORE the engine's credential is checked, so
@@ -68,28 +69,60 @@ pub const OPA_SURFACE_PREFIX: &str = "/opa/v1/data/egret/trino";
 /// `{"table":{"catalogName","schemaName","tableName"}}` object per table: 59
 /// bytes of JSON plus the three names, so 120 to 150 bytes with 20- to
 /// 30-character names. 4 MiB holds 28 000 to 35 000 tables in one schema,
-/// three times the plan's 10 000-table figure. `FilterColumns` carries one
+/// three times the plan's 10 000-table figure. The Task 20 measurement
+/// found the plugin does not chunk `FilterTables` (73 bytes per table with
+/// short names), so `/batch` alone takes a larger, configurable limit
+/// ([`OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES`]). `FilterColumns` carries one
 /// table and about 25 bytes per column. A larger listing fails the query
 /// rather than being answered. A parsed `Value` costs about ten times its
-/// bytes, so one parse at the limit is about 40 MB; [`OPA_MAX_CONCURRENT_PARSES`]
-/// bounds how many run at once.
+/// bytes, so one parse of 4 MiB is about 40 MB.
+///
+/// It is also the unit both [`ParseGate`]s weigh a body in: a body takes one
+/// permit per started 4 MiB, so a larger `/batch` body takes more of the
+/// same budget and the worst-case memory does not grow with the limit.
 pub const OPA_BODY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 
-/// The most request bodies parsed at once, before authentication. At the
-/// body limit a parse holds about 40 MB, so 16 bound the transient pre-auth
-/// parse memory near 640 MB. A permit is held only while the body is parsed
+/// The default `/batch` body limit, `[governance.opa] batch_body_limit_bytes`
+/// (`egret_config::DEFAULT_OPA_BATCH_BODY_LIMIT_BYTES`, the same number): 24
+/// MiB, about 340 000 tables of one schema at the measured 73 bytes each.
+pub const OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES: usize = 24 * 1024 * 1024;
+
+/// The parse budget, in [`OPA_BODY_LIMIT_BYTES`] units: 16 bodies of up to 4
+/// MiB parsed at once before authentication, or fewer larger ones (a 24 MiB
+/// `/batch` body takes 6). A 4 MiB parse holds about 40 MB, so the budget
+/// bounds the transient pre-auth parse memory near 640 MB whatever the
+/// `/batch` limit is. A permit is held only while the body is parsed
 /// (microseconds for the small `/allow` bodies that make up nearly all of
 /// Trino's traffic), so 16 is not a throughput limit in practice.
 pub const OPA_MAX_CONCURRENT_PARSES: usize = 16;
+
+/// The in-flight budget, in [`OPA_BODY_LIMIT_BYTES`] units (SP2b Task 20F,
+/// T10): requests on the OPA routes admitted at once, BEFORE their body is
+/// read. A request reserves one unit per started 4 MiB of its declared
+/// `Content-Length` (its route's whole limit when it declares none), so the
+/// raw bodies buffered before authentication stay under 64 × 4 MiB = 256 MiB,
+/// and the parse budget above bounds what is parsed of them. Over it a request
+/// waits [`OPA_PARSE_WAIT`], then is answered 503 with its body unread.
+pub const OPA_MAX_IN_FLIGHT: usize = 64;
+
+/// The default deadline for a request's whole body once it holds its
+/// in-flight units (`[governance.opa] body_read_timeout_ms`,
+/// `egret_config::DEFAULT_OPA_BODY_READ_TIMEOUT_MS`): 5 s. See
+/// [`bound_in_flight`].
+pub const OPA_DEFAULT_BODY_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long a request waits for a parse permit before it is answered 503
 /// (the plugin fails the query: fail closed).
 pub const OPA_PARSE_WAIT: Duration = Duration::from_secs(1);
 
-/// Bounds the pre-authentication parses ([`OPA_MAX_CONCURRENT_PARSES`],
-/// [`OPA_PARSE_WAIT`] in production).
+/// A budget of permits, each worth [`OPA_BODY_LIMIT_BYTES`] of request body,
+/// with a bounded wait. Bounds the pre-authentication parses
+/// ([`OPA_MAX_CONCURRENT_PARSES`]) and the requests in flight before their
+/// body is read ([`OPA_MAX_IN_FLIGHT`]), both with [`OPA_PARSE_WAIT`] in
+/// production.
 pub struct ParseGate {
     permits: tokio::sync::Semaphore,
+    total: u32,
     wait: Duration,
 }
 
@@ -97,13 +130,28 @@ impl ParseGate {
     pub fn new(permits: usize, wait: Duration) -> Self {
         Self {
             permits: tokio::sync::Semaphore::new(permits),
+            total: u32::try_from(permits).unwrap_or(u32::MAX),
             wait,
         }
     }
 
-    /// A permit, or `None` once the wait has passed without one.
+    /// The units free right now.
+    pub fn available(&self) -> usize {
+        self.permits.available_permits()
+    }
+
+    /// One permit, or `None` once the wait has passed without one.
     pub async fn acquire(&self) -> Option<tokio::sync::SemaphorePermit<'_>> {
-        tokio::time::timeout(self.wait, self.permits.acquire())
+        self.acquire_for(0).await
+    }
+
+    /// The permits a body of `bytes` takes (one per started
+    /// [`OPA_BODY_LIMIT_BYTES`], at least one, at most the whole budget), or
+    /// `None` once the wait has passed without them.
+    pub async fn acquire_for(&self, bytes: usize) -> Option<tokio::sync::SemaphorePermit<'_>> {
+        let units = bytes.div_ceil(OPA_BODY_LIMIT_BYTES).max(1);
+        let units = u32::try_from(units).unwrap_or(u32::MAX).min(self.total);
+        tokio::time::timeout(self.wait, self.permits.acquire_many(units))
             .await
             .ok()
             .and_then(Result::ok)
@@ -138,19 +186,48 @@ pub struct OpaState {
     pub verifier: Arc<dyn EngineCredentialVerifier>,
     pub credentials: Arc<VerifiedCache>,
     pub parses: Arc<ParseGate>,
+    /// Requests admitted before their body is read ([`OPA_MAX_IN_FLIGHT`]).
+    pub in_flight: Arc<ParseGate>,
+    /// The `/batch` body limit (`[governance.opa] batch_body_limit_bytes`);
+    /// every other route has [`OPA_BODY_LIMIT_BYTES`].
+    pub batch_body_limit: usize,
+    /// How long an admitted request's body may take to arrive
+    /// (`[governance.opa] body_read_timeout_ms`).
+    pub body_read_timeout: Duration,
 }
 
 impl OpaState {
     /// The production state: credentials remembered for [`VERIFIED_TTL`],
-    /// parses bounded by [`ParseGate::default`].
+    /// parses bounded by [`ParseGate::default`], [`OPA_MAX_IN_FLIGHT`]
+    /// requests in flight, and the default `/batch` limit.
     pub fn new(cache: Arc<SnapshotCache>, verifier: Arc<dyn EngineCredentialVerifier>) -> Self {
         Self {
             cache,
             verifier,
             credentials: Arc::new(VerifiedCache::new(VERIFIED_TTL)),
             parses: Arc::new(ParseGate::default()),
+            in_flight: Arc::new(in_flight_gate()),
+            batch_body_limit: OPA_DEFAULT_BATCH_BODY_LIMIT_BYTES,
+            body_read_timeout: OPA_DEFAULT_BODY_READ_TIMEOUT,
         }
     }
+
+    /// This state with `/batch` limited to `bytes`.
+    pub fn with_batch_body_limit(mut self, bytes: usize) -> Self {
+        self.batch_body_limit = bytes;
+        self
+    }
+
+    /// This state with bodies given `timeout` to arrive.
+    pub fn with_body_read_timeout(mut self, timeout: Duration) -> Self {
+        self.body_read_timeout = timeout;
+        self
+    }
+}
+
+/// The production in-flight gate: [`OPA_MAX_IN_FLIGHT`] units, [`OPA_PARSE_WAIT`].
+pub fn in_flight_gate() -> ParseGate {
+    ParseGate::new(OPA_MAX_IN_FLIGHT, OPA_PARSE_WAIT)
 }
 
 /// `(engine, sha256(secret))`.
@@ -255,11 +332,17 @@ pub fn opa_route_paths() -> [String; 5] {
     Route::ALL.map(route_path)
 }
 
-/// The routes, under [`OPA_SURFACE_PREFIX`].
+/// The routes, under [`OPA_SURFACE_PREFIX`]. `/batch` takes
+/// [`OpaState::batch_body_limit`], every other route [`OPA_BODY_LIMIT_BYTES`];
+/// every route is admitted through [`bound_in_flight`] before its body is read.
 pub fn opa_surface(state: OpaState) -> axum::Router {
+    let in_flight = axum::middleware::from_fn_with_state(state.clone(), bound_in_flight);
     axum::Router::new()
         .route(&route_path(Route::Allow), post(allow))
-        .route(&route_path(Route::Batch), post(batch))
+        .route(
+            &route_path(Route::Batch),
+            post(batch).layer(DefaultBodyLimit::max(state.batch_body_limit)),
+        )
         .route(&route_path(Route::RowFilters), post(row_filters))
         .route(
             &route_path(Route::BatchColumnMasks),
@@ -267,7 +350,103 @@ pub fn opa_surface(state: OpaState) -> axum::Router {
         )
         .route(&route_path(Route::ColumnMask), post(column_mask))
         .layer(DefaultBodyLimit::max(OPA_BODY_LIMIT_BYTES))
+        .route_layer(in_flight)
         .with_state(state)
+}
+
+/// Admits a request into [`OpaState::in_flight`] before anything reads its
+/// body (SP2b Task 20F, T10): the raw body is buffered before authentication,
+/// so the parse permits alone did not bound what unauthenticated callers make
+/// egret hold. A request reserves its declared `Content-Length` (capped at its
+/// route's limit, which refuses anything larger) or, declaring none, its
+/// route's whole limit. Without room within [`OPA_PARSE_WAIT`] it is answered
+/// 503 (the plugin fails the query) and its body is never read.
+///
+/// **The body is read here, under a deadline** (Task 20F fix round 1, I1).
+/// Units are held while the body arrives, so a caller that sends headers and
+/// then nothing would otherwise hold its share for as long as it keeps the
+/// connection open, and a few such connections would starve every engine's
+/// requests. The whole body must arrive within [`OpaState::body_read_timeout`]
+/// (default [`OPA_DEFAULT_BODY_READ_TIMEOUT`]); past it the request is
+/// answered 408 with `Connection: close`, and its units are released. A body
+/// over the route's limit is 413, an unreadable one 400, both closing the
+/// connection too. 408 and 400 are logged as `opa: request body not read` and
+/// counted in `egret_opa_unread_total`, not as denials: nothing was decided. Only then does the handler see the request, its body
+/// already buffered.
+async fn bound_in_flight(
+    State(state): State<OpaState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let route = Route::ALL
+        .into_iter()
+        .find(|r| req.uri().path() == route_path(*r))
+        .unwrap_or(Route::Allow);
+    let limit = match route {
+        Route::Batch => state.batch_body_limit,
+        _ => OPA_BODY_LIMIT_BYTES,
+    };
+    let declared = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok())
+        .map_or(limit, |n| n.min(limit));
+    let Some(_permit) = state.in_flight.acquire_for(declared).await else {
+        let who = Who {
+            route,
+            engine: None,
+            req: None,
+        };
+        return who.busy("too many requests in flight");
+    };
+    let who = Who {
+        route,
+        engine: None,
+        req: None,
+    };
+    let (parts, body) = req.into_parts();
+    let read = tokio::time::timeout(state.body_read_timeout, axum::body::to_bytes(body, limit));
+    let bytes = match read.await {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(e)) => {
+            let too_large = std::error::Error::source(&e)
+                .is_some_and(|s| s.is::<http_body_util::LengthLimitError>());
+            // Over the limit is a refusal like any other (413, as before);
+            // a body that could not be read was never decided (400).
+            let status = if too_large {
+                who.denied(None, &format!("request body refused: {e}"));
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                who.unread(&format!("request body unreadable: {e}"));
+                StatusCode::BAD_REQUEST
+            };
+            return closing(status, "request body refused");
+        }
+        Err(_) => {
+            who.unread("request body not received in time");
+            return closing(
+                StatusCode::REQUEST_TIMEOUT,
+                "request body not received in time",
+            );
+        }
+    };
+    next.run(axum::extract::Request::from_parts(
+        parts,
+        axum::body::Body::from(bytes),
+    ))
+    .await
+}
+
+/// A refusal of a request whose body was not (fully) read: the connection is
+/// closed with it, so its unread bytes are never taken as a next request.
+fn closing(status: StatusCode, error: &str) -> Response {
+    (
+        status,
+        [(header::CONNECTION, "close")],
+        Json(json!({ "error": error })),
+    )
+        .into_response()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -347,13 +526,30 @@ impl Who<'_> {
         metrics::counter!("egret_opa_deny_total", "route" => self.route.name()).increment(1);
     }
 
+    /// A request answered before any decision because its body never arrived
+    /// whole (408 deadline, 400 unreadable) or egret had no room to read it
+    /// (503 busy): logged, and counted apart from
+    /// the denials (`egret_opa_unread_total`), so a dashboard of denials
+    /// counts only requests that were decided.
+    fn unread(&self, reason: &str) {
+        tracing::info!(
+            target: "egret::opa",
+            route = self.route.name(),
+            reason = %reason,
+            "opa: request body not read"
+        );
+        metrics::counter!("egret_opa_unread_total", "route" => self.route.name()).increment(1);
+    }
+
     fn allowed(&self) {
         metrics::counter!("egret_opa_allow_total", "route" => self.route.name()).increment(1);
     }
 
-    /// Too many bodies being parsed: 503, so the plugin fails the query.
-    fn busy(&self) -> Response {
-        self.denied(None, "too many requests being parsed");
+    /// Too many bodies in flight or being parsed: 503, so the plugin fails
+    /// the query. Nothing was decided for this request, so it is counted with
+    /// the unread ones (`egret_opa_unread_total`), never as a denial.
+    fn busy(&self, why: &str) -> Response {
+        self.unread(why);
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": "busy" })),
@@ -449,8 +645,8 @@ async fn admit(
         }
     };
     let parsed = {
-        let Some(_permit) = state.parses.acquire().await else {
-            return Err(who.busy().into());
+        let Some(_permit) = state.parses.acquire_for(body.len()).await else {
+            return Err(who.busy("too many requests being parsed").into());
         };
         serde_json::from_slice::<Value>(&body)
             .map_err(|_| "body is not JSON".to_string())

@@ -16957,6 +16957,11 @@ async fn opa_plugin_config_for_an_external_engine_on_an_opa_profile() {
         egret_engine_mgmt_api::opa_config::OPA_EXTERNAL_ENGINE_NOTE
     );
     assert_eq!(
+        warnings[2],
+        egret_engine_mgmt_api::opa_config::OPA_BATCHED_URI_WARNING,
+        "right after the two fixed warnings"
+    );
+    assert_eq!(
         j["adminMustSupply"],
         serde_json::json!([
             "egret.secret: the engine's Ranger plugin credential (rotate it with POST /api/control-plane/engines/{id}/rotate-ranger-credential to see it once)",
@@ -17034,4 +17039,116 @@ async fn opa_plugin_config_refuses_a_provisioned_engine_with_409() {
     assert_eq!(status, StatusCode::FORBIDDEN, "{j}");
     let (status, j) = call(&f, "GET", &path(Uuid::new_v4()), &admin, None).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{j}");
+}
+
+/// SP2b Task 20F (T15 M1): an engine the provisioner accepted but whose
+/// `applied_mechanism` could not be recorded is a failure of that engine, not
+/// a log line: the switch answers 502 naming it, and the same PATCH again
+/// re-applies and records.
+#[tokio::test]
+async fn a_lost_applied_mechanism_write_answers_502_by_name_and_a_resend_records_it() {
+    // Arrange: an OPA profile with one engine on it, switched back to Ranger,
+    // and a trigger that refuses this engine's applied_mechanism write.
+    let port = FakeEnginePort::default();
+    let Some(f) = opa_fixture(&port).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "opa_record_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let service = engine_name("opa-record-p");
+    let profile = seed_typed_profile(&f, &service, "trino").await;
+    let name = engine_name("opa-record");
+    set_profile_mechanism(&f, profile, "opa").await;
+    let id = create_trino(&f, &token, &name, wh_id, "483", Some(profile)).await;
+    assert_eq!(applied_mechanism(&f, id).await.as_deref(), Some("opa"));
+    let admin = egret_policy::policy_admin_router().with_state(egret_policy::PolicyAdminState {
+        store: egret_policy::PolicyStore::new(f.db.clone()),
+        engines: Arc::new(NoBindings),
+        users: UserRepo::new(f.db.clone()),
+        groups: egret_auth::groups::GroupRepo::new(f.db.clone()),
+        sessions: f.sessions.clone(),
+        engine_egret_url: "http://egret:8080".into(),
+        pdp: Arc::new(AllowAllPdp),
+        recompiler: Arc::new(egret_perm_compile::PermRecompiler),
+        reconfigurer: Arc::new(EngineReconfigurer(state_of(&f))),
+        opa_enabled: true,
+    });
+    let patch = || async {
+        into_json(
+            admin
+                .clone()
+                .oneshot(req(
+                    "PATCH",
+                    &format!("/policies/services/{service}"),
+                    &token,
+                    Some(serde_json::json!({ "mechanism": "ranger" })),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await
+    };
+    // Only this engine's row: other tests share the table.
+    let func = format!("test_refuse_applied_mechanism_{}", id.simple());
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE FUNCTION public.{func}() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN \
+           IF NEW.id = '{id}' AND NEW.applied_mechanism IS DISTINCT FROM OLD.applied_mechanism THEN \
+             RAISE EXCEPTION 'injected applied_mechanism write failure'; \
+           END IF; \
+           RETURN NEW; \
+         END $$"
+    )))
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE TRIGGER {func} BEFORE UPDATE ON engine_mgmt.engines \
+         FOR EACH ROW EXECUTE FUNCTION public.{func}()"
+    )))
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    let updates_before = port.updated.lock().unwrap().len();
+
+    // Act: the apply lands, its record does not.
+    let (status, j) = patch().await;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP TRIGGER {func} ON engine_mgmt.engines"
+    )))
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP FUNCTION public.{func}()"
+    )))
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+
+    // Assert: 502 naming the engine and the lost record.
+    assert_eq!(port.updated.lock().unwrap().len(), updates_before + 1);
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{j}");
+    assert!(j["error"].as_str().unwrap().contains(&name), "{j}");
+    let failed = j["engines_failed"].as_array().expect("engines_failed");
+    assert_eq!(failed.len(), 1, "{j}");
+    assert_eq!(failed[0]["engine"], name, "{j}");
+    let why = failed[0]["error"].as_str().unwrap();
+    assert!(
+        why.starts_with("applied, but the applied mechanism (ranger) could not be recorded: ")
+            && why.contains("injected applied_mechanism write failure"),
+        "{j}"
+    );
+    assert_eq!(j["engines_reconfigured"], serde_json::json!([]), "{j}");
+    assert_eq!(applied_mechanism(&f, id).await.as_deref(), Some("opa"));
+
+    // Act: the same PATCH again.
+    let (status, j) = patch().await;
+
+    // Assert: re-applied and recorded.
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["engines_reconfigured"], serde_json::json!([name]), "{j}");
+    assert_eq!(port.updated.lock().unwrap().len(), updates_before + 2);
+    assert_eq!(applied_mechanism(&f, id).await.as_deref(), Some("ranger"));
 }

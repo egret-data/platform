@@ -22,6 +22,8 @@ pub fn start_opa_from_config(
 ) -> Option<(egret_perm_compile::OpaState, tokio::task::JoinHandle<()>)> {
     egret_perm_compile::start_opa(
         governance.opa.enabled,
+        governance.opa.batch_body_limit_bytes,
+        std::time::Duration::from_millis(governance.opa.body_read_timeout_ms),
         verifier,
         pool,
         shutdown.clone().cancelled_owned(),

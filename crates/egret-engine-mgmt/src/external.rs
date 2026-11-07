@@ -1004,6 +1004,7 @@ async fn opa_plugin_config(
     let mut warnings = vec![
         OPA_LOG_REQUESTS_WARNING.to_string(),
         OPA_EXTERNAL_ENGINE_NOTE.to_string(),
+        egret_engine_mgmt_api::opa_config::OPA_BATCHED_URI_WARNING.to_string(),
     ];
     warnings.extend(egret_engine_mgmt_api::ranger_config::download_url_warning(
         &st.engine_egret_url,

@@ -8,6 +8,7 @@
  * catalogs can be DECLARED attached, and an operator can read the Ranger plugin
  * configuration to install. Nothing here talks to a cluster.
  */
+import type { QueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { ShieldCheck, TriangleAlert } from "lucide-react";
 
@@ -16,6 +17,7 @@ import {
   type controlPlaneEnginesListModelledRangerPluginsResponse,
   useControlPlaneEnginesListModelledRangerPlugins,
 } from "@/api/generated/control-plane-engines/control-plane-engines";
+import { getPolicyAdminListProfilesQueryKey } from "@/api/generated/policy-admin/policy-admin";
 import type { ModelledRangerPluginDto } from "@/api/generated/model";
 import { useAuth } from "@/auth/useAuth";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -85,6 +87,25 @@ export const ENGINE_TYPE_LABEL: Record<string, string> = { trino: "Trino", starr
 
 /** The query key family of the profile list, shared with the governance pages. */
 export const profilesQueryKey = ["control-plane", "profiles"] as const;
+
+const PLUGIN_CONFIG_PATH = /^\/api\/control-plane\/engines\/[^/]+\/(opa|ranger)-plugin-config$/;
+
+/**
+ * After a profile's mechanism changed: every cached copy of the profile list (the generated hook's
+ * key and `profilesQueryKey` hold the same resource under two keys) and both plugin-config reads of
+ * every engine, so an external engine's Plugin config tab never picks its route from the old mechanism.
+ */
+export function invalidateAfterMechanismSwitch(qc: QueryClient) {
+  const isPluginConfig = (q: { queryKey: readonly unknown[] }) =>
+    typeof q.queryKey[0] === "string" && PLUGIN_CONFIG_PATH.test(q.queryKey[0]);
+  // A copy nobody is looking at is dropped, not just marked stale: the next page to mount it would
+  // otherwise render the old mechanism first and fire that route's request before the refetch lands.
+  qc.removeQueries({ queryKey: profilesQueryKey, type: "inactive" });
+  qc.removeQueries({ predicate: isPluginConfig, type: "inactive" });
+  void qc.invalidateQueries({ queryKey: getPolicyAdminListProfilesQueryKey() });
+  void qc.invalidateQueries({ queryKey: profilesQueryKey });
+  void qc.invalidateQueries({ predicate: isPluginConfig });
+}
 
 /** Why a Trino profile is not offered for binding (#786): the bind would be refused with 400. */
 export const NO_TAG_SERVICE_SUFFIX = "no tag service: give it one on its Advanced tab";

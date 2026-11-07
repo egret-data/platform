@@ -909,6 +909,25 @@ pub(crate) async fn apply_built(
     built: &BuiltReq,
     op: ApplyOp,
 ) -> Result<(), ApplyBuiltError> {
+    apply_built_noting(st, prov, engine, built, op)
+        .await
+        .map(|_| ())
+}
+
+/// [`apply_built`], also answering whether the applied mechanism could not be
+/// recorded: `Ok(Some(why))` when the provisioner accepted the apply but the
+/// `applied_mechanism` write failed. Every apply route logs that and moves on
+/// (its apply did land); a mechanism switch's re-apply reports it as a failure
+/// of that engine instead (SP2b Task 20F, T15 M1), because the OPA surface
+/// decides from that record which profiles it still serves, so the switch
+/// answers 502 and re-sending it re-applies and records again.
+pub(crate) async fn apply_built_noting(
+    st: &CpState,
+    prov: std::sync::Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>,
+    engine: &Engine,
+    built: &BuiltReq,
+    op: ApplyOp,
+) -> Result<Option<String>, ApplyBuiltError> {
     match st.engine_mgmt.get_engine(engine.id).await {
         Ok(Some(current)) if current.status != crate::engine_status::DELETING => {
             if !renders_the_current_ranger_credential(&built.req, &current) {
@@ -966,7 +985,7 @@ async fn finish_apply(
     engine: Engine,
     built: BuiltReq,
     op: ApplyOp,
-) -> Result<(), ApplyBuiltError> {
+) -> Result<Option<String>, ApplyBuiltError> {
     let res = match op {
         ApplyOp::Provision => prov.provision(&built.req).await,
         ApplyOp::Update => prov.update(&built.req).await,
@@ -988,6 +1007,7 @@ async fn finish_apply(
     }
     // The provisioner accepted it: this engine now runs this mechanism (SP2b
     // Task 15, open question (a)). Recorded here so no caller can forget it.
+    let mut mechanism_not_recorded = None;
     if res.is_ok() {
         let mechanism = match built.req.ranger.as_ref().map(|r| r.mechanism) {
             Some(egret_engine_mgmt_api::opa_config::AccessMechanism::Opa) => "opa",
@@ -1000,6 +1020,9 @@ async fn finish_apply(
         {
             tracing::error!(engine = %engine.name, error = %e, mechanism,
                 "applied, but the applied mechanism could not be recorded");
+            mechanism_not_recorded = Some(format!(
+                "applied, but the applied mechanism ({mechanism}) could not be recorded: {e}"
+            ));
         }
     }
     if let Some(secrets) = &built.internal {
@@ -1014,7 +1037,8 @@ async fn finish_apply(
                  the monitor fails until the next successful apply");
         }
     }
-    res.map_err(ApplyBuiltError::Failed)
+    res.map(|()| mechanism_not_recorded)
+        .map_err(ApplyBuiltError::Failed)
 }
 
 /// The access mechanism of the profile `authz_service_id` names, read from the
@@ -1139,8 +1163,12 @@ async fn reapply_one(
         let built = build_provision_req(st, &engine)
             .await
             .map_err(|e| e.to_string())?;
-        match apply_built(st, prov.clone(), &engine, &built, ApplyOp::Update).await {
-            Ok(()) => return Ok(()),
+        match apply_built_noting(st, prov.clone(), &engine, &built, ApplyOp::Update).await {
+            Ok(None) => return Ok(()),
+            // The engine runs the new mechanism, but the record the OPA surface
+            // serves from does not say so: a failure of this engine, so the
+            // switch answers 502 and a resend re-applies and records again.
+            Ok(Some(not_recorded)) => return Err(not_recorded),
             Err(ApplyBuiltError::CredentialChanged) if !retried => {
                 retried = true;
                 engine = st

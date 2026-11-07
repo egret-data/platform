@@ -192,6 +192,38 @@ pub struct ProfileMechanism {
     /// The bound external engines: egret does not configure them; their
     /// operator installs the new plugin files.
     pub external_engines_unchanged: Vec<String>,
+    /// What the operator of each external engine must do now, for the
+    /// direction of this switch. Absent when no external engine is bound.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_engines_warning: Option<String>,
+}
+
+/// What an external engine's operator must do after the profile moved to
+/// `mechanism`, or `None` when `engines` is empty (SP2b Task 20F, T15 M7).
+/// egret does not configure an external engine, so after Ranger→OPA it keeps
+/// enforcing the Ranger artifact (still compiled). After OPA→Ranger, one whose
+/// operator installed the OPA plugin asks an OPA surface that no longer
+/// serves its profile, so it fails every query until its Ranger plugin is
+/// back; one still on the Ranger plugin is unaffected.
+pub fn external_engines_warning(mechanism: MechanismName, engines: &[String]) -> Option<String> {
+    if engines.is_empty() {
+        return None;
+    }
+    let names = engines.join(", ");
+    Some(match mechanism {
+        MechanismName::Opa => format!(
+            "external engines not reconfigured: {names}. They keep enforcing the Ranger \
+             policies until their operator installs the OPA plugin files from \
+             GET /api/control-plane/engines/{{id}}/opa-plugin-config (Trino 483 or later \
+             with plugin/opa)."
+        ),
+        MechanismName::Ranger => format!(
+            "external engines not reconfigured: {names}. Any of them running the OPA \
+             plugin fails every query until its operator re-installs the Ranger plugin \
+             files from GET /api/control-plane/engines/{{id}}/ranger-plugin-config; one \
+             still running the Ranger plugin is unaffected."
+        ),
+    })
 }
 
 impl MechanismName {
@@ -229,13 +261,13 @@ impl MechanismName {
     params(("service" = String, Path, description = "Policy profile (Ranger service) name")),
     request_body = SetMechanismBody,
     responses(
-        (status = 200, description = "The coordinator of every bound egret-provisioned engine restarts to load the new access control; queries running on it fail. External engines are listed in `external_engines_unchanged`: their operator installs the new plugin files and must run Trino 483 or later with `plugin/opa`.", body = ProfileMechanism),
+        (status = 200, description = "The coordinator of every bound egret-provisioned engine restarts to load the new access control; queries running on it fail. External engines are listed in `external_engines_unchanged`, and `external_engines_warning` says what their operator must do: after a switch to OPA they keep enforcing the Ranger policies until the OPA plugin files are installed (Trino 483 or later with `plugin/opa`); after a switch to Ranger, those running the OPA plugin fail every query until the Ranger plugin files are re-installed.", body = ProfileMechanism),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such policy profile", body = ErrorBody),
         (status = 409, description = "The switch to OPA is refused: `{error, code: \"mechanism_refused\", refusals}`, `refusals` naming every condition that holds (`error` is the first). Nothing is written", body = Object),
         (status = 500, description = "Internal error", body = ErrorBody),
-        (status = 502, description = "The switch is committed, but some bound engines were not reconfigured: `{error, engines_reconfigured, engines_failed: [{engine, error}]}`. Send the same PATCH again to retry", body = Object),
+        (status = 502, description = "The switch is committed, but some bound engines were not reconfigured: `{error, engines_reconfigured, engines_failed: [{engine, error}], external_engines_unchanged, external_engines_warning?}`. Send the same PATCH again to retry", body = Object),
     ),
 )]
 pub async fn set_mechanism(
@@ -321,6 +353,7 @@ pub async fn set_mechanism(
     // Always, also when nothing was written: the retry path of a failed
     // reconfigure (plan-review ruling a).
     let report = st.reconfigurer.reconfigure_bound_engines(svc.id).await;
+    let warning = external_engines_warning(b.mechanism, &external_engines_unchanged);
     if !report.failed.is_empty() {
         let names: Vec<&str> = report.failed.iter().map(|(n, _)| n.as_str()).collect();
         let failed: Vec<serde_json::Value> = report
@@ -328,25 +361,27 @@ pub async fn set_mechanism(
             .iter()
             .map(|(engine, error)| json!({ "engine": engine, "error": error }))
             .collect();
-        return Ok((
-            axum::http::StatusCode::BAD_GATEWAY,
-            axum::Json(json!({
-                "error": format!(
-                    "the profile is now on {after}; engines not reconfigured: {}. \
-                     Send the same PATCH again to retry.",
-                    names.join(", ")
-                ),
-                "engines_reconfigured": report.applied,
-                "engines_failed": failed,
-            })),
-        )
-            .into_response());
+        let mut body = json!({
+            "error": format!(
+                "the profile is now on {after}; engines not reconfigured: {}. \
+                 Send the same PATCH again to retry.",
+                names.join(", ")
+            ),
+            "engines_reconfigured": report.applied,
+            "engines_failed": failed,
+            "external_engines_unchanged": external_engines_unchanged,
+        });
+        if let Some(warning) = warning {
+            body["external_engines_warning"] = json!(warning);
+        }
+        return Ok((axum::http::StatusCode::BAD_GATEWAY, axum::Json(body)).into_response());
     }
     Ok(axum::Json(ProfileMechanism {
         name: svc.name,
         mechanism: b.mechanism,
         engines_reconfigured: report.applied,
         external_engines_unchanged,
+        external_engines_warning: warning,
     })
     .into_response())
 }

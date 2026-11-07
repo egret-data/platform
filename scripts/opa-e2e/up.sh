@@ -17,6 +17,7 @@ BASE="http://127.0.0.1:${EGRET_OPA_E2E_PORT}"
 TRINO_IMAGE="trinodb/trino:483@sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534"
 IMAGE_VERSION="483@sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534"
 PROFILE=opa_e2e
+TAG_PROFILE=opa_e2e_tag
 CATALOG=lake
 OPA_ENGINE=trino-opa
 OPA_CONTAINER=egret-engine-egret-engines-${OPA_ENGINE}-coordinator
@@ -79,13 +80,26 @@ fi
 [ -n "$CAT_ID" ] || die "catalog $CATALOG was not created with its warehouse"
 log "catalog $CATALOG = $CAT_ID"
 
-# --- 4. profile ---------------------------------------------------------------------------
-PROFILE_ID=$(api "$BASE/api/control-plane/policies/services" | jget "next((p['id'] for p in (d if isinstance(d,list) else d.get('services',d.get('items',[]))) if p['name']=='$PROFILE'), None)")
+# --- 4. profile, with a tag service ---------------------------------------------------------
+# Without a `tagService` the compile skips every tag rule and clearance on this profile (golden
+# G10), on Ranger and OPA alike, and Layer 2 (Task 21) would measure no classification at all.
+# The tag service can only be named at create time: PUT .../tag-service refuses a profile an
+# engine binds or the permission model compiles (409).
+# The profile list, as a JSON list whether the route answers a list or {services|items: [...]}.
+services() { api "$BASE/api/control-plane/policies/services" | python3 -c \
+  "import sys,json; d=json.load(sys.stdin); print(json.dumps(d if isinstance(d,list) else d.get('services', d.get('items', []))))"; }
+if [ -z "$(services | jget "next((p['id'] for p in d if p['name']=='$TAG_PROFILE'), None)")" ]; then
+  log "tag profile $TAG_PROFILE"
+  api -X POST "$BASE/api/control-plane/policies/services" -d "{\"name\":\"$TAG_PROFILE\",\"type\":\"tag\"}" >/dev/null
+fi
+PROFILE_ID=$(services | jget "next((p['id'] for p in d if p['name']=='$PROFILE'), None)")
 if [ -z "$PROFILE_ID" ]; then
   log "profile $PROFILE"
   PROFILE_ID=$(api -X POST "$BASE/api/control-plane/policies/services" \
-    -d "{\"name\":\"$PROFILE\",\"type\":\"trino\"}" | jget "d['id']")
+    -d "{\"name\":\"$PROFILE\",\"type\":\"trino\",\"config\":{\"tagService\":\"$TAG_PROFILE\"}}" | jget "d['id']")
 fi
+[ "$(services | jget "next((p.get('tag_service') for p in d if p['name']=='$PROFILE'), None)")" = "$TAG_PROFILE" ] \
+  || die "profile $PROFILE has no tag service $TAG_PROFILE (made by an older up.sh?): run down.sh, then up.sh"
 log "profile $PROFILE = $PROFILE_ID"
 
 engine_id() { api "$BASE/api/control-plane/engines" | jget "next((e['id'] for e in (d if isinstance(d,list) else d.get('items',[])) if e['name']=='$1'), None)"; }

@@ -4,6 +4,8 @@
 //! access. `tests/boundary.rs` enforces it.
 
 pub mod decide;
+#[cfg(test)]
+mod oracle;
 pub mod pattern;
 pub mod snapshot;
 pub mod trino_ops;

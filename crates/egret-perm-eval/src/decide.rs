@@ -553,7 +553,7 @@ impl Snapshot {
     /// allow on the object, or the all-access statement.
     fn check_data(&self, user: &str, p: Privilege, o: &Obj) -> Decision {
         let classes = self.classes_of(o);
-        let candidates = self.candidates(o.catalog, &classes);
+        let candidates = self.candidates(o.catalog, o.schema, o.table, &classes);
         let mut allow = None;
         for &i in &candidates {
             let s = &self.statements[i];
@@ -590,7 +590,7 @@ impl Snapshot {
         // allow reaches for it, and no engine capability does.
         let lineage = self.lineage_principal == user;
         let classes = self.classes_of(o);
-        let candidates = self.candidates(o.catalog, &classes);
+        let candidates = self.candidates(o.catalog, o.schema, o.table, &classes);
         let mut allow = None;
         for &i in &candidates {
             let s = &self.statements[i];
@@ -653,7 +653,7 @@ impl Snapshot {
                 classes.extend(c.iter().cloned());
             }
         }
-        for i in self.candidates(o.catalog, &classes) {
+        for i in self.candidates(o.catalog, Some(schema), Some(base), &classes) {
             let s = &self.statements[i];
             if !applies(&s.audience, user) || !restricts(&s.effect) {
                 continue;
@@ -696,24 +696,33 @@ impl Snapshot {
         out
     }
 
-    /// Every statement that can match an object in `catalog` carrying
-    /// `classes`, ascending (source order decides `by`).
-    pub(crate) fn candidates(&self, catalog: &str, classes: &BTreeSet<String>) -> Vec<usize> {
-        let mut out: Vec<usize> = self
-            .index
-            .by_catalog
-            .get(&catalog.to_lowercase())
-            .into_iter()
-            .flatten()
-            .chain(&self.index.wild_catalog)
-            .chain(
-                classes
-                    .iter()
-                    .filter_map(|c| self.index.by_classification.get(c))
-                    .flatten(),
-            )
-            .copied()
-            .collect();
+    /// Every statement that can match an object at `catalog`, `schema`,
+    /// `table` carrying `classes`, ascending (source order decides `by`). A
+    /// superset: callers still test each statement's target in full. An
+    /// absent level visits every statement at that level.
+    pub(crate) fn candidates(
+        &self,
+        catalog: &str,
+        schema: Option<&str>,
+        table: Option<&str>,
+        classes: &BTreeSet<String>,
+    ) -> Vec<usize> {
+        #[cfg(test)]
+        if crate::oracle::linear() {
+            return (0..self.statements.len()).collect();
+        }
+        let mut out: Vec<usize> = Vec::new();
+        self.index.paths.visit(Some(catalog), &mut |schemas| {
+            schemas.visit(schema, &mut |tables| {
+                tables.visit(table, &mut |ids| out.extend_from_slice(ids));
+            });
+        });
+        out.extend(
+            classes
+                .iter()
+                .filter_map(|c| self.index.by_classification.get(c))
+                .flatten(),
+        );
         out.sort_unstable();
         out.dedup();
         out

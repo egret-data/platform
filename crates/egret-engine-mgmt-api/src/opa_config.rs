@@ -24,6 +24,10 @@ pub const OPA_LOG_REQUESTS_WARNING: &str = "Do not enable opa.log-requests: ever
 /// C6: egret cannot see an external engine's image.
 pub const OPA_EXTERNAL_ENGINE_NOTE: &str = "The coordinator must run Trino 483 or later with plugin/opa; egret cannot check an external engine's image.";
 
+/// Task 22 measured: without `opa.policy.batched-uri` the plugin sends one request per object, its
+/// queue (1024) overflows, and `information_schema.columns` over ~1000 tables fails.
+pub const OPA_BATCHED_URI_WARNING: &str = "Do not remove opa.policy.batched-uri from access-control.properties: without it Trino sends one request per object, and a listing of about a thousand tables, such as information_schema.columns, failed in testing.";
+
 /// How an engine's access decisions are made.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AccessMechanism {
@@ -170,6 +174,19 @@ mod tests {
         );
         assert_eq!(f.files[0].0, "access-control.properties");
         assert_eq!(f.files[1].0, OPA_CONTEXT_FILE);
+    }
+
+    #[test]
+    fn the_batched_uri_warning_is_exact_and_names_what_the_file_carries() {
+        assert_eq!(
+            OPA_BATCHED_URI_WARNING,
+            "Do not remove opa.policy.batched-uri from access-control.properties: without it Trino sends one request per object, and a listing of about a thousand tables, such as information_schema.columns, failed in testing."
+        );
+        let f = opa_plugin_files("e-1", "http://egret:8080", "pw").unwrap();
+        assert!(f
+            .get("access-control.properties")
+            .unwrap()
+            .contains("opa.policy.batched-uri="));
     }
 
     #[test]

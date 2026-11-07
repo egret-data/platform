@@ -57,6 +57,19 @@ describe("ExplainResultView — an OPA profile", () => {
     expect(screen.getByTestId("explain-mechanism")).toHaveTextContent("OPA");
   });
 
+  test("names the engines not yet re-applied to the profile's mechanism", async () => {
+    await renderOpen(one(opaProfile({ engines_not_reapplied: ["trino-a", "trino-b"] })));
+    expect(screen.getByTestId("explain-not-reapplied")).toHaveTextContent(
+      "Not re-applied yet: trino-a, trino-b still run the previous plugin, so they may answer " +
+        "differently from this OPA explanation until re-applied (send the switch again).",
+    );
+  });
+
+  test("says nothing about re-applying when every engine is on the mechanism", async () => {
+    await renderOpen(one(opaProfile()));
+    expect(screen.queryByTestId("explain-not-reapplied")).toBeNull();
+  });
+
   test("a Ranger profile's header says Ranger", async () => {
     await renderOpen(one(opaProfile({ mechanism: "ranger", opa: undefined })));
     expect(screen.getByTestId("explain-mechanism")).toHaveTextContent("Ranger");
@@ -92,12 +105,87 @@ describe("ExplainResultView — an OPA profile", () => {
       ),
     );
     const access = screen.getByTestId("explain-access");
-    expect(within(access).getByTestId("decision-badge")).toHaveTextContent("Refused by a deny item");
+    expect(within(access).getByTestId("decision-badge")).toHaveTextContent("Refused by egret’s rule");
+    expect(within(access).getByTestId("decision-badge")).not.toHaveTextContent(/deny item/);
     expect(within(access).getByTestId("explain-ir-reason")).toHaveTextContent(
       "withhold pii refuses Read on lake.s.t.ssn",
     );
     expect(access).not.toHaveTextContent(/Ranger policy/);
     expect(access).not.toHaveTextContent(/Outside the permission model/);
+  });
+
+  test("a Ranger deny keeps the Ranger wording", async () => {
+    await renderOpen(
+      one(
+        opaProfile({
+          mechanism: "ranger",
+          opa: undefined,
+          accesses: [
+            {
+              access_type: "select",
+              decision: { kind: "denied", policy_id: 4, policy_name: "p", reason: "deny_policy_item" },
+              attribution: null,
+            },
+          ],
+        }),
+      ),
+    );
+    expect(screen.getByTestId("decision-badge")).toHaveTextContent("Refused by a deny item");
+  });
+
+  test("a database error says what happened and what to do, not the class name", async () => {
+    await renderOpen(
+      one(
+        opaProfile({
+          accesses: [
+            {
+              access_type: "select",
+              decision: { kind: "denied", policy_id: null, policy_name: "", reason: "no_policy_matched" },
+              attribution: null,
+              ir_reason: "no OPA snapshot: build failed (Unread)",
+            },
+          ],
+          opa: undefined,
+        }),
+      ),
+    );
+    const reason = screen.getByTestId("explain-ir-reason");
+    expect(reason).toHaveTextContent("Could not read the profile’s current state; try again.");
+    expect(reason).not.toHaveTextContent(/Unread|build failed/);
+  });
+
+  test("an answer from the previous snapshot says so outside the fold, once", async () => {
+    const spliced =
+      "grant 6f1c (from the previous snapshot: the current model did not build, and the engine is answered from the previous data)";
+    render(
+      <MemoryRouter>
+        <ExplainResultView
+          result={one(
+            opaProfile({
+              accesses: [
+                {
+                  access_type: "select",
+                  decision: { kind: "allowed", policy_id: null, policy_name: "grant 6f1c" },
+                  attribution: null,
+                  ir_reason: spliced,
+                },
+              ],
+            }),
+          )}
+        />
+      </MemoryRouter>,
+    );
+    const note = screen.getByTestId("explain-spliced");
+    expect(note).toHaveTextContent(/from the previous snapshot/);
+    expect(note.closest("details")).toBeNull();
+    await userEvent.click(screen.getByText("Which policies decided this"));
+    expect(screen.getByTestId("explain-ir-reason")).toHaveTextContent("Decided by egret’s evaluator: grant 6f1c");
+    expect(screen.getByTestId("explain-ir-reason")).not.toHaveTextContent(/previous snapshot/);
+  });
+
+  test("an answer from the current snapshot has no previous-snapshot note", async () => {
+    await renderOpen(one(opaProfile()));
+    expect(screen.queryByTestId("explain-spliced")).toBeNull();
   });
 
   test("a refused profile shows the refusal class as its reason", async () => {

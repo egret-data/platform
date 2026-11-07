@@ -15,3 +15,9 @@ thiserror.workspace = true
 egret-perm.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
+# SP2b Task 22: `benches/eval.rs`.
+criterion.workspace = true
+
+[[bench]]
+name = "eval"
+harness = false

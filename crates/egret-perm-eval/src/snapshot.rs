@@ -2,7 +2,7 @@
 //! the classified columns of its catalogs, read at one `(policy_version,
 //! tag_version)`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use egret_perm_ir::audience::{Audience, MemberName};
 use egret_perm_ir::statement::{Level, Path, Source, Statement, Target};
@@ -59,12 +59,71 @@ pub(crate) struct TableClasses {
 /// `(catalog, schema, table)`, lowercased.
 pub(crate) type TableKey = (String, String, String);
 
+/// One level of the path index (Task 22F).
+///
+/// - `named`: the statements whose value at this level is a literal (no `*`
+///   or `?`), keyed by that value lowercased. A literal matches a request
+///   value only when the two are equal ignoring case
+///   (`pattern::matches`), and never a request value that is `*` or empty
+///   (`named_matches` asks a wildcard run there, which a literal is not), so
+///   a lookup by the request value lowercased finds every literal that can
+///   match it.
+/// - `wild`: every other statement: an unnamed level, or a pattern holding
+///   `*` or `?` (wildcard runs such as `**` included). Every lookup at this
+///   level visits it.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LevelIndex<T> {
+    pub(crate) named: HashMap<String, T>,
+    pub(crate) wild: T,
+}
+
+impl<T: Default> LevelIndex<T> {
+    /// The bucket a statement whose value at this level is `key` belongs in.
+    fn slot(&mut self, key: Option<String>) -> &mut T {
+        match key {
+            Some(k) => self.named.entry(k).or_default(),
+            None => &mut self.wild,
+        }
+    }
+}
+
+impl<T> LevelIndex<T> {
+    /// Every bucket that may hold a statement matching a request whose value
+    /// at this level is `value`. An absent value visits every bucket: the
+    /// reach rule leaves the levels below the object free.
+    pub(crate) fn visit<'a>(&'a self, value: Option<&str>, f: &mut impl FnMut(&'a T)) {
+        match value {
+            Some(v) => {
+                if let Some(t) = self.named.get(&v.to_lowercase()) {
+                    f(t);
+                }
+            }
+            None => self.named.values().for_each(&mut *f),
+        }
+        f(&self.wild);
+    }
+}
+
+/// The literal key of a level value: lowercased, or None when the value
+/// holds a wildcard and so belongs with the patterns.
+fn literal_key(value: &str) -> Option<String> {
+    (!pattern::is_wild(value)).then(|| value.to_lowercase())
+}
+
+fn level_key(level: &Level) -> Option<String> {
+    match level {
+        Level::Named(v) => literal_key(v),
+        Level::Unnamed => None,
+    }
+}
+
+/// `Target::Path` statements by catalog, then schema, then table.
+pub(crate) type PathIndex = LevelIndex<LevelIndex<LevelIndex<Vec<usize>>>>;
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Index {
-    /// `Target::Path` statements by their literal catalog, lowercased.
-    pub(crate) by_catalog: BTreeMap<String, Vec<usize>>,
-    /// `Target::Path` statements whose catalog holds `*` or `?`.
-    pub(crate) wild_catalog: Vec<usize>,
+    /// `Target::Path` statements by (catalog, schema, table) level.
+    pub(crate) paths: PathIndex,
     /// `Target::Classification` statements by classification name, lowercased.
     pub(crate) by_classification: BTreeMap<String, Vec<usize>>,
     /// `Target::Infra` statements.
@@ -95,11 +154,11 @@ impl Snapshot {
                 check_path(i, p)?;
             }
             match &s.target {
-                Target::Path(p) if pattern::is_wild(&p.catalog) => index.wild_catalog.push(i),
                 Target::Path(p) => index
-                    .by_catalog
-                    .entry(p.catalog.to_lowercase())
-                    .or_default()
+                    .paths
+                    .slot(literal_key(&p.catalog))
+                    .slot(level_key(&p.schema))
+                    .slot(level_key(&p.table))
                     .push(i),
                 Target::Classification { name } => index
                     .by_classification

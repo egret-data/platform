@@ -85,6 +85,24 @@ function opaHint(d: WireDecision): string {
   return "egret refuses this access: nothing in the permission model allows it, or the profile could not be answered at all (named below). The engine's OPA plugin is refused too.";
 }
 
+/** The server appends this to every `ir_reason` of a snapshot built from the previous data. */
+const SPLICED_MARKER = " (from the previous snapshot";
+/** The server's `ir_reason` when the profile's stored state could not be read (a database error). */
+const UNREAD_REASON = "no OPA snapshot: build failed (Unread)";
+
+/** True when the verdict was answered from the previous snapshot. */
+function isSpliced(irReason: string | null | undefined): boolean {
+  return !!irReason && irReason.includes(SPLICED_MARKER);
+}
+
+/** An `ir_reason` in the page's words: the splice note is said once, above the fold, and a
+ *  database error says what to do (FE-COPY-2). */
+function irReasonText(irReason: string): string {
+  if (irReason === UNREAD_REASON) return "Could not read the profile’s current state; try again.";
+  const at = irReason.indexOf(SPLICED_MARKER);
+  return at < 0 ? irReason : irReason.slice(0, at);
+}
+
 const PLUGIN_LABEL: Record<WirePluginVersion, string> = {
   ranger_2_5_0: "Ranger 2.5.0",
   ranger_2_8_0: "Ranger 2.8.0",
@@ -844,7 +862,9 @@ function AccessRow({
         <span className="font-mono text-xs text-muted-foreground">{verdict.access_type}</span>
         <Badge data-testid="decision-badge" variant={meta.variant} className="gap-1">
           <Icon className="h-3 w-3" />
-          {meta.label}
+          {opa && verdict.decision.kind === "denied" && verdict.decision.reason === "deny_policy_item"
+            ? "Refused by egret’s rule"
+            : meta.label}
         </Badge>
       </div>
       <div className="min-w-0 flex-1 space-y-1.5">
@@ -852,7 +872,13 @@ function AccessRow({
         {opa ? (
           verdict.ir_reason && (
             <p data-testid="explain-ir-reason" className="text-xs text-muted-foreground">
-              Decided by egret’s evaluator: <code className="font-mono text-xs">{verdict.ir_reason}</code>
+              {verdict.ir_reason === UNREAD_REASON ? (
+                irReasonText(verdict.ir_reason)
+              ) : (
+                <>
+                  Decided by egret’s evaluator: <code className="font-mono text-xs">{irReasonText(verdict.ir_reason)}</code>
+                </>
+              )}
             </p>
           )
         ) : verdict.decision.kind === "undecidable" ? (
@@ -930,6 +956,24 @@ function ProfileBlock({
         </Badge>
         <span className="text-xs text-muted-foreground">service id {profile.service_id}</span>
       </div>
+      {/* Governance SP2b Task 20F (T16 M1): explain follows the profile's
+          mechanism; an engine a switch has not re-applied yet still runs the
+          other plugin, so it may answer differently. */}
+      {profile.engines_not_reapplied && profile.engines_not_reapplied.length > 0 && (
+        <p data-testid="explain-not-reapplied" className="text-xs text-muted-foreground">
+          Not re-applied yet: {profile.engines_not_reapplied.join(", ")} still{" "}
+          {profile.engines_not_reapplied.length === 1 ? "runs" : "run"} the previous plugin, so{" "}
+          {profile.engines_not_reapplied.length === 1 ? "it" : "they"} may answer differently from
+          this {MECHANISM_LABEL[profile.mechanism]} explanation until re-applied (send the switch
+          again).
+        </p>
+      )}
+      {isOpa && profile.accesses.some((a) => isSpliced(a.ir_reason)) && (
+        <p data-testid="explain-spliced" className="text-xs text-muted-foreground">
+          This answer is from the previous snapshot: the current model did not build, so egret answers from the
+          previous data until it does.
+        </p>
+      )}
       {/* Spec §5.10: the answer in sentences first, built by the server (C1);
           the verdicts they were built from fold below. */}
       {profile.effect_lines.length > 0 && (

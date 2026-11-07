@@ -1558,22 +1558,64 @@ struct ExplainedFile {
     difference: Vec<Entry>,
 }
 
+/// One accepted difference. `layer` names the differentials that produce it:
+/// 1 is this test, 2 is the end-to-end differential (Task 21,
+/// `scripts/opa-e2e/compare.py`); a missing key means `[1]`. Only a layer-1
+/// entry needs a predicate here, claims a Layer 1 case, and counts in the
+/// stale-entry check. A layer-2 entry carries `layer2` matchers, which only
+/// `compare.py` reads.
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Entry {
     id: String,
+    #[serde(default = "layer_one")]
+    layer: Vec<u8>,
+    #[serde(default)]
     operations: Vec<String>,
     mechanism: String,
     right: String,
     why: String,
+    #[serde(default)]
+    layer2: Vec<Layer2Match>,
+}
+
+/// A Layer 2 matcher (`compare.py` applies it), parsed here so a typo in a
+/// key fails this test too.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct Layer2Match {
+    scenario: String,
+    user: String,
+    statement: String,
+    kind: String,
+}
+
+fn layer_one() -> Vec<u8> {
+    vec![1]
+}
+
+impl Entry {
+    fn in_layer(&self, layer: u8) -> bool {
+        self.layer.contains(&layer)
+    }
 }
 
 const EXPLAINED: &str = include_str!("opa_differential/explained.toml");
 
-fn explained() -> Vec<Entry> {
+/// Every entry, of either layer.
+fn explained_all() -> Vec<Entry> {
     toml::from_str::<ExplainedFile>(EXPLAINED)
         .expect("explained.toml parses")
         .difference
+}
+
+/// The entries this differential (layer 1) produces and checks for staleness.
+fn explained() -> Vec<Entry> {
+    explained_all()
+        .into_iter()
+        .filter(|e| e.in_layer(1))
+        .collect()
 }
 
 type Predicate = fn(&Diff) -> bool;
@@ -1742,6 +1784,23 @@ fn every_operation_row_names_the_plugins_leaf_and_access() {
 
 #[test]
 fn every_explained_entry_has_a_predicate() {
+    let all = explained_all();
+    let mut all_ids = BTreeSet::new();
+    for e in &all {
+        assert!(all_ids.insert(e.id.as_str()), "{} is listed twice", e.id);
+        assert!(
+            !e.layer.is_empty() && e.layer.iter().all(|l| [1, 2].contains(l)),
+            "{}: layer = {:?}",
+            e.id,
+            e.layer
+        );
+        assert_eq!(
+            e.in_layer(2),
+            !e.layer2.is_empty(),
+            "{}: a layer-2 entry carries `layer2` matchers, and only a layer-2 entry does",
+            e.id
+        );
+    }
     let entries = explained();
     let mut ids = BTreeSet::new();
     for e in &entries {
@@ -1774,6 +1833,69 @@ fn every_explained_entry_has_a_predicate() {
             "predicate {id} has no explained.toml entry"
         );
     }
+}
+
+/// M14: a missing `layer` is `[1]`; a `[2]` entry is neither claimed by nor
+/// stale in this differential; a `[1, 2]` entry is both.
+#[test]
+fn the_layer_key_defaults_to_one_and_scopes_the_stale_check() {
+    let file: ExplainedFile = toml::from_str(
+        r#"
+        [[difference]]
+        id = "one"
+        operations = ["ShowTables"]
+        mechanism = "m"
+        right = "egret"
+        why = "w"
+
+        [[difference]]
+        id = "two"
+        layer = [2]
+        mechanism = "m"
+        right = "egret"
+        why = "w"
+        [[difference.layer2]]
+        scenario = "G01*"
+        user = "*"
+        statement = "^SHOW"
+        kind = "opa-hides-rows"
+
+        [[difference]]
+        id = "both"
+        layer = [1, 2]
+        operations = ["ShowTables"]
+        mechanism = "m"
+        right = "egret"
+        why = "w"
+        [[difference.layer2]]
+        scenario = "*"
+        user = "*"
+        statement = ".*"
+        kind = "opa-refuses"
+        "#,
+    )
+    .expect("parses");
+    let layer: Vec<(&str, bool, bool)> = file
+        .difference
+        .iter()
+        .map(|e| (e.id.as_str(), e.in_layer(1), e.in_layer(2)))
+        .collect();
+    assert_eq!(
+        layer,
+        [
+            ("one", true, false),
+            ("two", false, true),
+            ("both", true, true)
+        ]
+    );
+    // The real file: every layer-1 entry is what `explained()` returns.
+    let ones: Vec<String> = explained().into_iter().map(|e| e.id).collect();
+    let all_ones: Vec<String> = explained_all()
+        .into_iter()
+        .filter(|e| e.in_layer(1))
+        .map(|e| e.id)
+        .collect();
+    assert_eq!(ones, all_ones);
 }
 
 fn reproducer(seed: u64) -> String {

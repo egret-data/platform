@@ -55,6 +55,9 @@ tracing.workspace = true
 # transaction as its write — and `egret-perm` depending on this crate would
 # be a dependency cycle. Same shape `egret-policy` already has (store plus
 # admin router in one crate).
+# SP2b Task 20F fix round 1: the OPA surface reads a body under a deadline
+# and tells an over-limit body (413) from a broken one (400).
+http-body-util = "0.1"
 axum.workspace = true
 egret-auth.workspace = true
 egret-core.workspace = true
@@ -116,6 +119,11 @@ required-features = ["harness"]
 name = "opa_cache"
 required-features = ["harness"]
 
+# Governance SP2b Task 22 (T7 M1): the snapshot rebuild timing, `#[ignore]`d.
+[[test]]
+name = "opa_rebuild_timing"
+required-features = ["harness"]
+
 # Governance SP2b Task 18: the OPA decision-level differential against the
 # real Ranger engine (JVM; gated on EGRET_TEST_RANGER_E2E=1).
 [[test]]
@@ -147,3 +155,6 @@ egret-query-api.workspace = true
 # Governance SP2b Task 9: `tests/opa_surface.rs` reads the surface's log lines
 # back (no secret, one line per batch).
 tracing-subscriber.workspace = true
+# SP2b Task 20F: `tests/opa_surface.rs` sends a body that records whether it
+# was ever read (`stream::poll_fn`).
+futures-util.workspace = true

@@ -97,7 +97,7 @@ impl Snapshot {
     ) -> Result<Vec<String>, EvalError> {
         let classes = self.table_classes(catalog, schema, table);
         let mut seen: Vec<&str> = Vec::new();
-        for i in self.candidates(catalog, &classes) {
+        for i in self.candidates(catalog, Some(schema), Some(table), &classes) {
             let s = &self.statements[i];
             let Effect::RowFilter { expression } = &s.effect else {
                 continue;
@@ -168,7 +168,7 @@ impl Snapshot {
         let mut classes = self.table_classes(catalog, schema, table);
         classes.extend(self.column_classes(catalog, schema, table, column));
         let mut chosen: Option<MaskChoice> = None;
-        for i in self.candidates(catalog, &classes) {
+        for i in self.candidates(catalog, Some(schema), Some(table), &classes) {
             let s = &self.statements[i];
             let Some(choice) = mask_of(s) else {
                 continue;

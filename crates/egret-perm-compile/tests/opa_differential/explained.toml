@@ -1,5 +1,11 @@
-# Every accepted difference between egret-perm-eval and real Ranger on the Layer 1 corpus.
-# A difference with no entry fails CI; an entry no case produces fails CI too.
+# Every accepted difference between egret's OPA answers and real Ranger.
+# `layer` names the differentials that produce an entry (a missing key means [1]):
+#   1 — tests/opa_differential.rs, decisions inside egret against the Ranger JVM; each
+#       layer-1 entry has a predicate there;
+#   2 — scripts/opa-e2e/layer2.sh + compare.py, query output of Trino 483 on the OPA plugin
+#       against Trino 483 on the Ranger plugin; each layer-2 entry has `[[difference.layer2]]`
+#       matchers (scenario and user globs, a statement regex, a compare.py kind).
+# A difference with no entry fails CI; an entry its layer does not produce fails CI too.
 # A difference where OPA allows, shows or unmasks what Ranger refuses is never
 # listed here: the test fails it "fix the evaluator" whatever this file says.
 #
@@ -49,6 +55,7 @@ why = "The engine does the same; only the spelling of \"no mask\" differs."
 
 [[difference]]
 id = "reach-any-is-answered-by-another-access-type"
+layer = [1, 2]
 operations = ["AccessCatalog", "ShowSchemas", "ShowTables", "ShowColumns", "ShowFunctions", "FilterCatalogs", "FilterSchemas", "FilterTables", "FilterColumns"]
 mechanism = """
 Ranger 2.8.0 answers `_any` allowed whenever some allow covers the object or
@@ -64,13 +71,73 @@ table-level classification of lake.s1.t1 (a SELF tag whose clearance denies
 select, insert, delete), is allowed FilterTables, ShowColumns and
 FilterColumns on it. egret-perm-eval's check_reach (decide.rs) refuses reach
 when any deny or withhold that carries any privilege covers the object or an
-ancestor, D2's conservative `_any`."""
+ancestor, D2's conservative `_any`.
+Layer 2 (scripts/opa-e2e, real Trino 483 on both plugins, measured):
+G02 — ann, public read on lake and a public deny read on lake.s2: trino-ranger
+lists s2 in SHOW SCHEMAS, lists t3 and w in SHOW TABLES FROM lake.s2, and
+returns s2's columns from information_schema.columns; trino-opa hides s2 and
+refuses SHOW TABLES FROM lake.s2. G05 — bob and dan, read and write on lake.s1
+and a public deny WRITE on lake.s1.t2: trino-ranger lists t2 (and its columns),
+trino-opa hides it, although both engines let them SELECT from t2. G14 — ann,
+public read on lake and a deny read on lake.s2.w: trino-ranger lists w and
+w.id, trino-opa hides them. G11 — public read on lake; classifications under a
+clearance on the column lake.s1.t1.ssn, on the whole table lake.s2.t3
+(column_name = ''), and on lake.s1.t1.name (a role nobody holds): both engines
+refuse the uncleared user's SELECTs, but trino-ranger's SHOW COLUMNS FROM
+lake.s1.t1 and information_schema.columns still list ssn, name and every t3
+column, and trino-opa hides them (ann, cleared for ssn and t3, still loses
+name). G14 — carol, not cleared for the classification on lake.s2.t3.salary:
+the same for t3.salary in information_schema.columns. No Layer 2 case shows
+OPA listing more."""
 right = "egret"
 why = """
 D2 chose a conservative reach: an object a deny or withhold reaches is hidden
 from listings and catalog access. OPA is stricter, never looser. The
 withheld-table anchor also catches Task 3's mutation h (classification
-withholds dropped from reach), which makes those cases agree."""
+withholds dropped from reach), which makes those cases agree. Layer 2 shows the
+cost: a deny of another privilege (G05: write) hides a table the user can read."""
+
+[[difference.layer2]]
+scenario = "G02"
+user = "ann"
+statement = "^SHOW SCHEMAS FROM lake$"
+kind = "opa-hides-rows"
+
+[[difference.layer2]]
+scenario = "G02"
+user = "ann"
+statement = "^SHOW TABLES FROM lake\\.s2$"
+kind = "opa-refuses"
+
+[[difference.layer2]]
+scenario = "G0[25]"
+user = "*"
+statement = "FROM lake\\.information_schema\\.columns"
+kind = "opa-hides-rows"
+
+[[difference.layer2]]
+scenario = "G05"
+user = "*"
+statement = "^SHOW TABLES FROM lake\\.s1$"
+kind = "opa-hides-rows"
+
+[[difference.layer2]]
+scenario = "G14"
+user = "ann"
+statement = "^SHOW TABLES FROM lake\\.s2$|FROM lake\\.information_schema\\.columns"
+kind = "opa-hides-rows"
+
+[[difference.layer2]]
+scenario = "G11"
+user = "*"
+statement = "^SHOW COLUMNS FROM lake\\.s1\\.t1$|FROM lake\\.information_schema\\.columns"
+kind = "opa-hides-rows"
+
+[[difference.layer2]]
+scenario = "G14"
+user = "carol"
+statement = "FROM lake\\.information_schema\\.columns"
+kind = "opa-hides-rows"
 
 [[difference]]
 id = "a-metadata-table-is-reached-in-ranger"
