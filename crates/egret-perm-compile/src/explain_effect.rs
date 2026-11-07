@@ -24,7 +24,7 @@ use crate::explain_wire::{
 };
 use crate::routes::{
     ClearanceMaskGapReason, ExplainAccess, ExplainAttribution, ExplainExemption, ExplainProfile,
-    ExplainRowFilterGap, ExplainTagDecline, ExplainTargetLevel,
+    ExplainTagDecline, ExplainTargetLevel,
 };
 
 /// One sentence about one person on one engine.
@@ -175,6 +175,117 @@ pub(crate) fn effect_lines(input: &EffectInput<'_>) -> Vec<ExplainEffectLine> {
     }
 }
 
+/// An OPA profile's lines (governance SP2b Task 16), from the IR evaluator's
+/// verdicts and values on `profile` and nothing else:
+///
+/// - one `access` line per access, `allowed` or `refused`, reading
+///   `"{subject} {is|is not} allowed to {access_type} {target}: {ir_reason}"`;
+/// - for a `read` every access allows, the column line (`masked`, with the
+///   expression as code, or `real_value`) when a column is named, and the
+///   rows line (`filtered`, with the filter as code, or `all_rows`) when a
+///   table is. A refused read gets neither, as on the Ranger path.
+pub fn opa_effect_lines(
+    subject: &str,
+    action: Action,
+    target: &Scope,
+    profile: &ExplainProfile,
+) -> Vec<ExplainEffectLine> {
+    let object = [
+        target.schema.as_deref(),
+        target.table.as_deref(),
+        target.column.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(".");
+    let object = if object.is_empty() {
+        "the catalog".to_string()
+    } else {
+        object
+    };
+    let mut lines = Vec::new();
+    let mut all_allowed = true;
+    for a in &profile.accesses {
+        let allowed = matches!(a.decision, WireDecision::Allowed { .. });
+        all_allowed &= allowed;
+        let mut l = Line::default();
+        l.push(EffectPart::Subject {
+            text: subject.to_string(),
+        });
+        l.text(" is ");
+        l.strong(if allowed { "allowed" } else { "not allowed" });
+        l.text(format!(" to {} ", a.access_type));
+        l.code(object.clone());
+        l.text(format!(": {}", a.ir_reason.as_deref().unwrap_or_default()));
+        lines.push(l.finish(
+            EffectAbout::Access,
+            if allowed {
+                EffectOutcome::Allowed
+            } else {
+                EffectOutcome::Refused
+            },
+        ));
+    }
+    let Some(opa) = profile.opa.as_ref() else {
+        return lines;
+    };
+    if action != Action::Read || !all_allowed {
+        return lines;
+    }
+    if let Some(column) = &target.column {
+        let mut l = Line::default();
+        l.push(EffectPart::Subject {
+            text: subject.to_string(),
+        });
+        let outcome = match (&opa.column_mask_type, &opa.column_mask) {
+            (Some(mask_type), Some(expr)) => {
+                l.text(" sees ");
+                l.code(column.clone());
+                l.text(" ");
+                l.strong(format!("masked by {mask_type}"));
+                l.text(": ");
+                l.code(expr.clone());
+                EffectOutcome::Masked
+            }
+            _ => {
+                l.text(" sees the ");
+                l.strong("real value");
+                l.text(" of ");
+                l.code(column.clone());
+                EffectOutcome::RealValue
+            }
+        };
+        lines.push(l.finish(EffectAbout::Column, outcome));
+    }
+    if let Some(table) = &target.table {
+        let mut l = Line::default();
+        l.push(EffectPart::Subject {
+            text: subject.to_string(),
+        });
+        let outcome = match &opa.row_filter {
+            Some(filter) => {
+                l.text(" sees ");
+                l.strong("only the rows");
+                l.text(" of ");
+                l.code(table.clone());
+                l.text(" where ");
+                l.code(filter.clone());
+                EffectOutcome::Filtered
+            }
+            None => {
+                l.text(" sees ");
+                l.strong("every row");
+                l.text(" of ");
+                l.code(table.clone());
+                EffectOutcome::AllRows
+            }
+        };
+        lines.push(l.finish(EffectAbout::Rows, outcome));
+    }
+    lines
+}
+
 /// C5: the line for `no_profile_serves_the_catalog`.
 pub(crate) fn not_enforced_line(
     catalog_id: Uuid,
@@ -260,7 +371,7 @@ fn mask_label(mask_type: Option<&str>) -> &str {
 }
 
 /// A clearance deny on a whole table (D2): its locator ends in the `*`
-/// column ([`crate::clearance`]'s whole-table deny).
+/// column ([`crate::ranger::withhold::WHOLE_TABLE_COLUMN`]).
 fn is_whole_table_clearance(attribution: Option<&ExplainAttribution>) -> bool {
     matches!(attribution, Some(ExplainAttribution::Clearance { locator: Some(l), .. })
         if l.ends_with(".*"))
@@ -893,7 +1004,6 @@ impl Builder<'_> {
         let outcome = match &rf.decision {
             WireRowFilterDecision::NoFilter => {
                 self.every_row(&mut l);
-                self.append_row_filter_gaps(&mut l, &self.input.profile.row_filter_not_applied);
                 EffectOutcome::AllRows
             }
             WireRowFilterDecision::Filtered { result } => match (&rf.attribution, &rf.exemption) {
@@ -959,40 +1069,6 @@ impl Builder<'_> {
         l.strong("rows where");
         l.text(" ");
         l.code(filter_expr);
-    }
-
-    /// D3: ": rule *X* does not filter on Trino here, because *PII* is on a
-    /// column, not on the table". Only Trino profiles carry these gaps.
-    fn append_row_filter_gaps(&self, l: &mut Line, gaps: &[ExplainRowFilterGap]) {
-        let (engine, here, there) = ("Trino", "a column", "the table");
-        match gaps {
-            [] => {}
-            [gap] => {
-                l.text(": rule ");
-                l.push(Self::rule_part(gap.rule_id, Some(&gap.rule_name)));
-                l.text(format!(
-                    " does not filter on {engine} here, because {} is on {here}, not on {there}",
-                    gap.tag_name
-                ));
-            }
-            several => {
-                l.text(": rules ");
-                for (i, gap) in several.iter().enumerate() {
-                    if i > 0 {
-                        l.text(if i + 1 == several.len() {
-                            " and "
-                        } else {
-                            ", "
-                        });
-                    }
-                    l.push(Self::rule_part(gap.rule_id, Some(&gap.rule_name)));
-                }
-                l.text(format!(
-                    " do not filter on {engine} here, because their classifications are on \
-                     {here}, not on {there}"
-                ));
-            }
-        }
     }
 
     /// A `write` is a summary of its access verdicts (spec §12).
@@ -1065,13 +1141,15 @@ mod tests {
             service_id: 1,
             service_name: "p".into(),
             engine,
+            mechanism: crate::explain_wire::WireMechanism::Ranger,
+            opa: None,
+            engines_not_reapplied: Vec::new(),
             accesses: vec![allowed()],
             tags: Vec::new(),
             tag_policies_in_download: 0,
             mask: None,
             row_filter: None,
             clearance_masks_missing: Vec::new(),
-            row_filter_not_applied: Vec::new(),
             masked_read_skips_access: false,
             other_columns_access: None,
             effect_lines: Vec::new(),
@@ -1086,6 +1164,7 @@ mod tests {
                 policy_name: "perm-grant-x".into(),
             },
             attribution: None,
+            ir_reason: None,
         }
     }
 
@@ -1102,6 +1181,7 @@ mod tests {
                 reason,
             },
             attribution,
+            ir_reason: None,
         }
     }
 
@@ -1385,10 +1465,6 @@ mod tests {
                 "u sees rows where region = 'us' (rule X)"),
             rows("filter exempt", with(t(), |p| p.row_filter = filter("", rule(RULE, "X"), Some(group_exemption()))),
                 "u sees every row (exempt from rule X via group data-team)"),
-            rows("D3 gap", with(t(), |p| {
-                p.row_filter = Some(ExplainRowFilter { access_type: "select".into(), decision: WireRowFilterDecision::NoFilter, attribution: None, exemption: None });
-                p.row_filter_not_applied = vec![ExplainRowFilterGap { rule_id: RULE, rule_name: "X".into(), tag_name: "PII".into() }];
-            }), "u sees every row: rule X does not filter on Trino here, because PII is on a column, not on the table"),
             rows("filter tie, agreeing", with(t(), |p| p.row_filter = Some(ExplainRowFilter { access_type: "select".into(), decision: WireRowFilterDecision::Undecidable { why: tie(vec![
                     WireTiedOutcome::RowFilter { filter_expr: "a = 1".into() }, WireTiedOutcome::RowFilter { filter_expr: "a = 1".into() }]) }, attribution: None, exemption: None })),
                 "u sees rows where a = 1 (2 rules agree: A, B)"),

@@ -1,0 +1,5 @@
+# trino-ranger's view of egret's embedded Iceberg catalog `lake` (warehouse `lake`).
+# scripts/opa-e2e/up.sh fills @PROPERTIES@ with the provisioned trino-opa's own
+# /etc/trino/catalog/lake.properties, its ${ENV:...} references resolved, so both
+# engines read the same tables through the same REST catalog and RustFS endpoint.
+@PROPERTIES@

@@ -84,7 +84,7 @@ fn request(values: &[(&str, &str)]) -> RequestResource {
 /// `Access Denied: Cannot select from columns [v, id] in table or view
 /// sibling` on real Trino — see
 /// `docs/en/plans/2026-09-24-permission-model-sp4a-live-result.md` §3 T1
-/// and `crates/egret-perm-compile/src/grants.rs:227-254`.
+/// and `crates/egret-perm-compile/src/ranger/grants.rs` (`scope_to_resources`).
 ///
 /// Task 5 must not turn this into an allow: Ranger's
 /// `RangerDefaultPolicyEvaluator.evaluate` only accepts `SELF`,

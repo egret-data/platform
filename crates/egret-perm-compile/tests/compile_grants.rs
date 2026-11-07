@@ -381,15 +381,17 @@ fn an_access_policy_fills_every_declared_level_below_the_scope() {
     }
 }
 
-/// The other half of defect 1's fix, stated as its own assertion: a MASK and a
-/// ROW-FILTER policy are NOT widened. Task 10 measured both working exactly as
-/// emitted (T3b masked a column for real; T4 removed rows for real), and the
-/// design spec's reading of Ranger says masking/row-filter policies take no
-/// wildcards at all. Widening them would swap one unverified assumption for
-/// another in the fail-OPEN direction. This test is what would fail if a later
-/// reader "made it consistent" without a live measurement to justify it.
+/// The other half of defect 1's fix, per policy type. This test used to pin a
+/// table-scoped MASK at "no `column` resource" on the strength of T3b — which
+/// measured a mask that NAMED its column, never one scoped above it. Measured
+/// on the real jars since (`egret-ranger-eval`'s
+/// `a_path_mask_naming_no_column_masks_every_column_beneath_it_on_the_real_jars`),
+/// that body masks NOTHING: every `dataMaskDef` level is mandatory once Ranger
+/// merges it onto the access def. So a table-scoped mask now carries
+/// `column: *`, exactly like an access policy, and a table-scoped ROW FILTER
+/// still carries no column at all, because `rowFilterDef` declares none.
 #[test]
-fn a_path_selected_rule_is_not_widened_the_way_an_access_policy_is() {
+fn a_path_selected_table_rule_renders_the_levels_its_policy_type_declares() {
     use egret_perm::{Rule, RuleKind, Selector};
     use egret_perm_compile::{compile_rule, ResolvedNames};
 
@@ -399,14 +401,20 @@ fn a_path_selected_rule_is_not_widened_the_way_an_access_policy_is() {
         table: Some("orders".into()),
         column: None,
     };
-    for kind in [
-        RuleKind::Mask {
-            mask_type: "MASK".to_string(),
-            value_expr: None,
-        },
-        RuleKind::RowFilter {
-            filter_expr: "country = 'US'".to_string(),
-        },
+    for (kind, column) in [
+        (
+            RuleKind::Mask {
+                mask_type: "MASK".to_string(),
+                value_expr: None,
+            },
+            Some("*"),
+        ),
+        (
+            RuleKind::RowFilter {
+                filter_expr: "country = 'US'".to_string(),
+            },
+            None,
+        ),
     ] {
         let r = Rule {
             id: Uuid::nil(),
@@ -431,10 +439,10 @@ fn a_path_selected_rule_is_not_widened_the_way_an_access_policy_is() {
         assert_eq!(bodies.len(), 1);
         let resources = &bodies[0]["resources"];
         assert_eq!(resources["table"]["values"][0], "orders");
-        assert!(
-            resources.get("column").is_none(),
-            "a masking/row-filter policy keeps today's measured shape: an unnamed level is \
-             absent, not a wildcard"
+        assert_eq!(
+            resources.get("column").map(|c| &c["values"][0]),
+            column.map(serde_json::Value::from).as_ref(),
+            "a table-scoped mask must cover every column (`*`); a row filter has no column level"
         );
     }
 }

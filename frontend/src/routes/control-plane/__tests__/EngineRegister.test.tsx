@@ -95,6 +95,10 @@ describe("EngineRegister", () => {
     const taken = screen.getByRole("option", { name: /trino-taken/ });
     expect(taken).toHaveAttribute("aria-disabled", "true");
     expect(taken).toHaveTextContent(/bound to other-trino/);
+    // A Trino profile with no tag service would be refused at bind (#786): disabled, with the reason.
+    const tagless = screen.getByRole("option", { name: /trino-tagless/ });
+    expect(tagless).toHaveAttribute("aria-disabled", "true");
+    expect(tagless).toHaveTextContent(/no tag service/);
     await user.click(screen.getByRole("option", { name: /trino-main/ }));
     expect(screen.getByRole("combobox", { name: "Policy profile" })).toHaveTextContent("trino-main");
 

@@ -87,6 +87,10 @@ impl From<egret_perm::CompileError> for CpError {
         if let Some(body) = e.expansion_ceiling_body() {
             return CpError::Coded(StatusCode::CONFLICT, body);
         }
+        // The profile set grew under the write (#792): retryable, a 409.
+        if let Some(body) = e.profile_set_changed_body() {
+            return CpError::Coded(StatusCode::CONFLICT, body);
+        }
         tracing::error!(error = %e, "a control-plane write's policy recompile failed");
         CpError::Internal
     }

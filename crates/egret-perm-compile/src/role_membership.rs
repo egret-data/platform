@@ -25,7 +25,7 @@
 //! # ONE trigger, TWO consumers
 //!
 //! The enumeration happens in two places — a clearance's `denyExceptions`
-//! ([`crate::clearance`]) and a `role` principal in a grant
+//! ([`crate::ir_load::load_withhold_inputs`]) and a `role` principal in a grant
 //! ([`crate::members`]) — and both read the same `role_usernames`, which mints
 //! a holder's missing username (2026-10-18 design R5), so the recompile a
 //! grant triggers names a holder who never used an engine. So there is
@@ -43,7 +43,7 @@
 //! is owned here, which also keeps the lock-ordering invariant in one place
 //! instead of at every HTTP handler.
 
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use egret_auth::roles::RoleRepo;
@@ -89,6 +89,20 @@ pub async fn unassign_platform_role_and_recompile(
     with_recompile(pool, Op::Unassign, ptype, pid, role_id).await
 }
 
+/// [`unassign_platform_role_and_recompile`] on the caller's transaction, which
+/// the caller commits. The control plane's revoke routes use it so the
+/// last-admin guard (`egret_auth::roles::LastAdminGuard`, KI-284) brackets the
+/// write on the same transaction: the guard's lock first, then this (profile
+/// locks, write, recompile), then the guard's check.
+pub async fn unassign_platform_role_and_recompile_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    ptype: &str,
+    pid: Uuid,
+    role_id: Uuid,
+) -> Result<(), CompileError> {
+    with_recompile_in_tx(tx, Op::Unassign, ptype, pid, role_id).await
+}
+
 /// Delete platform role `role_id` and recompile every service the deletion can
 /// reach, in ONE transaction.
 ///
@@ -121,21 +135,18 @@ pub async fn delete_platform_role_and_recompile(
     pool: &PgPool,
     role_id: Uuid,
 ) -> Result<(), CompileError> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
+    let mut tx = pool.begin().await.map_err(CompileError::from_db)?;
 
     let name = RoleRepo::name_of_in_tx(&mut tx, role_id)
         .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
+        .map_err(crate::db_error::from_core)?;
 
     if let Some(name) = name.as_deref() {
         let services = affected_services_for_role_membership(&mut tx, name).await?;
         lock_services_in_tx(&mut tx, &services).await?;
         RoleRepo::delete_in_tx(&mut tx, role_id)
             .await
-            .map_err(|e| CompileError::Db(e.to_string()))?;
+            .map_err(crate::db_error::from_core)?;
         for summary in recompile_services_in_tx(&mut tx, &services).await? {
             if !summary.skipped.is_empty() {
                 tracing::warn!(
@@ -148,12 +159,10 @@ pub async fn delete_platform_role_and_recompile(
     } else {
         RoleRepo::delete_in_tx(&mut tx, role_id)
             .await
-            .map_err(|e| CompileError::Db(e.to_string()))?;
+            .map_err(crate::db_error::from_core)?;
     }
 
-    tx.commit()
-        .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
+    tx.commit().await.map_err(CompileError::from_db)?;
     Ok(())
 }
 
@@ -179,24 +188,33 @@ async fn with_recompile(
     pid: Uuid,
     role_id: Uuid,
 ) -> Result<(), CompileError> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
+    let mut tx = pool.begin().await.map_err(CompileError::from_db)?;
+    with_recompile_in_tx(&mut tx, op, ptype, pid, role_id).await?;
+    tx.commit().await.map_err(CompileError::from_db)?;
+    Ok(())
+}
 
-    let name = RoleRepo::name_of_in_tx(&mut tx, role_id)
+/// [`with_recompile`]'s steps on the caller's transaction; the caller commits.
+async fn with_recompile_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    op: Op,
+    ptype: &str,
+    pid: Uuid,
+    role_id: Uuid,
+) -> Result<(), CompileError> {
+    let name = RoleRepo::name_of_in_tx(tx, role_id)
         .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
+        .map_err(crate::db_error::from_core)?;
 
     // A role name that resolves is looked up BEFORE the write, and the locks are
     // taken before it too; a role that does not exist skips both, because the
     // write itself already answers that case (the INSERT's FK refuses it, the
     // DELETE is a no-op) and a full compile for a nameless role changes nothing.
     if let Some(name) = name.as_deref() {
-        let services = affected_services_for_role_membership(&mut tx, name).await?;
-        lock_services_in_tx(&mut tx, &services).await?;
-        apply(&mut tx, op, ptype, pid, role_id).await?;
-        for summary in recompile_services_in_tx(&mut tx, &services).await? {
+        let services = affected_services_for_role_membership(tx, name).await?;
+        lock_services_in_tx(tx, &services).await?;
+        apply(tx, op, ptype, pid, role_id).await?;
+        for summary in recompile_services_in_tx(tx, &services).await? {
             if !summary.skipped.is_empty() {
                 tracing::warn!(
                     role = %name,
@@ -206,12 +224,8 @@ async fn with_recompile(
             }
         }
     } else {
-        apply(&mut tx, op, ptype, pid, role_id).await?;
+        apply(tx, op, ptype, pid, role_id).await?;
     }
-
-    tx.commit()
-        .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
     Ok(())
 }
 
@@ -226,7 +240,7 @@ async fn apply(
         Op::Assign => RoleRepo::assign_in_tx(conn, ptype, pid, role_id).await,
         Op::Unassign => RoleRepo::unassign_in_tx(conn, ptype, pid, role_id).await,
     }
-    .map_err(|e| CompileError::Db(e.to_string()))
+    .map_err(crate::db_error::from_core)
 }
 
 /// Recompile every profile whose model names a role — a `role` principal in
@@ -246,10 +260,11 @@ async fn apply(
 /// role, its locks taken ascending ([`lock_services_in_tx`]), then
 /// [`recompile_services_in_tx`]. Idempotent: an unchanged body writes nothing
 /// and bumps no `policy_version`, which is why it runs on every boot with no
-/// record of having run. `egret-bin` spawns it off the boot path, and a
-/// failure is logged and never blocks boot.
+/// record of having run. `egret-bin` spawns it off the boot path through
+/// [`repair_role_referencing_profiles_with_retry`], which retries a failure
+/// and never blocks boot.
 pub async fn recompile_role_referencing_profiles(pool: &PgPool) -> Result<Vec<i64>, CompileError> {
-    let db = |e: sqlx::Error| CompileError::Db(e.to_string());
+    let db = CompileError::from_db;
     let mut tx = pool.begin().await.map_err(db)?;
 
     let roles: Vec<String> = sqlx::query_scalar(
@@ -289,6 +304,68 @@ pub async fn recompile_role_referencing_profiles(pool: &PgPool) -> Result<Vec<i6
     Ok(services)
 }
 
+/// The waits before each retry of the boot repair (#787): three retries, 5 s,
+/// 30 s and 2 min after the attempt before them, so four attempts in all.
+pub const BOOT_REPAIR_BACKOFF: [std::time::Duration; 3] = [
+    std::time::Duration::from_secs(5),
+    std::time::Duration::from_secs(30),
+    std::time::Duration::from_secs(120),
+];
+
+/// [`recompile_role_referencing_profiles`] as the boot repair runs it (#787):
+/// retried on ANY error after each wait in [`BOOT_REPAIR_BACKOFF`]. `egret-bin`
+/// spawns this, so boot never waits for it. Each failure is logged at `warn`;
+/// after the last, an `error` says what was left unrepaired. The pass is
+/// idempotent, so a retry after a partial failure is safe (it runs in one
+/// transaction, so a failed attempt wrote nothing anyway).
+pub async fn repair_role_referencing_profiles_with_retry(pool: PgPool) {
+    retry_boot_repair(&BOOT_REPAIR_BACKOFF, || {
+        recompile_role_referencing_profiles(&pool)
+    })
+    .await;
+}
+
+/// The retry loop of [`repair_role_referencing_profiles_with_retry`], over any
+/// attempt, so a test can drive it with a failing attempt and paused time.
+/// Returns the repaired profiles, or `None` when every attempt failed.
+#[doc(hidden)]
+pub async fn retry_boot_repair<F, Fut>(
+    backoff: &[std::time::Duration],
+    mut attempt: F,
+) -> Option<Vec<i64>>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<i64>, CompileError>>,
+{
+    let attempts = backoff.len() + 1;
+    for n in 1..=attempts {
+        match attempt().await {
+            Ok(services) => return Some(services),
+            Err(e) => match backoff.get(n - 1) {
+                Some(wait) => {
+                    tracing::warn!(
+                        error = %e,
+                        attempt = n,
+                        attempts,
+                        retry_in_secs = wait.as_secs(),
+                        "the boot recompile of role-referencing profiles failed; retrying"
+                    );
+                    tokio::time::sleep(*wait).await;
+                }
+                None => tracing::error!(
+                    error = %e,
+                    attempts,
+                    "the boot recompile of role-referencing profiles failed on every attempt: \
+                     the policy profiles whose model names a role were NOT recompiled, so a \
+                     body an older compiler wrote may still leave out a role holder until the \
+                     next restart or the next write that recompiles those profiles"
+                ),
+            },
+        }
+    }
+    None
+}
+
 /// Set `user_id`'s status (`active` | `disabled`) and converge every
 /// `egret-admin` set it changes, in ONE transaction (username-takeover spec
 /// 2026-10-23 §4.2): the engine-admin set holds active platform admins only,
@@ -314,26 +391,37 @@ pub async fn set_user_status_and_recompile(
     user_id: Uuid,
     status: &str,
 ) -> Result<(), CompileError> {
-    let db = |e: sqlx::Error| CompileError::Db(e.to_string());
+    let db = CompileError::from_db;
     let mut tx = pool.begin().await.map_err(db)?;
-    let services = egret_policy::default_policies::admin_policy_services_via(&mut tx)
-        .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
-    lock_for_admin_sync_in_tx(&mut tx, &services).await?;
-    egret_auth::users::UserRepo::set_status_in_tx(&mut tx, egret_core::UserId(user_id), status)
-        .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
-    for &service_id in &services {
-        crate::trigger::sync_admin_policy_in_tx(&mut tx, service_id).await?;
-    }
+    set_user_status_and_recompile_in_tx(&mut tx, user_id, status).await?;
     tx.commit().await.map_err(db)?;
     Ok(())
 }
 
-/// The locks an `egret-admin` sync outside a compile takes, in the compile's
-/// order: the profiles ascending, then the mint lock (the sync may mint an
-/// admin's missing username).
-async fn lock_for_admin_sync_in_tx(
+/// [`set_user_status_and_recompile`] on the caller's transaction, which the
+/// caller commits: the control plane's disable takes the last-admin guard
+/// (`egret_auth::roles::LastAdminGuard`, KI-284) on the same transaction,
+/// before these profile locks, and checks it after the write.
+pub async fn set_user_status_and_recompile_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    status: &str,
+) -> Result<(), CompileError> {
+    let services = crate::infra::infra_services_via(tx).await?;
+    lock_for_admin_sync_in_tx(tx, &services).await?;
+    egret_auth::users::UserRepo::set_status_in_tx(tx, egret_core::UserId(user_id), status)
+        .await
+        .map_err(crate::db_error::from_core)?;
+    for &service_id in &services {
+        crate::infra::converge_infra_in_tx(tx, service_id).await?;
+    }
+    Ok(())
+}
+
+/// The locks an infrastructure convergence outside a compile takes, in the
+/// compile's order: the profiles ascending, then the mint lock (convergence
+/// may mint an admin's missing username).
+pub(crate) async fn lock_for_admin_sync_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     services: &[i64],
 ) -> Result<(), CompileError> {
@@ -341,41 +429,34 @@ async fn lock_for_admin_sync_in_tx(
     if !services.is_empty() {
         crate::members::lock_compile_mints_in_tx(tx)
             .await
-            .map_err(|e| CompileError::Db(e.to_string()))?;
+            .map_err(CompileError::from_db)?;
     }
     Ok(())
 }
 
-/// The boot pass of the `egret-admin` sync (username-takeover spec 2026-10-23
-/// §4.2): converge every service holding an `egret-admin` set, so a body
-/// written before the fix (or by an apply that raced an admin change) is
-/// repaired at startup. The sync alone, one transaction per service (review
-/// L1): a profile that cannot compile still gets its `egret-admin` set
-/// repaired, and a service that fails is logged and skipped while every other
-/// engine is repaired. Idempotent (an unchanged body writes nothing). Returns
-/// how many services it repaired or found current.
-pub async fn sync_admin_policies(pool: &PgPool) -> Result<usize, CompileError> {
-    let db = |e: sqlx::Error| CompileError::Db(e.to_string());
+/// The boot pass of infrastructure convergence (username-takeover spec
+/// 2026-10-23 §4.2; governance SP2a, D4): converge every infra service
+/// ([`crate::infra::infra_services_via`]), so a body written before the fix,
+/// by an apply that raced an admin change, or left by an engine no longer
+/// bound, is repaired at startup. Convergence alone, one transaction per
+/// service (review L1): a profile that cannot compile still gets its infra
+/// rows repaired, and a service that fails is logged and skipped while every
+/// other engine is repaired. Idempotent (an unchanged set writes nothing).
+/// Returns how many services it repaired or found current.
+pub async fn converge_infra_policies(pool: &PgPool) -> Result<usize, CompileError> {
+    let db = CompileError::from_db;
     let services = {
         let mut conn = pool.acquire().await.map_err(db)?;
-        egret_policy::default_policies::admin_policy_services_via(&mut conn)
-            .await
-            .map_err(|e| CompileError::Db(e.to_string()))?
+        crate::infra::infra_services_via(&mut conn).await?
     };
     let mut synced = 0;
     for service_id in services {
-        let one = async {
-            let mut tx = pool.begin().await.map_err(db)?;
-            lock_for_admin_sync_in_tx(&mut tx, &[service_id]).await?;
-            crate::trigger::sync_admin_policy_in_tx(&mut tx, service_id).await?;
-            tx.commit().await.map_err(db)
-        };
-        match one.await {
-            Ok(()) => synced += 1,
+        match crate::infra::converge_infra_policy(pool, service_id).await {
+            Ok(_) => synced += 1,
             Err(e) => tracing::warn!(
                 service_id,
                 error = %e,
-                "the boot sync could not converge this profile's egret-admin set"
+                "the boot pass could not converge this profile's infrastructure policies"
             ),
         }
     }

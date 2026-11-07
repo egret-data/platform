@@ -52,6 +52,7 @@ import type {
   PolicyAdminUpdatePolicyBody,
   ProfileDto,
   ProfileEngine,
+  TrinoConfigResponse,
 } from "./generated/model";
 import { ApiError } from "./client";
 
@@ -184,8 +185,10 @@ export interface RowFilterPolicyInput {
 export type PolicyInput = (AccessPolicyInput & { kind: "access" }) | MaskingPolicyInput | RowFilterPolicyInput;
 
 export interface ConfigFile { name: string; content: string; }
-export async function getTrinoConfig(service: string): Promise<ConfigFile[]> {
-  return (await policyAdminTrinoConfig(service)).data as ConfigFile[];
+/** The coordinator files, and what makes them not work as rendered (KI-149). */
+export type TrinoConfig = TrinoConfigResponse;
+export async function getTrinoConfig(service: string): Promise<TrinoConfig> {
+  return (await policyAdminTrinoConfig(service)).data as TrinoConfig;
 }
 
 /** Seed default "admin has all access" policies (one per Trino resource hierarchy). Idempotent. */

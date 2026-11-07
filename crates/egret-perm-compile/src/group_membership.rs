@@ -115,7 +115,7 @@ impl egret_auth::groups::GroupMembershipRecompiler for PermGroupRecompiler {
         if !services.is_empty() {
             crate::members::lock_compile_mints_in_tx(tx)
                 .await
-                .map_err(|e| to_core(CompileError::Db(e.to_string()), Some(group_names)))?;
+                .map_err(|e| to_core(CompileError::from_db(e), Some(group_names)))?;
         }
         Ok(services)
     }
@@ -152,7 +152,7 @@ impl egret_auth::groups::GroupMembershipRecompiler for PermGroupRecompiler {
         .bind(user_id)
         .fetch_all(&mut **tx)
         .await
-        .map_err(|e| to_core(CompileError::Db(e.to_string()), Some(group_names)))?;
+        .map_err(|e| to_core(CompileError::from_db(e), Some(group_names)))?;
         for role in &roles {
             services.extend(
                 affected_services_for_role_membership(tx, role)
@@ -168,7 +168,7 @@ impl egret_auth::groups::GroupMembershipRecompiler for PermGroupRecompiler {
         .bind(user_id)
         .fetch_all(&mut **tx)
         .await
-        .map_err(|e| to_core(CompileError::Db(e.to_string()), Some(group_names)))?;
+        .map_err(|e| to_core(CompileError::from_db(e), Some(group_names)))?;
         for ws in workspaces {
             services.extend(
                 affected_services_for_workspace_members(tx, ws)
@@ -186,7 +186,7 @@ impl egret_auth::groups::GroupMembershipRecompiler for PermGroupRecompiler {
         if !services.is_empty() {
             crate::members::lock_compile_mints_in_tx(tx)
                 .await
-                .map_err(|e| to_core(CompileError::Db(e.to_string()), Some(group_names)))?;
+                .map_err(|e| to_core(CompileError::from_db(e), Some(group_names)))?;
         }
         Ok(services)
     }

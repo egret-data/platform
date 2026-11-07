@@ -18,7 +18,7 @@ use egret_perm::{
 };
 use uuid::Uuid;
 
-use crate::members::expand_enumerated_principals;
+use crate::members::{expand_enumerated_principals, MissingUsername};
 use crate::people::{read_user_via, NotOnEngines, UserPrincipal};
 
 async fn test_db() -> Option<Db> {
@@ -96,7 +96,7 @@ async fn holds(
 
 /// What a compile emits for an allow grant naming `p`.
 async fn expanded(conn: &mut sqlx::PgConnection, p: Principal) -> BTreeSet<String> {
-    let mut grants = vec![Grant {
+    let grants = vec![Grant {
         id: Uuid::new_v4(),
         effect: Effect::Allow,
         actions: vec![Action::Read],
@@ -112,15 +112,14 @@ async fn expanded(conn: &mut sqlx::PgConnection, p: Principal) -> BTreeSet<Strin
         },
         origin: GrantOrigin::Explicit,
     }];
-    expand_enumerated_principals(conn, &mut grants, &mut [], &mut [])
+    let dir = expand_enumerated_principals(conn, &grants, &[], &[], MissingUsername::Mint)
         .await
         .expect("expand");
-    grants
-        .remove(0)
-        .principals
+    egret_perm_ir::audience::audience(&grants[0].principals, &dir)
         .include
         .into_iter()
-        .map(|p| {
+        .map(|m| {
+            let p = m.name.to_principal();
             assert_eq!(p.kind, PrincipalKind::User, "expanded to users only");
             p.r#ref
         })

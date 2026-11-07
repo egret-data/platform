@@ -8,6 +8,8 @@
 //!
 //!   env -u EGRET_ALLOW_DB_SKIP cargo test -p egret-perm-compile --test engine_grants_routes
 
+#[path = "support/admin_rows.rs"]
+mod admin_rows;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -124,6 +126,7 @@ async fn env() -> Option<Env> {
         .await
         .expect("starrocks def");
     let app = perm_router().with_state(PermState {
+        opa_cache: None,
         perm: PermStore::new(db.pool.clone()),
         policy: policy.clone(),
         sessions,
@@ -771,15 +774,14 @@ async fn the_listing_maps_seeded_baselines_to_managed_entries() {
         "impersonate",
     )
     .await;
-    e.policy
-        .seed_admin_all_access(
-            b.profile,
-            &b.profile_name,
-            "trino",
-            &["root-admin".to_string()],
-        )
-        .await
-        .expect("admin");
+    admin_rows::write_admin_rows(
+        &e.db.pool,
+        b.profile,
+        &b.profile_name,
+        "trino",
+        &["root-admin".to_string()],
+    )
+    .await;
 
     let (status, body) = call(
         &e,

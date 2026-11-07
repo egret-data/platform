@@ -1,7 +1,9 @@
 import type { ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import { ExternalLink } from "lucide-react";
 import type { ApiError } from "@/api/client";
+import { getEngine } from "@/api/controlPlane";
 import { useControlPlaneGovernanceEnginePlugin } from "@/api/generated/control-plane-governance/control-plane-governance";
 import { usePermListEngineGrants } from "@/api/generated/perm/perm";
 import { usePolicyAdminListProfiles } from "@/api/generated/policy-admin/policy-admin";
@@ -29,6 +31,10 @@ import { EngineTabBody } from "@/routes/governance/engines/tabBodies";
 import { useProfilePolicies } from "@/routes/governance/engines/profilePolicies";
 import { useProfileOverlaps } from "@/routes/governance/engines/tabs/OverlapsTab";
 import { PageContainer } from "@/components/layout/PageContainer";
+import {
+  StarRocksMetadataTablesWarning,
+  isPatchedStarRocksImage,
+} from "@/routes/control-plane/StarRocksMetadataTablesWarning";
 
 /**
  * An engine's page (spec §6): `/governance/engines/:id`, `policy:read`.
@@ -49,6 +55,15 @@ export default function EnginePage() {
   const grants = grantsQ.data?.status === 200 ? grantsQ.data.data : null;
   const engine = grants?.engine ?? null;
   const profileName = grants?.profile?.name ?? null;
+  // A provisioned StarRocks engine on egret's patched image gets no metadata-table warning. Its
+  // image is in the Control plane engine record, readable only with engine:read; without it (or
+  // while it loads, or for an external engine, whose image egret does not know) the warning stays.
+  const srEngineQ = useQuery<Awaited<ReturnType<typeof getEngine>>, ApiError>({
+    queryKey: ["cp", "engine", id],
+    queryFn: () => getEngine(id),
+    enabled: engineRead && engine?.type === "starrocks" && engine.origin === "provisioned",
+  });
+  const srImage = srEngineQ.data ? (srEngineQ.data.image ?? srEngineQ.data.spec.starrocksConfig?.feImage) : undefined;
   const dto =
     profileName && profilesQ.data?.status === 200
       ? (profilesQ.data.data.find((p) => p.name === profileName) ?? null)
@@ -140,6 +155,9 @@ export default function EnginePage() {
         <Banner>{sharedSentence(profileName, others)}</Banner>
       ) : null}
       {engine?.origin === "external" ? <Banner>{EXTERNAL_SENTENCE}</Banner> : null}
+      {engine && !isPatchedStarRocksImage(srImage) ? (
+        <StarRocksMetadataTablesWarning engineType={engine.type} bound={!!profileName} />
+      ) : null}
       <FrameTabs
         tabs={tabs}
         badges={overlaps.pairs ? { overlaps: overlaps.pairs.length } : undefined}

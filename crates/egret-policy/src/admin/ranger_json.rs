@@ -384,7 +384,7 @@ fn render_editor_form(v: &Value, service_type: &str) -> Result<RangerPolicy, Str
 ///
 /// The names are the service defs' (`trino`: catalog, schema, table, column;
 /// `starrocks`: catalog, database, table, column) — the same four
-/// `egret_perm_compile::grants::resource_level_names` spells, which this crate
+/// `egret_perm_compile::ranger::grants::resource_level_names` spells, which this crate
 /// cannot call (it depends on this one).
 fn editor_level_chain(service_type: &str, kind: &str) -> Option<&'static [&'static str]> {
     let all: &'static [&'static str] = match service_type {

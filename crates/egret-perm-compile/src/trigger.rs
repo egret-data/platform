@@ -7,7 +7,7 @@
 //! tag-masking/tag-rowfilter policy that the Ranger tag plugin resolves
 //! itself; egret never has to touch it again. StarRocks has no tag service
 //! (upstream `starrocks#67458`), so the SAME rule compiles to one policy PER
-//! matching column, enumerated at compile time (`egret-perm-compile::rules`) —
+//! matching column, enumerated at compile time (`egret_perm_ir::lower::rules`) —
 //! and that enumeration is stale the moment a new column gets the tag.
 //! `egret-catalog-registry::tag_version::bump_bound_tag_versions` already
 //! bumps a bound service's `tag_version` on every tag write; this module is
@@ -21,7 +21,7 @@
 //! how writes are composed:**
 //!
 //! 1. **The sweep no longer reads through `perm.compiled`.** `perm.compiled.grant_id`/
-//!    `rule_id` are `ON DELETE CASCADE` (`migrations/0154_perm_model.sql:121-122`):
+//!    `rule_id` are `ON DELETE CASCADE` (`migrations/0154_perm_model.sql`):
 //!    deleting a grant or rule erases its PROVENANCE row, but the
 //!    `policy.authz_policies` row it produced survives untouched. Round 1's
 //!    `apply_diff` joined `perm.compiled ⋈ policy.authz_policies` to find
@@ -42,7 +42,8 @@
 //!    established: every read (the model, the reachable catalogs, the
 //!    tagged columns, the tag name, the existing compiled state) AND every
 //!    write happen against the SAME `&mut Transaction`, via
-//!    `egret_perm::{list_grants_via, list_rules_via}` and
+//!    `egret_perm::{list_grants_via, list_rules_via}` and (since governance
+//!    sub-project 1, gathered in `crate::ir_load`)
 //!    `egret_policy::{get_service_by_id_via, catalogs_for_service_via,
 //!    tag_assignments_for_service_via, tag_name_for_key_via}` (all
 //!    connection-generic, added in this fix round for exactly this reason).
@@ -105,21 +106,12 @@ use serde_json::Value;
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
-use egret_perm::{
-    list_engine_grants_for_profile_via, list_grants_via, list_rules_via, CompileError, EngineGrant,
-    EngineType, Grant, PermStore, Rule, Selector,
-};
-use egret_policy::admin::access_to_ranger_json;
+use egret_perm::{CompileError, EngineType, Grant, PermStore, Rule, Selector};
 use egret_policy::{
-    catalogs_for_service_via, compiler_targeted_services_via, get_service_by_id_via,
-    service_id_by_name_via, services_and_tag_services_via, services_for_catalog_via,
-    tag_assignments_for_service_via, tag_name_for_key_via, PolicyStore, COMPILER_CLEARANCE_PREFIX,
-    COMPILER_ENGINE_GRANT_PREFIX, COMPILER_GRANT_PREFIX, COMPILER_HIDDEN_PREFIX,
-    COMPILER_RULE_PREFIX,
+    compiler_targeted_services_via, services_and_tag_services_via, services_for_catalog_via,
+    PolicyStore, COMPILER_CLEARANCE_PREFIX, COMPILER_ENGINE_GRANT_PREFIX, COMPILER_GRANT_PREFIX,
+    COMPILER_HIDDEN_PREFIX, COMPILER_RULE_PREFIX,
 };
-
-use crate::grants::compile_grant;
-use crate::rules::{stamp_service_type, ResolvedNames, TableTarget};
 
 /// The StarRocks per-column expansion ceiling this driver enforces.
 ///
@@ -196,8 +188,8 @@ pub const DEFAULT_EXPANSION_CEILING: usize = 500;
 pub const PROFILE_EXPANSION_CEILING: usize = 1000;
 
 // The name prefixes every policy `compile_grant`/`compile_rule` produces
-// carries (`grants.rs`'s `format!("{COMPILER_GRANT_PREFIX}{}", g.id)`,
-// `rules.rs`'s `format!("{COMPILER_RULE_PREFIX}{}", ...)`). `apply_diff_in_tx`
+// carries (`ranger/grants.rs`'s `format!("{COMPILER_GRANT_PREFIX}{grant_id}")`,
+// `ranger/rules.rs`'s `format!("{COMPILER_RULE_PREFIX}{rule_id}", ...)`). `apply_diff_in_tx`
 // uses these to find every policy THIS COMPILER owns under a service
 // directly from `policy.authz_policies`, independent of whether
 // `perm.compiled` still has a provenance row for it (fix round 1 Critical —
@@ -216,16 +208,19 @@ pub const PROFILE_EXPANSION_CEILING: usize = 1000;
 /// Which half of the `perm` model a compiled policy (or a skip) came from —
 /// plus, since SP4c Task 2, a third source that is not in the `perm` model at
 /// all: a TAG's classification clearance (`classification_policies`), compiled
-/// by [`crate::clearance`]. Its `SkippedItem::id` is the `tags.id`, not a
+/// by `egret_perm_ir::lower::withhold` ([`crate::ranger::withhold`]). Its `SkippedItem::id` is the `tags.id`, not a
 /// grant or rule id. And since F11 a fourth: an ENGINE GRANT
 /// (`perm.engine_grants`, [`crate::engine_grants`]), whose id is the engine
 /// grant's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum SourceKind {
     Grant,
     Rule,
     Clearance,
     EngineGrant,
+    /// An infrastructure statement; converged outside the compile.
+    Infra,
 }
 
 impl SourceKind {
@@ -235,6 +230,7 @@ impl SourceKind {
             SourceKind::Rule => "rule",
             SourceKind::Clearance => "clearance",
             SourceKind::EngineGrant => "engine_grant",
+            SourceKind::Infra => "infra",
         }
     }
 }
@@ -278,21 +274,21 @@ impl CompileSummary {
 /// One policy this recompile wants to exist. **Which service it must exist
 /// under travels in the map KEY** ([`PolicyKey`]), not here: a tag-selected
 /// rule on Trino compiles to a body whose own `service` field names the
-/// profile's TAG service (`rules::build_tag_body` → `tagify`), and that is
+/// profile's TAG service (`ranger::rules::build_tag_body` → `tagify`), and that is
 /// where the row has to land or the tag plugin never downloads it. See
 /// [`target_service_id`] and `apply_diff_in_tx`.
-struct DesiredPolicy {
-    body: Value,
-    source_kind: SourceKind,
-    grant_id: Option<Uuid>,
-    rule_id: Option<Uuid>,
+pub(crate) struct DesiredPolicy {
+    pub(crate) body: Value,
+    pub(crate) source_kind: SourceKind,
+    pub(crate) grant_id: Option<Uuid>,
+    pub(crate) rule_id: Option<Uuid>,
 }
 
 /// The `(service_id, name)` a desired policy is keyed by — the same pair
 /// `policy.authz_policies`' own `UNIQUE (service_id, name)` uses, and the
 /// reason the desired map is keyed by a pair at all: one recompile now writes
 /// into two services (the profile and its tag service).
-type PolicyKey = (i64, String);
+pub(crate) type PolicyKey = (i64, String);
 
 /// Resolve the service a rendered policy body belongs to from the body's OWN
 /// `service` field, against the names this recompile is allowed to write into.
@@ -307,7 +303,7 @@ type PolicyKey = (i64, String);
 /// makes the row and the body unable to disagree; an unknown name is a hard
 /// error rather than a silent fallback to the profile, because a fallback is
 /// exactly the behaviour that produced the defect.
-fn target_service_id(
+pub(crate) fn target_service_id(
     body: &Value,
     writable: &HashMap<String, i64>,
     what: &str,
@@ -328,8 +324,8 @@ fn target_service_id(
     })
 }
 
-fn db_err<E: std::fmt::Display>(e: E) -> CompileError {
-    CompileError::Db(e.to_string())
+fn db_err(e: sqlx::Error) -> CompileError {
+    CompileError::from_db(e)
 }
 
 /// `None` when `service_type` names something this compiler was never built
@@ -362,7 +358,7 @@ pub(crate) fn engine_type_for(service_type: &str) -> Option<EngineType> {
 /// `ranger_json` module sets it from the caller-supplied name) — this is the
 /// desired policy's stable identity, matched against `policy.authz_policies`'s
 /// own `UNIQUE (service_id, name)`.
-fn body_name(body: &Value, what: &str) -> Result<String, CompileError> {
+pub(crate) fn body_name(body: &Value, what: &str) -> Result<String, CompileError> {
     body.get("name")
         .and_then(|v| v.as_str())
         .map(str::to_string)
@@ -371,231 +367,150 @@ fn body_name(body: &Value, what: &str) -> Result<String, CompileError> {
         })
 }
 
+/// One enforcement point lowered: what [`crate::ir_load::load_ep`] read, and
+/// each statement family's IR lowering, before anything is rendered.
+/// Governance SP2b Task 6: shared by the Ranger compile ([`compile_desired`],
+/// which renders it) and the OPA snapshot (`crate::opa::build`, which
+/// evaluates it), so the two answer from one lowering.
+pub(crate) struct LoweredEp {
+    pub loaded: crate::ir_load::Loaded,
+    /// Each family's lowering, in the order compile_desired emits them:
+    /// grants, engine privileges, rules, withholds.
+    pub families: Vec<egret_perm_ir::statement::Lowered>,
+    pub whole_tables: Vec<egret_perm::TableCount>,
+    pub view_guard: Vec<egret_perm_ir::lower::withhold::PendingGuard>,
+}
+
+/// Read and lower the four statement families of profile `service_id`, every
+/// read against `conn`. `None` means `service_id` names something this
+/// compiler doesn't target (see [`engine_type_for`]). `missing` is
+/// [`MissingUsername::Mint`](crate::members::MissingUsername::Mint) for a
+/// compile and `Omit` for a read that must not write (SP2b I9).
+///
+/// The reads are the ones the per-family compile always made, in the same
+/// order; the lowerings between them do no I/O, and neither does
+/// `crate::ranger::emit`, so rendering after all the reads changes nothing.
+pub(crate) async fn lower_ep_via(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+    missing: crate::members::MissingUsername,
+) -> Result<Option<LoweredEp>, CompileError> {
+    // Load: every read the lowerings need up to the grant family, and the
+    // directory every audience is expanded against.
+    let Some(l) = crate::ir_load::load_ep(conn, service_id, missing).await? else {
+        return Ok(None);
+    };
+    let engine = l.ep.kind.engine;
+    let mut families = Vec::with_capacity(4);
+
+    // Grants (Task 5).
+    families.push(egret_perm_ir::lower::grants::lower_grants(
+        &l.ep,
+        &l.grants,
+        &l.directory,
+    )?);
+
+    // Engine grants (F11, spec §4.2; Task 9), checked by the loader. A grant
+    // with no grantee left, or whose impersonation target can no longer be
+    // compiled (spec E11), or that the compiler cannot express, is SKIPPED with
+    // its reason rather than failing the profile: a user deleted or renamed
+    // elsewhere must not fail every recompile. The loader makes the target
+    // reads the old per-grant loop made, at the same point and in the same
+    // order.
+    let checks = crate::ir_load::load_engine_privilege_checks(
+        conn,
+        service_id,
+        engine,
+        &l.engine_grants,
+        &l.directory,
+    )
+    .await?;
+    families.push(
+        egret_perm_ir::lower::engine_privileges::lower_engine_privileges(
+            &l.engine_grants,
+            &l.directory,
+            &checks,
+        )?,
+    );
+
+    // Rules, masks and row filters (Task 6). The loader makes the
+    // classification reads the old per-rule loop made, in the same order.
+    let (rule_inputs, read_skips) = crate::ir_load::load_rule_inputs(conn, &l.ep, &l.rules).await?;
+    families.push(egret_perm_ir::lower::rules::lower_rules(
+        &l.ep,
+        &l.rules,
+        &l.directory,
+        &rule_inputs,
+        read_skips,
+        DEFAULT_EXPANSION_CEILING,
+        &l.leaving,
+    )?);
+
+    // **SP4c Task 2: a classification's CLEARANCE, which AMENDS SP4a's D2**
+    // ("tags drive rules only, never access") — the argument is at the site,
+    // in `crate::ranger::withhold`'s module doc, because a classification
+    // exists to withhold data and a mask still answers the query. Clearances
+    // come from `classification_policies`, not from the `perm` model.
+    //
+    // Governance sub-project 1 Task 7: decided by the IR lowering
+    // (`egret_perm_ir::lower::withhold`, the `withhold` effect) and only
+    // rendered by the caller. **Installation-wide on Trino, service-scoped on
+    // StarRocks** (SP4c Task 2d): a Trino clearance is one TAG policy carrying
+    // no catalog resource, so it compiles identically into every Trino profile
+    // with a tag service; a StarRocks clearance expands to one ACCESS deny per
+    // tagged column reachable from THIS service — the same
+    // `tag_assignments_for_service_via` expansion a tag-selected rule uses
+    // above. The loader makes the reads the clearance compile always made, at
+    // the same point and in the same order.
+    let gates = crate::ir_load::load_withhold_inputs(conn, &l.ep, service_id, missing).await?;
+    let withheld = egret_perm_ir::lower::withhold::lower_withholds(
+        &l.ep,
+        &gates,
+        egret_ranger_eval::resource::fold_identifier,
+        DEFAULT_EXPANSION_CEILING,
+        &l.leaving,
+    )?;
+    families.push(withheld.lowered);
+
+    Ok(Some(LoweredEp {
+        loaded: l,
+        families,
+        whole_tables: withheld.whole_tables,
+        view_guard: withheld.view_guard,
+    }))
+}
+
 /// Compile `service_id`'s desired policy set from the CURRENT `perm` model
 /// (every read against `conn`, so a caller running this inside its own open
 /// transaction sees its own uncommitted writes). `None` means `service_id`
 /// names something this compiler doesn't target (see [`engine_type_for`]) —
 /// nothing to diff, nothing to write.
-async fn compile_desired(
+pub(crate) async fn compile_desired(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
 ) -> Result<Option<Compiled>, CompileError> {
-    let svc = get_service_by_id_via(conn, service_id)
-        .await
-        .map_err(db_err)?;
-    let Some(engine) = engine_type_for(&svc.r#type) else {
+    // Lower every family (`lower_ep_via`), then render: each family is
+    // decided by its IR lowering (`egret_perm_ir::lower`) and only rendered by
+    // `crate::ranger`, in the order grants, engine grants, rules, withholds.
+    let Some(LoweredEp {
+        loaded: mut l,
+        families,
+        whole_tables,
+        view_guard,
+    }) = lower_ep_via(conn, service_id, crate::members::MissingUsername::Mint).await?
+    else {
         return Ok(None);
     };
-
-    let catalogs = catalogs_for_service_via(conn, service_id)
-        .await
-        .map_err(db_err)?;
-    let catalog_names: HashMap<Uuid, String> =
-        catalogs.into_iter().map(|c| (c.id, c.name)).collect();
-    // A held rename's leaving coordinates (rename spec C8): emitted, never
-    // counted against a ceiling.
-    let leaving = crate::table_columns::leaving_via(conn).await?;
-
-    // The services this recompile may write into, by the NAME a compiled body
-    // stamps on itself: the profile always, and its tag service when the
-    // profile both configures one AND that configured name resolves to a real
-    // `policy.authz_services` row. A `tagService` naming nothing is treated
-    // exactly like an absent one — the tag plugin polls that service BY NAME
-    // (`/service/plugins/policies/download/{service}`, 404 on an unknown
-    // name), so a policy filed under a profile that does not exist could not
-    // be served to anyone. That lands in the same `MissingTagService` skip the
-    // unconfigured case already took, rather than aborting the recompile.
-    let mut writable: HashMap<String, i64> = HashMap::new();
-    writable.insert(svc.name.clone(), service_id);
-    let mut sweep: Vec<i64> = vec![service_id];
-
-    let tag_service: Option<String> = if engine == EngineType::Trino {
-        match svc
-            .config_jsonb
-            .get(egret_policy_api::TAG_SERVICE_CONFIG_KEY)
-            .and_then(|v| v.as_str())
-        {
-            Some(name) => match service_id_by_name_via(conn, name).await.map_err(db_err)? {
-                Some(tag_id) => {
-                    writable.insert(name.to_string(), tag_id);
-                    sweep.push(tag_id);
-                    Some(name.to_string())
-                }
-                None => {
-                    tracing::warn!(
-                        service_id,
-                        tag_service = %name,
-                        "profile's `tagService` names no policy profile — tag rules cannot \
-                         compile for this profile"
-                    );
-                    None
-                }
-            },
-            None => None,
-        }
-    } else {
-        None
-    };
-
-    // Ascending: `apply_diff_in_tx` takes a row lock per swept service and the
-    // acquisition order is what turns two overlapping recompiles into a queue
-    // instead of a deadlock (see that function).
-    sweep.sort_unstable();
-    sweep.dedup();
-
-    let mut all_grants = list_grants_via(conn).await.map_err(db_err)?;
-    let mut all_rules = list_rules_via(conn).await.map_err(db_err)?;
-    // D3: turn every `workspace_members` principal — and, since SP4c Task 2b,
-    // every `role` principal, and since J-F3 Task 1b every non-`public` `group`
-    // principal — into the people it stands for BEFORE anything is compiled,
-    // so the pure compilers below never see one. See `crate::members`
-    // for what a member is, what it costs, and why a role name cannot be left
-    // for Ranger to resolve.
-    // F11: the engine grants of every engine bound to this profile, expanded
-    // in the same call so a person named by a grant and an engine grant
-    // resolves to one name.
-    let mut engine_grants = list_engine_grants_for_profile_via(conn, service_id)
-        .await
-        .map_err(db_err)?;
-    crate::members::expand_enumerated_principals(
-        conn,
-        &mut all_grants,
-        &mut all_rules,
-        &mut engine_grants,
-    )
-    .await?;
-
+    let engine = l.ep.kind.engine;
     let mut desired: BTreeMap<PolicyKey, DesiredPolicy> = BTreeMap::new();
     let mut skipped: Vec<SkippedItem> = Vec::new();
-
-    for g in &all_grants {
-        let Some(catalog_name) = catalog_names.get(&g.scope.catalog_id) else {
-            continue; // not reachable by this service — out of scope
-        };
-        if g.principals.include.is_empty() {
-            // Nothing to name. Emitting the policy anyway would write a Ranger
-            // item with empty `users`/`groups`/`roles`, which matches nobody —
-            // the same answer, said less clearly, and one more policy against
-            // the profile total. Recorded so "my workspace has no members yet"
-            // is visible rather than inferred from a missing policy.
-            let reason = "the grant's principals name no engine principal (an empty include, or \
-                          a workspace_members, role or group reference that expands to no \
-                          member)"
-                .to_string();
-            tracing::warn!(
-                service_id,
-                grant_id = %g.id,
-                reason = %reason,
-                "grant skipped during recompile"
-            );
-            skipped.push(SkippedItem {
-                source_kind: SourceKind::Grant,
-                id: g.id,
-                reason,
-            });
-            continue;
-        }
-        match compile_grant(g, catalog_name, &svc.name, engine) {
-            Ok(input) => {
-                let name = input.name.clone();
-                let body = stamp_service_type(access_to_ranger_json(&input), engine);
-                let target = target_service_id(&body, &writable, &format!("grant {}", g.id))?;
-                desired.insert(
-                    (target, name),
-                    DesiredPolicy {
-                        body,
-                        source_kind: SourceKind::Grant,
-                        grant_id: Some(g.id),
-                        rule_id: None,
-                    },
-                );
-            }
-            Err(CompileError::UnexpandedPrincipalKind { kind }) => {
-                let reason = format!(
-                    "principal kind {kind:?} reached the compiler unexpanded — a bug in \
-                     `crate::members::expand_enumerated_principals`, not in the grant"
-                );
-                tracing::warn!(
-                    service_id,
-                    grant_id = %g.id,
-                    reason = %reason,
-                    "grant skipped during recompile"
-                );
-                skipped.push(SkippedItem {
-                    source_kind: SourceKind::Grant,
-                    id: g.id,
-                    reason,
-                });
-            }
-            Err(other) => return Err(other),
-        }
+    for lowered in families {
+        crate::ranger::emit(&l, lowered, &mut desired, &mut skipped)?;
     }
-
-    compile_engine_grants(
-        conn,
-        service_id,
-        &svc.name,
-        engine,
-        &engine_grants,
-        &writable,
-        &mut desired,
-        &mut skipped,
-    )
-    .await?;
-
-    for r in &all_rules {
-        compile_one_rule(
-            r,
-            engine,
-            &svc.name,
-            tag_service.as_deref(),
-            conn,
-            service_id,
-            &catalog_names,
-            &writable,
-            &leaving,
-            &mut desired,
-            &mut skipped,
-        )
-        .await?;
-    }
-
-    // **SP4c Task 2: a classification's CLEARANCE, which AMENDS SP4a's D2**
-    // ("tags drive rules only, never access") — the argument is at the site,
-    // in `crate::clearance`'s module doc, because a classification exists to
-    // withhold data and a mask still answers the query. Clearances come from
-    // `classification_policies`, not from the `perm` model.
-    //
-    // **Installation-wide on Trino, service-scoped on StarRocks** (SP4c Task
-    // 2d). A Trino clearance is one TAG policy carrying no catalog resource, so
-    // it compiles identically into every Trino profile with a tag service. A
-    // StarRocks clearance expands to one ACCESS deny per tagged column
-    // reachable from THIS service — the same `tag_assignments_for_service_via`
-    // expansion a tag-selected rule uses above — so `service_id` and the
-    // profile's own name both have to reach the compiler.
-    let clearances = crate::clearance::compile_clearance(
-        conn,
-        engine,
-        service_id,
-        &svc.name,
-        tag_service.as_deref(),
-        &leaving,
-    )
-    .await?;
-    skipped.extend(clearances.skipped);
-    let whole_tables = clearances.whole_tables;
-    for (name, body) in clearances.policies {
-        let target = target_service_id(&body, &writable, &format!("clearance {name}"))?;
-        desired.insert(
-            (target, name),
-            DesiredPolicy {
-                body,
-                source_kind: SourceKind::Clearance,
-                grant_id: None,
-                rule_id: None,
-            },
-        );
-    }
+    let view_guard: Vec<crate::clearance_mask::PendingMask> = view_guard
+        .into_iter()
+        .map(crate::clearance_mask::PendingMask::from)
+        .collect();
 
     // **View governance A2: the StarRocks clearance MASK, folded through the
     // evaluator.** A base deny does not hold through a plain view; a base mask
@@ -604,96 +519,106 @@ async fn compile_desired(
     // profile's OTHER masks give each cleared user — computed by
     // `egret-ranger-eval`, refused when undecidable. Folded HERE because only
     // the complete desired set holds every rule mask (exact AND wildcard) that
-    // can reach the column, and BEFORE the overlap check below, which must see
-    // the masks it will serve. Read `crate::clearance_mask`'s module doc.
-    if engine == EngineType::StarRocks && !clearances.masks.is_empty() {
+    // can reach the column, and BEFORE the completion passes and the overlap
+    // check below, which must see the masks it will serve. Read
+    // `crate::clearance_mask`'s module doc.
+    if engine == EngineType::StarRocks && !view_guard.is_empty() {
         fold_clearance_masks(
             conn,
             service_id,
-            &svc.name,
+            &l.profile_name,
             engine,
-            clearances.masks,
-            &writable,
+            view_guard,
+            &mut l.ep,
+            &l.writable,
             &mut desired,
             &mut skipped,
         )
         .await?;
     }
 
-    // **§11.4: hide `_file` and `_pos` wherever the profile masks a table.** A
-    // `SELECT *` on a masked StarRocks table still returns those two columns
-    // (the Iceberg data-file path and the row position) with every visible
-    // column nulled, so the masks alone leak the path. The masks are the
-    // profile's compiled ones and its enabled hand-written ones, the same set
-    // the clearance fold sees as `others`. Read `crate::clearance::hidden_column_denies`.
-    if engine == EngineType::StarRocks {
-        let is_mask = |b: &Value| b.get("policyType").and_then(Value::as_i64) == Some(1);
-        let mut masks: Vec<Value> = desired
-            .iter()
-            .filter(|((sid, _), dp)| *sid == service_id && is_mask(&dp.body))
-            .map(|(_, dp)| dp.body.clone())
-            .collect();
-        masks.extend(
-            egret_policy::enabled_policies_for_service_via(conn, service_id)
-                .await
-                .map_err(db_err)?
-                .into_iter()
-                .filter(|b| {
-                    is_mask(b)
-                        && !b
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .is_some_and(egret_policy::is_compiler_owned_policy_name)
-                }),
-        );
-        for (name, body) in crate::clearance::hidden_column_denies(&masks, &svc.name)? {
-            desired.insert(
-                (service_id, name),
-                DesiredPolicy {
-                    body,
-                    source_kind: SourceKind::Clearance,
-                    grant_id: None,
-                    rule_id: None,
-                },
-            );
-        }
-    }
+    // Complete: the served-unit passes the capability matrix chooses (M16
+    // hidden columns, M17 metadata tables). Read `crate::ranger::completion`.
+    let tag_service_id = l.sweep.iter().copied().find(|&id| id != service_id);
+    crate::ranger::completion::complete(conn, &l, &mut desired, tag_service_id).await?;
 
-    // **SP4d debt Task 6, item 1: the write side of `EvalOrderAmbiguous`** —
-    // widened by SP4d-4 Task 3 to the profile's whole evaluation unit.
-    // Checked HERE, on the complete desired set, because no single
-    // `compile_rule`/`compile_clearance` call can see another rule's output —
-    // the pair SP4d-1's F2 measured came from two different `perm.rules` rows
-    // compiled independently, and the ambiguity exists only in their union.
-    //
-    // The rule is `egret_policy::unit_overlaps`, spelled once and shared with
-    // the policy editor; it takes every within-download pair from
-    // `ambiguous_arbitrations_in` (read `egret_policy::ambiguous_arbitration`
-    // for the measurement and for why an AGREEING tie is admitted) and adds
-    // the pairs only the tag assignments reveal — a tag rule and a path rule on
-    // one tagged column, two tag rules whose tags share a column. See
-    // `crate::overlap` for the write paths this covers.
-    //
-    // ⚠ It runs BEFORE `apply_diff_in_tx`, so a refusal writes nothing at all
-    // — the caller's transaction is intact and its route returns the refusal
-    // rather than rolling back a partial sweep. That also makes
-    // `POST /perm/preview` report it before the steward presses Save, since
-    // preview runs the real `write_rule` in a rolled-back transaction.
-    //
-    // **Only pairs THIS compile creates are refused** (user ruling
-    // 2026-10-12, SP4d-4 Task 3 fix round 2 — superseding the wedge round 1
-    // widened). The stored unit (compiled and hand-written, as served now) is
-    // the BEFORE; the unit with this profile's compiler-owned policies
-    // replaced by `desired` is the AFTER; a pair whose identity (names, both
-    // item arrays, the set of coordinates) is new is refused. A stored pair is
-    // reported, not refused, so it no longer blocks unrelated writes — which
-    // for a tag-rule write or a tag rename meant every engine-bound profile in
-    // the installation. A migration's originals are switched off before its
-    // rule writes (`migrate.rs`, step 1), so they are in neither set. See
-    // `crate::overlap::refuse_created_by_compile_via`.
-    let tag_service_id = sweep.iter().copied().find(|&id| id != service_id);
-    let rule_names: HashMap<Uuid, &str> =
-        all_rules.iter().map(|r| (r.id, r.name.as_str())).collect();
+    refuse_overlaps(conn, &l, &desired, tag_service_id).await?;
+
+    let levels = crate::ranger::grants::resource_level_names(engine);
+    // Only a body the classifications produced leaves with them: a held
+    // rename moves the classification rows, so the source's clearance and
+    // tag-rule bodies are gone once it is done. A grant's or a path rule's
+    // body stays on the old name after the rename (grants-follow spec G2,
+    // D12) and is served afterwards, so it always counts.
+    let tag_rules: HashSet<Uuid> = l
+        .rules
+        .iter()
+        .filter(|r| matches!(r.selector, egret_perm::Selector::Tag { .. }))
+        .map(|r| r.id)
+        .collect();
+    let follows_classifications = |dp: &DesiredPolicy| match dp.source_kind {
+        SourceKind::Clearance => true,
+        SourceKind::Rule => dp.rule_id.is_some_and(|id| tag_rules.contains(&id)),
+        SourceKind::Grant | SourceKind::EngineGrant | SourceKind::Infra => false,
+    };
+    let uncounted = desired
+        .iter()
+        .filter(|((sid, _), dp)| {
+            *sid == service_id
+                && follows_classifications(dp)
+                && !l.leaving.counts_body(&dp.body, &levels)
+        })
+        .count();
+    Ok(Some(Compiled {
+        desired,
+        skipped,
+        sweep: l.sweep,
+        profile_name: l.profile_name,
+        largest: whole_tables,
+        uncounted,
+    }))
+}
+
+/// **SP4d debt Task 6, item 1: the write side of `EvalOrderAmbiguous`** —
+/// widened by SP4d-4 Task 3 to the profile's whole evaluation unit. Checked
+/// on the complete desired set, because no single
+/// `compile_rule`/`lower_withholds` call can see another rule's output — the
+/// pair SP4d-1's F2 measured came from two different `perm.rules` rows
+/// compiled independently, and the ambiguity exists only in their union.
+///
+/// The rule is `egret_policy::unit_overlaps`, spelled once and shared with
+/// the policy editor; it takes every within-download pair from
+/// `ambiguous_arbitrations_in` (read `egret_policy::ambiguous_arbitration`
+/// for the measurement and for why an AGREEING tie is admitted) and adds
+/// the pairs only the tag assignments reveal — a tag rule and a path rule on
+/// one tagged column, two tag rules whose tags share a column. See
+/// `crate::overlap` for the write paths this covers.
+///
+/// ⚠ It runs BEFORE `apply_diff_in_tx`, so a refusal writes nothing at all
+/// — the caller's transaction is intact and its route returns the refusal
+/// rather than rolling back a partial sweep. That also makes
+/// `POST /perm/preview` report it before the steward presses Save, since
+/// preview runs the real `write_rule` in a rolled-back transaction.
+///
+/// **Only pairs THIS compile creates are refused** (user ruling
+/// 2026-10-12, SP4d-4 Task 3 fix round 2 — superseding the wedge round 1
+/// widened). The stored unit (compiled and hand-written, as served now) is
+/// the BEFORE; the unit with this profile's compiler-owned policies
+/// replaced by `desired` is the AFTER; a pair whose identity (names, both
+/// item arrays, the set of coordinates) is new is refused. A stored pair is
+/// reported, not refused, so it no longer blocks unrelated writes — which
+/// for a tag-rule write or a tag rename meant every engine-bound profile in
+/// the installation. A migration's originals are switched off before its
+/// rule writes (`migrate.rs`, step 1), so they are in neither set. See
+/// `crate::overlap::refuse_created_by_compile_via`.
+async fn refuse_overlaps(
+    conn: &mut sqlx::PgConnection,
+    l: &crate::ir_load::Loaded,
+    desired: &BTreeMap<PolicyKey, DesiredPolicy>,
+    tag_service_id: Option<i64>,
+) -> Result<(), CompileError> {
+    let service_id = l.ep.profile_id;
+    let rule_names: HashMap<Uuid, &str> = l.rules.iter().map(|r| (r.id, r.name.as_str())).collect();
     let for_overlap: Vec<crate::overlap::CompiledForOverlap<'_>> = desired
         .iter()
         .map(|((sid, name), dp)| crate::overlap::CompiledForOverlap {
@@ -711,123 +636,12 @@ async fn compile_desired(
         .collect();
     crate::overlap::refuse_created_by_compile_via(
         conn,
-        &svc.name,
+        &l.profile_name,
         service_id,
         tag_service_id,
         &for_overlap,
     )
-    .await?;
-
-    let levels = crate::grants::resource_level_names(engine);
-    // Only a body the classifications produced leaves with them: a held
-    // rename moves the classification rows, so the source's clearance and
-    // tag-rule bodies are gone once it is done. A grant's or a path rule's
-    // body stays on the old name after the rename (grants-follow spec G2,
-    // D12) and is served afterwards, so it always counts.
-    let tag_rules: HashSet<Uuid> = all_rules
-        .iter()
-        .filter(|r| matches!(r.selector, egret_perm::Selector::Tag { .. }))
-        .map(|r| r.id)
-        .collect();
-    let follows_classifications = |dp: &DesiredPolicy| match dp.source_kind {
-        SourceKind::Clearance => true,
-        SourceKind::Rule => dp.rule_id.is_some_and(|id| tag_rules.contains(&id)),
-        SourceKind::Grant | SourceKind::EngineGrant => false,
-    };
-    let uncounted = desired
-        .iter()
-        .filter(|((sid, _), dp)| {
-            *sid == service_id
-                && follows_classifications(dp)
-                && !leaving.counts_body(&dp.body, &levels)
-        })
-        .count();
-    Ok(Some(Compiled {
-        desired,
-        skipped,
-        sweep,
-        profile_name: svc.name,
-        largest: whole_tables,
-        uncounted,
-    }))
-}
-
-/// F11 (spec §4.2): compile every engine grant of the profile into
-/// `desired`. A grant with no grantee left, or whose impersonation target can
-/// no longer be compiled (spec E11), or that the compiler cannot express, is
-/// SKIPPED with its reason rather than failing the profile: a user deleted or
-/// renamed elsewhere must not fail every recompile.
-#[allow(clippy::too_many_arguments)]
-async fn compile_engine_grants(
-    conn: &mut sqlx::PgConnection,
-    service_id: i64,
-    profile_name: &str,
-    engine: EngineType,
-    engine_grants: &[EngineGrant],
-    writable: &HashMap<String, i64>,
-    desired: &mut BTreeMap<PolicyKey, DesiredPolicy>,
-    skipped: &mut Vec<SkippedItem>,
-) -> Result<(), CompileError> {
-    let mut skip = |id: Uuid, reason: String| {
-        tracing::warn!(
-            service_id,
-            engine_grant_id = %id,
-            reason = %reason,
-            "engine grant skipped during recompile"
-        );
-        skipped.push(SkippedItem {
-            source_kind: SourceKind::EngineGrant,
-            id,
-            reason,
-        });
-    };
-    for g in engine_grants {
-        if g.principals.include.is_empty() {
-            skip(
-                g.id,
-                "the engine grant's principals name no engine principal (a role or group \
-                 reference that expands to no member)"
-                    .to_string(),
-            );
-            continue;
-        }
-        let target = match g.target_user_id {
-            Some(user_id) => {
-                match crate::engine_grants::impersonation_target_ok(conn, service_id, user_id)
-                    .await?
-                {
-                    Ok(username) => Some(username),
-                    Err(reason) => {
-                        skip(g.id, reason);
-                        continue;
-                    }
-                }
-            }
-            None => None,
-        };
-        match crate::engine_grants::compile_engine_grant(g, target.as_deref(), profile_name, engine)
-        {
-            Ok(input) => {
-                let name = input.name.clone();
-                let body = stamp_service_type(access_to_ranger_json(&input), engine);
-                let target_service =
-                    target_service_id(&body, writable, &format!("engine grant {}", g.id))?;
-                desired.insert(
-                    (target_service, name),
-                    DesiredPolicy {
-                        body,
-                        source_kind: SourceKind::EngineGrant,
-                        grant_id: None,
-                        rule_id: None,
-                    },
-                );
-            }
-            Err(e @ CompileError::InvalidEngineGrant { .. })
-            | Err(e @ CompileError::UnexpandedPrincipalKind { .. }) => skip(g.id, e.to_string()),
-            Err(other) => return Err(other),
-        }
-    }
-    Ok(())
+    .await
 }
 
 /// What one profile's compile produced: the desired policies keyed by the
@@ -844,19 +658,19 @@ async fn compile_engine_grants(
 /// from the profile's configuration, not from what happened to compile: a
 /// profile with a tag service sweeps it even when zero tag policies are
 /// desired, which is exactly the "the rule was deleted" case.
-struct Compiled {
-    desired: BTreeMap<PolicyKey, DesiredPolicy>,
-    skipped: Vec<SkippedItem>,
-    sweep: Vec<i64>,
+pub(crate) struct Compiled {
+    pub(crate) desired: BTreeMap<PolicyKey, DesiredPolicy>,
+    pub(crate) skipped: Vec<SkippedItem>,
+    pub(crate) sweep: Vec<i64>,
     /// The profile's own service NAME — carried alongside `sweep` so
     /// [`apply_diff_in_tx`]'s [`CompileError::ProfileExpansionCeiling`]
     /// refusal can name the profile, not just its numeric id.
-    profile_name: String,
+    pub(crate) profile_name: String,
     /// The largest whole-table classified tables (D2), for the same refusal.
-    largest: Vec<egret_perm::TableCount>,
+    pub(crate) largest: Vec<egret_perm::TableCount>,
     /// The profile's desired policies on a held rename's leaving coordinates,
     /// which the profile total does not count (rename spec C8).
-    uncounted: usize,
+    pub(crate) uncounted: usize,
 }
 
 /// Fold one priority-1 clearance mask per classified column into `desired`
@@ -875,6 +689,7 @@ async fn fold_clearance_masks(
     profile: &str,
     engine: EngineType,
     pending: Vec<crate::clearance_mask::PendingMask>,
+    ep: &mut egret_perm_ir::ep::EpInput,
     writable: &HashMap<String, i64>,
     desired: &mut BTreeMap<PolicyKey, DesiredPolicy>,
     skipped: &mut Vec<SkippedItem>,
@@ -890,7 +705,7 @@ async fn fold_clearance_masks(
     others.extend(
         egret_policy::enabled_policies_for_service_via(conn, service_id)
             .await
-            .map_err(db_err)?
+            .map_err(crate::db_error::from_store)?
             .into_iter()
             .filter(|b| {
                 is_mask(b)
@@ -901,7 +716,7 @@ async fn fold_clearance_masks(
             }),
     );
 
-    use crate::clearance_mask::{FoldVersions, Folded};
+    use crate::clearance_mask::Folded;
     let merged = crate::clearance_mask::merge_by_column(pending);
     let mut skip = |tag_id: Uuid, reason: String| {
         tracing::warn!(service_id, tag_id = %tag_id, reason = %reason,
@@ -912,19 +727,38 @@ async fn fold_clearance_masks(
             reason,
         });
     };
-    let plugins =
-        match crate::clearance_mask::fold_plugin_versions(conn, service_id, profile, engine).await?
-        {
-            FoldVersions::Modelled(v) => v,
-            // An engine-level reason: no mask for ANY column of this profile,
-            // one skip per column so each classified column says so.
-            FoldVersions::Unmodelled(reason) => {
-                for p in &merged {
-                    skip(p.tag_id, reason.clone());
-                }
-                return Ok(());
+    // The bound engines are read HERE, after the enabled policies above, as
+    // they always were: see `crate::ir_load`'s module doc.
+    crate::ir_load::bound_engines(conn, ep).await?;
+    // The versions are the IR's decision (matrix M13); turning its labels into
+    // the evaluator's enum is this target's shape. A label with no variant is
+    // unreachable (M13 lists 2.8.0 and 2.9.0, both variants), so its skip text
+    // is new and no compile has ever emitted it; it is a skip, not a panic,
+    // because the cause would be the matrix, not anything a steward wrote.
+    let decided = egret_perm_ir::lower::withhold::view_guard_versions(ep).and_then(|labels| {
+        labels
+            .iter()
+            .map(|label| {
+                crate::ir_load::plugin_version_from_label(label).ok_or_else(|| {
+                    format!(
+                        "view protection (clearance mask) not active for {profile}: plugin \
+                         version {label} has no evaluator variant"
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()
+    });
+    let plugins = match decided {
+        Ok(v) => v,
+        // An engine-level reason: no mask for ANY column of this profile,
+        // one skip per column so each classified column says so.
+        Err(reason) => {
+            for p in &merged {
+                skip(p.tag_id, reason.clone());
             }
-        };
+            return Ok(());
+        }
+    };
     for p in merged {
         let name = crate::clearance_mask::clearance_mask_name(p.tag_id, &p.column);
         let body = match crate::clearance_mask::fold_at_versions(
@@ -948,167 +782,6 @@ async fn fold_clearance_masks(
         );
     }
     Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn compile_one_rule(
-    r: &Rule,
-    engine: EngineType,
-    service_name: &str,
-    tag_service: Option<&str>,
-    conn: &mut sqlx::PgConnection,
-    service_id: i64,
-    catalog_names: &HashMap<Uuid, String>,
-    writable: &HashMap<String, i64>,
-    leaving: &crate::table_columns::Leaving,
-    desired: &mut BTreeMap<PolicyKey, DesiredPolicy>,
-    skipped: &mut Vec<SkippedItem>,
-) -> Result<(), CompileError> {
-    let (catalog_name, tag_name, tagged): (String, Option<String>, Vec<TableTarget>) =
-        match &r.selector {
-            Selector::Path(scope) => {
-                let Some(name) = catalog_names.get(&scope.catalog_id) else {
-                    return Ok(()); // not reachable by this service — out of scope
-                };
-                (name.clone(), None, Vec::new())
-            }
-            Selector::Tag { key } => {
-                let Some(name) = tag_name_for_key_via(conn, key).await.map_err(db_err)? else {
-                    // The rule names a tag that no longer exists. Not a
-                    // compiler defect and not the WorkspaceMembers case
-                    // either — record and move on rather than aborting the
-                    // whole service's recompile over one dangling rule.
-                    let reason = format!("tag key {key:?} has no matching row in `tags`");
-                    tracing::warn!(
-                        service_id,
-                        rule_id = %r.id,
-                        reason = %reason,
-                        "rule skipped during recompile"
-                    );
-                    skipped.push(SkippedItem {
-                        source_kind: SourceKind::Rule,
-                        id: r.id,
-                        reason,
-                    });
-                    return Ok(());
-                };
-                let tagged = if engine == EngineType::StarRocks {
-                    crate::rules::group_by_table(
-                        tag_assignments_for_service_via(conn, service_id, key)
-                            .await
-                            .map_err(db_err)?,
-                    )
-                } else {
-                    Vec::new()
-                };
-                (String::new(), Some(name), tagged)
-            }
-        };
-
-    let resolved = ResolvedNames {
-        catalog_name: &catalog_name,
-        tag_name: tag_name.as_deref(),
-    };
-
-    let bodies = crate::rules::compile_rule_counting(
-        r,
-        engine,
-        service_name,
-        tag_service,
-        &resolved,
-        &tagged,
-        DEFAULT_EXPANSION_CEILING,
-        leaving,
-    );
-    match bodies {
-        Ok(bodies) => {
-            for body in bodies {
-                let what = format!("rule {:?}", r.name);
-                let name = body_name(&body, &what)?;
-                // A TAG body names the tag service here, a path body the
-                // profile — the routing that Task 10 found missing.
-                let target = target_service_id(&body, writable, &what)?;
-                desired.insert(
-                    (target, name),
-                    DesiredPolicy {
-                        body,
-                        source_kind: SourceKind::Rule,
-                        grant_id: None,
-                        rule_id: Some(r.id),
-                    },
-                );
-            }
-            Ok(())
-        }
-        Err(CompileError::UnexpandedPrincipalKind { kind }) => {
-            let reason = format!(
-                "principal kind {kind:?} reached the compiler unexpanded — a bug in \
-                 `crate::members::expand_enumerated_principals`, not in the rule"
-            );
-            tracing::warn!(
-                service_id,
-                rule_id = %r.id,
-                reason = %reason,
-                "rule skipped during recompile"
-            );
-            skipped.push(SkippedItem {
-                source_kind: SourceKind::Rule,
-                id: r.id,
-                reason,
-            });
-            Ok(())
-        }
-        // A Trino profile with no `tagService` in its config cannot host a
-        // tag policy at all — the Ranger tag plugin it would be resolved by
-        // is not wired to this profile. That is a property of the PROFILE,
-        // not a defect in the rule, so it is recorded as a skip (and warned
-        // about) exactly like the dangling-tag-key case above rather than
-        // aborting the service's recompile.
-        //
-        // **The discriminator for skip-vs-refuse, stated once here because it
-        // is the question every future variant will have to answer: would the
-        // skipped item have been ENFORCED had it compiled?**
-        //
-        // - A deny grant: yes. Skipping it silently drops an enforced denial,
-        //   which fails OPEN, so the compiler refuses instead.
-        // - A tag rule on a profile with no `tagService`: no. Ranger's
-        //   `download_tags` (`egret-policy/src/ranger/api/download.rs`) reads
-        //   the tag service strictly from `config_jsonb`, with no fallback, so
-        //   this profile serves no tag policies to anyone whatever we do here.
-        //   Aborting would have left it unmasked AND stopped every OTHER
-        //   profile from getting the mask. Skipping is strictly more
-        //   protective, not merely more convenient.
-        //
-        // **Why this matters as of SP4a Task 9 and not before.** Task 7's
-        // only caller recompiled the handful of profiles bound to ONE
-        // warehouse. Task 9's rule-mutation path recompiles every
-        // compiler-targeted profile in the installation, because a Trino tag
-        // rule is catalog-unscoped (see `affected_services_for_rule`). Under
-        // an abort, one misconfigured Trino profile anywhere would make
-        // every tag-rule create and delete fail with a 500 — a profile
-        // nobody involved in the write has heard of blocking the write. Each
-        // skip still reaches the caller in `CompileSummary::skipped` and the
-        // logs, so it is visible rather than silent.
-        Err(CompileError::MissingTagService { rule }) => {
-            let reason = format!(
-                "profile has no usable `tagService` (unconfigured, or naming a profile that \
-                 does not exist), so tag rule {rule:?} cannot compile here"
-            );
-            tracing::warn!(
-                service_id,
-                rule_id = %r.id,
-                reason = %reason,
-                "rule skipped during recompile"
-            );
-            skipped.push(SkippedItem {
-                source_kind: SourceKind::Rule,
-                id: r.id,
-                reason,
-            });
-            Ok(())
-        }
-        Err(other) => Err(other),
-    }
 }
 
 #[derive(sqlx::FromRow)]
@@ -1188,13 +861,10 @@ async fn apply_diff_in_tx(
         sweep.is_sorted(),
         "apply_diff_in_tx requires an ascending sweep set, got {sweep:?}"
     );
-    for &sid in sweep {
-        sqlx::query("SELECT id FROM policy.authz_services WHERE id = $1 FOR UPDATE")
-            .bind(sid)
-            .execute(&mut **tx)
-            .await
-            .map_err(db_err)?;
-    }
+    // Through the one profile-lock helper: a sweep member this transaction
+    // did not lock first (a tag service created after `lock_services_in_tx`'s
+    // expansion) is refused, not waited on, once the mint lock is held (#792).
+    lock_profile_rows_in_tx(tx, sweep).await?;
 
     let existing: Vec<ExistingPolicyRow> = sqlx::query_as(
         "SELECT id, service_id, name, policy_jsonb FROM policy.authz_policies \
@@ -1424,7 +1094,7 @@ async fn apply_diff_in_tx(
     Ok(summary)
 }
 
-async fn bump_policy_version(
+pub(crate) async fn bump_policy_version(
     tx: &mut Transaction<'_, Postgres>,
     service_id: i64,
 ) -> Result<(), CompileError> {
@@ -1470,7 +1140,7 @@ async fn record_compiled(
     // (`perm-engine-{id}`) already carries its id.
     if matches!(
         dp.source_kind,
-        SourceKind::Clearance | SourceKind::EngineGrant
+        SourceKind::Clearance | SourceKind::EngineGrant | SourceKind::Infra
     ) {
         return Ok(());
     }
@@ -1518,33 +1188,71 @@ async fn record_compiled(
 /// lock ([`crate::members::lock_compile_mints_in_tx`], which states the order:
 /// profiles, then that lock, then any row write or mint), which is what rules
 /// the cycle out — the sweep keeps it to one acquisition in the common case.
+/// Refuse to compile a profile that an engine of another type is bound to (d-i).
+/// `check_profile_bindable` refuses such a bind; this catches a binding that
+/// predates it, on every write that would recompile the profile.
+async fn refuse_engine_of_another_type(
+    tx: &mut Transaction<'_, Postgres>,
+    service_id: i64,
+) -> Result<(), CompileError> {
+    let mismatch: Option<(String, String, String, String)> = sqlx::query_as(
+        "SELECT s.name, s.type, e.name, e.type \
+           FROM engine_mgmt.engines e \
+           JOIN policy.authz_services s ON s.id = e.authz_service_id \
+          WHERE e.authz_service_id = $1 AND e.type <> s.type \
+          ORDER BY e.name \
+          LIMIT 1",
+    )
+    .bind(service_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    match mismatch {
+        None => Ok(()),
+        Some((profile, profile_type, engine, engine_type)) => {
+            Err(CompileError::EngineTypeMismatch {
+                profile,
+                profile_type,
+                engine,
+                engine_type,
+            })
+        }
+    }
+}
+
 pub async fn recompile_service_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     service_id: i64,
 ) -> Result<CompileSummary, CompileError> {
     lock_services_in_tx(tx, &[service_id]).await?;
-    crate::members::premint_model_usernames(tx).await?;
+    refuse_engine_of_another_type(tx, service_id).await?;
+    if recompile_can_mint(tx, &[service_id]).await? {
+        crate::members::premint_model_usernames(tx).await?;
+    }
     recompile_locked_service_in_tx(tx, service_id).await
 }
 
 /// [`recompile_service_in_tx`] without its lock and pre-mint, for a caller
 /// that has already taken both over a whole set ([`recompile_services_in_tx`]).
 ///
-/// **The `egret-admin` chokepoint (username-takeover spec 2026-10-23 §4.2,
-/// D2).** Every recompile path ends here, so the profile's `egret-admin - …`
-/// policies are converged to the current engine-admin set first: before the
-/// early return (a profile the compiler does not target still carries them)
-/// and before the compile (the impersonation near-root check reads the fresh
-/// body). A path that changes who is an admin therefore only has to put the
-/// admin-policy services in the set it locks ([`admin_policy_services_in`]).
+/// **The infrastructure chokepoint (username-takeover spec 2026-10-23 §4.2,
+/// D2; governance SP2a, D4).** Every recompile path ends here, so the
+/// profile's IR-owned infrastructure policies (the `egret-admin - …` set,
+/// which names the current engine admins, and the delegation baseline) are
+/// converged first ([`crate::infra::converge_infra_in_tx`]): before the
+/// compile, whose impersonation near-root check reads the fresh body. A path
+/// that changes who is an admin therefore only has to put the infra services
+/// in the set it locks ([`admin_policy_services_in`]).
 async fn recompile_locked_service_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     service_id: i64,
 ) -> Result<CompileSummary, CompileError> {
-    sync_admin_policy_in_tx(tx, service_id).await?;
+    crate::infra::converge_infra_in_tx(tx, service_id).await?;
     let Some(compiled) = compile_desired(tx, service_id).await? else {
         return Ok(CompileSummary::default());
     };
+    #[cfg(feature = "shadow-compile")]
+    crate::shadow::compare(tx, service_id, &compiled).await?;
     let summary = apply_diff_in_tx(
         tx,
         service_id,
@@ -1563,48 +1271,14 @@ async fn recompile_locked_service_in_tx(
     Ok(summary)
 }
 
-/// Rewrite `service_id`'s `egret-admin - …` policies to name exactly the
-/// engine admins (`egret_auth::roles::engine_admin_user_ids_via`), when the
-/// service holds any. The caller holds the profile lock; the usernames were
-/// minted by `premint_model_usernames`, and one still missing is minted here
-/// under the same mint lock. Writes nothing when the body is current.
-pub(crate) async fn sync_admin_policy_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    service_id: i64,
-) -> Result<(), CompileError> {
-    if !egret_policy::default_policies::admin_policy_services_via(tx)
-        .await
-        .map_err(db_err)?
-        .contains(&service_id)
-    {
-        return Ok(());
-    }
-    let users = crate::members::engine_admin_usernames_via(tx).await?;
-    let sync = egret_policy::default_policies::sync_admin_all_access_in_tx(tx, service_id, &users)
-        .await
-        .map_err(db_err)?;
-    if sync.changed {
-        tracing::info!(
-            service_id,
-            removed = ?sync.removed,
-            added = ?sync.added,
-            "egret-admin now names exactly the engine admins"
-        );
-    }
-    Ok(())
-}
-
-/// The services holding `egret-admin` policies, appended to an affected set
-/// whose change can alter who is an engine admin.
+/// The infra services ([`crate::infra::infra_services_via`]: those holding an
+/// IR-owned infra row or bound to a qualifying engine), appended to an
+/// affected set whose change can alter who is an engine admin.
 async fn admin_policy_services_in(
     conn: &mut sqlx::PgConnection,
     ids: &mut Vec<i64>,
 ) -> Result<(), CompileError> {
-    ids.extend(
-        egret_policy::default_policies::admin_policy_services_via(conn)
-            .await
-            .map_err(db_err)?,
-    );
+    ids.extend(crate::infra::infra_services_via(conn).await?);
     Ok(())
 }
 
@@ -1670,7 +1344,7 @@ pub(crate) async fn record_failure_logged(
 // - A **rule** depends on its selector. A path-selector rule is catalog-scoped
 //   in exactly the same way a grant is. A TAG-selector rule is not: on Trino it
 //   compiles to one tag policy addressed to the profile's tag service, with no
-//   catalog resource at all (D5, `rules::build_tag_body`), so it lands in EVERY
+//   catalog resource at all (D5, `ranger::rules::build_tag_body`), so it lands in EVERY
 //   Trino profile regardless of which catalogs that profile reaches. On
 //   StarRocks it compiles per tagged column, which is catalog-scoped in effect
 //   — but "which StarRocks profiles have a column carrying this tag" is a
@@ -1730,7 +1404,9 @@ pub async fn affected_starrocks_profiles_for_tables(
 
 /// D2 (spec §5.6, C13): the boot pass. Recompiles every StarRocks profile
 /// that reaches a whole-table attachment of a classification with a
-/// role-bearing clearance, or of one a row-filter rule selects, so the first
+/// role-bearing clearance, or of one a row-filter rule selects, and every
+/// Trino profile that reaches a column attachment of a classification a
+/// row-filter rule selects (KI-287: compiled per table since), so the first
 /// compile after an upgrade does not wait for an unrelated write, and a
 /// table-commit hook recompile that failed is retried.
 ///
@@ -1750,13 +1426,18 @@ pub async fn recompile_table_classified_profiles(
            JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id \
            JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id \
            JOIN engine_mgmt.engines e ON e.id = ea.engine_id \
-          WHERE a.column_name = '' AND e.type = 'starrocks' \
-            AND e.authz_service_id IS NOT NULL \
-            AND (EXISTS (SELECT 1 FROM classification_policies cp \
-                          WHERE cp.tag_id = a.tag_id AND cardinality(cp.required_roles) > 0) \
-                 OR EXISTS (SELECT 1 FROM perm.rules r \
-                             WHERE r.selector_kind = 'tag' AND r.tag_key = t.key \
-                               AND r.kind = 'row_filter')) \
+          WHERE e.authz_service_id IS NOT NULL \
+            AND ((a.column_name = '' AND e.type = 'starrocks' \
+                  AND (EXISTS (SELECT 1 FROM classification_policies cp \
+                                WHERE cp.tag_id = a.tag_id \
+                                  AND cardinality(cp.required_roles) > 0) \
+                       OR EXISTS (SELECT 1 FROM perm.rules r \
+                                   WHERE r.selector_kind = 'tag' AND r.tag_key = t.key \
+                                     AND r.kind = 'row_filter'))) \
+                 OR (a.column_name <> '' AND e.type = 'trino' \
+                     AND EXISTS (SELECT 1 FROM perm.rules r \
+                                  WHERE r.selector_kind = 'tag' AND r.tag_key = t.key \
+                                    AND r.kind = 'row_filter'))) \
           ORDER BY 1",
     )
     .fetch_all(pool)
@@ -1776,7 +1457,7 @@ pub async fn recompile_table_classified_profiles(
                 tracing::warn!(
                     service_id,
                     error = %e,
-                    "the boot recompile of a StarRocks profile with whole-table \
+                    "the boot recompile of a profile with table-expanded \
                      classifications was refused; it keeps its previous compile"
                 );
                 record_failure_logged(pool, service_id, &e).await;
@@ -1784,6 +1465,178 @@ pub async fn recompile_table_classified_profiles(
         }
     }
     Ok(compiled)
+}
+
+/// What one run of [`recompile_path_mask_profiles`] did. Both lists are
+/// ascending service ids.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PathMaskRepair {
+    /// Profiles recompiled: each now serves masks with every level present.
+    pub compiled: Vec<i64>,
+    /// Profiles whose recompile was refused, with the refusal: each keeps its
+    /// previous compile, so its column-less masks stay INERT, and every write
+    /// that recompiles it is refused the same way until a steward resolves
+    /// what the refusal names. Retried at every boot.
+    pub refused: Vec<(i64, String)>,
+    /// Profiles whose recompile FAILED for a reason that is not a refusal of
+    /// the model (a database error, a lock timeout, a ceiling): each keeps its
+    /// previous compile, and the next boot retries it. Nothing here says a
+    /// write to the profile is refused, because nothing showed that it is.
+    pub failed: Vec<(i64, String)>,
+}
+
+/// The `perm.compile_runs` / log prefix a refused boot recompile carries. On
+/// the FIRST line of the recorded error, because the Governance Overview's
+/// `compile_failed` sample shows only that line (`first_line`, 200 chars).
+pub const PATH_MASK_REFUSAL_PREFIX: &str = "Refused at boot: masks with no column stay inert \
+     (previous compile served); writes recompiling this profile are refused until these rules \
+     are resolved. ";
+
+/// The prefix for a boot recompile that failed for any OTHER reason (a
+/// database error, a lock timeout, an expansion ceiling): accurate about the
+/// masks, and makes no claim about writes or rules it has not seen.
+pub const PATH_MASK_FAILURE_PREFIX: &str = "Boot recompile failed: masks with no column stay \
+     inert (previous compile served); the next boot retries. ";
+
+/// Whether `e` is a refusal of the MODEL — a pair of rules the compile will
+/// not serve together — rather than a failure of the run. Only a refusal
+/// recurs on every write that recompiles the profile until a steward changes
+/// the rules; everything else (a database error, a lock timeout, a ceiling)
+/// says nothing about the rules and may pass on the next try.
+pub fn is_rule_refusal(e: &CompileError) -> bool {
+    matches!(
+        e,
+        CompileError::AmbiguousMaskOrFilterArbitration { .. }
+            | CompileError::ClearanceMaskUndecidable { .. }
+    )
+}
+
+/// The `perm.compile_runs` error a failed boot recompile of a path-mask
+/// profile records: [`PATH_MASK_REFUSAL_PREFIX`] for a refusal of the rules
+/// ([`is_rule_refusal`]), [`PATH_MASK_FAILURE_PREFIX`] otherwise, then the
+/// error itself (whose quoted rule names the Overview links).
+pub fn path_mask_boot_error(e: &CompileError) -> String {
+    let prefix = if is_rule_refusal(e) {
+        PATH_MASK_REFUSAL_PREFIX
+    } else {
+        PATH_MASK_FAILURE_PREFIX
+    };
+    format!("{prefix}{e}")
+}
+
+/// The boot pass for fix/ranger-table-mask-column: recompile every profile
+/// that still SERVES a compiled path mask with a missing level.
+///
+/// Until that fix `scope_to_resources` rendered a mask on a whole table,
+/// schema or catalog (the Rules tab's default) without a `column` resource,
+/// and every `dataMaskDef` level is mandatory once Ranger merges the def, so
+/// the stored body masked NOTHING. The compiler now renders the unnamed levels
+/// as `*`, but a stored body changes only when its profile recompiles, and
+/// nothing about a deploy recompiles one. No migration: the rows in
+/// `perm.rules` were always right; only the compiled artifact was wrong, and a
+/// migration cannot run the compiler.
+///
+/// **It selects on the stored artifact, not on the model**: a profile is
+/// reached while `policy.authz_policies` holds a compiled rule mask
+/// (`perm-rule-…`, `policyType` 1, a path body) without a `column` level. Once
+/// a profile is recompiled it has none, so the pass retires itself after the
+/// first successful boot; a profile whose recompile is refused stays stale and
+/// is retried — and reported — at every boot.
+///
+/// One transaction per profile, so one refusal does not block the others. The
+/// refusal this fix can newly provoke is the overlap guard's
+/// (`crate::overlap::refuse_created_by_compile_via`): a stored pair of masks
+/// at one priority that disagree, one of them column-less, gets a new
+/// coordinate once that member names `column: *`, so the pair reads as one the
+/// compile CREATES. That refusal is right (with the pair live Ranger would
+/// serve the broader mask first, possibly un-masking a user the narrower one
+/// masks), and the identity is deliberately NOT relaxed. Instead it is made
+/// loud: logged at `error` with the profile and both rule ids, recorded in
+/// `perm.compile_runs` behind [`PATH_MASK_REFUSAL_PREFIX`] (the Governance
+/// Overview's `compile_failed` finding shows that line and links both rules),
+/// and returned so `egret-bin` logs the count. The same pair is listed by
+/// `GET /api/control-plane/perm/overlaps`, which reads the stored bodies.
+pub async fn recompile_path_mask_profiles(
+    pool: &sqlx::PgPool,
+) -> Result<PathMaskRepair, CompileError> {
+    let profiles: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT DISTINCT p.service_id, s.name \
+           FROM policy.authz_policies p \
+           JOIN policy.authz_services s ON s.id = p.service_id \
+          WHERE s.type IN ('trino', 'starrocks') \
+            AND starts_with(p.name, $1) \
+            AND p.policy_jsonb->>'policyType' = '1' \
+            AND p.policy_jsonb->'resources' ? 'catalog' \
+            AND NOT (p.policy_jsonb->'resources' ? 'column') \
+          ORDER BY 1",
+    )
+    .bind(COMPILER_RULE_PREFIX)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?;
+    let mut out = PathMaskRepair::default();
+    for (service_id, profile) in profiles {
+        let result = async {
+            let mut tx = pool.begin().await.map_err(db_err)?;
+            recompile_service_in_tx(&mut tx, service_id).await?;
+            tx.commit().await.map_err(db_err)
+        }
+        .await;
+        let Err(e) = result else {
+            out.compiled.push(service_id);
+            continue;
+        };
+        let refusal = is_rule_refusal(&e);
+        if refusal {
+            let rules = match &e {
+                CompileError::AmbiguousMaskOrFilterArbitration { rules, .. } => rules
+                    .iter()
+                    .map(|r| match r.id {
+                        Some(id) => format!("{} ({id})", r.name),
+                        None => r.name.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                _ => String::new(),
+            };
+            tracing::error!(
+                service_id,
+                profile = %profile,
+                rules = %rules,
+                error = %e,
+                "the boot recompile of a profile with a whole-table, schema or catalog mask \
+                 was REFUSED: its previous compile keeps serving, so those masks stay inert \
+                 (they mask no column), and every write that recompiles this profile is \
+                 refused until a steward resolves the rules named here (see GET \
+                 /api/control-plane/perm/overlaps)"
+            );
+        } else {
+            tracing::error!(
+                service_id,
+                profile = %profile,
+                error = %e,
+                "the boot recompile of a profile with a whole-table, schema or catalog mask \
+                 FAILED: its previous compile keeps serving, so those masks stay inert until \
+                 it succeeds; the next boot retries"
+            );
+        }
+        let recorded = path_mask_boot_error(&e);
+        if let Err(w) =
+            crate::compile_runs::record_compile_failure(pool, service_id, &recorded).await
+        {
+            tracing::warn!(
+                service_id,
+                error = %w,
+                "could not record a failed compile in perm.compile_runs"
+            );
+        }
+        if refusal {
+            out.refused.push((service_id, e.to_string()));
+        } else {
+            out.failed.push((service_id, e.to_string()));
+        }
+    }
+    Ok(out)
 }
 
 /// The services a create/delete of `g` can change the compiled output of —
@@ -1795,7 +1648,7 @@ pub async fn affected_services_for_grant(
 ) -> Result<Vec<i64>, CompileError> {
     let mut ids = services_for_catalog_via(conn, g.scope.catalog_id)
         .await
-        .map_err(db_err)?;
+        .map_err(crate::db_error::from_store)?;
     normalize_service_order(&mut ids);
     Ok(ids)
 }
@@ -1841,8 +1694,10 @@ pub async fn affected_services_for_rule(
     let mut ids = match &r.selector {
         Selector::Path(scope) => services_for_catalog_via(conn, scope.catalog_id)
             .await
-            .map_err(db_err)?,
-        Selector::Tag { .. } => compiler_targeted_services_via(conn).await.map_err(db_err)?,
+            .map_err(crate::db_error::from_store)?,
+        Selector::Tag { .. } => compiler_targeted_services_via(conn)
+            .await
+            .map_err(crate::db_error::from_store)?,
     };
     normalize_service_order(&mut ids);
     Ok(ids)
@@ -1871,7 +1726,7 @@ pub async fn affected_services_for_rule(
 /// real fail-OPEN gap, not a tidy-up.** Until SP4c a tag's name reached a
 /// compiled policy only through a `perm.rules` tag selector, so this function
 /// early-returned on `perm.rules` alone. A CLEARANCE also stamps `tags.name`
-/// into a Trino tag policy's `tag` resource ([`crate::clearance`]) — and a gated
+/// into a Trino tag policy's `tag` resource ([`crate::ranger::withhold`]) — and a gated
 /// tag needs no rule. So renaming a gated-but-unruled tag returned an EMPTY
 /// affected set, the clearance deny kept naming the OLD tag, and at the next tag
 /// map refresh the deny matched nothing: the classified column started answering
@@ -1892,7 +1747,9 @@ pub async fn affected_services_for_tag_rename(
     if !selected {
         return Ok(Vec::new());
     }
-    let mut ids = compiler_targeted_services_via(conn).await.map_err(db_err)?;
+    let mut ids = compiler_targeted_services_via(conn)
+        .await
+        .map_err(crate::db_error::from_store)?;
     normalize_service_order(&mut ids);
     Ok(ids)
 }
@@ -1906,7 +1763,7 @@ pub async fn affected_services_for_tag_rename(
 /// StarRocks clearance expands into every StarRocks profile from which any
 /// column carrying the tag is reachable. Deriving the narrow StarRocks set would
 /// mean walking `catalog_tag_assignments → catalogs → attachments → engines` for
-/// the tag here, duplicating a resolution `compile_clearance` already does
+/// the tag here, duplicating a resolution `load_withhold_inputs` already does
 /// per-service — and getting it wrong in the narrow direction is the failure
 /// this function exists to prevent, while getting it wrong WIDE costs one
 /// recompile that writes nothing (`apply_diff_in_tx` diffs each body
@@ -1919,7 +1776,9 @@ pub async fn affected_services_for_tag_rename(
 pub async fn affected_services_for_classification(
     conn: &mut sqlx::PgConnection,
 ) -> Result<Vec<i64>, CompileError> {
-    let mut ids = compiler_targeted_services_via(conn).await.map_err(db_err)?;
+    let mut ids = compiler_targeted_services_via(conn)
+        .await
+        .map_err(crate::db_error::from_store)?;
     normalize_service_order(&mut ids);
     Ok(ids)
 }
@@ -1934,7 +1793,7 @@ pub async fn affected_services_for_classification(
 /// and `disableRoleResolution` defaults true; D0b re-derived it for StarRocks,
 /// where `setUserRoles` is never called anywhere in `fe/`). So egret enumerates
 /// the holders at compile time in **two** places — a clearance's
-/// `denyExceptions` ([`crate::clearance`], SP4c Task 2/2d) and a `role`
+/// `denyExceptions` ([`crate::ir_load::load_withhold_inputs`], SP4c Task 2/2d) and a `role`
 /// principal in a grant ([`crate::members`], SP4c Task 2b) — and both read the
 /// same `role_usernames`, which mints a holder's missing username (2026-10-18
 /// design R5), so a holder is named from the compile their grant triggers, not
@@ -1977,7 +1836,11 @@ pub async fn affected_services_for_role_membership(
 
     let mut ids: Vec<i64> = Vec::new();
     if clears {
-        ids.extend(compiler_targeted_services_via(conn).await.map_err(db_err)?);
+        ids.extend(
+            compiler_targeted_services_via(conn)
+                .await
+                .map_err(crate::db_error::from_store)?,
+        );
     }
 
     // Grants: a `role` principal in either mode. `exclude` matters as much as
@@ -1996,7 +1859,7 @@ pub async fn affected_services_for_role_membership(
         ids.extend(
             services_for_catalog_via(conn, catalog_id)
                 .await
-                .map_err(db_err)?,
+                .map_err(crate::db_error::from_store)?,
         );
     }
     // F11: the profile of every engine whose engine grants name the role.
@@ -2074,7 +1937,11 @@ pub async fn affected_services_for_workspace_members(
 
     let mut ids: Vec<i64> = Vec::new();
     if tag_rule_exempts {
-        ids.extend(compiler_targeted_services_via(conn).await.map_err(db_err)?);
+        ids.extend(
+            compiler_targeted_services_via(conn)
+                .await
+                .map_err(crate::db_error::from_store)?,
+        );
     }
     for catalog_id in catalogs
         .into_iter()
@@ -2083,7 +1950,7 @@ pub async fn affected_services_for_workspace_members(
         ids.extend(
             services_for_catalog_via(conn, catalog_id)
                 .await
-                .map_err(db_err)?,
+                .map_err(crate::db_error::from_store)?,
         );
     }
     normalize_service_order(&mut ids);
@@ -2114,7 +1981,7 @@ pub async fn affected_services_for_workspace_members(
 ///
 /// **There is deliberately no clearance arm.** A tag's `required_groups` is not
 /// expanded — a group-only gate still compiles to nothing and reports the skip
-/// (`crate::clearance`'s module doc) — so no clearance body names a group's
+/// (`egret_perm_ir::lower::withhold`'s module doc) — so no clearance body names a group's
 /// members, and nothing there can go stale.
 ///
 /// `public` contributes nothing: it is never expanded (every engine resolves
@@ -2129,7 +1996,7 @@ pub async fn affected_services_for_group_membership(
     let names: Vec<&str> = group_names
         .iter()
         .map(String::as_str)
-        .filter(|n| *n != crate::rules::PUBLIC_GROUP)
+        .filter(|n| *n != crate::ranger::rules::PUBLIC_GROUP)
         .collect();
     if names.is_empty() {
         return Ok(Vec::new());
@@ -2164,13 +2031,17 @@ pub async fn affected_services_for_group_membership(
 
     let mut ids: Vec<i64> = Vec::new();
     if tag_rule_exempts {
-        ids.extend(compiler_targeted_services_via(conn).await.map_err(db_err)?);
+        ids.extend(
+            compiler_targeted_services_via(conn)
+                .await
+                .map_err(crate::db_error::from_store)?,
+        );
     }
     for catalog_id in catalogs {
         ids.extend(
             services_for_catalog_via(conn, catalog_id)
                 .await
-                .map_err(db_err)?,
+                .map_err(crate::db_error::from_store)?,
         );
     }
     // F11: the profile of every engine whose engine grants name the group.
@@ -2190,6 +2061,22 @@ pub async fn affected_services_for_group_membership(
     .map_err(db_err)?;
     for role in &roles {
         ids.extend(affected_services_for_role_membership(conn, role).await?);
+    }
+    // A workspace held by the group: its members are the workspace's members,
+    // so a change of who is in the group changes every workspace list it feeds.
+    let workspaces: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT ag.scope_id FROM access_grants ag \
+           JOIN groups g ON g.id = ag.principal_id \
+          WHERE ag.principal_type = 'group' AND ag.scope_type = 'workspace' \
+            AND ag.scope_id IS NOT NULL AND g.name = ANY($1) \
+          ORDER BY ag.scope_id",
+    )
+    .bind(&names)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    for ws in workspaces {
+        ids.extend(affected_services_for_workspace_members(conn, ws).await?);
     }
     // F11: a group holding `platform_admin` makes its members platform admins,
     // whom an impersonation grant may not target; joining or leaving it
@@ -2322,7 +2209,7 @@ pub async fn group_references_via(
          ORDER BY group_name, source, id, position",
     )
     .bind(group_names)
-    .bind(crate::rules::PUBLIC_GROUP)
+    .bind(crate::ranger::rules::PUBLIC_GROUP)
     .fetch_all(&mut *conn)
     .await
     .map_err(db_err)
@@ -2372,15 +2259,128 @@ pub async fn lock_services_in_tx(
     // the same pair ascending: the exact opposed order two transactions
     // deadlock on. Locking the expanded, sorted set here keeps every path's
     // acquisition order ascending over the same universe.
-    let expanded = services_and_tag_services_via(tx, service_ids)
+    let mut expanded = services_and_tag_services_via(tx, service_ids)
         .await
-        .map_err(db_err)?;
-    // The one spelling of the row lock, shared with the policy editor's
-    // overlap check (SP4d-4 Task 3 fix round 1, review I1): one statement per
-    // id, ascending — see `egret_policy::lock_service_rows_via`.
-    egret_policy::lock_service_rows_via(tx, &expanded)
+        .map_err(crate::db_error::from_store)?;
+    // **P6: and every profile that names one of them as its `tagService`.**
+    // A recompile bumps the tag service's `policy_version`, and migration
+    // 0191's trigger (`authz_services_tag_bump_reaches_linkers`) carries that
+    // bump to every such linker, which takes their row locks: another profile
+    // sharing the tag service was locked by the trigger, after the tag
+    // service and after the compile-mint lock, outside any ascending order.
+    // Locking the linkers here, one hop as the trigger goes, makes the
+    // trigger's locks re-takes.
+    let linkers: Vec<i64> = sqlx::query_scalar(
+        "SELECT id FROM policy.authz_services \
+          WHERE config_jsonb ->> 'tagService' IN \
+                (SELECT name FROM policy.authz_services WHERE id = ANY($1))",
+    )
+    .bind(&expanded)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    expanded.extend(linkers);
+    expanded.sort_unstable();
+    expanded.dedup();
+    lock_profile_rows_in_tx(tx, &expanded).await
+}
+
+/// **The one place this crate takes a profile lock** (`policy.authz_services`
+/// row, `FOR UPDATE`), for [`lock_services_in_tx`] and `apply_diff_in_tx`.
+/// `service_ids` must be ascending.
+///
+/// It records the ids it locked in a transaction-local setting
+/// (`egret.profile_locks`), and skips the ones already recorded (re-taking a
+/// row lock this transaction holds is free anyway). **Once the compile-mint
+/// lock is held** (`egret.compile_mint_held`, set by
+/// [`crate::members::lock_compile_mints_in_tx`]) an id NOT recorded is refused
+/// with [`CompileError::ProfileSetChanged`], before any lock statement: the
+/// stated order is profiles, then the mint lock, and a profile locked after it
+/// can deadlock with a compile of that profile that holds it and waits on the
+/// mint lock (#792). The settings are transaction-local, so they end with the
+/// transaction, and a rolled-back savepoint reverts them together with the row
+/// locks taken inside it.
+///
+/// The row lock itself is still `egret_policy::lock_service_rows_via`, the one
+/// spelling shared with the policy editor's overlap check (SP4d-4 Task 3 fix
+/// round 1, review I1): one statement per id, ascending.
+pub(crate) async fn lock_profile_rows_in_tx(
+    conn: &mut sqlx::PgConnection,
+    service_ids: &[i64],
+) -> Result<(), CompileError> {
+    debug_assert!(
+        service_ids.is_sorted(),
+        "lock_profile_rows_in_tx requires ascending service ids, got {service_ids:?}"
+    );
+    if service_ids.is_empty() {
+        return Ok(());
+    }
+    let (mint_held, locked): (bool, String) = sqlx::query_as(
+        "SELECT coalesce(current_setting('egret.compile_mint_held', true), '') = 'on', \
+                coalesce(current_setting('egret.profile_locks', true), '')",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(CompileError::from_db)?;
+    let mut held: std::collections::BTreeSet<i64> =
+        locked.split(',').filter_map(|id| id.parse().ok()).collect();
+    let added: Vec<i64> = service_ids
+        .iter()
+        .copied()
+        .filter(|id| !held.contains(id))
+        .collect();
+    if added.is_empty() {
+        return Ok(());
+    }
+    if mint_held {
+        tracing::warn!(
+            ?added,
+            "a write's profile set grew after it took the compile-mint lock; refused (retryable)"
+        );
+        return Err(CompileError::ProfileSetChanged { added });
+    }
+    egret_policy::lock_service_rows_via(conn, &added)
         .await
-        .map_err(db_err)
+        .map_err(crate::db_error::from_store)?;
+    held.extend(added);
+    let held = held
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    sqlx::query("SELECT set_config('egret.profile_locks', $1, true)")
+        .bind(held)
+        .execute(&mut *conn)
+        .await
+        .map_err(CompileError::from_db)?;
+    Ok(())
+}
+
+/// Whether a recompile of `service_ids` can mint a username at all (#791):
+/// some id is a profile this compiler targets ([`engine_type_for`]), whose
+/// passes expand principals, or is an infra service, whose convergence names
+/// the engine admins ([`crate::infra::converge_infra_in_tx`]). When neither
+/// holds, the pre-mint sweep is
+/// skipped, and with it the installation-wide compile-mint lock it takes when
+/// anyone in the model is unnamed.
+async fn recompile_can_mint(
+    conn: &mut sqlx::PgConnection,
+    service_ids: &[i64],
+) -> Result<bool, CompileError> {
+    if service_ids.is_empty() {
+        return Ok(false);
+    }
+    let types: Vec<String> =
+        sqlx::query_scalar("SELECT type FROM policy.authz_services WHERE id = ANY($1)")
+            .bind(service_ids)
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(db_err)?;
+    if types.iter().any(|t| engine_type_for(t).is_some()) {
+        return Ok(true);
+    }
+    let infra = crate::infra::infra_services_via(conn).await?;
+    Ok(service_ids.iter().any(|id| infra.contains(id)))
 }
 
 /// The policy editor's recompile seam (final review I-3): an editor write that
@@ -2404,7 +2404,7 @@ impl egret_policy::ProfileRecompiler for PermRecompiler {
             Err(e) => Err(match crate::overlap::refusal_body(&e) {
                 Some(body) => PolicyHttpError::Overlap { body },
                 None => match e {
-                    CompileError::Db(detail) => {
+                    CompileError::Db(detail) | CompileError::LockTimeout(detail) => {
                         tracing::error!(%detail, ?service_ids, "editor write: recompile failed");
                         PolicyHttpError::Internal
                     }
@@ -2416,6 +2416,30 @@ impl egret_policy::ProfileRecompiler for PermRecompiler {
             }),
         }
     }
+
+    /// [`crate::overlap::stored_overlaps_of_via`], the predicate the OPA
+    /// snapshot refresher re-checks, one line per pair.
+    async fn stored_overlaps_in_tx(
+        &self,
+        tx: &mut Transaction<'static, Postgres>,
+        service_id: i64,
+    ) -> Result<Vec<String>, egret_policy::PolicyHttpError> {
+        let pairs = crate::overlap::stored_overlaps_of_via(tx, service_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, service_id, "switch to OPA: stored overlaps unreadable");
+                egret_policy::PolicyHttpError::Internal
+            })?;
+        Ok(pairs.iter().map(opa_switch_pair_line).collect())
+    }
+}
+
+/// `"{kind} on {coordinate}: {rule names joined by ', '}"`, how the switch to
+/// OPA names a stored pair. The names are those `GET /perm/overlaps` shows the
+/// profile's admin.
+fn opa_switch_pair_line(o: &crate::overlap::StoredOverlap) -> String {
+    let names: Vec<&str> = o.rules.iter().map(|m| m.name.as_str()).collect();
+    format!("{} on {}: {}", o.kind, o.coordinate, names.join(", "))
 }
 
 /// Recompile every service in `service_ids` on the CALLER's open transaction.
@@ -2442,7 +2466,8 @@ pub async fn recompile_services_in_tx(
     // username this loop would mint in ONE ascending sweep, so the per-profile
     // expansions below take no `users` row lock out of order
     // (`crate::members::premint_model_usernames`).
-    if !service_ids.is_empty() {
+    // Skipped when nothing in the set can mint (#791).
+    if recompile_can_mint(tx, service_ids).await? {
         crate::members::premint_model_usernames(tx).await?;
     }
     let mut out = Vec::with_capacity(service_ids.len());
@@ -2458,4 +2483,48 @@ pub async fn recompile_services_in_tx(
         out.push(summary);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod path_mask_boot_tests {
+    use super::*;
+    use egret_perm::{OverlapKind, OverlapRule};
+
+    /// Only a refusal of the rules carries "writes are refused until these
+    /// rules are resolved"; a database error, a lock timeout or a ceiling gets
+    /// the accurate "the next boot retries".
+    #[test]
+    fn only_a_rule_refusal_says_writes_are_refused() {
+        let overlap = CompileError::AmbiguousMaskOrFilterArbitration {
+            profile: "p".into(),
+            refusal: "rule \"a\" and rule \"b\"".into(),
+            kind: OverlapKind::Mask,
+            coordinate: "c".into(),
+            rules: vec![OverlapRule {
+                id: None,
+                name: "a".into(),
+            }],
+        };
+        let tie = CompileError::ClearanceMaskUndecidable {
+            column: "c".into(),
+            user: "u".into(),
+        };
+        for e in [&overlap, &tie] {
+            assert!(is_rule_refusal(e), "{e}");
+            assert!(path_mask_boot_error(e).starts_with(PATH_MASK_REFUSAL_PREFIX));
+        }
+        for e in [
+            CompileError::Db("canceling statement due to lock timeout".into()),
+            CompileError::Db("connection reset".into()),
+        ] {
+            assert!(!is_rule_refusal(&e), "{e}");
+            let recorded = path_mask_boot_error(&e);
+            assert!(recorded.starts_with(PATH_MASK_FAILURE_PREFIX), "{recorded}");
+            assert!(
+                !recorded.contains("refused"),
+                "a failure must not claim writes are refused: {recorded}"
+            );
+        }
+        assert!(PATH_MASK_FAILURE_PREFIX.chars().count() < 200);
+    }
 }

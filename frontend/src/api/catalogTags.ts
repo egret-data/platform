@@ -14,6 +14,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { apiJson } from "./client";
+import type { AssignResourceTagResponse } from "./generated/model";
 import { invalidateObjectHandwritten, invalidateTag, type Tag } from "./tags";
 
 export interface ResourceTagAssignment {
@@ -46,11 +47,12 @@ export function useResourceTags(warehouseId: string, schema: string, table: stri
   });
 }
 
+/** Answers the server's `notices` (KI-307): what the author should know about an attach that succeeded. */
 export function useAssignResourceTag(warehouseId: string) {
   const queryClient = useQueryClient();
-  return useMutation<void, Error, ResourceTagInput>({
+  return useMutation<AssignResourceTagResponse, Error, ResourceTagInput>({
     mutationFn: async (input) => {
-      await apiJson<void>(`/control-plane/warehouses/${warehouseId}/resource-tags`, {
+      return apiJson<AssignResourceTagResponse>(`/control-plane/warehouses/${warehouseId}/resource-tags`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(input),

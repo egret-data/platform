@@ -1,0 +1,64 @@
+{{- /*
+Who may connect to the engines egret provisions (Trino, StarRocks) in `engineNamespace`.
+
+An engine accepts a user's SQL and answers it under the policies egret compiles, but a person who can
+reach its ports directly needs only a login, and StarRocks also serves an HTTP SQL API (8030) and the
+operator-facing ports. egret's own pods are the only client that needs them: app pods and workflow
+task pods run author code and query through egret's gateway (see networkpolicy-apps.yaml and
+networkpolicy-tasks.yaml), and nothing else in the cluster has a reason to. So ingress is limited to:
+
+1. pods of the engine namespace itself: StarRocks FE <-> CN, Trino coordinator <-> workers, the
+   StarRocks `{name}-initpwd` Job;
+2. egret's pods (`app: egret` in the release namespace), on every port;
+3. the StarRocks operator's namespaces, on the FE's HTTP (8030) and query (9030) ports: the operator
+   runs SQL against the FE (CN scale-in) and reads its feature list over HTTP;
+4. `engineNetworkPolicy.ingressFrom`: the peers an engine Ingress forwards from (the ingress
+   controller), on the engine HTTP ports (StarRocks FE 8030, Trino 8080 and 8443). Leave it empty and
+   an engine Ingress gets no traffic;
+5. `engineNetworkPolicy.extraFrom`: any other peers, on every port (for example a metrics scraper).
+
+Egress is not restricted: an engine reaches egret (policies, catalog), object storage and external
+catalogs. The kubelet's probes are not subject to a NetworkPolicy.
+*/ -}}
+{{- $np := .Values.engineNetworkPolicy }}
+{{- if $np.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: egret-engine-isolation, namespace: {{ .Values.engineNamespace }} }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    # 1. the engine namespace itself
+    - from:
+        - podSelector: {}
+    # 2. egret
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ .Release.Namespace }} }
+          podSelector:
+            matchLabels: { app: egret }
+    {{- if $np.operatorNamespaces }}
+    # 3. the StarRocks operator: FE HTTP and query ports
+    - from:
+        {{- range $np.operatorNamespaces }}
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ . }} }
+        {{- end }}
+      ports:
+        - { protocol: TCP, port: 8030 }
+        - { protocol: TCP, port: 9030 }
+    {{- end }}
+    {{- with $np.ingressFrom }}
+    # 4. the ingress controller: engine HTTP ports
+    - from: {{- toYaml . | nindent 8 }}
+      ports:
+        - { protocol: TCP, port: 8030 }
+        - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 8443 }
+    {{- end }}
+    {{- with $np.extraFrom }}
+    # 5. extra peers, every port
+    - from: {{- toYaml . | nindent 8 }}
+    {{- end }}
+{{- end }}

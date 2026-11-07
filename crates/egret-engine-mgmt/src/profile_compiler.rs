@@ -31,6 +31,13 @@ pub trait ProfileCompilerPort: Send + Sync {
     /// `service_id` is a `policy.authz_services` id.
     async fn recompile_profile(&self, service_id: i64) -> Result<(), egret_perm::CompileError>;
 
+    /// Converge one profile's infrastructure policies (the `egret-admin - …`
+    /// set and the delegation baseline) from the store, in a transaction of
+    /// its own, without compiling the profile (governance SP2a, D4). Engine
+    /// apply calls it after binding or changing an engine, so a profile whose
+    /// compile fails still gets its infrastructure rows.
+    async fn converge_infra(&self, service_id: i64) -> Result<(), egret_perm::CompileError>;
+
     /// Recompile, on the CALLER's own open transaction, every profile
     /// `catalog_id` currently reaches — the same affected-service set a
     /// grant scoped to that catalog would use
@@ -83,6 +90,19 @@ pub trait ProfileCompilerPort: Send + Sync {
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         service_id: i64,
+    ) -> Result<(), egret_perm::CompileError>;
+
+    /// Lock every profile in `service_ids` on the CALLER's transaction, in the
+    /// one order every recompile path shares (`egret_perm_compile::lock_services_in_tx`:
+    /// expanded with tag services and their other linkers, ascending), before a
+    /// write that recompiles SEVERAL profiles. Without it the second recompile
+    /// locks its profile after the first one's pre-mint took the compile-mint
+    /// lock, which the compiler refuses as `ProfileSetChanged` (#792), and which
+    /// before that refusal was a lock-order inversion that could deadlock.
+    async fn lock_profiles_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_ids: &[i64],
     ) -> Result<(), egret_perm::CompileError>;
 
     /// The mask and row-filter pairs stored in every unit the profiles in
@@ -204,6 +224,23 @@ pub(crate) async fn snapshot_overlaps(
     ))
 }
 
+/// Lock `service_ids` (any order; sorted here) on the caller's transaction
+/// before a write that recompiles several of them. A no-op when no compiler is
+/// wired.
+pub(crate) async fn lock_profiles(
+    st: &crate::EngineMgmtState,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    service_ids: &[i64],
+) -> Result<(), egret_perm::CompileError> {
+    let Some(compiler) = st.perm_compiler.clone() else {
+        return Ok(());
+    };
+    let mut ids = service_ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    compiler.lock_profiles_in_tx(tx, &ids).await
+}
+
 /// Recompile `service_id` on the caller's transaction and refuse the pairs the
 /// write made since `before`. A no-op when no compiler is wired.
 pub(crate) async fn recompile_refusing_created_overlaps(
@@ -260,7 +297,10 @@ pub(crate) async fn bind_profile_guarded(
                 .engine_mgmt
                 .set_engine_authz_service_in_tx(&mut tx, engine_id, Some(profile_id), &status)
                 .await
-                .map_err(|e| egret_perm::CompileError::Db(e.to_string()))?;
+                .map_err(|e| match e {
+                    crate::EngineMgmtError::Db(e) => egret_perm::CompileError::from_db(e),
+                    other => egret_perm::CompileError::Db(other.to_string()),
+                })?;
             if !bound {
                 return Ok(false);
             }
@@ -306,7 +346,9 @@ fn bind_refusal(
     tracing::error!(engine = %engine_name, service_id = profile_id, error = %e,
         "the guarded bind could not complete; the engine was not bound");
     match e {
-        egret_perm::CompileError::Db(_) => crate::EngineHttpError::Internal,
+        egret_perm::CompileError::Db(_) | egret_perm::CompileError::LockTimeout(_) => {
+            crate::EngineHttpError::Internal
+        }
         other => crate::EngineHttpError::Conflict(format!(
             "engine {engine_name} was not bound to policy profile {profile_id}: the profile \
              could not be checked for order-ambiguous pairs: {other}"

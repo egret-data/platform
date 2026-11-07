@@ -1994,6 +1994,28 @@ async fn grant_endpoint_invoke(
     let sa = scoped_account(&st, ctx.workspace_id.0, body.service_account_id).await?;
     let role = invoke_role_id(&st).await?;
 
+    let mut tx = st.db.pool.begin().await.map_err(db_err)?;
+    // Only a live `allow` row is "already granted" (`egret_auth::live_allow_grant!`).
+    // An expired `allow` or a `deny` row on this (account, endpoint) would
+    // otherwise survive the grant and keep the account out — the expired one
+    // because the INSERT below would conflict with it and do nothing. Removed
+    // first, so the grant leaves exactly one live row: the same rows a revoke
+    // removes, so this takes nothing a manager could not already take.
+    sqlx::query(concat!(
+        "DELETE FROM access_grants ag \
+         WHERE ag.principal_type = 'user' AND ag.principal_id = $1 AND ag.role_id = $2 \
+           AND ag.scope_type = 'object' AND ag.object_type = $3 AND ag.scope_id = $4 \
+           AND NOT ",
+        egret_auth::live_allow_grant!("ag"),
+    ))
+    .bind(sa)
+    .bind(role)
+    .bind(crate::endpoints::OBJECT_KIND)
+    .bind(id)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+
     // `ON CONFLICT DO NOTHING` against the `(principal_type, principal_id,
     // role_id, scope_type, scope_id, effect)` unique key, so re-granting is a
     // no-op rather than a 500 — and the row is re-read afterwards so the
@@ -2008,7 +2030,7 @@ async fn grant_endpoint_invoke(
     .bind(crate::endpoints::OBJECT_KIND)
     .bind(id)
     .bind(ctx.principal.user_id.0)
-    .execute(&st.db.pool)
+    .execute(&mut *tx)
     .await
     .map_err(db_err)?;
 
@@ -2028,9 +2050,10 @@ async fn grant_endpoint_invoke(
     .bind(role)
     .bind(crate::endpoints::OBJECT_KIND)
     .bind(id)
-    .fetch_one(&st.db.pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(db_err)?;
+    tx.commit().await.map_err(db_err)?;
 
     st.audit.emit(egret_audit::mutation_for(
         &ctx.principal,

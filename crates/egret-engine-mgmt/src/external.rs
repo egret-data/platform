@@ -50,7 +50,7 @@ use crate::engines::EngineDto;
 use crate::state::RangerSurfaceMode;
 use crate::{Engine, EngineHttpError as CpError, EngineMgmtState as CpState};
 
-pub const ORIGIN_EXTERNAL: &str = "external";
+pub use egret_core::engine_delegation::ORIGIN_EXTERNAL;
 pub const ORIGIN_PROVISIONED: &str = "provisioned";
 
 /// The Ranger releases an operator may declare as installed on an external
@@ -160,14 +160,20 @@ fn present_or_null<'de, D: serde::Deserializer<'de>>(
 /// [`crate::openapi`].
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(register_external_engine, update_external_engine, ranger_plugin_config),
+    paths(
+        register_external_engine,
+        update_external_engine,
+        ranger_plugin_config,
+        opa_plugin_config
+    ),
     components(schemas(
         RegisterExternalEngine,
         RegisteredExternalEngineDto,
         RangerCredentialDto,
         UpdateExternalEngine,
         RangerPluginConfigDto,
-        RangerPluginFileDto
+        RangerPluginFileDto,
+        OpaPluginConfigDto
     ))
 )]
 pub struct ExternalEngineApi;
@@ -180,6 +186,7 @@ pub fn routes() -> Router<CpState> {
             "/engines/{id}/ranger-plugin-config",
             get(ranger_plugin_config),
         )
+        .route("/engines/{id}/opa-plugin-config", get(opa_plugin_config))
 }
 
 fn validate_name(name: &str) -> Result<(), CpError> {
@@ -429,6 +436,11 @@ async fn update_external_engine(
     // Taken BEFORE the write: a rebind changes which catalogs, hence which tag
     // assignments, the new profile's unit resolves.
     let touched: Vec<i64> = new_profile.into_iter().chain(old_profile).collect();
+    // Both profiles locked first, ascending: the engine row's UPDATE below bumps
+    // both through migration 0187's trigger, and the recompile of the second
+    // would otherwise lock it after the first one's pre-mint took the
+    // compile-mint lock (refused as `ProfileSetChanged`, #792).
+    crate::profile_compiler::lock_profiles(&st, &mut tx, &touched).await?;
     let before = crate::profile_compiler::snapshot_overlaps_of(&st, &mut tx, &touched).await?;
     let updated = sqlx::query_as::<_, Engine>(
         "UPDATE engine_mgmt.engines \
@@ -753,32 +765,6 @@ struct PluginConfigFacts<'a> {
     version: Option<&'a str>,
 }
 
-/// Why `raw` cannot be a download URL an external engine reaches, if it cannot:
-/// its host is loopback or unspecified (`localhost`, `localhost.`, `127.0.0.0/8`,
-/// `0.0.0.0`, `::`, `::1`, an IPv4-mapped form of those), or it is not an
-/// http(s) URL with a host (`localhost:8080` parses as scheme `localhost`).
-/// Parsed, never substring-matched: `localhost.example.com` is an ordinary name.
-fn download_url_problem(raw: &str) -> Option<&'static str> {
-    use std::net::Ipv6Addr;
-    use url::Host;
-    let unusable = |v4: std::net::Ipv4Addr| v4.is_loopback() || v4.is_unspecified();
-    let url = url::Url::parse(raw).ok();
-    let Some(url) = url.filter(|u| matches!(u.scheme(), "http" | "https")) else {
-        return Some("is not an http(s) URL with a host");
-    };
-    let loopback = match url.host() {
-        None => return Some("is not an http(s) URL with a host"),
-        Some(Host::Domain(d)) => d.trim_end_matches('.').eq_ignore_ascii_case("localhost"),
-        Some(Host::Ipv4(ip)) => unusable(ip),
-        Some(Host::Ipv6(ip)) => {
-            ip == Ipv6Addr::UNSPECIFIED
-                || ip.is_loopback()
-                || ip.to_ipv4_mapped().is_some_and(unusable)
-        }
-    };
-    loopback.then_some("is a loopback or unspecified address")
-}
-
 fn plugin_config_judgements(
     f: &PluginConfigFacts<'_>,
 ) -> (&'static str, Vec<String>, Vec<String>, bool) {
@@ -794,12 +780,10 @@ fn plugin_config_judgements(
              cluster cannot reach it. Set `[catalog] public_url` to an address the engine can reach."
         ));
     }
-    if let Some(problem) = download_url_problem(host_part) {
-        warnings.push(format!(
-            "The download URL ({host_part}) {problem}: no external engine can reach it. It \
-             comes from `[catalog] public_url`, which defaults to localhost on a fresh install; \
-             set it to an address the engine can reach."
-        ));
+    // One judgement for both plugin-configuration routes (KI-149): the
+    // profile's `trino-config` gives the same warning.
+    if let Some(w) = egret_engine_mgmt_api::ranger_config::download_url_warning(f.public_url) {
+        warnings.push(w);
     }
     // The surface is authenticated unless egret runs it anonymous: the plugin
     // presents the engine's own credential (spec A11).
@@ -942,6 +926,100 @@ async fn ranger_plugin_config(
             .into_iter()
             .map(|(name, content)| RangerPluginFileDto { name, content })
             .collect(),
+    }))
+}
+
+/// The Trino OPA plugin configuration an external engine's admin installs.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OpaPluginConfigDto {
+    /// `access-control.properties`, then the context file; the context file
+    /// carries a placeholder in place of the engine's secret.
+    pub files: Vec<RangerPluginFileDto>,
+    pub warnings: Vec<String>,
+    /// What the admin supplies that egret cannot.
+    pub admin_must_supply: Vec<String>,
+}
+
+/// `GET /api/control-plane/engines/{id}/opa-plugin-config`.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/engines/{id}/opa-plugin-config",
+    tag = "control-plane-engines",
+    params(("id" = Uuid, Path, description = "Engine id")),
+    responses(
+        (status = 200, description = "The Trino OPA plugin files to install on this external engine, rendered by the same code that renders the files egret mounts into its own engines. The context file carries the engine's id and a placeholder in place of its secret: the secret (the engine's Ranger plugin credential) was shown once and is never returned here. Nothing is minted", body = OpaPluginConfigDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:read permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 409, description = "The engine is provisioned (egret mounts these files itself), it is bound to no policy profile (bind one first), or its profile is on Ranger (use /ranger-plugin-config)", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn opa_plugin_config(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<OpaPluginConfigDto>, CpError> {
+    use egret_engine_mgmt_api::opa_config::{
+        opa_plugin_files, AccessMechanism, OPA_EXTERNAL_ENGINE_NOTE, OPA_LOG_REQUESTS_WARNING,
+    };
+    egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
+    let engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    if !is_external(&engine) {
+        return Err(CpError::Conflict(format!(
+            "engine {} is provisioned: egret mounts its OPA plugin files itself",
+            engine.name
+        )));
+    }
+    let Some(service_name) =
+        crate::engines::resolve_ranger_service_name(&st, engine.authz_service_id).await?
+    else {
+        return Err(CpError::Conflict(format!(
+            "engine {} is bound to no policy profile: bind a profile first",
+            engine.name
+        )));
+    };
+    let mechanism = crate::engines::resolve_profile_mechanism(&st, engine.authz_service_id).await?;
+    if mechanism != AccessMechanism::Opa {
+        return Err(CpError::Conflict(format!(
+            "profile {service_name} is on Ranger; use /ranger-plugin-config"
+        )));
+    }
+    // The secret is a placeholder: the real one was shown once and is never
+    // re-rendered here.
+    let rendered = opa_plugin_files(
+        &engine.id.to_string(),
+        &st.engine_egret_url,
+        egret_engine_mgmt_api::ranger_config::PASSWORD_PLACEHOLDER,
+    )
+    .map_err(|e| {
+        tracing::error!(engine = %engine.name, error = %e, "the OPA plugin files are unrenderable");
+        CpError::Internal
+    })?;
+    let mut warnings = vec![
+        OPA_LOG_REQUESTS_WARNING.to_string(),
+        OPA_EXTERNAL_ENGINE_NOTE.to_string(),
+        egret_engine_mgmt_api::opa_config::OPA_BATCHED_URI_WARNING.to_string(),
+    ];
+    warnings.extend(egret_engine_mgmt_api::ranger_config::download_url_warning(
+        &st.engine_egret_url,
+    ));
+    Ok(Json(OpaPluginConfigDto {
+        files: rendered
+            .files
+            .into_iter()
+            .map(|(name, content)| RangerPluginFileDto { name, content })
+            .collect(),
+        warnings,
+        admin_must_supply: vec![
+            "egret.secret: the engine's Ranger plugin credential (rotate it with POST /api/control-plane/engines/{id}/rotate-ranger-credential to see it once)".to_string(),
+            "a Trino 483 or later coordinator with plugin/opa (it ships in trinodb/trino:483)".to_string(),
+        ],
     }))
 }
 

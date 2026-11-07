@@ -48,3 +48,7 @@ __pycache__/
 
 # W5b plugin host: Maven output, including the fetched plugin jars (plugin-host/fetch-plugins.sh)
 plugin-host/target/
+
+# scripts/opa-e2e/layer2.sh output (CI uploads it as an artifact)
+/layer2-report.json
+/layer2-results.jsonl

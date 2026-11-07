@@ -32,11 +32,14 @@ import {
   ServerRefusal,
   UnmodelledVersionNote,
   profilesQueryKey,
+  noTagService,
+  NO_TAG_SERVICE_SUFFIX,
   useCan,
   ModelledPluginsUnavailable,
   useModelledPlugins,
 } from "./externalEngine";
 import { OneTimeCredentialDialog } from "./RangerCredential";
+import { StarRocksMetadataTablesWarning } from "./StarRocksMetadataTablesWarning";
 import { PageContainer } from "@/components/layout/PageContainer";
 import { DetailHeader } from "@/components/layout/DetailHeader";
 
@@ -323,9 +326,9 @@ export default function EngineRegister() {
                     {profilesOfType.map((p) => {
                       const owner = p.engines[0];
                       return (
-                        <SelectItem key={p.id} value={String(p.id)} disabled={!!owner}>
+                        <SelectItem key={p.id} value={String(p.id)} disabled={!!owner || noTagService(p)}>
                           {p.name}
-                          {owner ? ` — bound to ${owner.name}` : ""}
+                          {owner ? ` — bound to ${owner.name}` : noTagService(p) ? ` — ${NO_TAG_SERVICE_SUFFIX}` : ""}
                         </SelectItem>
                       );
                     })}
@@ -336,6 +339,7 @@ export default function EngineRegister() {
                     There is no {ENGINE_TYPE_LABEL[type]} profile yet. Create one under Governance → Policies.
                   </p>
                 )}
+                <StarRocksMetadataTablesWarning engineType={type} bound={!!chosenProfile} />
               </div>
             )}
           </section>

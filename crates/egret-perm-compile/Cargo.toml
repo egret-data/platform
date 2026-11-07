@@ -22,10 +22,18 @@ license.workspace = true
 # regular dependencies.
 [dependencies]
 egret-perm.workspace = true
+# Governance sub-project 1: the capability matrix and the neutral IR.
+egret-perm-ir.workspace = true
+# Governance SP2b Task 6: the OPA snapshot (`opa::build`) is the pure
+# evaluator's input, built from the same lowering the Ranger compile renders.
+egret-perm-eval.workspace = true
 # View governance Task 7: `lineage::ExplainRunner` is implemented by a runner in
 # `egret-query` and faked in tests, and is held as `dyn` by the commit hold.
 async-trait.workspace = true
 egret-policy.workspace = true
+# #787: the boot repair's retry sleeps between attempts; #789: the PATCH
+# path's test seam is a task-local.
+tokio.workspace = true
 # Rename spec C11: `view_tags::ViewReach` (moved from `egret-bi`) resolves the
 # services bound to the warehouses a tag write reaches. That crate does not
 # depend on this one.
@@ -47,6 +55,9 @@ tracing.workspace = true
 # transaction as its write — and `egret-perm` depending on this crate would
 # be a dependency cycle. Same shape `egret-policy` already has (store plus
 # admin router in one crate).
+# SP2b Task 20F fix round 1: the OPA surface reads a body under a deadline
+# and tells an over-limit body (413) from a broken one (400).
+http-body-util = "0.1"
 axum.workspace = true
 egret-auth.workspace = true
 egret-core.workspace = true
@@ -73,6 +84,11 @@ egret-ranger-eval.workspace = true
 egret-policy-api.workspace = true
 # People & groups Task 3: a membership's `expiresAt` on the principal reads.
 chrono.workspace = true
+# Governance SP2b Task 9: the OPA surface verifies an engine's secret through
+# the same `EngineCredentialVerifier` the Ranger surface uses, and counts its
+# answers.
+egret-engine-mgmt-api.workspace = true
+metrics.workspace = true
 
 [features]
 # View governance Task 3: `harness_support`, the doc-hidden wrappers the
@@ -80,15 +96,47 @@ chrono.workspace = true
 # Off in every production build; enabled only by `egret-ranger-eval`'s
 # dev-dependency and by `tests/gate_timing.rs` (`required-features`).
 harness = []
+# Governance sub-project 1: every recompile compiles a second time on the same
+# transaction and asserts the two agree (`src/shadow.rs`). Test-only.
+shadow-compile = []
 
 [[test]]
 name = "gate_timing"
 required-features = ["harness"]
 
+# Governance sub-project 1: the golden corpus of compiled Ranger artifacts.
+[[test]]
+name = "golden_compile"
+required-features = ["harness"]
+
+# Governance SP2b Task 6: the OPA snapshot, built over the golden builders.
+[[test]]
+name = "opa_snapshot"
+required-features = ["harness"]
+
+# Governance SP2b Task 7: the snapshot cache and its refresher.
+[[test]]
+name = "opa_cache"
+required-features = ["harness"]
+
+# Governance SP2b Task 22 (T7 M1): the snapshot rebuild timing, `#[ignore]`d.
+[[test]]
+name = "opa_rebuild_timing"
+required-features = ["harness"]
+
+# Governance SP2b Task 18: the OPA decision-level differential against the
+# real Ranger engine (JVM; gated on EGRET_TEST_RANGER_E2E=1).
+[[test]]
+name = "opa_differential"
+required-features = ["harness"]
+
 [dev-dependencies]
+# SP2b Task 18: `tests/opa_differential/explained.toml`.
+toml.workspace = true
 egret-metastore.workspace = true
 egret-test-db.workspace = true
-tokio.workspace = true
+# #787: `start_paused` drives the boot repair's backoff without waiting it out.
+tokio = { workspace = true, features = ["test-util"] }
 # `tests/routes.rs` drives the composed router with `oneshot` and a real
 # session cookie, and builds a real `CedarPdp` for the 403 assertions.
 tower.workspace = true
@@ -104,3 +152,9 @@ serde_json.workspace = true
 # apart independently. A leaf contract crate (no sqlx/axum), and dev-only —
 # nothing in `src/` depends on it.
 egret-query-api.workspace = true
+# Governance SP2b Task 9: `tests/opa_surface.rs` reads the surface's log lines
+# back (no secret, one line per batch).
+tracing-subscriber.workspace = true
+# SP2b Task 20F: `tests/opa_surface.rs` sends a body that records whether it
+# was ever read (`stream::poll_fn`).
+futures-util.workspace = true

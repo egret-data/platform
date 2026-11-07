@@ -14,6 +14,7 @@ import {
   useControlPlaneCatalogRegistryRegistryAttachCatalog,
 } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import {
+  getControlPlaneEnginesOpaPluginConfigQueryKey,
   getControlPlaneEnginesRangerPluginConfigQueryKey,
   useControlPlaneEnginesUpdateExternalEngine,
 } from "@/api/generated/control-plane-engines/control-plane-engines";
@@ -63,13 +64,17 @@ import {
   PolicyProfileLink,
   ServerRefusal,
   UnmodelledVersionNote,
+  invalidateAfterMechanismSwitch,
   profilesQueryKey,
+  noTagService,
+  NO_TAG_SERVICE_SUFFIX,
   useCan,
   ModelledPluginsUnavailable,
   useModelledPlugins,
 } from "./externalEngine";
 import { catalogKey, catalogsQueryKey, engineDetailKey } from "./queryKeys";
 import { RangerCredentialSection, useRotationToken } from "./RangerCredential";
+import { StarRocksMetadataTablesWarning } from "./StarRocksMetadataTablesWarning";
 import { PageContainer } from "@/components/layout/PageContainer";
 import { DetailHeader } from "@/components/layout/DetailHeader";
 
@@ -151,7 +156,12 @@ export default function ExternalEngineDetail({ engine }: { engine: ExternalEngin
           <DeclaredCatalogs engine={engine} />
         </TabsContent>
         <TabsContent value="plugin-config">
-          <EnginePluginConfig engineId={engine.id} onOpenSettings={() => setTab("settings")} />
+          <PluginConfigTab
+            engineId={engine.id}
+            profilesQ={profilesQ}
+            bound={bound}
+            onOpenSettings={() => setTab("settings")}
+          />
         </TabsContent>
         <TabsContent value="settings">
           <ExternalSettings engine={engine} profilesQ={profilesQ} bound={bound} />
@@ -277,8 +287,72 @@ function Overview({
           </dd>
         </dl>
       </section>
+      <StarRocksMetadataTablesWarning engineType={engine.type} bound={!!bound} />
       {engine.rangerPluginVersionModelled === false && <UnmodelledVersionNote />}
     </>
+  );
+}
+
+// ── Plugin config ────────────────────────────────────────────────────────────
+
+/**
+ * The bound profile's mechanism picks which plugin's files to ask for, so neither request is
+ * made until the profiles have been read and the engine's profile is among them: a guess would
+ * show Ranger files for an OPA engine (FE-STATE-1: an error never renders as something else).
+ */
+function PluginConfigTab({
+  engineId,
+  profilesQ,
+  bound,
+  onOpenSettings,
+}: {
+  engineId: string;
+  profilesQ: { isLoading: boolean; isError: boolean; error: ApiError | null; refetch: () => unknown };
+  bound: Profile | undefined;
+  onOpenSettings: () => void;
+}) {
+  const queryClient = useQueryClient();
+  if (profilesQ.isError)
+    return (
+      <Alert variant="destructive" data-testid="plugin-config-profiles-error">
+        <AlertDescription className="space-y-2">
+          <p>
+            Could not read the policy profiles, so egret cannot tell which plugin this engine uses:{" "}
+            {profilesQ.error?.message ?? "the request failed"}. Try again.
+          </p>
+          <Button size="sm" variant="outline" onClick={() => void profilesQ.refetch()}>
+            Retry
+          </Button>
+        </AlertDescription>
+      </Alert>
+    );
+  if (profilesQ.isLoading) return <ListSkeleton rows={4} cols={2} />;
+  if (!bound)
+    return (
+      <Alert data-testid="plugin-config-no-profile">
+        <AlertDescription className="space-y-2">
+          <p>
+            No policy profile is bound to this engine yet, or this account cannot see the one that is. The plugin
+            configuration comes from the bound profile, so bind a profile in Settings first.
+          </p>
+          <div className="flex gap-2">
+            <Button size="sm" variant="outline" onClick={onOpenSettings}>
+              Open Settings
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => void profilesQ.refetch()}>
+              Reload profiles
+            </Button>
+          </div>
+        </AlertDescription>
+      </Alert>
+    );
+  return (
+    <EnginePluginConfig
+      engineId={engineId}
+      mechanism={bound.mechanism}
+      onOpenSettings={onOpenSettings}
+      onReload={() => invalidateAfterMechanismSwitch(queryClient)}
+    />
   );
 }
 
@@ -535,6 +609,9 @@ function SettingsForm({
         void queryClient.invalidateQueries({
           queryKey: getControlPlaneEnginesRangerPluginConfigQueryKey(engine.id),
         });
+        void queryClient.invalidateQueries({
+          queryKey: getControlPlaneEnginesOpaPluginConfigQueryKey(engine.id),
+        });
         toast.success("Saved.");
       },
     },
@@ -644,9 +721,9 @@ function SettingsForm({
                 {profilesOfType.map((p) => {
                   const owner = p.engines.find((e) => e.id !== engine.id);
                   return (
-                    <SelectItem key={p.id} value={String(p.id)} disabled={!!owner}>
+                    <SelectItem key={p.id} value={String(p.id)} disabled={!!owner || noTagService(p)}>
                       {p.name}
-                      {owner ? ` — bound to ${owner.name}` : ""}
+                      {owner ? ` — bound to ${owner.name}` : noTagService(p) ? ` — ${NO_TAG_SERVICE_SUFFIX}` : ""}
                     </SelectItem>
                   );
                 })}
@@ -656,6 +733,7 @@ function SettingsForm({
               Changing or removing the profile recompiles both the old and the new one. If that would leave two mask or
               row-filter rules deciding one column differently, egret refuses and changes nothing.
             </p>
+            <StarRocksMetadataTablesWarning engineType={engine.type} bound={profileId !== ""} />
           </div>
         )}
       </section>

@@ -20,6 +20,19 @@ import { cn } from "@/lib/utils";
 export const TAG_POLICIES_NEED_POLICY_READ =
   "Manual tag policies are read with the policy:read permission, which this account does not have.";
 
+export const WIDER_THAN_PATTERN = "Wider than its pattern";
+
+/**
+ * Why a row whose pattern does not match this classification is listed (#803):
+ * Ranger picks tag policies by the literal prefix before a value's first
+ * wildcard, so the engine applies it to every tag with that prefix.
+ */
+export function engineReach(prefix: string | null | undefined): string {
+  return prefix
+    ? `The engine applies this policy to every tag starting with “${prefix}”, not only the tags its pattern matches.`
+    : "The engine applies this policy to every tag, not only the tags its pattern matches.";
+}
+
 const byName = <T extends { name: string }>(a: T, b: T) => a.name.localeCompare(b.name);
 
 /**
@@ -36,8 +49,9 @@ function editHref(p: TagPolicyRow): string | null {
 /**
  * Manual policies (spec §5.5, Q4; the glossary's `TERM.manualPolicies`, the
  * tab formerly "Hand-written"), from route D: every hand-written policy of a
- * usable tag service whose tag resource matches this classification's name
- * through the tag service-def's matcher. A row is a match on the tag name, not
+ * usable tag service that the engines apply to this classification's name.
+ * The engines pick tag policies more widely than the patterns read (#803);
+ * such a row says so with its prefix. A row is a match on the tag name, not
  * a decision: disabled policies, deny-all-else and constructs egret does not
  * evaluate are stated (CL9), and group and role items reach nobody (Q1).
  * Read with `policy:read`; without it the tab says so and asks nothing.
@@ -68,7 +82,7 @@ function Body({ tagId }: { tagId: string }) {
   return (
     <div className="space-y-3">
       <p className="text-sm text-muted-foreground">
-        Manual tag policies, written in an engine profile&apos;s own editor, whose tag matches this
+        Manual tag policies, written in an engine profile&apos;s own editor, that the engines apply to this
         classification&apos;s name. A listed policy names the classification; it may still be disabled or outranked on
         the engine.
       </p>
@@ -117,6 +131,12 @@ function Body({ tagId }: { tagId: string }) {
                       {p.throughPattern ? (
                         <span className="block text-xs text-muted-foreground">
                           Names this classification through a pattern.
+                        </span>
+                      ) : null}
+                      {p.widenedByEngine ? (
+                        <span className="mt-1 block text-xs">
+                          <StatusBadge tone="highlight">{WIDER_THAN_PATTERN}</StatusBadge>
+                          <span className="mt-1 block text-muted-foreground">{engineReach(p.engineTagPrefix)}</span>
                         </span>
                       ) : null}
                     </TableCell>

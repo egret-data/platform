@@ -55,12 +55,19 @@ struct RecordingProfileCompiler {
     /// asserting the update path's in-transaction recompile cannot be
     /// satisfied by the create path's fire-and-forget one.
     in_tx_calls: Arc<std::sync::Mutex<Vec<i64>>>,
+    /// `converge_infra` calls (governance SP2a infrastructure convergence).
+    converge_calls: Arc<std::sync::Mutex<Vec<i64>>>,
 }
 
 #[async_trait::async_trait]
 impl egret_engine_mgmt::ProfileCompilerPort for RecordingProfileCompiler {
     async fn recompile_profile(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
         self.calls.lock().unwrap().push(service_id);
+        Ok(())
+    }
+
+    async fn converge_infra(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
+        self.converge_calls.lock().unwrap().push(service_id);
         Ok(())
     }
 
@@ -81,6 +88,78 @@ impl egret_engine_mgmt::ProfileCompilerPort for RecordingProfileCompiler {
         service_id: i64,
     ) -> Result<(), egret_perm::CompileError> {
         self.in_tx_calls.lock().unwrap().push(service_id);
+        Ok(())
+    }
+
+    async fn lock_profiles_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        _service_ids: &[i64],
+    ) -> Result<(), egret_perm::CompileError> {
+        Ok(())
+    }
+
+    async fn overlap_snapshot_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        _service_ids: &[i64],
+    ) -> Result<egret_engine_mgmt::OverlapSnapshot, egret_perm::CompileError> {
+        Ok(egret_engine_mgmt::OverlapSnapshot::new(()))
+    }
+
+    async fn refuse_created_overlaps_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        _snapshot: &egret_engine_mgmt::OverlapSnapshot,
+    ) -> Result<(), egret_perm::CompileError> {
+        Ok(())
+    }
+}
+
+/// A `ProfileCompilerPort` whose only real call is `converge_infra`, against
+/// the fixture's own pool; every other call is a no-op, as with no compiler.
+/// Governance SP2a: apply converges a bound profile's infrastructure policies
+/// through the compiler and is refused without one, so a test that applied a
+/// bound engine with no compiler (when apply wrote those rows itself) now
+/// arranges this one, the closest analogue of what it had.
+#[derive(Clone)]
+struct ConvergeOnlyCompiler {
+    pool: sqlx::PgPool,
+}
+
+#[async_trait::async_trait]
+impl egret_engine_mgmt::ProfileCompilerPort for ConvergeOnlyCompiler {
+    async fn recompile_profile(&self, _service_id: i64) -> Result<(), egret_perm::CompileError> {
+        Ok(())
+    }
+
+    async fn converge_infra(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
+        egret_perm_compile::converge_infra_policy(&self.pool, service_id)
+            .await
+            .map(|_| ())
+    }
+
+    async fn recompile_catalog_assignment_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        _catalog_id: Uuid,
+    ) -> Result<(), egret_perm::CompileError> {
+        Ok(())
+    }
+
+    async fn recompile_profile_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        _service_id: i64,
+    ) -> Result<(), egret_perm::CompileError> {
+        Ok(())
+    }
+
+    async fn lock_profiles_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        _service_ids: &[i64],
+    ) -> Result<(), egret_perm::CompileError> {
         Ok(())
     }
 
@@ -121,6 +200,12 @@ impl egret_engine_mgmt::ProfileCompilerPort for RealProfileCompiler {
             .map(|_| ())
     }
 
+    async fn converge_infra(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
+        egret_perm_compile::converge_infra_policy(self.perm.pool(), service_id)
+            .await
+            .map(|_| ())
+    }
+
     async fn recompile_catalog_assignment_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -148,6 +233,15 @@ impl egret_engine_mgmt::ProfileCompilerPort for RealProfileCompiler {
         egret_perm_compile::lock_services_in_tx(tx, &[service_id]).await?;
         egret_perm_compile::recompile_service_in_tx(tx, service_id).await?;
         Ok(())
+    }
+
+    /// The same call `egret-bin`'s `lock_profiles_in_tx` makes.
+    async fn lock_profiles_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_ids: &[i64],
+    ) -> Result<(), egret_perm::CompileError> {
+        egret_perm_compile::lock_services_in_tx(tx, service_ids).await
     }
 
     async fn overlap_snapshot_in_tx(
@@ -354,6 +448,31 @@ async fn setup_with_ranger(
     ranger_enabled: bool,
 ) -> Option<Fixture> {
     setup_with_ranger_and_compiler(engine_provisioner, kube, ranger_enabled, None).await
+}
+
+/// `setup_with_ranger` with a [`ConvergeOnlyCompiler`] wired: for a test
+/// that applies an engine bound to a profile, which converges the profile's
+/// infrastructure policies through the compiler (governance SP2a).
+async fn setup_with_ranger_converging(
+    engine_provisioner: Option<Arc<dyn EngineProvisioningPort>>,
+    kube: Option<Arc<dyn KubeClient>>,
+    ranger_enabled: bool,
+) -> Option<Fixture> {
+    let mut f = setup_with_ranger(engine_provisioner, kube, ranger_enabled).await?;
+    f.perm_compiler = Some(Arc::new(ConvergeOnlyCompiler {
+        pool: f.db.pool.clone(),
+    }));
+    f.app = build_app(
+        &f.db,
+        &f.sessions,
+        f.engine_provisioner.clone(),
+        f.kube.clone(),
+        std::sync::Arc::new(AllowAllPdp),
+        f.ranger_enabled,
+        f.starrocks_ddl.clone(),
+        f.perm_compiler.clone(),
+    );
+    Some(f)
 }
 
 /// `setup_with_ranger` with the SP4a profile compiler under the test's control.
@@ -5144,7 +5263,7 @@ async fn authz_service_of(f: &Fixture, name: &str) -> Option<i64> {
 #[tokio::test]
 async fn recreate_with_same_name_binds_the_orphan_profile_before_provisioning() {
     let port = FakeEnginePort::default();
-    let Some(f) = setup_with_ranger(
+    let Some(f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         true,
@@ -5189,7 +5308,7 @@ async fn recreate_with_same_name_binds_the_orphan_profile_before_provisioning() 
 #[tokio::test]
 async fn create_whose_profile_is_bound_elsewhere_is_409_and_mints_nothing() {
     let port = FakeEnginePort::default();
-    let Some(f) = setup_with_ranger(
+    let Some(f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         true,
@@ -5261,7 +5380,7 @@ async fn create_whose_profile_is_bound_elsewhere_is_409_and_mints_nothing() {
 #[tokio::test]
 async fn apply_late_binds_ranger_once_it_is_enabled_after_an_unbound_create() {
     let port = FakeEnginePort::default();
-    let Some(mut f) = setup_with_ranger(
+    let Some(mut f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         false, // created while Ranger is OFF
@@ -5332,7 +5451,7 @@ async fn apply_late_binds_ranger_once_it_is_enabled_after_an_unbound_create() {
 async fn failed_create_removes_the_profile_it_created() {
     let port = FakeEnginePort::default();
     port.set_fail_provision(true);
-    let Some(f) = setup_with_ranger(
+    let Some(f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         true,
@@ -5730,7 +5849,7 @@ async fn sweep_ranger_retire(f: &Fixture) -> usize {
 #[tokio::test]
 async fn a_bound_trino_engine_is_applied_with_a_ranger_credential_that_verifies() {
     let port = FakeEnginePort::default();
-    let Some(f) = setup_with_ranger(
+    let Some(f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         true,
@@ -5823,7 +5942,7 @@ async fn a_starrocks_engine_name_over_the_volume_budget_is_refused() {
 #[tokio::test]
 async fn an_existing_starrocks_engine_over_the_name_bound_is_refused_on_apply() {
     let port = FakeEnginePort::default();
-    let Some(f) = setup_with_ranger(
+    let Some(f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         true,
@@ -5888,7 +6007,7 @@ async fn an_existing_starrocks_engine_over_the_name_bound_is_refused_on_apply() 
 #[tokio::test]
 async fn a_bound_starrocks_engine_is_applied_with_a_ranger_credential_that_verifies() {
     let port = FakeEnginePort::default();
-    let Some(f) = setup_with_ranger(
+    let Some(f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         true,
@@ -5957,7 +6076,7 @@ async fn a_bound_starrocks_engine_is_applied_with_a_ranger_credential_that_verif
 #[tokio::test]
 async fn rotate_ranger_credential_keeps_the_old_one_until_the_rollout_is_observed_complete() {
     let port = FakeEnginePort::default();
-    let Some(f) = setup_with_ranger(
+    let Some(f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         true,
@@ -6116,7 +6235,7 @@ async fn rotate_ranger_credential_keeps_the_old_one_until_the_rollout_is_observe
 #[tokio::test]
 async fn a_failed_rollout_probe_keeps_the_previous_ranger_credential() {
     let port = FakeEnginePort::default();
-    let Some(f) = setup_with_ranger(
+    let Some(f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         true,
@@ -6161,7 +6280,7 @@ async fn a_failed_rollout_probe_keeps_the_previous_ranger_credential() {
 #[tokio::test]
 async fn a_panicking_retire_pass_does_not_stop_the_sweep() {
     let port = FakeEnginePort::default();
-    let Some(f) = setup_with_ranger(
+    let Some(f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         true,
@@ -6206,7 +6325,7 @@ async fn a_panicking_retire_pass_does_not_stop_the_sweep() {
 #[tokio::test]
 async fn an_unrenderable_stored_credential_fails_the_apply_until_rotated() {
     let port = FakeEnginePort::default();
-    let Some(f) = setup_with_ranger(
+    let Some(f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         true,
@@ -11834,6 +11953,7 @@ async fn a_late_refusal_restores_the_previous_binding() {
     let target_name = format!("srtarget-{}", Uuid::new_v4().simple());
     let target = seed_profile_without_tag_service(&f, &target_name, "starrocks").await;
     compiler.in_tx_calls.lock().unwrap().clear();
+    compiler.converge_calls.lock().unwrap().clear();
 
     // This engine has no primary warehouse attachment, so the StarRocks
     // provision-req build 400s — after the bind.
@@ -11857,6 +11977,14 @@ async fn a_late_refusal_restores_the_previous_binding() {
     // Both profile rows survive — a restore unbinds, never deletes.
     assert!(service_exists(&f, &start_name).await);
     assert!(service_exists(&f, &target_name).await);
+    // SP2a final review I1: both profiles' infrastructure rows are converged
+    // again once the binding is restored, since the failed attempt may have
+    // converged them with the engine on the target.
+    let converged = compiler.converge_calls.lock().unwrap().clone();
+    assert!(
+        converged.contains(&start) && converged.contains(&target),
+        "both profiles must be re-converged after the rollback; got {converged:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -13027,6 +13155,17 @@ async fn a_late_bind_that_cannot_complete_fails_the_apply_and_leaves_the_engine_
     assert!(authz_service_of(&f, &name).await.is_some());
 }
 
+/// A StarRocks engine bound to a Trino profile is refused with the cross-type
+/// message, not created (d-i).
+fn assert_cross_type_refusal(status: StatusCode, body: &serde_json::Value) {
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("has type trino, but engine") && error.contains("is a starrocks engine"),
+        "the refusal names the two types: {body}"
+    );
+}
+
 /// C1, StarRocks: `POST /engines` with `authzServiceId`.
 #[tokio::test]
 async fn a_starrocks_create_with_authz_service_id_that_creates_an_overlap_is_409_and_creates_nothing(
@@ -13048,7 +13187,9 @@ async fn a_starrocks_create_with_authz_service_id_that_creates_an_overlap_is_409
         Some(starrocks_create_body(&name, wh, unit.profile)),
     )
     .await;
-    assert_rule_overlap(status, &body);
+    // The tag profile is Trino and the engine StarRocks: a cross-type bind is
+    // refused before any overlap is weighed, and the create is undone (d-i).
+    assert_cross_type_refusal(status, &body);
     assert_eq!(
         engine_rows_named(&f, &name).await,
         0,
@@ -13071,8 +13212,12 @@ async fn a_starrocks_create_with_authz_service_id_that_creates_an_overlap_is_409
         Some(starrocks_create_body(&ok_name, wh2, ok.profile)),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-    assert_eq!(authz_service_of(&f, &ok_name).await, Some(ok.profile));
+    assert_cross_type_refusal(status, &body);
+    assert_eq!(
+        engine_rows_named(&f, &ok_name).await,
+        0,
+        "the create is undone"
+    );
 }
 
 /// C1, the late-bind inside an apply: Ranger turned on after an unbound create
@@ -13255,6 +13400,9 @@ impl egret_engine_mgmt::ProfileCompilerPort for ConflictAfterDryRun {
         }
         self.inner.recompile_profile(service_id).await
     }
+    async fn converge_infra(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
+        self.inner.converge_infra(service_id).await
+    }
     async fn recompile_catalog_assignment_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -13270,6 +13418,13 @@ impl egret_engine_mgmt::ProfileCompilerPort for ConflictAfterDryRun {
         service_id: i64,
     ) -> Result<(), egret_perm::CompileError> {
         self.inner.recompile_profile_in_tx(tx, service_id).await
+    }
+    async fn lock_profiles_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_ids: &[i64],
+    ) -> Result<(), egret_perm::CompileError> {
+        self.inner.lock_profiles_in_tx(tx, service_ids).await
     }
     async fn overlap_snapshot_in_tx(
         &self,
@@ -14697,7 +14852,7 @@ async fn the_engine_dto_exposes_the_ranger_credential_id_and_pending_flag_never_
 #[tokio::test]
 async fn a_provisioned_engine_dto_shows_its_rotation_pending_until_the_rollout_completes() {
     let port = FakeEnginePort::default();
-    let Some(f) = setup_with_ranger(
+    let Some(f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         true,
@@ -14747,7 +14902,7 @@ async fn a_provisioned_engine_dto_shows_its_rotation_pending_until_the_rollout_c
 #[tokio::test]
 async fn an_engine_read_does_not_wait_on_a_hung_rollout_probe() {
     let port = FakeEnginePort::default();
-    let Some(f) = setup_with_ranger(
+    let Some(f) = setup_with_ranger_converging(
         Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
         true,
@@ -16199,4 +16354,801 @@ async fn a_docker_settings_save_dropped_between_remove_and_start_still_starts_th
     let (status, j) = into_json(resp).await;
     assert_eq!(status, StatusCode::OK, "get engine; body={j}");
     assert_eq!(j["status"]["phase"], "running", "body={j}");
+}
+
+// ---------------------------------------------------------------------------
+// Governance SP2b Task 15: apply reads the profile's mechanism, a switch
+// re-applies the profile's engines, and an external engine on an OPA profile
+// gets its OPA plugin files.
+// ---------------------------------------------------------------------------
+
+/// The `EngineMgmtState` `f.app` runs over, for a direct call.
+fn state_of(f: &Fixture) -> EngineMgmtState {
+    engine_state(
+        &f.db,
+        &f.sessions,
+        f.engine_provisioner.clone(),
+        f.kube.clone(),
+        Arc::new(AllowAllPdp),
+        f.ranger_enabled,
+        f.starrocks_ddl.clone(),
+        f.perm_compiler.clone(),
+        egret_engine_mgmt::state::RangerSurfaceMode::Required,
+    )
+}
+
+async fn set_profile_mechanism(f: &Fixture, id: i64, mechanism: &str) {
+    sqlx::query("UPDATE policy.authz_services SET mechanism = $2 WHERE id = $1")
+        .bind(id)
+        .bind(mechanism)
+        .execute(&f.db.pool)
+        .await
+        .expect("set mechanism");
+}
+
+async fn applied_mechanism(f: &Fixture, id: Uuid) -> Option<String> {
+    sqlx::query_scalar("SELECT applied_mechanism FROM engine_mgmt.engines WHERE id = $1")
+        .bind(id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("engine row")
+}
+
+fn trino_body(name: &str, wh_id: Uuid, image: &str, authz: Option<i64>) -> serde_json::Value {
+    serde_json::json!({
+        "name": name, "warehouseId": wh_id, "imageVersion": image, "authzServiceId": authz,
+        "coordinatorReplicas": 1, "workerReplicas": 1,
+        "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+    })
+}
+
+/// A provisioned Trino engine named `name` on `image`, created through the
+/// route; its id.
+async fn create_trino(
+    f: &Fixture,
+    token: &str,
+    name: &str,
+    wh_id: Uuid,
+    image: &str,
+    authz: Option<i64>,
+) -> Uuid {
+    let (status, j) = call(
+        f,
+        "POST",
+        "/engines",
+        token,
+        Some(trino_body(name, wh_id, image, authz)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create {name} on {image}: {j}");
+    Uuid::parse_str(j["id"].as_str().unwrap()).unwrap()
+}
+
+/// A fresh DNS-label engine name; `prefix` orders engines by name.
+fn engine_name(prefix: &str) -> String {
+    format!("{prefix}-{}", &Uuid::new_v4().simple().to_string()[..12])
+}
+
+async fn opa_fixture(port: &FakeEnginePort) -> Option<Fixture> {
+    setup_with_ranger_converging(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+    )
+    .await
+}
+
+const NO_OPA_PLUGIN: &str = "which does not ship the Trino OPA plugin, and its profile is on OPA; \
+                             use trinodb/trino:483 or switch the profile to Ranger";
+
+#[tokio::test]
+async fn an_opa_profiles_engine_is_applied_with_the_opa_binding_and_records_it() {
+    // Arrange
+    let port = FakeEnginePort::default();
+    let Some(f) = opa_fixture(&port).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "opa_apply_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let profile = seed_typed_profile(&f, &engine_name("opa-apply-p"), "trino").await;
+    let name = engine_name("opa-apply");
+    let id = create_trino(&f, &token, &name, wh_id, "483", Some(profile)).await;
+    // A Ranger profile's engine renders exactly the Ranger plugin it did before.
+    let created = port.last_provisioned();
+    let r = created.ranger.as_ref().expect("bound");
+    assert_eq!(
+        r.mechanism,
+        egret_engine_mgmt_api::opa_config::AccessMechanism::Ranger
+    );
+    let xml = egret_provisioner::trino::trino_ranger_secret(&created)
+        .unwrap()
+        .unwrap()["stringData"]["ranger-trino-security.xml"]
+        .as_str()
+        .expect("the Ranger XML")
+        .to_string();
+    let want = egret_provisioner::ranger_plugin_files(
+        egret_engine_mgmt_api::EngineKind::Trino,
+        &r.service_name,
+        "http://egret:8080",
+        egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS.into(),
+        r.credential_ref(),
+    );
+    assert_eq!(&xml, want.get("ranger-trino-security.xml").unwrap());
+    assert_eq!(applied_mechanism(&f, id).await.as_deref(), Some("ranger"));
+    set_profile_mechanism(&f, profile, "opa").await;
+
+    // Act
+    let report = egret_engine_mgmt::reapply_bound_engines(&state_of(&f), profile).await;
+
+    // Assert
+    assert_eq!(report.applied, vec![name.clone()], "{report:?}");
+    assert!(report.failed.is_empty(), "{report:?}");
+    let spec = port.last_updated();
+    let r = spec.ranger.as_ref().expect("bound");
+    assert_eq!(
+        r.mechanism,
+        egret_engine_mgmt_api::opa_config::AccessMechanism::Opa
+    );
+    assert_eq!(r.engine_id, id.to_string());
+    assert!(
+        r.credential.is_some(),
+        "the context file carries the credential"
+    );
+    assert_eq!(applied_mechanism(&f, id).await.as_deref(), Some("opa"));
+
+    // And back: the engine is re-applied on Ranger and says so.
+    set_profile_mechanism(&f, profile, "ranger").await;
+    let report = egret_engine_mgmt::reapply_bound_engines(&state_of(&f), profile).await;
+    assert_eq!(report.applied, vec![name], "{report:?}");
+    assert_eq!(
+        port.last_updated().ranger.unwrap().mechanism,
+        egret_engine_mgmt_api::opa_config::AccessMechanism::Ranger
+    );
+    assert_eq!(applied_mechanism(&f, id).await.as_deref(), Some("ranger"));
+}
+
+#[tokio::test]
+async fn a_failed_apply_does_not_record_the_mechanism() {
+    let port = FakeEnginePort::default();
+    let Some(f) = opa_fixture(&port).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "opa_failed_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let profile = seed_typed_profile(&f, &engine_name("opa-failed-p"), "trino").await;
+    let name = engine_name("opa-failed");
+    let id = create_trino(&f, &token, &name, wh_id, "483", Some(profile)).await;
+    set_profile_mechanism(&f, profile, "opa").await;
+    port.set_fail_update(true);
+
+    let report = egret_engine_mgmt::reapply_bound_engines(&state_of(&f), profile).await;
+
+    assert_eq!(
+        report.failed,
+        vec![(name, "injected update failure".to_string())]
+    );
+    assert_eq!(applied_mechanism(&f, id).await.as_deref(), Some("ranger"));
+}
+
+#[tokio::test]
+async fn reapply_skips_external_and_deleting_engines_and_tries_every_other_one() {
+    // Arrange
+    let port = FakeEnginePort::default();
+    let Some(f) = opa_fixture(&port).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "opa_every_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let profile = seed_typed_profile(&f, &engine_name("opa-every-p"), "trino").await;
+    let (external, external_name) =
+        register_external(&f, &token, "trino", "2.8.0", Some(profile), &[]).await;
+    let first = engine_name("a-opa-every");
+    let second = engine_name("b-opa-every");
+    let deleting = engine_name("c-opa-every");
+    let mut ids = Vec::new();
+    for name in [&first, &second, &deleting] {
+        ids.push(create_trino(&f, &token, name, wh_id, "483", None).await);
+    }
+    // One profile serves one engine through the routes; the store allows more,
+    // and a reconfigure must not stop at one of them.
+    sqlx::query("UPDATE engine_mgmt.engines SET authz_service_id = $1 WHERE id = ANY($2)")
+        .bind(profile)
+        .bind(&ids)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE engine_mgmt.engines SET status = 'deleting' WHERE id = $1")
+        .bind(ids[2])
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    set_profile_mechanism(&f, profile, "opa").await;
+    port.set_fail_update_for(&first, true);
+    port.updated.lock().unwrap().clear();
+
+    // Act
+    let report = egret_engine_mgmt::reapply_bound_engines(&state_of(&f), profile).await;
+
+    // Assert
+    assert_eq!(
+        report.failed,
+        vec![(first.clone(), "injected update failure".to_string())],
+        "{report:?}"
+    );
+    assert_eq!(report.applied, vec![second.clone()], "{report:?}");
+    let tried: Vec<String> = port
+        .updated
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
+    assert_eq!(
+        tried,
+        vec![first, second],
+        "never the external or the deleting one"
+    );
+    assert!(!tried.contains(&external_name));
+    assert_eq!(applied_mechanism(&f, external).await, None);
+}
+
+#[tokio::test]
+async fn reapply_without_a_provisioner_reports_every_engine_failed() {
+    let port = FakeEnginePort::default();
+    let Some(mut f) = opa_fixture(&port).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "opa_noprov_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let profile = seed_typed_profile(&f, &engine_name("opa-noprov-p"), "trino").await;
+    let name = engine_name("opa-noprov");
+    create_trino(&f, &token, &name, wh_id, "483", Some(profile)).await;
+    f.engine_provisioner = None;
+
+    let report = egret_engine_mgmt::reapply_bound_engines(&state_of(&f), profile).await;
+
+    assert!(report.applied.is_empty());
+    assert_eq!(
+        report.failed,
+        vec![(name, "no engine provisioner is configured".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn an_engine_on_an_image_without_the_opa_plugin_cannot_be_applied_on_an_opa_profile() {
+    // Arrange: the brief's stored 470 (no route accepts it any more).
+    let port = FakeEnginePort::default();
+    let Some(f) = opa_fixture(&port).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "opa_470_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let profile = seed_typed_profile(&f, &engine_name("opa-470-p"), "trino").await;
+    let name = engine_name("opa-470");
+    let id = create_trino(&f, &token, &name, wh_id, "483", Some(profile)).await;
+    sqlx::query(
+        "UPDATE engine_mgmt.engines SET spec = jsonb_set(spec, '{imageVersion}', '\"470\"') \
+         WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    set_profile_mechanism(&f, profile, "opa").await;
+
+    // Act
+    let report = egret_engine_mgmt::reapply_bound_engines(&state_of(&f), profile).await;
+
+    // Assert
+    assert!(report.applied.is_empty(), "{report:?}");
+    assert_eq!(report.failed.len(), 1, "{report:?}");
+    assert_eq!(report.failed[0].0, name);
+    assert_eq!(
+        report.failed[0].1,
+        format!("conflict: engine {name} runs trinodb/trino:470, {NO_OPA_PLUGIN}")
+    );
+    assert!(
+        port.updated.lock().unwrap().is_empty(),
+        "nothing reached the fake"
+    );
+    assert_eq!(applied_mechanism(&f, id).await.as_deref(), Some("ranger"));
+}
+
+#[tokio::test]
+async fn a_create_onto_an_opa_profile_on_an_image_without_the_plugin_is_409() {
+    let port = FakeEnginePort::default();
+    let Some(f) = opa_fixture(&port).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "opa_create_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let profile = seed_typed_profile(&f, &engine_name("opa-create-p"), "trino").await;
+    set_profile_mechanism(&f, profile, "opa").await;
+    let name = engine_name("opa-create");
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/engines",
+        &token,
+        Some(trino_body(&name, wh_id, "476", Some(profile))),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    assert_eq!(
+        j["error"],
+        format!("conflict: engine {name} runs trinodb/trino:476, {NO_OPA_PLUGIN}"),
+        "{j}"
+    );
+    assert!(
+        port.provisioned.lock().unwrap().is_empty(),
+        "nothing provisioned"
+    );
+    // On the plugin's image the same create goes through, on OPA.
+    let ok = engine_name("opa-create-ok");
+    let id = create_trino(&f, &token, &ok, wh_id, "483", Some(profile)).await;
+    assert_eq!(
+        port.last_provisioned().ranger.unwrap().mechanism,
+        egret_engine_mgmt_api::opa_config::AccessMechanism::Opa
+    );
+    assert_eq!(applied_mechanism(&f, id).await.as_deref(), Some("opa"));
+}
+
+#[tokio::test]
+async fn an_image_change_on_an_engine_of_an_opa_profile_is_409_and_keeps_the_spec() {
+    let port = FakeEnginePort::default();
+    let Some(f) = opa_fixture(&port).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "opa_image_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let profile = seed_typed_profile(&f, &engine_name("opa-image-p"), "trino").await;
+    let name = engine_name("opa-image");
+    let id = create_trino(&f, &token, &name, wh_id, "483", Some(profile)).await;
+    set_profile_mechanism(&f, profile, "opa").await;
+
+    let (status, j) = call(
+        &f,
+        "PUT",
+        &format!("/engines/{id}"),
+        &token,
+        Some(trino_body(&name, wh_id, "476", None)),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    assert_eq!(
+        j["error"],
+        format!("conflict: engine {name} runs trinodb/trino:476, {NO_OPA_PLUGIN}"),
+        "{j}"
+    );
+    assert_eq!(
+        stored_spec(&f, &id.to_string()).await["imageVersion"],
+        "483"
+    );
+    assert!(port.updated.lock().unwrap().is_empty(), "nothing updated");
+}
+
+#[tokio::test]
+async fn binding_an_engine_without_the_plugin_to_an_opa_profile_is_409_and_unbinds_nothing() {
+    let port = FakeEnginePort::default();
+    let Some(f) = opa_fixture(&port).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "opa_bind_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = engine_name("opa-bind");
+    let id = create_trino(&f, &token, &name, wh_id, "476", None).await;
+    let own_profile = authz_service_of(&f, &name).await;
+    assert!(
+        own_profile.is_some(),
+        "auto-bound to its own Ranger profile"
+    );
+    let profile = seed_typed_profile(&f, &engine_name("opa-bind-p"), "trino").await;
+    set_profile_mechanism(&f, profile, "opa").await;
+
+    let (status, j) = call(
+        &f,
+        "PUT",
+        &format!("/engines/{id}"),
+        &token,
+        Some(trino_body(&name, wh_id, "476", Some(profile))),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    assert_eq!(
+        j["error"],
+        format!("conflict: engine {name} runs trinodb/trino:476, {NO_OPA_PLUGIN}"),
+        "{j}"
+    );
+    assert_eq!(
+        authz_service_of(&f, &name).await,
+        own_profile,
+        "binding restored"
+    );
+    assert!(port.updated.lock().unwrap().is_empty(), "nothing updated");
+}
+
+/// The seam egret-bin wires: the policy admin's switch, over the engine seam.
+struct EngineReconfigurer(EngineMgmtState);
+
+#[async_trait::async_trait]
+impl egret_policy::ProfileEngineReconfigurer for EngineReconfigurer {
+    async fn reconfigure_bound_engines(&self, service_id: i64) -> egret_policy::ReconfigureReport {
+        egret_engine_mgmt::reapply_bound_engines(&self.0, service_id).await
+    }
+}
+
+/// The Ranger switch reads no binding (it judges no image).
+struct NoBindings;
+
+#[async_trait::async_trait]
+impl egret_policy::EngineBindingReader for NoBindings {
+    async fn list_engine_bindings(
+        &self,
+    ) -> Result<Vec<egret_policy::EngineBinding>, egret_policy::EngineReadError> {
+        Ok(vec![])
+    }
+    async fn engine_catalog_names(
+        &self,
+        _e: Uuid,
+    ) -> Result<Vec<String>, egret_policy::EngineReadError> {
+        Ok(vec![])
+    }
+    async fn warehouse_schemas(
+        &self,
+        _w: Uuid,
+    ) -> Result<Vec<String>, egret_policy::EngineReadError> {
+        Ok(vec![])
+    }
+    async fn warehouse_tables(
+        &self,
+        _w: Uuid,
+        _s: &str,
+    ) -> Result<Vec<String>, egret_policy::EngineReadError> {
+        Ok(vec![])
+    }
+    async fn warehouse_columns(
+        &self,
+        _w: Uuid,
+        _s: &str,
+        _t: &str,
+    ) -> Result<Vec<String>, egret_policy::EngineReadError> {
+        Ok(vec![])
+    }
+}
+
+#[tokio::test]
+async fn the_switch_reapplies_the_profiles_engines_answers_502_by_name_and_a_resend_retries() {
+    // Arrange: an OPA profile with one engine on it, switched back to Ranger.
+    let port = FakeEnginePort::default();
+    let Some(f) = opa_fixture(&port).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "opa_switch_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let service = engine_name("opa-switch-p");
+    let profile = seed_typed_profile(&f, &service, "trino").await;
+    let name = engine_name("opa-switch");
+    set_profile_mechanism(&f, profile, "opa").await;
+    let id = create_trino(&f, &token, &name, wh_id, "483", Some(profile)).await;
+    assert_eq!(applied_mechanism(&f, id).await.as_deref(), Some("opa"));
+    let admin = egret_policy::policy_admin_router().with_state(egret_policy::PolicyAdminState {
+        store: egret_policy::PolicyStore::new(f.db.clone()),
+        engines: Arc::new(NoBindings),
+        users: UserRepo::new(f.db.clone()),
+        groups: egret_auth::groups::GroupRepo::new(f.db.clone()),
+        sessions: f.sessions.clone(),
+        engine_egret_url: "http://egret:8080".into(),
+        pdp: Arc::new(AllowAllPdp),
+        recompiler: Arc::new(egret_perm_compile::PermRecompiler),
+        reconfigurer: Arc::new(EngineReconfigurer(state_of(&f))),
+        opa_enabled: true,
+    });
+    let patch = || async {
+        into_json(
+            admin
+                .clone()
+                .oneshot(req(
+                    "PATCH",
+                    &format!("/policies/services/{service}"),
+                    &token,
+                    Some(serde_json::json!({ "mechanism": "ranger" })),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await
+    };
+    port.set_fail_update(true);
+
+    // Act: the reconfigure fails.
+    let (status, j) = patch().await;
+
+    // Assert: 502 naming the engine; the engine still runs OPA.
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{j}");
+    assert_eq!(
+        j["engines_failed"],
+        serde_json::json!([{ "engine": name, "error": "injected update failure" }]),
+        "{j}"
+    );
+    assert!(j["error"].as_str().unwrap().contains(&name), "{j}");
+    assert_eq!(applied_mechanism(&f, id).await.as_deref(), Some("opa"));
+
+    // Act: the same PATCH again, the cluster healthy.
+    port.set_fail_update(false);
+    let updates_before = port.updated.lock().unwrap().len();
+    let (status, j) = patch().await;
+
+    // Assert: the reconfigure ran again and the engine is on Ranger.
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["engines_reconfigured"], serde_json::json!([name]), "{j}");
+    assert_eq!(port.updated.lock().unwrap().len(), updates_before + 1);
+    assert_eq!(
+        port.last_updated().ranger.unwrap().mechanism,
+        egret_engine_mgmt_api::opa_config::AccessMechanism::Ranger
+    );
+    assert_eq!(applied_mechanism(&f, id).await.as_deref(), Some("ranger"));
+}
+
+#[tokio::test]
+async fn opa_plugin_config_for_an_external_engine_on_an_opa_profile() {
+    let Some(f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "opa_cfg_admin", true).await;
+    let profile = seed_typed_profile(&f, &external_name("opa-cfg-p"), "trino").await;
+    let (id, registered) = external_credential_register(&f, &token, "trino", Some(profile)).await;
+    let (_user, password) = credential_of(&registered);
+    set_profile_mechanism(&f, profile, "opa").await;
+
+    let (status, j) = call(
+        &f,
+        "GET",
+        &format!("/engines/{id}/opa-plugin-config"),
+        &token,
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{j}");
+    let placeholder = egret_engine_mgmt_api::ranger_config::PASSWORD_PLACEHOLDER;
+    let want = egret_engine_mgmt_api::opa_config::opa_plugin_files(
+        &id.to_string(),
+        "http://egret:8080",
+        placeholder,
+    )
+    .unwrap();
+    assert_eq!(j["files"][0]["name"], "access-control.properties");
+    assert_eq!(
+        j["files"][0]["content"],
+        want.get("access-control.properties").unwrap()
+    );
+    assert_eq!(
+        j["files"][1]["name"],
+        egret_engine_mgmt_api::opa_config::OPA_CONTEXT_FILE
+    );
+    let ctx = j["files"][1]["content"].as_str().unwrap();
+    assert!(ctx.contains(&format!("egret.engine={id}\n")), "{j}");
+    assert!(
+        ctx.contains(&format!("egret.secret={placeholder}\n")),
+        "{j}"
+    );
+    assert!(!j.to_string().contains(&password), "never the real secret");
+    let warnings = j["warnings"].as_array().unwrap();
+    assert_eq!(
+        warnings[0],
+        egret_engine_mgmt_api::opa_config::OPA_LOG_REQUESTS_WARNING
+    );
+    assert_eq!(
+        warnings[1],
+        egret_engine_mgmt_api::opa_config::OPA_EXTERNAL_ENGINE_NOTE
+    );
+    assert_eq!(
+        warnings[2],
+        egret_engine_mgmt_api::opa_config::OPA_BATCHED_URI_WARNING,
+        "right after the two fixed warnings"
+    );
+    assert_eq!(
+        j["adminMustSupply"],
+        serde_json::json!([
+            "egret.secret: the engine's Ranger plugin credential (rotate it with POST /api/control-plane/engines/{id}/rotate-ranger-credential to see it once)",
+            "a Trino 483 or later coordinator with plugin/opa (it ships in trinodb/trino:483)"
+        ])
+    );
+}
+
+#[tokio::test]
+async fn opa_plugin_config_refuses_a_ranger_profile_with_409() {
+    let Some(f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "opa_cfg_ranger_admin", true).await;
+    let service = external_name("opa-cfg-r");
+    let profile = seed_typed_profile(&f, &service, "trino").await;
+    let (id, _) = register_external(&f, &token, "trino", "2.8.0", Some(profile), &[]).await;
+
+    let (status, j) = call(
+        &f,
+        "GET",
+        &format!("/engines/{id}/opa-plugin-config"),
+        &token,
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    assert_eq!(
+        j["error"],
+        format!("conflict: profile {service} is on Ranger; use /ranger-plugin-config"),
+        "{j}"
+    );
+}
+
+#[tokio::test]
+async fn opa_plugin_config_refuses_a_provisioned_engine_with_409() {
+    let Some(mut f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin = session_for(&f, "opa_cfg_prov_admin", true).await;
+    let nobody = session_for_with_permission(&f, "opa_cfg_nobody", "workspace:read").await;
+    attach_real_pdp(&mut f).await;
+    let _wh = seed_provisioned_warehouse(&f).await;
+    let provisioned = seed_jwt_engine(&f).await;
+    let profile = seed_typed_profile(&f, &external_name("opa-cfg-pv"), "trino").await;
+    set_profile_mechanism(&f, profile, "opa").await;
+    sqlx::query("UPDATE engine_mgmt.engines SET authz_service_id = $1 WHERE id = $2")
+        .bind(profile)
+        .bind(provisioned)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    let (unbound, _) = register_external(&f, &admin, "trino", "2.8.0", None, &[]).await;
+    let path = |id: Uuid| format!("/engines/{id}/opa-plugin-config");
+
+    let (status, j) = call(&f, "GET", &path(provisioned), &admin, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    assert!(
+        j["error"].as_str().unwrap().contains("is provisioned"),
+        "{j}"
+    );
+    let (status, j) = call(&f, "GET", &path(unbound), &admin, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    assert!(
+        j["error"]
+            .as_str()
+            .unwrap()
+            .contains("bind a profile first"),
+        "{j}"
+    );
+    let (status, j) = call(&f, "GET", &path(provisioned), &nobody, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{j}");
+    let (status, j) = call(&f, "GET", &path(Uuid::new_v4()), &admin, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{j}");
+}
+
+/// SP2b Task 20F (T15 M1): an engine the provisioner accepted but whose
+/// `applied_mechanism` could not be recorded is a failure of that engine, not
+/// a log line: the switch answers 502 naming it, and the same PATCH again
+/// re-applies and records.
+#[tokio::test]
+async fn a_lost_applied_mechanism_write_answers_502_by_name_and_a_resend_records_it() {
+    // Arrange: an OPA profile with one engine on it, switched back to Ranger,
+    // and a trigger that refuses this engine's applied_mechanism write.
+    let port = FakeEnginePort::default();
+    let Some(f) = opa_fixture(&port).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "opa_record_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let service = engine_name("opa-record-p");
+    let profile = seed_typed_profile(&f, &service, "trino").await;
+    let name = engine_name("opa-record");
+    set_profile_mechanism(&f, profile, "opa").await;
+    let id = create_trino(&f, &token, &name, wh_id, "483", Some(profile)).await;
+    assert_eq!(applied_mechanism(&f, id).await.as_deref(), Some("opa"));
+    let admin = egret_policy::policy_admin_router().with_state(egret_policy::PolicyAdminState {
+        store: egret_policy::PolicyStore::new(f.db.clone()),
+        engines: Arc::new(NoBindings),
+        users: UserRepo::new(f.db.clone()),
+        groups: egret_auth::groups::GroupRepo::new(f.db.clone()),
+        sessions: f.sessions.clone(),
+        engine_egret_url: "http://egret:8080".into(),
+        pdp: Arc::new(AllowAllPdp),
+        recompiler: Arc::new(egret_perm_compile::PermRecompiler),
+        reconfigurer: Arc::new(EngineReconfigurer(state_of(&f))),
+        opa_enabled: true,
+    });
+    let patch = || async {
+        into_json(
+            admin
+                .clone()
+                .oneshot(req(
+                    "PATCH",
+                    &format!("/policies/services/{service}"),
+                    &token,
+                    Some(serde_json::json!({ "mechanism": "ranger" })),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await
+    };
+    // Only this engine's row: other tests share the table.
+    let func = format!("test_refuse_applied_mechanism_{}", id.simple());
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE FUNCTION public.{func}() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN \
+           IF NEW.id = '{id}' AND NEW.applied_mechanism IS DISTINCT FROM OLD.applied_mechanism THEN \
+             RAISE EXCEPTION 'injected applied_mechanism write failure'; \
+           END IF; \
+           RETURN NEW; \
+         END $$"
+    )))
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE TRIGGER {func} BEFORE UPDATE ON engine_mgmt.engines \
+         FOR EACH ROW EXECUTE FUNCTION public.{func}()"
+    )))
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    let updates_before = port.updated.lock().unwrap().len();
+
+    // Act: the apply lands, its record does not.
+    let (status, j) = patch().await;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP TRIGGER {func} ON engine_mgmt.engines"
+    )))
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP FUNCTION public.{func}()"
+    )))
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+
+    // Assert: 502 naming the engine and the lost record.
+    assert_eq!(port.updated.lock().unwrap().len(), updates_before + 1);
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{j}");
+    assert!(j["error"].as_str().unwrap().contains(&name), "{j}");
+    let failed = j["engines_failed"].as_array().expect("engines_failed");
+    assert_eq!(failed.len(), 1, "{j}");
+    assert_eq!(failed[0]["engine"], name, "{j}");
+    let why = failed[0]["error"].as_str().unwrap();
+    assert!(
+        why.starts_with("applied, but the applied mechanism (ranger) could not be recorded: ")
+            && why.contains("injected applied_mechanism write failure"),
+        "{j}"
+    );
+    assert_eq!(j["engines_reconfigured"], serde_json::json!([]), "{j}");
+    assert_eq!(applied_mechanism(&f, id).await.as_deref(), Some("opa"));
+
+    // Act: the same PATCH again.
+    let (status, j) = patch().await;
+
+    // Assert: re-applied and recorded.
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["engines_reconfigured"], serde_json::json!([name]), "{j}");
+    assert_eq!(port.updated.lock().unwrap().len(), updates_before + 2);
+    assert_eq!(applied_mechanism(&f, id).await.as_deref(), Some("ranger"));
 }

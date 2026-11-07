@@ -40,6 +40,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 use egret_perm::CompileError;
+use egret_perm_ir::enforcement::withhold_engine_reason;
 
 use crate::members::{group_members_via, role_group_holders_via, role_holders_via};
 
@@ -108,7 +109,7 @@ pub enum PeopleList {
 }
 
 fn db(e: sqlx::Error) -> CompileError {
-    CompileError::Db(e.to_string())
+    CompileError::from_db(e)
 }
 
 /// The users filter, shared by the count and the page so the two cannot
@@ -303,9 +304,9 @@ pub enum Via {
     Workspace { id: Uuid, name: String },
     /// `group:public`: everyone.
     Public,
-    /// A role held by one of the user's groups (egret only).
+    /// A role held by one of the user's groups; engines enforce it for the user too.
     GroupRole { group: String, role: String },
-    /// A workspace held by one of the user's groups (egret only).
+    /// A workspace held by one of the user's groups; engines enforce it for the user too.
     GroupWorkspace {
         group: String,
         id: Uuid,
@@ -317,10 +318,6 @@ pub enum Via {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum NotOnEngines {
-    /// A workspace membership held by a group: the compiler expands a `group`
-    /// principal to its members, but not a group's own workspace memberships
-    /// (`members.rs` module doc, narrowing 1; measured, live doc §1.1 C3b).
-    HeldThroughGroup,
     /// Expired. The compiler reads only unexpired rows, but a lapse is not a
     /// write, so engines may apply it until the profile next recompiles
     /// (`members.rs` module doc, narrowing 2).
@@ -392,7 +389,7 @@ pub struct MemberRef {
     pub not_on_engines: Option<NotOnEngines>,
 }
 
-/// A group holding a role (egret only).
+/// A group holding a role. Its members get the role on engines too.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupRef {
@@ -512,7 +509,7 @@ pub struct RolePrincipal {
     pub holders: Vec<MemberRef>,
     /// How many of `holders` are service accounts.
     pub service_accounts: i64,
-    /// Groups holding the role, unexpired (egret only).
+    /// Groups holding the role, unexpired. Their members get it on engines too.
     pub holder_groups: Vec<GroupRef>,
     pub stands_for: Vec<StandsFor>,
     pub clearances: Vec<ClearanceFact>,
@@ -704,8 +701,28 @@ struct Gate {
     required_groups: Vec<Uuid>,
 }
 
+impl Gate {
+    /// The capability matrix's M10 ([`withhold_engine_reason`]): engines
+    /// enforce no group exemption, so the gate's group half is not enforced
+    /// there.
+    fn group_half_not_enforced(&self) -> bool {
+        withhold_engine_reason(
+            self.required_roles.is_empty(),
+            self.required_groups.is_empty(),
+        )
+        .is_some()
+    }
+
+    /// The gate names only groups and engines do not enforce them (M10), so
+    /// nothing is compiled for it (`egret_perm_ir::lower::withhold`, the groups-only skip).
+    /// [`gates_via`] never returns a gate with both lists empty.
+    fn groups_only_not_enforced(&self) -> bool {
+        self.required_roles.is_empty() && self.group_half_not_enforced()
+    }
+}
+
 /// Every gate, and the names of the groups they require. Both lists empty is
-/// no gate (`clearance.rs`, "BOTH lists empty is NO gate").
+/// no gate (`egret_perm_ir::lower::withhold::lower_withholds`).
 async fn gates_via(
     conn: &mut sqlx::PgConnection,
 ) -> Result<(Vec<Gate>, BTreeMap<Uuid, String>), CompileError> {
@@ -867,7 +884,6 @@ pub async fn read_user_via(
             .unwrap_or_default()
     };
     let expired = Some(NotOnEngines::Expired);
-    let through_group = Some(NotOnEngines::HeldThroughGroup);
 
     // Memberships.
     let group_memberships: Vec<Membership> = group_names
@@ -940,7 +956,7 @@ pub async fn read_user_via(
                     name: r.ws_name(),
                 },
                 r,
-                mark(has_username, false, through_group),
+                mark(has_username, !r.expired && member_of.contains(&ws), expired),
             ));
         }
     }
@@ -1015,7 +1031,7 @@ pub async fn read_user_via(
                     id: ws,
                     name: r.ws_name(),
                 },
-                mark(has_username, false, through_group),
+                mark(has_username, member_of.contains(&ws), None),
             );
         }
     }
@@ -1024,7 +1040,7 @@ pub async fn read_user_via(
     let clearances = gates
         .iter()
         .map(|g| {
-            let engines = if g.required_roles.is_empty() {
+            let engines = if g.groups_only_not_enforced() {
                 EngineClearance::NotEnforcedGroupsOnly
             } else {
                 match g.required_roles.iter().find(|r| holds.contains(*r)) {
@@ -1038,7 +1054,9 @@ pub async fn read_user_via(
                             .any(|r| r.expired && g.required_roles.contains(&r.role_name))
                         {
                             Some(EngineNotClearedReason::Expired)
-                        } else if group_ids.iter().any(|gid| g.required_groups.contains(gid)) {
+                        } else if g.group_half_not_enforced()
+                            && group_ids.iter().any(|gid| g.required_groups.contains(gid))
+                        {
                             Some(EngineNotClearedReason::GroupsNotEnforced)
                         } else {
                             None
@@ -1155,24 +1173,22 @@ pub async fn read_group_via(
     let members = member_refs_via(conn, &member_ids).await?;
     let held = held_rows_via(conn, "group", &[gid]).await?;
     let (gates, gate_group_names) = gates_via(conn).await?;
-    let through_group = (false, Some(NotOnEngines::HeldThroughGroup));
-
+    // The compiler expands a group's roles and workspaces to its members
+    // (`role_usernames`, `workspace_members_via`), so a lapsed row is the only
+    // thing that keeps one from applying on engines.
     let membership = |via: Via, r: &HeldRow| Membership {
         via,
         role: Some(r.role_name.clone()),
         scope: Some(r.scope()),
         expires_at: r.expires_at,
         expired: r.expired,
-        on_engines: false,
-        not_on_engines: through_group.1,
+        on_engines: !r.expired,
+        not_on_engines: r.expired.then_some(NotOnEngines::Expired),
     };
-    // The compiler expands a group's role to its members (`role_usernames`).
     let roles: Vec<Membership> = held
         .iter()
-        .map(|r| Membership {
-            on_engines: !r.expired,
-            not_on_engines: r.expired.then_some(NotOnEngines::Expired),
-            ..membership(
+        .map(|r| {
+            membership(
                 Via::Role {
                     name: r.role_name.clone(),
                 },
@@ -1228,7 +1244,7 @@ pub async fn read_group_via(
                     id: ws,
                     name: r.ws_name(),
                 },
-                through_group,
+                (true, None),
             );
         }
     }
@@ -1237,7 +1253,7 @@ pub async fn read_group_via(
         .iter()
         .map(|g| {
             let held_role = clearing_row(&held, &g.required_roles);
-            let engines = if g.required_roles.is_empty() {
+            let engines = if g.groups_only_not_enforced() {
                 EngineClearance::NotEnforcedGroupsOnly
             } else if let Some(r) = held_role {
                 EngineClearance::Cleared {
@@ -1245,7 +1261,7 @@ pub async fn read_group_via(
                 }
             } else {
                 EngineClearance::NotCleared {
-                    because: if g.required_groups.contains(&gid) {
+                    because: if g.group_half_not_enforced() && g.required_groups.contains(&gid) {
                         Some(EngineNotClearedReason::GroupsNotEnforced)
                     } else {
                         None
@@ -1325,7 +1341,7 @@ pub async fn read_role_via(
         .iter()
         .map(|g| {
             let required = g.required_roles.iter().any(|r| r == name);
-            let engines = if g.required_roles.is_empty() {
+            let engines = if g.groups_only_not_enforced() {
                 EngineClearance::NotEnforcedGroupsOnly
             } else if required {
                 EngineClearance::Cleared {
@@ -1588,7 +1604,7 @@ async fn group_role_holders_via(
 /// Direct role holders and group members come from the compiler's own reads
 /// ([`role_holders_via`], [`group_members_via`]), never a predicate written
 /// here, so the people marked `on_engines` are exactly those a compile
-/// excepts from the deny (`crate::clearance`, which reads
+/// excepts from the deny (`crate::ir_load::load_withhold_inputs`, which reads
 /// [`crate::members::role_usernames`] over the same [`role_holders_via`]).
 pub async fn cleared_people_via(
     conn: &mut sqlx::PgConnection,
@@ -1620,7 +1636,7 @@ pub async fn cleared_people_via(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    // `crate::clearance`: a gate with no required role compiles to nothing
+    // `egret_perm_ir::lower::withhold`: a gate with no required role compiles to nothing
     // on engines.
     let engines_enforce = !roles.is_empty();
     // A gate stores group ids; membership is read by name, the key the

@@ -154,16 +154,7 @@ impl Engine {
     /// StarRocks: has no `trinoConfig.auth.jwt` concept — jwt-capability is
     /// simply "the stored delegation mode is `jwt`" (see [`Self::delegation_mode`]).
     pub fn supports_jwt_delegation(&self) -> bool {
-        if self.is_starrocks() {
-            self.is_jwt_delegation()
-        } else {
-            self.spec
-                .get("trinoConfig")
-                .and_then(|tc| tc.get("auth"))
-                .and_then(|a| a.get("jwt"))
-                .map(|j| j.is_object())
-                .unwrap_or(false)
-        }
+        egret_core::engine_delegation::supports_jwt_delegation(&self.r#type, &self.spec)
     }
 
     /// Delegation mode from the stored spec.
@@ -181,20 +172,7 @@ impl Engine {
     /// Absent/unset delegation on a StarRocks engine reports `"none"`, which
     /// none of `is_impersonate_delegation`/`is_jwt_delegation` match.
     pub fn delegation_mode(&self) -> &str {
-        if self.is_starrocks() {
-            self.spec
-                .get("starrocksConfig")
-                .and_then(|c| c.get("delegation"))
-                .and_then(|d| d.get("mode"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("none")
-        } else {
-            self.spec
-                .get("trinoConfig")
-                .and_then(|t| t.get("delegationMode"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("impersonate")
-        }
+        egret_core::engine_delegation::delegation_mode(&self.r#type, &self.spec)
     }
 
     /// True when delegated queries run via basic-auth service-user impersonation.
@@ -213,7 +191,7 @@ impl Engine {
     /// `false` (see [`Self::delegation_mode`]'s doc) rather than silently
     /// defaulting to impersonate.
     pub fn supports_delegation(&self) -> bool {
-        self.is_impersonate_delegation() || self.supports_jwt_delegation()
+        egret_core::engine_delegation::supports_delegation(&self.r#type, &self.spec)
     }
 }
 
@@ -430,6 +408,37 @@ impl EngineMgmtStore {
         .bind(service_id)
         .fetch_one(self.pool())
         .await?)
+    }
+
+    /// The engines bound to a policy profile, by name: the engines a switch of
+    /// its mechanism re-applies (governance SP2b Task 15).
+    pub async fn list_engines_bound_to_authz_service(
+        &self,
+        service_id: i64,
+    ) -> Result<Vec<Engine>, EngineMgmtError> {
+        Ok(sqlx::query_as::<_, Engine>(
+            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id \
+             FROM engine_mgmt.engines WHERE authz_service_id = $1 ORDER BY name",
+        )
+        .bind(service_id)
+        .fetch_all(self.pool())
+        .await?)
+    }
+
+    /// Record the mechanism (`ranger` or `opa`) the provisioner accepted for
+    /// this engine. The OPA surface keeps answering an engine still running the
+    /// OPA plugin after its profile went back to Ranger, until this says otherwise.
+    pub async fn set_applied_mechanism(
+        &self,
+        id: Uuid,
+        mechanism: &str,
+    ) -> Result<(), EngineMgmtError> {
+        sqlx::query("UPDATE engine_mgmt.engines SET applied_mechanism = $2 WHERE id = $1")
+            .bind(id)
+            .bind(mechanism)
+            .execute(self.pool())
+            .await?;
+        Ok(())
     }
 
     /// Persist the generated delegator secret id for an engine (idempotent bookkeeping).

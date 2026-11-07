@@ -111,7 +111,9 @@ impl From<PolicyStoreError> for PermHttpError {
 impl From<CompileError> for PermHttpError {
     fn from(e: CompileError) -> Self {
         match e {
-            CompileError::Db(detail) => PermHttpError::db(detail),
+            CompileError::Db(detail) | CompileError::LockTimeout(detail) => {
+                PermHttpError::db(detail)
+            }
             ref overlap @ CompileError::AmbiguousMaskOrFilterArbitration { .. } => {
                 PermHttpError::Overlap {
                     body: crate::overlap::refusal_body(overlap)
@@ -125,6 +127,12 @@ impl From<CompileError> for PermHttpError {
                 body: ceiling
                     .expansion_ceiling_body()
                     .expect("expansion_ceiling_body answers every ceiling variant"),
+            },
+            ref grew @ CompileError::ProfileSetChanged { .. } => PermHttpError::Coded {
+                status: StatusCode::CONFLICT,
+                body: grew
+                    .profile_set_changed_body()
+                    .expect("profile_set_changed_body answers ProfileSetChanged"),
             },
             CompileError::ServiceDefUnreadable { .. } => {
                 tracing::error!(error = %e, "embedded service-def failed to parse");

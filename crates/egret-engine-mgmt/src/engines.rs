@@ -742,44 +742,28 @@ pub(crate) async fn build_provision_req_with(
     }
     // Impersonate-mode delegation: when auth is on, provision the `egret_delegator`
     // service user (generate + store its password once, inject its bcrypt into the
-    // auth block so it lands in `password.db`) and seed the delegator's impersonate
-    // Ranger policy onto the bound Trino service (the per-user baseline is seeded
-    // below, for both modes). Guarded on auth being
-    // enabled — without a `password.db` the delegator can't basic-auth, so
-    // impersonate delegation is meaningless (and `inject_delegator_user` no-ops).
+    // auth block so it lands in `password.db`). Guarded on auth being enabled —
+    // without a `password.db` the delegator can't basic-auth, so impersonate
+    // delegation is meaningless (and `inject_delegator_user` no-ops). Its
+    // impersonate policy is not written here: convergence below derives it.
+    // The bound profile's mechanism, as committed now (SP2b Task 15). Every
+    // apply builds here, so a bind, an image change and a create onto an OPA
+    // profile are all judged against the image before anything is rendered.
+    let mechanism = resolve_profile_mechanism(st, authz_service_id).await?;
+    refuse_opa_without_the_plugin(engine, mechanism)?;
     let ranger_service_name = resolve_ranger_service_name(st, authz_service_id).await?;
     if config.auth.is_some() && engine.is_impersonate_delegation() {
         let (_secret_id, pw) = ensure_delegator_secret(st, engine).await?;
         inject_delegator_user(&mut config.auth, &pw)?;
-        if let Some(service_name) = ranger_service_name.as_deref() {
-            seed_delegator_policies(st, service_name).await?;
-        }
     }
-    // Ranger auto-admin (sub-project A): grant each platform admin all-access on
-    // the bound Ranger service so a governed engine is immediately queryable with
-    // no manual policy seeding. Fires for impersonate AND jwt. Idempotent (upsert).
-    if let Some(service_name) = ranger_service_name.as_deref() {
-        if engine.supports_delegation() {
-            if let Some(svc) = st
-                .authz
-                .get_service_opt(service_name)
-                .await
-                .map_err(|e| CpError::BadRequest(format!("resolve ranger service: {e}")))?
-            {
-                // This hook only runs on the Trino provision path (the StarRocks
-                // path returns early into `build_starrocks_provision_req`), so the
-                // service type is always "trino".
-                let admins = admin_usernames(st).await?;
-                st.authz
-                    .seed_admin_all_access(svc.id, service_name, "trino", &admins)
-                    .await
-                    .map_err(|e| CpError::BadRequest(format!("seed admin policy: {e}")))?;
-                recompile_after_infra_seed(st, svc.id).await;
-            }
-            // The per-user baseline, for impersonate AND jwt: every delegated
-            // session is checked for it (DG Task 7).
-            seed_user_baseline(st, service_name).await?;
-        }
+    // Infrastructure policies (governance SP2a, D1): converge the bound
+    // profile's `egret-admin - …` set, the delegator grant and the per-user
+    // baseline from the store, so a governed engine is immediately queryable
+    // and a row this engine no longer needs (a delegator grant after
+    // impersonate → jwt) is removed. Convergence is their only writer.
+    if let Some(svc_id) = authz_service_id {
+        converge_infra_at_apply(st, svc_id).await?;
+        recompile_after_infra_seed(st, svc_id).await;
     }
     // When the engine is bound to a Ranger profile — named by
     // `resolve_ranger_service_name` from the BOUND profile row, not assumed to
@@ -792,6 +776,7 @@ pub(crate) async fn build_provision_req_with(
         st,
         engine,
         ranger_service_name.clone(),
+        mechanism,
         opts.rotate_ranger_credential,
     )
     .await?;
@@ -924,6 +909,25 @@ pub(crate) async fn apply_built(
     built: &BuiltReq,
     op: ApplyOp,
 ) -> Result<(), ApplyBuiltError> {
+    apply_built_noting(st, prov, engine, built, op)
+        .await
+        .map(|_| ())
+}
+
+/// [`apply_built`], also answering whether the applied mechanism could not be
+/// recorded: `Ok(Some(why))` when the provisioner accepted the apply but the
+/// `applied_mechanism` write failed. Every apply route logs that and moves on
+/// (its apply did land); a mechanism switch's re-apply reports it as a failure
+/// of that engine instead (SP2b Task 20F, T15 M1), because the OPA surface
+/// decides from that record which profiles it still serves, so the switch
+/// answers 502 and re-sending it re-applies and records again.
+pub(crate) async fn apply_built_noting(
+    st: &CpState,
+    prov: std::sync::Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>,
+    engine: &Engine,
+    built: &BuiltReq,
+    op: ApplyOp,
+) -> Result<Option<String>, ApplyBuiltError> {
     match st.engine_mgmt.get_engine(engine.id).await {
         Ok(Some(current)) if current.status != crate::engine_status::DELETING => {
             if !renders_the_current_ranger_credential(&built.req, &current) {
@@ -981,7 +985,7 @@ async fn finish_apply(
     engine: Engine,
     built: BuiltReq,
     op: ApplyOp,
-) -> Result<(), ApplyBuiltError> {
+) -> Result<Option<String>, ApplyBuiltError> {
     let res = match op {
         ApplyOp::Provision => prov.provision(&built.req).await,
         ApplyOp::Update => prov.update(&built.req).await,
@@ -1001,6 +1005,26 @@ async fn finish_apply(
             }
         }
     }
+    // The provisioner accepted it: this engine now runs this mechanism (SP2b
+    // Task 15, open question (a)). Recorded here so no caller can forget it.
+    let mut mechanism_not_recorded = None;
+    if res.is_ok() {
+        let mechanism = match built.req.ranger.as_ref().map(|r| r.mechanism) {
+            Some(egret_engine_mgmt_api::opa_config::AccessMechanism::Opa) => "opa",
+            _ => "ranger",
+        };
+        if let Err(e) = st
+            .engine_mgmt
+            .set_applied_mechanism(engine.id, mechanism)
+            .await
+        {
+            tracing::error!(engine = %engine.name, error = %e, mechanism,
+                "applied, but the applied mechanism could not be recorded");
+            mechanism_not_recorded = Some(format!(
+                "applied, but the applied mechanism ({mechanism}) could not be recorded: {e}"
+            ));
+        }
+    }
     if let Some(secrets) = &built.internal {
         let superseded = if res.is_ok() {
             Supersede::Delete
@@ -1013,7 +1037,156 @@ async fn finish_apply(
                  the monitor fails until the next successful apply");
         }
     }
-    res.map_err(ApplyBuiltError::Failed)
+    res.map(|()| mechanism_not_recorded)
+        .map_err(ApplyBuiltError::Failed)
+}
+
+/// The access mechanism of the profile `authz_service_id` names, read from the
+/// committed row (`PolicyService::mechanism`); an unbound engine is `Ranger`.
+/// A bound id with no row is the same corruption
+/// [`resolve_ranger_service_name`] refuses.
+pub(crate) async fn resolve_profile_mechanism(
+    st: &CpState,
+    authz_service_id: Option<i64>,
+) -> Result<egret_engine_mgmt_api::opa_config::AccessMechanism, CpError> {
+    use egret_engine_mgmt_api::opa_config::AccessMechanism;
+    let Some(sid) = authz_service_id else {
+        return Ok(AccessMechanism::Ranger);
+    };
+    let services = st
+        .authz
+        .list_services()
+        .await
+        .map_err(|e| CpError::BadRequest(format!("list policy profiles: {e}")))?;
+    match services.into_iter().find(|s| s.id == sid) {
+        Some(svc) if svc.mechanism == "opa" => Ok(AccessMechanism::Opa),
+        Some(svc) if svc.mechanism == "ranger" => Ok(AccessMechanism::Ranger),
+        Some(svc) => {
+            tracing::error!(service_id = sid, mechanism = %svc.mechanism,
+                "policy profile has an unknown mechanism");
+            Err(CpError::Internal)
+        }
+        None => {
+            tracing::error!(
+                service_id = sid,
+                "engine is bound to authz_service_id {sid} but no such policy profile row exists"
+            );
+            Err(CpError::Internal)
+        }
+    }
+}
+
+/// I6: a provisioned Trino engine on an OPA profile must run an image that
+/// ships Trino's OPA plugin. The switch checks this once; this check runs on
+/// every apply, so a later bind, image change or create cannot get past it.
+fn refuse_opa_without_the_plugin(
+    engine: &Engine,
+    mechanism: egret_engine_mgmt_api::opa_config::AccessMechanism,
+) -> Result<(), CpError> {
+    if engine.r#type != "trino"
+        || crate::external::is_external(engine)
+        || mechanism != egret_engine_mgmt_api::opa_config::AccessMechanism::Opa
+    {
+        return Ok(());
+    }
+    let image = egret_perm::stored_engine_image("trino", &engine.spec);
+    if image
+        .as_deref()
+        .is_some_and(|i| egret_perm::ships_opa_plugin("trino", i))
+    {
+        return Ok(());
+    }
+    let name = &engine.name;
+    let image = image.as_deref().unwrap_or("an unknown image");
+    Err(CpError::Conflict(format!(
+        "engine {name} runs {image}, which does not ship the Trino OPA plugin, and its profile \
+         is on OPA; use trinodb/trino:483 or switch the profile to Ranger"
+    )))
+}
+
+/// Re-apply every egret-provisioned engine bound to the profile `service_id`,
+/// each with the profile's mechanism as committed now (a mechanism switch,
+/// M4b). External engines (their operator installs the plugin) and engines
+/// being deleted are skipped. Every other engine is tried, in name order: one
+/// failure is recorded and the next engine is still applied.
+pub async fn reapply_bound_engines(
+    st: &CpState,
+    service_id: i64,
+) -> egret_policy_api::ReconfigureReport {
+    let mut report = egret_policy_api::ReconfigureReport::default();
+    let engines = match st
+        .engine_mgmt
+        .list_engines_bound_to_authz_service(service_id)
+        .await
+    {
+        Ok(engines) => engines,
+        Err(e) => {
+            tracing::error!(service_id, error = %e, "listing the profile's engines failed");
+            report.failed.push((
+                format!("policy profile {service_id}"),
+                format!("its engines could not be listed: {e}"),
+            ));
+            return report;
+        }
+    };
+    let engines = engines
+        .into_iter()
+        .filter(|e| !crate::external::is_external(e) && e.status != crate::engine_status::DELETING);
+    let Some(prov) = st.engine_provisioner.as_ref() else {
+        report
+            .failed
+            .extend(engines.map(|e| (e.name, "no engine provisioner is configured".to_string())));
+        return report;
+    };
+    for engine in engines {
+        match reapply_one(st, prov.clone(), engine.clone()).await {
+            Ok(()) => report.applied.push(engine.name),
+            Err(why) => {
+                tracing::warn!(engine = %engine.name, service_id, error = %why,
+                    "re-applying an engine after a mechanism switch failed");
+                report.failed.push((engine.name, why));
+            }
+        }
+    }
+    report
+}
+
+/// One engine of [`reapply_bound_engines`]; a rotation that lands while the
+/// request is built is retried once against the re-read row.
+async fn reapply_one(
+    st: &CpState,
+    prov: std::sync::Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>,
+    mut engine: Engine,
+) -> Result<(), String> {
+    let mut retried = false;
+    loop {
+        let built = build_provision_req(st, &engine)
+            .await
+            .map_err(|e| e.to_string())?;
+        match apply_built_noting(st, prov.clone(), &engine, &built, ApplyOp::Update).await {
+            Ok(None) => return Ok(()),
+            // The engine runs the new mechanism, but the record the OPA surface
+            // serves from does not say so: a failure of this engine, so the
+            // switch answers 502 and a resend re-applies and records again.
+            Ok(Some(not_recorded)) => return Err(not_recorded),
+            Err(ApplyBuiltError::CredentialChanged) if !retried => {
+                retried = true;
+                engine = st
+                    .engine_mgmt
+                    .get_engine(engine.id)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "the engine was deleted".to_string())?;
+            }
+            Err(ApplyBuiltError::CredentialChanged) => {
+                return Err(RANGER_CREDENTIAL_CHANGED.to_string())
+            }
+            Err(ApplyBuiltError::Conflict) => {
+                return Err("the engine was deleted, or is being deleted".to_string())
+            }
+            Err(ApplyBuiltError::Failed(m)) => return Err(m),
+        }
+    }
 }
 
 /// The Ranger binding of an engine bound to `service_name` (`None`: unbound,
@@ -1030,6 +1203,7 @@ async fn ranger_binding(
     st: &CpState,
     engine: &Engine,
     service_name: Option<String>,
+    mechanism: egret_engine_mgmt_api::opa_config::AccessMechanism,
     rotate: bool,
 ) -> Result<Option<egret_engine_mgmt_api::RangerBinding>, CpError> {
     let Some(service_name) = service_name else {
@@ -1058,6 +1232,8 @@ async fn ranger_binding(
             ))
         })?;
     Ok(Some(egret_engine_mgmt_api::RangerBinding {
+        mechanism,
+        engine_id: engine.id.to_string(),
         service_name,
         egret_url: st.engine_egret_url.clone(),
         poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
@@ -2525,102 +2701,34 @@ async fn ensure_tls_cert(st: &CpState, engine: &Engine) -> Result<(String, Strin
     Ok((keystore, cert_pem))
 }
 
-/// Engine usernames of every engine admin
-/// (`egret_auth::roles::engine_admin_user_ids_via`: active platform admins,
-/// direct or through a group), sorted and deduped — the same set every
-/// recompile converges the `egret-admin` bodies to, so an apply and the next
-/// recompile write the same body. Unresolvable usernames are skipped; an empty
-/// list is valid.
-async fn admin_usernames(st: &CpState) -> Result<Vec<String>, CpError> {
-    let ids = {
-        let mut conn = st
-            .engine_mgmt
-            .pool()
-            .acquire()
-            .await
-            .map_err(|e| CpError::BadRequest(format!("list platform admins: {e}")))?;
-        egret_auth::roles::engine_admin_user_ids_via(&mut conn)
-            .await
-            .map_err(|e| CpError::BadRequest(format!("list platform admins: {e}")))?
-    };
-    let mut names = Vec::new();
-    for id in ids {
-        if let Ok(u) = st.users.ensure_username(id).await {
-            names.push(u);
-        }
-    }
-    names.sort();
-    names.dedup();
-    Ok(names)
+/// Converge one bound profile's infrastructure policies at apply, through the
+/// profile compiler (`ProfileCompilerPort::converge_infra`, its own
+/// transaction). Production always wires a compiler (`egret-bin`); without one
+/// the apply is refused rather than leaving the profile's infrastructure rows
+/// unwritten.
+async fn converge_infra_at_apply(st: &CpState, service_id: i64) -> Result<(), CpError> {
+    st.perm_compiler
+        .as_ref()
+        .ok_or_else(|| {
+            CpError::BadRequest(
+                "converge infrastructure policies: no profile compiler is wired".into(),
+            )
+        })?
+        .converge_infra(service_id)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("converge infrastructure policies: {e}")))
 }
 
-/// Seed the delegator's impersonate policy (`egret_delegator` may become any
-/// user) onto the engine's bound Trino service. Impersonate engines only; the
-/// per-user baseline is [`seed_user_baseline`]'s. No-op when the service does
-/// not exist. Upserted, so it is idempotent and lands on a profile the SP4a
-/// compiler has claimed too (`create_policy` refuses those, live finding B-F2).
-async fn seed_delegator_policies(st: &CpState, service_name: &str) -> Result<(), CpError> {
-    use crate::delegator_policy as dp;
-    let Some(svc) = st
-        .authz
-        .get_service_opt(service_name)
-        .await
-        .map_err(|e| CpError::BadRequest(format!("resolve ranger service: {e}")))?
-    else {
-        return Ok(());
-    };
-    st.authz
-        .upsert_infra_policy(
-            svc.id,
-            dp::IMPERSONATE_POLICY_NAME,
-            &dp::delegator_impersonate_policy(service_name),
-        )
-        .await
-        .map_err(|e| CpError::BadRequest(format!("seed policy: {e}")))?;
-    recompile_after_infra_seed(st, svc.id).await;
-    Ok(())
-}
-
-/// Seed the per-user baseline ([`crate::delegator_policy::user_baseline_policies`])
-/// onto a delegating Trino engine's bound service: the three per-user checks
-/// Trino 483 makes on every session, without which every delegated query fails
-/// (DG Task 6b, live result §4.8, finding B-F1). JWT and impersonate engines
-/// alike. No-op when the service does not exist.
-///
-/// Upserted as infrastructure (`managed_by = 'infra'`), like the admin
-/// all-access set: idempotent, the compiler's sweep never touches it (it reaps
-/// only its own `perm-*` names), and the compiled-profile guard on
-/// `create_policy` does not refuse it.
-pub(crate) async fn seed_user_baseline(st: &CpState, service_name: &str) -> Result<(), CpError> {
-    use crate::delegator_policy as dp;
-    let Some(svc) = st
-        .authz
-        .get_service_opt(service_name)
-        .await
-        .map_err(|e| CpError::BadRequest(format!("resolve ranger service: {e}")))?
-    else {
-        return Ok(());
-    };
-    for (name, body) in dp::user_baseline_policies(service_name) {
-        st.authz
-            .upsert_infra_policy(svc.id, name, &body)
-            .await
-            .map_err(|e| CpError::BadRequest(format!("seed policy {name}: {e}")))?;
-    }
-    recompile_after_infra_seed(st, svc.id).await;
-    Ok(())
-}
-
-/// Recompile a profile egret has just seeded infra policies on, when its
-/// engines carry impersonation grants: a grant's target is re-checked against
-/// every policy of the profile (engine grants spec E11, security re-review
-/// M-a). The `egret-admin` set itself needs no recompile here: since the
-/// username-takeover fix every recompile converges it to the engine admins
-/// (`egret_perm_compile`'s `recompile_locked_service_in_tx`), and apply seeds
-/// that same set. The seeded users (platform admins, `egret_delegator`, `{USER}`) are
+/// Recompile a profile whose infrastructure policies apply has just converged,
+/// when its engines carry impersonation grants: a grant's target is re-checked
+/// against every policy of the profile (engine grants spec E11, security
+/// re-review M-a). The infrastructure set itself needs no recompile here: every
+/// recompile converges it first (`egret_perm_compile`'s
+/// `recompile_locked_service_in_tx`), to the same rows apply converges to. The
+/// users those rows name (platform admins, `egret_delegator`, `{USER}`) are
 /// refused as targets already, so this only re-applies a decision the check
-/// has made; it runs after the seed (the seed's upserts are not one
-/// transaction), fire-and-forget and logged with the repair URL.
+/// has made; it runs after the convergence has committed, fire-and-forget and
+/// logged with the repair URL.
 async fn recompile_after_infra_seed(st: &CpState, service_id: i64) {
     let Some(compiler) = st.perm_compiler.clone() else {
         return;
@@ -2646,62 +2754,6 @@ async fn recompile_after_infra_seed(st: &CpState, service_id: i64) {
         Err(e) => tracing::error!(service_id, error = %e,
             "could not tell whether a seeded profile carries impersonation grants"),
     }
-}
-
-/// Seed the per-user baseline on ONE existing engine, without an apply.
-/// Returns whether it seeded: `false` for an external engine, for one that is
-/// not a delegating Trino engine, and for one bound to no Ranger profile.
-///
-/// External engines are refused first and explicitly. egret runs nothing on
-/// that cluster, and the apply path never seeds one: every apply handler
-/// refuses it, and the build stops at the missing image. But its stored spec
-/// is `{}`, which `delegation_mode()` reads as `impersonate`, so
-/// `supports_delegation()` alone would let this pass write three allows onto
-/// a profile the external cluster's plugin polls.
-pub async fn seed_engine_user_baseline(st: &CpState, engine: &Engine) -> Result<bool, CpError> {
-    if crate::external::is_external(engine)
-        || engine.is_starrocks()
-        || !engine.supports_delegation()
-    {
-        return Ok(false);
-    }
-    let Some(service_name) = resolve_ranger_service_name(st, engine.authz_service_id).await? else {
-        return Ok(false);
-    };
-    seed_user_baseline(st, &service_name).await?;
-    Ok(true)
-}
-
-/// The startup pass that brings EVERY existing delegating Trino engine's
-/// profile up to the per-user baseline, so engines deployed before the
-/// baseline existed work without a manual reapply. Policies are served by
-/// egret's own download API, which each plugin polls, so a seeded row reaches
-/// the running engine on its next poll; nothing in the cluster is touched.
-///
-/// Best-effort per engine: a failure is logged with the engine's name and the
-/// pass goes on, so one bad profile cannot stop egret from starting. Returns
-/// `(seeded, failed)`.
-pub async fn seed_user_baselines_for_existing_engines(st: &CpState) -> (usize, usize) {
-    let engines = match st.engine_mgmt.list_engines().await {
-        Ok(engines) => engines,
-        Err(e) => {
-            tracing::error!(error = %e, "per-user baseline pass: listing engines failed");
-            return (0, 1);
-        }
-    };
-    let (mut seeded, mut failed) = (0, 0);
-    for engine in &engines {
-        match seed_engine_user_baseline(st, engine).await {
-            Ok(true) => seeded += 1,
-            Ok(false) => {}
-            Err(e) => {
-                failed += 1;
-                tracing::error!(engine = %engine.name, error = %e,
-                    "per-user baseline pass: seeding failed");
-            }
-        }
-    }
-    (seeded, failed)
 }
 
 // ── handlers ───────────────────────────────────────────────────────────────────
@@ -3851,25 +3903,11 @@ async fn build_starrocks_provision_req_with(
         service_password: delegation_service_password.clone().unwrap_or_default(),
     });
 
-    // Ranger auto-admin (sub-project A): grant platform admins all-access on the
-    // bound Ranger service so a governed StarRocks engine is immediately queryable
-    // with no manual policy seeding. Idempotent (upsert). Mirrors the Trino path.
-    if let Some(service_name) = ranger_service_name.as_deref() {
-        if engine.supports_delegation() {
-            if let Some(svc) = st
-                .authz
-                .get_service_opt(service_name)
-                .await
-                .map_err(|e| CpError::BadRequest(format!("resolve ranger service: {e}")))?
-            {
-                let admins = admin_usernames(st).await?;
-                st.authz
-                    .seed_admin_all_access(svc.id, service_name, "starrocks", &admins)
-                    .await
-                    .map_err(|e| CpError::BadRequest(format!("seed admin policy: {e}")))?;
-                recompile_after_infra_seed(st, svc.id).await;
-            }
-        }
+    // Infrastructure policies (governance SP2a, D1): converge the bound
+    // profile's `egret-admin - …` set from the store, as the Trino path does.
+    if let Some(svc_id) = engine.authz_service_id {
+        converge_infra_at_apply(st, svc_id).await?;
+        recompile_after_infra_seed(st, svc_id).await;
     }
 
     // Secure-by-default root password: resolve the engine's stored FE `root`
@@ -3913,10 +3951,12 @@ async fn build_starrocks_provision_req_with(
         check_starrocks_engine_name(&engine.name)?;
     }
     // Last fallible step: a refused rotation (409) leaves nothing half-done.
+    // A StarRocks profile is always on Ranger (migration 0213's CHECK).
     let ranger = ranger_binding(
         st,
         engine,
         ranger_service_name.clone(),
+        egret_engine_mgmt_api::opa_config::AccessMechanism::Ranger,
         rotate_ranger_credential,
     )
     .await?;
@@ -5491,6 +5531,44 @@ async fn restore_engine_spec(
                  the stored spec is ahead of the cluster");
         }
     }
+    // The failed attempt's build converged (and committed) the bound profile's
+    // infrastructure rows for the spec just rolled back; converge them again
+    // for the spec the cluster still runs.
+    match st.engine_mgmt.get_engine(id).await {
+        Ok(Some(engine)) => reconverge_infra_after_rollback(st, &[engine.authz_service_id]).await,
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(engine_id = %id, error = %e,
+                "could not read the engine back to re-converge its profile's infrastructure \
+                 policies after a failed update; they are converged at the next recompile or boot");
+        }
+    }
+}
+
+/// Converge the infrastructure policies of every profile in `service_ids`
+/// again after a failed engine update has been rolled back (governance SP2a,
+/// final review I1). The failed attempt's build converged them for the spec
+/// or binding that was just put back, and convergence commits on its own, so
+/// the rollback alone leaves them describing an engine the cluster does not
+/// run (impersonate → open deletes the delegator grant and the per-user
+/// baseline while the cluster still impersonates).
+///
+/// Best-effort: the caller is already returning the original error, so a
+/// failure here is logged and the rows are converged at the next recompile or
+/// boot. Each profile converges in its own transaction, under the locks
+/// `converge_infra` takes itself, one profile at a time.
+async fn reconverge_infra_after_rollback(st: &CpState, service_ids: &[Option<i64>]) {
+    let Some(compiler) = st.perm_compiler.as_ref() else {
+        return;
+    };
+    let ids: std::collections::BTreeSet<i64> = service_ids.iter().flatten().copied().collect();
+    for sid in ids {
+        if let Err(e) = compiler.converge_infra(sid).await {
+            tracing::warn!(service_id = sid, error = %e,
+                "could not re-converge a profile's infrastructure policies after a failed \
+                 engine update was rolled back; they are converged at the next recompile or boot");
+        }
+    }
 }
 
 /// Re-materialize every workspace assigned to `engine_id`, shared by both
@@ -5672,9 +5750,9 @@ pub(crate) async fn check_profile_bindable(
     // `egret_policy::service_def::STARROCKS_SERVICE_DEF_JSON`), so a StarRocks
     // profile is not supposed to have a tag service: the compiler EXPANDS a
     // tag-selector rule into per-column resource policies on the profile
-    // itself, and `CompileError::MissingTagService` is raised only on the
-    // `(Selector::Tag, EngineType::Trino)` branch
-    // (`egret-perm-compile/src/rules.rs`). Applying this guard to StarRocks
+    // itself, and `CompileError::MissingTagService` is raised only where the
+    // capability matrix needs a classification channel (Trino, M1/M2;
+    // `egret-perm-ir/src/lower/rules.rs`). Applying this guard to StarRocks
     // would refuse every legitimate StarRocks bind — including the one the
     // live masking gate depends on — while protecting nothing.
     if svc.r#type == "trino"
@@ -5900,6 +5978,7 @@ async fn update_engine(
     let previous_authz_service_id = engine.authz_service_id;
     apply_authz_service_update(&st, &mut engine, b.authz_service_id).await?;
     let rebound = engine.authz_service_id != previous_authz_service_id;
+    let engine_authz_after_bind = engine.authz_service_id;
     // StarRocks has its own spec builder + provision-req assembler (FE/CN roles,
     // builtin storage volume) — dispatch to it rather than running the Trino
     // spec/assembly below.
@@ -5914,6 +5993,10 @@ async fn update_engine(
     // re-pointed. See `restore_engine_authz_service`.
     if out.is_err() && rebound {
         restore_engine_authz_service(&st, engine_id, previous_authz_service_id).await;
+        // Both profiles were converged with the engine on the NEW one: put the
+        // infrastructure rows of each back in line with the restored binding.
+        reconverge_infra_after_rollback(&st, &[engine_authz_after_bind, previous_authz_service_id])
+            .await;
     }
     // The update stood: the profile the engine left must stop serving what the
     // engine's grants compiled there (spec E10).
@@ -6514,6 +6597,19 @@ async fn cleanup_deleted_engine(st: &CpState, engine: &Engine, attachments: &[At
         ],
     )
     .await;
+    // The infrastructure policies of the profile the engine was bound to
+    // (`engine` is the row as read before the delete, so this is its FORMER
+    // `authz_service_id`). The row is gone, so convergence no longer counts
+    // this engine: a profile whose last qualifying engine this was loses its
+    // IR-owned infra rows (governance SP2a, D5 (c)). `recompile_former_profile`
+    // skips a profile no engine binds any more, so it cannot cover this.
+    if let (Some(sid), Some(compiler)) = (engine.authz_service_id, st.perm_compiler.as_ref()) {
+        if let Err(e) = compiler.converge_infra(sid).await {
+            tracing::error!(engine = %engine.name, service_id = sid, error = %e,
+                "could not converge the infrastructure policies of a deleted engine's former \
+                 profile; they are converged at the next recompile or boot");
+        }
+    }
 }
 
 /// `POST /engines/{id}/restart` — roll the engine's pods without changing config
@@ -8292,6 +8388,96 @@ mod tests {
         e
     }
 
+    /// `egret_core::engine_delegation` is the pure form of the apply path's
+    /// delegation decisions. The oracle for the auth condition is the real
+    /// `resolve_auth` (what `build_provision_req_with` assigns to `config.auth`;
+    /// `build_trino_config` itself always leaves `auth` as `None`). Self-skips
+    /// without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`.
+    #[tokio::test]
+    async fn delegation_facts_match_the_apply_path() {
+        use egret_core::engine_delegation as ed;
+        let Some(mut st) = test_state().await else {
+            eprintln!("skipping delegation_facts_match_the_apply_path: DATABASE_URL not set");
+            return;
+        };
+        // A platform JWKS so a jwt block resolves instead of being rejected.
+        st.engine_jwks_uri = "https://idp/jwks".into();
+        let specs = [
+            serde_json::json!({}),
+            serde_json::json!({"trinoConfig": {}}),
+            serde_json::json!({"trinoConfig": {"delegationMode": "jwt", "auth": {"jwt": {}}}}),
+            serde_json::json!({"trinoConfig": {"delegationMode": "open"}}),
+            serde_json::json!({"trinoConfig": {"coordinator": {}, "auth": {"password": {}}}}),
+            serde_json::json!({"trinoConfig": {"coordinator": {}, "delegationMode": "impersonate", "auth": {"jwt": {}}}}),
+            serde_json::json!({"trinoConfig": {"coordinator": {}, "delegationMode": "jwt", "auth": {"jwt": {}}}}),
+            serde_json::json!({"trinoConfig": {"coordinator": {}}}),
+            // flat spec (no coordinator object), auth present
+            serde_json::json!({"trinoConfig": {"auth": {"passwordUsers": []}}}),
+            // auth present but empty
+            serde_json::json!({"trinoConfig": {"auth": {}}}),
+            serde_json::json!({"trinoConfig": {"coordinator": {}, "auth": {}}}),
+            // auth not an object
+            serde_json::json!({"trinoConfig": {"auth": null}}),
+            serde_json::json!({"trinoConfig": {"auth": "yes"}}),
+            // password-only auth, structured and flat
+            serde_json::json!({"trinoConfig": {"coordinator": {}, "auth": {"passwordUsers": []}}}),
+            // jwt not an object
+            serde_json::json!({"trinoConfig": {"auth": {"jwt": true}}}),
+        ];
+        for spec in specs {
+            let mut e = dummy_engine();
+            e.spec = spec.clone();
+            assert!(build_trino_config(&e.spec).auth.is_none(), "{spec}");
+            let auth = resolve_auth(&st, &e.spec["trinoConfig"])
+                .await
+                .expect("resolves")
+                .is_some();
+            let apply = auth && e.is_impersonate_delegation();
+            assert_eq!(ed::delegator_impersonates("trino", &spec), apply, "{spec}");
+            assert_eq!(
+                ed::supports_delegation("trino", &spec),
+                e.supports_delegation(),
+                "{spec}"
+            );
+            assert_eq!(ed::delegation_mode("trino", &spec), e.delegation_mode());
+            assert_eq!(
+                ed::supports_jwt_delegation("trino", &spec),
+                e.supports_jwt_delegation()
+            );
+        }
+        for spec in [
+            serde_json::json!({}),
+            serde_json::json!({"trinoConfig": {"auth": {"jwt": {}}}}),
+            serde_json::json!({"starrocksConfig": {"delegation": {"mode": "impersonate"}}}),
+            serde_json::json!({"starrocksConfig": {"delegation": {"mode": "jwt"}}}),
+        ] {
+            assert!(!ed::delegator_impersonates("starrocks", &spec), "{spec}");
+            let mut e = dummy_engine();
+            e.r#type = "starrocks".into();
+            e.spec = spec.clone();
+            assert_eq!(
+                ed::supports_delegation("starrocks", &spec),
+                e.supports_delegation(),
+                "{spec}"
+            );
+        }
+        assert!(!ed::qualifies_for_infra(
+            "trino",
+            "external",
+            &serde_json::json!({})
+        ));
+        assert!(ed::qualifies_for_infra(
+            "trino",
+            "provisioned",
+            &serde_json::json!({})
+        ));
+        assert!(!ed::qualifies_for_infra(
+            "starrocks",
+            "provisioned",
+            &serde_json::json!({})
+        ));
+    }
+
     #[test]
     fn provision_branch_gates_tls_delegator_and_monitor_by_mode() {
         // impersonate: delegation-capable, TLS provisioned, delegator injected,
@@ -8867,6 +9053,81 @@ mod tests {
         })
     }
 
+    /// A `ProfileCompilerPort` whose only real call is `converge_infra`, the
+    /// one production makes (`egret-bin`'s `ProfileCompilerImpl`). Every other
+    /// call is a no-op, as with no compiler wired: these tests drive apply
+    /// and delete, and compile through `egret_perm_compile` themselves.
+    struct ConvergingCompiler {
+        pool: sqlx::PgPool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::profile_compiler::ProfileCompilerPort for ConvergingCompiler {
+        async fn recompile_profile(
+            &self,
+            _service_id: i64,
+        ) -> Result<(), egret_perm::CompileError> {
+            Ok(())
+        }
+
+        async fn converge_infra(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
+            egret_perm_compile::converge_infra_policy(&self.pool, service_id)
+                .await
+                .map(|_| ())
+        }
+
+        async fn recompile_catalog_assignment_in_tx(
+            &self,
+            _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+            _catalog_id: Uuid,
+        ) -> Result<(), egret_perm::CompileError> {
+            Ok(())
+        }
+
+        async fn recompile_profile_in_tx(
+            &self,
+            _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+            _service_id: i64,
+        ) -> Result<(), egret_perm::CompileError> {
+            Ok(())
+        }
+
+        async fn lock_profiles_in_tx(
+            &self,
+            _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+            _service_ids: &[i64],
+        ) -> Result<(), egret_perm::CompileError> {
+            Ok(())
+        }
+
+        async fn overlap_snapshot_in_tx(
+            &self,
+            _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+            _service_ids: &[i64],
+        ) -> Result<crate::OverlapSnapshot, egret_perm::CompileError> {
+            Ok(crate::OverlapSnapshot::new(()))
+        }
+
+        async fn refuse_created_overlaps_in_tx(
+            &self,
+            _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+            _snapshot: &crate::OverlapSnapshot,
+        ) -> Result<(), egret_perm::CompileError> {
+            Ok(())
+        }
+    }
+
+    /// [`test_state`] with a [`ConvergingCompiler`] wired, as production always
+    /// wires a compiler: apply converges a bound profile's infrastructure
+    /// policies through it, and refuses without one.
+    async fn converging_state() -> Option<CpState> {
+        let mut st = test_state().await?;
+        st.perm_compiler = Some(std::sync::Arc::new(ConvergingCompiler {
+            pool: st.engine_mgmt.pool().clone(),
+        }));
+        Some(st)
+    }
+
     /// Seed a workspace + storage-conn (with a resolvable secret) + warehouse,
     /// returning the `(Warehouse, storage_secret_plaintext)` so a test can drive
     /// `build_starrocks_provision_req`. Mirrors `tests/store.rs::seed_warehouse`
@@ -9257,7 +9518,7 @@ mod tests {
     #[tokio::test]
     async fn build_starrocks_provision_req_names_ranger_binding_after_the_bound_profile_not_the_engine(
     ) {
-        let Some(st) = test_state().await else {
+        let Some(st) = converging_state().await else {
             eprintln!(
                 "skipping build_starrocks_provision_req_names_ranger_binding_after_the_bound_profile_not_the_engine: DATABASE_URL not set"
             );
@@ -9326,7 +9587,7 @@ mod tests {
     /// `build_provision_req` (Task 3's other call site, `:583`).
     #[tokio::test]
     async fn build_provision_req_names_ranger_binding_after_the_bound_profile_not_the_engine() {
-        let Some(st) = test_state().await else {
+        let Some(st) = converging_state().await else {
             eprintln!(
                 "skipping build_provision_req_names_ranger_binding_after_the_bound_profile_not_the_engine: DATABASE_URL not set"
             );
@@ -9443,8 +9704,7 @@ mod tests {
     /// Every policy of the per-user baseline is stored exactly once, with the
     /// producer's body, owned by egret's plumbing.
     fn assert_user_baseline(rows: &[(String, serde_json::Value, String)], profile_name: &str) {
-        use crate::delegator_policy as dp;
-        for (name, body) in dp::user_baseline_policies(profile_name) {
+        for (name, body) in egret_policy_api::infra_bodies::user_baseline_policies(profile_name) {
             let hits: Vec<_> = rows.iter().filter(|(n, _, _)| n == name).collect();
             assert_eq!(
                 hits.len(),
@@ -9469,7 +9729,7 @@ mod tests {
     /// seeded here: a JWT engine has no delegator.
     #[tokio::test]
     async fn a_jwt_engine_apply_seeds_the_user_baseline_and_no_delegator_grant() {
-        let Some(st) = test_state().await else {
+        let Some(st) = converging_state().await else {
             eprintln!("skipping a_jwt_engine_apply_seeds_the_user_baseline_and_no_delegator_grant: DATABASE_URL not set");
             return;
         };
@@ -9498,7 +9758,7 @@ mod tests {
     /// (impersonate-only, unchanged) and gets the same per-user baseline.
     #[tokio::test]
     async fn an_impersonate_engine_apply_seeds_the_delegator_grant_and_the_user_baseline() {
-        let Some(st) = test_state().await else {
+        let Some(st) = converging_state().await else {
             eprintln!("skipping an_impersonate_engine_apply_seeds_the_delegator_grant_and_the_user_baseline: DATABASE_URL not set");
             return;
         };
@@ -9522,7 +9782,7 @@ mod tests {
         assert_eq!(delegator.len(), 1, "{rows:#?}");
         assert_eq!(
             delegator[0].1,
-            crate::delegator_policy::delegator_impersonate_policy(&profile)
+            egret_policy_api::infra_bodies::delegator_impersonate_policy(&profile)
         );
         assert_eq!(delegator[0].2, "infra");
     }
@@ -9530,7 +9790,7 @@ mod tests {
     /// Applying twice leaves one row per name: the seed is idempotent.
     #[tokio::test]
     async fn applying_twice_seeds_no_duplicate_baseline_policies() {
-        let Some(st) = test_state().await else {
+        let Some(st) = converging_state().await else {
             eprintln!("skipping applying_twice_seeds_no_duplicate_baseline_policies: DATABASE_URL not set");
             return;
         };
@@ -9548,6 +9808,94 @@ mod tests {
         assert_user_baseline(&rows, &profile);
     }
 
+    /// `(id, name)` of every IR-owned infrastructure row stored under
+    /// `service_id`, in id order.
+    async fn ir_owned_infra_rows(service_id: i64) -> Vec<(i64, String)> {
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 2)
+            .await
+            .expect("connect");
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT id, name FROM policy.authz_policies WHERE service_id = $1 ORDER BY id",
+        )
+        .bind(service_id)
+        .fetch_all(&db.pool)
+        .await
+        .expect("read policies");
+        rows.into_iter()
+            .filter(|(_, n)| egret_policy_api::infra_names::is_ir_infra_name(n))
+            .collect()
+    }
+
+    /// SP2a final review I1: the build converges (and commits) the profile's
+    /// infrastructure rows for the NEW spec before the apply runs. A PUT that
+    /// switches impersonate → open converges every row away; when the apply
+    /// then fails, the spec is restored and the cluster still runs
+    /// impersonate, so the rows must be converged back for the restored spec.
+    /// Otherwise every delegated query is denied until some later recompile.
+    #[tokio::test]
+    async fn a_failed_update_reconverges_the_infra_rows_for_the_restored_spec() {
+        let Some(mut st) = converging_state().await else {
+            eprintln!("skipping a_failed_update_reconverges_the_infra_rows_for_the_restored_spec: DATABASE_URL not set");
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(FailingUpdateProvisioner));
+        let (engine, sid, profile) = bound_trino_engine(
+            &st,
+            serde_json::json!({ "delegationMode": "impersonate", "auth": {} }),
+        )
+        .await;
+        build_provision_req(&st, &engine)
+            .await
+            .expect("build_provision_req");
+        let before = ir_owned_infra_rows(sid).await;
+        assert!(
+            before
+                .iter()
+                .any(|(_, n)| n == crate::delegator_policy::IMPERSONATE_POLICY_NAME),
+            "the fixture must hold the delegator grant: {before:#?}"
+        );
+
+        let body = CreateEngineBody {
+            name: engine.name.clone(),
+            warehouse_id: None,
+            catalogs: Vec::new(),
+            image_version: None,
+            coordinator_replicas: 1,
+            worker_replicas: 1,
+            cpu_min: "1".into(),
+            cpu_max: "2".into(),
+            memory: "4Gi".into(),
+            trino_config: Some(serde_json::json!({ "delegationMode": "none", "auth": {} })),
+            authz_service_id: None,
+            kind: "trino".into(),
+            starrocks: None,
+            tls_cert_secret_ref: None,
+        };
+        let err = update_trino_engine(st.clone(), engine.clone(), body)
+            .await
+            .err()
+            .expect("the apply failure must surface");
+        assert!(matches!(err, CpError::ClusterApplyFailed(_)), "got {err:?}");
+
+        let reloaded = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.spec, engine.spec, "stored spec restored");
+        assert!(reloaded.is_impersonate_delegation());
+        // By name: the build's convergence deleted the rows and the
+        // re-convergence inserts them again, so their ids are new.
+        let names = |rows: Vec<(i64, String)>| {
+            rows.into_iter()
+                .map(|(_, n)| n)
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(
+            names(ir_owned_infra_rows(sid).await),
+            names(before),
+            "the infra rows must match the restored spec"
+        );
+        assert_user_baseline(&stored_policies(sid).await, &profile);
+    }
+
     /// Live finding B-F2 turned on egret's own seed: once a profile holds a
     /// compiled grant (`origin = 'generated'`), `create_policy` refuses every
     /// new policy with "compiled by the SP4a permission model". The baseline
@@ -9555,7 +9903,7 @@ mod tests {
     /// refused by it.
     #[tokio::test]
     async fn a_profile_holding_a_compiled_grant_gets_and_keeps_the_user_baseline() {
-        let Some(st) = test_state().await else {
+        let Some(st) = converging_state().await else {
             eprintln!("skipping a_profile_holding_a_compiled_grant_gets_and_keeps_the_user_baseline: DATABASE_URL not set");
             return;
         };
@@ -9651,51 +9999,41 @@ mod tests {
         );
     }
 
-    /// Existing engines get the baseline without an apply: the startup pass
-    /// seeds every delegating Trino engine bound to a profile, and only those.
+    /// Existing engines get their infrastructure policies without an apply:
+    /// the boot pass (`egret_perm_compile::converge_infra_policies`, which
+    /// replaced the per-user baseline pass) converges every profile a
+    /// qualifying engine is bound to, and gives nothing to a profile whose
+    /// engine is open, unbound or external.
     #[tokio::test]
-    async fn the_startup_pass_seeds_the_baseline_on_an_existing_engine_without_an_apply() {
-        let Some(st) = test_state().await else {
-            eprintln!("skipping the_startup_pass_seeds_the_baseline_on_an_existing_engine_without_an_apply: DATABASE_URL not set");
+    async fn the_boot_pass_converges_an_existing_engine_and_skips_open_unbound_and_external_ones() {
+        let Some(st) = converging_state().await else {
+            eprintln!("skipping the_boot_pass_converges_an_existing_engine_and_skips_open_unbound_and_external_ones: DATABASE_URL not set");
             return;
         };
-        let (jwt, jwt_sid, jwt_profile) = bound_trino_engine(
+        let (_jwt, jwt_sid, jwt_profile) = bound_trino_engine(
             &st,
             serde_json::json!({ "delegationMode": "jwt", "auth": { "jwt": {} } }),
         )
         .await;
-        let (open, open_sid, _) =
+        let (_open, open_sid, _) =
             bound_trino_engine(&st, serde_json::json!({ "delegationMode": "none" })).await;
+        // A delegating engine that was bound and then unbound: its former
+        // profile has no qualifying engine left.
+        let (unbound, unbound_sid, _) = bound_trino_engine(
+            &st,
+            serde_json::json!({ "delegationMode": "jwt", "auth": { "jwt": {} } }),
+        )
+        .await;
+        st.engine_mgmt
+            .set_engine_authz_service(unbound.id, None)
+            .await
+            .expect("unbind");
         assert!(stored_policies(jwt_sid).await.is_empty(), "no apply ran");
-
-        assert!(
-            seed_engine_user_baseline(&st, &jwt)
-                .await
-                .expect("seed the jwt engine"),
-            "a bound delegating engine is seeded"
-        );
-        assert_user_baseline(&stored_policies(jwt_sid).await, &jwt_profile);
-
-        assert!(
-            !seed_engine_user_baseline(&st, &open)
-                .await
-                .expect("an open engine is skipped, not an error"),
-            "a non-delegating engine is not seeded"
-        );
-        assert!(stored_policies(open_sid).await.is_empty());
-
-        let mut unbound = jwt.clone();
-        unbound.authz_service_id = None;
-        assert!(!seed_engine_user_baseline(&st, &unbound).await.unwrap());
-
-        let mut starrocks = jwt.clone();
-        starrocks.r#type = "starrocks".into();
-        assert!(!seed_engine_user_baseline(&st, &starrocks).await.unwrap());
 
         // An EXTERNAL Trino engine, bound to a profile, as `register_external`
         // stores it: `spec = '{}'`, which `delegation_mode()` reads as
         // `impersonate`, so `supports_delegation()` is true. egret never
-        // touches that cluster, so it must get nothing — not at startup, and
+        // touches that cluster, so it must get nothing — not at boot, and
         // not through an apply either.
         let ext_profile = format!("ubext_{}", Uuid::new_v4().simple());
         let ext_svc = st
@@ -9730,18 +10068,127 @@ mod tests {
             crate::external::is_external(&external) && external.supports_delegation(),
             "the fixture must be the case the guard exists for"
         );
+
+        egret_perm_compile::converge_infra_policies(st.engine_mgmt.pool())
+            .await
+            .expect("the boot pass");
+
+        assert_user_baseline(&stored_policies(jwt_sid).await, &jwt_profile);
         assert!(
-            !seed_engine_user_baseline(&st, &external)
-                .await
-                .expect("an external engine is skipped, not an error"),
-            "an external engine is not seeded"
+            stored_policies(open_sid).await.is_empty(),
+            "a non-delegating engine's profile gets nothing"
         );
-        assert!(stored_policies(ext_svc.id).await.is_empty());
-        // The apply path cannot reach the seed for it either: every apply
-        // handler refuses an external engine, and the build itself stops at
-        // `stored_image` (an external spec carries no image) before any seed.
+        assert!(
+            stored_policies(unbound_sid).await.is_empty(),
+            "a profile no engine is bound to gets nothing"
+        );
+        assert!(
+            stored_policies(ext_svc.id).await.is_empty(),
+            "an external engine's profile gets nothing"
+        );
+        // The apply path cannot reach it for an external engine either: every
+        // apply handler refuses one, and the build itself stops at
+        // `stored_image` (an external spec carries no image).
         assert!(build_provision_req(&st, &external).await.is_err());
         assert!(stored_policies(ext_svc.id).await.is_empty());
+    }
+
+    /// Governance SP2a (D5 (b)): apply converges, so an engine switched from
+    /// impersonate to jwt and applied again loses `egret-delegator-impersonate`
+    /// and keeps the per-user baseline. The old seeders only ever upserted,
+    /// so the delegator grant outlived the mode that needed it.
+    #[tokio::test]
+    async fn an_engine_switched_impersonate_to_jwt_and_reapplied_loses_the_delegator_grant() {
+        let Some(st) = converging_state().await else {
+            eprintln!("skipping an_engine_switched_impersonate_to_jwt_and_reapplied_loses_the_delegator_grant: DATABASE_URL not set");
+            return;
+        };
+        let (engine, sid, profile) = bound_trino_engine(
+            &st,
+            serde_json::json!({ "delegationMode": "impersonate", "auth": {} }),
+        )
+        .await;
+        build_provision_req(&st, &engine)
+            .await
+            .expect("impersonate apply");
+        let delegator = crate::delegator_policy::IMPERSONATE_POLICY_NAME;
+        assert!(
+            stored_policies(sid)
+                .await
+                .iter()
+                .any(|(n, _, _)| n == delegator),
+            "the arrangement must hold the delegator grant"
+        );
+
+        let mut spec = engine.spec.clone();
+        spec["trinoConfig"] = serde_json::json!({ "delegationMode": "jwt", "auth": { "jwt": {} } });
+        assert!(st
+            .engine_mgmt
+            .update_engine(engine.id, &spec, &engine.status)
+            .await
+            .expect("switch to jwt"));
+        let engine = st
+            .engine_mgmt
+            .get_engine(engine.id)
+            .await
+            .unwrap()
+            .expect("reloaded engine");
+        assert!(engine.is_jwt_delegation());
+        build_provision_req(&st, &engine).await.expect("jwt apply");
+
+        let rows = stored_policies(sid).await;
+        assert!(
+            !rows.iter().any(|(n, _, _)| n == delegator),
+            "a jwt engine has no delegator: {rows:#?}"
+        );
+        assert_user_baseline(&rows, &profile);
+    }
+
+    /// Deleting the last qualifying engine bound to a profile removes the
+    /// profile's IR-owned infrastructure rows (D5 (c)): the unbind and delete
+    /// recompile only a profile another engine still binds, so the delete
+    /// cleanup converges the former profile itself. An `all - …` row, which
+    /// the IR does not own, stays.
+    #[tokio::test]
+    async fn deleting_the_last_qualifying_engine_removes_its_profiles_infra_rows() {
+        let Some(st) = converging_state().await else {
+            eprintln!("skipping deleting_the_last_qualifying_engine_removes_its_profiles_infra_rows: DATABASE_URL not set");
+            return;
+        };
+        let (engine, sid, profile) = bound_trino_engine(
+            &st,
+            serde_json::json!({ "delegationMode": "impersonate", "auth": {} }),
+        )
+        .await;
+        build_provision_req(&st, &engine).await.expect("apply");
+        let all_name = "all - catalog";
+        st.authz
+            .upsert_infra_policy(sid, all_name, &serde_json::json!({ "name": all_name }))
+            .await
+            .expect("seed an all - row");
+        let before = stored_policies(sid).await;
+        assert_user_baseline(&before, &profile);
+        assert!(before.iter().any(|(n, _, _)| n == all_name));
+
+        assert!(matches!(
+            st.engine_mgmt
+                .delete_engine_unless_blocked(engine.id)
+                .await
+                .expect("delete the row"),
+            DeleteEngineOutcome::Deleted
+        ));
+        cleanup_deleted_engine(&st, &engine, &[]).await;
+
+        let after = stored_policies(sid).await;
+        assert!(
+            !after
+                .iter()
+                .any(|(n, _, _)| egret_policy_api::infra_names::is_ir_infra_name(n)),
+            "no IR-owned infra row may outlive the last qualifying engine: {after:#?}"
+        );
+        let kept: Vec<_> = after.iter().filter(|(n, _, _)| n == all_name).collect();
+        assert_eq!(kept.len(), 1, "the all - row stays: {after:#?}");
+        assert_eq!(kept[0].1, serde_json::json!({ "name": all_name }));
     }
 
     /// `resolve_ranger_service_name` must fail LOUDLY — never fall back to the
@@ -12796,6 +13243,8 @@ mod tests {
             .expect("build request");
         let render = |built: &mut BuiltReq, id: String| {
             built.req.ranger = Some(egret_engine_mgmt_api::RangerBinding {
+                mechanism: egret_engine_mgmt_api::opa_config::AccessMechanism::Ranger,
+                engine_id: "engine-1".into(),
                 service_name: "p".into(),
                 egret_url: "http://egret:8080".into(),
                 poll_interval_ms: 30_000,

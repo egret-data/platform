@@ -688,10 +688,31 @@ pub async fn live_table_id_via(
     ns: &[String],
     table: &str,
 ) -> Result<Option<Uuid>, sqlx::Error> {
+    live_tabular_id_of_via(conn, warehouse_id, ns, table, "table").await
+}
+
+/// The live view id of `ns.view` (any depth) in egret warehouse
+/// `warehouse_id`, `None` when it is not a live view (KI-319).
+pub async fn live_view_id_via(
+    conn: &mut sqlx::PgConnection,
+    warehouse_id: Uuid,
+    ns: &[String],
+    view: &str,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    live_tabular_id_of_via(conn, warehouse_id, ns, view, "view").await
+}
+
+async fn live_tabular_id_of_via(
+    conn: &mut sqlx::PgConnection,
+    warehouse_id: Uuid,
+    ns: &[String],
+    name: &str,
+    typ: &'static str,
+) -> Result<Option<Uuid>, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT t.tabular_id FROM catalog.warehouses w \
            JOIN lakekeeper.tabular t ON t.warehouse_id::text = w.lakekeeper_warehouse_id \
-          WHERE w.id = $1 AND t.typ = 'table' AND t.deleted_at IS NULL \
+          WHERE w.id = $1 AND t.typ::text = $4 AND t.deleted_at IS NULL \
             AND t.metadata_location IS NOT NULL \
             AND cardinality(t.tabular_namespace_name) = cardinality($2::text[]) \
             AND NOT EXISTS (SELECT 1 FROM unnest(t.tabular_namespace_name, $2::text[]) AS p(x, y) \
@@ -700,7 +721,8 @@ pub async fn live_table_id_via(
     )
     .bind(warehouse_id)
     .bind(ns)
-    .bind(table)
+    .bind(name)
+    .bind(typ)
     .fetch_optional(&mut *conn)
     .await
 }

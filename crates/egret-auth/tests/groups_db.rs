@@ -664,3 +664,165 @@ fn deleter() -> egret_core::Principal {
         impersonator: None,
     }
 }
+
+/// A [`egret_auth::groups::ReferenceDetailSource`] that counts how often it is
+/// asked and answers with an error, so a test sees both whether the repo asked
+/// and what asking costs.
+#[derive(Default)]
+struct CountingDetail {
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl egret_auth::groups::ReferenceDetailSource for &CountingDetail {
+    async fn reference_detail(&self) -> egret_core::Result<egret_auth::groups::ReferenceDetail> {
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(egret_core::Error::Internal(anyhow::anyhow!(
+            "the PDP is down (test)"
+        )))
+    }
+}
+
+/// #788: the detail of a "still named" refusal is decided lazily. A rename or
+/// delete that nothing names never asks for it — so a failing source (a PDP
+/// error on `policy:read`) cannot fail it — and a refusal asks exactly once.
+#[tokio::test]
+async fn the_reference_detail_is_asked_only_when_the_write_is_refused() {
+    let Some(db) = connect().await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    // Arrange: an unreferenced group and a source that would fail if asked.
+    let groups = GroupRepo::new(db.clone());
+    let gid = groups
+        .create_local(&uniq("t_lazy_detail"), &Recorder::default())
+        .await
+        .unwrap();
+    let detail = CountingDetail::default();
+
+    // Act + Assert: unreferenced rename and delete succeed without asking.
+    let renamed = groups
+        .rename(gid, &uniq("t_lazy_renamed"), &Recorder::default(), &detail)
+        .await
+        .expect("an unreferenced rename needs no detail");
+    assert_eq!(renamed, 1);
+    let deleted = groups
+        .delete_local(gid, &Recorder::default(), &detail)
+        .await
+        .expect("an unreferenced delete needs no detail");
+    assert_eq!(deleted, 1);
+    assert_eq!(
+        detail.asked.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "nothing names the group, so the detail must not be asked for"
+    );
+
+    // Arrange: a referenced group.
+    let name = uniq("t_lazy_ref");
+    let gid = groups
+        .create_local(&name, &Recorder::default())
+        .await
+        .unwrap();
+    let rc = Recorder::with_references(vec![egret_auth::groups::GroupReference {
+        group_name: name.clone(),
+        source: "grant".into(),
+        id: uuid::Uuid::new_v4(),
+        rule_name: None,
+        effect: Some("allow".into()),
+        position: "include".into(),
+    }]);
+
+    // Act + Assert: the refusal asks, once, and its error is what surfaces.
+    let err = groups.delete_local(gid, &rc, &detail).await.unwrap_err();
+    assert!(matches!(err, egret_core::Error::Internal(_)), "{err:?}");
+    assert_eq!(detail.asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// KI-324: a role grant names its group by id with no foreign key, so a group
+/// delete must take the group's `access_grants` rows (every scope) with it, in
+/// the same transaction — and leave another group's grants alone.
+#[tokio::test]
+async fn deleting_a_group_removes_its_role_grants() {
+    let Some(db) = connect().await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    // Arrange: two local groups, each granted a platform role, a workspace
+    // role and an object role.
+    let groups = GroupRepo::new(db.clone());
+    let doomed = groups
+        .create_local(&uniq("t_grant_doomed"), &Recorder::default())
+        .await
+        .unwrap();
+    let kept = groups
+        .create_local(&uniq("t_grant_kept"), &Recorder::default())
+        .await
+        .unwrap();
+    let workspace = uuid::Uuid::new_v4();
+    for gid in [doomed, kept] {
+        sqlx::query(
+            "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+             SELECT 'group', $1, id, 'platform', NULL FROM roles \
+              WHERE scope = 'platform' AND name <> 'platform_admin' \
+             ORDER BY name LIMIT 1",
+        )
+        .bind(gid)
+        .execute(&db.pool)
+        .await
+        .expect("platform grant");
+        sqlx::query(
+            "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+             SELECT 'group', $1, id, 'workspace', $2 FROM roles \
+              WHERE scope = 'workspace' ORDER BY name LIMIT 1",
+        )
+        .bind(gid)
+        .bind(workspace)
+        .execute(&db.pool)
+        .await
+        .expect("workspace grant");
+        sqlx::query(
+            "INSERT INTO access_grants \
+               (principal_type, principal_id, role_id, scope_type, object_type, scope_id, effect) \
+             SELECT 'group', $1, id, 'object', 'dashboard', $2, 'deny' FROM roles \
+              WHERE scope = 'workspace' ORDER BY name LIMIT 1",
+        )
+        .bind(gid)
+        .bind(uuid::Uuid::new_v4())
+        .execute(&db.pool)
+        .await
+        .expect("object grant");
+    }
+    let count = |gid: uuid::Uuid| {
+        let pool = db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM access_grants \
+                  WHERE principal_type = 'group' AND principal_id = $1",
+            )
+            .bind(gid)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(
+        count(doomed).await,
+        3,
+        "positive control: three grants seeded"
+    );
+
+    // Act
+    let rows = groups
+        .delete_local(
+            doomed,
+            &Recorder::default(),
+            egret_auth::groups::ReferenceDetail::Entries,
+        )
+        .await
+        .unwrap();
+
+    // Assert
+    assert_eq!(rows, 1);
+    assert_eq!(count(doomed).await, 0, "the deleted group's grants must go");
+    assert_eq!(count(kept).await, 3, "another group's grants must stay");
+}

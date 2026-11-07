@@ -7,6 +7,9 @@ import type { Tag } from "@/api/tags";
 import type { ResourceTagAssignment } from "@/api/catalogTags";
 import { ApiError } from "@/api/client";
 
+const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn() }));
+vi.mock("sonner", () => ({ toast }));
+
 const catalogTagsMock = vi.fn();
 const resourceTagsMock = vi.fn();
 const assignMutate = vi.fn();
@@ -83,6 +86,7 @@ beforeEach(() => {
   resourceTagsMock.mockReset().mockReturnValue({ data: [], isLoading: false });
   assignMutate.mockReset();
   unassignMutate.mockReset();
+  toast.warning.mockReset();
   assignState = { isError: false, error: null };
   unassignState = { isError: false, error: null };
 });
@@ -148,12 +152,30 @@ describe("CatalogTagEditor", () => {
     expect(screen.queryByRole("option", { name: "PII" })).toBeNull();
     await user.click(await screen.findByRole("option", { name: "Sensitive" }));
 
-    expect(assignMutate).toHaveBeenCalledWith({
-      schema: "eng",
-      table: "orders",
-      column: "",
-      tag_id: "t2",
-    });
+    expect(assignMutate).toHaveBeenCalledWith(
+      {
+        schema: "eng",
+        table: "orders",
+        column: "",
+        tag_id: "t2",
+      },
+      expect.anything(),
+    );
+  });
+
+  // KI-307: an attach that succeeded with a notice shows it to the steward.
+  it("shows each notice of a successful attach as a warning toast", async () => {
+    catalogTagsMock.mockReturnValue({ data: [tag({ id: "t2", name: "Sensitive" })], isLoading: false });
+    const user = userEvent.setup();
+    renderEditor();
+    await user.click(screen.getByLabelText("Add tag"));
+    await user.click(await screen.findByRole("option", { name: "Sensitive" }));
+
+    const [, options] = assignMutate.mock.calls[0] as [unknown, { onSuccess: (res: unknown) => void }];
+    options.onSuccess({ ok: true, notices: [] });
+    expect(toast.warning).not.toHaveBeenCalled();
+    options.onSuccess({ ok: true, notices: [{ code: "clearance_masks_pending_table", message: "Attached. The masks take effect later." }] });
+    expect(toast.warning).toHaveBeenCalledWith("Attached. The masks take effect later.");
   });
 
   it("sends the column coordinate when tagging a column", async () => {
@@ -165,12 +187,15 @@ describe("CatalogTagEditor", () => {
     await user.click(screen.getByLabelText("Add tag"));
     await user.click(await screen.findByRole("option", { name: "PII" }));
 
-    expect(assignMutate).toHaveBeenCalledWith({
-      schema: "eng",
-      table: "orders",
-      column: "email",
-      tag_id: "t1",
-    });
+    expect(assignMutate).toHaveBeenCalledWith(
+      {
+        schema: "eng",
+        table: "orders",
+        column: "email",
+        tag_id: "t1",
+      },
+      expect.anything(),
+    );
   });
 
   /**

@@ -192,10 +192,28 @@ pub struct CatalogSettings {
     /// stable across deploys; changing it mints a *different* system admin.
     #[serde(default = "default_system_user")]
     pub system_user: String,
+    /// How long the S3 credentials the catalog vends stay valid, in seconds:
+    /// the `DurationSeconds` of the STS `AssumeRole` call (KI-315). A revoked
+    /// or narrowed grant stops new credentials at once, but a credential
+    /// already handed out keeps working until it expires, so this bounds how
+    /// long a revocation takes to reach the object store. Default 900, the STS
+    /// minimum; 900..=43200 (the STS maximum). egret writes it into every S3
+    /// warehouse's storage profile, at creation and at every boot.
+    #[serde(default = "default_sts_token_validity_seconds")]
+    pub sts_token_validity_seconds: u64,
 }
 
 fn default_system_user() -> String {
     "egret-system".into()
+}
+
+/// The STS minimum, and the default lifetime of a vended credential.
+pub const MIN_STS_TOKEN_VALIDITY_SECONDS: u64 = 900;
+/// The STS maximum (`AssumeRole` refuses a longer `DurationSeconds`).
+pub const MAX_STS_TOKEN_VALIDITY_SECONDS: u64 = 43_200;
+
+fn default_sts_token_validity_seconds() -> u64 {
+    MIN_STS_TOKEN_VALIDITY_SECONDS
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -557,6 +575,136 @@ pub struct Config {
     /// `apps`: a deployment's TOML predates the section.
     #[serde(default)]
     pub engines: EnginesConfig,
+    /// Governance enforcement switches. Serde-defaulted like `engines`: a
+    /// deployment's TOML predates the section.
+    #[serde(default)]
+    pub governance: GovernanceConfig,
+}
+
+/// `[governance]` — deployment-level switches for how egret enforces policy.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GovernanceConfig {
+    #[serde(default)]
+    pub opa: OpaSettings,
+}
+
+/// The default of [`OpaSettings::batch_body_limit_bytes`]: 24 MiB.
+pub const DEFAULT_OPA_BATCH_BODY_LIMIT_BYTES: usize = 24 * 1024 * 1024;
+
+/// The smallest [`OpaSettings::batch_body_limit_bytes`] accepted: 4 MiB, the
+/// limit of every other OPA route. A smaller value would refuse (413) a
+/// `FilterTables` body the other routes' limit allows, failing SHOW TABLES and
+/// `information_schema` reads of ordinary schemas.
+pub const MIN_OPA_BATCH_BODY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
+
+/// The largest [`OpaSettings::batch_body_limit_bytes`] accepted: 64 MiB, the
+/// whole parse budget of the OPA surface (16 units of 4 MiB,
+/// `egret_perm_compile::opa::surface::{OPA_MAX_CONCURRENT_PARSES,
+/// OPA_BODY_LIMIT_BYTES}`). Up to it, a body never needs more units than the
+/// budget holds, so the surface's memory bound holds exactly.
+pub const MAX_OPA_BATCH_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+
+fn default_opa_batch_body_limit_bytes() -> usize {
+    DEFAULT_OPA_BATCH_BODY_LIMIT_BYTES
+}
+
+/// The default of [`OpaSettings::body_read_timeout_ms`]: 5 s.
+pub const DEFAULT_OPA_BODY_READ_TIMEOUT_MS: u64 = 5_000;
+
+/// The largest [`OpaSettings::body_read_timeout_ms`] accepted: 60 s.
+pub const MAX_OPA_BODY_READ_TIMEOUT_MS: u64 = 60_000;
+
+fn default_opa_body_read_timeout_ms() -> u64 {
+    DEFAULT_OPA_BODY_READ_TIMEOUT_MS
+}
+
+/// `[governance.opa]` — egret answering Trino's OPA plugin (governance SP2b).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpaSettings {
+    /// **The exposure lever for the OPA surface, and it defaults to `false`**
+    /// until SP2b-2 (Task 26) — modelled on
+    /// [`WorkflowConfig::webhooks_enabled`]. Key `[governance.opa] enabled`,
+    /// env `EGRET_GOVERNANCE__OPA__ENABLED=true`.
+    ///
+    /// While it is false the OPA routes are not mounted, the snapshot
+    /// refresher does not run, and a profile cannot be switched to
+    /// `mechanism = "opa"` (switching back to Ranger always works).
+    #[serde(default)]
+    pub enabled: bool,
+    /// The largest request body the OPA surface's `/batch` route accepts, in
+    /// bytes. Key `[governance.opa] batch_body_limit_bytes`, env
+    /// `EGRET_GOVERNANCE__OPA__BATCH_BODY_LIMIT_BYTES`. Default 24 MiB
+    /// ([`DEFAULT_OPA_BATCH_BODY_LIMIT_BYTES`]); every other OPA route keeps
+    /// its fixed 4 MiB.
+    ///
+    /// Trino 483's plugin sends `FilterTables` for a whole schema in one
+    /// `/batch` request, measured at about 73 bytes per table with short
+    /// names. The default holds about 340 000 such tables (170 000 to
+    /// 210 000 at 20- to 30-character names). A larger body is answered 413,
+    /// which fails the query (SHOW TABLES, `information_schema` reads).
+    ///
+    /// Accepted range: 4 194 304 (4 MiB, [`MIN_OPA_BATCH_BODY_LIMIT_BYTES`],
+    /// the other routes' limit) to 67 108 864 (64 MiB,
+    /// [`MAX_OPA_BATCH_BODY_LIMIT_BYTES`]); anything else is refused at
+    /// startup ([`Config::validate`]).
+    ///
+    /// Memory: the surface admits request bodies and their parses by size, in
+    /// 4 MiB units: at most 64 units (256 MiB) of raw body in flight before
+    /// authentication, and at most 16 units (64 MiB) of body being parsed at
+    /// once, which is about 640 MB of parsed JSON at the estimated tenfold
+    /// cost. Within the accepted range a body never needs more units than the
+    /// parse budget holds, so these bounds hold for every accepted value: a
+    /// larger limit only lets one body take more of the same budget (a 64 MiB
+    /// body takes all of it), and other requests wait (then 503) meanwhile.
+    #[serde(default = "default_opa_batch_body_limit_bytes")]
+    pub batch_body_limit_bytes: usize,
+    /// How long the OPA surface waits for a request's whole body once it has
+    /// admitted the request, in milliseconds. Key `[governance.opa]
+    /// body_read_timeout_ms`, env `EGRET_GOVERNANCE__OPA__BODY_READ_TIMEOUT_MS`.
+    /// Default 5 000 ([`DEFAULT_OPA_BODY_READ_TIMEOUT_MS`]); accepted range 1
+    /// to 60 000 ([`MAX_OPA_BODY_READ_TIMEOUT_MS`]).
+    ///
+    /// An admitted request holds part of the surface's in-flight budget while
+    /// its body arrives, so a caller that sends headers and then stalls would
+    /// hold that share for as long as its connection stays open. Past this
+    /// deadline the request is answered 408, its share is released and its
+    /// connection closed. 5 s covers the largest default `/batch` body (24 MiB)
+    /// at about 40 Mbit/s, while a Trino coordinator on a LAN sends its body
+    /// in milliseconds; a stalled caller holds its share for 5 s at most.
+    #[serde(default = "default_opa_body_read_timeout_ms")]
+    pub body_read_timeout_ms: u64,
+}
+
+impl OpaSettings {
+    /// Refuses a value outside its accepted range, naming the key.
+    pub fn validate(&self) -> Result<(), String> {
+        let limit = self.batch_body_limit_bytes;
+        if !(MIN_OPA_BATCH_BODY_LIMIT_BYTES..=MAX_OPA_BATCH_BODY_LIMIT_BYTES).contains(&limit) {
+            return Err(format!(
+                "governance.opa.batch_body_limit_bytes must be between \
+                 {MIN_OPA_BATCH_BODY_LIMIT_BYTES} (4 MiB) and \
+                 {MAX_OPA_BATCH_BODY_LIMIT_BYTES} (64 MiB), got {limit}"
+            ));
+        }
+        let timeout = self.body_read_timeout_ms;
+        if !(1..=MAX_OPA_BODY_READ_TIMEOUT_MS).contains(&timeout) {
+            return Err(format!(
+                "governance.opa.body_read_timeout_ms must be between 1 and \
+                 {MAX_OPA_BODY_READ_TIMEOUT_MS}, got {timeout}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Default for OpaSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            batch_body_limit_bytes: DEFAULT_OPA_BATCH_BODY_LIMIT_BYTES,
+            body_read_timeout_ms: DEFAULT_OPA_BODY_READ_TIMEOUT_MS,
+        }
+    }
 }
 
 /// Which backend provisions engines (`[engines] provisioner`, env
@@ -1969,6 +2117,7 @@ impl Default for Config {
                 // Derived from `server.port` in `Config::load` (KI-141).
                 public_url: None,
                 system_user: default_system_user(),
+                sts_token_validity_seconds: default_sts_token_validity_seconds(),
             },
             storage: StorageSettings {
                 endpoint: Some("http://localhost:9000".into()),
@@ -1997,6 +2146,7 @@ impl Default for Config {
             starrocks: default_starrocks(),
             apps: default_apps(),
             engines: EnginesConfig::default(),
+            governance: GovernanceConfig::default(),
             audit: AuditConfig {
                 enabled: true,
                 retention_days: 90,
@@ -2074,6 +2224,13 @@ impl Config {
                 return Err("catalog.enabled requires storage access_key/secret_key/bucket".into());
             }
         }
+        let sts = self.catalog.sts_token_validity_seconds;
+        if !(MIN_STS_TOKEN_VALIDITY_SECONDS..=MAX_STS_TOKEN_VALIDITY_SECONDS).contains(&sts) {
+            return Err(format!(
+                "catalog.sts_token_validity_seconds must be between \
+                 {MIN_STS_TOKEN_VALIDITY_SECONDS} and {MAX_STS_TOKEN_VALIDITY_SECONDS}, got {sts}"
+            ));
+        }
         // ranger.auth_token may be empty: an empty token is fine; engines authenticate with
         // their own credentials; `anonymous` (ranger.auth_mode) must be chosen explicitly.
         if !self.secrets.master_key.is_empty() {
@@ -2107,6 +2264,7 @@ impl Config {
         }
         self.workflow.storage.validate()?;
         self.workflow.http.validate()?;
+        self.governance.opa.validate()?;
         if self.workflow.kill_poll_ms < MIN_KILL_POLL_MS {
             return Err(format!(
                 "workflow.kill_poll_ms: {} is below the minimum {MIN_KILL_POLL_MS} \
@@ -3908,6 +4066,35 @@ values = { allowed-images = [] }
         assert!(cfg.validate().is_ok());
     }
 
+    /// KI-315: vended credentials last 15 minutes unless configured, and
+    /// the lifetime stays within what STS `AssumeRole` accepts.
+    #[test]
+    fn sts_token_validity_defaults_to_900_and_is_bounded() {
+        let mut cfg = Config::default();
+        cfg.storage.bucket = "b".into();
+        cfg.storage.access_key = "a".into();
+        cfg.storage.secret_key = "s".into();
+        assert_eq!(cfg.catalog.sts_token_validity_seconds, 900);
+        assert!(cfg.validate().is_ok());
+
+        cfg.catalog.sts_token_validity_seconds = 899;
+        assert!(cfg.validate().is_err(), "below the STS minimum");
+        cfg.catalog.sts_token_validity_seconds = 43_201;
+        assert!(cfg.validate().is_err(), "above the STS maximum");
+        cfg.catalog.sts_token_validity_seconds = 3600;
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn sts_token_validity_reads_from_the_environment() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_CATALOG__STS_TOKEN_VALIDITY_SECONDS", "1800");
+            let cfg = Config::load()?;
+            assert_eq!(cfg.catalog.sts_token_validity_seconds, 1800);
+            Ok(())
+        });
+    }
+
     #[test]
     fn ranger_disabled_by_default_validates() {
         let mut cfg = Config::default();
@@ -4188,6 +4375,122 @@ values = { allowed-images = [] }
     /// helm, which renders a Go bool as lowercase `true`/`false` — asserted
     /// below against the chart itself, because "the chart can only emit a legal
     /// spelling" is the sentence that makes refusing everything else safe.
+    /// Governance SP2b: the OPA surface is off until an operator turns it on
+    /// (`[governance.opa] enabled`, env `EGRET_GOVERNANCE__OPA__ENABLED`).
+    #[test]
+    fn governance_opa_is_off_by_default() {
+        figment::Jail::expect_with(|jail| {
+            // A TOML with no `[governance]` section at all.
+            jail.create_file("egret.toml", "[workflow]\nwebhooks_enabled = false\n")?;
+            let c: Config = Config::figment().extract().expect("defaults");
+            assert!(
+                !c.governance.opa.enabled,
+                "OPA must default to OFF when the section is absent"
+            );
+            Ok(())
+        });
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_GOVERNANCE__OPA__ENABLED", "true");
+            let c: Config = Config::figment().extract().expect("env");
+            assert!(c.governance.opa.enabled, "the env spelling turns it on");
+            Ok(())
+        });
+    }
+
+    /// SP2b Task 20F fix rounds 1 and 2 (I2, r1): the `/batch` limit is
+    /// refused outside 4 MiB..=64 MiB, and the body-read timeout outside 1..=60 000 ms, at
+    /// `Config::validate`, naming the key and the range.
+    #[test]
+    fn governance_opa_limits_are_refused_outside_their_range() {
+        let with = |limit: usize, timeout: u64| OpaSettings {
+            enabled: true,
+            batch_body_limit_bytes: limit,
+            body_read_timeout_ms: timeout,
+        };
+        let max = 64 * 1024 * 1024;
+        let min = 4 * 1024 * 1024;
+        assert_eq!(MAX_OPA_BATCH_BODY_LIMIT_BYTES, max);
+        assert_eq!(MIN_OPA_BATCH_BODY_LIMIT_BYTES, min);
+        // Accepted: both ends of each range, and the defaults.
+        for (limit, timeout) in [(min, 1), (max, 60_000), (24 * 1024 * 1024, 5_000)] {
+            assert_eq!(with(limit, timeout).validate(), Ok(()), "{limit} {timeout}");
+        }
+        assert_eq!(OpaSettings::default().validate(), Ok(()));
+        // Refused: just outside each end.
+        let refused = |got: usize| {
+            Err(format!(
+                "governance.opa.batch_body_limit_bytes must be between 4194304 (4 MiB) and \
+                 67108864 (64 MiB), got {got}"
+            ))
+        };
+        assert_eq!(with(0, 5_000).validate(), refused(0));
+        assert_eq!(with(1, 5_000).validate(), refused(1));
+        assert_eq!(with(min - 1, 5_000).validate(), refused(min - 1));
+        assert_eq!(with(max + 1, 5_000).validate(), refused(max + 1));
+        assert_eq!(
+            with(max, 0).validate(),
+            Err(
+                "governance.opa.body_read_timeout_ms must be between 1 and 60000, got 0"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            with(max, 60_001).validate(),
+            Err(
+                "governance.opa.body_read_timeout_ms must be between 1 and 60000, got 60001"
+                    .to_string()
+            )
+        );
+        // `Config::validate` runs it.
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_GOVERNANCE__OPA__BATCH_BODY_LIMIT_BYTES", "0");
+            let c: Config = Config::figment().extract().expect("env");
+            let err = c.validate().expect_err("0 is refused at load");
+            assert!(
+                err.contains("governance.opa.batch_body_limit_bytes"),
+                "{err}"
+            );
+            Ok(())
+        });
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_GOVERNANCE__OPA__BODY_READ_TIMEOUT_MS", "2500");
+            let c: Config = Config::figment().extract().expect("env");
+            assert_eq!(c.governance.opa.body_read_timeout_ms, 2_500);
+            c.governance.opa.validate().expect("2500 is accepted");
+            Ok(())
+        });
+    }
+
+    /// SP2b Task 20F: `/batch` has its own body limit, 24 MiB unless set.
+    #[test]
+    fn governance_opa_batch_body_limit_defaults_to_24_mib_and_is_configurable() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("egret.toml", "[governance.opa]\nenabled = true\n")?;
+            let c: Config = Config::figment().extract().expect("defaults");
+            assert_eq!(c.governance.opa.batch_body_limit_bytes, 24 * 1024 * 1024);
+            assert_eq!(
+                OpaSettings::default().batch_body_limit_bytes,
+                24 * 1024 * 1024
+            );
+            Ok(())
+        });
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "egret.toml",
+                "[governance.opa]\nbatch_body_limit_bytes = 33554432\n",
+            )?;
+            let c: Config = Config::figment().extract().expect("toml");
+            assert_eq!(c.governance.opa.batch_body_limit_bytes, 32 * 1024 * 1024);
+            Ok(())
+        });
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_GOVERNANCE__OPA__BATCH_BODY_LIMIT_BYTES", "8388608");
+            let c: Config = Config::figment().extract().expect("env");
+            assert_eq!(c.governance.opa.batch_body_limit_bytes, 8 * 1024 * 1024);
+            Ok(())
+        });
+    }
+
     #[test]
     fn the_webhook_lever_defaults_off_and_refuses_what_it_cannot_parse() {
         // **Every arm below counts its own iterations and the counts are

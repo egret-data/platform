@@ -1,0 +1,8 @@
+[
+  {
+    "error": "compiling rule \"g19.mask\" would expand to 501 entries, over the ceiling of 500"
+  },
+  {
+    "error": "compiling the clearance on tag \"g19.secret\" would expand to 501 per-column denies, over the ceiling of 500"
+  }
+]

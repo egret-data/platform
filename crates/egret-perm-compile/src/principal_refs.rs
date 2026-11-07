@@ -3,7 +3,7 @@
 //!
 //! # Why an unknown ref is a security defect and not a typo
 //!
-//! The compiler writes a ref through verbatim (`crate::grants`'s module doc), so a
+//! The compiler writes a ref through verbatim (`egret_perm_ir::lower::grants`' module doc), so a
 //! ref that matches nobody compiles to a Ranger item naming nobody. Where that
 //! lands decides which way it fails:
 //!
@@ -12,7 +12,7 @@
 //!   exclude** fails **OPEN**: the deny or the subtract silently evaporates and
 //!   the compiled policy allows more than the model states;
 //! - a **deny grant's exclude** fails closed: it compiles to a
-//!   `denyExceptions` item (`crate::grants`, `compile_grant`), and an exception
+//!   `denyExceptions` item (`crate::ranger::grants`, `compile_grant`), and an exception
 //!   naming nobody makes the deny WIDER than written, not narrower;
 //! - a rule's **`exempt.include`** fails closed the other way: the mask applies to
 //!   someone the author meant to exempt.
@@ -436,7 +436,7 @@ enum Stored {
 ///
 /// - **A `user` ref the lookup finds only by case** (`Analyst` for `analyst`)
 ///   is unresolved here, where the write path would have rewritten it: a
-///   stored row is compiled byte-for-byte (`crate::grants`' module doc) and
+///   stored row is compiled byte-for-byte (`egret_perm_ir::lower::grants`' module doc) and
 ///   compared byte-for-byte downstream, so on an engine it names nobody.
 /// - **A group that exists with no members** is `empty`: since J-F3 Task 1b
 ///   a non-`public` group compiles to its members' usernames through
@@ -673,6 +673,119 @@ pub(crate) async fn stored_user_refs_naming_via(
             r#ref,
         })
         .collect())
+}
+
+/// What [`allocate_username_via`] found or did.
+#[derive(Debug)]
+pub(crate) enum Allocation {
+    /// The user already had this username; nothing was written.
+    Existing(String),
+    /// This call minted the username, on the caller's transaction.
+    Allocated(String),
+    /// Minting `username` would make these stored refs start applying to the
+    /// user; the caller must roll its transaction back (the mint is in it).
+    Refused {
+        username: String,
+        refs: Vec<StoredUserRef>,
+    },
+}
+
+/// The core of `POST /perm/people/users/{id}/username` (People & groups §4.4,
+/// Q1), shared with the boot repair [`mint_missing_usernames`]: on `tx` (an
+/// open transaction the caller commits only for [`Allocation::Allocated`]),
+/// lock the user's row, mint with `ensure_username_via` if it has no username,
+/// and refuse when a stored `user` ref already names the minted name. `None`
+/// when no user has this id.
+///
+/// `FOR UPDATE` holds the user's row until the transaction ends, so this read
+/// is the one that decides: no other allocation of THIS user (another steward,
+/// a first query, a compile minting a group member) can set the username in
+/// between. It is the only lock taken: a new grant or rule write cannot add a
+/// ref to the allocated name concurrently, because the write path refuses a
+/// `user` ref no committed `users.username` carries, and the name is not
+/// committed until the guard has passed.
+pub(crate) async fn allocate_username_via(
+    tx: &mut PgConnection,
+    user_id: Uuid,
+) -> Result<Option<Allocation>, PermHttpError> {
+    let existing: Option<Option<String>> =
+        sqlx::query_scalar("SELECT username::text FROM users WHERE id = $1 FOR UPDATE")
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(PermHttpError::db)?;
+    match existing {
+        None => return Ok(None),
+        Some(Some(username)) => return Ok(Some(Allocation::Existing(username))),
+        Some(None) => {}
+    }
+    let username = egret_auth::users::ensure_username_via(&mut *tx, egret_core::UserId(user_id))
+        .await
+        .map_err(PermHttpError::from)?;
+    let refs = stored_user_refs_naming_via(&mut *tx, &username).await?;
+    if refs.is_empty() {
+        Ok(Some(Allocation::Allocated(username)))
+    } else {
+        Ok(Some(Allocation::Refused { username, refs }))
+    }
+}
+
+/// What the boot repair did: users named, and users left without a name
+/// because a stored ref already names theirs.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct UsernameRepair {
+    pub minted: usize,
+    pub refused: usize,
+}
+
+/// Boot repair (spec `2026-10-31-local-user-username.md`, decision 4): give
+/// every human user (provider other than `service`) who still has no username
+/// one, through the same core as the steward's allocation — one transaction
+/// per user, `ensure_username_via` and its ledger, and the stale-ref guard. A
+/// user the guard refuses keeps no username and is logged; the Governance
+/// allocation then answers 409 with the refs, as before.
+///
+/// Before 2026-10-31 no creation path minted, so a user who never ran a query
+/// could not be named in a grant written through the API. Creation mints
+/// since; this converges the rows written before. Idempotent: once converged
+/// it is one query that finds nobody. Service accounts are left as they are
+/// (a name at their first token, or from Governance).
+pub async fn mint_missing_usernames(pool: &sqlx::PgPool) -> anyhow::Result<UsernameRepair> {
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM users WHERE username IS NULL AND provider <> 'service' \
+          ORDER BY created_at, id",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut out = UsernameRepair::default();
+    for user_id in ids {
+        let mut tx = pool.begin().await?;
+        match allocate_username_via(&mut tx, user_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("allocating a username for user {user_id}: {e}"))?
+        {
+            Some(Allocation::Allocated(username)) => {
+                tx.commit().await?;
+                out.minted += 1;
+                tracing::info!(%user_id, username = %username, "boot repair allocated a username");
+            }
+            Some(Allocation::Refused { username, refs }) => {
+                tx.rollback().await?;
+                out.refused += 1;
+                tracing::warn!(
+                    %user_id,
+                    username = %username,
+                    refs = refs.len(),
+                    "boot repair left a user without a username: stored grant principals or \
+                     rule exemptions already name the one they would get; review them in \
+                     GET /api/control-plane/perm/unresolved-principals"
+                );
+            }
+            // Deleted, or named by someone else, since the list was read.
+            Some(Allocation::Existing(_)) | None => tx.rollback().await?,
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

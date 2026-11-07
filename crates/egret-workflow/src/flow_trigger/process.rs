@@ -190,7 +190,7 @@ struct SourceRow {
     loop_index: Option<i32>,
     /// The execution's own labels (migration 0192), beyond its flow's.
     labels: Option<serde_json::Value>,
-    /// The execution's flow outputs (migration 0211, package #6), SECRET
+    /// The execution's flow outputs (migration 0214, package #6), SECRET
     /// values masked; `NULL` when none were evaluated.
     outputs: Option<serde_json::Value>,
 }

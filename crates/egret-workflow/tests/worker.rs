@@ -13163,7 +13163,7 @@ async fn an_inherited_create_new_execution_retry_is_still_refused_in_a_loop(pool
 // ---------------------------------------------------------------------------
 // Package #6 Task B1: the flow-level `outputs:` evaluated when the execution
 // reaches its terminal state (spec D6), stored in `workflow.executions.outputs`
-// (migration 0211, D11). No oracle sees outputs (spec §4): the content is
+// (migration 0214, D11). No oracle sees outputs (spec §4): the content is
 // pinned here.
 // ---------------------------------------------------------------------------
 
@@ -13279,7 +13279,7 @@ async fn flow_outputs_are_typed_and_stored_on_the_execution(pool: sqlx::PgPool) 
 }
 
 /// **A flow with no `outputs:` stores none** (`NULL`, "no outputs evaluated",
-/// migration 0211), and its history is untouched.
+/// migration 0214), and its history is untouched.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_flow_without_outputs_stores_none(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();

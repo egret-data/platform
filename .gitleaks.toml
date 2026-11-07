@@ -20,4 +20,6 @@ paths = [
   '''crates/egret-config/src/lib\.rs''',
   # Docker demo stack: fixed, documented, PUBLIC development values (see docs/en/guides/demo-stack.md).
   '''deploy/demo/demo\.env$''',
+  # SP2b OPA e2e stack (scripts/opa-e2e): the same public development values as demo.env.
+  '''deploy/opa-e2e/egret\.env$''',
 ]

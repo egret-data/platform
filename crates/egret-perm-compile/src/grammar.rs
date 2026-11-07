@@ -10,7 +10,12 @@
 //! Ranger's: `Action` has two values and expands to a FIXED access-type set per
 //! engine (`egret_perm::actions::engine_accesses`), `Scope` names ONE catalog by
 //! registry UUID, `principals.exclude` emits exactly one exception item, and
-//! `grants.rs::level` hard-codes `is_excludes: false` and `is_recursive: false`.
+//! `ranger::grants::level` hard-codes `is_excludes: false` and `is_recursive: false`.
+//! (The compiler's one `isExcludes` — a catalog-scoped mask's
+//! `information_schema` exclusion, `ranger::grants::INFORMATION_SCHEMA` — has
+//! no scope that renders it from a hand-written body, so the grammar still
+//! refuses every `isExcludes`; a hand-written catalog mask with `schema: *`
+//! migrates verbatim and keeps covering `information_schema`.)
 //! Anything outside that is refused with a blocker that names it.
 //!
 //! **The subset rule is the whole point.** `Action::Write` is atomic: on Trino
@@ -34,7 +39,7 @@
 //! # The design oracle: this is the inverse of `compile_grant`
 //!
 //! Everything accepted here is written as a real permission and compiled back
-//! by [`crate::grants::compile_grant`]. So the rule for every field is: if the
+//! by [`crate::ranger::grants::compile_grant`]. So the rule for every field is: if the
 //! compiled-back body could decide differently from the body read here, the
 //! field is refused. `tests/grammar_access.rs`'s
 //! `every_accepted_body_compiles_back_to_what_it_came_from` checks that
@@ -101,11 +106,10 @@ use egret_ranger_eval::model::{
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::grants::{
-    level_is_a_wildcard_run, resource_level_names, validate_user_ref, PolicyTarget,
-    ROW_FILTER_LEVELS,
-};
-use crate::rules::{declared_mask_types, validate_rule_shape};
+use crate::ranger::grants::{resource_level_names, PolicyTarget, ROW_FILTER_LEVELS};
+use crate::ranger::rules::declared_mask_types;
+use egret_perm_ir::lower::grants::{level_is_a_wildcard_run, validate_user_ref};
+use egret_perm_ir::lower::rules::validate_rule_shape;
 
 /// Why one Ranger policy cannot become model objects. Each variant names the
 /// offending value where there is one, so Task 5 can render it as a sentence
@@ -161,6 +165,20 @@ pub enum Blocker {
     SecurityZone { zone: String },
     /// A level of the engine's hierarchy is absent (an absent level is not `*`).
     MissingLevel { level: String },
+    /// A MASKING policy's non-catalog level is absent. Its own variant because
+    /// the consequence and the remedy differ from an access policy's: every
+    /// `dataMaskDef` level is mandatory once Ranger merges the def, so such a
+    /// policy masks NOTHING today, while the rule it would become masks every
+    /// column below the path.
+    ///
+    /// `named_below` is the first level BELOW the missing one that the policy
+    /// does name, if any: then the policy has a GAP, and the remedy is to name
+    /// the missing level (or set only it to `*`) — never to widen the named
+    /// levels under it.
+    MaskMissingLevel {
+        level: String,
+        named_below: Option<String>,
+    },
     /// A resource key outside the engine's catalog/schema|database/table/column
     /// hierarchy.
     UnknownLevel { level: String },
@@ -196,7 +214,7 @@ pub enum Blocker {
     /// A tag-addressed ACCESS policy (`policyType` 0 with a `tag` resource).
     /// The only tag access policy the model has is a CLEARANCE, and its
     /// cleared set is the MEMBERSHIP of `required_roles`, enumerated at
-    /// compile time (`crate::clearance`): a hand-written list of users cannot
+    /// compile time (`crate::ir_load::load_withhold_inputs`): a hand-written list of users cannot
     /// be inverted into roles, and a tag ALLOW has no model at all. Clearance
     /// migration is therefore OUT OF SCOPE (user ruling, 2026-10-10).
     ClearanceNotExpressible,
@@ -231,7 +249,7 @@ pub enum Blocker {
     /// per-principal mask or filter the model has no shape for.
     NotAnExemption { index: usize },
     /// The exemption item names the `public` group, which would exempt
-    /// everyone (`rules::exempt_principals` refuses it).
+    /// everyone (`egret_perm_ir::lower::rules`' `exempt_audience` refuses it).
     PublicExemption,
     /// A tag-addressed policy for a StarRocks profile: StarRocks has no tag
     /// service, so a tag rule compiles there to one resource policy per
@@ -649,18 +667,9 @@ fn from_unmodelled(u: &Unmodelled) -> Blocker {
 /// grant only (0179): there it widens AUTHORITY, the measured escalation. On a
 /// rule it widens RESTRICTION and both plugins enforce it — product decision
 /// 2026-10-10, `migrations/0179`'s closing section, and the reason
-/// `rules::validate_rule_shape` does not call the grant-side guard either.
+/// `egret_perm_ir::lower::rules::validate_rule_shape` does not call the grant-side guard either.
 fn refuses_wildcard_over_named(target: PolicyTarget) -> bool {
     matches!(target, PolicyTarget::Access)
-}
-
-/// Whether a scope may stop above the deepest level by OMITTING the rest. Only
-/// a mask: `scope_to_resources`' `Mask` arm renders exactly the levels a scope
-/// names, so an absent trailing level is `None` and compiles back absent. A
-/// grant's and a row filter's renderers emit every level of their hierarchy,
-/// so for them an absent level is a body the compiler cannot produce.
-fn may_stop_short(target: PolicyTarget) -> bool {
-    matches!(target, PolicyTarget::Mask)
 }
 
 /// The resources map → one [`Scope`] per registered catalog value, read
@@ -669,7 +678,7 @@ fn may_stop_short(target: PolicyTarget) -> bool {
 ///
 /// Values are carried as the compiler renders them back: on a grant a wildcard
 /// run is "unnamed" (`None`, rendered `*`); on a rule every present value is
-/// kept VERBATIM (`Some("*")` renders `*`, and `None` renders absent on a mask).
+/// kept VERBATIM (`Some("*")` renders `*`).
 fn scopes(
     resources: &std::collections::BTreeMap<String, ResourceLevel>,
     engine: EngineType,
@@ -745,14 +754,27 @@ fn scopes(
         raw[i - 1] = Some(level.values[0].clone());
     }
 
-    // An absent level is refused unless it is part of a trailing run a mask is
-    // allowed to omit. The catalog is never optional (`Scope.catalog_id`).
+    // An absent level is refused for every target: each renderer emits every
+    // level of its hierarchy (`scope_to_resources` fills an unnamed one with
+    // `*`), so an absent level is a body the compiler cannot produce.
+    //
+    // ⚠ A MASK used to be allowed to omit a trailing run, because its renderer
+    // used to omit it too. That body masks NOTHING on the real plugin (every
+    // `dataMaskDef` level is mandatory once Ranger merges it onto the access
+    // def), while the same scope now compiles to `*` and masks every column —
+    // so accepting it would migrate an inert policy into one that masks.
     for (i, name) in names.iter().enumerate() {
-        let omissible =
-            may_stop_short(target) && i > 0 && absent[i..names.len()].iter().all(|a| *a);
-        if absent[i] && !omissible {
-            b.push(Blocker::MissingLevel {
-                level: (*name).to_string(),
+        if absent[i] {
+            let level = (*name).to_string();
+            b.push(if target == PolicyTarget::Mask && i > 0 {
+                Blocker::MaskMissingLevel {
+                    level,
+                    named_below: (i + 1..names.len())
+                        .find(|j| !absent[*j])
+                        .map(|j| names[j].to_string()),
+                }
+            } else {
+                Blocker::MissingLevel { level }
             });
         }
     }
@@ -935,7 +957,7 @@ fn actions(it: &PolicyItem, engine: EngineType, b: &mut Vec<Blocker>) -> Vec<Act
 /// [`Rule`]s it is equivalent to, or every reason it is not expressible.
 ///
 /// The design oracle is [`crate::rules::compile_rule`], exactly as
-/// [`crate::grants::compile_grant`] is for [`grants_from_access_policy`]: an
+/// [`crate::ranger::grants::compile_grant`] is for [`grants_from_access_policy`]: an
 /// accepted body, compiled back, must decide identically. What that compiler
 /// emits, and therefore the only shape accepted here:
 ///
@@ -947,10 +969,12 @@ fn actions(it: &PolicyItem, engine: EngineType, b: &mut Vec<Blocker>) -> Vec<Act
 ///   named principals only, two different masks, an exemption after the
 ///   everyone item — is a per-principal control a [`Rule`] cannot hold.
 /// - **Accesses: exactly `select`** on every item.
-/// - **Resources: as `scope_to_resources` renders them.** A mask renders only
-///   the levels its scope names, so it may stop above the column; a row filter
-///   always renders catalog + schema|database + table, so all three are
-///   required and a `column` is [`Blocker::UnknownLevel`]. Values are kept
+/// - **Resources: as `scope_to_resources` renders them.** A mask always
+///   renders all four levels (an unnamed one as `*`), so all four are required
+///   — a mask body that stops above the column masks nothing on the plugin and
+///   is [`Blocker::MaskMissingLevel`]; a row filter always renders catalog +
+///   schema|database + table, so all three are required and a `column` is
+///   [`Blocker::UnknownLevel`]. Values are kept
 ///   verbatim, so a `*` above a named level is ACCEPTED here (product decision
 ///   2026-10-10) — the asymmetry with the grant grammar is
 ///   [`refuses_wildcard_over_named`].
@@ -1258,7 +1282,7 @@ fn rule_items(
     ))
 }
 
-/// What `rules::mask_items` / `rowfilter_items` put in the exemption item.
+/// What `ranger::rules::mask_items` / `rowfilter_items` put in the exemption item.
 fn lifts_the_control(kind: &RuleKind) -> bool {
     match kind {
         RuleKind::Mask {

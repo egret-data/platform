@@ -5,7 +5,7 @@
   <img alt="Egret" src=".github/assets/egret-wordmark-light.svg" width="260">
 </picture>
 
-### One governed data platform for every team
+### Open-source, multi-tenant data platform
 
 Isolated workspaces on one shared, governed data foundation: BI, data APIs, workflows and data apps,\
 with access policy enforced in the query engine and every decision audited.

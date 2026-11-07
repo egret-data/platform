@@ -28,7 +28,65 @@ env:
   EGRET_TEST_SHARED_STORE_URL: redis://localhost:6379
 
 jobs:
+  # Which jobs a pull request needs. A change that touches only docs, top-level Markdown or a workflow
+  # other than this one cannot change what rust, ranger-differential or frontend test: no Rust test
+  # reads a file under docs/ (checked: the docs paths in crates/ are message strings), and the
+  # frontend reads three docs files, listed below. A push to main always runs everything, and so does a
+  # pull request whose `changes` job did not succeed (fail closed: never a vacuous green).
+  changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.code.outputs.code }}
+      frontend_docs: ${{ steps.frontend_docs.outputs.frontend_docs }}
+      opa: ${{ steps.opa.outputs.opa }}
+    steps:
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: code
+        with:
+          # A file counts as code unless it matches one of the exclusions.
+          predicate-quantifier: every
+          filters: |
+            code:
+              - '!docs/**'
+              - '!*.md'
+              - '!.github/workflows/ghcr-cleanup.yml'
+              - '!.github/workflows/images.yml'
+              - '!.github/workflows/apps-image.yml'
+              - '!.github/workflows/oss-hygiene.yml'
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: frontend_docs
+        with:
+          # Read by frontend/eslint-rules/__tests__/rulebook.test.js.
+          filters: |
+            frontend_docs:
+              - 'docs/en/frontend-rules.md'
+              - 'docs/vi/frontend-rules.md'
+              - 'docs/en/ui-conventions.md'
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: opa
+        with:
+          # What can change the end-to-end OPA differential (opa-e2e). Every crate, by inclusion
+          # rather than a list: the OPA and Ranger paths run through the compile's own
+          # dependencies (egret-ranger-eval, egret-policy-api, egret-auth, the catalog registry
+          # ...), and a hand-picked list drifts the day one is added (review R2). Then the
+          # schema, the lock file, the image, the stack, its scripts and this workflow.
+          filters: |
+            opa:
+              - 'crates/**'
+              - 'migrations/**'
+              - 'Cargo.lock'
+              - 'deploy/docker/backend.Dockerfile'
+              - 'deploy/opa-e2e/**'
+              - 'scripts/opa-e2e/**'
+              - '.github/workflows/ci.yml'
+
   rust:
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -154,6 +212,8 @@ jobs:
       # carry the flag like the other two axes.
       - name: Test
         run: EGRET_ALLOW_ENGINE_SKIP=1 EGRET_ALLOW_DOCKER_SKIP=1 cargo test --workspace --no-fail-fast
+      - name: Golden compile corpus
+        run: cargo test -p egret-perm-compile --features harness --test golden_compile
       # Prints on failure too, so a future disk exhaustion is a number in the log rather than a
       # mystery SIGBUS — this one cost a full investigation to identify.
       - name: Disk after build
@@ -174,6 +234,8 @@ jobs:
   # `continue-on-error` is deliberately NOT set: a gate allowed to fail is the
   # vacuous green again, one level up.
   ranger-differential:
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -197,7 +259,112 @@ jobs:
       - name: Ranger differential corpus
         run: EGRET_TEST_RANGER_E2E=1 cargo test -p egret-ranger-eval --test differential --no-fail-fast -- --nocapture
 
+  # SP2b. egret's OPA evaluator (`egret-perm-eval`) against the Ranger artifact and real
+  # Ranger 2.8.0. Java 17 and the maven cache match `ranger-differential`. Like it, no
+  # `continue-on-error` and no `-q`: the surefire summary is asserted by name.
+  opa-differential:
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: egret
+          POSTGRES_PASSWORD: egret
+          POSTGRES_DB: egret_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U egret"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      # Builds egret-perm-compile with `harness`, as large as the `rust` job's link; same reclaim.
+      - name: Reclaim runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/.ghcup /usr/local/share/boost \
+                      /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force > /dev/null 2>&1 || true
+          df -h /
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - uses: Swatinem/rust-cache@v2
+      # The operation table must still equal what the 483 jar sends.
+      - name: Operation table covers the 483 plugin
+        run: cargo test -p egret-perm-eval --no-fail-fast
+      # S8: every Trino golden fixture compiled on an OPA profile equals its blessed Ranger artifact.
+      - name: The Ranger artifact does not depend on the mechanism
+        run: env -u EGRET_ALLOW_DB_SKIP EGRET_GOLDEN_MECHANISM=opa cargo test -p egret-perm-compile --features harness --test golden_compile --no-fail-fast
+      # 40 store states x 50 Trino questions, egret-perm-eval against real Ranger 2.8.0.
+      - name: OPA decision-level differential
+        run: env -u EGRET_ALLOW_DB_SKIP EGRET_TEST_RANGER_E2E=1 cargo test -p egret-perm-compile --features harness --test opa_differential --no-fail-fast -- --nocapture
+
+  # SP2b Task 21, Layer 2: Trino-on-OPA against Trino-on-Ranger, end to end. Brings up compose
+  # project egret-opa-e2e (egret built from this tree, a provisioned trino-opa on the OPA plugin, a
+  # trino-ranger on the same profile's Ranger download), runs every scenario of
+  # scripts/opa-e2e/scenarios.sql.d on both, and fails on any difference explained.toml does not
+  # explain, or on any case where trino-opa shows more than trino-ranger.
+  opa-e2e:
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.opa == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      LAYER2_REPORT: ${{ github.workspace }}/layer2-report.json
+    steps:
+      - uses: actions/checkout@v4
+      # `runner` is not available in a job-level `env`, so WORK is set here.
+      - name: Work directory
+        run: echo "WORK=$RUNNER_TEMP/egret-opa-e2e" >> "$GITHUB_ENV"
+      # The backend image build links egret-bin like the `rust` job does; same reclaim.
+      - name: Reclaim runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/.ghcup /usr/local/share/boost \
+                      /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force > /dev/null 2>&1 || true
+          df -h /
+      - name: compare.py unit tests
+        run: python3 -I -m unittest discover -s scripts/opa-e2e -p test_compare.py -v
+      - name: Bring up the stack
+        run: scripts/opa-e2e/up.sh
+      - name: Layer 2 differential
+        run: scripts/opa-e2e/layer2.sh
+      - name: Collect the stack's logs
+        if: failure()
+        run: |
+          mkdir -p opa-e2e-logs
+          docker compose -f deploy/opa-e2e/docker-compose.yml -p egret-opa-e2e logs --no-color > opa-e2e-logs/compose.log 2>&1 || true
+          docker logs egret-engine-egret-engines-trino-opa-coordinator > opa-e2e-logs/trino-opa.log 2>&1 || true
+      - name: Tear down
+        if: always()
+        run: scripts/opa-e2e/down.sh
+      - name: Upload the Layer 2 report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: opa-e2e-report
+          path: |
+            layer2-report.json
+            layer2-results.jsonl
+            opa-e2e-logs/
+          if-no-files-found: warn
+
   frontend:
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.code == 'true' || needs.changes.outputs.frontend_docs == 'true') }}
     runs-on: ubuntu-latest
     defaults:
       run:

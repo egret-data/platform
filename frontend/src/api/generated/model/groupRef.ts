@@ -7,7 +7,7 @@
  */
 
 /**
- * A group holding a role (egret only).
+ * A group holding a role. Its members get the role on engines too.
  */
 export interface GroupRef {
   name: string;

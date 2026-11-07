@@ -8,12 +8,13 @@ import { AuthContext } from "@/auth/useAuth";
 import { AddTagDialog, type TagTarget } from "@/routes/governance/data/AddTagDialog";
 import { serve, ok, fail } from "@/routes/governance/engines/__tests__/engineHarness";
 
-const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
+const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn() }));
 vi.mock("sonner", () => ({ toast }));
 
 afterEach(() => {
   vi.unstubAllGlobals();
   toast.success.mockClear();
+  toast.warning.mockClear();
 });
 
 const PII = { id: "t-pii", key: "pii", name: "PII", description: "Personal data", color: "#e11d48", assignment_count: 0, created_at: "", required_roles: [], required_groups: [] };
@@ -148,6 +149,24 @@ describe("Add classification on a whole table", () => {
     open({ ...TABLE, column: "email" }, me(["tag:read", "policy:read", "catalog_registry:update"]));
     await userEvent.click(await screen.findByRole("combobox", { name: "Classification" }));
     expect(await screen.findByRole("option", { name: /PII/ })).toHaveTextContent("1 rule");
+  });
+
+  // KI-307: the attach succeeded, and the server says what the steward should know about it.
+  it("shows the server's notice in place of the plain success toast", async () => {
+    const notice =
+      "Attached. egret found no table sales.orders in the catalog, so StarRocks has no column masks for clearance PII on it yet: a direct read is refused, but a view over the table shows the values. The masks take effect once the table exists in the catalog.";
+    const served = serve({
+      "/tags": ok([{ ...PII, required_roles: ["cleared"] }]),
+      "/perm/rules": ok([]),
+      "PUT /warehouses/wh-1/resource-tags": ok({ ok: true, notices: [{ code: "clearance_masks_pending_table", message: notice }] }),
+    });
+    const onOpenChange = open(TABLE, me(["tag:read", "policy:read", "catalog_registry:update"]));
+    await pick("PII");
+    await userEvent.click(screen.getByRole("button", { name: "Add classification" }));
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(notice));
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(served.bodies["PUT /warehouses/wh-1/resource-tags"]).toEqual([{ schema: "sales", table: "orders", column: "", tag_id: "t-pii" }]);
   });
 
   it("keeps a failed write's server sentence beside the field", async () => {

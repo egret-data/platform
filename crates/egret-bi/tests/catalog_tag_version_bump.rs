@@ -143,32 +143,18 @@ async fn attach_catalog(pool: &sqlx::PgPool, engine_id: Uuid, catalog_id: Uuid) 
     .expect("attach catalog");
 }
 
-async fn create_service(pool: &sqlx::PgPool) -> i64 {
-    // Seed a minimal service-def + service directly (no full policy seam needed).
-    // Both tests in this binary seed this def at once, against one database.
-    // `ON CONFLICT (id)` makes only the primary key the arbiter, so a racer that
-    // misses the other's uncommitted `id` still collides on the `name` UNIQUE
-    // index and raises `authz_service_defs_name_key` instead of doing nothing.
-    // With no conflict target every unique index is an arbiter.
-    sqlx::query(
-        "INSERT INTO policy.authz_service_defs (id, name, def_jsonb) VALUES ($1,$2,'{}'::jsonb) \
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(950950_i64)
-    .bind("trino_tv")
-    .execute(pool)
-    .await
-    .expect("insert service-def");
-    // `authz_services.type` is a FOREIGN KEY onto `authz_service_defs(name)`, so the service must
-    // name the def this function just created. It said 'trino', which no migration seeds — the row
-    // only ever existed because some OTHER test had called `upsert_service_def` against the same
-    // database first. That made this test pass on a developer's accumulated database and on a
-    // `--workspace` run where the other binary happened to go first, and fail on a clean one.
+async fn create_service(db: &Db) -> i64 {
+    // The real Trino service-def, seeded the way the server does at startup, so
+    // the profile is of the engine's own type. An engine bound to a profile of
+    // another type is refused at compile (d-i), so a fake type would not compile.
+    egret_policy::seed_trino(&egret_policy::PolicyStore::new(db.clone()))
+        .await
+        .expect("seed trino service-def");
     sqlx::query_scalar(
-        "INSERT INTO policy.authz_services (name, type, config_jsonb) VALUES ($1,'trino_tv','{}'::jsonb) RETURNING id",
+        "INSERT INTO policy.authz_services (name, type, config_jsonb) VALUES ($1,'trino','{}'::jsonb) RETURNING id",
     )
-    .bind(format!("trino_tv_{}", Uuid::new_v4().simple()))
-    .fetch_one(pool)
+    .bind(format!("trino_{}", Uuid::new_v4().simple()))
+    .fetch_one(&db.pool)
     .await
     .expect("insert service")
 }
@@ -191,7 +177,7 @@ async fn assign_and_unassign_bump_bound_service_tag_version() {
     db.migrate().await.expect("migrate");
     let pool = db.pool.clone();
 
-    let service_id = create_service(&pool).await;
+    let service_id = create_service(&db).await;
     let wh = seed_bound_warehouse(&pool, service_id).await;
     // Freshly-created services default to tag_version = 1.
     assert_eq!(tag_version(&pool, service_id).await, 1);
@@ -251,7 +237,7 @@ async fn secondary_attachment_bump_reaches_engines_bound_service() {
     db.migrate().await.expect("migrate");
     let pool = db.pool.clone();
 
-    let service_id = create_service(&pool).await;
+    let service_id = create_service(&db).await;
     let eng_b = seed_engine(&pool, service_id).await;
 
     // Warehouse W is not attached at all yet; B attaches W's registry catalog.

@@ -33,7 +33,10 @@
 use crate::model::{Action, PrincipalKind};
 
 /// The two engines SP4a's compiler targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Ord` and `Hash` because governance sub-project 1's `egret_perm_ir::ep::EpKind`
+/// (`engine × mechanism`) is a map key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EngineType {
     Trino,
     StarRocks,
@@ -389,6 +392,21 @@ pub enum CompileError {
     /// here would be the one path that panics instead.
     #[error("{engine:?}'s embedded service-def failed to parse: {detail}")]
     ServiceDefUnreadable { engine: EngineType, detail: String },
+    /// An engine is bound to a policy profile of another type. The plugin
+    /// downloads the service-def of the profile's own type, so compiling would
+    /// write policy for the wrong engine: a fail-open, not a cosmetic mismatch
+    /// (the bind route refuses it, `check_profile_bindable`). Refused before any
+    /// write, so a legacy binding stops every write to its profile (d-i).
+    #[error(
+        "policy profile {profile} has type {profile_type}, but engine {engine} is a {engine_type} engine; \
+         bind a profile of the same type"
+    )]
+    EngineTypeMismatch {
+        profile: String,
+        profile_type: String,
+        engine: String,
+        engine_type: String,
+    },
     /// A path-selected ROW-FILTER rule whose scope is not exactly
     /// catalog + schema + table (SP4a whole-branch review, Critical 1). Both
     /// engines' `rowFilterDef.resources` declares those three levels, every
@@ -417,7 +435,7 @@ pub enum CompileError {
     /// `grants_check` on the same connection.
     ///
     /// What the empty level then does:
-    /// `crate::grants::scope_to_resources` copies the level through verbatim, so
+    /// `egret_perm_compile::ranger::grants::scope_to_resources` copies the level through verbatim, so
     /// the compiled policy carries `"schema": {"values": [""]}`;
     /// `RangerAbstractResourceMatcher.init()` **drops an empty policy value**
     /// before a matcher is built for it; a level left with no matchers is
@@ -462,7 +480,7 @@ pub enum CompileError {
     /// # This is NOT "`*` is illegitimate"
     ///
     /// A grant scoped to a whole catalog or a whole schema is an ordinary thing
-    /// a steward writes, `crate::grants::scope_to_resources` emits `*` ITSELF at
+    /// a steward writes, `egret_perm_compile::ranger::grants::scope_to_resources` emits `*` ITSELF at
     /// every level the scope does not name, and the compiled resources a steward
     /// reads back are full of it. `('*','*')`, `('sales','orders','*')` and every
     /// other shape where a `*` has nothing named beneath it stay legal, and the
@@ -557,6 +575,25 @@ pub enum CompileError {
     /// the parse error itself.
     #[error("database error: {0}")]
     Db(String),
+    /// A database error whose SQLSTATE is 55P03 (`lock_not_available`): a
+    /// lock wait ran past the transaction's `lock_timeout`. Callers answer it
+    /// as "busy, retry", not as a refusal of the write. Built only by
+    /// [`CompileError::from_db`] / [`CompileError::from_db_in`], which read the
+    /// SQLSTATE, never the message: Postgres translates the message under a
+    /// non-English `lc_messages`. Carries the same rendered text as
+    /// [`Self::Db`], for the same reason (`Clone + PartialEq + Eq`).
+    #[error("database error: {0}")]
+    LockTimeout(String),
+    /// A hidden-column deny the compiler cannot plan: the wildcard data mask
+    /// `selector` (`catalog.database.table`) matches tables that cannot be
+    /// listed, because no registered catalog matches its catalog level or the
+    /// matched catalog has no warehouse. Refused rather than denied broadly:
+    /// a guessed scope would either over-deny or leave a table unprotected.
+    #[error(
+        "the data mask on {selector:?} cannot be compiled: its tables cannot be listed ({reason}), \
+         so the hidden-column deny on them cannot be planned"
+    )]
+    HiddenColumnsUnenumerable { selector: String, reason: String },
     /// An engine grant (F11, `perm.engine_grants`) the compiler cannot express:
     /// an unknown capability, a capability of another engine than the
     /// profile's, a value that breaks the catalogue's rules, or an exclude.
@@ -565,9 +602,61 @@ pub enum CompileError {
     /// that one grant rather than failing the whole profile.
     #[error("engine grant {id} cannot be compiled: {reason}")]
     InvalidEngineGrant { id: uuid::Uuid, reason: String },
+    /// The profiles this write recompiles grew after it took the compile-mint
+    /// lock (#792): an engine was bound or attached, or a profile or tag
+    /// service created, between the write's first read of its profile set and
+    /// its recompile. Locking the new profiles while holding the mint lock
+    /// would break the lock order (profiles, then the mint lock) and can
+    /// deadlock with a compile of those profiles, so the write is refused
+    /// before it waits on them. Nothing was written; the same request
+    /// succeeds when retried, because the set is then read before the lock.
+    #[error(
+        "the policy profiles this write recompiles changed while it ran (profile(s) {} were \
+         bound or created meanwhile); nothing was written, retry",
+        added.iter().map(i64::to_string).collect::<Vec<_>>().join(", ")
+    )]
+    ProfileSetChanged { added: Vec<i64> },
 }
 
+/// SQLSTATE `lock_not_available`: a lock wait ran past `lock_timeout`.
+const LOCK_NOT_AVAILABLE: &str = "55P03";
+
 impl CompileError {
+    /// A database error, as [`Self::LockTimeout`] when its SQLSTATE is 55P03
+    /// and as [`Self::Db`] otherwise. The one place a `sqlx::Error` becomes a
+    /// `CompileError`.
+    pub fn from_db(e: sqlx::Error) -> Self {
+        let message = e.to_string();
+        Self::classified(&e, message)
+    }
+
+    /// [`Self::from_db`], its message prefixed with `context` (`"{context}: {e}"`).
+    pub fn from_db_in(context: &str, e: sqlx::Error) -> Self {
+        let message = format!("{context}: {e}");
+        Self::classified(&e, message)
+    }
+
+    /// A `perm` store error: its database error through [`Self::from_db`],
+    /// anything else as [`Self::Db`].
+    pub fn from_perm(e: crate::PermError) -> Self {
+        match e {
+            crate::PermError::Db(e) => Self::from_db(e),
+            other => Self::Db(other.to_string()),
+        }
+    }
+
+    fn classified(e: &sqlx::Error, message: String) -> Self {
+        let lock_timeout = e
+            .as_database_error()
+            .and_then(|d| d.code())
+            .is_some_and(|c| c == LOCK_NOT_AVAILABLE);
+        if lock_timeout {
+            Self::LockTimeout(message)
+        } else {
+            Self::Db(message)
+        }
+    }
+
     /// The coded body of an expansion-ceiling refusal (a rule, a clearance or
     /// a profile total over its ceiling) — `{error, code: "expansion_ceiling"}`
     /// — or `None` for any other error. It is a refusal of the write that
@@ -581,6 +670,20 @@ impl CompileError {
                 | CompileError::ProfileExpansionCeiling { .. }
         )
         .then(|| serde_json::json!({ "error": self.to_string(), "code": "expansion_ceiling" }))
+    }
+
+    /// The coded body of a [`CompileError::ProfileSetChanged`] refusal —
+    /// `{error, code: "profile_set_changed", retryable: true}` — or `None` for
+    /// any other error. Every write route answers it as a 409; a client shows
+    /// the sentence and the user retries (no automatic retry).
+    pub fn profile_set_changed_body(&self) -> Option<serde_json::Value> {
+        matches!(self, CompileError::ProfileSetChanged { .. }).then(|| {
+            serde_json::json!({
+                "error": self.to_string(),
+                "code": "profile_set_changed",
+                "retryable": true,
+            })
+        })
     }
 
     /// The structured 409 body of an order-ambiguous pair —

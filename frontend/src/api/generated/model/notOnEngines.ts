@@ -13,7 +13,6 @@ export type NotOnEngines = typeof NotOnEngines[keyof typeof NotOnEngines];
 
 
 export const NotOnEngines = {
-  held_through_group: 'held_through_group',
   expired: 'expired',
   no_username: 'no_username',
 } as const;

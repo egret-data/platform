@@ -209,7 +209,7 @@ async fn assign(e: &Env, u: &Unit, tag: Uuid, column: &str) -> Result<(), (Statu
         .assign_catalog(tag, u.warehouse_id, "sales", "orders", column, Some(e.by))
         .await
     {
-        Ok(()) => Ok(()),
+        Ok(_) => Ok(()),
         Err(err) => {
             let resp = err.into_response();
             let status = resp.status();

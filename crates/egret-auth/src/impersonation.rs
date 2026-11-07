@@ -53,7 +53,7 @@ pub fn overlay_refused_by_platform_authority(
     if scoped_to_one_workspace {
         !target_platform_roles.is_empty()
     } else {
-        target_platform_roles.iter().any(|r| r == "platform_admin")
+        egret_core::context::holds_platform_admin(target_platform_roles)
     }
 }
 

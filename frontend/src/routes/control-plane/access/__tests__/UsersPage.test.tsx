@@ -29,6 +29,7 @@ const USERS: api.AccessUser[] = [
     provider: "local",
     status: "active",
     roles: ["Admin"],
+    effectiveRoles: [{ name: "Admin", group: null }],
     groups: [],
     username: "alice",
   },
@@ -39,6 +40,7 @@ const USERS: api.AccessUser[] = [
     provider: "oidc",
     status: "disabled",
     roles: [],
+    effectiveRoles: [],
     groups: ["Engineering"],
     username: null,
   },
@@ -148,6 +150,7 @@ describe("UsersPage", () => {
       provider: "local",
       status: "active",
       roles: [],
+      effectiveRoles: [],
       groups: [],
     });
 
@@ -476,7 +479,10 @@ describe("UsersPage", () => {
   });
 
   test("Disable instead says why for the last active platform admin and does nothing", async () => {
-    vi.mocked(api.listUsers).mockResolvedValue([{ ...USERS[0], roles: ["platform_admin"] }, USERS[1]]);
+    vi.mocked(api.listUsers).mockResolvedValue([
+      { ...USERS[0], roles: ["platform_admin"], effectiveRoles: [{ name: "platform_admin", group: null }] },
+      USERS[1],
+    ]);
     const user = userEvent.setup();
     renderPage();
     await screen.findByText("alice@example.com");
@@ -490,5 +496,32 @@ describe("UsersPage", () => {
     await user.click(button);
     expect(screen.getAllByRole("alertdialog")).toHaveLength(1);
     expect(screen.queryByRole("button", { name: "Disable user" })).not.toBeInTheDocument();
+  });
+
+  test("the Roles column shows a role held through a group, with the group (KI-260)", async () => {
+    vi.mocked(api.listUsers).mockResolvedValue([
+      USERS[0],
+      { ...USERS[1], effectiveRoles: [{ name: "platform_admin", group: "platform-admins" }] },
+    ]);
+    renderPage();
+    const bobRow = (await screen.findByText("bob@example.com")).closest("tr") as HTMLElement;
+
+    expect(within(bobRow).getByText("platform_admin · via group platform-admins")).toBeInTheDocument();
+  });
+
+  test("the last active platform admin through a group is counted (KI-285)", async () => {
+    vi.mocked(api.listUsers).mockResolvedValue([
+      { ...USERS[0], effectiveRoles: [{ name: "platform_admin", group: "platform-admins" }] },
+      USERS[1],
+    ]);
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("alice@example.com");
+
+    await user.click(screen.getByRole("button", { name: /Actions for alice@example.com/i }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    const dialog = await screen.findByRole("alertdialog");
+    const button = within(dialog).getByRole("button", { name: "Disable instead" });
+    expect(button).toHaveAccessibleDescription(/the last active platform admin cannot be disabled/);
   });
 });

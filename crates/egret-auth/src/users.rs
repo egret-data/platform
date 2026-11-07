@@ -38,14 +38,55 @@ impl UserRepo {
         Ok(row.map(Into::into))
     }
 
-    /// Insert a local user with a password hash; returns the new id.
+    /// Create a local user with a password hash and mint their engine
+    /// username in the same transaction; returns the new id and the username.
     /// Errors with `Conflict` if a user with the same email already exists.
+    ///
+    /// This is what production calls (`POST /users`, `egret create-admin`):
+    /// a human user is never committed without a username, so a grant or rule
+    /// can name them before their first query (spec
+    /// `2026-10-31-local-user-username.md`). The name comes from
+    /// [`ensure_username_via`], the one mint path, so it goes through the
+    /// append-only `username_ledger` like every other mint.
+    pub async fn create_local(
+        &self,
+        email: &str,
+        name: &str,
+        password_hash: &str,
+    ) -> Result<(UserId, String)> {
+        let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+        let id = Self::insert_local_with(&mut *tx, email, name, password_hash).await?;
+        let username = ensure_username_via(&mut tx, id).await?;
+        tx.commit().await.map_err(db_err)?;
+        Ok((id, username))
+    }
+
+    /// Insert a local user with a password hash and NO username; returns the
+    /// new id. Errors with `Conflict` if a user with the same email already
+    /// exists.
+    ///
+    /// The bare insert: production creates through
+    /// [`create_local`](Self::create_local). This stays for fixtures that need
+    /// a user with no username yet — a state a service account, or a user the
+    /// boot repair skipped, can still be in.
     pub async fn insert_local(
         &self,
         email: &str,
         name: &str,
         password_hash: &str,
     ) -> Result<UserId> {
+        Self::insert_local_with(&self.db.pool, email, name, password_hash).await
+    }
+
+    async fn insert_local_with<'e, E>(
+        exec: E,
+        email: &str,
+        name: &str,
+        password_hash: &str,
+    ) -> Result<UserId>
+    where
+        E: sqlx::PgExecutor<'e>,
+    {
         let res = sqlx::query_scalar::<_, Uuid>(
             "INSERT INTO users (provider, email, name, password_hash) \
              VALUES ('local', $1, $2, $3) RETURNING id",
@@ -53,7 +94,7 @@ impl UserRepo {
         .bind(email)
         .bind(name)
         .bind(password_hash)
-        .fetch_one(&self.db.pool)
+        .fetch_one(exec)
         .await;
         match res {
             Ok(id) => Ok(UserId(id)),
@@ -179,7 +220,27 @@ impl UserRepo {
         Ok(row.map(Into::into))
     }
 
+    /// JIT-create an OIDC user and mint their engine username in the same
+    /// transaction — [`create_local`](Self::create_local)'s counterpart for a
+    /// first SSO sign-in.
+    pub async fn create_oidc(&self, sub: &str, email: &str, name: &str) -> Result<UserId> {
+        let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+        let id = Self::insert_oidc_with(&mut *tx, sub, email, name).await?;
+        ensure_username_via(&mut tx, id).await?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(id)
+    }
+
+    /// Insert an OIDC user with NO username (the bare insert; production
+    /// creates through [`create_oidc`](Self::create_oidc)).
     pub async fn insert_oidc(&self, sub: &str, email: &str, name: &str) -> Result<UserId> {
+        Self::insert_oidc_with(&self.db.pool, sub, email, name).await
+    }
+
+    async fn insert_oidc_with<'e, E>(exec: E, sub: &str, email: &str, name: &str) -> Result<UserId>
+    where
+        E: sqlx::PgExecutor<'e>,
+    {
         let res = sqlx::query_scalar::<_, uuid::Uuid>(
             "INSERT INTO users (provider, external_subject, email, name) \
              VALUES ('oidc', $1, $2, $3) RETURNING id",
@@ -187,7 +248,7 @@ impl UserRepo {
         .bind(sub)
         .bind(email)
         .bind(name)
-        .fetch_one(&self.db.pool)
+        .fetch_one(exec)
         .await;
         match res {
             Ok(id) => Ok(UserId(id)),
@@ -316,6 +377,10 @@ impl UserRepo {
     /// covers the profiles reached through the user's roles, workspace
     /// memberships and clearances, and the delete records a `user:delete`
     /// governance event, by `actor`, on the same transaction.
+    ///
+    /// Refused with `Conflict` ([`crate::roles::LAST_ADMIN_REFUSAL`]) when the
+    /// target is the last active platform admin, directly or through a group,
+    /// under [`crate::roles::LastAdminGuard`] (KI-284).
     pub async fn hard_delete(
         &self,
         target: UserId,
@@ -341,6 +406,10 @@ impl UserRepo {
                 return Err(crate::groups::unstable());
             }
         };
+        // KI-284: deleting the last active platform admin is refused, on this
+        // transaction, whether they hold the role directly or through a group.
+        // Lock order: `crate::roles::LastAdminGuard`'s doc.
+        let guard = crate::roles::LastAdminGuard::lock_via(&mut tx).await?;
         // The groups' services and (F11) the profiles of engine grants that
         // target this user, in one ascending pass.
         let services = recompiler
@@ -392,6 +461,7 @@ impl UserRepo {
                 return Err(db_err(e));
             }
         };
+        guard.refuse_if_emptied_via(&mut tx).await?;
         if !groups.is_empty() || !services.is_empty() {
             recompiler.recompile_in_tx(&mut tx, &services).await?;
         }
@@ -469,10 +539,11 @@ fn db_err(e: sqlx::Error) -> egret_core::Error {
 /// `workspace_members` principal into the member list enumerated at compile
 /// time (D7 §3: groups never reach the engine), and the name it must emit is
 /// the bare username the engine sees — `users.username`. That column is
-/// NULLable and **no user-insert path in egret sets it**: `insert_local`,
-/// the OIDC upsert and the kernel's user rows all leave it NULL, and it is
-/// minted lazily the first time someone runs a query, opens a notebook or is
-/// issued an engine token. A compiler that only READ the column would
+/// NULLable: a service account, and a human user created before the
+/// 2026-10-31 fix whom the boot repair could not name, still have none, and it
+/// is minted lazily the first time someone runs a query, opens a notebook or is
+/// issued an engine token. (A human user is minted at creation since then:
+/// [`UserRepo::create_local`], [`UserRepo::create_oidc`].) A compiler that only READ the column would
 /// therefore omit every member who has not yet used an engine — including,
 /// on a fresh install, the bootstrap admin — and the omission is invisible:
 /// the policy compiles, deploys, is listed live, and denies that person.

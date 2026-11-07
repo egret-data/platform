@@ -16,21 +16,26 @@ impl Authorizer {
         Self { db }
     }
 
-    /// The principal's workspace role names for `ws` (direct + group), for display precedence.
+    /// The principal's workspace role names for `ws` (direct + group), for display
+    /// precedence. Live `allow` grants only (`egret_auth::live_allow_grant!`):
+    /// `WsContext` admits a member by this list being non-empty, so a `deny`
+    /// grant must not put a role in it.
     pub async fn workspace_roles_for(
         &self,
         user_id: UserId,
         ws: WorkspaceId,
     ) -> Result<Vec<String>> {
-        let rows: Vec<(String,)> = sqlx::query_as(
+        let rows: Vec<(String,)> = sqlx::query_as(concat!(
             "SELECT DISTINCT r.name FROM access_grants ag \
              JOIN roles r ON r.id = ag.role_id \
              WHERE ag.scope_type = 'workspace' AND ag.scope_id = $1 \
-               AND (ag.expires_at IS NULL OR ag.expires_at > now()) \
+               AND ",
+            egret_auth::live_allow_grant!("ag"),
+            " \
                AND ( (ag.principal_type = 'user'  AND ag.principal_id = $2) \
                   OR (ag.principal_type = 'group' AND ag.principal_id IN \
                          (SELECT group_id FROM user_groups WHERE user_id = $2)) )",
-        )
+        ))
         .bind(ws.0)
         .bind(user_id.0)
         .fetch_all(&self.db.pool)
@@ -74,6 +79,10 @@ impl Authorizer {
     }
 
     /// Replace the user's platform role assignments with the supplied (validated) role names.
+    ///
+    /// Refused with `Conflict` (`egret_auth::roles::LAST_ADMIN_REFUSAL`) when
+    /// the new set would leave no active platform admin, under
+    /// `egret_auth::roles::LastAdminGuard` on this transaction (KI-284).
     pub async fn replace_platform_roles(&self, user_id: UserId, roles: &[String]) -> Result<()> {
         for r in roles {
             if !PLATFORM_ROLES.contains(&r.as_str()) {
@@ -81,6 +90,9 @@ impl Authorizer {
             }
         }
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+        // KI-284: taken before the reads below and the profile locks
+        // (`LastAdminGuard`'s doc for the lock order).
+        let guard = egret_auth::roles::LastAdminGuard::lock_via(&mut tx).await?;
 
         // **SP4c Task 3, input 3: who holds the clearing role.** This method
         // REPLACES a user's whole platform role set, so the affected services are
@@ -151,6 +163,7 @@ impl Authorizer {
             .await
             .map_err(db_err)?;
         }
+        guard.refuse_if_emptied_via(&mut tx).await?;
         // A recompile FAILURE fails the whole replace, deliberately: a committed
         // role set whose engine policies were never rewritten is worse than a
         // rejected one, because egret's UI shows the new set as in force.

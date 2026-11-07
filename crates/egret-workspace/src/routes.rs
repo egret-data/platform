@@ -637,7 +637,7 @@ async fn list_my_workspaces(
     State(st): State<WorkspaceState>,
     Auth(p): Auth,
 ) -> Result<Json<Vec<WorkspaceDto>>, AuthError> {
-    let is_admin = p.platform_roles.iter().any(|r| r == "platform_admin");
+    let is_admin = p.is_platform_admin();
     let list = st
         .workspaces
         .list_for_principal(p.user_id, is_admin)
@@ -1012,6 +1012,7 @@ async fn get_user(
         (status = 200, description = "Platform roles replaced", body = Ack),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Not a platform admin (role assignment is not delegatable)", body = ErrorBody),
+        (status = 409, description = "Would remove the last active platform admin", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1381,11 +1382,9 @@ async fn add_member(
     if body.role != "ws_admin"
         && st
             .members
-            .role_of(ctx.workspace_id, &body.principal_type, pid)
+            .is_live_ws_admin(ctx.workspace_id, &body.principal_type, pid)
             .await
             .map_err(AuthError)?
-            .as_deref()
-            == Some("ws_admin")
         && st
             .members
             .count_ws_admins(ctx.workspace_id)
@@ -1562,11 +1561,9 @@ async fn remove_member(
     // without platform intervention).
     if st
         .members
-        .role_of(ctx.workspace_id, &ptype, pid)
+        .is_live_ws_admin(ctx.workspace_id, &ptype, pid)
         .await
         .map_err(AuthError)?
-        .as_deref()
-        == Some("ws_admin")
         && st
             .members
             .count_ws_admins(ctx.workspace_id)

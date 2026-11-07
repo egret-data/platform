@@ -70,9 +70,9 @@ function engineTabs(engines: Engine[]): EngineType[] {
 export const DEFAULT_TRINO_IMAGE_VERSION =
   "483@sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534";
 export const DEFAULT_SR_FE_IMAGE =
-  "starrocks/fe-ubuntu:4.1.6@sha256:d07aa750be77625a09866a76dbfe0ee032baeb5e48fe0e952d30cb525329dc31";
+  "ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.4@sha256:55ec35ecf6df85320557f017e0c3c16056d82a258cf4a4e79a80a6565ac6fdc5";
 export const DEFAULT_SR_CN_IMAGE =
-  "starrocks/cn-ubuntu:4.1.6@sha256:bf0f5ca7fd9fc4e568d4d0e593e362f229b376976b513a5a549b1b922d9ec23b";
+  "starrocks/cn-ubuntu:4.1.7@sha256:39f7320127c9924abb1f1ce0ba0583ab11989cbe5bd1bb6274ada6f89ba5740d";
 
 // Harmless defaults for the still-required Trino-only body fields
 // (coordinatorReplicas/workerReplicas/cpuMin/cpuMax/memory) when creating a

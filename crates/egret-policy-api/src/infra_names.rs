@@ -30,7 +30,8 @@
 //! test, that the column and the names still agree.
 
 /// Name prefix of the per-admin all-access policies
-/// (`seed_admin_all_access` → `build_default_policies(..., "egret-admin", ...)`).
+/// (`admin_all_access_bodies` → `build_default_policies(..., "egret-admin", ...)`,
+/// written by convergence, `egret_perm_compile::infra`).
 pub const ADMIN_ALL_ACCESS_NAME_PREFIX: &str = "egret-admin";
 
 /// Name prefix of the group-granted default policy set
@@ -85,9 +86,9 @@ pub const DEFAULT_ALL_ACCESS_SERVICE_TYPE: &str = "trino";
 ///
 /// The type matters for one shape only. The four fixed names and the
 /// `egret-admin - …` per-admin set are infrastructure on EVERY type (the
-/// per-admin set is seeded StarRocks-shaped on StarRocks profiles by
-/// `seed_admin_all_access(…, "starrocks", …)`, and unlocking it would let an
-/// operator lock every admin out). The `all - …` default set is
+/// per-admin set is written StarRocks-shaped on StarRocks profiles, by
+/// convergence from `admin_all_access_bodies("starrocks", …)`, and unlocking
+/// it would let an operator lock every admin out). The `all - …` default set is
 /// infrastructure only on [`DEFAULT_ALL_ACCESS_SERVICE_TYPE`]. There is
 /// deliberately no name-only variant: two predicates would be two spellings.
 pub fn is_egret_infrastructure_policy(service_type: &str, name: &str) -> bool {
@@ -110,5 +111,44 @@ fn is_seeded_hierarchy_name(name: &str, prefix: &str) -> bool {
     match name.strip_prefix(prefix) {
         Some(rest) => rest.starts_with(SEEDED_NAME_SEPARATOR),
         None => false,
+    }
+}
+
+/// Whether `name` is one of the infrastructure policies the permission IR
+/// owns (governance SP2a): an `egret-admin - …` row, or one of the four fixed
+/// names. Convergence reads, writes and deletes exactly these. The `all - …`
+/// default set is deliberately NOT one: it stays outside the IR, written only
+/// by its own route.
+pub fn is_ir_infra_name(name: &str) -> bool {
+    is_admin_all_access_policy_name(name)
+        || name == IMPERSONATE_POLICY_NAME
+        || name == SELF_IMPERSONATE_POLICY_NAME
+        || name == EXECUTE_QUERY_POLICY_NAME
+        || name == QUERY_TIMEOUT_POLICY_NAME
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_ir_owns_egret_admin_and_the_four_fixed_names_only() {
+        assert!(is_ir_infra_name("egret-admin - catalog"));
+        assert!(is_ir_infra_name("egret-admin - catalog, schema, table"));
+        for fixed in [
+            IMPERSONATE_POLICY_NAME,
+            SELF_IMPERSONATE_POLICY_NAME,
+            EXECUTE_QUERY_POLICY_NAME,
+            QUERY_TIMEOUT_POLICY_NAME,
+        ] {
+            assert!(is_ir_infra_name(fixed), "{fixed} is IR-owned");
+        }
+        assert!(
+            !is_ir_infra_name("all - catalog"),
+            "the `all - …` default set stays out of the IR"
+        );
+        assert!(!is_ir_infra_name("egret-admin"), "no separator");
+        assert!(!is_ir_infra_name("egret-admins - x"), "another prefix");
+        assert!(!is_ir_infra_name("perm-grant-1"));
     }
 }

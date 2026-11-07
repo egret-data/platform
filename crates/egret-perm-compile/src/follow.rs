@@ -4,9 +4,15 @@
 //! escape, and the writes that copy, move or undo them on a caller's
 //! transaction.
 //!
-//! Coordinate-based, so the table hook and a later view hold use it alike
-//! (D19). Selection folds case as the engines do; a level is a Ranger glob
+//! Coordinate-based, so the table hook and the view hold use it alike (D19,
+//! KI-319). Selection folds case as the engines do; a level is a Ranger glob
 //! ([`egret_perm::eval::resource_level_matches`]).
+//!
+//! Hand-written policies (D5, KI-320): one that names the source literally
+//! with a restriction refuses the rename; one that reaches the source only
+//! through a pattern is judged by Ranger's own resource matching for its
+//! profile's service-def (`egret-ranger-eval`), and refuses when it is
+//! restrictive and would not reach the new name.
 //!
 //! | row | follows (D3) | matched the source but not the destination (D4) |
 //! |---|---|---|
@@ -18,7 +24,10 @@
 //! left.
 
 use egret_perm::eval::resource_level_matches;
-use egret_perm::{Effect, Grant, GrantOrigin, Rule, Scope, Selector};
+use egret_perm::{Effect, EngineType, Grant, GrantOrigin, Rule, Scope, Selector};
+use egret_ranger_eval::model::RangerPolicy;
+use egret_ranger_eval::resource::{PreparedPolicyResources, RequestResource};
+use egret_ranger_eval::servicedef::ServiceDef;
 use uuid::Uuid;
 
 /// One side of a move: a table, or one of its columns.
@@ -568,6 +577,9 @@ pub struct Handwritten {
     pub id: i64,
     pub profile: String,
     pub name: String,
+    /// It reaches the old name through a pattern (KI-320), not by naming it
+    /// literally (D5).
+    pub through_pattern: bool,
 }
 
 impl Handwritten {
@@ -583,8 +595,17 @@ pub struct HandwrittenCheck {
     /// Restrictive (a mask, a row filter, a deny, or an exclusion list on the
     /// renamed level): the rename is refused.
     pub refuse: Vec<Handwritten>,
-    /// A plain literal allow: reported.
+    /// A plain allow that names the source literally, or reaches it through
+    /// a pattern and not the destination (KI-320): reported.
     pub report: Vec<Handwritten>,
+}
+
+/// What the renamed object is to the engines: a view is a `table` on Trino,
+/// and on StarRocks may also be named by the `view` level (KI-319).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MovedObject {
+    Table,
+    View,
 }
 
 /// One resource level of a Ranger policy: `(values, isExcludes)`.
@@ -621,6 +642,19 @@ fn non_empty_list(body: &serde_json::Value, key: &str) -> bool {
         .is_some_and(|a| !a.is_empty())
 }
 
+/// A mask, a row filter, or a deny (D5's restrictive kinds, before the
+/// exclusion list, which depends on the level).
+fn denies_masks_or_filters(body: &serde_json::Value) -> bool {
+    let policy_type = body
+        .get("policyType")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+    policy_type == 1
+        || policy_type == 2
+        || non_empty_list(body, "denyPolicyItems")
+        || non_empty_list(body, "denyExceptions")
+}
+
 /// Classify one hand-written policy body for `mv` (D5): `None` when it does
 /// not name the source literally, else `Some(true)` when it is restrictive.
 pub fn handwritten_names(body: &serde_json::Value, catalog_name: &str, mv: &Move) -> Option<bool> {
@@ -649,21 +683,127 @@ pub fn handwritten_names(body: &serde_json::Value, catalog_name: &str, mv: &Move
             column
         }
     };
-    let policy_type = body
-        .get("policyType")
-        .and_then(serde_json::Value::as_i64)
-        .unwrap_or(0);
-    Some(
-        policy_type == 1
-            || policy_type == 2
-            || non_empty_list(body, "denyPolicyItems")
-            || non_empty_list(body, "denyExceptions")
-            || renamed.1,
-    )
+    Some(denies_masks_or_filters(body) || renamed.1)
+}
+
+/// Does any resource map of `policy` mark a level `isExcludes`?
+fn has_exclusion_list(policy: &RangerPolicy) -> bool {
+    std::iter::once(&policy.resources)
+        .chain(&policy.additional_resources)
+        .any(|map| map.values().any(|level| level.is_excludes))
+}
+
+/// The requests that ask the engines about `at` in `catalog_name`: the
+/// engine's own resource levels, and on StarRocks also its `view` level when
+/// the object is a view.
+fn requests_for(
+    engine: EngineType,
+    object: MovedObject,
+    catalog_name: &str,
+    catalog_id: Uuid,
+    at: &Coord,
+) -> Vec<RequestResource> {
+    let target = Scope {
+        catalog_id,
+        schema: Some(at.schema.clone()),
+        table: Some(at.table.clone()),
+        column: at.column.clone(),
+    };
+    let mut out = vec![crate::handwritten::object_request(
+        engine,
+        catalog_name,
+        &target,
+    )];
+    if engine == EngineType::StarRocks && object == MovedObject::View && at.column.is_none() {
+        out.push(
+            RequestResource::new()
+                .with("catalog", catalog_name)
+                .with("database", at.schema.as_str())
+                .with("view", at.table.as_str()),
+        );
+    }
+    out
+}
+
+/// Does `policy` reach `at` on an engine (KI-320)? Ranger's own resource
+/// matching for the profile's service-def, over every resource map
+/// ([`crate::handwritten::object_match`]): it applies to the object, or names
+/// part of it (a column of a renamed table). A namespace of several levels is
+/// never reached: no Ranger resource names one (D14), so a restriction cannot
+/// be shown to follow there.
+fn policy_reaches(
+    prepared: &PreparedPolicyResources<'_>,
+    policy: &RangerPolicy,
+    engine: EngineType,
+    object: MovedObject,
+    catalog_name: &str,
+    catalog_id: Uuid,
+    at: &Coord,
+) -> bool {
+    use crate::handwritten::{object_match, ObjectMatch};
+    if at.is_multi_level() {
+        return false;
+    }
+    requests_for(engine, object, catalog_name, catalog_id, at)
+        .iter()
+        .any(|request| {
+            matches!(
+                object_match(prepared, policy, request),
+                ObjectMatch::Applies { .. } | ObjectMatch::Part
+            )
+        })
+}
+
+/// KI-320: how a hand-written policy that does not name the source literally
+/// (D5) still bears on the move, by Ranger's matching: `None` when it does
+/// not, `Some(true)` when the rename must be refused, `Some(false)` when it is
+/// a plain allow to report.
+///
+/// - It reaches the old name and not the new one: refused when restrictive
+///   (a mask, a row filter, a deny, or an exclusion list), else reported, as
+///   #764 does for grants and rules written with a pattern (G4, D4).
+/// - It has an exclusion list and reaches the new name but not the old one:
+///   refused. The old name sat in the exclusion list, so the rename would
+///   move the object out of it (an allow that did not reach it now does).
+///
+/// A body the evaluator cannot read is refused: egret cannot tell what it
+/// reaches.
+pub fn handwritten_pattern_check(
+    body: &serde_json::Value,
+    def: &ServiceDef,
+    engine: EngineType,
+    object: MovedObject,
+    catalog_name: &str,
+    mv: &Move,
+) -> Option<bool> {
+    let Ok(policy) = serde_json::from_value::<RangerPolicy>(body.clone()) else {
+        return Some(true);
+    };
+    let prepared = PreparedPolicyResources::new(&policy, def);
+    let reaches = |at: &Coord| {
+        policy_reaches(
+            &prepared,
+            &policy,
+            engine,
+            object,
+            catalog_name,
+            mv.catalog_id,
+            at,
+        )
+    };
+    let (old, new) = (reaches(&mv.from), reaches(&mv.to));
+    let excludes = has_exclusion_list(&policy);
+    match (old, new) {
+        (true, false) => Some(denies_masks_or_filters(body) || excludes),
+        (false, true) if excludes => Some(true),
+        _ => None,
+    }
 }
 
 /// D5 over the enabled operator policies of `services` (the profiles bound to
-/// the warehouse), `catalog_name` the registry catalog's name.
+/// the warehouse), `catalog_name` the registry catalog's name; then, for a
+/// policy that does not name the source literally, KI-320's pattern check
+/// ([`handwritten_pattern_check`]) with the profile's own service-def.
 ///
 /// # Errors
 /// The database's error.
@@ -672,9 +812,10 @@ pub async fn handwritten_via(
     services: &[i64],
     catalog_name: &str,
     mv: &Move,
+    object: MovedObject,
 ) -> Result<HandwrittenCheck, sqlx::Error> {
-    let rows: Vec<(i64, String, String, serde_json::Value)> = sqlx::query_as(
-        "SELECT p.id, s.name, p.name, p.policy_jsonb FROM policy.authz_policies p \
+    let rows: Vec<(i64, String, String, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT p.id, s.name, s.type, p.name, p.policy_jsonb FROM policy.authz_policies p \
            JOIN policy.authz_services s ON s.id = p.service_id \
           WHERE p.service_id = ANY($1) AND p.enabled AND p.managed_by = 'operator' \
           ORDER BY s.name, p.name, p.id",
@@ -682,12 +823,40 @@ pub async fn handwritten_via(
     .bind(services)
     .fetch_all(&mut *conn)
     .await?;
+    let mut defs: std::collections::BTreeMap<String, ServiceDef> = Default::default();
     let mut out = HandwrittenCheck::default();
-    for (id, profile, name, body) in rows {
-        let Some(restrictive) = handwritten_names(&body, catalog_name, mv) else {
+    for (id, profile, service_type, name, body) in rows {
+        let (verdict, through_pattern) = match handwritten_names(&body, catalog_name, mv) {
+            Some(restrictive) => (Some(restrictive), false),
+            None => {
+                let Some(engine) = crate::trigger::engine_type_for(&service_type) else {
+                    continue;
+                };
+                if !defs.contains_key(&service_type) {
+                    let def: serde_json::Value = sqlx::query_scalar(
+                        "SELECT def_jsonb FROM policy.authz_service_defs WHERE name = $1",
+                    )
+                    .bind(&service_type)
+                    .fetch_one(&mut *conn)
+                    .await?;
+                    defs.insert(service_type.clone(), ServiceDef::parse(&def));
+                }
+                let def = &defs[&service_type];
+                (
+                    handwritten_pattern_check(&body, def, engine, object, catalog_name, mv),
+                    true,
+                )
+            }
+        };
+        let Some(restrictive) = verdict else {
             continue;
         };
-        let h = Handwritten { id, profile, name };
+        let h = Handwritten {
+            id,
+            profile,
+            name,
+            through_pattern,
+        };
         if restrictive {
             out.refuse.push(h);
         } else {
@@ -943,12 +1112,30 @@ pub fn refusal_message(
             rows.join("; ")
         ));
     }
-    if !handwritten.is_empty() {
-        let names: Vec<String> = handwritten.iter().map(Handwritten::label).collect();
+    let literal: Vec<String> = handwritten
+        .iter()
+        .filter(|h| !h.through_pattern)
+        .map(Handwritten::label)
+        .collect();
+    if !literal.is_empty() {
         parts.push(format!(
             "hand-written Ranger policies name {from} with a deny, mask, row filter or exclusion \
              list: {}; egret does not rewrite hand-written policies: edit or migrate them first",
-            names.join(", ")
+            literal.join(", ")
+        ));
+    }
+    let pattern: Vec<String> = handwritten
+        .iter()
+        .filter(|h| h.through_pattern)
+        .map(Handwritten::label)
+        .collect();
+    if !pattern.is_empty() {
+        parts.push(format!(
+            "hand-written Ranger policies with a deny, mask, row filter or exclusion list reach \
+             {from} through a name pattern and would not reach {to} the same way: {}; egret does \
+             not rewrite hand-written policies: edit or migrate them first, or choose a name they \
+             cover",
+            pattern.join(", ")
         ));
     }
     if parts.is_empty() {

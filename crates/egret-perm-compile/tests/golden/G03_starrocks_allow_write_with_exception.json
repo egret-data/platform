@@ -1,0 +1,201 @@
+[
+  {
+    "desired": [
+      {
+        "service": "{g03.starrocks}",
+        "name": "perm-grant-{g03.write}",
+        "body": {
+          "additionalResources": [],
+          "allowExceptions": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "insert"
+                },
+                {
+                  "isAllowed": true,
+                  "type": "update"
+                },
+                {
+                  "isAllowed": true,
+                  "type": "delete"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [],
+              "roles": [],
+              "users": [
+                "{g03.erin.username}"
+              ]
+            }
+          ],
+          "denyExceptions": [],
+          "denyPolicyItems": [],
+          "description": "",
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-grant-{g03.write}",
+          "policyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "insert"
+                },
+                {
+                  "isAllowed": true,
+                  "type": "update"
+                },
+                {
+                  "isAllowed": true,
+                  "type": "delete"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [],
+              "roles": [],
+              "users": [
+                "{g03.dave.username}",
+                "{g03.erin.username}"
+              ]
+            }
+          ],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g03_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            },
+            "database": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "orders"
+              ]
+            }
+          },
+          "service": "{g03.starrocks}",
+          "serviceType": "starrocks"
+        }
+      }
+    ],
+    "skipped": [],
+    "served": [
+      {
+        "additionalResources": [],
+        "allowExceptions": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "insert"
+              },
+              {
+                "isAllowed": true,
+                "type": "update"
+              },
+              {
+                "isAllowed": true,
+                "type": "delete"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g03.erin.username}"
+            ]
+          }
+        ],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "description": "",
+        "id": 0,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "perm-grant-{g03.write}",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "insert"
+              },
+              {
+                "isAllowed": true,
+                "type": "update"
+              },
+              {
+                "isAllowed": true,
+                "type": "delete"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g03.dave.username}",
+              "{g03.erin.username}"
+            ]
+          }
+        ],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g03_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "database": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "sales"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "orders"
+            ]
+          }
+        },
+        "service": "{g03.starrocks}",
+        "serviceType": "starrocks",
+        "version": 1
+      }
+    ]
+  }
+]

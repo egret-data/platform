@@ -7,6 +7,7 @@
 //! 2 = row-filter (`rowFilterPolicyItems`).
 
 mod error;
+pub mod mechanism;
 mod ranger_json;
 mod reader;
 
@@ -36,7 +37,7 @@ pub use ranger_json::{AccessItemInput, AccessPolicyInput, ResourceLevel};
 // is the first real caller of `compile_grant` outside this crate's own
 // tests, and `compile_grant` returns a typed `AccessPolicyInput`, never
 // rendered JSON (the compiler stays free of `serde_json` rendering choices —
-// see `egret-perm-compile/src/grants.rs`'s module doc). Something outside
+// see `egret-perm-compile/src/ranger/grants.rs`'s module doc). Something outside
 // `egret-policy` has to render it before it can be written to
 // `policy.authz_policies.policy_jsonb`, so `access_to_ranger_json` (the plain,
 // resource-addressed renderer) is re-exported here too.
@@ -97,6 +98,13 @@ pub struct PolicyAdminState {
     /// of its data masks (final review I-3). Not optional: an editor without
     /// it would leave the clearance-mask fold stale.
     pub recompiler: Arc<dyn ProfileRecompiler>,
+    /// Re-applies a profile's bound egret-provisioned engines after its
+    /// mechanism is set (governance SP2b Task 12;
+    /// [`mechanism::NoReconfigure`] until the engine seam provides one).
+    pub reconfigurer: Arc<dyn mechanism::ProfileEngineReconfigurer>,
+    /// `[governance.opa] enabled`: while false, the switch to OPA is refused
+    /// (switching back to Ranger never is).
+    pub opa_enabled: bool,
 }
 
 /// Recompiles policy profiles on the caller's open transaction — the seam
@@ -121,6 +129,17 @@ pub trait ProfileRecompiler: Send + Sync {
         tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
         service_ids: &[i64],
     ) -> Result<(), PolicyHttpError>;
+
+    /// The mask/row-filter pairs already stored in profile `service_id`'s
+    /// download whose winner the compiled artifact does not express, one
+    /// `"{kind} on {coordinate}: {rule names joined by ', '}"` each — the
+    /// same pairs the OPA snapshot refresher refuses to build over. The switch
+    /// to OPA refuses while any remain ([`mechanism::opa_switch_check`]).
+    async fn stored_overlaps_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+        service_id: i64,
+    ) -> Result<Vec<String>, PolicyHttpError>;
 }
 
 /// Whether a write to `body` under `service_id` changes what a StarRocks
@@ -304,13 +323,24 @@ pub fn summarize_policy(
     // present. A service names its second level `schema` (Trino) or `database` (StarRocks),
     // never both, so listing both keeps either in position.
     let res = body.get("resources").and_then(Value::as_object);
+    // An `isExcludes` level is "every value BUT these", so it is shown with a
+    // leading `!` (as `ambiguous_arbitration::render_resources` and the
+    // StarRocks completion's `Selected::text` do): a catalog-scoped mask, which
+    // excludes the catalog's `information_schema`, lists as
+    // `wh.!information_schema.*.*` and never as the one schema it skips.
     let level = |k: &str| -> Option<String> {
-        res.and_then(|r| r.get(k))
-            .and_then(|v| v.get("values"))
+        let lvl = res.and_then(|r| r.get(k))?;
+        let first = lvl
+            .get("values")
             .and_then(Value::as_array)
             .and_then(|a| a.first())
-            .and_then(Value::as_str)
-            .map(str::to_string)
+            .and_then(Value::as_str)?;
+        let excludes = lvl.get("isExcludes").and_then(Value::as_bool) == Some(true);
+        Some(if excludes {
+            format!("!{first}")
+        } else {
+            first.to_string()
+        })
     };
     let mut resource_path = ["catalog", "schema", "database", "table", "column"]
         .iter()
@@ -465,6 +495,9 @@ pub struct ProfileDto {
     /// field the editor cannot tell an operator which half they are looking
     /// at, and the first thing they learn is the 409 on save.
     pub origin: String,
+    /// How the profile's engines are asked: `"ranger"` or `"opa"` (Trino only;
+    /// migration 0213).
+    pub mechanism: String,
     /// Policies by owner, the profile's own plus its `tag_service`'s (DG #4a
     /// Q1): `compiler` (egret-compiled), `infra` (egret-seeded), `operator`
     /// (hand-written). `policy_count` stays the profile's own total.
@@ -510,11 +543,15 @@ pub fn router() -> Router<PolicyAdminState> {
         )
         .route(
             "/policies/services/{service}",
-            axum::routing::delete(delete_profile),
+            axum::routing::delete(delete_profile).patch(mechanism::set_mechanism),
         )
         .route(
             "/policies/services/{service}/trino-config",
             get(trino_config),
+        )
+        .route(
+            "/policies/services/{service}/tag-service",
+            axum::routing::put(set_tag_service),
         )
         .route(
             "/policies/services/{service}/seed-defaults",
@@ -800,6 +837,7 @@ async fn list_profiles(
     //
     // The product gap this exposes — no way to give an existing profile a
     // `tagService` — is plan Task 18, not a regression introduced here.
+    // (Closed by #786: `PUT /policies/services/{service}/tag-service`.)
     let usable_tag: std::collections::HashMap<i64, String> = st
         .store
         .usable_tag_services(&services.iter().map(|s| s.id).collect::<Vec<_>>())
@@ -849,6 +887,7 @@ async fn list_profiles(
                 policy_version: s.policy_version,
                 tag_service,
                 origin: s.origin,
+                mechanism: s.mechanism,
             }
         })
         .collect();
@@ -859,7 +898,7 @@ async fn list_profiles(
 pub struct CreateProfileBody {
     /// Ranger service (profile) name.
     pub name: String,
-    /// Ranger service type: `"trino"` or `"starrocks"`.
+    /// Ranger service type: `"trino"`, `"starrocks"` or `"tag"`.
     pub r#type: String,
     /// Optional service config (e.g. StarRocks JDBC coordinates). Stored verbatim.
     ///
@@ -991,6 +1030,130 @@ pub struct ConfigFile {
     pub content: String,
 }
 
+/// What `trino-config` answers: the files, and what makes them not work as
+/// rendered (KI-149).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct TrinoConfigResponse {
+    pub files: Vec<ConfigFile>,
+    /// The same download-URL warning the external engine's plugin
+    /// configuration gives (`egret_engine_mgmt_api::ranger_config::download_url_warning`):
+    /// a loopback or unparseable URL no engine can reach. Empty when none.
+    pub warnings: Vec<String>,
+    /// `"ranger"` or `"opa"`: which plugin the files configure. An OPA
+    /// profile's files are the plugin selector and the context file that
+    /// carries the engine id and secret (both shown as placeholders).
+    pub mechanism: String,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SetTagServiceBody {
+    /// The `tag` profile to name, or `null` to remove the tag service.
+    #[serde(rename = "tagService")]
+    #[schema(value_type = Option<String>)]
+    pub tag_service: Value,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ProfileTagService {
+    pub name: String,
+    /// The profile's tag service after the write; `null` when it has none.
+    #[serde(rename = "tagService")]
+    pub tag_service: Option<String>,
+}
+
+/// PUT /policies/services/{service}/tag-service — set, change or remove the
+/// `config.tagService` of an existing profile (#786).
+///
+/// A Trino profile made by the console (name and type) had no way to acquire a
+/// tag service, so no engine could ever be bound to it ("has no usable tag
+/// service"). This is that way, with every guard the create path has (only a
+/// `trino` profile may carry one, the value is a non-empty string, it names an
+/// existing `tag` profile; see `egret_policy::store::set_tag_service_via`).
+///
+/// **Conservative ruling: refuse rather than recompile.** A profile an engine
+/// downloads is refused (409): changing its tag service swaps the tag policies
+/// that engine enforces, and the tag service is checked against an engine at
+/// bind time. A profile the permission model compiles (`generated`) is refused
+/// too: the compiler files its tag rules into the tag service it reads, and this
+/// route does not recompile. Unbind, change, bind again. Recorded as the
+/// governance event `profile:tag_service`.
+#[utoipa::path(
+    put,
+    path = "/api/control-plane/policies/services/{service}/tag-service",
+    tag = "policy-admin",
+    params(("service" = String, Path, description = "Policy profile (Ranger service) name")),
+    request_body = SetTagServiceBody,
+    responses(
+        (status = 200, description = "The profile's tag service after the write. Setting the value it already has writes nothing", body = ProfileTagService),
+        (status = 400, description = "The profile is not of type `trino`; the value is not a non-empty string or `null`; or it names a profile that is missing or not of type `tag`. Nothing is written", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:update permission", body = ErrorBody),
+        (status = 404, description = "No such policy profile", body = ErrorBody),
+        (status = 409, description = "An engine downloads the profile (unbind it first), or egret compiles it (`generated`)", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn set_tag_service(
+    State(st): State<PolicyAdminState>,
+    Auth(p): Auth,
+    Path(service): Path<String>,
+    Json(b): Json<SetTagServiceBody>,
+) -> Result<Json<ProfileTagService>, PolicyHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
+    let svc = st.store.get_service(&service).await?;
+    let bound: Vec<String> = st
+        .engines
+        .list_engine_bindings()
+        .await?
+        .into_iter()
+        .filter(|e| e.authz_service_id == Some(svc.id))
+        .map(|e| e.name)
+        .collect();
+    if !bound.is_empty() {
+        return Err(PolicyHttpError::Conflict(format!(
+            "profile {service} is downloaded by {}: changing its tag service would swap the \
+             tag policies that engine enforces. Unbind the engine, change the tag service, then \
+             bind it again",
+            bound.join(", ")
+        )));
+    }
+    if svc.origin == "generated" {
+        return Err(PolicyHttpError::Conflict(format!(
+            "profile {service} is compiled by egret's permission model, which files its tag \
+             rules into the tag service it names; its tag service is not changed by hand"
+        )));
+    }
+    let mut tx = st.store.begin().await?;
+    let changed = crate::store::set_tag_service_via(&mut tx, svc.id, &b.tag_service).await?;
+    let after = match changed {
+        Some(change) => {
+            egret_audit::governance::record_change(
+                &mut tx,
+                egret_audit::governance::Change {
+                    action: egret_audit::governance::action::PROFILE_TAG_SERVICE,
+                    resource_type: egret_audit::governance::resource::POLICY_PROFILE,
+                    resource_id: svc.id.to_string(),
+                    summary: json!({
+                        "service": service,
+                        "before": { "tagService": change.before },
+                        "after": { "tagService": change.after },
+                    }),
+                    principal: &p,
+                },
+            )
+            .await
+            .map_err(crate::PolicyStoreError::from)?;
+            change.after
+        }
+        None => b.tag_service.as_str().map(str::to_string),
+    };
+    tx.commit().await.map_err(crate::PolicyStoreError::from)?;
+    Ok(Json(ProfileTagService {
+        name: service,
+        tag_service: after,
+    }))
+}
+
 /// GET /policies/services/{service}/trino-config — the two files a Trino
 /// coordinator needs to enforce this profile via the native ranger plugin.
 ///
@@ -1002,7 +1165,7 @@ pub struct ConfigFile {
     tag = "policy-admin",
     params(("service" = String, Path, description = "Policy profile (Ranger service) name")),
     responses(
-        (status = 200, description = "The Trino coordinator config files for this profile's native ranger plugin, from the same renderer that writes the files egret mounts into its own engines (`access-control.properties` and `ranger-trino-security.xml`). Since SP4d-4 the security file also carries the policy source, cache directory and client timeouts, the properties file points at `/etc/trino/ranger-trino-security.xml`, and the poll interval is 30000 ms; earlier responses omitted those keys and used a relative resource path", body = Vec<ConfigFile>),
+        (status = 200, description = "The Trino coordinator config files for this profile's native ranger plugin (for a profile whose `mechanism` is `opa`: the OPA plugin's `access-control.properties` and `egret-opa-context.properties`, with the engine id and secret as placeholders, and `warnings` adding the log-requests warning and the Trino 483 note), from the same renderer that writes the files egret mounts into its own engines (`access-control.properties` and `ranger-trino-security.xml`), and `warnings`: the same download-URL warning as the external engine's plugin configuration (a loopback or unparseable `[catalog] public_url`). Since SP4d-4 the security file also carries the policy source, cache directory and client timeouts, the properties file points at `/etc/trino/ranger-trino-security.xml`, and the poll interval is 30000 ms. Before KI-149 the body was the bare array of files", body = TrinoConfigResponse),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read permission", body = ErrorBody),
         (status = 404, description = "No such policy profile", body = ErrorBody),
@@ -1013,26 +1176,47 @@ async fn trino_config(
     State(st): State<PolicyAdminState>,
     Auth(p): Auth,
     Path(service): Path<String>,
-) -> Result<Json<Vec<ConfigFile>>, PolicyHttpError> {
+) -> Result<Json<TrinoConfigResponse>, PolicyHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
-    let _ = st.store.get_service(&service).await?; // 404 if the profile doesn't exist
+    let profile = st.store.get_service(&service).await?; // 404 if the profile doesn't exist
+    let opa = profile.mechanism == "opa";
 
     // ONE renderer: the same code that writes the files egret mounts into its own
     // engines (SP4d-4 Task 9). The poll interval is the one shared constant.
-    let rendered = egret_engine_mgmt_api::ranger_config::ranger_plugin_files(
-        egret_engine_mgmt_api::EngineKind::Trino,
-        &service,
-        &st.engine_egret_url,
-        egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS.into(),
-        None,
-    );
-    Ok(Json(
-        rendered
+    let rendered = if opa {
+        egret_engine_mgmt_api::opa_config::opa_plugin_files(
+            egret_engine_mgmt_api::opa_config::PLACEHOLDER_ENGINE_ID,
+            &st.engine_egret_url,
+            egret_engine_mgmt_api::ranger_config::PASSWORD_PLACEHOLDER,
+        )
+        .map_err(|e| PolicyHttpError::BadRequest(e.to_string()))?
+    } else {
+        egret_engine_mgmt_api::ranger_config::ranger_plugin_files(
+            egret_engine_mgmt_api::EngineKind::Trino,
+            &service,
+            &st.engine_egret_url,
+            egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS.into(),
+            None,
+        )
+    };
+    let mut warnings: Vec<String> =
+        egret_engine_mgmt_api::ranger_config::download_url_warning(&st.engine_egret_url)
+            .into_iter()
+            .collect();
+    if opa {
+        warnings.push(egret_engine_mgmt_api::opa_config::OPA_LOG_REQUESTS_WARNING.to_string());
+        warnings.push(egret_engine_mgmt_api::opa_config::OPA_EXTERNAL_ENGINE_NOTE.to_string());
+        warnings.push(egret_engine_mgmt_api::opa_config::OPA_BATCHED_URI_WARNING.to_string());
+    }
+    Ok(Json(TrinoConfigResponse {
+        mechanism: profile.mechanism,
+        warnings,
+        files: rendered
             .files
             .into_iter()
             .map(|(name, content)| ConfigFile { name, content })
             .collect(),
-    ))
+    }))
 }
 
 /// POST /policies/services/{service}/seed-defaults — seed default "admin has
@@ -1330,7 +1514,7 @@ pub struct SeedResult {
 ///   offering the name, so it could not invent a write target, and Task 9
 ///   initially kept it on that ground. The ruling went the other way once the
 ///   consequence was stated plainly: nothing can give an existing profile a
-///   `tagService` (no `UPDATE` of `config_jsonb` exists in `src/`, and
+///   `tagService` (no `UPDATE` of `config_jsonb` existed in `src/` before #786, and
 ///   `createProfile` sends no `config`), so the tab that fallback offered led to
 ///   a workflow that **cannot complete, ever** — a guaranteed 400 from right
 ///   here. `list_profiles` now resolves through the same join
@@ -2169,7 +2353,9 @@ async fn set_policy_enabled(
         list_profiles,
         create_profile,
         delete_profile,
+        mechanism::set_mechanism,
         trino_config,
+        set_tag_service,
         seed_defaults,
         get_service_def,
         resource_lookup,
@@ -2183,6 +2369,12 @@ async fn set_policy_enabled(
         CreateProfileBody,
         CreatedProfile,
         ConfigFile,
+        TrinoConfigResponse,
+        SetTagServiceBody,
+        ProfileTagService,
+        mechanism::SetMechanismBody,
+        mechanism::ProfileMechanism,
+        mechanism::MechanismName,
         Principal,
         EnabledBody,
         CreatedPolicyId,
@@ -2205,6 +2397,30 @@ pub struct PolicyAdminApi;
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// An `isExcludes` level is listed with `!`: the catalog-scoped mask the
+    /// compiler emits (every schema but `information_schema`) must not read as
+    /// a mask on `information_schema` only.
+    #[test]
+    fn summarize_marks_an_excluded_level() {
+        let body = json!({
+            "name": "perm-rule-x",
+            "policyType": 1,
+            "isEnabled": true,
+            "resources": {
+                "catalog": {"values": ["wh"], "isExcludes": false},
+                "schema":  {"values": ["information_schema"], "isExcludes": true},
+                "table":   {"values": ["*"], "isExcludes": false},
+                "column":  {"values": ["*"], "isExcludes": false}
+            },
+            "dataMaskPolicyItems": [
+                {"groups": ["public"], "accesses": [{"type": "select"}],
+                 "dataMaskInfo": {"dataMaskType": "MASK_HASH"}}
+            ]
+        });
+        let s = summarize_policy(1, "trino", true, "compiler", &body);
+        assert_eq!(s.resource_path, "wh.!information_schema.*.*");
+    }
 
     #[test]
     fn summarize_access_policy() {

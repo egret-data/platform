@@ -55,9 +55,18 @@ function anyDecision(r: ExplainResponse, kind: "denied" | "undecidable"): boolea
 export const MASK_NULL_NOT_ALLOWED =
   "A StarRocks read of a MASK_NULL column is not access-checked: it returns NULL, and the query is still refused unless the member may read another column it selects. Such a member is counted as masked, not allowed.";
 
-/** The read transformed by a mask (anything but MASK_NONE) on at least one profile. */
+/**
+ * The read transformed by a mask (anything but MASK_NONE) on at least one
+ * profile: a Ranger profile's mask verdict, or the mask egret's evaluator
+ * chose on an OPA profile (`opa.column_mask`, which the server leaves out for
+ * MASK_NONE).
+ */
 function anyMasked(r: ExplainResponse): boolean {
-  return r.profiles.some((p) => p.mask?.decision.kind === "masked" && p.mask.decision.result.mask_type !== "MASK_NONE");
+  return r.profiles.some(
+    (p) =>
+      (p.mask?.decision.kind === "masked" && p.mask.decision.result.mask_type !== "MASK_NONE") ||
+      (p.mechanism === "opa" && !!p.opa?.column_mask),
+  );
 }
 
 /**

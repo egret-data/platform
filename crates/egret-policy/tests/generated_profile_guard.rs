@@ -125,6 +125,8 @@ impl Fixture {
             engine_egret_url: "http://egret:8080".into(),
             pdp: self.pdp.clone(),
             recompiler: std::sync::Arc::new(NoRecompile),
+            reconfigurer: std::sync::Arc::new(egret_policy::NoReconfigure),
+            opa_enabled: false,
         })
     }
 }
@@ -1072,6 +1074,13 @@ impl egret_policy::ProfileRecompiler for NoRecompile {
         _service_ids: &[i64],
     ) -> Result<(), egret_policy::PolicyHttpError> {
         Ok(())
+    }
+    async fn stored_overlaps_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+        _service_id: i64,
+    ) -> Result<Vec<String>, egret_policy::PolicyHttpError> {
+        Ok(vec![])
     }
 }
 

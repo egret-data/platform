@@ -986,6 +986,174 @@ fn the_row_filter_resource_map_matches_what_the_service_def_declares() {
     }
 }
 
+/// The `dataMaskDef` levels after Ranger's own normalisation, root first, with
+/// whether each is mandatory and whether it takes a wildcard.
+///
+/// `dataMaskDef.resources` entries carry neither `mandatory` nor `parent`:
+/// `ServiceDefUtil.normalizeDataMaskDef` merges each onto the access resource
+/// of the same name (`mergeResourceDef`), which starts from a COPY of the access
+/// resource and overwrites `mandatory` only when the mask entry itself says
+/// `true` (2.8.0 bytecode, offsets 9-27). So the effective flag is the access
+/// def's — read here from the file rather than assumed. `wildCard` is the mask
+/// entry's own `matcherOptions` when it carries one, else the access def's.
+fn effective_mask_levels(engine: EngineType) -> Vec<(String, bool, bool)> {
+    let def = service_def(engine);
+    let access = def["resources"].as_array().expect("resources");
+    let truthy = |v: &serde_json::Value| v.as_bool() == Some(true) || v.as_str() == Some("true");
+    def["dataMaskDef"]["resources"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{engine:?}'s service-def declares no dataMaskDef.resources"))
+        .iter()
+        .map(|m| {
+            let name = m["name"].as_str().unwrap().to_string();
+            let base = access
+                .iter()
+                .find(|r| r["name"] == m["name"])
+                .unwrap_or_else(|| panic!("{engine:?}: no access resource named {name}"));
+            let mandatory = truthy(&m["mandatory"]) || truthy(&base["mandatory"]);
+            let wild = &m["matcherOptions"]["wildCard"];
+            let wild_card = if wild.is_null() {
+                truthy(&base["matcherOptions"]["wildCard"])
+            } else {
+                truthy(wild)
+            };
+            (name, mandatory, wild_card)
+        })
+        .collect()
+}
+
+/// **The mask twin of the row-filter test above.** A path mask whose scope
+/// stops above the column — the Rules tab's default, "leave Column empty to
+/// mask every column" — compiled to a body with no `column` (and above the
+/// table, no `table`/`schema` either). Every `dataMaskDef` level is mandatory
+/// once Ranger normalises the def, so that body matched no column request and
+/// masked nothing; the real jars confirm it
+/// (`egret-ranger-eval`'s
+/// `a_path_mask_naming_no_column_masks_every_column_beneath_it_on_the_real_jars`).
+///
+/// The expectation is derived from the service-def files, so this fails if the
+/// emission drifts, if a def stops declaring a level mandatory, or if a def
+/// stops admitting `*` at a level the compiler fills with it.
+#[test]
+fn the_mask_resource_map_matches_what_the_service_def_declares() {
+    for engine in [EngineType::Trino, EngineType::StarRocks] {
+        let levels = effective_mask_levels(engine);
+        let mut expected: Vec<String> = levels.iter().map(|(n, ..)| n.clone()).collect();
+        assert_eq!(
+            expected.last().map(String::as_str),
+            Some("column"),
+            "{engine:?}: dataMaskDef is expected to end at column"
+        );
+        assert!(
+            levels.iter().all(|(_, mandatory, _)| *mandatory),
+            "{engine:?}: every dataMaskDef level is expected to be mandatory after Ranger's \
+             merge — if that stops being true, the wildcard fill needs re-deciding: {levels:?}"
+        );
+        assert!(
+            levels.iter().all(|(_, _, wild)| *wild),
+            "{engine:?}: every dataMaskDef level must take `*`, or the fill is a value the \
+             plugin reads literally: {levels:?}"
+        );
+        // The catalog-scoped mask's schema level is an exclusion
+        // (`information_schema`): `mergeResourceDef` keeps the access def's
+        // `excludesSupported` unless the mask entry sets one.
+        let def = service_def(engine);
+        let second = &levels[1].0;
+        let mask_entry = def["dataMaskDef"]["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| &r["name"] == second)
+            .unwrap();
+        let base = def["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| &r["name"] == second)
+            .unwrap();
+        let excludes_supported = if mask_entry["excludesSupported"].is_null() {
+            base["excludesSupported"].as_bool() == Some(true)
+        } else {
+            mask_entry["excludesSupported"].as_bool() == Some(true)
+        };
+        assert!(
+            excludes_supported,
+            "{engine:?}: dataMaskDef {second} must support isExcludes for the information_schema \
+             exclusion"
+        );
+        expected.sort();
+
+        // (scope, the levels that must carry `*`)
+        let cases: [(Scope, &[usize]); 4] = [
+            (
+                scope_of(Some("sales"), Some("orders"), Some("customer_email")),
+                &[],
+            ),
+            (scope_of(Some("sales"), Some("orders"), None), &[3]),
+            (scope_of(Some("sales"), None, None), &[2, 3]),
+            (scope_of(None, None, None), &[1, 2, 3]),
+        ];
+        for (scope, wild) in cases {
+            let r = mask_rule_on_path(scope.clone(), "MASK_HASH");
+            let out =
+                compile_rule(&r, engine, "svc", None, &resolved("wh", None), &[], 100).unwrap();
+            assert_eq!(out.len(), 1);
+            assert_eq!(
+                resource_keys(&out[0]),
+                expected,
+                "{engine:?} {scope:?}: a path mask must name every mandatory dataMaskDef level"
+            );
+            let named = [
+                Some("wh"),
+                scope.schema.as_deref(),
+                scope.table.as_deref(),
+                scope.column.as_deref(),
+            ];
+            if scope.schema.is_none() {
+                // The Policies list (`summarize_policy`) must show the
+                // exclusion, not the one schema the mask skips.
+                let listed =
+                    egret_policy::admin::summarize_policy(1, "svc", true, "compiler", &out[0]);
+                assert_eq!(
+                    listed.resource_path, "wh.!information_schema.*.*",
+                    "{engine:?}: a catalog-wide mask lists as every schema but information_schema"
+                );
+            }
+            for (i, (name, ..)) in levels.iter().enumerate() {
+                let level = &out[0]["resources"][name];
+                // A catalog-scoped mask's schema level excludes the catalog's
+                // `information_schema` instead of being `*`.
+                if i == 1 && scope.schema.is_none() {
+                    assert_eq!(
+                        (&level["values"], &level["isExcludes"]),
+                        (
+                            &serde_json::json!(["information_schema"]),
+                            &serde_json::json!(true)
+                        ),
+                        "{engine:?} {scope:?}: a catalog mask must exclude information_schema"
+                    );
+                    continue;
+                }
+                let want = if wild.contains(&i) {
+                    "*"
+                } else {
+                    named[i].expect("a level not filled is named")
+                };
+                assert_eq!(
+                    level["values"],
+                    serde_json::json!([want]),
+                    "{engine:?} {scope:?}: level {name}"
+                );
+                assert_eq!(
+                    level["isExcludes"],
+                    serde_json::json!(false),
+                    "{engine:?} {scope:?}: level {name}"
+                );
+            }
+        }
+    }
+}
+
 /// C1's third shape, and the reason it is a recurring class rather than a
 /// one-off: `column_resources` (the StarRocks tag expansion) emitted all four
 /// levels unconditionally while its sibling `scope_to_resources` already
@@ -1510,5 +1678,105 @@ fn a_row_filter_ceiling_counts_tables() {
             Err(CompileError::ExpansionCeiling { count: 600, .. })
         ),
         "a mask still counts its 600 columns"
+    );
+}
+
+/// KI-287 (owner decision: compile it table-level): on Trino a tag row filter
+/// is the tag policy, which filters a table carrying the classification on the
+/// table, PLUS one resource row filter per table carrying it on columns only,
+/// which the tag policy does not reach. A table carrying it at both levels is
+/// the tag policy's alone, so no table is filtered twice by one rule.
+#[test]
+fn a_trino_tag_row_filter_also_filters_the_tables_tagged_on_columns_only() {
+    let r = rowfilter_rule_on_tag("region", "country = 'US'");
+    let mut both = whole_table("wh", "sales", "customers");
+    both.columns.push("id".to_string());
+    let mut tagged = targets(&[
+        col("wh", "sales", "orders", "email"),
+        col("wh", "sales", "orders", "phone"),
+    ]);
+    tagged.push(whole_table("wh", "sales", "regions"));
+    tagged.push(both);
+    let out = compile_rule(
+        &r,
+        EngineType::Trino,
+        "trino-1",
+        Some("trino-1_tag"),
+        &resolved("wh", Some("region-tag")),
+        &tagged,
+        100,
+    )
+    .unwrap();
+    assert_eq!(out.len(), 2, "{out:?}");
+    assert_eq!(out[0]["service"], "trino-1_tag");
+    assert_eq!(out[0]["resources"]["tag"]["values"][0], "region-tag");
+    let table = &out[1];
+    assert_eq!(table["service"], "trino-1");
+    assert_eq!(table["policyType"], 2);
+    assert_eq!(
+        table["name"],
+        format!(
+            "{}{}-wh.sales.orders",
+            egret_policy::COMPILER_RULE_PREFIX,
+            Uuid::nil()
+        )
+    );
+    assert_eq!(
+        resource_keys(table),
+        vec![
+            "catalog".to_string(),
+            "schema".to_string(),
+            "table".to_string()
+        ]
+    );
+    assert_eq!(table["resources"]["catalog"]["values"][0], "wh");
+    assert_eq!(table["resources"]["schema"]["values"][0], "sales");
+    assert_eq!(table["resources"]["table"]["values"][0], "orders");
+    let last = table["rowFilterPolicyItems"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(last["rowFilterInfo"]["filterExpr"], "country = 'US'");
+    assert_eq!(last["groups"][0], "public");
+
+    // A Trino mask stays one tag policy: Trino masks a tagged column itself.
+    let m = mask_rule_on_tag("region", "MASK_HASH");
+    let out = compile_rule(
+        &m,
+        EngineType::Trino,
+        "trino-1",
+        Some("trino-1_tag"),
+        &resolved("wh", Some("region-tag")),
+        &tagged,
+        100,
+    )
+    .unwrap();
+    assert_eq!(out.len(), 1, "{out:?}");
+}
+
+/// KI-287: the Trino ceiling counts the column-only tables it expands to.
+#[test]
+fn a_trino_tag_row_filter_ceiling_counts_column_only_tables() {
+    let r = rowfilter_rule_on_tag("region", "country = 'US'");
+    let many = targets(
+        &(0..501)
+            .map(|i| col("wh", "sales", &format!("t{i}"), "email"))
+            .collect::<Vec<_>>(),
+    );
+    let err = compile_rule(
+        &r,
+        EngineType::Trino,
+        "trino-1",
+        Some("trino-1_tag"),
+        &resolved("wh", Some("region-tag")),
+        &many,
+        500,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, CompileError::ExpansionCeiling { count: 501, .. }),
+        "{err:?}"
     );
 }

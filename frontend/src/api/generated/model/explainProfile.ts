@@ -9,10 +9,11 @@ import type { ExplainAccess } from './explainAccess';
 import type { ExplainClearanceMaskGap } from './explainClearanceMaskGap';
 import type { ExplainEffectLine } from './explainEffectLine';
 import type { ExplainMask } from './explainMask';
+import type { ExplainOpa } from './explainOpa';
 import type { ExplainResolvedTag } from './explainResolvedTag';
 import type { ExplainRowFilter } from './explainRowFilter';
-import type { ExplainRowFilterGap } from './explainRowFilterGap';
 import type { WireEngineType } from './wireEngineType';
+import type { WireMechanism } from './wireMechanism';
 
 /**
  * One policy profile's answer: the artifact ITS plugin downloads, evaluated
@@ -33,6 +34,26 @@ export interface ExplainProfile {
      */
   service_name: string;
   engine: WireEngineType;
+  /**
+     * How this profile's engines are asked, and so which evaluator answered:
+     * `ranger` evaluates the served Ranger download with `egret-ranger-eval`,
+     * `opa` evaluates the profile's IR snapshot with `egret-perm-eval`
+     * (governance SP2b Task 16). An OPA profile carries no Ranger-only
+     * fields (`mask`, `row_filter`, `tags`); its values are in `opa`.
+     */
+  mechanism: WireMechanism;
+  opa?: null | ExplainOpa;
+  /**
+     * The engines bound to this profile that still run the OTHER mechanism:
+     * their recorded `applied_mechanism` differs from the profile's, because
+     * a switch's re-apply has not reached them yet (governance SP2b Task 20F,
+     * final review T16 M1). This explanation follows the profile's mechanism,
+     * so those engines may answer differently until they are re-applied
+     * (re-send the switch). Absent when every bound engine is on it. Lists
+     * only engines a re-sent switch re-applies: never an external engine,
+     * nor one being deleted.
+     */
+  engines_not_reapplied?: string[];
   accesses: ExplainAccess[];
   /**
      * The tag set **this profile's** verdicts could have been decided by.
@@ -106,13 +127,6 @@ export interface ExplainProfile {
      * masks exist (live spike, spec §14).
      */
   clearance_masks_missing?: ExplainClearanceMaskGap[];
-  /**
-     * For a read naming a table, Trino only (when the download has tag
-     * policies): the classification row filters that filter nothing here
-     * because their classification is on columns of the table only
-     * ([`ExplainRowFilterGap`]).
-     */
-  row_filter_not_applied?: ExplainRowFilterGap[];
   /**
      * The answer in words (spec §5.1, C1): for a `read`, the column (or
      * table) line and then the rows line, which a refused read does not get;

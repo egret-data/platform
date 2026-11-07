@@ -1,0 +1,882 @@
+[
+  {
+    "desired": [
+      {
+        "service": "{g09.trino}_tag",
+        "name": "perm-rule-{g09.rf}",
+        "body": {
+          "denyPolicyItems": [],
+          "description": "",
+          "isEnabled": true,
+          "name": "perm-rule-{g09.rf}",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 2,
+          "resources": {
+            "tag": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "g09.region"
+              ]
+            }
+          },
+          "rowFilterPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "groups": [],
+              "roles": [],
+              "rowFilterInfo": {
+                "filterExpr": ""
+              },
+              "users": [
+                "{g09.alice.username}"
+              ]
+            },
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "rowFilterInfo": {
+                "filterExpr": "region = 'EU'"
+              },
+              "users": []
+            }
+          ],
+          "service": "{g09.trino}_tag",
+          "serviceType": "tag"
+        }
+      },
+      {
+        "service": "{g09.trino}",
+        "name": "perm-hidden-meta-perm-rule-{g09.rf}-gold_g09_cat.sales.customers",
+        "body": {
+          "additionalResources": [],
+          "allowExceptions": [],
+          "denyExceptions": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [],
+              "roles": [],
+              "users": [
+                "{g09.alice.username}"
+              ]
+            }
+          ],
+          "denyPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "users": []
+            }
+          ],
+          "description": "",
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-hidden-meta-perm-rule-{g09.rf}-gold_g09_cat.sales.customers",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g09_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            },
+            "schema": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "customers$*"
+              ]
+            }
+          },
+          "service": "{g09.trino}",
+          "serviceType": "trino"
+        }
+      },
+      {
+        "service": "{g09.trino}",
+        "name": "perm-hidden-meta-perm-rule-{g09.rf}-gold_g09_cat.sales.orders",
+        "body": {
+          "additionalResources": [],
+          "allowExceptions": [],
+          "denyExceptions": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [],
+              "roles": [],
+              "users": [
+                "{g09.alice.username}"
+              ]
+            }
+          ],
+          "denyPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "users": []
+            }
+          ],
+          "description": "",
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-hidden-meta-perm-rule-{g09.rf}-gold_g09_cat.sales.orders",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g09_cat"
+              ]
+            },
+            "column": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            },
+            "schema": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "orders$*"
+              ]
+            }
+          },
+          "service": "{g09.trino}",
+          "serviceType": "trino"
+        }
+      },
+      {
+        "service": "{g09.trino}",
+        "name": "perm-rule-{g09.rf}-gold_g09_cat.sales.orders",
+        "body": {
+          "denyPolicyItems": [],
+          "description": "",
+          "isEnabled": true,
+          "name": "perm-rule-{g09.rf}-gold_g09_cat.sales.orders",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 2,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g09_cat"
+              ]
+            },
+            "schema": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "orders"
+              ]
+            }
+          },
+          "rowFilterPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "groups": [],
+              "roles": [],
+              "rowFilterInfo": {
+                "filterExpr": ""
+              },
+              "users": [
+                "{g09.alice.username}"
+              ]
+            },
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "rowFilterInfo": {
+                "filterExpr": "region = 'EU'"
+              },
+              "users": []
+            }
+          ],
+          "service": "{g09.trino}",
+          "serviceType": "trino"
+        }
+      }
+    ],
+    "skipped": [],
+    "served": [
+      {
+        "additionalResources": [],
+        "allowExceptions": [],
+        "denyExceptions": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g09.alice.username}"
+            ]
+          }
+        ],
+        "denyPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "description": "",
+        "id": 0,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "perm-hidden-meta-perm-rule-{g09.rf}-gold_g09_cat.sales.customers",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g09_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "sales"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "customers$*"
+            ]
+          }
+        },
+        "service": "{g09.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "additionalResources": [],
+        "allowExceptions": [],
+        "denyExceptions": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g09.alice.username}"
+            ]
+          }
+        ],
+        "denyPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "description": "",
+        "id": 1,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "perm-hidden-meta-perm-rule-{g09.rf}-gold_g09_cat.sales.orders",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g09_cat"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "sales"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "orders$*"
+            ]
+          }
+        },
+        "service": "{g09.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "denyPolicyItems": [],
+        "description": "",
+        "id": 2,
+        "isEnabled": true,
+        "name": "perm-rule-{g09.rf}-gold_g09_cat.sales.orders",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 2,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g09_cat"
+            ]
+          },
+          "schema": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "sales"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "orders"
+            ]
+          }
+        },
+        "rowFilterPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "groups": [],
+            "roles": [],
+            "rowFilterInfo": {
+              "filterExpr": ""
+            },
+            "users": [
+              "{g09.alice.username}"
+            ]
+          },
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "rowFilterInfo": {
+              "filterExpr": "region = 'EU'"
+            },
+            "users": []
+          }
+        ],
+        "service": "{g09.trino}",
+        "serviceType": "trino",
+        "version": 1
+      }
+    ],
+    "servedTag": [
+      {
+        "denyPolicyItems": [],
+        "description": "",
+        "id": 0,
+        "isEnabled": true,
+        "name": "perm-rule-{g09.rf}",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 2,
+        "resources": {
+          "tag": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "g09.region"
+            ]
+          }
+        },
+        "rowFilterPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "groups": [],
+            "roles": [],
+            "rowFilterInfo": {
+              "filterExpr": ""
+            },
+            "users": [
+              "{g09.alice.username}"
+            ]
+          },
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "rowFilterInfo": {
+              "filterExpr": "region = 'EU'"
+            },
+            "users": []
+          }
+        ],
+        "service": "{g09.trino}_tag",
+        "serviceType": "tag",
+        "version": 1
+      }
+    ]
+  },
+  {
+    "desired": [
+      {
+        "service": "{g09.starrocks}",
+        "name": "perm-rule-{g09.rf}-gold_g09_cat.sales.customers",
+        "body": {
+          "denyPolicyItems": [],
+          "description": "",
+          "isEnabled": true,
+          "name": "perm-rule-{g09.rf}-gold_g09_cat.sales.customers",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 2,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g09_cat"
+              ]
+            },
+            "database": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "customers"
+              ]
+            }
+          },
+          "rowFilterPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "groups": [],
+              "roles": [],
+              "rowFilterInfo": {
+                "filterExpr": ""
+              },
+              "users": [
+                "{g09.alice.username}"
+              ]
+            },
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "rowFilterInfo": {
+                "filterExpr": "region = 'EU'"
+              },
+              "users": []
+            }
+          ],
+          "service": "{g09.starrocks}",
+          "serviceType": "starrocks"
+        }
+      },
+      {
+        "service": "{g09.starrocks}",
+        "name": "perm-rule-{g09.rf}-gold_g09_cat.sales.orders",
+        "body": {
+          "denyPolicyItems": [],
+          "description": "",
+          "isEnabled": true,
+          "name": "perm-rule-{g09.rf}-gold_g09_cat.sales.orders",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 2,
+          "resources": {
+            "catalog": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "gold_g09_cat"
+              ]
+            },
+            "database": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "sales"
+              ]
+            },
+            "table": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "orders"
+              ]
+            }
+          },
+          "rowFilterPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "groups": [],
+              "roles": [],
+              "rowFilterInfo": {
+                "filterExpr": ""
+              },
+              "users": [
+                "{g09.alice.username}"
+              ]
+            },
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                }
+              ],
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "rowFilterInfo": {
+                "filterExpr": "region = 'EU'"
+              },
+              "users": []
+            }
+          ],
+          "service": "{g09.starrocks}",
+          "serviceType": "starrocks"
+        }
+      }
+    ],
+    "skipped": [],
+    "served": [
+      {
+        "denyPolicyItems": [],
+        "description": "",
+        "id": 0,
+        "isEnabled": true,
+        "name": "perm-rule-{g09.rf}-gold_g09_cat.sales.customers",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 2,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g09_cat"
+            ]
+          },
+          "database": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "sales"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "customers"
+            ]
+          }
+        },
+        "rowFilterPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "groups": [],
+            "roles": [],
+            "rowFilterInfo": {
+              "filterExpr": ""
+            },
+            "users": [
+              "{g09.alice.username}"
+            ]
+          },
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "rowFilterInfo": {
+              "filterExpr": "region = 'EU'"
+            },
+            "users": []
+          }
+        ],
+        "service": "{g09.starrocks}",
+        "serviceType": "starrocks",
+        "version": 1
+      },
+      {
+        "denyPolicyItems": [],
+        "description": "",
+        "id": 1,
+        "isEnabled": true,
+        "name": "perm-rule-{g09.rf}-gold_g09_cat.sales.orders",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 2,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "gold_g09_cat"
+            ]
+          },
+          "database": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "sales"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "orders"
+            ]
+          }
+        },
+        "rowFilterPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "groups": [],
+            "roles": [],
+            "rowFilterInfo": {
+              "filterExpr": ""
+            },
+            "users": [
+              "{g09.alice.username}"
+            ]
+          },
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "rowFilterInfo": {
+              "filterExpr": "region = 'EU'"
+            },
+            "users": []
+          }
+        ],
+        "service": "{g09.starrocks}",
+        "serviceType": "starrocks",
+        "version": 1
+      }
+    ]
+  }
+]

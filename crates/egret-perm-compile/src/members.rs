@@ -74,26 +74,22 @@
 //! `principal_type = 'user'`. Two deliberate narrowings, both recorded in the
 //! design spec's D3 because they are visible behaviour:
 //!
-//! 1. **A GROUP added as a workspace member is not expanded.** egret's PDP
-//!    does expand it (`egret_auth::grants::AccessGrantStore::grants_for` joins
-//!    `user_groups`), so this compiles LESS access than egret's own evaluator
-//!    would allow for such a subject. That is the fail-closed direction. It
-//!    was chosen because the writers of `user_groups` live in
-//!    `egret-auth::groups`, BELOW this crate, and could not call the
-//!    recompile. **J-F3 Task 1b removed that obstacle** — every writer now
-//!    recompiles through the `egret_auth::groups::GroupMembershipRecompiler`
-//!    port, and the per-login sync recompiles only the groups a login moved —
-//!    but it expanded only a `group` PRINCIPAL (design R8) and, since the role arm,
-//!    a role a group holds (`role_group_holders_via`). A group holding a
-//!    workspace membership is still not expanded: extending it needs
-//!    `affected_services_for_group_membership` to gain the workspace arm first,
-//!    or a membership change of such a group goes stale on REMOVAL, which fails
-//!    open; until then the narrowing stands.
+//! 1. **Group membership is expanded for groups and roles and workspaces.**
+//!    A group added as a workspace member, or holding a role, is expanded to its
+//!    members (`workspace_members_via`, `role_group_holders_via`), as the PDP
+//!    does (`egret_auth::grants::AccessGrantStore::grants_for`). The membership
+//!    writers recompile through the group-membership trigger, which covers the
+//!    role and workspace arms.
 //! 2. **An `expires_at` that lapses is not a write, so nothing recompiles.**
 //!    A time-boxed membership (the access-request approval path grants one)
 //!    stays in the compiled policy until the next recompile of that profile
-//!    for any other reason. Also fail-open, also recorded rather than papered
-//!    over; closing it needs a sweeper, which SP4a does not have.
+//!    for any other reason. Fail-open. **CLOSED by the expiry sweep**
+//!    ([`crate::expiry::recompile_lapsed_grants`], run hourly by `egret-bin`):
+//!    each run recompiles the profiles that a grant lapsed inside the last two
+//!    hours can change. The residual window is up to one hour after a lapse
+//!    (the next tick) plus the sweep's own compile time. Lapses during a
+//!    process downtime longer than two hours are seen only by the boot-time
+//!    role recompile, which covers role grants and not workspace memberships.
 //!
 //! **This module no longer answers the reverse question, and nothing asks it
 //! (SP4d-2a Task 5).** `workspaces_for_username` and `roles_for_username`
@@ -113,8 +109,9 @@ use uuid::Uuid;
 use egret_auth::users::ensure_username_via;
 use egret_core::UserId;
 use egret_perm::{
-    CompileError, EngineGrant, Grant, Principal, PrincipalKind, PrincipalSet, Rule, PUBLIC_GROUP,
+    CompileError, EngineGrant, Grant, PrincipalKind, PrincipalSet, Rule, PUBLIC_GROUP,
 };
+use egret_perm_ir::audience::{is_expanded_group, Directory};
 
 /// The usernames of the users currently holding each role NAME in `roles` —
 /// the expansion SP4c needs twice over (**SP4c Task 2 and Task 2b**).
@@ -288,7 +285,8 @@ pub(crate) async fn role_usernames(
 ///
 /// It adds no cycle with the profile locks: it is always taken after them, and
 /// nothing asks for a profile lock while holding it, because every recompile
-/// locks its whole profile set first. `crate::view_tags::lock_view_tags_in_tx`
+/// locks its whole profile set first, and a request for a profile not locked
+/// first is refused rather than waited on (below). `crate::view_tags::lock_view_tags_in_tx`
 /// and the group and member advisory locks (`egret_auth::groups`) come before
 /// the profile locks in any transaction that takes them. Re-taking it in the
 /// same transaction is free. A mint outside a compile — `ensure_username` on
@@ -304,19 +302,25 @@ pub(crate) async fn role_usernames(
 /// price of ruling the deadlock out. Taking it per user instead would need
 /// every writer to know, before its write, which users the compile will mint.
 ///
-/// **Known gap (not closed).** A writer that takes this lock early and then
-/// recompiles reads its profile set again: `retag_bump_and_recompile`'s
-/// `services_bound_to_warehouses`, `recompile_for_clearance_in_tx`'s
-/// `affected_services_for_classification`, and `lock_services_in_tx`'s
-/// tag-service expansion. If that set grew in between (a profile bound or
-/// attached concurrently), the new profile is locked while this lock is held,
-/// against the stated order, and can deadlock with a compile of that profile.
-/// Closing it means refusing with a retryable error when the set grows, or
-/// taking those late profile locks `NOWAIT`.
+/// **A profile set that grows after this lock (#792) is refused.** A writer
+/// that takes this lock early reads its profile set again at its recompile
+/// (`retag_bump_and_recompile`'s `services_bound_to_warehouses`,
+/// `recompile_for_clearance_in_tx`'s `affected_services_for_classification`,
+/// `lock_services_in_tx`'s tag-service expansion). A profile bound or created
+/// in between would be locked while this lock is held, against the stated
+/// order, and could deadlock with a compile of that profile. So this lock
+/// marks the transaction (`egret.compile_mint_held`, transaction-local), and
+/// the one profile-lock helper (`crate::trigger::lock_profile_rows_in_tx`)
+/// answers a request for a profile this transaction has not locked yet with
+/// [`CompileError::ProfileSetChanged`] while the mark is set, before any lock
+/// statement: the write is refused (a retryable 409) instead of waiting.
 pub async fn lock_compile_mints_in_tx(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('egret-compile-mint', 0))")
-        .execute(&mut *conn)
-        .await?;
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended('egret-compile-mint', 0)), \
+                set_config('egret.compile_mint_held', 'on', true)",
+    )
+    .execute(&mut *conn)
+    .await?;
     Ok(())
 }
 
@@ -329,10 +333,10 @@ async fn mint_for_compile(
 ) -> Result<String, CompileError> {
     lock_compile_mints_in_tx(conn)
         .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
+        .map_err(CompileError::from_db)?;
     ensure_username_via(conn, UserId(user_id))
         .await
-        .map_err(|e| CompileError::Db(e.to_string()))
+        .map_err(crate::db_error::from_core)
 }
 
 /// Mint, in ONE ascending sweep, the username of every person a compile of
@@ -348,9 +352,20 @@ async fn mint_for_compile(
 /// aborts one of them. Minting everyone first, ascending, means the passes
 /// find names already set and take no `users` row lock at all.
 ///
-/// The set is a SUBSET of what the passes mint, never wider, because a mint is
-/// a write a compile must not make for someone it does not name. It is built
-/// from the SAME shared reads the passes and People use —
+/// **What it guarantees, and what it does not (#790).** The set never names
+/// someone no compile of the current model would name, because a mint is a
+/// write a compile must not make for someone it does not name. It is meant to
+/// COVER this transaction's passes, but that is not provable: it reads
+/// statement by statement under READ COMMITTED, so a ref committed after it
+/// is minted by a pass. What keeps compile mints deadlock-free is the mint
+/// lock ([`lock_compile_mints_in_tx`]), under which no two compiles mint at
+/// once in any order; this sweep only keeps that lock to one acquisition and
+/// this transaction's `users` row locks ascending. That is also why it reads
+/// the whole model rather than the profiles being recompiled: a narrower
+/// sweep would have to restate, per profile, which refs each pass reads, the
+/// copy this sweep exists to avoid, for little gain (#790, not done).
+///
+/// It is built from the SAME shared reads the passes and People use —
 /// [`role_holders_via`], [`group_members_via`], [`workspace_members_via`] —
 /// over the refs the whole model holds (grant principals, rule exemptions,
 /// engine-grant principals (F11), a clearance's `required_roles`; `public` excluded; a workspace ref parsed as
@@ -371,7 +386,7 @@ pub(crate) async fn premint_model_usernames(
     )
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(e.to_string()))?;
+    .map_err(CompileError::from_db)?;
     let mut roles: BTreeSet<String> = BTreeSet::new();
     let mut groups: BTreeSet<String> = BTreeSet::new();
     let mut workspaces: BTreeSet<Uuid> = BTreeSet::new();
@@ -414,21 +429,16 @@ pub(crate) async fn premint_model_usernames(
             unnamed.insert(m.user_id);
         }
     }
-    // The engine admins, when any engine carries an `egret-admin` set: every
-    // recompile of such a profile names them (`crate::trigger`'s
-    // `sync_admin_policy_in_tx`).
-    if !egret_policy::default_policies::admin_policy_services_via(conn)
-        .await
-        .map_err(|e| CompileError::Db(e.to_string()))?
-        .is_empty()
-    {
+    // The engine admins, when there is any infra service: every recompile of
+    // such a profile names them (`crate::infra::converge_infra_in_tx`).
+    if !crate::infra::infra_services_via(conn).await?.is_empty() {
         let admins = egret_auth::roles::engine_admin_user_ids_via(conn)
             .await
-            .map_err(|e| CompileError::Db(e.to_string()))?;
+            .map_err(crate::db_error::from_core)?;
         let ids: Vec<Uuid> = admins.iter().map(|u| u.0).collect();
         let named = egret_auth::users::usernames_via(conn, &ids)
             .await
-            .map_err(|e| CompileError::Db(e.to_string()))?;
+            .map_err(crate::db_error::from_core)?;
         unnamed.extend(ids.into_iter().filter(|id| !named.contains_key(id)));
     }
 
@@ -448,19 +458,24 @@ pub(crate) async fn premint_model_usernames(
 /// pre-mint sweep normally got there first).
 pub(crate) async fn engine_admin_usernames_via(
     conn: &mut sqlx::PgConnection,
+    missing: MissingUsername,
 ) -> Result<Vec<String>, CompileError> {
     let admins = egret_auth::roles::engine_admin_user_ids_via(conn)
         .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
+        .map_err(crate::db_error::from_core)?;
     let ids: Vec<Uuid> = admins.iter().map(|u| u.0).collect();
     let named = egret_auth::users::usernames_via(conn, &ids)
         .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
+        .map_err(crate::db_error::from_core)?;
     let mut out = Vec::with_capacity(ids.len());
     for id in ids {
         match named.get(&id) {
             Some(u) => out.push(u.clone()),
-            None => out.push(mint_for_compile(conn, id).await?),
+            None if missing == MissingUsername::Mint => out.push(mint_for_compile(conn, id).await?),
+            // A read that must not write (the OPA snapshot): an unnamed admin
+            // is no principal on any engine yet, so leaving them out grants
+            // nobody anything.
+            None => {}
         }
     }
     out.sort();
@@ -468,15 +483,20 @@ pub(crate) async fn engine_admin_usernames_via(
     Ok(out)
 }
 
-/// What [`role_usernames`] does with a holder who has no `users.username`
-/// yet (2026-10-18 design R5).
+/// What a read of who a principal stands for ([`role_usernames`],
+/// [`expand_enumerated_principals`], [`engine_admin_usernames_via`]) does with
+/// a person who has no `users.username` yet (2026-10-18 design R5).
+///
+/// `pub` (governance SP2b Task 6) because the OPA snapshot build takes it
+/// (`crate::opa::build`, which re-exports it); the module stays crate-private.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MissingUsername {
+pub enum MissingUsername {
     /// Mint one on the caller's connection with `ensure_username_via`, so the
     /// compiled policy names the identity the engine will see. Every compile.
     Mint,
-    /// Leave the holder out. A read that must not write: `owner_cleared`,
-    /// served on GET routes.
+    /// Leave the person out, and write nothing. A read that must not write:
+    /// `owner_cleared`, served on GET routes, and the OPA snapshot build,
+    /// which runs in a `READ ONLY` transaction (SP2b I9).
     Omit,
 }
 
@@ -562,7 +582,7 @@ pub(crate) async fn role_holders_via(
     .bind(roles)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(e.to_string()))
+    .map_err(CompileError::from_db)
 }
 
 /// The members of each group that holds a role in `roles` (a live `allow`
@@ -592,7 +612,7 @@ pub(crate) async fn role_group_holders_via(
     .bind(roles)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(e.to_string()))
+    .map_err(CompileError::from_db)
 }
 
 /// The direct user members of each workspace in `ids`: the membership
@@ -606,6 +626,8 @@ pub(crate) async fn workspace_members_via(
     if ids.is_empty() {
         return Ok(Vec::new());
     }
+    // The direct members, and the members of a group that holds the workspace
+    // (the group arm: the PDP expands it, so the compiled list must too).
     sqlx::query_as(
         "SELECT ag.scope_id AS workspace_id, ag.principal_id AS user_id, \
             u.username::text AS username \
@@ -615,12 +637,22 @@ pub(crate) async fn workspace_members_via(
         AND ag.scope_type = 'workspace' \
         AND ag.scope_id = ANY($1) \
         AND ag.effect = 'allow' \
+        AND (ag.expires_at IS NULL OR ag.expires_at > now()) \
+     UNION \
+     SELECT ag.scope_id AS workspace_id, ug.user_id, u.username::text AS username \
+       FROM access_grants ag \
+       JOIN user_groups ug ON ug.group_id = ag.principal_id \
+       JOIN users u ON u.id = ug.user_id \
+      WHERE ag.principal_type = 'group' \
+        AND ag.scope_type = 'workspace' \
+        AND ag.scope_id = ANY($1) \
+        AND ag.effect = 'allow' \
         AND (ag.expires_at IS NULL OR ag.expires_at > now())",
     )
     .bind(ids)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(e.to_string()))
+    .map_err(CompileError::from_db)
 }
 
 /// The direct members of each group NAME in `names` (J-F3 Task 1b):
@@ -644,7 +676,7 @@ pub(crate) async fn group_members_via(
     .bind(names)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(e.to_string()))
+    .map_err(CompileError::from_db)
 }
 
 /// What a model references that has to be enumerated: workspace ids, role
@@ -654,15 +686,6 @@ struct Referenced {
     workspaces: BTreeSet<Uuid>,
     roles: BTreeSet<String>,
     groups: BTreeSet<String>,
-}
-
-/// Whether `p` is a group this module expands: every group except
-/// [`PUBLIC_GROUP`], the one name every engine resolves without a group
-/// provider (`egret_perm::PUBLIC_GROUP`'s doc) — the compiler's own "applies to
-/// everyone" item uses it, and expanding it would turn "everyone" into "every
-/// user who has a row naming a group called public".
-fn is_expanded_group(p: &Principal) -> bool {
-    p.kind == PrincipalKind::Group && p.r#ref != PUBLIC_GROUP
 }
 
 /// Every workspace id a `workspace_members` principal names, every role NAME a
@@ -706,28 +729,30 @@ fn referenced_principals(
     out
 }
 
-/// Replace every `workspace_members`, every `role` **and every non-`public`
-/// `group`** principal in `grants` and `rules` with the `User` principals it
-/// stands for, read from the database on `conn`.
+/// Read who every `workspace_members`, every `role` **and every non-`public`
+/// `group`** principal in `grants`, `rules` and `engine_grants` stands for, from
+/// the database on `conn`, as the [`Directory`] each family expands its
+/// audience against (`egret_perm_ir::audience::audience`). The model itself
+/// is not rewritten (governance sub-project 1, Task 10).
 ///
 /// Runs ONE query for every workspace referenced by the whole model and ONE for
 /// every group (minting a username for any member that has none — module doc),
 /// and ONE for every role name ([`role_usernames`], which mints the same way
-/// since the 2026-10-18 design R5). After this returns, no `PrincipalKind::WorkspaceMembers`, no
-/// `PrincipalKind::Role` and no group other than `public` survives anywhere in
-/// `grants`/`rules` — which is what lets
+/// since the 2026-10-18 design R5). Expanded against the directory, no
+/// `PrincipalKind::WorkspaceMembers`, no `PrincipalKind::Role` and no group
+/// other than `public` survives in an audience — which is what lets
 /// `compile_grant`/`compile_rule` refuse the first two kinds outright as a
-/// defence in depth (a group is not refused there; `grants.rs`' module doc says
+/// defence in depth (a group is not refused there; `egret_perm_ir::lower::grants`' module doc says
 /// why): reaching them with an unexpanded principal is a bug in THIS function,
 /// not an authoring mistake, and a refusal says so loudly instead of emitting a
 /// policy that silently grants nobody (an `include` that fails closed) or
 /// silently grants everybody the subtract was meant to remove (an `exclude`
-/// that fails OPEN — the reason dropping was never an option; see `grants.rs`'s
+/// that fails OPEN — the reason dropping was never an option; see `egret_perm_ir::lower::grants`'
 /// module doc).
 ///
 /// **`role` joined this function in SP4c Task 2b, and it is a FIX.** Before it,
 /// `compile_grant` put a `role` principal straight into the Ranger `roles`
-/// bucket (`grants.rs:105`), which D0 measured is never populated — so a role
+/// bucket (`ranger/grants.rs`), which D0 measured is never populated — so a role
 /// grant matched nobody in the engine while `egret_perm::eval` matched it
 /// happily and `explain` reported an access the engine did not grant. Same
 /// divergence class D7 found for groups, on a path D7 did not look at. It is
@@ -755,17 +780,18 @@ fn referenced_principals(
 /// the compiler answer identically for the same model. It is logged.
 pub(crate) async fn expand_enumerated_principals(
     conn: &mut sqlx::PgConnection,
-    grants: &mut [Grant],
-    rules: &mut [Rule],
-    engine_grants: &mut [EngineGrant],
-) -> Result<(), CompileError> {
+    grants: &[Grant],
+    rules: &[Rule],
+    engine_grants: &[EngineGrant],
+    missing: MissingUsername,
+) -> Result<Directory, CompileError> {
     let Referenced {
         workspaces: wanted,
         roles: wanted_roles,
         groups: wanted_groups,
     } = referenced_principals(grants, rules, engine_grants);
     if wanted.is_empty() && wanted_roles.is_empty() && wanted_groups.is_empty() {
-        return Ok(());
+        return Ok(Directory::default());
     }
     let ids: Vec<Uuid> = wanted.iter().copied().collect();
 
@@ -800,6 +826,13 @@ pub(crate) async fn expand_enumerated_principals(
             }
         }
     }
+    // `Omit` (the OPA snapshot): an unnamed member is left out, as
+    // `role_usernames` leaves out an unnamed holder, and nothing is written.
+    let to_mint = if missing == MissingUsername::Mint {
+        to_mint
+    } else {
+        BTreeSet::new()
+    };
     for user_id in to_mint {
         let minted = mint_for_compile(conn, user_id).await?;
         tracing::info!(
@@ -811,7 +844,7 @@ pub(crate) async fn expand_enumerated_principals(
         resolved.insert(user_id, minted);
     }
 
-    let mut members: HashMap<Uuid, Vec<String>> = HashMap::new();
+    let mut members: BTreeMap<Uuid, Vec<String>> = BTreeMap::new();
     for row in &rows {
         let Some(name) = resolved.get(&row.user_id) else {
             continue;
@@ -830,7 +863,7 @@ pub(crate) async fn expand_enumerated_principals(
         names.dedup();
     }
     // A referenced workspace with no members at all still has to appear in the
-    // map, so substitution knows it expanded to zero rather than that it was
+    // directory, so the audience knows it expanded to zero rather than that it was
     // never looked up.
     for id in &ids {
         members.entry(*id).or_default();
@@ -859,24 +892,13 @@ pub(crate) async fn expand_enumerated_principals(
     // AFTER the mints above, so the role pass mints only holders the member
     // pass did not reach (see this function's doc comment).
     let roles: Vec<String> = wanted_roles.into_iter().collect();
-    let role_members = role_usernames(conn, &roles, MissingUsername::Mint).await?;
+    let role_members = role_usernames(conn, &roles, missing).await?;
 
-    let expansions = Expansions {
-        workspaces: &members,
-        roles: &role_members,
-        groups: &group_members,
-    };
-    for g in grants.iter_mut() {
-        substitute(&mut g.principals, &expansions);
-    }
-    for r in rules.iter_mut() {
-        substitute(&mut r.exempt, &expansions);
-    }
-    // F11: an engine grant's grantees are expanded exactly as a grant's.
-    for g in engine_grants.iter_mut() {
-        substitute(&mut g.principals, &expansions);
-    }
-    Ok(())
+    Ok(Directory {
+        workspaces: members,
+        roles: role_members,
+        groups: group_members,
+    })
 }
 
 // **`workspaces_for_username` and `roles_for_username` lived here and are
@@ -894,123 +916,15 @@ pub(crate) async fn expand_enumerated_principals(
 // read from the other direction (role -> holders) and is still live, because
 // the compiler needs it.
 
-/// The three member lists a substitution reads, keyed the way each principal
-/// kind stores its ref.
-struct Expansions<'a> {
-    workspaces: &'a HashMap<Uuid, Vec<String>>,
-    roles: &'a BTreeMap<String, Vec<String>>,
-    groups: &'a BTreeMap<String, Vec<String>>,
-}
-
-/// Rewrite one `PrincipalSet` in place: every `WorkspaceMembers`, every `Role`
-/// and every non-`public` `Group` entry becomes the `User` entries it stands
-/// for, everything else is carried through untouched and in its original
-/// order. Duplicates are collapsed — a grant that names `alice` explicitly AND
-/// the workspace she belongs to (or a role she holds, or a group she is in)
-/// must not emit `alice` twice into the same Ranger item.
-fn substitute(set: &mut PrincipalSet, x: &Expansions<'_>) {
-    substitute_one(&mut set.include, x);
-    substitute_one(&mut set.exclude, x);
-}
-
-fn substitute_one(list: &mut Vec<Principal>, x: &Expansions<'_>) {
-    if !list.iter().any(|p| {
-        matches!(
-            p.kind,
-            PrincipalKind::WorkspaceMembers | PrincipalKind::Role
-        ) || is_expanded_group(p)
-    }) {
-        return;
-    }
-    let mut out: Vec<Principal> = Vec::with_capacity(list.len());
-    let mut seen: BTreeMap<(&'static str, String), ()> = BTreeMap::new();
-    for p in list.drain(..) {
-        let expanded: Vec<Principal> = match p.kind {
-            PrincipalKind::WorkspaceMembers => {
-                let names = p
-                    .r#ref
-                    .parse::<Uuid>()
-                    .ok()
-                    .and_then(|id| x.workspaces.get(&id))
-                    .cloned()
-                    .unwrap_or_default();
-                if names.is_empty() {
-                    tracing::warn!(
-                        workspace_ref = %p.r#ref,
-                        "a workspace_members principal expanded to no engine principal — it \
-                         names no workspace, or the workspace has no direct user members with \
-                         a live allow grant"
-                    );
-                }
-                as_users(names)
-            }
-            PrincipalKind::Role => {
-                let names = x.roles.get(&p.r#ref).cloned().unwrap_or_default();
-                if names.is_empty() {
-                    tracing::warn!(
-                        role = %p.r#ref,
-                        "a role principal expanded to no engine principal — no such role, or \
-                         nobody holds it with a live allow grant. The \
-                         Ranger `roles` bucket is NOT used as a fallback: D0 measured that it \
-                         matches nobody, so naming the role there would be a control that does \
-                         nothing (in an include) or one that denies everybody (in a \
-                         denyException)"
-                    );
-                }
-                as_users(names)
-            }
-            PrincipalKind::Group if is_expanded_group(&p) => {
-                let names = x.groups.get(&p.r#ref).cloned().unwrap_or_default();
-                if names.is_empty() {
-                    tracing::warn!(
-                        group = %p.r#ref,
-                        "a group principal expanded to no engine principal — no such group, or \
-                         it has no members. The Ranger `groups` bucket is NOT used as a \
-                         fallback: D7 measured that no engine egret provisions resolves a \
-                         group, so naming it there would be a control that does nothing"
-                    );
-                }
-                as_users(names)
-            }
-            _ => vec![p],
-        };
-        for e in expanded {
-            if seen
-                .insert((e.kind.as_str(), e.r#ref.clone()), ())
-                .is_none()
-            {
-                out.push(e);
-            }
-        }
-    }
-    *list = out;
-}
-
-fn as_users(names: Vec<String>) -> Vec<Principal> {
-    names
-        .into_iter()
-        .map(|name| Principal {
-            kind: PrincipalKind::User,
-            r#ref: name,
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egret_perm::Principal;
 
     fn ws_principal(id: Uuid) -> Principal {
         Principal {
             kind: PrincipalKind::WorkspaceMembers,
             r#ref: id.to_string(),
-        }
-    }
-
-    fn user(name: &str) -> Principal {
-        Principal {
-            kind: PrincipalKind::User,
-            r#ref: name.to_string(),
         }
     }
 
@@ -1021,63 +935,8 @@ mod tests {
         }
     }
 
-    static NO_ROLES: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    static NO_GROUPS: BTreeMap<String, Vec<String>> = BTreeMap::new();
-
-    fn ws_only(members: &HashMap<Uuid, Vec<String>>) -> Expansions<'_> {
-        Expansions {
-            workspaces: members,
-            roles: &NO_ROLES,
-            groups: &NO_GROUPS,
-        }
-    }
-
-    /// J-F3 Task 1b: a group expands to its members on BOTH sides, in place,
-    /// deduplicated against an explicitly named member — and an empty group
-    /// leaves nothing behind, never an entry naming the group.
-    #[test]
-    fn a_group_expands_to_its_members_and_an_empty_group_to_nothing() {
-        let no_ws = HashMap::new();
-        let mut groups = BTreeMap::new();
-        groups.insert(
-            "analysts".to_string(),
-            vec!["alice".to_string(), "bob".to_string()],
-        );
-        groups.insert("nobody".to_string(), Vec::new());
-        let x = Expansions {
-            workspaces: &no_ws,
-            roles: &NO_ROLES,
-            groups: &groups,
-        };
-        let mut set = PrincipalSet {
-            include: vec![user("alice"), group("analysts"), group("nobody")],
-            exclude: vec![group("analysts")],
-        };
-        substitute(&mut set, &x);
-        assert_eq!(set.include, vec![user("alice"), user("bob")]);
-        assert_eq!(set.exclude, vec![user("alice"), user("bob")]);
-    }
-
-    /// `public` is the one group every engine resolves; it is never expanded,
-    /// even if a `groups` row carries that name and has members.
-    #[test]
-    fn the_public_group_is_never_expanded() {
-        let no_ws = HashMap::new();
-        let mut groups = BTreeMap::new();
-        groups.insert(PUBLIC_GROUP.to_string(), vec!["mallory".to_string()]);
-        let x = Expansions {
-            workspaces: &no_ws,
-            roles: &NO_ROLES,
-            groups: &groups,
-        };
-        let mut set = PrincipalSet {
-            include: vec![group(PUBLIC_GROUP)],
-            exclude: vec![],
-        };
-        substitute(&mut set, &x);
-        assert_eq!(set.include, vec![group(PUBLIC_GROUP)]);
-
-        let grant = Grant {
+    fn read_grant(principals: PrincipalSet) -> Grant {
+        Grant {
             id: Uuid::nil(),
             effect: egret_perm::Effect::Allow,
             actions: vec![egret_perm::Action::Read],
@@ -1087,12 +946,20 @@ mod tests {
                 table: None,
                 column: None,
             },
-            principals: PrincipalSet {
-                include: vec![group(PUBLIC_GROUP), group("analysts")],
-                exclude: vec![],
-            },
+            principals,
             origin: egret_perm::GrantOrigin::Explicit,
-        };
+        }
+    }
+
+    /// `public` is the one group every engine resolves; it is not even looked
+    /// up. (That it is never expanded is `egret_perm_ir::audience`'s
+    /// `the_public_group_is_never_expanded`.)
+    #[test]
+    fn the_public_group_is_never_looked_up() {
+        let grant = read_grant(PrincipalSet {
+            include: vec![group(PUBLIC_GROUP), group("analysts")],
+            exclude: vec![],
+        });
         assert_eq!(
             referenced_principals(&[grant], &[], &[])
                 .groups
@@ -1104,69 +971,6 @@ mod tests {
     }
 
     #[test]
-    fn a_workspace_expands_to_its_members_in_place() {
-        let ws = Uuid::new_v4();
-        let mut members = HashMap::new();
-        members.insert(ws, vec!["alice".to_string(), "bob-2".to_string()]);
-        let mut set = PrincipalSet {
-            include: vec![user("carol"), ws_principal(ws)],
-            exclude: vec![],
-        };
-        substitute(&mut set, &ws_only(&members));
-        assert_eq!(
-            set.include,
-            vec![user("carol"), user("alice"), user("bob-2")],
-            "explicit principals keep their place; the expansion follows, sorted"
-        );
-    }
-
-    #[test]
-    fn an_already_named_member_is_not_named_twice() {
-        let ws = Uuid::new_v4();
-        let mut members = HashMap::new();
-        members.insert(ws, vec!["alice".to_string()]);
-        let mut set = PrincipalSet {
-            include: vec![user("alice"), ws_principal(ws)],
-            exclude: vec![],
-        };
-        substitute(&mut set, &ws_only(&members));
-        assert_eq!(set.include, vec![user("alice")]);
-    }
-
-    /// The `exclude` half is the one that fails OPEN when it is got wrong: a
-    /// subtract that evaporates grants MORE than the model states. Expanding
-    /// it to zero principals must leave the list EMPTY (so `compile_grant`
-    /// emits no exception block at all), never an entry naming nobody.
-    #[test]
-    fn an_empty_workspace_expands_to_nothing_rather_than_to_an_empty_item() {
-        let ws = Uuid::new_v4();
-        let mut members = HashMap::new();
-        members.insert(ws, Vec::new());
-        let mut set = PrincipalSet {
-            include: vec![ws_principal(ws)],
-            exclude: vec![ws_principal(ws)],
-        };
-        substitute(&mut set, &ws_only(&members));
-        assert!(set.include.is_empty());
-        assert!(set.exclude.is_empty());
-    }
-
-    /// Same answer the evaluator gives a ref it cannot parse
-    /// (`matches_principal` → `unwrap_or(false)`): it matches nobody.
-    #[test]
-    fn a_ref_that_is_not_a_uuid_expands_to_nothing() {
-        let mut set = PrincipalSet {
-            include: vec![Principal {
-                kind: PrincipalKind::WorkspaceMembers,
-                r#ref: "not-a-uuid".into(),
-            }],
-            exclude: vec![],
-        };
-        substitute(&mut set, &ws_only(&HashMap::new()));
-        assert!(set.include.is_empty());
-    }
-
-    #[test]
     fn referenced_principals_skips_unparseable_workspace_refs() {
         let ws = Uuid::new_v4();
         let mut set = PrincipalSet::default();
@@ -1175,20 +979,7 @@ mod tests {
             kind: PrincipalKind::WorkspaceMembers,
             r#ref: "nope".into(),
         });
-        let grant = Grant {
-            id: Uuid::nil(),
-            effect: egret_perm::Effect::Allow,
-            actions: vec![egret_perm::Action::Read],
-            scope: egret_perm::Scope {
-                catalog_id: Uuid::nil(),
-                schema: None,
-                table: None,
-                column: None,
-            },
-            principals: set,
-            origin: egret_perm::GrantOrigin::Explicit,
-        };
-        let found = referenced_principals(&[grant], &[], &[]).workspaces;
+        let found = referenced_principals(&[read_grant(set)], &[], &[]).workspaces;
         assert_eq!(found.into_iter().collect::<Vec<_>>(), vec![ws]);
     }
 }

@@ -1150,7 +1150,7 @@ pub struct ExecutionDetail {
     pub source: String,
     pub runs: Vec<TaskRunRow>,
     /// The flow-level `outputs:` the execution's terminal evaluated
-    /// (migration 0211, package #6), each SECRET value stored as `******`;
+    /// (migration 0214, package #6), each SECRET value stored as `******`;
     /// `NULL` when none were (no `outputs:`, not ended, or a failed
     /// evaluation). On the detail only, never the list (fix wave 6, final
     /// review I4: up to 16 MiB). **`secret_outputs`, the sealed values beside

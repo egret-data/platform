@@ -284,7 +284,7 @@ fn open_named(sealed: &[u8], what: &str) -> Result<Map<String, Value>> {
 // ---------------------------------------------------------------------------
 // SECRET outputs (package #6, spec D9): the same cipher and the same seal
 // (`nonce || ciphertext` of one JSON object) for every SECRET output egret
-// stores (migration 0211): a flow's outputs (`executions.secret_outputs`,
+// stores (migration 0214): a flow's outputs (`executions.secret_outputs`,
 // Task B1), a `Subflow` run's copy of its child's (`task_runs.secret_outputs`,
 // Task B3) -- each ONE sealed object -- and a `Loop` run's list, which is
 // append-only frames, one sealed object per entry ([`seal_loop_entry`],

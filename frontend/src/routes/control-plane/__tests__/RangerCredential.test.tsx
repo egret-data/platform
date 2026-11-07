@@ -45,7 +45,12 @@ function externalServer(start: { current: string | null; pending: boolean }) {
     "GET /api/control-plane/engines/x1": () => ({
       body: { ...EXTERNAL_ENGINE, rangerCredentialId: row.current, rangerCredentialPending: row.pending },
     }),
-    "GET /api/control-plane/policies/services": { body: PROFILES },
+    // The Plugin config tab waits for the engine's bound profile (its mechanism picks the route).
+    "GET /api/control-plane/policies/services": {
+      body: PROFILES.map((p) =>
+        p.id === 11 ? { ...p, mechanism: "ranger", engines: [{ id: "x1", name: "legacy-trino", status: "running" }] } : p,
+      ),
+    },
     "GET /api/control-plane/catalogs": { body: [] },
     "GET /api/control-plane/engines/modelled-ranger-plugins": { body: MODELLED_PLUGINS },
     "GET /api/control-plane/engines/x1/ranger-plugin-config": {

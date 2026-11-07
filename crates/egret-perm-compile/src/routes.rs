@@ -82,21 +82,24 @@ use sqlx::{Postgres, Transaction};
 
 use crate::attribution::{attribute_policy_name, PolicyAttribution};
 use crate::explain_wire::{
-    WireDecision, WireEngineType, WireMaskDecision, WireRowFilterDecision, WireUndecidableCause,
+    ExplainOpa, WireDecision, WireEngineType, WireMaskDecision, WireMechanism,
+    WireRowFilterDecision, WireUndecidableCause,
 };
-use crate::grants::validate_grant_shape;
 use crate::principal_refs::{resolve_principal_refs, still_stored};
-use crate::rules::validate_rule_shape;
 use crate::trigger::{
     affected_services_for_grant, affected_services_for_rule, engine_type_for, lock_services_in_tx,
     merge_service_ids, recompile_services_in_tx, CompileSummary, SkippedItem, SourceKind,
 };
+use egret_perm_ir::lower::grants::validate_grant_shape;
+use egret_perm_ir::lower::rules::validate_rule_shape;
 
 mod engine_grants;
 mod error;
+mod explain_opa;
 mod people;
 mod username_reuse;
 pub use error::PermHttpError;
+use explain_opa::{opa_profile, opa_snapshot_for_explain, OpaProfileInput};
 pub use people::{
     ExplainPrincipalRequest, ExplainPrincipalResponse, PeoplePage, PeopleQuery, PersonKind,
     PersonRow, EXPLAIN_MEMBER_LIMIT,
@@ -114,6 +117,12 @@ pub struct PermState {
     /// Policy decision point; every route gates through
     /// `egret_core::authz::require`. `platform_admin` bypasses inside the PDP.
     pub pdp: Arc<dyn egret_core::authz::Pdp>,
+    /// Governance SP2b Task 16: the OPA refresher's snapshot cache, set by
+    /// `egret-bin` while `[governance.opa] enabled` is on and `None`
+    /// otherwise. `explain` answers an OPA profile from the cached snapshot
+    /// when its key is the profile's current `(policy_version, tag_version)`,
+    /// and builds one in its own read-only transaction when it is not.
+    pub opa_cache: Option<Arc<crate::opa::cache::SnapshotCache>>,
 }
 
 impl FromRef<PermState> for SessionService {
@@ -317,7 +326,6 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         crate::effect::ExistingMask,
         crate::effect::EffectKind,
         crate::effect::NotEnforced,
-        crate::effect::TrinoColumnOnly,
         crate::effect::RuleEnforcement,
         ExplainRequest,
         ExplainSubject,
@@ -669,6 +677,12 @@ pub struct ExplainAccess {
     /// [`ExplainAttribution`]. Always `None` for `Undecidable`, which has no
     /// single deciding policy.
     pub attribution: Option<ExplainAttribution>,
+    /// An OPA profile only (governance SP2b Task 16): the IR evaluator's own
+    /// words for the verdict — the deciding statement's source on an allow
+    /// (`grant …`, `rule …`), the reason on a deny (`withhold pii`), or why
+    /// the profile's snapshot could not be built. Absent on a Ranger profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ir_reason: Option<String>,
 }
 
 /// Whether the deciding mask is `MASK_NULL`, whichever policy decided it
@@ -699,6 +713,27 @@ pub struct ExplainProfile {
     /// `/service/plugins/policies/download/{service}` with.
     pub service_name: String,
     pub engine: WireEngineType,
+    /// How this profile's engines are asked, and so which evaluator answered:
+    /// `ranger` evaluates the served Ranger download with `egret-ranger-eval`,
+    /// `opa` evaluates the profile's IR snapshot with `egret-perm-eval`
+    /// (governance SP2b Task 16). An OPA profile carries no Ranger-only
+    /// fields (`mask`, `row_filter`, `tags`); its values are in `opa`.
+    pub mechanism: WireMechanism,
+    /// An OPA profile's `read` of a table or column: the rendered column mask
+    /// and the row filter. Absent on a Ranger profile, on a `write`, on a
+    /// target above the table, and when the snapshot could not be built.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opa: Option<ExplainOpa>,
+    /// The engines bound to this profile that still run the OTHER mechanism:
+    /// their recorded `applied_mechanism` differs from the profile's, because
+    /// a switch's re-apply has not reached them yet (governance SP2b Task 20F,
+    /// final review T16 M1). This explanation follows the profile's mechanism,
+    /// so those engines may answer differently until they are re-applied
+    /// (re-send the switch). Absent when every bound engine is on it. Lists
+    /// only engines a re-sent switch re-applies: never an external engine,
+    /// nor one being deleted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub engines_not_reapplied: Vec<String>,
     pub accesses: Vec<ExplainAccess>,
     /// The tag set **this profile's** verdicts could have been decided by.
     ///
@@ -771,8 +806,9 @@ pub struct ExplainProfile {
     pub mask: Option<ExplainMask>,
     /// The rows the subject sees: present for a `read` explain whose target
     /// names a table (or a column of one), on every engine. Asked against the
-    /// table with a TABLE-level tag resolution, so a classification on a column
-    /// does not reach it (E14: on Trino it filters nothing).
+    /// table with a TABLE-level tag resolution, as Trino's tag row filter is
+    /// (E14); a classification on columns only filters through the resource
+    /// row filter the compile adds on the table (KI-287).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub row_filter: Option<ExplainRowFilter>,
     /// StarRocks only, for a column read: the gated classifications that reach
@@ -783,12 +819,6 @@ pub struct ExplainProfile {
     /// masks exist (live spike, spec §14).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clearance_masks_missing: Vec<ExplainClearanceMaskGap>,
-    /// For a read naming a table, Trino only (when the download has tag
-    /// policies): the classification row filters that filter nothing here
-    /// because their classification is on columns of the table only
-    /// ([`ExplainRowFilterGap`]).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub row_filter_not_applied: Vec<ExplainRowFilterGap>,
     /// The answer in words (spec §5.1, C1): for a `read`, the column (or
     /// table) line and then the rows line, which a refused read does not get;
     /// for a `write`, one access line. Built by `explain_effect` from the
@@ -915,22 +945,10 @@ pub enum ClearanceMaskGapReason {
     NotCompiled,
 }
 
-/// A classification row-filter rule that filters nothing on a Trino profile
-/// for the target's table (spec §5.8, D3, E14): the classification is on a
-/// column of the table and not on the table, and a Trino tag row filter fires
-/// only for a table-level attachment.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
-pub struct ExplainRowFilterGap {
-    pub rule_id: Uuid,
-    pub rule_name: String,
-    /// `tags.name`.
-    pub tag_name: String,
-}
-
 /// How many exempting principals [`ExplainExemption::via`] names (D1).
 pub const EXEMPTION_VIA_SHOWN: usize = 3;
 
-/// The mask type a rule's exempt item carries (`rules::mask_items`); an empty
+/// The mask type a rule's exempt item carries (`ranger::rules::mask_items`); an empty
 /// `filterExpr` is the row-filter equivalent.
 const EXEMPT_MASK_TYPE: &str = "MASK_NONE";
 
@@ -1189,6 +1207,7 @@ impl From<SkippedItem> for SkipReport {
                 // F11: an engine grant with no grantee left, or whose
                 // impersonation target can no longer be compiled.
                 SourceKind::EngineGrant => "engine_grant".into(),
+                SourceKind::Infra => "infra".into(),
             },
             id: sk.id,
             reason: sk.reason,
@@ -1311,7 +1330,7 @@ pub(crate) async fn write_grant(
     // **A grant with nothing in `principals.include` REVOKES, silently** (SP4b-1
     // review, I-2). `NewGrant.principals` is `#[serde(default)]`, so a body that
     // omits the field deserializes to an empty `PrincipalSet` — and
-    // `compile_desired` treats an empty include as a SKIP (`trigger.rs`, "the
+    // `compile_desired` treats an empty include as a SKIP (`egret_perm_ir::lower::grants`, "the
     // grant's principals name no engine principal"), which means the recompile
     // produces nothing for the grant and the sweep REAPS the policy it had.
     // Over a PATCH that is a 200 that quietly stops enforcing a live grant, and
@@ -1335,49 +1354,31 @@ pub(crate) async fn write_grant(
         ));
     }
 
-    // The OLD affected set, and the origin the patched row keeps. Read from
-    // the stored row BEFORE anything is written — after the UPDATE the old
-    // catalog is gone and the profiles it reached are unrecoverable.
-    let (old_services, origin, stored_principals, effect_unchanged, old_scope) = match id {
+    // The stored row, read BEFORE any lock: it names the groups whose locks
+    // the patch must take (below), so it cannot wait for them. It is a
+    // prediction — a concurrent patch can commit before those locks are held —
+    // so everything the write derives from the stored row is derived again
+    // from the row re-read under the locks (#789).
+    let stale = match id {
         Some(id) => {
-            let Some(old) = get_grant_via(tx, id).await? else {
-                return Err(PermHttpError::NotFound);
-            };
-            // A `workspace_assignment` grant is the assignment path's row (D3):
-            // it is derived from `(catalog, workspace)` and recreated from the
-            // assignment on demand, so an edit here would either be reverted by
-            // the next sync or collide with `grants_one_per_assignment`. The
-            // create path refuses to MINT one for the same reason.
             // The patch's OTHER end. The body's catalog was confined at the top;
             // a grant can MOVE between catalogs, so a caller confined to one
             // workspace must also not be able to drag a *foreign* grant into its
             // own workspace — which is what confining only the body would allow.
-            confine_to_overlay_workspace(tx, p, old.scope.catalog_id).await?;
-            if !matches!(old.origin, GrantOrigin::Explicit) {
-                return Err(PermHttpError::BadRequest(
-                    "this grant is derived from a workspace assignment and is owned by the \
-                     assignment sync; change the assignment instead"
-                        .into(),
-                ));
-            }
-            // The R6 skip below holds only while the EFFECT is unchanged: a
-            // stored ref that matches nobody fails closed on an allow include
-            // and OPEN on a deny include, so flipping allow -> deny around it
-            // turns a harmless row into a fail-open one. A patch that changes
-            // the effect re-checks every principal.
-            let effect_unchanged = old.effect == body.effect;
-            (
-                affected_services_for_grant(tx, &old).await?,
-                old.origin,
-                Some(old.principals),
-                effect_unchanged,
-                Some(old.scope),
-            )
+            // A foreign grant answers 404, like a missing one (#801).
+            let old = grant_in_reach(tx, p, id).await?;
+            refuse_assignment_grant(&old)?;
+            Some(old)
         }
-        // The database mints the id on a create; `GrantOrigin::Explicit` is the
-        // only origin this surface may write — see `NewGrant`'s doc comment.
-        None => (Vec::new(), GrantOrigin::Explicit, None, false, None),
+        None => None,
     };
+    // The R6 skip below holds only while the EFFECT is unchanged: a stored ref
+    // that matches nobody fails closed on an allow include and OPEN on a deny
+    // include, so flipping allow -> deny around it turns a harmless row into a
+    // fail-open one. A patch that changes the effect re-checks every principal.
+    let effect_unchanged = stale.as_ref().is_some_and(|old| old.effect == body.effect);
+    let stored_principals = stale.map(|old| old.principals);
+    crate::write_seam::before_locks().await;
 
     // **Every ref must name someone egret knows** (J-F3) — include AND exclude,
     // on create, patch and preview alike, since all three are this function. A
@@ -1426,14 +1427,30 @@ pub(crate) async fn write_grant(
         [&principals].into_iter().chain(stored_principals.as_ref()),
     )
     .await?;
-    let old_principals = match (id, stored_principals.as_ref()) {
-        (Some(id), Some(stale)) if effect_unchanged => {
-            let Some(fresh) = get_grant_via(tx, id).await? else {
-                return Err(PermHttpError::NotFound);
-            };
-            (fresh.effect == body.effect).then(|| still_stored(stale, &fresh.principals))
+    // The OLD affected set, and the origin the patched row keeps, from the row
+    // as it stands NOW, under the group locks (#789). Read before anything is
+    // written — after the UPDATE the old catalog is gone and the profiles it
+    // reached are unrecoverable. From the stale copy instead, a patch that
+    // committed while this one waited would be missing from the set: the
+    // profiles it moved the grant to would keep a policy nothing produces, or,
+    // with the re-check after the profile locks, this write would answer a
+    // needless 409.
+    let (old_services, origin, old_principals, old_scope) = match (id, stored_principals.as_ref()) {
+        (Some(id), Some(stale)) => {
+            let fresh = grant_in_reach(tx, p, id).await?;
+            refuse_assignment_grant(&fresh)?;
+            let kept = (effect_unchanged && fresh.effect == body.effect)
+                .then(|| still_stored(stale, &fresh.principals));
+            (
+                affected_services_for_grant(tx, &fresh).await?,
+                fresh.origin,
+                kept,
+                Some(fresh.scope),
+            )
         }
-        _ => None,
+        // The database mints the id on a create; `GrantOrigin::Explicit` is the
+        // only origin this surface may write — see `NewGrant`'s doc comment.
+        _ => (Vec::new(), GrantOrigin::Explicit, None, None),
     };
     resolve_principal_refs(tx, "principals", &mut principals, old_principals.as_ref()).await?;
 
@@ -1592,6 +1609,22 @@ async fn refuse_while_held_in_tx(
     Ok(())
 }
 
+/// A `workspace_assignment` grant is the assignment path's row (D3): it is
+/// derived from `(catalog, workspace)` and recreated from the assignment on
+/// demand, so an edit here would either be reverted by the next sync or
+/// collide with `grants_one_per_assignment`. The create path refuses to MINT
+/// one for the same reason.
+fn refuse_assignment_grant(g: &Grant) -> Result<(), PermHttpError> {
+    if matches!(g.origin, GrantOrigin::Explicit) {
+        return Ok(());
+    }
+    Err(PermHttpError::BadRequest(
+        "this grant is derived from a workspace assignment and is owned by the \
+         assignment sync; change the assignment instead"
+            .into(),
+    ))
+}
+
 /// Re-read grant `id` now that every profile in `locked` is locked, and refuse
 /// if the row has moved outside that set — see the call site in [`write_grant`]
 /// for why the first read cannot take a row lock and what a stale one costs.
@@ -1658,22 +1691,18 @@ pub(crate) async fn write_rule(
         ));
     }
 
-    let (old_services, old_exempt, old_selector) = match id {
+    // The stored row, read before any lock, as in [`write_grant`] (#789): it
+    // names the groups to lock, and everything else is derived from the row
+    // re-read under those locks.
+    let old_exempt = match id {
         Some(id) => {
-            let Some(old) = get_rule_via(tx, id).await? else {
-                return Err(PermHttpError::NotFound);
-            };
             // The patch's other end — a rule can be moved between selectors, so
-            // see the twin comment in `write_grant`.
-            confine_rule_selector(tx, p, &old.selector).await?;
-            (
-                affected_services_for_rule(tx, &old).await?,
-                Some(old.exempt),
-                Some(old.selector),
-            )
+            // see the twin comment in `write_grant`. 404 when foreign (#801).
+            Some(rule_in_reach(tx, p, id).await?.exempt)
         }
-        None => (Vec::new(), None, None),
+        None => None,
     };
+    crate::write_seam::before_locks().await;
 
     // Same check, same position and same reason as [`write_grant`]'s: an
     // `exempt.include` naming nobody masks someone the author meant to exempt,
@@ -1687,14 +1716,18 @@ pub(crate) async fn write_rule(
     // the locks.
     let mut exempt = body.exempt;
     lock_named_groups(tx, [&exempt].into_iter().chain(old_exempt.as_ref())).await?;
-    let kept_exempt = match (id, old_exempt.as_ref()) {
+    // The OLD affected set from that fresh row too, for the reason
+    // `write_grant` gives at the same point (#789).
+    let (old_services, kept_exempt, old_selector) = match (id, old_exempt.as_ref()) {
         (Some(id), Some(stale)) => {
-            let Some(fresh) = get_rule_via(tx, id).await? else {
-                return Err(PermHttpError::NotFound);
-            };
-            Some(still_stored(stale, &fresh.exempt))
+            let fresh = rule_in_reach(tx, p, id).await?;
+            (
+                affected_services_for_rule(tx, &fresh).await?,
+                Some(still_stored(stale, &fresh.exempt)),
+                Some(fresh.selector),
+            )
         }
-        _ => None,
+        _ => (Vec::new(), None, None),
     };
     resolve_principal_refs(tx, "exempt", &mut exempt, kept_exempt.as_ref()).await?;
 
@@ -1983,12 +2016,9 @@ async fn delete_grant(
     let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
     // Read the grant BEFORE deleting it: the affected-service set is derived
     // from its own `scope.catalog_id`, which is gone once the row is.
-    let Some(g) = get_grant_via(&mut tx, id).await? else {
-        return Err(PermHttpError::NotFound);
-    };
-    // The delete paths build no body, so the containment runs on the stored row —
-    // see [`confine_to_overlay_workspace`].
-    confine_to_overlay_workspace(&mut tx, &p, g.scope.catalog_id).await?;
+    // The delete paths build no body, so the containment runs on the stored row,
+    // and a foreign grant answers 404 like a missing one — see [`grant_in_reach`].
+    let g = grant_in_reach(&mut tx, &p, id).await?;
     let services = affected_services_for_grant(&mut tx, &g).await?;
     refuse_while_held_in_tx(&mut tx, &[&g.scope]).await?;
     // Before the DELETE, never after — see `lock_services_in_tx`.
@@ -2159,9 +2189,9 @@ async fn rule_effect(
         .execute(&mut *tx)
         .await
         .map_err(PermHttpError::db)?;
-    let Some(r) = get_rule_via(&mut tx, id).await? else {
-        return Err(PermHttpError::NotFound);
-    };
+    // A rule outside a confined caller's workspace answers 404 like a missing
+    // one (#801) — see [`rule_in_reach`].
+    let r = rule_in_reach(&mut tx, &p, id).await?;
     let rule = NewRule {
         name: r.name,
         kind: r.kind,
@@ -2346,11 +2376,8 @@ async fn delete_rule(
     let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
     // Same reason as the grant delete: a rule's affected-service set depends
     // on its SELECTOR, which the row carries and the deletion removes.
-    let Some(r) = get_rule_via(&mut tx, id).await? else {
-        return Err(PermHttpError::NotFound);
-    };
     // Same as `delete_grant`'s.
-    confine_rule_selector(&mut tx, &p, &r.selector).await?;
+    let r = rule_in_reach(&mut tx, &p, id).await?;
     let services = affected_services_for_rule(&mut tx, &r).await?;
     if let Selector::Path(scope) = &r.selector {
         refuse_while_held_in_tx(&mut tx, &[scope]).await?;
@@ -2551,6 +2578,7 @@ async fn explain(
         std::slice::from_ref(&body.subject.user),
         body.action,
         &body.target,
+        st.opa_cache.as_deref(),
     )
     .await?;
     tx.rollback().await.map_err(PermHttpError::db)?;
@@ -2619,6 +2647,7 @@ pub(crate) async fn explain_users(
     users: &[String],
     action: Action,
     target: &Scope,
+    opa_cache: Option<&crate::opa::cache::SnapshotCache>,
 ) -> Result<Vec<ExplainResponse>, PermHttpError> {
     // ONE resolution for the whole response, not one per profile: the levels it
     // synthesises are the literal `catalog`/`schema`/`table`/`column` keys
@@ -2671,10 +2700,6 @@ pub(crate) async fn explain_users(
     // Asked of the catalog at most once, and only for a column a StarRocks
     // artifact serves no clearance mask on.
     let mut gap_reason: Option<ClearanceMaskGapReason> = None;
-    let trino_row_filter_gaps = match &table_scope {
-        Some(scope) => row_filters_not_applied(&mut *conn, scope).await?,
-        None => Vec::new(),
-    };
     let mut cache = ExplainCache::default();
     let mut per_user: Vec<Vec<ExplainProfile>> = users.iter().map(|_| Vec::new()).collect();
     for service_id in services_for_catalog_via(&mut *conn, target.catalog_id).await? {
@@ -2687,6 +2712,46 @@ pub(crate) async fn explain_users(
         let Some(engine) = engine_type_for(&svc.r#type) else {
             continue;
         };
+        // Governance SP2b Task 16: an OPA profile's engines are asked by egret
+        // itself, from the profile's IR snapshot, so that is what explains it.
+        // Before the plugin-version read below: an OPA profile runs no Ranger
+        // plugin, and its engines' images say nothing about one. The catalog
+        // lookup is the Ranger path's own, below, repeated here so that path's
+        // order (and so its refusals) stays exactly as it was.
+        let not_reapplied =
+            engines_not_reapplied_via(&mut *conn, service_id, &svc.mechanism).await?;
+        if svc.mechanism == "opa" {
+            let Some(catalog_name) = catalogs_for_service_via(&mut *conn, service_id)
+                .await?
+                .into_iter()
+                .find(|c| c.id == target.catalog_id)
+                .map(|c| c.name)
+            else {
+                continue;
+            };
+            let snapshot = opa_snapshot_for_explain(
+                &mut *conn,
+                opa_cache,
+                service_id,
+                (svc.policy_version, svc.tag_version),
+            )
+            .await?;
+            for (i, user) in users.iter().enumerate() {
+                let mut profile = opa_profile(&OpaProfileInput {
+                    snapshot: &snapshot,
+                    service_id,
+                    service_name: &svc.name,
+                    engine,
+                    catalog: &catalog_name,
+                    user,
+                    action,
+                    target,
+                });
+                profile.engines_not_reapplied = not_reapplied.clone();
+                per_user[i].push(profile);
+            }
+            continue;
+        }
         // The version this profile's plugin runs at: the bound engine's when
         // exactly one is bound (an external engine declares its own), the plugin
         // version of egret's default image for the type when none is. Several bound engines of one profile are
@@ -2899,6 +2964,7 @@ pub(crate) async fn explain_users(
                     access_type: access_type.to_string(),
                     decision: WireDecision::from(&decision),
                     attribution,
+                    ir_reason: None,
                 });
             }
 
@@ -2926,6 +2992,7 @@ pub(crate) async fn explain_users(
                         access_type: "select".to_string(),
                         decision: WireDecision::from(&decision),
                         attribution,
+                        ir_reason: None,
                     })
                 }
                 _ => None,
@@ -2979,18 +3046,15 @@ pub(crate) async fn explain_users(
                 service_id,
                 service_name: svc.name.clone(),
                 engine: WireEngineType::from(ranger_engine(engine)),
+                mechanism: WireMechanism::Ranger,
+                opa: None,
+                engines_not_reapplied: not_reapplied.clone(),
                 accesses,
                 tags: tags_for_profile(&resolved_for_display, tag_policies_in_download),
                 tag_policies_in_download,
                 mask,
                 row_filter,
                 clearance_masks_missing: clearance_masks_missing.clone(),
-                row_filter_not_applied: match engine {
-                    EngineType::Trino if tag_policies_in_download > 0 => {
-                        trino_row_filter_gaps.clone()
-                    }
-                    _ => Vec::new(),
-                },
                 masked_read_skips_access,
                 other_columns_access,
                 effect_lines: Vec::new(),
@@ -3216,12 +3280,12 @@ fn validate_explain_target(target: &Scope) -> Result<(), PermHttpError> {
 /// earlier version of this paragraph stopped at "this route", which reads as a
 /// claim about every uuid the route accepts; the whole-branch review (2026-10-10,
 /// finding L-1) showed it is false for the GRANT and RULE uuids in the PATH,
-/// which answer `404` for a uuid naming no row and `403` for one naming a row in
-/// another workspace — so a contained caller can still learn that a grant id
-/// exists somewhere. That gap is recorded as accepted debt, not covered here:
-/// closing it means returning `404` for a row that does exist but is not the
-/// caller's to see, which is a decision about every `perm` read, not about this
-/// guard.
+/// which answered `404` for a uuid naming no row and `403` for one naming a row
+/// in another workspace — so a contained caller could learn that a grant id
+/// exists somewhere. #801 closed that: every route taking a grant or rule id
+/// reads the stored row through [`grant_in_reach`] / [`rule_in_reach`], which
+/// answer `404` for both. This function still answers `403` for a body's
+/// catalog, which names no row.
 ///
 /// **An unscoped overlay (`workspace_scope == None`, a platform_admin acting as
 /// someone) is unrestricted here, exactly as it is in `WsContext`.**
@@ -3236,8 +3300,9 @@ fn validate_explain_target(target: &Scope) -> Result<(), PermHttpError> {
 /// back by forgetting a call. A patch is confined TWICE, against the stored row's
 /// catalog and against the body's, because a patch can move a grant between
 /// catalogs and either end alone leaves half the move reachable. `delete_grant`
-/// and `delete_rule` call it directly on the stored row, since they never build a
-/// body.
+/// and `delete_rule` run it on the stored row only, since they never build a
+/// body. Every stored-row check goes through [`grant_in_reach`] /
+/// [`rule_in_reach`], which turn its `403` into the `404` a missing id gets.
 ///
 /// Still **not** confined here, deliberately and named so it is not mistaken for
 /// covered:
@@ -3359,6 +3424,51 @@ pub async fn confine_rule_selector(
             Err(PermHttpError::Forbidden)
         }
         Selector::Tag { .. } => Ok(()),
+    }
+}
+
+/// The stored grant `id` as `p` may address it: `NotFound` both when no row
+/// has that id and when the row is outside a confined caller's workspace
+/// (#801). Answering `Forbidden` for the second, as the bare
+/// [`confine_to_overlay_workspace`] does, tells such a caller that the id
+/// exists somewhere else. Every route that takes a grant id in its path reads
+/// the stored row through this, never through `get_grant_via` and a separate
+/// confinement.
+///
+/// `pub` for the reason [`confine_to_overlay_workspace`] is: no session builds
+/// a confined principal that passes the `policy:*` gate, so
+/// `grant_and_rule_ids_answer_404_alike_outside_the_callers_workspace` in
+/// `tests/grant_rule_by_id.rs` tests it directly.
+pub async fn grant_in_reach(
+    conn: &mut sqlx::PgConnection,
+    p: &egret_core::Principal,
+    id: Uuid,
+) -> Result<Grant, PermHttpError> {
+    let Some(g) = get_grant_via(&mut *conn, id).await? else {
+        return Err(PermHttpError::NotFound);
+    };
+    match confine_to_overlay_workspace(conn, p, g.scope.catalog_id).await {
+        Ok(()) => Ok(g),
+        Err(PermHttpError::Forbidden) => Err(PermHttpError::NotFound),
+        Err(e) => Err(e),
+    }
+}
+
+/// [`grant_in_reach`] for a rule: `NotFound` for a missing id and for a rule
+/// whose selector a confined caller may not address (a foreign path, or any
+/// tag selector — see [`confine_rule_selector`]).
+pub async fn rule_in_reach(
+    conn: &mut sqlx::PgConnection,
+    p: &egret_core::Principal,
+    id: Uuid,
+) -> Result<Rule, PermHttpError> {
+    let Some(r) = get_rule_via(&mut *conn, id).await? else {
+        return Err(PermHttpError::NotFound);
+    };
+    match confine_rule_selector(conn, p, &r.selector).await {
+        Ok(()) => Ok(r),
+        Err(PermHttpError::Forbidden) => Err(PermHttpError::NotFound),
+        Err(e) => Err(e),
     }
 }
 
@@ -3575,6 +3685,40 @@ pub(crate) async fn served_artifact_via(
     conn: &mut sqlx::PgConnection,
     svc: &ServiceRow,
 ) -> Result<ServicePolicySet, PermHttpError> {
+    to_policy_set(&served_envelope_via(conn, svc).await?)
+}
+
+/// The envelope [`served_artifact_via`] reads, before it is parsed: the
+/// plugin download, `tagPolicies` included, with the lineage transform when
+/// the profile's first engine is eligible. The OPA differential (SP2b
+/// Task 18) hands this, as JSON, to the real Ranger engine.
+/// The engines bound to `service_id` whose recorded `applied_mechanism` is not
+/// `mechanism` (see [`ExplainProfile::engines_not_reapplied`]). Only the
+/// engines a re-sent switch re-applies are listed, by the same filter as
+/// `egret_engine_mgmt::reapply_bound_engines`: never an external engine, nor
+/// one being deleted. An engine with no record (never applied) is not listed.
+async fn engines_not_reapplied_via(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+    mechanism: &str,
+) -> Result<Vec<String>, PermHttpError> {
+    sqlx::query_scalar(
+        "SELECT name FROM engine_mgmt.engines \
+          WHERE authz_service_id = $1 AND applied_mechanism <> $2 \
+            AND origin <> 'external' AND status <> 'deleting' \
+          ORDER BY name",
+    )
+    .bind(service_id)
+    .bind(mechanism)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(PermHttpError::db)
+}
+
+pub(crate) async fn served_envelope_via(
+    conn: &mut sqlx::PgConnection,
+    svc: &ServiceRow,
+) -> Result<ServicePolicies, PermHttpError> {
     use egret_policy::lineage_transform as lt;
     let mut envelope = envelope_via(conn, svc).await?;
     // Fix round 2, N4: the download's own per-poller decision, asked for a
@@ -3594,6 +3738,23 @@ pub(crate) async fn served_artifact_via(
         {
             lt::apply_lineage_transform(&mut envelope, &catalogs);
         }
+    }
+    Ok(envelope)
+}
+
+/// [`artifact_via`] as the compiler serves the profile: on Trino, with the
+/// metadata-table denies of `crate::ranger::completion::metadata_tables` its restricting policies
+/// get once it is compiled. The migration gate's BEFORE (see
+/// `crate::ranger::completion::metadata_tables::with_denies_via`).
+pub(crate) async fn compiled_artifact_via(
+    conn: &mut sqlx::PgConnection,
+    svc: &ServiceRow,
+) -> Result<ServicePolicySet, PermHttpError> {
+    let mut envelope = envelope_via(conn, svc).await?;
+    if svc.r#type == "trino" {
+        crate::ranger::completion::metadata_tables::with_denies_via(conn, svc.id, &mut envelope)
+            .await
+            .map_err(PermHttpError::from)?;
     }
     to_policy_set(&envelope)
 }
@@ -3924,51 +4085,6 @@ async fn line_names(
         }
     }
     Ok((tied, tag_names))
-}
-
-/// The classification row-filter rules on a classification that is on a column
-/// of the target table and NOT on the table: they filter nothing on Trino,
-/// whose tag row filter fires only for a table-level attachment (D3, E14).
-const ROW_FILTER_GAPS_COLUMN_ONLY: &str = "SELECT r.id, r.name, t.name \
-       FROM perm.rules r \
-       JOIN tags t ON t.key = r.tag_key \
-      WHERE r.kind = 'row_filter' AND r.selector_kind = 'tag' \
-        AND EXISTS (SELECT 1 FROM catalog_tag_assignments a \
-                      JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id \
-                     WHERE c.id = $1 AND a.tag_id = t.id \
-                       AND lower(a.schema_name) = lower($2) \
-                       AND lower(a.table_name) = lower($3) \
-                       AND a.column_name <> '') \
-        AND NOT EXISTS (SELECT 1 FROM catalog_tag_assignments a \
-                          JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id \
-                         WHERE c.id = $1 AND a.tag_id = t.id \
-                           AND lower(a.schema_name) = lower($2) \
-                           AND lower(a.table_name) = lower($3) \
-                           AND a.column_name = '') \
-      ORDER BY r.name, r.id";
-
-/// The classification row-filter rules that filter nothing on Trino for
-/// `table`'s rows ([`ExplainRowFilterGap`], [`ROW_FILTER_GAPS_COLUMN_ONLY`]).
-/// Levels compare case-folded, as the tag resolution does.
-async fn row_filters_not_applied(
-    conn: &mut sqlx::PgConnection,
-    table: &Scope,
-) -> Result<Vec<ExplainRowFilterGap>, PermHttpError> {
-    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(ROW_FILTER_GAPS_COLUMN_ONLY)
-        .bind(table.catalog_id)
-        .bind(table.schema.as_deref())
-        .bind(table.table.as_deref())
-        .fetch_all(&mut *conn)
-        .await
-        .map_err(PermHttpError::db)?;
-    Ok(rows
-        .into_iter()
-        .map(|(rule_id, rule_name, tag_name)| ExplainRowFilterGap {
-            rule_id,
-            rule_name,
-            tag_name,
-        })
-        .collect())
 }
 
 /// The model reads explain repeats, memoised for ONE request (spec §5.9, C7).
@@ -6404,7 +6520,8 @@ mod engine_plugin_version_tests {
     }
 
     // Both engines' default images are modelled: Trino 483 runs Ranger 2.8.0
-    // (proved in engine-upgrade Task 5) and StarRocks 4.1.6 runs 2.9.0 (Task 4).
+    // (proved in engine-upgrade Task 5) and egret's patched StarRocks 4.1.7
+    // (egret-starrocks-fe:4.1.7-egret.4) runs 2.9.0, the official jars.
     // No known image is unmodelled any more, so the "refused, not guessed" cover
     // below uses an UNKNOWN image (a floating or unrecognised tag).
     #[test]
@@ -6418,7 +6535,7 @@ mod engine_plugin_version_tests {
         assert_eq!(
             super::default_image_plugin_version(EngineType::StarRocks),
             Ok(PluginVersion::Ranger2_9_0),
-            "egret's default StarRocks image is fe-ubuntu:4.1.6, which runs Ranger 2.9.0"
+            "egret's default StarRocks image is egret-starrocks-fe:4.1.7-egret.4, which runs Ranger 2.9.0"
         );
     }
 

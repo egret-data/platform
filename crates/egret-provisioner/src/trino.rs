@@ -8,6 +8,10 @@ use crate::spec::{
     EngineSpec, EngineStatus, KedaTrigger, PodStatus, RangerRollout, ResourceGroup, ResourceGroups,
     RoleConfig, SessionRule,
 };
+use egret_engine_mgmt_api::opa_config::{
+    opa_plugin_files, AccessMechanism, UnrenderableOpaValue, OPA_CONTEXT_FILE, OPA_CONTEXT_PATH,
+};
+use egret_engine_mgmt_api::ranger_config::PASSWORD_PLACEHOLDER;
 use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -381,7 +385,22 @@ pub fn trino_config_map(spec: &EngineSpec) -> Value {
         }
     }
 
-    if let Some(r) = &spec.ranger {
+    if let Some(r) = spec
+        .ranger
+        .as_ref()
+        .filter(|r| r.mechanism == AccessMechanism::Opa)
+    {
+        // The selector only; the context file (and its secret) lives in
+        // `{name}-rc-{tag}` ([`trino_ranger_secret`]), never in this ConfigMap.
+        // The placeholder stands for the secret, so it cannot leak here. A
+        // value the renderer refuses fails closed: a selector no Trino loads,
+        // never allow-all (the apply path fails on the Secret first).
+        let selector = opa_plugin_files(&r.engine_id, &r.egret_url, PASSWORD_PLACEHOLDER)
+            .ok()
+            .and_then(|f| f.get("access-control.properties").map(str::to_string))
+            .unwrap_or_else(|| "access-control.name=egret-unrenderable-opa-binding\n".to_string());
+        data.insert("access-control.properties".into(), json!(selector));
+    } else if let Some(r) = &spec.ranger {
         // The access-control selector only. The security XML carries the
         // plugin's credential, so it lives in `{name}-rc-{tag}`
         // ([`trino_ranger_secret`]), never in this ConfigMap.
@@ -478,24 +497,38 @@ const TRINO_RANGER_SECURITY_XML: &str = crate::ranger_config::TRINO_SECURITY_XML
 /// content. `None` unless the engine is bound to a profile. Mounted by
 /// `subPath` into both roles, so a change reaches a pod only when it is
 /// replaced: [`config_checksum`] hashes this Secret for exactly that reason.
-pub fn trino_ranger_secret(spec: &EngineSpec) -> Option<Value> {
-    let r = spec.ranger.as_ref()?;
-    let rendered = crate::ranger_config::ranger_plugin_files(
-        egret_engine_mgmt_api::EngineKind::Trino,
-        &r.service_name,
-        &r.egret_url,
-        r.poll_interval_ms.into(),
-        r.credential_ref(),
-    );
-    let xml = rendered
-        .get(TRINO_RANGER_SECURITY_XML)
-        .expect("the renderer emits it");
+///
+/// For an OPA profile the Secret holds the OPA context file (with the real
+/// secret) instead of the XML; a value that cannot be written into it is an
+/// error naming the field only. An OPA binding without a credential is refused
+/// by name, never rendered with an empty secret.
+pub fn trino_ranger_secret(spec: &EngineSpec) -> Result<Option<Value>, UnrenderableOpaValue> {
+    let Some(r) = spec.ranger.as_ref() else {
+        return Ok(None);
+    };
+    let (file_name, content) = if r.mechanism == AccessMechanism::Opa {
+        // Never an empty `egret.secret=`: egret would refuse every request
+        // of an engine whose context file carries none.
+        let secret = r
+            .credential
+            .as_ref()
+            .ok_or_else(UnrenderableOpaValue::missing_credential)?
+            .password();
+        let files = opa_plugin_files(&r.engine_id, &r.egret_url, secret)?;
+        let ctx = files
+            .get(OPA_CONTEXT_FILE)
+            .expect("the renderer emits it")
+            .to_string();
+        (OPA_CONTEXT_FILE, ctx)
+    } else {
+        (TRINO_RANGER_SECURITY_XML, ranger_xml(r))
+    };
     let mut secret = json!({
         "apiVersion": "v1", "kind": "Secret", "type": "Opaque",
         "metadata": { "name": crate::rollout::spec_ranger_secret_name(spec), "namespace": spec.namespace,
                       "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name,
                                   "egret/component": crate::rollout::RANGER_SECRET_COMPONENT } },
-        "stringData": { TRINO_RANGER_SECURITY_XML: xml }
+        "stringData": { file_name: content }
     });
     // Which credential this Secret now holds (its non-secret id), so a rollout
     // probe can tell a later write of an OLDER credential (`crate::rollout`).
@@ -503,7 +536,21 @@ pub fn trino_ranger_secret(spec: &EngineSpec) -> Option<Value> {
         secret["metadata"]["annotations"] =
             json!({ crate::rollout::RANGER_CREDENTIAL_ANNOTATION: id });
     }
-    Some(secret)
+    Ok(Some(secret))
+}
+
+fn ranger_xml(r: &egret_engine_mgmt_api::RangerBinding) -> String {
+    let rendered = crate::ranger_config::ranger_plugin_files(
+        egret_engine_mgmt_api::EngineKind::Trino,
+        &r.service_name,
+        &r.egret_url,
+        r.poll_interval_ms.into(),
+        r.credential_ref(),
+    );
+    rendered
+        .get(TRINO_RANGER_SECURITY_XML)
+        .expect("the renderer emits it")
+        .to_string()
 }
 
 /// Project the resolved dockerconfigjson value (populated at provision from a
@@ -536,9 +583,10 @@ fn config_checksum(spec: &EngineSpec) -> String {
     // The Ranger security XML (and so its credential): a rotation changes only
     // this Secret, and its `subPath` mount is never refreshed in a running pod.
     // `None` (unbound) hashes differently from any bound XML.
+    // A mechanism change swaps the file in it, so it rolls the coordinator too.
     trino_ranger_secret(spec)
-        .map(|s| s.to_string())
-        .unwrap_or_default()
+        .map(|s| s.map(|s| s.to_string()).unwrap_or_default())
+        .unwrap_or_else(|e| e.to_string())
         .hash(&mut h);
     format!("{:016x}", h.finish())
 }
@@ -746,8 +794,12 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
     // allow-all — see the config map builder), so ALWAYS mount it; without the
     // mount Trino falls back to its impersonation-denying default.
     volume_mounts.push(json!({ "name": "config", "mountPath": "/etc/trino/access-control.properties", "subPath": "access-control.properties" }));
-    if spec.ranger.is_some() {
-        volume_mounts.push(json!({ "name": "ranger-secret", "mountPath": "/etc/trino/ranger-trino-security.xml", "subPath": TRINO_RANGER_SECURITY_XML }));
+    if let Some(r) = &spec.ranger {
+        if r.mechanism == AccessMechanism::Opa {
+            volume_mounts.push(json!({ "name": "ranger-secret", "mountPath": OPA_CONTEXT_PATH, "subPath": OPA_CONTEXT_FILE }));
+        } else {
+            volume_mounts.push(json!({ "name": "ranger-secret", "mountPath": "/etc/trino/ranger-trino-security.xml", "subPath": TRINO_RANGER_SECURITY_XML }));
+        }
     }
     // Only the coordinator serves HTTPS, so only it mounts the keystore Secret.
     if role.is_coord() && spec.config.tls.is_some() {
@@ -1239,6 +1291,8 @@ impl TrinoProvisioner {
     async fn apply_all(&self, spec: &EngineSpec) -> anyhow::Result<()> {
         // ConfigMaps + Secret first so the Deployments mount current data; the
         // checksum annotation on the pod template rolls pods when they change.
+        // An OPA value the renderer refuses fails here, before anything is applied.
+        trino_ranger_secret(spec).map_err(|e| anyhow::anyhow!("engine {}: {e}", spec.name))?;
         self.kube.apply(&trino_config_map(spec)).await?;
         self.kube.apply(&trino_catalogs_config_map(spec)).await?;
         self.kube.apply(&trino_env_secret(spec)).await?;
@@ -1247,7 +1301,7 @@ impl TrinoProvisioner {
         }
         // Before the Deployments that mount it: a pod scheduled first would
         // fail to start (or, on an update, start with the old credential).
-        if let Some(ranger) = trino_ranger_secret(spec) {
+        if let Some(ranger) = trino_ranger_secret(spec)? {
             self.kube.apply(&ranger).await?;
         }
         // Apply the image pull Secret before the Deployments so it exists when
@@ -1504,6 +1558,8 @@ mod tests {
 
     fn bound_as(id: &str, credential: Option<(&str, &str)>) -> RangerBinding {
         RangerBinding {
+            mechanism: egret_engine_mgmt_api::opa_config::AccessMechanism::Ranger,
+            engine_id: "engine-1".into(),
             service_name: "demo2".into(),
             egret_url: "http://host.docker.internal:8080".into(),
             poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
@@ -1511,6 +1567,126 @@ mod tests {
                 crate::ranger_config::RenderableCredential::new(id, u, p).expect("renderable")
             }),
         }
+    }
+
+    fn opa_spec(password: &str) -> EngineSpec {
+        let mut spec = sample_spec();
+        let mut b = bound(Some(("engine-1", password)));
+        b.mechanism = egret_engine_mgmt_api::opa_config::AccessMechanism::Opa;
+        spec.ranger = Some(b);
+        spec
+    }
+
+    #[test]
+    fn an_opa_binding_renders_opa_access_control_and_a_context_secret() {
+        let spec = opa_spec("Pw_only-in-the-secret");
+        let cm = trino_config_map(&spec);
+        let ac = cm["data"]["access-control.properties"].as_str().unwrap();
+        assert!(ac.starts_with("access-control.name=opa\n"));
+        assert!(!ac.contains("Pw_only-in-the-secret"));
+        assert!(cm["data"].get("egret-opa-context.properties").is_none());
+        assert!(!cm.to_string().contains("Pw_only-in-the-secret"));
+        let sec = trino_ranger_secret(&spec).unwrap().unwrap();
+        let ctx = sec["stringData"]["egret-opa-context.properties"]
+            .as_str()
+            .unwrap();
+        assert!(ctx.contains("egret.secret=Pw_only-in-the-secret\n"));
+        assert!(ctx.contains("egret.engine=engine-1\n"));
+        assert!(sec["stringData"].get("ranger-trino-security.xml").is_none());
+        let dep = trino_deployment(&spec, Role::Coordinator);
+        let mounts = dep["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+            .as_array()
+            .unwrap();
+        let m = mounts
+            .iter()
+            .find(|m| m["mountPath"] == "/etc/trino/egret-opa-context.properties")
+            .expect("the context mount");
+        assert_eq!(m["name"], "ranger-secret");
+        assert_eq!(m["subPath"], "egret-opa-context.properties");
+        assert!(!mounts
+            .iter()
+            .any(|m| m["mountPath"] == "/etc/trino/ranger-trino-security.xml"));
+    }
+
+    #[test]
+    fn switching_mechanism_changes_the_pod_checksum() {
+        let mut ranger = sample_spec();
+        ranger.ranger = Some(bound(Some(("engine-1", "pw"))));
+        let mut opa = ranger.clone();
+        opa.ranger.as_mut().unwrap().mechanism =
+            egret_engine_mgmt_api::opa_config::AccessMechanism::Opa;
+        assert_ne!(config_checksum(&ranger), config_checksum(&opa));
+        let annotation = |s: &EngineSpec| {
+            trino_deployment(s, Role::Coordinator)["spec"]["template"]["metadata"]["annotations"]
+                ["egret/config-checksum"]
+                .clone()
+        };
+        assert_ne!(annotation(&ranger), annotation(&opa));
+    }
+
+    #[test]
+    fn an_unrenderable_opa_value_is_an_error_naming_only_the_field() {
+        let spec = opa_spec("bad\nsecret=x");
+        let e = trino_ranger_secret(&spec).unwrap_err();
+        assert_eq!(e.field, "secret");
+        assert!(!e.to_string().contains("bad"));
+        // The ConfigMap never fails open: its selector is not a loadable one.
+        let mut s2 = opa_spec("pw");
+        s2.ranger.as_mut().unwrap().engine_id = "e\n1".into();
+        let ac = trino_config_map(&s2)["data"]["access-control.properties"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(ac, "access-control.name=egret-unrenderable-opa-binding\n");
+    }
+
+    #[tokio::test]
+    async fn an_unrenderable_opa_value_fails_before_anything_is_applied() {
+        use crate::kube_client::FakeKube;
+        let kube = std::sync::Arc::new(FakeKube::default());
+        let p = TrinoProvisioner::new(kube.clone());
+        let spec = opa_spec("bad\nsecret=x");
+        let e = p.apply_all(&spec).await.expect_err("an unsafe secret");
+        assert!(!e.to_string().contains("bad"));
+        assert!(
+            kube.applied.lock().unwrap().is_empty(),
+            "nothing applied, not even the ConfigMap"
+        );
+    }
+
+    /// Task 14 ruling, carried to Task 15: an OPA binding with no engine
+    /// credential is a named error on the Kubernetes path, never an empty
+    /// `egret.secret=`, and nothing is applied.
+    #[tokio::test]
+    async fn an_opa_binding_without_a_credential_fails_by_name_before_anything_is_applied() {
+        use crate::kube_client::FakeKube;
+        let mut spec = opa_spec("pw");
+        spec.ranger.as_mut().unwrap().credential = None;
+        let e = trino_ranger_secret(&spec).unwrap_err();
+        assert!(e.missing);
+        assert_eq!(
+            e.to_string(),
+            egret_engine_mgmt_api::opa_config::NO_OPA_CREDENTIAL
+        );
+        let kube = std::sync::Arc::new(FakeKube::default());
+        let p = TrinoProvisioner::new(kube.clone());
+        let e = p.apply_all(&spec).await.expect_err("no credential");
+        assert_eq!(
+            e.to_string(),
+            format!(
+                "engine {}: no engine credential for the OPA context file",
+                spec.name
+            )
+        );
+        assert!(kube.applied.lock().unwrap().is_empty(), "nothing applied");
+    }
+
+    #[test]
+    fn changing_only_the_opa_secret_changes_the_pod_checksum() {
+        assert_ne!(
+            config_checksum(&opa_spec("pw-one")),
+            config_checksum(&opa_spec("pw-two"))
+        );
     }
 
     /// Unbound (no credential) the files are the pre-refactor golden: the
@@ -1527,7 +1703,9 @@ mod tests {
             None,
         );
         let cm = trino_config_map(&spec);
-        let secret = trino_ranger_secret(&spec).expect("a bound engine has the Secret");
+        let secret = trino_ranger_secret(&spec)
+            .unwrap()
+            .expect("a bound engine has the Secret");
         assert_eq!(
             cm["data"]["access-control.properties"].as_str().unwrap(),
             rendered.get("access-control.properties").unwrap()
@@ -1565,7 +1743,7 @@ mod tests {
             cm["data"].get("ranger-trino-security.xml").is_none(),
             "the security XML left the ConfigMap"
         );
-        let secret = trino_ranger_secret(&spec).unwrap();
+        let secret = trino_ranger_secret(&spec).unwrap().unwrap();
         assert_eq!(secret["kind"], "Secret");
         assert_eq!(secret["type"], "Opaque");
         assert_eq!(secret["metadata"]["name"], "demo-rc-0b5ad7".to_string());
@@ -1624,7 +1802,7 @@ mod tests {
     #[test]
     fn an_unbound_engine_has_no_ranger_secret_and_no_volume() {
         let spec = sample_spec();
-        assert!(trino_ranger_secret(&spec).is_none());
+        assert!(trino_ranger_secret(&spec).unwrap().is_none());
         let dep = trino_deployment(&spec, Role::Coordinator);
         assert!(dep["spec"]["template"]["spec"]["volumes"]
             .as_array()
@@ -1701,7 +1879,7 @@ mod tests {
         assert!(ac.contains("access-control.name=ranger"));
         assert!(ac.contains("ranger.service.name=demo2"));
         assert!(ac.contains("ranger.plugin.config.resource=/etc/trino/ranger-trino-security.xml"));
-        let secret = trino_ranger_secret(&spec).unwrap();
+        let secret = trino_ranger_secret(&spec).unwrap().unwrap();
         let xml = secret["stringData"]["ranger-trino-security.xml"]
             .as_str()
             .unwrap();
@@ -3049,7 +3227,7 @@ mod tests {
             );
             assert!(!d.to_string().contains("Pw_secret"));
         }
-        let secret = trino_ranger_secret(&spec).unwrap();
+        let secret = trino_ranger_secret(&spec).unwrap().unwrap();
         assert_eq!(secret["metadata"]["annotations"][ANN], TEST_CREDENTIAL_ID);
 
         // Bound without a credential, or unbound: no annotation anywhere.
@@ -3159,7 +3337,7 @@ mod tests {
         };
         let (a, b) = (spec_for("cred-1"), spec_for("cred-2"));
         let name = |s: &EngineSpec| {
-            trino_ranger_secret(s).unwrap()["metadata"]["name"]
+            trino_ranger_secret(s).unwrap().unwrap()["metadata"]["name"]
                 .as_str()
                 .unwrap()
                 .to_string()
@@ -3167,7 +3345,7 @@ mod tests {
         assert_eq!(name(&a), "demo-rc-cred1");
         assert_eq!(name(&b), "demo-rc-cred2");
         assert_eq!(name(&a), name(&spec_for("cred-1")), "deterministic");
-        let secret = trino_ranger_secret(&a).unwrap();
+        let secret = trino_ranger_secret(&a).unwrap().unwrap();
         assert_eq!(
             secret["metadata"]["labels"]["egret/component"],
             crate::rollout::RANGER_SECRET_COMPONENT
@@ -3217,7 +3395,7 @@ mod tests {
             let mut spec = sample_spec();
             spec.name = engine.into();
             spec.ranger = Some(bound_as(id, Some(("engine-1", "pw"))));
-            kube.apply(&trino_ranger_secret(&spec).unwrap())
+            kube.apply(&trino_ranger_secret(&spec).unwrap().unwrap())
                 .await
                 .unwrap();
         }

@@ -579,3 +579,103 @@ async fn an_expanded_grant_is_one_policy_with_one_item_however_many_members() {
     // `named_users` itself asserts there is exactly ONE item.
     assert_eq!(named_users(&body), expected);
 }
+
+/// A group that holds a workspace makes its members workspace members: the
+/// implicit grant names them, as the PDP already lets them in (the group arm).
+#[tokio::test]
+async fn a_group_holding_the_workspace_names_its_members() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+
+    let member = new_user(
+        &db,
+        &format!("{}@egret.local", unique("grpmem")),
+        Some("wsgrp-member"),
+    )
+    .await;
+    let outsider = new_user(
+        &db,
+        &format!("{}@egret.local", unique("grpout")),
+        Some("wsgrp-outsider"),
+    )
+    .await;
+    let group_id: Uuid = sqlx::query_scalar("INSERT INTO groups (name) VALUES ($1) RETURNING id")
+        .bind(unique("wsgrp"))
+        .fetch_one(&db.pool)
+        .await
+        .expect("group");
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(member)
+        .bind(group_id)
+        .execute(&db.pool)
+        .await
+        .expect("join group");
+    let res = sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         SELECT 'group', $1, r.id, 'workspace', $2 FROM roles r \
+          WHERE r.scope = 'workspace' AND r.name = 'ws_viewer'",
+    )
+    .bind(group_id)
+    .bind(f.workspace_id)
+    .execute(&db.pool)
+    .await
+    .expect("group holds the workspace");
+    assert_eq!(
+        res.rows_affected(),
+        1,
+        "the group's workspace row must exist"
+    );
+    let _ = outsider; // not in the group, so not named
+
+    let grant_id = assign_and_get_grant_id(&db, &f).await;
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+
+    let body = implicit_policy(&db, f.service_id, grant_id)
+        .await
+        .expect("the implicit grant must compile to a policy");
+    let users = named_users(&body);
+    assert_eq!(
+        users,
+        vec!["wsgrp-member".to_string()],
+        "the group's member is named through the group; the outsider is not: {users:?}"
+    );
+}
+
+/// A change of who is in a group that holds a workspace reaches the profile
+/// that enumerates the workspace's members.
+#[tokio::test]
+async fn a_group_membership_change_reaches_a_workspace_its_group_holds() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+    let group_name = unique("wsgrp-leave");
+    let group_id: Uuid = sqlx::query_scalar("INSERT INTO groups (name) VALUES ($1) RETURNING id")
+        .bind(&group_name)
+        .fetch_one(&db.pool)
+        .await
+        .expect("group");
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         SELECT 'group', $1, r.id, 'workspace', $2 FROM roles r \
+          WHERE r.scope = 'workspace' AND r.name = 'ws_viewer'",
+    )
+    .bind(group_id)
+    .bind(f.workspace_id)
+    .execute(&db.pool)
+    .await
+    .expect("group holds the workspace");
+    assign_and_get_grant_id(&db, &f).await;
+
+    let mut conn = db.pool.acquire().await.expect("acquire");
+    let services = egret_perm_compile::affected_services_for_group_membership(
+        &mut conn,
+        std::slice::from_ref(&group_name),
+    )
+    .await
+    .expect("affected services");
+    assert!(
+        services.contains(&f.service_id),
+        "a membership change of {group_name:?} must reach the profile naming its workspace: {services:?}"
+    );
+}

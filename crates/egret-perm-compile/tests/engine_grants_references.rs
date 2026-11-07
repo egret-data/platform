@@ -100,6 +100,7 @@ async fn env() -> Option<Env> {
     .expect("engine");
 
     let app = perm_router().with_state(PermState {
+        opa_cache: None,
         perm: PermStore::new(pool.clone()),
         policy: policy.clone(),
         sessions,
@@ -545,7 +546,7 @@ async fn a_target_who_becomes_platform_admin_loses_the_grant_in_the_same_commit(
 }
 
 /// A platform admin through a GROUP (an OIDC `platform-admins` group, which
-/// `platform_admin_user_ids` expands and `seed_admin_all_access` seeds) is a
+/// `platform_admin_user_ids` expands and convergence names in `egret-admin`) is a
 /// platform admin too: refused as a target, and joining such a group reaps the
 /// member's impersonation grant in the membership write's own transaction.
 #[tokio::test]

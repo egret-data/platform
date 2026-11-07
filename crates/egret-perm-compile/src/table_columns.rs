@@ -77,6 +77,14 @@ pub struct Leaving {
     columns: HashSet<(String, String, String, String)>,
 }
 
+/// The IR's ceiling question (`egret_perm_ir::lower::rules`) answered by
+/// [`Leaving::counts_toward_ceiling`].
+impl egret_perm_ir::lower::rules::CeilingCount for Leaving {
+    fn counts(&self, catalog: &str, schema: &str, table: &str, column: Option<&str>) -> bool {
+        self.counts_toward_ceiling(catalog, schema, table, column)
+    }
+}
+
 impl Leaving {
     /// Does a policy on `catalog.schema.table` (and `column`, when it names
     /// one) count toward an expansion ceiling? Not when its table or its
@@ -160,7 +168,7 @@ pub async fn leaving_via(conn: &mut sqlx::PgConnection) -> Result<Leaving, Compi
     .bind(&warehouses)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(format!("reading the catalogs of a held move: {e}")))?;
+    .map_err(|e| CompileError::from_db_in("reading the catalogs of a held move", e))?;
     for p in &pending {
         for (_, catalog) in catalogs.iter().filter(|(w, _)| *w == p.warehouse_id) {
             let t = (
@@ -298,7 +306,7 @@ async fn stored_current_schemas(
     .bind(&tables)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(format!("reading table columns from the catalog: {e}")))
+    .map_err(|e| CompileError::from_db_in("reading table columns from the catalog", e))
 }
 
 /// The STORED current top-level fields of one table, `None` when it is not an
@@ -413,7 +421,7 @@ pub async fn table_states_ns_via(
     .bind(&tables)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(format!("reading table states from the catalog: {e}")))?;
+    .map_err(|e| CompileError::from_db_in("reading table states from the catalog", e))?;
     Ok(rows
         .into_iter()
         .map(|(_, live, dropped)| {
@@ -426,6 +434,82 @@ pub async fn table_states_ns_via(
             }
         })
         .collect())
+}
+
+/// Every active table of one egret warehouse, as `(namespace, table)` in the
+/// catalog's own spelling: the enumeration a wildcard data mask is planned
+/// against, since a Ranger wildcard names no table itself. Same "active"
+/// predicate as the column reads above.
+pub async fn active_tables_via(
+    conn: &mut sqlx::PgConnection,
+    warehouse_id: Uuid,
+) -> Result<Vec<(String, String)>, CompileError> {
+    sqlx::query_as(
+        "SELECT ti.tabular_namespace_name[1], ti.name \
+           FROM catalog.warehouses w \
+           JOIN lakekeeper.tabular ti ON ti.warehouse_id::text = w.lakekeeper_warehouse_id \
+          WHERE w.id = $1 AND ti.typ = 'table' AND ti.deleted_at IS NULL \
+            AND ti.metadata_location IS NOT NULL AND cardinality(ti.tabular_namespace_name) = 1",
+    )
+    .bind(warehouse_id)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(CompileError::from_db)
+}
+
+/// Is `schema.view` an active VIEW of the catalog (`typ = 'view'`, not
+/// deleted, with a metadata location, single-level namespace)? Folds case like
+/// the column reads above. A view never becomes a table, so a caller telling
+/// the author why a name has no columns needs to tell it from an unknown name.
+pub async fn is_active_view_via(
+    conn: &mut sqlx::PgConnection,
+    warehouse_id: Uuid,
+    schema: &str,
+    view: &str,
+) -> Result<bool, CompileError> {
+    let key = TableKey {
+        warehouse_id,
+        schema: schema.to_string(),
+        table: view.to_string(),
+    };
+    Ok(active_views_batch_via(conn, std::slice::from_ref(&key))
+        .await?
+        .pop()
+        .unwrap_or(false))
+}
+
+/// [`is_active_view_via`] for many names in one query; the answer is in
+/// `keys`' order.
+pub async fn active_views_batch_via(
+    conn: &mut sqlx::PgConnection,
+    keys: &[TableKey],
+) -> Result<Vec<bool>, CompileError> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let warehouses: Vec<Uuid> = keys.iter().map(|k| k.warehouse_id).collect();
+    let schemas: Vec<String> = keys.iter().map(|k| k.schema.clone()).collect();
+    let names: Vec<String> = keys.iter().map(|k| k.table.clone()).collect();
+    let rows: Vec<(i64, bool)> = sqlx::query_as(
+        "SELECT q.ord, EXISTS (SELECT 1 FROM catalog.warehouses w \
+                  JOIN lakekeeper.tabular ti \
+                    ON ti.warehouse_id::text = w.lakekeeper_warehouse_id \
+                 WHERE w.id = q.warehouse_id AND ti.typ = 'view' AND ti.deleted_at IS NULL \
+                   AND ti.metadata_location IS NOT NULL \
+                   AND cardinality(ti.tabular_namespace_name) = 1 \
+                   AND lower(ti.tabular_namespace_name[1]) = lower(q.schema_name) \
+                   AND lower(ti.name) = lower(q.view_name)) \
+           FROM unnest($1::uuid[], $2::text[], $3::text[]) WITH ORDINALITY \
+                AS q(warehouse_id, schema_name, view_name, ord) \
+          ORDER BY q.ord",
+    )
+    .bind(&warehouses)
+    .bind(&schemas)
+    .bind(&names)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|e| CompileError::from_db_in("reading whether names are views in the catalog", e))?;
+    Ok(rows.into_iter().map(|(_, view)| view).collect())
 }
 
 /// The Lakekeeper `tabular_id` (the Iceberg table uuid, which a rename keeps)
@@ -451,7 +535,7 @@ pub async fn live_tabular_id_via(
     .bind(table)
     .fetch_optional(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(format!("reading a table id from the catalog: {e}")))
+    .map_err(|e| CompileError::from_db_in("reading a table id from the catalog", e))
 }
 
 /// Whether each of `keys` names a SOFT-DELETED tabular (any number may share
@@ -485,7 +569,7 @@ pub async fn has_dropped_tabular_via(
     .bind(&tables)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(format!("reading dropped tables from the catalog: {e}")))
+    .map_err(|e| CompileError::from_db_in("reading dropped tables from the catalog", e))
 }
 
 /// A classified column a live table does not have (rename spec R8, §5.8).
@@ -537,7 +621,7 @@ pub async fn missing_columns_via(
     .bind(&names)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(format!("reading table schemas from the catalog: {e}")))?;
+    .map_err(|e| CompileError::from_db_in("reading table schemas from the catalog", e))?;
     let mut out = Vec::new();
     for (i, (key, columns)) in tables.iter().enumerate() {
         let ord = i as i64 + 1;
@@ -599,7 +683,7 @@ pub async fn dropped_table_columns_via(
     .bind(tabular_id)
     .fetch_optional(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(format!("reading a dropped table's columns: {e}")))?;
+    .map_err(|e| CompileError::from_db_in("reading a dropped table's columns", e))?;
     Ok(row.map(|(schema, table, iceberg_schema)| TableColumns {
         schema,
         table,
@@ -617,7 +701,7 @@ async fn pending_columns(
         .bind(PENDING_COLUMNS_SETTING)
         .fetch_one(&mut *conn)
         .await
-        .map_err(|e| CompileError::Db(format!("reading the pending table columns: {e}")))?;
+        .map_err(|e| CompileError::from_db_in("reading the pending table columns", e))?;
     match raw.as_deref() {
         None | Some("") => Ok(Vec::new()),
         Some(json) => serde_json::from_str(json).map_err(|e| {
@@ -668,7 +752,7 @@ pub async fn stored_schema_fields_via(
     .bind(i32::try_from(schema_id).unwrap_or(-1))
     .fetch_optional(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(format!("reading a stored table schema: {e}")))?;
+    .map_err(|e| CompileError::from_db_in("reading a stored table schema", e))?;
     Ok(found.as_ref().map(top_level_fields))
 }
 

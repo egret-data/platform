@@ -103,8 +103,7 @@ const ANA: UserPrincipal = {
       via: { kind: "group_role", group: "analysts", role: "reader" },
       role: "reader",
       scope: { type: "workspace", id: "w1", name: "Sales" },
-      onEngines: false,
-      notOnEngines: "held_through_group",
+      onEngines: true,
     }),
   ],
   workspaces: [
@@ -112,8 +111,7 @@ const ANA: UserPrincipal = {
       via: { kind: "group_workspace", group: "analysts", id: "w1", name: "Sales" },
       role: "reader",
       scope: { type: "workspace", id: "w1", name: "Sales" },
-      onEngines: false,
-      notOnEngines: "held_through_group",
+      onEngines: true,
     }),
   ],
   standsFor: [],
@@ -143,8 +141,7 @@ const ANALYSTS: GroupPrincipal = {
       via: { kind: "role", name: "reader" },
       role: "reader",
       scope: { type: "workspace", id: "w1", name: "Sales" },
-      onEngines: false,
-      notOnEngines: "held_through_group",
+      onEngines: true,
     }),
   ],
   workspaces: [
@@ -152,8 +149,7 @@ const ANALYSTS: GroupPrincipal = {
       via: { kind: "workspace", id: "w1", name: "Sales" },
       role: "reader",
       scope: { type: "workspace", id: "w1", name: "Sales" },
-      onEngines: false,
-      notOnEngines: "held_through_group",
+      onEngines: true,
     }),
   ],
   standsFor: [],
@@ -335,12 +331,12 @@ describe("principal page: Overview", () => {
       "/governance/people/groups/analysts",
     );
     expect(within(reader).getByText("Never")).toBeInTheDocument();
-    expect(within(reader).getByText("egret only — not applied on engines: held through a group")).toBeInTheDocument();
+    expect(within(reader).getByText("Yes")).toBeInTheDocument();
 
     const ws = screen.getByRole("region", { name: "Workspaces" });
     const sales = within(ws).getByText("Sales").closest("tr")!;
     expect(within(sales).getByText("reader")).toBeInTheDocument();
-    expect(within(sales).getByText("egret only — not applied on engines: held through a group")).toBeInTheDocument();
+    expect(within(sales).getByText("Yes")).toBeInTheDocument();
     for (const region of [groups, roles, ws]) expectStackedLabels(within(region).getByRole("table"));
   });
 
@@ -365,7 +361,7 @@ describe("principal page: Overview", () => {
     expect(screen.getByText("No workspaces.")).toBeInTheDocument();
   });
 
-  it("a group's members, with the sentence for one with no username, and its roles and workspaces marked egret only", async () => {
+  it("a group's members, with the sentence for one with no username, and its roles and workspaces applied on engines", async () => {
     serve({ "groups/eu/analysts": { status: 200, body: ANALYSTS } });
     open("/governance/people/groups/eu%2Fanalysts");
     const members = await screen.findByRole("region", { name: "Members" });
@@ -377,12 +373,12 @@ describe("principal page: Overview", () => {
     const bot = within(members).getByRole("link", { name: "etl-bot" }).closest("tr")!;
     expect(within(bot).getByText("Service account")).toBeInTheDocument();
     const roles = screen.getByRole("region", { name: "Roles held" });
-    expect(within(roles).getByText("egret only — not applied on engines: held through a group")).toBeInTheDocument();
+    expect(within(roles).getByText("Yes")).toBeInTheDocument();
     const ws = screen.getByRole("region", { name: "Workspaces held" });
-    expect(within(ws).getByText("egret only — not applied on engines: held through a group")).toBeInTheDocument();
+    expect(within(ws).getByText("Yes")).toBeInTheDocument();
   });
 
-  it("a role's holders, with the sentence for one with no username, and the groups holding it marked egret only", async () => {
+  it("a role's holders, with the sentence for one with no username, and the groups holding it applied on engines", async () => {
     serve({ "roles/steward": { status: 200, body: STEWARD_ROLE } });
     open("/governance/people/roles/steward");
     const holders = await screen.findByRole("region", { name: "Holders" });
@@ -390,7 +386,7 @@ describe("principal page: Overview", () => {
     expect(within(bo).getByText("No username yet: a grant naming this role allocates one at compile")).toBeInTheDocument();
     const groups = screen.getByRole("region", { name: "Groups holding this role" });
     const analysts = within(groups).getByRole("link", { name: "analysts" }).closest("tr")!;
-    expect(within(analysts).getByText("egret only — not applied on engines")).toBeInTheDocument();
+    expect(within(analysts).getByText("Yes")).toBeInTheDocument();
     for (const region of [holders, groups]) expectStackedLabels(within(region).getByRole("table"));
   });
 

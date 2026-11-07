@@ -52,7 +52,6 @@ export type ReachGroup =
   | "workspace"
   | "public"
   | "excluded"
-  | "egret_only"
   | "not_on_engines";
 
 /** The order a page lists the groups in, the most direct first. */
@@ -63,7 +62,6 @@ export const REACH_GROUPS: readonly ReachGroup[] = [
   "workspace",
   "public",
   "excluded",
-  "egret_only",
   "not_on_engines",
 ];
 
@@ -73,6 +71,9 @@ const BY_VIA: Partial<Record<Via["kind"], ReachGroup>> = {
   role: "role",
   workspace: "workspace",
   public: "public",
+  // A role or workspace held through a group applies on engines, as a direct one does.
+  group_role: "role",
+  group_workspace: "workspace",
 };
 
 /**
@@ -80,20 +81,18 @@ const BY_VIA: Partial<Record<Via["kind"], ReachGroup>> = {
  *
  * - `excluded`: an exclude path that applies on engines. Ranger's exclude wins
  *   over any include, so the engines leave the principal out.
- * - An exclude path engines do not apply (a role held through a group, say)
- *   excludes nobody on engines, so it does not decide the group: the includes
- *   do, and the page says the exclude is egret's only.
  * - Otherwise the most direct include that applies on engines names the group.
- * - No include applies on engines: `egret_only` when one is held through a
- *   group (egret's own checks count it, the compiler does not), else
- *   `not_on_engines` (expired, or no username yet).
+ * - No include applies on engines: `not_on_engines` (expired, or no username yet).
  */
 export function reachGroup(r: Reach[]): ReachGroup {
   if (r.some((x) => x.position === "exclude" && x.onEngines)) return "excluded";
   const includes = r.filter((x) => x.position === "include");
-  const onEngines = includes.filter((x) => x.onEngines).map((x) => BY_VIA[x.via.kind] ?? "egret_only");
+  const onEngines = includes
+    .filter((x) => x.onEngines)
+    .map((x) => BY_VIA[x.via.kind])
+    .filter((g): g is ReachGroup => g !== undefined);
   for (const g of REACH_GROUPS) if (onEngines.includes(g)) return g;
-  return includes.some((x) => x.notOnEngines === "held_through_group") ? "egret_only" : "not_on_engines";
+  return "not_on_engines";
 }
 
 /**

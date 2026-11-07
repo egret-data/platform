@@ -195,17 +195,17 @@ describe("EngineCreate", () => {
     );
   });
 
-  test("StarRocks: the image placeholders are the server's pinned 4.1.6 defaults", () => {
+  test("StarRocks: the image placeholders are the server's pinned defaults (patched 4.1.7 FE)", () => {
     renderCreate("starrocks");
     expect(screen.getByLabelText("FE image")).toHaveValue("");
     expect(screen.getByLabelText("FE image")).toHaveAttribute(
       "placeholder",
-      "starrocks/fe-ubuntu:4.1.6@sha256:d07aa750be77625a09866a76dbfe0ee032baeb5e48fe0e952d30cb525329dc31",
+      "ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.4@sha256:55ec35ecf6df85320557f017e0c3c16056d82a258cf4a4e79a80a6565ac6fdc5",
     );
     expect(screen.getByLabelText("CN image")).toHaveValue("");
     expect(screen.getByLabelText("CN image")).toHaveAttribute(
       "placeholder",
-      "starrocks/cn-ubuntu:4.1.6@sha256:bf0f5ca7fd9fc4e568d4d0e593e362f229b376976b513a5a549b1b922d9ec23b",
+      "starrocks/cn-ubuntu:4.1.7@sha256:39f7320127c9924abb1f1ce0ba0583ab11989cbe5bd1bb6274ada6f89ba5740d",
     );
   });
 

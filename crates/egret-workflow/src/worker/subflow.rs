@@ -888,7 +888,7 @@ impl NoChildOutputs {
 }
 
 /// Read the child's flow outputs from its row (`workflow.executions.outputs`
-/// and `secret_outputs`, migration 0211; Task B1 writes them).
+/// and `secret_outputs`, migration 0214; Task B1 writes them).
 ///
 /// **`{}` for a child that declares no `outputs:`**, the shape this run
 /// carried before package #6 (`{{ outputs.sub.outputs }}` renders and

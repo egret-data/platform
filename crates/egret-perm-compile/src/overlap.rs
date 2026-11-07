@@ -253,7 +253,7 @@ pub async fn refuse_created_by_compile_via(
     tag_service: Option<i64>,
     desired: &[CompiledForOverlap<'_>],
 ) -> Result<(), CompileError> {
-    let db = |e: egret_policy::PolicyStoreError| CompileError::Db(e.to_string());
+    let db = crate::db_error::from_store;
     let mut units: BTreeSet<UnitIds> = BTreeSet::from([UnitIds {
         resource: Some(profile_id),
         tag_service,
@@ -350,12 +350,12 @@ pub async fn unit_snapshot_via(
 ) -> Result<UnitSnapshot, CompileError> {
     let units = units_for_services_via(conn, profile_ids)
         .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
+        .map_err(crate::db_error::from_store)?;
     let mut before = Vec::new();
     for &ids in &units {
         let unit = load_unit_via(conn, ids)
             .await
-            .map_err(|e| CompileError::Db(e.to_string()))?;
+            .map_err(crate::db_error::from_store)?;
         before.extend(unit.overlaps());
     }
     Ok(UnitSnapshot { units, before })
@@ -371,7 +371,7 @@ async fn rules_for_names_via(
     let names: Vec<&str> = names.iter().copied().collect();
     Ok(egret_policy::compiled_rule_names_via(conn, &names)
         .await
-        .map_err(|e| CompileError::Db(e.to_string()))?
+        .map_err(crate::db_error::from_store)?
         .into_iter()
         .map(|(policy, (id, name))| (policy, OverlapRule { id: Some(id), name }))
         .collect())
@@ -392,7 +392,7 @@ pub async fn refuse_created_overlaps_via(
     for &ids in &snapshot.units {
         let unit = load_unit_via(conn, ids)
             .await
-            .map_err(|e| CompileError::Db(e.to_string()))?;
+            .map_err(crate::db_error::from_store)?;
         let Some(o) = egret_policy::created_overlaps(&snapshot.before, unit.overlaps())
             .into_iter()
             .next()
@@ -404,7 +404,7 @@ pub async fn refuse_created_overlaps_via(
         let profile_id = ids.resource.or(ids.tag_service).unwrap_or_default();
         let profile = get_service_by_id_via(conn, profile_id)
             .await
-            .map_err(|e| CompileError::Db(e.to_string()))?
+            .map_err(crate::db_error::from_store)?
             .name;
         return Err(into_compile_error(&profile, named(o, &rules)));
     }
@@ -465,6 +465,55 @@ fn how_to_fix(o: &UnitOverlap, hand_written: bool) -> String {
     )
 }
 
+/// The pairs of [`stored_overlaps_via`] that profile `service_id`'s download
+/// serves. Governance SP2b: the one predicate behind both the OPA snapshot
+/// refresher's re-check on every build (`opa::cache`) and the switch to OPA
+/// (`egret_policy::opa_switch_check`, through [`crate::PermRecompiler`]), so a
+/// profile the switch accepts is never refused by the refresher for a stored
+/// pair, nor the reverse.
+///
+/// Task 22F: it reads only the units of `service_id` and of the service its
+/// `tagService` names, not every service's. That is the same set of pairs.
+/// A pair's `service_id` is its unit's `resource`, else its `tag_service`
+/// (below), and `egret_policy::units_for_service_via(sid)` yields:
+/// - a unit whose resource is `service_id` only for `sid == service_id` (its
+///   own unit) or for `sid` the service `service_id`'s `tagService` names (a
+///   tag service's unit for each profile naming it);
+/// - a unit with no resource and tag service `service_id` only for
+///   `sid == service_id`.
+///
+/// So every unit the filter keeps comes from those services, and the filter
+/// then keeps exactly the pairs the scan of every service kept, in the same
+/// order (the units are ordered, and the final sort is stable).
+///
+/// **The read-error blast radius is narrower.** Before Task 22F, a unit of
+/// ANY service that failed to load failed this call, so one unreadable
+/// profile left every OPA profile's build `Unread`. Now only a failure in the
+/// units read here (this profile's, and its tag service's) fails it; a broken
+/// unit elsewhere affects only the profiles that read it.
+pub async fn stored_overlaps_of_via(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<Vec<StoredOverlap>, CompileError> {
+    let ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT s.id FROM policy.authz_services s \
+          WHERE s.id = $1 \
+             OR s.name = (SELECT p.config_jsonb ->> $2 FROM policy.authz_services p \
+                           WHERE p.id = $1) \
+          ORDER BY s.id",
+    )
+    .bind(service_id)
+    .bind(egret_policy_api::TAG_SERVICE_CONFIG_KEY)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(CompileError::from_db)?;
+    Ok(stored_overlaps_of_services_via(conn, &ids)
+        .await?
+        .into_iter()
+        .filter(|o| o.service_id == service_id)
+        .collect())
+}
+
 /// **Every pair stored in every profile's download**, read through
 /// `egret_policy::unit_overlaps` over the stored units (compiled AND
 /// hand-written, enabled, as each download holds them): each profile with its
@@ -478,12 +527,24 @@ fn how_to_fix(o: &UnitOverlap, hand_written: bool) -> String {
 pub async fn stored_overlaps_via(
     conn: &mut sqlx::PgConnection,
 ) -> Result<Vec<StoredOverlap>, CompileError> {
-    let db = |e: egret_policy::PolicyStoreError| CompileError::Db(e.to_string());
     let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM policy.authz_services ORDER BY id")
         .fetch_all(&mut *conn)
         .await
-        .map_err(|e| CompileError::Db(e.to_string()))?;
-    let units: Vec<UnitIds> = units_for_services_via(conn, &ids).await.map_err(db)?;
+        .map_err(CompileError::from_db)?;
+    stored_overlaps_of_services_via(conn, &ids).await
+}
+
+/// The pairs stored in every unit touching any of `service_ids`
+/// (`egret_policy::units_for_services_via`), as [`stored_overlaps_via`]
+/// reports them.
+async fn stored_overlaps_of_services_via(
+    conn: &mut sqlx::PgConnection,
+    service_ids: &[i64],
+) -> Result<Vec<StoredOverlap>, CompileError> {
+    let db = crate::db_error::from_store;
+    let units: Vec<UnitIds> = units_for_services_via(conn, service_ids)
+        .await
+        .map_err(db)?;
     let mut out = Vec::new();
     for ids in units {
         let unit = load_unit_via(conn, ids).await.map_err(db)?;

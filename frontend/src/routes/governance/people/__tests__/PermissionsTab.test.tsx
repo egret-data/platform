@@ -112,7 +112,7 @@ const STANDS_FOR: StandsFor[] = [
   { kind: "user", ref: "ana", via: { kind: "itself" }, onEngines: true },
   { kind: "group", ref: "analysts", via: { kind: "group", name: "analysts" }, onEngines: true },
   { kind: "role", ref: "steward", via: { kind: "role", name: "steward" }, onEngines: true },
-  { kind: "role", ref: "reader", via: { kind: "group_role", group: "analysts", role: "reader" }, onEngines: false, notOnEngines: "held_through_group" },
+  { kind: "role", ref: "reader", via: { kind: "group_role", group: "analysts", role: "reader" }, onEngines: true },
   { kind: "workspace_members", ref: WS, via: { kind: "workspace", id: WS, name: "Sales" }, onEngines: true },
   { kind: "group", ref: "public", via: { kind: "public" }, onEngines: true },
 ];
@@ -176,14 +176,16 @@ describe("a principal's Permissions tab", () => {
       "Through a workspace",
       "Everyone",
       "Excluded",
-      "Not applied anywhere",
       "Engine permissions",
     ]);
     expect(rowsOf("Directly")).toEqual([["user ana can read and write ice.sales.*", "Directly · applied on engines", "Allow"]]);
     expect(rowsOf("Through a group")).toEqual([
       ["group analysts cannot read ice.sales.salaries", "Through group analysts · applied on engines", "Deny"],
     ]);
-    expect(rowsOf("Through a role")).toEqual([["role steward can write ice.sales.*", "Through role steward · applied on engines", "Allow"]]);
+    expect(rowsOf("Through a role")).toEqual([
+      ["role reader can read ice.sales.*", "Through role reader, held by group analysts · applied on engines", "Allow"],
+      ["role steward can write ice.sales.*", "Through role steward · applied on engines", "Allow"],
+    ]);
     expect(rowsOf("Through a workspace")).toEqual([
       [
         `members of workspace Sales can read ice.sales.*Set by workspace assignment · Sales`,
@@ -199,19 +201,6 @@ describe("a principal's Permissions tab", () => {
         "Allow",
       ],
     ]);
-    expect(rowsOf("Not applied anywhere")).toEqual([
-      [
-        "role reader can read ice.sales.*",
-        "Through role reader, held by group analysts · not applied anywhere: held through a group",
-        "Allow",
-      ],
-    ]);
-    // Final review I1: egret's own checks never read grants, so a group-held role reaches nowhere.
-    expect(
-      within(within(tab()).getByRole("region", { name: "Not applied anywhere" })).getByText(
-        "These reach this principal only through a role or workspace a group holds, which engines do not apply. egret's own checks do not read grants either, so a grant that reaches only this way applies to this principal nowhere.",
-      ),
-    ).toBeInTheDocument();
     // A grant naming someone else, or the username in another case, is not listed.
     expect(tab().textContent).not.toMatch(/bob|user Ana /);
   });
@@ -221,17 +210,22 @@ describe("a principal's Permissions tab", () => {
       effect: "deny",
       principals: { include: [{ kind: "group", ref: "analysts" }], exclude: [{ kind: "role", ref: "reader" }] },
     });
-    // An exclude engines do not apply, with no include, concerns nobody: not listed.
+    // An exclude that engines apply reaches the principal even with no include of theirs: listed.
     const NOTHING = grant("g-nothing", { principals: { include: [{ kind: "user", ref: "bob" }], exclude: [{ kind: "role", ref: "reader" }] } });
     serve({ "users/u-ana": ok(ANA) }, ok([DENY, NOTHING]));
     open("/governance/people/users/u-ana?tab=permissions");
-    await within(await screen.findByRole("tabpanel")).findByRole("table", { name: "Through a group" });
-    expect(within(tab()).getAllByRole("heading", { level: 2 }).map((h) => h.textContent).filter(notHandWritten)).toEqual(["Through a group", "Engine permissions"]);
-    expect(rowsOf("Through a group")).toEqual([
+    await within(await screen.findByRole("tabpanel")).findByRole("table", { name: "Excluded" });
+    expect(within(tab()).getAllByRole("heading", { level: 2 }).map((h) => h.textContent).filter(notHandWritten)).toEqual(["Excluded", "Engine permissions"]);
+    expect(rowsOf("Excluded")).toEqual([
       [
         "group analysts cannot read ice.sales.* except role reader",
-        "Through group analysts · applied on enginesExcludes nobody: through role reader, held by group analysts — engines do not apply it, and egret's own checks do not read grants",
+        "Through group analysts · applied on enginesExcluded: through role reader, held by group analysts · applied on engines",
         "Deny",
+      ],
+      [
+        "user bob can read ice.sales.* except role reader",
+        "Excluded: through role reader, held by group analysts · applied on engines",
+        "Allow",
       ],
     ]);
   });
@@ -242,7 +236,8 @@ describe("a principal's Permissions tab", () => {
       username: null,
       standsFor: [
         { kind: "group", ref: "analysts", via: { kind: "group", name: "analysts" }, onEngines: false, notOnEngines: "no_username" },
-        { kind: "role", ref: "reader", via: { kind: "group_role", group: "analysts", role: "reader" }, onEngines: false, notOnEngines: "held_through_group" },
+        // Engines need the username, so a role held through a group is not applied either.
+        { kind: "role", ref: "reader", via: { kind: "group_role", group: "analysts", role: "reader" }, onEngines: false, notOnEngines: "no_username" },
       ],
     };
     serve({ "users/u-ana": ok(NO_NAME) }, ok(GRANTS));
@@ -252,13 +247,13 @@ describe("a principal's Permissions tab", () => {
       await within(panel).findByText("No engine knows this user until they have a username; nothing below applies on engines."),
     ).toBeInTheDocument();
     expect(within(panel).getAllByRole("heading", { level: 2 }).map((h) => h.textContent).filter(notHandWritten)).toEqual([
-      "Not applied anywhere",
       "Not applied on engines",
       "Engine permissions",
     ]);
     expect(rowsOf("Not applied on engines")).toEqual([
       ["group analysts can read ice.hr.* except user ana", "Through group analysts · No: no username yet", "Allow"],
       ["group analysts cannot read ice.sales.salaries", "Through group analysts · No: no username yet", "Deny"],
+      ["role reader can read ice.sales.*", "Through role reader, held by group analysts · No: no username yet", "Allow"],
     ]);
   });
 
@@ -324,7 +319,7 @@ describe("a principal's Permissions tab", () => {
     expect(await within(tab()).findByText("No grant matches these filters.")).toBeInTheDocument();
     expect(where()).toBe("/governance/people/users/u-ana?tab=permissions&action=write&effect=deny");
     await userEvent.click(within(tab()).getByRole("button", { name: "Clear filters" }));
-    expect(await within(tab()).findByRole("table", { name: "Not applied anywhere" })).toBeInTheDocument();
+    expect(await within(tab()).findByRole("table", { name: "Through a role" })).toBeInTheDocument();
     expect(where()).toBe("/governance/people/users/u-ana?tab=permissions");
   });
 

@@ -32,6 +32,28 @@ where
     }
 }
 
+/// [`Auth`] for a route only a platform admin may call: anyone else is refused
+/// with 403 before the handler runs. "Platform admin" is
+/// [`Principal::is_platform_admin`], which counts the role held directly or
+/// through a group (#802).
+pub struct PlatformAuth(pub Principal);
+
+impl<S> FromRequestParts<S> for PlatformAuth
+where
+    SessionService: axum::extract::FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = AuthError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let Auth(principal) = Auth::from_request_parts(parts, state).await?;
+        if !principal.is_platform_admin() {
+            return Err(AuthError(Error::Forbidden));
+        }
+        Ok(PlatformAuth(principal))
+    }
+}
+
 /// Newtype to satisfy orphan rules for `IntoResponse`.
 pub struct AuthError(pub Error);
 

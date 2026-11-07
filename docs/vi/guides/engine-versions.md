@@ -8,17 +8,40 @@ Control plane hiện kết quả cho mọi engine: image nó chạy, phiên bả
 
 ## egret pin gì
 
-Ba image dưới đây là những image egret đã đo: jar plugin được đọc ra từ chính mỗi image. Mặc định cho engine mới được pin theo digest.
+Bốn image dưới đây là những image egret đã đo: jar plugin được đọc ra từ chính mỗi image. Mặc định cho engine mới được pin theo digest.
 
 | Engine | Image | Digest | Ranger plugin |
 |---|---|---|---|
 | Trino | `trinodb/trino:483` | `sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534` | 2.8.0 |
 | StarRocks | `starrocks/fe-ubuntu:4.1.4` | `sha256:0b9099483e52ee66f9ee0244799bd32f3ccb491492857c59ada622ceb15b914b` | 2.8.0 |
 | StarRocks | `starrocks/fe-ubuntu:4.1.6` | `sha256:d07aa750be77625a09866a76dbfe0ee032baeb5e48fe0e952d30cb525329dc31` | 2.9.0 |
+| StarRocks | `ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.1` (bản 4.1.7 egret đã vá, patch 0001-0002; đã thay) | `sha256:da948dad19e98a5a43b0073ec48f87c9e7429246ce4581a000c0955c742af250` | 2.9.0 |
+| StarRocks | `ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.3` (bản 4.1.7 egret đã vá, patch 0001-0007; đã thay) | `sha256:5c74c820f9b741bc8054247f47f3d54dd9e526710b6fc2b5a7873cae6bb2d2b0` | 2.9.0 |
+| StarRocks | `ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.4` (bản 4.1.7 egret đã vá, patch 0001-0009; mặc định) | `sha256:55ec35ecf6df85320557f017e0c3c16056d82a258cf4a4e79a80a6565ac6fdc5` | 2.9.0 |
 
-Engine mới mặc định là Trino 483 và StarRocks 4.1.6 (FE và CN, mỗi cái pin theo digest). Các cặp (loại, phiên bản plugin) được mô hình hoá là Trino 2.8.0, StarRocks 2.8.0 và StarRocks 2.9.0. `GET /api/control-plane/engines/modelled-ranger-plugins` liệt kê chúng, và form đăng ký engine external chỉ đưa ra các cặp của loại đã chọn, cùng "Other…".
+Engine mới mặc định là Trino 483 và StarRocks 4.1.7: FE là image egret đã vá, CN là image chính thức `starrocks/cn-ubuntu:4.1.7` (mỗi cái pin theo digest). Xem [Image StarRocks egret đã vá](#image-starrocks-egret-đã-vá). Các cặp (loại, phiên bản plugin) được mô hình hoá là Trino 2.8.0, StarRocks 2.8.0 và StarRocks 2.9.0. `GET /api/control-plane/engines/modelled-ranger-plugins` liệt kê chúng, và form đăng ký engine external chỉ đưa ra các cặp của loại đã chọn, cùng "Other…".
 
 Tag có digest chỉ khớp nếu digest là digest đã đo. Tag không có digest khớp với tag đã đo.
+
+
+## Image StarRocks egret đã vá
+
+Image StarRocks chính thức có những lỗ mà không policy nào egret biên dịch đóng được. Mỗi lỗ đã được đo trên 4.1.7 với một user bị Ranger áp mask cột và row filter, và một user không có quyền nào:
+
+- **Bảng metadata của Iceberg không được kiểm tra.** StarRocks trả `t$files`, `t$partitions`, `t$manifests`, `t$snapshots`, `t$history`, `t$refs`, `t$metadata_log_entries` và các bảng metadata khác của một bảng Iceberg mà không hỏi Ranger. Ai đăng nhập được cũng đọc được, với mọi bảng, số dòng, giá trị partition, đường dẫn file dữ liệu và giá trị nhỏ nhất, lớn nhất của từng cột, bất kể grant, mask, row filter và classification nói gì.
+- **Prepared statement bỏ qua mask và row filter.** Câu lệnh chạy qua `PREPARE`/`EXECUTE` hoặc giao thức nhị phân MySQL (`COM_STMT_PREPARE`/`COM_STMT_EXECUTE`) không bị áp mask hay row filter. Connector StarRocks của egret chạy endpoint Data API có tham số theo cách này, nên trên image chính thức endpoint đó trả mọi dòng và cột ở dạng rõ (upstream issue [#78176](https://github.com/StarRocks/starrocks/issues/78176)). `PIVOT` cũng bỏ qua như vậy.
+- **HTTP SQL API và Arrow Flight SQL bỏ qua mask và row filter.** Câu truy vấn gửi tới cổng HTTP của FE (`/api/v1/catalogs/<catalog>/databases/<db>/sql`, cổng 8030, mà Ingress của StarRocks đưa ra ngoài) hoặc tới Arrow Flight SQL trả mọi dòng và cột ở dạng rõ (upstream [#78175](https://github.com/StarRocks/starrocks/issues/78175)).
+- **`FILES()` không có quyền riêng.** User nào cũng đọc và ghi object storage qua nó, vượt mọi grant, mask và row filter, và với `aws.s3.use_instance_profile` thì dùng chính danh tính cloud của BE (upstream [#80233](https://github.com/StarRocks/starrocks/issues/80233)).
+- **Materialized view lưu dữ liệu vượt policy của người tạo.** Lần refresh đọc bảng gốc không áp mask và row filter của người tạo, nên một user bị mask và lọc dòng mà được tạo MV sẽ đọc được cả bảng qua nó.
+- **`EXPLAIN COSTS` lộ thống kê của các dòng bị ẩn.** Nó in giá trị nhỏ nhất, lớn nhất và số giá trị khác nhau của từng cột trên cả bảng, nên user bị row filter biết được khoảng giá trị của những dòng bị lọc.
+- **Load và export chạy bằng danh tính của cluster.** `BROKER LOAD`, `EXPORT`, `SELECT ... INTO OUTFILE` và bảng `ENGINE = file` không mang key riêng sẽ rơi về danh tính của node (instance profile, credential chain mặc định của AWS, managed identity). User nào, kể cả không có quyền gì, cũng ghi được kết quả truy vấn vào mọi bucket mà danh tính đó với tới.
+- **`SELECT *` dưới mask hoặc row filter trả thêm `_file` và `_pos`** trên bảng Iceberg (KI-337), và **`SHOW CREATE CATALOG` không cần quyền**: user nào cũng đọc được endpoint của mọi catalog và đầu, cuối key của nó.
+
+`ghcr.io/egret-data/egret-starrocks-fe` đóng tất cả các lỗ này từ `4.1.7-egret.4` (`4.1.7-egret.3` còn để ngỏ `EXPLAIN COSTS` và load bằng danh tính cluster, `4.1.7-egret.1` chỉ đóng hai lỗ đầu). Nó là image `starrocks/fe-ubuntu` chính thức cùng bản, với hai jar FE build lại từ tag của bản đó cộng các patch của egret; ngoài ra không khác gì, và nó mang jar plugin Ranger chính thức. Trên image này, `FILES()` cần quyền OPERATE trên SYSTEM, và `BROKER LOAD`, `EXPORT`, `SELECT ... INTO OUTFILE`, bảng `ENGINE = file` cũng vậy trừ khi chúng mang key riêng cho một object store (lỗi 5214). Tạo materialized view trên một bảng mà người tạo đang bị mask hoặc row filter sẽ bị từ chối, `EXPLAIN COSTS` trên bảng như vậy cũng thế (lỗi 5213; các mức `EXPLAIN` khác vẫn chạy). Image còn mang plugin AuditLoader của StarRocks, chưa dùng cho tới khi egret cài nó. Mã nguồn, các patch, những giới hạn nó không thay đổi và bài test end-to-end bảo mật mà mọi image phải qua trước khi publish nằm ở [github.com/egret-data/egret-starrocks](https://github.com/egret-data/egret-starrocks). Compute node dùng image `starrocks/cn-ubuntu` chính thức cùng bản: không patch nào chạm tới chúng.
+
+Trang engine hiện cảnh báo về các lỗ này cho một engine StarRocks đã gắn profile, trừ khi image FE của nó là `egret-starrocks-fe` `4.1.7-egret.4` trở lên, nên engine đang ở `4.1.7-egret.3` sẽ hiện lại cảnh báo. Engine external luôn hiện cảnh báo, vì egret không biết nó chạy image nào.
+
+Để chuyển một engine StarRocks đang có sang image đã vá, cập nhật nó như trong [Cách pin](#cách-pin) với `feImage` `ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.4@sha256:55ec35ecf6df85320557f017e0c3c16056d82a258cf4a4e79a80a6565ac6fdc5` và `cnImage` `starrocks/cn-ubuntu:4.1.7@sha256:39f7320127c9924abb1f1ce0ba0583ab11989cbe5bd1bb6274ada6f89ba5740d`. Từ 4.1.4 hoặc 4.1.6 đây là nâng cấp (lên 4.1.7), không bao giờ là hạ cấp; engine đang ở `4.1.7-egret.1` hoặc `4.1.7-egret.3` chuyển theo cách y hệt.
 
 ## Ranger plugin 2.8.0 là mức sàn (bỏ Trino 470)
 

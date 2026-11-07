@@ -50,6 +50,34 @@ pub fn catalog_grant_covers_by(
     }
 }
 
+/// May a role holding this grant see namespace `ns` named in a listing
+/// (KI-312)? A `catalog` grant sees every namespace. A `namespace` grant sees
+/// its own namespace, the namespaces above it (to reach it) and those under it.
+/// A `table` grant sees its table's namespace and the namespaces above it.
+/// Any privilege sees. `eq` as for [`catalog_grant_covers_by`].
+pub fn grant_sees_namespace(
+    g: &CatalogGrant,
+    ns: &[String],
+    eq: &dyn Fn(&str, &str) -> bool,
+) -> bool {
+    let Some(granted) = g.namespace.as_deref() else {
+        return g.securable_type == "catalog";
+    };
+    let common = granted.len().min(ns.len());
+    let related = granted[..common]
+        .iter()
+        .zip(&ns[..common])
+        .all(|(a, b)| eq(a, b));
+    match g.securable_type.as_str() {
+        "catalog" => true,
+        // On, above or under the granted namespace.
+        "namespace" => related,
+        // The table's namespace or above it.
+        "table" => related && ns.len() <= granted.len(),
+        _ => false,
+    }
+}
+
 /// Name equality as lakekeeper's collation has it, for the names in one
 /// decision: byte-equal names are equal, and every other (grant name,
 /// requested name) pair is asked of Postgres once
@@ -93,5 +121,55 @@ impl CatalogNameEq {
             || self
                 .0
                 .contains(&(granted.to_string(), requested.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn grant(securable: &str, ns: Option<&[&str]>, table: Option<&str>) -> CatalogGrant {
+        CatalogGrant {
+            id: uuid::Uuid::nil(),
+            catalog_role_id: uuid::Uuid::nil(),
+            securable_type: securable.into(),
+            namespace: ns.map(|n| n.iter().map(|s| s.to_string()).collect()),
+            table_name: table.map(str::to_string),
+            privilege: "read".into(),
+        }
+    }
+
+    fn sees(g: &CatalogGrant, ns: &[&str]) -> bool {
+        let ns: Vec<String> = ns.iter().map(|s| s.to_string()).collect();
+        grant_sees_namespace(g, &ns, &|a, b| a == b)
+    }
+
+    #[test]
+    fn a_namespace_grant_sees_its_line_and_nothing_beside_it() {
+        let g = grant("namespace", Some(&["corp", "fin"]), None);
+        assert!(sees(&g, &["corp"]), "above");
+        assert!(sees(&g, &["corp", "fin"]), "on");
+        assert!(sees(&g, &["corp", "fin", "q1"]), "under");
+        assert!(!sees(&g, &["corp", "hr"]), "a sibling");
+        assert!(!sees(&g, &["sales"]), "another top level");
+        assert!(!sees(&g, &["fin"]), "the same name at another level");
+    }
+
+    #[test]
+    fn a_table_grant_sees_only_the_way_to_its_table() {
+        let g = grant("table", Some(&["corp", "fin"]), Some("ledger"));
+        assert!(sees(&g, &["corp"]));
+        assert!(sees(&g, &["corp", "fin"]));
+        assert!(
+            !sees(&g, &["corp", "fin", "q1"]),
+            "under the table's namespace"
+        );
+        assert!(!sees(&g, &["corp", "hr"]));
+    }
+
+    #[test]
+    fn a_catalog_grant_sees_everything() {
+        let g = grant("catalog", None, None);
+        assert!(sees(&g, &["anything", "at", "all"]));
     }
 }

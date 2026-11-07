@@ -1,17 +1,20 @@
 //! Compile an engine grant (F11, spec §4) into the one Ranger access policy
 //! it stands for, `perm-engine-{id}`, in its engine's profile.
 //!
-//! [`compile_engine_grant`] is pure, like `compile_grant`: the catalogue entry
-//! gives the resource keys and the access type, the grant gives the values and
-//! the (already expanded) grantees. The impersonation target is the one value
-//! a grant does not carry as text: it is stored by user id (spec E21, amended)
-//! and [`impersonation_target_ok`] renders the user's CURRENT username from it,
+//! A recompile checks each engine grant here ([`check_engine_grant`], read by
+//! `crate::ir_load::load_engine_privilege_checks`), lowers it in
+//! `egret_perm_ir::lower::engine_privileges` and renders it in
+//! `crate::ranger::engine_privileges` (governance sub-project 1, Task 9).
+//! [`compile_engine_grant`] is that path for one grant, pure like
+//! `compile_grant`: the catalogue entry gives the resource keys and the
+//! access type, the grant gives the values and the (already expanded)
+//! grantees. The impersonation target is the one value a grant does not carry
+//! as text: it is stored by user id (spec E21, amended) and
+//! [`impersonation_target_ok`] renders the user's CURRENT username from it,
 //! or says why the grant must be skipped this time (spec E11).
 
-use std::collections::BTreeMap;
-
-use egret_perm::{CompileError, Effect, EngineGrant, EngineType};
-use egret_policy::admin::{AccessPolicyInput, ResourceLevel};
+use egret_perm::{CompileError, EngineGrant, EngineType};
+use egret_policy::admin::AccessPolicyInput;
 use egret_policy::COMPILER_ENGINE_GRANT_PREFIX;
 use uuid::Uuid;
 
@@ -46,20 +49,35 @@ pub(crate) fn is_reserved_target(username: &str) -> bool {
         || username.eq_ignore_ascii_case(ROOT_TARGET)
 }
 
-/// Compile `g` for `profile` on `engine`. `target` is the impersonation
-/// target's current username ([`impersonation_target_ok`]); it is required for
-/// an impersonation capability and refused for any other.
+/// Check `g` against the catalogue for `engine`: the loader-side verdict
+/// (`crate::ir_load::load_engine_privilege_checks`). `target` is the
+/// impersonation target's current username ([`impersonation_target_ok`]); it
+/// is required for an impersonation capability and refused for any other.
+/// Returns the values in the catalogue's key order with the target in its
+/// slot, as [`check_values`] normalised them.
 ///
-/// Refuses (`InvalidEngineGrant`) an unknown capability, one of another engine,
-/// a value that breaks the catalogue's rules, a reserved target, and an
-/// exclude; a grantee `User` ref fails as it does for a grant
-/// (`UnusableUserRef`, `ReservedEnginePrincipal`).
-pub fn compile_engine_grant(
+/// Refuses (`InvalidEngineGrant`), in this order: an unknown capability, one
+/// of another engine, an exclude, a missing or extra value or target, a value
+/// that breaks the catalogue's rules, and a reserved target. The grantees are
+/// the lowering's to check
+/// (`egret_perm_ir::lower::engine_privileges::engine_privilege_statement`).
+pub(crate) fn check_engine_grant(
     g: &EngineGrant,
     target: Option<&str>,
-    profile: &str,
     engine: EngineType,
-) -> Result<AccessPolicyInput, CompileError> {
+) -> Result<Vec<String>, CompileError> {
+    check_engine_grant_for(g, !g.principals.exclude.is_empty(), target, engine)
+}
+
+/// [`check_engine_grant`] with the exclude judged by the caller:
+/// `excludes_anyone` is whether the grant's exclude, expanded as the
+/// recompile expands it, names anyone (`crate::ir_load`).
+pub(crate) fn check_engine_grant_for(
+    g: &EngineGrant,
+    excludes_anyone: bool,
+    target: Option<&str>,
+    engine: EngineType,
+) -> Result<Vec<String>, CompileError> {
     let cap = capability(&g.capability)
         .ok_or_else(|| invalid(g, format!("unknown capability {:?}", g.capability)))?;
     if cap.engine != engine {
@@ -68,7 +86,7 @@ pub fn compile_engine_grant(
             format!("{} is not a capability of a {engine:?} engine", cap.id),
         ));
     }
-    if !g.principals.exclude.is_empty() {
+    if excludes_anyone {
         return Err(invalid(g, "an engine grant is include-only"));
     }
 
@@ -94,53 +112,40 @@ pub fn compile_engine_grant(
     }
     let values = check_values(cap, &values).map_err(|reason| invalid(g, reason))?;
 
-    let mut values_iter = values.iter();
-    let mut resources: BTreeMap<String, ResourceLevel> = BTreeMap::new();
-    for (key, kind) in cap.resources {
-        let value = match kind {
-            Some(ValueKind::Username) => {
-                let v = values_iter.next().expect("checked count");
-                if is_reserved_target(v) {
-                    return Err(invalid(
-                        g,
-                        format!("{v:?} is a principal egret runs as; it cannot be impersonated"),
-                    ));
-                }
-                v.clone()
-            }
-            Some(_) => values_iter.next().expect("checked count").clone(),
-            None => "*".to_string(),
-        };
-        resources.insert(
-            (*key).to_string(),
-            ResourceLevel {
-                values: vec![value],
-                is_excludes: false,
-                is_recursive: false,
-            },
-        );
+    for (kind, v) in cap.value_kinds().zip(&values) {
+        if kind == ValueKind::Username && is_reserved_target(v) {
+            return Err(invalid(
+                g,
+                format!("{v:?} is a principal egret runs as; it cannot be impersonated"),
+            ));
+        }
     }
+    Ok(values)
+}
 
-    let item = crate::grants::expanded_principal_item(
-        &g.principals.include,
-        Effect::Allow,
-        &[cap.access.to_string()],
+/// Compile `g` for `profile` on `engine`: [`check_engine_grant`], the
+/// lowering's `engine_privilege_statement`, and the Ranger render
+/// (`crate::ranger::engine_privileges::render`) — the path a recompile takes,
+/// for one grant and with every refusal returned rather than skipped. `target`
+/// is the impersonation target's current username
+/// ([`impersonation_target_ok`]).
+///
+/// Refuses (`InvalidEngineGrant`) whatever [`check_engine_grant`] refuses; a
+/// grantee `User` ref fails as it does for a grant (`UnusableUserRef`,
+/// `ReservedEnginePrincipal`).
+pub fn compile_engine_grant(
+    g: &EngineGrant,
+    target: Option<&str>,
+    profile: &str,
+    engine: EngineType,
+) -> Result<AccessPolicyInput, CompileError> {
+    let values = check_engine_grant(g, target, engine)?;
+    let s = egret_perm_ir::lower::engine_privileges::engine_privilege_statement(
+        g,
+        &g.capability,
+        &values,
     )?;
-
-    Ok(AccessPolicyInput {
-        name: engine_grant_policy_name(g.id),
-        service: profile.to_string(),
-        is_enabled: true,
-        resources,
-        items: vec![item],
-        allow_exceptions: Vec::new(),
-        deny_exceptions: Vec::new(),
-        is_deny_all_else: false,
-        description: String::new(),
-        labels: Vec::new(),
-        is_override: false,
-        additional: Vec::new(),
-    })
+    crate::ranger::engine_privileges::render(&s, profile, engine)
 }
 
 /// The checks an impersonation target must pass at compile (spec E11), read on
@@ -160,7 +165,7 @@ pub(crate) async fn impersonation_target_ok(
             .bind(target_user_id)
             .fetch_optional(&mut *conn)
             .await
-            .map_err(|e| CompileError::Db(e.to_string()))?
+            .map_err(CompileError::from_db)?
             .flatten();
     let Some(username) = username else {
         return Ok(Err(format!(
@@ -188,13 +193,13 @@ fn is_pattern(value: &str) -> bool {
 }
 
 /// The platform role whose holders egret seeds as engine admins
-/// (`egret_engine_mgmt`'s `admin_usernames` → `seed_admin_all_access`).
+/// (`members::engine_admin_usernames_via` → `infra::converge_infra_in_tx`).
 pub(crate) const PLATFORM_ADMIN_ROLE: &str = "platform_admin";
 
 /// Whether `username` holds `platform_admin` at platform scope, directly or
 /// through a group: the same two arms as
 /// `egret_auth::roles::RoleRepo::platform_admin_user_ids`, the list
-/// `seed_admin_all_access` seeds as engine admins.
+/// convergence writes into `egret-admin` as engine admins.
 async fn is_platform_admin(
     conn: &mut sqlx::PgConnection,
     username: &str,
@@ -216,7 +221,7 @@ async fn is_platform_admin(
     .bind(PLATFORM_ADMIN_ROLE)
     .fetch_one(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(e.to_string()))
+    .map_err(CompileError::from_db)
 }
 
 /// How far [`impersonation_closure_problem`] walks before it refuses. A chain
@@ -234,7 +239,7 @@ async fn profile_policies(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
 ) -> Result<Option<ProfilePolicies>, CompileError> {
-    let db = |e: sqlx::Error| CompileError::Db(e.to_string());
+    let db = CompileError::from_db;
     let service_type: Option<String> =
         sqlx::query_scalar("SELECT type FROM policy.authz_services WHERE id = $1")
             .bind(service_id)
@@ -268,7 +273,7 @@ async fn identity_of(
     conn: &mut sqlx::PgConnection,
     username: &str,
 ) -> Result<(Vec<String>, Vec<String>), CompileError> {
-    let db = |e: sqlx::Error| CompileError::Db(e.to_string());
+    let db = CompileError::from_db;
     let mut groups: Vec<String> = sqlx::query_scalar(
         "SELECT lower(g.name) FROM users u JOIN user_groups ug ON ug.user_id = u.id \
            JOIN groups g ON g.id = ug.group_id WHERE u.username = $1::citext",
@@ -466,7 +471,7 @@ async fn engine_grant_hops(
     .bind(roles)
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| CompileError::Db(e.to_string()))
+    .map_err(CompileError::from_db)
 }
 
 /// Why impersonating `username` on profile `service_id` would hand out more
@@ -521,8 +526,8 @@ pub(crate) async fn impersonation_closure_problem(
         }
         let (groups, roles) = identity_of(conn, &user).await?;
         // egret seeds every platform admin as an engine admin (`egret-admin -
-        // …`, `seed_admin_all_access`) at each engine apply, so a platform admin
-        // is near-root whether or not that seed has run on this profile yet.
+        // …`, converged at each engine apply and recompile), so a platform admin
+        // is near-root whether or not that convergence has run on this profile yet.
         if is_platform_admin(conn, &user).await? {
             return Ok(Some(format!(
                 "{via}is a platform admin, whom egret seeds as an engine admin"
@@ -554,7 +559,7 @@ pub(crate) async fn impersonation_closure_problem(
 mod tests {
     use super::*;
     use crate::engine_capabilities::CAPABILITIES;
-    use crate::rules::stamp_service_type;
+    use crate::ranger::rules::stamp_service_type;
     use egret_perm::{Principal, PrincipalKind, PrincipalSet};
     use egret_policy::admin::access_to_ranger_json;
     use serde_json::{json, Value};

@@ -5,11 +5,13 @@ edition.workspace = true
 license.workspace = true
 
 # Leaf contract crate for the Policy/Ranger seam (E2). DTOs + PolicyPort trait
-# only — no sqlx, axum, or egret-* deps, so any seam (engine-mgmt, controlplane)
+# only — no sqlx or axum, and `egret-core` (a pure-domain leaf, for the delegator
+# principal `infra_bodies` names) as its one egret-* dep, so any seam (engine-mgmt, controlplane)
 # can depend on the interface cheaply. Mirrors egret-engine-mgmt-api (E1a).
 # `utoipa`/ToSchema is intentionally absent until E0·P4 wires OpenAPI emit.
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+egret-core.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true

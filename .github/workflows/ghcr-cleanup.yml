@@ -1,22 +1,31 @@
-# Weekly retention for the images `images.yml` publishes.
+# Daily retention for the images `images.yml` publishes.
 #
 # Deletes, per package:
-#   - untagged versions (a `sha-*` or `edge` tag moved away, a publish whose `merge` failed);
-#   - `sha-*` images beyond the newest 20.
-# Never touches `latest`, `edge` or a version tag (any tag with a dot: X.Y.Z, X.Y, X.Y.Z-rc.N),
-# and never the Helm chart (oci://ghcr.io/egret-data/charts/egret).
+#   - `sha-*` images from `main` beyond the newest three (the one `edge` points to and the two before it);
+#   - untagged versions (a `sha-*` or `edge` tag moved away, a publish whose `merge` failed).
+# Never touches `latest`, `edge` or a release tag (any tag with a dot: X.Y.Z, X.Y, X.Y.Z-rc.N),
+# and never the Helm chart (oci://ghcr.io/egret-data/charts/egret). Release images are kept forever.
 #
 # A multi-arch image is an index plus one untagged manifest per platform and its attestations;
 # deleting "untagged versions" naively breaks every image. The cleanup action walks the indexes
 # first and treats those children as part of their parent.
 #
-# `older-than: 2 days` keeps it away from a publish in progress, whose per-platform digests are
-# untagged until `merge` joins them.
+# Two steps, because the action drops images younger than `older-than` before it counts
+# `keep-n-tagged`: one step with both kept the newest N old images plus every image of the last
+# `older-than`. A `sha-*` image is tagged only after `merge` joined it, so it is whole and the first
+# step needs no age guard. The untagged step does: a publish in progress pushes per-platform digests
+# untagged and joins them up to ~3h20m later (build legs time out at 180 minutes, `merge` at 20), so
+# it leaves anything younger than four hours alone.
+#
+# One job per package, daily: GitHub deletes about one version a second, and every push to main adds
+# about five versions to each of the seven packages (an index, two platform manifests and their
+# attestations). The weekly single job had ~1400 versions a week plus its backlog to delete and hit
+# its 30 minute timeout on 2026-11-02 (run 41436104915, cancelled with ~330 versions per package left).
 name: ghcr-cleanup
 
 on:
   schedule:
-    - cron: "17 3 * * 1" # Monday 03:17 UTC
+    - cron: "17 3 * * *" # daily 03:17 UTC
   workflow_dispatch:
     inputs:
       dry-run:
@@ -34,18 +43,40 @@ jobs:
   cleanup:
     if: github.repository == 'egret-data/platform'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       packages: write
+    strategy:
+      fail-fast: false
+      # The jobs share one token; a few at a time stays clear of GitHub's secondary rate limit on deletes.
+      max-parallel: 3
+      matrix:
+        package:
+          - egret-backend
+          - egret-backend-demo
+          - egret-frontend
+          - egret-renderer
+          - egret-apps
+          - egret-plugin-host
+          - egret-task-helper
     steps:
-      - uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
+      - name: Keep the newest three main images
+        uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
         with:
           owner: egret-data
-          packages: egret-backend,egret-backend-demo,egret-frontend,egret-renderer,egret-apps,egret-plugin-host,egret-task-helper
-          delete-untagged: true
+          packages: ${{ matrix.package }}
           delete-tags: sha-*
-          keep-n-tagged: 20
+          # `edge` is excluded, so its image is not counted: it plus two more is three.
+          keep-n-tagged: 2
           exclude-tags: latest,edge,*.*
-          older-than: 2 days
           # A scheduled run has no inputs: it deletes. A manual run defaults to a dry run.
+          dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run }}
+      - name: Delete untagged versions
+        uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
+        with:
+          owner: egret-data
+          packages: ${{ matrix.package }}
+          delete-untagged: true
+          exclude-tags: latest,edge,*.*
+          older-than: 4 hours
           dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run }}

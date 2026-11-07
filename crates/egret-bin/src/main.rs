@@ -14,7 +14,9 @@ use egret_auth::routes::AuthState;
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
 use egret_bin::bootstrap::{admin_report, AdminPassword};
-use egret_catalog_engine::grant_match::{catalog_grant_covers_by, grants_write, CatalogNameEq};
+use egret_catalog_engine::grant_match::{
+    catalog_grant_covers_by, grant_sees_namespace, grants_write, CatalogNameEq,
+};
 use egret_config::Config;
 use egret_core::ratelimit::RateLimiter;
 use egret_metastore::Db;
@@ -105,11 +107,15 @@ async fn init(config: Config, force: bool) -> anyhow::Result<()> {
     db.migrate().await.context("running migrations")?;
 
     if !force {
-        let existing: i64 = sqlx::query_scalar(
+        // A lapsed or `deny` grant makes no admin, so it does not stop the
+        // bootstrap (`egret_auth::live_allow_grant!`).
+        let existing: i64 = sqlx::query_scalar(concat!(
             "SELECT count(*) FROM access_grants ag \
              JOIN roles r ON r.id = ag.role_id \
-             WHERE r.scope='platform' AND r.name='platform_admin' AND ag.scope_type='platform'",
-        )
+             WHERE r.scope='platform' AND r.name='platform_admin' AND ag.scope_type='platform' \
+               AND ",
+            egret_auth::live_allow_grant!("ag"),
+        ))
         .fetch_one(&db.pool)
         .await?;
         if existing > 0 {
@@ -126,7 +132,7 @@ async fn init(config: Config, force: bool) -> anyhow::Result<()> {
     let hash = hash_password(password.secret())?;
 
     let users = UserRepo::new(db.clone());
-    let user_id = users.insert_local(&email, "Administrator", &hash).await?;
+    let (user_id, _) = users.create_local(&email, "Administrator", &hash).await?;
 
     // NOT EXISTS rather than ON CONFLICT: platform grants have a NULL scope_id,
     // which the UNIQUE index treats as distinct, so ON CONFLICT would not dedupe.
@@ -146,7 +152,7 @@ async fn init(config: Config, force: bool) -> anyhow::Result<()> {
     // Username takeover (spec 2026-10-23 §4.2): with `--force` on an install
     // that already has engines, the new admin joins every `egret-admin` set
     // now rather than at the next boot.
-    if let Err(e) = egret_perm_compile::sync_admin_policies(&db.pool).await {
+    if let Err(e) = egret_perm_compile::converge_infra_policies(&db.pool).await {
         tracing::warn!(error = %e, "could not add the new admin to the engines' egret-admin \
             policies; the boot pass will");
     }
@@ -259,7 +265,7 @@ async fn recompile_catalog_assignment(
 ) -> Result<(), egret_perm::CompileError> {
     let mut ids = egret_policy::services_for_catalog_via(tx, catalog_id)
         .await
-        .map_err(|e| egret_perm::CompileError::Db(e.to_string()))?;
+        .map_err(egret_perm_compile::db_error::from_store)?;
     ids.sort_unstable();
     ids.dedup();
     if ids.is_empty() {
@@ -298,6 +304,12 @@ impl egret_engine_mgmt::ProfileCompilerPort for ProfileCompilerImpl {
             .map(|_| ())
     }
 
+    async fn converge_infra(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
+        egret_perm_compile::converge_infra_policy(self.perm.pool(), service_id)
+            .await
+            .map(|_| ())
+    }
+
     async fn recompile_catalog_assignment_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -312,6 +324,14 @@ impl egret_engine_mgmt::ProfileCompilerPort for ProfileCompilerImpl {
         service_id: i64,
     ) -> Result<(), egret_perm::CompileError> {
         recompile_one_profile(tx, service_id).await
+    }
+
+    async fn lock_profiles_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_ids: &[i64],
+    ) -> Result<(), egret_perm::CompileError> {
+        egret_perm_compile::lock_services_in_tx(tx, service_ids).await
     }
 
     async fn overlap_snapshot_in_tx(
@@ -421,6 +441,7 @@ impl egret_policy::EngineBindingReader for EngineBindingReaderImpl {
             .into_iter()
             .map(|e| egret_policy::EngineBinding {
                 warehouse_ids: warehouses.remove(&e.id).unwrap_or_default(),
+                image: egret_perm::stored_engine_image(&e.r#type, &e.spec),
                 id: e.id,
                 name: e.name,
                 status: e.status,
@@ -734,6 +755,39 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
                         write: true,
                     });
                 }
+                Some(egret_catalog_engine::GuardedBody::NamespaceCreate) => {
+                    // Creating a namespace is a write in its parent, as
+                    // creating a table is a write in its namespace (KI-312):
+                    // a namespace-level grant on the parent, or a
+                    // catalog-level one; a top-level namespace needs the
+                    // catalog.
+                    let ns = parse_namespace_create_body(body)
+                        .map_err(|m| malformed("namespace create", m))?;
+                    let name = ns.join(".");
+                    let parent = ns[..ns.len() - 1].to_vec();
+                    if parent.is_empty() {
+                        if !grants
+                            .iter()
+                            .any(|g| g.securable_type == "catalog" && grants_write(g))
+                        {
+                            return forbid(format!(
+                                "role '{token_role}' may not create namespace {name}: a \
+                                 top-level namespace needs a catalog-level write or manage grant"
+                            ));
+                        }
+                    } else {
+                        needs.push(Need {
+                            refusal: format!(
+                                "role '{token_role}' may not create namespace {name}: it needs \
+                                 write on namespace {}, its parent",
+                                parent.join(".")
+                            ),
+                            ns: parent,
+                            table: None,
+                            write: true,
+                        });
+                    }
+                }
                 None => {
                     // Resolve the request target: /namespaces/{ns}[/tables|views/{table}],
                     // decoded as lakekeeper decodes its path parameters.
@@ -776,7 +830,9 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
                     }
                     match target_ns {
                         // catalog-root op (list namespaces, …): any grant for
-                        // reads, a write/manage grant for writes.
+                        // reads, a write/manage grant for writes. A listing's
+                        // answer is then cut to what the role may see
+                        // (`filter_listing`).
                         None => {
                             if !grants.iter().any(|g| !is_write || grants_write(g)) {
                                 return forbid(refusal);
@@ -816,6 +872,112 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
         }
         Ok(caller)
     }
+
+    async fn filter_listing(
+        &self,
+        caller: &egret_catalog_engine::CatalogCaller,
+        listing: egret_catalog_engine::Listing,
+        body: &[u8],
+    ) -> Result<Option<Vec<u8>>, (axum::http::StatusCode, String)> {
+        use axum::http::StatusCode;
+        let unreadable = |m: String| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("the catalog's listing could not be read: {m}"),
+            )
+        };
+        let grants = self
+            .catalog
+            .grants_for_role(&caller.warehouse, &caller.role)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("grants: {e}")))?;
+        if grants.iter().any(|g| g.securable_type == "catalog") {
+            return Ok(None);
+        }
+        let mut json: serde_json::Value =
+            serde_json::from_slice(body).map_err(|e| unreadable(e.to_string()))?;
+        let key = match listing {
+            egret_catalog_engine::Listing::Namespaces => "namespaces",
+            egret_catalog_engine::Listing::Tables | egret_catalog_engine::Listing::Views => {
+                "identifiers"
+            }
+        };
+        let listed: Vec<TableIdent> = json
+            .get(key)
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| unreadable(format!("no `{key}` list")))?
+            .iter()
+            .enumerate()
+            .map(|(i, v)| match listing {
+                egret_catalog_engine::Listing::Namespaces => namespace_levels(v)
+                    .map(|ns| (ns, String::new()))
+                    .ok_or(format!("`namespaces[{i}]` is not a list of strings")),
+                _ => identifier(v, &format!("identifiers[{i}]")),
+            })
+            .collect::<Result<_, _>>()
+            .map_err(unreadable)?;
+
+        // Names compare as lakekeeper compares them (rename-authz spec §10.4).
+        let requested: Vec<&str> = listed
+            .iter()
+            .flat_map(|(ns, name)| ns.iter().map(String::as_str).chain([name.as_str()]))
+            .filter(|n| !n.is_empty())
+            .collect();
+        let eq = CatalogNameEq::load(&self.catalog, &grants, &requested)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("names: {e}")))?;
+        let eq = |a: &str, b: &str| eq.eq(a, b);
+        let keep: Vec<bool> = listed
+            .iter()
+            .map(|(ns, name)| match listing {
+                egret_catalog_engine::Listing::Namespaces => {
+                    grants.iter().any(|g| grant_sees_namespace(g, ns, &eq))
+                }
+                // What a load of the table or view would allow.
+                _ => grants
+                    .iter()
+                    .any(|g| catalog_grant_covers_by(g, Some(ns), Some(name), false, &eq)),
+            })
+            .collect();
+        if keep.iter().all(|k| *k) {
+            return Ok(None);
+        }
+        // Cut the list and every list beside it of the same length:
+        // lakekeeper's `namespace-uuids`, `table-uuids` and
+        // `protection-status` run in step with the names.
+        let n = keep.len();
+        if let Some(obj) = json.as_object_mut() {
+            for v in obj.values_mut() {
+                if let Some(arr) = v.as_array_mut().filter(|a| a.len() == n) {
+                    let mut k = keep.iter();
+                    arr.retain(|_| *k.next().unwrap_or(&false));
+                }
+            }
+        }
+        serde_json::to_vec(&json)
+            .map(Some)
+            .map_err(|e| unreadable(e.to_string()))
+    }
+}
+
+/// The namespace a namespace create body names: `namespace`, a non-empty
+/// list of non-empty strings. `Err` says what is wrong, for the 400.
+fn parse_namespace_create_body(body: Option<&[u8]>) -> Result<Vec<String>, String> {
+    let body = body.ok_or("no body")?;
+    let json: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("the body is not JSON: {e}"))?;
+    json.get("namespace")
+        .and_then(namespace_levels)
+        .filter(|ns| !ns.is_empty() && ns.iter().all(|l| !l.is_empty()))
+        .ok_or_else(|| "`namespace` is not a non-empty list of non-empty strings".to_string())
+}
+
+/// A JSON list of strings, as the levels of a namespace.
+fn namespace_levels(v: &serde_json::Value) -> Option<Vec<String>> {
+    v.as_array()?
+        .iter()
+        .map(|l| l.as_str().map(str::to_string))
+        .collect()
 }
 
 /// A table or view named in a request body: the namespace's levels and the
@@ -976,6 +1138,8 @@ fn catalog_grant_covers(
 struct LakekeeperProvisioner {
     engine_state: egret_catalog_engine::ApiContext<egret_catalog_engine::EngineState>,
     system_user: String,
+    /// `catalog.sts_token_validity_seconds` (KI-315).
+    sts_token_validity_seconds: u64,
 }
 
 #[async_trait::async_trait]
@@ -993,6 +1157,7 @@ impl egret_catalog_engine::WarehouseProvisioner for LakekeeperProvisioner {
             access_key: s3.access_key.clone(),
             secret_key: s3.secret_key.clone(),
             key_prefix: s3.key_prefix.clone(),
+            sts_token_validity_seconds: self.sts_token_validity_seconds,
         };
         egret_catalog_engine::create_lakekeeper_warehouse(
             self.engine_state.clone(),
@@ -1788,6 +1953,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         _ => None,
     };
 
+    // The Ranger surface's engine credential verifier, shared with the OPA
+    // surface; `None` while the Ranger surface is off.
+    let mut engine_credential_verifier: Option<
+        std::sync::Arc<dyn egret_engine_mgmt_api::credential::EngineCredentialVerifier>,
+    > = None;
     let ranger = if config.ranger.enabled {
         let store = egret_policy::PolicyStore::new(db.clone());
         egret_policy::seed_trino(&store)
@@ -1815,22 +1985,25 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 egret_policy::ranger::AuthMode::Anonymous
             }
         };
+        // Engine plugins authenticate with their per-engine credential
+        // (current or previous, `egret_engine_mgmt::ranger_credential`),
+        // read from the same engine rows and secret store the engine-mgmt
+        // seam writes them to. The OPA surface (governance SP2b) checks the
+        // same credential through this same verifier.
+        let verifier: std::sync::Arc<
+            dyn egret_engine_mgmt_api::credential::EngineCredentialVerifier,
+        > = std::sync::Arc::new(egret_engine_mgmt::ranger_credential::DbVerifier::new(
+            egret_engine_mgmt::ranger_credential::RangerCredentialStore::new(
+                egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
+                workspace_secrets.clone(),
+            ),
+        ));
+        engine_credential_verifier = Some(verifier.clone());
         Some(egret_policy::RangerState {
             store,
             auth_token: config.ranger.auth_token.clone().into(),
             mode,
-            // Engine plugins authenticate with their per-engine credential
-            // (current or previous, `egret_engine_mgmt::ranger_credential`),
-            // read from the same engine rows and secret store the engine-mgmt
-            // seam writes them to.
-            verifier: Some(std::sync::Arc::new(
-                egret_engine_mgmt::ranger_credential::DbVerifier::new(
-                    egret_engine_mgmt::ranger_credential::RangerCredentialStore::new(
-                        egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
-                        workspace_secrets.clone(),
-                    ),
-                ),
-            )),
+            verifier: Some(verifier),
         })
     } else {
         None
@@ -2458,11 +2631,24 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         )
         .await
         .context("bootstrapping catalog engine")?;
+        // KI-315: warehouses created before, or under another setting, get
+        // the configured vended-credential lifetime before the catalog serves.
+        let lifetime = config.catalog.sts_token_validity_seconds;
+        let changed =
+            egret_catalog_engine::apply_vended_credential_lifetime(&engine_state, lifetime)
+                .await
+                .context("setting the vended credential lifetime")?;
+        tracing::info!(
+            seconds = lifetime,
+            warehouses_changed = changed,
+            "vended credential lifetime"
+        );
         let gc_cancel = egret_catalog_engine::CancellationToken::new();
         egret_catalog_engine::spawn_gc_workers(gc_registry, gc_cancel);
         catalog_provisioner = Some(std::sync::Arc::new(LakekeeperProvisioner {
             engine_state: engine_state.clone(),
             system_user: config.catalog.system_user.clone(),
+            sts_token_validity_seconds: lifetime,
         }));
         let table_hook = std::sync::Arc::new(egret_catalog_engine::TableHook::new(db.clone()));
         catalog_browser = Some(std::sync::Arc::new(LakekeeperBrowser {
@@ -2655,6 +2841,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // Policy/Ranger seam admin router (E2d): the Policies console. Owns the
     // policy store; reads the engine seam through `EngineBindingReader` (which
     // engines bind to which profile) — wired here in the composition root.
+    // Filled once the engine seam's state is built (below); until then a
+    // switch reports every bound engine as not reconfigured.
+    let engine_mgmt_cell: std::sync::Arc<
+        tokio::sync::OnceCell<egret_engine_mgmt::EngineMgmtState>,
+    > = std::sync::Arc::default();
     let policy_admin = Some(egret_policy::PolicyAdminState {
         store: egret_policy::PolicyStore::new(db.clone()),
         engines: std::sync::Arc::new(EngineBindingReaderImpl {
@@ -2673,13 +2864,26 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // Final review I-3: an editor write to a StarRocks data mask refolds the
         // clearance masks in the same transaction.
         recompiler: std::sync::Arc::new(egret_perm_compile::PermRecompiler),
+        // Governance SP2b Task 15: a switch re-applies the profile's engines
+        // over the engine seam, whose state is built below and put in the cell.
+        reconfigurer: std::sync::Arc::new(egret_bin::reconfigurer::ReconfigurerImpl {
+            cp: engine_mgmt_cell.clone(),
+            store: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
+        }),
+        // Final review I1: the switch to OPA is allowed only when the OPA surface
+        // actually runs, which `start_opa` also requires the Ranger surface (and
+        // so its credential verifier) for. With `ranger.enabled` off the PATCH is
+        // refused (`Disabled`) instead of answering 200 to engines left on 404s.
+        opa_enabled: config.governance.opa.enabled && engine_credential_verifier.is_some(),
     });
 
     // Data-permission model surface (SP4a Task 9): grants/rules/explain, plus
     // the manual compile trigger. Both stores are built over the SAME `db`,
     // which is what lets a grant write and its recompile share one
     // transaction across the `perm.*` and `policy.*` schemas.
-    let perm = Some(egret_perm_compile::PermState {
+    let mut perm = Some(egret_perm_compile::PermState {
+        // Set below, once the OPA refresher's cache exists (gate on).
+        opa_cache: None,
         perm: egret_perm::PermStore::new(db.pool.clone()),
         policy: egret_policy::PolicyStore::new(db.clone()),
         sessions: sessions.clone(),
@@ -2703,32 +2907,68 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // role, so a body an older compile wrote without a holder who had no
     // username names them now (role expansion mints since R5). Idempotent and
     // best-effort: an unchanged profile writes nothing, and a failure is
-    // logged and never blocks boot.
+    // logged, retried with backoff (#787) and never blocks boot.
+    tokio::spawn(
+        egret_perm_compile::role_membership::repair_role_referencing_profiles_with_retry(
+            db.pool.clone(),
+        ),
+    );
+    // Expiry sweep (narrowing 2 of `egret_perm_compile::members`): a grant that
+    // lapses is not a write, so an hourly pass recompiles the profiles it named.
+    // Spawned here, off the boot path; the first tick runs at once in the
+    // background. Idempotent; a failure is logged and the next run retries.
     {
         let pool = db.pool.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                egret_perm_compile::role_membership::recompile_role_referencing_profiles(&pool)
-                    .await
-            {
-                tracing::warn!(
-                    error = %e,
-                    "the boot recompile of role-referencing profiles did not run"
-                );
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                tick.tick().await;
+                match egret_perm_compile::expiry::recompile_lapsed_grants(&pool).await {
+                    Ok(s) if s.lapsed_rows > 0 => tracing::info!(
+                        lapsed_rows = s.lapsed_rows,
+                        profiles = s.services.len(),
+                        rewritten = s.rewritten.len(),
+                        "expiry sweep ran"
+                    ),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "expiry sweep failed; retried next run"),
+                }
             }
         });
     }
-    // Username takeover (spec 2026-10-23 §4.2): converge every `egret-admin`
-    // set to the active platform admins, repairing bodies written before the
-    // fix. Best-effort; a failure is logged and never blocks boot.
+    // Username takeover (spec 2026-10-23 §4.2) and governance SP2a (D4):
+    // converge every profile's infrastructure policies, so `egret-admin` names
+    // the active platform admins and bodies written before the fix are
+    // repaired. Best-effort; a failure is logged and never blocks boot.
     {
         let pool = db.pool.clone();
         tokio::spawn(async move {
-            match egret_perm_compile::sync_admin_policies(&pool).await {
-                Ok(n) => tracing::info!(services = n, "egret-admin policies synced at boot"),
+            match egret_perm_compile::converge_infra_policies(&pool).await {
+                Ok(n) => tracing::info!(services = n, "infrastructure policies converged at boot"),
                 Err(e) => tracing::warn!(
                     error = %e,
-                    "the boot sync of the egret-admin policies did not run"
+                    "the boot convergence of the infrastructure policies did not run"
+                ),
+            }
+        });
+    }
+    // A human user has a username from creation (spec 2026-10-31
+    // local-user-username); name the users created before that, through the
+    // steward's allocation core and its stale-ref guard. Best-effort; a
+    // failure is logged and never blocks boot, and the next boot retries.
+    {
+        let pool = db.pool.clone();
+        tokio::spawn(async move {
+            match egret_perm_compile::mint_missing_usernames(&pool).await {
+                Ok(r) if r.minted > 0 || r.refused > 0 => tracing::info!(
+                    minted = r.minted,
+                    refused = r.refused,
+                    "usernames allocated at boot for users created without one"
+                ),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "the boot allocation of missing usernames did not finish; retried next boot"
                 ),
             }
         });
@@ -2748,6 +2988,51 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 Err(e) => tracing::warn!(
                     error = %e,
                     "the boot compile of StarRocks whole-table classifications did not run"
+                ),
+            }
+        });
+    }
+    // fix/ranger-table-mask-column: a path mask that names no column (a whole
+    // table, schema or catalog) used to compile without a `column` resource and
+    // masked nothing on Ranger; the compiler now renders it as `*`. Recompile
+    // the profiles such rules reach so they serve the fixed artifact without
+    // waiting for an unrelated write. One transaction per profile, idempotent;
+    // a refusal is logged and recorded, and the next boot retries.
+    {
+        let pool = db.pool.clone();
+        tokio::spawn(async move {
+            match egret_perm_compile::recompile_path_mask_profiles(&pool).await {
+                Ok(r) => {
+                    tracing::info!(
+                        compiled = r.compiled.len(),
+                        refused = r.refused.len(),
+                        failed = r.failed.len(),
+                        "profiles with whole-table, schema or catalog masks compiled at boot"
+                    );
+                    if !r.failed.is_empty() {
+                        tracing::error!(
+                            failed = r.failed.len(),
+                            profiles = ?r.failed.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                            "the boot recompile of profiles with whole-table, schema or catalog \
+                             masks FAILED for some profiles: their masks stay inert until it \
+                             succeeds; the next boot retries"
+                        );
+                    }
+                    if !r.refused.is_empty() {
+                        tracing::error!(
+                            refused = r.refused.len(),
+                            profiles = ?r.refused.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                            "the boot recompile of profiles with whole-table, schema or catalog \
+                             masks was REFUSED for some profiles: their masks stay inert and \
+                             every write that recompiles them is refused until a steward \
+                             resolves the overlapping rules (Governance overview, or GET \
+                             /api/control-plane/perm/overlaps)"
+                        );
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "the boot compile of whole-table, schema or catalog masks did not run"
                 ),
             }
         });
@@ -2869,23 +3154,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             as std::sync::Arc<dyn egret_catalog_registry::CatalogAssignmentCompiler>),
     });
 
-    // DG Task 7: bring every existing delegating Trino engine's Ranger profile
-    // up to the per-user baseline Trino 483 checks on every session. An apply
-    // seeds it too; this pass is what reaches engines deployed before the
-    // baseline existed, with no reapply (each plugin picks the rows up on its
-    // next policy poll). Best-effort: a failing profile is logged, not fatal.
-    //
-    // Not gated on `config.ranger.enabled` (final review F6): the apply path
-    // seeds any engine bound to a profile whatever that flag says, and an
-    // engine bound while it was on keeps its profile after it is turned off.
-    // `seed_engine_user_baseline` skips every engine bound to no profile.
-    {
-        let st = engine_mgmt
-            .as_ref()
-            .expect("engine-mgmt state is built just above");
-        let (seeded, failed) =
-            egret_engine_mgmt::seed_user_baselines_for_existing_engines(st).await;
-        tracing::info!(seeded, failed, "per-user Ranger baseline pass");
+    if let Some(st) = engine_mgmt.as_ref() {
+        if engine_mgmt_cell.set(st.clone()).is_err() {
+            tracing::error!("the engine reconfigurer's state was already set");
+        }
     }
 
     // Spec 2026-10-20-ranger-surface-auth A10 (Task 6b): a provisioned engine's
@@ -2904,6 +3176,27 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             egret_engine_mgmt::ranger_credential::RANGER_RETIRE_SWEEP_INTERVAL,
             reaper_cancel.clone().cancelled_owned(),
         );
+    }
+
+    // Governance SP2b: the OPA decision surface and its snapshot refresher,
+    // only while `[governance.opa] enabled` (default false) and the Ranger
+    // surface is on. With the gate off, `opa` is `None`: the routes are not
+    // mounted and no refresher runs. The refresher stops with the other
+    // background loops.
+    // The refresher supervises its own ticks (a panicking refresh is logged
+    // and retried), so its handle is not kept.
+    let opa = egret_bin::start_opa_from_config(
+        &config.governance,
+        engine_credential_verifier.clone(),
+        db.pool.clone(),
+        &reaper_cancel,
+    )
+    .map(|(state, _refresher)| state);
+    // Governance SP2b Task 16: `/perm/explain*` answers an OPA profile from the
+    // refresher's snapshot when it is current (gate off: `None`, and explain
+    // builds the snapshot itself).
+    if let (Some(perm), Some(opa)) = (perm.as_mut(), opa.as_ref()) {
+        perm.opa_cache = Some(std::sync::Arc::clone(&opa.cache));
     }
 
     // Control plane: global platform-admin Storage + Secrets + Access console.
@@ -3298,6 +3591,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         workspace: Some(workspace),
         oidc,
         ranger,
+        opa,
         database,
         engine,
         bi,

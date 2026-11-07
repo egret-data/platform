@@ -1,0 +1,291 @@
+[
+  {
+    "desired": [
+      {
+        "service": "{g13.trino}",
+        "name": "perm-engine-{g13.become_bob}",
+        "body": {
+          "additionalResources": [],
+          "allowExceptions": [],
+          "denyExceptions": [],
+          "denyPolicyItems": [],
+          "description": "",
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-engine-{g13.become_bob}",
+          "policyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "impersonate"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [],
+              "roles": [],
+              "users": [
+                "{g13.alice.username}"
+              ]
+            }
+          ],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "trinouser": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "{g13.bob.username}"
+              ]
+            }
+          },
+          "service": "{g13.trino}",
+          "serviceType": "trino"
+        }
+      },
+      {
+        "service": "{g13.trino}",
+        "name": "perm-engine-{g13.session}",
+        "body": {
+          "additionalResources": [],
+          "allowExceptions": [],
+          "denyExceptions": [],
+          "denyPolicyItems": [],
+          "description": "",
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-engine-{g13.session}",
+          "policyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "alter"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [],
+              "roles": [],
+              "users": [
+                "{g13.alice.username}"
+              ]
+            }
+          ],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "systemproperty": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "query_max_memory"
+              ]
+            }
+          },
+          "service": "{g13.trino}",
+          "serviceType": "trino"
+        }
+      }
+    ],
+    "skipped": [
+      {
+        "kind": "EngineGrant",
+        "id": "{g13.become_root}",
+        "reason": "the impersonation target \"root\" is reserved: egret runs as it on the engine"
+      },
+      {
+        "kind": "EngineGrant",
+        "id": "{g13.become_gone}",
+        "reason": "no user carries the impersonation target {g13.gone} as a username any more"
+      }
+    ],
+    "served": [
+      {
+        "additionalResources": [],
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "description": "",
+        "id": 0,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "perm-engine-{g13.become_bob}",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "impersonate"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g13.alice.username}"
+            ]
+          }
+        ],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "trinouser": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "{g13.bob.username}"
+            ]
+          }
+        },
+        "service": "{g13.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "additionalResources": [],
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "description": "",
+        "id": 1,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "perm-engine-{g13.session}",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "alter"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g13.alice.username}"
+            ]
+          }
+        ],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "systemproperty": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "query_max_memory"
+            ]
+          }
+        },
+        "service": "{g13.trino}",
+        "serviceType": "trino",
+        "version": 1
+      }
+    ]
+  },
+  {
+    "desired": [
+      {
+        "service": "{g13.starrocks}",
+        "name": "perm-engine-{g13.blacklist}",
+        "body": {
+          "additionalResources": [],
+          "allowExceptions": [],
+          "denyExceptions": [],
+          "denyPolicyItems": [],
+          "description": "",
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-engine-{g13.blacklist}",
+          "policyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "blacklist"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [],
+              "roles": [],
+              "users": [
+                "{g13.alice.username}"
+              ]
+            }
+          ],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "system": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "*"
+              ]
+            }
+          },
+          "service": "{g13.starrocks}",
+          "serviceType": "starrocks"
+        }
+      }
+    ],
+    "skipped": [
+      {
+        "kind": "EngineGrant",
+        "id": "{g13.nobody}",
+        "reason": "the engine grant's principals name no engine principal (a role or group reference that expands to no member)"
+      }
+    ],
+    "served": [
+      {
+        "additionalResources": [],
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "description": "",
+        "id": 0,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "perm-engine-{g13.blacklist}",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "blacklist"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{g13.alice.username}"
+            ]
+          }
+        ],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "system": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g13.starrocks}",
+        "serviceType": "starrocks",
+        "version": 1
+      }
+    ]
+  }
+]

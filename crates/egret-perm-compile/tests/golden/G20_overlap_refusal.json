@@ -1,0 +1,5 @@
+[
+  {
+    "error": "recompiling profile \"{g20.trino}\" would emit an order-ambiguous pair: two row filter policies would be served at policyPriority 0 that may both decide one request (catalog=[gold_g20_cat] schema=[sales] table=[orders]) with different rowFilterPolicyItems: rule \"g20.us\" and rule \"g20.eu\". Ranger arbitrates row filters with `>=`, so the FIRST evaluator in its band is final, and within a band the order is `getEvalOrder()` (a wildcard-count score: with the same users, groups and accesses the broader policy runs first and wins wherever both match) and then the policy name, i.e. a rule's uuid — neither of which says which of the two should win. Narrow one of the two so they no longer select a common resource, or delete one, or make them agree."
+  }
+]

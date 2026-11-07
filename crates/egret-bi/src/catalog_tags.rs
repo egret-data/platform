@@ -91,7 +91,7 @@ impl CatalogTagRepo {
         table: &str,
         column: &str,
         assigned_by: Option<Uuid>,
-    ) -> Result<(), BiApiError> {
+    ) -> Result<Vec<AssignNotice>, BiApiError> {
         if let Some(why) = unresolvable_coordinate(schema, table, column) {
             return Err(crate::error::BiError::BadRequest(why).into());
         }
@@ -197,8 +197,11 @@ impl CatalogTagRepo {
                 };
                 crate::error::BiError::from_assignment_check(e, &format!("this tag to {at}"))
             })?;
+        let notices = clearance_mask_notices(&mut tx, tag_id, warehouse_id, schema, table, column)
+            .await
+            .map_err(crate::error::BiError::from)?;
         tx.commit().await.map_err(crate::error::BiError::from)?;
-        Ok(())
+        Ok(notices)
     }
 
     /// Detach `tag_id` from a catalog resource (idempotent — deletes 0 or 1 row).
@@ -312,6 +315,101 @@ impl CatalogTagRepo {
                 .map_err(crate::error::BiError::from)?,
         )
     }
+}
+
+/// Something an assignment that succeeded wants its author to know.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct AssignNotice {
+    /// Stable, for programs: `clearance_masks_pending_table` or `clearance_on_view`.
+    pub code: String,
+    /// The sentence a person reads.
+    pub message: String,
+}
+
+/// [`AssignNotice::code`] of KI-307's notice.
+pub const CLEARANCE_MASKS_PENDING_TABLE: &str = "clearance_masks_pending_table";
+
+/// [`AssignNotice::code`] when the name is a view in the catalog: a view never
+/// becomes a table, so no masks follow later (KI-307 follow-up).
+pub const CLEARANCE_ON_VIEW: &str = "clearance_on_view";
+
+/// KI-307 (owner decision: warn at attach). A WHOLE-TABLE attachment of a
+/// classification with a role-bearing clearance, served by a StarRocks profile,
+/// compiles StarRocks NULL masks from the table's columns
+/// (`egret_perm_compile::clearance`); a table the catalog does not have yet
+/// (unknown, a staged create) has none, so only the deny is compiled until the
+/// table exists, and a view over it shows the values. A VIEW in the catalog
+/// has no columns there either and never will: it gets [`CLEARANCE_ON_VIEW`],
+/// which says what the compile gives it (the deny on its name, never masks)
+/// and points at the table it reads. Read on the write's own transaction,
+/// after the row is in.
+async fn clearance_mask_notices(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tag_id: Uuid,
+    warehouse_id: Uuid,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> Result<Vec<AssignNotice>, egret_perm::CompileError> {
+    if !column.is_empty() {
+        return Ok(Vec::new());
+    }
+    let gated: Option<String> = sqlx::query_scalar(
+        "SELECT t.name FROM tags t JOIN classification_policies cp ON cp.tag_id = t.id \
+          WHERE t.id = $1 AND cardinality(cp.required_roles) > 0",
+    )
+    .bind(tag_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(egret_perm::CompileError::from_db)?;
+    let Some(tag_name) = gated else {
+        return Ok(Vec::new());
+    };
+    let served = egret_perm_compile::affected_starrocks_profiles_for_tables(
+        tx,
+        warehouse_id,
+        &[(schema.to_string(), Some(table.to_string()))],
+    )
+    .await?;
+    if served.is_empty()
+        || egret_perm_compile::table_columns::current_columns_via(tx, warehouse_id, schema, table)
+            .await?
+            .is_some()
+    {
+        return Ok(Vec::new());
+    }
+    if egret_perm_compile::table_columns::is_active_view_via(tx, warehouse_id, schema, table)
+        .await?
+    {
+        return Ok(vec![AssignNotice {
+            code: CLEARANCE_ON_VIEW.to_string(),
+            message: format!(
+                "Attached. {schema}.{table} is a view in the catalog, not a table. On StarRocks, \
+                 clearance {tag_name} on a view compiles only a select deny on that name, which \
+                 egret has not measured StarRocks applying to a view, and no column masks, now \
+                 or later: egret builds masks from a table's columns. To protect the values the \
+                 view shows, classify the table it reads: that table's masks hold through the \
+                 views over it."
+            ),
+        }]);
+    }
+    Ok(vec![AssignNotice {
+        code: CLEARANCE_MASKS_PENDING_TABLE.to_string(),
+        message: format!(
+            "Attached. egret found no table {schema}.{table} in the catalog, so StarRocks has no \
+             column masks for clearance {tag_name} on it yet: a direct read is refused, but a \
+             view over the table shows the values. The masks take effect once the table exists \
+             in the catalog."
+        ),
+    }])
+}
+
+/// The answer of `PUT …/resource-tags`: `ok`, and what the author should know
+/// about an assignment that succeeded ([`AssignNotice`]; empty when nothing).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AssignResourceTagResponse {
+    pub ok: bool,
+    pub notices: Vec<AssignNotice>,
 }
 
 /// Refuse (409, code `table_change_held`) a write on `schema.table` while a
@@ -564,12 +662,12 @@ async fn require_warehouse_and_tag(
     params(("warehouse_id" = Uuid, Path, description = "Warehouse id")),
     request_body = ResourceTagBody,
     responses(
-        (status = 200, description = "Tag assigned to the catalog resource (idempotent)", body = egret_core::Ack),
+        (status = 200, description = "Tag assigned to the catalog resource (idempotent). `notices` lists what the author should know about an assignment that succeeded: `clearance_masks_pending_table` when a whole-table classification with a clearance is attached to a table a StarRocks engine serves but the catalog does not have yet (unknown, a staged create): the select deny is compiled, the column NULL masks only once the table exists, so a view over it shows the values until then; `clearance_on_view` when the name is a view in the catalog: only the select deny on its name is compiled, never column masks, so the message points at classifying the table the view reads", body = AssignResourceTagResponse),
         (status = 400, description = "The coordinate cannot be stored (an empty schema or table, or `*`/`?` in any level — see migration 0177), or the tag is being attached to a whole TABLE while a tag-addressed mask names it, which would make that table unreadable rather than masked (code `table_tag_mask_conflict`, with `tag`, `tagId`, `schema`, `table`, `mask`, `maskOrigin`; `warehouseId` is null)", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing catalog_registry:update permission", body = egret_core::http::ErrorBody),
         (status = 404, description = "`code` is `warehouse_not_found` (no warehouse has `warehouse_id`; the body adds `warehouseId`) or `tag_not_found` (no classification has `tag_id`; the body adds `tagId`)", body = egret_core::http::ErrorBody),
-        (status = 409, description = "A rule overlap: the assignment would make two mask (or two row-filter) policies decide one column differently (compiled rules, hand-written tag policies, or one of each), or a profile it recompiles already holds such a pair. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = egret_core::http::ErrorBody),
+        (status = 409, description = "A rule overlap: the assignment would make two mask (or two row-filter) policies decide one column differently (compiled rules, hand-written tag policies, or one of each), or a profile it recompiles already holds such a pair. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`). Or `code: \"profile_set_changed\"` with `retryable: true`: an engine was bound, or a policy profile created, while this write ran, so a profile it recompiles was not locked first (#792); nothing was written, and the same request succeeds when retried", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
@@ -578,11 +676,11 @@ async fn assign_resource_tag(
     Auth(p): Auth,
     Path(warehouse_id): Path<Uuid>,
     Json(b): Json<ResourceTagBody>,
-) -> Result<Json<serde_json::Value>, BiApiError> {
+) -> Result<Json<AssignResourceTagResponse>, BiApiError> {
     egret_core::authz::require(&*st.pdp, &p, WAREHOUSE_WRITE).await?;
     require_warehouse_and_tag(&st.db, warehouse_id, b.tag_id).await?;
     let column = b.column.as_deref().unwrap_or("");
-    CatalogTagRepo::new(st.db.clone())
+    let notices = CatalogTagRepo::new(st.db.clone())
         .assign_catalog(
             b.tag_id,
             warehouse_id,
@@ -603,7 +701,7 @@ async fn assign_resource_tag(
         )),
         serde_json::json!({ "tag_id": b.tag_id }),
     ));
-    Ok(Json(serde_json::json!({ "ok": true })))
+    Ok(Json(AssignResourceTagResponse { ok: true, notices }))
 }
 
 #[utoipa::path(
@@ -617,7 +715,7 @@ async fn assign_resource_tag(
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing catalog_registry:update permission", body = egret_core::http::ErrorBody),
         (status = 404, description = "`code` is `warehouse_not_found` or `tag_not_found`, as for the assignment", body = egret_core::http::ErrorBody),
-        (status = 409, description = "A rule overlap that the unassignment does not remove: a profile it recompiles already holds two mask (or two row-filter) rules that decide one request differently. Same body as the assignment's 409", body = egret_core::http::ErrorBody),
+        (status = 409, description = "A rule overlap that the unassignment does not remove: a profile it recompiles already holds two mask (or two row-filter) rules that decide one request differently. Same body as the assignment's 409. Or `code: \"profile_set_changed\"` with `retryable: true`: an engine was bound, or a policy profile created, while this write ran, so a profile it recompiles was not locked first (#792); nothing was written, and the same request succeeds when retried", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
@@ -652,7 +750,12 @@ async fn unassign_resource_tag(
 #[derive(utoipa::OpenApi)]
 #[openapi(
     paths(list_resource_tags, assign_resource_tag, unassign_resource_tag),
-    components(schemas(ResourceTagDto, ResourceTagBody))
+    components(schemas(
+        ResourceTagDto,
+        ResourceTagBody,
+        AssignResourceTagResponse,
+        AssignNotice
+    ))
 )]
 pub struct CatalogTagsApi;
 

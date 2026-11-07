@@ -211,27 +211,110 @@ describe("EngineDetail for an external engine", () => {
     expect(document.body.textContent).not.toContain("tok-must-never-render");
   });
 
-  test("Plugin config with no profile bound says why in a sentence and offers Settings (KI-204)", async () => {
-    stubFetch(
+  test("Plugin config on an OPA profile asks the OPA route, not the Ranger one, and shows the files, warnings and what to supply", async () => {
+    const calls = stubFetch(
       routes({
-        "GET /api/control-plane/policies/services": { body: PROFILES },
-        // The server's own words, as it sends them.
-        "GET /api/control-plane/engines/x1/ranger-plugin-config": {
+        "GET /api/control-plane/policies/services": {
+          body: BOUND_PROFILES.map((p) => (p.id === 11 ? { ...p, mechanism: "opa" } : p)),
+        },
+        "GET /api/control-plane/engines/x1/opa-plugin-config": {
+          body: {
+            files: [
+              { name: "access-control.properties", content: "access-control.name=opa\n" },
+              { name: "egret-opa-context.properties", content: "egret.engine=x1\negret.secret=REPLACE\n" },
+            ],
+            warnings: ["Do not remove opa.policy.batched-uri from access-control.properties: without it Trino sends one request per object."],
+            adminMustSupply: ["egret.secret: the engine's Ranger plugin credential"],
+            // Not part of the contract: a page that rendered unknown fields would leak it.
+            secret: "real-secret-must-never-render",
+          },
+        },
+      }),
+    );
+    renderDetail(ADMIN, "/control-plane/engines/x1?tab=plugin-config");
+
+    expect(await screen.findByText("egret-opa-context.properties")).toBeInTheDocument();
+    expect(screen.getByText("access-control.properties")).toBeInTheDocument();
+    expect(screen.getByText(/Do not remove opa\.policy\.batched-uri/)).toBeInTheDocument();
+    expect(screen.getByText("egret.secret: the engine's Ranger plugin credential")).toBeInTheDocument();
+    expect(calls.some((c) => c.method === "GET" && c.path.endsWith("/engines/x1/opa-plugin-config"))).toBe(true);
+    expect(calls.some((c) => c.path.endsWith("/engines/x1/ranger-plugin-config"))).toBe(false);
+    expect(document.body.textContent).not.toContain("real-secret-must-never-render");
+  });
+
+  test("an OPA route 409 says the profile is no longer on OPA and Reload re-reads the profiles", async () => {
+    const calls = stubFetch(
+      routes({
+        "GET /api/control-plane/policies/services": {
+          body: BOUND_PROFILES.map((p) => (p.id === 11 ? { ...p, mechanism: "opa" } : p)),
+        },
+        "GET /api/control-plane/engines/x1/opa-plugin-config": {
           status: 409,
-          body: { error: "conflict: engine legacy-trino is bound to no policy profile: bind a profile first" },
+          body: { error: "conflict: profile is not on OPA" },
         },
       }),
     );
     const user = userEvent.setup();
     renderDetail(ADMIN, "/control-plane/engines/x1?tab=plugin-config");
-    expect(
-      await screen.findByText(
-        "No policy profile is bound to this engine yet. The plugin configuration names the profile's Ranger service, so bind a profile first.",
-      ),
-    ).toBeInTheDocument();
+    const note = await screen.findByTestId("plugin-config-not-opa");
+    expect(note).toHaveTextContent(/no longer on OPA/);
+    expect(note).toHaveTextContent(/Reload/);
+    expect(document.body.textContent).not.toContain("No policy profile is bound");
     expect(document.body.textContent).not.toContain("conflict:");
-    await user.click(screen.getByRole("button", { name: "Open Settings" }));
+    const before = calls.filter((c) => c.path.endsWith("/policies/services")).length;
+    await user.click(screen.getByRole("button", { name: "Reload" }));
+    await waitFor(() =>
+      expect(calls.filter((c) => c.path.endsWith("/policies/services")).length).toBeGreaterThan(before),
+    );
+  });
+
+  test("a Ranger route 409 says the server and the page disagree, not that nothing was ever bound", async () => {
+    stubFetch(
+      routes({
+        "GET /api/control-plane/engines/x1/ranger-plugin-config": {
+          status: 409,
+          body: { error: "conflict: engine legacy-trino is bound to no policy profile" },
+        },
+      }),
+    );
+    renderDetail(ADMIN, "/control-plane/engines/x1?tab=plugin-config");
+    const note = await screen.findByTestId("plugin-config-no-profile");
+    expect(note).toHaveTextContent(/differs from this page's profile list/);
+    expect(note).toHaveTextContent(/Reload to check, or bind a profile in Settings/);
+    expect(document.body.textContent).not.toContain("conflict:");
+  });
+
+  test("Plugin config with the profiles unreadable shows the error and requests neither plugin route", async () => {
+    const calls = stubFetch(
+      routes({
+        "GET /api/control-plane/policies/services": { status: 500, body: { error: "the profile store is down" } },
+        "GET /api/control-plane/engines/x1/opa-plugin-config": { body: { files: [], warnings: [], adminMustSupply: [] } },
+      }),
+    );
+    renderDetail(ADMIN, "/control-plane/engines/x1?tab=plugin-config");
+    const err = await screen.findByTestId("plugin-config-profiles-error");
+    expect(err).toHaveTextContent(/Could not read the policy profiles/);
+    expect(err).toHaveTextContent(/Try again/);
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(calls.some((c) => c.path.endsWith("-plugin-config"))).toBe(false);
+    expect(screen.queryByText("access-control.properties")).not.toBeInTheDocument();
+  });
+
+  test("Open Settings from the no-profile note switches to the Settings tab (KI-204)", async () => {
+    stubFetch(routes({ "GET /api/control-plane/policies/services": { body: PROFILES } }));
+    const user = userEvent.setup();
+    renderDetail(ADMIN, "/control-plane/engines/x1?tab=plugin-config");
+    await user.click(await screen.findByRole("button", { name: "Open Settings" }));
     expect(screen.getByRole("tab", { name: "Settings" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  test("Plugin config with the engine's profile missing from the list says so and requests neither plugin route", async () => {
+    const calls = stubFetch(routes({ "GET /api/control-plane/policies/services": { body: PROFILES } }));
+    renderDetail(ADMIN, "/control-plane/engines/x1?tab=plugin-config");
+    const note = await screen.findByTestId("plugin-config-no-profile");
+    expect(note).toHaveTextContent(/No policy profile is bound to this engine yet, or this account cannot see/);
+    expect(screen.getByRole("button", { name: "Open Settings" })).toBeInTheDocument();
+    expect(calls.some((c) => c.path.endsWith("-plugin-config"))).toBe(false);
   });
 
   test("Plugin config shows any other refusal in the server's words", async () => {

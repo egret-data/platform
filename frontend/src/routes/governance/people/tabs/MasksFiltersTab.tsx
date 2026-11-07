@@ -19,16 +19,6 @@ import { cn } from "@/lib/utils";
 /** The Permissions tab's group titles; an exclude here takes the principal out of an exemption. */
 const RULE_GROUP_TITLE: Record<ReachGroup, string> = { ...GROUP_TITLE, excluded: "Excluded from the exemption" };
 
-/**
- * Under the "Not applied anywhere" group (an exemption held through a group, which the
- * compiler does not expand). Rules are compiled to engine masking and
- * row-filter policies only; nothing in egret reads them to mask or filter, so
- * such an exemption exempts nobody anywhere. Not said of an expired path,
- * which engines may still apply until the next recompile.
- */
-export const EXEMPTION_NOT_ON_ENGINES =
-  "egret applies no mask or row filter itself, so an exemption engines do not apply exempts nobody.";
-
 /** `N other rules apply to everyone they do not exempt; …`, in the singular for one. */
 export function otherRulesText(n: number): string {
   return n === 1
@@ -114,9 +104,6 @@ function EgretRules({ principal }: { principal: Principal }) {
       {header}
       {REACH_GROUPS.filter((g) => byGroup.has(g)).map((g) => (
         <Section key={g} title={RULE_GROUP_TITLE[g]}>
-          {g === "egret_only" ? (
-            <p className="text-sm text-muted-foreground">{EXEMPTION_NOT_ON_ENGINES}</p>
-          ) : null}
           <RuleTable label={RULE_GROUP_TITLE[g]} rows={byGroup.get(g) ?? []} catalogNameById={catalogNameById} />
         </Section>
       ))}

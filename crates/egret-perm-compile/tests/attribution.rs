@@ -2,10 +2,10 @@
 //! NAME back to the `perm` model object that minted it. Pure function, no DB.
 //!
 //! One test per shape the compiler actually mints (read at the minting
-//! sites, not assumed): `grants.rs:451`, `rules.rs:339`/`:445` (bare rule),
-//! `rules.rs:317-326` (StarRocks per-column tag expansion, row-filter and
-//! mask arities), `clearance.rs:307` (bare clearance),
-//! `clearance.rs:354` (StarRocks per-column clearance expansion) — plus every
+//! sites, not assumed): `ranger/grants.rs` (grant policy name), `ranger/rules.rs` (bare rule),
+//! `ranger/rules.rs` (StarRocks per-column tag expansion, row-filter and
+//! mask arities), `ranger::withhold::render` (bare clearance),
+//! `ranger::withhold::starrocks_deny` (StarRocks per-column clearance expansion) — plus every
 //! no-model-object shape that is LIVE in the cluster today and must come
 //! back `None` cleanly rather than erroring or matching wrong.
 
@@ -97,7 +97,7 @@ fn rule_locator_survives_hyphenated_catalog_name() {
 
 #[test]
 fn clearance_bare_tag_id() {
-    // clearance.rs:307 — Trino: one tag-service DENY per gated tag.
+    // ranger::withhold::render — Trino: one tag-service DENY per gated tag.
     let tag_id = Uuid::new_v4();
     let name = format!("{COMPILER_CLEARANCE_PREFIX}{tag_id}");
     assert_eq!(
@@ -111,7 +111,7 @@ fn clearance_bare_tag_id() {
 
 #[test]
 fn clearance_per_column_locator() {
-    // clearance.rs:354-356 — StarRocks per-column expansion.
+    // ranger::withhold::starrocks_deny — StarRocks per-column expansion.
     let tag_id = Uuid::new_v4();
     let name = format!("{COMPILER_CLEARANCE_PREFIX}{tag_id}-analytics.public.customers.email");
     assert_eq!(
@@ -125,7 +125,7 @@ fn clearance_per_column_locator() {
 
 #[test]
 fn the_engine_wide_materialized_view_deny_is_attributed() {
-    // clearance.rs `mv_deny_inputs` (view governance A3, Task 3 review M-4):
+    // ranger::withhold `mv_deny_input` (view governance A3, Task 3 review M-4):
     // one `perm-clearance-mv` per StarRocks profile, which carries no tag id.
     assert_eq!(
         attribute_policy_name(&format!("{COMPILER_CLEARANCE_PREFIX}mv")),

@@ -132,7 +132,9 @@ async fn admin(db: &Db) -> (Uuid, String) {
     (id, name)
 }
 
-/// A Trino profile whose `egret-admin` names `users`.
+/// A Trino profile whose `egret-admin` names `users`, with a qualifying
+/// (impersonate-mode) Trino engine bound: convergence keeps `egret-admin` only
+/// on such a profile (governance SP2a, D2).
 async fn seeded_service(db: &Db, users: &[String]) -> i64 {
     let policy = PolicyStore::new(db.clone());
     egret_policy::seed_trino(&policy).await.expect("def");
@@ -143,10 +145,32 @@ async fn seeded_service(db: &Db, users: &[String]) -> i64 {
         .expect("service");
     let mut users = users.to_vec();
     users.sort();
-    policy
-        .seed_admin_all_access(svc.id, &name, "trino", &users)
+    // The rows as an arrangement (convergence, their only writer, derives
+    // their users from the store): the bodies the def builds for `users`.
+    for (policy_name, body) in
+        egret_policy::default_policies::admin_all_access_bodies("trino", &name, &users)
+            .expect("bodies")
+    {
+        sqlx::query(
+            "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb, managed_by) \
+             VALUES ($1, $2, $3, 'infra')",
+        )
+        .bind(svc.id)
+        .bind(&policy_name)
+        .bind(&body)
+        .execute(&db.pool)
         .await
         .expect("seed");
+    }
+    sqlx::query(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1, 'trino', 'egret', '{}'::jsonb, $2)",
+    )
+    .bind(unique("cp-engine").replace('_', "-"))
+    .bind(svc.id)
+    .execute(&db.pool)
+    .await
+    .expect("engine");
     svc.id
 }
 
