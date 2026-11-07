@@ -4,10 +4,16 @@
 #
 # Each stdin line is one job: `label TAB sid TAB user TAB original-user TAB sql`, `-` for no
 # original user (a tab is IFS whitespace: an empty field would collapse). The statement
-# goes over Trino's client protocol to 127.0.0.1:8080 with `X-Trino-User: user` and, when
-# original-user is set, `X-Trino-Original-User: original-user`. That second header is what makes
-# Trino authorize an impersonation (ImpersonateUser): measured on both engines, the CLI's
-# `--user A --session-user B` over insecure HTTP claims B outright and checks nothing.
+# goes over Trino's client protocol to 127.0.0.1:8080 with `X-Trino-User: user` and
+# `X-Trino-Original-User: original-user`. That second header is what makes Trino authorize an
+# impersonation (ImpersonateUser) of user by original-user.
+#
+# Authentication (port-8080 hardening, A5): both engines refuse authentication over plain HTTP
+# (allow-insecure-over-http=false), so every request is authenticated as the delegator (Basic,
+# password in the environment variable TRINO_DELEGATOR_PASSWORD, see trino-auth.sh) and carries
+# `X-Forwarded-Proto: https`, the supported path on 8080. A job without an original user runs as
+# egret's own query path does: `X-Trino-Original-User: egret_delegator`, `X-Trino-User: user`.
+# Trino then writes every nextUri as https://; its path is followed on 8080.
 #
 # The sql `KILL` is the kill_query family. A long query is started as ANOTHER user than the
 # job's: the admin ($1), or, when the job's user is the admin, $2. Trino skips the access check
@@ -22,33 +28,41 @@
 set -u
 ADMIN=$1
 OTHER=$2
-URL=http://127.0.0.1:8080/v1/statement
+BASE=http://127.0.0.1:8080
+URL=$BASE/v1/statement
+DELEGATOR=egret_delegator # egret_core::engine_principals::DELEGATOR_PRINCIPAL
 DEADLINE=${LAYER2_QUERY_DEADLINE:-300} # seconds one statement may take, all pages included
 
 harness() { printf '{"error":{"errorName":"HARNESS","message":"layer2 harness: %s"}}\n' "$1"; }
 
+# tcurl USER ORIGINAL-USER [curl args...]: curl as the delegator over the forwarded-https path.
+# --fail: a refused request (401/403) is a harness failure, never a protocol response.
+tcurl() {
+  u=$1 o=$2
+  shift 2
+  curl -sS --fail --max-time 60 -u "$DELEGATOR:$TRINO_DELEGATOR_PASSWORD" -H 'X-Forwarded-Proto: https' \
+    -H "X-Trino-Original-User: $o" -H "X-Trino-User: $u" "$@"
+}
+
 # $1 = user, $2 = original user or "", $3 = sql; prints each response on its own line.
 run() {
   start=$(date +%s)
-  if [ -n "$2" ]; then
-    r=$(curl -sS --max-time 60 -X POST "$URL" -H "X-Trino-User: $1" -H "X-Trino-Original-User: $2" \
-      -H "X-Trino-Source: egret-layer2" --data-binary "$3" 2>&1) || { harness "curl POST failed"; return; }
-  else
-    r=$(curl -sS --max-time 60 -X POST "$URL" -H "X-Trino-User: $1" -H "X-Trino-Source: egret-layer2" \
-      --data-binary "$3" 2>&1) || { harness "curl POST failed"; return; }
-  fi
+  o=${2:-$DELEGATOR}
+  [ -n "${TRINO_DELEGATOR_PASSWORD:-}" ] || { harness "TRINO_DELEGATOR_PASSWORD is not set"; return; }
+  r=$(tcurl "$1" "$o" -X POST "$URL" -H "X-Trino-Source: egret-layer2" --data-binary "$3" 2>&1) \
+    || { harness "curl POST failed: $(printf '%s' "$r" | tr -d '\n"\\' | cut -c1-200)"; return; }
   while :; do
     r=$(printf '%s' "$r" | tr -d '\n')
     [ -z "$r" ] && { harness "empty response"; return; }
     printf '%s\n' "$r"
-    n=$(printf '%s' "$r" | sed -n 's/.*"nextUri":"\([^"]*\)".*/\1/p')
+    n=$(printf '%s' "$r" | sed -n 's/.*"nextUri":"\([^"]*\)".*/\1/p' | sed 's#^https\{0,1\}://[^/]*##')
     [ -z "$n" ] && break
     if [ $(( $(date +%s) - start )) -gt "$DEADLINE" ]; then
-      curl -sS --max-time 10 -X DELETE "$n" -H "X-Trino-User: $1" >/dev/null 2>&1
+      tcurl "$1" "$o" --max-time 10 -X DELETE "$BASE$n" >/dev/null 2>&1
       harness "statement outlived ${DEADLINE}s"
       return
     fi
-    r=$(curl -sS --max-time 60 "$n" -H "X-Trino-User: $1" 2>&1) || { harness "curl GET failed"; return; }
+    r=$(tcurl "$1" "$o" "$BASE$n" 2>&1) || { harness "curl GET failed"; return; }
   done
 }
 
