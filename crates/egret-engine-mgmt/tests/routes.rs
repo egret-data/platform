@@ -17412,7 +17412,8 @@ async fn security_reapply_needed(f: &Fixture, token: &str, id: Uuid) -> serde_js
 
 #[tokio::test]
 async fn a_trino_engine_applied_before_the_hardening_asks_to_be_re_applied_until_it_is() {
-    // Arrange
+    // Arrange: an open (delegation "none") engine, which the old render left
+    // open on port 8080, so only the revision create writes keeps it unflagged.
     let Some((f, _port)) = setup_external().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
@@ -17420,39 +17421,23 @@ async fn a_trino_engine_applied_before_the_hardening_asks_to_be_re_applied_until
     let token = session_for(&f, "sec_rev_admin", true).await;
     let wh_id = seed_provisioned_warehouse(&f).await;
     let name = engine_name("sec-rev");
-    let id = create_trino(&f, &token, &name, wh_id, "483", None).await;
+    let mut body = trino_body(&name, wh_id, "483", None);
+    body["trinoConfig"] = serde_json::json!({ "delegationMode": "none" });
+    let (status, j) = call(&f, "POST", "/engines", &token, Some(body)).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
     assert_eq!(
         security_reapply_needed(&f, &token, id).await,
         false,
         "creating an engine applies it with the current revision"
     );
 
-    // Act: the engine as it was before the hardening (revision 0). A fresh
-    // engine is jwt-only with no human password user, which the old render
-    // already closed on port 8080 and so is never flagged ...
+    // Act: the engine as it was before the hardening (revision 0).
     sqlx::query("UPDATE engine_mgmt.engines SET applied_security_rev = 0 WHERE id = $1")
         .bind(id)
         .execute(&f.db.pool)
         .await
         .unwrap();
-    assert_eq!(
-        security_reapply_needed(&f, &token, id).await,
-        false,
-        "a jwt-only engine without password users was already closed"
-    );
-    // ... while a human password user made it `PASSWORD,JWT`, which was open.
-    let secret = seed_secret(&f, "s3cret").await;
-    sqlx::query(
-        "UPDATE engine_mgmt.engines SET spec = jsonb_set(spec, \
-         '{trinoConfig,auth,passwordUsers}', \
-         jsonb_build_array(jsonb_build_object('username', 'ann', 'secretRef', $2::text)), \
-         true) WHERE id = $1",
-    )
-    .bind(id)
-    .bind(secret.to_string())
-    .execute(&f.db.pool)
-    .await
-    .unwrap();
 
     // Assert
     assert_eq!(security_reapply_needed(&f, &token, id).await, true);
@@ -17485,6 +17470,195 @@ async fn a_trino_engine_applied_before_the_hardening_asks_to_be_re_applied_until
         false,
         "a successful apply records the current revision"
     );
+}
+
+#[tokio::test]
+async fn a_jwt_only_engine_is_flagged_only_once_it_has_password_users() {
+    // Arrange: a default create is jwt-only with no human password user,
+    // which the old render already closed on port 8080.
+    let Some((f, _port)) = setup_external().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sec_rev_jwt_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let id = create_trino(&f, &token, &engine_name("sec-rev-jwt"), wh_id, "483", None).await;
+    sqlx::query("UPDATE engine_mgmt.engines SET applied_security_rev = 0 WHERE id = $1")
+        .bind(id)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        security_reapply_needed(&f, &token, id).await,
+        false,
+        "a jwt-only engine without password users was already closed"
+    );
+
+    // Act: a human password user made it `PASSWORD,JWT`, which was open.
+    let secret = seed_secret(&f, "s3cret").await;
+    sqlx::query(
+        "UPDATE engine_mgmt.engines SET spec = jsonb_set(spec, \
+         '{trinoConfig,auth,passwordUsers}', \
+         jsonb_build_array(jsonb_build_object('username', 'ann', 'secretRef', $2::text)), \
+         true) WHERE id = $1",
+    )
+    .bind(id)
+    .bind(secret.to_string())
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+
+    // Assert
+    assert_eq!(security_reapply_needed(&f, &token, id).await, true);
+}
+
+/// The backfill statement of migration 0215, scoped to one engine so a test
+/// does not rewrite rows other tests share the table with.
+async fn run_0215_backfill_for(f: &Fixture, id: Uuid) {
+    const MIGRATION: &str = include_str!("../../../migrations/0215_engine_security_rev.sql");
+    let start = MIGRATION
+        .find("UPDATE engine_mgmt.engines")
+        .expect("0215 carries the auth backfill");
+    let stmt = MIGRATION[start..].trim_end().trim_end_matches(';');
+    let res = sqlx::query(sqlx::AssertSqlSafe(format!("{stmt} AND id = $1")))
+        .bind(id)
+        .execute(&f.db.pool)
+        .await
+        .expect("run the 0215 backfill");
+    assert_eq!(res.rows_affected(), 1, "the legacy row is backfilled");
+}
+
+/// Final review I1: a legacy impersonate row with no auth block, re-applied
+/// through a path that does not persist the spec (rotate-secrets). After the
+/// 0215 backfill and that apply, the monitor signs in as `egret-monitor` over
+/// the proxied hop, and the workspace connection is bound to the delegator
+/// secret the apply minted (before the fix only PUT re-materialized it).
+#[tokio::test]
+async fn a_legacy_no_auth_engine_re_applied_by_rotation_binds_its_delegator_and_monitor() {
+    // Arrange
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sec_rev_legacy_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = engine_name("sec-rev-legacy");
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &name,
+        wh_id,
+        serde_json::json!({ "delegationMode": "impersonate" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    // The row as stored before the hardening: no auth block, so no delegator.
+    sqlx::query(
+        "UPDATE engine_mgmt.engines SET spec = spec #- '{trinoConfig,auth}', \
+         delegator_secret_id = NULL, applied_security_rev = 0 WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    let ws = seed_workspace(&f).await;
+    let (status, j) = call(
+        &f,
+        "PUT",
+        &format!("/engines/{id}/workspaces"),
+        &token,
+        Some(serde_json::json!({ "workspaceIds": [ws] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "assign; body={j}");
+    let bound = || async {
+        sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT secret_id FROM query.databases WHERE workspace_id = $1 AND engine_id = $2",
+        )
+        .bind(ws)
+        .bind(id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("materialized connection")
+    };
+    assert_eq!(
+        bound().await,
+        None,
+        "baseline: a legacy connection has no secret"
+    );
+
+    // Act: the migration's backfill, then a re-apply that is not a PUT.
+    run_0215_backfill_for(&f, id).await;
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{id}/rotate-secrets"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "rotate; body={j}");
+
+    // Assert: the stored spec agrees with the render.
+    let (spec, delegator): (serde_json::Value, Option<Uuid>) =
+        sqlx::query_as("SELECT spec, delegator_secret_id FROM engine_mgmt.engines WHERE id = $1")
+            .bind(id)
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        spec["trinoConfig"]["auth"],
+        serde_json::json!({ "password": {} }),
+        "{spec}"
+    );
+    let delegator = delegator.expect("the apply provisioned the delegator");
+    // Assert: the workspace connection is bound to that delegator secret.
+    assert_eq!(
+        bound().await,
+        Some(delegator),
+        "a non-PUT re-apply must re-materialize the workspace connection"
+    );
+    // Assert: the monitor signs in as egret-monitor over the proxied hop.
+    let transport = Arc::new(Trino483Transport::default());
+    let app = docker_app(&f, transport.clone(), FakeMinter::default());
+    let resp = app
+        .oneshot(req("GET", &format!("/engines/{id}/cluster"), &token, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "cluster summary; body={j}");
+    let calls = transport.calls.lock().unwrap();
+    assert!(!calls.is_empty());
+    for (method, path, headers) in calls.iter() {
+        let basic = headers
+            .iter()
+            .find(|(k, _)| k == "Authorization")
+            .and_then(|(_, v)| v.strip_prefix("Basic "))
+            .unwrap_or_else(|| panic!("{method} {path} sends Basic: {headers:?}"));
+        use base64::Engine as _;
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(basic)
+            .expect("base64");
+        assert!(
+            String::from_utf8(raw)
+                .unwrap()
+                .starts_with("egret-monitor:"),
+            "{method} {path} signs in as egret-monitor"
+        );
+        assert!(
+            headers
+                .iter()
+                .any(|(k, v)| k == "X-Forwarded-Proto" && v == "https"),
+            "{method} {path}: {headers:?}"
+        );
+    }
 }
 
 #[tokio::test]

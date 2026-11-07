@@ -950,7 +950,9 @@ pub(crate) async fn apply_built(
 
 /// [`apply_built`], also answering whether the applied mechanism could not be
 /// recorded: `Ok(Some(why))` when the provisioner accepted the apply but the
-/// `applied_mechanism` write failed. Every apply route logs that and moves on
+/// `applied_mechanism` write failed (or, for Trino, the security revision
+/// write or the workspace-connection re-materialization; see
+/// [`finish_apply`]). Every apply route logs that and moves on
 /// (its apply did land); a mechanism switch's re-apply reports it as a failure
 /// of that engine instead (SP2b Task 20F, T15 M1), because the OPA surface
 /// decides from that record which profiles it still serves, so the switch
@@ -1070,6 +1072,28 @@ async fn finish_apply(
             let note = format!(
                 "applied, but the security revision ({TRINO_SECURITY_REV}) could not be recorded: {e}"
             );
+            not_recorded = Some(match not_recorded {
+                Some(prev) => format!("{prev}; {note}"),
+                None => note,
+            });
+        }
+    }
+    // Every successful Trino apply re-materializes the engine's workspace
+    // connections from the row as it now stands (port-8080 hardening, final
+    // review I1). The build may have minted the `egret_delegator` secret (a
+    // legacy row with no auth block becomes impersonate-capable once
+    // normalised), and only the PUT routes re-materialized: a re-apply through
+    // rotate, a catalog change, restart-recreate or a mechanism switch left the
+    // workspace connection bound to no secret. Doing it on every apply, not
+    // only on a fresh mint, lets a retry repair a connection an earlier apply
+    // could not. A failure does not turn a landed apply into an error: it is
+    // logged and noted like the records above, and the next apply retries it.
+    if res.is_ok() && !engine.is_starrocks() {
+        if let Err(e) = st.assignment.rematerialize_for_engine(engine.id).await {
+            tracing::error!(engine = %engine.name, error = %e,
+                "applied, but the workspace connections could not be re-materialized");
+            let note =
+                format!("applied, but the workspace connections could not be re-materialized: {e}");
             not_recorded = Some(match not_recorded {
                 Some(prev) => format!("{prev}; {note}"),
                 None => note,
@@ -8736,19 +8760,21 @@ mod tests {
         let imp = engine_with_mode("impersonate");
         assert!(imp.supports_delegation()); // ⇒ TLS provisioned
         assert!(imp.is_impersonate_delegation()); // ⇒ delegator + delegator policies
-        assert!(!imp.is_jwt_delegation()); // ⇒ monitor NOT skipped
+        assert!(!imp.is_jwt_only_coordinator()); // ⇒ monitor NOT skipped
 
         // jwt: delegation-capable (jwt auth present), TLS provisioned, but NO
         // delegator (impersonate-only) and monitor SKIPPED (JWT-only coordinator).
         let jwt = engine_with_mode("jwt");
         assert!(jwt.supports_delegation()); // ⇒ TLS provisioned
         assert!(!jwt.is_impersonate_delegation()); // ⇒ no delegator user/policies
-        assert!(jwt.is_jwt_delegation()); // ⇒ monitor skipped
+        assert!(jwt.is_jwt_only_coordinator()); // ⇒ monitor skipped
 
-        // a jwt engine with NO jwt auth is NOT delegation-capable ⇒ no TLS.
+        // a jwt engine with NO jwt auth is NOT delegation-capable ⇒ no TLS, and
+        // its coordinator renders PASSWORD ⇒ monitor NOT skipped.
         let mut jwt_no_auth = dummy_engine();
         jwt_no_auth.spec = serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } });
         assert!(!jwt_no_auth.supports_delegation());
+        assert!(!jwt_no_auth.is_jwt_only_coordinator());
     }
 
     #[test]
