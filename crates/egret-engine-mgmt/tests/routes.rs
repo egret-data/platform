@@ -1420,6 +1420,88 @@ async fn create_and_get_engine() {
     );
 }
 
+/// Port-8080 hardening: a Trino engine created with no `trinoConfig.auth` is
+/// stored with an auth object (so it always provisions an authenticator), and a
+/// PUT that drops `auth` stores it back.
+#[tokio::test]
+async fn trino_engine_create_and_update_always_store_an_auth_object() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_auth_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let body = |trino_config: Option<serde_json::Value>| {
+        let mut b = serde_json::json!({
+            "name": name,
+            "warehouseId": wh_id,
+            "coordinatorReplicas": 1,
+            "workerReplicas": 1,
+            "cpuMin": "1",
+            "cpuMax": "2",
+            "memory": "4Gi",
+        });
+        if let Some(tc) = trino_config {
+            b["trinoConfig"] = tc;
+        }
+        b
+    };
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/engines", &token, Some(body(None))))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    assert!(
+        j["spec"]["trinoConfig"]["auth"].is_object(),
+        "a create without auth must store an auth object; body={j}"
+    );
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    // A PUT whose trinoConfig carries no `auth` must not drop it.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}"),
+            &token,
+            Some(body(Some(serde_json::json!({
+                "coordinator": { "replicas": 1 },
+                "worker": { "replicas": 1 }
+            })))),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "update engine; body={j}");
+    assert!(
+        j["spec"]["trinoConfig"]["auth"].is_object(),
+        "an update that drops auth must store it back; body={j}"
+    );
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &format!("/engines/{engine_id}"), &token, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "get engine; body={j}");
+    assert!(
+        j["spec"]["trinoConfig"]["auth"].is_object(),
+        "the stored spec keeps the auth object; body={j}"
+    );
+}
+
 /// The register picker's source: exactly the modelled (type, version) pairs, in
 /// the order egret declares them; and a provisioned engine reports its image.
 #[tokio::test]

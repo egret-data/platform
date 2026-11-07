@@ -639,14 +639,18 @@ pub(crate) async fn build_provision_req_with(
     for (i, a) in attached.iter().enumerate() {
         catalogs.push(crate::catalog_apply::trino_catalog_req(st, a, &format!("C{i}")).await?);
     }
-    let mut config = build_trino_config(&engine.spec);
+    // A row stored before every Trino engine authenticated may lack an auth
+    // block: normalise a clone so the apply renders authentication anyway.
+    let mut spec = engine.spec.clone();
+    normalise_trino_auth(&mut spec);
+    let mut config = build_trino_config(&spec);
     // Resolve the fault-tolerant exchange storage connection (if any) into S3
     // coords + creds, mirroring the egret-warehouse arm's storage resolution.
     config.fault_tolerant =
-        resolve_fault_tolerant(st, &engine.spec["trinoConfig"], &mut config.env).await?;
+        resolve_fault_tolerant(st, &spec["trinoConfig"], &mut config.env).await?;
     // Resolve the RAW auth block (password secrets → bcrypt hashes, JWKS default),
     // mirroring the fault-tolerant storage resolution. Ingress is parsed inline.
-    config.auth = resolve_auth(st, &engine.spec["trinoConfig"]).await?;
+    config.auth = resolve_auth(st, &spec["trinoConfig"]).await?;
     // TLS for ANY delegation-capable engine (both modes): generate/reuse a
     // self-signed coordinator cert + mount the keystore so the coordinator serves
     // https and the connector can pin the cert. impersonate: encrypts the wire so
@@ -2044,6 +2048,26 @@ fn parse_prometheus_trigger(v: &serde_json::Value) -> Option<PrometheusTriggerRe
     })
 }
 
+/// Every provisioned Trino engine authenticates (port-8080 hardening, spec
+/// 2026-11-07 A1): a spec without an auth object is treated as PASSWORD auth
+/// with no human users, which still provisions `egret-monitor` and, in
+/// impersonate mode, `egret_delegator`. A jwt-delegation engine gets no monitor
+/// (its coordinator is JWT-only), so it must carry a `jwt` block as well, or it
+/// would render no authentication type at all. Idempotent; a spec with no
+/// `trinoConfig` (StarRocks) is left untouched.
+pub(crate) fn normalise_trino_auth(spec: &mut serde_json::Value) {
+    if let Some(tc) = spec.get_mut("trinoConfig").and_then(|v| v.as_object_mut()) {
+        if !tc.get("auth").is_some_and(serde_json::Value::is_object) {
+            tc.insert("auth".into(), serde_json::json!({ "password": {} }));
+        }
+        if tc.get("delegationMode").and_then(|v| v.as_str()) == Some("jwt") {
+            if let Some(a) = tc.get_mut("auth").and_then(|v| v.as_object_mut()) {
+                a.entry("jwt").or_insert_with(|| serde_json::json!({}));
+            }
+        }
+    }
+}
+
 /// Resolve the RAW `trinoConfig.auth`
 /// `{ passwordUsers: [{username, secretRef}], jwt?: {jwksUri?, requiredAudience?} }`
 /// into an [`AuthReq`]: each password secret is resolved + bcrypted so the
@@ -2158,9 +2182,10 @@ pub(crate) async fn monitor_password_for(st: &CpState, engine: &Engine) -> Resul
 }
 
 /// Inject the `egret-monitor` password entry into an engine's auth block so the
-/// native monitor can authenticate. No-op when `auth` is `None`: this must NOT
-/// turn auth on for engines that have none — it only rides along when auth is
-/// already enabled. Uses the same `$2b$`→`$2y$` relabel as the human users so
+/// native monitor can authenticate. Still a no-op when `auth` is `None`, but
+/// that no longer happens for a provisioned Trino engine: [`normalise_trino_auth`]
+/// gives every one an auth block, so this is what turns PASSWORD authentication
+/// on for an engine with no human users. Uses the same `$2b$`→`$2y$` relabel as the human users so
 /// Trino's jBCrypt file authenticator accepts the hash.
 fn inject_monitor_user(auth: &mut Option<AuthReq>, password: &str) -> Result<(), CpError> {
     let Some(auth) = auth.as_mut() else {
@@ -2178,8 +2203,9 @@ fn inject_monitor_user(auth: &mut Option<AuthReq>, password: &str) -> Result<(),
 
 /// Inject the `egret_delegator` PASSWORD user (bcrypt of `password`) into an
 /// engine's auth block so egret can basic-auth as it for impersonate-mode
-/// delegated queries. No-op when auth is `None` (must not turn auth on). Uses the
-/// same `$2b$`→`$2y$` relabel as the human users so Trino's jBCrypt file
+/// delegated queries. Still a no-op when auth is `None`, which no longer happens
+/// for a provisioned Trino engine ([`normalise_trino_auth`] gives each an auth
+/// block). Uses the same `$2b$`→`$2y$` relabel as the human users so Trino's jBCrypt file
 /// authenticator accepts the hash.
 fn inject_delegator_user(auth: &mut Option<AuthReq>, password: &str) -> Result<(), CpError> {
     let Some(auth) = auth.as_mut() else {
@@ -3539,6 +3565,7 @@ async fn create_engine(
         "imageVersion": image_version,
     });
     spec["trinoConfig"] = trino_config;
+    normalise_trino_auth(&mut spec);
     sync_flat_replicas(&mut spec);
     validate_spec_resource_groups(&spec)?;
     // Kubernetes must be configured before anything is minted or rendered.
@@ -6055,6 +6082,7 @@ async fn update_trino_engine(
         }
     }
     preserve_trino_delegation_mode(&mut spec, &engine.spec);
+    normalise_trino_auth(&mut spec);
     sync_flat_replicas(&mut spec);
     validate_spec_resource_groups(&spec)?;
     // Validate an optional ingress-TLS secret reference (400 on a missing /
@@ -8292,6 +8320,135 @@ mod tests {
         let mut auth: Option<AuthReq> = None;
         inject_monitor_user(&mut auth, "pw").unwrap();
         assert!(auth.is_none());
+    }
+
+    #[test]
+    fn normalise_trino_auth_adds_password_block_when_absent() {
+        let mut spec = serde_json::json!({"trinoConfig": {}});
+        normalise_trino_auth(&mut spec);
+        assert_eq!(
+            spec["trinoConfig"]["auth"],
+            serde_json::json!({"password": {}})
+        );
+        // A non-object auth (null / string) is replaced too.
+        let mut spec = serde_json::json!({"trinoConfig": {"auth": null}});
+        normalise_trino_auth(&mut spec);
+        assert!(spec["trinoConfig"]["auth"].is_object());
+        // Idempotent.
+        let again = spec.clone();
+        normalise_trino_auth(&mut spec);
+        assert_eq!(spec, again);
+    }
+
+    #[test]
+    fn normalise_trino_auth_keeps_an_existing_auth_object() {
+        let auth = serde_json::json!({"passwordUsers": [{"username": "bob", "secretRef": "x"}]});
+        let mut spec = serde_json::json!({"trinoConfig": {"auth": auth.clone()}});
+        normalise_trino_auth(&mut spec);
+        assert_eq!(spec["trinoConfig"]["auth"], auth);
+        // An explicit empty object is also kept as is.
+        let mut spec = serde_json::json!({"trinoConfig": {"auth": {}}});
+        normalise_trino_auth(&mut spec);
+        assert_eq!(spec["trinoConfig"]["auth"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn normalise_trino_auth_leaves_a_starrocks_spec_untouched() {
+        let mut spec = serde_json::json!({"starrocksConfig": {"delegation": {"mode": "none"}}});
+        let before = spec.clone();
+        normalise_trino_auth(&mut spec);
+        assert_eq!(spec, before);
+    }
+
+    #[test]
+    fn normalise_trino_auth_gives_a_jwt_engine_a_jwt_block() {
+        // jwt delegation gets no egret-monitor, so without a jwt block the
+        // engine would render no authentication type.
+        let mut spec = serde_json::json!({"trinoConfig": {"delegationMode": "jwt"}});
+        normalise_trino_auth(&mut spec);
+        assert!(spec["trinoConfig"]["auth"]["jwt"].is_object());
+        // An admin-provided jwt block is not clobbered.
+        let mut spec = serde_json::json!({"trinoConfig": {
+            "delegationMode": "jwt", "auth": {"jwt": {"jwksUri": "https://x/jwks"}}}});
+        normalise_trino_auth(&mut spec);
+        assert_eq!(
+            spec["trinoConfig"]["auth"]["jwt"]["jwksUri"],
+            "https://x/jwks"
+        );
+    }
+
+    /// True when the provisioner would render `http-server.authentication.type`
+    /// for this auth block (mirrors `egret_provisioner::trino::auth_type`).
+    fn renders_authentication_type(auth: &Option<AuthReq>) -> bool {
+        auth.as_ref()
+            .is_some_and(|a| !a.password_users.is_empty() || a.jwt.is_some())
+    }
+
+    /// The invariant of the port-8080 hardening: EVERY provisioned Trino engine
+    /// renders an authentication type, whatever spec shape is stored, including
+    /// a row stored before the hardening (no `auth` block at all).
+    #[tokio::test]
+    async fn every_provisioned_trino_engine_renders_an_authentication_type() {
+        let Some(mut st) = test_state().await else {
+            eprintln!("skipping every_provisioned_trino_engine_renders_an_authentication_type: DATABASE_URL not set");
+            return;
+        };
+        st.engine_jwks_uri = "https://idp/jwks".into();
+        let secret_id = st
+            .secrets
+            .create(
+                None,
+                &format!("auth_pw_{}", Uuid::new_v4().simple()),
+                None,
+                "human-pw",
+            )
+            .await
+            .expect("create password secret");
+        let shapes = [
+            (
+                "impersonate, no auth",
+                serde_json::json!({"delegationMode": "impersonate"}),
+            ),
+            (
+                "impersonate, empty password block",
+                serde_json::json!({"delegationMode": "impersonate", "auth": {"password": {}}}),
+            ),
+            ("no delegationMode at all", serde_json::json!({})),
+            (
+                "jwt mode, no jwt block",
+                serde_json::json!({"delegationMode": "jwt"}),
+            ),
+            (
+                "jwt mode, jwt block",
+                serde_json::json!({"delegationMode": "jwt", "auth": {"jwt": {}}}),
+            ),
+            (
+                "human password users",
+                serde_json::json!({"auth": {"passwordUsers": [
+                    {"username": "bob", "secretRef": secret_id.to_string()}]}}),
+            ),
+        ];
+        for (label, trino_config) in shapes {
+            let engine = st
+                .engine_mgmt
+                .create_engine(
+                    &format!("trino-auth-{}", Uuid::new_v4().simple()),
+                    "trino",
+                    "egret-engines",
+                    &serde_json::json!({"imageVersion": "483", "trinoConfig": trino_config}),
+                    None,
+                )
+                .await
+                .unwrap_or_else(|e| panic!("{label}: create engine row: {e}"));
+            let built = build_provision_req(&st, &engine)
+                .await
+                .unwrap_or_else(|e| panic!("{label}: build_provision_req: {e:?}"));
+            assert!(
+                renders_authentication_type(&built.req.config.auth),
+                "{label}: renders no authentication type: {:?}",
+                built.req.config.auth
+            );
+        }
     }
 
     /// Fix #3c: enabling the engine `jwt` block with no JWKS anywhere (platform OIDC
