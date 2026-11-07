@@ -174,7 +174,7 @@ async fn monitor_headers(
     if !engine.spec["trinoConfig"]["auth"].is_object() {
         return Ok(vec![("X-Trino-User".into(), "egret-monitor".into())]);
     }
-    let authorization = if engine.is_jwt_delegation() {
+    let authorization = if engine.is_jwt_only_coordinator() {
         let minter = st.engine_token_minter.as_ref().ok_or_else(|| {
             CpError::BadRequest(
                 "this engine accepts only egret-signed engine tokens, and no token minter \

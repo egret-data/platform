@@ -744,12 +744,13 @@ pub(crate) async fn build_provision_req_with(
             }
         }
     }
-    // Impersonate-mode delegation: when auth is on, provision the `egret_delegator`
-    // service user (generate + store its password once, inject its bcrypt into the
-    // auth block so it lands in `password.db`). Guarded on auth being enabled —
-    // without a `password.db` the delegator can't basic-auth, so impersonate
-    // delegation is meaningless (and `inject_delegator_user` no-ops). Its
-    // impersonate policy is not written here: convergence below derives it.
+    // Impersonate-mode delegation: provision the `egret_delegator` service user
+    // (generate + store its password once, inject its bcrypt into the auth block
+    // so it lands in `password.db`). Every provisioned Trino engine has an auth
+    // block (`normalise_trino_auth` above), so `config.auth.is_some()` always
+    // holds here; it stays as a guard because `inject_delegator_user` needs a
+    // block to write into. Its impersonate policy is not written here:
+    // convergence below derives it.
     // The bound profile's mechanism, as committed now (SP2b Task 15). Every
     // apply builds here, so a bind, an image change and a create onto an OPA
     // profile are all judged against the image before anything is rendered.
@@ -789,9 +790,11 @@ pub(crate) async fn build_provision_req_with(
     // after itself. `apply_built` records or discards them.
     let internal = resolve_internal_secrets(st, engine, opts.rotate_internal_secrets).await?;
     // The native monitor signs in as `egret-monitor`. Skipped for jwt-delegation
-    // engines: their coordinator is JWT-only (no PASSWORD authenticator), so a
-    // basic-auth monitor user can't authenticate — the monitor degrades there.
-    if !engine.is_jwt_delegation() {
+    // engines (jwt mode AND an `auth.jwt` block): their coordinator is JWT-only
+    // (no PASSWORD authenticator), so a basic-auth monitor user can't authenticate
+    // — the monitor degrades there. A jwt-mode spec with no jwt block is not
+    // delegation-capable and renders PASSWORD, so it gets the monitor user.
+    if !engine.is_jwt_only_coordinator() {
         if let Err(e) = inject_monitor_user(&mut config.auth, &internal.monitor) {
             discard_internal_secrets(st, &internal).await;
             return Err(e);
@@ -2051,19 +2054,15 @@ fn parse_prometheus_trigger(v: &serde_json::Value) -> Option<PrometheusTriggerRe
 /// Every provisioned Trino engine authenticates (port-8080 hardening, spec
 /// 2026-11-07 A1): a spec without an auth object is treated as PASSWORD auth
 /// with no human users, which still provisions `egret-monitor` and, in
-/// impersonate mode, `egret_delegator`. A jwt-delegation engine gets no monitor
-/// (its coordinator is JWT-only), so it must carry a `jwt` block as well, or it
-/// would render no authentication type at all. Idempotent; a spec with no
-/// `trinoConfig` (StarRocks) is left untouched.
+/// impersonate mode, `egret_delegator`. It never adds a `jwt` block: that would
+/// make the engine delegation-capable (`supports_jwt_delegation`). A jwt-mode
+/// spec with no jwt block therefore renders PASSWORD with `egret-monitor` (see
+/// `Engine::is_jwt_only_coordinator`). Idempotent; a spec with no `trinoConfig`
+/// (StarRocks) is left untouched.
 pub(crate) fn normalise_trino_auth(spec: &mut serde_json::Value) {
     if let Some(tc) = spec.get_mut("trinoConfig").and_then(|v| v.as_object_mut()) {
         if !tc.get("auth").is_some_and(serde_json::Value::is_object) {
             tc.insert("auth".into(), serde_json::json!({ "password": {} }));
-        }
-        if tc.get("delegationMode").and_then(|v| v.as_str()) == Some("jwt") {
-            if let Some(a) = tc.get_mut("auth").and_then(|v| v.as_object_mut()) {
-                a.entry("jwt").or_insert_with(|| serde_json::json!({}));
-            }
         }
     }
 }
@@ -8361,20 +8360,18 @@ mod tests {
     }
 
     #[test]
-    fn normalise_trino_auth_gives_a_jwt_engine_a_jwt_block() {
-        // jwt delegation gets no egret-monitor, so without a jwt block the
-        // engine would render no authentication type.
+    fn normalise_trino_auth_never_adds_a_jwt_block() {
+        // A jwt block would make the engine delegation-capable.
         let mut spec = serde_json::json!({"trinoConfig": {"delegationMode": "jwt"}});
         normalise_trino_auth(&mut spec);
-        assert!(spec["trinoConfig"]["auth"]["jwt"].is_object());
-        // An admin-provided jwt block is not clobbered.
-        let mut spec = serde_json::json!({"trinoConfig": {
-            "delegationMode": "jwt", "auth": {"jwt": {"jwksUri": "https://x/jwks"}}}});
-        normalise_trino_auth(&mut spec);
         assert_eq!(
-            spec["trinoConfig"]["auth"]["jwt"]["jwksUri"],
-            "https://x/jwks"
+            spec["trinoConfig"]["auth"],
+            serde_json::json!({"password": {}})
         );
+        assert!(!egret_core::engine_delegation::supports_delegation(
+            "trino",
+            &serde_json::json!({"trinoConfig": {"delegationMode": "jwt"}})
+        ));
     }
 
     /// True when the provisioner would render `http-server.authentication.type`
@@ -8448,6 +8445,24 @@ mod tests {
                 "{label}: renders no authentication type: {:?}",
                 built.req.config.auth
             );
+            if label == "jwt mode, no jwt block" {
+                // Not delegation-capable: PASSWORD with the monitor user, no JWT,
+                // and no TLS / delegation machinery.
+                let auth = built.req.config.auth.as_ref().expect("auth");
+                assert!(auth.jwt.is_none(), "{label}: must not render JWT");
+                assert!(
+                    auth.password_users
+                        .iter()
+                        .any(|u| u.username == "egret-monitor"),
+                    "{label}: must render the egret-monitor PASSWORD user"
+                );
+                assert!(built.req.config.tls.is_none(), "{label}: no TLS");
+                assert!(
+                    !engine.supports_delegation(),
+                    "{label}: not delegation-capable"
+                );
+                assert!(!engine.is_jwt_only_coordinator());
+            }
         }
     }
 

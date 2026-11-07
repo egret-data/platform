@@ -185,6 +185,15 @@ impl Engine {
         self.delegation_mode() == "jwt"
     }
 
+    /// True when the coordinator is JWT-only for egret's own callers: jwt
+    /// delegation mode AND an `auth.jwt` object. A jwt-mode spec with no jwt block
+    /// is not delegation-capable and renders PASSWORD auth like any other engine,
+    /// so it keeps its `egret-monitor` basic-auth user.
+    pub fn is_jwt_only_coordinator(&self) -> bool {
+        self.is_jwt_delegation()
+            && egret_core::engine_delegation::supports_jwt_delegation(&self.r#type, &self.spec)
+    }
+
     /// True when the engine can back a delegated (per-user) connection at all.
     /// Impersonate mode always can; jwt mode requires JWT auth enabled. A
     /// StarRocks engine with no `starrocksConfig.delegation` at all reports

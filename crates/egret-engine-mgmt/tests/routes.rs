@@ -1502,6 +1502,171 @@ async fn trino_engine_create_and_update_always_store_an_auth_object() {
     );
 }
 
+/// Create a Trino engine through the API and return its id; the body carries
+/// `trino_config` when given.
+async fn create_trino_engine_via_api(
+    f: &Fixture,
+    token: &str,
+    wh_id: Uuid,
+    name: &str,
+    trino_config: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    let mut b = serde_json::json!({
+        "name": name, "warehouseId": wh_id,
+        "coordinatorReplicas": 1, "workerReplicas": 1,
+        "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+    });
+    if let Some(tc) = trino_config {
+        b["trinoConfig"] = tc;
+    }
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/engines", token, Some(b)))
+        .await
+        .unwrap();
+    into_json(resp).await
+}
+
+async fn put_trino_engine_via_api(
+    f: &Fixture,
+    token: &str,
+    wh_id: Uuid,
+    id: &str,
+    name: &str,
+    trino_config: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    let mut b = serde_json::json!({
+        "name": name, "warehouseId": wh_id,
+        "coordinatorReplicas": 1, "workerReplicas": 1,
+        "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+    });
+    if let Some(tc) = trino_config {
+        b["trinoConfig"] = tc;
+    }
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("PUT", &format!("/engines/{id}"), token, Some(b)))
+        .await
+        .unwrap();
+    into_json(resp).await
+}
+
+/// An update must not rewrite an `auth` block the admin supplied: with no
+/// `trinoConfig` in the body the stored one is carried over, and with one the
+/// body's is stored as given.
+#[tokio::test]
+async fn trino_engine_update_keeps_existing_password_users() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_auth_keep_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let secret_id = secret_store(&f)
+        .create(
+            None,
+            &format!("pw_{}", Uuid::new_v4().simple()),
+            None,
+            "pw-1",
+        )
+        .await
+        .expect("create password secret");
+    let users = serde_json::json!([{"username": "bob", "secretRef": secret_id.to_string()}]);
+    let auth = serde_json::json!({"passwordUsers": users});
+
+    let (status, j) = create_trino_engine_via_api(
+        &f,
+        &token,
+        wh_id,
+        &name,
+        Some(serde_json::json!({"coordinator": {"replicas": 1}, "worker": {"replicas": 1}, "auth": auth, "delegationMode": "none"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = j["id"].as_str().expect("id").to_string();
+    assert_eq!(
+        j["spec"]["trinoConfig"]["auth"], auth,
+        "create keeps auth; body={j}"
+    );
+
+    // (a) PUT with no trinoConfig: the stored auth is unchanged.
+    let (status, j) = put_trino_engine_via_api(&f, &token, wh_id, &id, &name, None).await;
+    assert_eq!(status, StatusCode::OK, "update; body={j}");
+    assert_eq!(
+        j["spec"]["trinoConfig"]["auth"], auth,
+        "a PUT with no trinoConfig must keep the stored auth; body={j}"
+    );
+
+    // (b) PUT whose trinoConfig carries auth.passwordUsers: stored as given.
+    let (status, j) = put_trino_engine_via_api(
+        &f,
+        &token,
+        wh_id,
+        &id,
+        &name,
+        Some(serde_json::json!({
+            "coordinator": {"replicas": 1}, "worker": {"replicas": 1}, "auth": auth,
+            "delegationMode": "none"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "update; body={j}");
+    assert_eq!(
+        j["spec"]["trinoConfig"]["auth"], auth,
+        "a PUT with auth.passwordUsers must store it unchanged; body={j}"
+    );
+}
+
+/// (c) A create with no `auth` stores only the password block: no `jwt` is
+/// injected, so the engine does not become delegation-capable. (A jwt-mode
+/// create through the API already adds its own jwt block, or 400s without a
+/// platform JWKS, so the no-jwt-block jwt shape is covered by the build test
+/// `every_provisioned_trino_engine_renders_an_authentication_type`.)
+#[tokio::test]
+async fn trino_create_without_auth_stores_password_only_never_jwt() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_auth_jwt_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_trino_engine_via_api(
+        &f,
+        &token,
+        wh_id,
+        &name,
+        Some(serde_json::json!({
+            "coordinator": {"replicas": 1}, "worker": {"replicas": 1},
+            "delegationMode": "none"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    assert_eq!(
+        j["spec"]["trinoConfig"]["auth"],
+        serde_json::json!({"password": {}}),
+        "body={j}"
+    );
+    assert!(
+        j["spec"]["trinoConfig"]["auth"].get("jwt").is_none(),
+        "body={j}"
+    );
+}
+
 /// The register picker's source: exactly the modelled (type, version) pairs, in
 /// the order egret declares them; and a provisioned engine reports its image.
 #[tokio::test]
