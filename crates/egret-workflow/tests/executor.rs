@@ -1562,6 +1562,19 @@ fn the_truncate_is_confined_to_this_process_own_clone() {
 async fn egret_side() -> &'static Side {
     static SIDE: tokio::sync::OnceCell<Side> = tokio::sync::OnceCell::const_new();
     SIDE.get_or_init(|| async {
+        // **Package #6 fix wave 6 (final review m12): the oracle's egret runs
+        // with NO master key**, as Kestra's harness runs with no encryption
+        // key. `valids/subflow-secret-output-child` and `-parent` bank on that
+        // shared no-key path (egret refuses to store the SECRET output, as
+        // Kestra fails on the missing key; `baseline.txt`'s 2026-10-29
+        // notes). A key installed in this binary would flip both to a
+        // mismatch for reasons unrelated to egret's correctness, so it is
+        // refused here, before anything runs.
+        assert!(
+            !egret_workflow::secret_inputs::can_seal(),
+            "the oracle's egret must run without secrets.master_key: the \
+             subflow-secret-output-* banks compare its no-key refusal with Kestra's"
+        );
         let db = common::db()
             .await
             .expect("the oracle now drives a REAL executor and needs DATABASE_URL");

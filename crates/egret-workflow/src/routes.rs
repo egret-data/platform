@@ -1597,16 +1597,6 @@ pub struct ExecutionListItemDto {
     pub labels: Option<Vec<LabelDto>>,
     /// The backfill that fired this execution (W7f), `null` otherwise.
     pub backfill_id: Option<Uuid>,
-    /// The flow's `outputs:` as the execution's end evaluated them, typed by
-    /// each output's `type`; `null` when none were evaluated: the flow
-    /// declares none, the execution has not ended, or the evaluation failed
-    /// (the execution then ended `FAILED` and its logs say why). **A
-    /// `SECRET` output's value is always `******`** here, in the list and
-    /// the detail alike: the real value is kept encrypted on the server and
-    /// no response carries it. A `FILE` output is a `kestra:///` URI of the
-    /// execution's own storage, read through the execution file API.
-    #[schema(value_type = Option<Object>)]
-    pub outputs: Option<serde_json::Value>,
 }
 
 /// One execution label.
@@ -1656,7 +1646,6 @@ impl From<ExecutionRow> for ExecutionListItemDto {
             updated_at: r.updated_at,
             labels: (!own.is_empty()).then_some(own),
             backfill_id: r.backfill_id,
-            outputs: r.outputs,
         }
     }
 }
@@ -1813,6 +1802,17 @@ pub struct ExecutionDto {
     pub source: String,
     /// Every task run, in `run_ix` order — the executor's creation order.
     pub runs: Vec<TaskRunDto>,
+    /// The flow's `outputs:` as the execution's end evaluated them, typed by
+    /// each output's `type`; `null` when none were evaluated: the flow
+    /// declares none, the execution has not ended, or the evaluation failed
+    /// (the execution then ended `FAILED` and its logs say why). **A
+    /// `SECRET` output's value is always `******`** here: the real value is
+    /// kept encrypted on the server and no response carries it. A `FILE`
+    /// output is a `kestra:///` URI of the execution's own storage, read
+    /// through the execution file API. On the detail only: the list leaves
+    /// it out, since it can be up to 16 MiB per execution.
+    #[schema(value_type = Option<Object>)]
+    pub outputs: Option<serde_json::Value>,
     /// Whether the caller may resume and replay this execution: they hold
     /// `workflow:manage` in this workspace. A detail page hides both actions
     /// when this is false; the routes still check for themselves.
@@ -1847,6 +1847,7 @@ impl ExecutionDto {
             execution: ExecutionListItemDto::from(d.execution),
             source: d.source,
             runs: d.runs.into_iter().map(TaskRunDto::from).collect(),
+            outputs: d.outputs,
             can_manage,
             worker_enabled,
         }

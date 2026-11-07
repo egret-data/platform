@@ -869,7 +869,8 @@ async fn every_repository_column_reaches_the_wire() {
         // W7f: the execution's own labels and the backfill that fired it.
         "labels",
         "backfill_id",
-        // Package #6 Task B3: the flow outputs (never `secret_outputs`).
+        // Package #6 Task B3: the flow outputs (never `secret_outputs`);
+        // on the detail only since fix wave 6 (final review I4).
         "outputs",
         "source",
         "runs",
@@ -1027,7 +1028,13 @@ async fn every_repository_column_reaches_the_wire() {
         .filter(|k| {
             !matches!(
                 *k,
-                "source" | "runs" | "can_manage" | "effective_labels" | "worker_enabled"
+                "source"
+                    | "runs"
+                    | "can_manage"
+                    | "effective_labels"
+                    | "worker_enabled"
+                    // Package #6 fix wave 6 (final review I4): detail only.
+                    | "outputs"
             )
         })
         .collect();
@@ -3672,9 +3679,10 @@ async fn the_run_answer_the_flow_and_the_executions_say_whether_the_worker_runs(
 
 // ── Package #6 Task B3: `outputs` on the execution API ──────────────────────
 
-/// **The detail and the list carry the execution's flow `outputs` as stored
-/// -- a SECRET value as `******` -- and never the sealed columns** (spec D6,
-/// D9). The sealed `secret_outputs` of the execution and of its run are
+/// **The detail carries the execution's flow `outputs` as stored -- a SECRET
+/// value as `******` -- and never the sealed columns** (spec D6, D9); **the
+/// list carries no `outputs` at all** (fix wave 6, final review I4: up to
+/// 16 MiB per row). The sealed `secret_outputs` of the execution and of its run are
 /// seeded here with a recognisable plaintext marker (as if unsealed), so a
 /// projection that selected either would put the marker in the body; the
 /// body text is searched for it and for the column name. A row with no
@@ -3749,12 +3757,16 @@ async fn the_execution_api_carries_the_outputs_masked_and_never_the_sealed_colum
             .cloned()
             .unwrap_or_else(|| panic!("{eid} listed: {page}"))
     };
-    assert_eq!(
-        row(id)["outputs"],
-        serde_json::json!({"s": "******", "p": "plain", "n": 3}),
-        "the list row carries them too"
+    for eid in [id, none] {
+        assert!(
+            !row(eid).as_object().expect("a row").contains_key("outputs"),
+            "the list row carries no outputs (I4): {page}"
+        );
+    }
+    assert!(
+        !text.contains("plain"),
+        "no output value reaches the list: {text}"
     );
-    assert_eq!(row(none)["outputs"], Value::Null, "control: none evaluated");
     assert!(
         !text.contains(MARKER) && !text.contains("secret_outputs"),
         "the list carries no sealed column: {text}"

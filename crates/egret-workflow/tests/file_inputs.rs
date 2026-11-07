@@ -1297,6 +1297,57 @@ async fn a_loop_whose_copied_file_input_was_pruned_fails_its_run_naming_the_inpu
     assert_eq!(fx.state_of(root).await, "FAILED");
 }
 
+/// **Package #6 fix wave 6 (final review m5): a `Loop` failure completion
+/// keeps what the iterations that ended already appended.** Iteration 0
+/// pauses; the input's index row is pruned; resuming it ends iteration 0
+/// (its entry and counters appended), and starting iteration 1 is refused
+/// (the copied FILE input no longer exists), which fails the `Loop` run
+/// through `subflow::Completion` -- before the fix with `outputs = NULL`,
+/// wiping the list and the counters.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_loop_failure_completion_keeps_the_list_and_the_counters() {
+    let Some(fx) = fx().await else { return };
+    let src = format!(
+        "id: loop-keep\nnamespace: {NS}\ninputs:\n  - id: f\n    type: FILE\n\
+         tasks:\n  - id: each\n    type: io.kestra.plugin.core.flow.Loop\n    values: '[\"a\", \"b\"]'\n\
+         \x20   outputs:\n      - id: v\n        type: STRING\n        value: \"{{{{ item.value }}}}\"\n\
+         \x20   tasks:\n\
+         \x20     - id: wait\n        type: io.kestra.plugin.core.flow.Pause\n"
+    );
+    let flow = fx.flow(&src).await;
+    let res = fx.upload(flow, &[Part::File("f", "k.txt", b"kept")]).await;
+    assert_eq!(res.status(), 201);
+    let root = id_of(res).await;
+    fx.drain().await;
+    let first: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions WHERE parent_execution_id = $1 AND loop_index = 0",
+    )
+    .bind(root)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("iteration 0, paused");
+    prune_index(&fx, root).await;
+    egret_workflow::worker::resume_by_hand(&fx.db.pool, first)
+        .await
+        .expect("resume iteration 0");
+    fx.drain().await;
+    let (state, outputs, msg) = fx.run(root, "each").await;
+    let msg = msg.unwrap_or_default();
+    assert_eq!(state, "FAILED", "{msg}");
+    assert!(msg.starts_with("loop iteration 1: "), "{msg}");
+    let outputs = outputs.expect("the list and counters are kept");
+    assert_eq!(
+        outputs["outputs"],
+        serde_json::json!([{"item": {"value": "a", "iteration": 0}, "outputs": {"v": "a"}}]),
+        "{outputs}"
+    );
+    assert_eq!(outputs["iterationCount"], serde_json::json!(2));
+    assert_eq!(
+        outputs["terminatedIterations"],
+        serde_json::json!({"SUCCESS": 1})
+    );
+}
+
 /// **M4, the retry replay**: a `CREATE_NEW_EXECUTION` retry whose copied FILE
 /// input was pruned FAILS the run naming the input instead of replaying, and
 /// the tick answers `Ok`.

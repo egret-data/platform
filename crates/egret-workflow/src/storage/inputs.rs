@@ -222,8 +222,11 @@ impl tokio::io::AsyncRead for Guarded<'_> {
 /// Every FILE input's value must be a `kestra://` URI readable from
 /// `execution` ([`super::resolve_readable_for_read`] over
 /// [`super::readable_executions`]: the read rule, which since package #6
-/// Task B4 admits a file a waited-for `Subflow` child published) whose file name `allowedFileExtensions`
-/// accepts. Called at every execution-creating INSERT, after the row exists.
+/// Task B4 admits a file a waited-for `Subflow` child published to any
+/// execution of the readable set, so across the one trigger hop that set
+/// already crosses -- see [`super::resolve_readable_for_read`]) whose file
+/// name `allowedFileExtensions` accepts. Called at every execution-creating
+/// INSERT, after the row exists.
 ///
 /// An absent or `null` value is not checked (a default, or no value; the
 /// render decides). `uploaded` are the files [`upload_input`] stored for

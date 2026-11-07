@@ -11,10 +11,11 @@
  * each output's `type`; `null` when none were evaluated: the flow
  * declares none, the execution has not ended, or the evaluation failed
  * (the execution then ended `FAILED` and its logs say why). **A
- * `SECRET` output's value is always `******`** here, in the list and
- * the detail alike: the real value is kept encrypted on the server and
- * no response carries it. A `FILE` output is a `kestra:///` URI of the
- * execution's own storage, read through the execution file API.
+ * `SECRET` output's value is always `******`** here: the real value is
+ * kept encrypted on the server and no response carries it. A `FILE`
+ * output is a `kestra:///` URI of the execution's own storage, read
+ * through the execution file API. On the detail only: the list leaves
+ * it out, since it can be up to 16 MiB per execution.
  * @nullable
  */
-export type ExecutionListItemDtoOutputs = { [key: string]: unknown } | null;
+export type ExecutionDtoOutputs = { [key: string]: unknown } | null;

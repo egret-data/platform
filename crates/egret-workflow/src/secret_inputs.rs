@@ -282,11 +282,14 @@ fn open_named(sealed: &[u8], what: &str) -> Result<Map<String, Value>> {
 }
 
 // ---------------------------------------------------------------------------
-// SECRET outputs (package #6, spec D9): the same cipher, the same column
-// shape (`nonce || ciphertext` of one JSON object), for a `Loop` run's list
-// (`workflow.task_runs.secret_outputs`, migration 0211). Brought forward from
-// Task B4 to Task A4, which is the first writer of a `Loop`'s outputs: a
-// SECRET value is never stored in clear, not even for one task.
+// SECRET outputs (package #6, spec D9): the same cipher and the same seal
+// (`nonce || ciphertext` of one JSON object) for every SECRET output egret
+// stores (migration 0211): a flow's outputs (`executions.secret_outputs`,
+// Task B1), a `Subflow` run's copy of its child's (`task_runs.secret_outputs`,
+// Task B3) -- each ONE sealed object -- and a `Loop` run's list, which is
+// append-only frames, one sealed object per entry ([`seal_loop_entry`],
+// package #6 fix wave 6, final review I1). A SECRET value is never stored in
+// clear, not even for one task.
 // ---------------------------------------------------------------------------
 
 /// Whether this process can seal a SECRET value (`secrets.master_key` set).
@@ -306,13 +309,9 @@ pub fn no_key_for_secret_outputs(ids: &[String]) -> String {
     )
 }
 
-/// Seal `object` (one JSON object) under the installed cipher, as
-/// [`split`] seals inputs. `Err` with no cipher installed: the caller checks
-/// [`can_seal`] at evaluation, so reaching this without one is an outage.
-pub(crate) fn seal_object(object: &Map<String, Value>) -> Result<Vec<u8>> {
-    seal_object_with(object, CIPHER.get())
-}
-
+/// Seal `object` (one JSON object) under `cipher`, as [`split`] seals
+/// inputs. `Err` with no cipher installed: the caller checks [`can_seal`]
+/// at evaluation, so reaching this without one is an outage.
 fn seal_object_with(object: &Map<String, Value>, cipher: Option<&Crypto>) -> Result<Vec<u8>> {
     let cipher = cipher.ok_or_else(|| {
         Error::Internal(anyhow::anyhow!(
@@ -362,10 +361,77 @@ fn split_outputs_with(
     Ok((masked, Some(seal_object_with(&secret, cipher)?)))
 }
 
-/// Open a `Loop` run's sealed SECRET outputs: `{list position: {output id:
-/// value}}`.
+/// Open one sealed `{output id: value}` object: a flow's SECRET outputs
+/// (`executions.secret_outputs`) or a `Subflow` run's copy of its child's.
 pub fn open_outputs(sealed: &[u8]) -> Result<Map<String, Value>> {
     open_named(sealed, "outputs")
+}
+
+/// The bytes a frame's header takes: the list position and the sealed
+/// length, each a big-endian `u32`.
+const FRAME_HEADER: usize = 8;
+
+/// **One frame of a `Loop` run's append-only `task_runs.secret_outputs`**
+/// (package #6 fix wave 6, final review I1): the entry's list position, the
+/// length of its seal, and its SECRET values sealed as one `{output id:
+/// value}` object. The worker appends it in SQL (`secret_outputs ||
+/// frame`), so an iteration end seals and sends this entry's values only,
+/// never the whole list's. `Err` with no cipher installed (the caller
+/// refuses first with [`can_seal`]) or a position or seal past `u32`.
+pub(crate) fn seal_loop_entry(pos: usize, secrets: &Map<String, Value>) -> Result<Vec<u8>> {
+    seal_loop_entry_with(pos, secrets, CIPHER.get())
+}
+
+fn seal_loop_entry_with(
+    pos: usize,
+    secrets: &Map<String, Value>,
+    cipher: Option<&Crypto>,
+) -> Result<Vec<u8>> {
+    let sealed = seal_object_with(secrets, cipher)?;
+    let too_large = || {
+        Error::Internal(anyhow::anyhow!(
+            "sealing SECRET outputs: list position {pos} or its seal does not fit a frame"
+        ))
+    };
+    let pos = u32::try_from(pos).map_err(|_| too_large())?;
+    let len = u32::try_from(sealed.len()).map_err(|_| too_large())?;
+    let mut frame = Vec::with_capacity(FRAME_HEADER + sealed.len());
+    frame.extend(pos.to_be_bytes());
+    frame.extend(len.to_be_bytes());
+    frame.extend(sealed);
+    Ok(frame)
+}
+
+/// Open a `Loop` run's sealed SECRET outputs, every frame
+/// ([`seal_loop_entry`]): `{list position: {output id: value}}`. A frame
+/// that is truncated or does not open is an error, never a silently masked
+/// render.
+pub fn open_loop_outputs(frames: &[u8]) -> Result<Map<String, Value>> {
+    let mut opened = Map::new();
+    let mut rest = frames;
+    while !rest.is_empty() {
+        let truncated = || {
+            Error::Internal(anyhow::anyhow!(
+                "the sealed SECRET outputs of a Loop run are truncated"
+            ))
+        };
+        if rest.len() < FRAME_HEADER {
+            return Err(truncated());
+        }
+        let (header, body) = rest.split_at(FRAME_HEADER);
+        let pos = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+        let len = u32::from_be_bytes([header[4], header[5], header[6], header[7]]) as usize;
+        if body.len() < len {
+            return Err(truncated());
+        }
+        let (sealed, tail) = body.split_at(len);
+        opened.insert(
+            pos.to_string(),
+            Value::Object(open_named(sealed, "outputs")?),
+        );
+        rest = tail;
+    }
+    Ok(opened)
 }
 
 /// An execution's stored flow `outputs` (`workflow.executions.outputs`, the
@@ -415,7 +481,8 @@ pub(crate) fn reveal_subflow_outputs(
 }
 
 /// A `Loop` run's stored `outputs` (`{…, outputs: [{item, outputs}, …]}`)
-/// with its sealed SECRET values put back at their list positions, and those
+/// with its sealed SECRET frames ([`open_loop_outputs`]) put back at their
+/// list positions, and those
 /// values as strings, for masking what the run writes (as [`reveal`] for
 /// inputs). Only the worker's render surface calls it. A position the list
 /// does not hold (a list cleared since) is skipped.
@@ -426,7 +493,7 @@ pub(crate) fn reveal_loop_outputs(
     let Some(sealed) = sealed else {
         return Ok((outputs, Vec::new()));
     };
-    let opened = open_outputs(sealed)?;
+    let opened = open_loop_outputs(sealed)?;
     let mut outputs = outputs;
     let mut values = Vec::new();
     for (pos, secret) in opened {
@@ -494,9 +561,9 @@ mod tests {
     #[test]
     fn a_loop_runs_secret_outputs_are_sealed_by_position_and_revealed_there() {
         install_for_tests();
-        let mut sealed = Map::new();
-        sealed.insert("1".into(), json!({"s": "hunter2-out"}));
-        let sealed = seal_object(&sealed).unwrap();
+        let mut secrets = Map::new();
+        secrets.insert("s".into(), json!("hunter2-out"));
+        let sealed = seal_loop_entry(1, &secrets).unwrap();
         assert!(
             !sealed.windows(11).any(|w| w == b"hunter2-out"),
             "the column never holds the plaintext"
@@ -510,6 +577,27 @@ mod tests {
         assert_eq!(revealed["outputs"][0]["outputs"]["s"], json!(MASK));
         assert_eq!(values, vec!["hunter2-out".to_string()]);
         assert_eq!(reveal_loop_outputs(stored.clone(), None).unwrap().0, stored);
+    }
+
+    /// Fix wave 6 (final review I1): a `Loop` run's frames are append-only
+    /// -- two seals concatenated open to both positions -- and a truncated
+    /// frame is an error, never a silently masked render.
+    #[test]
+    fn a_loop_runs_frames_append_and_a_truncated_one_is_an_error() {
+        install_for_tests();
+        let mut a = Map::new();
+        a.insert("s".into(), json!("first-secret"));
+        let mut b = Map::new();
+        b.insert("s".into(), json!("third-secret"));
+        let mut column = seal_loop_entry(0, &a).unwrap();
+        column.extend(seal_loop_entry(2, &b).unwrap());
+        assert_eq!(
+            Value::Object(open_loop_outputs(&column).unwrap()),
+            json!({"0": {"s": "first-secret"}, "2": {"s": "third-secret"}})
+        );
+        assert!(open_loop_outputs(&column[..column.len() - 1]).is_err());
+        assert!(open_loop_outputs(&column[..5]).is_err());
+        assert!(seal_loop_entry_with(0, &a, None).is_err());
     }
 
     #[test]

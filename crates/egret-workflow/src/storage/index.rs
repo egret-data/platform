@@ -341,6 +341,17 @@ pub async fn resolve_readable_many(
 ///    child cannot hand its parent a third execution's file through a STRING
 ///    output.
 ///
+/// **Whose children (final review m3, recorded 2026-10-30).** Condition 1
+/// says "an execution in `readable`", and `readable` is the reader's whole
+/// read set: its loop family, its replay chain **and its trigger execution
+/// with that one's loop family**. So the widening follows the existing
+/// one-hop rule, no further: a Flow-triggered execution (any namespace of
+/// the workspace) can read a file that its SOURCE's waited-for `Subflow`
+/// child published, and a `Subflow` child can read a file a sibling child
+/// published to their common parent. Nothing beyond what that hop already
+/// reads is reached: the child must be the run's own (2) and the URI the
+/// child's own (3). Spec §6 records it.
+///
 /// Only the URI is admitted, never the child's other files. An admitted URI
 /// then resolves exactly as a readable one does (`Missing`, `Pruned`). Not
 /// used by [`super::inputs::check_file_outputs`] (an output publishes only

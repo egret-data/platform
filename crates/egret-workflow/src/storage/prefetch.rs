@@ -294,15 +294,19 @@ struct State {
     uploads_pending: BTreeMap<(Uuid, String), Vec<u8>>,
     /// The uploads done with no transaction open: `Ok`, or the outage the
     /// store answered.
-    uploaded: BTreeMap<(Uuid, String), std::result::Result<(), String>>,
+    /// `Ok` carries the size written (final review m7), which is what the
+    /// index row must record when a later attempt computed other bytes.
+    uploaded: BTreeMap<(Uuid, String), std::result::Result<u64, String>>,
 }
 
 /// What [`Prefetch::upload`] answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Upload {
     /// The object was written, with no transaction open, by an earlier
-    /// round of this call: the attempt may index it and commit.
-    Done,
+    /// round of this call: the attempt may index it and commit. Carries the
+    /// size of what was WRITTEN -- the first attempt's bytes, not this
+    /// attempt's (package #6 fix wave 6, final review m7).
+    Done(u64),
     /// Recorded: this attempt will not commit; the owner writes the object
     /// with the transaction rolled back and runs the attempt again.
     Pending,
@@ -379,7 +383,7 @@ impl Prefetch {
         let key = (workspace, object.to_string());
         if let Some(done) = s.uploaded.get(&key) {
             return match done {
-                Ok(()) => Upload::Done,
+                Ok(size) => Upload::Done(*size),
                 Err(outage) => Upload::Outage(outage.clone()),
             };
         }
@@ -477,10 +481,12 @@ impl Prefetch {
         if !uploads.is_empty() {
             let mut done = Vec::with_capacity(uploads.len());
             for ((workspace, object), bytes) in uploads {
+                let size = bytes.len() as u64;
                 let answer = store
                     .store
                     .put(&object, bytes)
                     .await
+                    .map(|_| size)
                     .map_err(|e| format!("{object} could not be written: {e}"));
                 done.push(((workspace, object), answer));
             }
@@ -927,7 +933,9 @@ mod tests {
         assert!(!pf.has_pending());
         assert_eq!(pf.rounds(), rounds + 1);
         assert_eq!(fs.store.get(&object).await.unwrap(), b"{v:1}");
-        assert_eq!(pf.upload(WS, &object, b"{v:2}".to_vec()), Upload::Done);
+        // Final review m7: the size of what was written (5 bytes), not of
+        // this attempt's bytes (6).
+        assert_eq!(pf.upload(WS, &object, b"{v:22}".to_vec()), Upload::Done(5));
         assert!(!pf.has_pending());
         pf.bind("owner-b");
         assert_eq!(pf.upload(WS, &object, b"{v:1}".to_vec()), Upload::Pending);

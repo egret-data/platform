@@ -1260,6 +1260,19 @@ async fn window_step(
         }
     };
 
+    // **The window's copy of the source's outputs, capped** (package #6 fix
+    // wave 6, final review I4): what a window stores is held to the flow
+    // outputs' 16 MiB, so the merge below starts from two bounded maps.
+    let creator_outputs = window_outputs(&source.record);
+    let cap = crate::outputs::flow_outputs_cap(l.workspace_id);
+    if let Err(message) = trigger_outputs_within(
+        creator_outputs.as_ref(),
+        cap,
+        "the dependsOn window's copy of the source's flow outputs",
+    ) {
+        return Ok(WindowStep::Done(Fate::Refused(message)));
+    }
+
     // Statement 6, insert-if-absent. A missing row cannot be created twice.
     // Package #6 Task B3: the row keeps its creator's outputs
     // ([`window_outputs`]), which migration 0158's comment still describes as
@@ -1275,7 +1288,7 @@ async fn window_step(
     .bind(&l.trigger_id)
     .bind(start)
     .bind(end)
-    .bind(window_outputs(&source.record))
+    .bind(&creator_outputs)
     .execute(sp.conn())
     .await
     .map_err(step_err)?;
@@ -1305,13 +1318,13 @@ async fn window_step(
         .bind(&l.trigger_id)
         .bind(start)
         .bind(end)
-        .bind(window_outputs(&source.record))
+        .bind(&creator_outputs)
         .execute(sp.conn())
         .await
         .map_err(step_err)?;
         (w_start, w_end) = (start, end);
         results.clear();
-        w_outputs = window_outputs(&source.record);
+        w_outputs = creator_outputs.clone();
     }
 
     // Step 3: outside the window (a daily window's off-hours, a future
@@ -1345,6 +1358,17 @@ async fn window_step(
     // Kestra's `Flow.evaluate`: the event's outputs deep-merged with the
     // window's (its creator's, keyed namespace -> flowId; see [`window_outputs`]).
     let merged = deep_merge(source.record.outputs.as_ref(), w_outputs.as_ref());
+    // Fix wave 6 (final review I4): the merge of two capped maps can still
+    // reach twice the cap, and it is stored on the fired execution
+    // (`execution_trigger`). Refused with the sizes, never a value; the
+    // window is kept, as for any refusal.
+    if let Err(message) = trigger_outputs_within(
+        merged.as_ref(),
+        cap,
+        "trigger.outputs (the event's flow outputs deep-merged with the dependsOn window's)",
+    ) {
+        return Ok(WindowStep::Done(Fate::Refused(message)));
+    }
     match start_fire(sp, ev, l, source, ctx, fired, merged.as_ref()).await? {
         Ok(render_failure) => {
             sqlx::query(
@@ -1359,6 +1383,28 @@ async fn window_step(
         }
         Err(e) => Ok(WindowStep::StartFailed(e)),
     }
+}
+
+/// **`Err(message)` when `outputs` serialises to more than `cap` bytes**
+/// (package #6 fix wave 6, final review I4): an egret-only limit, the flow
+/// outputs' 16 MiB ([`flow_outputs_cap`](crate::outputs::flow_outputs_cap)),
+/// on what a `dependsOn` window stores and on the merged `trigger.outputs` a
+/// fire stores. Kestra has no such limit. The message names `what` and the
+/// sizes, never a value.
+fn trigger_outputs_within(
+    outputs: Option<&Value>,
+    cap: usize,
+    what: &str,
+) -> std::result::Result<(), String> {
+    let bytes = outputs.map_or(0, |v| serde_json::to_vec(v).map_or(0, |b| b.len()));
+    if bytes <= cap {
+        return Ok(());
+    }
+    Err(format!(
+        "{what} would be {bytes} bytes; egret keeps at most {} of them. The listener does not \
+         fire on this event",
+        crate::worker::bytes_text(cap)
+    ))
 }
 
 /// What a `dependsOn` window keeps of the event that creates (or replaces)

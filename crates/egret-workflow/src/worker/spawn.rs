@@ -207,6 +207,7 @@ pub(super) async fn open_batch(
                     states: vec![RunState::Failed],
                     outputs: None,
                     secret_outputs: None,
+                    keep_outputs: true,
                     outputs_failed: None,
                     message: Some(format!("loop iteration {index}: {why}")),
                     stack: claim::Stack::Nested(ctx.caller()),
@@ -336,6 +337,7 @@ async fn spawn_one(
                 states: vec![RunState::Failed],
                 outputs: None,
                 secret_outputs: None,
+                keep_outputs: true,
                 outputs_failed: None,
                 message: Some(format!("loop iteration {index}: {why}")),
                 stack: claim::Stack::Nested(parent.caller()),
@@ -662,22 +664,25 @@ async fn on_execution_terminal_inner(
         // whole list: an over-cap iteration is a FAILED iteration, its
         // entry not appended and the message logged on the `Loop` run (the
         // sub-execution's own history is not rewritten after it ended).
-        let mut entry = entry;
-        if let Some(e) = &entry {
+        let mut entry = entry.map(|e| (e, 0));
+        if let Some((e, total)) = &mut entry {
             let cap = crate::outputs::loop_list_cap(ctx.workspace_id);
-            if let Err(message) = book.would_fit(e, cap) {
-                log_line(
-                    conn,
-                    ctx.workspace_id,
-                    parent_id,
-                    Some(book.run_id),
-                    LogLevel::Error,
-                    &message,
-                    &[],
-                )
-                .await?;
-                entry = None;
-                child = RunState::Failed;
+            match book.would_fit(e, cap) {
+                Ok(fits) => *total = fits,
+                Err(message) => {
+                    log_line(
+                        conn,
+                        ctx.workspace_id,
+                        parent_id,
+                        Some(book.run_id),
+                        LogLevel::Error,
+                        &message,
+                        &[],
+                    )
+                    .await?;
+                    entry = None;
+                    child = RunState::Failed;
+                }
             }
         }
         if !(transmit && terminated_in_error(child)) {
@@ -688,8 +693,8 @@ async fn on_execution_terminal_inner(
                 started_after.saturating_sub(terminated),
                 child,
             );
-            if let Some(e) = entry {
-                book.append(e);
+            if let Some((e, total)) = entry {
+                book.append(e, total)?;
             }
             book.store(conn).await?;
         }
@@ -792,68 +797,110 @@ fn map_key(rendered: &str, index: i32) -> Option<String> {
     }
 }
 
-/// A `Loop` run's `task_runs.outputs` and `secret_outputs`, read and written
-/// under the parent lock (spec D3, D4): `iterationCount`,
-/// `runningIterations`, `terminatedIterations` (state name -> count) and,
-/// once an entry was appended, `outputs` (the list, in termination order).
+/// A `Loop` run's `task_runs.outputs`, `secret_outputs` and `outputs_bytes`,
+/// read and written under the parent lock (spec D3, D4):
+/// `iterationCount`, `runningIterations`, `terminatedIterations` (state name
+/// -> count) and, once an entry was appended, `outputs` (the list, in
+/// termination order).
+///
+/// **Work per iteration end is the entry's, not the list's** (package #6 fix
+/// wave 6, final review I1). [`LoopRunBook::load`] reads the counters (the
+/// object without its list, `outputs - 'outputs'`), the list's length and
+/// the running byte total -- never the list; [`LoopRunBook::would_fit`]
+/// checks the cap from that total and this entry alone; and
+/// [`LoopRunBook::store`] appends the entry in SQL (`outputs -> 'outputs' ||
+/// entry`) and its SECRET values as one more sealed frame
+/// (`secret_outputs || frame`, [`seal_loop_entry`](crate::secret_inputs::seal_loop_entry)),
+/// never re-sealing the earlier ones. What the worker sends and receives,
+/// and what it parses, serialises and seals, is therefore the counters plus
+/// one entry at any list length; `the_loop_book_moves_one_entry_per_
+/// iteration_end_at_any_list_length` (`tests/worker.rs`) counts it.
+/// Postgres itself still writes the whole `jsonb` value (and its TOAST and
+/// WAL) on each `UPDATE`: a `jsonb` column is not updated in place. That
+/// residual is bounded by the 16 MiB cap and recorded in the spec (§7).
 struct LoopRunBook {
     execution: Uuid,
     run: RunIx,
     run_id: Uuid,
-    outputs: serde_json::Map<String, serde_json::Value>,
-    sealed: Option<serde_json::Map<String, serde_json::Value>>,
-    changed_secrets: bool,
+    /// `outputs` without its list: the three counters.
+    counters: serde_json::Map<String, serde_json::Value>,
+    /// The list's length, read in SQL: the next entry's position.
+    len: usize,
+    /// `task_runs.outputs_bytes`: the list's serialised bytes plus the clear
+    /// size of every SECRET value in it (spec D4, final review I3). `None`
+    /// until the first append.
+    bytes: Option<usize>,
+    /// This iteration end's entry, its sealed frame and the new total, set
+    /// by [`LoopRunBook::append`].
+    appended: Option<(serde_json::Value, Option<Vec<u8>>, usize)>,
+    /// The bytes this book sent to and received from the database, for the
+    /// I1 benchmark (`test-util`).
+    io: usize,
+}
+
+/// The length of `v` serialised, `0` for the impossible error (a positive
+/// cap then reads it as "no bytes").
+fn json_len(v: &serde_json::Value) -> usize {
+    serde_json::to_vec(v).map_or(0, |v| v.len())
+}
+
+impl Entry {
+    /// **The entry's size for the 16 MiB total, its SECRET values in clear**
+    /// (final review I3; as `flow_outputs::cap` counts a flow's): the
+    /// masked entry as it is stored, with each `"******"` replaced by the
+    /// size of the value it hides. So a SECRET-heavy `Loop` cannot grow its
+    /// sealed column past the cap while its masked list stays small.
+    fn size(&self) -> usize {
+        let mask = json_len(&serde_json::Value::from(crate::logs::MASK));
+        self.secrets.values().fold(json_len(&self.entry), |n, v| {
+            n.saturating_add(json_len(v)).saturating_sub(mask)
+        })
+    }
 }
 
 impl LoopRunBook {
     async fn load(conn: &mut PgConnection, execution: Uuid, run: RunIx) -> Result<Self> {
-        let (run_id, outputs, sealed): (Uuid, Option<serde_json::Value>, Option<Vec<u8>>) =
+        let (run_id, counters, len, bytes): (Uuid, Option<serde_json::Value>, i32, Option<i64>) =
             sqlx::query_as(
-                "SELECT id, outputs, secret_outputs FROM workflow.task_runs \
-                  WHERE execution_id = $1 AND run_ix = $2",
+                "SELECT id, outputs - 'outputs', \
+                        COALESCE(jsonb_array_length(outputs -> 'outputs'), 0), outputs_bytes \
+                   FROM workflow.task_runs WHERE execution_id = $1 AND run_ix = $2",
             )
             .bind(execution)
             .bind(run as i32)
             .fetch_one(&mut *conn)
             .await
             .map_err(db_err)?;
-        let outputs = match outputs {
+        let io = 16 + 4 + 8 + counters.as_ref().map_or(0, json_len);
+        let counters = match counters {
             Some(serde_json::Value::Object(m)) => m,
             _ => serde_json::Map::new(),
         };
-        let sealed = sealed
-            .as_deref()
-            .map(crate::secret_inputs::open_outputs)
-            .transpose()?;
         Ok(Self {
             execution,
             run,
             run_id,
-            outputs,
-            sealed,
-            changed_secrets: false,
+            counters,
+            len: usize::try_from(len).unwrap_or(0),
+            bytes: bytes.and_then(|b| usize::try_from(b).ok()),
+            appended: None,
+            io,
         })
     }
 
-    fn list_len(&self) -> usize {
-        self.outputs
-            .get("outputs")
-            .and_then(serde_json::Value::as_array)
-            .map_or(0, Vec::len)
-    }
-
-    /// `Err(message)` when appending `e` takes the list past `cap` bytes
-    /// (spec D4's 16 MiB variant: it names the total).
-    fn would_fit(&self, e: &Entry, cap: usize) -> std::result::Result<(), String> {
-        let list = self
-            .outputs
-            .get("outputs")
-            .map_or(2, |l| serde_json::to_vec(l).map_or(0, |v| v.len()));
-        let entry = serde_json::to_vec(&e.entry).map_or(0, |v| v.len());
-        // `[]` plus the entry, plus one comma when the list is not empty.
-        let total = list + entry + usize::from(self.list_len() > 0);
+    /// `Ok(total)` -- the running total once `e` is appended -- or
+    /// `Err(message)` when that takes the list past `cap` bytes (spec D4's
+    /// 16 MiB variant: it names the total). `[]` counts 2 bytes, each entry
+    /// its [`Entry::size`], and each entry after the first one comma, so the
+    /// total is the list's serialised size with every SECRET value in clear.
+    fn would_fit(&self, e: &Entry, cap: usize) -> std::result::Result<usize, String> {
+        let total = self
+            .bytes
+            .unwrap_or(2)
+            .saturating_add(e.size())
+            .saturating_add(usize::from(self.len > 0));
         if total <= cap {
-            return Ok(());
+            return Ok(total);
         }
         let iteration = e.entry["item"]["iteration"].as_i64().unwrap_or(-1);
         Err(total_cap_message(iteration, total, cap))
@@ -861,7 +908,7 @@ impl LoopRunBook {
 
     /// The three counters after one more terminated iteration in `child`.
     fn count(&mut self, iteration_count: usize, running: usize, child: RunState) {
-        let mut terminated = match self.outputs.remove("terminatedIterations") {
+        let mut terminated = match self.counters.remove("terminatedIterations") {
             Some(serde_json::Value::Object(m)) => m,
             _ => serde_json::Map::new(),
         };
@@ -870,54 +917,93 @@ impl LoopRunBook {
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         terminated.insert(child.wire().to_string(), serde_json::Value::from(n + 1));
-        self.outputs
+        self.counters
             .insert("iterationCount".into(), iteration_count.into());
-        self.outputs
+        self.counters
             .insert("runningIterations".into(), running.into());
-        self.outputs.insert(
+        self.counters.insert(
             "terminatedIterations".into(),
             serde_json::Value::Object(terminated),
         );
     }
 
-    fn append(&mut self, e: Entry) {
-        let pos = self.list_len();
-        if !e.secrets.is_empty() {
-            self.sealed
-                .get_or_insert_with(serde_json::Map::new)
-                .insert(pos.to_string(), serde_json::Value::Object(e.secrets));
-            self.changed_secrets = true;
-        }
-        match self.outputs.get_mut("outputs") {
-            Some(serde_json::Value::Array(list)) => list.push(e.entry),
-            _ => {
-                self.outputs
-                    .insert("outputs".into(), serde_json::Value::Array(vec![e.entry]));
-            }
-        }
+    /// Append `e` at position [`LoopRunBook::len`], `total` being what
+    /// [`LoopRunBook::would_fit`] answered: its SECRET values are sealed
+    /// here, as this position's frame, and nothing else is.
+    fn append(&mut self, e: Entry, total: usize) -> Result<()> {
+        let frame = if e.secrets.is_empty() {
+            None
+        } else {
+            Some(crate::secret_inputs::seal_loop_entry(self.len, &e.secrets)?)
+        };
+        self.appended = Some((e.entry, frame, total));
+        Ok(())
     }
 
-    async fn store(self, conn: &mut PgConnection) -> Result<()> {
-        // Re-sealed only when this append added a SECRET value; otherwise
-        // the column is left as it is.
-        let sealed = match (&self.sealed, self.changed_secrets) {
-            (Some(m), true) => Some(crate::secret_inputs::seal_object(m)?),
-            _ => None,
+    /// Write the counters and, when [`LoopRunBook::append`] ran, the entry,
+    /// its frame and the new total -- each appended in SQL.
+    async fn store(mut self, conn: &mut PgConnection) -> Result<usize> {
+        let (entry, frame, total) = match self.appended.take() {
+            Some((entry, frame, total)) => (Some(entry), frame, i64::try_from(total).ok()),
+            None => (None, None, None),
         };
+        let counters = serde_json::Value::Object(std::mem::take(&mut self.counters));
+        self.io += 16
+            + 4
+            + json_len(&counters)
+            + entry.as_ref().map_or(0, json_len)
+            + frame.as_ref().map_or(0, Vec::len)
+            + 8;
         sqlx::query(
             "UPDATE workflow.task_runs \
-                SET outputs = $3, secret_outputs = COALESCE($4, secret_outputs) \
+                SET outputs = $3::jsonb || CASE \
+                      WHEN $4::jsonb IS NOT NULL THEN jsonb_build_object('outputs', \
+                           COALESCE(outputs -> 'outputs', '[]'::jsonb) || jsonb_build_array($4::jsonb)) \
+                      WHEN outputs ? 'outputs' THEN jsonb_build_object('outputs', outputs -> 'outputs') \
+                      ELSE '{}'::jsonb END, \
+                    outputs_bytes = COALESCE($5, outputs_bytes), \
+                    secret_outputs = CASE WHEN $6::bytea IS NULL THEN secret_outputs \
+                      ELSE COALESCE(secret_outputs, ''::bytea) || $6::bytea END \
               WHERE execution_id = $1 AND run_ix = $2",
         )
         .bind(self.execution)
         .bind(self.run as i32)
-        .bind(serde_json::Value::Object(self.outputs))
-        .bind(sealed)
+        .bind(counters)
+        .bind(entry)
+        .bind(total)
+        .bind(frame)
         .execute(&mut *conn)
         .await
         .map_err(db_err)?;
-        Ok(())
+        Ok(self.io)
     }
+}
+
+/// **Test-only (`test-util`): one iteration end's book-keeping on a `Loop`
+/// run, as `on_execution_terminal_inner` does it** -- load, the cap, the
+/// counters, the append, the store -- for the I1 benchmark of package #6
+/// fix wave 6. `entry` is the masked entry, `secrets` the SECRET values it
+/// masks. Answers the bytes the book moved, or the cap's message.
+#[cfg(any(test, feature = "test-util"))]
+#[doc(hidden)]
+pub async fn append_loop_entry_for_tests(
+    conn: &mut PgConnection,
+    execution: Uuid,
+    run: RunIx,
+    entry: serde_json::Value,
+    secrets: serde_json::Map<String, serde_json::Value>,
+    cap: usize,
+) -> Result<std::result::Result<usize, String>> {
+    let mut book = LoopRunBook::load(conn, execution, run).await?;
+    let e = Entry { entry, secrets };
+    let total = match book.would_fit(&e, cap) {
+        Ok(total) => total,
+        Err(message) => return Ok(Err(message)),
+    };
+    let n = book.len + 1;
+    book.count(n, 0, RunState::Success);
+    book.append(e, total)?;
+    Ok(Ok(book.store(conn).await?))
 }
 
 /// Spec D4's message for the 16 MiB total, naming it.
@@ -933,7 +1019,7 @@ fn total_cap_message(iteration: i64, total: usize, cap: usize) -> String {
 }
 
 /// `n` as `<k> MiB` when it is a whole number of MiB, else `<n> bytes`.
-pub(super) fn bytes_text(n: usize) -> String {
+pub(crate) fn bytes_text(n: usize) -> String {
     if n > 0 && n.is_multiple_of(1 << 20) {
         format!("{} MiB", n >> 20)
     } else {
@@ -1287,12 +1373,15 @@ async fn store_iteration_outputs(
             ctx.id
         ))
     })?;
-    let size = bytes.len() as u64;
-    match gate.prefetch().upload(ctx.workspace_id, &object, bytes) {
+    let attempted = bytes.len() as u64;
+    let size = match gate.prefetch().upload(ctx.workspace_id, &object, bytes) {
+        // The size of what was WRITTEN, the first attempt's bytes (final
+        // review m7): a later attempt may compute other bytes (`now()`).
+        Upload::Done(written) => written,
         // `Pending`: this attempt is rolled back whatever it answers; it
         // carries on as if written (the gather rule), and its index row and
         // entry go with the rollback.
-        Upload::Done | Upload::Pending => {}
+        Upload::Pending => attempted,
         Upload::Outage(outage) => {
             return Err(Error::Internal(anyhow::anyhow!(
                 "execution {}: {outage}",
@@ -1303,7 +1392,7 @@ async fn store_iteration_outputs(
             log_on_execution(conn, ctx, LogLevel::Error, &message, redactions).await?;
             return Ok(IterationEnd::Failed);
         }
-    }
+    };
     crate::storage::index_execution_files(
         conn,
         ctx.workspace_id,

@@ -1247,3 +1247,64 @@ async fn a_depends_on_fire_merges_the_windows_outputs() {
         serde_json::json!({"p2_out": "two", "w13": {"p1": {"p1_out": "one"}}})
     );
 }
+
+/// **Package #6 fix wave 6 (final review I4): the merged `trigger.outputs`
+/// is held to the flow outputs' cap.** Lowered for this workspace to 100
+/// bytes: `p1`'s and `p2`'s own maps (53 bytes each) and the window's copy
+/// (68) fit, but their merge (~120) would not, so the event that completes
+/// the window is refused with a message naming the sizes, nothing fires,
+/// and the window is kept. Before the fix the merge was stored on the fired
+/// execution whatever its size (up to 2 x 16 MiB).
+#[tokio::test]
+async fn a_depends_on_fire_whose_merged_outputs_pass_the_cap_is_refused() {
+    let Some(fx) = fx().await else { return };
+    egret_workflow::outputs::lower_flow_outputs_cap_for_tests(fx.ws, 100);
+    let pad = "y".repeat(40);
+    let with_output = |id: &str| {
+        format!(
+            "id: {id}\nnamespace: w13\ntasks:\n  - id: a\n    \
+             type: io.kestra.plugin.core.log.Log\n    message: hi\n\
+             outputs:\n  - id: {id}_out\n    type: STRING\n    value: {pad}\n"
+        )
+    };
+    let p1_yaml = with_output("p1");
+    let p1 = Src {
+        id: fx.flow(&p1_yaml).await,
+        yaml: p1_yaml,
+    };
+    let p2_yaml = with_output("p2");
+    let p2 = Src {
+        id: fx.flow(&p2_yaml).await,
+        yaml: p2_yaml,
+    };
+    let listener = fx
+        .flow(&listener_yaml(
+            "listener",
+            "",
+            &depends_on(&["p1", "p2"], ""),
+        ))
+        .await;
+
+    fx.event(&p1).await;
+    assert!(
+        window(&fx.db, listener).await.is_some(),
+        "p1 opened the window"
+    );
+    let logs = LogCapture::default();
+    let r = {
+        let _guard = logs.install();
+        fx.event(&p2).await
+    };
+    assert_eq!(r.refused, 1, "{r:?}");
+    assert_eq!(executions_of(&fx.db, listener).await, 0, "nothing fired");
+    assert!(
+        window(&fx.db, listener).await.is_some(),
+        "the window is kept"
+    );
+    let text = logs.text();
+    assert!(
+        text.contains("trigger.outputs (the event's flow outputs deep-merged with the dependsOn window's) would be ")
+            && text.contains("egret keeps at most 100 bytes"),
+        "{text}"
+    );
+}

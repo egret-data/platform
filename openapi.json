@@ -45236,6 +45236,13 @@
                 },
                 "description": "Every task run, in `run_ix` order — the executor's creation order."
               },
+              "outputs": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "The flow's `outputs:` as the execution's end evaluated them, typed by\neach output's `type`; `null` when none were evaluated: the flow\ndeclares none, the execution has not ended, or the evaluation failed\n(the execution then ended `FAILED` and its logs say why). **A\n`SECRET` output's value is always `******`** here: the real value is\nkept encrypted on the server and no response carries it. A `FILE`\noutput is a `kestra:///` URI of the execution's own storage, read\nthrough the execution file API. On the detail only: the list leaves\nit out, since it can be up to 16 MiB per execution."
+              },
               "can_manage": {
                 "type": "boolean",
                 "description": "Whether the caller may resume and replay this execution: they hold\n`workflow:manage` in this workspace. A detail page hides both actions\nwhen this is false; the routes still check for themselves."
@@ -45438,13 +45445,6 @@
             ],
             "format": "uuid",
             "description": "The backfill that fired this execution (W7f), `null` otherwise."
-          },
-          "outputs": {
-            "type": [
-              "object",
-              "null"
-            ],
-            "description": "The flow's `outputs:` as the execution's end evaluated them, typed by\neach output's `type`; `null` when none were evaluated: the flow\ndeclares none, the execution has not ended, or the evaluation failed\n(the execution then ended `FAILED` and its logs say why). **A\n`SECRET` output's value is always `******`** here, in the list and\nthe detail alike: the real value is kept encrypted on the server and\nno response carries it. A `FILE` output is a `kestra:///` URI of the\nexecution's own storage, read through the execution file API."
           }
         }
       },

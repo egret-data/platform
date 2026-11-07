@@ -12784,7 +12784,7 @@ async fn a_secret_loop_output_is_masked_sealed_and_revealed_to_a_later_render(po
         "the sealed column never holds the plaintext"
     );
     assert_eq!(
-        egret_workflow::secret_inputs::open_outputs(&sealed).expect("opens"),
+        egret_workflow::secret_inputs::open_loop_outputs(&sealed).expect("opens"),
         serde_json::json!({
             "0": {"s": format!("{PLAIN}-a")},
             "1": {"s": format!("{PLAIN}-b")},
@@ -14074,5 +14074,252 @@ async fn a_flow_trigger_context_sees_a_loops_secret_outputs_masked(pool: sqlx::P
         egret_workflow::render_str("{{ outputs.loop.outputs[0].outputs.n }}", &cx)
             .expect("renders"),
         "a"
+    );
+
+    // **Fix wave 6, final review m1: the Flow trigger's context never opens
+    // the sealed columns.** Seals that cannot be opened -- a rotated or
+    // removed master key reads the same as these bytes -- leave it working
+    // and masked; the execution's own render surface would fail on them.
+    sqlx::query("UPDATE workflow.task_runs SET secret_outputs = $2 WHERE execution_id = $1")
+        .bind(ex)
+        .bind(b"not a seal, a rotated key".as_slice())
+        .execute(&pool)
+        .await
+        .expect("spoil the run's seal");
+    sqlx::query("UPDATE workflow.executions SET secret_outputs = $2 WHERE id = $1")
+        .bind(ex)
+        .bind(b"not a seal either".as_slice())
+        .execute(&pool)
+        .await
+        .expect("spoil the execution's seal");
+    let cx = egret_workflow::worker::execution_render_context(&mut conn, ex)
+        .await
+        .expect("a seal that does not open does not fail a listener");
+    assert_eq!(
+        egret_workflow::render_str("{{ outputs.loop.outputs[0].outputs.s }}", &cx)
+            .expect("renders"),
+        "******"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Package #6 fix wave 6 (final review I1, I2, I3).
+// ---------------------------------------------------------------------------
+
+/// **I1: an iteration end moves the counters and ONE entry, at any list
+/// length.** Drives the production book-keeping
+/// (`worker::append_loop_entry_for_tests`: load, cap, counters, append,
+/// store -- what `on_execution_terminal_inner` runs under the parent lock)
+/// `N` times on one `Loop` run, a SECRET value every tenth entry, and counts
+/// the bytes the worker sent to and received from Postgres at each end.
+/// Before the fix each end read, parsed, re-serialised and wrote back the
+/// whole list and re-sealed every SECRET value: the count grew with the
+/// list (about 65 bytes per entry). Now the last end moves no more than the
+/// first, plus the digits the counters and the entry grow by. Also checks
+/// that the SQL append built the same list, that every frame opens at its
+/// position, and that `outputs_bytes` is the list's serialised size with
+/// the SECRET values in clear (the I3 total). `N` is 2000;
+/// `EGRET_LOOP_BENCH_N` overrides it (the spec's 10 000 figure).
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_loop_book_moves_one_entry_per_iteration_end_at_any_list_length(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    egret_workflow::secret_inputs::install_for_tests();
+    let (_db, ws) = seed(&pool).await;
+    let n: usize = std::env::var("EGRET_LOOP_BENCH_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2000);
+    let source = loop_with("lo-bench", r#"["a"]"#, RETURN_BODY, "");
+    let ex = start_execution(&pool, ws, None, &source, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    let run: i32 = sqlx::query_scalar(
+        "UPDATE workflow.task_runs SET outputs = NULL, secret_outputs = NULL, outputs_bytes = NULL \
+          WHERE execution_id = $1 AND task_id = 'loop' RETURNING run_ix",
+    )
+    .bind(ex)
+    .fetch_one(&pool)
+    .await
+    .expect("the Loop run");
+    let mut conn = pool.acquire().await.expect("a connection");
+    let mut io = Vec::with_capacity(n);
+    let mut clear = Vec::with_capacity(n);
+    let started = std::time::Instant::now();
+    for i in 0..n {
+        let secret = i % 10 == 0;
+        let mut outputs = serde_json::json!({"v": format!("value-{i}")});
+        let mut secrets = serde_json::Map::new();
+        let mut revealed = outputs.clone();
+        if secret {
+            outputs["s"] = serde_json::json!("******");
+            revealed["s"] = serde_json::json!(format!("secret-{i}"));
+            secrets.insert("s".into(), serde_json::json!(format!("secret-{i}")));
+        }
+        let item = serde_json::json!({"value": format!("v{i}"), "iteration": i});
+        clear.push(serde_json::json!({"item": item, "outputs": revealed}));
+        let moved = egret_workflow::worker::append_loop_entry_for_tests(
+            &mut conn,
+            ex,
+            run as usize,
+            serde_json::json!({"item": item, "outputs": outputs}),
+            secrets,
+            usize::MAX,
+        )
+        .await
+        .expect("the append")
+        .expect("under the cap");
+        io.push(moved);
+    }
+    let elapsed = started.elapsed();
+    let (stored, frames, bytes, column): (serde_json::Value, Vec<u8>, i64, i32) = sqlx::query_as(
+        "SELECT outputs, secret_outputs, outputs_bytes, pg_column_size(outputs) \
+           FROM workflow.task_runs WHERE execution_id = $1 AND run_ix = $2",
+    )
+    .bind(ex)
+    .bind(run)
+    .fetch_one(&pool)
+    .await
+    .expect("the stored run");
+    println!(
+        "I1 bench: n={n} first={} last={} max={} total={} elapsed={elapsed:?} \
+         outputs_bytes={bytes} pg_column_size={column}",
+        io[0],
+        io[n - 1],
+        io.iter().max().unwrap(),
+        io.iter().sum::<usize>(),
+    );
+    println!("I1 bench io: {:?} .. {:?}", &io[..12], &io[n - 12..]);
+    // Like for like: an end with a SECRET value (it sends a frame) against
+    // the first such end after the first (the very first loads no counters),
+    // and one without against the first without.
+    for (first, kind) in [(10, "with a frame"), (1, "without")] {
+        let max = io.iter().skip(first).step_by(10).max().unwrap();
+        assert!(
+            *max <= io[first] + 64,
+            "an iteration end {kind} moves O(entry), not O(list): first {} bytes, \
+             max {max} at n={n}",
+            io[first]
+        );
+    }
+    let list = stored["outputs"].as_array().expect("the list");
+    assert_eq!(list.len(), n);
+    assert_eq!(stored["iterationCount"], serde_json::json!(n));
+    assert_eq!(
+        stored["terminatedIterations"],
+        serde_json::json!({"SUCCESS": n})
+    );
+    assert_eq!(
+        list[n - 1]["outputs"]["v"],
+        serde_json::json!(format!("value-{}", n - 1))
+    );
+    let opened = egret_workflow::secret_inputs::open_loop_outputs(&frames).expect("frames open");
+    assert_eq!(opened.len(), n.div_ceil(10));
+    for (pos, secret) in &opened {
+        let pos: usize = pos.parse().unwrap();
+        assert_eq!(pos % 10, 0);
+        assert_eq!(secret["s"], serde_json::json!(format!("secret-{pos}")));
+        assert_eq!(list[pos]["outputs"]["s"], serde_json::json!("******"));
+    }
+    assert_eq!(
+        bytes as usize,
+        serde_json::to_vec(&clear).unwrap().len(),
+        "outputs_bytes is the list's size with its SECRET values in clear"
+    );
+}
+
+/// **I2: an iteration's settles never fetch its still-running `Loop`'s
+/// row.** The inherited query asks for terminated runs only, in SQL -- the
+/// one place the rule is applied -- so the running `Loop` run, whose
+/// counters `open_batch` wrote before the first iteration, is not in the
+/// iteration's context: `{{ outputs.loop.iterationCount ??? 'absent' }}`
+/// reads `absent` in every iteration. Without the filter the row (and its
+/// growing list) is fetched and reads `2`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_iteration_does_not_read_its_running_loops_list(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let body = "      - id: r\n        type: io.kestra.plugin.core.debug.Return\n        \
+                format: \"{{ outputs.loop.iterationCount ??? 'absent' }}\"\n";
+    let source = loop_with("lo-running", r#"["a", "b"]"#, body, VALUE_OUTPUT);
+    let ex = start_execution(&pool, ws, None, &source, serde_json::json!({}))
+        .await
+        .expect("start execution");
+
+    settle_everything(&pool, &core_handlers()).await;
+
+    let seen: Vec<Option<serde_json::Value>> = sqlx::query_scalar(
+        "SELECT tr.outputs FROM workflow.task_runs tr \
+           JOIN workflow.executions e ON e.id = tr.execution_id \
+          WHERE e.parent_execution_id = $1 AND tr.task_id = 'r' ORDER BY e.loop_index",
+    )
+    .bind(ex)
+    .fetch_all(&pool)
+    .await
+    .expect("the iterations' runs");
+    assert_eq!(
+        seen,
+        vec![
+            Some(serde_json::json!({"value": "absent"})),
+            Some(serde_json::json!({"value": "absent"})),
+        ]
+    );
+    assert_eq!(
+        loop_run_outputs(&pool, ex).await["outputs"][1]["outputs"]["v"],
+        serde_json::json!("absent"),
+        "control: the list itself was written"
+    );
+}
+
+/// **I3: the 16 MiB total counts a SECRET value in clear.** One SECRET
+/// output of 1 000 000 bytes per iteration (under the 1 MiB per-iteration
+/// cap), 18 iterations, `transmitFailed: false`, the real 16 MiB cap: an
+/// entry is 1 000 000 bytes plus about 55, so 16 fit (16 000 9xx bytes) and
+/// the 17th and 18th are FAILED iterations, not appended. Before the fix
+/// the cap counted the 8-byte mask, so all 18 were appended and the sealed
+/// column grew without bound.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_secret_heavy_loop_is_held_to_the_total_cap_in_clear(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    egret_workflow::secret_inputs::install_for_tests();
+    let (_db, ws) = seed(&pool).await;
+    let big = "x".repeat(1_000_000);
+    let values: Vec<String> = (0..18).map(|i| format!("v{i}")).collect();
+    let extra = format!(
+        "    transmitFailed: false\n    outputs:\n      - id: s\n        type: SECRET\n        \
+         value: {big}\n"
+    );
+    let source = loop_with(
+        "lo-secret-cap",
+        &serde_json::to_string(&values).unwrap(),
+        RETURN_BODY,
+        &extra,
+    );
+    let ex = start_execution(&pool, ws, None, &source, serde_json::json!({}))
+        .await
+        .expect("start execution");
+
+    settle_everything(&pool, &core_handlers()).await;
+
+    let stored = loop_run_outputs(&pool, ex).await;
+    assert_eq!(
+        stored["outputs"].as_array().map(Vec::len),
+        Some(16),
+        "{}",
+        stored["terminatedIterations"]
+    );
+    assert_eq!(
+        stored["terminatedIterations"],
+        serde_json::json!({"SUCCESS": 16, "FAILED": 2})
+    );
+    let bytes: i64 = sqlx::query_scalar(
+        "SELECT outputs_bytes FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'loop'",
+    )
+    .bind(ex)
+    .fetch_one(&pool)
+    .await
+    .expect("the total");
+    assert!(
+        bytes > 16_000_000 && bytes <= 16 << 20,
+        "the total counts the SECRET values in clear: {bytes}"
     );
 }
