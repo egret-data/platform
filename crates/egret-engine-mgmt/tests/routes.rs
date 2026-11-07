@@ -17427,12 +17427,32 @@ async fn a_trino_engine_applied_before_the_hardening_asks_to_be_re_applied_until
         "creating an engine applies it with the current revision"
     );
 
-    // Act: the engine as it was before the hardening (revision 0).
+    // Act: the engine as it was before the hardening (revision 0). A fresh
+    // engine is jwt-only with no human password user, which the old render
+    // already closed on port 8080 and so is never flagged ...
     sqlx::query("UPDATE engine_mgmt.engines SET applied_security_rev = 0 WHERE id = $1")
         .bind(id)
         .execute(&f.db.pool)
         .await
         .unwrap();
+    assert_eq!(
+        security_reapply_needed(&f, &token, id).await,
+        false,
+        "a jwt-only engine without password users was already closed"
+    );
+    // ... while a human password user made it `PASSWORD,JWT`, which was open.
+    let secret = seed_secret(&f, "s3cret").await;
+    sqlx::query(
+        "UPDATE engine_mgmt.engines SET spec = jsonb_set(spec, \
+         '{trinoConfig,auth,passwordUsers}', \
+         jsonb_build_array(jsonb_build_object('username', 'ann', 'secretRef', $2::text)), \
+         true) WHERE id = $1",
+    )
+    .bind(id)
+    .bind(secret.to_string())
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
 
     // Assert
     assert_eq!(security_reapply_needed(&f, &token, id).await, true);

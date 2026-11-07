@@ -382,6 +382,18 @@ impl EngineDto {
     }
 }
 
+/// Before the hardening the provisioner rendered `allow-insecure-over-http=false`
+/// only when the engine had TLS and the rendered auth type was exactly `JWT`:
+/// a jwt-only coordinator with no human password users. Such an engine was
+/// already closed on port 8080, so asking for a re-apply would be a false alarm.
+/// Any password user makes the type `PASSWORD,JWT`, which was open.
+fn was_already_safe_before_the_hardening(e: &Engine) -> bool {
+    let no_password_users = e.spec["trinoConfig"]["auth"]["passwordUsers"]
+        .as_array()
+        .is_none_or(|users| users.is_empty());
+    e.is_jwt_only_coordinator() && no_password_users
+}
+
 impl From<Engine> for EngineDto {
     fn from(e: Engine) -> Self {
         let image = if crate::external::is_external(&e) {
@@ -403,7 +415,8 @@ impl From<Engine> for EngineDto {
         let endpoint = e.client_endpoint();
         let security_reapply_needed = !crate::external::is_external(&e)
             && !e.is_starrocks()
-            && e.applied_security_rev < TRINO_SECURITY_REV;
+            && e.applied_security_rev < TRINO_SECURITY_REV
+            && !was_already_safe_before_the_hardening(&e);
         let spec = serde_json::from_value(e.spec).unwrap_or_default();
         EngineDto {
             id: e.id,
@@ -1028,7 +1041,7 @@ async fn finish_apply(
     }
     // The provisioner accepted it: this engine now runs this mechanism (SP2b
     // Task 15, open question (a)). Recorded here so no caller can forget it.
-    let mut mechanism_not_recorded = None;
+    let mut not_recorded = None;
     if res.is_ok() {
         let mechanism = match built.req.ranger.as_ref().map(|r| r.mechanism) {
             Some(egret_engine_mgmt_api::opa_config::AccessMechanism::Opa) => "opa",
@@ -1041,7 +1054,7 @@ async fn finish_apply(
         {
             tracing::error!(engine = %engine.name, error = %e, mechanism,
                 "applied, but the applied mechanism could not be recorded");
-            mechanism_not_recorded = Some(format!(
+            not_recorded = Some(format!(
                 "applied, but the applied mechanism ({mechanism}) could not be recorded: {e}"
             ));
         }
@@ -1057,7 +1070,7 @@ async fn finish_apply(
             let note = format!(
                 "applied, but the security revision ({TRINO_SECURITY_REV}) could not be recorded: {e}"
             );
-            mechanism_not_recorded = Some(match mechanism_not_recorded {
+            not_recorded = Some(match not_recorded {
                 Some(prev) => format!("{prev}; {note}"),
                 None => note,
             });
@@ -1075,8 +1088,7 @@ async fn finish_apply(
                  the monitor fails until the next successful apply");
         }
     }
-    res.map(|()| mechanism_not_recorded)
-        .map_err(ApplyBuiltError::Failed)
+    res.map(|()| not_recorded).map_err(ApplyBuiltError::Failed)
 }
 
 /// The access mechanism of the profile `authz_service_id` names, read from the
@@ -8083,6 +8095,40 @@ mod tests {
             external_port: None,
             ranger_plugin_version: None,
         }
+    }
+
+    fn trino_spec(delegation: &str, password_users: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "trinoConfig": {
+            "delegationMode": delegation,
+            "auth": { "jwt": { "jwksUri": "http://egret/jwks" }, "passwordUsers": password_users },
+        }})
+    }
+
+    fn reapply_needed(spec: serde_json::Value) -> bool {
+        let e = Engine {
+            spec,
+            ..dto_engine("trino", "provisioned")
+        };
+        serde_json::to_value(EngineDto::from(e)).unwrap()["securityReapplyNeeded"]
+            .as_bool()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_jwt_only_engine_without_password_users_was_already_closed_and_needs_no_re_apply() {
+        assert!(!reapply_needed(trino_spec("jwt", serde_json::json!([]))));
+        assert!(!reapply_needed(trino_spec("jwt", serde_json::Value::Null)));
+    }
+
+    #[test]
+    fn an_engine_with_a_human_password_user_or_without_jwt_delegation_still_needs_a_re_apply() {
+        let user = serde_json::json!([{ "username": "ann", "secretRef": "s" }]);
+        assert!(reapply_needed(trino_spec("jwt", user.clone())));
+        assert!(reapply_needed(trino_spec(
+            "impersonate",
+            serde_json::json!([])
+        )));
+        assert!(reapply_needed(serde_json::json!({})));
     }
 
     #[test]
