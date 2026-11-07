@@ -93,3 +93,37 @@ because its request carries `X-Forwarded-Proto: https`.
   (simulated here, unmeasured against the real proxies).
 - Caveat: a client on plain `:8080` without the forwarded header (an in-cluster client such as the
   Trino CLI) is refused at `false`.
+
+## End to end on the opa-e2e stack (Task A5)
+
+Run 2026-11-08 on a local `egret-opa-e2e` stack (ports 28091/28092), scripts at commit
+`26ff43e40`. This is NOT the run of record: the only `egret-opa-e2e-backend:dev` image on the
+machine was built 2026-11-05, before Task A2, so egret rendered
+`allow-insecure-over-http=true` on trino-opa. A new image could not be built safely (other stacks
+were up). The CI `opa-e2e` job on the pushed branch is the run of record.
+
+What the stale image showed, unchanged:
+
+- `up.sh` step 11b, trino-opa on the Ranger plugin as rendered (`true`): `FAIL identity
+  trino-opa/ranger plain-http-no-credential: want 403, got 200` (the query ran as bob); the run
+  stopped there. Rows 2–4 of the check passed. So the check fails the job on a regression to `true`.
+
+Then the A2 render was EMULATED: `allow-insecure-over-http` set to `false` by `sed` in the
+provisioned trino-opa container and `docker restart` (once on Ranger, again after the switch
+re-provisioned it on OPA); trino-ranger copies trino-opa's lines (up.sh step 7b).
+
+| Check (identity-check.sh) | trino-opa, Ranger plugin | trino-opa, OPA plugin | trino-ranger |
+|---|---|---|---|
+| plain HTTP, `X-Trino-User: bob`, no credential | 403 | 403 | 403 |
+| plus `X-Forwarded-Proto: https`, no credential | 401 | 401 | 401 |
+| Basic `egret_delegator`, forwarded https, `X-Trino-Original-User: egret_delegator`, `X-Trino-User: bob` | 200 | 200 | 200 |
+| its `SELECT current_user` | `[["bob"]]` | `[["bob"]]` | `[["bob"]]` |
+| `GET /v1/info`, no credential | 200 | 200 | 200 |
+
+`layer2.sh` then ran every scenario with the harness on the delegator path: 501 cases,
+`same` 485, `opa-hides-rows` 15, `opa-refuses` 1, `PASS` (16 min). `@session-user` jobs still
+reach Trino's impersonation check for the scenario user (`Access Denied: User … cannot impersonate
+user carol|root|bob`), so authenticating as the delegator does not change what those jobs compare.
+
+The delegator password came from the stack's Postgres, opened with the public dev master key in
+`deploy/opa-e2e/egret.env` (`scripts/opa-e2e/trino-auth.sh`); the 200 rows above prove it.
