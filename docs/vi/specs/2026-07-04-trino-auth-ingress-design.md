@@ -50,4 +50,12 @@ routing thật cần nginx-ingress controller — opt-in).
 
 Compat: field optional, engine cũ no-auth, không migration. allow-insecure an toàn (TLS ở ingress, coordinator nội bộ).
 
+> **Đính chính, 2026-11-07.** Nhận định "allow-insecure an toàn" ở trên là sai. Với cờ `true`,
+> Trino không xác thực request HTTP thường: ai gọi tới :8080 của coordinator mà không có
+> `X-Forwarded-Proto: https` sẽ chạy với bất kỳ `X-Trino-User` nào họ gửi (đo trên Trino 483).
+> Ingress không cần cờ này: nó gửi `X-Forwarded-Proto: https`, và Trino vẫn xác thực request đó
+> khi cờ là `false`. egret nay render `allow-insecure-over-http=false` cho mọi engine có xác
+> thực. Xem `docs/en/specs/2026-11-07-port-8080-hardening-design.md` §2.2 và
+> `docs/en/plans/2026-11-07-port-8080-hardening-live-result.md`.
+
 Chi tiết đầy đủ xem bản EN.
