@@ -66,6 +66,10 @@ pub mod models;
 /// W7d: what the namespace pages read beyond the repository -- the
 /// dependencies graph built from flow drafts.
 pub(crate) mod namespaces;
+/// Package #6 (spec D2): the ONE outputs evaluator a `Loop`'s `outputs:` and
+/// a flow's `outputs:` share -- render, then type with `inputs_check`'s
+/// coercer. Pure. `pub` as `inputs_check` is.
+pub mod outputs;
 /// W7e: reading triggers -- a flow's and the workspace's, with their state
 /// (spec §3.5, §3.6).
 pub(crate) mod triggers;

@@ -261,6 +261,25 @@ pub enum Command {
         /// fact about the state rather than a choice this command makes.
         attempt: RunState,
     },
+    /// A `Subflow` whose child's flow outputs could not be taken -- package
+    /// #6 Task B3, Kestra's `Subflow.failSubflowDueToOutput`.
+    ///
+    /// Kestra moves the run to `state` (`State.Type.fail(task)`: `FAILED`,
+    /// or what `allowFailure:`/`allowWarning:` soften it to) with
+    /// `withState`, which appends nothing when the run is already there, and
+    /// **replaces** its attempts with one fresh attempt, `new
+    /// State().withState(state)`, so `[CREATED, <state>]`. Golden
+    /// `valids/subflow-secret-output-parent`: run `CREATED RUNNING FAILED`,
+    /// attempt `CREATED FAILED`. No `SetRunState`/`CompleteRun` sequence can
+    /// drop the attempt the run already has, hence a command of its own.
+    ///
+    /// It contains no decision: the emitter chose `state`.
+    FailSubflowOutputs {
+        run: RunIx,
+        state: RunState,
+        /// The fresh attempt's start, as `StartRun`'s `at`.
+        at: Tick,
+    },
     SetExecutionState {
         state: RunState,
     },

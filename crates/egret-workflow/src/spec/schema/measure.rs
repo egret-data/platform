@@ -212,6 +212,10 @@ fn sample(row: &str, prop: &str, schema: &Value) -> Value {
         }
         (FLOW_ROW, "inputs") => return json!([{ "id": "i", "type": "STRING" }]),
         (FLOW_ROW, "outputs") => return json!([{ "id": "o", "type": "STRING", "value": "x" }]),
+        // Package #6: a `Loop`'s `outputs:` is the same `Output` bean.
+        ("io.kestra.plugin.core.flow.Loop", "outputs") => {
+            return json!([{ "id": "o", "type": "STRING", "value": "x" }])
+        }
         ("io.kestra.plugin.core.flow.Dag", "tasks") => return json!([{ "task": log_task("x") }]),
         (_, "namespaceFiles") => return json!({ "enabled": true }),
         (_, "tasks" | "errors" | "finally" | "then" | "else" | "defaults")

@@ -3261,6 +3261,7 @@ impl Job {
             caller,
             outage: None,
             forced: true,
+            outputs: None,
         })
     }
 }
@@ -3313,6 +3314,11 @@ pub(super) struct Settled {
     /// and a parent that cannot be loaded either hears nothing
     /// ([`forced_report`]).
     forced: bool,
+    /// Package #6 Task A3 (spec D1): a LOOP iteration's typed `outputs:`,
+    /// evaluated in the outbox phase of the settle that terminated it, for
+    /// `spawn::on_execution_terminal`. `None` when its `Loop` declares no
+    /// `outputs:`, for every other execution, and for a forced report.
+    outputs: Option<crate::outputs::Typed>,
 }
 
 /// One step of [`walk`].
@@ -3378,7 +3384,7 @@ async fn walk_from<'a>(conn: &mut PgConnection, mut steps: Vec<Step<'a>>) -> Res
                     steps.push(Step::Frame(Box::new(frame)));
                 }
             }
-            Step::Loop(s) => {
+            Step::Loop(mut s) => {
                 let started = match s.terminal {
                     Some(_) if s.forced && parent_is_terminal(conn, s.id).await? => None,
                     Some(terminal) => {
@@ -3386,6 +3392,7 @@ async fn walk_from<'a>(conn: &mut PgConnection, mut steps: Vec<Step<'a>>) -> Res
                             conn,
                             s.id,
                             terminal,
+                            s.outputs.take(),
                             s.caller.clone(),
                         ))
                         .await;
@@ -3614,6 +3621,41 @@ async fn advance_frame(conn: &mut PgConnection, frame: &mut Frame<'_>) -> Result
             *phase = Phase::Outbox { surface };
         }
         Phase::Outbox { surface } => {
+            // Package #6 Task A3 (spec D1): a LOOP iteration that terminated in
+            // this settle evaluates its `Loop`'s `outputs:` here -- after its
+            // `errors:`/`finally:`, which ran inside it, and before the
+            // Flow-trigger outbox, so a FAILED the evaluation appends is one
+            // more appended state like any other. A failure appends `FAILED`
+            // AFTER the terminal (`CREATED RUNNING SUCCESS FAILED`, golden
+            // `valids/loop-outputs-failed-render`), persists it, and the report
+            // below carries `FAILED`; the error is already logged on the
+            // sub-execution. Kestra persists the same (`DefaultExecutor`,
+            // `executionStateStore.lock(... withState(FAILED))`).
+            //
+            // Package #6 Task B1 (spec D6): the flow's own `outputs:` are
+            // evaluated in the settle that made the execution TERMINAL --
+            // not "terminated": before `afterExecution:` has run anything,
+            // as Kestra's `onEnd` precedes `handleAfterExecution` -- and a
+            // failure appends `FAILED` the same way
+            // (`worker::flow_outputs`). An iteration evaluates nothing here
+            // (D6), so at most one of the two below acts.
+            if became_terminal(before, state) {
+                match super::flow_outputs::at_terminal(conn, ctx, &surface, state).await? {
+                    super::flow_outputs::FlowEnd::NoOutputs
+                    | super::flow_outputs::FlowEnd::Stored => {}
+                    super::flow_outputs::FlowEnd::Failed => {
+                        fail_after_terminal(conn, ctx, state).await?
+                    }
+                }
+            }
+            let mut outputs = None;
+            if terminated_now(ctx, before, state).is_some() {
+                match spawn::iteration_outputs(conn, ctx, &surface, state).await? {
+                    spawn::IterationEnd::NoOutputs => {}
+                    spawn::IterationEnd::Typed(typed) => outputs = Some(typed),
+                    spawn::IterationEnd::Failed => fail_after_terminal(conn, ctx, state).await?,
+                }
+            }
             outbox(conn, ctx, before, state).await?;
             // Step 4 is the tail ([`walk`]): if this settle reached a
             // terminal, tell the parent. `was != is` reads `state` -- this
@@ -3632,13 +3674,11 @@ async fn advance_frame(conn: &mut PgConnection, frame: &mut Frame<'_>) -> Result
             // the execution ended with. `was != is` keeps today's report of
             // a terminal that changes into another one. A forced report
             // ([`Job::report`]) has no plan and keeps the old rule.
-            let was = before.history.last().copied();
-            let is = state.history.last().copied();
-            let now_terminated = crate::executor::terminated(&ctx.plan, state)
-                && (!crate::executor::terminated(&ctx.plan, before) || was != is);
+            let terminal = terminated_now(ctx, before, state);
             return Ok(Some(Settled {
                 id: ctx.id,
-                terminal: is.filter(|s| now_terminated && notifies_parent(*s)),
+                outputs: outputs.filter(|_| terminal.is_some()),
+                terminal,
                 caller: ctx.caller(),
                 outage: surface.files_outage(),
                 forced: false,
@@ -3646,6 +3686,80 @@ async fn advance_frame(conn: &mut PgConnection, frame: &mut Frame<'_>) -> Result
         }
     }
     Ok(None)
+}
+
+/// The terminal this settle reports to a parent, if it made the execution
+/// terminated (the rule the outbox phase's comment states): `was != is`
+/// reads `state`, this settle's in-memory copy.
+fn terminated_now(
+    ctx: &ExecutionCtx,
+    before: &ExecutionState,
+    state: &ExecutionState,
+) -> Option<RunState> {
+    let was = before.history.last().copied();
+    let is = state.history.last().copied();
+    let now_terminated = crate::executor::terminated(&ctx.plan, state)
+        && (!crate::executor::terminated(&ctx.plan, before) || was != is);
+    is.filter(|s| now_terminated && notifies_parent(*s))
+}
+
+/// Package #6 Task B1: this settle moved the execution INTO a terminal state
+/// -- its last state is terminal and either it was not at the settle's start
+/// or a non-terminal state was appended since (a restart that ended again in
+/// one settle). A terminal-to-terminal append (Task A3's FAILED) is not a new
+/// terminal. Reads `state`, this settle's in-memory copy, for the reason
+/// [`terminated_now`] does: a nested settle that made the execution terminal
+/// has already evaluated what this one would.
+fn became_terminal(before: &ExecutionState, state: &ExecutionState) -> bool {
+    if !state.history.last().is_some_and(|s| s.is_terminal()) {
+        return false;
+    }
+    !before.history.last().is_some_and(|s| s.is_terminal())
+        || state
+            .history
+            .get(before.history.len()..)
+            .is_some_and(|added| added.iter().any(|s| !s.is_terminal()))
+}
+
+/// Package #6 Task A3 (spec D1): append `FAILED` after the terminal a LOOP
+/// iteration reached, because its `Loop`'s `outputs:` failed -- and, since
+/// Task B1, after the terminal an execution reached because its flow's
+/// `outputs:` failed -- and write the execution's state and history. A
+/// terminal-to-terminal move, so `stamps::Entered` keeps the `ended_at` the
+/// terminal set. Kestra's `withState(FAILED)` appends after any other
+/// terminal and is a no-op on `FAILED` (corrected 2026-10-29, Task B1: A3's
+/// text said it appended whatever the state before it was).
+async fn fail_after_terminal(
+    conn: &mut PgConnection,
+    ctx: &ExecutionCtx,
+    state: &mut ExecutionState,
+) -> Result<()> {
+    // Kestra's `State.withState` returns the state unchanged when it is
+    // already the one asked for (`State.java:73-77`): an execution that
+    // ended FAILED stays `… FAILED`, never `… FAILED FAILED`. **Corrected
+    // 2026-10-29 (Task B1):** Task A3 appended unconditionally and its report
+    // read Kestra as appending; it does not.
+    if state.history.last() == Some(&RunState::Failed) {
+        return Ok(());
+    }
+    let prior = state.history.clone();
+    apply(
+        state,
+        &Command::SetExecutionState {
+            state: RunState::Failed,
+        },
+    );
+    let entered = stamps::Entered::of(&prior, &state.history, false);
+    sqlx::query(EXECUTION_STATE_UPDATE)
+        .bind(RunState::Failed.wire())
+        .bind(states_json(&state.history))
+        .bind(ctx.id)
+        .bind(entered.running)
+        .bind(entered.terminal)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+    Ok(())
 }
 
 /// Steps 1-2 of a settle: the render scope, the SLA, `drive`, `persist` and
@@ -3737,6 +3851,9 @@ async fn begin(
     // `persist` serialises, so they ride the same UPDATE as the terminal state.
     stamps::stamp_attempt_ends(before, state, now);
     persist(conn, ctx, before, state, release, &marks, seq).await?;
+    // Package #6 Task A4 (spec D4): a `Loop` with no values ends here, and
+    // carries its counters all the same.
+    spawn::empty_loop_counters(conn, ctx, before, state).await?;
     if !side.is_empty() {
         // Built and boxed in a SYNC callee: `settle` re-enters itself through
         // a `Subflow` chain, and a statement future built inline (even one

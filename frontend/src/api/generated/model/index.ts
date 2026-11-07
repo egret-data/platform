@@ -268,6 +268,7 @@ export * from './errorBody';
 export * from './everyonePolicy';
 export * from './everyoneSummary';
 export * from './executionDto';
+export * from './executionDtoOutputs';
 export * from './executionGraph';
 export * from './executionGraphStates';
 export * from './executionListItemDto';

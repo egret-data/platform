@@ -869,6 +869,9 @@ async fn every_repository_column_reaches_the_wire() {
         // W7f: the execution's own labels and the backfill that fired it.
         "labels",
         "backfill_id",
+        // Package #6 Task B3: the flow outputs (never `secret_outputs`);
+        // on the detail only since fix wave 6 (final review I4).
+        "outputs",
         "source",
         "runs",
         // W7f: what the run sees as `labels` (detail only).
@@ -1025,7 +1028,13 @@ async fn every_repository_column_reaches_the_wire() {
         .filter(|k| {
             !matches!(
                 *k,
-                "source" | "runs" | "can_manage" | "effective_labels" | "worker_enabled"
+                "source"
+                    | "runs"
+                    | "can_manage"
+                    | "effective_labels"
+                    | "worker_enabled"
+                    // Package #6 fix wave 6 (final review I4): detail only.
+                    | "outputs"
             )
         })
         .collect();
@@ -3666,4 +3675,100 @@ async fn the_run_answer_the_flow_and_the_executions_say_whether_the_worker_runs(
             );
         }
     }
+}
+
+// ── Package #6 Task B3: `outputs` on the execution API ──────────────────────
+
+/// **The detail carries the execution's flow `outputs` as stored -- a SECRET
+/// value as `******` -- and never the sealed columns** (spec D6, D9); **the
+/// list carries no `outputs` at all** (fix wave 6, final review I4: up to
+/// 16 MiB per row). The sealed `secret_outputs` of the execution and of its run are
+/// seeded here with a recognisable plaintext marker (as if unsealed), so a
+/// projection that selected either would put the marker in the body; the
+/// body text is searched for it and for the column name. A row with no
+/// outputs answers `null` (the control).
+#[tokio::test]
+async fn the_execution_api_carries_the_outputs_masked_and_never_the_sealed_columns() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    const MARKER: &str = "hush-b3-api-0451";
+    let id = insert_execution(&db, ws, None, "a.outputs", "f", "SUCCESS", at(2)).await;
+    let none = insert_execution(&db, ws, None, "a.outputs", "g", "SUCCESS", at(1)).await;
+    insert_wired_task_run(&db, id).await;
+    sqlx::query("UPDATE workflow.executions SET outputs = $2, secret_outputs = $3 WHERE id = $1")
+        .bind(id)
+        .bind(serde_json::json!({"s": "******", "p": "plain", "n": 3}))
+        .bind(MARKER.as_bytes())
+        .execute(&db.pool)
+        .await
+        .expect("seed the outputs");
+    sqlx::query("UPDATE workflow.task_runs SET secret_outputs = $2 WHERE execution_id = $1")
+        .bind(id)
+        .bind(MARKER.as_bytes())
+        .execute(&db.pool)
+        .await
+        .expect("seed the run's sealed column");
+
+    let app = common::app(&db).await;
+    let res = common::get(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{id}"),
+        user,
+    )
+    .await;
+    let text = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), 1024 * 1024)
+            .await
+            .expect("the body")
+            .to_vec(),
+    )
+    .expect("UTF-8");
+    let detail: Value = serde_json::from_str(&text).expect("the detail is JSON");
+    assert_eq!(
+        detail["outputs"],
+        serde_json::json!({"s": "******", "p": "plain", "n": 3})
+    );
+    assert!(
+        !text.contains(MARKER) && !text.contains("secret_outputs"),
+        "the detail carries no sealed column: {text}"
+    );
+
+    let res = common::get(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions?namespace=a.outputs"),
+        user,
+    )
+    .await;
+    let text = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), 1024 * 1024)
+            .await
+            .expect("the body")
+            .to_vec(),
+    )
+    .expect("UTF-8");
+    let page: Value = serde_json::from_str(&text).expect("the page is JSON");
+    let row = |eid: Uuid| {
+        page["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .find(|r| r["id"] == eid.to_string())
+            .cloned()
+            .unwrap_or_else(|| panic!("{eid} listed: {page}"))
+    };
+    for eid in [id, none] {
+        assert!(
+            !row(eid).as_object().expect("a row").contains_key("outputs"),
+            "the list row carries no outputs (I4): {page}"
+        );
+    }
+    assert!(
+        !text.contains("plain"),
+        "no output value reaches the list: {text}"
+    );
+    assert!(
+        !text.contains(MARKER) && !text.contains("secret_outputs"),
+        "the list carries no sealed column: {text}"
+    );
 }

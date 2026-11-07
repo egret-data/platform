@@ -693,6 +693,65 @@ async fn an_ended_iteration_of_a_running_root_keeps_its_files() {
     w.prefixes_are_own(&[root, iteration]);
 }
 
+/// **Package #6 Task A5 (spec D5): a `Loop` iteration's `fetchType: STORE`
+/// file is protected while its execution runs**, as any file of the loop
+/// family is: written and indexed as the worker does
+/// (`storage::loop_outputs_file`, `index_execution_files`), kept while the
+/// root runs and while it ended inside the window, still readable from the
+/// root, and pruned with the family once the root ages past it.
+#[tokio::test]
+async fn a_loop_store_file_is_kept_while_its_root_runs_and_pruned_with_its_family() {
+    let _g = SERIAL.lock().await;
+    let Some(w) = World::new().await else { return };
+    let root = w.exec("RUNNING", 0, None).await;
+    let iteration = w.exec("SUCCESS", 400, Some((root, 0))).await;
+    let values = serde_json::json!({"value": "some output"});
+    let (file, bytes) = storage::loop_outputs_file(
+        NS,
+        FLOW,
+        iteration,
+        values.as_object().unwrap(),
+        w.fs.caps.max_file_bytes,
+    )
+    .expect("a STORE file");
+    assert_eq!(bytes, br#"{value:"some output"}"#);
+    w.store.put(&w.object(&file), bytes.clone()).await.unwrap();
+    let mut conn = w.db.pool.acquire().await.unwrap();
+    storage::index_execution_files(
+        &mut conn,
+        w.ws,
+        iteration,
+        &[StoredFile {
+            uri: file.clone(),
+            size: bytes.len() as u64,
+        }],
+    )
+    .await
+    .expect("index the STORE file");
+    drop(conn);
+
+    w.pass().await;
+    assert!(
+        w.kept(&file).await,
+        "the STORE file of a running root's iteration was pruned"
+    );
+    let mut conn = w.db.pool.acquire().await.unwrap();
+    assert!(resolve_readable(&mut conn, w.ws, root, &file)
+        .await
+        .unwrap()
+        .is_ok());
+    drop(conn);
+
+    w.set(root, "SUCCESS", 1).await;
+    w.pass().await;
+    assert!(w.kept(&file).await, "pruned inside the window");
+
+    w.set(root, "SUCCESS", 31).await;
+    let report = w.pass().await;
+    assert!(w.gone(&file).await, "{report:?}");
+    w.prefixes_are_own(&[root, iteration]);
+}
+
 #[tokio::test]
 async fn a_running_iteration_keeps_its_ended_roots_family() {
     let _g = SERIAL.lock().await;

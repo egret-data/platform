@@ -7612,6 +7612,133 @@ tasks:
         );
         assert!(state.runs[0].not_before.is_none());
     }
+
+    /// Drive `plan` failing every `Runnable` attempt until nothing moves, and
+    /// return the attempts each task's run recorded, with the execution's
+    /// last state.
+    fn attempts_when_everything_fails(plan: &Plan) -> (Vec<(String, usize)>, Option<RunState>) {
+        let mut state = ExecutionState::new(plan);
+        let mut now = T0;
+        for _ in 0..400 {
+            let cmds = advance(plan, &state, now);
+            if !cmds.is_empty() {
+                for cmd in &cmds {
+                    apply(&mut state, cmd);
+                }
+                continue;
+            }
+            let in_flight = (0..state.runs.len()).find(|&ix| {
+                matches!(
+                    plan.tasks[state.runs[ix].task].kind,
+                    TaskKind::Runnable { .. }
+                ) && state.runs[ix].history.last() == Some(&RunState::Running)
+            });
+            match in_flight {
+                Some(ix) => apply(
+                    &mut state,
+                    &Command::SetRunState {
+                        run: ix,
+                        state: RunState::Failed,
+                    },
+                ),
+                None => match state
+                    .runs
+                    .iter()
+                    .filter_map(|r| r.not_before)
+                    .filter(|t| *t > now)
+                    .min()
+                {
+                    Some(t) => now = t,
+                    None => break,
+                },
+            }
+        }
+        let attempts = state
+            .runs
+            .iter()
+            .map(|r| (plan.tasks[r.task].id.clone(), r.attempts.len()))
+            .collect();
+        (attempts, state.history.last().copied())
+    }
+
+    /// **Package #6 Task A6 (spec D7): the precedence an iteration's task
+    /// meets** -- its own `retry:` > an ancestor's inside the iteration > the
+    /// one inherited from the parent flow (`x-egret-inherited-retry`, written
+    /// by `worker::spawn::sub_flow_source`) > the flow's own. Each row removes
+    /// the winner of the row before, so each source is seen winning once, and
+    /// the attempt counts are all different.
+    #[test]
+    fn an_iterations_task_meets_own_then_ancestor_then_inherited_then_flow_retry() {
+        let retry = |n: u32| format!("{{type: constant, interval: PT1S, maxAttempts: {n}}}");
+        let src = |inherited: bool, seq: bool, own: bool| {
+            format!(
+                "id: f\nnamespace: a.b\nretry: {}\n{}tasks:\n  - id: s\n    \
+                 type: io.kestra.plugin.core.flow.Sequential\n{}    tasks:\n      - id: c\n        \
+                 type: io.kestra.plugin.core.debug.Return\n        format: a\n{}",
+                retry(5),
+                if inherited {
+                    format!("x-egret-inherited-retry: {}\n", retry(4))
+                } else {
+                    String::new()
+                },
+                if seq {
+                    format!("    retry: {}\n", retry(3))
+                } else {
+                    String::new()
+                },
+                if own {
+                    format!("        retry: {}\n", retry(2))
+                } else {
+                    String::new()
+                },
+            )
+        };
+        for (inherited, seq, own, want) in [
+            (true, true, true, 2),
+            (true, true, false, 3),
+            (true, false, false, 4),
+            (false, false, false, 5),
+        ] {
+            let plan = plan_stored(&src(inherited, seq, own)).expect("the probe plans");
+            let (attempts, last) = attempts_when_everything_fails(&plan);
+            assert_eq!(
+                attempts,
+                [("s".to_string(), 1), ("c".to_string(), want)],
+                "inherited={inherited} seq={seq} own={own}"
+            );
+            assert_eq!(last, Some(RunState::Failed), "and the execution ends");
+        }
+    }
+
+    /// **A failed flowable is never awaited as a retry** (package #6 Task
+    /// A6): a `Sequential` under a `Sequential` with a `retry:` fails once its
+    /// child has used every attempt, and the outer one then ends instead of
+    /// holding at `RetryPending` for a retry `retry::scan` never schedules
+    /// (it retries only `Runnable`/`Executable` runs, as Kestra's
+    /// `ExecutorService.java:572`). The same stall held a `Loop` under such
+    /// a `Sequential` once its iteration failed.
+    #[test]
+    fn a_failed_flowable_under_an_ancestors_retry_ends_its_parent() {
+        let plan = plan_stored(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: outer\n    \
+             type: io.kestra.plugin.core.flow.Sequential\n    \
+             retry: {type: constant, interval: PT1S, maxAttempts: 2}\n    tasks:\n      \
+             - id: inner\n        type: io.kestra.plugin.core.flow.Sequential\n        tasks:\n          \
+             - id: c\n            type: io.kestra.plugin.core.debug.Return\n            format: a\n",
+        )
+        .expect("the probe plans");
+        let (attempts, last) = attempts_when_everything_fails(&plan);
+        assert_eq!(
+            attempts.iter().find(|(id, _)| id == "c").map(|(_, n)| *n),
+            Some(2),
+            "the child used the outer's two attempts: {attempts:?}"
+        );
+        assert_eq!(
+            last,
+            Some(RunState::Failed),
+            "and the execution ended: {attempts:?}"
+        );
+    }
     // ----------------------------------------------------------------------
     // `Pause` — W8 Task 3
     // ----------------------------------------------------------------------

@@ -6199,6 +6199,12 @@ W3b's moment. Task A8's sweep added this note rather than re-deriving every figu
 removal itself did not move. Kept pairs asserted **885** (673 + 212), not asserted **231** (216 + 15),
 after B2, B6 and B7 banked five entries.)*
 
+*(**20 across 5 over 1119 at package #6's end, 2026-10-29** (Task Z's sweep): Task B1's banks took
+`subflow-secret-output-parent` out of the removal (its `subflow` run fails now, so `log` no longer runs
+past it), so `RESTRICTION_REMOVES` 21 → 20, `RESTRICTION_REMOVES_ENTRIES` 6 → 5 and
+`EGRET_PAIRS_BEFORE_RESTRICTION` 1120 → 1119. Kept pairs asserted **897** (680 + 217), not asserted
+**219** (209 + 10), after A4 (`if-in-parallel`'s nested pairs) and B2 (`after-execution`).)*
+
 *(**80 across 6 over 771 through W5; 85 across 9 over 791 at W6 Task 3.** The
 three entries added are `valids/restart-parent`, `valids/restart-parent-loop`
 and `valids/subflow-secret-output-parent` — `Subflow` parents that used to stall
@@ -6301,6 +6307,12 @@ them. The parentheticals below are the record of the earlier moments.)*
 `loop-object` and `loop-object-in-list`, both spawners, so `SPAWNED_ENTRIES_THAT_MATCH` went 32 → 34
 and the rest 8 → 6; B6 and B7 moved none of the three.)*
 
+*(**40 / 0 / 1 at package #6's end, 2026-10-29** (Task Z's sweep): Task A3 banked
+`loop-outputs-failed-render` (34 → 35, rest 6 → 5), A4 `if-in-parallel`, `loop-outputs`,
+`loop-outputs-auto`, `loop-outputs-store` (35 → 39, rest 5 → 1), A6 `retry-flowable-parallel`, the
+last entry that differed only inside `spawned` (39 → 40, that bucket 1 → 0). B1–B4 moved none of the
+three; the total is still 41.)*
+
 *(**17/8/16 through W5; 18/8/15 at W6 Task 3; 22/4/15 since W6 Task 4** — the
 four `valids/retry-new-execution-*` entries moved from the middle row to the
 top one when `worker::replay` created the replacement execution they were
@@ -6337,6 +6349,11 @@ different sentence from the one W3a's `39 of the 41 differ on nothing but
 spawned` made**: that field was empty, and these four are filled and wrong
 somewhere inside.
 
+*(**None since package #6 Task A6 (2026-10-29, measured):** the end-hooks A6
+banks left `valids/retry-flowable-parallel` alone in this bucket, and A6 banked
+it — its `Loop`'s `retry:` now reaches each iteration's `child`, which runs
+three attempts as in Kestra.)*
+
 *(It was **eight** through W6 Task 3, and the four that left are the four
 `valids/retry-new-execution-*` entries Task 4 banked. They were in this bucket
 for the strongest version of "differs inside `spawned`": everything the parent
@@ -6357,7 +6374,7 @@ exactly as `loop-switch` does. Both are corrected in `baseline.txt`.
 
 ### The residual baseline, by construct and owner
 
-**35 entries** since package #5b's Task B7 (2026-10-29: `errors` banked, `errorLogs()`). **36 entries** since package #5b's Task B6 (2026-10-29: `variables` banked, `render()`). **37 entries** since package #5b's Task B2 (2026-10-29: `loop-object`, `loop-object-in-list`, `task-runif-taskswithstate` banked). **40 entries** at package #5a's end (2026-10-29, `baseline.len()` printed by the test below; Task A8's sweep corrected this heading and the cells marked so in the table, which had stopped following the banks of the end-hooks package and of #5a). **108 entries** at W9a — it read `111` until W8 Task 7, two banks behind, and `109`
+**25 entries** since package #6's Task B3 (2026-10-29: `subflow-secret-output-parent` banked, a `Subflow` whose child's outputs were not stored fails as Kestra's `failSubflowDueToOutput`, attempt `[CREATED, FAILED]`). **26 entries** since package #6's Task B2 (2026-10-29: `after-execution` banked, `{{ execution.outputs }}` reads the flow outputs stored at the terminal). **27 entries** since package #6's Task B1 (2026-10-29: `flow-with-outputs-failed` banked, the flow-level `outputs:` evaluated at the terminal; `subflow-secret-output-child` banked, not predicted: its SECRET output is refused on the oracle's keyless egret as Kestra's keyless harness fails it). **29 entries** since package #6's Task A6 (2026-10-29: `retry-flowable-parallel` banked, a `Loop`'s `retry:` inherited by each iteration's tasks). **30 entries** since package #6's Task A4 (2026-10-29: `if-in-parallel`, `loop-outputs`, `loop-outputs-auto`, `loop-outputs-store` banked, the `Loop` run's `outputs` list; `-auto` and `-store` ahead of the plan, which put them at Task A5: they match on states while their entries still hold the FETCH map). **34 entries** since package #6's Task A3 (2026-10-29: `loop-outputs-failed-render` banked, a `Loop`'s `outputs:` evaluated at each iteration's terminal). **35 entries** since package #5b's Task B7 (2026-10-29: `errors` banked, `errorLogs()`). **36 entries** since package #5b's Task B6 (2026-10-29: `variables` banked, `render()`). **37 entries** since package #5b's Task B2 (2026-10-29: `loop-object`, `loop-object-in-list`, `task-runif-taskswithstate` banked). **40 entries** at package #5a's end (2026-10-29, `baseline.len()` printed by the test below; Task A8's sweep corrected this heading and the cells marked so in the table, which had stopped following the banks of the end-hooks package and of #5a). **108 entries** at W9a — it read `111` until W8 Task 7, two banks behind, and `109`
 until W9a Task 11 banked `valids/loop-values-from-uri` (a `Loop` over the ION
 file a `core.storage.Write` wrote; the `Loop` row below fell 19 → 18 with it).
 `the_residual_baseline_is_attributed_to_a_construct_or_named` derives the rows
@@ -6370,16 +6387,16 @@ found.
 
 | baselined entries declaring it | construct | owner |
 |---|---|---|
-| **7** | `Loop` — a sub-execution egret **runs and gets wrong** | see below. **12 at package #5a Task A3 (2026-10-28, measured by the derivation; it read 14 before)**: `restart-loop` and `restart-parent-loop` banked; **11 at Task A6** (`if-in-flowable`), **9 at Task A7** (`all-flowable`, `disable-flowable`), **7 at package #5b Task B2** (`loop-object`, `loop-object-in-list`: `is json`). This cell read 18 until Task A8's sweep |
+| **1** | `Loop` — a sub-execution egret **runs and gets wrong** | see below. **1 at package #6 Task A6 (2026-10-29, measured)**: `retry-flowable-parallel` banked (the `Loop`'s `retry:` inherited by each iteration, spec D7). **2 at package #6 Task A4 (2026-10-29, measured)**: `if-in-parallel`, `loop-outputs`, `loop-outputs-auto`, `loop-outputs-store` banked (the `Loop` run's `outputs` list, spec D3). **6 at package #6 Task A3 (2026-10-29, measured)**: `loop-outputs-failed-render` banked (its failing `outputs:` fail the first iteration). **12 at package #5a Task A3 (2026-10-28, measured by the derivation; it read 14 before)**: `restart-loop` and `restart-parent-loop` banked; **11 at Task A6** (`if-in-flowable`), **9 at Task A7** (`all-flowable`, `disable-flowable`), **7 at package #5b Task B2** (`loop-object`, `loop-object-in-list`: `is json`). This cell read 18 until Task A8's sweep |
 | **1** | `finally:` | end hooks #2a/#2b banked fourteen; package #5b Task B2 (2026-10-29) banked `task-runif-taskswithstate` (the `empty` test); the one left is `pause-errors-finally-after-execution` (#9). This cell read 16 until package #5a Task A8's sweep |
 | ~~1~~ | ~~`ExecutionUpdatableTask`~~ (`Exit` left at kill-and-exit Task 3, 16 → 12; `Labels`, `SetVariables`, `UnsetVariables` at group C2 Task 5, 12 → 1) | **row removed at package #5b Task B2 (2026-10-29)**: its last entry, `valids/task-runif-taskswithstate`, banked, and the derivation drops a row that holds nothing rather than asserting 0 |
 | **2** | `AllowFailure` / `allowFailure:` → `WARNING` | **W8 Task 5 banked seven of its twelve**; the five that remained were held by the FLOWABLE and not by the flag — see the paragraph below. Two now (`retry-with-flowable-errors`, `pause-timeout-allow-failure`); this cell read 5 until package #5a Task A8's sweep |
 | 3 | `Pause` → `PAUSED` | W8 — and **not one of the three is held by the wait**; see below |
-| **2** | `afterExecution:` | end hooks #2b banked eight; `valids/after-execution` (#6, flow `outputs:`) and `pause-errors-finally-after-execution` (#9) remain. This cell read 10 until package #5a Task A8's sweep |
+| **1** | `afterExecution:` | end hooks #2b banked eight; `valids/after-execution` (#6, flow `outputs:`) and `pause-errors-finally-after-execution` (#9) remained. This cell read 10 until package #5a Task A8's sweep. **2 → 1 at package #6 Task B2 (2026-10-29, measured)**: `after-execution` banked; `pause-errors-finally-after-execution` (#9) remains |
 | 2 | `LoopUntil` / `WaitFor` | W8 — **and not one of the two is held by the loop** (eight until group C1 Task 2); see below. **8 → 3 at group C1 Task 2**: five of the six `OutputValues` ones banked. **3 → 2 at package #5a Task A2 (2026-10-28)**: `loopuntil-failed-flowable` banked (spec D1) |
 | 3 | `sla:` | **W8 Task 6 banked two of the five**; the three that remain are `MAX_DURATION`s and **no implementation can bank them under this harness** — see the fifth blindness mechanism below |
 | **2** | `WorkingDirectory` (planned opaque) | **unclaimed**; 3 → 2 at package #5a Task A6 (`task-runif-workingdirectory`: its `contains` did not parse). This cell read 4 until Task A8's sweep |
-| **17** | **none of the above** | named individually in `UNATTRIBUTED` (36 → 30 at group C1 Task 2: six entries held by `OutputValues` alone banked; 30 → 29 at group C1 Task 3: `valids/assert` banked; **20 before package #5a Task A5, 19 since** (`webhook-plaintext`); this cell read 29 until Task A8's sweep, already stale before #5a; 18 since package #5b Task B6 (`variables`, `render()`); **17 since its Task B7** (`errors`, `errorLogs()`), the count the test prints) |
+| **14** | **none of the above** | named individually in `UNATTRIBUTED` (36 → 30 at group C1 Task 2: six entries held by `OutputValues` alone banked; 30 → 29 at group C1 Task 3: `valids/assert` banked; **20 before package #5a Task A5, 19 since** (`webhook-plaintext`); this cell read 29 until Task A8's sweep, already stale before #5a; 18 since package #5b Task B6 (`variables`, `render()`); **17 since its Task B7** (`errors`, `errorLogs()`); **15 since package #6 Task B1 (2026-10-29, measured)** (`flow-with-outputs-failed`, `subflow-secret-output-child`; `subflow-secret-output-parent` stays, re-attributed to its `subflow` run's attempt shape, Task B3's); **14 since package #6 Task B3 (2026-10-29, measured)** (`subflow-secret-output-parent`), the count the test prints) |
 
 **The `LoopUntil` / `WaitFor` row is 9 → 8 at W8 Task 4, and the eight that
 remain are held by three things, none of which is the construct.** SIX have an
@@ -9427,10 +9444,10 @@ over `oracle-exec/corpus/`; each classified against `harvest-run.txt`,
 | FILE input (5) | `valids/inputs`, `valids/inputs-small-files`, `valids/restart_with_inputs`, `valids/pause_on_resume` | no | -- | not-standalone at harvest: Kestra's own test supplies the file from the JVM classpath (or stays PAUSED), so there is no golden trace to compare |
 | | `invalids/inputs-validation` | yes (refused) | no → no | Kestra refuses it at publish for a `multiselect` input, not for its FILE input; it matched before W9a and still does |
 | `outputFiles` (1) | `valids/working-directory-outputs` | no | -- | rejected at harvest: `WorkingDirectoryTest$LocalFiles` is a test-only task type |
-| STORE (2) | `valids/loop-outputs-store` | yes | yes → yes | a `Loop`'s own `outputs:` in STORE mode, which W9a does not produce (the user's ruling of 2026-10-03; W9a spec §15) |
+| STORE (2) | `valids/loop-outputs-store` | yes | yes → yes | a `Loop`'s own `outputs:` in STORE mode, which W9a does not produce (the user's ruling of 2026-10-03; W9a spec §15). *(Reopened 2026-10-19; banked 2026-10-29 by package #6 Task A4 on states, and its STORE files written by Task A5: one `outputs.ion` per iteration.)* |
 | | `valids/webhook-store-body` | yes (FAILED) | no → no | a webhook trigger's STORE body; W9a does not implement it, and egret already matched Kestra's FAILED |
 | `core.storage` (2) | `valids/loop-values-from-uri` | yes | **yes → no** | `Write` an Ion file, `Loop` over its URI: banked at Task 11, measured |
-| | `valids/loop-outputs-auto` | yes | yes → yes | `fetchType: AUTO` over a file writes the `Loop`'s outputs as STORE files: same ruling as `loop-outputs-store` |
+| | `valids/loop-outputs-auto` | yes | yes → yes | `fetchType: AUTO` over a file writes the `Loop`'s outputs as STORE files: same ruling as `loop-outputs-store`. *(Banked 2026-10-29 by package #6 Task A4 on states; Task A5 resolves AUTO to STORE and its content matches the artifact's run field by field, file name aside.)* |
 
 What the ratchet can see of W9a: the driver registers the nine core storage
 tasks over the test `MemStore` (`oracle-exec/driver.rs:131-159`; `storage::`
@@ -10418,7 +10435,7 @@ sub-executions, or a run Kestra ended `KILLED`/`FAILED` that egret ended
 | **W2** (the renderer answers where Java throws) | `all-flowable`, `disable-flowable`, `restart-child`, `restart-loop` | `{{ taskrun.value }}` is undefined in a `Loop` body and a `Switch` case in this artifact and Kestra FAILED both; `{{ 1 / taskrun.attemptsCount }}` renders `Infinity` where Java throws. So the run succeeds and everything after it runs — `all-flowable` 12 runs and 3 sub-executions against Kestra's 3 and 1 **(Package #5a Task A3, 2026-10-28: `restart-child` and `restart-loop` left the register and the baseline, with `restart-parent` and `restart-parent-loop`: integer `/` is Java's now and `1 / 0` fails with Kestra's text, spec D2.)** **(Package #5a Task A7, 2026-10-29: `all-flowable` and `disable-flowable` left the register and the baseline too: a null `taskrun.value` is absent from the render context, as in Kestra's `RunVariables`, spec D7.)** |
 | **W4** (the kill path) | `parallel-fail-with-flowable` | a `Sleep` still in flight when its sibling failed the `Parallel`. W4 Task 3 wired `TaskHandler::cancel` to the budget's expiry — the artifact's only `kill(null)` site — and this entry is not that: `advance()` abandoned the run, and `advance()` has no worker to tell. The row stands and the owner is still W4 |
 | **W8** (`sla:`) | ~~`flow-concurrency-sla-assert-cancel`~~, `flow-concurrency-sla-fail-child`, ~~`sla-execution-condition`~~, `sla-max-duration-fail`, `sla-subflow` | **Five until W8 Task 6, three now.** The two struck out are the `EXECUTION_ASSERTION`s: egret cancels the execution before any run exists, so it no longer runs anything Kestra did not, and both bank. The three left are `MAX_DURATION`s, where Kestra KILLED the `Sleep` and egret completes it — and that is an over-acceptance of the **harness** rather than of egret, because `driver.rs` caps the `Sleep` to `ZERO` and no window exists to kill it in. They stay registered rather than excused |
-| **unclaimed** (a `Loop`'s own `outputs:`) | `loop-outputs-failed-render` | Kestra FAILED the loop at iteration 1 when its `outputs:` could not render; `advance()` has no loop `outputs:`, so egret runs all three |
+| ~~**unclaimed** (a `Loop`'s own `outputs:`)~~ | ~~`loop-outputs-failed-render`~~ | **Closed 2026-10-29 by package #6 Task A3 (spec D1), and the entry banked.** Kestra FAILED the loop at iteration 1 when its `outputs:` could not render; egret did not evaluate a `Loop`'s `outputs:` and ran all three. It evaluates them at each iteration's terminal now: the iteration ends `CREATED RUNNING SUCCESS FAILED` and `transmitFailed` stops the loop, as in Kestra |
 
 A **stalled** execution is deliberately not in this class: egret doing less than
 Kestra is under-acceptance, which the ratchet already reports as a mismatch and
@@ -13901,3 +13918,50 @@ removed types, so `UNKNOWN_TYPE_REFUSED` did not move.
   `io.kestra.plugin.core.execution.PurgeExecutions`; the unserved probe moved
   from `egret.sql` to `egret.report.send`.
 
+
+## Package #6 as built (Task Z, 2026-10-29): `Loop` outputs, `Loop` retry and flow outputs, ten entries bank
+
+Measured on `feat/workflow-loop-outputs` (`cargo test -p egret-workflow --test
+executor`): ratchet **301 / 25 / 25 / 0**, `(301, 276, 25)`, from T0's
+**301 / 35 / 35 / 0** (the merge of #5b, `271b1c17`); census 295 live, 25
+validate-refused, 21 unknown type, unchanged. Spec
+`docs/en/specs/2026-10-29-workflow-loop-outputs-design.md` §7.
+
+**Banked (10), by task, measured:**
+
+| Task | Entries | Ratchet after |
+|---|---|---|
+| A3 | `loop-outputs-failed-render` | 34 |
+| A4 | `loop-outputs`, `if-in-parallel`, and ahead of the plan `loop-outputs-auto`, `loop-outputs-store` (the list exists for every `fetchType`, so `end` renders; A5 wrote their STORE content) | 30 |
+| A5 | none (content only: one `outputs.ion` per iteration, AUTO resolved) | 30 |
+| A6 | `retry-flowable-parallel` | 29 |
+| B1 | `flow-with-outputs-failed`, and not predicted `subflow-secret-output-child` | 27 |
+| B2 | `after-execution` | 26 |
+| B3 | `subflow-secret-output-parent` | 25 |
+| B4 | none | 25 |
+
+The plan expected 8 upper / 6 strict and a final 27 / 27. The two extra are
+the `subflow-secret-output-*` pair, which the spec's Q3 expected to stay
+baselined: the oracle's egret runs, like Kestra's harness, with **no master
+key**, so egret refuses to store the SECRET output and fails the child as
+Kestra does, and the parent then fails as Kestra's
+`Subflow.failSubflowDueToOutput` does. With a key, egret stores the value
+sealed (pinned by `tests/worker.rs`, not by this oracle).
+
+**No oracle sees outputs.** `golden.json` and `traces.json` record states
+only, so every bank above is a state bank; the content (list shape, counters,
+typing, STORE URIs and file text, masking, the `Subflow` copy,
+`trigger.outputs`, the API field) is pinned by `tests/worker.rs`,
+`tests/storage_render.rs`, `tests/storage_prune.rs`,
+`tests/flow_trigger_fire.rs`, `tests/flow_trigger_windows.rs` and
+`tests/executions_routes.rs`. `loop-outputs-auto` is the one entry whose
+content an artifact measured (`w9a-storage.json`): it matches field by field
+except the file name (Kestra a random `{n}.ion`, egret `outputs.ion`) and
+`nextOffset` (not written, spec D4).
+
+`handler_surface.py`: baseline size 25; `handler-surface.txt` reproduced 266
+→ 276, the "flow-level `outputs:`" construct row gone, ceiling 286 → 290.
+Earlier sections of this file that call `loop-outputs*`, `if-in-parallel`,
+`after-execution`, `flow-with-outputs-failed`, `retry-flowable-parallel` or
+`subflow-secret-output-*` baselined, or say egret never evaluates flow
+`outputs:`, are dated records of their day.

@@ -517,8 +517,10 @@ pub struct DagNode {
 // `transmitFailed` (Java: `Boolean = true`, no `@NotNull`) is ported too --
 // omitted from the first pass of this task without being named as dropped,
 // which was the actual defect flagged in review (silence, not the omission
-// itself); `outputs`/`fetchType` remain deliberately out (execution-plane,
-// unused before W3).
+// itself). `outputs`/`fetchType` were left out then and modelled by package #6
+// (Task A1, spec D8): `outputs` reuses the flow's `FlowOutput` (Kestra's field
+// is the same `io.kestra.core.models.flows.Output`, `Loop.java:248`) and
+// `fetchType` is `Loop.FetchType` (`AUTO` default, `Loop.java:258-261`).
 //
 // `tasks` carries the same `@NotEmpty`-on-`AbstractBranch` debt `Sequential`
 // documents above (Task 4 fix round 3). `concurrencyLimit` is `@NotNull
@@ -540,6 +542,21 @@ pub struct Loop {
     pub concurrency_limit: Option<i32>,
     #[serde(default = "default_true")]
     pub transmit_failed: bool,
+    /// `Loop.outputs` (`Loop.java:242-248`): evaluated once per iteration, at
+    /// the end of that iteration's sub-execution, and collected on the `Loop`
+    /// run (package #6, spec D1, D3). The same bean as a flow's `outputs:`.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::models::wire::null_is_absent"
+    )]
+    pub outputs: Vec<crate::models::FlowOutput>,
+    /// `Loop.fetchType` (`Loop.java:250-261`, `@NotNull @Builder.Default
+    /// AUTO`). `Option` for the reason `concurrency_limit` gives: an explicit
+    /// `null` parses, and an absent key is not written back on serialising
+    /// (as `LoopUntil::check_frequency`). [`Loop::fetch_type`] is the value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_type: Option<LoopFetchType>,
     /// `AbstractBranch.errors`: the list driven when a child of `tasks` fails.
     #[serde(
         default,
@@ -556,6 +573,29 @@ pub struct Loop {
         deserialize_with = "crate::models::wire::null_is_absent"
     )]
     pub finally: Vec<Task>,
+}
+
+impl Loop {
+    /// The `fetchType` this `Loop` runs with: the written one, `AUTO` when
+    /// absent or `null` (Kestra's `@Builder.Default`).
+    pub fn fetch_type(&self) -> LoopFetchType {
+        self.fetch_type.unwrap_or_default()
+    }
+}
+
+/// `Loop.FetchType` (`Loop.java:434-438`): how an iteration's outputs reach
+/// the `Loop` run. `FETCH` keeps the typed map, `STORE` writes it to one ION
+/// file per iteration, `AUTO` picks `STORE` when `values:` is a string that
+/// renders to an internal-storage URI and `FETCH` otherwise (spec D5). Named
+/// apart from the Webhook trigger's `models::FetchType` (`NONE`/`FETCH`/`STORE`, no
+/// `AUTO`), a different Kestra enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum LoopFetchType {
+    #[default]
+    Auto,
+    Fetch,
+    Store,
 }
 
 // kestra: LoopUntil.java -- a second `AbstractBranch` sibling of `Loop` this
@@ -1187,6 +1227,52 @@ mod tests {
                 .collect();
             assert_eq!(ids.last(), Some(&"z"), "{ty}: {ids:?}");
         }
+    }
+
+    /// Package #6 Task A1: a `Loop` reads `outputs` (the flow's `Output` bean)
+    /// and `fetchType`, and serialises them back; an absent `fetchType` is
+    /// `AUTO` and is not written out, and an empty `outputs` is not either.
+    #[test]
+    fn a_loop_reads_outputs_and_fetch_type_and_round_trips_them() {
+        use super::LoopFetchType;
+        let src = "id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: io.kestra.plugin.core.flow.Loop\n    values: [a, b]\n    fetchType: STORE\n    outputs:\n      - id: v\n        type: STRING\n        value: \"{{ outputs.t.value }}\"\n      - id: n\n        type: INT\n        value: 3\n        required: false\n    tasks: [{id: t, type: core.log, message: m}]\n";
+        let flow = crate::spec::parse(src).unwrap();
+        let TaskKind::Loop(l) = &flow.tasks[0].kind else {
+            panic!("not a Loop: {:?}", flow.tasks[0].kind)
+        };
+        assert_eq!(l.fetch_type(), LoopFetchType::Store);
+        let ids: Vec<&str> = l.outputs.iter().map(|o| o.id.as_str()).collect();
+        assert_eq!(ids, ["v", "n"]);
+        assert_eq!(
+            l.outputs[0].value.as_ref().unwrap().source(),
+            "{{ outputs.t.value }}"
+        );
+        assert_eq!(
+            l.outputs[1].r#type,
+            Some(crate::models::InputType::Int),
+            "{:?}",
+            l.outputs[1]
+        );
+        assert_eq!(l.outputs[1].required, Some(false));
+
+        let json = serde_json::to_value(&flow.tasks[0]).unwrap();
+        assert_eq!(json["fetchType"], "STORE");
+        assert_eq!(json["outputs"][1]["id"], "n");
+        let back: Task = serde_json::from_value(json).unwrap();
+        assert_eq!(back, flow.tasks[0]);
+
+        let plain = crate::spec::parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: io.kestra.plugin.core.flow.Loop\n    values: [a]\n    tasks: [{id: t, type: core.log, message: m}]\n",
+        )
+        .unwrap();
+        let TaskKind::Loop(l) = &plain.tasks[0].kind else {
+            panic!("not a Loop")
+        };
+        assert_eq!(l.fetch_type(), LoopFetchType::Auto);
+        assert!(l.outputs.is_empty());
+        let json = serde_json::to_value(&plain.tasks[0]).unwrap();
+        assert!(json.get("fetchType").is_none(), "{json}");
+        assert!(json.get("outputs").is_none(), "{json}");
     }
 
     #[test]

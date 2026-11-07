@@ -1705,3 +1705,83 @@ async fn a_foreach_listener_is_refused_and_its_loop_sibling_fires() {
         1
     );
 }
+
+// ── Package #6 Task B3: `trigger.outputs` ──────────────────────────────────
+
+/// **A listener's `inputs:` read the source's flow outputs as
+/// `{{ trigger.outputs.x }}`, and the fired execution's trigger record
+/// carries them** (spec D6; Kestra's `Flow.evaluate` binds `trigger:
+/// {outputs}` when the outputs are non-empty). A SECRET output reaches both
+/// as the mask (spec D9): the sealed value never leaves the source. Control:
+/// a source with no `outputs:` binds no `trigger`, so the same `inputs:`
+/// fail and the listener's execution is born FAILED (the W13a measurement),
+/// with no `outputs` key in its record.
+#[tokio::test]
+async fn a_listener_reads_the_sources_flow_outputs_as_trigger_outputs() {
+    let Some(fx) = fx().await else { return };
+    egret_workflow::secret_inputs::install_for_tests();
+    const PLAIN: &str = "hush-b3-trig-0451";
+    let producer_src = format!(
+        "id: producer\nnamespace: w13\ntasks:\n  - id: a\n    \
+         type: io.kestra.plugin.core.log.Log\n    message: hi\n\
+         outputs:\n  - id: date\n    type: STRING\n    value: \"{{{{ flow.id | replace({{'producer': '2026-10-29'}}) }}}}\"\n  \
+         - id: s\n    type: SECRET\n    value: {PLAIN}\n"
+    );
+    let producer = fx.flow(&producer_src).await;
+    let plain_src = source_yaml("plain");
+    let plain = fx.flow(&plain_src).await;
+    let listener = fx
+        .flow(&listener_yaml(
+            "listener",
+            "inputs:\n  - id: date\n    type: STRING\n  - id: sec\n    type: STRING\n",
+            "    states: [SUCCESS]\n    inputs:\n      date: \"{{ trigger.outputs.date }}\"\n      \
+             sec: \"{{ trigger.outputs.s }}\"\n",
+        ))
+        .await;
+
+    let exec = fx.run(producer, &producer_src, serde_json::json!({})).await;
+    fx.pass().await;
+    let (inputs, state, trigger): (serde_json::Value, String, serde_json::Value) = sqlx::query_as(
+        "SELECT inputs, state, execution_trigger FROM workflow.executions \
+              WHERE flow_id = $1 AND trigger_execution_id = $2",
+    )
+    .bind(listener)
+    .bind(exec)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("the listener fired once on the producer");
+    assert_ne!(state, "FAILED", "the inputs rendered");
+    assert_eq!(
+        inputs,
+        serde_json::json!({"date": "2026-10-29", "sec": "******"})
+    );
+    assert_eq!(
+        trigger["variables"]["outputs"],
+        serde_json::json!({"date": "2026-10-29", "s": "******"})
+    );
+    let rows: Vec<String> =
+        sqlx::query_scalar("SELECT e::text FROM workflow.executions e WHERE flow_id = $1")
+            .bind(listener)
+            .fetch_all(&fx.db.pool)
+            .await
+            .unwrap();
+    assert!(
+        !rows.iter().any(|r| r.contains(PLAIN)),
+        "no listener row holds the plaintext: {rows:?}"
+    );
+
+    // Control: no outputs, no `trigger`.
+    let exec = fx.run(plain, &plain_src, serde_json::json!({})).await;
+    fx.pass().await;
+    let (state, trigger): (String, serde_json::Value) = sqlx::query_as(
+        "SELECT state, execution_trigger FROM workflow.executions \
+          WHERE flow_id = $1 AND trigger_execution_id = $2",
+    )
+    .bind(listener)
+    .bind(exec)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("the listener fired once on the plain source");
+    assert_eq!(state, "FAILED", "born FAILED: `trigger` is not bound");
+    assert!(trigger["variables"].get("outputs").is_none());
+}

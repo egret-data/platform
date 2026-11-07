@@ -45615,6 +45615,13 @@
                 },
                 "description": "Every task run, in `run_ix` order — the executor's creation order."
               },
+              "outputs": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "The flow's `outputs:` as the execution's end evaluated them, typed by\neach output's `type`; `null` when none were evaluated: the flow\ndeclares none, the execution has not ended, or the evaluation failed\n(the execution then ended `FAILED` and its logs say why). **A\n`SECRET` output's value is always `******`** here: the real value is\nkept encrypted on the server and no response carries it. A `FILE`\noutput is a `kestra:///` URI of the execution's own storage, read\nthrough the execution file API. On the detail only: the list leaves\nit out, since it can be up to 16 MiB per execution."
+              },
               "can_manage": {
                 "type": "boolean",
                 "description": "Whether the caller may resume and replay this execution: they hold\n`workflow:manage` in this workspace. A detail page hides both actions\nwhen this is false; the routes still check for themselves."
@@ -56816,7 +56823,7 @@
               "object",
               "null"
             ],
-            "description": "The run's outputs, `NULL` for a run that has none: a handler that\nreturned nothing (a `Log`, a `Sleep`) and any run not yet terminal."
+            "description": "The run's outputs, `NULL` for a run that has none: a handler that\nreturned nothing (a `Log`, a `Sleep`) and any run not yet terminal.\nA `SECRET` output inside them -- a `Loop`'s `outputs` list, a\n`Subflow`'s copy of its child's flow outputs -- is always `******`."
           },
           "message": {
             "type": [

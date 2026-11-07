@@ -220,9 +220,13 @@ impl tokio::io::AsyncRead for Guarded<'_> {
 }
 
 /// Every FILE input's value must be a `kestra://` URI readable from
-/// `execution` ([`super::resolve_readable_many`] over
-/// [`super::readable_executions`]) whose file name `allowedFileExtensions`
-/// accepts. Called at every execution-creating INSERT, after the row exists.
+/// `execution` ([`super::resolve_readable_for_read`] over
+/// [`super::readable_executions`]: the read rule, which since package #6
+/// Task B4 admits a file a waited-for `Subflow` child published to any
+/// execution of the readable set, so across the one trigger hop that set
+/// already crosses -- see [`super::resolve_readable_for_read`]) whose file
+/// name `allowedFileExtensions` accepts. Called at every execution-creating
+/// INSERT, after the row exists.
 ///
 /// An absent or `null` value is not checked (a default, or no value; the
 /// render decides). `uploaded` are the files [`upload_input`] stored for
@@ -268,7 +272,9 @@ pub async fn check_file_inputs(
         Default::default()
     } else {
         let readable = super::readable_executions(conn, workspace, execution).await?;
-        super::resolve_readable_many(conn, workspace, &readable, &lookup).await?
+        // A FILE input READS the file: a waited-for `Subflow` child's
+        // published file passes on (package #6 Task B4).
+        super::resolve_readable_for_read(conn, workspace, &readable, &lookup).await?
     };
     for (input, value) in &given {
         if !uploaded.contains(value.as_str()) {
@@ -292,6 +298,59 @@ pub async fn check_file_inputs(
         let file_name = value.rsplit('/').next().unwrap_or_default();
         if let Err(why) = extension_allowed(input, file_name) {
             return Ok(Err(why));
+        }
+    }
+    Ok(Ok(()))
+}
+
+/// **A FILE output publishes only a file of its own execution** (package #6,
+/// spec D10, user decision Q4; a recorded security divergence: Kestra OSS
+/// checks nothing).
+///
+/// Every non-`null` value of a `type: FILE` output in `values` must be a
+/// `kestra:///` URI whose `{exec}` is `execution` or another execution of its
+/// LOOP FAMILY ([`super::loop_family`]: the loop root and every iteration
+/// under it), and which resolves as readable there
+/// ([`super::resolve_readable_many`] over that family). That is narrower than
+/// the readability rule of a read, which also admits the replay chain and the
+/// trigger family: an output publishes a file, a read only consumes one.
+/// Anything else -- another execution, a malformed URI, a path that is not
+/// `kestra://`, a value that is not a string -- is
+/// `Ok(Err("egret refuses output <id>: <uri> is not a file of this execution"))`.
+/// `Err` is the database's.
+pub async fn check_file_outputs(
+    conn: &mut PgConnection,
+    workspace: Uuid,
+    execution: Uuid,
+    outputs: &[crate::models::FlowOutput],
+    values: &serde_json::Map<String, serde_json::Value>,
+) -> Result<std::result::Result<(), String>> {
+    let refuse = |id: &str, shown: &str| {
+        format!("egret refuses output {id}: {shown} is not a file of this execution")
+    };
+    let mut given: Vec<(&str, String)> = Vec::new();
+    for output in outputs.iter().filter(|o| o.r#type == Some(InputType::File)) {
+        match values.get(&output.id) {
+            None | Some(serde_json::Value::Null) => {}
+            Some(serde_json::Value::String(s)) => given.push((output.id.as_str(), s.clone())),
+            Some(other) => return Ok(Err(refuse(&output.id, kind_of(other)))),
+        }
+    }
+    if given.is_empty() {
+        return Ok(Ok(()));
+    }
+    let family = super::loop_family(conn, workspace, execution).await?;
+    let uris: Vec<String> = given.iter().map(|(_, v)| v.clone()).collect();
+    let resolved = super::resolve_readable_many(conn, workspace, &family, &uris).await?;
+    for (id, value) in &given {
+        match resolved.get(value) {
+            Some(Ok(_)) => {}
+            Some(Err(_)) => return Ok(Err(refuse(id, value))),
+            None => {
+                return Err(egret_core::Error::Internal(anyhow::anyhow!(
+                    "resolve_readable_many did not answer {value}"
+                )))
+            }
         }
     }
     Ok(Ok(()))

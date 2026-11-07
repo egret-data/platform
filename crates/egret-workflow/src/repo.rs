@@ -1007,6 +1007,11 @@ impl FlowRepo {
 /// document, per row -- and a fifty-row list page would carry fifty copies of
 /// something no list column shows. [`ExecutionRepo::get`] selects it beside
 /// this list, because a detail page draws its topology from it.
+///
+/// **So is `outputs`** (package #6 fix wave 6, final review I4), for the same
+/// reason with a bigger multiplier: a flow's outputs are up to 16 MiB per
+/// row, so a 200-row page could carry 3.2 GB. [`ExecutionRepo::get`] selects
+/// it for the one execution it reads.
 macro_rules! execution_cols {
     () => {
         "id, workspace_id, flow_id, namespace, flow_key, state, history, inputs, seq, \
@@ -1144,6 +1149,14 @@ pub struct ExecutionDetail {
     /// draw the topology from this string alone.
     pub source: String,
     pub runs: Vec<TaskRunRow>,
+    /// The flow-level `outputs:` the execution's terminal evaluated
+    /// (migration 0214, package #6), each SECRET value stored as `******`;
+    /// `NULL` when none were (no `outputs:`, not ended, or a failed
+    /// evaluation). On the detail only, never the list (fix wave 6, final
+    /// review I4: up to 16 MiB). **`secret_outputs`, the sealed values beside
+    /// it, is not selected by any statement here** (spec D9): no read of
+    /// this type can carry it, so no response can.
+    pub outputs: Option<serde_json::Value>,
     /// The execution's executor-level `variables` (migration 0196, group C2);
     /// `None` is "the flow's `variables:`". Read for the replay route, which
     /// copies it (D3); skipped by `Serialize`, so no response carries it.
@@ -1165,6 +1178,7 @@ struct ExecutionWithSource {
     source: String,
     variables: Option<serde_json::Value>,
     secret_inputs: Option<Vec<u8>>,
+    outputs: Option<serde_json::Value>,
 }
 
 /// Filters for [`ExecutionRepo::list`]. Every field `None` lists the whole
@@ -1436,7 +1450,7 @@ impl ExecutionRepo {
         let row: Option<ExecutionWithSource> = sqlx::query_as(concat!(
             "SELECT ",
             execution_cols!(),
-            ", source, variables, secret_inputs \
+            ", source, variables, secret_inputs, outputs \
              FROM workflow.executions WHERE id = $1 AND workspace_id = $2"
         ))
         .bind(id)
@@ -1453,6 +1467,7 @@ impl ExecutionRepo {
             execution: row.execution,
             source: row.source,
             runs,
+            outputs: row.outputs,
             variables: row.variables,
             secret_inputs: row.secret_inputs,
         })

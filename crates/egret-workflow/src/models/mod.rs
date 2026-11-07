@@ -32,7 +32,8 @@ pub(crate) use task::WorkingDirectory;
 #[cfg(test)]
 pub(crate) use task::{AllowFailure, Dag, If, Loop, Parallel, Sequential, Switch};
 pub use task::{
-    CheckFrequency, LoopUntil, Pause, Retry, RetryBehavior, RetryCommon, Subflow, Task, TaskKind,
+    CheckFrequency, LoopFetchType, LoopUntil, Pause, Retry, RetryBehavior, RetryCommon, Subflow,
+    Task, TaskKind,
 };
 pub use trigger::{
     Dependency, FetchType, FlowTrigger, FlowTriggerMode, Schedule, Trigger, TriggerKind, Webhook,

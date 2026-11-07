@@ -1732,6 +1732,8 @@ pub struct TaskRunDto {
     pub claimed_at: Option<DateTime<Utc>>,
     /// The run's outputs, `NULL` for a run that has none: a handler that
     /// returned nothing (a `Log`, a `Sleep`) and any run not yet terminal.
+    /// A `SECRET` output inside them -- a `Loop`'s `outputs` list, a
+    /// `Subflow`'s copy of its child's flow outputs -- is always `******`.
     #[schema(value_type = Option<Object>)]
     pub outputs: Option<serde_json::Value>,
     pub message: Option<String>,
@@ -1800,6 +1802,17 @@ pub struct ExecutionDto {
     pub source: String,
     /// Every task run, in `run_ix` order — the executor's creation order.
     pub runs: Vec<TaskRunDto>,
+    /// The flow's `outputs:` as the execution's end evaluated them, typed by
+    /// each output's `type`; `null` when none were evaluated: the flow
+    /// declares none, the execution has not ended, or the evaluation failed
+    /// (the execution then ended `FAILED` and its logs say why). **A
+    /// `SECRET` output's value is always `******`** here: the real value is
+    /// kept encrypted on the server and no response carries it. A `FILE`
+    /// output is a `kestra:///` URI of the execution's own storage, read
+    /// through the execution file API. On the detail only: the list leaves
+    /// it out, since it can be up to 16 MiB per execution.
+    #[schema(value_type = Option<Object>)]
+    pub outputs: Option<serde_json::Value>,
     /// Whether the caller may resume and replay this execution: they hold
     /// `workflow:manage` in this workspace. A detail page hides both actions
     /// when this is false; the routes still check for themselves.
@@ -1834,6 +1847,7 @@ impl ExecutionDto {
             execution: ExecutionListItemDto::from(d.execution),
             source: d.source,
             runs: d.runs.into_iter().map(TaskRunDto::from).collect(),
+            outputs: d.outputs,
             can_manage,
             worker_enabled,
         }

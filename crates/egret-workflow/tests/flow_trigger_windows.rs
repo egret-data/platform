@@ -1178,3 +1178,133 @@ async fn a_draft_with_an_invalid_window_or_dependency_never_fires() {
         );
     }
 }
+
+/// **Package #6 Task B3: a `dependsOn` fire's `trigger.outputs` is the
+/// completing event's outputs deep-merged with the window's**, Kestra's
+/// `Flow.evaluate` (`MapUtils.deepMerge(current.getOutputs(),
+/// window.getOutputs())`): the window keeps its CREATOR's outputs keyed
+/// `namespace -> flowId` (`FlowTriggerService.buildOutputs`). So with `p1`
+/// opening the window and `p2` completing it, `trigger.outputs` holds `p2`'s
+/// own keys at the top and `p1`'s under `w13.p1`.
+#[tokio::test]
+async fn a_depends_on_fire_merges_the_windows_outputs() {
+    let Some(fx) = fx().await else { return };
+    let with_output = |id: &str, v: &str| {
+        format!(
+            "id: {id}\nnamespace: w13\ntasks:\n  - id: a\n    \
+             type: io.kestra.plugin.core.log.Log\n    message: hi\n\
+             outputs:\n  - id: {id}_out\n    type: STRING\n    value: {v}\n"
+        )
+    };
+    let p1_yaml = with_output("p1", "one");
+    let p1 = Src {
+        id: fx.flow(&p1_yaml).await,
+        yaml: p1_yaml,
+    };
+    let p2_yaml = with_output("p2", "two");
+    let p2 = Src {
+        id: fx.flow(&p2_yaml).await,
+        yaml: p2_yaml,
+    };
+    let src = listener_yaml(
+        "listener",
+        "inputs:\n  - id: mine\n    type: STRING\n  - id: theirs\n    type: STRING\n",
+        &depends_on(
+            &["p1", "p2"],
+            "    inputs:\n      mine: \"{{ trigger.outputs.p2_out }}\"\n      \
+             theirs: \"{{ trigger.outputs.w13.p1.p1_out }}\"\n",
+        ),
+    );
+    let listener = fx.flow(&src).await;
+
+    fx.event(&p1).await;
+    let stored: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT outputs FROM workflow.flow_trigger_windows WHERE flow_id = $1")
+            .bind(listener)
+            .fetch_one(&fx.db.pool)
+            .await
+            .expect("p1 opened the window");
+    assert_eq!(
+        stored,
+        Some(serde_json::json!({"w13": {"p1": {"p1_out": "one"}}})),
+        "the window keeps its creator's outputs"
+    );
+    let p2_run = fx.run(&p2).await;
+    fx.pass().await;
+
+    let (inputs, trigger): (serde_json::Value, serde_json::Value) = sqlx::query_as(
+        "SELECT inputs, execution_trigger FROM workflow.executions \
+          WHERE flow_id = $1 AND trigger_execution_id = $2",
+    )
+    .bind(listener)
+    .bind(p2_run)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("the listener fired on p2");
+    assert_eq!(inputs, serde_json::json!({"mine": "two", "theirs": "one"}));
+    assert_eq!(
+        trigger["variables"]["outputs"],
+        serde_json::json!({"p2_out": "two", "w13": {"p1": {"p1_out": "one"}}})
+    );
+}
+
+/// **Package #6 fix wave 6 (final review I4): the merged `trigger.outputs`
+/// is held to the flow outputs' cap.** Lowered for this workspace to 100
+/// bytes: `p1`'s and `p2`'s own maps (53 bytes each) and the window's copy
+/// (68) fit, but their merge (~120) would not, so the event that completes
+/// the window is refused with a message naming the sizes, nothing fires,
+/// and the window is kept. Before the fix the merge was stored on the fired
+/// execution whatever its size (up to 2 x 16 MiB).
+#[tokio::test]
+async fn a_depends_on_fire_whose_merged_outputs_pass_the_cap_is_refused() {
+    let Some(fx) = fx().await else { return };
+    egret_workflow::outputs::lower_flow_outputs_cap_for_tests(fx.ws, 100);
+    let pad = "y".repeat(40);
+    let with_output = |id: &str| {
+        format!(
+            "id: {id}\nnamespace: w13\ntasks:\n  - id: a\n    \
+             type: io.kestra.plugin.core.log.Log\n    message: hi\n\
+             outputs:\n  - id: {id}_out\n    type: STRING\n    value: {pad}\n"
+        )
+    };
+    let p1_yaml = with_output("p1");
+    let p1 = Src {
+        id: fx.flow(&p1_yaml).await,
+        yaml: p1_yaml,
+    };
+    let p2_yaml = with_output("p2");
+    let p2 = Src {
+        id: fx.flow(&p2_yaml).await,
+        yaml: p2_yaml,
+    };
+    let listener = fx
+        .flow(&listener_yaml(
+            "listener",
+            "",
+            &depends_on(&["p1", "p2"], ""),
+        ))
+        .await;
+
+    fx.event(&p1).await;
+    assert!(
+        window(&fx.db, listener).await.is_some(),
+        "p1 opened the window"
+    );
+    let logs = LogCapture::default();
+    let r = {
+        let _guard = logs.install();
+        fx.event(&p2).await
+    };
+    assert_eq!(r.refused, 1, "{r:?}");
+    assert_eq!(executions_of(&fx.db, listener).await, 0, "nothing fired");
+    assert!(
+        window(&fx.db, listener).await.is_some(),
+        "the window is kept"
+    );
+    let text = logs.text();
+    assert!(
+        text.contains("trigger.outputs (the event's flow outputs deep-merged with the dependsOn window's) would be ")
+            && text.contains("egret keeps at most 100 bytes"),
+        "{text}"
+    );
+}

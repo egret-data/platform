@@ -9,6 +9,12 @@
 //! `taskrun`, `execution`, `flow`, the loop `item` and `tasksWithState()`. The
 //! W3b spec (§4.4) calls that gap the reason W3c's `runIf:` fix banks nothing
 //! and the reason `loop-outputs-auto` cannot resolve its `values:`.
+//! **Corrected 2026-10-29 (package #6 Task A3, spec §2.2 item 7): that second
+//! reason is history.** W9a Task 11 gave this surface the file scope, and
+//! `loop-outputs-auto`'s `values:` (a `Write`'s URI) resolves and spawns its
+//! three iterations, which match the golden (package #6 T0). What held that
+//! entry was its `Loop`'s `outputs:`, which nothing evaluated before package
+//! #6 (`spawn::iteration_outputs`).
 //!
 //! Until this module, **nothing in the worker rendered anything**: Task 2's
 //! Concern 2 and Task 3's Concern 4 both name it, and the consequence is not an
@@ -28,7 +34,7 @@
 //! | `outputs` | `task id -> the handler's output map`, `{}` when it produced none | 14 comparable entries |
 //! | `task` | `{id, type}` of the task being rendered | `id` 177, `type` 2 |
 //! | `taskrun` | `{id, startDate, value, attemptsCount, parentId}` of the run being rendered | `startDate` 52, `id` 17, `attemptsCount` 9, `value` 8 |
-//! | `execution` | `{id, startDate, state, outputs}` | `id` 30, `state` 4, `startDate` 1 |
+//! | `execution` | `{id, startDate, state, outputs}`; `outputs` is the stored flow outputs (package #6 Task B2), `{}` when none | `id` 30, `state` 4, `startDate` 1, `outputs` 1 (`valids/after-execution`) |
 //! | `flow` | `{id, namespace}` | `id` 10, `namespace` 2 |
 //! | `labels` | the flow's own `labels:`, plus `labels.system.correlationId` | 2 |
 //! | `item` | `{index, value, key, parent, parents}` inside a loop sub-execution | `valids/loop-serial` writes `{{item.index}} - {{item.value}}`; `loop-map` `{{item.key}}`; `loop-nested` `{{item.parent.index}}` and `{{item.parents[0].value}}` |
@@ -56,8 +62,11 @@
 //!
 //! # What is NOT supplied, and stays a refusal
 //!
-//! `trigger`, `kv`, `secret`, `envs`, `globals` and the flow-level `outputs:`
-//! block. Each is a name a corpus flow writes and this worker cannot resolve;
+//! `trigger`, `kv`, `secret`, `envs` and `globals`. (The flow-level
+//! `outputs:` block was in this list until package #6: Task B1 evaluates it
+//! at the terminal and Task B2, 2026-10-29, supplies it as
+//! `execution.outputs`.) Each is a name a corpus flow writes and this worker
+//! cannot resolve;
 //! an expression over one of them FAILS the run rather than rendering to
 //! nothing, which is a divergence in the safe direction and is visible in the
 //! trace instead of silently choosing a branch.
@@ -119,6 +128,9 @@ pub(super) struct Surface {
     execution: Value,
     /// `item`, for a loop sub-execution. `None` at the top level.
     item: Option<Value>,
+    /// Whether this execution's row has a `loop_index`: a `Loop` iteration
+    /// (package #6 Task B1, [`Surface::is_loop_iteration`]).
+    loop_iteration: bool,
     /// The outputs of every LOOP ancestor's terminated runs, by task id.
     ///
     /// A loop body renders in its own sub-execution and reads the parent's
@@ -175,13 +187,37 @@ impl Link {
     }
 }
 
+/// Whether [`Surface::load_with`] opens the sealed SECRET outputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecretOutputs {
+    /// The execution's own renders: the values are put back and join
+    /// `secrets`.
+    Reveal,
+    /// A render whose result leaves the execution (a Flow trigger's `when`
+    /// and `inputs`, [`execution_render_context`]): the stored masks stay
+    /// and the sealed columns are never opened (package #6 fix wave 6,
+    /// final review m1). Fail-closed -- a field this surface adds later
+    /// shows the mask unless someone opens it on purpose -- and no crypto,
+    /// so a missing or rotated master key cannot fail a listener.
+    Masked,
+}
+
 impl Surface {
     /// Read everything the renders of one `settle` will need.
     pub(super) async fn load(conn: &mut PgConnection, ctx: &ExecutionCtx) -> Result<Self> {
+        Self::load_with(conn, ctx, SecretOutputs::Reveal).await
+    }
+
+    async fn load_with(
+        conn: &mut PgConnection,
+        ctx: &ExecutionCtx,
+        mode: SecretOutputs,
+    ) -> Result<Self> {
+        let reveal = mode == SecretOutputs::Reveal;
         let row = sqlx::query(
             "SELECT inputs, state, created_at, loop_index, loop_value, \
                     parent_execution_id, parent_run_ix, trigger_execution_id, labels, variables, \
-                    secret_inputs \
+                    secret_inputs, outputs, secret_outputs \
                FROM workflow.executions WHERE id = $1",
         )
         .bind(ctx.id)
@@ -191,7 +227,7 @@ impl Surface {
 
         let flow = crate::spec::parse(&ctx.source).ok();
         // KI-112: the one reader that opens the sealed SECRET values.
-        let (posted, secrets) = crate::secret_inputs::reveal(
+        let (posted, mut secrets) = crate::secret_inputs::reveal(
             row.get("inputs"),
             row.get::<Option<Vec<u8>>, _>("secret_inputs").as_deref(),
         )?;
@@ -272,16 +308,31 @@ impl Surface {
         let flow_labels = flow.as_ref().map(|f| f.labels.as_slice()).unwrap_or(&[]);
         let labels_list = crate::labels::execution_labels(flow_labels, &own);
         let started_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
+        // **`execution.outputs` (package #6 Task B2, spec D6, D9).** The
+        // flow-level `outputs:` the execution's terminal stored (Task B1,
+        // `worker::flow_outputs`), with its sealed SECRET values put back:
+        // this surface is the one reader that opens `secret_outputs`, as for
+        // SECRET inputs, and the values join `secrets` so every line the run
+        // writes masks them. `NULL` (nothing evaluated yet, no `outputs:`, or
+        // an evaluation that failed) is the empty map rather than an absent
+        // key, as before B2: `{{ execution.outputs }}` renders `{}` and
+        // `{{ execution.outputs.x }}` fails, the shape the `outputs` rule
+        // above has. Under [`SecretOutputs::Masked`] the stored masks stay
+        // and nothing is opened.
+        let flow_outputs_stored = row
+            .get::<Option<Value>, _>("outputs")
+            .unwrap_or_else(|| json!({}));
+        let flow_sealed = row.get::<Option<Vec<u8>>, _>("secret_outputs");
+        let (flow_outputs, values) = crate::secret_inputs::reveal_flow_outputs(
+            flow_outputs_stored,
+            flow_sealed.as_deref().filter(|_| reveal),
+        )?;
+        secrets.extend(values);
         let execution = json!({
             "id": ctx.id.to_string(),
             "startDate": started_at.to_rfc3339(),
             "state": row.get::<String, _>("state"),
-            // The flow-level `outputs:` block is not evaluated by anything in
-            // W3b, so this is the empty map rather than an absent key: an
-            // author's `{{ execution.outputs }}` renders, and
-            // `{{ execution.outputs.x }}` fails, which is the same shape the
-            // `outputs` rule above has.
-            "outputs": {},
+            "outputs": flow_outputs,
         });
         let mut inherited = Map::new();
         let mut root = ctx.id;
@@ -289,6 +340,7 @@ impl Surface {
         // iteration, then its parent's, and so on. `valids/loop-nested` is
         // three deep and reads `{{ item.parents[1].value }}`.
         let mut levels: Vec<Value> = Vec::new();
+        let loop_iteration = row.get::<Option<i32>, _>("loop_index").is_some();
         let mut here = Link {
             loop_index: row.get("loop_index"),
             loop_value: row.get("loop_value"),
@@ -466,24 +518,38 @@ impl Surface {
             // of the link about to be traversed.
             inheriting = inheriting && here.loop_index.is_some();
             if inheriting {
+                // **Terminated runs only, filtered in SQL** (package #6 fix
+                // wave 6, final review I2): the ancestor's still-running
+                // `Loop` run -- the one this iteration belongs to -- carries
+                // its growing list (up to 16 MiB) and its sealed frames, and
+                // every settle of every iteration would otherwise fetch them
+                // only to drop them. `workflow.state_is_terminal` is the SQL
+                // twin of `RunState::is_terminal` (`worker::stamps`); this is
+                // the one place the rule is applied, so
+                // `an_iteration_does_not_read_its_running_loops_list` holds it.
                 let rows = sqlx::query(
-                    "SELECT task_id, outputs, state FROM workflow.task_runs \
-                       WHERE execution_id = $1 ORDER BY run_ix",
+                    "SELECT task_id, outputs, secret_outputs FROM workflow.task_runs \
+                       WHERE execution_id = $1 AND workflow.state_is_terminal(state) \
+                       ORDER BY run_ix",
                 )
                 .bind(id)
                 .fetch_all(&mut *conn)
                 .await
                 .map_err(db_err)?;
                 for r in &rows {
-                    let state: String = r.get("state");
-                    if !super::from_wire(&state).is_some_and(|s| s.is_terminal()) {
+                    let task_id: String = r.get("task_id");
+                    if inherited.contains_key(&task_id) {
                         continue;
                     }
-                    let task_id: String = r.get("task_id");
                     let outputs: Option<Value> = r.get("outputs");
-                    inherited
-                        .entry(task_id)
-                        .or_insert_with(|| outputs.unwrap_or_else(|| json!({})));
+                    let outputs = reveal_run_outputs(
+                        outputs,
+                        r.get::<Option<Vec<u8>>, _>("secret_outputs")
+                            .as_deref()
+                            .filter(|_| reveal),
+                        &mut secrets,
+                    )?;
+                    inherited.insert(task_id, outputs.unwrap_or_else(|| json!({})));
                 }
             }
             root = id;
@@ -526,7 +592,7 @@ impl Surface {
         let labels = labels_value(&labels_list, &system_label);
 
         let rows = sqlx::query(
-            "SELECT run_ix, id, outputs, created_at FROM workflow.task_runs \
+            "SELECT run_ix, id, outputs, created_at, secret_outputs FROM workflow.task_runs \
                WHERE execution_id = $1 ORDER BY run_ix",
         )
         .bind(ctx.id)
@@ -538,7 +604,14 @@ impl Surface {
         let mut ids = std::collections::BTreeMap::new();
         for r in &rows {
             let ix = r.get::<i32, _>("run_ix").max(0) as usize;
-            if let Some(o) = r.get::<Option<Value>, _>("outputs") {
+            let revealed = reveal_run_outputs(
+                r.get::<Option<Value>, _>("outputs"),
+                r.get::<Option<Vec<u8>>, _>("secret_outputs")
+                    .as_deref()
+                    .filter(|_| reveal),
+                &mut secrets,
+            )?;
+            if let Some(o) = revealed {
                 own.insert(ix, o);
             }
             let at: chrono::DateTime<chrono::Utc> = r.get("created_at");
@@ -557,6 +630,7 @@ impl Surface {
             system_label,
             execution,
             item,
+            loop_iteration,
             inherited,
             own,
             started,
@@ -705,6 +779,12 @@ impl Surface {
     /// See [`Surface::parsed`] for why it is kept rather than re-parsed.
     pub(super) fn flow(&self) -> Option<&Flow> {
         self.parsed.as_ref()
+    }
+
+    /// Whether this execution is a `Loop` iteration (its row has a
+    /// `loop_index`).
+    pub(super) fn is_loop_iteration(&self) -> bool {
+        self.loop_iteration
     }
 
     /// The context one expression renders against.
@@ -1031,7 +1111,7 @@ pub async fn execution_render_context(
         super::claim::Stack::Reader,
     )
     .await?;
-    let surface = Surface::load(conn, &ctx).await?;
+    let surface = Surface::load_with(conn, &ctx, SecretOutputs::Masked).await?;
     Ok(surface.context(&ctx.plan, &state, None))
 }
 
@@ -1131,6 +1211,7 @@ mod tests {
             system_label: Value::Null,
             execution: json!({}),
             item: None,
+            loop_iteration: false,
             inherited: Map::new(),
             own: std::collections::BTreeMap::new(),
             started: std::collections::BTreeMap::new(),
@@ -1174,6 +1255,7 @@ mod tests {
             system_label: json!({"correlationId": "root"}),
             execution: json!({}),
             item: None,
+            loop_iteration: false,
             inherited: Map::new(),
             own: std::collections::BTreeMap::new(),
             started: std::collections::BTreeMap::new(),
@@ -2049,6 +2131,38 @@ fn renders_at(plan: &Plan, task: usize) -> RunState {
     match plan.tasks.get(task).map(|t| &t.kind) {
         Some(TaskKind::Loop { .. }) => RunState::Created,
         _ => RunState::Running,
+    }
+}
+
+/// A task run's stored `outputs` with its sealed SECRET outputs put back
+/// (package #6 spec D9), their values added to `secrets` so every line the
+/// run writes masks them. `sealed` is `None` under [`SecretOutputs::Masked`],
+/// so the stored masks stay. The render surface is the one reader that
+/// opens the column, as for SECRET inputs.
+///
+/// Two runs carry a sealed column, told apart by their `outputs` key, which
+/// each writer sets with the seal:
+/// - a `Loop` run (Task A4): `outputs` is the LIST, sealed as append-only
+///   frames `{position: {id: value}}` ([`crate::secret_inputs::open_loop_outputs`]);
+/// - a `Subflow` run (Task B3): `outputs` is the child's MAP, sealed `{id:
+///   value}`, the child's own object copied as it is.
+fn reveal_run_outputs(
+    outputs: Option<Value>,
+    sealed: Option<&[u8]>,
+    secrets: &mut Vec<String>,
+) -> Result<Option<Value>> {
+    match (outputs, sealed) {
+        (Some(o), Some(sealed)) => {
+            let (o, values) = match o.get("outputs") {
+                Some(Value::Object(_)) => {
+                    crate::secret_inputs::reveal_subflow_outputs(o, Some(sealed))?
+                }
+                _ => crate::secret_inputs::reveal_loop_outputs(o, Some(sealed))?,
+            };
+            secrets.extend(values);
+            Ok(Some(o))
+        }
+        (o, _) => Ok(o),
     }
 }
 

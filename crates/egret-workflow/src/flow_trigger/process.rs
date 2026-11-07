@@ -25,7 +25,7 @@ use crate::trigger::flow::{
     evaluate, FiredExecution, ListeningFlow, Outcome, SourceExecution, WhenVerdict,
     WindowFreeFlowTrigger, DEFAULT_MAX_EXECUTION_DEPTH,
 };
-use crate::trigger::webhook::{render_value, InputRefusal};
+use crate::trigger::webhook::{render_value, render_value_guarded, InputRefusal};
 use crate::trigger::{
     condition_keys, dependency_matches, depends_on_refusals, merge, satisfied, DepSource,
     ResolvedWindow, TimeWindow,
@@ -190,6 +190,9 @@ struct SourceRow {
     loop_index: Option<i32>,
     /// The execution's own labels (migration 0192), beyond its flow's.
     labels: Option<serde_json::Value>,
+    /// The execution's flow outputs (migration 0214, package #6), SECRET
+    /// values masked; `NULL` when none were evaluated.
+    outputs: Option<serde_json::Value>,
 }
 
 /// The source's half of `execution.trigger.variables`, with egret's values
@@ -206,6 +209,10 @@ pub(crate) struct SourceRecord {
     pub end_date: Option<DateTime<Utc>>,
     pub last_task_id: Option<String>,
     pub labels: Vec<Label>,
+    /// The source's flow outputs as stored (package #6 Task B3): SECRET
+    /// values are `******`, so nothing sealed leaves the source (spec D9).
+    /// `None` when the source evaluated none.
+    pub outputs: Option<Value>,
 }
 
 /// What became of one listener on one event.
@@ -784,7 +791,7 @@ async fn load_source(
 ) -> Result<(Source, RenderContext)> {
     let row: SourceRow = sqlx::query_as(
         "SELECT e.workspace_id, e.namespace, e.flow_key, e.execution_depth, e.created_at, e.updated_at, \
-                e.source, e.loop_index, e.labels, \
+                e.source, e.loop_index, e.labels, e.outputs, \
                 (SELECT r.task_id FROM workflow.task_runs r \
                   WHERE r.execution_id = e.id ORDER BY r.run_ix DESC LIMIT 1) AS last_task_id \
            FROM workflow.executions e WHERE e.id = $1",
@@ -834,6 +841,7 @@ async fn load_source(
         end_date: state.is_terminated().then_some(row.updated_at),
         last_task_id: row.last_task_id,
         labels,
+        outputs: row.outputs,
     };
     Ok((Source { execution, record }, ctx))
 }
@@ -883,7 +891,16 @@ async fn listen(
     // insert, the first settle, an aborted statement -- rolls back alone, so a
     // sibling's fire in this transaction survives it (spec §4.4 point 1).
     let mut sp = at.savepoint().await?;
-    let started = start_fire(&mut sp, ev, l, source, ctx, &fired).await?;
+    let started = start_fire(
+        &mut sp,
+        ev,
+        l,
+        source,
+        ctx,
+        &fired,
+        source.record.outputs.as_ref(),
+    )
+    .await?;
     Ok(match started {
         Ok(render_failure) => {
             sp.release().await?;
@@ -975,6 +992,7 @@ async fn start_fire(
     source: &Source,
     ctx: &RenderContext,
     fired: &FiredExecution,
+    trigger_outputs: Option<&Value>,
 ) -> Result<std::result::Result<Option<String>, Error>> {
     // `inputs` render against the same context, by the same
     // `runContext.render(Map)` the webhook uses. **A failure is NOT a
@@ -985,7 +1003,21 @@ async fn start_fire(
     // DEFAULT '{}'` -- and the render error, which egret has no
     // execution-level column to keep, is logged.
     let declared = Value::Object(fired.inputs.clone().into_iter().collect());
-    let (inputs, render_failure) = match render_value(&declared, ctx, "") {
+    // **`trigger.outputs` (package #6 Task B3, spec D6).** Kestra's
+    // `Flow.evaluate` renders `inputs` with `trigger: {outputs}` bound when
+    // the outputs are non-empty, and with no `trigger` at all otherwise
+    // (the measured "Unable to find `trigger`" above). Only `outputs` is
+    // bound: `{{ trigger.executionId }}` still fails then, as Kestra's
+    // `Map.of(TRIGGER_VAR, Map.of(OUTPUTS_VAR, outputs))` holds no other key.
+    let rendered = match trigger_outputs {
+        Some(Value::Object(o)) if !o.is_empty() => {
+            let mut cx = ctx.clone();
+            cx.insert("trigger", serde_json::json!({ "outputs": o }));
+            render_value_guarded(&declared, &cx, "", &[])
+        }
+        _ => render_value(&declared, ctx, ""),
+    };
+    let (inputs, render_failure) = match rendered {
         Ok(v) => (v, None),
         Err(InputRefusal::NeedsTriggerContext { key }) => (
             Value::Object(Map::new()),
@@ -1007,7 +1039,7 @@ async fn start_fire(
             flow_id: Some(l.flow_id),
             source: &l.source,
             inputs,
-            trigger: Some(flow_trigger_record(fired, &source.record)),
+            trigger: Some(flow_trigger_record(fired, &source.record, trigger_outputs)),
             scheduled_date: None,
             trigger_execution_id: Some(fired.trigger_execution_id),
             execution_depth: i32::try_from(fired.execution_depth)
@@ -1136,6 +1168,15 @@ async fn listen_depends_on(
     })
 }
 
+/// A window row as [`window_step`] locks it: bounds, results, and the
+/// creator's outputs (package #6 Task B3).
+type WindowRow = (
+    DateTime<Utc>,
+    DateTime<Utc>,
+    Json<BTreeMap<String, bool>>,
+    Option<Value>,
+);
+
 /// What [`window_step`] did.
 enum WindowStep {
     /// Commit the savepoint: this is the listener's fate.
@@ -1219,28 +1260,42 @@ async fn window_step(
         }
     };
 
+    // **The window's copy of the source's outputs, capped** (package #6 fix
+    // wave 6, final review I4): what a window stores is held to the flow
+    // outputs' 16 MiB, so the merge below starts from two bounded maps.
+    let creator_outputs = window_outputs(&source.record);
+    let cap = crate::outputs::flow_outputs_cap(l.workspace_id);
+    if let Err(message) = trigger_outputs_within(
+        creator_outputs.as_ref(),
+        cap,
+        "the dependsOn window's copy of the source's flow outputs",
+    ) {
+        return Ok(WindowStep::Done(Fate::Refused(message)));
+    }
+
     // Statement 6, insert-if-absent. A missing row cannot be created twice.
+    // Package #6 Task B3: the row keeps its creator's outputs
+    // ([`window_outputs`]), which migration 0158's comment still describes as
+    // written NULL -- true until this task, and a migration's prose is not
+    // edited after it ships.
     sqlx::query(
         "INSERT INTO workflow.flow_trigger_windows \
-           (flow_id, trigger_id, window_start, window_end, results) \
-         VALUES ($1, $2, $3, $4, '{}'::jsonb) \
+           (flow_id, trigger_id, window_start, window_end, results, outputs) \
+         VALUES ($1, $2, $3, $4, '{}'::jsonb, $5) \
          ON CONFLICT (flow_id, trigger_id) DO NOTHING",
     )
     .bind(l.flow_id)
     .bind(&l.trigger_id)
     .bind(start)
     .bind(end)
+    .bind(&creator_outputs)
     .execute(sp.conn())
     .await
     .map_err(step_err)?;
 
     // Statement 7, the row lock: what makes "fire once" hold.
-    let (mut w_start, mut w_end, Json(mut results)): (
-        DateTime<Utc>,
-        DateTime<Utc>,
-        Json<BTreeMap<String, bool>>,
-    ) = sqlx::query_as(
-        "SELECT window_start, window_end, results FROM workflow.flow_trigger_windows \
+    let (mut w_start, mut w_end, Json(mut results), mut w_outputs): WindowRow = sqlx::query_as(
+        "SELECT window_start, window_end, results, outputs FROM workflow.flow_trigger_windows \
           WHERE flow_id = $1 AND trigger_id = $2 \
             FOR UPDATE",
     )
@@ -1256,18 +1311,20 @@ async fn window_step(
     if w_end <= now {
         sqlx::query(
             "UPDATE workflow.flow_trigger_windows \
-                SET window_start = $3, window_end = $4, results = '{}'::jsonb, outputs = NULL \
+                SET window_start = $3, window_end = $4, results = '{}'::jsonb, outputs = $5 \
               WHERE flow_id = $1 AND trigger_id = $2",
         )
         .bind(l.flow_id)
         .bind(&l.trigger_id)
         .bind(start)
         .bind(end)
+        .bind(&creator_outputs)
         .execute(sp.conn())
         .await
         .map_err(step_err)?;
         (w_start, w_end) = (start, end);
         results.clear();
+        w_outputs = creator_outputs.clone();
     }
 
     // Step 3: outside the window (a daily window's off-hours, a future
@@ -1298,7 +1355,21 @@ async fn window_step(
     // window (statement 9) under every mode -- no `resetOnSuccess` exists
     // (D1; measured for ALL, ANY and AT_LEAST). The merged results are not
     // written first: the row is deleted in this savepoint either way.
-    match start_fire(sp, ev, l, source, ctx, fired).await? {
+    // Kestra's `Flow.evaluate`: the event's outputs deep-merged with the
+    // window's (its creator's, keyed namespace -> flowId; see [`window_outputs`]).
+    let merged = deep_merge(source.record.outputs.as_ref(), w_outputs.as_ref());
+    // Fix wave 6 (final review I4): the merge of two capped maps can still
+    // reach twice the cap, and it is stored on the fired execution
+    // (`execution_trigger`). Refused with the sizes, never a value; the
+    // window is kept, as for any refusal.
+    if let Err(message) = trigger_outputs_within(
+        merged.as_ref(),
+        cap,
+        "trigger.outputs (the event's flow outputs deep-merged with the dependsOn window's)",
+    ) {
+        return Ok(WindowStep::Done(Fate::Refused(message)));
+    }
+    match start_fire(sp, ev, l, source, ctx, fired, merged.as_ref()).await? {
         Ok(render_failure) => {
             sqlx::query(
                 "DELETE FROM workflow.flow_trigger_windows WHERE flow_id = $1 AND trigger_id = $2",
@@ -1311,6 +1382,88 @@ async fn window_step(
             Ok(WindowStep::Done(fired_fate(render_failure)))
         }
         Err(e) => Ok(WindowStep::StartFailed(e)),
+    }
+}
+
+/// **`Err(message)` when `outputs` serialises to more than `cap` bytes**
+/// (package #6 fix wave 6, final review I4): an egret-only limit, the flow
+/// outputs' 16 MiB ([`flow_outputs_cap`](crate::outputs::flow_outputs_cap)),
+/// on what a `dependsOn` window stores and on the merged `trigger.outputs` a
+/// fire stores. Kestra has no such limit. The message names `what` and the
+/// sizes, never a value.
+fn trigger_outputs_within(
+    outputs: Option<&Value>,
+    cap: usize,
+    what: &str,
+) -> std::result::Result<(), String> {
+    let bytes = outputs.map_or(0, |v| serde_json::to_vec(v).map_or(0, |b| b.len()));
+    if bytes <= cap {
+        return Ok(());
+    }
+    Err(format!(
+        "{what} would be {bytes} bytes; egret keeps at most {} of them. The listener does not \
+         fire on this event",
+        crate::worker::bytes_text(cap)
+    ))
+}
+
+/// What a `dependsOn` window keeps of the event that creates (or replaces)
+/// it: Kestra's `FlowTriggerService.buildOutputs`, the source's outputs keyed
+/// `namespace -> flowId -> outputs`, `None` when it has none
+/// (`MultipleConditionStateStore.create`). A window already open keeps its
+/// creator's: `MultipleConditionWindow.with` copies `outputs` unchanged.
+/// SECRET values are the mask, as stored on the source.
+fn window_outputs(source: &SourceRecord) -> Option<Value> {
+    source
+        .outputs
+        .as_ref()
+        .map(|o| serde_json::json!({ source.namespace.clone(): { source.flow_id.clone(): o } }))
+}
+
+/// Kestra's `MapUtils.deepMerge(a, b)`: `None` when both are; the other one
+/// when either is absent or an empty map; otherwise `a` with each key of `b`
+/// merged in -- a `null` in `b` keeps `a`'s, two maps merge again, two
+/// lists concatenate (`b`'s elements `a` does not hold appended), anything
+/// else is `b`'s. Package #6 Task B3: `Flow.evaluate` merges the event's
+/// outputs (`a`) with the window's (`b`) into `trigger.outputs`.
+fn deep_merge(a: Option<&Value>, b: Option<&Value>) -> Option<Value> {
+    let empty = |v: Option<&Value>| match v {
+        None => true,
+        Some(Value::Object(m)) => m.is_empty(),
+        Some(_) => false,
+    };
+    match (a, b) {
+        (None, None) => None,
+        (_, Some(b)) if empty(a) => Some(b.clone()),
+        (Some(a), _) if empty(b) => Some(a.clone()),
+        (Some(Value::Object(a)), Some(Value::Object(b))) => {
+            let mut out = a.clone();
+            for (k, vb) in b {
+                let merged = merge_value(out.get(k), vb);
+                out.insert(k.clone(), merged);
+            }
+            Some(Value::Object(out))
+        }
+        // Not maps: Java's signature makes this unreachable; `b` wins, as
+        // `mergeValues` answers for two non-collections.
+        (_, b) => b.cloned(),
+    }
+}
+
+/// `MapUtils.mergeValues` for one key of [`deep_merge`].
+fn merge_value(a: Option<&Value>, b: &Value) -> Value {
+    match (a, b) {
+        (Some(a), Value::Null) => a.clone(),
+        (None | Some(Value::Null), b) => b.clone(),
+        (Some(a @ Value::Object(_)), Value::Object(_)) => {
+            deep_merge(Some(a), Some(b)).unwrap_or(Value::Null)
+        }
+        (Some(Value::Array(a)), Value::Array(b)) => {
+            let mut out = a.clone();
+            out.extend(b.iter().filter(|x| !a.contains(x)).cloned());
+            Value::Array(out)
+        }
+        (_, b) => b.clone(),
     }
 }
 
@@ -1330,6 +1483,7 @@ async fn window_step(
 /// | `lastTaskId` | the source's highest-`run_ix` task run; omitted when it has none | measured on one-task flows only |
 /// | `executionLabels` | the source EXECUTION's labels (its flow's, then its own), dotted keys nested, `system.correlationId` excluded | measured: `system.from` nests under `system`, and `correlationId` is absent. The source EXECUTION's labels: its flow's declared ones (which Kestra copies onto every execution), then the execution's own (W7f); egret sets no `system.*` label, so with none of either it is `{}`, which is what hop 2 measured |
 /// | `flowRevision` | **omitted** | egret records no revision on an execution. `flow_versions` exists, but nothing says which version an execution ran, and a guessed number would be an invented value |
+/// | `outputs` | the source's flow outputs as stored (SECRET values `******`), deep-merged with a `dependsOn` window's; **omitted** when there are none | package #6 Task B3, from Kestra's source (`Flow.evaluate`, `Flow.Output.outputs`): no measured record carries it, because no measured source declared `outputs:` |
 ///
 /// Dates carry six fractional digits and `Z`, the measured shape. A date whose
 /// microseconds end in zeros was not measured.
@@ -1338,7 +1492,11 @@ async fn window_step(
 /// the transition happened (spec §4.4 point 3). For a terminal source they
 /// agree unless the source was replayed or restarted before its event was
 /// processed; then they describe the later run.
-pub(crate) fn flow_trigger_record(fired: &FiredExecution, source: &SourceRecord) -> Value {
+pub(crate) fn flow_trigger_record(
+    fired: &FiredExecution,
+    source: &SourceRecord,
+    outputs: Option<&Value>,
+) -> Value {
     let fmt = |at: DateTime<Utc>| at.to_rfc3339_opts(SecondsFormat::Micros, true);
     let mut variables = Map::new();
     variables.insert("state".into(), Value::String(source.state.clone()));
@@ -1356,6 +1514,12 @@ pub(crate) fn flow_trigger_record(fired: &FiredExecution, source: &SourceRecord)
         variables.insert("lastTaskId".into(), Value::String(task.clone()));
     }
     variables.insert("executionLabels".into(), execution_labels(&source.labels));
+    // Package #6 Task B3: `Flow.Output.outputs`, the source's flow outputs
+    // (deep-merged with a `dependsOn` window's), omitted when there are none,
+    // as Kestra's `null` is. SECRET values are the mask (spec D9).
+    if let Some(o) = outputs {
+        variables.insert("outputs".into(), o.clone());
+    }
     serde_json::json!({
         "id": fired.trigger_id,
         "type": FLOW_TYPE,
@@ -1470,8 +1634,9 @@ mod tests {
                 .last()
                 .map(|t| t["id"].as_str().unwrap().to_string()),
             labels: labels_of(src),
+            outputs: None,
         };
-        let got = flow_trigger_record(&fired(captured["id"].as_str().unwrap()), &record);
+        let got = flow_trigger_record(&fired(captured["id"].as_str().unwrap()), &record, None);
         assert_matches_measured(&got, captured);
     }
 
@@ -1502,8 +1667,9 @@ mod tests {
                     .last()
                     .map(|t| t["id"].as_str().unwrap().to_string()),
                 labels: labels_of(src),
+                outputs: None,
             };
-            let got = flow_trigger_record(&fired(captured["id"].as_str().unwrap()), &record);
+            let got = flow_trigger_record(&fired(captured["id"].as_str().unwrap()), &record, None);
             assert_matches_measured(&got, captured);
         }
     }
@@ -1525,8 +1691,9 @@ mod tests {
                 key: "team".into(),
                 value: "data".into(),
             }],
+            outputs: None,
         };
-        let got = flow_trigger_record(&fired("t"), &record);
+        let got = flow_trigger_record(&fired("t"), &record, None);
         assert_eq!(
             got["variables"],
             serde_json::json!({
@@ -1538,5 +1705,70 @@ mod tests {
                 "executionLabels": {"team": "data"},
             })
         );
+    }
+
+    /// Package #6 Task B3: `MapUtils.deepMerge`, as `Flow.evaluate` merges an
+    /// event's outputs with its `dependsOn` window's into `trigger.outputs`.
+    #[test]
+    fn deep_merge_follows_kestras_map_utils() {
+        use serde_json::json;
+        assert_eq!(deep_merge(None, None), None);
+        assert_eq!(
+            deep_merge(Some(&json!({"a": 1})), None),
+            Some(json!({"a": 1}))
+        );
+        assert_eq!(
+            deep_merge(Some(&json!({})), Some(&json!({"b": 2}))),
+            Some(json!({"b": 2}))
+        );
+        assert_eq!(
+            deep_merge(
+                Some(&json!({"date": "d", "n": {"x": 1}, "l": [1, 2], "k": "a", "z": 1})),
+                Some(
+                    &json!({"ns": {"f": {"date": "d"}}, "n": {"y": 2}, "l": [2, 3], "k": "b", "z": null})
+                ),
+            ),
+            Some(json!({
+                "date": "d",
+                "n": {"x": 1, "y": 2},
+                "l": [1, 2, 3],
+                "k": "b",
+                "z": 1,
+                "ns": {"f": {"date": "d"}},
+            }))
+        );
+    }
+
+    /// A window keeps its creator's outputs keyed `namespace -> flowId`, and
+    /// nothing for a creator without outputs; the record carries `outputs`
+    /// only when given some.
+    #[test]
+    fn a_window_keys_its_creators_outputs_and_the_record_carries_them() {
+        use serde_json::json;
+        let at: DateTime<Utc> = "2026-10-29T00:00:00Z".parse().unwrap();
+        let mut record = SourceRecord {
+            execution_id: "x".into(),
+            namespace: "n".into(),
+            flow_id: "f".into(),
+            state: "SUCCESS".into(),
+            start_date: at,
+            end_date: Some(at),
+            last_task_id: None,
+            labels: vec![],
+            outputs: None,
+        };
+        assert_eq!(window_outputs(&record), None);
+        record.outputs = Some(json!({"s": "******", "d": "2026"}));
+        assert_eq!(
+            window_outputs(&record),
+            Some(json!({"n": {"f": {"s": "******", "d": "2026"}}}))
+        );
+        let got = flow_trigger_record(&fired("t"), &record, record.outputs.as_ref());
+        assert_eq!(
+            got["variables"]["outputs"],
+            json!({"s": "******", "d": "2026"})
+        );
+        let none = flow_trigger_record(&fired("t"), &record, None);
+        assert!(none["variables"].get("outputs").is_none());
     }
 }

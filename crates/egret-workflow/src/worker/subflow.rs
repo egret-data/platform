@@ -60,15 +60,18 @@
 //!
 //! # Where this is knowingly narrower than Kestra, stated rather than found
 //!
-//! * **The flow-level `outputs:` block is not evaluated**, here or anywhere in
-//!   egret (`render::Surface` publishes `execution.outputs` as `{}` for the
-//!   same reason), so `outputs.<task>.outputs` is always the empty map. The one
-//!   corpus entry that reads it, `valids/subflow-secret-output-parent`, is
-//!   baselined and stays so — and it would not match anyway: on the artifact
-//!   that flow FAILS inside `ExecutableUtils.subflowExecutionResultFromChildExecution`'s
-//!   catch block (`ExecutableUtils.java:305-309`), which is what produces its
-//!   golden attempt of `["CREATED","FAILED"]` beside a run of
-//!   `["CREATED","RUNNING","FAILED"]`.
+//! * ~~**The flow-level `outputs:` block is not evaluated**~~ -- **package #6
+//!   Task B3, 2026-10-29.** It read: *"here or anywhere in egret, so
+//!   `outputs.<task>.outputs` is always the empty map"*. Task B1 evaluates a
+//!   flow's `outputs:` at its terminal, and [`on_child_terminal`] now copies
+//!   the child's stored map (and its sealed SECRET values) onto the waiting
+//!   `Subflow` run; a child whose declared outputs were not stored fails the
+//!   run as Kestra's `failSubflowDueToOutput` does, which is what
+//!   `valids/subflow-secret-output-parent`'s golden attempt `["CREATED",
+//!   "FAILED"]` beside a run of `["CREATED","RUNNING","FAILED"]` records
+//!   (on the artifact it fails inside `Subflow.createSubflowExecutionResult`;
+//!   `ExecutableUtils.subflowExecutionResultFromChildExecution`'s catch block,
+//!   which this paragraph used to name, is the generic fallback).
 //! * ~~**`allowFailure`/`allowWarning` are unrepresentable**~~ — **W8 Task 5.**
 //!   `models::Task` carries both and `RunState` has `Warning`, so
 //!   [`guess_state`] implements `ExecutableUtils.guessState` whole rather than
@@ -617,6 +620,9 @@ pub(super) async fn spawn_one(
             run: r.run,
             states: vec![RunState::Success],
             outputs: Some(json!({"executionId": child_id.to_string(), "state": "CREATED"})),
+            secret_outputs: None,
+            keep_outputs: false,
+            outputs_failed: None,
             message: None,
             // `Nested`: this is inside this execution's own `settle`, and the
             // one the completion runs nests inside it.
@@ -758,30 +764,200 @@ async fn on_child_terminal_inner(
         parent_task.allow_failure,
         parent_task.allow_warning,
     );
-    let states: Vec<RunState> = if guessed == child_state {
-        vec![child_state]
-    } else {
-        vec![child_state, guessed]
+    // **The child's flow outputs (package #6 Task B3, spec D6, D9).** Kestra's
+    // `Subflow.createSubflowExecutionResult` renders and types the child
+    // flow's `outputs:` again, in a context over the child, when the child
+    // ends and the parent waits; egret copies what the child's own terminal
+    // stored (Task B1, `worker::flow_outputs`), which is the same evaluation
+    // over the same surface. See [`child_outputs`].
+    match child_outputs(conn, execution_id).await? {
+        ChildOutputs::Failed(why) => {
+            // Kestra's `failSubflowDueToOutput`: the run takes the child's
+            // state, then `State.Type.fail(task)` (FAILED, or what the
+            // `allow*` flags soften it to) on ONE fresh attempt, with no
+            // outputs and an ERROR line on the run. `guessState` is not
+            // consulted on that path.
+            let failed = crate::executor::allow_failure::soften(
+                RunState::Failed,
+                parent_task.allow_failure,
+                parent_task.allow_warning,
+            );
+            let message = format!(
+                "Failed to extract outputs with the error: 'the flow outputs of subflow \
+                 execution {execution_id} {}'",
+                why.text()
+            );
+            let run_id: Uuid = sqlx::query_scalar(
+                "SELECT id FROM workflow.task_runs WHERE execution_id = $1 AND run_ix = $2",
+            )
+            .bind(parent_id)
+            .bind(run as i32)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(db_err)?;
+            super::spawn::log_line(
+                conn,
+                ctx.workspace_id,
+                parent_id,
+                Some(run_id),
+                crate::logs::LogLevel::Error,
+                &message,
+                &[],
+            )
+            .await?;
+            Ok(Some(claim::Job::Complete(Completion {
+                execution_id: parent_id,
+                run,
+                states: vec![child_state],
+                outputs: None,
+                secret_outputs: None,
+                keep_outputs: false,
+                outputs_failed: Some(failed),
+                message: Some(message),
+                stack: claim::Stack::Nested(caller),
+                unless_terminal: false,
+            })))
+        }
+        ChildOutputs::Copied { outputs, sealed } => {
+            let states: Vec<RunState> = if guessed == child_state {
+                vec![child_state]
+            } else {
+                vec![child_state, guessed]
+            };
+            // See `open_completion` for why the SECOND state is a `Command::CompleteRun`.
+            Ok(Some(claim::Job::Complete(Completion {
+                execution_id: parent_id,
+                run,
+                states,
+                outputs: Some(json!({
+                    "executionId": execution_id.to_string(),
+                    "state": child_state.wire(),
+                    "outputs": outputs,
+                })),
+                secret_outputs: sealed,
+                keep_outputs: false,
+                outputs_failed: None,
+                message: None,
+                stack: claim::Stack::Nested(caller),
+                unless_terminal: false,
+            })))
+        }
+    }
+}
+
+/// What a waiting parent takes of its child's flow outputs.
+enum ChildOutputs {
+    /// The child's flow declares `outputs:` and none were stored: its
+    /// evaluation failed (or never ran), which Kestra's re-render in the
+    /// parent meets as `failSubflowDueToOutput`. Or the child's source no
+    /// longer parses, so egret cannot tell (final review m9).
+    Failed(NoChildOutputs),
+    /// The map to publish as `outputs.<sub>.outputs` -- the child's stored
+    /// one, its SECRET values masked, or `{}` for a child that declares none
+    /// -- and the child's sealed SECRET values, copied as they are into the
+    /// `Subflow` run's `task_runs.secret_outputs` (spec D9: the parent is the
+    /// child's execution family, so its own renders open them).
+    Copied {
+        outputs: Value,
+        sealed: Option<Vec<u8>>,
+    },
+}
+
+/// Why a waiting parent has no flow outputs to copy from its child (final
+/// review m9: each gets its own message on the `Subflow` run).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoChildOutputs {
+    /// The child ran and its evaluation failed: its own logs say why.
+    Evaluation,
+    /// The child ended before `RUNNING` (killed while `CREATED`, say), so
+    /// nothing was evaluated and its logs say nothing about outputs.
+    NeverRan,
+    /// The child's frozen source does not parse, so whether it declares
+    /// outputs is unknown; publishing `{}` would hide that.
+    Unparseable,
+}
+
+impl NoChildOutputs {
+    fn text(self) -> &'static str {
+        match self {
+            Self::Evaluation => "failed to evaluate; its own logs say why",
+            Self::NeverRan => "were never evaluated: the execution ended before it ran",
+            Self::Unparseable => "cannot be read: the execution's flow source does not parse",
+        }
+    }
+}
+
+/// Read the child's flow outputs from its row (`workflow.executions.outputs`
+/// and `secret_outputs`, migration 0214; Task B1 writes them).
+///
+/// **`{}` for a child that declares no `outputs:`**, the shape this run
+/// carried before package #6 (`{{ outputs.sub.outputs }}` renders and
+/// `{{ outputs.sub.outputs.x }}` fails): Kestra builds `Subflow.Output`
+/// without `outputs` there.
+///
+/// **A declared list with nothing stored is a failure.** egret stores the
+/// column only on a successful evaluation, so `NULL` under a non-empty
+/// `outputs:` means it failed (the child's history then ends `FAILED`) or
+/// never ran (a child that ended before `RUNNING`: B1 evaluates only an
+/// execution that ran). Kestra re-renders in the parent and fails in both
+/// cases unless every output is a literal; that last case, a child ended
+/// before running whose outputs are all literals, is where the two differ
+/// (Kestra copies the literals, egret fails the run), recorded in the
+/// Task B3 report.
+async fn child_outputs(conn: &mut PgConnection, child: Uuid) -> Result<ChildOutputs> {
+    let row = sqlx::query(
+        "SELECT source, outputs, secret_outputs, history FROM workflow.executions WHERE id = $1",
+    )
+    .bind(child)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    Ok(decide_child_outputs(
+        row.get("source"),
+        row.get("outputs"),
+        row.get("secret_outputs"),
+        &row.get::<Value, _>("history"),
+    ))
+}
+
+/// [`child_outputs`]' decision over the child's row, pure.
+fn decide_child_outputs(
+    source: &str,
+    outputs: Option<Value>,
+    sealed: Option<Vec<u8>>,
+    history: &Value,
+) -> ChildOutputs {
+    let states = history.as_array();
+    let ran = states.is_some_and(|h| {
+        h.iter()
+            .any(|s| s.as_str() == Some(RunState::Running.wire()))
+    });
+    let killed = states
+        .and_then(|h| h.last())
+        .is_some_and(|s| s.as_str() == Some(RunState::Killed.wire()));
+    // A stored map is copied whatever the source says now; with none, a
+    // source that does not parse is a failure, never a silent `{}` (m9) --
+    // **except for a KILLED child**: the kill route force-closes exactly the
+    // children whose source no longer loads, and its rule 5 reports such a
+    // child to its waiting parent as a killed child's would
+    // (`kill_route.rs` `a_force_closed_child_reports_to_its_parent`), which
+    // a failure here would turn into `FAILED`.
+    let declared = match crate::spec::parse(source) {
+        Ok(f) => !f.outputs.is_empty(),
+        Err(_) if outputs.is_none() && !killed => {
+            return ChildOutputs::Failed(NoChildOutputs::Unparseable)
+        }
+        Err(_) => outputs.is_some(),
     };
-    // See `open_completion` for why the SECOND state is a `Command::CompleteRun`.
-    Ok(Some(claim::Job::Complete(Completion {
-        execution_id: parent_id,
-        run,
-        states,
-        outputs: Some(json!({
-            "executionId": execution_id.to_string(),
-            "state": child_state.wire(),
-            // The flow-level `outputs:` block is not evaluated anywhere in
-            // egret, so this is the empty map rather than an absent key — the
-            // same shape `render::Surface` gives `execution.outputs`, and for
-            // the same reason: `{{ outputs.sub.outputs }}` renders and
-            // `{{ outputs.sub.outputs.x }}` fails.
-            "outputs": {},
-        })),
-        message: None,
-        stack: claim::Stack::Nested(caller),
-        unless_terminal: false,
-    })))
+    match outputs {
+        Some(outputs) => ChildOutputs::Copied { outputs, sealed },
+        None if declared && ran => ChildOutputs::Failed(NoChildOutputs::Evaluation),
+        None if declared => ChildOutputs::Failed(NoChildOutputs::NeverRan),
+        None => ChildOutputs::Copied {
+            outputs: json!({}),
+            sealed: None,
+        },
+    }
 }
 
 /// `ExecutableUtils.guessState` — **whole since W8 Task 5**, except for the
@@ -923,6 +1099,22 @@ pub(super) struct Completion {
     pub run: RunIx,
     pub states: Vec<RunState>,
     pub outputs: Option<Value>,
+    /// The sealed SECRET values beside `outputs` (`task_runs.secret_outputs`,
+    /// package #6 spec D9): a `Subflow`'s copy of its child's. Written with
+    /// `outputs`, so a completion that replaces the outputs never leaves a
+    /// stale sealed object beside them.
+    pub secret_outputs: Option<Vec<u8>>,
+    /// **Keep the run's stored outputs** and ignore `outputs` and
+    /// `secret_outputs` (package #6 fix wave 6, final review m5): a `Loop`
+    /// run's failure completion (`worker::spawn`, an iteration whose copied
+    /// FILE input is no longer readable) keeps the list, its sealed frames,
+    /// its byte total and the counters the iterations that ended already
+    /// appended. Every other completion writes its own outputs.
+    pub keep_outputs: bool,
+    /// `Some(state)`: the child's flow outputs could not be taken, and the
+    /// run ends on [`Command::FailSubflowOutputs`] after `states` (package #6
+    /// Task B3, Kestra's `failSubflowDueToOutput`).
+    pub outputs_failed: Option<RunState>,
     pub message: Option<String>,
     pub stack: claim::Stack,
     /// Skip it when the run is already terminal (re-review m1): only the loop
@@ -945,6 +1137,9 @@ pub(super) async fn open_completion(
         run,
         states,
         outputs,
+        secret_outputs,
+        keep_outputs,
+        outputs_failed,
         message,
         stack,
         unless_terminal,
@@ -961,13 +1156,18 @@ pub(super) async fn open_completion(
     }
     let before = state.clone();
     sqlx::query(
-        "UPDATE workflow.task_runs SET outputs = $1, message = $2 \
+        "UPDATE workflow.task_runs \
+            SET outputs = CASE WHEN $6 THEN outputs ELSE $1 END, message = $2, \
+                secret_outputs = CASE WHEN $6 THEN secret_outputs ELSE $5 END, \
+                outputs_bytes = CASE WHEN $6 THEN outputs_bytes END \
           WHERE execution_id = $3 AND run_ix = $4",
     )
     .bind(&outputs)
     .bind(message.as_deref())
     .bind(execution_id)
     .bind(run as i32)
+    .bind(secret_outputs)
+    .bind(keep_outputs)
     .execute(&mut *conn)
     .await
     .map_err(db_err)?;
@@ -993,6 +1193,16 @@ pub(super) async fn open_completion(
         };
         apply(&mut state, &cmd);
     }
+    if let Some(failed) = outputs_failed {
+        apply(
+            &mut state,
+            &Command::FailSubflowOutputs {
+                run,
+                state: failed,
+                at: now,
+            },
+        );
+    }
     Ok(Some(claim::Frame::loaded(ctx, before, state, now)))
 }
 
@@ -1008,6 +1218,9 @@ fn fail_run(ctx: &claim::ExecutionCtx, run: RunIx, message: &str) -> Vec<claim::
         run,
         states: vec![RunState::Failed],
         outputs: None,
+        secret_outputs: None,
+        keep_outputs: false,
+        outputs_failed: None,
         message: Some(message.to_string()),
         // `Nested`: every caller of this is inside `spawn_one`, which is inside
         // its own execution's `settle`.
@@ -1430,6 +1643,40 @@ fn worker_err(e: WorkerError) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Final review m9 (fix wave 6): no silent `{}` and no misleading
+    /// message.** A child whose source no longer parses fails the copy
+    /// (`Unparseable`), not "declares nothing"; a declared list with nothing
+    /// stored names why: the evaluation failed (the child ran) or the child
+    /// ended before it ran (killed while `CREATED`). A stored map is copied
+    /// whatever, and a parseable source with no `outputs:` publishes `{}`.
+    #[test]
+    fn a_childs_missing_outputs_say_why_and_an_unparseable_source_is_no_empty_map() {
+        let declares =
+            "id: c\nnamespace: t\ntasks: []\noutputs:\n  - id: x\n    type: STRING\n    value: v\n";
+        let plain = "id: c\nnamespace: t\ntasks: []\n";
+        let ran = json!(["CREATED", "RUNNING", "FAILED"]);
+        let killed = json!(["CREATED", "KILLED"]);
+        let why = |source, history: &Value| match decide_child_outputs(source, None, None, history)
+        {
+            ChildOutputs::Failed(why) => Some(why),
+            ChildOutputs::Copied { .. } => None,
+        };
+        assert_eq!(why("not: [a flow", &ran), Some(NoChildOutputs::Unparseable));
+        // The kill route's force-close (rule 5): a KILLED child whose source
+        // no longer loads reports as killed, with `{}`.
+        assert_eq!(why("not: [a flow", &killed), None);
+        assert_eq!(why(declares, &ran), Some(NoChildOutputs::Evaluation));
+        assert_eq!(why(declares, &killed), Some(NoChildOutputs::NeverRan));
+        assert_eq!(why(plain, &ran), None);
+        assert!(NoChildOutputs::NeverRan
+            .text()
+            .contains("ended before it ran"));
+        assert!(matches!(
+            decide_child_outputs("not: [a flow", Some(json!({"x": 1})), None, &ran),
+            ChildOutputs::Copied { .. }
+        ));
+    }
 
     /// [`guess_state`]'s whole table, against the two measurements that pin it.
     ///

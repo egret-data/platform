@@ -1046,8 +1046,27 @@ def check_inputs(flows, kinds, golden, baseline):
     # (`render()`), spec D9.
     # 35 since package #5b Task B7 (2026-10-29) banked `valids/errors`
     # (`errorLogs()`), spec D11.
-    if len(baseline) != 35:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 35; the split "
+    # 34 since package #6 Task A3 (2026-10-29) banked
+    # `valids/loop-outputs-failed-render` (a `Loop`'s `outputs:` are
+    # evaluated at each iteration's terminal), spec D1.
+    # 30 since package #6 Task A4 (2026-10-29) banked `valids/if-in-parallel`,
+    # `valids/loop-outputs`, `valids/loop-outputs-auto` and
+    # `valids/loop-outputs-store` (the `Loop` run's `outputs` list), spec D3.
+    # 29 since package #6 Task A6 (2026-10-29) banked
+    # `valids/retry-flowable-parallel` (a `Loop`'s `retry:` is inherited by
+    # each iteration's tasks), spec D7.
+    # 27 since package #6 Task B1 (2026-10-29) banked
+    # `valids/flow-with-outputs-failed` (the flow-level `outputs:` evaluated at
+    # the terminal), spec D6, and `valids/subflow-secret-output-child` (its
+    # SECRET output refused with no master key, as Kestra's harness fails it),
+    # spec D9.
+    # 26 since package #6 Task B2 (2026-10-29) banked `valids/after-execution`
+    # (`execution.outputs` reads the stored flow outputs in render), spec D6.
+    # 25 since package #6 Task B3 (2026-10-29) banked
+    # `valids/subflow-secret-output-parent` (a `Subflow` whose child's outputs
+    # were not stored fails as Kestra's `failSubflowDueToOutput`), spec D6.
+    if len(baseline) != 25:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 25; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1697,8 +1716,8 @@ def self_test():
          "not 273",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 35",
-         "not 35",
+    case("baseline.txt is no longer 25",
+         "not 25",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

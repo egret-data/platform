@@ -91,6 +91,8 @@ export interface TaskRunDto {
   /**
      * The run's outputs, `NULL` for a run that has none: a handler that
      * returned nothing (a `Log`, a `Sleep`) and any run not yet terminal.
+     * A `SECRET` output inside them -- a `Loop`'s `outputs` list, a
+     * `Subflow`'s copy of its child's flow outputs -- is always `******`.
      * @nullable
      */
   outputs?: TaskRunDtoOutputs;

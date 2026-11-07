@@ -80,6 +80,7 @@
 mod cancel;
 mod claim;
 pub mod commands;
+mod flow_outputs;
 mod force_close;
 pub mod handlers;
 pub mod k8s;
@@ -123,6 +124,13 @@ pub use claim::{
 /// terminal row.
 #[cfg(any(test, feature = "test-util"))]
 pub use claim::{EXECUTION_STATE_UPDATE, RUN_STATE_UPDATE};
+/// Test-only (`test-util`; package #6 fix wave 6, final review I1): one
+/// iteration end's `Loop` book-keeping, for the benchmark that counts the
+/// bytes it moves.
+#[cfg(any(test, feature = "test-util"))]
+pub use spawn::append_loop_entry_for_tests;
+/// `n` as `<k> MiB` or `<n> bytes`, for the messages of egret's size caps.
+pub(crate) use spawn::bytes_text;
 
 /// Test-only (`test-util`; W7b Task 1 cleanup): `persist`'s per-transition
 /// stamp rule, `(entered_running, entered_terminal)` for a write that takes

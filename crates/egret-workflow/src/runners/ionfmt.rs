@@ -261,11 +261,13 @@ pub(crate) fn write_ion_element(out: &mut String, element: &ion_rs::Element) {
     }
 }
 
-/// One JSON value as Ion text, for [`write_ion_row`] (the KV store's
+/// One JSON value as Ion text, for [`write_ion_row`] and a `Loop`
+/// iteration's STORE file (`storage::loop_outputs_file`, package #6 Task A5;
+/// the KV store's
 /// `storage::kv::value::encode` writes its own tree with [`write_ion_float`],
 /// [`write_ion_string`] and [`write_symbol`]). Recursion is bounded by
 /// the JSON's own depth, which `serde_json` caps when it parses.
-fn write_ion_json(out: &mut String, value: &serde_json::Value) {
+pub(crate) fn write_ion_json(out: &mut String, value: &serde_json::Value) {
     use serde_json::Value as J;
     match value {
         J::Null => out.push_str("null"),

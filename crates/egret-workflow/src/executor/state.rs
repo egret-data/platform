@@ -981,6 +981,18 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
                 a.history.push(*attempt);
             }
         }
+        // Package #6 Task B3 -- see `Command::FailSubflowOutputs`.
+        Command::FailSubflowOutputs { run, state: s, at } => {
+            let r = &mut state.runs[*run];
+            if r.history.last() != Some(s) {
+                r.history.push(*s);
+            }
+            r.attempts = vec![Attempt {
+                history: vec![RunState::Created, *s],
+                started_at: *at,
+                ended_at: None,
+            }];
+        }
         // W8 Task 4 -- Kestra's `ExecutionService.retryWaitFor`, whose two
         // halves are the two loops below. See `Command::RestartLoop`.
         Command::RestartLoop { run } => {

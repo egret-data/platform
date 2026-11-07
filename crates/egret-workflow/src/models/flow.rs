@@ -103,6 +103,32 @@ pub struct Flow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<Retry>,
 
+    /// **egret-only, never authored**: the `retry:` a `Loop` iteration's tasks
+    /// inherit from the parent flow (package #6 Task A6, spec D7).
+    ///
+    /// Kestra gives a failed task with no `retry:` of its own the nearest
+    /// ancestor's, walking the **parent** flow's task tree up through the
+    /// `Loop` (`searchForParentTaskWithRetry`, `ExecutorService.java:841-856`).
+    /// An iteration's flow is the `Loop`'s body cut out of that tree
+    /// (`worker::spawn::sub_flow_source`), so the walk inside it stops at the
+    /// body's root; this field carries what it would have found above: the
+    /// `Loop`'s own `retry:`, else its nearest ancestor's, else the one the
+    /// enclosing iteration inherited (a nested `Loop`). `retry::policy_for`
+    /// consults it after the run chain and before the flow's own `retry:`,
+    /// which keeps its meaning: it is consulted only when no ancestor has one,
+    /// exactly as in Kestra.
+    ///
+    /// Only `sub_flow_source` writes it, into an iteration's stored source.
+    /// No Kestra class has the key, so a flow that writes it is refused at
+    /// save as `unknown_property` (`spec::keys`); the run path parses it
+    /// without a check, as it parses every stored source.
+    #[serde(
+        default,
+        rename = "x-egret-inherited-retry",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub inherited_retry: Option<Retry>,
+
     #[serde(default)]
     pub sla: Vec<Sla>,
     #[serde(default)]

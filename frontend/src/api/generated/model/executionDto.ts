@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { ExecutionDtoOutputs } from './executionDtoOutputs';
 import type { ExecutionListItemDto } from './executionListItemDto';
 import type { LabelDto } from './labelDto';
 import type { TaskRunDto } from './taskRunDto';
@@ -22,6 +23,19 @@ export type ExecutionDto = ExecutionListItemDto & {
   source: string;
   /** Every task run, in `run_ix` order — the executor's creation order. */
   runs: TaskRunDto[];
+  /**
+     * The flow's `outputs:` as the execution's end evaluated them, typed by
+     * each output's `type`; `null` when none were evaluated: the flow
+     * declares none, the execution has not ended, or the evaluation failed
+     * (the execution then ended `FAILED` and its logs say why). **A
+     * `SECRET` output's value is always `******`** here: the real value is
+     * kept encrypted on the server and no response carries it. A `FILE`
+     * output is a `kestra:///` URI of the execution's own storage, read
+     * through the execution file API. On the detail only: the list leaves
+     * it out, since it can be up to 16 MiB per execution.
+     * @nullable
+     */
+  outputs?: ExecutionDtoOutputs;
   /**
      * Whether the caller may resume and replay this execution: they hold
      * `workflow:manage` in this workspace. A detail page hides both actions

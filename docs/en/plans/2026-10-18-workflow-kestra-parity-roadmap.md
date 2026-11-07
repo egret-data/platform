@@ -76,7 +76,7 @@ Each package goes through the usual flow: spec (or a spec section) → plan → 
 | 3 | **Inputs checked at start** — **done**: a merged (#762), b built (PR in review; marked merged after it merges) | `required`, type coercion errors, SELECT/MULTISELECT `values`/`allowCustomValue`, STRING `validator`, INT/FLOAT min/max, date/time bounds, ARRAY items, SECRET/URI/EMAIL/YAML/ION type checks, at manual, API, webhook and flow-trigger start. The `validate inputs` endpoint | a few invalids | M |
 | 4 | **HTTP and the unserved platform tasks** — built (PR in review, `feat/workflow-http`) | `http.Request`, `http.Download`, `http.SseRequest` as worker handlers with an egress policy. Decide and wire `egret.sql` (needs a `QueryExecPort`) and the other `egret.*`/`core.*` rows, or remove the rows | 0 | M |
 | 5 | **Renderer parity** — **done**: a and b built 2026-10-29 (#5a `feat/workflow-renderer`, #5b `feat/workflow-renderer-b` stacked on it; both PRs in review; marked merged after both merge). Banked 15: a 301 / 40 / 40 / 0, b 301 / 35 / 35 / 0; expression baseline 107 → 102 of 1 800. Designed 2026-10-28 (spec `2026-10-28-workflow-renderer-design.md`; two PRs, #5a operators and render context, #5b names; `subflow()` moved to #12; premises corrected in spec §2.2) | Division by zero (the `restart-*` Infinity case), undefined `taskrun.value`, number-vs-string comparison, `??` on a missing root. `render`/`renderOnce`, `errorLogs`, `subflow`, `max`/`min`. The ten missing filters and four missing tests. `escape` strategies `js`/`css`/`url_param`. Lazy chained comparisons, BigDecimal arithmetic, `{{ task.type }}` on a flowable | ~8–10 (measured: 11 strict, 15 upper) | M |
-| 6 | **`Loop` own `outputs:`** | A `Loop`'s `outputs:` evaluated at its end, including STORE/AUTO (reopened). Name the cause of the 4 unattributed `Loop` entries first | 3 (+ up to 4) | M |
+| 6 | **`Loop` own `outputs:`** — **done**: built 2026-10-29 (`feat/workflow-loop-outputs`, one PR with `Loop` retry and flow-level `outputs:`; PR in review; marked merged after it merges). Banked 10: 301 / 35 / 35 / 0 → 301 / 25 / 25 / 0. Spec `2026-10-29-workflow-loop-outputs-design.md` §7 | A `Loop`'s `outputs:` evaluated at its end, including STORE/AUTO (reopened). Name the cause of the 4 unattributed `Loop` entries first | 3 (+ up to 4) | M |
 | 7 | **Execution operations** | Restart failed tasks in place, replay from a chosen task (with inputs and a revision choice), change-status and task-run state, pause, delete (with logs and storage), labels API. Resume with `onResume` inputs, and resume-validate. Logs follow (SSE), download and delete. Execution follow (SSE), the expression-eval endpoint, export/distinct/average-duration/latest. Then every `by-ids`/`by-query` bulk operation | 0 (operability) | L |
 | 8 | **Flow `concurrency:`** | `limit` with QUEUE/CANCEL/FAIL, unqueue and force-run | few | M |
 | 9 | **`Pause` and `AllowFailure` in full** (reopened) | `Pause` `tasks:`, `errors:`, `behavior:`, `onPause:`, `onResume:`. `AllowFailure` block `retry:` | 4 refused → live | M |
@@ -142,6 +142,18 @@ Each package goes through the usual flow: spec (or a spec section) → plan → 
 - **Known limitations** (spec §5): the editor schema still offers the refused `options`; a whole-map template for `headers`/`formData`/`params` fails at run; outputs are not masked (Kestra parity).
 - **Moved elsewhere:** `http.Trigger` stays in #11; a per-workspace allowlist, a deployment egress proxy, `egret.dataapi.call`/`egret.report.run` and a `run_as` column are recorded follow-ups (spec §4).
 
+**Row #6 done, 2026-10-29 (`feat/workflow-loop-outputs`, Tasks T0, A1–A6, B1–B4, Z; one PR, in review; the row is marked merged only after it merges; the row above is not edited beyond its status).** Spec `2026-10-29-workflow-loop-outputs-design.md`, §7 "As built". Measured with `cargo test -p egret-workflow --test executor`:
+- **Executor ratchet 301 / 35 / 35 / 0 → 301 / 25 / 25 / 0**, `(301, 276, 25)`; `LIVE` 295, `VALIDATE_REFUSED` 25, `UNKNOWN_TYPE_REFUSED` 21 unchanged. **Banked 10** (the row said 3 + up to 4; the spec 8 upper, 6 strict): `valids/loop-outputs-failed-render`, `loop-outputs`, `if-in-parallel`, `loop-outputs-auto`, `loop-outputs-store` (`Loop` outputs, STORE/AUTO included), `retry-flowable-parallel` (a `Loop`'s `retry:` inherited by each iteration), `flow-with-outputs-failed`, `after-execution` (flow-level `outputs:`, note 6 below is closed), `subflow-secret-output-child`, `subflow-secret-output-parent` (not predicted: the oracle's egret has no master key, like Kestra's harness, so both fail as in Kestra).
+- **Scope grew (user Q1, Q2):** flow-level `outputs:` (`{{ execution.outputs }}`, a `Subflow`'s `outputs.<id>.outputs`, a Flow trigger's `trigger.outputs` in its `inputs:`, `outputs` on the execution API, SECRET outputs sealed and masked) and `Loop` `retry:` inheritance went into the same PR. Migration `0214_workflow_execution_outputs.sql` (D12's networked re-check of the number is owed before merge).
+- **Corrections to this roadmap (spec §2.2, dated 2026-10-29):** a `Loop`'s `outputs:` are evaluated per iteration, not "at its end"; STORE did not need more of W9a, only one Ion file write per iteration; the 4 "unattributed `Loop` entries" were `if-in-flowable` (#5a), `loop-object` and `loop-object-in-list` (#5b) and `retry-flowable-parallel` (a `Loop`'s `retry:`, #6), none a `Loop`-outputs cause; Appendix A's "flow `outputs:` ... may be partly stale (inferred)" was not stale (nothing evaluated flow outputs); package #1 had recorded `Flow.outputs` and `Loop.retry` "honoured" though nothing ran them (`property-treatment.json` measures the save path only). Appendix A carries a dated note below its cause table.
+- **egret-only limits and divergences** (spec §6): `Loop` outputs capped at 1 MiB per iteration and 16 MiB per `Loop`, flow outputs at 16 MiB per execution; FILE outputs confined to the execution's `Loop` family (§3.1); SECRET outputs refused under STORE; duplicate output ids refused inside a `Loop`; STORE file named `outputs.ion`; the parent flow's `outputs:` not evaluated inside a `Loop` iteration.
+- **Bug fix besides the banks:** a failed flowable under an ancestor's or the flow's `retry:` no longer leaves its parent `RUNNING` forever (`retry::is_retried_kind`).
+
+**Notes, 2026-10-29 (package #6, spec §5 and §7; the rows above are not edited).**
+13. **#11 gains: `trigger` bound in the fired flow's task renders.** #6 binds `trigger.outputs` only in a Flow trigger's `inputs:`; `worker::render` binds no `trigger` root for any trigger type, so `{{ trigger.outputs.x }}` (or `{{ trigger.date }}`) in a task of the fired flow still fails to render.
+14. **KI-112 follow-up:** SECRET inputs are still revealed in a Flow trigger's render context (#6 masks the SECRET outputs there).
+15. **Storage:** the pruner does not protect a `Subflow` child's published files while the parent still runs (#6, spec §2.2 item 14).
+
 *Rule 2 as built, 2026-10-28 (#2b Task B5).* Rule 2 is closed. The orphan sweep's superseded rule, the storage pruner and the logs route's `complete` read `workflow.execution_is_idle` (migration 0210: terminal and no live run); the `_wd` sweep reads the block's own state. Two debts are recorded in the end-hooks spec §6 as-built: the `Exit`-sibling leak (row #20 below) and the `protected_set` cost (0.12 s to about 4 s per 100 000 executions, hourly; a cheaper form is named there).
 
 **Notes, 2026-10-28 (package #2b, end-hooks spec D9, D12 and §6 as built; the rows above are not edited).**
@@ -160,7 +172,7 @@ Each package goes through the usual flow: spec (or a spec section) → plan → 
 5. **#17:** gains the script `outputFiles` `**` and `[...]` patterns (`worker/commands.rs:3108-3124`).
 
 **Notes, 2026-10-27 (package #2, end-hooks spec §7.1, §9 and §4.1 as-built).**
-6. **#6:** gains flow-level `outputs:` evaluation. `valids/after-execution` stays baselined because its `afterExecution:` renders `{{ execution.outputs.final }}` and egret never evaluates flow `outputs:` (`worker/render.rs:279-284`).
+6. **#6:** gains flow-level `outputs:` evaluation. `valids/after-execution` stays baselined because its `afterExecution:` renders `{{ execution.outputs.final }}` and egret never evaluates flow `outputs:` (`worker/render.rs:279-284`). *Closed 2026-10-29: #6 evaluates them and `after-execution` banked (Task B2).*
 7. **#7:** when it builds restart in place it must remove the `errors`, `finally` and `afterExecution` runs, as Kestra's `ExecutionService` does (`ExS:339-351`). Latent today: `run_of` takes a task's first run, so an execution-level restart would read a stale end-hook run.
 8. **#9:** owns `Pause` `finally:` (refused naming #9 until then).
 9. **#17:** a `WorkingDirectory` block whose prepare or finish claim fails ends `FAILED` without running its `errors`/`finally` (the V3 rule, pinned by a test in `tests/working_dir_claims.rs`); revisit with the Kubernetes runner.
@@ -280,7 +292,7 @@ finally-sequential-error-first, restart-with-finally, finally-loop, finally-loop
 **Pause `behavior:` / `errors:` / `onPause:` (3)**, refused by user ruling 2026-10-11 until egret runs them
 pause-behavior, pause_on_pause, pause-errors-finally-after-execution (also needs `finally:` and `afterExecution:`).
 
-**`Loop` own `outputs:` not produced (5)**
+**`Loop` own `outputs:` not produced (5)** *(all 5 banked by #6, 2026-10-29; see the note below the cause table)*
 loop-outputs, loop-outputs-failed-render, if-in-parallel (assert reads `outputs.for_each.outputs[i]`), loop-outputs-store and
 loop-outputs-auto (STORE/AUTO file outputs, deferred by user ruling 2026-10-03, W9a spec 15).
 
@@ -298,12 +310,12 @@ README calls these unbankable under this harness (`Sleep::capped(ZERO)` leaves n
 retry-failed-task-duration (Kestra ~0.6 s/retry, 3 attempts vs 4; user chose to baseline), retry-failed-flow-duration (driver clock moves only to next deadline),
 loop-until-restart (4 iterations vs 3, `maxDuration: PT3S`), waitfor-child-task-warning (one extra `WaitFor` iteration, same shape).
 
-**Flow-level `outputs:` not evaluated / SECRET outputs (3)**: flow-with-outputs-failed, subflow-secret-output-parent (flow `outputs:` block),
+**Flow-level `outputs:` not evaluated / SECRET outputs (3)** *(all 3 banked by #6, 2026-10-29; the "partly stale" guess below was wrong)*: flow-with-outputs-failed, subflow-secret-output-parent (flow `outputs:` block),
 subflow-secret-output-child (harness has no encryption key). Note `flow_outputs` appears in `src/worker/subflow.rs`/`render.rs` so the first two's cause text may be partly stale (inferred).
 
 **Subflow retry accumulation (2)**: retry-subflow, subflow-parent-retry (`state::apply` rule 1: Kestra folds sub-execution retries into the parent attempt).
 
-**Loop sub-execution diverges, not attributed (4, inferred)**: loop-object, loop-object-in-list, if-in-flowable (no cause text anywhere; all are `Loop`+`Switch/If` bodies
+**Loop sub-execution diverges, not attributed (4, inferred)** *(named 2026-10-29 by #6's survey: see the note below the cause table)*: loop-object, loop-object-in-list, if-in-flowable (no cause text anywhere; all are `Loop`+`Switch/If` bodies
 with `item.*` rendering; need a diff to name the field), retry-flowable-parallel (`retry:` on a `Loop` block; README: "held by the Loop", differs only inside `spawned`).
 
 **`Loop errors:` (1)**: loop-switch-failed (`models::Loop` has no `errors` field; `Loop.java:272`).
@@ -352,6 +364,11 @@ README "Known over-refusals at publish"). 14 `not-standalone`/10 rejected flows 
 | retry `warningOnRetry` | 1 | retry-success | gap (inferred) | S | WARNING on retried success |
 | AllowFailure block `retry:` | 1 | retry-with-flowable-errors | deliberate (decided non-goal) | M if reversed | spec 2 |
 | PurgeLogs scope | 1 | purge_logs_full_arguments | deliberate, permanent | - | user ruling 2026-10-18 |
+
+**Corrections, 2026-10-29 (package #6, spec §2.2 items 1–6; the rows above are the 2026-10-18 record).**
+- `Loop` own `outputs:`: evaluated **per iteration** at each sub-execution's end, not "at loop end"; STORE did not need the W9a store beyond one Ion file write per iteration. All 5 entries banked by #6.
+- "Loop unattributed (4)": `if-in-flowable` (the `equals` operator, #5a), `loop-object` and `loop-object-in-list` (the `json` test, #5b), `retry-flowable-parallel` (a `Loop`'s `retry:` not inherited by its iterations, banked by #6). None was a `Loop`-outputs cause.
+- Flow `outputs:` / SECRET (3): not stale; nothing evaluated flow outputs. All 3 banked by #6: `flow-with-outputs-failed` (evaluation at the terminal), `subflow-secret-output-child` and `-parent` (the oracle's egret has no master key, like Kestra's harness, so both fail as in Kestra; the "harness key" row did not need a keyed harness).
 
 ### 4. Unblock ranking (single construct -> entries banked, upper bound / strict)
 
