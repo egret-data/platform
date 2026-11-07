@@ -321,10 +321,12 @@ jobs:
     permissions:
       contents: read
     env:
-      WORK: ${{ runner.temp }}/egret-opa-e2e
       LAYER2_REPORT: ${{ github.workspace }}/layer2-report.json
     steps:
       - uses: actions/checkout@v4
+      # `runner` is not available in a job-level `env`, so WORK is set here.
+      - name: Work directory
+        run: echo "WORK=$RUNNER_TEMP/egret-opa-e2e" >> "$GITHUB_ENV"
       # The backend image build links egret-bin like the `rust` job does; same reclaim.
       - name: Reclaim runner disk
         run: |
