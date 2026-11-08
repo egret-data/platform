@@ -199,3 +199,98 @@ async fn the_drain_gives_up_at_its_deadline() {
     );
     client.abort();
 }
+
+/// Final review I2: a side listener (the OPA surface on its own port) drains
+/// with the API listener. The API listener has nothing in flight, so its drain
+/// returns at once; in production `main` then returns and the process exits.
+/// The OPA decision in flight on the side listener must be waited for, which
+/// is what `join_side_listeners` does after the API drain.
+///
+/// Mutants: make `join_side_listeners` return at once, or drop the side
+/// listener's task handle, and the handler is still running when the join
+/// returns.
+#[tokio::test]
+async fn a_side_listener_request_completes_before_the_join_returns() {
+    let api_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let side_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let side_addr = side_listener.local_addr().unwrap();
+
+    let in_handler = Arc::new(tokio::sync::Notify::new());
+    let entered = in_handler.clone();
+    let handler_done = Arc::new(AtomicBool::new(false));
+    let done_in_handler = handler_done.clone();
+    let side_app = Router::new().route(
+        "/v1/data/trino/allow",
+        get(move || {
+            let entered = entered.clone();
+            let done = done_in_handler.clone();
+            async move {
+                entered.notify_waiters();
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                done.store(true, Ordering::SeqCst);
+                "the-decision"
+            }
+        }),
+    );
+
+    // One SIGTERM, observed by both listeners, as `shutdown_signal()` is.
+    let (sigterm_tx, sigterm_rx) = tokio::sync::watch::channel(false);
+    let signal = |mut rx: tokio::sync::watch::Receiver<bool>| async move {
+        let _ = rx.wait_for(|fired| *fired).await;
+    };
+    let side = egret_server::spawn_side_listener(
+        "opa",
+        side_listener,
+        side_app,
+        signal(sigterm_rx.clone()),
+        Duration::from_secs(10),
+    );
+    let api = tokio::spawn(egret_server::serve_with_drain(
+        api_listener,
+        Router::new().route("/", get(|| async { "api" })),
+        signal(sigterm_rx),
+        Duration::from_secs(10),
+    ));
+
+    let waiting = in_handler.notified();
+    tokio::pin!(waiting);
+    waiting.as_mut().enable();
+    let client = tokio::spawn(async move { raw_request(side_addr, "/v1/data/trino/allow").await });
+    waiting.await;
+
+    sigterm_tx.send(true).unwrap();
+
+    // The API drain returns while the decision is still in flight: this is the
+    // moment `main` used to return.
+    tokio::time::timeout(Duration::from_secs(5), api)
+        .await
+        .expect("the API listener did not drain")
+        .unwrap()
+        .unwrap();
+    assert!(
+        !handler_done.load(Ordering::SeqCst),
+        "the decision finished before the API drain returned, so this test \
+         cannot tell a joined side listener from a dropped one"
+    );
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        egret_server::join_side_listeners(vec![side], Duration::from_secs(10)),
+    )
+    .await
+    .expect("the side listener did not drain");
+    assert!(
+        handler_done.load(Ordering::SeqCst),
+        "join_side_listeners returned with an OPA decision still in flight; the \
+         process would exit and fail that Trino query"
+    );
+
+    let response = client
+        .await
+        .unwrap()
+        .expect("connection was reset mid-response");
+    assert!(
+        response.starts_with("HTTP/1.1 200 OK") && response.ends_with("the-decision"),
+        "the in-flight decision did not get its whole response: {response:?}"
+    );
+}

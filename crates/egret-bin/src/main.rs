@@ -3644,24 +3644,23 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("binding {addr}"))?;
     tracing::info!(%addr, "egret listening");
+    // The OPA and apps listeners drain with the API listener; `main` waits for
+    // them below, after the API drain, so their in-flight requests are not
+    // killed when it returns.
+    let mut side_listeners = Vec::new();
     if let Some(router) = opa_listener_router {
         let opa_addr = config.governance.opa.listen.clone();
         let opa_listener = tokio::net::TcpListener::bind(&opa_addr)
             .await
             .with_context(|| format!("binding OPA listener {opa_addr}"))?;
         tracing::info!(addr = %opa_addr, "OPA surface listening");
-        tokio::spawn(async move {
-            if let Err(e) = egret_server::serve_with_drain(
-                opa_listener,
-                router,
-                egret_server::shutdown_signal(),
-                egret_server::DRAIN_DEADLINE,
-            )
-            .await
-            {
-                tracing::error!(error = %e, "OPA listener stopped");
-            }
-        });
+        side_listeners.push(egret_server::spawn_side_listener(
+            "opa",
+            opa_listener,
+            router,
+            egret_server::shutdown_signal(),
+            egret_server::DRAIN_DEADLINE,
+        ));
     }
     // Engines on an OPA profile whose plugin files still name an older OPA URL
     // (applied before the listener moved) are re-applied once, in the
@@ -3691,18 +3690,13 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             .await
             .with_context(|| format!("binding apps host {apps_addr}"))?;
         tracing::info!(addr = %apps_addr, origin = %config.apps.origin, "apps host listening");
-        tokio::spawn(async move {
-            if let Err(e) = egret_server::serve_with_drain(
-                apps_listener,
-                router,
-                egret_server::shutdown_signal(),
-                egret_server::DRAIN_DEADLINE,
-            )
-            .await
-            {
-                tracing::error!(error = %e, "apps host stopped");
-            }
-        });
+        side_listeners.push(egret_server::spawn_side_listener(
+            "apps",
+            apps_listener,
+            router,
+            egret_server::shutdown_signal(),
+            egret_server::DRAIN_DEADLINE,
+        ));
     }
     // SIGTERM is observed and in-flight requests are drained, bounded by
     // `DRAIN_DEADLINE`. Before this, a rollout dropped every in-flight query on
@@ -3716,6 +3710,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     )
     .await
     .context("server error")?;
+    // An OPA decision in flight at SIGTERM is a Trino query; it gets the same
+    // drain as the API. Bounded by the same deadline, counted from the same
+    // signal, so this stays inside the pod's grace period.
+    egret_server::join_side_listeners(side_listeners, egret_server::DRAIN_DEADLINE).await;
     // The workflow claim loop, then its log writer's drain (bounded at 10 s by
     // the writer itself). Bounded here too: a tick in flight can be a long
     // `Sleep`, and a pod's grace period is finite.

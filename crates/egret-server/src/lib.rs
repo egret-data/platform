@@ -787,6 +787,57 @@ where
     }
 }
 
+/// A listener served beside the API listener (the OPA surface, the apps host)
+/// on its own task. Kept so `main` can wait for its drain: a dropped task dies
+/// with the process the moment the API listener's drain returns.
+pub struct SideListener {
+    name: &'static str,
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// Serves `app` on `listener` with [`serve_with_drain`] on a spawned task. An
+/// error is logged under `name`; [`join_side_listeners`] waits for the task.
+pub fn spawn_side_listener<F>(
+    name: &'static str,
+    listener: tokio::net::TcpListener,
+    app: Router,
+    shutdown: F,
+    drain_deadline: Duration,
+) -> SideListener
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let task = tokio::spawn(async move {
+        if let Err(e) = serve_with_drain(listener, app, shutdown, drain_deadline).await {
+            tracing::error!(listener = name, error = %e, "listener stopped");
+        }
+    });
+    SideListener { name, task }
+}
+
+/// Waits until every side listener has drained, so the process does not exit
+/// with their requests in flight. Call it after the API listener's drain has
+/// returned: each side listener started its own `drain_deadline` at the same
+/// signal, so this adds no time past that deadline; the `drain_deadline`
+/// bound here only guards a listener that would not stop.
+pub async fn join_side_listeners(listeners: Vec<SideListener>, drain_deadline: Duration) {
+    let names: Vec<&'static str> = listeners.iter().map(|l| l.name).collect();
+    let all = async move {
+        for l in listeners {
+            if let Err(e) = l.task.await {
+                tracing::error!(listener = l.name, error = %e, "listener task failed");
+            }
+        }
+    };
+    if tokio::time::timeout(drain_deadline, all).await.is_err() {
+        tracing::warn!(
+            listeners = ?names,
+            deadline_secs = drain_deadline.as_secs(),
+            "side listeners still draining at the deadline; exiting anyway"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
