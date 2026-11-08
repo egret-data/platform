@@ -20,8 +20,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use egret_perm::Selector;
 use egret_perm::{
-    list_engine_grants_for_profile_via, list_grants_via, list_rules_via, CompileError, EngineGrant,
-    EngineType, Grant, Rule,
+    list_engine_grants_for_profile_via, list_grants_for_catalogs_via, list_rules_for_catalogs_via,
+    CompileError, EngineGrant, EngineType, Grant, Rule,
 };
 use egret_perm_ir::audience::Directory;
 use egret_perm_ir::ep::{BoundEngine, EpInput, EpKind, Mechanism};
@@ -137,10 +137,18 @@ pub(crate) async fn load_ep(
     sweep.sort_unstable();
     sweep.dedup();
 
-    let grants = list_grants_via(conn)
+    // Only the model rows this profile can lower: the grants and path rules on
+    // the catalogs it reaches, and every tag rule. The lowerings skip a grant
+    // or path rule on any other catalog (`lower_grants`, `lower_rules`), so
+    // reading them changed nothing but the cost, which grew with the whole
+    // installation on every profile's rebuild (SP2b Task 26 follow-up).
+    // Principals are expanded below for these rows only, so a compile mints a
+    // username only for someone this profile's policies name.
+    let reachable: Vec<Uuid> = catalog_names.keys().copied().collect();
+    let grants = list_grants_for_catalogs_via(conn, &reachable)
         .await
         .map_err(CompileError::from_perm)?;
-    let rules = list_rules_via(conn)
+    let rules = list_rules_for_catalogs_via(conn, &reachable)
         .await
         .map_err(CompileError::from_perm)?;
     // D3: read who every `workspace_members` principal — and, since SP4c Task

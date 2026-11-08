@@ -257,7 +257,33 @@ pub async fn list_grants_via(conn: &mut sqlx::PgConnection) -> Result<Vec<Grant>
     )
     .fetch_all(&mut *conn)
     .await?;
+    grants_with_principals(conn, rows).await
+}
 
+/// The grants scoped to one of `catalogs`, as [`list_grants_via`] reads them.
+/// A compile of one profile lowers only the grants on the catalogs the profile
+/// reaches (`egret_perm_ir::lower::grants::lower_grants` skips every other
+/// one), so its loader reads only those: the whole table grows with the
+/// installation, and every profile's rebuild used to read all of it.
+pub async fn list_grants_for_catalogs_via(
+    conn: &mut sqlx::PgConnection,
+    catalogs: &[Uuid],
+) -> Result<Vec<Grant>, PermError> {
+    let rows: Vec<GrantRow> = sqlx::query_as(
+        "SELECT id, effect::text AS effect, actions, catalog_id, schema_name, \
+                table_name, column_name, origin, origin_workspace_id \
+         FROM perm.grants WHERE catalog_id = ANY($1)",
+    )
+    .bind(catalogs)
+    .fetch_all(&mut *conn)
+    .await?;
+    grants_with_principals(conn, rows).await
+}
+
+async fn grants_with_principals(
+    conn: &mut sqlx::PgConnection,
+    rows: Vec<GrantRow>,
+) -> Result<Vec<Grant>, PermError> {
     let ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
     let principal_rows: Vec<GrantPrincipalRow> = sqlx::query_as(
         "SELECT grant_id, kind::text AS kind, ref AS principal_ref, mode::text AS mode \
@@ -291,7 +317,35 @@ pub async fn list_rules_via(conn: &mut sqlx::PgConnection) -> Result<Vec<Rule>, 
     )
     .fetch_all(&mut *conn)
     .await?;
+    rules_with_exemptions(conn, rows).await
+}
 
+/// Every tag-selected rule, and the path-selected rules scoped to one of
+/// `catalogs`, as [`list_rules_via`] reads them. A tag rule names no catalog,
+/// so it can reach any profile; a path rule on another catalog is skipped by
+/// the lowering (`egret_perm_ir::lower::rules::lower_rules`). Same reason as
+/// [`list_grants_for_catalogs_via`].
+pub async fn list_rules_for_catalogs_via(
+    conn: &mut sqlx::PgConnection,
+    catalogs: &[Uuid],
+) -> Result<Vec<Rule>, PermError> {
+    let rows: Vec<RuleRow> = sqlx::query_as(
+        "SELECT id, name, kind::text AS kind, mask_type, value_expr, filter_expr, \
+                selector_kind::text AS selector_kind, tag_key, catalog_id, \
+                schema_name, table_name, column_name \
+         FROM perm.rules \
+         WHERE selector_kind = 'tag'::perm.selector_kind OR catalog_id = ANY($1)",
+    )
+    .bind(catalogs)
+    .fetch_all(&mut *conn)
+    .await?;
+    rules_with_exemptions(conn, rows).await
+}
+
+async fn rules_with_exemptions(
+    conn: &mut sqlx::PgConnection,
+    rows: Vec<RuleRow>,
+) -> Result<Vec<Rule>, PermError> {
     let ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
     let exemption_rows: Vec<RuleExemptionRow> = sqlx::query_as(
         "SELECT rule_id, kind::text AS kind, ref AS principal_ref, mode::text AS mode \

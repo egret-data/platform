@@ -369,7 +369,9 @@ async fn mint_for_compile(
 /// [`role_holders_via`], [`group_members_via`], [`workspace_members_via`] —
 /// over the refs the whole model holds (grant principals, rule exemptions,
 /// engine-grant principals (F11), a clearance's `required_roles`; `public` excluded; a workspace ref parsed as
-/// the member pass parses it), which is what every recompile reads. No
+/// the member pass parses it), a superset of what any recompile reads (each
+/// profile's loader reads only the rows on its own catalogs, plus every tag
+/// rule). No
 /// membership predicate is restated here, so a change to one moves this sweep
 /// with it.
 pub(crate) async fn premint_model_usernames(

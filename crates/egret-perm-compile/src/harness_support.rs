@@ -150,6 +150,25 @@ pub async fn load_ep_for_test(
     )
 }
 
+/// Run `ir_load::load_ep` on `conn` without minting, and return the ids of
+/// the grants and rules it read: the scoping test checks which rows the
+/// loader reads, and the timing harness times this piece of a build.
+pub async fn load_ep_model_ids_for_test(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<Option<(Vec<Uuid>, Vec<Uuid>)>, CompileError> {
+    Ok(
+        crate::ir_load::load_ep(conn, service_id, crate::members::MissingUsername::Omit)
+            .await?
+            .map(|l| {
+                (
+                    l.grants.iter().map(|g| g.id).collect(),
+                    l.rules.iter().map(|r| r.id).collect(),
+                )
+            }),
+    )
+}
+
 /// The OPA snapshot of `service_id` as the refresher builds it: lowered with
 /// `MissingUsername::Omit`, so nothing is minted (governance SP2b Task 6).
 pub async fn build_snapshot_for_test(
