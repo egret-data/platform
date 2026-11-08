@@ -1,8 +1,9 @@
 //! Governance SP2b Task 10: the OPA decision surface as `build_router` mounts
 //! it, and the gate that decides whether it is mounted and refreshed.
 //!
-//! - With `AppState::opa` set, the five routes answer through the composed
-//!   router; with it `None` (the gate off) they are not there at all (404).
+//! - With `AppState::opa` set, the five routes answer through `opa_router`
+//!   (the OPA listener); `build_router` (the API port) never serves them (404),
+//!   and with it `None` (the gate off) there is no OPA router at all.
 //! - The request body is bounded at [`OPA_BODY_LIMIT_BYTES`] (4 MiB): one byte
 //!   over is refused with a non-2xx (the plugin fails the query), never answered.
 //! - [`start_opa`] returns nothing and touches no database while the gate is
@@ -26,7 +27,7 @@ use egret_perm_compile::{start_opa, OpaState, OPA_SURFACE_PREFIX};
 use egret_perm_eval::{Snapshot, SnapshotInput};
 use egret_perm_ir::audience::{Audience, Member, MemberName, Via};
 use egret_perm_ir::statement::*;
-use egret_server::{build_router, AppState};
+use egret_server::{build_router, opa_router, AppState};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -101,10 +102,15 @@ fn opa_state(verifier: Arc<dyn EngineCredentialVerifier>, engine: uuid::Uuid) ->
     }
 }
 
-fn router(opa: Option<OpaState>) -> axum::Router {
+fn state_with(opa: Option<OpaState>) -> AppState {
     let mut state = AppState::without_db();
     state.opa = opa;
-    build_router(state)
+    state
+}
+
+/// The OPA listener's router (`None` with the gate off).
+fn router(opa: Option<OpaState>) -> axum::Router {
+    opa_router(&state_with(opa)).expect("the gate is on")
 }
 
 fn body(engine: uuid::Uuid, secret: &str, action: Value) -> Value {
@@ -202,16 +208,24 @@ async fn the_mounted_surface_answers_an_admitted_engine() {
     assert_eq!(allow, (200, json!({"result": true})));
 }
 
+#[test]
+fn with_the_gate_off_there_is_no_opa_router() {
+    assert!(opa_router(&state_with(None)).is_none());
+}
+
 #[tokio::test]
-async fn with_the_gate_off_the_surface_is_not_mounted() {
-    // Arrange
-    let app = router(None);
+async fn the_api_router_never_serves_the_opa_surface() {
+    // Arrange: the gate is on, yet the API port must not carry the surface.
+    let app = build_router(state_with(Some(opa_state(
+        Arc::new(Stub { accept: true }),
+        ENGINE,
+    ))));
 
     // Act
     let allow = send(&app, "/allow", body(ENGINE, RIGHT, select_lake())).await;
 
     // Assert
-    assert_eq!(allow.0, 404);
+    assert_eq!(allow.0, 404, "{allow:?}");
 }
 
 #[tokio::test]

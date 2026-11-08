@@ -328,12 +328,7 @@ pub fn build_router(state: AppState) -> Router {
         router = router.merge(egret_policy::ranger_surface(ranger).with_state(()));
     }
 
-    // Like the Ranger surface, a third-party protocol for the engine, not the
-    // browser: no CSRF layer, no OpenAPI entry. Its body limit is the
-    // surface's own layer (`OPA_BODY_LIMIT_BYTES`).
-    if let Some(opa) = state.opa.clone() {
-        router = router.merge(egret_perm_compile::opa_surface(opa).with_state(()));
-    }
+    // The OPA decision surface is deliberately NOT merged here: see [`opa_router`].
 
     if let Some(database) = state.database.clone() {
         let group = Router::new()
@@ -565,6 +560,26 @@ pub fn build_router(state: AppState) -> Router {
     router.with_state(state).layer(axum::middleware::from_fn(
         egret_auth::fetch_meta::refuse_same_site,
     ))
+}
+
+/// The OPA decision surface (governance SP2b), served on its own listener
+/// (`[governance.opa] listen`, port-8080 hardening) and never on the API port:
+/// it reads a request body before it can authenticate it, so only engines may
+/// reach it (Helm `networkpolicy-egret.yaml`).
+///
+/// Like the Ranger surface it is a third-party protocol for the engine, not the
+/// browser: no CSRF layer, no OpenAPI entry. Its body limits and in-flight
+/// budget are the surface's own layers (`OPA_BODY_LIMIT_BYTES`,
+/// `bound_in_flight`); the outermost `refuse_same_site` layer that wrapped it
+/// in [`build_router`] is kept. `None` when the gate is off.
+pub fn opa_router(state: &AppState) -> Option<Router> {
+    state.opa.clone().map(|opa| {
+        egret_perm_compile::opa_surface(opa)
+            .with_state(())
+            .layer(axum::middleware::from_fn(
+                egret_auth::fetch_meta::refuse_same_site,
+            ))
+    })
 }
 
 /// Liveness: the process is up. Always 200.

@@ -3585,7 +3585,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         )))
     };
 
-    let app = build_router(AppState {
+    let app_state = AppState {
         db: Some(db),
         auth: Some(auth),
         workspace: Some(workspace),
@@ -3625,12 +3625,33 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         apps,
         apps_api,
         apps_pod,
-    });
+    };
+    let opa_listener_router = egret_server::opa_router(&app_state);
+    let app = build_router(app_state);
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .with_context(|| format!("binding {addr}"))?;
     tracing::info!(%addr, "egret listening");
+    if let Some(router) = opa_listener_router {
+        let opa_addr = config.governance.opa.listen.clone();
+        let opa_listener = tokio::net::TcpListener::bind(&opa_addr)
+            .await
+            .with_context(|| format!("binding OPA listener {opa_addr}"))?;
+        tracing::info!(addr = %opa_addr, "OPA surface listening");
+        tokio::spawn(async move {
+            if let Err(e) = egret_server::serve_with_drain(
+                opa_listener,
+                router,
+                egret_server::shutdown_signal(),
+                egret_server::DRAIN_DEADLINE,
+            )
+            .await
+            {
+                tracing::error!(error = %e, "OPA listener stopped");
+            }
+        });
+    }
     if let Some(router) = apps_proxy {
         let apps_addr = config.apps.listen.clone();
         let apps_listener = tokio::net::TcpListener::bind(&apps_addr)
