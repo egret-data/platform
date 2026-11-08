@@ -898,6 +898,79 @@ async fn a_stored_overlap_counts_only_in_the_profile_whose_download_serves_it() 
     not_built_error(&cache, a.profile);
 }
 
+/// The units `profile`'s C8 re-check loads (`units_served_by_via`).
+async fn served(db: &Db, profile: i64) -> Vec<egret_policy::UnitIds> {
+    let mut conn = db.pool.acquire().await.expect("conn");
+    egret_perm_compile::overlap::units_served_by_via(&mut conn, profile)
+        .await
+        .expect("units")
+}
+
+/// Task 26 (Task 3): the C8 re-check of a profile whose tag service other
+/// profiles share loads only the profile's own unit, `{profile, its tag
+/// service}`, not one unit per profile sharing it (the O(N²) of a tag-version
+/// bump). Also when another profile names this one as its tag service. The
+/// pairs it reports are the all-services scan's pairs for that profile.
+#[tokio::test]
+async fn the_recheck_loads_only_the_profiles_own_unit_of_a_shared_tag_service() {
+    let _serial = SERIAL.lock().await;
+    let db = db().await;
+    let mut names = Names::default();
+
+    // Arrange: B and C share A's tag service.
+    let a = store(&db, "oc13a", open(), &mut names).await;
+    let b = store(&db, "oc13b", open(), &mut names).await;
+    let c = store(&db, "oc13c", open(), &mut names).await;
+    let a_tag = service_name(&db, a.tag_service).await;
+    set_tag_service(&db, b.profile, &a_tag).await;
+    set_tag_service(&db, c.profile, &a_tag).await;
+    let unit = |resource: i64, tag: i64| egret_policy::UnitIds {
+        resource: Some(resource),
+        tag_service: Some(tag),
+    };
+    // Act / Assert: one unit each, not three.
+    assert_eq!(
+        served(&db, a.profile).await,
+        vec![unit(a.profile, a.tag_service)]
+    );
+    assert_eq!(
+        served(&db, b.profile).await,
+        vec![unit(b.profile, a.tag_service)]
+    );
+    assert_eq!(
+        served(&db, c.profile).await,
+        vec![unit(c.profile, a.tag_service)]
+    );
+
+    // Arrange: C names A itself as its tag service; A is then tag-like, and
+    // its own unit is reached only through A's tag service.
+    let a_name = service_name(&db, a.profile).await;
+    set_tag_service(&db, c.profile, &a_name).await;
+
+    // Act / Assert
+    assert_eq!(
+        served(&db, a.profile).await,
+        vec![unit(a.profile, a.tag_service)]
+    );
+    assert_eq!(
+        served(&db, c.profile).await,
+        vec![unit(c.profile, a.profile)]
+    );
+
+    // Assert: the scoped pairs are the all-services scan's, profile by profile.
+    let mut conn = db.pool.acquire().await.expect("conn");
+    let all = egret_perm_compile::overlap::stored_overlaps_via(&mut conn)
+        .await
+        .expect("all pairs");
+    for id in [a.profile, b.profile, c.profile] {
+        let scoped = egret_perm_compile::overlap::stored_overlaps_of_via(&mut conn, id)
+            .await
+            .expect("scoped pairs");
+        let expected: Vec<_> = all.iter().filter(|o| o.service_id == id).cloned().collect();
+        assert_eq!(scoped, expected, "profile {id}");
+    }
+}
+
 /// Task 18 fix round 1 (I1): the snapshot the refresher serves (built by
 /// `cache.rs`'s `outcome_from_parts`, not `build_snapshot_via`) names the
 /// reserved lineage principal, so a `public` write grant does not let

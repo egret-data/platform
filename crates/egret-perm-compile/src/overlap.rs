@@ -495,6 +495,29 @@ pub async fn stored_overlaps_of_via(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
 ) -> Result<Vec<StoredOverlap>, CompileError> {
+    let units = units_served_by_via(conn, service_id).await?;
+    stored_overlaps_in_units_via(conn, units).await
+}
+
+/// The units whose pairs [`stored_overlaps_of_via`] reports for
+/// `service_id`: of the units touching `service_id` and the service its
+/// `tagService` names, those whose pairs carry `service_id` (a unit's
+/// `resource`, else its `tag_service`, as [`stored_overlaps_in_units_via`]
+/// labels them).
+///
+/// Task 26 (Task 3): the filter runs on the unit ids, BEFORE any unit is
+/// loaded. Before, every unit was loaded and its pairs filtered after, so a
+/// profile whose tag service N profiles share loaded N units of about 1 000
+/// policies on each rebuild, and a tag-version bump that moves all N cost
+/// O(N²) unit loads. The pairs kept are the same: a pair's `service_id` is
+/// its unit's, so a unit this filter drops held no pair the old post-filter
+/// kept, and the order of the units kept is unchanged. A unit that fails to
+/// load now fails only the profiles whose pairs it holds.
+#[doc(hidden)]
+pub async fn units_served_by_via(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<Vec<UnitIds>, CompileError> {
     let ids: Vec<i64> = sqlx::query_scalar(
         "SELECT s.id FROM policy.authz_services s \
           WHERE s.id = $1 \
@@ -507,10 +530,11 @@ pub async fn stored_overlaps_of_via(
     .fetch_all(&mut *conn)
     .await
     .map_err(CompileError::from_db)?;
-    Ok(stored_overlaps_of_services_via(conn, &ids)
-        .await?
+    Ok(units_for_services_via(conn, &ids)
+        .await
+        .map_err(crate::db_error::from_store)?
         .into_iter()
-        .filter(|o| o.service_id == service_id)
+        .filter(|u| u.resource.or(u.tag_service) == Some(service_id))
         .collect())
 }
 
@@ -541,10 +565,19 @@ async fn stored_overlaps_of_services_via(
     conn: &mut sqlx::PgConnection,
     service_ids: &[i64],
 ) -> Result<Vec<StoredOverlap>, CompileError> {
-    let db = crate::db_error::from_store;
     let units: Vec<UnitIds> = units_for_services_via(conn, service_ids)
         .await
-        .map_err(db)?;
+        .map_err(crate::db_error::from_store)?;
+    stored_overlaps_in_units_via(conn, units).await
+}
+
+/// The pairs stored in `units`, each labelled with its unit's `resource`,
+/// else its `tag_service`; sorted by that service's name (stable).
+async fn stored_overlaps_in_units_via(
+    conn: &mut sqlx::PgConnection,
+    units: Vec<UnitIds>,
+) -> Result<Vec<StoredOverlap>, CompileError> {
+    let db = crate::db_error::from_store;
     let mut out = Vec::new();
     for ids in units {
         let unit = load_unit_via(conn, ids).await.map_err(db)?;
