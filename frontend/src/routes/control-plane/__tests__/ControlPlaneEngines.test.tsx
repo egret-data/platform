@@ -60,6 +60,26 @@ describe("ControlPlaneEngines", () => {
     vi.mocked(api.listWarehouses).mockResolvedValue([]);
   });
 
+  // Port-8080 hardening A4: an engine applied before the hardening is flagged.
+  test("flags an engine that needs a re-apply, and only that one", async () => {
+    vi.mocked(api.listEngines).mockResolvedValue([
+      { ...ENGINE, securityReapplyNeeded: true },
+      { ...ENGINE, id: "e2", name: "current-trino", securityReapplyNeeded: false },
+    ]);
+    renderPage();
+    await screen.findByText("analytics-trino");
+    const badges = screen.getAllByText("Re-apply needed");
+    expect(badges).toHaveLength(1);
+    expect(badges[0]).toHaveAttribute(
+      "title",
+      "This engine still accepts unauthenticated requests on port 8080. Re-apply it to turn on authentication.",
+    );
+    const flaggedRow = screen.getByText("analytics-trino").closest("tr")!;
+    expect(within(flaggedRow).getByText("Re-apply needed")).toBeInTheDocument();
+    const currentRow = screen.getByText("current-trino").closest("tr")!;
+    expect(within(currentRow).queryByText("Re-apply needed")).not.toBeInTheDocument();
+  });
+
   test("renders the engine list", async () => {
     renderPage();
     expect(screen.getByText("Engines")).toBeInTheDocument();

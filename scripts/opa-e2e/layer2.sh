@@ -34,6 +34,12 @@
 # scenario shares (COMMON below): the listings, information_schema, a `$files` table,
 # SET SESSION query_max_run_time, kill_query against another user's query, and impersonation
 # by the delegator (egret_core::engine_principals::DELEGATOR_PRINCIPAL).
+#
+# Since the port-8080 hardening both engines refuse authentication over plain HTTP, so every job
+# authenticates as the delegator (trino-auth.sh, trino-batch.sh). A `direct` job runs as the
+# delegator impersonating the user, as egret's own query path does; an `impersonate` job is the
+# same request, kept for its statements; an `@session-user` job still names the scenario user as
+# the original user, so Trino still asks whether that user may impersonate U.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -61,6 +67,20 @@ RANGER_CONTAINER=$("${COMPOSE[@]}" ps -q trino-ranger)
 [ -n "$RANGER_CONTAINER" ] || die "trino-ranger is not running: run up.sh first"
 docker exec "$OPA_CONTAINER" grep -q '^access-control.name=opa' /etc/trino/access-control.properties \
   || die "$OPA_CONTAINER is not on the OPA plugin: run up.sh first"
+
+# --- authentication, and the identity check (port-8080 hardening, A5) ----------------------
+# Both engines refuse authentication over plain HTTP; the harness authenticates as the delegator
+# (trino-auth.sh). First, on both engines, trino-opa now on the OPA plugin: a plain-HTTP
+# `X-Trino-User` is refused (403), the same with `X-Forwarded-Proto: https` and no credential is
+# refused (401), and the delegator still impersonates (identity-check.sh). up.sh ran the same
+# check while trino-opa was on the Ranger plugin.
+. "$HERE/trino-auth.sh"
+TRINO_DELEGATOR_PASSWORD=$(delegator_password trino-opa) || die "reading trino-opa's delegator password"
+# Mask it in CI logs, so a future `set -x` cannot print it.
+if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::add-mask::$TRINO_DELEGATOR_PASSWORD"; fi
+export TRINO_DELEGATOR_PASSWORD
+identity_check "$OPA_CONTAINER" trino-opa/opa || die "identity check failed on trino-opa (OPA plugin)"
+identity_check "$RANGER_CONTAINER" trino-ranger || die "identity check failed on trino-ranger"
 
 # --- admin session ------------------------------------------------------------------------
 JAR="$WORK/admin.jar"
@@ -110,12 +130,12 @@ done
 # Every compared statement goes through trino-batch.sh INSIDE each engine's container (Trino's
 # client protocol over curl; see that file for why not the CLI). One docker exec per side.
 batch() { # $1 = container, stdin = jobs; stdout = protocol responses
-  docker exec -i "$1" sh -c "$(cat "$HERE/trino-batch.sh")" trino-batch "$ADMIN" "$KILL_OTHER"
+  docker exec -i -e TRINO_DELEGATOR_PASSWORD "$1" sh -c "$(cat "$HERE/trino-batch.sh")" trino-batch "$ADMIN" "$KILL_OTHER"
 }
 # admin_sql SQL: on trino-ranger as the platform admin; dies, naming the scenario, unless it succeeds.
 admin_sql() {
   local out rc=0
-  out=$(docker exec "$RANGER_CONTAINER" trino --user "$ADMIN" --output-format TSV --execute "$1" 2>&1) || rc=$?
+  out=$(trino_cli "$RANGER_CONTAINER" "$ADMIN" "$1" 2>&1) || rc=$?
   out=$(grep -v '^Picked up JAVA_TOOL_OPTIONS' <<<"$out" || true)
   if [ "$rc" != 0 ] || grep -q '^Query [^ ]* failed' <<<"$out"; then
     die "admin SQL failed (exit $rc): $1 -> $(head -3 <<<"$out")"
@@ -124,7 +144,7 @@ admin_sql() {
 }
 # admin_probe SQL: the same, but a failure is an answer (empty output), not an error.
 admin_probe() {
-  docker exec "$RANGER_CONTAINER" trino --user "$ADMIN" --output-format TSV --execute "$1" 2>/dev/null \
+  trino_cli "$RANGER_CONTAINER" "$ADMIN" "$1" 2>/dev/null \
     | grep -v '^Picked up JAVA_TOOL_OPTIONS' || true
 }
 

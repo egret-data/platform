@@ -1,0 +1,7 @@
+{
+  "catalogs": [{"allow": "all"}],
+  "impersonation": [
+    {"original_user": "egret_delegator", "new_user": ".*", "allow": true},
+    {"original_user": "egret-monitor", "new_user": "egret-monitor", "allow": true}
+  ]
+}

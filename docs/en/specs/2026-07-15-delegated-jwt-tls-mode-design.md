@@ -109,6 +109,19 @@ For a jwt-mode engine (auth block present, jwt selected):
   TLS:8443, where the JWT binds identity. impersonate engines keep
   `allow-insecure-over-http=true` (their basic-auth monitor needs it; their
   impersonate grant is delegator-only, so :8080 is not exploitable).
+
+  > **As corrected, 2026-11-07.** The claim above, that `allow-insecure-over-http=true`
+  > on an impersonate engine is safe because its impersonate grant is delegator-only,
+  > is wrong. Measured on Trino 483: with the flag `true`, Trino does not authenticate a
+  > plain-HTTP request on :8080 at all, so a client that sends `X-Trino-User: bob` and no
+  > credential runs as `bob` (the Trino CLI's `--session-user` does the same). No
+  > impersonation check is involved, so the delegator-only grant does not help. With the
+  > flag `false`, the same request is refused 403 before any identity is read, and a
+  > request with `X-Forwarded-Proto: https` must carry a credential (401 without one). The
+  > basic-auth monitor did not need `true`: it sends `X-Forwarded-Proto: https` and a
+  > password, which works at `false`. Every authenticated engine egret renders now sets
+  > `allow-insecure-over-http=false`. See `2026-11-07-port-8080-hardening-design.md` §2.2
+  > and the live result `../plans/2026-11-07-port-8080-hardening-live-result.md`.
 - **Expose 8443** on the coordinator pod (`containerPort`) and the `{name}-trino`
   Service (`https` port) whenever `tls` is set, so in-cluster delegated
   connections can reach the TLS listener (dev still reaches the pod directly via

@@ -13,6 +13,13 @@ Keycloak + Trino stack:
    JWT but does **not require** one — a request with only `X-Trino-User` and no
    `Authorization` header still ran queries. TLS closes this: enable
    `http-server.https.enabled` + a keystore and drop `allow-insecure-over-http`.
+   (Corrected 2026-11-07: the plain-HTTP gap was the flag, not the missing TLS.
+   With `allow-insecure-over-http=true` Trino does not authenticate a plain-HTTP
+   request at all and trusts `X-Trino-User`; with `false` it refuses one with 403.
+   This `config.properties` no longer sets the key. egret's provisioned engines
+   render `allow-insecure-over-http=false` explicitly on every authenticated
+   engine; see `docs/en/specs/2026-11-07-port-8080-hardening-design.md` and
+   `docs/en/plans/2026-11-07-port-8080-hardening-live-result.md`.)
    Now verified: no-auth → **401**, bad token → **401**, valid JWT → **200** and
    runs as the user. Run `./gen-certs.sh` to make the dev keystore
    (`trino-keystore.p12`, gitignored) and connect on the HTTPS port (8443,
@@ -64,10 +71,18 @@ rules are refined in P5 after real user/group fixtures exist in Keycloak.
 
 | File | Purpose |
 |---|---|
-| `config.properties` | Single-node coordinator config + JWT auth (dev only, plain HTTP) |
+| `config.properties` | Single-node coordinator config + JWT auth over HTTPS 8443 (dev only) |
 | `access-control.properties` | Enables the file-based system access control |
 | `rules.json` | Starter catalog ACL — `data-team` full, everyone else read-only |
 
-> **Warning**: `allow-insecure-over-http=true` and the placeholder
-> `internal-communication.shared-secret` are **dev-only** values.  Remove
-> them before any non-local environment.
+> **Warning**: the placeholder `internal-communication.shared-secret` and the
+> keystore password `changeit` are **dev-only** values. Replace them before any
+> non-local environment.
+>
+> `allow-insecure-over-http` is not set in this file (an earlier version set it to
+> `true`). Do not set it to `true`: at `true` Trino skips authentication for a
+> plain-HTTP request, so anyone who reaches port 8080 runs as the user they name
+> in `X-Trino-User` (measured on Trino 483, 2026-11-07). egret renders
+> `allow-insecure-over-http=false` on every authenticated engine it provisions;
+> a client on 8080 must send `X-Forwarded-Proto: https` and a credential, or use
+> HTTPS on 8443.

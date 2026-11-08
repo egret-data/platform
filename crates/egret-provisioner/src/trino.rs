@@ -140,14 +140,15 @@ fn config_properties(spec: &EngineSpec, coord: bool) -> String {
         if let Some(auth) = &cfg.auth {
             if let Some(t) = auth_type(auth) {
                 out.push_str(&format!("http-server.authentication.type={t}\n"));
-                // jwt-mode (TLS + JWT-only) binds query identity to the TLS-validated
-                // JWT — reject auth over plain HTTP:8080 so a spoofed X-Trino-User can't
-                // run as another user. impersonate engines keep insecure-over-http for
-                // their basic-auth monitor; safe because impersonation is delegator-only.
-                let insecure_over_http = !(cfg.tls.is_some() && t == "JWT");
-                out.push_str(&format!(
-                    "http-server.authentication.allow-insecure-over-http={insecure_over_http}\n"
-                ));
+                // Every authenticated engine refuses authentication over plain
+                // HTTP (port-8080 hardening, spec 2026-11-07 A2). With `true`, Trino
+                // does not authenticate a plain-HTTP request at all: whoever reaches
+                // 8080 runs as the user they name (measured, live result
+                // 2026-11-07). A request carrying `X-Forwarded-Proto: https` (the
+                // ingress, egret's monitor) is treated as secure, so it must still
+                // present a password or JWT. Coordinator<->worker traffic uses the
+                // internal shared secret and is not subject to this flag.
+                out.push_str("http-server.authentication.allow-insecure-over-http=false\n");
                 if let Some(j) = &auth.jwt {
                     out.push_str(&format!(
                         "http-server.authentication.jwt.key-file={}\n",
@@ -2093,7 +2094,7 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(cc.contains("http-server.authentication.type=PASSWORD,JWT"));
-        assert!(cc.contains("http-server.authentication.allow-insecure-over-http=true"));
+        assert!(cc.contains("http-server.authentication.allow-insecure-over-http=false"));
         assert!(cc.contains("http-server.process-forwarded=true"));
         assert!(cc.contains(
             "http-server.authentication.jwt.key-file=https://kc/realms/egret/protocol/openid-connect/certs"
@@ -2277,7 +2278,7 @@ mod tests {
     }
 
     #[test]
-    fn impersonate_engine_keeps_insecure_over_http() {
+    fn impersonate_engine_rejects_insecure_over_http() {
         let mut s = sample_spec();
         // impersonate engine = PASSWORD monitor user + JWT + TLS.
         s.config.auth = Some(Auth {
@@ -2298,7 +2299,28 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string();
-        assert!(cc.contains("http-server.authentication.allow-insecure-over-http=true"));
+        assert!(cc.contains("http-server.authentication.allow-insecure-over-http=false"));
+        assert!(!cc.contains("http-server.authentication.allow-insecure-over-http=true"));
+    }
+
+    #[test]
+    fn password_only_engine_rejects_insecure_over_http() {
+        let mut s = sample_spec();
+        s.config.auth = Some(Auth {
+            password_users: vec![PasswordEntry {
+                username: "bob".into(),
+                bcrypt_hash: "$2b$10$abc".into(),
+            }],
+            jwt: None,
+        });
+        s.config.tls = None;
+        let cc = trino_config_map(&s)["data"]["config-coordinator.properties"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(cc.contains("http-server.authentication.type=PASSWORD"));
+        assert!(cc.contains("http-server.authentication.allow-insecure-over-http=false"));
+        assert!(!cc.contains("http-server.authentication.allow-insecure-over-http=true"));
     }
 
     #[test]

@@ -81,14 +81,21 @@ echo "== 2. wait: OPA refresher (2 s) and the Ranger plugin's policy poll (30 s)
 sleep "${LIVE_CHECK_WAIT:-35}"
 
 # --- 3/4. the same statement on both engines, through each one's own Trino CLI ----------
-# trino-opa is reached with `docker exec` (a provisioned engine publishes no port); its
-# coordinator allows insecure authentication over plain HTTP, so `--user` alone names ann.
+# trino-opa is reached with `docker exec` (a provisioned engine publishes no port). Both engines
+# refuse authentication over plain HTTP (port-8080 hardening), so the CLI goes over HTTPS 8443 as
+# the delegator impersonating the user, as egret's own query path does (trino-auth.sh).
+. "$REPO/scripts/opa-e2e/trino-auth.sh"
+TRINO_DELEGATOR_PASSWORD=$(delegator_password trino-opa) || { echo "cannot read trino-opa's delegator password" >&2; exit 1; }
+# Mask it in CI logs, so a future `set -x` cannot print it.
+if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::add-mask::$TRINO_DELEGATOR_PASSWORD"; fi
+export TRINO_DELEGATOR_PASSWORD
+RANGER_CONTAINER=$("${COMPOSE[@]}" ps -q trino-ranger)
 q() { # $1 = opa|ranger, $2 = user, $3 = sql  -> rows as TSV, or the CLI's error line
   local out
   if [ "$1" = opa ]; then
-    out=$(docker exec "$OPA_CONTAINER" trino --user "$2" --output-format TSV --execute "$3" 2>&1 || true)
+    out=$(trino_cli "$OPA_CONTAINER" "$2" "$3" 2>&1 || true)
   else
-    out=$("${COMPOSE[@]}" exec -T trino-ranger trino --user "$2" --output-format TSV --execute "$3" 2>&1 || true)
+    out=$(trino_cli "$RANGER_CONTAINER" "$2" "$3" 2>&1 || true)
   fi
   grep -v '^Picked up JAVA_TOOL_OPTIONS' <<<"$out" | sed -E 's/^Query [0-9a-z_]+ failed: /ERROR: /'
 }

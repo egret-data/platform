@@ -11,20 +11,36 @@
 #     Repeats the statement for <seconds>, sleeping <interval> seconds between the end of
 #     one and the start of the next. Prints `<start ns> <ok|fail> <end ns>` per statement;
 #     a statement is ok when no response carries an "error".
+#
+# Authentication (port-8080 hardening, A5): both engines refuse authentication over plain HTTP, so
+# each request authenticates as the delegator (Basic, TRINO_DELEGATOR_PASSWORD from the
+# environment, see trino-auth.sh) with `X-Forwarded-Proto: https`, and runs as <user> through
+# `X-Trino-Original-User: egret_delegator` (egret's own query path). nextUri comes back as
+# https://; its path is followed on 8080.
 set -u
-URL=http://127.0.0.1:8080/v1/statement
+BASE=http://127.0.0.1:8080
+URL=$BASE/v1/statement
+DELEGATOR=egret_delegator # egret_core::engine_principals::DELEGATOR_PRINCIPAL
+
+tcurl() { # $1 = user, then curl args; --fail: a refused request is a harness failure
+  u=$1
+  shift
+  cred="$DELEGATOR:${TRINO_DELEGATOR_PASSWORD:-}"
+  curl -sS --fail --max-time 60 -u "$cred" -H 'X-Forwarded-Proto: https' \
+    -H "X-Trino-Original-User: $DELEGATOR" -H "X-Trino-User: $u" "$@"
+}
 
 # $1 = user, $2 = sql: every response on its own line.
 run() {
-  r=$(curl -sS --max-time 60 -X POST "$URL" -H "X-Trino-User: $1" -H "X-Trino-Source: egret-latency" \
+  r=$(tcurl "$1" -X POST "$URL" -H "X-Trino-Source: egret-latency" \
     --data-binary "$2" 2>&1) || { printf '{"error":{"errorName":"HARNESS","message":"curl POST failed"}}\n'; return; }
   while :; do
     r=$(printf '%s' "$r" | tr -d '\n')
     [ -z "$r" ] && { printf '{"error":{"errorName":"HARNESS","message":"empty response"}}\n'; return; }
     printf '%s\n' "$r"
-    n=$(printf '%s' "$r" | sed -n 's/.*"nextUri":"\([^"]*\)".*/\1/p')
+    n=$(printf '%s' "$r" | sed -n 's/.*"nextUri":"\([^"]*\)".*/\1/p' | sed 's#^https\{0,1\}://[^/]*##')
     [ -z "$n" ] && break
-    r=$(curl -sS --max-time 60 "$n" -H "X-Trino-User: $1" 2>&1) \
+    r=$(tcurl "$1" "$BASE$n" 2>&1) \
       || { printf '{"error":{"errorName":"HARNESS","message":"curl GET failed"}}\n'; return; }
   done
 }

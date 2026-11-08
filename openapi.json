@@ -45067,7 +45067,8 @@
           "spec",
           "origin",
           "rangerCredentialPending",
-          "endpoint"
+          "endpoint",
+          "securityReapplyNeeded"
         ],
         "properties": {
           "id": {
@@ -45163,6 +45164,10 @@
                 "description": "Provisioned only: what runs the engine (`kubernetes` or `docker`).\nAbsent for an external engine and when nothing provisions engines. Set\nby the reads (`GET /engines`, `GET /engines/{id}`)."
               }
             ]
+          },
+          "securityReapplyNeeded": {
+            "type": "boolean",
+            "description": "Provisioned Trino only: `true` when the engine was last applied before\nthe current security render (or never applied), so it may still accept\nunauthenticated requests on port 8080. Re-applying it clears this."
           }
         }
       },

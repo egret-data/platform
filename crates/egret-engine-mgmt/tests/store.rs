@@ -189,6 +189,7 @@ fn coordinator_host_and_jwt_check() {
         monitor_secret_id: None,
         ranger_secret_id: None,
         ranger_secret_prev_id: None,
+        applied_security_rev: 0,
         created_at: chrono::Utc::now(),
         origin: "provisioned".into(),
         external_host: None,

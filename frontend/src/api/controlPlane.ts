@@ -592,6 +592,12 @@ export interface Engine {
    * when nothing provisions engines.
    */
   runtime?: EngineRuntime | null;
+  /**
+   * Provisioned Trino only: applied before the current security render (or never
+   * applied), so it may still accept unauthenticated requests on port 8080.
+   * Re-applying clears it. Absent on older payloads.
+   */
+  securityReapplyNeeded?: boolean;
 }
 
 /** What runs a provisioned engine (`EngineDto.runtime`). */

@@ -26,6 +26,7 @@ ADMIN_PASS='Admin12345!'
 
 log() { printf '→ %s\n' "$*" >&2; }
 die() { printf 'up.sh: %s\n' "$*" >&2; exit 1; }
+. "$REPO/scripts/opa-e2e/trino-auth.sh"
 # jq-free JSON: `jget <python expr over d>` reads stdin.
 jget() { python3 -c "import sys,json; d=json.load(sys.stdin); v=$1; print('' if v is None else v)"; }
 
@@ -129,6 +130,10 @@ wait_opa_ready() {
   die "$OPA_CONTAINER did not become ready"
 }
 wait_opa_ready
+TRINO_DELEGATOR_PASSWORD=$(delegator_password "$OPA_ENGINE") || die "reading $OPA_ENGINE's delegator password"
+# Mask it in CI logs, so a future `set -x` cannot print it.
+if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::add-mask::$TRINO_DELEGATOR_PASSWORD"; fi
+export TRINO_DELEGATOR_PASSWORD
 
 # --- 6/7. trino-ranger: the Ranger plugin on THIS profile's Ranger download ----------------
 # The brief registered trino-ranger as an external engine bound to `opa_e2e`. egret refuses
@@ -154,6 +159,25 @@ else
   log "installed trino-opa's Ranger plugin files (service $PROFILE) for trino-ranger"
 fi
 
+# --- 7b. trino-ranger authenticates exactly as egret renders trino-opa -------------------
+# Port-8080 hardening (A5): trino-opa refuses authentication over plain HTTP. The oracle gets the
+# same authentication, so the harness reaches both engines the same way (the delegator over
+# Basic, trino-auth.sh) and the identity check asserts the same refusals on both. Copied from
+# trino-opa on every run: the authentication lines of its config.properties (the internal shared
+# secret replaced by one of trino-ranger's own), its password file (bcrypt hashes of
+# egret_delegator and egret-monitor) and its TLS keystore (HTTPS 8443, for the Trino CLI). E2E
+# only: the files are world-readable under $WORK so trino-ranger's `trino` user can read them.
+mkdir -p "$ETC/auth/password" "$ETC/tls"
+docker exec "$OPA_CONTAINER" cat /etc/trino/config.properties > "$WORK/opa-config.properties"
+docker exec "$OPA_CONTAINER" cat /etc/trino/password-authenticator.properties > "$ETC/password-authenticator.properties"
+docker exec "$OPA_CONTAINER" cat /etc/trino/auth/password/password.db > "$ETC/auth/password/password.db"
+docker exec "$OPA_CONTAINER" cat /etc/trino/tls/keystore.pem > "$ETC/tls/keystore.pem"
+grep -x 'http-server.authentication.type=PASSWORD' "$WORK/opa-config.properties" >/dev/null \
+  || die "$OPA_CONTAINER does not render PASSWORD authentication"
+python3 -I "$REPO/scripts/opa-e2e/copy_auth.py" "$ETC/config.properties" "$WORK/opa-config.properties"
+rm -f "$WORK/opa-config.properties"
+chmod -R a+rX "$ETC"
+
 # --- 8. trino-ranger's catalog file: the provisioned engine's own, ENV refs resolved -------
 docker exec "$OPA_CONTAINER" cat /etc/trino/catalog/$CATALOG.properties > "$WORK/opa-catalog.properties"
 docker exec "$OPA_CONTAINER" env > "$WORK/opa-env.txt"
@@ -172,7 +196,8 @@ rm -f "$WORK/opa-env.txt"
 log "restarting trino-ranger"
 "${COMPOSE[@]}" up -d --force-recreate --wait trino-ranger
 
-trino_ranger() { "${COMPOSE[@]}" exec -T trino-ranger trino --user "$1" --output-format TSV --execute "$2"; }
+RANGER_CONTAINER=$("${COMPOSE[@]}" ps -q trino-ranger)
+trino_ranger() { trino_cli "$RANGER_CONTAINER" "$1" "$2"; }
 
 # --- users ---------------------------------------------------------------------------------
 for u in ann bob; do
@@ -213,6 +238,11 @@ if ! api "$BASE/api/control-plane/perm/grants" | grep '"ref":"bob"' >/dev/null; 
     \"scope\":{\"catalog_id\":\"$CAT_ID\",\"schema\":\"s1\",\"table\":\"t2\"},
     \"principals\":{\"include\":[{\"kind\":\"user\",\"ref\":\"bob\"}],\"exclude\":[]}}" >/dev/null
 fi
+
+# --- 11b. identity: plain-HTTP spoofing is refused, trino-opa still on the Ranger plugin -----
+log "identity check: trino-opa (Ranger plugin) and trino-ranger"
+identity_check "$OPA_CONTAINER" trino-opa/ranger || die "identity check failed on trino-opa (Ranger plugin)"
+identity_check "$RANGER_CONTAINER" trino-ranger || die "identity check failed on trino-ranger"
 
 # --- 12. switch the profile to OPA ----------------------------------------------------------
 MECH=$(api "$BASE/api/control-plane/policies/services" | jget "next((p.get('mechanism') for p in (d if isinstance(d,list) else d.get('services',d.get('items',[]))) if p['name']=='$PROFILE'), None)")

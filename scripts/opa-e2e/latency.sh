@@ -97,6 +97,12 @@ if ! api "$BASE/api/control-plane/perm/rules" | grep '"lat-mask-wide"' >/dev/nul
 fi
 
 # --- everything else: one Python driver -----------------------------------------------------
+# Both engines refuse plain-HTTP authentication: latency-run.sh authenticates as the delegator.
+. "$REPO/scripts/opa-e2e/trino-auth.sh"
+TRINO_DELEGATOR_PASSWORD=$(delegator_password trino-opa) || die "reading trino-opa's delegator password"
+# Mask it in CI logs, so a future `set -x` cannot print it.
+if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::add-mask::$TRINO_DELEGATOR_PASSWORD"; fi
+export TRINO_DELEGATOR_PASSWORD
 export REPO OUT BASE OPA_CONTAINER RANGER_CONTAINER ADMIN_USER JAR CSRF CATALOG
 COMPOSE_JSON=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "${COMPOSE[@]}")
 export COMPOSE_JSON
@@ -141,7 +147,7 @@ def say(*a):
 
 def once(container, user, sql):
     p = subprocess.run(
-        ["docker", "exec", container, "sh", "-c", SCRIPT, "latency-run", "once", user, sql],
+        ["docker", "exec", "-e", "TRINO_DELEGATOR_PASSWORD", container, "sh", "-c", SCRIPT, "latency-run", "once", user, sql],
         capture_output=True, text=True, timeout=900,
     )
     t0 = t1 = None
@@ -373,7 +379,7 @@ def restart_window():
     for name, c in (("trino-opa", OPA), ("trino-ranger", RANGER)):
         f = open(f"{OUT}/restart-{name}.txt", "w")
         procs[name] = (subprocess.Popen(
-            ["docker", "exec", c, "sh", "-c", SCRIPT, "latency-run", "loop", "ann", "SELECT 1",
+            ["docker", "exec", "-e", "TRINO_DELEGATOR_PASSWORD", c, "sh", "-c", SCRIPT, "latency-run", "loop", "ann", "SELECT 1",
              str(RESTART_SECONDS), "0.1"], stdout=f), f)
     time.sleep(before)
     t0 = time.time()

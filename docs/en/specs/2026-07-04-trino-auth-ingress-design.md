@@ -121,3 +121,13 @@ A new **Exposure & Auth** card (Cluster area):
 - `allow-insecure-over-http=true` is safe here: TLS terminates at the ingress and the
   coordinator is in-cluster; the setting only permits auth over the trusted internal
   hop.
+
+  > **As corrected, 2026-11-07.** That is wrong. With the flag `true`, Trino does not
+  > authenticate a plain-HTTP request at all: anyone who reaches the coordinator's :8080
+  > without `X-Forwarded-Proto: https` runs as whatever `X-Trino-User` they send (measured on
+  > Trino 483). The ingress does not need the flag: it sends `X-Forwarded-Proto: https`, and
+  > Trino treats such a request as secure and authenticates it at `false` too (the header was
+  > sent by hand; not measured against a real ingress controller). egret now
+  > renders `allow-insecure-over-http=false` on every authenticated engine. See
+  > `2026-11-07-port-8080-hardening-design.md` §2.2 and
+  > `../plans/2026-11-07-port-8080-hardening-live-result.md`.
