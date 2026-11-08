@@ -328,12 +328,7 @@ pub fn build_router(state: AppState) -> Router {
         router = router.merge(egret_policy::ranger_surface(ranger).with_state(()));
     }
 
-    // Like the Ranger surface, a third-party protocol for the engine, not the
-    // browser: no CSRF layer, no OpenAPI entry. Its body limit is the
-    // surface's own layer (`OPA_BODY_LIMIT_BYTES`).
-    if let Some(opa) = state.opa.clone() {
-        router = router.merge(egret_perm_compile::opa_surface(opa).with_state(()));
-    }
+    // The OPA decision surface is deliberately NOT merged here: see [`opa_router`].
 
     if let Some(database) = state.database.clone() {
         let group = Router::new()
@@ -567,6 +562,26 @@ pub fn build_router(state: AppState) -> Router {
     ))
 }
 
+/// The OPA decision surface (governance SP2b), served on its own listener
+/// (`[governance.opa] listen`, port-8080 hardening) and never on the API port:
+/// it reads a request body before it can authenticate it, so only engines may
+/// reach it (Helm `networkpolicy-egret.yaml`).
+///
+/// Like the Ranger surface it is a third-party protocol for the engine, not the
+/// browser: no CSRF layer, no OpenAPI entry. Its body limits and in-flight
+/// budget are the surface's own layers (`OPA_BODY_LIMIT_BYTES`,
+/// `bound_in_flight`); the outermost `refuse_same_site` layer that wrapped it
+/// in [`build_router`] is kept. `None` when the gate is off.
+pub fn opa_router(state: &AppState) -> Option<Router> {
+    state.opa.clone().map(|opa| {
+        egret_perm_compile::opa_surface(opa)
+            .with_state(())
+            .layer(axum::middleware::from_fn(
+                egret_auth::fetch_meta::refuse_same_site,
+            ))
+    })
+}
+
 /// Liveness: the process is up. Always 200.
 async fn healthz() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok" }))
@@ -769,6 +784,57 @@ where
             );
             Ok(())
         }
+    }
+}
+
+/// A listener served beside the API listener (the OPA surface, the apps host)
+/// on its own task. Kept so `main` can wait for its drain: a dropped task dies
+/// with the process the moment the API listener's drain returns.
+pub struct SideListener {
+    name: &'static str,
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// Serves `app` on `listener` with [`serve_with_drain`] on a spawned task. An
+/// error is logged under `name`; [`join_side_listeners`] waits for the task.
+pub fn spawn_side_listener<F>(
+    name: &'static str,
+    listener: tokio::net::TcpListener,
+    app: Router,
+    shutdown: F,
+    drain_deadline: Duration,
+) -> SideListener
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let task = tokio::spawn(async move {
+        if let Err(e) = serve_with_drain(listener, app, shutdown, drain_deadline).await {
+            tracing::error!(listener = name, error = %e, "listener stopped");
+        }
+    });
+    SideListener { name, task }
+}
+
+/// Waits until every side listener has drained, so the process does not exit
+/// with their requests in flight. Call it after the API listener's drain has
+/// returned: each side listener started its own `drain_deadline` at the same
+/// signal, so this adds no time past that deadline; the `drain_deadline`
+/// bound here only guards a listener that would not stop.
+pub async fn join_side_listeners(listeners: Vec<SideListener>, drain_deadline: Duration) {
+    let names: Vec<&'static str> = listeners.iter().map(|l| l.name).collect();
+    let all = async move {
+        for l in listeners {
+            if let Err(e) = l.task.await {
+                tracing::error!(listener = l.name, error = %e, "listener task failed");
+            }
+        }
+    };
+    if tokio::time::timeout(drain_deadline, all).await.is_err() {
+        tracing::warn!(
+            listeners = ?names,
+            deadline_secs = drain_deadline.as_secs(),
+            "side listeners still draining at the deadline; exiting anyway"
+        );
     }
 }
 

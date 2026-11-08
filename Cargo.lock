@@ -3349,6 +3349,7 @@ dependencies = [
  "figment",
  "serde",
  "serde_ignored",
+ "url",
 ]
 
 [[package]]

@@ -9,3 +9,8 @@ spec:
     # The apps host (ticket redeem + the marimo proxy): its own listener, its own ingress host.
     - { name: apps, port: 8081, targetPort: 8081 }
     {{- end }}
+    {{- if .Values.opa.enabled }}
+    # egret's OPA decision surface for engines: its own listener, admitted only from engines
+    # (networkpolicy-egret.yaml).
+    - { name: opa, port: {{ .Values.opa.port }}, targetPort: {{ .Values.opa.port }} }
+    {{- end }}

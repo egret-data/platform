@@ -1,0 +1,30 @@
+{{- /*
+Who may connect to egret's pod. The API (8080) and the apps host (8081, only when
+`apps.origin` is set) stay open to every peer, as before this policy existed: the
+frontend, the ingresses, app pods, task pods and the kubelet all use them. Those are
+the only ports the backend serves (`server.port`, `apps.listen`) besides the OPA one.
+The OPA port admits only engines (and `opa.extraFrom`): the OPA surface reads a
+request body before it can authenticate it, so a peer that holds stalled requests
+could exhaust its budget (port-8080 hardening spec B3).
+*/ -}}
+{{- if .Values.engineNetworkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: egret-ingress, namespace: {{ .Release.Namespace }} }
+spec:
+  podSelector: { matchLabels: { app: egret } }
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: 8080 }
+        {{- if .Values.apps.origin }}
+        - { protocol: TCP, port: 8081 }
+        {{- end }}
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: {{ .Values.engineNamespace }} } }
+        {{- with .Values.opa.extraFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.opa.port }} }
+{{- end }}

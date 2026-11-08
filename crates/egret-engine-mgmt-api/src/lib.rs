@@ -411,7 +411,8 @@ pub struct RangerBinding {
     /// `ranger.service.name` — the bound trino profile's name.
     pub service_name: String,
     /// egret's own URL; the plugin is configured with
-    /// [`ranger_config::plugin_base_url`] of it. Reuse `engine_egret_url`.
+    /// [`ranger_config::plugin_base_url`] of it. Reuse `engine_egret_url`; for
+    /// an OPA binding it is the OPA listener's URL (`engine_opa_url`).
     pub egret_url: String,
     /// Policy/tag poll interval in ms (default 30_000).
     pub poll_interval_ms: u32,

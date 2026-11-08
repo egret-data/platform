@@ -62,3 +62,28 @@ identity_check() {
   docker exec -e TRINO_DELEGATOR_PASSWORD "$1" sh -c "$(cat "$REPO/scripts/opa-e2e/identity-check.sh")" \
     identity-check "$2"
 }
+
+# opa_port_check CONTAINER: egret's OPA surface is on its own listener (`[governance.opa] listen`,
+# 8082), not on the API port. Inside CONTAINER (an engine on the OPA plugin): the rendered
+# access-control.properties names `:8082/opa/` and no `:8080/opa/`, and
+# POST http://egret:8080/opa/... answers 404. Returns non-zero (printing FAIL lines) on any miss.
+opa_port_check() {
+  local ac code rc=0
+  ac=$(docker exec "$1" cat /etc/trino/access-control.properties) || { echo "FAIL opa-port: cannot read access-control.properties"; return 1; }
+  if grep -q '^opa\.policy\.uri=http://[^/]*:8082/opa/' <<<"$ac"; then
+    echo "PASS opa-port rendered opa.policy.uri names :8082/opa/"
+  else
+    echo "FAIL opa-port rendered opa.policy.uri does not name :8082/opa/"; rc=1
+  fi
+  if grep -q ':8080/opa/' <<<"$ac"; then
+    echo "FAIL opa-port rendered config still names :8080/opa/"; rc=1
+  fi
+  code=$(docker exec "$1" curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST \
+    http://egret:8080/opa/v1/data/egret/trino/allow 2>/dev/null || true)
+  if [ "$code" = 404 ]; then
+    echo "PASS opa-port POST egret:8080/opa/v1/data/egret/trino/allow: 404"
+  else
+    echo "FAIL opa-port POST egret:8080/opa/v1/data/egret/trino/allow: want 404, got ${code:-none}"; rc=1
+  fi
+  return "$rc"
+}

@@ -1061,6 +1061,32 @@ async fn finish_apply(
             ));
         }
     }
+    if res.is_ok() {
+        // The OPA URL this apply rendered; NULL unless a Trino engine is on OPA
+        // (StarRocks has no OPA path).
+        let opa_url = built
+            .req
+            .ranger
+            .as_ref()
+            .filter(|r| {
+                !engine.is_starrocks()
+                    && r.mechanism == egret_engine_mgmt_api::opa_config::AccessMechanism::Opa
+            })
+            .map(|r| r.egret_url.clone());
+        if let Err(e) = st
+            .engine_mgmt
+            .set_applied_opa_url(engine.id, opa_url.as_deref())
+            .await
+        {
+            tracing::error!(engine = %engine.name, error = %e,
+                "applied, but the applied OPA URL could not be recorded");
+            let note = format!("applied, but the applied OPA URL could not be recorded: {e}");
+            not_recorded = Some(match not_recorded {
+                Some(prev) => format!("{prev}; {note}"),
+                None => note,
+            });
+        }
+    }
     if res.is_ok() && !engine.is_starrocks() {
         if let Err(e) = st
             .engine_mgmt
@@ -1225,6 +1251,50 @@ pub async fn reapply_bound_engines(
     report
 }
 
+/// Re-apply every egret-provisioned engine on an OPA profile whose last apply
+/// did not render the current OPA URL (`st.engine_opa_url`), so its plugin
+/// files point at the OPA listener. Run once at start. External and deleting
+/// engines are skipped; every other engine is tried and a failure is recorded
+/// and logged without stopping the pass.
+pub async fn reapply_stale_opa_engines(st: &CpState) -> egret_policy_api::ReconfigureReport {
+    let mut report = egret_policy_api::ReconfigureReport::default();
+    let engines = match st
+        .engine_mgmt
+        .list_engines_with_stale_opa_url(&st.engine_opa_url)
+        .await
+    {
+        Ok(engines) => engines,
+        Err(e) => {
+            tracing::error!(error = %e, "listing the engines with a stale OPA URL failed");
+            report.failed.push((
+                "engines on an OPA profile".to_string(),
+                format!("they could not be listed: {e}"),
+            ));
+            return report;
+        }
+    };
+    let engines = engines
+        .into_iter()
+        .filter(|e| !crate::external::is_external(e) && e.status != crate::engine_status::DELETING);
+    let Some(prov) = st.engine_provisioner.as_ref() else {
+        report
+            .failed
+            .extend(engines.map(|e| (e.name, "no engine provisioner is configured".to_string())));
+        return report;
+    };
+    for engine in engines {
+        match reapply_one(st, prov.clone(), engine.clone()).await {
+            Ok(()) => report.applied.push(engine.name),
+            Err(why) => {
+                tracing::warn!(engine = %engine.name, engine_id = %engine.id, error = %why,
+                    "re-applying an engine with a stale OPA URL failed");
+                report.failed.push((engine.name, why));
+            }
+        }
+    }
+    report
+}
+
 /// One engine of [`reapply_bound_engines`]; a rotation that lands while the
 /// request is built is retried once against the re-read row.
 async fn reapply_one(
@@ -1309,7 +1379,11 @@ async fn ranger_binding(
         mechanism,
         engine_id: engine.id.to_string(),
         service_name,
-        egret_url: st.engine_egret_url.clone(),
+        // The OPA surface has its own listener; Ranger stays on the main port.
+        egret_url: match mechanism {
+            egret_engine_mgmt_api::opa_config::AccessMechanism::Opa => st.engine_opa_url.clone(),
+            _ => st.engine_egret_url.clone(),
+        },
         poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
         credential: Some(credential),
     }))
@@ -9320,6 +9394,7 @@ mod tests {
             coordinator_transport: None,
             engine_token_minter: None,
             engine_egret_url: "http://egret:8080".into(),
+            engine_opa_url: "http://egret:8082".into(),
             engine_jwks_uri: "https://idp/jwks".into(),
             engine_oidc_issuer: "https://idp/realms/egret".into(),
             ranger_enabled: false,

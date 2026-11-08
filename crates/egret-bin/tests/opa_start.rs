@@ -102,6 +102,7 @@ async fn the_configured_batch_body_limit_reaches_the_surface() {
             enabled: true,
             batch_body_limit_bytes: 7 * 1024 * 1024,
             body_read_timeout_ms: 2_500,
+            ..OpaSettings::default()
         },
     };
 

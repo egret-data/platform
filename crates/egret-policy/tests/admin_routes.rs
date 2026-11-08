@@ -111,6 +111,7 @@ impl Fixture {
             groups: self.groups.clone(),
             sessions: self.sessions.clone(),
             engine_egret_url: "http://egret:8080".into(),
+            engine_opa_url: "http://egret:8082".into(),
             pdp: self.pdp.clone(),
             recompiler: std::sync::Arc::new(NoRecompile),
             reconfigurer: std::sync::Arc::new(egret_policy::NoReconfigure),
@@ -130,6 +131,7 @@ impl Fixture {
             groups: self.groups.clone(),
             sessions: self.sessions.clone(),
             engine_egret_url: url.into(),
+            engine_opa_url: "http://egret:8082".into(),
             pdp: self.pdp.clone(),
             recompiler: std::sync::Arc::new(NoRecompile),
             reconfigurer: std::sync::Arc::new(egret_policy::NoReconfigure),
@@ -4520,6 +4522,12 @@ async fn trino_config_of_an_opa_profile_shows_the_opa_files_and_the_log_warning(
         names,
         ["access-control.properties", "egret-opa-context.properties"]
     );
+    let selector = files[0]["content"].as_str().unwrap();
+    assert!(
+        selector.contains("opa.policy.uri=http://egret:8082/opa/"),
+        "{selector}"
+    );
+    assert!(!selector.contains(":8080"), "{selector}");
     let ctx = files[1]["content"].as_str().unwrap();
     assert!(
         ctx.contains(egret_engine_mgmt_api::ranger_config::PASSWORD_PLACEHOLDER),

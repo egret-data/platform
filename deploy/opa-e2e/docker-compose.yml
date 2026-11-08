@@ -110,6 +110,8 @@ services:
       EGRET_RANGER__AUTH_TOKEN: ""
       # The OPA gate is on for THIS stack only (default false).
       EGRET_GOVERNANCE__OPA__ENABLED: "true"
+      # The engines-only decision listener (default 0.0.0.0:8082). Not published to the host.
+      EGRET_GOVERNANCE__OPA__LISTEN: 0.0.0.0:8082
       EGRET_ENGINES__PROVISIONER: docker
       EGRET_ENGINES__DOCKER__HOST: tcp://docker-proxy:2375
       EGRET_ENGINES__DOCKER__NETWORK: egret-opa-e2e_default

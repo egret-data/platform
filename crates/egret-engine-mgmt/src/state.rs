@@ -75,6 +75,10 @@ pub struct EngineMgmtState {
     /// In-cluster URL Trino pods use to reach egret's REST catalog + token
     /// endpoint (e.g. `http://egret:8080`); populated from config in egret-bin.
     pub engine_egret_url: String,
+    /// The URL engines use to reach egret's `/opa/` decision surface, which is
+    /// served on its own listener (`[governance.opa] listen`), not on the
+    /// port of `engine_egret_url`. Rendered into the OPA plugin files.
+    pub engine_opa_url: String,
     /// Default JWKS URI for a Trino JWT authenticator when the engine's auth
     /// block omits one; populated from config in egret-bin. Tests set a
     /// dummy value.

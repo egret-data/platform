@@ -89,6 +89,8 @@ TRINO_DELEGATOR_PASSWORD=$(delegator_password trino-opa) || { echo "cannot read 
 # Mask it in CI logs, so a future `set -x` cannot print it.
 if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::add-mask::$TRINO_DELEGATOR_PASSWORD"; fi
 export TRINO_DELEGATOR_PASSWORD
+echo "== 2b. the OPA surface is on its own port"
+opa_port_check "$OPA_CONTAINER" || { echo "FAIL opa-port"; FAILS=$((FAILS+1)); }
 RANGER_CONTAINER=$("${COMPOSE[@]}" ps -q trino-ranger)
 q() { # $1 = opa|ranger, $2 = user, $3 = sql  -> rows as TSV, or the CLI's error line
   local out

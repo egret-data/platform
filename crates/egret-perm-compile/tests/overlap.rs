@@ -159,6 +159,7 @@ async fn env() -> Option<Env> {
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
         sessions: sessions.clone(),
         engine_egret_url: "http://egret:8080".into(),
+        engine_opa_url: "http://egret:8082".into(),
         pdp: pdp.clone(),
         recompiler: Arc::new(egret_perm_compile::PermRecompiler),
         reconfigurer: std::sync::Arc::new(egret_policy::NoReconfigure),

@@ -91,6 +91,9 @@ pub struct PolicyAdminState {
     /// In-cluster URL Trino pods use to reach egret's REST catalog + token
     /// endpoint (e.g. `http://egret:8080`); rendered into the plugin config.
     pub engine_egret_url: String,
+    /// Where engines reach egret's `/opa/` surface (its own listener); rendered
+    /// into an OPA profile's plugin files.
+    pub engine_opa_url: String,
     /// Policy decision point: every route gates on `egret_core::authz::require`
     /// (B1b-2). `platform_admin` still bypasses inside the PDP.
     pub pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
@@ -1186,7 +1189,7 @@ async fn trino_config(
     let rendered = if opa {
         egret_engine_mgmt_api::opa_config::opa_plugin_files(
             egret_engine_mgmt_api::opa_config::PLACEHOLDER_ENGINE_ID,
-            &st.engine_egret_url,
+            &st.engine_opa_url,
             egret_engine_mgmt_api::ranger_config::PASSWORD_PLACEHOLDER,
         )
         .map_err(|e| PolicyHttpError::BadRequest(e.to_string()))?
@@ -1199,8 +1202,13 @@ async fn trino_config(
             None,
         )
     };
+    let rendered_url = if opa {
+        &st.engine_opa_url
+    } else {
+        &st.engine_egret_url
+    };
     let mut warnings: Vec<String> =
-        egret_engine_mgmt_api::ranger_config::download_url_warning(&st.engine_egret_url)
+        egret_engine_mgmt_api::ranger_config::download_url_warning(rendered_url)
             .into_iter()
             .collect();
     if opa {

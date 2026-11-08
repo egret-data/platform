@@ -88,6 +88,15 @@ engineNetworkPolicy:
   ingressFrom: []
   # Other NetworkPolicy peers, allowed on every port (for example a metrics scraper).
   extraFrom: []
+# egret answers Trino's OPA plugin (governance SP2b) on its own port, reachable only from engines
+# (templates/networkpolicy-egret.yaml). The engines' URL is derived by egret from
+# EGRET_CATALOG__PUBLIC_URL with this port swapped in, so it needs no value of its own.
+opa:
+  enabled: false
+  port: 8082
+  # NetworkPolicy peers outside engineNamespace that may reach the OPA port, for example the
+  # namespace of an external Trino on OPA.
+  extraFrom: []
 admin:
   email: admin@egret.local
   password: Admin12345!

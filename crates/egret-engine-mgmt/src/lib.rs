@@ -24,9 +24,9 @@ pub use assignment::EngineAssignmentService;
 pub use delegation_default::{
     has_platform_jwks, resolve_delegation, starrocks_image_is_pre_3_5, ResolvedDelegation,
 };
-pub use engines::reapply_bound_engines;
 pub use engines::router as engine_mgmt_router;
 pub use engines::workspace_engines_router;
+pub use engines::{reapply_bound_engines, reapply_stale_opa_engines};
 pub use error::EngineMgmtError;
 pub use http_error::EngineHttpError;
 // `fe_target` stays `pub(crate)` (used by Task 4/5 apply/bootstrap code within

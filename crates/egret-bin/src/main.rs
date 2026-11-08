@@ -2810,6 +2810,13 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             .clone()
             .unwrap_or_else(|| "http://egret:8080".to_string()),
     };
+    // Engines reach the OPA decision surface on its own listener, so they are
+    // given that URL, not the catalog's. An error only while OPA is on: with
+    // it off, an underivable URL falls back to `engine_egret_url`.
+    let engine_opa_url = egret_config::opa_engine_url(&engine_egret_url, &config.governance.opa)
+        .map_err(|e| {
+            anyhow::anyhow!("governance.opa.engine_url: cannot derive the OPA URL engines use: {e}")
+        })?;
 
     // Recompiles a catalog's implicit assignment grant (SP4a Task 16, D3
     // defects 2 and 3) — built once here, shared (as two DIFFERENT trait
@@ -2860,6 +2867,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
         sessions: sessions.clone(),
         engine_egret_url: engine_egret_url.clone(),
+        engine_opa_url: engine_opa_url.clone(),
         pdp: pdp.clone(),
         // Final review I-3: an editor write to a StarRocks data mask refolds the
         // clearance masks in the same transaction.
@@ -3102,6 +3110,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // The native monitor signs in to a JWT-delegation engine as the viewer.
         engine_token_minter: Some(engine_minter.clone()),
         engine_egret_url,
+        engine_opa_url,
         // Engines trust egret's OWN machine-IdP (the STS): the same issuer that
         // signs catalog + engine tokens, independent of whether external OIDC is
         // configured. This replaces the old Keycloak-realm-derived JWKS/issuer
@@ -3204,6 +3213,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // credential-rotation push-down onto provisioned warehouses; the warehouse
     // admin router itself moved to egret-catalog-engine (E3d-3, see
     // `catalog_admin` below).
+    let opa_on = opa.is_some();
+    let opa_reapply_state = engine_mgmt.clone();
     let control_plane = Some(egret_controlplane::CpState {
         storage: egret_catalog_engine::CatalogStore::new(db.clone()),
         storage_registry: egret_storage::StorageRegistry::new(db.clone()),
@@ -3585,7 +3596,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         )))
     };
 
-    let app = build_router(AppState {
+    let app_state = AppState {
         db: Some(db),
         auth: Some(auth),
         workspace: Some(workspace),
@@ -3625,30 +3636,67 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         apps,
         apps_api,
         apps_pod,
-    });
+    };
+    let opa_listener_router = egret_server::opa_router(&app_state);
+    let app = build_router(app_state);
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .with_context(|| format!("binding {addr}"))?;
     tracing::info!(%addr, "egret listening");
+    // The OPA and apps listeners drain with the API listener; `main` waits for
+    // them below, after the API drain, so their in-flight requests are not
+    // killed when it returns.
+    let mut side_listeners = Vec::new();
+    if let Some(router) = opa_listener_router {
+        let opa_addr = config.governance.opa.listen.clone();
+        let opa_listener = tokio::net::TcpListener::bind(&opa_addr)
+            .await
+            .with_context(|| format!("binding OPA listener {opa_addr}"))?;
+        tracing::info!(addr = %opa_addr, "OPA surface listening");
+        side_listeners.push(egret_server::spawn_side_listener(
+            "opa",
+            opa_listener,
+            router,
+            egret_server::shutdown_signal(),
+            egret_server::DRAIN_DEADLINE,
+        ));
+    }
+    // Engines on an OPA profile whose plugin files still name an older OPA URL
+    // (applied before the listener moved) are re-applied once, in the
+    // background so serving is never delayed; a failure is logged per engine.
+    if opa_on {
+        if let Some(st) = opa_reapply_state {
+            tokio::spawn(async move {
+                let report = egret_engine_mgmt::reapply_stale_opa_engines(&st).await;
+                if report.applied.is_empty() && report.failed.is_empty() {
+                    tracing::debug!("no engine has a stale OPA URL");
+                } else {
+                    tracing::info!(
+                        applied = report.applied.len(),
+                        failed = report.failed.len(),
+                        "re-applied engines with a stale OPA URL"
+                    );
+                }
+                for (engine, why) in &report.failed {
+                    tracing::warn!(engine = %engine, error = %why, "stale OPA URL re-apply failed");
+                }
+            });
+        }
+    }
     if let Some(router) = apps_proxy {
         let apps_addr = config.apps.listen.clone();
         let apps_listener = tokio::net::TcpListener::bind(&apps_addr)
             .await
             .with_context(|| format!("binding apps host {apps_addr}"))?;
         tracing::info!(addr = %apps_addr, origin = %config.apps.origin, "apps host listening");
-        tokio::spawn(async move {
-            if let Err(e) = egret_server::serve_with_drain(
-                apps_listener,
-                router,
-                egret_server::shutdown_signal(),
-                egret_server::DRAIN_DEADLINE,
-            )
-            .await
-            {
-                tracing::error!(error = %e, "apps host stopped");
-            }
-        });
+        side_listeners.push(egret_server::spawn_side_listener(
+            "apps",
+            apps_listener,
+            router,
+            egret_server::shutdown_signal(),
+            egret_server::DRAIN_DEADLINE,
+        ));
     }
     // SIGTERM is observed and in-flight requests are drained, bounded by
     // `DRAIN_DEADLINE`. Before this, a rollout dropped every in-flight query on
@@ -3662,6 +3710,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     )
     .await
     .context("server error")?;
+    // An OPA decision in flight at SIGTERM is a Trino query; it gets the same
+    // drain as the API. Bounded by the same deadline, counted from the same
+    // signal, so this stays inside the pod's grace period.
+    egret_server::join_side_listeners(side_listeners, egret_server::DRAIN_DEADLINE).await;
     // The workflow claim loop, then its log writer's drain (bounded at 10 s by
     // the writer itself). Bounded here too: a tick in flight can be a long
     // `Sleep`, and a pod's grace period is finite.

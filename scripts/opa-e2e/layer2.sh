@@ -82,6 +82,9 @@ export TRINO_DELEGATOR_PASSWORD
 identity_check "$OPA_CONTAINER" trino-opa/opa || die "identity check failed on trino-opa (OPA plugin)"
 identity_check "$RANGER_CONTAINER" trino-ranger || die "identity check failed on trino-ranger"
 
+# egret's OPA surface is on its own port (8082); 8080 answers 404 for /opa/.
+opa_port_check "$OPA_CONTAINER" || die "OPA port check failed on trino-opa"
+
 # --- admin session ------------------------------------------------------------------------
 JAR="$WORK/admin.jar"
 curl -fsS -c "$JAR" -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
