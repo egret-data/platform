@@ -524,3 +524,215 @@ proof of mechanism.
 **What it means for production.** A bulk write, such as a migration or a large import, can
 leave the refresher on stale statistics until autoanalyze runs. In this run, one rebuild
 then cost up to 810.3 ms.
+
+## Shared tag service (Task 26) (2026-11-08)
+
+The question: when N profiles share one tag service and its tag version moves, how long
+until the OPA refresher serves the last of the N profiles a snapshot at its new key? The
+plan's threshold was 1 s at N = 10.
+
+The raw outputs are in the measuring session's scratchpad,
+`/private/tmp/claude-501/-Users-1pro-l4r8-Documents-github-data-portal/739fff40-b4cd-44a8-8f4d-649cbeb36373/scratchpad/latency/task26-shared-tag/`
+(called `RAWT26/` below), next to `RAW/`.
+
+### Machine and conditions
+
+The machine is the one in "Machine" above (`RAWT26/machine.txt`): Intel i7-1068NG7, 8
+logical CPUs, 4 performance cores, 32 GiB, macOS 26.7 (25G229), rustc 1.99.0, and
+Postgres `egret_test` on localhost:5432. The harness gives each test process its own
+database.
+
+The machine was not idle. Docker's VM ran throughout at 70 % to 85 % of a core.
+- The first "before" run started at load average 23.87 (`RAWT26/conditions-before.txt`).
+- So I ran the unfixed code again later, at load average 6.54 to 11.44
+  (`RAWT26/conditions-before-rerun.txt`).
+- The two "after" runs ran at load averages 6.51 and 6.88 to 7.92 (`conditions-after.txt`,
+  `conditions-pieces.txt`).
+
+No other build or test suite of mine ran during a measurement. Another session's
+`egret-policy` mutant run in the same worktree ended before the "after" runs started. I
+waited for it, and checked that `crates/egret-policy` was unmodified.
+
+### Command
+
+```bash
+env -u EGRET_ALLOW_DB_SKIP DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test \
+  CARGO_TARGET_DIR=$PWD/target-t26 \
+  cargo test -p egret-perm-compile --release --features harness --test opa_rebuild_timing \
+  -- --ignored --nocapture --exact opa_shared_tag_service_refresh_latency
+```
+
+The test is `opa_shared_tag_service_refresh_latency` in
+`crates/egret-perm-compile/tests/opa_rebuild_timing.rs`, beside section 4's test, and it uses
+the same `arrange`.
+
+**Setup.**
+- One tag service. N compiled Trino profiles name it as `tagService`; N grows 1, 5, 10, 20.
+- Each profile is section 4's 820-table profile: 984 stored policies, on OPA, with its own
+  engine and catalog.
+- `ANALYZE` runs after each arrange, so no step measures on statistics that were never
+  taken (22F.3).
+
+**One run.**
+1. One `UPDATE` moves `tag_version` on all N profiles and on the tag service, as
+   `egret_catalog_registry::tag_version` does.
+2. The clock starts.
+3. `refresh_once` is driven directly. A thread polls `SnapshotCache::get` every 100 µs and
+   records when each profile is `Ready` with a snapshot whose `key()` equals the new
+   `(policy_version, tag_version)`.
+4. "Last current" is the last of those moments.
+
+There are 10 runs per N. The 1 s ticker is not running: the period's share is added below.
+
+### Before the fix
+
+At `c5274af1c`, output in `RAWT26/shared-tag-before-rerun.out` (and the busier
+`shared-tag-before.out`). Times in ms, p50 with min to max in brackets.
+
+| N | last profile current | first profile current | one rebuild | scoped overlap scan, alone |
+|---|---|---|---|---|
+| 1 | 60.8 (52.7–79.1) | 60.8 | 60.8 (52.7–79.1) | 36.5 |
+| 5 | 1117.6 (926.0–1350.6) | 223.8 | 215.8 (177.5–306.5) | 168.0 |
+| 10 | **4291.3 (3715.3–4638.1)** | 388.9 | 418.8 (339.3–632.8) | 346.5 |
+| 20 | 18289.5 (16688.2–19658.8) | 873.7 | 887.9 (720.7–1549.1) | 820.4 |
+
+The busier first run gave last-current p50s of 55.1, 1075.7, 3772.4 and 15123.7 ms, with
+ranges 49.5–78.7, 1009.5–1380.0, 3708.7–4016.6 and 14869.6–16543.2.
+
+**Why.**
+- `stored_overlaps_of_via(p)` (the C8 re-check) resolved `{p, tag(p)}`.
+- `units_for_service_via(tag)` then returned one unit per profile naming the tag service,
+  and each unit was LOADED: 984 policies plus the tag service's.
+- Only then were the pairs filtered down to `p`'s.
+
+So one rebuild loaded N units, and a bump that moves N profiles loaded N² units. The scan
+alone grew 36.5 → 168.0 → 346.5 → 820.4 ms, which is most of each rebuild.
+
+### Decision: change the code
+
+4291.3 ms at N = 10 is over the 1 s threshold, so I changed the code.
+
+`stored_overlaps_of_via` now filters the unit ids before loading any of them. It keeps the
+units whose pairs carry `p`, meaning the unit's `resource`, else its `tag_service`. That is
+the same predicate the pairs were filtered by after loading, so the set and order of pairs
+do not change. The filter is in `units_served_by_via`, in
+`crates/egret-perm-compile/src/overlap.rs`.
+
+For a profile on a shared tag service, that leaves one unit: `{p, tag(p)}`. Two other
+effects:
+- A unit that fails to load now fails only the profiles whose pairs it holds. Before, it
+  failed every profile sharing the tag service.
+- `stored_overlaps_via`, the all-services report, is unchanged.
+
+**Tests.** `the_recheck_loads_only_the_profiles_own_unit_of_a_shared_tag_service` in
+`crates/egret-perm-compile/tests/opa_cache.rs` checks three things:
+- B and C share A's tag service, and each profile's re-check loads exactly its own unit;
+- after C names A itself as its tag service, A still loads only `{A, tag(A)}`;
+- each profile's scoped pairs equal the all-services scan's pairs for that profile.
+
+**Mutant.** Remove the `.filter(…)` in `units_served_by_via`. Two tests fail
+(`RAWT26/mutant-no-prefilter.out`):
+- the new test: A's re-check got three units;
+- `a_stored_overlap_counts_only_in_the_profile_whose_download_serves_it`: A was charged
+  B's pair.
+
+The full `opa_cache` suite passes with the change: 11 of 11 (`RAWT26/opa-cache-fixed.out`).
+
+**C8 still refuses** a pair stored in a profile's own unit, including the unit it shares a
+tag service with. `a_stored_overlap_counts_only_in_the_profile_whose_download_serves_it`
+(same file) proves it:
+- A's tag service serves MASK and MASK_NULL on one column, and A goes `NotBuilt`
+  (`StoredStateRefused`);
+- also when another profile names A as its tag service;
+- a pair stored only in B, which shares A's tag service, leaves A `Ready`.
+
+That test passes with the change and fails under the mutant above.
+
+### After the fix
+
+Output in `RAWT26/shared-tag-after.out`. A second run, `shared-tag-after-pieces.out`, also
+times two pieces of one build.
+
+| N | last profile current | first profile current | one rebuild | scoped overlap scan, alone |
+|---|---|---|---|---|
+| 1 | 52.2 (47.2–187.1) | 52.2 | 52.2 (47.2–187.1) | 32.9 |
+| 5 | 392.0 (325.8–466.8) | 76.6 | 74.4 (63.1–105.2) | 33.1 |
+| 10 | **1041.0 (932.8–1201.6)** | 103.2 | 100.8 (84.1–151.9) | 32.6 |
+| 20 | 3507.5 (3052.0–4116.9) | 176.2 | 169.0 (129.4–328.7) | 35.7 |
+
+The second run gave last-current p50s of 53.0, 403.3, **1184.9** and 3094.6 ms, with ranges
+47.8–64.5, 358.8–424.2, 1081.1–1349.9 and 2935.8–3223.2.
+
+**What this shows.**
+- **N = 10 went from 4291.3 ms to 1041.0 ms** (1184.9 ms in the second run), and N = 20
+  from 18289.5 ms to 3507.5 ms.
+- **The scan is now flat**: about 33 ms at every N.
+- **It is still not inside 1 s at N = 10.** The p50 is 41 ms over in one run and 185 ms over
+  in the other.
+
+**What still grows.** One rebuild still grows with N: 52 → 74 → 101 → 169 ms. The second run
+breaks one build down (p50):
+
+| N | `stored_state_refusals_via` | `snapshot_parts_via` | scoped scan |
+|---|---|---|---|
+| 1 | 7.0 | 24.4 | 32.5 |
+| 5 | 5.1 | 30.5 | 31.9 |
+| 10 | 5.0 | 70.2 | 37.3 |
+| 20 | 3.6 | 113.9 | 33.9 |
+
+`snapshot_parts_via` is what grows. Its loader, `ir_load::load_ep`, calls `list_grants_via`
+and `list_rules_via`. These read EVERY grant and rule in the installation, because the
+`perm` model is installation-wide, and the lowering then keeps only this profile's catalogs.
+
+Here each profile adds 820 grants, so each rebuild reads 820 × N grants, and N rebuilds
+still cost O(N²). The main term is now linear, about 100 ms × N at this size.
+
+This cost does not depend on the shared tag service: any N profiles whose keys move
+together pay it. I did not change it. `load_ep` is the Ranger compile's loader too, so
+scoping it is a change to the compiler's input, outside this task. It is the next fix if a
+shared tag service of 10 or more large profiles must go current within 1 s.
+
+### Stale window: how long the surface answers from the previous snapshot
+
+During a rebuild, `get` keeps returning the previous `Ready` snapshot. The entry is replaced
+only when that profile's build ends (`SnapshotCache::apply`). So the surface keeps answering,
+and nothing is denied for lack of a snapshot.
+
+Profiles rebuild one at a time, in id order. Profile k of N therefore answers from its
+previous snapshot for about k × (one rebuild), and the last one for the whole "last profile
+current" figure. With the change, at this size:
+
+| N | one rebuild p50 (each profile's own share) | last profile stale for, p50 (max) |
+|---|---|---|
+| 1 | 52 ms | 52 ms (187 ms) |
+| 5 | 74 ms | 392 ms (467 ms) |
+| 10 | 101 ms | 1041 ms (1202 ms) |
+| 20 | 169 ms | 3508 ms (4117 ms) |
+
+Before the change, the same last-profile window was 1.1 s at N = 5, 4.3 s at N = 10 and
+18.3 s at N = 20.
+
+22F.3 measured up to 810 ms for ONE rebuild, on planner statistics that had never been
+taken. This test runs `ANALYZE` first, so its numbers exclude that state. In that state, one
+rebuild cost up to 4 to 5 times more (22F.3: 810 ms against about 170 ms). Multiply the
+table by about that factor for a refresh that follows a bulk write before autoanalyze.
+
+**What an operator sees, with the 1 s ticker.**
+- `refresh_once` was driven directly here. In production it runs on a `tokio` interval of 1 s
+  (`REFRESH_PERIOD`, `MissedTickBehavior::Delay`), and a refresh lists the profiles' keys
+  when it starts.
+- A bump that lands while the refresher is idle waits for the next tick: between 0 and 1 s,
+  0.5 s on average. Then the table's time follows.
+- A bump that lands during a refresh waits for that refresh to finish, then for the next
+  tick. With `Delay`, the next tick comes no sooner than 1 s after the late tick fired.
+- So at N = 10 an operator sees the last profile current about 1.0 to 2.0 s after the bump
+  (p50 rebuilds), and at N = 20 about 3.5 to 4.5 s. Before the change, that was 4.3 to 5.3 s
+  at N = 10.
+
+### Files
+
+| File | What |
+|---|---|
+| `crates/egret-perm-compile/tests/opa_rebuild_timing.rs` | `opa_shared_tag_service_refresh_latency`, `#[ignore]`d |
+| `crates/egret-perm-compile/src/overlap.rs` | `units_served_by_via`: the unit filter before loading |
+| `crates/egret-perm-compile/tests/opa_cache.rs` | `the_recheck_loads_only_the_profiles_own_unit_of_a_shared_tag_service` |
