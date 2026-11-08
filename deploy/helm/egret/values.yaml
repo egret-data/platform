@@ -91,8 +91,10 @@ engineNetworkPolicy:
 # egret answers Trino's OPA plugin (governance SP2b) on its own port, reachable only from engines
 # (templates/networkpolicy-egret.yaml). The engines' URL is derived by egret from
 # EGRET_CATALOG__PUBLIC_URL with this port swapped in, so it needs no value of its own.
+# On by default since SP2b-2; `--set opa.enabled=false` turns the surface off. egret runs it only
+# while `ranger.enabled` is on too, and a profile stays on Ranger until it is switched to OPA.
 opa:
-  enabled: false
+  enabled: true
   port: 8082
   # NetworkPolicy peers outside engineNamespace that may reach the OPA port, for example the
   # namespace of an external Trino on OPA.
