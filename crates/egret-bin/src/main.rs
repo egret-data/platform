@@ -2811,7 +2811,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             .unwrap_or_else(|| "http://egret:8080".to_string()),
     };
     // Engines reach the OPA decision surface on its own listener, so they are
-    // given that URL, not the catalog's.
+    // given that URL, not the catalog's. An error only while OPA is on: with
+    // it off, an underivable URL falls back to `engine_egret_url`.
     let engine_opa_url = egret_config::opa_engine_url(&engine_egret_url, &config.governance.opa)
         .map_err(|e| {
             anyhow::anyhow!("governance.opa.engine_url: cannot derive the OPA URL engines use: {e}")
