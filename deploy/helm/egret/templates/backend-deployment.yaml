@@ -30,6 +30,9 @@ spec:
             {{- if .Values.apps.origin }}
             - { containerPort: 8081 }
             {{- end }}
+            {{- if .Values.opa.enabled }}
+            - { name: opa, containerPort: {{ .Values.opa.port }} }
+            {{- end }}
           envFrom:
             - configMapRef: { name: egret-env }
           env:
