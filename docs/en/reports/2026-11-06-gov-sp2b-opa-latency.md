@@ -760,3 +760,102 @@ table by about that factor for a refresh that follows a bulk write before autoan
 | `crates/egret-perm-compile/tests/opa_rebuild_timing.rs` | `opa_shared_tag_service_refresh_latency`, `#[ignore]`d |
 | `crates/egret-perm-compile/src/overlap.rs` | `units_served_by_via`: the unit filter before loading |
 | `crates/egret-perm-compile/tests/opa_cache.rs` | `the_recheck_loads_only_the_profiles_own_unit_of_a_shared_tag_service` |
+
+## Follow-up 2026-11-09: the loader reads only the profile's catalogs
+
+The section above left one cost that grew with N: `ir_load::load_ep` read every grant and
+rule in the installation on every rebuild. This follow-up scopes those two reads. Raw output
+is in the measuring session's scratchpad,
+`/private/tmp/claude-501/-Users-1pro-l4r8-Documents-github-data-portal/739fff40-b4cd-44a8-8f4d-649cbeb36373/scratchpad/epscope/`
+(called `RAWEP/` below). The machine is the same as above.
+
+### Measure first
+
+The harness now also times `load_ep` alone, in the same `REPEATABLE READ, READ ONLY`
+transaction as the other pieces, and prints how many grants it read. Before the change,
+at `main` 441413651 (`RAWEP/before.out`), p50 in ms:
+
+| N | `snapshot_parts_via` | `load_ep` alone | grants read | last profile current |
+|---|---|---|---|---|
+| 1 | 12.1 | 9.9 | 820 | 60.9 (50.9–81.6) |
+| 5 | 38.4 | 31.9 | 4 100 | 403.3 (353.3–440.1) |
+| 10 | 61.2 | 55.9 | 8 200 | 954.2 (915.7–1050.1) |
+| 20 | 126.8 | 110.1 | 16 400 | 3112.8 (2996.9–3183.1) |
+
+So `load_ep` was almost all of `snapshot_parts_via`, and it grew with the grants it read,
+which is 820 × N here. This run's N = 10 figure, 954 ms, is under the earlier run's 1 041 ms.
+Its range still crosses 1 s.
+
+### The change
+
+`load_ep` now reads:
+- **Grants:** `list_grants_for_catalogs_via`, the grants whose `catalog_id` is one of the
+  catalogs the profile reaches (`catalogs_for_service_via`, read just before).
+- **Rules:** `list_rules_for_catalogs_via`, every tag-selected rule, plus the path-selected
+  rules on those catalogs.
+
+Both functions are in `crates/egret-perm/src/store.rs`. They share row parsing with
+`list_grants_via` and `list_rules_via`, which are unchanged and still serve the API listings.
+
+**Why the compiled output does not change.**
+- `lower_grants` skips a grant whose catalog is not in `ep.catalogs`.
+- `lower_rules` skips a path rule whose catalog is not in `ep.catalogs`.
+- A tag rule names no catalog, so every tag rule is still read.
+- No other reader of the loaded grants or rules looks at a row outside those catalogs:
+  - `refuse_overlaps` names only rules that produced a desired policy;
+  - the tag-rule set reads only tag rules.
+
+**Two side effects.**
+- **Fewer usernames minted.** `expand_enumerated_principals` now expands only the principals
+  of these rows. A compile therefore mints a username only for someone this profile's policies
+  name. Before, it minted one for anyone named anywhere in the model. Anyone else is minted
+  by the compile of a profile that does name them, and `premint_model_usernames` still mints
+  across the whole model for a multi-profile recompile.
+- **Row order.** The reads still have no `ORDER BY`, so rows come back in whatever order the
+  plan returns them, as before. Grants on one catalog may now come back through
+  `grants_catalog_idx` and not in heap order. The Ranger desired set is keyed by name. In the
+  OPA snapshot, order only picks which statement a decision names as its reason; it never
+  changes allow or deny.
+
+**Test.** `the_loader_reads_only_the_grants_and_rules_its_catalogs_reach`, in
+`crates/egret-perm-compile/tests/metadata_tables.rs`, sets up two Trino profiles, each on
+its own catalog, with a grant and a path rule on each catalog and one tag rule. It checks that:
+- each profile's load holds its own grant and path rule, and the tag rule;
+- it holds neither the other profile's grant nor its path rule.
+
+**Mutants**, each run against that test:
+
+| Mutant | Result |
+|---|---|
+| M1: `load_ep` back on `list_grants_via` and `list_rules_via` | fails at "not the other catalog's grant" |
+| M2: the `selector_kind = 'tag'` clause dropped from the rule read | fails at "every tag rule" |
+
+### After
+
+Output in `RAWEP/after.out`, p50 in ms:
+
+| N | `snapshot_parts_via` | `load_ep` alone | grants read | one rebuild | last profile current |
+|---|---|---|---|---|---|
+| 1 | 14.8 | 11.9 | 820 | 49.8 | 49.8 (45.0–57.4) |
+| 5 | 12.4 | 8.8 | 820 | 50.9 | 257.5 (236.1–273.6) |
+| 10 | 14.2 | 9.5 | 820 | 47.4 | **493.0 (437.7–541.8)** |
+| 20 | 11.7 | 8.8 | 820 | 46.9 | 971.2 (938.5–1028.7) |
+
+**What this shows.**
+- **One rebuild is flat**, at about 47 to 51 ms for every N. The refresh is now linear in N,
+  about 50 ms per profile at this size.
+- **N = 10 is inside 1 s**: 493 ms p50, 542 ms max. Before this change it was 954 ms in the
+  same session.
+- **N = 20**: 3 113 ms went to 971 ms.
+- With the 1 s ticker (see "What an operator sees" above), an operator now sees the last of
+  10 profiles current about 0.5 to 1.5 s after the bump.
+
+### Files
+
+| File | What |
+|---|---|
+| `crates/egret-perm/src/store.rs` | `list_grants_for_catalogs_via`, `list_rules_for_catalogs_via` |
+| `crates/egret-perm-compile/src/ir_load.rs` | `load_ep` reads through them |
+| `crates/egret-perm-compile/src/harness_support.rs` | `load_ep_model_ids_for_test` |
+| `crates/egret-perm-compile/tests/metadata_tables.rs` | the scoping test |
+| `crates/egret-perm-compile/tests/opa_rebuild_timing.rs` | the `load_ep` piece in `opa_shared_tag_service_refresh_latency` |

@@ -346,3 +346,94 @@ async fn loaded_mechanism(
         .kind
         .mechanism
 }
+
+/// SP2b Task 26 follow-up: the loader reads only the model rows the profile
+/// can lower — the grants and path rules on the catalogs it reaches, and every
+/// tag rule — not every grant and rule in the installation. Two profiles, each
+/// with its own catalog; each one's read holds its own catalog's grant and
+/// path rule, not the other's, and both hold the tag rule.
+#[cfg(feature = "harness")]
+#[tokio::test]
+async fn the_loader_reads_only_the_grants_and_rules_its_catalogs_reach() {
+    use egret_perm::{Action, Effect, Grant, GrantOrigin, Principal, PrincipalKind};
+    let Some(db) = test_db().await else { return };
+    let a = trino_fixture(&db).await;
+    let b = trino_fixture(&db).await;
+    let public = PrincipalSet {
+        include: vec![Principal {
+            kind: PrincipalKind::Group,
+            r#ref: "public".to_string(),
+        }],
+        exclude: vec![],
+    };
+    let grant_on = |f: &Fixture| Grant {
+        id: Uuid::nil(),
+        effect: Effect::Allow,
+        actions: vec![Action::Read],
+        scope: Scope {
+            catalog_id: f.catalog_id,
+            schema: Some("sales".to_string()),
+            table: None,
+            column: None,
+        },
+        principals: public.clone(),
+        origin: GrantOrigin::Explicit,
+    };
+    let filter = RuleKind::RowFilter {
+        filter_expr: "region = 'us'".to_string(),
+    };
+    let grant_a = a.perm.create_grant(&grant_on(&a)).await.expect("grant a");
+    let grant_b = b.perm.create_grant(&grant_on(&b)).await.expect("grant b");
+    let rule_a = a
+        .perm
+        .create_rule(&path_rule(&a, filter.clone(), None))
+        .await
+        .expect("rule a");
+    let rule_b = b
+        .perm
+        .create_rule(&path_rule(&b, filter, None))
+        .await
+        .expect("rule b");
+    let tag_key = unique("scope_tag");
+    sqlx::query("INSERT INTO tags (key, name) VALUES ($1, $1)")
+        .bind(&tag_key)
+        .execute(&db.pool)
+        .await
+        .expect("tag");
+    let tag_rule = a
+        .perm
+        .create_rule(&Rule {
+            id: Uuid::nil(),
+            name: unique("scope-tag-rule"),
+            kind: RuleKind::Mask {
+                mask_type: "MASK_NULL".to_string(),
+                value_expr: None,
+            },
+            selector: Selector::Tag { key: tag_key },
+            exempt: PrincipalSet::default(),
+        })
+        .await
+        .expect("tag rule");
+
+    let mut conn = db.pool.acquire().await.unwrap();
+    for (f, own, other) in [
+        (&a, (grant_a, rule_a), (grant_b, rule_b)),
+        (&b, (grant_b, rule_b), (grant_a, rule_a)),
+    ] {
+        let (grants, rules) = egret_perm_compile::harness_support::load_ep_model_ids_for_test(
+            &mut conn,
+            f.service_id,
+        )
+        .await
+        .unwrap()
+        .expect("a trino profile");
+        assert!(grants.contains(&own.0), "its own catalog's grant");
+        assert!(rules.contains(&own.1), "its own catalog's path rule");
+        assert!(rules.contains(&tag_rule), "every tag rule");
+        assert!(!grants.contains(&other.0), "not the other catalog's grant");
+        assert!(
+            !rules.contains(&other.1),
+            "not the other catalog's path rule"
+        );
+    }
+}

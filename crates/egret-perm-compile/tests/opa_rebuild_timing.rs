@@ -440,7 +440,8 @@ async fn measure_shared(db: &Db, tag: &str, ids: &[i64], cache: &std::sync::Arc<
     }
     // What one build of ids[0] spends, piece by piece, each alone in its own
     // `REPEATABLE READ, READ ONLY` transaction, as a build runs them.
-    let (mut guard, mut parts) = (Vec::new(), Vec::new());
+    let (mut guard, mut parts, mut reads) = (Vec::new(), Vec::new(), Vec::new());
+    let mut model_rows = 0;
     for _ in 0..RUNS {
         let mut tx = db.pool.begin().await.expect("tx");
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
@@ -462,11 +463,22 @@ async fn measure_shared(db: &Db, tag: &str, ids: &[i64], cache: &std::sync::Arc<
         .expect("parts")
         .expect("trino");
         parts.push(t.elapsed());
+        // The model reads `ir_load::load_ep` makes for ids[0], alone: what
+        // grows with the installation, not with the profile.
+        let t = Instant::now();
+        let (grants, _rules) =
+            egret_perm_compile::harness_support::load_ep_model_ids_for_test(&mut tx, ids[0])
+                .await
+                .expect("load_ep")
+                .expect("trino");
+        reads.push(t.elapsed());
+        model_rows = grants.len();
     }
     println!(
-        "{label} pieces: stored_state_refusals {} | snapshot_parts {}",
+        "{label} pieces: stored_state_refusals {} | snapshot_parts {} | load_ep {} (grants read={model_rows})",
         line(&mut guard),
         line(&mut parts),
+        line(&mut reads),
     );
     println!(
         "{label} profiles={n} services_in_db={} last_current {} | first_current {} | refresh_once {} | one_rebuild {} | overlap_scan_profile {} (pairs={pairs})",

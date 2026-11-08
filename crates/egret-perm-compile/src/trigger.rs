@@ -42,7 +42,7 @@
 //!    established: every read (the model, the reachable catalogs, the
 //!    tagged columns, the tag name, the existing compiled state) AND every
 //!    write happen against the SAME `&mut Transaction`, via
-//!    `egret_perm::{list_grants_via, list_rules_via}` and (since governance
+//!    `egret_perm::{list_grants_for_catalogs_via, list_rules_for_catalogs_via}` and (since governance
 //!    sub-project 1, gathered in `crate::ir_load`)
 //!    `egret_policy::{get_service_by_id_via, catalogs_for_service_via,
 //!    tag_assignments_for_service_via, tag_name_for_key_via}` (all
