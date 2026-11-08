@@ -621,22 +621,33 @@ do not change. The filter is in `units_served_by_via`, in
 For a profile on a shared tag service, that leaves one unit: `{p, tag(p)}`. Two other
 effects:
 - A unit that fails to load now fails only the profiles whose pairs it holds. Before, it
-  failed every profile sharing the tag service.
+  failed every profile sharing the tag service. **This narrowing is deliberate, and no test
+  covers it**: there is no seam to make one unit fail to load while the others load. It is
+  safe for two reasons:
+  - the units it skips hold only other profiles' pairs, which the old code loaded and then
+    discarded, so they never changed this profile's verdict;
+  - each skipped unit is still loaded by the build of the profile whose pairs it holds, so
+    a unit that fails to load still leaves that profile `Unread`, as before.
 - `stored_overlaps_via`, the all-services report, is unchanged.
 
 **Tests.** `the_recheck_loads_only_the_profiles_own_unit_of_a_shared_tag_service` in
 `crates/egret-perm-compile/tests/opa_cache.rs` checks three things:
 - B and C share A's tag service, and each profile's re-check loads exactly its own unit;
 - after C names A itself as its tag service, A still loads only `{A, tag(A)}`;
-- each profile's scoped pairs equal the all-services scan's pairs for that profile.
+- each profile's scoped pairs equal the all-services scan's pairs for that profile. The
+  test checks this first. A stores one pair (two tag masks of the shared tag service meeting
+  on its `email`), B stores one (two path masks on one column), and the test asserts that
+  neither list is empty.
 
-**Mutant.** Remove the `.filter(…)` in `units_served_by_via`. Two tests fail
-(`RAWT26/mutant-no-prefilter.out`):
-- the new test: A's re-check got three units;
+**Mutant.** Remove the `.filter(…)` in `units_served_by_via`. Two tests fail:
+- the new test. In the first round (`RAWT26/mutant-no-prefilter.out`), A's re-check got
+  three units. After review fix round 1 (`RAWT26/mutant-no-prefilter-fix1.out`), the
+  pairs-equality check fails first: A's scoped pairs also hold B's;
 - `a_stored_overlap_counts_only_in_the_profile_whose_download_serves_it`: A was charged
   B's pair.
 
-The full `opa_cache` suite passes with the change: 11 of 11 (`RAWT26/opa-cache-fixed.out`).
+The full `opa_cache` suite passes with the change: 11 of 11 (`RAWT26/opa-cache-fixed.out`,
+and `RAWT26/opa-cache-fix1.out` after fix round 1).
 
 **C8 still refuses** a pair stored in a profile's own unit, including the unit it shares a
 tag service with. `a_stored_overlap_counts_only_in_the_profile_whose_download_serves_it`
@@ -688,7 +699,18 @@ Here each profile adds 820 grants, so each rebuild reads 820 × N grants, and N 
 still cost O(N²). The main term is now linear, about 100 ms × N at this size.
 
 This cost does not depend on the shared tag service: any N profiles whose keys move
-together pay it. I did not change it. `load_ep` is the Ranger compile's loader too, so
+together pay it.
+
+**The N axis also measures installation size.** In this test, N profiles are all the
+profiles there are, so a larger N also means more grants and rules in the installation,
+and each rebuild reads all of them. The 1 041 ms at N = 10 is therefore this installation's
+figure: 10 profiles, 8 200 grants, nothing else.
+
+In production, N = 10 profiles on one tag service can come out above or below 1 041 ms:
+- above, in an installation with more profiles and grants beside them;
+- below, with fewer or smaller ones.
+
+I did not measure the effect of other profiles' size separately. I did not change it. `load_ep` is the Ranger compile's loader too, so
 scoping it is a change to the compiler's input, outside this task. It is the next fix if a
 shared tag service of 10 or more large profiles must go current within 1 s.
 
@@ -699,8 +721,10 @@ only when that profile's build ends (`SnapshotCache::apply`). So the surface kee
 and nothing is denied for lack of a snapshot.
 
 Profiles rebuild one at a time, in id order. Profile k of N therefore answers from its
-previous snapshot for about k × (one rebuild), and the last one for the whole "last profile
-current" figure. With the change, at this size:
+previous snapshot for about k × (one rebuild). That formula is approximate: it multiplies
+the p50 of one rebuild, and single rebuilds vary (the max column). The last profile answers
+from its previous snapshot for the whole "last profile current" figure. With the change,
+at this size:
 
 | N | one rebuild p50 (each profile's own share) | last profile stale for, p50 (max) |
 |---|---|---|
