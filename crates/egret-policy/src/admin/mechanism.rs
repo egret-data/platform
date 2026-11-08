@@ -30,7 +30,7 @@ pub enum MechanismName {
 /// One reason a profile may not switch to OPA.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SwitchRefusal {
-    /// `[governance.opa] enabled` is false.
+    /// `[governance.opa] enabled` is false, or `ranger.enabled` is off (OPA does not run without it).
     Disabled,
     /// OPA exists for Trino only (migration 0213's CHECK).
     NotTrino { r#type: String },
@@ -55,7 +55,9 @@ impl SwitchRefusal {
     pub fn message(&self) -> String {
         match self {
             Self::Disabled => {
-                "OPA is not enabled on this installation ([governance.opa] enabled)".to_string()
+                "OPA is not running on this installation: it needs both [governance.opa] enabled \
+                 and ranger.enabled"
+                    .to_string()
             }
             Self::NotTrino { r#type } => {
                 format!("only a Trino profile can use OPA; this profile is of type {type}")

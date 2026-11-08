@@ -752,10 +752,17 @@ impl Config {
         opa_engine_url(
             engine_egret_url,
             &OpaSettings {
-                enabled: self.governance.opa.enabled && self.ranger.enabled,
+                enabled: self.opa_effective(),
                 ..self.governance.opa.clone()
             },
         )
+    }
+
+    /// Whether the OPA surface actually runs: `governance.opa.enabled` and the
+    /// Ranger surface it checks engines with. `egret-bin` applies the same rule
+    /// at runtime as `opa.enabled && engine_credential_verifier.is_some()`.
+    pub fn opa_effective(&self) -> bool {
+        self.governance.opa.enabled && self.ranger.enabled
     }
 }
 
@@ -2379,7 +2386,7 @@ impl Config {
         self.workflow.http.validate()?;
         // The listener exists only while OPA actually runs: `enabled` and the
         // Ranger surface it needs (`start_opa` is not started without it).
-        let opa_on = self.governance.opa.enabled && self.ranger.enabled;
+        let opa_on = self.opa_effective();
         OpaSettings {
             enabled: opa_on,
             ..self.governance.opa.clone()

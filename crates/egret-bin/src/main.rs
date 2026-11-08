@@ -2881,6 +2881,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // actually runs, which `start_opa` also requires the Ranger surface (and
         // so its credential verifier) for. With `ranger.enabled` off the PATCH is
         // refused (`Disabled`) instead of answering 200 to engines left on 404s.
+        // Runtime form of `Config::opa_effective` (the verifier exists only with
+        // `ranger.enabled`).
         opa_enabled: config.governance.opa.enabled && engine_credential_verifier.is_some(),
     });
 
@@ -3187,7 +3189,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     }
 
     // Governance SP2b: the OPA decision surface and its snapshot refresher,
-    // only while `[governance.opa] enabled` (default false) and the Ranger
+    // only while `[governance.opa] enabled` (default true) and the Ranger
     // surface is on. With the gate off, `opa` is `None`: the routes are not
     // mounted and no refresher runs. The refresher stops with the other
     // background loops.

@@ -132,7 +132,7 @@ describe("the Ranger | OPA selector (SP2b Task 23)", () => {
               code: "mechanism_refused",
               refusals: [
                 "the profile holds the `all - …` default policies (13); delete them first",
-                "OPA is not enabled on this installation",
+                "OPA is not running on this installation",
               ],
             },
           },
@@ -145,7 +145,7 @@ describe("the Ranger | OPA selector (SP2b Task 23)", () => {
     await user.click(within(await dialog()).getByRole("button", { name: "Switch" }));
     const s = await section();
     expect(await s.findByText("the profile holds the `all - …` default policies (13); delete them first", {}, T)).toBeVisible();
-    expect(s.getByText("OPA is not enabled on this installation")).toBeVisible();
+    expect(s.getByText("OPA is not running on this installation")).toBeVisible();
     expect(s.getByLabelText("Ranger")).toBeChecked();
     expect(s.getByLabelText("OPA")).not.toBeChecked();
     expect(toast.success).not.toHaveBeenCalled();

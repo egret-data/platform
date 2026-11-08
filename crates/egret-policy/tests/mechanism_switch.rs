@@ -135,7 +135,7 @@ async fn the_gate_off_is_refused_first() {
     assert_eq!(off.refusals, vec![SwitchRefusal::Disabled]);
     assert_eq!(
         messages(&off),
-        vec!["OPA is not enabled on this installation ([governance.opa] enabled)"]
+        vec!["OPA is not running on this installation: it needs both [governance.opa] enabled and ranger.enabled"]
     );
     assert_eq!(
         gated_and_manual.refusals,
@@ -835,7 +835,7 @@ mod route {
             &h,
             svc.id,
             &svc.name,
-            "OPA is not enabled on this installation ([governance.opa] enabled)",
+            "OPA is not running on this installation: it needs both [governance.opa] enabled and ranger.enabled",
         )
         .await;
         h.opa_enabled = true;
