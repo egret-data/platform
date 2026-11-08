@@ -40,10 +40,42 @@ fn gate(enabled: bool) -> GovernanceConfig {
 }
 
 #[tokio::test]
-async fn the_default_config_starts_nothing() {
+async fn the_default_config_starts_opa_when_the_ranger_surface_is_on() {
+    // Arrange
+    let cancel = CancellationToken::new();
+
     // Act
     let started = start_opa_from_config(
         &GovernanceConfig::default(),
+        verifier(),
+        unreachable_pool(),
+        &cancel,
+    );
+    cancel.cancel();
+
+    // Assert: on by default since SP2b-2
+    assert!(started.is_some());
+}
+
+#[tokio::test]
+async fn the_default_config_starts_nothing_without_the_ranger_surface() {
+    // Act: no verifier, which is what `ranger.enabled = false` leaves
+    let started = start_opa_from_config(
+        &GovernanceConfig::default(),
+        None,
+        unreachable_pool(),
+        &CancellationToken::new(),
+    );
+
+    // Assert
+    assert!(started.is_none());
+}
+
+#[tokio::test]
+async fn the_gate_off_starts_nothing_even_with_the_ranger_verifier() {
+    // Act
+    let started = start_opa_from_config(
+        &gate(false),
         verifier(),
         unreachable_pool(),
         &CancellationToken::new(),

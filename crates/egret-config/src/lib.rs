@@ -621,15 +621,17 @@ fn default_opa_body_read_timeout_ms() -> u64 {
 /// `[governance.opa]` — egret answering Trino's OPA plugin (governance SP2b).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpaSettings {
-    /// **The exposure lever for the OPA surface, and it defaults to `false`**
-    /// until SP2b-2 (Task 26) — modelled on
-    /// [`WorkflowConfig::webhooks_enabled`]. Key `[governance.opa] enabled`,
-    /// env `EGRET_GOVERNANCE__OPA__ENABLED=true`.
+    /// **The exposure lever for the OPA surface.** On by default since SP2b-2;
+    /// an operator can still turn it off, and then the surface is not mounted
+    /// and a switch to OPA is refused. Key `[governance.opa] enabled`, env
+    /// `EGRET_GOVERNANCE__OPA__ENABLED=false`.
     ///
-    /// While it is false the OPA routes are not mounted, the snapshot
-    /// refresher does not run, and a profile cannot be switched to
-    /// `mechanism = "opa"` (switching back to Ranger always works).
-    #[serde(default)]
+    /// The surface runs only while `ranger.enabled` is on too (it checks engines
+    /// with the Ranger surface's credentials); with `ranger.enabled` off nothing
+    /// binds the OPA listener, whatever this key says. Off, the OPA routes are
+    /// not mounted, the snapshot refresher does not run, and a profile cannot be
+    /// switched to `mechanism = "opa"` (switching back to Ranger always works).
+    #[serde(default = "default_true")]
     pub enabled: bool,
     /// The largest request body the OPA surface's `/batch` route accepts, in
     /// bytes. Key `[governance.opa] batch_body_limit_bytes`, env
@@ -787,10 +789,14 @@ impl OpaSettings {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl Default for OpaSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             batch_body_limit_bytes: DEFAULT_OPA_BATCH_BODY_LIMIT_BYTES,
             body_read_timeout_ms: DEFAULT_OPA_BODY_READ_TIMEOUT_MS,
             listen: default_opa_listen(),
@@ -2358,10 +2364,11 @@ impl Config {
         self.workflow.http.validate()?;
         self.governance.opa.validate()?;
         // Validated above, so the port parses. Two listeners in one pod collide on
-        // the port whatever the host, so compare ports, not strings. With OPA off
-        // nothing binds `listen`, so it cannot collide.
+        // the port whatever the host, so compare ports, not strings. With OPA off,
+        // or with the Ranger surface off (OPA is not started without it), nothing
+        // binds `listen`, so it cannot collide.
         let opa_port = listen_port(&self.governance.opa.listen);
-        let opa_on = self.governance.opa.enabled;
+        let opa_on = self.governance.opa.enabled && self.ranger.enabled;
         if opa_on && opa_port == Some(self.server.port) {
             return Err(format!(
                 "governance.opa.listen {:?} has the same port as server.host:server.port \
@@ -4486,24 +4493,35 @@ values = { allowed-images = [] }
     /// helm, which renders a Go bool as lowercase `true`/`false` — asserted
     /// below against the chart itself, because "the chart can only emit a legal
     /// spelling" is the sentence that makes refusing everything else safe.
-    /// Governance SP2b: the OPA surface is off until an operator turns it on
-    /// (`[governance.opa] enabled`, env `EGRET_GOVERNANCE__OPA__ENABLED`).
+    /// Governance SP2b-2: the OPA surface is on unless an operator turns it off
+    /// (`[governance.opa] enabled`, env `EGRET_GOVERNANCE__OPA__ENABLED=false`).
     #[test]
-    fn governance_opa_is_off_by_default() {
+    fn governance_opa_is_on_by_default() {
         figment::Jail::expect_with(|jail| {
             // A TOML with no `[governance]` section at all.
             jail.create_file("egret.toml", "[workflow]\nwebhooks_enabled = false\n")?;
             let c: Config = Config::figment().extract().expect("defaults");
             assert!(
-                !c.governance.opa.enabled,
-                "OPA must default to OFF when the section is absent"
+                c.governance.opa.enabled,
+                "OPA must default to ON when the section is absent"
             );
             Ok(())
         });
+        assert!(OpaSettings::default().enabled);
+        // A `[governance.opa]` table that does not name `enabled` takes the serde default.
         figment::Jail::expect_with(|jail| {
-            jail.set_env("EGRET_GOVERNANCE__OPA__ENABLED", "true");
+            jail.create_file(
+                "egret.toml",
+                "[governance.opa]\nlisten = \"0.0.0.0:9000\"\n",
+            )?;
+            let c: Config = Config::figment().extract().expect("partial table");
+            assert!(c.governance.opa.enabled, "a partial table keeps OPA on");
+            Ok(())
+        });
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_GOVERNANCE__OPA__ENABLED", "false");
             let c: Config = Config::figment().extract().expect("env");
-            assert!(c.governance.opa.enabled, "the env spelling turns it on");
+            assert!(!c.governance.opa.enabled, "the env spelling turns it off");
             Ok(())
         });
     }
@@ -4625,6 +4643,7 @@ values = { allowed-images = [] }
     fn governance_opa_listen_is_validated() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("EGRET_GOVERNANCE__OPA__ENABLED", "true");
+            jail.set_env("EGRET_RANGER__ENABLED", "true");
             jail.set_env("EGRET_GOVERNANCE__OPA__LISTEN", "0.0.0.0");
             let c: Config = Config::figment().extract().expect("env");
             let err = c.validate().expect_err("no port is refused");
@@ -4633,6 +4652,7 @@ values = { allowed-images = [] }
         });
         figment::Jail::expect_with(|jail| {
             jail.set_env("EGRET_GOVERNANCE__OPA__ENABLED", "true");
+            jail.set_env("EGRET_RANGER__ENABLED", "true");
             let c: Config = Config::figment().extract().expect("defaults");
             let addr = format!("{}:{}", c.server.host, c.server.port);
             jail.set_env("EGRET_GOVERNANCE__OPA__LISTEN", &addr);
@@ -4646,6 +4666,7 @@ values = { allowed-images = [] }
         });
         figment::Jail::expect_with(|jail| {
             jail.set_env("EGRET_GOVERNANCE__OPA__ENABLED", "true");
+            jail.set_env("EGRET_RANGER__ENABLED", "true");
             jail.set_env("EGRET_APPS__ORIGIN", "https://apps.example.com");
             jail.set_env("EGRET_APPS__EGRET_ORIGIN", "https://egret.example.com");
             jail.set_env("EGRET_APPS__LISTEN", "0.0.0.0:8082");
@@ -4665,6 +4686,7 @@ values = { allowed-images = [] }
     fn governance_opa_listen_collides_by_port_and_ignores_disabled_apps() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("EGRET_GOVERNANCE__OPA__ENABLED", "true");
+            jail.set_env("EGRET_RANGER__ENABLED", "true");
             let c: Config = Config::figment().extract().expect("defaults");
             jail.set_env(
                 "EGRET_GOVERNANCE__OPA__LISTEN",
@@ -4680,6 +4702,7 @@ values = { allowed-images = [] }
         });
         figment::Jail::expect_with(|jail| {
             jail.set_env("EGRET_GOVERNANCE__OPA__ENABLED", "true");
+            jail.set_env("EGRET_RANGER__ENABLED", "true");
             jail.set_env("EGRET_APPS__ORIGIN", "https://apps.example.com");
             jail.set_env("EGRET_APPS__EGRET_ORIGIN", "https://egret.example.com");
             jail.set_env("EGRET_APPS__LISTEN", "127.0.0.1:8082");
@@ -4690,6 +4713,7 @@ values = { allowed-images = [] }
         });
         figment::Jail::expect_with(|jail| {
             jail.set_env("EGRET_GOVERNANCE__OPA__ENABLED", "true");
+            jail.set_env("EGRET_RANGER__ENABLED", "true");
             // apps.origin empty: apps is disabled, so its listen is not bound.
             jail.set_env("EGRET_APPS__LISTEN", "0.0.0.0:8082");
             jail.set_env("EGRET_STORAGE__BUCKET", "b");
@@ -4710,6 +4734,7 @@ values = { allowed-images = [] }
     #[test]
     fn governance_opa_listen_is_not_checked_while_opa_is_off() {
         figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_GOVERNANCE__OPA__ENABLED", "false");
             jail.set_env("EGRET_STORAGE__BUCKET", "b");
             jail.set_env("EGRET_STORAGE__ACCESS_KEY", "k");
             jail.set_env("EGRET_STORAGE__SECRET_KEY", "s");
@@ -4722,6 +4747,7 @@ values = { allowed-images = [] }
             Ok(())
         });
         figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_GOVERNANCE__OPA__ENABLED", "false");
             jail.set_env("EGRET_STORAGE__BUCKET", "b");
             jail.set_env("EGRET_STORAGE__ACCESS_KEY", "k");
             jail.set_env("EGRET_STORAGE__SECRET_KEY", "s");
@@ -4734,6 +4760,7 @@ values = { allowed-images = [] }
             Ok(())
         });
         figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_GOVERNANCE__OPA__ENABLED", "false");
             jail.set_env("EGRET_STORAGE__BUCKET", "b");
             jail.set_env("EGRET_STORAGE__ACCESS_KEY", "k");
             jail.set_env("EGRET_STORAGE__SECRET_KEY", "s");
@@ -4744,7 +4771,27 @@ values = { allowed-images = [] }
                 .expect("a bad listen / engine_url is accepted while OPA is off");
             Ok(())
         });
+        // On by default but with the Ranger surface off: OPA does not start, so
+        // nothing binds `listen` and a collision cannot happen.
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_STORAGE__BUCKET", "b");
+            jail.set_env("EGRET_STORAGE__ACCESS_KEY", "k");
+            jail.set_env("EGRET_STORAGE__SECRET_KEY", "s");
+            jail.set_env("EGRET_SERVER__PORT", "8082");
+            let c: Config = Config::figment().extract().expect("env");
+            assert!(c.governance.opa.enabled && !c.ranger.enabled);
+            c.validate()
+                .expect("server.port 8082 is accepted while ranger.enabled is off");
+            jail.set_env("EGRET_RANGER__ENABLED", "true");
+            let c: Config = Config::figment().extract().expect("env");
+            assert!(
+                c.validate().is_err(),
+                "the same config collides once the Ranger surface is on"
+            );
+            Ok(())
+        });
         let off = OpaSettings {
+            enabled: false,
             listen: "0.0.0.0".into(),
             ..OpaSettings::default()
         };
@@ -4754,7 +4801,13 @@ values = { allowed-images = [] }
             "underivable while off: falls back to the engine egret URL"
         );
         assert_eq!(
-            opa_engine_url("not a url", &OpaSettings::default()),
+            opa_engine_url(
+                "not a url",
+                &OpaSettings {
+                    enabled: false,
+                    ..OpaSettings::default()
+                }
+            ),
             Ok("not a url".to_string())
         );
         let on = OpaSettings {
