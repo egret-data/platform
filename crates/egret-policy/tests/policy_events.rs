@@ -135,6 +135,7 @@ async fn setup() -> Option<Fixture> {
         groups: GroupRepo::new(db.clone()),
         sessions,
         engine_egret_url: "http://egret:8080".into(),
+        engine_opa_url: "http://egret:8082".into(),
         pdp,
         recompiler: Arc::new(NoRecompile),
         reconfigurer: std::sync::Arc::new(egret_policy::NoReconfigure),

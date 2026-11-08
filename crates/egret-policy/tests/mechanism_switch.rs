@@ -599,6 +599,7 @@ mod route {
                 groups: GroupRepo::new(self.db.clone()),
                 sessions: self.sessions.clone(),
                 engine_egret_url: "http://egret:8080".into(),
+                engine_opa_url: "http://egret:8082".into(),
                 pdp: self.pdp.clone(),
                 recompiler: self.recompiles.clone(),
                 reconfigurer: self.reconfigures.clone(),

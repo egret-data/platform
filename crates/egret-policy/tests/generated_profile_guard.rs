@@ -123,6 +123,7 @@ impl Fixture {
             groups: self.groups.clone(),
             sessions: self.sessions.clone(),
             engine_egret_url: "http://egret:8080".into(),
+            engine_opa_url: "http://egret:8082".into(),
             pdp: self.pdp.clone(),
             recompiler: std::sync::Arc::new(NoRecompile),
             reconfigurer: std::sync::Arc::new(egret_policy::NoReconfigure),

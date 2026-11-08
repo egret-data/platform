@@ -387,6 +387,7 @@ fn engine_state(
         coordinator_transport: None,
         engine_token_minter: Some(Arc::new(FakeMinter::default())),
         engine_egret_url: "http://egret:8080".into(),
+        engine_opa_url: "http://egret:8082".into(),
         engine_jwks_uri: "https://idp/jwks".into(),
         engine_oidc_issuer: "https://idp/realms/egret".into(),
         ranger_enabled,
@@ -16742,6 +16743,17 @@ async fn an_opa_profiles_engine_is_applied_with_the_opa_binding_and_records_it()
         r.credential.is_some(),
         "the context file carries the credential"
     );
+    // The OPA surface has its own listener: the rendered selector points there.
+    let selector = egret_provisioner::trino::trino_config_map(&spec)["data"]
+        ["access-control.properties"]
+        .as_str()
+        .expect("the OPA selector")
+        .to_string();
+    assert!(
+        selector.contains("opa.policy.uri=http://egret:8082/opa/"),
+        "{selector}"
+    );
+    assert!(!selector.contains(":8080"), "{selector}");
     assert_eq!(applied_mechanism(&f, id).await.as_deref(), Some("opa"));
 
     // And back: the engine is re-applied on Ranger and says so.
@@ -17098,6 +17110,7 @@ async fn the_switch_reapplies_the_profiles_engines_answers_502_by_name_and_a_res
         groups: egret_auth::groups::GroupRepo::new(f.db.clone()),
         sessions: f.sessions.clone(),
         engine_egret_url: "http://egret:8080".into(),
+        engine_opa_url: "http://egret:8082".into(),
         pdp: Arc::new(AllowAllPdp),
         recompiler: Arc::new(egret_perm_compile::PermRecompiler),
         reconfigurer: Arc::new(EngineReconfigurer(state_of(&f))),
@@ -17174,10 +17187,16 @@ async fn opa_plugin_config_for_an_external_engine_on_an_opa_profile() {
     let placeholder = egret_engine_mgmt_api::ranger_config::PASSWORD_PLACEHOLDER;
     let want = egret_engine_mgmt_api::opa_config::opa_plugin_files(
         &id.to_string(),
-        "http://egret:8080",
+        "http://egret:8082",
         placeholder,
     )
     .unwrap();
+    let selector = j["files"][0]["content"].as_str().unwrap();
+    assert!(
+        selector.contains("opa.policy.uri=http://egret:8082/opa/"),
+        "{selector}"
+    );
+    assert!(!selector.contains(":8080"), "{selector}");
     assert_eq!(j["files"][0]["name"], "access-control.properties");
     assert_eq!(
         j["files"][0]["content"],
@@ -17316,6 +17335,7 @@ async fn a_lost_applied_mechanism_write_answers_502_by_name_and_a_resend_records
         groups: egret_auth::groups::GroupRepo::new(f.db.clone()),
         sessions: f.sessions.clone(),
         engine_egret_url: "http://egret:8080".into(),
+        engine_opa_url: "http://egret:8082".into(),
         pdp: Arc::new(AllowAllPdp),
         recompiler: Arc::new(egret_perm_compile::PermRecompiler),
         reconfigurer: Arc::new(EngineReconfigurer(state_of(&f))),

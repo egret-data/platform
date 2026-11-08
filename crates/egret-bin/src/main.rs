@@ -2810,6 +2810,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             .clone()
             .unwrap_or_else(|| "http://egret:8080".to_string()),
     };
+    // Engines reach the OPA decision surface on its own listener, so they are
+    // given that URL, not the catalog's.
+    let engine_opa_url = egret_config::opa_engine_url(&engine_egret_url, &config.governance.opa)
+        .map_err(|e| {
+            anyhow::anyhow!("governance.opa.engine_url: cannot derive the OPA URL engines use: {e}")
+        })?;
 
     // Recompiles a catalog's implicit assignment grant (SP4a Task 16, D3
     // defects 2 and 3) — built once here, shared (as two DIFFERENT trait
@@ -2860,6 +2866,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
         sessions: sessions.clone(),
         engine_egret_url: engine_egret_url.clone(),
+        engine_opa_url: engine_opa_url.clone(),
         pdp: pdp.clone(),
         // Final review I-3: an editor write to a StarRocks data mask refolds the
         // clearance masks in the same transaction.
@@ -3102,6 +3109,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // The native monitor signs in to a JWT-delegation engine as the viewer.
         engine_token_minter: Some(engine_minter.clone()),
         engine_egret_url,
+        engine_opa_url,
         // Engines trust egret's OWN machine-IdP (the STS): the same issuer that
         // signs catalog + engine tokens, independent of whether external OIDC is
         // configured. This replaces the old Keycloak-realm-derived JWKS/issuer

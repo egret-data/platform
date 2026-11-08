@@ -994,7 +994,7 @@ async fn opa_plugin_config(
     // re-rendered here.
     let rendered = opa_plugin_files(
         &engine.id.to_string(),
-        &st.engine_egret_url,
+        &st.engine_opa_url,
         egret_engine_mgmt_api::ranger_config::PASSWORD_PLACEHOLDER,
     )
     .map_err(|e| {
@@ -1007,7 +1007,7 @@ async fn opa_plugin_config(
         egret_engine_mgmt_api::opa_config::OPA_BATCHED_URI_WARNING.to_string(),
     ];
     warnings.extend(egret_engine_mgmt_api::ranger_config::download_url_warning(
-        &st.engine_egret_url,
+        &st.engine_opa_url,
     ));
     Ok(Json(OpaPluginConfigDto {
         files: rendered

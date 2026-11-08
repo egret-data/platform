@@ -1309,7 +1309,11 @@ async fn ranger_binding(
         mechanism,
         engine_id: engine.id.to_string(),
         service_name,
-        egret_url: st.engine_egret_url.clone(),
+        // The OPA surface has its own listener; Ranger stays on the main port.
+        egret_url: match mechanism {
+            egret_engine_mgmt_api::opa_config::AccessMechanism::Opa => st.engine_opa_url.clone(),
+            _ => st.engine_egret_url.clone(),
+        },
         poll_interval_ms: egret_engine_mgmt_api::ranger_config::RANGER_POLL_INTERVAL_MS,
         credential: Some(credential),
     }))
@@ -9320,6 +9324,7 @@ mod tests {
             coordinator_transport: None,
             engine_token_minter: None,
             engine_egret_url: "http://egret:8080".into(),
+            engine_opa_url: "http://egret:8082".into(),
             engine_jwks_uri: "https://idp/jwks".into(),
             engine_oidc_issuer: "https://idp/realms/egret".into(),
             ranger_enabled: false,
