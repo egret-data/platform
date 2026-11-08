@@ -65,6 +65,18 @@ describe("ExplainResultView — an OPA profile", () => {
     );
   });
 
+  test("shows the no-tag-service warning once on the profile that carries it", async () => {
+    const warning = "This profile has no tag service, so classification rules and clearances do not apply to its engines.";
+    await renderOpen(one(opaProfile({ no_tag_service_warning: warning })));
+    expect(screen.getAllByText(warning)).toHaveLength(1);
+    expect(screen.getByTestId("explain-no-tag-service")).toHaveTextContent(warning);
+  });
+
+  test("shows no tag-service warning on a profile without one", async () => {
+    await renderOpen(one(opaProfile()));
+    expect(screen.queryByTestId("explain-no-tag-service")).toBeNull();
+  });
+
   test("says nothing about re-applying when every engine is on the mechanism", async () => {
     await renderOpen(one(opaProfile()));
     expect(screen.queryByTestId("explain-not-reapplied")).toBeNull();

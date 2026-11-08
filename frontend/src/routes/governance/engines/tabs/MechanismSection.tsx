@@ -39,6 +39,7 @@ interface PartialSwitch {
   unchanged: string[];
   failed: Array<{ engine: string; error: string }>;
   warning: string | null;
+  noTagServiceWarning: string | null;
 }
 
 /** What a 409 carries: every reason the switch is refused, one string each. */
@@ -55,12 +56,15 @@ function partialOf(e: unknown): PartialSwitch {
     external_engines_unchanged?: string[];
     engines_failed?: Array<{ engine: string; error: string }>;
     external_engines_warning?: string | null;
+    no_tag_service_warning?: string | null;
   };
   return {
     error: err.message,
     reconfigured: body.engines_reconfigured ?? [],
     unchanged: body.external_engines_unchanged ?? [],
-    failed: body.engines_failed ?? [], warning: body.external_engines_warning || null,
+    failed: body.engines_failed ?? [],
+    warning: body.external_engines_warning || null,
+    noTagServiceWarning: body.no_tag_service_warning || null,
   };
 }
 
@@ -71,6 +75,7 @@ function doneLines(res: ProfileMechanism): string[] {
     lines.push(`Not restarted (external): ${res.external_engines_unchanged.join(", ")}.`);
   }
   if (res.external_engines_warning) lines.push(res.external_engines_warning);
+  if (res.no_tag_service_warning) lines.push(res.no_tag_service_warning);
   return lines;
 }
 
@@ -202,6 +207,7 @@ export function MechanismSection({ profile }: { profile: FrameProfile }) {
                 <p>Not restarted (external): {failure.partial.unchanged.join(", ")}.</p>
               ) : null}
               {failure.partial.warning ? <p>{failure.partial.warning}</p> : null}
+              {failure.partial.noTagServiceWarning ? <p>{failure.partial.noTagServiceWarning}</p> : null}
               <Button size="sm" variant="outline" disabled={setMechanism.isPending} onClick={() => send(failure.target)}>
                 Retry
               </Button>

@@ -60,6 +60,9 @@ async function chooseOpa(user: ReturnType<typeof userEvent.setup>) {
 }
 const dialog = () => screen.findByRole("alertdialog", {}, T);
 
+const NO_TAG =
+  "This profile has no tag service, so classification rules and clearances do not apply to its engines. Bind a tag service in the profile's settings.";
+
 describe("the Ranger | OPA selector (SP2b Task 23)", () => {
   it("shows the stored mechanism and asks before switching", async () => {
     serve(answers());
@@ -98,6 +101,7 @@ describe("the Ranger | OPA selector (SP2b Task 23)", () => {
             engines_reconfigured: ["trino-a"],
             external_engines_unchanged: ["ext-trino"],
             external_engines_warning: "ext-trino keeps enforcing the Ranger policies until its OPA plugin files are installed.",
+            no_tag_service_warning: NO_TAG,
           }),
         },
       ),
@@ -110,6 +114,7 @@ describe("the Ranger | OPA selector (SP2b Task 23)", () => {
     const status = (await section()).getByRole("status");
     await waitFor(() => expect(status).toHaveTextContent("trino-a"));
     expect(status).toHaveTextContent("ext-trino");
+    expect(status).toHaveTextContent(NO_TAG);
     expect(status).toHaveTextContent("keeps enforcing the Ranger policies");
     expect(toast.success).toHaveBeenCalledWith("Switched to OPA.");
     await waitFor(() => expect(served.asked.filter((k) => k === "GET /policies/services").length).toBeGreaterThan(1));
@@ -197,6 +202,7 @@ describe("the Ranger | OPA selector (SP2b Task 23)", () => {
             engines_failed: [{ engine: "trino-b", error: "timeout" }],
             external_engines_unchanged: [],
             external_engines_warning: "ext-trino keeps enforcing Ranger until its OPA plugin files are installed.",
+            no_tag_service_warning: NO_TAG,
           },
         };
       },
@@ -210,6 +216,7 @@ describe("the Ranger | OPA selector (SP2b Task 23)", () => {
     expect(await s.findByText(/engines not reconfigured: trino-b/, {}, T)).toBeVisible();
     expect(s.getByText(/trino-b/, { selector: "li" })).toHaveTextContent("timeout");
     expect(s.getByText(/ext-trino keeps enforcing Ranger/)).toBeVisible();
+    expect(s.getByText(NO_TAG)).toBeVisible();
     // The list was refetched, the selection follows the committed switch, the alert stays.
     await waitFor(() => expect(s.getByLabelText("OPA")).toBeChecked());
     expect(served.asked.filter((k) => k === "GET /policies/services").length).toBeGreaterThan(1);

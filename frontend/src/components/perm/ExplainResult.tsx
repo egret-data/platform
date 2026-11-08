@@ -968,6 +968,11 @@ function ProfileBlock({
           again).
         </p>
       )}
+      {profile.no_tag_service_warning && (
+        <p data-testid="explain-no-tag-service" className="text-xs text-muted-foreground">
+          {profile.no_tag_service_warning}
+        </p>
+      )}
       {isOpa && profile.accesses.some((a) => isSpliced(a.ir_reason)) && (
         <p data-testid="explain-spliced" className="text-xs text-muted-foreground">
           This answer is from the previous snapshot: the current model did not build, so egret answers from the

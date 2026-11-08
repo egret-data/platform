@@ -18,8 +18,9 @@ pub mod store;
 pub mod unit_overlap;
 pub mod unreadable_table_mask;
 pub use admin::mechanism::{
-    opa_switch_check, MechanismName, NoReconfigure, ProfileEngineReconfigurer, ProfileMechanism,
-    ReconfigureReport, SetMechanismBody, SwitchCheck, SwitchRefusal,
+    no_tag_service_warning_via, opa_switch_check, MechanismName, NoReconfigure,
+    ProfileEngineReconfigurer, ProfileMechanism, ReconfigureReport, SetMechanismBody, SwitchCheck,
+    SwitchRefusal, NO_TAG_SERVICE_WARNING,
 };
 pub use admin::{
     policy_admin_router, EngineBinding, EngineBindingReader, EngineReadError, PolicyAdminState,

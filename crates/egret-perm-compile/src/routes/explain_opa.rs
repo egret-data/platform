@@ -291,6 +291,7 @@ pub(super) fn opa_profile(i: &OpaProfileInput<'_>) -> ExplainProfile {
         mechanism: WireMechanism::Opa,
         opa,
         engines_not_reapplied: Vec::new(),
+        no_tag_service_warning: None,
         accesses,
         tags: Vec::new(),
         tag_policies_in_download: 0,
