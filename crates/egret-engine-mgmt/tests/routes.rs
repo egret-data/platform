@@ -16767,6 +16767,157 @@ async fn an_opa_profiles_engine_is_applied_with_the_opa_binding_and_records_it()
     assert_eq!(applied_mechanism(&f, id).await.as_deref(), Some("ranger"));
 }
 
+async fn applied_opa_url(f: &Fixture, id: Uuid) -> Option<String> {
+    sqlx::query_scalar("SELECT applied_opa_url FROM engine_mgmt.engines WHERE id = $1")
+        .bind(id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("engine row")
+}
+
+async fn set_applied_opa_url(f: &Fixture, id: Uuid, url: Option<&str>) {
+    sqlx::query("UPDATE engine_mgmt.engines SET applied_opa_url = $2 WHERE id = $1")
+        .bind(id)
+        .bind(url)
+        .execute(&f.db.pool)
+        .await
+        .expect("set applied_opa_url");
+}
+
+#[tokio::test]
+async fn an_opa_apply_records_the_opa_url_and_a_ranger_apply_clears_it() {
+    // Arrange
+    let port = FakeEnginePort::default();
+    let Some(f) = opa_fixture(&port).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "opa_url_rec_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let profile = seed_typed_profile(&f, &engine_name("opa-url-rec-p"), "trino").await;
+    let id = create_trino(
+        &f,
+        &token,
+        &engine_name("opa-url-rec"),
+        wh_id,
+        "483",
+        Some(profile),
+    )
+    .await;
+    assert_eq!(applied_opa_url(&f, id).await, None, "a Ranger apply");
+    set_profile_mechanism(&f, profile, "opa").await;
+
+    // Act
+    let report = egret_engine_mgmt::reapply_bound_engines(&state_of(&f), profile).await;
+
+    // Assert
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(
+        applied_opa_url(&f, id).await.as_deref(),
+        Some("http://egret:8082")
+    );
+    set_profile_mechanism(&f, profile, "ranger").await;
+    egret_engine_mgmt::reapply_bound_engines(&state_of(&f), profile).await;
+    assert_eq!(applied_opa_url(&f, id).await, None);
+}
+
+#[tokio::test]
+async fn the_start_up_pass_re_applies_only_stale_provisioned_opa_engines() {
+    // Arrange
+    let port = FakeEnginePort::default();
+    let Some(f) = opa_fixture(&port).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "opa_stale_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let opa_profile = seed_typed_profile(&f, &engine_name("opa-stale-p"), "trino").await;
+    set_profile_mechanism(&f, opa_profile, "opa").await;
+    let ranger_profile = seed_typed_profile(&f, &engine_name("opa-stale-rp"), "trino").await;
+    let stale = engine_name("a-stale");
+    let current = engine_name("b-current");
+    let unrecorded = engine_name("c-unrecorded");
+    let deleting = engine_name("d-deleting");
+    let ranger = engine_name("e-ranger");
+    let mut ids = Vec::new();
+    for name in [&stale, &current, &unrecorded, &deleting, &ranger] {
+        ids.push(create_trino(&f, &token, name, wh_id, "483", None).await);
+    }
+    let (external, _) =
+        register_external(&f, &token, "trino", "2.8.0", Some(opa_profile), &[]).await;
+    sqlx::query("UPDATE engine_mgmt.engines SET authz_service_id = $1 WHERE id = ANY($2)")
+        .bind(opa_profile)
+        .bind(&ids[..4])
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE engine_mgmt.engines SET authz_service_id = $1 WHERE id = $2")
+        .bind(ranger_profile)
+        .bind(ids[4])
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE engine_mgmt.engines SET status = 'deleting' WHERE id = $1")
+        .bind(ids[3])
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    set_applied_opa_url(&f, ids[0], Some("http://egret:8080")).await;
+    set_applied_opa_url(&f, ids[1], Some("http://egret:8082")).await;
+    set_applied_opa_url(&f, ids[2], None).await;
+    set_applied_opa_url(&f, ids[3], Some("http://egret:8080")).await;
+    set_applied_opa_url(&f, external, Some("http://egret:8080")).await;
+    port.updated.lock().unwrap().clear();
+
+    // Act
+    let report = egret_engine_mgmt::reapply_stale_opa_engines(&state_of(&f)).await;
+
+    // Assert
+    // The test database is shared: other tests' engines may also be stale, so
+    // only this test's engines are judged.
+    let mine = [&stale, &current, &unrecorded, &deleting, &ranger];
+    assert!(
+        !report.failed.iter().any(|(n, _)| mine.contains(&n)),
+        "{report:?}"
+    );
+    assert!(report.applied.contains(&stale), "{report:?}");
+    assert!(report.applied.contains(&unrecorded), "{report:?}");
+    let tried: Vec<String> = port
+        .updated
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
+    for name in [&current, &deleting, &ranger] {
+        assert!(
+            !tried.contains(name),
+            "{name} must not be touched: {tried:?}"
+        );
+    }
+    assert!(!report.applied.contains(&current), "{report:?}");
+    assert_eq!(
+        applied_opa_url(&f, ids[0]).await.as_deref(),
+        Some("http://egret:8082")
+    );
+    assert_eq!(
+        applied_opa_url(&f, ids[3]).await.as_deref(),
+        Some("http://egret:8080"),
+        "a deleting engine keeps its record"
+    );
+    assert_eq!(
+        applied_opa_url(&f, external).await.as_deref(),
+        Some("http://egret:8080")
+    );
+    // A second pass has nothing left to do.
+    port.updated.lock().unwrap().clear();
+    let again = egret_engine_mgmt::reapply_stale_opa_engines(&state_of(&f)).await;
+    assert!(
+        !again.applied.contains(&stale) && !again.applied.contains(&unrecorded),
+        "{again:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_failed_apply_does_not_record_the_mechanism() {
     let port = FakeEnginePort::default();

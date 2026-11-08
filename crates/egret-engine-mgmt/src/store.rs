@@ -468,6 +468,38 @@ impl EngineMgmtStore {
         Ok(())
     }
 
+    /// Record the OPA base URL rendered into this engine's plugin files by the
+    /// apply the provisioner accepted (`None`: the engine was not applied on OPA).
+    pub async fn set_applied_opa_url(
+        &self,
+        id: Uuid,
+        url: Option<&str>,
+    ) -> Result<(), EngineMgmtError> {
+        sqlx::query("UPDATE engine_mgmt.engines SET applied_opa_url = $2 WHERE id = $1")
+            .bind(id)
+            .bind(url)
+            .execute(self.pool())
+            .await?;
+        Ok(())
+    }
+
+    /// Engines on an OPA profile whose last apply did not render `current` as
+    /// the OPA URL (including engines applied before the URL was recorded).
+    /// Callers still skip external and deleting engines.
+    pub async fn list_engines_with_stale_opa_url(
+        &self,
+        current: &str,
+    ) -> Result<Vec<Engine>, EngineMgmtError> {
+        Ok(sqlx::query_as::<_, Engine>(
+            "SELECT e.id, e.name, e.type, e.namespace, e.spec, e.status, e.authz_service_id, e.delegator_secret_id, e.root_secret_id, e.tls_secret_id, e.coordinator_cert, e.tls_cert_secret_ref, e.internal_secret_id, e.monitor_secret_id, e.created_at, e.origin, e.external_host, e.external_port, e.ranger_plugin_version, e.ranger_secret_id, e.ranger_secret_prev_id, e.applied_security_rev \
+             FROM engine_mgmt.engines e JOIN policy.authz_services a ON a.id = e.authz_service_id \
+             WHERE a.mechanism = 'opa' AND e.applied_opa_url IS DISTINCT FROM $1 ORDER BY e.name",
+        )
+        .bind(current)
+        .fetch_all(self.pool())
+        .await?)
+    }
+
     /// Persist the generated delegator secret id for an engine (idempotent bookkeeping).
     pub async fn set_delegator_secret(
         &self,

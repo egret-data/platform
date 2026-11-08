@@ -3212,6 +3212,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // credential-rotation push-down onto provisioned warehouses; the warehouse
     // admin router itself moved to egret-catalog-engine (E3d-3, see
     // `catalog_admin` below).
+    let opa_on = opa.is_some();
+    let opa_reapply_state = engine_mgmt.clone();
     let control_plane = Some(egret_controlplane::CpState {
         storage: egret_catalog_engine::CatalogStore::new(db.clone()),
         storage_registry: egret_storage::StorageRegistry::new(db.clone()),
@@ -3659,6 +3661,24 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 tracing::error!(error = %e, "OPA listener stopped");
             }
         });
+    }
+    // Engines on an OPA profile whose plugin files still name an older OPA URL
+    // (applied before the listener moved) are re-applied once, in the
+    // background so serving is never delayed; a failure is logged per engine.
+    if opa_on {
+        if let Some(st) = opa_reapply_state {
+            tokio::spawn(async move {
+                let report = egret_engine_mgmt::reapply_stale_opa_engines(&st).await;
+                tracing::info!(
+                    applied = report.applied.len(),
+                    failed = report.failed.len(),
+                    "re-applied engines with a stale OPA URL"
+                );
+                for (engine, why) in &report.failed {
+                    tracing::warn!(engine = %engine, error = %why, "stale OPA URL re-apply failed");
+                }
+            });
+        }
     }
     if let Some(router) = apps_proxy {
         let apps_addr = config.apps.listen.clone();
