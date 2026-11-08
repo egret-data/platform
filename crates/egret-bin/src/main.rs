@@ -3669,11 +3669,15 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         if let Some(st) = opa_reapply_state {
             tokio::spawn(async move {
                 let report = egret_engine_mgmt::reapply_stale_opa_engines(&st).await;
-                tracing::info!(
-                    applied = report.applied.len(),
-                    failed = report.failed.len(),
-                    "re-applied engines with a stale OPA URL"
-                );
+                if report.applied.is_empty() && report.failed.is_empty() {
+                    tracing::debug!("no engine has a stale OPA URL");
+                } else {
+                    tracing::info!(
+                        applied = report.applied.len(),
+                        failed = report.failed.len(),
+                        "re-applied engines with a stale OPA URL"
+                    );
+                }
                 for (engine, why) in &report.failed {
                     tracing::warn!(engine = %engine, error = %why, "stale OPA URL re-apply failed");
                 }

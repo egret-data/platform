@@ -1062,12 +1062,16 @@ async fn finish_apply(
         }
     }
     if res.is_ok() {
-        // The OPA URL this apply rendered; NULL when the engine is not on OPA.
+        // The OPA URL this apply rendered; NULL unless a Trino engine is on OPA
+        // (StarRocks has no OPA path).
         let opa_url = built
             .req
             .ranger
             .as_ref()
-            .filter(|r| r.mechanism == egret_engine_mgmt_api::opa_config::AccessMechanism::Opa)
+            .filter(|r| {
+                !engine.is_starrocks()
+                    && r.mechanism == egret_engine_mgmt_api::opa_config::AccessMechanism::Opa
+            })
             .map(|r| r.egret_url.clone());
         if let Err(e) = st
             .engine_mgmt

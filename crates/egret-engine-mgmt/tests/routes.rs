@@ -16919,6 +16919,159 @@ async fn the_start_up_pass_re_applies_only_stale_provisioned_opa_engines() {
 }
 
 #[tokio::test]
+async fn a_failed_apply_keeps_the_stored_opa_url() {
+    // Arrange: a Ranger profile, so no other test's stale pass (the database is
+    // shared) lists this engine; only the apply's own recording could change it.
+    let port = FakeEnginePort::default();
+    let Some(f) = opa_fixture(&port).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "opa_url_fail_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let profile = seed_typed_profile(&f, &engine_name("opa-url-fail-p"), "trino").await;
+    let name = engine_name("opa-url-fail");
+    let id = create_trino(&f, &token, &name, wh_id, "483", Some(profile)).await;
+    set_applied_opa_url(&f, id, Some("http://egret:8080")).await;
+    port.set_fail_update_for(&name, true);
+
+    // Act
+    let report = egret_engine_mgmt::reapply_bound_engines(&state_of(&f), profile).await;
+
+    // Assert
+    assert!(report.failed.iter().any(|(n, _)| n == &name), "{report:?}");
+    assert_eq!(
+        applied_opa_url(&f, id).await.as_deref(),
+        Some("http://egret:8080"),
+        "a failed apply records nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_lost_applied_opa_url_write_fails_the_engine_by_name_and_a_retry_records_it() {
+    // Arrange: a stale OPA engine and a trigger refusing its applied_opa_url write.
+    let port = FakeEnginePort::default();
+    let Some(f) = opa_fixture(&port).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "opa_url_lost_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let profile = seed_typed_profile(&f, &engine_name("opa-url-lost-p"), "trino").await;
+    set_profile_mechanism(&f, profile, "opa").await;
+    let name = engine_name("opa-url-lost");
+    let id = create_trino(&f, &token, &name, wh_id, "483", Some(profile)).await;
+    set_applied_opa_url(&f, id, Some("http://egret:8080")).await;
+    let func = format!("test_refuse_applied_opa_url_{}", id.simple());
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE FUNCTION public.{func}() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN \
+           IF NEW.id = '{id}' AND NEW.applied_opa_url IS DISTINCT FROM OLD.applied_opa_url THEN \
+             RAISE EXCEPTION 'injected applied_opa_url write failure'; \
+           END IF; \
+           RETURN NEW; \
+         END $$"
+    )))
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE TRIGGER {func} BEFORE UPDATE ON engine_mgmt.engines \
+         FOR EACH ROW EXECUTE FUNCTION public.{func}()"
+    )))
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+
+    // Act: the apply lands, its record does not.
+    let report = egret_engine_mgmt::reapply_stale_opa_engines(&state_of(&f)).await;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP TRIGGER {func} ON engine_mgmt.engines"
+    )))
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP FUNCTION public.{func}()"
+    )))
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+
+    // Assert
+    let why = report
+        .failed
+        .iter()
+        .find(|(n, _)| n == &name)
+        .map(|(_, w)| w.clone())
+        .unwrap_or_else(|| panic!("{report:?}"));
+    assert!(
+        why.starts_with("applied, but the applied OPA URL could not be recorded: ")
+            && why.contains("injected applied_opa_url write failure"),
+        "{why}"
+    );
+    assert_eq!(
+        applied_opa_url(&f, id).await.as_deref(),
+        Some("http://egret:8080")
+    );
+
+    // Act: the next pass retries it.
+    let report = egret_engine_mgmt::reapply_stale_opa_engines(&state_of(&f)).await;
+
+    // Assert
+    assert!(report.applied.contains(&name), "{report:?}");
+    assert_eq!(
+        applied_opa_url(&f, id).await.as_deref(),
+        Some("http://egret:8082")
+    );
+}
+
+#[tokio::test]
+async fn a_starrocks_engine_is_never_listed_or_applied_by_the_stale_pass() {
+    // Arrange: StarRocks has no OPA path; force one onto an OPA profile anyway.
+    let port = FakeEnginePort::default();
+    let Some(f) = opa_fixture(&port).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "opa_url_sr_admin", true).await;
+    let profile = seed_typed_profile(&f, &engine_name("opa-url-sr-p"), "trino").await;
+    set_profile_mechanism(&f, profile, "opa").await;
+    let (sr_id, _) = create_starrocks_via_api(&f, &token).await;
+    let sr_id = Uuid::parse_str(&sr_id).unwrap();
+    sqlx::query("UPDATE engine_mgmt.engines SET authz_service_id = $1 WHERE id = $2")
+        .bind(profile)
+        .bind(sr_id)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    let sr_name: String = sqlx::query_scalar("SELECT name FROM engine_mgmt.engines WHERE id = $1")
+        .bind(sr_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+    port.updated.lock().unwrap().clear();
+
+    // Act
+    let report = egret_engine_mgmt::reapply_stale_opa_engines(&state_of(&f)).await;
+
+    // Assert
+    assert!(!report.applied.contains(&sr_name), "{report:?}");
+    assert!(
+        !report.failed.iter().any(|(n, _)| n == &sr_name),
+        "{report:?}"
+    );
+    let tried: Vec<String> = port
+        .updated
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
+    assert!(!tried.contains(&sr_name), "{tried:?}");
+}
+
+#[tokio::test]
 async fn a_failed_apply_does_not_record_the_mechanism() {
     let port = FakeEnginePort::default();
     let Some(f) = opa_fixture(&port).await else {
