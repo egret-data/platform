@@ -248,6 +248,60 @@ async fn a_body_at_the_limit_is_answered_and_one_byte_over_is_refused() {
     assert_eq!(over.0, 413, "{over:?}");
 }
 
+fn filter_catalogs() -> Value {
+    json!({"operation": "FilterCatalogs", "filterResources": [{"catalog": {"name": "lake"}}]})
+}
+
+/// An admitted `/batch` request padded with trailing JSON whitespace to `len` bytes.
+fn padded_batch(len: usize) -> String {
+    let mut raw = body(ENGINE, RIGHT, filter_catalogs()).to_string();
+    assert!(raw.len() <= len);
+    raw.push_str(&" ".repeat(len - raw.len()));
+    raw
+}
+
+const FIVE_MIB: usize = 5 * 1024 * 1024;
+
+#[tokio::test]
+async fn a_five_mebibyte_batch_under_the_default_limit_is_read_and_answered() {
+    // Arrange: the production default limit (24 MiB), through the OPA router.
+    let app = router(Some(opa_state(Arc::new(Stub { accept: true }), ENGINE)));
+
+    // Act
+    let res = send_raw(&app, "POST", "/batch", padded_batch(FIVE_MIB)).await;
+
+    // Assert: no outer limit refused it; the engine is admitted, so it is answered.
+    assert_eq!(res, (200, json!({"result": [0]})), "{res:?}");
+}
+
+#[tokio::test]
+async fn a_batch_over_the_configured_limit_is_refused_with_413() {
+    // Arrange: `/batch` limited to 4 MiB.
+    let mut opa = opa_state(Arc::new(Stub { accept: true }), ENGINE);
+    opa.batch_body_limit = OPA_BODY_LIMIT_BYTES;
+    let app = router(Some(opa));
+
+    // Act
+    let over = send_raw(&app, "POST", "/batch", padded_batch(FIVE_MIB)).await;
+    let at = send_raw(&app, "POST", "/batch", padded_batch(OPA_BODY_LIMIT_BYTES)).await;
+
+    // Assert
+    assert_eq!(over.0, 413, "{over:?}");
+    assert_eq!(at.0, 200, "{at:?}");
+}
+
+#[tokio::test]
+async fn an_allow_body_over_four_mebibytes_is_refused_even_when_batch_may_be_larger() {
+    // Arrange: default state, `/batch` allows 24 MiB.
+    let app = router(Some(opa_state(Arc::new(Stub { accept: true }), ENGINE)));
+
+    // Act
+    let res = send_raw(&app, "POST", "/allow", padded_allow(FIVE_MIB)).await;
+
+    // Assert
+    assert_eq!(res.0, 413, "{res:?}");
+}
+
 #[test]
 fn the_body_limit_is_four_mebibytes() {
     assert_eq!(OPA_BODY_LIMIT_BYTES, 4 * 1024 * 1024);
