@@ -4,14 +4,20 @@
 //! Service and pod, and whether only engines are admitted to it.
 
 fn read(rel: &str) -> String {
-    let path = format!("{}/../../deploy/helm/egret/{rel}", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/../../deploy/helm/egret/{rel}",
+        env!("CARGO_MANIFEST_DIR")
+    );
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"))
 }
 
 /// The `ingress:` rules of the policy, one string per `- ` rule.
 fn rules() -> Vec<String> {
     let policy = read("templates/networkpolicy-egret.yaml");
-    let body = policy.split("  ingress:\n").nth(1).expect("no ingress rules");
+    let body = policy
+        .split("  ingress:\n")
+        .nth(1)
+        .expect("no ingress rules");
     format!("\n{body}")
         .split("\n    - ")
         .skip(1)
@@ -29,8 +35,14 @@ fn the_policy_selects_only_the_backend_pods() {
 #[test]
 fn api_and_apps_ports_stay_open_to_every_peer() {
     let rules = rules();
-    let open = rules.iter().find(|r| r.contains("port: 8080")).expect("no 8080 rule");
-    assert!(!open.contains("from:"), "8080 must stay open to every peer: {open}");
+    let open = rules
+        .iter()
+        .find(|r| r.contains("port: 8080"))
+        .expect("no 8080 rule");
+    assert!(
+        !open.contains("from:"),
+        "8080 must stay open to every peer: {open}"
+    );
     assert!(open.contains("port: 8081"));
     assert!(!open.contains(".Values.opa.port"));
 }
@@ -42,7 +54,10 @@ fn the_opa_port_admits_only_engines() {
         .iter()
         .find(|r| r.contains(".Values.opa.port"))
         .expect("no OPA rule");
-    assert!(opa.contains("from:"), "the OPA port must name its peers: {opa}");
+    assert!(
+        opa.contains("from:"),
+        "the OPA port must name its peers: {opa}"
+    );
     assert!(opa.contains(".Values.engineNamespace"));
     assert!(opa.contains(".Values.opa.extraFrom"));
     assert!(!opa.contains("port: 8080"));
@@ -51,17 +66,30 @@ fn the_opa_port_admits_only_engines() {
 #[test]
 fn the_opa_port_is_on_the_pod_service_and_env_under_opa_enabled() {
     for (file, needle) in [
-        ("templates/backend-deployment.yaml", "name: opa, containerPort: {{ .Values.opa.port }}"),
-        ("templates/backend-service.yaml", "name: opa, port: {{ .Values.opa.port }}"),
-        ("templates/configmap-env.yaml", "EGRET_GOVERNANCE__OPA__ENABLED: \"true\""),
+        (
+            "templates/backend-deployment.yaml",
+            "name: opa, containerPort: {{ .Values.opa.port }}",
+        ),
+        (
+            "templates/backend-service.yaml",
+            "name: opa, port: {{ .Values.opa.port }}",
+        ),
+        (
+            "templates/configmap-env.yaml",
+            "EGRET_GOVERNANCE__OPA__ENABLED: \"true\"",
+        ),
         (
             "templates/configmap-env.yaml",
             "EGRET_GOVERNANCE__OPA__LISTEN: \"0.0.0.0:{{ .Values.opa.port }}\"",
         ),
     ] {
         let text = read(file);
-        let at = text.find(needle).unwrap_or_else(|| panic!("{file}: no `{needle}`"));
-        let guard = text[..at].rfind("{{- if").expect("no guard before the line");
+        let at = text
+            .find(needle)
+            .unwrap_or_else(|| panic!("{file}: no `{needle}`"));
+        let guard = text[..at]
+            .rfind("{{- if")
+            .expect("no guard before the line");
         assert!(
             text[guard..at].contains(".Values.opa.enabled"),
             "{file}: `{needle}` must sit under `if .Values.opa.enabled`"
