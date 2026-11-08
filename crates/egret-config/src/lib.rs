@@ -673,6 +673,57 @@ pub struct OpaSettings {
     /// in milliseconds; a stalled caller holds its share for 5 s at most.
     #[serde(default = "default_opa_body_read_timeout_ms")]
     pub body_read_timeout_ms: u64,
+    /// Where the dedicated OPA listener binds, `host:port`. Key `[governance.opa]
+    /// listen`, env `EGRET_GOVERNANCE__OPA__LISTEN`. Default
+    /// [`DEFAULT_OPA_LISTEN`] (`0.0.0.0:8082`).
+    ///
+    /// The OPA surface gets its own listener so `/opa/` leaves the shared API
+    /// port 8080 (spec B1): a NetworkPolicy can then admit only the engines
+    /// to this port while 8080 stays reachable by browsers and ingress. The
+    /// NetworkPolicy must allow the engine pods to reach this port. Refused at
+    /// startup when it has no port or equals `server.host:server.port` or
+    /// `apps.listen` ([`Config::validate`]).
+    #[serde(default = "default_opa_listen")]
+    pub listen: String,
+    /// The URL engines use to reach the OPA listener, e.g.
+    /// `http://egret.ns.svc:8082`. Key `[governance.opa] engine_url`, env
+    /// `EGRET_GOVERNANCE__OPA__ENGINE_URL`. When unset it is derived from the
+    /// engine-facing egret URL with the port of `listen` ([`opa_engine_url`]);
+    /// set it when a proxy or Service maps the OPA port differently.
+    #[serde(default)]
+    pub engine_url: Option<String>,
+}
+
+/// The default of [`OpaSettings::listen`].
+pub const DEFAULT_OPA_LISTEN: &str = "0.0.0.0:8082";
+
+fn default_opa_listen() -> String {
+    DEFAULT_OPA_LISTEN.to_string()
+}
+
+/// The port of a `host:port` listen address, or `None` when it has no valid one.
+fn listen_port(listen: &str) -> Option<u16> {
+    listen.rsplit_once(':')?.1.parse().ok()
+}
+
+/// The URL engines use to reach egret's OPA listener: `settings.engine_url`
+/// when set, else `engine_egret_url` with its port replaced by the port of
+/// `settings.listen`, without a trailing slash.
+pub fn opa_engine_url(engine_egret_url: &str, settings: &OpaSettings) -> Result<String, String> {
+    if let Some(url) = &settings.engine_url {
+        return Ok(url.clone());
+    }
+    let port = listen_port(&settings.listen).ok_or_else(|| {
+        format!(
+            "governance.opa.listen {:?} must be host:port",
+            settings.listen
+        )
+    })?;
+    let mut url = url::Url::parse(engine_egret_url)
+        .map_err(|e| format!("engine egret url {engine_egret_url:?} is not a URL: {e}"))?;
+    url.set_port(Some(port))
+        .map_err(|()| format!("engine egret url {engine_egret_url:?} cannot carry a port"))?;
+    Ok(url.as_str().trim_end_matches('/').to_string())
 }
 
 impl OpaSettings {
@@ -693,6 +744,12 @@ impl OpaSettings {
                  {MAX_OPA_BODY_READ_TIMEOUT_MS}, got {timeout}"
             ));
         }
+        if listen_port(&self.listen).is_none() {
+            return Err(format!(
+                "governance.opa.listen {:?} must be host:port (EGRET_GOVERNANCE__OPA__LISTEN)",
+                self.listen
+            ));
+        }
         Ok(())
     }
 }
@@ -703,6 +760,8 @@ impl Default for OpaSettings {
             enabled: false,
             batch_body_limit_bytes: DEFAULT_OPA_BATCH_BODY_LIMIT_BYTES,
             body_read_timeout_ms: DEFAULT_OPA_BODY_READ_TIMEOUT_MS,
+            listen: default_opa_listen(),
+            engine_url: None,
         }
     }
 }
@@ -2265,6 +2324,20 @@ impl Config {
         self.workflow.storage.validate()?;
         self.workflow.http.validate()?;
         self.governance.opa.validate()?;
+        let api_listen = format!("{}:{}", self.server.host, self.server.port);
+        if self.governance.opa.listen == api_listen {
+            return Err(format!(
+                "governance.opa.listen {api_listen:?} equals server.host:server.port: the OPA \
+                 listener must be a separate port from the API"
+            ));
+        }
+        if !self.apps.origin.is_empty() && self.governance.opa.listen == self.apps.listen {
+            return Err(format!(
+                "governance.opa.listen {:?} equals apps.listen: the OPA listener must be a \
+                 separate port from the apps host",
+                self.governance.opa.listen
+            ));
+        }
         if self.workflow.kill_poll_ms < MIN_KILL_POLL_MS {
             return Err(format!(
                 "workflow.kill_poll_ms: {} is below the minimum {MIN_KILL_POLL_MS} \
@@ -4406,6 +4479,7 @@ values = { allowed-images = [] }
             enabled: true,
             batch_body_limit_bytes: limit,
             body_read_timeout_ms: timeout,
+            ..OpaSettings::default()
         };
         let max = 64 * 1024 * 1024;
         let min = 4 * 1024 * 1024;
@@ -4457,6 +4531,77 @@ values = { allowed-images = [] }
             let c: Config = Config::figment().extract().expect("env");
             assert_eq!(c.governance.opa.body_read_timeout_ms, 2_500);
             c.governance.opa.validate().expect("2500 is accepted");
+            Ok(())
+        });
+    }
+
+    /// PR B1: the OPA listener address defaults to 0.0.0.0:8082 and the
+    /// engine-facing URL is derived from the engine-facing egret URL.
+    #[test]
+    fn governance_opa_listen_defaults_and_engine_url_derivation() {
+        let d = OpaSettings::default();
+        assert_eq!(d.listen, "0.0.0.0:8082");
+        assert_eq!(d.engine_url, None);
+        assert_eq!(
+            opa_engine_url("http://egret:8080", &d),
+            Ok("http://egret:8082".to_string())
+        );
+        assert_eq!(
+            opa_engine_url("http://egret.ns.svc:8080/", &d),
+            Ok("http://egret.ns.svc:8082".to_string())
+        );
+        let explicit = OpaSettings {
+            engine_url: Some("http://opa.example:9000".into()),
+            ..OpaSettings::default()
+        };
+        assert_eq!(
+            opa_engine_url("http://egret:8080", &explicit),
+            Ok("http://opa.example:9000".to_string())
+        );
+        assert!(opa_engine_url("not a url", &d).is_err());
+        let custom = OpaSettings {
+            listen: "127.0.0.1:9191".into(),
+            ..OpaSettings::default()
+        };
+        assert_eq!(
+            opa_engine_url("http://egret:8080", &custom),
+            Ok("http://egret:9191".to_string())
+        );
+    }
+
+    /// PR B1: `listen` must be host:port and must not collide with the API
+    /// listener or the apps listener.
+    #[test]
+    fn governance_opa_listen_is_validated() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_GOVERNANCE__OPA__LISTEN", "0.0.0.0");
+            let c: Config = Config::figment().extract().expect("env");
+            let err = c.validate().expect_err("no port is refused");
+            assert!(err.contains("governance.opa.listen"), "{err}");
+            Ok(())
+        });
+        figment::Jail::expect_with(|jail| {
+            let c: Config = Config::figment().extract().expect("defaults");
+            let addr = format!("{}:{}", c.server.host, c.server.port);
+            jail.set_env("EGRET_GOVERNANCE__OPA__LISTEN", &addr);
+            let c: Config = Config::figment().extract().expect("env");
+            let err = c.validate().expect_err("same as the API listener");
+            assert!(
+                err.contains("governance.opa.listen") && err.contains("server.port"),
+                "{err}"
+            );
+            Ok(())
+        });
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_APPS__ORIGIN", "https://apps.example.com");
+            jail.set_env("EGRET_APPS__EGRET_ORIGIN", "https://egret.example.com");
+            jail.set_env("EGRET_APPS__LISTEN", "0.0.0.0:8082");
+            let c: Config = Config::figment().extract().expect("env");
+            let err = c.validate().expect_err("same as the apps listener");
+            assert!(
+                err.contains("governance.opa.listen") && err.contains("apps.listen"),
+                "{err}"
+            );
             Ok(())
         });
     }
