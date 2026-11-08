@@ -711,7 +711,7 @@ fn listen_port(listen: &str) -> Option<u16> {
 /// `settings.listen`, without a trailing slash.
 pub fn opa_engine_url(engine_egret_url: &str, settings: &OpaSettings) -> Result<String, String> {
     if let Some(url) = &settings.engine_url {
-        return Ok(url.clone());
+        return Ok(url.trim_end_matches('/').to_string());
     }
     let port = listen_port(&settings.listen).ok_or_else(|| {
         format!(
@@ -2324,18 +2324,21 @@ impl Config {
         self.workflow.storage.validate()?;
         self.workflow.http.validate()?;
         self.governance.opa.validate()?;
-        let api_listen = format!("{}:{}", self.server.host, self.server.port);
-        if self.governance.opa.listen == api_listen {
+        // Validated above, so the port parses. Two listeners in one pod collide on
+        // the port whatever the host, so compare ports, not strings.
+        let opa_port = listen_port(&self.governance.opa.listen);
+        if opa_port == Some(self.server.port) {
             return Err(format!(
-                "governance.opa.listen {api_listen:?} equals server.host:server.port: the OPA \
-                 listener must be a separate port from the API"
+                "governance.opa.listen {:?} has the same port as server.host:server.port \
+                 ({}:{}): the OPA listener must be a separate port from the API",
+                self.governance.opa.listen, self.server.host, self.server.port
             ));
         }
-        if !self.apps.origin.is_empty() && self.governance.opa.listen == self.apps.listen {
+        if !self.apps.origin.is_empty() && opa_port == listen_port(&self.apps.listen) {
             return Err(format!(
-                "governance.opa.listen {:?} equals apps.listen: the OPA listener must be a \
-                 separate port from the apps host",
-                self.governance.opa.listen
+                "governance.opa.listen {:?} has the same port as apps.listen {:?}: the OPA \
+                 listener must be a separate port from the apps host",
+                self.governance.opa.listen, self.apps.listen
             ));
         }
         if self.workflow.kill_poll_ms < MIN_KILL_POLL_MS {
@@ -4558,6 +4561,14 @@ values = { allowed-images = [] }
             opa_engine_url("http://egret:8080", &explicit),
             Ok("http://opa.example:9000".to_string())
         );
+        let slashed = OpaSettings {
+            engine_url: Some("http://opa.example:9000/".into()),
+            ..OpaSettings::default()
+        };
+        assert_eq!(
+            opa_engine_url("http://egret:8080", &slashed),
+            Ok("http://opa.example:9000".to_string())
+        );
         assert!(opa_engine_url("not a url", &d).is_err());
         let custom = OpaSettings {
             listen: "127.0.0.1:9191".into(),
@@ -4602,6 +4613,47 @@ values = { allowed-images = [] }
                 err.contains("governance.opa.listen") && err.contains("apps.listen"),
                 "{err}"
             );
+            Ok(())
+        });
+    }
+
+    /// Fix round 1: collisions are by port, whatever the host; and an apps
+    /// listener that is not configured (no apps.origin) cannot collide.
+    #[test]
+    fn governance_opa_listen_collides_by_port_and_ignores_disabled_apps() {
+        figment::Jail::expect_with(|jail| {
+            let c: Config = Config::figment().extract().expect("defaults");
+            jail.set_env(
+                "EGRET_GOVERNANCE__OPA__LISTEN",
+                format!("127.0.0.1:{}", c.server.port),
+            );
+            let c: Config = Config::figment().extract().expect("env");
+            let err = c.validate().expect_err("same port, different host");
+            assert!(
+                err.contains("governance.opa.listen") && err.contains("server.port"),
+                "{err}"
+            );
+            Ok(())
+        });
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_APPS__ORIGIN", "https://apps.example.com");
+            jail.set_env("EGRET_APPS__EGRET_ORIGIN", "https://egret.example.com");
+            jail.set_env("EGRET_APPS__LISTEN", "127.0.0.1:8082");
+            let c: Config = Config::figment().extract().expect("env");
+            let err = c.validate().expect_err("apps, same port, different host");
+            assert!(err.contains("apps.listen"), "{err}");
+            Ok(())
+        });
+        figment::Jail::expect_with(|jail| {
+            // apps.origin empty: apps is disabled, so its listen is not bound.
+            jail.set_env("EGRET_APPS__LISTEN", "0.0.0.0:8082");
+            jail.set_env("EGRET_STORAGE__BUCKET", "b");
+            jail.set_env("EGRET_STORAGE__ACCESS_KEY", "k");
+            jail.set_env("EGRET_STORAGE__SECRET_KEY", "s");
+            let c: Config = Config::figment().extract().expect("env");
+            assert!(c.apps.origin.is_empty());
+            assert_eq!(c.governance.opa.listen, "0.0.0.0:8082");
+            c.validate().expect("accepted while apps is disabled");
             Ok(())
         });
     }
