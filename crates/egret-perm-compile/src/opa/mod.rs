@@ -39,11 +39,12 @@ pub fn start_opa(
         return None;
     }
     let Some(verifier) = verifier else {
-        tracing::error!(
-            "governance.opa.enabled is set but the Ranger surface (ranger.enabled) is off: \
-             OPA IS NOT RUNNING. The OPA surface checks engines with the Ranger surface's \
-             credentials, so its routes are not mounted and no snapshot is built; every OPA \
-             request gets 404 and fails its query. Enable ranger.enabled to run OPA."
+        // Not an error: with `governance.opa.enabled` on by default this is the
+        // state of every install that has not turned the Ranger surface on.
+        tracing::info!(
+            "OPA surface idle: ranger.enabled is off, so no OPA listener runs (the surface \
+             checks engines with the Ranger surface's credentials); a switch to OPA is \
+             refused until ranger.enabled is on"
         );
         return None;
     };

@@ -734,6 +734,12 @@ pub struct ExplainProfile {
     /// nor one being deleted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub engines_not_reapplied: Vec<String>,
+    /// Set for a Trino profile with no tag service, on either mechanism:
+    /// classification rules and clearances do not apply to its engines, so
+    /// the verdicts here carry no tag-based decision. Read in this explain's
+    /// own transaction. Absent otherwise (StarRocks, or a bound tag service).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_tag_service_warning: Option<String>,
     pub accesses: Vec<ExplainAccess>,
     /// The tag set **this profile's** verdicts could have been decided by.
     ///
@@ -2720,6 +2726,7 @@ pub(crate) async fn explain_users(
         // order (and so its refusals) stays exactly as it was.
         let not_reapplied =
             engines_not_reapplied_via(&mut *conn, service_id, &svc.mechanism).await?;
+        let no_tag_warning = egret_policy::no_tag_service_warning_via(&mut *conn, &svc).await?;
         if svc.mechanism == "opa" {
             let Some(catalog_name) = catalogs_for_service_via(&mut *conn, service_id)
                 .await?
@@ -2748,6 +2755,7 @@ pub(crate) async fn explain_users(
                     target,
                 });
                 profile.engines_not_reapplied = not_reapplied.clone();
+                profile.no_tag_service_warning = no_tag_warning.clone();
                 per_user[i].push(profile);
             }
             continue;
@@ -3049,6 +3057,7 @@ pub(crate) async fn explain_users(
                 mechanism: WireMechanism::Ranger,
                 opa: None,
                 engines_not_reapplied: not_reapplied.clone(),
+                no_tag_service_warning: no_tag_warning.clone(),
                 accesses,
                 tags: tags_for_profile(&resolved_for_display, tag_policies_in_download),
                 tag_policies_in_download,

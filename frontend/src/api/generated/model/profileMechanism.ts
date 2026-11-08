@@ -26,4 +26,11 @@ export interface ProfileMechanism {
      * @nullable
      */
   external_engines_warning?: string | null;
+  /**
+     * Set when this is a Trino profile with no tag service: classification
+     * rules and clearances do not apply to its engines, on either mechanism.
+     * Absent otherwise (a StarRocks profile, or one with a tag service).
+     * @nullable
+     */
+  no_tag_service_warning?: string | null;
 }

@@ -54,6 +54,14 @@ export interface ExplainProfile {
      * nor one being deleted.
      */
   engines_not_reapplied?: string[];
+  /**
+     * Set for a Trino profile with no tag service, on either mechanism:
+     * classification rules and clearances do not apply to its engines, so
+     * the verdicts here carry no tag-based decision. Read in this explain's
+     * own transaction. Absent otherwise (StarRocks, or a bound tag service).
+     * @nullable
+     */
+  no_tag_service_warning?: string | null;
   accesses: ExplainAccess[];
   /**
      * The tag set **this profile's** verdicts could have been decided by.

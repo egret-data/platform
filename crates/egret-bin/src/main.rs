@@ -2813,10 +2813,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // Engines reach the OPA decision surface on its own listener, so they are
     // given that URL, not the catalog's. An error only while OPA is on: with
     // it off, an underivable URL falls back to `engine_egret_url`.
-    let engine_opa_url = egret_config::opa_engine_url(&engine_egret_url, &config.governance.opa)
-        .map_err(|e| {
-            anyhow::anyhow!("governance.opa.engine_url: cannot derive the OPA URL engines use: {e}")
-        })?;
+    let engine_opa_url = config.opa_engine_url(&engine_egret_url).map_err(|e| {
+        anyhow::anyhow!("governance.opa.engine_url: cannot derive the OPA URL engines use: {e}")
+    })?;
 
     // Recompiles a catalog's implicit assignment grant (SP4a Task 16, D3
     // defects 2 and 3) — built once here, shared (as two DIFFERENT trait
@@ -2882,6 +2881,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // actually runs, which `start_opa` also requires the Ranger surface (and
         // so its credential verifier) for. With `ranger.enabled` off the PATCH is
         // refused (`Disabled`) instead of answering 200 to engines left on 404s.
+        // Runtime form of `Config::opa_effective` (the verifier exists only with
+        // `ranger.enabled`).
         opa_enabled: config.governance.opa.enabled && engine_credential_verifier.is_some(),
     });
 
@@ -3188,7 +3189,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     }
 
     // Governance SP2b: the OPA decision surface and its snapshot refresher,
-    // only while `[governance.opa] enabled` (default false) and the Ranger
+    // only while `[governance.opa] enabled` (default true) and the Ranger
     // surface is on. With the gate off, `opa` is `None`: the routes are not
     // mounted and no refresher runs. The refresher stops with the other
     // background loops.

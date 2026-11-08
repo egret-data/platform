@@ -30,7 +30,7 @@ pub enum MechanismName {
 /// One reason a profile may not switch to OPA.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SwitchRefusal {
-    /// `[governance.opa] enabled` is false.
+    /// `[governance.opa] enabled` is false, or `ranger.enabled` is off (OPA does not run without it).
     Disabled,
     /// OPA exists for Trino only (migration 0213's CHECK).
     NotTrino { r#type: String },
@@ -55,7 +55,9 @@ impl SwitchRefusal {
     pub fn message(&self) -> String {
         match self {
             Self::Disabled => {
-                "OPA is not enabled on this installation ([governance.opa] enabled)".to_string()
+                "OPA is not running on this installation: it needs both [governance.opa] enabled \
+                 and ranger.enabled"
+                    .to_string()
             }
             Self::NotTrino { r#type } => {
                 format!("only a Trino profile can use OPA; this profile is of type {type}")
@@ -196,6 +198,32 @@ pub struct ProfileMechanism {
     /// direction of this switch. Absent when no external engine is bound.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_engines_warning: Option<String>,
+    /// Set when this is a Trino profile with no tag service: classification
+    /// rules and clearances do not apply to its engines, on either mechanism.
+    /// Absent otherwise (a StarRocks profile, or one with a tag service).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_tag_service_warning: Option<String>,
+}
+
+/// What a Trino profile with no tag service is told (`no_tag_service_warning`
+/// on the switch answer and on explain's profile).
+pub const NO_TAG_SERVICE_WARNING: &str = "This profile has no tag service, so classification \
+    rules and clearances do not apply to its engines. Bind a tag service in the profile's \
+    settings.";
+
+/// [`NO_TAG_SERVICE_WARNING`] when `svc` is a Trino profile whose
+/// `config.tagService` resolves to no profile (the same answer
+/// [`crate::usable_tag_services_via`] gives the plugin download), else `None`.
+/// Reads in the caller's transaction.
+pub async fn no_tag_service_warning_via(
+    conn: &mut sqlx::PgConnection,
+    svc: &ServiceRow,
+) -> Result<Option<String>, crate::PolicyStoreError> {
+    if svc.r#type != crate::TRINO_DEF_NAME {
+        return Ok(None);
+    }
+    let bound = crate::usable_tag_services_via(conn, &[svc.id]).await?;
+    Ok(bound.is_empty().then(|| NO_TAG_SERVICE_WARNING.to_string()))
 }
 
 /// What an external engine's operator must do after the profile moved to
@@ -261,13 +289,13 @@ impl MechanismName {
     params(("service" = String, Path, description = "Policy profile (Ranger service) name")),
     request_body = SetMechanismBody,
     responses(
-        (status = 200, description = "The coordinator of every bound egret-provisioned engine restarts to load the new access control; queries running on it fail. External engines are listed in `external_engines_unchanged`, and `external_engines_warning` says what their operator must do: after a switch to OPA they keep enforcing the Ranger policies until the OPA plugin files are installed (Trino 483 or later with `plugin/opa`); after a switch to Ranger, those running the OPA plugin fail every query until the Ranger plugin files are re-installed.", body = ProfileMechanism),
+        (status = 200, description = "The coordinator of every bound egret-provisioned engine restarts to load the new access control; queries running on it fail. External engines are listed in `external_engines_unchanged`, and `external_engines_warning` says what their operator must do: after a switch to OPA they keep enforcing the Ranger policies until the OPA plugin files are installed (Trino 483 or later with `plugin/opa`); after a switch to Ranger, those running the OPA plugin fail every query until the Ranger plugin files are re-installed. `no_tag_service_warning` is present when the profile is a Trino profile with no tag service, so classification rules and clearances do not apply to its engines.", body = ProfileMechanism),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such policy profile", body = ErrorBody),
         (status = 409, description = "The switch to OPA is refused: `{error, code: \"mechanism_refused\", refusals}`, `refusals` naming every condition that holds (`error` is the first). Nothing is written", body = Object),
         (status = 500, description = "Internal error", body = ErrorBody),
-        (status = 502, description = "The switch is committed, but some bound engines were not reconfigured: `{error, engines_reconfigured, engines_failed: [{engine, error}], external_engines_unchanged, external_engines_warning?}`. Send the same PATCH again to retry", body = Object),
+        (status = 502, description = "The switch is committed, but some bound engines were not reconfigured: `{error, engines_reconfigured, engines_failed: [{engine, error}], external_engines_unchanged, external_engines_warning?, no_tag_service_warning?}`. Send the same PATCH again to retry", body = Object),
     ),
 )]
 pub async fn set_mechanism(
@@ -348,6 +376,7 @@ pub async fn set_mechanism(
         .await
         .map_err(crate::PolicyStoreError::from)?;
     }
+    let no_tag_service_warning = no_tag_service_warning_via(&mut tx, &svc).await?;
     tx.commit().await.map_err(crate::PolicyStoreError::from)?;
 
     // Always, also when nothing was written: the retry path of a failed
@@ -374,6 +403,9 @@ pub async fn set_mechanism(
         if let Some(warning) = warning {
             body["external_engines_warning"] = json!(warning);
         }
+        if let Some(warning) = no_tag_service_warning {
+            body["no_tag_service_warning"] = json!(warning);
+        }
         return Ok((axum::http::StatusCode::BAD_GATEWAY, axum::Json(body)).into_response());
     }
     Ok(axum::Json(ProfileMechanism {
@@ -382,6 +414,7 @@ pub async fn set_mechanism(
         engines_reconfigured: report.applied,
         external_engines_unchanged,
         external_engines_warning: warning,
+        no_tag_service_warning,
     })
     .into_response())
 }

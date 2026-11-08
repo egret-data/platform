@@ -898,6 +898,144 @@ async fn a_stored_overlap_counts_only_in_the_profile_whose_download_serves_it() 
     not_built_error(&cache, a.profile);
 }
 
+/// The units `profile`'s C8 re-check loads (`units_served_by_via`).
+async fn served(db: &Db, profile: i64) -> Vec<egret_policy::UnitIds> {
+    let mut conn = db.pool.acquire().await.expect("conn");
+    egret_perm_compile::overlap::units_served_by_via(&mut conn, profile)
+        .await
+        .expect("units")
+}
+
+/// Task 26 (Task 3): the C8 re-check of a profile whose tag service other
+/// profiles share loads only the profile's own unit, `{profile, its tag
+/// service}`, not one unit per profile sharing it (the O(N²) of a tag-version
+/// bump). Also when another profile names this one as its tag service. The
+/// pairs it reports are the all-services scan's pairs for that profile.
+#[tokio::test]
+async fn the_recheck_loads_only_the_profiles_own_unit_of_a_shared_tag_service() {
+    let _serial = SERIAL.lock().await;
+    let db = db().await;
+    let mut names = Names::default();
+
+    // Arrange: B and C share A's tag service.
+    let a = store(&db, "oc13a", open(), &mut names).await;
+    let b = store(&db, "oc13b", open(), &mut names).await;
+    let c = store(&db, "oc13c", open(), &mut names).await;
+    let a_tag = service_name(&db, a.tag_service).await;
+    set_tag_service(&db, b.profile, &a_tag).await;
+    set_tag_service(&db, c.profile, &a_tag).await;
+
+    // Arrange: one stored pair in A's unit (two tag masks of the shared tag
+    // service meeting on A's `email`), and one in B's (two path masks on one
+    // column), each written past the compile's refusal as stored state.
+    let mut tx = db.pool.begin().await.expect("tx");
+    let t1 = tag(&mut tx, "oc13.t1", &mut names).await;
+    let t2 = tag(&mut tx, "oc13.t2", &mut names).await;
+    tag_column(&mut tx, t1, a.wh, "s", "t", "email").await;
+    tag_column(&mut tx, t2, a.wh, "s", "t", "phone").await;
+    for (name, mask_type, key) in [
+        ("oc13a.mask_1", "MASK", "oc13.t1"),
+        ("oc13a.mask_2", "MASK_NULL", "oc13.t2"),
+    ] {
+        rule(
+            &mut tx,
+            name,
+            mask(mask_type, None),
+            by_tag(key),
+            set(&[], &[]),
+            &mut names,
+        )
+        .await;
+    }
+    rule(
+        &mut tx,
+        "oc13b.mask_a",
+        mask("MASK", None),
+        Selector::Path(scope(b.catalog, Some("s"), Some("t"), Some("email"))),
+        set(&[], &[]),
+        &mut names,
+    )
+    .await;
+    let moved_rule = rule(
+        &mut tx,
+        "oc13b.mask_b",
+        mask("MASK_NULL", None),
+        Selector::Path(scope(b.catalog, Some("s"), Some("t"), Some("phone"))),
+        set(&[], &[]),
+        &mut names,
+    )
+    .await;
+    tx.commit().await.expect("commit");
+    recompile(&db, a.profile).await;
+    recompile(&db, b.profile).await;
+    let mut tx = db.pool.begin().await.expect("tx");
+    tag_column(&mut tx, t2, a.wh, "s", "t", "email").await;
+    tx.commit().await.expect("commit");
+    let moved = sqlx::query(
+        "UPDATE policy.authz_policies \
+            SET policy_jsonb = jsonb_set(policy_jsonb, '{resources,column,values}', \
+                                         to_jsonb(ARRAY['email'::text])) \
+          WHERE name LIKE $1",
+    )
+    .bind(format!("perm-rule-{moved_rule}%"))
+    .execute(&db.pool)
+    .await
+    .expect("move the compiled body")
+    .rows_affected();
+    assert!(moved >= 1, "the rule's compiled policy was moved");
+
+    // Act / Assert: the scoped pairs are the all-services scan's, profile by
+    // profile, and A and B each have one.
+    let mut conn = db.pool.acquire().await.expect("conn");
+    let all = egret_perm_compile::overlap::stored_overlaps_via(&mut conn)
+        .await
+        .expect("all pairs");
+    for id in [a.profile, b.profile, c.profile] {
+        let scoped = egret_perm_compile::overlap::stored_overlaps_of_via(&mut conn, id)
+            .await
+            .expect("scoped pairs");
+        let expected: Vec<_> = all.iter().filter(|o| o.service_id == id).cloned().collect();
+        if id != c.profile {
+            assert!(!expected.is_empty(), "profile {id} stores a pair");
+        }
+        assert_eq!(scoped, expected, "profile {id}");
+    }
+    drop(conn);
+
+    let unit = |resource: i64, tag: i64| egret_policy::UnitIds {
+        resource: Some(resource),
+        tag_service: Some(tag),
+    };
+    // Act / Assert: one unit each, not three.
+    assert_eq!(
+        served(&db, a.profile).await,
+        vec![unit(a.profile, a.tag_service)]
+    );
+    assert_eq!(
+        served(&db, b.profile).await,
+        vec![unit(b.profile, a.tag_service)]
+    );
+    assert_eq!(
+        served(&db, c.profile).await,
+        vec![unit(c.profile, a.tag_service)]
+    );
+
+    // Arrange: C names A itself as its tag service; A is then tag-like, and
+    // its own unit is reached only through A's tag service.
+    let a_name = service_name(&db, a.profile).await;
+    set_tag_service(&db, c.profile, &a_name).await;
+
+    // Act / Assert
+    assert_eq!(
+        served(&db, a.profile).await,
+        vec![unit(a.profile, a.tag_service)]
+    );
+    assert_eq!(
+        served(&db, c.profile).await,
+        vec![unit(c.profile, a.profile)]
+    );
+}
+
 /// Task 18 fix round 1 (I1): the snapshot the refresher serves (built by
 /// `cache.rs`'s `outcome_from_parts`, not `build_snapshot_via`) names the
 /// reserved lineage principal, so a `public` write grant does not let

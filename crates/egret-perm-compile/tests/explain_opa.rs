@@ -1106,3 +1106,67 @@ async fn an_engine_not_yet_reapplied_to_the_profiles_mechanism_is_named() {
         "external: {body}"
     );
 }
+
+const NO_TAG_WARNING: &str = "This profile has no tag service, so classification rules and \
+                              clearances do not apply to its engines. Bind a tag service in the \
+                              profile's settings.";
+
+/// Explains `read` of a column on a Trino profile that is on `mechanism`,
+/// with or without its tag service, and returns the profile's answer.
+async fn explain_with_tag_service(mechanism: &str, tagged: bool) -> Value {
+    let db = db().await;
+    let st = store(&db, &prefix("xo_nt"), Extra::None).await;
+    if !tagged {
+        sqlx::query(
+            "UPDATE policy.authz_services SET config_jsonb = config_jsonb - 'tagService' \
+              WHERE id = $1",
+        )
+        .bind(st.profile)
+        .execute(&db.pool)
+        .await
+        .expect("unbind the tag service");
+    }
+    egret_perm_compile::recompile_service(
+        &PermStore::new(db.pool.clone()),
+        &PolicyStore::new(db.clone()),
+        st.profile,
+    )
+    .await
+    .expect("compile");
+    set_mechanism(&db, st.profile, mechanism).await;
+    let (app, token) = app(&db, None).await;
+    let (status, body, _) = explain(
+        &app,
+        &token,
+        &st.ann,
+        "read",
+        target(st.cat, Some("t"), Some("email")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    only_profile(&body).clone()
+}
+
+#[tokio::test]
+async fn a_tagless_trino_profile_is_explained_with_the_no_tag_service_warning() {
+    for mechanism in ["ranger", "opa"] {
+        let p = explain_with_tag_service(mechanism, false).await;
+        assert_eq!(p["mechanism"], mechanism, "{p}");
+        assert_eq!(
+            p["no_tag_service_warning"], NO_TAG_WARNING,
+            "{mechanism}: {p}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_trino_profile_with_a_tag_service_is_explained_without_the_warning() {
+    for mechanism in ["ranger", "opa"] {
+        let p = explain_with_tag_service(mechanism, true).await;
+        assert_eq!(p["mechanism"], mechanism, "{p}");
+        assert!(
+            p.get("no_tag_service_warning").is_none(),
+            "{mechanism}: {p}"
+        );
+    }
+}

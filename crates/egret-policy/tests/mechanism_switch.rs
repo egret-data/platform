@@ -135,7 +135,7 @@ async fn the_gate_off_is_refused_first() {
     assert_eq!(off.refusals, vec![SwitchRefusal::Disabled]);
     assert_eq!(
         messages(&off),
-        vec!["OPA is not enabled on this installation ([governance.opa] enabled)"]
+        vec!["OPA is not running on this installation: it needs both [governance.opa] enabled and ranger.enabled"]
     );
     assert_eq!(
         gated_and_manual.refusals,
@@ -835,7 +835,7 @@ mod route {
             &h,
             svc.id,
             &svc.name,
-            "OPA is not enabled on this installation ([governance.opa] enabled)",
+            "OPA is not running on this installation: it needs both [governance.opa] enabled and ranger.enabled",
         )
         .await;
         h.opa_enabled = true;
@@ -1140,6 +1140,97 @@ mod route {
             body.get("external_engines_warning").is_none(),
             "body={body}"
         );
+    }
+
+    const NO_TAG_WARNING: &str = "This profile has no tag service, so classification rules and \
+                                  clearances do not apply to its engines. Bind a tag service in \
+                                  the profile's settings.";
+
+    async fn tagless_trino_profile(h: &Harness) -> egret_policy::ServiceRow {
+        let profile = h
+            .store
+            .create_service(&uniq("ms_notag"), "trino", &json!({}))
+            .await
+            .expect("tagless trino profile");
+        set_generated(&h.db, profile.id).await;
+        h.store.get_service(&profile.name).await.unwrap()
+    }
+
+    /// Readiness 7: a Trino profile with no tag service ignores every
+    /// classification rule and clearance, so the switch answer says so, on the
+    /// 200 and on the 502, in both directions.
+    #[tokio::test]
+    async fn a_tagless_trino_profile_switch_carries_the_no_tag_service_warning() {
+        // Arrange
+        let Some(mut h) = harness().await else {
+            eprintln!("skip: DATABASE_URL not set");
+            return;
+        };
+        let svc = tagless_trino_profile(&h).await;
+        h.bindings = vec![binding(svc.id, "trino-a", "provisioned", Some(IMAGE_483))];
+
+        // Act
+        let (status, body) = h.patch(&svc.name, "opa").await;
+
+        // Assert
+        assert_eq!(status, StatusCode::OK, "body={body}");
+        assert_eq!(
+            body["no_tag_service_warning"], NO_TAG_WARNING,
+            "body={body}"
+        );
+
+        // Arrange: the same profile, its engine failing to reconfigure.
+        h.reconfigures = Arc::new(Reconfigures {
+            report: ReconfigureReport {
+                applied: vec![],
+                failed: vec![("trino-a".into(), "the rollout timed out".into())],
+            },
+            ..Default::default()
+        });
+
+        // Act
+        let (status, body) = h.patch(&svc.name, "ranger").await;
+
+        // Assert
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "body={body}");
+        assert_eq!(
+            body["no_tag_service_warning"], NO_TAG_WARNING,
+            "body={body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_profile_with_a_tag_service_switches_without_the_no_tag_service_warning() {
+        // Arrange
+        let Some(mut h) = harness().await else {
+            eprintln!("skip: DATABASE_URL not set");
+            return;
+        };
+        let (svc, _) = trino_profile(&h.db, &h.store, true).await;
+        h.bindings = vec![binding(svc.id, "trino-a", "provisioned", Some(IMAGE_483))];
+
+        // Act
+        let (status, body) = h.patch(&svc.name, "opa").await;
+
+        // Assert
+        assert_eq!(status, StatusCode::OK, "body={body}");
+        assert!(body.get("no_tag_service_warning").is_none(), "body={body}");
+
+        // Arrange: a 502 on the same profile.
+        h.reconfigures = Arc::new(Reconfigures {
+            report: ReconfigureReport {
+                applied: vec![],
+                failed: vec![("trino-a".into(), "the rollout timed out".into())],
+            },
+            ..Default::default()
+        });
+
+        // Act
+        let (status, body) = h.patch(&svc.name, "ranger").await;
+
+        // Assert
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "body={body}");
+        assert!(body.get("no_tag_service_warning").is_none(), "body={body}");
     }
 
     #[tokio::test]
