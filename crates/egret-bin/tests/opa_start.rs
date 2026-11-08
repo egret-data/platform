@@ -57,18 +57,52 @@ async fn the_default_config_starts_opa_when_the_ranger_surface_is_on() {
     assert!(started.is_some());
 }
 
-#[tokio::test]
-async fn the_default_config_starts_nothing_without_the_ranger_surface() {
-    // Act: no verifier, which is what `ranger.enabled = false` leaves
-    let started = start_opa_from_config(
-        &GovernanceConfig::default(),
-        None,
-        unreachable_pool(),
-        &CancellationToken::new(),
-    );
+/// A `MakeWriter` that keeps what the subscriber formats, to read the levels.
+#[derive(Clone, Default)]
+struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
 
-    // Assert
+impl std::io::Write for Captured {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+    type Writer = Captured;
+    fn make_writer(&'a self) -> Captured {
+        self.clone()
+    }
+}
+
+#[tokio::test]
+async fn the_default_config_starts_nothing_without_the_ranger_surface_and_logs_no_error() {
+    // Arrange
+    let captured = Captured::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(captured.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+
+    // Act: no verifier, which is what `ranger.enabled = false` leaves
+    let started = tracing::subscriber::with_default(subscriber, || {
+        start_opa_from_config(
+            &GovernanceConfig::default(),
+            None,
+            unreachable_pool(),
+            &CancellationToken::new(),
+        )
+    });
+
+    // Assert: a default install must not log an error for a state it is meant to be in
     assert!(started.is_none());
+    let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    assert!(log.contains("OPA surface idle"), "{log}");
+    assert!(!log.contains("ERROR"), "{log}");
 }
 
 #[tokio::test]

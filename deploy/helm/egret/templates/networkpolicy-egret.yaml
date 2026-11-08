@@ -20,7 +20,7 @@ spec:
         {{- if .Values.apps.origin }}
         - { protocol: TCP, port: 8081 }
         {{- end }}
-    {{- if .Values.opa.enabled }}
+    {{- if and .Values.opa.enabled .Values.ranger.enabled }}
     - from:
         - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: {{ .Values.engineNamespace }} } }
         {{- with .Values.opa.extraFrom }}

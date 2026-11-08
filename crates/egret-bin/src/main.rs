@@ -2813,10 +2813,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // Engines reach the OPA decision surface on its own listener, so they are
     // given that URL, not the catalog's. An error only while OPA is on: with
     // it off, an underivable URL falls back to `engine_egret_url`.
-    let engine_opa_url = egret_config::opa_engine_url(&engine_egret_url, &config.governance.opa)
-        .map_err(|e| {
-            anyhow::anyhow!("governance.opa.engine_url: cannot derive the OPA URL engines use: {e}")
-        })?;
+    let engine_opa_url = config.opa_engine_url(&engine_egret_url).map_err(|e| {
+        anyhow::anyhow!("governance.opa.engine_url: cannot derive the OPA URL engines use: {e}")
+    })?;
 
     // Recompiles a catalog's implicit assignment grant (SP4a Task 16, D3
     // defects 2 and 3) — built once here, shared (as two DIFFERENT trait

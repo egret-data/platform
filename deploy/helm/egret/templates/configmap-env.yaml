@@ -12,7 +12,7 @@ data:
   EGRET_CATALOG__PUBLIC_URL: "http://egret.{{ .Release.Namespace }}.svc.cluster.local:8080"
   # Always rendered, so the chart's value wins over the binary's default (on).
   EGRET_GOVERNANCE__OPA__ENABLED: "{{ .Values.opa.enabled }}"
-  {{- if .Values.opa.enabled }}
+  {{- if and .Values.opa.enabled .Values.ranger.enabled }}
   # Engines get the URL from EGRET_CATALOG__PUBLIC_URL with this port swapped in
   # (`[governance.opa] engine_url` unset), so the Service port above is the one they dial.
   EGRET_GOVERNANCE__OPA__LISTEN: "0.0.0.0:{{ .Values.opa.port }}"

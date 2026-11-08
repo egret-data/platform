@@ -744,6 +744,21 @@ fn derive_opa_engine_url(engine_egret_url: &str, settings: &OpaSettings) -> Resu
     Ok(url.as_str().trim_end_matches('/').to_string())
 }
 
+impl Config {
+    /// [`opa_engine_url`] for this config: OPA counts as on only while the
+    /// Ranger surface it needs is on too, so a default install (Ranger off)
+    /// falls back to `engine_egret_url` whatever it looks like.
+    pub fn opa_engine_url(&self, engine_egret_url: &str) -> Result<String, String> {
+        opa_engine_url(
+            engine_egret_url,
+            &OpaSettings {
+                enabled: self.governance.opa.enabled && self.ranger.enabled,
+                ..self.governance.opa.clone()
+            },
+        )
+    }
+}
+
 impl OpaSettings {
     /// Refuses a value outside its accepted range, naming the key.
     pub fn validate(&self) -> Result<(), String> {
@@ -2362,13 +2377,19 @@ impl Config {
         }
         self.workflow.storage.validate()?;
         self.workflow.http.validate()?;
-        self.governance.opa.validate()?;
+        // The listener exists only while OPA actually runs: `enabled` and the
+        // Ranger surface it needs (`start_opa` is not started without it).
+        let opa_on = self.governance.opa.enabled && self.ranger.enabled;
+        OpaSettings {
+            enabled: opa_on,
+            ..self.governance.opa.clone()
+        }
+        .validate()?;
         // Validated above, so the port parses. Two listeners in one pod collide on
         // the port whatever the host, so compare ports, not strings. With OPA off,
         // or with the Ranger surface off (OPA is not started without it), nothing
         // binds `listen`, so it cannot collide.
         let opa_port = listen_port(&self.governance.opa.listen);
-        let opa_on = self.governance.opa.enabled && self.ranger.enabled;
         if opa_on && opa_port == Some(self.server.port) {
             return Err(format!(
                 "governance.opa.listen {:?} has the same port as server.host:server.port \
@@ -4508,6 +4529,15 @@ values = { allowed-images = [] }
             Ok(())
         });
         assert!(OpaSettings::default().enabled);
+        assert!(
+            figment::Figment::from(figment::providers::Serialized::defaults(
+                std::collections::BTreeMap::<String, String>::new()
+            ))
+            .extract::<OpaSettings>()
+            .expect("serde defaults")
+            .enabled,
+            "the serde default is on too"
+        );
         // A `[governance.opa]` table that does not name `enabled` takes the serde default.
         figment::Jail::expect_with(|jail| {
             jail.create_file(
@@ -4815,6 +4845,40 @@ values = { allowed-images = [] }
             ..off
         };
         assert!(opa_engine_url("http://egret:8080", &on).is_err());
+    }
+
+    /// Fix round 1: OPA counts as running only with the Ranger surface on, so on
+    /// a default install (Ranger off) neither an underivable engine URL nor a
+    /// malformed `listen` / `engine_url` refuses the config.
+    #[test]
+    fn governance_opa_checks_apply_only_while_ranger_is_on() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_STORAGE__BUCKET", "b");
+            jail.set_env("EGRET_STORAGE__ACCESS_KEY", "k");
+            jail.set_env("EGRET_STORAGE__SECRET_KEY", "s");
+            jail.set_env("EGRET_GOVERNANCE__OPA__LISTEN", "0.0.0.0");
+            jail.set_env("EGRET_GOVERNANCE__OPA__ENGINE_URL", "not a url");
+            let c: Config = Config::figment().extract().expect("env");
+            assert!(c.governance.opa.enabled && !c.ranger.enabled);
+            c.validate().expect("accepted while ranger.enabled is off");
+            jail.set_env("EGRET_RANGER__ENABLED", "true");
+            let c: Config = Config::figment().extract().expect("env");
+            assert!(c.validate().is_err(), "refused once Ranger is on");
+            Ok(())
+        });
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_GOVERNANCE__OPA__LISTEN", "0.0.0.0");
+            let off: Config = Config::figment().extract().expect("env");
+            assert_eq!(
+                off.opa_engine_url("not a url"),
+                Ok("not a url".to_string()),
+                "Ranger off: falls back"
+            );
+            jail.set_env("EGRET_RANGER__ENABLED", "true");
+            let on: Config = Config::figment().extract().expect("env");
+            assert!(on.opa_engine_url("not a url").is_err(), "Ranger on: error");
+            Ok(())
+        });
     }
 
     /// Final review I1 (folds B1's deferred minors): while OPA is on, an
