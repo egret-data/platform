@@ -16709,6 +16709,8 @@ async fn an_opa_profiles_engine_is_applied_with_the_opa_binding_and_records_it()
         r.mechanism,
         egret_engine_mgmt_api::opa_config::AccessMechanism::Ranger
     );
+    // Ranger stays on the API port; only OPA moved to its own listener.
+    assert_eq!(r.egret_url, "http://egret:8080");
     let xml = egret_provisioner::trino::trino_ranger_secret(&created)
         .unwrap()
         .unwrap()["stringData"]["ranger-trino-security.xml"]
@@ -16739,6 +16741,7 @@ async fn an_opa_profiles_engine_is_applied_with_the_opa_binding_and_records_it()
         egret_engine_mgmt_api::opa_config::AccessMechanism::Opa
     );
     assert_eq!(r.engine_id, id.to_string());
+    assert_eq!(r.egret_url, "http://egret:8082");
     assert!(
         r.credential.is_some(),
         "the context file carries the credential"
@@ -16760,9 +16763,14 @@ async fn an_opa_profiles_engine_is_applied_with_the_opa_binding_and_records_it()
     set_profile_mechanism(&f, profile, "ranger").await;
     let report = egret_engine_mgmt::reapply_bound_engines(&state_of(&f), profile).await;
     assert_eq!(report.applied, vec![name], "{report:?}");
+    let back = port.last_updated().ranger.unwrap();
     assert_eq!(
-        port.last_updated().ranger.unwrap().mechanism,
+        back.mechanism,
         egret_engine_mgmt_api::opa_config::AccessMechanism::Ranger
+    );
+    assert_eq!(
+        back.egret_url, "http://egret:8080",
+        "a Ranger binding downloads policies from the API port, not the OPA listener"
     );
     assert_eq!(applied_mechanism(&f, id).await.as_deref(), Some("ranger"));
 }
