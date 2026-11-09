@@ -370,6 +370,14 @@ pub(crate) struct EngineDto {
     /// the current security render (or never applied), so it may still accept
     /// unauthenticated requests on port 8080. Re-applying it clears this.
     security_reapply_needed: bool,
+    /// `true` when Ranger is on and this StarRocks engine (provisioned or
+    /// external) is bound to no policy profile, so Ranger governs nothing on
+    /// it (KI-336). A Trino engine is never flagged: it late-binds a profile on
+    /// its next apply. Set by the reads (`with_runtime`); `false` otherwise.
+    not_governed: bool,
+    /// The bound policy profile, read only to derive `not_governed`.
+    #[serde(skip)]
+    authz_service_id: Option<i64>,
 }
 
 impl EngineDto {
@@ -378,6 +386,11 @@ impl EngineDto {
         if self.origin != crate::external::ORIGIN_EXTERNAL {
             self.runtime = st.engine_runtime();
         }
+        self.not_governed = (self.origin == crate::external::ORIGIN_PROVISIONED
+            || self.origin == crate::external::ORIGIN_EXTERNAL)
+            && self.r#type == "starrocks"
+            && self.authz_service_id.is_none()
+            && st.ranger_enabled;
         self
     }
 }
@@ -437,6 +450,8 @@ impl From<Engine> for EngineDto {
             endpoint,
             runtime: None,
             security_reapply_needed,
+            not_governed: false,
+            authz_service_id: e.authz_service_id,
         }
     }
 }
@@ -724,10 +739,10 @@ pub(crate) async fn build_provision_req_with(
     // failure - fails the apply with its cause; the engine is never left unbound.
     let mut authz_service_id = engine.authz_service_id;
     if st.ranger_enabled && authz_service_id.is_none() {
-        match plan_trino_profile(st, &engine.name, None).await {
+        match plan_profile(st, &engine.name, "trino", None).await {
             Ok(plan) => {
                 let mut undo = CreateUndo::default();
-                match bind_trino_profile(st, engine.id, &engine.name, &plan, &mut undo).await {
+                match bind_profile(st, engine.id, &engine.name, "trino", &plan, &mut undo).await {
                     Ok(()) => {
                         authz_service_id = match plan {
                             ProfilePlan::Existing(id) => Some(id),
@@ -3223,7 +3238,7 @@ pub(crate) async fn resolve_ranger_service_name(
     }
 }
 
-/// How a new Trino engine gets its Ranger profile — decided before anything is
+/// How a new engine gets its Ranger profile — decided before anything is
 /// minted, so a conflict is a clean 409.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ProfilePlan {
@@ -3233,16 +3248,18 @@ enum ProfilePlan {
     /// Bind to a profile that already exists (chosen, or an orphan left by a
     /// deleted same-name engine). Compensation never deletes it.
     Existing(i64),
-    /// Create `<name>` (trino) and `<name>_tag` (tag) during the create.
+    /// Create `<name>` during the create: for Trino a `trino` profile plus a
+    /// `<name>_tag` tag service, for StarRocks a `starrocks` profile alone.
     Create,
 }
 
-/// The 409 for a same-name profile of the wrong type. It says what is wrong and
-/// the one remedy that exists as a route: delete that profile.
-fn profile_type_conflict(name: &str, found_type: &str) -> String {
+/// The 409 for a same-name profile of the wrong type (`found_type`, where the
+/// engine needs `expected`). It says what is wrong and the one remedy that
+/// exists as a route: delete that profile.
+fn profile_type_conflict(name: &str, found_type: &str, expected: &str) -> String {
     format!(
         "engine {name} cannot take its own policy profile: a profile named {name} already exists \
-         with type {found_type}, not trino. If no engine uses it, delete it \
+         with type {found_type}, not {expected}. If no engine uses it, delete it \
          (DELETE /api/control-plane/policies/services/{name}) and retry"
     )
 }
@@ -3258,10 +3275,14 @@ fn profile_bound_conflict(name: &str, engines: &[String]) -> String {
     )
 }
 
-/// Decide the profile for a Trino create named `name`.
-async fn plan_trino_profile(
+/// Decide the profile for a create named `name` of `engine_type` (`trino` or
+/// `starrocks`, which is also the profile's type). A `requested` id naming no
+/// profile falls through to the name-based plan; the StarRocks create refuses
+/// such an id with a 400 before it gets here.
+async fn plan_profile(
     st: &CpState,
     name: &str,
+    engine_type: &str,
     requested: Option<i64>,
 ) -> Result<ProfilePlan, CpError> {
     if let Some(sid) = requested {
@@ -3277,7 +3298,8 @@ async fn plan_trino_profile(
     if !st.ranger_enabled {
         tracing::info!(
             engine = %name,
-            "ranger disabled; Trino engine provisioned without Ranger access-control (allow-all)"
+            engine_type,
+            "ranger disabled; engine provisioned without Ranger access-control (allow-all)"
         );
         return Ok(ProfilePlan::Unbound);
     }
@@ -3286,9 +3308,11 @@ async fn plan_trino_profile(
         CpError::Internal
     })? {
         None => Ok(ProfilePlan::Create),
-        Some(svc) if svc.r#type != "trino" => {
-            Err(CpError::Conflict(profile_type_conflict(name, &svc.r#type)))
-        }
+        Some(svc) if svc.r#type != engine_type => Err(CpError::Conflict(profile_type_conflict(
+            name,
+            &svc.r#type,
+            engine_type,
+        ))),
         Some(svc) => {
             let bound: Vec<String> = st
                 .engine_mgmt
@@ -3307,12 +3331,14 @@ async fn plan_trino_profile(
     }
 }
 
-/// Carry out a [`ProfilePlan`] for the new engine row, recording anything it
-/// creates in `undo`.
-async fn bind_trino_profile(
+/// Carry out a [`ProfilePlan`] for the new `engine_type` engine row, recording
+/// anything it creates in `undo` (and nothing it found, so compensation never
+/// deletes a profile it did not make).
+async fn bind_profile(
     st: &CpState,
     engine_id: Uuid,
     name: &str,
+    engine_type: &str,
     plan: &ProfilePlan,
     undo: &mut CreateUndo,
 ) -> Result<(), CpError> {
@@ -3320,39 +3346,23 @@ async fn bind_trino_profile(
         ProfilePlan::Unbound => return Ok(()),
         ProfilePlan::Existing(id) => *id,
         ProfilePlan::Create => {
-            st.authz
-                .ensure_trino_def()
-                .await
-                .map_err(|e| CpError::BadRequest(format!("seed trino service-def: {e}")))?;
-            // A TAG service alongside the trino profile (Access P3.2), linked by
-            // the profile's `tagService` config, so tag-based masking/row-filter
-            // policies have a service. Best-effort: the profile works untagged.
-            let tag_service_name = format!("{name}_tag");
-            if let Err(e) = st.authz.ensure_tag_def().await {
-                tracing::warn!(error = %e, "ensure_tag_def failed during auto-bind");
-            }
-            let tag_wired = match st
-                .authz
-                .create_service(&tag_service_name, "tag", &serde_json::json!({}))
-                .await
-            {
-                Ok(svc) => {
-                    undo.created_tag_service_id = Some(svc.id);
-                    true
+            let config = match engine_type {
+                "trino" => trino_profile_config(st, name, undo).await?,
+                // KI-336: a StarRocks profile has no tag service — StarRocks'
+                // own tag policies are not wired through egret yet.
+                "starrocks" => {
+                    st.authz.ensure_starrocks_def().await.map_err(|e| {
+                        CpError::BadRequest(format!("seed starrocks service-def: {e}"))
+                    })?;
+                    serde_json::json!({})
                 }
-                // Left by a deleted same-name engine: reuse, never delete.
-                Err(egret_policy_api::PolicyError::AlreadyExists(_)) => true,
-                Err(e) => {
-                    tracing::warn!(error = %e, "create tag service failed during auto-bind");
-                    false
+                other => {
+                    return Err(CpError::BadRequest(format!(
+                        "no policy profile type for engine type {other}"
+                    )))
                 }
             };
-            let config = if tag_wired {
-                serde_json::json!({ egret_policy_api::TAG_SERVICE_CONFIG_KEY: tag_service_name })
-            } else {
-                serde_json::json!({})
-            };
-            let svc = match st.authz.create_service(name, "trino", &config).await {
+            let svc = match st.authz.create_service(name, engine_type, &config).await {
                 Ok(svc) => svc,
                 Err(egret_policy_api::PolicyError::AlreadyExists(_)) => {
                     return Err(CpError::Conflict(format!(
@@ -3368,6 +3378,48 @@ async fn bind_trino_profile(
     // A pair this bind creates is refused (SP4d-4 Task 7 fix round 1, C1): the
     // caller undoes the create, or fails the late-bind apply.
     crate::profile_compiler::bind_profile_guarded(st, engine_id, name, profile_id).await
+}
+
+/// Seed the `trino` service-def and make the `<name>_tag` tag service a new
+/// Trino profile links to, returning that profile's config. Records a tag
+/// service it creates in `undo`.
+async fn trino_profile_config(
+    st: &CpState,
+    name: &str,
+    undo: &mut CreateUndo,
+) -> Result<serde_json::Value, CpError> {
+    st.authz
+        .ensure_trino_def()
+        .await
+        .map_err(|e| CpError::BadRequest(format!("seed trino service-def: {e}")))?;
+    // A TAG service alongside the trino profile (Access P3.2), linked by
+    // the profile's `tagService` config, so tag-based masking/row-filter
+    // policies have a service. Best-effort: the profile works untagged.
+    let tag_service_name = format!("{name}_tag");
+    if let Err(e) = st.authz.ensure_tag_def().await {
+        tracing::warn!(error = %e, "ensure_tag_def failed during auto-bind");
+    }
+    let tag_wired = match st
+        .authz
+        .create_service(&tag_service_name, "tag", &serde_json::json!({}))
+        .await
+    {
+        Ok(svc) => {
+            undo.created_tag_service_id = Some(svc.id);
+            true
+        }
+        // Left by a deleted same-name engine: reuse, never delete.
+        Err(egret_policy_api::PolicyError::AlreadyExists(_)) => true,
+        Err(e) => {
+            tracing::warn!(error = %e, "create tag service failed during auto-bind");
+            false
+        }
+    };
+    Ok(if tag_wired {
+        serde_json::json!({ egret_policy_api::TAG_SERVICE_CONFIG_KEY: tag_service_name })
+    } else {
+        serde_json::json!({})
+    })
 }
 
 /// Resolve the warehouse the engine leads with, from whichever shape the
@@ -3715,7 +3767,7 @@ async fn create_engine(
 
     // Decide the Ranger profile BEFORE minting anything: a same-name profile
     // bound to another engine is a 409 with nothing to roll back.
-    let profile_plan = plan_trino_profile(&st, &b.name, b.authz_service_id).await?;
+    let profile_plan = plan_profile(&st, &b.name, "trino", b.authz_service_id).await?;
 
     // 5. Auto-wire: the warehouse's registry catalog (created with the warehouse;
     //    ensured here for one that predates the registry) and a fresh Catalog
@@ -3799,7 +3851,7 @@ async fn create_engine(
 
     // 8. Bind the Ranger profile BEFORE the first provision, so a governed
     //    engine never runs unbound (allow-all) — not even between two applies.
-    if let Err(e) = bind_trino_profile(&st, engine.id, &b.name, &profile_plan, &mut undo).await {
+    if let Err(e) = bind_profile(&st, engine.id, &b.name, "trino", &profile_plan, &mut undo).await {
         compensate_failed_create(&st, undo).await;
         return Err(e);
     }
@@ -3848,7 +3900,7 @@ async fn create_engine(
 
     // 11. Bring the bound profile's compiled `perm` policies up to date
     //     (SP4a Task 9 review). Here, at the END, and not next to
-    //     `bind_trino_profile` in step 8: the compiler's desired set is derived
+    //     `bind_profile` in step 8: the compiler's desired set is derived
     //     from the catalogs the profile's engines REACH, and the non-primary
     //     ones are not attached until step 10. A recompile at bind time would
     //     see the primary catalog (step 7, before the bind) but none of the
@@ -4641,12 +4693,12 @@ fn build_starrocks_spec(
 /// delete the engine row) exactly like the Trino path; the post-provision wire
 /// step is best-effort and never fails the create (see its own docs).
 ///
-/// Ranger: if the body links an EXISTING profile (`authzServiceId`) it's
-/// validated and bound before the first provision, so the engine can come up
-/// enforced; an omitted/invalid id just leaves it unbound (`ranger: None`).
-/// Unlike the Trino path, this does NOT auto-create a fresh profile — that
-/// needs its own StarRocks service-def wiring, which isn't plumbed through
-/// `PolicyPort` yet.
+/// Ranger (KI-336): the same [`plan_profile`] / [`bind_profile`] the Trino path
+/// uses, bound before the first provision so the engine comes up enforced. An
+/// `authzServiceId` binds that profile; one naming no profile is a 400 (no
+/// fallback, unlike Trino). With no id and Ranger on, the engine gets its own
+/// `starrocks` profile `<name>` (no tag service), or adopts an unbound
+/// same-name one; with Ranger off it stays unbound.
 async fn create_starrocks_engine(
     st: CpState,
     b: CreateEngineBody,
@@ -4729,6 +4781,23 @@ async fn create_starrocks_engine(
     let Some(prov) = st.engine_provisioner.clone() else {
         return Err(CpError::BadRequest("kubernetes not configured".into()));
     };
+
+    // Decide the Ranger profile BEFORE minting anything (KI-336), as the Trino
+    // path does: a conflict is a clean 409 with nothing to roll back. An id
+    // naming no profile stays a 400 — `plan_profile` would fall back to
+    // creating one, which is Trino's contract, not this one's.
+    if let Some(sid) = b.authz_service_id {
+        let services = st.authz.list_services().await.map_err(|e| {
+            tracing::error!(error = %e, "list_services failed during starrocks create");
+            CpError::Internal
+        })?;
+        if !services.iter().any(|s| s.id == sid) {
+            return Err(CpError::BadRequest(format!(
+                "authzServiceId {sid} is not a policy profile"
+            )));
+        }
+    }
+    let profile_plan = plan_profile(&st, &b.name, "starrocks", b.authz_service_id).await?;
 
     // ── Iceberg external-catalog auto-wire (T6), step 1: mint a Catalog Client
     // for the warehouse — the EXACT same call the Trino path uses
@@ -4840,33 +4909,21 @@ async fn create_starrocks_engine(
         return Err(e.into());
     }
 
-    // Optional Ranger bind to an EXISTING profile (validated the same way the
-    // Trino auto-bind step validates `authzServiceId`).
-    if let Some(sid) = b.authz_service_id {
-        match st.authz.list_services().await {
-            Ok(svcs) if svcs.iter().any(|s| s.id == sid) => {
-                if let Err(e) =
-                    crate::profile_compiler::bind_profile_guarded(&st, engine.id, &b.name, sid)
-                        .await
-                {
-                    // Any refusal undoes the create: an engine created with an
-                    // `authzServiceId` must never come out unbound.
-                    compensate_failed_create(&st, undo).await;
-                    return Err(e);
-                }
-            }
-            Ok(_) => {
-                compensate_failed_create(&st, undo).await;
-                return Err(CpError::BadRequest(format!(
-                    "authzServiceId {sid} is not a policy profile"
-                )));
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "list_services failed during starrocks create");
-                compensate_failed_create(&st, undo).await;
-                return Err(CpError::Internal);
-            }
-        }
+    // Bind the Ranger profile planned above BEFORE the first provision. Any
+    // refusal undoes the create (deleting a profile this create made, never one
+    // it found): a governed engine must never come out unbound.
+    if let Err(e) = bind_profile(
+        &st,
+        engine.id,
+        &b.name,
+        "starrocks",
+        &profile_plan,
+        &mut undo,
+    )
+    .await
+    {
+        compensate_failed_create(&st, undo).await;
+        return Err(e);
     }
     // Secure-by-default (root-password task): mint + store a strong random FE
     // `root` password and persist its `root_secret_id` UNCONDITIONALLY — every NEW
@@ -5860,7 +5917,7 @@ pub(crate) async fn check_profile_bindable(
         )));
     };
     // I1: the profile's TYPE must match the engine's kind, the same 409 the
-    // create path already raises (`plan_trino_profile`). A cross-kind bind is
+    // create path already raises (`plan_profile`). A cross-kind bind is
     // a fail-open, not a cosmetic mismatch: the plugin downloads the
     // service-def of the profile's own type, so a StarRocks engine bound to a
     // `trino` profile evaluates trino-shaped policy definitions against
@@ -5874,7 +5931,7 @@ pub(crate) async fn check_profile_bindable(
         )));
     }
     // I2: refuse a profile another engine already binds — again mirroring
-    // create (`plan_trino_profile`'s `count_engines_bound_to_authz_service`
+    // create (`plan_profile`'s `count_engines_bound_to_authz_service`
     // arm). Two engines sharing one profile silently share one policy set, so
     // a grant written for one governs the other. This engine cannot be the
     // one counted: the `== Some(sid)` early-return above already handled
@@ -5962,7 +6019,7 @@ pub(crate) async fn check_profile_bindable(
 /// untouched, because unbinding must never delete a profile.
 ///
 /// **An unknown id is a 400 naming it.** Not a warning-and-carry-on the way
-/// create's `plan_trino_profile` treats a bad id (there, a fresh profile is
+/// Trino create's `plan_profile` treats a bad id (there, a fresh profile is
 /// created instead, so the engine still ends up governed). Here there is no
 /// fallback, and a silent no-op is precisely the defect.
 ///
@@ -8132,7 +8189,7 @@ mod tests {
 
     #[test]
     fn the_profile_conflicts_name_the_profile_the_engines_and_a_remedy_that_exists() {
-        let t = profile_type_conflict("eng-1", "starrocks");
+        let t = profile_type_conflict("eng-1", "starrocks", "trino");
         assert!(
             t.contains("profile named eng-1 already exists with type starrocks"),
             "{t}"
@@ -9888,8 +9945,7 @@ mod tests {
         assert_ne!(engine_name, profile_name, "test requires DIFFERING names");
 
         // The service-def type is irrelevant to what this test asserts (name
-        // resolution, not enforcement), so seed only the "trino" def rather
-        // than reaching for `seed_starrocks` (not exposed on `PolicyPort`).
+        // resolution, not enforcement), so a "trino" profile serves.
         st.authz
             .ensure_trino_def()
             .await
@@ -11106,6 +11162,346 @@ mod tests {
             created.root_secret_id.is_some(),
             "new StarRocks engine must have a minted root_secret_id (secure-by-default)"
         );
+    }
+
+    // ── KI-336: a StarRocks engine created while Ranger is on gets its own
+    // policy profile, the way a Trino engine does. ─────────────────────────
+
+    /// `provision` fails, `delete` succeeds: a create that fails AFTER the
+    /// profile step, whose compensation reaches the cluster and so runs every
+    /// undo (unlike `FailingProvisionAndDeleteProvisioner`, which keeps all).
+    struct FailingProvisionProvisioner;
+    #[async_trait::async_trait]
+    impl egret_engine_mgmt_api::EngineProvisioningPort for FailingProvisionProvisioner {
+        async fn provision(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+            Err("injected provision failure".into())
+        }
+        async fn status(
+            &self,
+            _kind: &str,
+            _namespace: &str,
+            _name: &str,
+        ) -> Result<egret_engine_mgmt_api::EngineStatus, String> {
+            Ok(egret_engine_mgmt_api::EngineStatus::default())
+        }
+        async fn update(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+            Ok(())
+        }
+        async fn delete(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn restart(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// A DB-backed state for the StarRocks profile tests: Ranger as given, a
+    /// no-op provisioner, a converging compiler (a bound engine's provision
+    /// request converges its profile's infra policies), and a seeded warehouse.
+    /// `None` when no test DB.
+    async fn sr_profile_state(
+        ranger: bool,
+    ) -> Option<(CpState, egret_metastore::Db, egret_catalog_api::Warehouse)> {
+        let mut st = converging_state().await?;
+        st.ranger_enabled = ranger;
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        Some((st, db, wh))
+    }
+
+    /// Create a StarRocks engine named `name` through `create_starrocks_engine`.
+    async fn create_sr_named(
+        st: &CpState,
+        wh: &egret_catalog_api::Warehouse,
+        name: &str,
+        authz_service_id: Option<i64>,
+    ) -> Result<StatusCode, CpError> {
+        let mut body = sr_update_body(None);
+        body.name = name.to_string();
+        body.authz_service_id = authz_service_id;
+        create_starrocks_engine(st.clone(), body, wh.clone(), Vec::new())
+            .await
+            .map(|(code, _)| code)
+    }
+
+    async fn engine_named(st: &CpState, name: &str) -> Option<Engine> {
+        st.engine_mgmt
+            .list_engines()
+            .await
+            .expect("list_engines")
+            .into_iter()
+            .find(|e| e.name == name)
+    }
+
+    /// Seed a profile of `type_` named `name` straight into the policy store.
+    async fn seed_profile(db: &egret_metastore::Db, name: &str, type_: &str) -> i64 {
+        let store = egret_policy::PolicyStore::new(db.clone());
+        match type_ {
+            "trino" => egret_policy::service_def::seed_trino(&store).await,
+            "starrocks" => egret_policy::service_def::seed_starrocks(&store).await,
+            other => panic!("no def for {other}"),
+        }
+        .expect("seed service-def");
+        store
+            .create_service(name, type_, &serde_json::json!({}))
+            .await
+            .expect("create profile")
+            .id
+    }
+
+    #[tokio::test]
+    async fn starrocks_create_with_ranger_on_creates_and_binds_its_own_starrocks_profile() {
+        let Some((st, _db, wh)) = sr_profile_state(true).await else {
+            eprintln!("skipping starrocks_create_with_ranger_on_creates_and_binds_its_own_starrocks_profile: DATABASE_URL not set");
+            return;
+        };
+        let name = format!("sr-{}", Uuid::new_v4().simple());
+
+        let code = create_sr_named(&st, &wh, &name, None)
+            .await
+            .expect("create");
+
+        assert_eq!(code, StatusCode::CREATED);
+        let svc = st
+            .authz
+            .get_service_opt(&name)
+            .await
+            .unwrap()
+            .expect("profile <name> created");
+        assert_eq!(svc.r#type, "starrocks");
+        let engine = engine_named(&st, &name).await.expect("engine row");
+        assert_eq!(
+            engine.authz_service_id,
+            Some(svc.id),
+            "bound to its profile"
+        );
+        assert!(
+            st.authz
+                .get_service_opt(&format!("{name}_tag"))
+                .await
+                .unwrap()
+                .is_none(),
+            "a StarRocks profile gets no tag service"
+        );
+    }
+
+    #[tokio::test]
+    async fn starrocks_create_with_ranger_off_and_no_id_stays_unbound() {
+        let Some((st, _db, wh)) = sr_profile_state(false).await else {
+            eprintln!("skipping starrocks_create_with_ranger_off_and_no_id_stays_unbound: DATABASE_URL not set");
+            return;
+        };
+        let name = format!("sr-{}", Uuid::new_v4().simple());
+
+        create_sr_named(&st, &wh, &name, None)
+            .await
+            .expect("create");
+
+        let engine = engine_named(&st, &name).await.expect("engine row");
+        assert_eq!(engine.authz_service_id, None);
+        assert!(st.authz.get_service_opt(&name).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn starrocks_create_binds_a_named_existing_profile() {
+        let Some((st, db, wh)) = sr_profile_state(true).await else {
+            eprintln!(
+                "skipping starrocks_create_binds_a_named_existing_profile: DATABASE_URL not set"
+            );
+            return;
+        };
+        let name = format!("sr-{}", Uuid::new_v4().simple());
+        let profile =
+            seed_profile(&db, &format!("p-{}", Uuid::new_v4().simple()), "starrocks").await;
+
+        create_sr_named(&st, &wh, &name, Some(profile))
+            .await
+            .expect("create");
+
+        let engine = engine_named(&st, &name).await.expect("engine row");
+        assert_eq!(engine.authz_service_id, Some(profile));
+        assert!(
+            st.authz.get_service_opt(&name).await.unwrap().is_none(),
+            "no profile of its own when one is named"
+        );
+    }
+
+    #[tokio::test]
+    async fn starrocks_create_with_an_id_naming_no_profile_is_still_a_400() {
+        let Some((st, _db, wh)) = sr_profile_state(true).await else {
+            eprintln!("skipping starrocks_create_with_an_id_naming_no_profile_is_still_a_400: DATABASE_URL not set");
+            return;
+        };
+        let name = format!("sr-{}", Uuid::new_v4().simple());
+
+        let err = create_sr_named(&st, &wh, &name, Some(i64::MAX))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&err, CpError::BadRequest(m) if m.contains("is not a policy profile")),
+            "{err:?}"
+        );
+        assert!(engine_named(&st, &name).await.is_none(), "nothing left");
+        assert!(st.authz.get_service_opt(&name).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn starrocks_create_refuses_a_same_name_trino_profile_with_409_not_starrocks() {
+        let Some((st, db, wh)) = sr_profile_state(true).await else {
+            eprintln!("skipping starrocks_create_refuses_a_same_name_trino_profile_with_409_not_starrocks: DATABASE_URL not set");
+            return;
+        };
+        let name = format!("sr-{}", Uuid::new_v4().simple());
+        seed_profile(&db, &name, "trino").await;
+
+        let err = create_sr_named(&st, &wh, &name, None).await.unwrap_err();
+
+        assert!(
+            matches!(&err, CpError::Conflict(m)
+                if m.contains("with type trino, not starrocks")),
+            "{err:?}"
+        );
+        assert!(engine_named(&st, &name).await.is_none(), "nothing left");
+    }
+
+    #[tokio::test]
+    async fn starrocks_create_refuses_a_same_name_profile_bound_to_another_engine() {
+        let Some((st, db, wh)) = sr_profile_state(true).await else {
+            eprintln!("skipping starrocks_create_refuses_a_same_name_profile_bound_to_another_engine: DATABASE_URL not set");
+            return;
+        };
+        let name = format!("sr-{}", Uuid::new_v4().simple());
+        let profile = seed_profile(&db, &name, "starrocks").await;
+        let other = st
+            .engine_mgmt
+            .create_engine(
+                &format!("sr-{}", Uuid::new_v4().simple()),
+                "starrocks",
+                "egret-engines",
+                &serde_json::json!({}),
+                None,
+            )
+            .await
+            .expect("other engine row");
+        st.engine_mgmt
+            .set_engine_authz_service(other.id, Some(profile))
+            .await
+            .expect("bind other engine");
+
+        let err = create_sr_named(&st, &wh, &name, None).await.unwrap_err();
+
+        assert!(
+            matches!(&err, CpError::Conflict(m)
+                if m.contains(&format!("is already bound to engine(s) {}", other.name))),
+            "{err:?}"
+        );
+        assert!(engine_named(&st, &name).await.is_none(), "nothing left");
+    }
+
+    #[tokio::test]
+    async fn a_failed_starrocks_create_deletes_the_profile_it_made() {
+        let Some((mut st, _db, wh)) = sr_profile_state(true).await else {
+            eprintln!("skipping a_failed_starrocks_create_deletes_the_profile_it_made: DATABASE_URL not set");
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(FailingProvisionProvisioner));
+        let name = format!("sr-{}", Uuid::new_v4().simple());
+
+        let err = create_sr_named(&st, &wh, &name, None).await.unwrap_err();
+
+        assert!(
+            matches!(&err, CpError::BadRequest(m) if m.contains("injected provision failure")),
+            "{err:?}"
+        );
+        assert!(engine_named(&st, &name).await.is_none(), "row undone");
+        assert!(
+            st.authz.get_service_opt(&name).await.unwrap().is_none(),
+            "the profile this create made is deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_starrocks_create_keeps_a_profile_it_found() {
+        let Some((mut st, db, wh)) = sr_profile_state(true).await else {
+            eprintln!(
+                "skipping a_failed_starrocks_create_keeps_a_profile_it_found: DATABASE_URL not set"
+            );
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(FailingProvisionProvisioner));
+        // An orphan same-name profile (left by a deleted engine), and one named
+        // by id: the create adopts each and must leave each in place.
+        let name = format!("sr-{}", Uuid::new_v4().simple());
+        let orphan = seed_profile(&db, &name, "starrocks").await;
+        let named_engine = format!("sr-{}", Uuid::new_v4().simple());
+        let named = seed_profile(&db, &format!("p-{}", Uuid::new_v4().simple()), "starrocks").await;
+
+        create_sr_named(&st, &wh, &name, None).await.unwrap_err();
+        create_sr_named(&st, &wh, &named_engine, Some(named))
+            .await
+            .unwrap_err();
+
+        let ids: Vec<i64> = st
+            .authz
+            .list_services()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert!(ids.contains(&orphan), "the found orphan survives");
+        assert!(ids.contains(&named), "the named profile survives");
+        assert!(engine_named(&st, &name).await.is_none());
+        assert!(engine_named(&st, &named_engine).await.is_none());
+    }
+
+    /// `notGoverned` through `with_runtime`, the call every engine read makes.
+    #[tokio::test]
+    async fn not_governed_is_an_unbound_starrocks_engine_while_ranger_is_on() {
+        let Some(mut st) = test_state().await else {
+            eprintln!("skipping not_governed_is_an_unbound_starrocks_engine_while_ranger_is_on: DATABASE_URL not set");
+            return;
+        };
+        let flag = |st: &CpState, kind: &str, origin: &str, bound: Option<i64>| {
+            let e = Engine {
+                authz_service_id: bound,
+                ..dto_engine(kind, origin)
+            };
+            let plain = serde_json::to_value(EngineDto::from(e.clone())).unwrap();
+            assert_eq!(
+                plain["notGoverned"], false,
+                "From<Engine> sets false: {plain}"
+            );
+            serde_json::to_value(EngineDto::from(e).with_runtime(st)).unwrap()["notGoverned"]
+                .as_bool()
+                .expect("notGoverned is a bool")
+        };
+
+        st.ranger_enabled = true;
+        assert!(flag(&st, "starrocks", "provisioned", None), "on, unbound");
+        assert!(
+            flag(&st, "starrocks", "external", None),
+            "on, unbound, external"
+        );
+        assert!(!flag(&st, "starrocks", "provisioned", Some(7)), "on, bound");
+        assert!(
+            !flag(&st, "trino", "provisioned", None),
+            "trino, on, unbound"
+        );
+        assert!(!flag(&st, "trino", "external", None), "trino external");
+
+        st.ranger_enabled = false;
+        assert!(!flag(&st, "starrocks", "provisioned", None), "off, unbound");
+        assert!(
+            !flag(&st, "starrocks", "provisioned", Some(7)),
+            "off, bound"
+        );
+        assert!(!flag(&st, "trino", "provisioned", None), "trino, off");
     }
 
     /// Drive `create_starrocks_engine` with the given delegation knobs (mode +
