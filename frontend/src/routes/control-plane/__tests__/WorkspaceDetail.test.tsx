@@ -54,6 +54,9 @@ const ALL_ENGINES: EngineDto[] = [
     origin: "provisioned",
     rangerCredentialPending: false,
     securityReapplyNeeded: false,
+    securityUpgradeNeeded: false,
+    securityUpgradeReasons: [],
+    notGoverned: false,
     endpoint: "analytics-trino-trino.engines.svc:8443",
     spec: {
       coordinatorReplicas: 1,
@@ -73,6 +76,9 @@ const ALL_ENGINES: EngineDto[] = [
     origin: "provisioned",
     rangerCredentialPending: false,
     securityReapplyNeeded: false,
+    securityUpgradeNeeded: false,
+    securityUpgradeReasons: [],
+    notGoverned: false,
     endpoint: "reporting-trino-trino.engines.svc:8443",
     // JWT-enabled → assignable (the picker only offers these).
     spec: {

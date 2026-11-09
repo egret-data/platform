@@ -47,6 +47,7 @@ import type {
   RegisterExternalEngine,
   RegisteredExternalEngineDto,
   RetirePreviousRangerCredential,
+  SecurityUpgradeDto,
   SetWorkspacesBody,
   UpdateExternalEngine,
   WorkspaceEngineDto
@@ -3357,6 +3358,130 @@ export const useControlPlaneEnginesRotateEngineSecrets = <TError = ErrorBody,
         TContext
       > => {
       return useMutation(getControlPlaneEnginesRotateEngineSecretsMutationOptions(options), queryClient);
+    }
+    export type controlPlaneEnginesSecurityUpgradeResponse200 = {
+  data: SecurityUpgradeDto
+  status: 200
+}
+
+export type controlPlaneEnginesSecurityUpgradeResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneEnginesSecurityUpgradeResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneEnginesSecurityUpgradeResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneEnginesSecurityUpgradeResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneEnginesSecurityUpgradeResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneEnginesSecurityUpgradeResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneEnginesSecurityUpgradeResponse502 = {
+  data: ErrorBody
+  status: 502
+}
+
+export type controlPlaneEnginesSecurityUpgradeResponseSuccess = (controlPlaneEnginesSecurityUpgradeResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneEnginesSecurityUpgradeResponseError = (controlPlaneEnginesSecurityUpgradeResponse400 | controlPlaneEnginesSecurityUpgradeResponse401 | controlPlaneEnginesSecurityUpgradeResponse403 | controlPlaneEnginesSecurityUpgradeResponse404 | controlPlaneEnginesSecurityUpgradeResponse409 | controlPlaneEnginesSecurityUpgradeResponse500 | controlPlaneEnginesSecurityUpgradeResponse502) & {
+  headers: Headers;
+};
+
+export type controlPlaneEnginesSecurityUpgradeResponse = (controlPlaneEnginesSecurityUpgradeResponseSuccess | controlPlaneEnginesSecurityUpgradeResponseError)
+
+export const getControlPlaneEnginesSecurityUpgradeUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/engines/${encodeURIComponent(id)}/security-upgrade`
+}
+
+/**
+ * Mints a FE root password if the engine has none, moves FE and CN to the
+ * default patched images unless that would be a downgrade, and re-applies
+ * the engine: a Job sets the root password on the running FE and the FE and
+ * CN pods restart. The engine is re-applied on every call, so a repeat
+ * finishes a run whose apply failed.
+ * @summary Bring a legacy StarRocks engine up to egret's security baseline
+ */
+export const controlPlaneEnginesSecurityUpgrade = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneEnginesSecurityUpgradeResponse> => {
+
+  return customInstance<controlPlaneEnginesSecurityUpgradeResponse>(getControlPlaneEnginesSecurityUpgradeUrl(id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneEnginesSecurityUpgradeMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesSecurityUpgrade>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesSecurityUpgrade>>, TError,{id: string}, TContext> => {
+
+const mutationKey = ['controlPlaneEnginesSecurityUpgrade'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneEnginesSecurityUpgrade>>, {id: string}> = (props) => {
+          const {id} = props ?? {};
+
+          return  controlPlaneEnginesSecurityUpgrade(id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneEnginesSecurityUpgradeMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesSecurityUpgrade>>>
+
+    export type ControlPlaneEnginesSecurityUpgradeMutationError = ErrorBody
+
+    /**
+ * @summary Bring a legacy StarRocks engine up to egret's security baseline
+ */
+export const useControlPlaneEnginesSecurityUpgrade = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesSecurityUpgrade>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneEnginesSecurityUpgrade>>,
+        TError,
+        {id: string},
+        TContext
+      > => {
+      return useMutation(getControlPlaneEnginesSecurityUpgradeMutationOptions(options), queryClient);
     }
     export type controlPlaneEnginesListEngineWorkspacesResponse200 = {
   data: EngineWorkspaceDto[]
