@@ -379,8 +379,9 @@ pub(crate) struct EngineDto {
     security_upgrade_needed: bool,
     /// Why the engine needs the security upgrade, in order: `unpatchedImage`
     /// (the stored FE image is absent or not an egret FE with every security
-    /// patch) and `noRootPassword` (the FE root has no password secret).
-    /// Always present; empty for an external engine, a Trino engine, and an
+    /// patch), `noRootPassword` (the FE root has no password secret) and
+    /// `notApplied` (the last security upgrade stored its changes but did not
+    /// finish applying them; run it again). Always present; empty for an external engine, a Trino engine, and an
     /// engine that needs nothing. The security upgrade action
     /// (`POST /api/control-plane/engines/{id}/security-upgrade`) empties it.
     security_upgrade_reasons: Vec<SecurityUpgradeReason>,
@@ -433,6 +434,9 @@ pub(crate) enum SecurityUpgradeReason {
     UnpatchedImage,
     /// The FE root user has no password secret.
     NoRootPassword,
+    /// The last security upgrade stored its changes but did not finish applying
+    /// them; run it again.
+    NotApplied,
 }
 
 /// The reasons a provisioned StarRocks engine needs the security upgrade, in
@@ -449,6 +453,9 @@ pub(crate) fn security_upgrade_reasons(e: &Engine) -> Vec<SecurityUpgradeReason>
     }
     if e.root_secret_id.is_none() {
         reasons.push(SecurityUpgradeReason::NoRootPassword);
+    }
+    if e.security_upgrade_pending {
+        reasons.push(SecurityUpgradeReason::NotApplied);
     }
     reasons
 }
@@ -1192,6 +1199,9 @@ async fn finish_apply(
             });
         }
     }
+    if res.is_ok() && engine.is_starrocks() {
+        clear_security_upgrade_pending(&st, &engine).await;
+    }
     // Every successful Trino apply re-materializes the engine's workspace
     // connections from the row as it now stands (port-8080 hardening, final
     // review I1). The build may have minted the `egret_delegator` secret (a
@@ -1539,14 +1549,38 @@ pub(crate) fn check_starrocks_engine_name(name: &str) -> Result<(), CpError> {
 
 /// The StarRocks update's provisioner call, behind the same stale-credential
 /// re-read `apply_built` does (the StarRocks paths do not go through it).
+/// `engine` is the row `req` was built from.
 pub(crate) async fn update_starrocks_cluster(
     st: &CpState,
     prov: &dyn egret_engine_mgmt_api::EngineProvisioningPort,
-    engine_id: Uuid,
+    engine: &Engine,
     req: &EngineProvisionReq,
 ) -> Result<(), CpError> {
-    refuse_a_stale_ranger_credential(st, engine_id, req).await?;
-    prov.update(req).await.map_err(CpError::ClusterApplyFailed)
+    refuse_a_stale_ranger_credential(st, engine.id, req).await?;
+    prov.update(req)
+        .await
+        .map_err(CpError::ClusterApplyFailed)?;
+    clear_security_upgrade_pending(st, engine).await;
+    Ok(())
+}
+
+/// A StarRocks apply the provisioner accepted was built from the row as it
+/// stood, so it carries whatever a security upgrade had stored there: the
+/// upgrade is no longer pending ([`Engine::security_upgrade_pending`]). A
+/// failure to record it is logged and not returned: the flag then still asks
+/// for a repeat of the upgrade, which re-applies and clears it.
+async fn clear_security_upgrade_pending(st: &CpState, engine: &Engine) {
+    if !engine.security_upgrade_pending {
+        return;
+    }
+    if let Err(e) = st
+        .engine_mgmt
+        .set_security_upgrade_pending(engine.id, false)
+        .await
+    {
+        tracing::warn!(engine = %engine.name, error = %e,
+            "applied, but the finished security upgrade could not be recorded");
+    }
 }
 
 /// `CpError::Conflict` with the wording every apply route uses when
@@ -6553,7 +6587,7 @@ async fn update_starrocks_engine(
             return Err(e);
         }
     };
-    if let Err(e) = update_starrocks_cluster(&st, prov.as_ref(), engine_id, &req).await {
+    if let Err(e) = update_starrocks_cluster(&st, prov.as_ref(), &engine, &req).await {
         restore_engine_spec(&st, engine_id, &snapshot_spec, &expected_status).await;
         return Err(e);
     }
@@ -8317,6 +8351,7 @@ mod tests {
             ranger_secret_id: None,
             ranger_secret_prev_id: None,
             applied_security_rev: 0,
+            security_upgrade_pending: false,
             created_at: chrono::Utc::now(),
             origin: origin.into(),
             external_host: None,
@@ -8361,6 +8396,37 @@ mod tests {
                 SecurityUpgradeReason::UnpatchedImage,
                 SecurityUpgradeReason::NoRootPassword
             ]
+        );
+    }
+
+    #[test]
+    fn an_unapplied_upgrade_adds_the_not_applied_reason_last() {
+        let pending = |e: Engine| Engine {
+            security_upgrade_pending: true,
+            ..e
+        };
+        assert_eq!(
+            security_upgrade_reasons(&pending(sr_engine("provisioned", OFFICIAL_4_1_6, false))),
+            vec![
+                SecurityUpgradeReason::UnpatchedImage,
+                SecurityUpgradeReason::NoRootPassword,
+                SecurityUpgradeReason::NotApplied,
+            ]
+        );
+        let e = pending(sr_engine("provisioned", EGRET_4, true));
+        assert_eq!(
+            security_upgrade_reasons(&e),
+            vec![SecurityUpgradeReason::NotApplied]
+        );
+        let v = serde_json::to_value(EngineDto::from(e)).unwrap();
+        assert_eq!(v["securityUpgradeNeeded"], true);
+        assert_eq!(
+            v["securityUpgradeReasons"],
+            serde_json::json!(["notApplied"])
+        );
+        // Only provisioned StarRocks engines carry it.
+        assert!(
+            security_upgrade_reasons(&pending(sr_engine("external", EGRET_4, true))).is_empty()
         );
     }
 
@@ -8457,6 +8523,7 @@ mod tests {
             ranger_secret_id: Some(current),
             ranger_secret_prev_id: Some(prev),
             applied_security_rev: 0,
+            security_upgrade_pending: false,
             ..dto_engine("trino", "external")
         };
         let j = serde_json::to_value(EngineDto::from(e.clone())).unwrap();
@@ -9566,6 +9633,7 @@ mod tests {
             ranger_secret_id: None,
             ranger_secret_prev_id: None,
             applied_security_rev: 0,
+            security_upgrade_pending: false,
             created_at: chrono::Utc::now(),
             origin: "provisioned".into(),
             external_host: None,
@@ -14202,7 +14270,7 @@ mod tests {
         // The StarRocks update path's own call: the same refusal.
         for stale in [c1.to_string(), Uuid::new_v4().to_string()] {
             render(&mut built, stale);
-            let err = update_starrocks_cluster(&st, counting.as_ref(), engine.id, &built.req)
+            let err = update_starrocks_cluster(&st, counting.as_ref(), &engine, &built.req)
                 .await
                 .expect_err("a stale credential is refused on the StarRocks path too");
             assert!(
@@ -14215,7 +14283,7 @@ mod tests {
             1
         );
         render(&mut built, c2.to_string());
-        update_starrocks_cluster(&st, counting.as_ref(), engine.id, &built.req)
+        update_starrocks_cluster(&st, counting.as_ref(), &engine, &built.req)
             .await
             .expect("the current credential is applied");
         assert_eq!(

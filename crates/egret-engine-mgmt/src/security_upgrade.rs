@@ -11,10 +11,15 @@
 //!    default images, unless the engine already runs a newer release, which is
 //!    never downgraded.
 //!
-//! When either step changed something the engine is re-applied the way
-//! `rotate_engine_secrets` re-applies one. The provisioner then renders the
-//! `{name}-initpwd` Job, which sets the root password on the running FE, and
-//! the FE and CN pods restart on the new images.
+//! Before either step writes anything the row is marked
+//! `security_upgrade_pending`. The engine is then ALWAYS re-applied the way
+//! `rotate_engine_secrets` re-applies one, and only an accepted apply clears
+//! the mark (`engines::finish_apply`, like any other successful StarRocks
+//! apply). So an apply that fails, or a request that dies between the writes
+//! and the apply, leaves the engine reporting the `notApplied` reason, and a
+//! repeat call, whose steps are both idempotent, finishes the run. The
+//! provisioner renders the `{name}-initpwd` Job, which sets the root password
+//! on the running FE, and the FE and CN pods restart on the new images.
 
 use axum::extract::{Path, State};
 use axum::routing::post;
@@ -60,20 +65,21 @@ pub(crate) struct SecurityUpgradeDto {
 /// Mints a FE root password if the engine has none, moves FE and CN to the
 /// default patched images unless that would be a downgrade, and re-applies
 /// the engine: a Job sets the root password on the running FE and the FE and
-/// CN pods restart. Nothing is applied when nothing changed.
+/// CN pods restart. The engine is re-applied on every call, so a repeat
+/// finishes a run whose apply failed.
 #[utoipa::path(
     post,
     path = "/api/control-plane/engines/{id}/security-upgrade",
     tag = "control-plane-engines",
     params(("id" = Uuid, Path, description = "Engine id")),
     responses(
-        (status = 200, description = "The engine is at the security baseline as far as egret can take it. When `rootPasswordSet` or `imageChanged` is true the engine was re-applied: a Job sets the new FE root password on the running FE, and the FE and CN pods restart (on the default patched images when `imageChanged`). When both are false nothing was applied. `imageKeptBecause` says why an unpatched image was kept (the engine runs a newer release than the default FE, which egret does not downgrade)", body = SecurityUpgradeDto),
+        (status = 200, description = "The engine is at the security baseline as far as egret can take it. The engine was re-applied (on every call): a Job sets the FE root password on the running FE, and the FE and CN pods restart (on the default patched images when `imageChanged`). `rootPasswordSet` says a root password was minted by this call. `imageKeptBecause` says why an unpatched image was kept (the engine runs a newer release than the default FE, which egret does not downgrade)", body = SecurityUpgradeDto),
         (status = 400, description = "Kubernetes not configured, or the engine's spec could not be assembled (e.g. no primary catalog with a warehouse)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
         (status = 409, description = "Not a StarRocks engine; or the engine changed concurrently (e.g. a delete in progress), retry; or the engine is external (`code` = `engine_is_external`): egret does not upgrade the cluster of it", body = ErrorBody),
-        (status = 502, description = "Kubernetes rejected the apply; the stored spec and root password secret already carry the upgrade, and the next apply of the engine applies them", body = ErrorBody),
+        (status = 502, description = "Kubernetes rejected the apply. The stored spec and root password secret already carry the upgrade; the engine keeps the `notApplied` security upgrade reason (`securityUpgradeNeeded` stays true), and a repeat call finishes the run", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -104,6 +110,12 @@ async fn security_upgrade(
         return Err(CpError::BadRequest("kubernetes not configured".into()));
     };
 
+    // Committed BEFORE either step writes: whatever happens to the apply
+    // below, the engine keeps reporting that the upgrade is unfinished until
+    // an apply is accepted.
+    st.engine_mgmt
+        .set_security_upgrade_pending(id, true)
+        .await?;
     let reasons = security_upgrade_reasons(&engine);
     let mut root_password_set = false;
     let mut image_changed = false;
@@ -139,29 +151,29 @@ async fn security_upgrade(
         }
     }
 
-    let engine = if root_password_set || image_changed {
-        let engine = st
-            .engine_mgmt
-            .get_engine(id)
-            .await?
-            .ok_or(CpError::NotFound)?;
-        let built = build_provision_req_with(&st, &engine, BuildOpts::default()).await?;
-        apply_built(&st, prov, &engine, &built, ApplyOp::Update)
-            .await
-            .map_err(|e| match e {
-                ApplyBuiltError::Conflict => apply_conflict(),
-                ApplyBuiltError::CredentialChanged => {
-                    CpError::Conflict(RANGER_CREDENTIAL_CHANGED.into())
-                }
-                ApplyBuiltError::Failed(msg) => CpError::ClusterApplyFailed(msg),
-            })?;
-        st.engine_mgmt
-            .get_engine(id)
-            .await?
-            .ok_or(CpError::NotFound)?
-    } else {
-        engine
-    };
+    // Always applied, not only when this call changed something: a previous
+    // call may have stored its changes and then failed to apply them. The
+    // apply, once accepted, clears `security_upgrade_pending`.
+    let engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    let built = build_provision_req_with(&st, &engine, BuildOpts::default()).await?;
+    apply_built(&st, prov, &engine, &built, ApplyOp::Update)
+        .await
+        .map_err(|e| match e {
+            ApplyBuiltError::Conflict => apply_conflict(),
+            ApplyBuiltError::CredentialChanged => {
+                CpError::Conflict(RANGER_CREDENTIAL_CHANGED.into())
+            }
+            ApplyBuiltError::Failed(msg) => CpError::ClusterApplyFailed(msg),
+        })?;
+    let engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
 
     Ok(Json(SecurityUpgradeDto {
         engine: EngineDto::from(engine).with_runtime(&st),

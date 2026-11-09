@@ -18044,6 +18044,15 @@ async fn make_legacy_starrocks(f: &Fixture, id: Uuid, fe_image: &str, cn_image: 
     .expect("make the engine legacy");
 }
 
+/// The row's `security_upgrade_pending`.
+async fn stored_upgrade_pending(f: &Fixture, id: Uuid) -> bool {
+    sqlx::query_scalar("SELECT security_upgrade_pending FROM engine_mgmt.engines WHERE id = $1")
+        .bind(id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("engine row")
+}
+
 /// The stored spec and root password secret id of an engine row.
 async fn stored_engine_row(f: &Fixture, id: Uuid) -> (serde_json::Value, Option<Uuid>) {
     sqlx::query_as("SELECT spec, root_secret_id FROM engine_mgmt.engines WHERE id = $1")
@@ -18115,14 +18124,26 @@ async fn security_upgrade_brings_a_legacy_starrocks_engine_to_the_baseline_once(
         "the apply sets the root password"
     );
 
-    // A second call has nothing to do and applies nothing.
+    assert!(
+        !stored_upgrade_pending(&f, id).await,
+        "the accepted apply cleared it"
+    );
+
+    // A second call changes nothing but still applies (a repeat is what
+    // finishes a run whose apply failed), and leaves the engine clean.
     let (status, j) = call(&f, "POST", &uri, &token, None).await;
     assert_eq!(status, StatusCode::OK, "{j}");
     assert_eq!(j["imageChanged"], false, "{j}");
     assert_eq!(j["rootPasswordSet"], false, "{j}");
     assert!(j.get("imageKeptBecause").is_none(), "{j}");
     assert_eq!(j["engine"]["securityUpgradeNeeded"], false, "{j}");
-    assert_eq!(port.updated.lock().unwrap().len(), updates_before + 1);
+    assert_eq!(
+        j["engine"]["securityUpgradeReasons"],
+        serde_json::json!([]),
+        "{j}"
+    );
+    assert_eq!(port.updated.lock().unwrap().len(), updates_before + 2);
+    assert!(!stored_upgrade_pending(&f, id).await);
 }
 
 #[tokio::test]
@@ -18249,4 +18270,167 @@ async fn security_upgrade_refuses_external_trino_unknown_and_unauthorised() {
     assert_eq!(status, StatusCode::FORBIDDEN, "{j}");
     let (_, root_secret_id) = stored_engine_row(&f, sr).await;
     assert!(root_secret_id.is_none(), "a refused call minted nothing");
+}
+
+/// Fix round 1: an apply that fails after the upgrade stored its changes must
+/// leave the engine flagged (`notApplied`), and a repeat call must finish it.
+#[tokio::test]
+async fn a_failed_security_upgrade_apply_stays_flagged_and_a_repeat_finishes_it() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sr_secup_fail_admin", true).await;
+    let (engine_id, _) = create_starrocks_via_api(&f, &token).await;
+    let id = Uuid::parse_str(&engine_id).unwrap();
+    make_legacy_starrocks(&f, id, LEGACY_SR_FE_IMAGE, LEGACY_SR_CN_IMAGE).await;
+    let uri = format!("/engines/{engine_id}/security-upgrade");
+    port.set_fail_update(true);
+
+    let (status, j) = call(&f, "POST", &uri, &token, None).await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{j}");
+    let (spec, root_secret_id) = stored_engine_row(&f, id).await;
+    assert!(
+        root_secret_id.is_some(),
+        "the root password secret is stored"
+    );
+    assert_eq!(
+        spec["starrocksConfig"]["feImage"],
+        egret_perm::DEFAULT_ENGINE_IMAGES.starrocks_fe_image
+    );
+    assert_eq!(
+        spec["starrocksConfig"]["cnImage"],
+        egret_perm::DEFAULT_ENGINE_IMAGES.starrocks_cn_image
+    );
+    assert!(
+        stored_upgrade_pending(&f, id).await,
+        "the upgrade is unfinished"
+    );
+    let (status, j) = call(&f, "GET", &format!("/engines/{engine_id}"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["securityUpgradeNeeded"], true, "{j}");
+    assert_eq!(
+        j["securityUpgradeReasons"],
+        serde_json::json!(["notApplied"]),
+        "{j}"
+    );
+
+    // With a working provisioner a repeat applies once and clears it.
+    port.set_fail_update(false);
+    let updates_before = port.updated.lock().unwrap().len();
+    let (status, j) = call(&f, "POST", &uri, &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["imageChanged"], false, "{j}");
+    assert_eq!(j["rootPasswordSet"], false, "{j}");
+    assert_eq!(j["engine"]["securityUpgradeNeeded"], false, "{j}");
+    assert_eq!(
+        j["engine"]["securityUpgradeReasons"],
+        serde_json::json!([]),
+        "{j}"
+    );
+    assert_eq!(port.updated.lock().unwrap().len(), updates_before + 1);
+    let applied = port.last_updated();
+    let sr = applied.starrocks.as_ref().expect("a StarRocks spec");
+    assert_eq!(
+        sr.fe_image,
+        egret_perm::DEFAULT_ENGINE_IMAGES.starrocks_fe_image
+    );
+    assert!(sr.root_password.is_some());
+    assert!(!stored_upgrade_pending(&f, id).await);
+}
+
+/// Fix round 1: an ordinary settings PUT of a StarRocks engine applies the
+/// row as it stands, so it also finishes an unfinished security upgrade.
+#[tokio::test]
+async fn a_starrocks_settings_put_clears_an_unfinished_security_upgrade() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sr_secup_put_admin", true).await;
+    let (engine_id, wh_id) = create_starrocks_via_api(&f, &token).await;
+    let id = Uuid::parse_str(&engine_id).unwrap();
+    let name: String = sqlx::query_scalar(
+        "UPDATE engine_mgmt.engines SET security_upgrade_pending = true WHERE id = $1 \
+         RETURNING name",
+    )
+    .bind(id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("flag the engine");
+
+    let (status, j) = call(
+        &f,
+        "PUT",
+        &format!("/engines/{engine_id}"),
+        &token,
+        Some(serde_json::json!({
+            "name": name, "warehouseId": wh_id, "kind": "starrocks",
+            "coordinatorReplicas": 1, "workerReplicas": 1,
+            "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            "starrocks": { "cnReplicas": 2 },
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert!(
+        !stored_upgrade_pending(&f, id).await,
+        "the accepted apply cleared it"
+    );
+}
+
+/// Review Minor 2: a deleting engine gets the apply conflict, and nothing is
+/// written or applied.
+#[tokio::test]
+async fn security_upgrade_refuses_a_deleting_engine() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sr_secup_deleting_admin", true).await;
+    let id = mv_engine(&f, "starrocks", None).await;
+    sqlx::query("UPDATE engine_mgmt.engines SET status = 'deleting' WHERE id = $1")
+        .bind(id)
+        .execute(&f.db.pool)
+        .await
+        .expect("mark deleting");
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{id}/security-upgrade"),
+        &token,
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    assert!(
+        j["error"].as_str().unwrap_or("").contains("engine changed"),
+        "{j}"
+    );
+    let (_, root_secret_id) = stored_engine_row(&f, id).await;
+    assert!(root_secret_id.is_none(), "nothing minted");
+    assert!(!stored_upgrade_pending(&f, id).await, "nothing flagged");
+    assert!(port.updated.lock().unwrap().is_empty(), "nothing applied");
 }

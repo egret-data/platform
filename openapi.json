@@ -6234,7 +6234,7 @@
           "control-plane-engines"
         ],
         "summary": "Bring a legacy StarRocks engine up to egret's security baseline",
-        "description": "Mints a FE root password if the engine has none, moves FE and CN to the\ndefault patched images unless that would be a downgrade, and re-applies\nthe engine: a Job sets the root password on the running FE and the FE and\nCN pods restart. Nothing is applied when nothing changed.",
+        "description": "Mints a FE root password if the engine has none, moves FE and CN to the\ndefault patched images unless that would be a downgrade, and re-applies\nthe engine: a Job sets the root password on the running FE and the FE and\nCN pods restart. The engine is re-applied on every call, so a repeat\nfinishes a run whose apply failed.",
         "operationId": "security_upgrade",
         "parameters": [
           {
@@ -6250,7 +6250,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The engine is at the security baseline as far as egret can take it. When `rootPasswordSet` or `imageChanged` is true the engine was re-applied: a Job sets the new FE root password on the running FE, and the FE and CN pods restart (on the default patched images when `imageChanged`). When both are false nothing was applied. `imageKeptBecause` says why an unpatched image was kept (the engine runs a newer release than the default FE, which egret does not downgrade)",
+            "description": "The engine is at the security baseline as far as egret can take it. The engine was re-applied (on every call): a Job sets the FE root password on the running FE, and the FE and CN pods restart (on the default patched images when `imageChanged`). `rootPasswordSet` says a root password was minted by this call. `imageKeptBecause` says why an unpatched image was kept (the engine runs a newer release than the default FE, which egret does not downgrade)",
             "content": {
               "application/json": {
                 "schema": {
@@ -6320,7 +6320,7 @@
             }
           },
           "502": {
-            "description": "Kubernetes rejected the apply; the stored spec and root password secret already carry the upgrade, and the next apply of the engine applies them",
+            "description": "Kubernetes rejected the apply. The stored spec and root password secret already carry the upgrade; the engine keeps the `notApplied` security upgrade reason (`securityUpgradeNeeded` stays true), and a repeat call finishes the run",
             "content": {
               "application/json": {
                 "schema": {
@@ -45285,7 +45285,7 @@
             "items": {
               "$ref": "#/components/schemas/SecurityUpgradeReason"
             },
-            "description": "Why the engine needs the security upgrade, in order: `unpatchedImage`\n(the stored FE image is absent or not an egret FE with every security\npatch) and `noRootPassword` (the FE root has no password secret).\nAlways present; empty for an external engine, a Trino engine, and an\nengine that needs nothing. The security upgrade action\n(`POST /api/control-plane/engines/{id}/security-upgrade`) empties it."
+            "description": "Why the engine needs the security upgrade, in order: `unpatchedImage`\n(the stored FE image is absent or not an egret FE with every security\npatch), `noRootPassword` (the FE root has no password secret) and\n`notApplied` (the last security upgrade stored its changes but did not\nfinish applying them; run it again). Always present; empty for an external engine, a Trino engine, and an\nengine that needs nothing. The security upgrade action\n(`POST /api/control-plane/engines/{id}/security-upgrade`) empties it."
           },
           "securityUpgradeFeImage": {
             "type": [
@@ -55055,7 +55055,8 @@
         "description": "Why a provisioned StarRocks engine needs the security upgrade.",
         "enum": [
           "unpatchedImage",
-          "noRootPassword"
+          "noRootPassword",
+          "notApplied"
         ]
       },
       "SeedResult": {
