@@ -6,32 +6,6 @@ import { WarningCallout, profilesQueryKey } from "./externalEngine";
 export const STARROCKS_METADATA_TABLES_SENTENCE =
   "Unless this engine runs egret-starrocks-fe 4.1.7-egret.4 or later, its StarRocks lets users past this profile's grants, masks, row filters and classifications. Official images serve the metadata tables of Iceberg tables ($files, $partitions, $manifests, $snapshots, $history, $refs, $metadata_log_entries) without asking Ranger and apply no mask or row filter to prepared statements (Data API endpoints with parameters); official images and egret's earlier patched images also apply none through the HTTP SQL API or Arrow Flight SQL, let anyone read object storage through FILES(), and let a masked or filtered user store a table's rows in the clear in a materialized view; images before 4.1.7-egret.4 also show a filtered user the statistics of the rows it hides through EXPLAIN COSTS, and let anyone reach object storage with the cluster's own identity through BROKER LOAD, EXPORT and SELECT INTO OUTFILE without keys. Run the engine on egret-starrocks-fe 4.1.7-egret.4 or later (the default for new engines), or give StarRocks logins only to people who may see every value and serve masked or filtered data through Trino.";
 
-/** egret's patched StarRocks FE image: `<N.N.N>-egret.<N>`, with or without its digest. */
-const PATCHED_STARROCKS_FE =
-  /^ghcr\.io\/egret-data\/egret-starrocks-fe:(\d+)\.(\d+)\.(\d+)-egret\.(\d+)(?:@sha256:[0-9a-f]{64})?$/;
-
-/**
- * The first patch level of each upstream release that closes every hole the warning names
- * (egret-starrocks: 0001 to 0009 on 4.1.7). A later upstream release starts at level 1 with
- * every patch rebased onto it, so any level of it counts.
- */
-const FIRST_COMPLETE = { release: [4, 1, 7], level: 4 } as const;
-
-/**
- * Whether `image` is an egret-patched StarRocks FE that closes every hole the warning
- * describes: 4.1.7 from egret.4, or any later release. Anything else, including an earlier
- * patch level and an engine whose image egret does not know, is treated as unpatched.
- */
-export function isPatchedStarRocksImage(image: string | null | undefined): boolean {
-  const m = image ? PATCHED_STARROCKS_FE.exec(image.trim()) : null;
-  if (!m) return false;
-  const release = [Number(m[1]), Number(m[2]), Number(m[3])];
-  for (let i = 0; i < 3; i++) {
-    if (release[i] !== FIRST_COMPLETE.release[i]) return release[i] > FIRST_COMPLETE.release[i];
-  }
-  return Number(m[4]) >= FIRST_COMPLETE.level;
-}
-
 /**
  * The warning shown wherever a StarRocks engine is, or is about to be, bound to
  * a policy profile (spec 2026-11-02-starrocks-metadata-table-warning): StarRocks
@@ -45,14 +19,38 @@ export function StarRocksMetadataTablesWarning({ engineType, bound }: { engineTy
 }
 
 /**
+ * Whether the server's verdict says this provisioned StarRocks engine's FE image
+ * is unpatched, or cannot say it. The rule lives in `egret-perm::engine_images`;
+ * the engine DTO carries its result in `securityUpgradeReasons`. A payload
+ * without the field (an older server, or no read of the engine) settles nothing.
+ */
+export function imageVerdict(reasons: readonly string[] | null | undefined): "patched" | "unpatched" | "unknown" {
+  if (!reasons) return "unknown";
+  return reasons.includes("unpatchedImage") ? "unpatched" : "patched";
+}
+
+/**
  * The warning on a provisioned StarRocks engine's page. The engine payload does
  * not carry its profile, so the binding is read from the profile list (as the
  * external engine page does); while that list loads or when it cannot be read,
- * nothing is shown. An engine on a complete egret-patched image gets no warning.
+ * nothing is shown.
+ *
+ * It reads the server's image verdict (`securityUpgradeReasons`):
+ * - `unpatchedImage` present: hidden, because the security-upgrade warning
+ *   (`StarRocksPostureWarnings.tsx`) names the image and offers the fix, so the
+ *   page carries one message, not two;
+ * - absent: the image is patched, so there is nothing to warn about;
+ * - no verdict at all (a payload without the field): shown while bound, as before.
  */
-export function ProvisionedStarRocksMetadataTablesWarning({ engineId, image }: { engineId: string; image?: string }) {
+export function ProvisionedStarRocksMetadataTablesWarning({
+  engineId,
+  securityUpgradeReasons,
+}: {
+  engineId: string;
+  securityUpgradeReasons?: readonly string[] | null;
+}) {
   const profilesQ = useQuery<Profile[], ApiError>({ queryKey: profilesQueryKey, queryFn: listProfiles });
   const bound = !!profilesQ.data?.some((p) => p.engines.some((e) => e.id === engineId));
-  if (isPatchedStarRocksImage(image)) return null;
+  if (imageVerdict(securityUpgradeReasons) !== "unknown") return null;
   return <StarRocksMetadataTablesWarning engineType="starrocks" bound={bound} />;
 }

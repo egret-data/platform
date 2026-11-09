@@ -6,12 +6,14 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import EngineCreate from "@/routes/control-plane/EngineCreate";
 import * as api from "@/api/controlPlane";
+import * as policies from "@/api/policies";
 import * as registry from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import { ApiError } from "@/api/client";
 import { warehousesQueryKey } from "@/routes/control-plane/queryKeys";
 import type { CreateEngineResponse, RegistryCatalogDto } from "@/api/generated/model";
 
 vi.mock("@/api/controlPlane");
+vi.mock("@/api/policies");
 // PARTIAL: the query-key builders stay real, so nothing here pins a literal
 // against itself.
 vi.mock(
@@ -118,6 +120,18 @@ const created = (over: Partial<CreateEngineResponse> = {}) =>
     ...over,
   }) as unknown as CreateEngineResponse;
 
+/**
+ * Not pre-filtered: a Trino profile, a StarRocks profile already bound, and two
+ * free StarRocks profiles, so a picker that lists everything (or every
+ * StarRocks profile) is told apart from one that lists only the free ones.
+ */
+const PROFILES = [
+  { id: 11, name: "trino-main", type: "trino", engines: [] },
+  { id: 21, name: "sr-free", type: "starrocks", engines: [] },
+  { id: 22, name: "sr-taken", type: "starrocks", engines: [{ id: "e9", name: "other-sr", status: "running" }] },
+  { id: 23, name: "sr-spare", type: "starrocks", engines: [] },
+] as unknown as policies.Profile[];
+
 describe("EngineCreate", () => {
   beforeEach(() => {
     vi.mocked(api.listWarehouses).mockResolvedValue([WAREHOUSE]);
@@ -125,6 +139,7 @@ describe("EngineCreate", () => {
     vi.mocked(api.createEngine).mockClear();
     vi.mocked(api.createEngine).mockResolvedValue(created());
     mockCatalogs([EGRET]);
+    vi.mocked(policies.listProfiles).mockResolvedValue(PROFILES);
   });
 
   test("Trino: submits kind trino with a trinoConfig (coordinator/worker)", async () => {
@@ -221,6 +236,53 @@ describe("EngineCreate", () => {
     const body = vi.mocked(api.createEngine).mock.calls[0][0];
     expect(body.starrocks?.feImage).toBe("starrocks/fe-ubuntu:4.1.4");
     expect(body.starrocks).not.toHaveProperty("cnImage");
+  });
+
+  test("StarRocks: the policy profile picker lists only free StarRocks profiles and says what no profile means", async () => {
+    const user = userEvent.setup();
+    renderCreate("starrocks");
+    const picker = screen.getByRole("combobox", { name: "Policy profile" });
+    expect(picker).toHaveTextContent("Create a profile named after the engine");
+    expect(picker).toHaveAccessibleDescription(
+      "Without a profile, egret's grants, masks and row filters do not reach this engine.",
+    );
+    await waitFor(() => expect(policies.listProfiles).toHaveBeenCalled());
+    await user.click(picker);
+    const options = (await screen.findAllByRole("option")).map((o) => o.textContent);
+    expect(options).toEqual(["Create a profile named after the engine", "sr-free", "sr-spare"]);
+  });
+
+  test("StarRocks: the default profile option sends no authzServiceId", async () => {
+    const user = userEvent.setup();
+    renderCreate("starrocks");
+    await user.type(screen.getByLabelText("Name"), "sr1");
+    await makePrimary(user, "demo-catalog");
+    await user.click(screen.getByRole("button", { name: "Create engine" }));
+    await waitFor(() => expect(api.createEngine).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(api.createEngine).mock.calls[0][0]).not.toHaveProperty("authzServiceId");
+  });
+
+  test("StarRocks: a picked profile sends its id", async () => {
+    const user = userEvent.setup();
+    renderCreate("starrocks");
+    await user.type(screen.getByLabelText("Name"), "sr1");
+    await makePrimary(user, "demo-catalog");
+    await user.click(screen.getByRole("combobox", { name: "Policy profile" }));
+    await user.click(await screen.findByRole("option", { name: "sr-spare" }));
+    await user.click(screen.getByRole("button", { name: "Create engine" }));
+    await waitFor(() => expect(api.createEngine).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(api.createEngine).mock.calls[0][0].authzServiceId).toBe(23);
+  });
+
+  test("Trino: no policy profile picker, and no authzServiceId", async () => {
+    const user = userEvent.setup();
+    renderCreate("trino");
+    expect(screen.queryByRole("combobox", { name: "Policy profile" })).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText("Name"), "t1");
+    await makePrimary(user, "demo-catalog");
+    await user.click(screen.getByRole("button", { name: "Create engine" }));
+    await waitFor(() => expect(api.createEngine).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(api.createEngine).mock.calls[0][0]).not.toHaveProperty("authzServiceId");
   });
 
   test("StarRocks: a delegation mode adds delegationMode + tlsEnabled", async () => {

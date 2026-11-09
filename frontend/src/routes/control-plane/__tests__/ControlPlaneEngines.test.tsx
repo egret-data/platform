@@ -80,6 +80,37 @@ describe("ControlPlaneEngines", () => {
     expect(within(currentRow).queryByText("Re-apply needed")).not.toBeInTheDocument();
   });
 
+  test("flags StarRocks engines that are not governed or need a security upgrade, and only those", async () => {
+    const SR = { ...ENGINE, type: "starrocks" };
+    vi.mocked(api.listEngines).mockResolvedValue([
+      { ...SR, id: "s1", name: "loose-sr", notGoverned: true },
+      { ...SR, id: "s2", name: "legacy-sr", securityUpgradeNeeded: true, securityUpgradeReasons: ["noRootPassword"] },
+      { ...SR, id: "s3", name: "current-sr", notGoverned: false, securityUpgradeNeeded: false },
+      { ...SR, id: "s4", name: "remote-sr", origin: "external", notGoverned: true },
+    ]);
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole("tab", { name: "StarRocks" }));
+    const row = async (name: string) => (await screen.findByText(name)).closest("tr")!;
+
+    const loose = within(await row("loose-sr"));
+    expect(loose.getByText("Not governed")).toHaveAttribute(
+      "title",
+      "Not governed: this engine is bound to no policy profile, so egret's grants, masks and row filters do not reach it. Bind it to a StarRocks profile in its settings.",
+    );
+    expect(loose.queryByText("Security upgrade needed")).not.toBeInTheDocument();
+
+    const legacy = within(await row("legacy-sr"));
+    expect(legacy.getByText("Security upgrade needed")).toBeInTheDocument();
+    expect(legacy.queryByText("Not governed")).not.toBeInTheDocument();
+
+    const current = within(await row("current-sr"));
+    expect(current.queryByText("Not governed")).not.toBeInTheDocument();
+    expect(current.queryByText("Security upgrade needed")).not.toBeInTheDocument();
+
+    expect(within(await row("remote-sr")).getByText("Not governed")).toBeInTheDocument();
+  });
+
   test("renders the engine list", async () => {
     renderPage();
     expect(screen.getByText("Engines")).toBeInTheDocument();

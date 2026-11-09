@@ -18,6 +18,7 @@ import {
   type controlPlaneCatalogRegistryListRegistryCatalogsResponse,
 } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import { ApiError } from "@/api/client";
+import { type Profile, listProfiles } from "@/api/policies";
 import { pickableSecrets } from "@/lib/systemSecrets";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -42,6 +43,7 @@ import {
   enginesQueryKey,
 } from "./ControlPlaneEngines";
 import { TrinoConfigEditor } from "./EngineDetail";
+import { profilesQueryKey } from "./externalEngine";
 import { warehousesQueryKey } from "./queryKeys";
 import { useEngineConfigForm } from "./useEngineConfigForm";
 import type { StarRocksDelegationOption } from "./useStarRocksConfigForm";
@@ -62,6 +64,9 @@ import { DetailHeader } from "@/components/layout/DetailHeader";
  * 400 to say something the row already knows (design D2).
  */
 const canBePrimary = (c: RegistryCatalogDto) => c.warehouseId != null;
+
+/** The StarRocks profile picker's default: send no `authzServiceId`. */
+const NEW_PROFILE = "__new__";
 
 /**
  * Full-page create-engine wizard (`/control-plane/engines/new`). Mirrors the
@@ -144,6 +149,17 @@ export default function EngineCreate() {
   const [delegationMode, setDelegationMode] =
     useState<StarRocksDelegationOption>("");
   const [tlsEnabled, setTlsEnabled] = useState(true);
+  // The StarRocks policy profile (KI-336). `NEW_PROFILE` sends no `authzServiceId`, and the
+  // server makes a profile named after the engine (when Ranger is on).
+  const [profileId, setProfileId] = useState(NEW_PROFILE);
+  const profilesQ = useQuery<Profile[], ApiError>({
+    queryKey: profilesQueryKey,
+    queryFn: listProfiles,
+    retry: false,
+    enabled: isStarRocks,
+  });
+  // A StarRocks profile binds one engine, so only a free one is offered.
+  const freeProfiles = (profilesQ.data ?? []).filter((p) => p.type === "starrocks" && p.engines.length === 0);
 
   // A synthetic engine seeds the Trino config form in "create mode": the form
   // starts from chart defaults (placeholders) and the save mutation inside the
@@ -280,6 +296,7 @@ export default function EngineCreate() {
             cnReplicas,
             ...(delegationMode !== "" ? { delegationMode, tlsEnabled } : {}),
           },
+          ...(profileId !== NEW_PROFILE ? { authzServiceId: Number(profileId) } : {}),
           ...TRINO_FIELD_DEFAULTS,
         }
       : {
@@ -632,6 +649,37 @@ export default function EngineCreate() {
                 />
               </div>
             )}
+            <div className="space-y-1.5 sm:col-span-2">
+              <Label htmlFor="ec-sr-profile">Policy profile</Label>
+              <Select value={profileId} onValueChange={setProfileId}>
+                <SelectTrigger
+                  id="ec-sr-profile"
+                  className="w-full"
+                  aria-describedby="ec-sr-profile-hint"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NEW_PROFILE}>
+                    Create a profile named after the engine
+                  </SelectItem>
+                  {freeProfiles.map((p) => (
+                    <SelectItem key={p.id} value={String(p.id)}>
+                      {p.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p id="ec-sr-profile-hint" className="text-xs text-muted-foreground">
+                Without a profile, egret's grants, masks and row filters do not reach this engine.
+              </p>
+              {profilesQ.isError && (
+                <p className="text-xs text-destructive">
+                  The profile list could not be read, so only a new profile is offered. Reload
+                  the page to try again.
+                </p>
+              )}
+            </div>
           </div>
         </section>
       ) : (

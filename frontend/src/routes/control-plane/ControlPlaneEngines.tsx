@@ -16,6 +16,8 @@ import {
 } from "@/components/explore/FilterableTable";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { ExternalChip, isExternal, useCan } from "./externalEngine";
+import { enginesQueryKey } from "./queryKeys";
+import { EnginePostureBadges } from "./StarRocksPostureWarnings";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { PageContainer } from "@/components/layout/PageContainer";
 import { PageTitle } from "@/components/layout/PageTitle";
@@ -114,7 +116,7 @@ export const DELEGATION_HELP: Record<StarRocksDelegationOption, string> = {
   none: "No delegation — the engine's own configured credential is used for all queries.",
 };
 
-export const enginesQueryKey = ["cp", "engines"] as const;
+export { enginesQueryKey };
 
 export default function ControlPlaneEngines() {
   const engines = useQuery<Engine[], ApiError>({
@@ -274,10 +276,14 @@ function EngineTable({
       // An external engine is not monitored: a chip stands where the status would be.
       cell: (e) =>
         isExternal(e) ? (
-          <ExternalChip />
+          <span className="flex flex-wrap items-center gap-1.5">
+            <ExternalChip />
+            <EnginePostureBadges engine={e} />
+          </span>
         ) : (
           <span className="flex flex-wrap items-center gap-1.5">
             <EngineStatusBadge id={e.id} fallback={e.status} />
+            <EnginePostureBadges engine={e} />
             {e.securityReapplyNeeded && (
               <StatusBadge
                 tone="highlight"
