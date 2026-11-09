@@ -124,8 +124,45 @@ fn values_default_the_port_to_8082_enabled() {
     assert!(opa.contains("  port: 8082"));
 }
 
-/// Renders the chart with `helm template` when helm is installed (CI images
-/// without it print a note and skip, the text tests above still bind).
+/// The opt-out for the render tests below, and it has to be **typed into the
+/// invocation**: without helm they FAIL, unless this is set. CI installs helm
+/// in the `rust` job, so a runner that loses it goes red instead of silently
+/// green with every render test skipped.
+pub const ALLOW_HELM_SKIP: &str = "EGRET_ALLOW_HELM_SKIP";
+
+/// What a render test should do, from the two facts that decide it: `Ok(true)`
+/// run, `Ok(false)` skip because the operator typed the opt-out, `Err(msg)`
+/// fail with `msg`. Pure, so the gate is tested in every direction without
+/// touching the real environment.
+fn helm_verdict(has_helm: bool, allow_skip: bool) -> Result<bool, String> {
+    match (has_helm, allow_skip) {
+        (true, _) => Ok(true),
+        (false, true) => Ok(false),
+        (false, false) => Err(format!(
+            "helm is not installed, so the chart render tests cannot run. Install helm \
+             (CI: azure/setup-helm in the `rust` job), or set {ALLOW_HELM_SKIP}=1 to skip them."
+        )),
+    }
+}
+
+#[test]
+fn the_helm_gate_fails_rather_than_skipping_and_the_opt_out_must_be_typed() {
+    assert_eq!(helm_verdict(true, false), Ok(true));
+    assert_eq!(
+        helm_verdict(true, true),
+        Ok(true),
+        "helm present: always run"
+    );
+    assert_eq!(helm_verdict(false, true), Ok(false), "typed opt-out: skip");
+    let err = helm_verdict(false, false).expect_err("no helm, no opt-out: fail");
+    assert!(
+        err.contains(ALLOW_HELM_SKIP),
+        "the failure names the opt-out"
+    );
+}
+
+/// Renders the chart with `helm template`. Without helm it fails, unless
+/// [`ALLOW_HELM_SKIP`] is set (see [`helm_verdict`]).
 fn render(args: &[&str]) -> Option<String> {
     let chart = format!("{}/../../deploy/helm/egret", env!("CARGO_MANIFEST_DIR"));
     let out = match std::process::Command::new("helm")
@@ -134,10 +171,16 @@ fn render(args: &[&str]) -> Option<String> {
         .output()
     {
         Ok(o) => o,
-        Err(_) => {
-            eprintln!("helm not installed: render test skipped");
-            return None;
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            match helm_verdict(false, std::env::var_os(ALLOW_HELM_SKIP).is_some()) {
+                Ok(_) => {
+                    eprintln!("helm not installed and {ALLOW_HELM_SKIP} set: render test skipped");
+                    return None;
+                }
+                Err(msg) => panic!("{msg}"),
+            }
         }
+        Err(e) => panic!("could not run helm: {e}"),
     };
     assert!(
         out.status.success(),
