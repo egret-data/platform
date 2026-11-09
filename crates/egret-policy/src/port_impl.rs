@@ -40,6 +40,12 @@ impl PolicyPort for PolicyStore {
         crate::service_def::seed_tag(self).await.map_err(Into::into)
     }
 
+    async fn ensure_starrocks_def(&self) -> Result<(), PolicyError> {
+        crate::service_def::seed_starrocks(self)
+            .await
+            .map_err(Into::into)
+    }
+
     async fn list_services(&self) -> Result<Vec<PolicyService>, PolicyError> {
         Ok(self
             .list_services()
