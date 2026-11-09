@@ -6228,6 +6228,110 @@
         }
       }
     },
+    "/api/control-plane/engines/{id}/security-upgrade": {
+      "post": {
+        "tags": [
+          "control-plane-engines"
+        ],
+        "summary": "Bring a legacy StarRocks engine up to egret's security baseline",
+        "description": "Mints a FE root password if the engine has none, moves FE and CN to the\ndefault patched images unless that would be a downgrade, and re-applies\nthe engine: a Job sets the root password on the running FE and the FE and\nCN pods restart. Nothing is applied when nothing changed.",
+        "operationId": "security_upgrade",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Engine id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The engine is at the security baseline as far as egret can take it. When `rootPasswordSet` or `imageChanged` is true the engine was re-applied: a Job sets the new FE root password on the running FE, and the FE and CN pods restart (on the default patched images when `imageChanged`). When both are false nothing was applied. `imageKeptBecause` says why an unpatched image was kept (the engine runs a newer release than the default FE, which egret does not downgrade)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityUpgradeDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Kubernetes not configured, or the engine's spec could not be assembled (e.g. no primary catalog with a warehouse)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing engine:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not a StarRocks engine; or the engine changed concurrently (e.g. a delete in progress), retry; or the engine is external (`code` = `engine_is_external`): egret does not upgrade the cluster of it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Kubernetes rejected the apply; the stored spec and root password secret already carry the upgrade, and the next apply of the engine applies them",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/engines/{id}/workspaces": {
       "get": {
         "tags": [
@@ -45068,7 +45172,10 @@
           "origin",
           "rangerCredentialPending",
           "endpoint",
-          "securityReapplyNeeded"
+          "securityReapplyNeeded",
+          "securityUpgradeNeeded",
+          "securityUpgradeReasons",
+          "notGoverned"
         ],
         "properties": {
           "id": {
@@ -45168,6 +45275,35 @@
           "securityReapplyNeeded": {
             "type": "boolean",
             "description": "Provisioned Trino only: `true` when the engine was last applied before\nthe current security render (or never applied), so it may still accept\nunauthenticated requests on port 8080. Re-applying it clears this."
+          },
+          "securityUpgradeNeeded": {
+            "type": "boolean",
+            "description": "Provisioned StarRocks only: `true` when `securityUpgradeReasons` is not\nempty, i.e. the engine runs an unpatched FE image and/or its FE root has\nno password. The security upgrade action\n(`POST /api/control-plane/engines/{id}/security-upgrade`) clears it."
+          },
+          "securityUpgradeReasons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SecurityUpgradeReason"
+            },
+            "description": "Why the engine needs the security upgrade, in order: `unpatchedImage`\n(the stored FE image is absent or not an egret FE with every security\npatch) and `noRootPassword` (the FE root has no password secret).\nAlways present; empty for an external engine, a Trino engine, and an\nengine that needs nothing. The security upgrade action\n(`POST /api/control-plane/engines/{id}/security-upgrade`) empties it."
+          },
+          "securityUpgradeFeImage": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The FE image the security upgrade would switch the engine to. Set only\nwhen `unpatchedImage` is a reason and the swap is not a downgrade;\nabsent otherwise. The security upgrade action\n(`POST /api/control-plane/engines/{id}/security-upgrade`) applies it and\nclears this field."
+          },
+          "securityUpgradeBlockedRelease": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The release (e.g. `4.1.8`) that blocks the FE image swap: set when\n`unpatchedImage` is a reason but the engine already runs a release newer\nthan the default FE, which cannot be downgraded. Absent otherwise. The\nsecurity upgrade action\n(`POST /api/control-plane/engines/{id}/security-upgrade`) leaves such an\nengine on its image, so this stays set until the platform default FE\ncatches up."
+          },
+          "notGoverned": {
+            "type": "boolean",
+            "description": "`true` when Ranger is on and this StarRocks engine (provisioned or\nexternal) is bound to no policy profile, so Ranger governs nothing on\nit (KI-336). A Trino engine is never flagged: it late-binds a profile on\nits next apply. Set by the reads (`with_runtime`); `false` otherwise."
           }
         }
       },
@@ -54882,6 +55018,44 @@
           "definer",
           "invoker",
           "unknown"
+        ]
+      },
+      "SecurityUpgradeDto": {
+        "type": "object",
+        "description": "What `POST /engines/{id}/security-upgrade` did.",
+        "required": [
+          "engine",
+          "imageChanged",
+          "rootPasswordSet"
+        ],
+        "properties": {
+          "engine": {
+            "$ref": "#/components/schemas/EngineDto",
+            "description": "The engine as it now stands."
+          },
+          "imageChanged": {
+            "type": "boolean",
+            "description": "`true` when FE and CN were moved to the default patched images."
+          },
+          "rootPasswordSet": {
+            "type": "boolean",
+            "description": "`true` when a FE root password was minted for the engine."
+          },
+          "imageKeptBecause": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the image was kept although it lacks the patches: the engine runs a\nnewer release than the default FE, and egret does not downgrade. Absent\notherwise."
+          }
+        }
+      },
+      "SecurityUpgradeReason": {
+        "type": "string",
+        "description": "Why a provisioned StarRocks engine needs the security upgrade.",
+        "enum": [
+          "unpatchedImage",
+          "noRootPassword"
         ]
       },
       "SeedResult": {

@@ -110,6 +110,8 @@ pub fn router() -> Router<CpState> {
         .route("/engines/{id}/pods/{pod}/exec", get(pod_exec))
         .route("/engines/{id}/restart", post(restart_engine))
         .route("/engines/{id}/rotate-secrets", post(rotate_engine_secrets))
+        // Bring a legacy StarRocks engine to the security baseline.
+        .merge(crate::security_upgrade::routes())
         .route(
             "/engines/{id}/rotate-ranger-credential",
             post(rotate_ranger_credential),
@@ -410,7 +412,7 @@ pub(crate) struct EngineDto {
 
 impl EngineDto {
     /// The DTO with what runs the engine filled in (absent for an external one).
-    fn with_runtime(mut self, st: &CpState) -> Self {
+    pub(crate) fn with_runtime(mut self, st: &CpState) -> Self {
         if self.origin != crate::external::ORIGIN_EXTERNAL {
             self.runtime = st.engine_runtime();
         }
@@ -2518,7 +2520,7 @@ async fn ensure_delegator_secret(st: &CpState, engine: &Engine) -> Result<(Uuid,
 /// `(secret_id, plaintext)`. Secure-by-default: `create_starrocks_engine` calls this
 /// unconditionally, so every NEW StarRocks engine gets a strong root password; only
 /// legacy engines (no `root_secret_id`) stay passwordless.
-async fn ensure_root_password_secret(
+pub(crate) async fn ensure_root_password_secret(
     st: &CpState,
     engine: &Engine,
 ) -> Result<(Uuid, String), CpError> {
