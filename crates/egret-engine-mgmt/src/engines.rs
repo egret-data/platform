@@ -370,6 +370,34 @@ pub(crate) struct EngineDto {
     /// the current security render (or never applied), so it may still accept
     /// unauthenticated requests on port 8080. Re-applying it clears this.
     security_reapply_needed: bool,
+    /// Provisioned StarRocks only: `true` when `securityUpgradeReasons` is not
+    /// empty, i.e. the engine runs an unpatched FE image and/or its FE root has
+    /// no password. The security upgrade action
+    /// (`POST /api/control-plane/engines/{id}/security-upgrade`) clears it.
+    security_upgrade_needed: bool,
+    /// Why the engine needs the security upgrade, in order: `unpatchedImage`
+    /// (the stored FE image is absent or not an egret FE with every security
+    /// patch) and `noRootPassword` (the FE root has no password secret).
+    /// Always present; empty for an external engine, a Trino engine, and an
+    /// engine that needs nothing. The security upgrade action
+    /// (`POST /api/control-plane/engines/{id}/security-upgrade`) empties it.
+    security_upgrade_reasons: Vec<SecurityUpgradeReason>,
+    /// The FE image the security upgrade would switch the engine to. Set only
+    /// when `unpatchedImage` is a reason and the swap is not a downgrade;
+    /// absent otherwise. The security upgrade action
+    /// (`POST /api/control-plane/engines/{id}/security-upgrade`) applies it and
+    /// clears this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    security_upgrade_fe_image: Option<String>,
+    /// The release (e.g. `4.1.8`) that blocks the FE image swap: set when
+    /// `unpatchedImage` is a reason but the engine already runs a release newer
+    /// than the default FE, which cannot be downgraded. Absent otherwise. The
+    /// security upgrade action
+    /// (`POST /api/control-plane/engines/{id}/security-upgrade`) leaves such an
+    /// engine on its image, so this stays set until the platform default FE
+    /// catches up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    security_upgrade_blocked_release: Option<String>,
     /// `true` when Ranger is on and this StarRocks engine (provisioned or
     /// external) is bound to no policy profile, so Ranger governs nothing on
     /// it (KI-336). A Trino engine is never flagged: it late-binds a profile on
@@ -393,6 +421,34 @@ impl EngineDto {
             && st.ranger_enabled;
         self
     }
+}
+
+/// Why a provisioned StarRocks engine needs the security upgrade.
+#[derive(Serialize, ToSchema, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum SecurityUpgradeReason {
+    /// The stored FE image is absent or not an egret FE with every security patch.
+    UnpatchedImage,
+    /// The FE root user has no password secret.
+    NoRootPassword,
+}
+
+/// The reasons a provisioned StarRocks engine needs the security upgrade, in
+/// order; empty for every other engine.
+pub(crate) fn security_upgrade_reasons(e: &Engine) -> Vec<SecurityUpgradeReason> {
+    if crate::external::is_external(e) || !e.is_starrocks() {
+        return Vec::new();
+    }
+    let mut reasons = Vec::new();
+    let unpatched = egret_perm::stored_engine_image("starrocks", &e.spec)
+        .is_none_or(|image| !egret_perm::is_patched_starrocks_fe(&image));
+    if unpatched {
+        reasons.push(SecurityUpgradeReason::UnpatchedImage);
+    }
+    if e.root_secret_id.is_none() {
+        reasons.push(SecurityUpgradeReason::NoRootPassword);
+    }
+    reasons
 }
 
 /// Before the hardening the provisioner rendered `allow-insecure-over-http=false`
@@ -430,6 +486,17 @@ impl From<Engine> for EngineDto {
             && !e.is_starrocks()
             && e.applied_security_rev < TRINO_SECURITY_REV
             && !was_already_safe_before_the_hardening(&e);
+        let security_upgrade_reasons = security_upgrade_reasons(&e);
+        let (security_upgrade_fe_image, security_upgrade_blocked_release) =
+            if security_upgrade_reasons.contains(&SecurityUpgradeReason::UnpatchedImage) {
+                let current = egret_perm::stored_engine_image("starrocks", &e.spec);
+                match egret_perm::starrocks_fe_upgrade_target(current.as_deref()) {
+                    Ok(target) => (Some(target.to_string()), None),
+                    Err(release) => (None, Some(release)),
+                }
+            } else {
+                (None, None)
+            };
         let spec = serde_json::from_value(e.spec).unwrap_or_default();
         EngineDto {
             id: e.id,
@@ -450,6 +517,10 @@ impl From<Engine> for EngineDto {
             endpoint,
             runtime: None,
             security_reapply_needed,
+            security_upgrade_needed: !security_upgrade_reasons.is_empty(),
+            security_upgrade_reasons,
+            security_upgrade_fe_image,
+            security_upgrade_blocked_release,
             not_governed: false,
             authz_service_id: e.authz_service_id,
         }
@@ -8267,6 +8338,96 @@ mod tests {
         serde_json::to_value(EngineDto::from(e)).unwrap()["securityReapplyNeeded"]
             .as_bool()
             .unwrap()
+    }
+
+    fn sr_engine(origin: &str, fe_image: &str, root_secret: bool) -> Engine {
+        Engine {
+            spec: serde_json::json!({ "starrocksConfig": { "feImage": fe_image } }),
+            root_secret_id: root_secret.then(Uuid::new_v4),
+            ..dto_engine("starrocks", origin)
+        }
+    }
+
+    const OFFICIAL_4_1_6: &str = "starrocks/fe-ubuntu:4.1.6";
+    const EGRET_4: &str = "ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.4@sha256:55ec35ecf6df85320557f017e0c3c16056d82a258cf4a4e79a80a6565ac6fdc5";
+
+    #[test]
+    fn an_unpatched_passwordless_engine_gets_both_reasons_in_order() {
+        assert_eq!(
+            security_upgrade_reasons(&sr_engine("provisioned", OFFICIAL_4_1_6, false)),
+            vec![
+                SecurityUpgradeReason::UnpatchedImage,
+                SecurityUpgradeReason::NoRootPassword
+            ]
+        );
+    }
+
+    #[test]
+    fn a_patched_engine_with_a_root_secret_needs_nothing() {
+        assert!(security_upgrade_reasons(&sr_engine("provisioned", EGRET_4, true)).is_empty());
+    }
+
+    #[test]
+    fn a_patched_engine_without_a_root_secret_has_only_the_password_reason() {
+        assert_eq!(
+            security_upgrade_reasons(&sr_engine("provisioned", EGRET_4, false)),
+            vec![SecurityUpgradeReason::NoRootPassword]
+        );
+    }
+
+    #[test]
+    fn an_external_starrocks_engine_has_no_reasons() {
+        assert!(security_upgrade_reasons(&sr_engine("external", OFFICIAL_4_1_6, false)).is_empty());
+    }
+
+    #[test]
+    fn a_trino_engine_has_no_reasons() {
+        assert!(security_upgrade_reasons(&dto_engine("trino", "provisioned")).is_empty());
+    }
+
+    #[test]
+    fn the_dto_serialises_the_reasons_and_the_fe_target() {
+        let v = serde_json::to_value(EngineDto::from(sr_engine(
+            "provisioned",
+            OFFICIAL_4_1_6,
+            false,
+        )))
+        .unwrap();
+        assert_eq!(v["securityUpgradeNeeded"], true);
+        assert_eq!(
+            v["securityUpgradeReasons"],
+            serde_json::json!(["unpatchedImage", "noRootPassword"])
+        );
+        assert_eq!(
+            v["securityUpgradeFeImage"],
+            DEFAULT_ENGINE_IMAGES.starrocks_fe_image
+        );
+        assert!(v.get("securityUpgradeBlockedRelease").is_none());
+    }
+
+    #[test]
+    fn a_newer_official_release_is_blocked_from_the_fe_swap() {
+        let v = serde_json::to_value(EngineDto::from(sr_engine(
+            "provisioned",
+            "starrocks/fe-ubuntu:4.1.8",
+            false,
+        )))
+        .unwrap();
+        assert_eq!(
+            v["securityUpgradeReasons"],
+            serde_json::json!(["unpatchedImage", "noRootPassword"])
+        );
+        assert!(v.get("securityUpgradeFeImage").is_none());
+        assert_eq!(v["securityUpgradeBlockedRelease"], "4.1.8");
+    }
+
+    #[test]
+    fn an_engine_without_reasons_serialises_an_empty_list_and_no_target() {
+        let v = serde_json::to_value(EngineDto::from(dto_engine("trino", "provisioned"))).unwrap();
+        assert_eq!(v["securityUpgradeNeeded"], false);
+        assert_eq!(v["securityUpgradeReasons"], serde_json::json!([]));
+        assert!(v.get("securityUpgradeFeImage").is_none());
+        assert!(v.get("securityUpgradeBlockedRelease").is_none());
     }
 
     #[test]
