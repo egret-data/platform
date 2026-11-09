@@ -28,15 +28,15 @@
 - Hai trường hợp bị từ chối bằng 409: có profile trùng tên nhưng khác kiểu, hoặc profile trùng tên đã gắn với engine khác. Câu thông báo nêu đúng kiểu cần có.
 - Tạo engine thất bại thì hoàn tác qua `CreateUndo`, và chỉ xoá profile do chính lần tạo này sinh ra.
 
-**Form Add engine:** nhánh StarRocks có bộ chọn profile giống Trino.
+**Form Add engine:** hiện nay form không có bộ chọn profile nào, vì tạo engine Trino tự tạo profile (`EngineCreate.tsx` không có). Vì vậy select **Policy profile** của StarRocks là một control mới, còn form Trino giữ nguyên.
 - Danh sách chỉ hiện profile kiểu `starrocks` chưa gắn với engine nào.
 - Lựa chọn mặc định là tạo profile mới mang tên engine.
 
-**Engine không gắn profile:** khi Ranger bật, engine hiện cảnh báo "Not governed" và có badge trong danh sách engine. Cách sửa là dùng `PUT …/engines/{id}` với `authzServiceId`.
+**Engine không gắn profile:** khi Ranger bật, engine hiện cảnh báo "Not governed" và có badge trong danh sách engine. Frontend không biết Ranger có bật hay không, nên backend quyết định: DTO của engine có trường `notGoverned: bool`, chỉ true khi Ranger bật, engine là StarRocks và không có profile. Trang engine và badge đọc trường này. Cách sửa là dùng `PUT …/engines/{id}` với `authzServiceId`.
 
 ## Phần 2: engine cũ, badge và nút nâng cấp
 
-**Điều kiện, chỉ áp cho engine do egret provision.** DTO của engine có thêm `securityUpgradeNeeded` và `securityUpgradeReasons`, với hai lý do:
+**Điều kiện, chỉ áp cho engine do egret provision.** DTO của engine có thêm `securityUpgradeNeeded`, `securityUpgradeReasons`, `securityUpgradeFeImage` (image FE mà nâng cấp sẽ đặt, vắng nếu không đặt gì) và `securityUpgradeBlockedRelease` (bản phát hành mới hơn đang giữ image hiện tại, vắng nếu không có), để hộp xác nhận hiện đích đến trước khi gọi. Có hai lý do nâng cấp:
 - **`unpatchedImage`:** image FE chưa vá đủ.
   - Quy tắc nhận diện chuyển vào `egret-perm::engine_images`.
   - Image tính là đã vá nếu khớp digest của một image fork đã biết (kể cả khi được mirror sang registry khác), hoặc tag là `4.1.7-egret.4` trở lên, hoặc một bản phát hành mới hơn.

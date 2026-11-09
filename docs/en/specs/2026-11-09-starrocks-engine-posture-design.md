@@ -56,9 +56,11 @@ profile only if this create made it.
 
 ### Add engine form
 
-The StarRocks branch of **Add engine** gets the same profile picker as Trino. It lists only
-profiles of type `starrocks` that no engine binds, and offers "Create a profile named after the
-engine" as its default.
+**Add engine** has no profile picker today: a Trino create makes its profile automatically
+(`frontend/src/routes/control-plane/EngineCreate.tsx` has none). The StarRocks **Policy profile**
+select is therefore a new control, and Trino's form is unchanged. It lists only profiles of type
+`starrocks` that no engine binds, and offers "Create a profile named after the engine" as its
+default.
 
 ### Unbound engines
 
@@ -68,6 +70,10 @@ on its page and as a badge in the engine list:
 > Not governed: this engine is bound to no policy profile, so egret's grants, masks and row
 > filters do not reach it. Bind it to a StarRocks profile in its settings.
 
+The frontend cannot tell whether Ranger is on, so the backend decides: the engine DTO carries
+`notGoverned: bool`, true only when Ranger is on, the engine is StarRocks and it has no profile.
+The page and the badge read that field.
+
 The fix is the existing route, `PUT /api/control-plane/engines/{id}` with `authzServiceId`. When
 Ranger is off, no warning is shown, because no engine is governed then.
 
@@ -76,9 +82,14 @@ Ranger is off, no warning is shown, because no engine is governed then.
 ### When an engine needs an upgrade
 
 This applies only to a **provisioned** StarRocks engine. An external engine's image is not
-egret's to change. The engine DTO gains two fields:
+egret's to change. The engine DTO gains these fields:
 - `securityUpgradeNeeded: bool`;
-- `securityUpgradeReasons: ("unpatchedImage" | "noRootPassword")[]`, in that order.
+- `securityUpgradeReasons: ("unpatchedImage" | "noRootPassword")[]`, in that order;
+- `securityUpgradeFeImage`: the FE image the upgrade would set, absent when it would set none;
+- `securityUpgradeBlockedRelease`: the newer release that keeps the current image (the downgrade
+  block), absent otherwise.
+
+The last two let the confirmation dialog show the target before the call.
 
 The reasons:
 - **`unpatchedImage`**: the stored FE image does not close every hole. The rule moves from the
@@ -197,7 +208,7 @@ test kills, recorded in the task report.
 - **Upgrade notes:** check the engine list for "Security upgrade needed" after upgrading egret.
 - **Known issues:** KI-336 fixed. KI-340 and KI-345 point to the upgrade action for engines on
   older images.
-- **REST API:** `POST /engines/{id}/security-upgrade`, and the two new DTO fields.
+- **REST API:** `POST /engines/{id}/security-upgrade`, and the new DTO fields.
 - **Screenshots:** the badge, the warning, the dialog and the picker.
 
 ## Out of scope
