@@ -18434,3 +18434,90 @@ async fn security_upgrade_refuses_a_deleting_engine() {
     assert!(!stored_upgrade_pending(&f, id).await, "nothing flagged");
     assert!(port.updated.lock().unwrap().is_empty(), "nothing applied");
 }
+
+// ---- `notGoverned` on the update and registration responses (final review M4) ----
+
+/// A StarRocks settings PUT answers with the same `notGoverned` (and `runtime`)
+/// the engine's GET reports: an unbound StarRocks engine under Ranger is flagged
+/// in the PUT response too, not only on the next read.
+#[tokio::test]
+async fn a_starrocks_put_response_reports_not_governed_like_the_get() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_with_ranger_converging(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sr_put_notgov_admin", true).await;
+    let (engine_id, wh_id) = create_starrocks_via_api(&f, &token).await;
+    let id = Uuid::parse_str(&engine_id).unwrap();
+    // An engine left with no profile (e.g. created while Ranger was off).
+    let name: String = sqlx::query_scalar(
+        "UPDATE engine_mgmt.engines SET authz_service_id = NULL WHERE id = $1 RETURNING name",
+    )
+    .bind(id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("unbind the engine");
+
+    let (status, put) = call(
+        &f,
+        "PUT",
+        &format!("/engines/{engine_id}"),
+        &token,
+        Some(serde_json::json!({
+            "name": name, "warehouseId": wh_id, "kind": "starrocks",
+            "coordinatorReplicas": 1, "workerReplicas": 1,
+            "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            "starrocks": { "cnReplicas": 2 },
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{put}");
+    assert_eq!(put["notGoverned"], true, "{put}");
+    let (status, get) = call(&f, "GET", &format!("/engines/{engine_id}"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{get}");
+    assert_eq!(put["notGoverned"], get["notGoverned"], "{put} vs {get}");
+    assert_eq!(put["runtime"], get["runtime"], "{put} vs {get}");
+}
+
+/// External registration and PATCH answer with `notGoverned` set: an external
+/// StarRocks engine registered with no profile under Ranger is flagged in both.
+#[tokio::test]
+async fn external_register_and_patch_responses_report_not_governed() {
+    let Some(f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_notgov_admin", true).await;
+    let name = external_name("ext-notgov");
+    let (status, reg) = call(
+        &f,
+        "POST",
+        "/engines/external",
+        &token,
+        Some(register_body(&name, "starrocks", "2.8.0", None, &[])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{reg}");
+    assert_eq!(reg["notGoverned"], true, "registration response: {reg}");
+    let id = reg["id"].as_str().unwrap();
+
+    let (status, patched) = call(
+        &f,
+        "PATCH",
+        &format!("/engines/{id}/external"),
+        &token,
+        Some(serde_json::json!({ "host": "sr2.example.com" })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    assert_eq!(patched["notGoverned"], true, "PATCH response: {patched}");
+}

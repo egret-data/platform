@@ -476,7 +476,7 @@ async fn update_external_engine(
     }
     tx.commit().await.map_err(crate::http_error::db_error)?;
     tracing::info!(engine = %updated.name, "external engine updated; nothing was sent to the cluster");
-    Ok(Json(updated.into()))
+    Ok(Json(EngineDto::from(updated).with_runtime(&st)))
 }
 
 #[utoipa::path(
@@ -573,7 +573,7 @@ async fn register_external_engine(
         // The body carries a password: no browser or intermediary may keep it.
         [(axum::http::header::CACHE_CONTROL, "no-store")],
         Json(RegisteredExternalEngineDto {
-            engine: engine.into(),
+            engine: EngineDto::from(engine).with_runtime(&st),
             ranger_credential: RangerCredentialDto {
                 username: credential.username.clone(),
                 password: credential.password.clone(),

@@ -337,6 +337,38 @@ impl EngineMgmtStore {
         Ok(res.rows_affected() == 1)
     }
 
+    /// Write a StarRocks engine's FE and CN images into its stored spec
+    /// (`starrocksConfig.feImage` / `.cnImage`), leaving every other spec key
+    /// as the row holds it now, gated on `status` like [`Self::update_engine`].
+    /// Only these two keys are written, so a spec change a concurrent PUT
+    /// commits between the caller's read and this write is kept. Returns
+    /// whether the row was still at `status` (and so was updated).
+    pub async fn set_starrocks_images(
+        &self,
+        id: Uuid,
+        fe_image: &str,
+        cn_image: &str,
+        status: &str,
+    ) -> Result<bool, EngineMgmtError> {
+        let res = sqlx::query(
+            "UPDATE engine_mgmt.engines SET spec = \
+               jsonb_set(jsonb_set( \
+                 jsonb_set(spec, '{starrocksConfig}', \
+                   CASE WHEN jsonb_typeof(spec->'starrocksConfig') = 'object' \
+                        THEN spec->'starrocksConfig' ELSE '{}'::jsonb END), \
+                 '{starrocksConfig,feImage}', to_jsonb($2::text)), \
+               '{starrocksConfig,cnImage}', to_jsonb($3::text)) \
+             WHERE id = $1 AND status = $4",
+        )
+        .bind(id)
+        .bind(fe_image)
+        .bind(cn_image)
+        .bind(status)
+        .execute(self.pool())
+        .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
     pub async fn set_engine_status(&self, id: Uuid, status: &str) -> Result<(), EngineMgmtError> {
         sqlx::query("UPDATE engine_mgmt.engines SET status = $2 WHERE id = $1")
             .bind(id)

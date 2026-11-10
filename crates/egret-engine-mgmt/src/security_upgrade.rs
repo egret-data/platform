@@ -130,13 +130,16 @@ async fn security_upgrade(
         let current = egret_perm::stored_engine_image("starrocks", &engine.spec);
         match egret_perm::starrocks_fe_upgrade_target(current.as_deref()) {
             Ok(target) => {
-                let mut spec = engine.spec.clone();
-                spec["starrocksConfig"]["feImage"] = target.into();
-                spec["starrocksConfig"]["cnImage"] =
-                    DEFAULT_ENGINE_IMAGES.starrocks_cn_image.into();
+                // Only the two image keys, in SQL: the rest of the spec is
+                // whatever the row holds now, not the copy read above.
                 if !st
                     .engine_mgmt
-                    .update_engine(id, &spec, &engine.status)
+                    .set_starrocks_images(
+                        id,
+                        target,
+                        DEFAULT_ENGINE_IMAGES.starrocks_cn_image,
+                        &engine.status,
+                    )
                     .await?
                 {
                     return Err(apply_conflict());
