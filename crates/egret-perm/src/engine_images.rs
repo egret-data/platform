@@ -265,7 +265,9 @@ fn is_complete_level(release: (u32, u32, u32), level: u32) -> bool {
 /// Whether `image` (a stored FE image ref, tag and/or digest) is an egret FE that closes every
 /// hole the StarRocks warning names: by digest, the digest of a known egret FE row at or after
 /// the first complete level (so a mirrored repository counts); by tag, an egret FE tag at or
-/// after it. Anything else, including an image egret does not know, is unpatched.
+/// after it, read only when the ref carries no digest (a ref with a digest is judged by the
+/// digest alone, whatever its tag says). Anything else, including an image egret does not know,
+/// is unpatched.
 pub fn is_patched_starrocks_fe(image: &str) -> bool {
     let (repo, tag, digest) = parse(image.trim());
     let by_digest = digest.is_some_and(|d| {
@@ -279,7 +281,8 @@ pub fn is_patched_starrocks_fe(image: &str) -> bool {
         && tag
             .and_then(parse_egret_tag)
             .is_some_and(|(r, n)| is_complete_level(r, n));
-    by_digest || by_tag
+    // A digest is what the node pulls, so it alone decides; the tag counts only without one.
+    digest.map_or(by_tag, |_| by_digest)
 }
 
 /// The release `<a>.<b>.<c>` of an image's tag (`4.1.6`, `4.1.7-egret.3`); a tag such as
@@ -662,6 +665,19 @@ mod tests {
         )));
         assert!(!is_patched_starrocks_fe("trinodb/trino:483"));
         assert!(!is_patched_starrocks_fe(""));
+    }
+
+    #[test]
+    fn a_digest_decides_over_a_patched_tag() {
+        assert!(!is_patched_starrocks_fe(&format!(
+            "{EGRET_FE}:4.1.7-egret.4@{EGRET3_DIGEST}"
+        )));
+        assert!(!is_patched_starrocks_fe(&format!(
+            "{EGRET_FE}:4.1.7-egret.4@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        )));
+        assert!(is_patched_starrocks_fe(&format!(
+            "{EGRET_FE}:4.1.7-egret.3@{EGRET4_DIGEST}"
+        )));
     }
 
     #[test]
