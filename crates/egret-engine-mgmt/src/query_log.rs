@@ -118,7 +118,7 @@ const SETUP_RETRY_DELAY: std::time::Duration = std::time::Duration::ZERO;
 /// Whether step 6 sends the probe (again) on this poll: on the first, then
 /// once every [`PROBE_RESEND_EVERY`] polls (a minute).
 fn sends_probe(poll: u32) -> bool {
-    poll % PROBE_RESEND_EVERY == 0
+    poll.is_multiple_of(PROBE_RESEND_EVERY)
 }
 
 /// What [`ensure_query_log`] answers.
