@@ -232,6 +232,8 @@ pub struct FakeKube {
     pub live_pods: Mutex<Vec<Value>>,
     /// When `Some`, every `get_object*` / `list_pod_objects` read fails with it.
     pub fail_reads: Mutex<Option<String>>,
+    /// When true, every `get_object` never resolves (a hung API read).
+    pub hang_reads: Mutex<bool>,
     /// Opt-in asynchronous delete: after a `delete_background` of a LIVE object
     /// the object stays visible to `get_object` for this many reads (it is
     /// "terminating"), like a Job whose pods are still being collected. `None`:
@@ -259,6 +261,7 @@ impl Default for FakeKube {
             live: Mutex::new(BTreeMap::new()),
             live_pods: Mutex::new(Vec::new()),
             fail_reads: Mutex::new(None),
+            hang_reads: Mutex::new(false),
             terminating_polls: Mutex::new(None),
             terminating: Mutex::new(BTreeMap::new()),
             applied_onto_terminating: Mutex::new(Vec::new()),
@@ -419,6 +422,9 @@ impl KubeClient for FakeKube {
         name: &str,
     ) -> anyhow::Result<Option<Value>> {
         self.read_failure()?;
+        if *self.hang_reads.lock().unwrap() {
+            std::future::pending::<()>().await;
+        }
         let key = format!("{kind}/{name}");
         {
             let mut terminating = self.terminating.lock().unwrap();
@@ -598,22 +604,25 @@ pub async fn delete_background_and_wait(
     timeout: std::time::Duration,
     interval: std::time::Duration,
 ) -> anyhow::Result<()> {
-    kube.delete_background(api_version, kind, namespace, name)
-        .await
-        .map_err(|e| anyhow::anyhow!("delete {kind}/{name}: {e}"))?;
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        if kube
-            .get_object(api_version, kind, namespace, name)
-            .await?
-            .is_none()
-        {
-            return Ok(());
+    let wait = async {
+        kube.delete_background(api_version, kind, namespace, name)
+            .await
+            .map_err(|e| anyhow::anyhow!("delete {kind}/{name}: {e}"))?;
+        loop {
+            let live = kube
+                .get_object(api_version, kind, namespace, name)
+                .await
+                .map_err(|e| anyhow::anyhow!("read {kind}/{name}: {e}"))?;
+            if live.is_none() {
+                return Ok(());
+            }
+            tokio::time::sleep(interval).await;
         }
-        if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!("{kind}/{name} was still terminating after {timeout:?}");
-        }
-        tokio::time::sleep(interval).await;
+    };
+    // The bound covers every call, so a hung API request cannot outlast it.
+    match tokio::time::timeout(timeout, wait).await {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!("{kind}/{name} was still terminating after {timeout:?}"),
     }
 }
 
@@ -1073,6 +1082,43 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
+        assert!(
+            err.contains("Job/j") && err.contains("terminating"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_and_wait_read_error_is_an_error_not_gone() {
+        let kube = FakeKube::default();
+        kube.set_live(job());
+        *kube.fail_reads.lock().unwrap() = Some("api down".into());
+        let err = delete_background_and_wait(&kube, "batch/v1", "Job", "ns", "j", TICK * 20, TICK)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("read Job/j") && err.contains("api down"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn delete_and_wait_bounds_a_hung_read() {
+        let kube = FakeKube::default();
+        *kube.hang_reads.lock().unwrap() = true;
+        let err = delete_background_and_wait(
+            &kube,
+            "batch/v1",
+            "Job",
+            "ns",
+            "j",
+            std::time::Duration::from_secs(30),
+            TICK,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(
             err.contains("Job/j") && err.contains("terminating"),
             "{err}"
