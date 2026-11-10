@@ -70,7 +70,7 @@ pub(crate) fn render(
         ),
         InfraKind::QueryLogGuard => {
             egret_policy::default_policies::query_log_guard_bodies(service_name)
-                .map_err(|e| CompileError::Db(format!("query-log guard bodies: {e}")))
+                .map_err(crate::db_error::from_store)
         }
     }
 }
@@ -203,8 +203,7 @@ mod tests {
                 "resources": {
                     "catalog": { "values": ["default_catalog"], "isExcludes": false, "isRecursive": false },
                     "database": { "values": ["starrocks_audit_db__"], "isExcludes": false, "isRecursive": false },
-                    "table": { "values": ["starrocks_audit_tbl__"], "isExcludes": false, "isRecursive": false },
-                    "column": { "values": ["*"], "isExcludes": false, "isRecursive": false }
+                    "table": { "values": ["starrocks_audit_tbl__"], "isExcludes": false, "isRecursive": false }
                 },
                 "policyItems": [{
                     "users": ["egret_query_log"],
@@ -293,6 +292,24 @@ mod tests {
                 .map(|a| a["type"].clone())
                 .collect();
             assert_eq!(got, want, "{name}: deny accesses");
+            if leaf == "table" {
+                // A literal, not read from the def: the builder reads the def
+                // too, so only this pins what the table row actually denies.
+                assert_eq!(
+                    got,
+                    ["delete", "drop", "insert", "alter", "export", "update", "refresh"]
+                        .map(serde_json::Value::from)
+                        .to_vec(),
+                    "the table row denies every table-level access type"
+                );
+            }
+            if leaf == "column" {
+                assert_eq!(
+                    got,
+                    vec![serde_json::Value::from("select")],
+                    "column: select"
+                );
+            }
             let exceptions = &body["denyExceptions"];
             if leaf == "table" {
                 assert_eq!(

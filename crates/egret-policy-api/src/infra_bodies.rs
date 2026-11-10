@@ -120,8 +120,10 @@ pub fn query_timeout_policy(service: &str) -> Value {
 
 /// The StarRocks AuditLoader's allow: `egret_query_log` may `insert` into
 /// `default_catalog.starrocks_audit_db__.starrocks_audit_tbl__`, and nothing
-/// else. The item has the shape of the fork's `tests/e2e/policies.py` policy
-/// `audit-loader`, which the fork's e2e measured against the real plugin.
+/// else. Resources and item have the shape of the fork's `tests/e2e/policies.py`
+/// policy `audit-loader`, which the fork's e2e measured against the real
+/// plugin: no `column` level, since `insert` is a table-leaf access type in
+/// the StarRocks def (the column leaf allows only `select`).
 pub fn query_log_loader_policy(service: &str) -> Value {
     let one = |v: &str| json!({ "values": [v], "isExcludes": false, "isRecursive": false });
     json!({
@@ -133,8 +135,7 @@ pub fn query_log_loader_policy(service: &str) -> Value {
         "resources": {
             "catalog": one("default_catalog"),
             "database": one(QUERY_LOG_DATABASE),
-            "table": one(QUERY_LOG_TABLE),
-            "column": one("*")
+            "table": one(QUERY_LOG_TABLE)
         },
         "policyItems": [{
             "users": [QUERY_LOG_LOADER_PRINCIPAL],
