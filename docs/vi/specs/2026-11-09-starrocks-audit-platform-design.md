@@ -77,3 +77,8 @@ Image fork egret.4 trở đi có sẵn plugin AuditLoader ở `/opt/egret/auditl
 2. Truy cập SQL trực tiếp vào database audit: không ai được, kể cả engine admin.
 3. Audit của Ranger: không hiển thị.
 4. Engine đã có từ trước: egret tự chạy setup một lần lúc khởi động, và nút **Set up query log** vẫn giữ để khôi phục.
+
+## Đã quyết ngày 2026-11-11 (review Task 4)
+
+1. **Nội dung lỗi cũng cần `engine:audit`.** Thông báo lỗi của StarRocks trích lại statement bị từ chối (`Unexpected input 'xyz'`, `Cast '<literal>' to INT failed`), nên `errorMessage` cũng là nội dung statement. Không có `engine:audit` thì entry không có cả `statement` lẫn `errorMessage` (không có trong JSON, chứ không phải `null`), và `statementTruncated` là false. Các trường khác giữ nguyên, kể cả `state`, nên statement lỗi vẫn hiện là lỗi. Áp dụng cho cả route danh sách lẫn chi tiết.
+2. **Bộ lọc `user` đọc `authorizedUser` giống như UI hiển thị.** Tên là phần giữa dấu `'` đầu tiên và `'@'<host>'` cuối cùng, `''` được đọc thành một dấu nháy, rồi chuyển chữ thường: `` lower(replace(regexp_extract(authorizedUser, '^''(.*)''@''[^'']*''$', 1), '''''', '''')) ``. Nhờ vậy `'o''brien'@'10.%'` được tìm thấy bằng user `o'brien`, đúng tên mà `authorizedUser` hiển thị.

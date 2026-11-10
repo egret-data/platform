@@ -18581,6 +18581,14 @@ fn ql_row(id: &str, ts: &str, stmt: &str) -> Vec<Option<String>> {
     row
 }
 
+/// A failed statement whose error quotes it.
+fn ql_failed_row() -> Vec<Option<String>> {
+    let mut row = ql_row(QL_ID_1, "2026-11-10 11:00:01", "SELECT secret_stuff");
+    row[7] = Some("ERR".into());
+    row[8] = Some("Unknown column 'secret_stuff'".into());
+    row
+}
+
 const QL_ID_1: &str = "0193a2b4-0000-4000-8000-000000000002";
 const QL_ID_2: &str = "0193a2b4-0000-4000-8000-000000000001";
 
@@ -18815,22 +18823,10 @@ async fn without_engine_audit_the_statement_is_absent() {
         session_for_with_permissions(&f, "ql_audit", &["engine:read", "engine:audit"]).await;
     attach_real_pdp(&mut f).await;
     let id = seed_query_log_engine(&f, "starrocks").await;
-    f.starrocks_ddl.answer_matching(
-        "left(stmt, 2000)",
-        vec![ql_row(
-            QL_ID_1,
-            "2026-11-10 11:00:01",
-            "SELECT secret_stuff",
-        )],
-    );
-    f.starrocks_ddl.answer_matching(
-        "digest, stmt, false",
-        vec![ql_row(
-            QL_ID_1,
-            "2026-11-10 11:00:01",
-            "SELECT secret_stuff",
-        )],
-    );
+    f.starrocks_ddl
+        .answer_matching("left(stmt, 2000)", vec![ql_failed_row()]);
+    f.starrocks_ddl
+        .answer_matching("digest, stmt, false", vec![ql_failed_row()]);
 
     for (token, visible) in [(&reader, false), (&auditor, true)] {
         let (status, page) =
@@ -18850,10 +18846,13 @@ async fn without_engine_audit_the_statement_is_absent() {
             assert_eq!(e["queryId"], QL_ID_1, "{e}");
             assert_eq!(e["db"], "sales", "every other field is there: {e}");
             assert_eq!(e["statementTruncated"], false, "{e}");
+            assert_eq!(e["state"], "ERR", "{e}");
             if visible {
                 assert_eq!(e["statement"], "SELECT secret_stuff", "{e}");
+                assert_eq!(e["errorMessage"], "Unknown column 'secret_stuff'", "{e}");
             } else {
                 assert!(e.get("statement").is_none(), "statement leaked: {e}");
+                assert!(e.get("errorMessage").is_none(), "error text leaked: {e}");
             }
         }
     }
@@ -19030,4 +19029,99 @@ async fn the_setup_route_sets_the_query_log_up_and_a_failure_is_a_scrubbed_502()
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
     assert_eq!(body["code"], "engine_fe_error", "{body}");
     assert!(!body.to_string().contains(ROOT_PW), "{body}");
+}
+
+/// The FE stops answering between the list read (no table) and the status
+/// read that would name the state: a 502 with the scrubbed message, not a 409
+/// carrying `unreachable`.
+#[tokio::test]
+async fn a_missing_table_on_an_fe_that_then_stops_answering_is_a_502() {
+    let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ql_gone", true).await;
+    let id = seed_query_log_engine(&f, "starrocks").await;
+    f.starrocks_ddl.fail_matching(
+        "left(stmt, 2000)",
+        "ERROR 5502 (HY000): Unknown table 'starrocks_audit_db__.starrocks_audit_tbl__'",
+    );
+    f.starrocks_ddl
+        .fail_matching("SHOW PLUGINS", "connect to the FE timed out after 10s");
+
+    let (status, body) = call(&f, "GET", &format!("/engines/{id}/query-log"), &token, None).await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(body["code"], "engine_fe_error", "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("timed out"),
+        "the status read's message: {body}"
+    );
+}
+
+/// Migration 0218's `engine:audit` grant, run again over two fresh platform
+/// roles: the one holding `engine:update` gets it, the other does not. The
+/// statement is read out of the migration file, so the file is what is tested.
+#[tokio::test]
+async fn migration_0218_grants_engine_audit_to_engine_updaters_only() {
+    let Some(f) = setup_full(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let migration = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../migrations/0218_engine_query_log.sql"
+    ))
+    .expect("read migration 0218");
+    let start = migration
+        .find("INSERT INTO role_permissions")
+        .expect("0218 grants a permission");
+    // `sqlx::query` takes `&'static str`; a test may leak one string.
+    let grant: &'static str = Box::leak(
+        migration[start..start + migration[start..].find(';').unwrap()]
+            .to_string()
+            .into_boxed_str(),
+    );
+    let mut roles = Vec::new();
+    for permission in ["engine:update", "engine:read"] {
+        let (role_id,): (Uuid,) = sqlx::query_as(
+            "INSERT INTO roles (scope, name, description) \
+             VALUES ('platform', $1, 'test-only role') RETURNING id",
+        )
+        .bind(format!("ql_grant_{}", Uuid::new_v4().simple()))
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("insert role");
+        sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, $2)")
+            .bind(role_id)
+            .bind(permission)
+            .execute(&f.db.pool)
+            .await
+            .expect("grant");
+        roles.push(role_id);
+    }
+
+    sqlx::query(grant)
+        .execute(&f.db.pool)
+        .await
+        .expect("run the grant");
+
+    let holds_audit = |role: Uuid| {
+        let pool = f.db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM role_permissions \
+                 WHERE role_id = $1 AND permission = 'engine:audit')",
+            )
+            .bind(role)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert!(
+        holds_audit(roles[0]).await,
+        "an engine:update role gets engine:audit"
+    );
+    assert!(!holds_audit(roles[1]).await, "an engine:read role does not");
 }

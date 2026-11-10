@@ -20,7 +20,7 @@ export interface QueryLogEntryDto {
   user?: string | null;
   /**
      * The bare name of the user the statement ran for ("User"), parsed from
-     * `'bob'@'%'`; absent when empty.
+     * `'bob'@'%'`; `null` when empty.
      * @nullable
      */
   authorizedUser?: string | null;
@@ -36,7 +36,8 @@ export interface QueryLogEntryDto {
      */
   state?: string | null;
   /**
-     * The FE's error, redacted.
+     * The FE's error, redacted. Absent (not `null`) for a caller without
+     * `engine:audit`: StarRocks errors quote the statement's text.
      * @nullable
      */
   errorMessage?: string | null;

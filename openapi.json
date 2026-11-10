@@ -5828,7 +5828,7 @@
         ],
         "responses": {
           "200": {
-            "description": "A page of the engine's statements, newest first. `statement` is absent without engine:audit",
+            "description": "A page of the engine's statements, newest first. `statement` and `errorMessage` are absent without engine:audit",
             "content": {
               "application/json": {
                 "schema": {
@@ -6113,7 +6113,7 @@
         ],
         "responses": {
           "200": {
-            "description": "One statement, whole. `statement` is absent without engine:audit",
+            "description": "One statement, whole. `statement` and `errorMessage` are absent without engine:audit",
             "content": {
               "application/json": {
                 "schema": {
@@ -52806,7 +52806,7 @@
               "string",
               "null"
             ],
-            "description": "The bare name of the user the statement ran for (\"User\"), parsed from\n`'bob'@'%'`; absent when empty."
+            "description": "The bare name of the user the statement ran for (\"User\"), parsed from\n`'bob'@'%'`; `null` when empty."
           },
           "clientIp": {
             "type": [
@@ -52838,7 +52838,7 @@
               "string",
               "null"
             ],
-            "description": "The FE's error, redacted."
+            "description": "The FE's error, redacted. Absent (not `null`) for a caller without\n`engine:audit`: StarRocks errors quote the statement's text."
           },
           "queryTimeMs": {
             "type": [
@@ -52937,7 +52937,7 @@
               "string",
               "null"
             ],
-            "description": "Pass it as `cursor` for the next page; absent on the last."
+            "description": "Pass it as `cursor` for the next page; `null` on the last."
           }
         }
       },
@@ -52967,14 +52967,14 @@
               "string",
               "null"
             ],
-            "description": "Why the state is `unreachable` (the FE's message, scrubbed). Absent\notherwise."
+            "description": "Why the state is `unreachable` (the FE's message, scrubbed). `null`\notherwise."
           },
           "lastEventAt": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The newest event in the last day (RFC 3339), absent when there is none\nor the table does not exist."
+            "description": "The newest event in the last day (RFC 3339); `null` when there is none\nor the table does not exist."
           },
           "retentionDays": {
             "type": "integer",

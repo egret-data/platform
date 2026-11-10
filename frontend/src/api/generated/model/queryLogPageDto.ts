@@ -13,7 +13,7 @@ import type { QueryLogEntryDto } from './queryLogEntryDto';
 export interface QueryLogPageDto {
   entries: QueryLogEntryDto[];
   /**
-     * Pass it as `cursor` for the next page; absent on the last.
+     * Pass it as `cursor` for the next page; `null` on the last.
      * @nullable
      */
   nextCursor?: string | null;

@@ -406,3 +406,17 @@ gives its duration and its environment.
 
 The question texts and the options that were not taken are in this file's git history (commit
 `2ec2461dd`).
+
+## Decided on 2026-11-11 (Task 4 review)
+
+1. **Error text needs `engine:audit` too.** StarRocks error messages quote the statement they
+   reject (`Unexpected input 'xyz'`, `Cast '<literal>' to INT failed`), so `errorMessage` is
+   statement text. Without `engine:audit`, an entry carries neither `statement` nor
+   `errorMessage` (both absent from the JSON, not `null`), and `statementTruncated` is false.
+   Every other field, `state` included, is unchanged, so a failed statement still reads as
+   failed. This applies to the list and the detail route alike.
+2. **The `user` filter reads `authorizedUser` the way the UI shows it.** The name is everything
+   between the first `'` and the last `'@'<host>'`, with a doubled quote read as one, then
+   lowercased: `` lower(replace(regexp_extract(authorizedUser, '^''(.*)''@''[^'']*''$', 1),
+   '''''', '''')) ``. So `'o''brien'@'10.%'` is found by the user `o'brien`, the same name
+   `authorizedUser` shows.

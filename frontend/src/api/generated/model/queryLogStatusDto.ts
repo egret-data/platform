@@ -13,13 +13,13 @@ import type { QueryLogState } from './queryLogState';
 export interface QueryLogStatusDto {
   state: QueryLogState;
   /**
-     * Why the state is `unreachable` (the FE's message, scrubbed). Absent
+     * Why the state is `unreachable` (the FE's message, scrubbed). `null`
      * otherwise.
      * @nullable
      */
   message?: string | null;
   /**
-     * The newest event in the last day (RFC 3339), absent when there is none
+     * The newest event in the last day (RFC 3339); `null` when there is none
      * or the table does not exist.
      * @nullable
      */

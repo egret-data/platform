@@ -19,7 +19,7 @@
 - **Task 1.** Thêm `QUERY_LOG_LOADER_PRINCIPAL`; migration 0218 (cột `query_log_secret_id`, và giữ chỗ tên trong `username_ledger`); thêm `set_query_log_secret` và `ensure_query_log_secret`. Task này cũng thêm ghi chú sửa spec.
 - **Task 2.** Ranger: thêm `InfraKind::QueryLogLoader` và `QueryLogGuard`, cờ `InfraInputs.query_log`, các body, tên trong `infra_names`, và nhánh trong `render`. Có test DB cho convergence.
 - **Task 3.** Viết `ensure_query_log` và gọi nó ở ba chỗ: bootstrap, sau apply hoặc nâng cấp của B, và route. Có `plugin_step`, tách `wait_for_fe_root_login` ra dùng chung, và thêm `plugin_enable`/`plugin_dir` vào danh sách key bị cấm. Có pass lúc boot (câu hỏi mở 4 đã quyết).
-- **Task 4.** Bốn route (`status`, danh sách, chi tiết, `setup`), SQL đọc, cursor, `authorized_name`, `redact_statement`, `statement_visible`, và quyền `engine:audit` (câu hỏi mở 1 đã quyết).
+- **Task 4.** Bốn route (`status`, danh sách, chi tiết, `setup`), SQL đọc, cursor, `authorized_name`, `redact_statement`, `statement_visible`, và quyền `engine:audit` (câu hỏi mở 1 đã quyết). Không có `engine:audit` thì ẩn cả `statement` lẫn `errorMessage`; bộ lọc `user` đọc tên trong `authorizedUser` giống `authorized_name` (`''` là một dấu nháy). Cả hai do người dùng quyết ngày 2026-11-11, xem spec.
 - **Task 5 (controller).** Test với StarRocks thật trên image egret.4 và image chính thức, đo bốn điểm chưa đo, và chạy e2e của fork cho guard.
 - **Task 6.** Frontend: tab Query log, bốn trạng thái, bộ lọc trong URL, bảng, panel chi tiết, **Load more**, và vitest.
 - **Task 7 (controller).** Kiểm tra live trên kind: event có xuất hiện, uỷ quyền, bị từ chối, admin bị chặn, plugin còn sau khi pod FE khởi động lại, nâng cấp engine cũ, và chụp màn hình.

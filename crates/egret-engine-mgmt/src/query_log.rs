@@ -531,10 +531,10 @@ impl QueryLogState {
 #[serde(rename_all = "camelCase")]
 pub struct QueryLogStatusDto {
     pub state: QueryLogState,
-    /// Why the state is `unreachable` (the FE's message, scrubbed). Absent
+    /// Why the state is `unreachable` (the FE's message, scrubbed). `null`
     /// otherwise.
     pub message: Option<String>,
-    /// The newest event in the last day (RFC 3339), absent when there is none
+    /// The newest event in the last day (RFC 3339); `null` when there is none
     /// or the table does not exist.
     pub last_event_at: Option<String>,
     /// How many days of events the table keeps.
@@ -551,14 +551,16 @@ pub struct QueryLogEntryDto {
     /// The session user ("Connected as").
     pub user: Option<String>,
     /// The bare name of the user the statement ran for ("User"), parsed from
-    /// `'bob'@'%'`; absent when empty.
+    /// `'bob'@'%'`; `null` when empty.
     pub authorized_user: Option<String>,
     pub client_ip: Option<String>,
     pub catalog: Option<String>,
     pub db: Option<String>,
     /// `EOF` or `OK` for a success, `ERR` for a failure.
     pub state: Option<String>,
-    /// The FE's error, redacted.
+    /// The FE's error, redacted. Absent (not `null`) for a caller without
+    /// `engine:audit`: StarRocks errors quote the statement's text.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
     pub query_time_ms: Option<i64>,
     pub scan_rows: Option<i64>,
@@ -583,7 +585,7 @@ pub struct QueryLogEntryDto {
 #[serde(rename_all = "camelCase")]
 pub struct QueryLogPageDto {
     pub entries: Vec<QueryLogEntryDto>,
-    /// Pass it as `cursor` for the next page; absent on the last.
+    /// Pass it as `cursor` for the next page; `null` on the last.
     pub next_cursor: Option<String>,
 }
 
@@ -707,6 +709,14 @@ const ENTRY_COLUMNS: &str = "queryId, timestamp, `user`, authorizedUser, clientI
      state, errorCode, queryTime, scanRows, scanBytes, returnRows, cpuCostNs, memCostBytes, \
      command, querySource, isQuery, digest";
 
+/// [`authorized_name`] in SQL, lowercased: the name is everything between the
+/// first `'` and the last `'@'…'` (greedy, so a quote inside the name is
+/// kept), with a doubled quote `''` read as one. A value not of that form
+/// extracts as `''`, which no filter value equals (an empty `user` is no
+/// filter).
+const AUTHORIZED_NAME_SQL: &str = "lower(replace(regexp_extract(authorizedUser, \
+     '^''(.*)''@''[^'']*''$', 1), '''''', ''''))";
+
 /// A page of the log, newest first, one row more than `limit` (the extra row
 /// decides `nextCursor`).
 pub(crate) fn list_sql(f: &QueryLogFilter) -> String {
@@ -721,8 +731,7 @@ pub(crate) fn list_sql(f: &QueryLogFilter) -> String {
     if let Some(user) = &f.user {
         let q = quote_string(QueryEngine::StarRocks, user);
         sql.push_str(&format!(
-            " AND (lower(`user`) = {q} OR \
-             lower(regexp_extract(authorizedUser, '^''([^'']*)''@', 1)) = {q})"
+            " AND (lower(`user`) = {q} OR {AUTHORIZED_NAME_SQL} = {q})"
         ));
     }
     match f.state {
@@ -787,7 +796,8 @@ const REDACTED: &str = "***";
 
 /// Redact a statement or an FE error before it leaves the server (design
 /// section 5): every `exact` value (the engine's root and loader passwords)
-/// becomes `***`, then the value of `IDENTIFIED BY '…'` and of every quoted
+/// becomes `***`, then the value of `IDENTIFIED BY '…'`, of `SET PASSWORD … =
+/// '…'` and `PASSWORD('…')`, and of every quoted
 /// property whose key names a password, secret or access key becomes `'***'`.
 /// The values are read as SQL literals, so one with spaces or escaped quotes
 /// is replaced whole; an unterminated one takes the rest of the text with it.
@@ -799,7 +809,7 @@ pub(crate) fn redact_statement(text: &str, exact: &[&str]) -> String {
     static SHAPES: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let shapes = SHAPES.get_or_init(|| {
         regex::Regex::new(
-            r#"(?i)\bIDENTIFIED\s+(?:WITH\s+\S+\s+)?(?:BY|AS)\s+(?:PASSWORD\s+)?|(['"`])[^'"`]*(?:password|passwd|secret|access_key)[^'"`]*['"`]\s*=\s*"#,
+            r#"(?i)\bIDENTIFIED\s+(?:WITH\s+\S+\s+)?(?:BY|AS)\s+(?:PASSWORD\s+)?|\bSET\s+PASSWORD\b[^=]*=\s*|\bPASSWORD\s*\(\s*|(['"`])[^'"`]*(?:password|passwd|secret|access_key)[^'"`]*['"`]\s*=\s*"#,
         )
         .expect("static redaction pattern compiles")
     });
@@ -819,6 +829,37 @@ pub(crate) fn redact_statement(text: &str, exact: &[&str]) -> String {
     }
     redacted.push_str(&out[pos..]);
     redacted
+}
+
+/// [`redact_statement`] for a statement the FE cut at
+/// [`STATEMENT_PREVIEW_CHARS`]: when `cut`, a secret the cut ran through left
+/// only a prefix of itself at the very end, which no exact match can see, so
+/// the longest end of the text that is a proper prefix of an `exact` value
+/// becomes `***` too. Any length counts, down to one character: the cost is a
+/// spurious `***` at the end of a cut preview, the alternative is part of a
+/// password.
+fn redact_preview(text: &str, exact: &[&str], cut: bool) -> String {
+    let out = redact_statement(text, exact);
+    if !cut {
+        return out;
+    }
+    let longest_tail = exact
+        .iter()
+        .filter_map(|secret| {
+            // Proper prefixes only: a whole secret was replaced above.
+            secret
+                .char_indices()
+                .skip(1)
+                .map(|(i, _)| &secret[..i])
+                .filter(|prefix| out.ends_with(prefix))
+                .map(str::len)
+                .max()
+        })
+        .max();
+    match longest_tail {
+        Some(len) => format!("{}{REDACTED}", &out[..out.len() - len]),
+        None => out,
+    }
 }
 
 /// The length of the quoted SQL literal `s` starts with (`'…'` or `"…"`, a
@@ -880,17 +921,19 @@ fn rfc3339(raw: &str) -> Option<(NaiveDateTime, String)> {
 }
 
 /// One row of [`list_sql`] or [`detail_sql`] as an entry, with the statement
-/// and the error redacted and the statement dropped unless `visible`.
+/// and the error redacted, and both dropped unless `visible` (the user's
+/// ruling of 2026-11-11: an FE error quotes the statement's text).
 fn entry_from_row(row: &[Option<String>], visible: bool, exact: &[&str]) -> QueryLogEntryDto {
     let text = |i: usize| row.get(i).cloned().flatten();
     let non_empty = |i: usize| text(i).filter(|s| !s.is_empty());
     let int = |i: usize| text(i).and_then(|s| s.parse::<i64>().ok());
     let raw_ts = text(1).unwrap_or_default();
+    let cut = matches!(text(20).as_deref(), Some("1" | "true"));
     let statement = visible
         .then(|| text(19))
         .flatten()
-        .map(|s| redact_statement(&s, exact));
-    let truncated = statement.is_some() && matches!(text(20).as_deref(), Some("1" | "true"));
+        .map(|s| redact_preview(&s, exact, cut));
+    let truncated = statement.is_some() && cut;
     QueryLogEntryDto {
         query_id: text(0).unwrap_or_default(),
         timestamp: rfc3339(&raw_ts).map(|(_, s)| s).unwrap_or(raw_ts),
@@ -900,7 +943,10 @@ fn entry_from_row(row: &[Option<String>], visible: bool, exact: &[&str]) -> Quer
         catalog: non_empty(5),
         db: non_empty(6),
         state: non_empty(7),
-        error_message: non_empty(8).map(|s| redact_statement(&s, exact)),
+        error_message: visible
+            .then(|| non_empty(8))
+            .flatten()
+            .map(|s| redact_statement(&s, exact)),
         query_time_ms: int(9),
         scan_rows: int(10),
         scan_bytes: int(11),
@@ -1035,7 +1081,13 @@ async fn read_status(st: &CpState, engine: &Engine, cx: &ReadContext) -> QueryLo
 /// says the table or its database is missing, a 502 otherwise.
 async fn read_failure(st: &CpState, engine: &Engine, cx: &ReadContext, e: FeError) -> CpError {
     if e.is_unknown_relation() {
-        let state = read_status(st, engine, cx).await.state;
+        let status = read_status(st, engine, cx).await;
+        // The FE stopped answering between the two reads: that is an FE
+        // failure (502), not a state of the query log.
+        if status.state == QueryLogState::Unreachable {
+            return CpError::FeFailed(status.message.unwrap_or_else(|| cx.scrub(&e)));
+        }
+        let state = status.state;
         // The table was missing a moment ago; a status that now reads `ready`
         // raced a setup, and the caller's retry will find it.
         let state = if state == QueryLogState::Ready {
@@ -1091,7 +1143,7 @@ async fn query_log_status(
     tag = "control-plane-engines",
     params(("id" = Uuid, Path, description = "Engine id"), QueryLogParams),
     responses(
-        (status = 200, description = "A page of the engine's statements, newest first. `statement` is absent without engine:audit", body = QueryLogPageDto),
+        (status = 200, description = "A page of the engine's statements, newest first. `statement` and `errorMessage` are absent without engine:audit", body = QueryLogPageDto),
         (status = 400, description = "A malformed parameter; the message names it", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:read permission", body = ErrorBody),
@@ -1157,7 +1209,7 @@ async fn list_query_log(
         ("queryId" = String, Path, description = "The statement's query id (a UUID)"),
     ),
     responses(
-        (status = 200, description = "One statement, whole. `statement` is absent without engine:audit", body = QueryLogEntryDto),
+        (status = 200, description = "One statement, whole. `statement` and `errorMessage` are absent without engine:audit", body = QueryLogEntryDto),
         (status = 400, description = "`queryId` is not a UUID", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:read permission", body = ErrorBody),
@@ -1516,8 +1568,8 @@ mod tests {
         let q = r"'o''b\\x'";
         assert!(
             sql.contains(&format!(
-                "(lower(`user`) = {q} OR lower(regexp_extract(authorizedUser, \
-                 '^''([^'']*)''@', 1)) = {q})"
+                "(lower(`user`) = {q} OR lower(replace(regexp_extract(authorizedUser, \
+                 '^''(.*)''@''[^'']*''$', 1), '''''', '''')) = {q})"
             )),
             "{sql}"
         );
@@ -1713,6 +1765,100 @@ mod tests {
         let json = serde_json::to_value(&hidden).unwrap();
         assert!(json.get("statement").is_none(), "absent, not null: {json}");
         assert_eq!(json["statementTruncated"], false);
-        assert_eq!(json["errorMessage"], "Access denied; pw ***");
+        assert!(
+            json.get("errorMessage").is_none(),
+            "the error quotes the statement, so it needs engine:audit too: {json}"
+        );
+        assert_eq!(hidden.query_time_ms, Some(12), "every other field stays");
+        assert_eq!(
+            hidden.state.as_deref(),
+            Some("ERR"),
+            "every other field stays"
+        );
+    }
+
+    /// The SQL literal that starts `sql`, unescaped (`''` read as `'`).
+    fn sql_literal(sql: &str) -> String {
+        let len = sql_literal_end(sql).expect("a literal");
+        sql[1..len - 1].replace("''", "'")
+    }
+
+    /// The SQL side of the user filter reads a name the way
+    /// [`authorized_name`] does, so the row shown as `o'brien` is found by
+    /// `o'brien`. Checked by running the clause's own pattern and replacement
+    /// (read back out of [`AUTHORIZED_NAME_SQL`]) with the `regex` crate.
+    #[test]
+    fn the_sql_authorized_name_agrees_with_authorized_name() {
+        let rest = AUTHORIZED_NAME_SQL
+            .split_once("regexp_extract(authorizedUser, ")
+            .unwrap()
+            .1;
+        let pattern = sql_literal(rest);
+        assert_eq!(pattern, "^'(.*)'@'[^']*'$");
+        let after = &rest[sql_literal_end(rest).unwrap()..];
+        let replace_args = after.split_once("1), ").unwrap().1;
+        let from = sql_literal(replace_args);
+        let to = sql_literal(
+            replace_args[sql_literal_end(replace_args).unwrap()..].trim_start_matches(", "),
+        );
+        assert_eq!((from.as_str(), to.as_str()), ("''", "'"));
+        let re = regex::Regex::new(&pattern).unwrap();
+        for raw in [
+            "'bob'@'%'",
+            "'Bob'@'10.%'",
+            "'o''brien'@'10.%'",
+            "'o'brien'@'%'",
+            "'a'@'b'@'%'",
+            "''@'%'",
+            "",
+            "bob",
+            "'bob'@",
+        ] {
+            let sql_side = re
+                .captures(raw)
+                .map(|c| c[1].to_string())
+                .unwrap_or_default()
+                .replace(&from, &to)
+                .to_lowercase();
+            let rust_side = authorized_name(raw).unwrap_or_default().to_lowercase();
+            assert_eq!(sql_side, rust_side, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn a_secret_the_cut_runs_through_leaves_no_prefix() {
+        let pw = "S3cret-Passw0rd";
+        let preview = format!("SELECT note FROM t WHERE x = {}", &pw[..7]);
+        assert_eq!(
+            redact_preview(&preview, &[pw, "other"], true),
+            "SELECT note FROM t WHERE x = ***"
+        );
+        assert_eq!(
+            redact_preview(&preview, &[pw], false),
+            preview,
+            "an uncut statement's end is its own"
+        );
+        assert_eq!(
+            redact_preview("SELECT 1", &[pw], true),
+            "SELECT 1",
+            "nothing at the end is a prefix"
+        );
+        assert_eq!(
+            redact_preview(&format!("x {pw} y S3c"), &[pw], true),
+            "x *** y ***",
+            "the whole value and the cut one"
+        );
+    }
+
+    #[test]
+    fn set_password_loses_its_value() {
+        assert_eq!(
+            redact_statement("SET PASSWORD FOR 'bob'@'%' = PASSWORD('x y')", &[]),
+            "SET PASSWORD FOR 'bob'@'%' = PASSWORD('***')"
+        );
+        assert_eq!(
+            redact_statement("set password = 'plain'", &[]),
+            "set password = '***'"
+        );
     }
 }

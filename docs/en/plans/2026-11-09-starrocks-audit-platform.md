@@ -387,20 +387,23 @@ pub struct QueryLogApi;             // utoipa fragment
   - it starts with `/* egret-query-log-read */ SELECT /*+ SET_VAR(query_timeout = 10) */`;
   - it filters on `timestamp >= '<from>' AND timestamp < '<to>'`, formatted by egret in the FE's
     zone as measured in Task 5 (UTC until then);
-  - `user`: `` (lower(`user`) = <q> OR lower(regexp_extract(authorizedUser, '^''([^'']*)''@', 1)) = <q>) ``,
-    with `<q>` = `quote_string(lowercased value)`;
+  - `user`: `` (lower(`user`) = <q> OR lower(replace(regexp_extract(authorizedUser, '^''(.*)''@''[^'']*''$', 1), '''''', '''')) = <q>) ``,
+    with `<q>` = `quote_string(lowercased value)` (the name up to the last `'@'<host>'`, `''`
+    read as `'`, the same rule as `authorized_name`; spec, "Decided on 2026-11-11", 2);
   - the state filter;
   - the cursor: `(timestamp, queryId) < (<ts>, <id>)` written as the expanded `OR` form;
   - `NOT (`user` = 'root' AND stmt LIKE '/* egret-query-log-read */%')`;
   - `ORDER BY timestamp DESC, queryId DESC LIMIT <limit + 1>`; the extra row decides
     `nextCursor`;
-  - it selects `left(stmt, 2000)` and `length(stmt) > 2000`. The detail route selects `stmt`
+  - it selects `left(stmt, 2000)` and `char_length(stmt) > 2000` (characters, as `left`
+    counts; `length` counts bytes). The detail route selects `stmt`
     whole.
 - **Validation:** `from < to`; `to - from <= 31 days`; `limit` within 1 to 200; `state` within
   `ok`, `error`, `all`; `user` at most 128 characters; `queryId` parses as a UUID. Each failure is
   a 400 naming the parameter.
-- **Statement fields:** when `!statement_visible`, `statement` is absent and `statementTruncated`
-  is false; every other field is unchanged.
+- **Statement fields:** when `!statement_visible`, `statement` and `errorMessage` are absent
+  and `statementTruncated` is false; every other field is unchanged (spec, "Decided on
+  2026-11-11", 1: an FE error quotes the statement).
 - **Redaction:** `redact_statement` runs on `statement` and `errorMessage` with
   `exact = [root password, loader password]` (resolved once per request), then the shape rules of
   the spec's section 5. Never return unredacted text, including from the detail route.
