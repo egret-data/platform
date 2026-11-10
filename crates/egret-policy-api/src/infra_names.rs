@@ -147,19 +147,25 @@ fn is_seeded_hierarchy_name(name: &str, prefix: &str) -> bool {
     }
 }
 
-/// Whether `name` is one of the infrastructure policies the permission IR
-/// owns (governance SP2a): an `egret-admin - …` row, one of the four fixed
-/// names, the query-log loader, or an `egret-query-log-guard - …` row.
-/// Convergence reads, writes and deletes exactly these. The `all - …`
-/// default set is deliberately NOT one: it stays outside the IR, written only
-/// by its own route.
-pub fn is_ir_infra_name(name: &str) -> bool {
+/// Whether a policy named `name` on a profile of type `service_type` is one
+/// of the infrastructure policies the permission IR owns (governance SP2a):
+/// an `egret-admin - …` row or one of the four fixed names on any type, and
+/// the query-log loader or an `egret-query-log-guard - …` row on a
+/// `starrocks` profile only. Convergence reads, writes and deletes exactly
+/// these. The `all - …` default set is deliberately NOT one: it stays outside
+/// the IR, written only by its own route.
+///
+/// The type matters for the same reason it does in
+/// [`is_egret_infrastructure_policy`]: on a Trino profile the query-log names
+/// are not reserved, so a row under one is a human's, and convergence must
+/// neither adopt nor delete it.
+pub fn is_ir_infra_name(service_type: &str, name: &str) -> bool {
     is_admin_all_access_policy_name(name)
         || name == IMPERSONATE_POLICY_NAME
         || name == SELF_IMPERSONATE_POLICY_NAME
         || name == EXECUTE_QUERY_POLICY_NAME
         || name == QUERY_TIMEOUT_POLICY_NAME
-        || is_query_log_name(name)
+        || (service_type == QUERY_LOG_SERVICE_TYPE && is_query_log_name(name))
 }
 
 #[cfg(test)]
@@ -168,33 +174,62 @@ mod tests {
 
     #[test]
     fn the_ir_owns_egret_admin_the_fixed_names_and_the_query_log_only() {
-        assert!(is_ir_infra_name("egret-admin - catalog"));
-        assert!(is_ir_infra_name(QUERY_LOG_LOADER_POLICY_NAME));
+        assert!(is_ir_infra_name("starrocks", "egret-admin - catalog"));
+        assert!(is_ir_infra_name("starrocks", QUERY_LOG_LOADER_POLICY_NAME));
         assert!(is_ir_infra_name(
+            "starrocks",
             "egret-query-log-guard - catalog, database"
         ));
-        assert!(!is_ir_infra_name("egret-query-log-guard"), "no separator");
         assert!(
-            !is_ir_infra_name("egret-query-log-guards - x"),
+            !is_ir_infra_name("starrocks", "egret-query-log-guard"),
+            "no separator"
+        );
+        assert!(
+            !is_ir_infra_name("starrocks", "egret-query-log-guards - x"),
             "another prefix"
         );
-        assert!(!is_ir_infra_name("egret-query-log-loader-2"));
-        assert!(is_ir_infra_name("egret-admin - catalog, schema, table"));
+        assert!(!is_ir_infra_name("starrocks", "egret-query-log-loader-2"));
+        assert!(is_ir_infra_name(
+            "starrocks",
+            "egret-admin - catalog, schema, table"
+        ));
         for fixed in [
             IMPERSONATE_POLICY_NAME,
             SELF_IMPERSONATE_POLICY_NAME,
             EXECUTE_QUERY_POLICY_NAME,
             QUERY_TIMEOUT_POLICY_NAME,
         ] {
-            assert!(is_ir_infra_name(fixed), "{fixed} is IR-owned");
+            assert!(is_ir_infra_name("starrocks", fixed), "{fixed} is IR-owned");
         }
         assert!(
-            !is_ir_infra_name("all - catalog"),
+            !is_ir_infra_name("starrocks", "all - catalog"),
             "the `all - …` default set stays out of the IR"
         );
-        assert!(!is_ir_infra_name("egret-admin"), "no separator");
-        assert!(!is_ir_infra_name("egret-admins - x"), "another prefix");
-        assert!(!is_ir_infra_name("perm-grant-1"));
+        assert!(
+            !is_ir_infra_name("starrocks", "egret-admin"),
+            "no separator"
+        );
+        assert!(
+            !is_ir_infra_name("starrocks", "egret-admins - x"),
+            "another prefix"
+        );
+        assert!(!is_ir_infra_name("starrocks", "perm-grant-1"));
+    }
+
+    #[test]
+    fn the_ir_owns_the_query_log_names_on_starrocks_only() {
+        for name in [
+            QUERY_LOG_LOADER_POLICY_NAME,
+            "egret-query-log-guard - catalog, database, table",
+        ] {
+            assert!(is_ir_infra_name("starrocks", name), "{name}");
+            assert!(
+                !is_ir_infra_name("trino", name),
+                "{name} on trino is a human name"
+            );
+        }
+        assert!(is_ir_infra_name("trino", "egret-admin - catalog"));
+        assert!(is_ir_infra_name("trino", IMPERSONATE_POLICY_NAME));
     }
 
     #[test]

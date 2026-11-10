@@ -10559,7 +10559,7 @@ mod tests {
         .await
         .expect("read policies");
         rows.into_iter()
-            .filter(|(_, n)| egret_policy_api::infra_names::is_ir_infra_name(n))
+            .filter(|(_, n)| egret_policy_api::infra_names::is_ir_infra_name("trino", n))
             .collect()
     }
 
@@ -10919,7 +10919,7 @@ mod tests {
         assert!(
             !after
                 .iter()
-                .any(|(n, _, _)| egret_policy_api::infra_names::is_ir_infra_name(n)),
+                .any(|(n, _, _)| egret_policy_api::infra_names::is_ir_infra_name("trino", n)),
             "no IR-owned infra row may outlive the last qualifying engine: {after:#?}"
         );
         let kept: Vec<_> = after.iter().filter(|(n, _, _)| n == all_name).collect();

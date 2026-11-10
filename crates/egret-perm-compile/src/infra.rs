@@ -81,7 +81,7 @@ pub async fn converge_infra_in_tx(
         )?);
     }
 
-    let stored = stored_infra_rows(tx, service_id).await?;
+    let stored = stored_infra_rows(tx, service_id, &loaded.service_type).await?;
     let named_before = admin_users(stored.iter().map(|s| (&s.name, &s.body)));
     let named_now = admin_users(desired.iter().map(|(n, b)| (n, b)));
 
@@ -159,11 +159,14 @@ pub async fn converge_infra_in_tx(
     Ok(sync)
 }
 
-/// `service_id`'s stored rows whose name the IR owns. The SQL narrows by the
-/// shapes' spellings; [`is_ir_infra_name`] is the predicate.
+/// `service_id`'s stored rows whose name the IR owns on a profile of type
+/// `service_type`. The SQL narrows by the shapes' spellings;
+/// [`is_ir_infra_name`] is the predicate (type-aware: a query-log name on a
+/// Trino profile is a human's row, and is neither adopted nor deleted).
 async fn stored_infra_rows(
     tx: &mut Transaction<'_, Postgres>,
     service_id: i64,
+    service_type: &str,
 ) -> Result<Vec<Stored>, CompileError> {
     let rows: Vec<(i64, String, Value, String)> = sqlx::query_as(
         "SELECT id, name, policy_jsonb, managed_by FROM policy.authz_policies \
@@ -180,7 +183,7 @@ async fn stored_infra_rows(
     .map_err(CompileError::from_db)?;
     Ok(rows
         .into_iter()
-        .filter(|(_, name, _, _)| is_ir_infra_name(name))
+        .filter(|(_, name, _, _)| is_ir_infra_name(service_type, name))
         .map(|(id, name, body, managed_by)| Stored {
             id,
             name,
@@ -229,9 +232,10 @@ pub(crate) async fn infra_services_via(
 ) -> Result<Vec<i64>, CompileError> {
     use egret_core::engine_delegation::qualifies_for_infra;
 
-    let holding: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT service_id, name FROM policy.authz_policies \
-          WHERE starts_with(name, $1) OR starts_with(name, $3) OR name = ANY($2)",
+    let holding: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT p.service_id, s.type, p.name \
+           FROM policy.authz_policies p JOIN policy.authz_services s ON s.id = p.service_id \
+          WHERE starts_with(p.name, $1) OR starts_with(p.name, $3) OR p.name = ANY($2)",
     )
     .bind(ADMIN_ALL_ACCESS_NAME_PREFIX)
     .bind(fixed_names())
@@ -248,8 +252,8 @@ pub(crate) async fn infra_services_via(
     .map_err(CompileError::from_db)?;
     let ids: BTreeSet<i64> = holding
         .into_iter()
-        .filter(|(_, name)| is_ir_infra_name(name))
-        .map(|(id, _)| id)
+        .filter(|(_, service_type, name)| is_ir_infra_name(service_type, name))
+        .map(|(id, _, _)| id)
         .chain(
             bound
                 .into_iter()

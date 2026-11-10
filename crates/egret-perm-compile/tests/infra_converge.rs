@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 
 use egret_metastore::Db;
 use egret_perm::PermStore;
-use egret_perm_compile::{converge_infra_policy, recompile_service};
+use egret_perm_compile::{converge_infra_policies, converge_infra_policy, recompile_service};
 use egret_policy::default_policies::{admin_all_access_bodies, query_log_guard_bodies};
 use egret_policy::infra_names::{
     is_ir_infra_name, EXECUTE_QUERY_POLICY_NAME, IMPERSONATE_POLICY_NAME,
@@ -183,12 +183,18 @@ async fn all_rows(db: &Db, svc: i64) -> BTreeMap<String, Row> {
         .collect()
 }
 
-/// The IR-owned infra rows of `svc`, by name.
+/// The IR-owned infra rows of `svc`, by name (the predicate is type-aware).
 async fn infra_rows(db: &Db, svc: i64) -> BTreeMap<String, Row> {
+    let service_type: String =
+        sqlx::query_scalar("SELECT type FROM policy.authz_services WHERE id = $1")
+            .bind(svc)
+            .fetch_one(&db.pool)
+            .await
+            .expect("service type");
     all_rows(db, svc)
         .await
         .into_iter()
-        .filter(|(name, _)| is_ir_infra_name(name))
+        .filter(|(name, _)| is_ir_infra_name(&service_type, name))
         .collect()
 }
 
@@ -617,4 +623,65 @@ async fn an_existing_row_is_adopted_in_place() {
         "the existing row was inserted again: {sync:?}"
     );
     assert_eq!(after.len(), 17, "the other rows were added around it");
+}
+
+/// Fix round 1, Important 1: the query-log names are reserved on StarRocks
+/// only, so on a Trino profile `egret-query-log-loader` is a human's policy.
+/// Convergence (on its own and in the boot pass) must neither delete nor adopt
+/// it, and the boot pass must not pull in a Trino profile for holding it.
+#[tokio::test]
+async fn a_human_query_log_named_policy_on_a_trino_profile_survives_convergence() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else { return };
+    one_admin(&db).await;
+    let store = PolicyStore::new(db.clone());
+    let body = json!({"name": QUERY_LOG_LOADER_POLICY_NAME, "policyItems": []});
+    // A Trino profile with a qualifying engine: convergence has work there.
+    let (bound, _) = profile(&db, "trino").await;
+    bind_engine(&db, bound, "trino", impersonate_with_auth()).await;
+    let human = store
+        .create_policy(bound, QUERY_LOG_LOADER_POLICY_NAME, &body)
+        .await
+        .expect("a human name on trino");
+    // A Trino profile holding only that human row, no engine.
+    let (idle, _) = profile(&db, "trino").await;
+    let idle_human = store
+        .create_policy(idle, QUERY_LOG_LOADER_POLICY_NAME, &body)
+        .await
+        .expect("a human name on trino");
+    let before = all_rows(&db, bound).await[QUERY_LOG_LOADER_POLICY_NAME].clone();
+    assert_eq!(before.id, human, "the arrangement");
+    assert_eq!(before.managed_by, "operator", "the arrangement");
+
+    let sync = converge_infra_policy(&db.pool, bound)
+        .await
+        .expect("converge");
+    assert!(
+        !egret_perm_compile::infra::infra_services(&db.pool)
+            .await
+            .expect("services")
+            .contains(&idle),
+        "the boot pass pulled in a Trino profile for a human query-log-named row"
+    );
+    converge_infra_policies(&db.pool).await.expect("boot pass");
+
+    assert!(
+        !sync
+            .removed
+            .contains(&QUERY_LOG_LOADER_POLICY_NAME.to_string()),
+        "convergence deleted a human policy: {sync:?}"
+    );
+    assert_eq!(
+        all_rows(&db, bound).await.get(QUERY_LOG_LOADER_POLICY_NAME),
+        Some(&before),
+        "the human row was deleted, adopted or rewritten"
+    );
+    let idle_rows = all_rows(&db, idle).await;
+    assert_eq!(
+        idle_rows
+            .get(QUERY_LOG_LOADER_POLICY_NAME)
+            .map(|r| (r.id, r.managed_by.as_str())),
+        Some((idle_human, "operator")),
+        "the boot pass touched the idle profile's human row"
+    );
 }
