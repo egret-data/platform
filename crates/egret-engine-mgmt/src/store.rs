@@ -34,6 +34,8 @@ pub struct Engine {
     pub authz_service_id: Option<i64>,
     pub delegator_secret_id: Option<Uuid>,
     pub root_secret_id: Option<Uuid>,
+    /// Named secret holding the `egret_query_log` loader password (migration 0218).
+    pub query_log_secret_id: Option<Uuid>,
     pub tls_secret_id: Option<Uuid>,
     pub coordinator_cert: Option<String>,
     pub tls_cert_secret_ref: Option<Uuid>,
@@ -255,7 +257,7 @@ impl EngineMgmtStore {
     ) -> Result<Engine, EngineMgmtError> {
         sqlx::query_as::<_, Engine>(
             "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, tls_cert_secret_ref) VALUES ($1,$2,$3,$4,$5) \
-             RETURNING id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev, security_upgrade_pending",
+             RETURNING id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, query_log_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev, security_upgrade_pending",
         )
         .bind(name)
         .bind(r#type)
@@ -274,7 +276,7 @@ impl EngineMgmtStore {
 
     pub async fn list_engines(&self) -> Result<Vec<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev, security_upgrade_pending \
+            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, query_log_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev, security_upgrade_pending \
              FROM engine_mgmt.engines ORDER BY created_at",
         )
         .fetch_all(self.pool())
@@ -287,7 +289,7 @@ impl EngineMgmtStore {
         &self,
     ) -> Result<Vec<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev, security_upgrade_pending \
+            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, query_log_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev, security_upgrade_pending \
              FROM engine_mgmt.engines \
              WHERE ranger_secret_prev_id IS NOT NULL AND origin = 'provisioned' ORDER BY created_at",
         )
@@ -297,7 +299,7 @@ impl EngineMgmtStore {
 
     pub async fn get_engine(&self, id: Uuid) -> Result<Option<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev, security_upgrade_pending \
+            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, query_log_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev, security_upgrade_pending \
              FROM engine_mgmt.engines WHERE id = $1",
         )
         .bind(id)
@@ -468,7 +470,7 @@ impl EngineMgmtStore {
         service_id: i64,
     ) -> Result<Vec<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev, security_upgrade_pending \
+            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, query_log_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev, security_upgrade_pending \
              FROM engine_mgmt.engines WHERE authz_service_id = $1 ORDER BY name",
         )
         .bind(service_id)
@@ -543,7 +545,7 @@ impl EngineMgmtStore {
         current: &str,
     ) -> Result<Vec<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT e.id, e.name, e.type, e.namespace, e.spec, e.status, e.authz_service_id, e.delegator_secret_id, e.root_secret_id, e.tls_secret_id, e.coordinator_cert, e.tls_cert_secret_ref, e.internal_secret_id, e.monitor_secret_id, e.created_at, e.origin, e.external_host, e.external_port, e.ranger_plugin_version, e.ranger_secret_id, e.ranger_secret_prev_id, e.applied_security_rev, e.security_upgrade_pending \
+            "SELECT e.id, e.name, e.type, e.namespace, e.spec, e.status, e.authz_service_id, e.delegator_secret_id, e.root_secret_id, e.query_log_secret_id, e.tls_secret_id, e.coordinator_cert, e.tls_cert_secret_ref, e.internal_secret_id, e.monitor_secret_id, e.created_at, e.origin, e.external_host, e.external_port, e.ranger_plugin_version, e.ranger_secret_id, e.ranger_secret_prev_id, e.applied_security_rev, e.security_upgrade_pending \
              FROM engine_mgmt.engines e JOIN policy.authz_services a ON a.id = e.authz_service_id \
              WHERE a.mechanism = 'opa' AND e.type = 'trino' AND e.applied_opa_url IS DISTINCT FROM $1 ORDER BY e.name",
         )
@@ -574,6 +576,20 @@ impl EngineMgmtStore {
         secret_id: Uuid,
     ) -> Result<(), EngineMgmtError> {
         sqlx::query("UPDATE engine_mgmt.engines SET root_secret_id = $2 WHERE id = $1")
+            .bind(engine_id)
+            .bind(secret_id)
+            .execute(self.pool())
+            .await?;
+        Ok(())
+    }
+
+    /// Persist the generated StarRocks query-log loader password secret id for an engine.
+    pub async fn set_query_log_secret(
+        &self,
+        engine_id: Uuid,
+        secret_id: Uuid,
+    ) -> Result<(), EngineMgmtError> {
+        sqlx::query("UPDATE engine_mgmt.engines SET query_log_secret_id = $2 WHERE id = $1")
             .bind(engine_id)
             .bind(secret_id)
             .execute(self.pool())
@@ -797,7 +813,7 @@ impl EngineMgmtStore {
         workspace_id: Uuid,
     ) -> Result<Vec<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT e.id, e.name, e.type, e.namespace, e.spec, e.status, e.authz_service_id, e.delegator_secret_id, e.root_secret_id, e.tls_secret_id, e.coordinator_cert, e.tls_cert_secret_ref, e.internal_secret_id, e.monitor_secret_id, e.created_at, e.origin, e.external_host, e.external_port, e.ranger_plugin_version, e.ranger_secret_id, e.ranger_secret_prev_id, e.applied_security_rev, e.security_upgrade_pending \
+            "SELECT e.id, e.name, e.type, e.namespace, e.spec, e.status, e.authz_service_id, e.delegator_secret_id, e.root_secret_id, e.query_log_secret_id, e.tls_secret_id, e.coordinator_cert, e.tls_cert_secret_ref, e.internal_secret_id, e.monitor_secret_id, e.created_at, e.origin, e.external_host, e.external_port, e.ranger_plugin_version, e.ranger_secret_id, e.ranger_secret_prev_id, e.applied_security_rev, e.security_upgrade_pending \
              FROM engine_mgmt.engines e JOIN engine_mgmt.engine_workspaces ew ON ew.engine_id = e.id \
              WHERE ew.workspace_id = $1 ORDER BY e.name",
         )
@@ -823,6 +839,7 @@ mod tests {
             authz_service_id: None,
             delegator_secret_id: None,
             root_secret_id: None,
+            query_log_secret_id: None,
             tls_secret_id: None,
             coordinator_cert: None,
             tls_cert_secret_ref: None,
@@ -855,6 +872,7 @@ mod tests {
             authz_service_id: None,
             delegator_secret_id: None,
             root_secret_id: None,
+            query_log_secret_id: None,
             tls_secret_id: None,
             coordinator_cert: None,
             tls_cert_secret_ref: None,
@@ -887,6 +905,7 @@ mod tests {
             authz_service_id: None,
             delegator_secret_id: None,
             root_secret_id: None,
+            query_log_secret_id: None,
             tls_secret_id: None,
             coordinator_cert: None,
             tls_cert_secret_ref: None,
@@ -921,6 +940,7 @@ mod tests {
             authz_service_id: None,
             delegator_secret_id: None,
             root_secret_id: None,
+            query_log_secret_id: None,
             tls_secret_id: None,
             coordinator_cert: None,
             tls_cert_secret_ref: None,
@@ -964,6 +984,7 @@ mod tests {
             authz_service_id: None,
             delegator_secret_id: None,
             root_secret_id: None,
+            query_log_secret_id: None,
             tls_secret_id: None,
             coordinator_cert: None,
             tls_cert_secret_ref: None,

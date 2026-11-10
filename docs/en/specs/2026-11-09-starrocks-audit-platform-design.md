@@ -7,6 +7,17 @@
 then C (a probe of the paths no one has measured yet). A builds on two things B adds:
 `egret_perm::is_patched_starrocks_fe` and the `POST /engines/{id}/security-upgrade` action.
 
+> **Corrections (2026-11-10, from the plan).** Already stated in section 1 and pointed at from here:
+> (1) "the provisioner creates the table" is not literal: `egret-provisioner` only renders
+> Kubernetes objects, every FE statement goes through `st.starrocks_ddl` with `fe_target`, so the
+> setup lives in `egret-engine-mgmt` (section 1, first paragraph). (2) The bootstrap does not run
+> after every apply: `update_starrocks_engine` spawns `spawn_starrocks_catalog_wire` only when
+> `deleg_changed`, and B's `security_upgrade` applies and returns, so an image change restarts the
+> FE without a bootstrap; hence call site 2, `spawn_query_log_setup` (section 1, item 2).
+> (4) The fork's e2e grants the loader nothing natively (Ranger's policy allows it); an egret
+> engine bound to no profile runs native access control, so egret must `GRANT INSERT` there
+> (section 1, step 4).
+
 ## Problem
 
 egret cannot answer "who ran what on this StarRocks engine, and was it allowed".

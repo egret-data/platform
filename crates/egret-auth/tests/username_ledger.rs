@@ -336,6 +336,21 @@ async fn the_delegator_name_is_reserved() {
 }
 
 #[tokio::test]
+async fn the_query_log_loader_name_is_reserved() {
+    let Some(db) = connect().await else { return };
+    let held: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM username_ledger WHERE username = 'egret_query_log'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(held, 1);
+    let got = mint(&db, &format!("egret_query_log@{}.test", t())).await;
+    assert_ne!(got, "egret_query_log");
+    assert!(got.starts_with("egret_query_log-"), "{got}");
+}
+
+#[tokio::test]
 async fn the_ledger_is_append_only() {
     let Some(db) = connect().await else { return };
     let tag = t();

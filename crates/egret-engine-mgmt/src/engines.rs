@@ -2545,6 +2545,56 @@ async fn ensure_delegator_secret(st: &CpState, engine: &Engine) -> Result<(Uuid,
     Ok((id, pw))
 }
 
+/// Resolve or mint a GLOBAL system-managed password secret for one engine.
+/// Returns `(secret_id, plaintext, persist)`; `persist` is true when the engine
+/// row does not name the secret yet (minted now, or recovered by `name`), and
+/// the caller then records the id on the row.
+async fn resolve_or_mint_system_secret(
+    st: &CpState,
+    existing: Option<Uuid>,
+    name: &str,
+    description: &str,
+    what: &str,
+) -> Result<(Uuid, String, bool), CpError> {
+    if let Some(id) = existing {
+        let pw = st
+            .secrets
+            .resolve_plaintext(None, id)
+            .await
+            .map_err(|e| CpError::BadRequest(format!("resolve {what}: {e}")))?;
+        return Ok((id, pw, false));
+    }
+    let pw: String = {
+        use rand::RngCore;
+        let mut b = [0u8; 24];
+        rand::thread_rng().fill_bytes(&mut b);
+        use base64::Engine as _;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
+    };
+    // Deterministic per-engine name so a partial prior run (secret created but the
+    // engine column not yet set) recovers by name instead of erroring forever.
+    match st.secrets.create_system(name, Some(description), &pw).await {
+        Ok(id) => Ok((id, pw, true)),
+        Err(egret_secrets::SecretsError::AlreadyExists(_)) => {
+            let meta = st
+                .secrets
+                .list(None)
+                .await
+                .map_err(|e| CpError::BadRequest(format!("list {what}: {e}")))?
+                .into_iter()
+                .find(|m| m.name == name)
+                .ok_or_else(|| CpError::BadRequest(format!("{what} vanished after conflict")))?;
+            let pw = st
+                .secrets
+                .resolve_plaintext(None, meta.id)
+                .await
+                .map_err(|e| CpError::BadRequest(format!("resolve {what}: {e}")))?;
+            Ok((meta.id, pw, true))
+        }
+        Err(e) => Err(CpError::BadRequest(format!("store {what}: {e}"))),
+    }
+}
+
 /// Ensure the engine has a stored StarRocks FE `root` password secret; generate one
 /// on first call and persist its named-secret id on the engine row (idempotent via
 /// the `root_secret_id` column). Mirrors [`ensure_delegator_secret`] exactly — same
@@ -2558,56 +2608,41 @@ pub(crate) async fn ensure_root_password_secret(
     st: &CpState,
     engine: &Engine,
 ) -> Result<(Uuid, String), CpError> {
-    if let Some(id) = engine.root_secret_id {
-        let pw = st
-            .secrets
-            .resolve_plaintext(None, id)
-            .await
-            .map_err(|e| CpError::BadRequest(format!("resolve root password secret: {e}")))?;
-        return Ok((id, pw));
+    let (id, pw, persist) = resolve_or_mint_system_secret(
+        st,
+        engine.root_secret_id,
+        &format!("egret-root-{}", engine.id),
+        "StarRocks FE root password",
+        "root password secret",
+    )
+    .await?;
+    if persist {
+        st.engine_mgmt.set_root_secret(engine.id, id).await?;
     }
-    let pw: String = {
-        use rand::RngCore;
-        let mut b = [0u8; 24];
-        rand::thread_rng().fill_bytes(&mut b);
-        use base64::Engine as _;
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
-    };
-    // Deterministic per-engine name so a partial prior run (secret created but the
-    // engine column not yet set) recovers by name instead of erroring forever.
-    let name = format!("egret-root-{}", engine.id);
-    let id = match st
-        .secrets
-        .create_system(&name, Some("StarRocks FE root password"), &pw)
-        .await
-    {
-        Ok(id) => id,
-        Err(egret_secrets::SecretsError::AlreadyExists(_)) => {
-            let meta = st
-                .secrets
-                .list(None)
-                .await
-                .map_err(|e| CpError::BadRequest(format!("list root password secret: {e}")))?
-                .into_iter()
-                .find(|m| m.name == name)
-                .ok_or_else(|| {
-                    CpError::BadRequest("root password secret vanished after conflict".into())
-                })?;
-            let pw = st
-                .secrets
-                .resolve_plaintext(None, meta.id)
-                .await
-                .map_err(|e| CpError::BadRequest(format!("resolve root password secret: {e}")))?;
-            st.engine_mgmt.set_root_secret(engine.id, meta.id).await?;
-            return Ok((meta.id, pw));
-        }
-        Err(e) => {
-            return Err(CpError::BadRequest(format!(
-                "store root password secret: {e}"
-            )))
-        }
-    };
-    st.engine_mgmt.set_root_secret(engine.id, id).await?;
+    Ok((id, pw))
+}
+
+/// Ensure the engine has a stored password secret for the `egret_query_log`
+/// StarRocks user the AuditLoader plugin loads as; same shape as
+/// [`ensure_root_password_secret`] (idempotent via `query_log_secret_id`,
+/// recovers by the deterministic name `egret-query-log-<engine id>`).
+// Called by the query-log setup added in the next task.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn ensure_query_log_secret(
+    st: &CpState,
+    engine: &Engine,
+) -> Result<(Uuid, String), CpError> {
+    let (id, pw, persist) = resolve_or_mint_system_secret(
+        st,
+        engine.query_log_secret_id,
+        &format!("egret-query-log-{}", engine.id),
+        "StarRocks query log loader password",
+        "query log secret",
+    )
+    .await?;
+    if persist {
+        st.engine_mgmt.set_query_log_secret(engine.id, id).await?;
+    }
     Ok((id, pw))
 }
 
@@ -8384,6 +8419,7 @@ mod tests {
             authz_service_id: None,
             delegator_secret_id: None,
             root_secret_id: None,
+            query_log_secret_id: None,
             tls_secret_id: None,
             coordinator_cert: None,
             tls_cert_secret_ref: None,
@@ -8422,6 +8458,7 @@ mod tests {
         Engine {
             spec: serde_json::json!({ "starrocksConfig": { "feImage": fe_image } }),
             root_secret_id: root_secret.then(Uuid::new_v4),
+            query_log_secret_id: None,
             ..dto_engine("starrocks", origin)
         }
     }
@@ -8436,6 +8473,7 @@ mod tests {
         let e = Engine {
             spec: serde_json::json!({ "starrocksConfig": {} }),
             root_secret_id: Some(Uuid::new_v4()),
+            query_log_secret_id: None,
             ..dto_engine("starrocks", "provisioned")
         };
         assert!(
@@ -9682,6 +9720,7 @@ mod tests {
             authz_service_id: None,
             delegator_secret_id: None,
             root_secret_id: None,
+            query_log_secret_id: None,
             tls_secret_id: None,
             coordinator_cert: None,
             tls_cert_secret_ref: None,
@@ -11182,6 +11221,53 @@ mod tests {
         assert!(st.secrets.get_meta(None, id1).await.unwrap().system_managed);
     }
 
+    /// `ensure_query_log_secret`: first call mints and stores; the second returns
+    /// the same id and value; with the column cleared it recovers the secret by
+    /// its deterministic name instead of minting another.
+    #[tokio::test]
+    async fn ensure_query_log_secret_mints_reuses_and_recovers_by_name() {
+        let Some(st) = test_state().await else {
+            eprintln!("skipping ensure_query_log_secret test: DATABASE_URL not set");
+            return;
+        };
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("sr-{}", Uuid::new_v4().simple()),
+                "starrocks",
+                "egret-engines",
+                &serde_json::json!({ "starrocksConfig": { "feImage": "starrocks/fe-ubuntu:4.1.6", "cnImage": "starrocks/cn-ubuntu:4.1.6" } }),
+                None,
+            )
+            .await
+            .expect("create engine row");
+        assert!(engine.query_log_secret_id.is_none());
+
+        let (id1, pw1) = ensure_query_log_secret(&st, &engine).await.expect("mint");
+        let row = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert_eq!(row.query_log_secret_id, Some(id1));
+        assert!(!pw1.is_empty());
+        assert!(st.secrets.get_meta(None, id1).await.unwrap().system_managed);
+
+        let (id2, pw2) = ensure_query_log_secret(&st, &row).await.expect("reuse");
+        assert_eq!((id1, &pw1), (id2, &pw2));
+
+        // Column cleared (a crash between create and persist): recover by name.
+        sqlx::query("UPDATE engine_mgmt.engines SET query_log_secret_id = NULL WHERE id = $1")
+            .bind(engine.id)
+            .execute(st.engine_mgmt.pool())
+            .await
+            .unwrap();
+        let cleared = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert!(cleared.query_log_secret_id.is_none());
+        let (id3, pw3) = ensure_query_log_secret(&st, &cleared)
+            .await
+            .expect("recover by name");
+        assert_eq!((id1, &pw1), (id3, &pw3));
+        let row = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert_eq!(row.query_log_secret_id, Some(id1));
+    }
+
     /// The projection primitive resolves a `kubernetes.io/tls` named secret to
     /// its `(tls.crt, tls.key)` PEM pair.
     #[tokio::test]
@@ -12519,6 +12605,7 @@ mod tests {
             .expect("mint root password");
         let base = Engine {
             root_secret_id: Some(secret_id),
+            query_log_secret_id: None,
             coordinator_cert: Some("CERTPEM".into()),
             ..legacy.clone()
         };

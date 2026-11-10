@@ -4,6 +4,11 @@
 
 **Trạng thái:** người dùng đã duyệt. Bốn câu hỏi mở được quyết ngày 2026-11-10, xem mục cuối.
 
+> **Đính chính (2026-11-10, từ plan).** Bản tiếng Anh đã nêu ở mục 1: provisioner chỉ render
+> object Kubernetes nên setup nằm trong `egret-engine-mgmt`; bootstrap không chạy sau mọi lần apply
+> (nên có `spawn_query_log_setup`); engine không gắn profile chạy native access control nên egret
+> phải `GRANT INSERT` cho loader.
+
 **Gói:** A trong các follow-up StarRocks. Thứ tự là B (đã merge, platform #847), A, rồi C. A dùng `egret_perm::is_patched_starrocks_fe` và nút **Upgrade security** của B.
 
 ## Vấn đề

@@ -25,6 +25,10 @@ pub const LINEAGE_PRINCIPAL: &str = "egret-lineage";
 /// minted it (username-takeover spec §4.1; engine grants spec E21).
 pub const DELEGATOR_PRINCIPAL: &str = "egret_delegator";
 
+/// The StarRocks user the AuditLoader plugin stream-loads audit events as.
+/// Reserved by migration 0218's `username_ledger` row, like [`DELEGATOR_PRINCIPAL`].
+pub const QUERY_LOG_LOADER_PRINCIPAL: &str = "egret_query_log";
+
 /// Usernames no human may hold (see the module doc).
 pub const RESERVED_ENGINE_USERNAMES: &[&str] = &[LINEAGE_PRINCIPAL];
 
@@ -46,6 +50,11 @@ mod tests {
     fn the_delegator_principal_is_not_in_the_list_but_is_reserved_by_the_ledger() {
         assert_eq!(DELEGATOR_PRINCIPAL, "egret_delegator");
         assert!(!is_reserved_engine_username(DELEGATOR_PRINCIPAL));
+    }
+
+    #[test]
+    fn the_query_log_loader_principal_name() {
+        assert_eq!(QUERY_LOG_LOADER_PRINCIPAL, "egret_query_log");
     }
 
     #[test]
