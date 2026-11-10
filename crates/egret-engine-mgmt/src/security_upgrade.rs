@@ -83,7 +83,7 @@ pub(crate) struct SecurityUpgradeDto {
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
-async fn security_upgrade(
+pub(crate) async fn security_upgrade(
     State(st): State<CpState>,
     Auth(p): Auth,
     Path(id): Path<Uuid>,

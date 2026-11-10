@@ -314,6 +314,12 @@ pub struct FeError {
     /// a predicate on a string built to be printed, and the branch claimed
     /// in two places that no such predicate was left.
     unknown_catalog: bool,
+    /// Whether the FE said the plugin is already installed (StarRocks'
+    /// `PluginMgr`: `plugin <name> has already been installed.`), decided
+    /// from the RAW message like the two above. The query log's `INSTALL`
+    /// branches on it: a concurrent setup that installed it first is not a
+    /// failure.
+    already_installed: bool,
 }
 
 impl FeError {
@@ -411,6 +417,12 @@ impl FeError {
     pub fn is_unknown_catalog(&self) -> bool {
         self.unknown_catalog
     }
+
+    /// Did the FE mean "that plugin is already installed"? Read off
+    /// [`Self::already_installed`], decided from the unredacted message.
+    pub fn is_already_installed(&self) -> bool {
+        self.already_installed
+    }
 }
 
 /// Does this FE message mean "the object is already there"? StarRocks answers
@@ -437,6 +449,14 @@ fn says_already_exists(raw: &str) -> bool {
 /// call site, which is where it used to be — see [`FeError::unknown_catalog`].
 fn says_unknown_catalog(raw: &str) -> bool {
     raw.to_ascii_lowercase().contains("unknown catalog")
+}
+
+/// Does this FE message mean "that plugin is already installed"? StarRocks'
+/// `PluginMgr` refuses a second `INSTALL PLUGIN` of a name it holds with
+/// `plugin <name> has already been installed.`; matched on the phrase,
+/// case-insensitively. The exact wording is pinned live in Task 5.
+fn says_already_installed(raw: &str) -> bool {
+    raw.to_ascii_lowercase().contains("already been installed")
 }
 
 /// The FE's error code and nothing else. Deliberately NOT the excerpt: this
@@ -516,6 +536,7 @@ fn fe_error(raw: impl std::fmt::Display) -> FeError {
     // redacted form is allowed to be lossy — capped, or withheld entirely.
     let already_exists = says_already_exists(&raw);
     let unknown_catalog = says_unknown_catalog(&raw);
+    let already_installed = says_already_installed(&raw);
 
     let redacted = normalize_mysql_async_wrapper(&raw);
     let redacted = redact_quoted(&redacted);
@@ -532,6 +553,7 @@ fn fe_error(raw: impl std::fmt::Display) -> FeError {
         excerpt,
         already_exists,
         unknown_catalog,
+        already_installed,
     }
 }
 
@@ -1233,6 +1255,10 @@ pub struct FakeStarRocksDdl {
     /// could only be expressed with the global `fail`, which also broke
     /// `SHOW CATALOGS`).
     selective_fail: Arc<Mutex<Vec<(String, String)>>>,
+    /// `(needle, message)`, each used ONCE: the first `execute` containing
+    /// `needle` fails with `message` and the entry is consumed. An FE that
+    /// refuses a statement and then, on a retry, accepts it.
+    fail_once: Arc<Mutex<Vec<(String, String)>>>,
     /// The names `SHOW PLUGINS` lists. An `INSTALL PLUGIN FROM` that the fake
     /// accepts adds `AuditLoader`, the one plugin egret installs.
     plugins: Arc<Mutex<Vec<String>>>,
@@ -1289,6 +1315,13 @@ impl FakeStarRocksDdl {
     /// `SHOW CREATE CATALOG` among several `SHOW CATALOGS` calls).
     pub fn fail_matching(&self, needle: &str, msg: &str) {
         self.selective_fail
+            .lock()
+            .unwrap()
+            .push((needle.to_string(), msg.to_string()));
+    }
+    /// Fail the next `execute` containing `needle` with `msg`, once.
+    pub fn fail_matching_once(&self, needle: &str, msg: &str) {
+        self.fail_once
             .lock()
             .unwrap()
             .push((needle.to_string(), msg.to_string()));
@@ -1432,6 +1465,13 @@ impl StarRocksDdl for FakeStarRocksDdl {
         }
         if let Some(msg) = self.selective_failure(sql) {
             return Err(fe_error(msg));
+        }
+        {
+            let mut once = self.fail_once.lock().unwrap();
+            if let Some(i) = once.iter().position(|(n, _)| sql.contains(n.as_str())) {
+                let (_, msg) = once.remove(i);
+                return Err(fe_error(msg));
+            }
         }
         let mut cats = self.catalogs.lock().unwrap();
         if let Some(name) = statement_target("CREATE EXTERNAL CATALOG", sql) {
@@ -2164,6 +2204,17 @@ mod tests {
         assert!(!fe_error("Connection refused (os error 111)").is_already_exists());
     }
 
+    /// The query log's `INSTALL` is `Ready` on this answer (fix round 1, M1).
+    #[test]
+    fn already_installed_is_decided_from_the_raw_message() {
+        assert!(
+            fe_error("ERROR 1064 (HY000): plugin AuditLoader has already been installed.")
+                .is_already_installed()
+        );
+        assert!(!fe_error("ERROR 1064 (HY000): plugin file does not exist").is_already_installed());
+        assert!(!fe_error("Catalog 'x' already exists").is_already_installed());
+    }
+
     /// Fix round 1, F2 — the regression this decision was moved to prevent.
     /// An FE message whose quoting this module cannot pair (a SQL-escaped
     /// apostrophe, the shape the module doc names as reachable from egret's
@@ -2335,6 +2386,7 @@ mod tests {
                 excerpt: "whatever".into(),
                 already_exists: false,
                 unknown_catalog: false,
+                already_installed: false,
             }
             .to_string(),
             "FE error (no code)"

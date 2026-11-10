@@ -15769,44 +15769,43 @@ mod tests {
         };
         let _guard = QUERY_LOG_USERNAME.lock().await;
         let pool = st.engine_mgmt.pool().clone();
+        // Everything that can panic runs BEFORE the human is committed: from
+        // the commit to the cleanup nothing may `expect` (fix round 1, M4), or
+        // a panic would leave a holder of the name in the shared test DB and
+        // fail every later query-log test there at step 1.
+        let engine = seed_sr_engine(&st).await;
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe target");
+        // Heal a run that died before its cleanup (a killed process).
+        remove_query_log_humans(&pool)
+            .await
+            .expect("remove a leftover holder (needs a superuser test role)");
         // A human who held the name before migration 0218 reserved it. The
         // ledger (append-only) now refuses that name, so the row is written
         // the way it existed then: with the ledger's triggers off for this
-        // one transaction.
+        // one transaction. A failure before the commit persists nothing.
         let email = format!("ql-{}@example.test", Uuid::new_v4().simple());
         let mut tx = pool.begin().await.expect("begin");
         sqlx::query("SET LOCAL session_replication_role = replica")
             .execute(&mut *tx)
             .await
             .expect("triggers off (needs a superuser test role)");
-        let user_id: Uuid = sqlx::query_scalar(
+        sqlx::query(
             "INSERT INTO users (provider, email, name, username) \
-             VALUES ('local', $1, 'Query Log Human', 'Egret_Query_Log') RETURNING id",
+             VALUES ('local', $1, 'Query Log Human', 'Egret_Query_Log')",
         )
         .bind(&email)
-        .fetch_one(&mut *tx)
+        .execute(&mut *tx)
         .await
         .expect("insert the human");
         tx.commit().await.expect("commit");
-        let engine = seed_sr_engine(&st).await;
-        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
-            .await
-            .expect("fe target");
 
         let setup = crate::query_log::ensure_query_log(&st, &engine, &fe, false).await;
         let taken = st.engine_mgmt.username_taken("egret_query_log").await;
-        let mut tx = pool.begin().await.expect("begin");
-        sqlx::query("SET LOCAL session_replication_role = replica")
-            .execute(&mut *tx)
-            .await
-            .expect("triggers off");
-        sqlx::query("DELETE FROM users WHERE id = $1")
-            .bind(user_id)
-            .execute(&mut *tx)
-            .await
-            .expect("remove the human");
-        tx.commit().await.expect("commit");
+        let cleaned = remove_query_log_humans(&pool).await;
 
+        cleaned.expect("remove the human");
         assert_eq!(taken.ok(), Some(true), "case-insensitive, like the column");
         let crate::query_log::QueryLogSetup::Failed(msg) = setup else {
             panic!("expected Failed, got {setup:?}");
@@ -15823,6 +15822,19 @@ mod tests {
             st.engine_mgmt.username_taken("egret_query_log").await.ok(),
             Some(false)
         );
+    }
+
+    /// Delete every user holding the loader's name, with the ledger's triggers
+    /// off (they refuse to free a name). Test DB only.
+    async fn remove_query_log_humans(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
+        let mut tx = pool.begin().await?;
+        sqlx::query("SET LOCAL session_replication_role = replica")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM users WHERE username = 'egret_query_log'::citext")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await
     }
 
     /// Step 6 runs only when asked: the probe and its read-back.
@@ -16024,6 +16036,263 @@ mod tests {
         let mut trino = live.clone();
         trino.r#type = "trino".to_string();
         assert!(!crate::query_log::boot_pass_takes(&trino));
+    }
+
+    /// Wait (bounded) until the fake FE was sent `needle`; a spawned task is
+    /// not awaited by the handler that started it.
+    async fn eventually_sent(fake: &crate::starrocks_ddl::FakeStarRocksDdl, needle: &str) -> bool {
+        for _ in 0..250 {
+            if fake.executed().iter().any(|s| s == needle) {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        false
+    }
+
+    /// I1 (fix round 1): a try that fails, the old pod refusing the
+    /// `INSTALL`, is followed by another, which reaches the new pod.
+    #[tokio::test]
+    async fn a_failed_query_log_setup_is_tried_again_until_it_is_ready() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping a_failed_query_log_setup_is_tried_again_until_it_is_ready: DATABASE_URL not set");
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let engine = seed_sr_engine(&st).await;
+        prov.set_status(ready_fe_status(&engine.name));
+        fake.fail_matching_once(
+            "INSTALL PLUGIN",
+            "ERROR 1064 (HY000): plugin file /opt/egret/auditloader.zip does not exist",
+        );
+
+        crate::query_log::spawn_query_log_setup(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+        )
+        .await
+        .expect("no panic");
+
+        let installs = fake
+            .executed()
+            .iter()
+            .filter(|s| s.starts_with("INSTALL PLUGIN"))
+            .count();
+        assert_eq!(installs, 2, "{:?}", fake.executed());
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe target");
+        let plugins = st
+            .starrocks_ddl
+            .query_with_header(&fe, "SHOW PLUGINS")
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::query_log::plugin_step(&plugins, None),
+            crate::query_log::PluginStep::AlreadyInstalled,
+            "the second try installed it"
+        );
+        assert!(
+            fake.queried()
+                .iter()
+                .any(|q| q.starts_with("SELECT 'egret-query-log-probe-")),
+            "Ready waits for the first event: {:?}",
+            fake.queried()
+        );
+    }
+
+    /// A setup that keeps failing gives up after the last try.
+    #[tokio::test]
+    async fn a_query_log_setup_that_keeps_failing_gives_up_after_five_tries() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping a_query_log_setup_that_keeps_failing_gives_up_after_five_tries: DATABASE_URL not set");
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let engine = seed_sr_engine(&st).await;
+        prov.set_status(ready_fe_status(&engine.name));
+        fake.fail_matching("INSTALL PLUGIN", "ERROR 1064 (HY000): no such file");
+
+        crate::query_log::spawn_query_log_setup(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+        )
+        .await
+        .expect("no panic");
+
+        let installs = fake
+            .executed()
+            .iter()
+            .filter(|s| s.starts_with("INSTALL PLUGIN"))
+            .count();
+        assert_eq!(installs, 5, "{:?}", fake.executed());
+        assert!(!fake
+            .queried()
+            .iter()
+            .any(|q| q.starts_with("SELECT 'egret-query-log-probe-")));
+    }
+
+    /// The retries stop once the engine is no longer current.
+    #[tokio::test]
+    async fn query_log_retries_stop_when_the_engine_is_being_deleted() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping query_log_retries_stop_when_the_engine_is_being_deleted: DATABASE_URL not set");
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let engine = seed_sr_engine(&st).await;
+        prov.set_status(ready_fe_status(&engine.name));
+        fake.fail_matching("INSTALL PLUGIN", "ERROR 1064 (HY000): no such file");
+        let store = st.engine_mgmt.clone();
+        let engine_id = engine.id;
+        fake.on_execute(move |sql| {
+            let store = store.clone();
+            Box::pin(async move {
+                if sql.starts_with("INSTALL PLUGIN") {
+                    stop_being_current(&store, engine_id).await;
+                }
+            })
+        });
+
+        crate::query_log::spawn_query_log_setup(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+        )
+        .await
+        .expect("no panic");
+
+        let installs = fake
+            .executed()
+            .iter()
+            .filter(|s| s.starts_with("INSTALL PLUGIN"))
+            .count();
+        assert_eq!(installs, 1, "{:?}", fake.executed());
+    }
+
+    /// M1 (fix round 1): an `INSTALL` refused because another setup installed
+    /// the plugin first is `Ready`, not `Failed`.
+    #[tokio::test]
+    async fn an_already_installed_answer_to_install_is_ready() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!(
+                "skipping an_already_installed_answer_to_install_is_ready: DATABASE_URL not set"
+            );
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let engine = seed_sr_engine(&st).await;
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe target");
+        fake.fail_matching(
+            "INSTALL PLUGIN",
+            "ERROR 1064 (HY000): plugin AuditLoader has already been installed.",
+        );
+
+        let setup = crate::query_log::ensure_query_log(&st, &engine, &fe, false).await;
+
+        assert_eq!(setup, crate::query_log::QueryLogSetup::Ready);
+        assert!(
+            fake.executed()
+                .iter()
+                .any(|s| s.starts_with("INSTALL PLUGIN")),
+            "premise: the INSTALL was refused"
+        );
+    }
+
+    /// I2 (fix round 1): an update that does not change delegation restarts
+    /// the FE without the bootstrap, so it starts the query log setup itself.
+    #[tokio::test]
+    async fn a_starrocks_update_sets_the_query_log_up_again() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!(
+                "skipping a_starrocks_update_sets_the_query_log_up_again: DATABASE_URL not set"
+            );
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st).await;
+        attach_primary_warehouse_catalog(&st, &engine, wh.id).await;
+        prov.set_status(ready_fe_status(&engine.name));
+        let body = sr_update_body(Some(StarRocksConfigBody {
+            fe_replicas: Some(2),
+            ..Default::default()
+        }));
+
+        if let Err(e) = update_starrocks_engine(st.clone(), engine.clone(), body).await {
+            panic!("update failed: {e}");
+        }
+
+        assert!(
+            eventually_sent(&fake, crate::query_log::QUERY_LOG_DATABASE_DDL).await,
+            "the update starts the query log setup: {:?}",
+            fake.executed()
+        );
+    }
+
+    /// I2 (fix round 1): the security upgrade restarts the FE, possibly onto
+    /// an image with the plugin, and starts the setup after its apply.
+    #[tokio::test]
+    async fn a_security_upgrade_sets_the_query_log_up_again() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!(
+                "skipping a_security_upgrade_sets_the_query_log_up_again: DATABASE_URL not set"
+            );
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine_on_official_image(&st).await;
+        attach_primary_warehouse_catalog(&st, &engine, wh.id).await;
+        prov.set_status(ready_fe_status(&engine.name));
+        let principal = egret_core::context::Principal {
+            user_id: egret_core::ids::UserId::new(),
+            email: "admin@egret.local".into(),
+            platform_roles: vec!["platform_admin".into()],
+            permissions: vec![],
+            group_ids: vec![],
+            impersonator: None,
+        };
+
+        if let Err(e) = crate::security_upgrade::security_upgrade(
+            State(st.clone()),
+            Auth(principal),
+            Path(engine.id),
+        )
+        .await
+        {
+            panic!("security upgrade failed: {e}");
+        }
+
+        assert!(
+            eventually_sent(&fake, crate::query_log::QUERY_LOG_DATABASE_DDL).await,
+            "the upgrade starts the query log setup: {:?}",
+            fake.executed()
+        );
+        assert!(
+            eventually_sent(&fake, &{
+                let pw = loader_password(&st, engine.id).await;
+                crate::query_log::install_plugin_sql(&pw)
+            })
+            .await,
+            "the upgraded image ships the plugin: {:?}",
+            fake.executed()
+        );
     }
 
     /// The Query log's plugin switches are egret's: an `feConfig` override

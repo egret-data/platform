@@ -103,6 +103,24 @@ const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 /// minute, so a probe sent before the plugin was picked up is never loaded.
 const PROBE_RESEND_EVERY: u32 = 12;
 
+/// How many times [`spawn_query_log_setup`] runs the setup when it answers
+/// `Failed`, and how long it waits between tries. Just after an apply the old
+/// FE pod is often still Ready and logs in, so the first try can reach the pod
+/// that is about to be replaced (an `INSTALL` on an official image that has no
+/// plugin zip, say); a later try reaches the new one. Five tries a minute apart
+/// cover an FE rollout. The test build keeps the tries and drops the wait.
+const SETUP_ATTEMPTS: u32 = 5;
+#[cfg(not(test))]
+const SETUP_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
+#[cfg(test)]
+const SETUP_RETRY_DELAY: std::time::Duration = std::time::Duration::ZERO;
+
+/// Whether step 6 sends the probe (again) on this poll: on the first, then
+/// once every [`PROBE_RESEND_EVERY`] polls (a minute).
+fn sends_probe(poll: u32) -> bool {
+    poll % PROBE_RESEND_EVERY == 0
+}
+
 /// What [`ensure_query_log`] answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum QueryLogSetup {
@@ -236,13 +254,13 @@ async fn setup_steps(st: &CpState, engine: &Engine, fe: &FeTarget) -> QueryLogSe
             ))
         }
     }
-    let (_, password) = match ensure_query_log_secret(st, engine).await {
+    let (secret_id, password) = match ensure_query_log_secret(st, engine).await {
         Ok(v) => v,
         Err(e) => {
             return QueryLogSetup::Failed(format!("could not resolve the loader password: {e}"))
         }
     };
-    let secrets = BTreeMap::from([(Uuid::from_u128(1), password.clone())]);
+    let secrets = BTreeMap::from([(secret_id, password.clone())]);
     let failed = |e: FeError| QueryLogSetup::Failed(e.scrubbed(fe, &secrets));
 
     // 2-4. The table, the loader user, the native grant when unbound.
@@ -267,6 +285,9 @@ async fn setup_steps(st: &CpState, engine: &Engine, fe: &FeTarget) -> QueryLogSe
             .await
         {
             Ok(()) => QueryLogSetup::Ready,
+            // Another setup on this engine (a bootstrap and an update's spawn
+            // that overlap) installed it between our `SHOW PLUGINS` and here.
+            Err(e) if e.is_already_installed() => QueryLogSetup::Ready,
             Err(e) => failed(e),
         },
     }
@@ -289,7 +310,7 @@ pub(crate) async fn wait_for_events(st: &CpState, fe: &FeTarget, engine_name: &s
     );
     let no_secrets = BTreeMap::new();
     for poll in 0..PROBE_MAX_POLLS {
-        if poll % PROBE_RESEND_EVERY == 0 {
+        if sends_probe(poll) {
             if let Err(e) = st.starrocks_ddl.query(fe, &probe).await {
                 tracing::debug!(engine = %engine_name, error = %e.scrubbed(fe, &no_secrets),
                     "query log: the probe statement failed");
@@ -324,8 +345,8 @@ pub(crate) async fn wait_for_events(st: &CpState, fe: &FeTarget, engine_name: &s
     false
 }
 
-/// Log what a background setup came to. `Failed` is already logged by
-/// [`ensure_query_log`].
+/// Log what a background setup came to. `Failed` is logged where it is
+/// decided: by [`ensure_query_log`], or by [`spawn_query_log_setup`]'s last try.
 pub(crate) fn log_outcome(engine_name: &str, setup: &QueryLogSetup) {
     match setup {
         QueryLogSetup::Ready => {
@@ -338,9 +359,13 @@ pub(crate) fn log_outcome(engine_name: &str, setup: &QueryLogSetup) {
     }
 }
 
-/// After an apply that may restart the FE: wait for the FE pod and a real
-/// `root` login exactly as the bootstrap does
-/// ([`wait_for_fe_root_login`]), then run [`ensure_query_log`] with step 6.
+/// After an apply that may restart the FE, and at boot: wait for the FE pod
+/// and a real `root` login exactly as the bootstrap does
+/// ([`wait_for_fe_root_login`]), run the setup, and on `Failed` try again,
+/// up to [`SETUP_ATTEMPTS`] times [`SETUP_RETRY_DELAY`] apart, each try
+/// behind the same waits and checkpoints, so a retry stops when the engine is
+/// deleted, renamed or failed. `Ready` waits for the first event (step 6);
+/// `Ready` and `PluginNotShipped` end it. Only the last `Failed` is a warning.
 /// Spawned, never awaited by a request; the handle is for tests.
 pub(crate) fn spawn_query_log_setup(
     st: CpState,
@@ -350,29 +375,50 @@ pub(crate) fn spawn_query_log_setup(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut consecutive_read_errors: u32 = 0;
-        let Some((engine, fe)) = wait_for_fe_root_login(
-            &st,
-            engine_id,
-            &name,
-            &namespace,
-            &mut consecutive_read_errors,
-        )
-        .await
-        else {
-            return;
-        };
-        if !engine_still_current(
-            &st.engine_mgmt,
-            engine_id,
-            &name,
-            &mut consecutive_read_errors,
-        )
-        .await
-        {
-            return;
+        for attempt in 1..=SETUP_ATTEMPTS {
+            let Some((engine, fe)) = wait_for_fe_root_login(
+                &st,
+                engine_id,
+                &name,
+                &namespace,
+                &mut consecutive_read_errors,
+            )
+            .await
+            else {
+                return;
+            };
+            if !engine_still_current(
+                &st.engine_mgmt,
+                engine_id,
+                &name,
+                &mut consecutive_read_errors,
+            )
+            .await
+            {
+                return;
+            }
+            match setup_steps(&st, &engine, &fe).await {
+                QueryLogSetup::Failed(why) if attempt < SETUP_ATTEMPTS => {
+                    tracing::info!(engine = %name, attempt, error = %why,
+                        "query log setup failed; trying again");
+                    tokio::time::sleep(SETUP_RETRY_DELAY).await;
+                }
+                QueryLogSetup::Failed(why) => {
+                    tracing::warn!(engine = %name, attempts = attempt, error = %why,
+                        "query log setup failed");
+                    return;
+                }
+                setup @ QueryLogSetup::Ready => {
+                    log_outcome(&name, &setup);
+                    wait_for_events(&st, &fe, &name).await;
+                    return;
+                }
+                setup @ QueryLogSetup::PluginNotShipped => {
+                    log_outcome(&name, &setup);
+                    return;
+                }
+            }
         }
-        let setup = ensure_query_log(&st, &engine, &fe, true).await;
-        log_outcome(&name, &setup);
     })
 }
 
@@ -524,6 +570,14 @@ mod tests {
     /// The name is read by header, not by position: the same row with the
     /// columns reordered is still found, and `AuditLoader` in another column
     /// (a description, say) is not a listing.
+    #[test]
+    fn the_probe_is_sent_on_the_first_poll_then_once_a_minute() {
+        let sent: Vec<u32> = (0..PROBE_MAX_POLLS.max(36))
+            .filter(|p| sends_probe(*p))
+            .collect();
+        assert_eq!(sent, vec![0, 12, 24]);
+    }
+
     #[test]
     fn the_name_column_is_found_by_its_header() {
         let reordered = show_plugins(
