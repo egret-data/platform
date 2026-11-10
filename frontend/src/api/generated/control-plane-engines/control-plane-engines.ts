@@ -28,6 +28,7 @@ import type {
   AssignEngineBody,
   CatalogTestDto,
   ClusterDto,
+  ControlPlaneEnginesListQueryLogParams,
   ControlPlaneEnginesPodLogsFollowParams,
   ControlPlaneEnginesPodLogsParams,
   CreateEngineBody,
@@ -42,6 +43,9 @@ import type {
   PodLogsDto,
   QueryDetailDto,
   QueryDto,
+  QueryLogEntryDto,
+  QueryLogPageDto,
+  QueryLogStatusDto,
   RangerCredentialDto,
   RangerPluginConfigDto,
   RegisterExternalEngine,
@@ -2667,7 +2671,557 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getControlPlaneEnginesKillQueryMutationOptions(options), queryClient);
     }
-    export type controlPlaneEnginesRangerPluginConfigResponse200 = {
+    export type controlPlaneEnginesListQueryLogResponse200 = {
+  data: QueryLogPageDto
+  status: 200
+}
+
+export type controlPlaneEnginesListQueryLogResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneEnginesListQueryLogResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneEnginesListQueryLogResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneEnginesListQueryLogResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneEnginesListQueryLogResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneEnginesListQueryLogResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneEnginesListQueryLogResponse502 = {
+  data: ErrorBody
+  status: 502
+}
+
+export type controlPlaneEnginesListQueryLogResponseSuccess = (controlPlaneEnginesListQueryLogResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneEnginesListQueryLogResponseError = (controlPlaneEnginesListQueryLogResponse400 | controlPlaneEnginesListQueryLogResponse401 | controlPlaneEnginesListQueryLogResponse403 | controlPlaneEnginesListQueryLogResponse404 | controlPlaneEnginesListQueryLogResponse409 | controlPlaneEnginesListQueryLogResponse500 | controlPlaneEnginesListQueryLogResponse502) & {
+  headers: Headers;
+};
+
+export type controlPlaneEnginesListQueryLogResponse = (controlPlaneEnginesListQueryLogResponseSuccess | controlPlaneEnginesListQueryLogResponseError)
+
+export const getControlPlaneEnginesListQueryLogUrl = (id: string,
+    params?: ControlPlaneEnginesListQueryLogParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/control-plane/engines/${encodeURIComponent(id)}/query-log?${stringifiedParams}` : `/api/control-plane/engines/${encodeURIComponent(id)}/query-log`
+}
+
+export const controlPlaneEnginesListQueryLog = async (id: string,
+    params?: ControlPlaneEnginesListQueryLogParams, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneEnginesListQueryLogResponse> => {
+
+  return customInstance<controlPlaneEnginesListQueryLogResponse>(getControlPlaneEnginesListQueryLogUrl(id,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneEnginesListQueryLogQueryKey = (id: string,
+    params?: ControlPlaneEnginesListQueryLogParams,) => {
+    return [
+    `/api/control-plane/engines/${encodeURIComponent(id)}/query-log`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getControlPlaneEnginesListQueryLogQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneEnginesListQueryLog>>, TError = ErrorBody>(id: string,
+    params?: ControlPlaneEnginesListQueryLogParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesListQueryLog>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneEnginesListQueryLogQueryKey(id,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneEnginesListQueryLog>>> = ({ signal }) => controlPlaneEnginesListQueryLog(id,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesListQueryLog>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneEnginesListQueryLogQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesListQueryLog>>>
+export type ControlPlaneEnginesListQueryLogQueryError = ErrorBody
+
+
+export function useControlPlaneEnginesListQueryLog<TData = Awaited<ReturnType<typeof controlPlaneEnginesListQueryLog>>, TError = ErrorBody>(
+ id: string,
+    params: undefined |  ControlPlaneEnginesListQueryLogParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesListQueryLog>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneEnginesListQueryLog>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneEnginesListQueryLog>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneEnginesListQueryLog<TData = Awaited<ReturnType<typeof controlPlaneEnginesListQueryLog>>, TError = ErrorBody>(
+ id: string,
+    params?: ControlPlaneEnginesListQueryLogParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesListQueryLog>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneEnginesListQueryLog>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneEnginesListQueryLog>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneEnginesListQueryLog<TData = Awaited<ReturnType<typeof controlPlaneEnginesListQueryLog>>, TError = ErrorBody>(
+ id: string,
+    params?: ControlPlaneEnginesListQueryLogParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesListQueryLog>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useControlPlaneEnginesListQueryLog<TData = Awaited<ReturnType<typeof controlPlaneEnginesListQueryLog>>, TError = ErrorBody>(
+ id: string,
+    params?: ControlPlaneEnginesListQueryLogParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesListQueryLog>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneEnginesListQueryLogQueryOptions(id,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type controlPlaneEnginesSetupQueryLogResponse200 = {
+  data: QueryLogStatusDto
+  status: 200
+}
+
+export type controlPlaneEnginesSetupQueryLogResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneEnginesSetupQueryLogResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneEnginesSetupQueryLogResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneEnginesSetupQueryLogResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneEnginesSetupQueryLogResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneEnginesSetupQueryLogResponse502 = {
+  data: ErrorBody
+  status: 502
+}
+
+export type controlPlaneEnginesSetupQueryLogResponseSuccess = (controlPlaneEnginesSetupQueryLogResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneEnginesSetupQueryLogResponseError = (controlPlaneEnginesSetupQueryLogResponse401 | controlPlaneEnginesSetupQueryLogResponse403 | controlPlaneEnginesSetupQueryLogResponse404 | controlPlaneEnginesSetupQueryLogResponse409 | controlPlaneEnginesSetupQueryLogResponse500 | controlPlaneEnginesSetupQueryLogResponse502) & {
+  headers: Headers;
+};
+
+export type controlPlaneEnginesSetupQueryLogResponse = (controlPlaneEnginesSetupQueryLogResponseSuccess | controlPlaneEnginesSetupQueryLogResponseError)
+
+export const getControlPlaneEnginesSetupQueryLogUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/engines/${encodeURIComponent(id)}/query-log/setup`
+}
+
+export const controlPlaneEnginesSetupQueryLog = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneEnginesSetupQueryLogResponse> => {
+
+  return customInstance<controlPlaneEnginesSetupQueryLogResponse>(getControlPlaneEnginesSetupQueryLogUrl(id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneEnginesSetupQueryLogMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesSetupQueryLog>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesSetupQueryLog>>, TError,{id: string}, TContext> => {
+
+const mutationKey = ['controlPlaneEnginesSetupQueryLog'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneEnginesSetupQueryLog>>, {id: string}> = (props) => {
+          const {id} = props ?? {};
+
+          return  controlPlaneEnginesSetupQueryLog(id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneEnginesSetupQueryLogMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesSetupQueryLog>>>
+
+    export type ControlPlaneEnginesSetupQueryLogMutationError = ErrorBody
+
+    export const useControlPlaneEnginesSetupQueryLog = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesSetupQueryLog>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneEnginesSetupQueryLog>>,
+        TError,
+        {id: string},
+        TContext
+      > => {
+      return useMutation(getControlPlaneEnginesSetupQueryLogMutationOptions(options), queryClient);
+    }
+    export type controlPlaneEnginesQueryLogStatusResponse200 = {
+  data: QueryLogStatusDto
+  status: 200
+}
+
+export type controlPlaneEnginesQueryLogStatusResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneEnginesQueryLogStatusResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneEnginesQueryLogStatusResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneEnginesQueryLogStatusResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneEnginesQueryLogStatusResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneEnginesQueryLogStatusResponseSuccess = (controlPlaneEnginesQueryLogStatusResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneEnginesQueryLogStatusResponseError = (controlPlaneEnginesQueryLogStatusResponse401 | controlPlaneEnginesQueryLogStatusResponse403 | controlPlaneEnginesQueryLogStatusResponse404 | controlPlaneEnginesQueryLogStatusResponse409 | controlPlaneEnginesQueryLogStatusResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneEnginesQueryLogStatusResponse = (controlPlaneEnginesQueryLogStatusResponseSuccess | controlPlaneEnginesQueryLogStatusResponseError)
+
+export const getControlPlaneEnginesQueryLogStatusUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/engines/${encodeURIComponent(id)}/query-log/status`
+}
+
+export const controlPlaneEnginesQueryLogStatus = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneEnginesQueryLogStatusResponse> => {
+
+  return customInstance<controlPlaneEnginesQueryLogStatusResponse>(getControlPlaneEnginesQueryLogStatusUrl(id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneEnginesQueryLogStatusQueryKey = (id: string,) => {
+    return [
+    `/api/control-plane/engines/${encodeURIComponent(id)}/query-log/status`
+    ] as const;
+    }
+
+
+export const getControlPlaneEnginesQueryLogStatusQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneEnginesQueryLogStatus>>, TError = ErrorBody>(id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesQueryLogStatus>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneEnginesQueryLogStatusQueryKey(id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneEnginesQueryLogStatus>>> = ({ signal }) => controlPlaneEnginesQueryLogStatus(id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesQueryLogStatus>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneEnginesQueryLogStatusQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesQueryLogStatus>>>
+export type ControlPlaneEnginesQueryLogStatusQueryError = ErrorBody
+
+
+export function useControlPlaneEnginesQueryLogStatus<TData = Awaited<ReturnType<typeof controlPlaneEnginesQueryLogStatus>>, TError = ErrorBody>(
+ id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesQueryLogStatus>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneEnginesQueryLogStatus>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneEnginesQueryLogStatus>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneEnginesQueryLogStatus<TData = Awaited<ReturnType<typeof controlPlaneEnginesQueryLogStatus>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesQueryLogStatus>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneEnginesQueryLogStatus>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneEnginesQueryLogStatus>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneEnginesQueryLogStatus<TData = Awaited<ReturnType<typeof controlPlaneEnginesQueryLogStatus>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesQueryLogStatus>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useControlPlaneEnginesQueryLogStatus<TData = Awaited<ReturnType<typeof controlPlaneEnginesQueryLogStatus>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesQueryLogStatus>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneEnginesQueryLogStatusQueryOptions(id,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type controlPlaneEnginesGetQueryLogEntryResponse200 = {
+  data: QueryLogEntryDto
+  status: 200
+}
+
+export type controlPlaneEnginesGetQueryLogEntryResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneEnginesGetQueryLogEntryResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneEnginesGetQueryLogEntryResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneEnginesGetQueryLogEntryResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneEnginesGetQueryLogEntryResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneEnginesGetQueryLogEntryResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneEnginesGetQueryLogEntryResponse502 = {
+  data: ErrorBody
+  status: 502
+}
+
+export type controlPlaneEnginesGetQueryLogEntryResponseSuccess = (controlPlaneEnginesGetQueryLogEntryResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneEnginesGetQueryLogEntryResponseError = (controlPlaneEnginesGetQueryLogEntryResponse400 | controlPlaneEnginesGetQueryLogEntryResponse401 | controlPlaneEnginesGetQueryLogEntryResponse403 | controlPlaneEnginesGetQueryLogEntryResponse404 | controlPlaneEnginesGetQueryLogEntryResponse409 | controlPlaneEnginesGetQueryLogEntryResponse500 | controlPlaneEnginesGetQueryLogEntryResponse502) & {
+  headers: Headers;
+};
+
+export type controlPlaneEnginesGetQueryLogEntryResponse = (controlPlaneEnginesGetQueryLogEntryResponseSuccess | controlPlaneEnginesGetQueryLogEntryResponseError)
+
+export const getControlPlaneEnginesGetQueryLogEntryUrl = (id: string,
+    queryId: string,) => {
+
+
+
+
+  return `/api/control-plane/engines/${encodeURIComponent(id)}/query-log/${encodeURIComponent(queryId)}`
+}
+
+export const controlPlaneEnginesGetQueryLogEntry = async (id: string,
+    queryId: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneEnginesGetQueryLogEntryResponse> => {
+
+  return customInstance<controlPlaneEnginesGetQueryLogEntryResponse>(getControlPlaneEnginesGetQueryLogEntryUrl(id,queryId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneEnginesGetQueryLogEntryQueryKey = (id: string,
+    queryId: string,) => {
+    return [
+    `/api/control-plane/engines/${encodeURIComponent(id)}/query-log/${encodeURIComponent(queryId)}`
+    ] as const;
+    }
+
+
+export const getControlPlaneEnginesGetQueryLogEntryQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneEnginesGetQueryLogEntry>>, TError = ErrorBody>(id: string,
+    queryId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesGetQueryLogEntry>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneEnginesGetQueryLogEntryQueryKey(id,queryId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneEnginesGetQueryLogEntry>>> = ({ signal }) => controlPlaneEnginesGetQueryLogEntry(id,queryId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: id !== null && id !== undefined && queryId !== null && queryId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesGetQueryLogEntry>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneEnginesGetQueryLogEntryQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesGetQueryLogEntry>>>
+export type ControlPlaneEnginesGetQueryLogEntryQueryError = ErrorBody
+
+
+export function useControlPlaneEnginesGetQueryLogEntry<TData = Awaited<ReturnType<typeof controlPlaneEnginesGetQueryLogEntry>>, TError = ErrorBody>(
+ id: string,
+    queryId: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesGetQueryLogEntry>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneEnginesGetQueryLogEntry>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneEnginesGetQueryLogEntry>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneEnginesGetQueryLogEntry<TData = Awaited<ReturnType<typeof controlPlaneEnginesGetQueryLogEntry>>, TError = ErrorBody>(
+ id: string,
+    queryId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesGetQueryLogEntry>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneEnginesGetQueryLogEntry>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneEnginesGetQueryLogEntry>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneEnginesGetQueryLogEntry<TData = Awaited<ReturnType<typeof controlPlaneEnginesGetQueryLogEntry>>, TError = ErrorBody>(
+ id: string,
+    queryId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesGetQueryLogEntry>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useControlPlaneEnginesGetQueryLogEntry<TData = Awaited<ReturnType<typeof controlPlaneEnginesGetQueryLogEntry>>, TError = ErrorBody>(
+ id: string,
+    queryId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesGetQueryLogEntry>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneEnginesGetQueryLogEntryQueryOptions(id,queryId,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type controlPlaneEnginesRangerPluginConfigResponse200 = {
   data: RangerPluginConfigDto
   status: 200
 }

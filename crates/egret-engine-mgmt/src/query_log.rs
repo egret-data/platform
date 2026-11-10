@@ -16,13 +16,23 @@
 
 use std::collections::BTreeMap;
 
+use axum::extract::{Path, Query, State};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use chrono::{DateTime, NaiveDateTime, SecondsFormat, TimeZone, Utc};
+use egret_auth::principal::Auth;
 use egret_core::engine_principals::QUERY_LOG_LOADER_PRINCIPAL;
+use egret_core::http::ErrorBody;
+use egret_core::Principal;
 use egret_policy_api::infra_names::{QUERY_LOG_DATABASE, QUERY_LOG_TABLE};
 use egret_query_api::{quote_string, Engine as QueryEngine};
+use serde::{Deserialize, Serialize};
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::engines::{engine_still_current, ensure_query_log_secret, wait_for_fe_root_login};
-use crate::starrocks_ddl::{FeError, FeTarget};
+use crate::starrocks_ddl::{fe_target, FeError, FeTarget};
+use crate::EngineHttpError as CpError;
 use crate::EngineMgmtState as CpState;
 use crate::{engine_status, Engine};
 
@@ -455,6 +465,779 @@ pub async fn setup_query_logs(st: &CpState) -> usize {
     started
 }
 
+// ── Reading the log (design section 5) ────────────────────────────────────────
+//
+// Four routes on the engines router: the status, a page of entries, one entry,
+// and the synchronous setup. Every read logs in as `root` through
+// [`fe_target`], starts with [`READ_MARKER`] (so the SQL can leave egret's own
+// reads out of what it shows), and carries only values egret validated and
+// then quoted with `quote_string`, or formatted itself. Every FE error leaves
+// through [`FeError::scrubbed`] with the loader password among its secrets
+// (the root password is the connection's, which `scrubbed` adds itself), and
+// every statement and error text leaves through [`redact_statement`].
+
+/// The comment every read of the log starts with. Rows whose statement starts
+/// with it and that `root` ran are egret's own reads and are left out.
+pub(crate) const READ_MARKER: &str = "/* egret-query-log-read */";
+
+/// The hint every `SELECT` of the log carries after the marker.
+const READ_HINT: &str = "/*+ SET_VAR(query_timeout = 10) */";
+
+/// How long the table keeps a partition (`QUERY_LOG_TABLE_DDL`'s
+/// `partition_retention_condition`).
+const RETENTION_DAYS: u32 = 30;
+
+/// How much of a statement a page carries; the detail route carries it whole.
+const STATEMENT_PREVIEW_CHARS: u32 = 2000;
+
+const DEFAULT_LIMIT: u32 = 50;
+const MAX_LIMIT: u32 = 200;
+const MAX_USER_CHARS: usize = 128;
+const MAX_RANGE_DAYS: i64 = 31;
+
+/// The text form of a `DATETIME` egret writes into SQL and into a cursor.
+const SQL_DATETIME: &str = "%Y-%m-%d %H:%M:%S%.6f";
+/// What it parses a `DATETIME` back with (the fraction is optional).
+const SQL_DATETIME_IN: &str = "%Y-%m-%d %H:%M:%S%.f";
+
+/// The query log's state, as the Query log tab shows it (design section 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum QueryLogState {
+    /// The plugin is listed and the table exists.
+    Ready,
+    /// A patched image, but the plugin or the table is missing.
+    NotSetUp,
+    /// The engine's image does not ship the plugin (design section 4).
+    PluginNotShipped,
+    /// The FE did not answer; `message` says why.
+    Unreachable,
+}
+
+impl QueryLogState {
+    /// The serialized name, for the `state` of a 409 `query_log_not_ready`.
+    fn as_str(self) -> &'static str {
+        match self {
+            QueryLogState::Ready => "ready",
+            QueryLogState::NotSetUp => "notSetUp",
+            QueryLogState::PluginNotShipped => "pluginNotShipped",
+            QueryLogState::Unreachable => "unreachable",
+        }
+    }
+}
+
+/// `GET …/query-log/status` and `POST …/query-log/setup`.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryLogStatusDto {
+    pub state: QueryLogState,
+    /// Why the state is `unreachable` (the FE's message, scrubbed). Absent
+    /// otherwise.
+    pub message: Option<String>,
+    /// The newest event in the last day (RFC 3339), absent when there is none
+    /// or the table does not exist.
+    pub last_event_at: Option<String>,
+    /// How many days of events the table keeps.
+    pub retention_days: u32,
+}
+
+/// One statement the engine ran.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryLogEntryDto {
+    pub query_id: String,
+    /// When the statement ended (RFC 3339).
+    pub timestamp: String,
+    /// The session user ("Connected as").
+    pub user: Option<String>,
+    /// The bare name of the user the statement ran for ("User"), parsed from
+    /// `'bob'@'%'`; absent when empty.
+    pub authorized_user: Option<String>,
+    pub client_ip: Option<String>,
+    pub catalog: Option<String>,
+    pub db: Option<String>,
+    /// `EOF` or `OK` for a success, `ERR` for a failure.
+    pub state: Option<String>,
+    /// The FE's error, redacted.
+    pub error_message: Option<String>,
+    pub query_time_ms: Option<i64>,
+    pub scan_rows: Option<i64>,
+    pub scan_bytes: Option<i64>,
+    pub return_rows: Option<i64>,
+    pub cpu_cost_ns: Option<i64>,
+    pub mem_cost_bytes: Option<i64>,
+    pub command: Option<String>,
+    pub query_source: Option<String>,
+    pub is_query: Option<bool>,
+    pub digest: Option<String>,
+    /// The statement, redacted: its first 2,000 characters on a page, whole
+    /// on the detail route. Absent for a caller without `engine:audit`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statement: Option<String>,
+    /// Whether `statement` was cut. Always false when it is absent.
+    pub statement_truncated: bool,
+}
+
+/// `GET …/query-log`.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryLogPageDto {
+    pub entries: Vec<QueryLogEntryDto>,
+    /// Pass it as `cursor` for the next page; absent on the last.
+    pub next_cursor: Option<String>,
+}
+
+/// `GET …/query-log`'s query parameters. Taken as text and validated by
+/// [`parse_filter`], so a malformed value is a 400 naming its parameter.
+#[derive(Debug, Default, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct QueryLogParams {
+    /// RFC 3339; rows with `from <= timestamp`. Default: `to` minus 24 hours.
+    #[param(value_type = Option<String>, format = DateTime)]
+    pub from: Option<String>,
+    /// RFC 3339; rows with `timestamp < to`. Default: now. At most 31 days
+    /// after `from`.
+    #[param(value_type = Option<String>, format = DateTime)]
+    pub to: Option<String>,
+    /// The session user or the user inside `authorizedUser`, exact and
+    /// case-insensitive; at most 128 characters.
+    pub user: Option<String>,
+    /// `ok`, `error` or `all` (default).
+    pub state: Option<String>,
+    /// Rows per page, 1 to 200 (default 50).
+    #[param(value_type = Option<u32>, minimum = 1, maximum = 200)]
+    pub limit: Option<String>,
+    /// The previous page's `nextCursor`.
+    pub cursor: Option<String>,
+}
+
+/// Which statements a page shows, by their `state` column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StateFilter {
+    All,
+    Ok,
+    Error,
+}
+
+/// A validated [`QueryLogParams`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct QueryLogFilter {
+    pub(crate) from: DateTime<Utc>,
+    pub(crate) to: DateTime<Utc>,
+    /// Lowercased.
+    pub(crate) user: Option<String>,
+    pub(crate) state: StateFilter,
+    pub(crate) limit: u32,
+    pub(crate) before: Option<(NaiveDateTime, Uuid)>,
+}
+
+fn bad(param: &str, why: &str) -> CpError {
+    CpError::BadRequest(format!("{param}: {why}"))
+}
+
+/// Validate the list route's parameters against `now` (the default `to`).
+pub(crate) fn parse_filter(
+    q: &QueryLogParams,
+    now: DateTime<Utc>,
+) -> Result<QueryLogFilter, CpError> {
+    let instant = |param: &str, v: &Option<String>| {
+        v.as_deref()
+            .map(|s| {
+                DateTime::parse_from_rfc3339(s)
+                    .map(|t| t.with_timezone(&Utc))
+                    .map_err(|_| bad(param, "must be an RFC 3339 instant"))
+            })
+            .transpose()
+    };
+    let to = instant("to", &q.to)?.unwrap_or(now);
+    let from = instant("from", &q.from)?.unwrap_or(to - chrono::Duration::hours(24));
+    if from >= to {
+        return Err(bad("from", "must be before to"));
+    }
+    if to - from > chrono::Duration::days(MAX_RANGE_DAYS) {
+        return Err(bad("to", "must be at most 31 days after from"));
+    }
+    let user = match q.user.as_deref() {
+        None | Some("") => None,
+        Some(u) if u.chars().count() > MAX_USER_CHARS => {
+            return Err(bad("user", "must be at most 128 characters"))
+        }
+        Some(u) => Some(u.to_lowercase()),
+    };
+    let state = match q.state.as_deref() {
+        None | Some("all") => StateFilter::All,
+        Some("ok") => StateFilter::Ok,
+        Some("error") => StateFilter::Error,
+        Some(_) => return Err(bad("state", "must be ok, error or all")),
+    };
+    let limit = match q.limit.as_deref() {
+        None => DEFAULT_LIMIT,
+        Some(l) => l
+            .parse::<u32>()
+            .ok()
+            .filter(|l| (1..=MAX_LIMIT).contains(l))
+            .ok_or_else(|| bad("limit", "must be a whole number from 1 to 200"))?,
+    };
+    let before = q.cursor.as_deref().map(decode_cursor).transpose()?;
+    Ok(QueryLogFilter {
+        from,
+        to,
+        user,
+        state,
+        limit,
+        before,
+    })
+}
+
+/// An instant as a `DATETIME` literal for the FE.
+fn sql_datetime(t: &NaiveDateTime) -> String {
+    // UTC until Task 5 measures the FE's time zone; this is the one place the
+    // instants of a read become FE wall-clock text.
+    format!("'{}'", t.format(SQL_DATETIME))
+}
+
+/// The self-exclusion clause: egret's own reads of the log, left out.
+fn own_reads_excluded() -> String {
+    format!("NOT (`user` = 'root' AND stmt LIKE '{READ_MARKER}%')")
+}
+
+/// The columns an entry is read from, in [`entry_from_row`]'s order, up to
+/// and without the statement pair.
+const ENTRY_COLUMNS: &str = "queryId, timestamp, `user`, authorizedUser, clientIp, catalog, db, \
+     state, errorCode, queryTime, scanRows, scanBytes, returnRows, cpuCostNs, memCostBytes, \
+     command, querySource, isQuery, digest";
+
+/// A page of the log, newest first, one row more than `limit` (the extra row
+/// decides `nextCursor`).
+pub(crate) fn list_sql(f: &QueryLogFilter) -> String {
+    let mut sql = format!(
+        "{READ_MARKER} SELECT {READ_HINT} {ENTRY_COLUMNS}, \
+         left(stmt, {STATEMENT_PREVIEW_CHARS}), char_length(stmt) > {STATEMENT_PREVIEW_CHARS} \
+         FROM {QUERY_LOG_DATABASE}.{QUERY_LOG_TABLE} \
+         WHERE timestamp >= {} AND timestamp < {}",
+        sql_datetime(&f.from.naive_utc()),
+        sql_datetime(&f.to.naive_utc()),
+    );
+    if let Some(user) = &f.user {
+        let q = quote_string(QueryEngine::StarRocks, user);
+        sql.push_str(&format!(
+            " AND (lower(`user`) = {q} OR \
+             lower(regexp_extract(authorizedUser, '^''([^'']*)''@', 1)) = {q})"
+        ));
+    }
+    match f.state {
+        StateFilter::All => {}
+        StateFilter::Ok => sql.push_str(" AND state IN ('EOF', 'OK')"),
+        StateFilter::Error => sql.push_str(" AND state = 'ERR'"),
+    }
+    if let Some((ts, id)) = &f.before {
+        let ts = sql_datetime(ts);
+        let id = quote_string(QueryEngine::StarRocks, &id.to_string());
+        sql.push_str(&format!(
+            " AND (timestamp < {ts} OR (timestamp = {ts} AND queryId < {id}))"
+        ));
+    }
+    sql.push_str(&format!(
+        " AND {} ORDER BY timestamp DESC, queryId DESC LIMIT {}",
+        own_reads_excluded(),
+        f.limit + 1
+    ));
+    sql
+}
+
+/// One entry, its statement whole.
+fn detail_sql(query_id: &Uuid) -> String {
+    format!(
+        "{READ_MARKER} SELECT {READ_HINT} {ENTRY_COLUMNS}, stmt, false \
+         FROM {QUERY_LOG_DATABASE}.{QUERY_LOG_TABLE} \
+         WHERE queryId = {} AND {} \
+         ORDER BY timestamp DESC LIMIT 1",
+        quote_string(QueryEngine::StarRocks, &query_id.to_string()),
+        own_reads_excluded(),
+    )
+}
+
+/// The newest event of the last day, egret's own reads left out.
+fn last_event_sql(now: DateTime<Utc>) -> String {
+    let since = (now - chrono::Duration::days(1)).naive_utc();
+    format!(
+        "{READ_MARKER} SELECT {READ_HINT} max(timestamp) \
+         FROM {QUERY_LOG_DATABASE}.{QUERY_LOG_TABLE} \
+         WHERE timestamp >= {} AND {}",
+        sql_datetime(&since),
+        own_reads_excluded(),
+    )
+}
+
+/// The bare user name out of StarRocks' `'bob'@'%'` form; `None` for an empty
+/// name or anything not of that form. A `''` inside the name is a quote.
+pub(crate) fn authorized_name(raw: &str) -> Option<String> {
+    let rest = raw.strip_prefix('\'')?;
+    // The host part is the last `'@'…'`; the name is everything before it.
+    let at = rest.rfind("'@'")?;
+    if !rest[at + 3..].ends_with('\'') || rest.len() < at + 4 {
+        return None;
+    }
+    let name = rest[..at].replace("''", "'");
+    (!name.is_empty()).then_some(name)
+}
+
+/// What [`redact_statement`] puts in place of a secret.
+const REDACTED: &str = "***";
+
+/// Redact a statement or an FE error before it leaves the server (design
+/// section 5): every `exact` value (the engine's root and loader passwords)
+/// becomes `***`, then the value of `IDENTIFIED BY '…'` and of every quoted
+/// property whose key names a password, secret or access key becomes `'***'`.
+/// The values are read as SQL literals, so one with spaces or escaped quotes
+/// is replaced whole; an unterminated one takes the rest of the text with it.
+pub(crate) fn redact_statement(text: &str, exact: &[&str]) -> String {
+    let mut out = text.to_string();
+    for value in exact.iter().filter(|v| !v.is_empty()) {
+        out = out.replace(value, REDACTED);
+    }
+    static SHAPES: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let shapes = SHAPES.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?i)\bIDENTIFIED\s+(?:WITH\s+\S+\s+)?(?:BY|AS)\s+(?:PASSWORD\s+)?|(['"`])[^'"`]*(?:password|passwd|secret|access_key)[^'"`]*['"`]\s*=\s*"#,
+        )
+        .expect("static redaction pattern compiles")
+    });
+    let mut redacted = String::with_capacity(out.len());
+    let mut pos = 0;
+    while let Some(m) = shapes.find_at(&out, pos) {
+        let value_at = m.end();
+        redacted.push_str(&out[pos..value_at]);
+        match sql_literal_end(&out[value_at..]) {
+            // Not a quoted value: nothing to replace, go on after the key.
+            None => pos = value_at,
+            Some(len) => {
+                redacted.push_str(&format!("'{REDACTED}'"));
+                pos = value_at + len;
+            }
+        }
+    }
+    redacted.push_str(&out[pos..]);
+    redacted
+}
+
+/// The length of the quoted SQL literal `s` starts with (`'…'` or `"…"`, a
+/// doubled quote or a backslash escaping the next character); all of `s` when
+/// the literal is never closed. `None` when `s` does not start with a quote.
+fn sql_literal_end(s: &str) -> Option<usize> {
+    let quote = s.chars().next().filter(|c| *c == '\'' || *c == '"')?;
+    let mut chars = s.char_indices().skip(1).peekable();
+    while let Some((i, c)) = chars.next() {
+        if c == '\\' {
+            chars.next();
+        } else if c == quote {
+            if chars.peek().map(|(_, n)| *n) == Some(quote) {
+                chars.next();
+            } else {
+                return Some(i + c.len_utf8());
+            }
+        }
+    }
+    Some(s.len())
+}
+
+/// The cursor for the row `(ts, id)`: opaque to the caller.
+pub(crate) fn encode_cursor(ts: &NaiveDateTime, id: &Uuid) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(format!("{}|{id}", ts.format(SQL_DATETIME)))
+}
+
+/// The row a cursor names; a 400 naming `cursor` for anything else.
+pub(crate) fn decode_cursor(c: &str) -> Result<(NaiveDateTime, Uuid), CpError> {
+    use base64::Engine as _;
+    let bad_cursor = || bad("cursor", "is not a cursor this server issued");
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(c)
+        .map_err(|_| bad_cursor())?;
+    let text = String::from_utf8(bytes).map_err(|_| bad_cursor())?;
+    let (ts, id) = text.split_once('|').ok_or_else(bad_cursor)?;
+    let ts = NaiveDateTime::parse_from_str(ts, SQL_DATETIME_IN).map_err(|_| bad_cursor())?;
+    let id = Uuid::parse_str(id).map_err(|_| bad_cursor())?;
+    Ok((ts, id))
+}
+
+/// Whether `p` may read statement text (open question 1, decided (b)).
+pub(crate) async fn statement_visible(st: &CpState, p: &Principal) -> bool {
+    egret_core::authz::require(&*st.pdp, p, "engine:audit")
+        .await
+        .is_ok()
+}
+
+/// A `DATETIME` the FE returned, as RFC 3339.
+fn rfc3339(raw: &str) -> Option<(NaiveDateTime, String)> {
+    let t = NaiveDateTime::parse_from_str(raw, SQL_DATETIME_IN).ok()?;
+    // The FE's wall clock read as UTC until Task 5 measures its zone.
+    let s = Utc
+        .from_utc_datetime(&t)
+        .to_rfc3339_opts(SecondsFormat::AutoSi, true);
+    Some((t, s))
+}
+
+/// One row of [`list_sql`] or [`detail_sql`] as an entry, with the statement
+/// and the error redacted and the statement dropped unless `visible`.
+fn entry_from_row(row: &[Option<String>], visible: bool, exact: &[&str]) -> QueryLogEntryDto {
+    let text = |i: usize| row.get(i).cloned().flatten();
+    let non_empty = |i: usize| text(i).filter(|s| !s.is_empty());
+    let int = |i: usize| text(i).and_then(|s| s.parse::<i64>().ok());
+    let raw_ts = text(1).unwrap_or_default();
+    let statement = visible
+        .then(|| text(19))
+        .flatten()
+        .map(|s| redact_statement(&s, exact));
+    let truncated = statement.is_some() && matches!(text(20).as_deref(), Some("1" | "true"));
+    QueryLogEntryDto {
+        query_id: text(0).unwrap_or_default(),
+        timestamp: rfc3339(&raw_ts).map(|(_, s)| s).unwrap_or(raw_ts),
+        user: text(2),
+        authorized_user: text(3).as_deref().and_then(authorized_name),
+        client_ip: non_empty(4),
+        catalog: non_empty(5),
+        db: non_empty(6),
+        state: non_empty(7),
+        error_message: non_empty(8).map(|s| redact_statement(&s, exact)),
+        query_time_ms: int(9),
+        scan_rows: int(10),
+        scan_bytes: int(11),
+        return_rows: int(12),
+        cpu_cost_ns: int(13),
+        mem_cost_bytes: int(14),
+        command: non_empty(15),
+        query_source: non_empty(16),
+        is_query: text(17).map(|s| s == "1" || s.eq_ignore_ascii_case("true")),
+        digest: non_empty(18),
+        statement,
+        statement_truncated: truncated,
+    }
+}
+
+/// Load the engine a query-log route names, refusing in the design's order:
+/// 404, an external engine (409 `engine_is_external`), a non-StarRocks engine
+/// (409), and, for the setup only, one being deleted (409).
+async fn load_engine(st: &CpState, id: Uuid, for_setup: bool) -> Result<Engine, CpError> {
+    let engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    crate::external::refuse_if_external(&engine, "read or set up its query log")?;
+    if engine.r#type != "starrocks" {
+        return Err(CpError::Conflict(format!(
+            "engine {} is not a StarRocks engine; only StarRocks engines have a query log",
+            engine.name
+        )));
+    }
+    if for_setup && engine.status == engine_status::DELETING {
+        return Err(CpError::Conflict(format!(
+            "engine {} is being deleted",
+            engine.name
+        )));
+    }
+    Ok(engine)
+}
+
+/// What one read request holds: the FE, the secrets its errors are scrubbed
+/// of, and the values its texts are redacted of. Resolved once per request.
+struct ReadContext {
+    fe: FeTarget,
+    secrets: BTreeMap<Uuid, String>,
+    exact: Vec<String>,
+}
+
+impl ReadContext {
+    async fn new(st: &CpState, engine: &Engine) -> Result<Self, CpError> {
+        let fe = fe_target(st, engine).await?;
+        let mut secrets = BTreeMap::new();
+        // The loader password, when one was ever stored. A read never mints
+        // one: with none stored, no FE has it.
+        if let Some(sid) = engine.query_log_secret_id {
+            match st.secrets.resolve_plaintext(None, sid).await {
+                Ok(pw) => {
+                    secrets.insert(sid, pw);
+                }
+                Err(egret_secrets::SecretsError::NotFound) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        let exact = fe
+            .root_password
+            .iter()
+            .chain(secrets.values())
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .collect();
+        Ok(Self { fe, secrets, exact })
+    }
+
+    fn exact(&self) -> Vec<&str> {
+        self.exact.iter().map(String::as_str).collect()
+    }
+
+    fn scrub(&self, e: &FeError) -> String {
+        redact_statement(&e.scrubbed(&self.fe, &self.secrets), &self.exact())
+    }
+}
+
+/// Read the query log's state from the FE (design section 5). A failure to
+/// reach or read the FE is `Unreachable` with the scrubbed message.
+async fn read_status(st: &CpState, engine: &Engine, cx: &ReadContext) -> QueryLogStatusDto {
+    let status = |state, message, last_event_at| QueryLogStatusDto {
+        state,
+        message,
+        last_event_at,
+        retention_days: RETENTION_DAYS,
+    };
+    let unreachable = |e: FeError| status(QueryLogState::Unreachable, Some(cx.scrub(&e)), None);
+    let ddl = &st.starrocks_ddl;
+    let plugins = match ddl
+        .query_with_header(&cx.fe, &format!("{READ_MARKER} SHOW PLUGINS"))
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => return unreachable(e),
+    };
+    let tables_sql = format!("{READ_MARKER} SHOW TABLES FROM {QUERY_LOG_DATABASE}");
+    let has_table = match ddl.query(&cx.fe, &tables_sql).await {
+        Ok(rows) => rows
+            .iter()
+            .any(|r| r.first().and_then(|v| v.as_deref()) == Some(QUERY_LOG_TABLE)),
+        Err(e) if e.is_unknown_relation() => false,
+        Err(e) => return unreachable(e),
+    };
+    let image = egret_perm::stored_engine_image("starrocks", &engine.spec);
+    let state = match plugin_step(&plugins, image.as_deref()) {
+        PluginStep::AlreadyInstalled if has_table => QueryLogState::Ready,
+        PluginStep::AlreadyInstalled | PluginStep::Install => QueryLogState::NotSetUp,
+        PluginStep::NotShipped => QueryLogState::PluginNotShipped,
+    };
+    let last_event_at = if has_table {
+        match ddl.query(&cx.fe, &last_event_sql(Utc::now())).await {
+            Ok(rows) => rows
+                .first()
+                .and_then(|r| r.first())
+                .and_then(|v| v.as_deref())
+                .and_then(rfc3339)
+                .map(|(_, s)| s),
+            Err(e) => return unreachable(e),
+        }
+    } else {
+        None
+    };
+    status(state, None, last_event_at)
+}
+
+/// A failed read of the table: "not set up" (409 with the state) when the FE
+/// says the table or its database is missing, a 502 otherwise.
+async fn read_failure(st: &CpState, engine: &Engine, cx: &ReadContext, e: FeError) -> CpError {
+    if e.is_unknown_relation() {
+        let state = read_status(st, engine, cx).await.state;
+        // The table was missing a moment ago; a status that now reads `ready`
+        // raced a setup, and the caller's retry will find it.
+        let state = if state == QueryLogState::Ready {
+            QueryLogState::NotSetUp
+        } else {
+            state
+        };
+        return CpError::QueryLogNotReady(state.as_str());
+    }
+    CpError::FeFailed(cx.scrub(&e))
+}
+
+/// The query-log routes, merged onto the engines router.
+pub fn routes() -> Router<CpState> {
+    Router::new()
+        .route("/engines/{id}/query-log", get(list_query_log))
+        .route("/engines/{id}/query-log/status", get(query_log_status))
+        .route("/engines/{id}/query-log/setup", post(setup_query_log))
+        .route(
+            "/engines/{id}/query-log/{query_id}",
+            get(get_query_log_entry),
+        )
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/engines/{id}/query-log/status",
+    tag = "control-plane-engines",
+    params(("id" = Uuid, Path, description = "Engine id")),
+    responses(
+        (status = 200, description = "The query log's state, read from the FE now. An FE that does not answer is state `unreachable` with its scrubbed message, still a 200", body = QueryLogStatusDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:read permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 409, description = "The engine is external (`code` = `engine_is_external`), or not a StarRocks engine", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn query_log_status(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<QueryLogStatusDto>, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
+    let engine = load_engine(&st, id, false).await?;
+    let cx = ReadContext::new(&st, &engine).await?;
+    Ok(Json(read_status(&st, &engine, &cx).await))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/engines/{id}/query-log",
+    tag = "control-plane-engines",
+    params(("id" = Uuid, Path, description = "Engine id"), QueryLogParams),
+    responses(
+        (status = 200, description = "A page of the engine's statements, newest first. `statement` is absent without engine:audit", body = QueryLogPageDto),
+        (status = 400, description = "A malformed parameter; the message names it", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:read permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 409, description = "The engine is external (`code` = `engine_is_external`), not a StarRocks engine, or its query log table does not exist (`code` = `query_log_not_ready`, with `state`)", body = ErrorBody),
+        (status = 502, description = "The FE did not answer or refused the read (`code` = `engine_fe_error`, scrubbed message)", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn list_query_log(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+    Query(params): Query<QueryLogParams>,
+) -> Result<Json<QueryLogPageDto>, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
+    let engine = load_engine(&st, id, false).await?;
+    let filter = parse_filter(&params, Utc::now())?;
+    let cx = ReadContext::new(&st, &engine).await?;
+    let rows = match st.starrocks_ddl.query(&cx.fe, &list_sql(&filter)).await {
+        Ok(rows) => rows,
+        Err(e) => return Err(read_failure(&st, &engine, &cx, e).await),
+    };
+    let visible = statement_visible(&st, &p).await;
+    let exact = cx.exact();
+    let limit = filter.limit as usize;
+    let next_cursor = if rows.len() > limit {
+        // The last row shown; a row whose key does not parse ends the paging
+        // (StarRocks writes every `queryId` as a UUID).
+        let last = &rows[limit - 1];
+        let ts = last
+            .get(1)
+            .cloned()
+            .flatten()
+            .and_then(|s| rfc3339(&s))
+            .map(|(t, _)| t);
+        let id = last
+            .first()
+            .cloned()
+            .flatten()
+            .and_then(|s| Uuid::parse_str(&s).ok());
+        ts.zip(id).map(|(t, id)| encode_cursor(&t, &id))
+    } else {
+        None
+    };
+    let entries = rows
+        .iter()
+        .take(limit)
+        .map(|r| entry_from_row(r, visible, &exact))
+        .collect();
+    Ok(Json(QueryLogPageDto {
+        entries,
+        next_cursor,
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/engines/{id}/query-log/{queryId}",
+    tag = "control-plane-engines",
+    params(
+        ("id" = Uuid, Path, description = "Engine id"),
+        ("queryId" = String, Path, description = "The statement's query id (a UUID)"),
+    ),
+    responses(
+        (status = 200, description = "One statement, whole. `statement` is absent without engine:audit", body = QueryLogEntryDto),
+        (status = 400, description = "`queryId` is not a UUID", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:read permission", body = ErrorBody),
+        (status = 404, description = "No such engine, or no such statement in the log", body = ErrorBody),
+        (status = 409, description = "The engine is external (`code` = `engine_is_external`), not a StarRocks engine, or its query log table does not exist (`code` = `query_log_not_ready`, with `state`)", body = ErrorBody),
+        (status = 502, description = "The FE did not answer or refused the read (`code` = `engine_fe_error`, scrubbed message)", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn get_query_log_entry(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, query_id)): Path<(Uuid, String)>,
+) -> Result<Json<QueryLogEntryDto>, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
+    let engine = load_engine(&st, id, false).await?;
+    let query_id = Uuid::parse_str(&query_id).map_err(|_| bad("queryId", "must be a UUID"))?;
+    let cx = ReadContext::new(&st, &engine).await?;
+    let rows = match st.starrocks_ddl.query(&cx.fe, &detail_sql(&query_id)).await {
+        Ok(rows) => rows,
+        Err(e) => return Err(read_failure(&st, &engine, &cx, e).await),
+    };
+    let row = rows
+        .first()
+        .ok_or_else(|| CpError::NotFoundNamed(format!("query {query_id}")))?;
+    let visible = statement_visible(&st, &p).await;
+    Ok(Json(entry_from_row(row, visible, &cx.exact())))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/engines/{id}/query-log/setup",
+    tag = "control-plane-engines",
+    params(("id" = Uuid, Path, description = "Engine id")),
+    responses(
+        (status = 200, description = "Set up: state `ready`, or `pluginNotShipped` when the engine's image has no plugin (the table and loader user were still created)", body = QueryLogStatusDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:update permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 409, description = "The engine is external (`code` = `engine_is_external`), not a StarRocks engine, or being deleted", body = ErrorBody),
+        (status = 502, description = "A setup step failed (`code` = `engine_fe_error`, scrubbed message)", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn setup_query_log(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<QueryLogStatusDto>, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "engine:update").await?;
+    let engine = load_engine(&st, id, true).await?;
+    let fe = fe_target(&st, &engine).await?;
+    let state = match ensure_query_log(&st, &engine, &fe, false).await {
+        QueryLogSetup::Ready => QueryLogState::Ready,
+        QueryLogSetup::PluginNotShipped => QueryLogState::PluginNotShipped,
+        QueryLogSetup::Failed(why) => return Err(CpError::FeFailed(why)),
+    };
+    Ok(Json(QueryLogStatusDto {
+        state,
+        message: None,
+        last_event_at: None,
+        retention_days: RETENTION_DAYS,
+    }))
+}
+
+/// OpenAPI fragment for the query-log routes, unioned into
+/// `egret_engine_mgmt::openapi()`.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(query_log_status, list_query_log, get_query_log_entry, setup_query_log),
+    components(schemas(
+        QueryLogStatusDto,
+        QueryLogState,
+        QueryLogEntryDto,
+        QueryLogPageDto,
+        ErrorBody
+    ))
+)]
+pub struct QueryLogApi;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -594,5 +1377,342 @@ mod tests {
         );
         assert_eq!(plugin_step(&elsewhere, Some(EGRET_4)), PluginStep::Install);
         assert_eq!(plugin_step(&[], Some(EGRET_4)), PluginStep::Install);
+    }
+
+    // ── reading the log ──────────────────────────────────────────────────
+
+    fn now() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 11, 10, 12, 0, 0).unwrap()
+    }
+
+    fn params(pairs: &[(&str, &str)]) -> QueryLogParams {
+        let mut q = QueryLogParams::default();
+        for (k, v) in pairs {
+            let v = Some(v.to_string());
+            match *k {
+                "from" => q.from = v,
+                "to" => q.to = v,
+                "user" => q.user = v,
+                "state" => q.state = v,
+                "limit" => q.limit = v,
+                "cursor" => q.cursor = v,
+                other => panic!("no parameter {other}"),
+            }
+        }
+        q
+    }
+
+    fn bad_param(q: &QueryLogParams) -> String {
+        match parse_filter(q, now()) {
+            Err(CpError::BadRequest(m)) => m,
+            other => panic!("expected a 400, got {other:?}"),
+        }
+    }
+
+    fn filter() -> QueryLogFilter {
+        parse_filter(&QueryLogParams::default(), now()).unwrap()
+    }
+
+    #[test]
+    fn the_filter_defaults_to_the_last_day_all_states_fifty_rows() {
+        let f = filter();
+        assert_eq!(f.to, now());
+        assert_eq!(f.from, now() - chrono::Duration::hours(24));
+        assert_eq!(f.user, None);
+        assert_eq!(f.state, StateFilter::All);
+        assert_eq!(f.limit, 50);
+        assert_eq!(f.before, None);
+    }
+
+    #[test]
+    fn the_filter_reads_every_parameter() {
+        let id = Uuid::parse_str("0193a2b4-0000-4000-8000-000000000001").unwrap();
+        let ts = NaiveDateTime::parse_from_str("2026-11-10 11:00:00.5", SQL_DATETIME_IN).unwrap();
+        let f = parse_filter(
+            &params(&[
+                ("from", "2026-11-01T00:00:00Z"),
+                ("to", "2026-11-02T00:00:00+07:00"),
+                ("user", "Bob"),
+                ("state", "error"),
+                ("limit", "200"),
+                ("cursor", &encode_cursor(&ts, &id)),
+            ]),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(f.from, Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap());
+        assert_eq!(f.to, Utc.with_ymd_and_hms(2026, 11, 1, 17, 0, 0).unwrap());
+        assert_eq!(f.user.as_deref(), Some("bob"), "lowercased");
+        assert_eq!(f.state, StateFilter::Error);
+        assert_eq!(f.limit, 200);
+        assert_eq!(f.before, Some((ts, id)));
+        let only_to = parse_filter(&params(&[("to", "2026-11-05T00:00:00Z")]), now()).unwrap();
+        assert_eq!(only_to.from, only_to.to - chrono::Duration::hours(24));
+    }
+
+    #[test]
+    fn each_malformed_parameter_is_a_400_naming_it() {
+        let cases: &[(&[(&str, &str)], &str)] = &[
+            (&[("from", "yesterday")], "from:"),
+            (&[("to", "2026-11-10")], "to:"),
+            (
+                &[
+                    ("from", "2026-11-10T00:00:00Z"),
+                    ("to", "2026-11-10T00:00:00Z"),
+                ],
+                "from:",
+            ),
+            (
+                &[
+                    ("from", "2026-10-01T00:00:00Z"),
+                    ("to", "2026-11-01T00:00:01Z"),
+                ],
+                "to:",
+            ),
+            (&[("limit", "0")], "limit:"),
+            (&[("limit", "201")], "limit:"),
+            (&[("limit", "ten")], "limit:"),
+            (&[("state", "failed")], "state:"),
+            (&[("user", &"u".repeat(129))], "user:"),
+            (&[("cursor", "not-a-cursor")], "cursor:"),
+        ];
+        for (pairs, prefix) in cases {
+            let m = bad_param(&params(pairs));
+            assert!(m.starts_with(prefix), "{pairs:?}: {m}");
+        }
+        // The edges are allowed.
+        let ok = params(&[
+            ("from", "2026-10-01T00:00:00Z"),
+            ("to", "2026-11-01T00:00:00Z"),
+            ("limit", "1"),
+            ("user", &"u".repeat(128)),
+            ("state", "ok"),
+        ]);
+        assert!(parse_filter(&ok, now()).is_ok());
+    }
+
+    #[test]
+    fn the_list_sql_is_marked_hinted_bounded_and_leaves_egrets_reads_out() {
+        let sql = list_sql(&filter());
+        assert_eq!(
+            sql,
+            "/* egret-query-log-read */ SELECT /*+ SET_VAR(query_timeout = 10) */ \
+             queryId, timestamp, `user`, authorizedUser, clientIp, catalog, db, state, errorCode, \
+             queryTime, scanRows, scanBytes, returnRows, cpuCostNs, memCostBytes, command, \
+             querySource, isQuery, digest, left(stmt, 2000), char_length(stmt) > 2000 \
+             FROM starrocks_audit_db__.starrocks_audit_tbl__ \
+             WHERE timestamp >= '2026-11-09 12:00:00.000000' \
+             AND timestamp < '2026-11-10 12:00:00.000000' \
+             AND NOT (`user` = 'root' AND stmt LIKE '/* egret-query-log-read */%') \
+             ORDER BY timestamp DESC, queryId DESC LIMIT 51"
+        );
+    }
+
+    #[test]
+    fn the_user_filter_is_quoted_and_lowercased() {
+        let mut f = filter();
+        f.user = Some(r"o'b\x".to_string());
+        let sql = list_sql(&f);
+        let q = r"'o''b\\x'";
+        assert!(
+            sql.contains(&format!(
+                "(lower(`user`) = {q} OR lower(regexp_extract(authorizedUser, \
+                 '^''([^'']*)''@', 1)) = {q})"
+            )),
+            "{sql}"
+        );
+        assert!(!sql.contains(r"o'b\x"), "the raw value reached SQL: {sql}");
+    }
+
+    #[test]
+    fn the_state_filter_narrows_by_state() {
+        let mut f = filter();
+        assert!(!list_sql(&f).contains("state IN"), "all: no clause");
+        assert!(!list_sql(&f).contains("state ="), "all: no clause");
+        f.state = StateFilter::Ok;
+        assert!(list_sql(&f).contains(" AND state IN ('EOF', 'OK') "));
+        f.state = StateFilter::Error;
+        assert!(list_sql(&f).contains(" AND state = 'ERR' "));
+    }
+
+    #[test]
+    fn the_cursor_asks_for_rows_strictly_before_it() {
+        let mut f = filter();
+        assert!(!list_sql(&f).contains("queryId <"), "no cursor: no clause");
+        let id = Uuid::parse_str("0193a2b4-0000-4000-8000-000000000001").unwrap();
+        let ts = NaiveDateTime::parse_from_str("2026-11-10 11:00:00.25", SQL_DATETIME_IN).unwrap();
+        f.before = Some((ts, id));
+        assert!(
+            list_sql(&f).contains(
+                " AND (timestamp < '2026-11-10 11:00:00.250000' \
+                 OR (timestamp = '2026-11-10 11:00:00.250000' \
+                 AND queryId < '0193a2b4-0000-4000-8000-000000000001')) "
+            ),
+            "{}",
+            list_sql(&f)
+        );
+    }
+
+    #[test]
+    fn the_detail_sql_reads_one_whole_statement() {
+        let id = Uuid::parse_str("0193a2b4-0000-4000-8000-000000000001").unwrap();
+        let sql = detail_sql(&id);
+        assert!(sql.starts_with(
+            "/* egret-query-log-read */ SELECT /*+ SET_VAR(query_timeout = 10) */ queryId, "
+        ));
+        assert!(sql.contains("digest, stmt, false FROM"), "{sql}");
+        assert!(
+            sql.contains("WHERE queryId = '0193a2b4-0000-4000-8000-000000000001' AND NOT"),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn authorized_name_reads_the_bare_name() {
+        assert_eq!(authorized_name("'bob'@'%'").as_deref(), Some("bob"));
+        assert_eq!(
+            authorized_name("'o''brien'@'10.%'").as_deref(),
+            Some("o'brien")
+        );
+        assert_eq!(authorized_name(""), None);
+        assert_eq!(authorized_name("''@'%'"), None, "an empty name is absent");
+        assert_eq!(authorized_name("bob"), None);
+        assert_eq!(authorized_name("'bob"), None);
+        assert_eq!(authorized_name("'bob'@"), None);
+    }
+
+    #[test]
+    fn a_cursor_round_trips_and_a_tampered_one_is_a_400() {
+        let id = Uuid::new_v4();
+        let ts =
+            NaiveDateTime::parse_from_str("2026-11-10 11:00:00.123456", SQL_DATETIME_IN).unwrap();
+        let c = encode_cursor(&ts, &id);
+        assert_eq!(decode_cursor(&c).unwrap(), (ts, id));
+        let whole = NaiveDateTime::parse_from_str("2026-11-10 11:00:00", SQL_DATETIME_IN).unwrap();
+        assert_eq!(
+            decode_cursor(&encode_cursor(&whole, &id)).unwrap(),
+            (whole, id)
+        );
+        let mut tampered = c.clone();
+        tampered.replace_range(0..1, if c.starts_with('A') { "B" } else { "A" });
+        for bad in [tampered.as_str(), "", "!!!", &c[..c.len() - 4]] {
+            match decode_cursor(bad) {
+                Err(CpError::BadRequest(m)) => assert!(m.starts_with("cursor:"), "{m}"),
+                other => panic!("{bad:?}: expected a 400, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn identified_by_loses_its_whole_value() {
+        assert_eq!(
+            redact_statement("CREATE USER 'u' IDENTIFIED BY 'x y'", &[]),
+            "CREATE USER 'u' IDENTIFIED BY '***'"
+        );
+        assert_eq!(
+            redact_statement("alter user u identified by 'it''s \\' x' ;", &[]),
+            "alter user u identified by '***' ;"
+        );
+    }
+
+    #[test]
+    fn a_secret_property_keeps_its_key_and_loses_its_value() {
+        assert_eq!(
+            redact_statement(
+                r#"CREATE CATALOG c PROPERTIES ("password" = "a b", "user" = "u")"#,
+                &[]
+            ),
+            r#"CREATE CATALOG c PROPERTIES ("password" = '***', "user" = "u")"#
+        );
+        assert_eq!(
+            redact_statement(
+                "SELECT * FROM FILES('secret_key'='k', 'aws.s3.access_key'='a')",
+                &[]
+            ),
+            "SELECT * FROM FILES('secret_key'='***', 'aws.s3.access_key'='***')"
+        );
+        assert_eq!(
+            redact_statement("x ('jdbc.Passwd' = 'unterminated", &[]),
+            "x ('jdbc.Passwd' = '***'",
+            "an unterminated value takes the rest of the text"
+        );
+    }
+
+    #[test]
+    fn an_exact_value_is_redacted_wherever_it_appears() {
+        let root = "R00t-pw";
+        assert_eq!(
+            redact_statement(
+                &format!("SELECT 'hello {root} world', note"),
+                &[root, "ld-pw"]
+            ),
+            "SELECT 'hello *** world', note"
+        );
+        assert_eq!(
+            redact_statement("ERROR: ld-pw rejected", &[root, "ld-pw"]),
+            "ERROR: *** rejected"
+        );
+        assert_eq!(
+            redact_statement("SELECT 1", &[""]),
+            "SELECT 1",
+            "an empty value is no value"
+        );
+    }
+
+    #[test]
+    fn a_statement_with_nothing_to_redact_is_unchanged() {
+        let s = "SELECT `password`, 'secret' AS k FROM t WHERE note = 'IDENTIFIED' -- by";
+        assert_eq!(redact_statement(s, &["absent-pw"]), s);
+    }
+
+    #[test]
+    fn a_row_becomes_an_entry_and_the_statement_needs_visibility() {
+        let row: Vec<Option<String>> = [
+            Some("0193a2b4-0000-4000-8000-000000000001"),
+            Some("2026-11-10 11:00:00.5"),
+            Some("egret_x"),
+            Some("'bob'@'%'"),
+            Some("10.0.0.1"),
+            Some("default_catalog"),
+            Some(""),
+            Some("ERR"),
+            Some("Access denied; pw R00t-pw"),
+            Some("12"),
+            Some("3"),
+            Some("4"),
+            Some("5"),
+            Some("6"),
+            Some("7"),
+            Some("MySQL.COM_QUERY"),
+            Some("External"),
+            Some("1"),
+            Some("abc"),
+            Some("CREATE USER x IDENTIFIED BY 'p q'"),
+            Some("1"),
+        ]
+        .iter()
+        .map(|v| v.map(str::to_string))
+        .collect();
+        let e = entry_from_row(&row, true, &["R00t-pw"]);
+        assert_eq!(e.timestamp, "2026-11-10T11:00:00.500Z");
+        assert_eq!(e.user.as_deref(), Some("egret_x"));
+        assert_eq!(e.authorized_user.as_deref(), Some("bob"));
+        assert_eq!(e.db, None, "an empty column is absent");
+        assert_eq!(e.error_message.as_deref(), Some("Access denied; pw ***"));
+        assert_eq!(e.query_time_ms, Some(12));
+        assert_eq!(e.is_query, Some(true));
+        assert_eq!(
+            e.statement.as_deref(),
+            Some("CREATE USER x IDENTIFIED BY '***'")
+        );
+        assert!(e.statement_truncated);
+
+        let hidden = entry_from_row(&row, false, &["R00t-pw"]);
+        assert_eq!(hidden.statement, None);
+        assert!(!hidden.statement_truncated);
+        let json = serde_json::to_value(&hidden).unwrap();
+        assert!(json.get("statement").is_none(), "absent, not null: {json}");
+        assert_eq!(json["statementTruncated"], false);
+        assert_eq!(json["errorMessage"], "Access denied; pw ***");
     }
 }

@@ -554,6 +554,12 @@ async fn session_for(f: &Fixture, tag: &str, platform_admin: bool) -> String {
 /// `session_for`'s `platform_admin` bypass path): `platform_roles` stays
 /// empty, `permissions` carries only `permission`.
 async fn session_for_with_permission(f: &Fixture, tag: &str, permission: &str) -> String {
+    session_for_with_permissions(f, tag, &[permission]).await
+}
+
+/// [`session_for_with_permission`] with every key in `permissions` on the one
+/// ad-hoc role.
+async fn session_for_with_permissions(f: &Fixture, tag: &str, permissions: &[&str]) -> String {
     let email = format!("{tag}_{}@egret.local", Uuid::new_v4().simple());
     let uid = f
         .users
@@ -571,12 +577,14 @@ async fn session_for_with_permission(f: &Fixture, tag: &str, permission: &str) -
     .await
     .expect("insert role");
 
-    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, $2)")
-        .bind(role_id)
-        .bind(permission)
-        .execute(&f.db.pool)
-        .await
-        .expect("grant permission");
+    for permission in permissions {
+        sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, $2)")
+            .bind(role_id)
+            .bind(permission)
+            .execute(&f.db.pool)
+            .await
+            .expect("grant permission");
+    }
 
     sqlx::query(
         "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
@@ -18523,4 +18531,503 @@ async fn external_register_and_patch_responses_report_not_governed() {
 
     assert_eq!(status, StatusCode::OK, "{patched}");
     assert_eq!(patched["notGoverned"], true, "PATCH response: {patched}");
+}
+
+// ── StarRocks query log (audit platform, Task 4) ──────────────────────────────
+
+const QL_EGRET_4_FE: &str = "ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.4";
+
+/// A provisioned StarRocks engine row on egret's FE image.
+async fn seed_query_log_engine(f: &Fixture, kind: &str) -> Uuid {
+    let spec = serde_json::json!({
+        "imageVersion": QL_EGRET_4_FE,
+        "starrocksConfig": { "feImage": QL_EGRET_4_FE, "feReplicas": 1, "cnReplicas": 1 },
+    });
+    egret_engine_mgmt::EngineMgmtStore::new(f.db.clone())
+        .create_engine(
+            &format!("ql-{}", &Uuid::new_v4().simple().to_string()[..10]),
+            kind,
+            "egret-engines",
+            &spec,
+            None,
+        )
+        .await
+        .expect("seed engine")
+        .id
+}
+
+/// One row of the list SQL, in its column order.
+fn ql_row(id: &str, ts: &str, stmt: &str) -> Vec<Option<String>> {
+    let mut row: Vec<Option<String>> = vec![
+        Some(id.into()),
+        Some(ts.into()),
+        Some("egret_alice".into()),
+        Some("'alice'@'%'".into()),
+        Some("10.0.0.1".into()),
+        Some("default_catalog".into()),
+        Some("sales".into()),
+        Some("EOF".into()),
+        Some(String::new()),
+    ];
+    row.extend(["12", "3", "4", "5", "6", "7"].map(|v| Some(v.to_string())));
+    row.extend([
+        Some("MySQL.COM_QUERY".into()),
+        Some("External".into()),
+        Some("1".into()),
+        Some("d1".into()),
+        Some(stmt.into()),
+        Some("0".into()),
+    ]);
+    row
+}
+
+const QL_ID_1: &str = "0193a2b4-0000-4000-8000-000000000002";
+const QL_ID_2: &str = "0193a2b4-0000-4000-8000-000000000001";
+
+#[tokio::test]
+async fn query_log_reads_need_engine_read_and_setup_needs_engine_update() {
+    let Some(mut f) = setup_full(Some(Arc::new(FakeEnginePort::default())), None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let wrong = session_for_with_permission(&f, "ql_wrong", "storage:read").await;
+    let reader = session_for_with_permission(&f, "ql_reader", "engine:read").await;
+    attach_real_pdp(&mut f).await;
+    let id = seed_query_log_engine(&f, "starrocks").await;
+
+    for path in [
+        format!("/engines/{id}/query-log/status"),
+        format!("/engines/{id}/query-log"),
+        format!("/engines/{id}/query-log/{QL_ID_1}"),
+    ] {
+        let (status, body) = call(&f, "GET", &path, &wrong, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {body}");
+    }
+    let (status, body) = call(
+        &f,
+        "POST",
+        &format!("/engines/{id}/query-log/setup"),
+        &reader,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "setup needs engine:update: {body}"
+    );
+    assert!(
+        f.starrocks_ddl.executed().is_empty(),
+        "a refused setup sent nothing: {:?}",
+        f.starrocks_ddl.executed()
+    );
+    let (status, body) = call(
+        &f,
+        "GET",
+        &format!("/engines/{id}/query-log/status"),
+        &reader,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "engine:read reads the status: {body}"
+    );
+}
+
+#[tokio::test]
+async fn query_log_refuses_unknown_external_trino_and_deleting_engines() {
+    let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ql_refusals", true).await;
+
+    let (status, body) = call(
+        &f,
+        "GET",
+        &format!("/engines/{}/query-log/status", Uuid::new_v4()),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    let external = seed_query_log_engine(&f, "starrocks").await;
+    sqlx::query(
+        "UPDATE engine_mgmt.engines SET origin = 'external', external_host = 'sr.example.com', \
+         external_port = 9030, ranger_plugin_version = '2.8.0', namespace = '', spec = '{}' \
+         WHERE id = $1",
+    )
+    .bind(external)
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    for (method, path) in [
+        ("GET", format!("/engines/{external}/query-log")),
+        ("POST", format!("/engines/{external}/query-log/setup")),
+    ] {
+        let (status, body) = call(&f, method, &path, &token, None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{path}: {body}");
+        assert_eq!(body["code"], "engine_is_external", "{path}: {body}");
+    }
+
+    let trino = seed_query_log_engine(&f, "trino").await;
+    let (status, body) = call(
+        &f,
+        "GET",
+        &format!("/engines/{trino}/query-log/status"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("not a StarRocks engine"),
+        "{body}"
+    );
+
+    let deleting = seed_query_log_engine(&f, "starrocks").await;
+    sqlx::query("UPDATE engine_mgmt.engines SET status = 'deleting' WHERE id = $1")
+        .bind(deleting)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    let (status, body) = call(
+        &f,
+        "POST",
+        &format!("/engines/{deleting}/query-log/setup"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(f.starrocks_ddl.executed().is_empty(), "nothing was set up");
+    assert!(
+        f.starrocks_ddl.queried().is_empty(),
+        "no refused route reached the FE: {:?}",
+        f.starrocks_ddl.queried()
+    );
+}
+
+#[tokio::test]
+async fn a_page_of_two_rows_with_limit_one_has_one_entry_and_a_cursor() {
+    let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ql_page", true).await;
+    let id = seed_query_log_engine(&f, "starrocks").await;
+    f.starrocks_ddl.answer_matching(
+        "left(stmt, 2000)",
+        vec![
+            ql_row(QL_ID_1, "2026-11-10 11:00:01", "SELECT 2"),
+            ql_row(QL_ID_2, "2026-11-10 11:00:00", "SELECT 1"),
+        ],
+    );
+
+    let (status, page) = call(
+        &f,
+        "GET",
+        &format!("/engines/{id}/query-log?limit=1&user=Alice&state=ok"),
+        &token,
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let entries = page["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "{page}");
+    assert_eq!(entries[0]["queryId"], QL_ID_1);
+    assert_eq!(entries[0]["timestamp"], "2026-11-10T11:00:01Z");
+    assert_eq!(entries[0]["authorizedUser"], "alice");
+    assert_eq!(entries[0]["user"], "egret_alice");
+    assert_eq!(entries[0]["statement"], "SELECT 2");
+    assert_eq!(entries[0]["statementTruncated"], false);
+    let cursor = page["nextCursor"]
+        .as_str()
+        .expect("a next cursor")
+        .to_string();
+    let sent = f.starrocks_ddl.queried();
+    let first = sent.last().unwrap();
+    assert!(
+        first.starts_with("/* egret-query-log-read */ SELECT"),
+        "{first}"
+    );
+    assert!(first.ends_with("LIMIT 2"), "{first}");
+    assert!(first.contains("lower(`user`) = 'alice'"), "{first}");
+
+    let (status, page) = call(
+        &f,
+        "GET",
+        &format!("/engines/{id}/query-log?limit=1&cursor={cursor}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let second = f.starrocks_ddl.queried().last().unwrap().clone();
+    assert!(
+        second.contains(&format!(
+            "(timestamp < '2026-11-10 11:00:01.000000' OR (timestamp = \
+             '2026-11-10 11:00:01.000000' AND queryId < '{QL_ID_1}'))"
+        )),
+        "the next page asks for rows before the cursor: {second}"
+    );
+
+    let (status, body) = call(
+        &f,
+        "GET",
+        &format!("/engines/{id}/query-log?limit=500"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("limit"), "{body}");
+    let (status, body) = call(
+        &f,
+        "GET",
+        &format!("/engines/{id}/query-log/not-a-uuid"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("queryId"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn without_engine_audit_the_statement_is_absent() {
+    let Some(mut f) = setup_full(Some(Arc::new(FakeEnginePort::default())), None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let reader = session_for_with_permission(&f, "ql_noaudit", "engine:read").await;
+    let auditor =
+        session_for_with_permissions(&f, "ql_audit", &["engine:read", "engine:audit"]).await;
+    attach_real_pdp(&mut f).await;
+    let id = seed_query_log_engine(&f, "starrocks").await;
+    f.starrocks_ddl.answer_matching(
+        "left(stmt, 2000)",
+        vec![ql_row(
+            QL_ID_1,
+            "2026-11-10 11:00:01",
+            "SELECT secret_stuff",
+        )],
+    );
+    f.starrocks_ddl.answer_matching(
+        "digest, stmt, false",
+        vec![ql_row(
+            QL_ID_1,
+            "2026-11-10 11:00:01",
+            "SELECT secret_stuff",
+        )],
+    );
+
+    for (token, visible) in [(&reader, false), (&auditor, true)] {
+        let (status, page) =
+            call(&f, "GET", &format!("/engines/{id}/query-log"), token, None).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        let entry = &page["entries"][0];
+        let (status, one) = call(
+            &f,
+            "GET",
+            &format!("/engines/{id}/query-log/{QL_ID_1}"),
+            token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{one}");
+        for e in [entry, &one] {
+            assert_eq!(e["queryId"], QL_ID_1, "{e}");
+            assert_eq!(e["db"], "sales", "every other field is there: {e}");
+            assert_eq!(e["statementTruncated"], false, "{e}");
+            if visible {
+                assert_eq!(e["statement"], "SELECT secret_stuff", "{e}");
+            } else {
+                assert!(e.get("statement").is_none(), "statement leaked: {e}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn query_log_fe_errors_come_back_scrubbed() {
+    let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ql_scrub", true).await;
+    let id = seed_query_log_engine(&f, "starrocks").await;
+    // Short and unquoted in the FE's reply: the shape only the secrets map
+    // removes.
+    const ROOT_PW: &str = "r00t-pw";
+    const LOADER_PW: &str = "ld0r-pw";
+    let secrets = secret_store(&f);
+    let root = secrets
+        .create(None, &format!("ql-root-{id}"), None, ROOT_PW)
+        .await
+        .unwrap();
+    let loader = secrets
+        .create(None, &format!("ql-loader-{id}"), None, LOADER_PW)
+        .await
+        .unwrap();
+    let store = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone());
+    store.set_root_secret(id, root).await.unwrap();
+    store.set_query_log_secret(id, loader).await.unwrap();
+    f.starrocks_ddl.set_fail(Some(&format!(
+        "ERROR 1045 (28000): Access denied for root with {ROOT_PW} near {LOADER_PW}"
+    )));
+
+    let (status, body) = call(
+        &f,
+        "GET",
+        &format!("/engines/{id}/query-log/status"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "unreachable is a 200: {body}");
+    assert_eq!(body["state"], "unreachable", "{body}");
+    let message = body["message"].as_str().unwrap();
+    assert!(
+        message.contains("Access denied"),
+        "the diagnosis stays: {body}"
+    );
+
+    let (status, list) = call(&f, "GET", &format!("/engines/{id}/query-log"), &token, None).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{list}");
+    assert_eq!(list["code"], "engine_fe_error", "{list}");
+    for text in [body.to_string(), list.to_string()] {
+        assert!(!text.contains(ROOT_PW), "the root password leaked: {text}");
+        assert!(
+            !text.contains(LOADER_PW),
+            "the loader password leaked: {text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn query_log_status_follows_the_fe_and_a_missing_table_is_not_ready() {
+    let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ql_status", true).await;
+    let id = seed_query_log_engine(&f, "starrocks").await;
+    let status_of = |f: &Fixture| {
+        let path = format!("/engines/{id}/query-log/status");
+        let token = token.clone();
+        let app = f.app.clone();
+        async move { into_json(app.oneshot(req("GET", &path, &token, None)).await.unwrap()).await }
+    };
+
+    // No plugin, no table, on egret's image: not set up.
+    let (status, body) = status_of(&f).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "notSetUp", "{body}");
+    assert_eq!(body["retentionDays"], 30, "{body}");
+
+    // The list then answers 409 with the state.
+    f.starrocks_ddl.fail_matching(
+        "left(stmt, 2000)",
+        "ERROR 5502 (HY000): Unknown table 'starrocks_audit_db__.starrocks_audit_tbl__'",
+    );
+    let (status, body) = call(&f, "GET", &format!("/engines/{id}/query-log"), &token, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "query_log_not_ready", "{body}");
+    assert_eq!(body["state"], "notSetUp", "{body}");
+
+    // Plugin listed and table there: ready, with the newest event.
+    f.starrocks_ddl.seed_plugin("AuditLoader");
+    f.starrocks_ddl.answer_matching(
+        "SHOW TABLES FROM starrocks_audit_db__",
+        vec![vec![Some("starrocks_audit_tbl__".into())]],
+    );
+    f.starrocks_ddl.answer_matching(
+        "max(timestamp)",
+        vec![vec![Some("2026-11-10 11:59:00".into())]],
+    );
+    let (status, body) = status_of(&f).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "ready", "{body}");
+    assert_eq!(body["lastEventAt"], "2026-11-10T11:59:00Z", "{body}");
+    assert!(
+        f.starrocks_ddl
+            .queried()
+            .iter()
+            .all(|q| q.starts_with("/* egret-query-log-read */")),
+        "every read carries the marker: {:?}",
+        f.starrocks_ddl.queried()
+    );
+}
+
+#[tokio::test]
+async fn the_setup_route_sets_the_query_log_up_and_a_failure_is_a_scrubbed_502() {
+    let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ql_setup", true).await;
+    let id = seed_query_log_engine(&f, "starrocks").await;
+
+    let (status, body) = call(
+        &f,
+        "POST",
+        &format!("/engines/{id}/query-log/setup"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "ready", "{body}");
+    assert!(
+        f.starrocks_ddl
+            .executed()
+            .iter()
+            .any(|s| s.starts_with("INSTALL PLUGIN")),
+        "{:?}",
+        f.starrocks_ddl.executed()
+    );
+    assert!(
+        !f.starrocks_ddl
+            .queried()
+            .iter()
+            .any(|q| q.contains("egret-query-log-probe")),
+        "the route does not wait for events"
+    );
+
+    let other = seed_query_log_engine(&f, "starrocks").await;
+    const ROOT_PW: &str = "r00t-pw";
+    let root = secret_store(&f)
+        .create(None, &format!("ql-root-{other}"), None, ROOT_PW)
+        .await
+        .unwrap();
+    egret_engine_mgmt::EngineMgmtStore::new(f.db.clone())
+        .set_root_secret(other, root)
+        .await
+        .unwrap();
+    f.starrocks_ddl.fail_matching(
+        "CREATE DATABASE",
+        &format!("ERROR 1045 (28000): Access denied for root with {ROOT_PW}"),
+    );
+    let (status, body) = call(
+        &f,
+        "POST",
+        &format!("/engines/{other}/query-log/setup"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(body["code"], "engine_fe_error", "{body}");
+    assert!(!body.to_string().contains(ROOT_PW), "{body}");
 }

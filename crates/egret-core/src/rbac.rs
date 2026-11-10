@@ -79,6 +79,14 @@ pub static PERMISSIONS: &[Permission] = &[
         "Kill running queries",
         Scope::Platform
     ),
+    // Granted by migration 0218 to every platform role holding
+    // `engine:update` (StarRocks query log, open question 1 decided (b)).
+    perm!(
+        "engine:audit",
+        "Engines",
+        "Read statement text in engine query logs",
+        Scope::Platform
+    ),
     // Registry catalogs (SP3). Deliberately NOT `catalog:*`: `catalog:read` is
     // the workspace-scope key every workspace role holds (0024) for
     // egret-query's workspace engine view. Cedar itself cannot confuse the two
@@ -517,6 +525,18 @@ mod tests {
         }
         assert!(!PERMISSIONS.is_empty());
     }
+    #[test]
+    fn engine_audit_is_a_platform_engines_permission() {
+        let p = PERMISSIONS
+            .iter()
+            .find(|p| p.key == "engine:audit")
+            .expect("engine:audit is in the catalog");
+        assert_eq!(p.group, "Engines");
+        assert_eq!(p.description, "Read statement text in engine query logs");
+        assert_eq!(p.scope, Scope::Platform);
+        assert!(!is_admin_graph("engine:audit"));
+    }
+
     #[test]
     fn known_and_groups() {
         assert!(is_known("engine:create"));

@@ -127,6 +127,8 @@ pub fn router() -> Router<CpState> {
         )
         // Native Trino monitor (query list / detail / kill / cluster).
         .merge(crate::monitor::routes())
+        // The StarRocks query log (status / page / entry / setup).
+        .merge(crate::query_log::routes())
         // Registry catalogs (SP3): platform CRUD + impact + re-apply.
         .merge(crate::catalogs::routes())
 }

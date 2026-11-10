@@ -55,6 +55,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     use utoipa::OpenApi as _;
     let mut doc = engines::EngineMgmtApi::openapi();
     doc.merge(monitor::MonitorApi::openapi());
+    doc.merge(query_log::QueryLogApi::openapi());
     doc.merge(catalogs::CatalogRegistryApi::openapi());
     doc.merge(external::ExternalEngineApi::openapi());
     doc.merge(security_upgrade::SecurityUpgradeApi::openapi());

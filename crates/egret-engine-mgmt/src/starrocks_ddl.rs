@@ -320,6 +320,11 @@ pub struct FeError {
     /// branches on it: a concurrent setup that installed it first is not a
     /// failure.
     already_installed: bool,
+    /// Whether the FE said the database or table does not exist
+    /// (`Unknown database '…'`, `Unknown table '…'`), decided from the RAW
+    /// message like the three above. The query log's reads branch on it: no
+    /// audit table is "not set up", not an FE failure.
+    unknown_relation: bool,
 }
 
 impl FeError {
@@ -423,6 +428,12 @@ impl FeError {
     pub fn is_already_installed(&self) -> bool {
         self.already_installed
     }
+
+    /// Did the FE mean "there is no such database or table"? Read off
+    /// [`Self::unknown_relation`], decided from the unredacted message.
+    pub fn is_unknown_relation(&self) -> bool {
+        self.unknown_relation
+    }
 }
 
 /// Does this FE message mean "the object is already there"? StarRocks answers
@@ -457,6 +468,16 @@ fn says_unknown_catalog(raw: &str) -> bool {
 /// case-insensitively. The exact wording is pinned live in Task 5.
 fn says_already_installed(raw: &str) -> bool {
     raw.to_ascii_lowercase().contains("already been installed")
+}
+
+/// Does this FE message mean "there is no such database or table"?
+/// StarRocks answers `SHOW TABLES FROM <db>` on an absent database with
+/// `Unknown database '<db>'` (MySQL's 1049), and a `SELECT` from an absent
+/// table with `Unknown table '<db>.<table>'`. Matched on the phrases,
+/// case-insensitively. The exact wording is pinned live in Task 5.
+fn says_unknown_relation(raw: &str) -> bool {
+    let raw = raw.to_ascii_lowercase();
+    raw.contains("unknown database") || raw.contains("unknown table")
 }
 
 /// The FE's error code and nothing else. Deliberately NOT the excerpt: this
@@ -498,6 +519,8 @@ impl std::fmt::Debug for FeError {
             )
             .field("already_exists", &self.already_exists)
             .field("unknown_catalog", &self.unknown_catalog)
+            .field("already_installed", &self.already_installed)
+            .field("unknown_relation", &self.unknown_relation)
             .finish()
     }
 }
@@ -537,6 +560,7 @@ fn fe_error(raw: impl std::fmt::Display) -> FeError {
     let already_exists = says_already_exists(&raw);
     let unknown_catalog = says_unknown_catalog(&raw);
     let already_installed = says_already_installed(&raw);
+    let unknown_relation = says_unknown_relation(&raw);
 
     let redacted = normalize_mysql_async_wrapper(&raw);
     let redacted = redact_quoted(&redacted);
@@ -554,6 +578,7 @@ fn fe_error(raw: impl std::fmt::Display) -> FeError {
         already_exists,
         unknown_catalog,
         already_installed,
+        unknown_relation,
     }
 }
 
@@ -1247,6 +1272,10 @@ pub struct FakeStarRocksDdl {
     materialized_views: Arc<Mutex<MaterializedViewRows>>,
     /// Canned answers to `query`, by exact statement text.
     answers: Arc<Mutex<BTreeMap<String, MaterializedViewRows>>>,
+    /// `(needle, rows)`: canned answers to any `query` containing `needle`,
+    /// first match wins, consulted after the exact `answers`. For statements
+    /// whose text carries a time the test does not control.
+    matching_answers: Arc<Mutex<Vec<(String, MaterializedViewRows)>>>,
     /// When set, every `execute`/`query` fails with this message.
     fail: Arc<Mutex<Option<String>>>,
     /// `(needle, message)`: fail only the statements containing `needle` —
@@ -1401,6 +1430,14 @@ impl FakeStarRocksDdl {
         self.answers.lock().unwrap().insert(sql.to_string(), rows);
     }
 
+    /// Answer every `query` containing `needle` with `rows` from now on.
+    pub fn answer_matching(&self, needle: &str, rows: Vec<Vec<Option<String>>>) {
+        self.matching_answers
+            .lock()
+            .unwrap()
+            .push((needle.to_string(), rows));
+    }
+
     pub fn seed_raw_materialized_view_row(&self, row: Vec<Option<String>>) {
         self.materialized_views.lock().unwrap().push(row);
     }
@@ -1516,6 +1553,9 @@ impl StarRocksDdl for FakeStarRocksDdl {
         if let Some(msg) = self.selective_failure(sql) {
             return Err(fe_error(msg));
         }
+        // The query log's reads lead with their marker comment, which a real
+        // FE skips; the fake's built-in answers are keyed on the bare text.
+        let sql = without_read_marker(sql);
         if sql == "SELECT 1" {
             return Ok(vec![vec![Some("1".into())]]);
         }
@@ -1538,6 +1578,15 @@ impl StarRocksDdl for FakeStarRocksDdl {
         if let Some(rows) = self.answers.lock().unwrap().get(sql) {
             return Ok(rows.clone());
         }
+        if let Some((_, rows)) = self
+            .matching_answers
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(needle, _)| sql.contains(needle.as_str()))
+        {
+            return Ok(rows.clone());
+        }
         if let Some(name) = statement_target("SHOW CREATE CATALOG", sql) {
             let Some(props) = self.catalogs.lock().unwrap().get(&name).cloned() else {
                 return Err(fe_error(format!("Unknown catalog '{name}'")));
@@ -1558,7 +1607,7 @@ impl StarRocksDdl for FakeStarRocksDdl {
         fe: &FeTarget,
         sql: &str,
     ) -> Result<Vec<Vec<Option<String>>>, FeError> {
-        if sql == "SHOW PLUGINS" {
+        if without_read_marker(sql) == "SHOW PLUGINS" {
             *self.last_target.lock().unwrap() = Some(fe.clone());
             self.queried.lock().unwrap().push(sql.to_string());
             if let Some(msg) = self.fail.lock().unwrap().clone() {
@@ -1573,6 +1622,13 @@ impl StarRocksDdl for FakeStarRocksDdl {
         rows.insert(0, vec![]);
         Ok(rows)
     }
+}
+
+/// `sql` without the query log's leading read marker comment, if it has one.
+fn without_read_marker(sql: &str) -> &str {
+    sql.strip_prefix(crate::query_log::READ_MARKER)
+        .map(str::trim_start)
+        .unwrap_or(sql)
 }
 
 /// The backtick-quoted name out of a statement that starts with `prefix`,
@@ -2215,6 +2271,22 @@ mod tests {
         assert!(!fe_error("Catalog 'x' already exists").is_already_installed());
     }
 
+    /// The query log reads answer "not set up" on this, not a 502.
+    #[test]
+    fn unknown_relation_is_decided_from_the_raw_message() {
+        assert!(
+            fe_error("ERROR 1049 (42000): Unknown database 'starrocks_audit_db__'")
+                .is_unknown_relation()
+        );
+        assert!(fe_error(
+            "ERROR 5502 (HY000): Getting analyzing error. Detail message: Unknown table \
+             'starrocks_audit_db__.starrocks_audit_tbl__'."
+        )
+        .is_unknown_relation());
+        assert!(!fe_error("Access denied for user 'root'").is_unknown_relation());
+        assert!(!fe_error("Unknown catalog 'x'").is_unknown_relation());
+    }
+
     /// Fix round 1, F2 — the regression this decision was moved to prevent.
     /// An FE message whose quoting this module cannot pair (a SQL-escaped
     /// apostrophe, the shape the module doc names as reachable from egret's
@@ -2387,6 +2459,7 @@ mod tests {
                 already_exists: false,
                 unknown_catalog: false,
                 already_installed: false,
+                unknown_relation: false,
             }
             .to_string(),
             "FE error (no code)"
