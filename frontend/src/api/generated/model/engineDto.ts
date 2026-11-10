@@ -138,7 +138,7 @@ export interface EngineDto {
      * `true` when Ranger is on and this StarRocks engine (provisioned or
      * external) is bound to no policy profile, so Ranger governs nothing on
      * it (KI-336). A Trino engine is never flagged: it late-binds a profile on
-     * its next apply. Set by the reads (`with_runtime`); `false` otherwise.
+     * its next apply. Set by every response (`with_runtime`); `false` otherwise.
      */
   notGoverned: boolean;
 }
