@@ -1,8 +1,9 @@
 //! Convergence of a profile's infrastructure policies (governance SP2a, D4).
 //!
-//! The IR owns two shapes of infrastructure row
+//! The IR owns three shapes of infrastructure row
 //! ([`egret_policy::infra_names::is_ir_infra_name`]): the `egret-admin - …`
-//! set and the four fixed names. [`converge_infra_in_tx`] derives every such
+//! set, the fixed names (the four Trino ones and the StarRocks query-log
+//! loader) and the StarRocks `egret-query-log-guard - …` set. [`converge_infra_in_tx`] derives every such
 //! row a profile should hold from the store (the bound engines and the engine
 //! admins, through [`egret_perm_ir::lower::infra::lower_infra`] and
 //! [`crate::ranger::infra::render`]) and reconciles the stored rows by name.
@@ -21,8 +22,8 @@ use std::collections::BTreeSet;
 use egret_perm::CompileError;
 use egret_policy::infra_names::{
     is_admin_all_access_policy_name, is_ir_infra_name, ADMIN_ALL_ACCESS_NAME_PREFIX,
-    EXECUTE_QUERY_POLICY_NAME, IMPERSONATE_POLICY_NAME, QUERY_TIMEOUT_POLICY_NAME,
-    SELF_IMPERSONATE_POLICY_NAME,
+    EXECUTE_QUERY_POLICY_NAME, IMPERSONATE_POLICY_NAME, QUERY_LOG_GUARD_NAME_PREFIX,
+    QUERY_LOG_LOADER_POLICY_NAME, QUERY_TIMEOUT_POLICY_NAME, SELF_IMPERSONATE_POLICY_NAME,
 };
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -159,19 +160,21 @@ pub async fn converge_infra_in_tx(
 }
 
 /// `service_id`'s stored rows whose name the IR owns. The SQL narrows by the
-/// two shapes' spellings; [`is_ir_infra_name`] is the predicate.
+/// shapes' spellings; [`is_ir_infra_name`] is the predicate.
 async fn stored_infra_rows(
     tx: &mut Transaction<'_, Postgres>,
     service_id: i64,
 ) -> Result<Vec<Stored>, CompileError> {
     let rows: Vec<(i64, String, Value, String)> = sqlx::query_as(
         "SELECT id, name, policy_jsonb, managed_by FROM policy.authz_policies \
-          WHERE service_id = $1 AND (starts_with(name, $2) OR name = ANY($3)) \
+          WHERE service_id = $1 \
+            AND (starts_with(name, $2) OR starts_with(name, $4) OR name = ANY($3)) \
           ORDER BY id",
     )
     .bind(service_id)
     .bind(ADMIN_ALL_ACCESS_NAME_PREFIX)
     .bind(fixed_names())
+    .bind(QUERY_LOG_GUARD_NAME_PREFIX)
     .fetch_all(&mut **tx)
     .await
     .map_err(CompileError::from_db)?;
@@ -193,6 +196,7 @@ fn fixed_names() -> Vec<String> {
         SELF_IMPERSONATE_POLICY_NAME,
         EXECUTE_QUERY_POLICY_NAME,
         QUERY_TIMEOUT_POLICY_NAME,
+        QUERY_LOG_LOADER_POLICY_NAME,
     ]
     .iter()
     .map(|s| s.to_string())
@@ -215,9 +219,11 @@ fn admin_users<'a>(rows: impl Iterator<Item = (&'a String, &'a Value)>) -> BTree
 }
 
 /// Every service convergence has something to do on, ascending and deduped:
-/// those holding an IR-owned infra row (to keep or delete) and those a
+/// those holding an IR-owned infra row (to keep or delete), those a
 /// qualifying engine is bound to (`egret_core::engine_delegation::
-/// qualifies_for_infra`). Callers lock them in this order.
+/// qualifies_for_infra`) and those a query-log-writing StarRocks engine is
+/// bound to ([`crate::ir_load::writes_query_log`]). Callers lock them in this
+/// order.
 pub(crate) async fn infra_services_via(
     conn: &mut sqlx::PgConnection,
 ) -> Result<Vec<i64>, CompileError> {
@@ -225,10 +231,11 @@ pub(crate) async fn infra_services_via(
 
     let holding: Vec<(i64, String)> = sqlx::query_as(
         "SELECT service_id, name FROM policy.authz_policies \
-          WHERE starts_with(name, $1) OR name = ANY($2)",
+          WHERE starts_with(name, $1) OR starts_with(name, $3) OR name = ANY($2)",
     )
     .bind(ADMIN_ALL_ACCESS_NAME_PREFIX)
     .bind(fixed_names())
+    .bind(QUERY_LOG_GUARD_NAME_PREFIX)
     .fetch_all(&mut *conn)
     .await
     .map_err(CompileError::from_db)?;
@@ -246,7 +253,10 @@ pub(crate) async fn infra_services_via(
         .chain(
             bound
                 .into_iter()
-                .filter(|(_, t, origin, spec)| qualifies_for_infra(t, origin, spec))
+                .filter(|(_, t, origin, spec)| {
+                    qualifies_for_infra(t, origin, spec)
+                        || crate::ir_load::writes_query_log(t, origin)
+                })
                 .map(|(id, _, _, _)| id),
         )
         .collect();

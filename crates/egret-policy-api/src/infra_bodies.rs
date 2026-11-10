@@ -6,10 +6,11 @@
 
 use serde_json::{json, Value};
 
-use egret_core::engine_principals::DELEGATOR_PRINCIPAL;
+use egret_core::engine_principals::{DELEGATOR_PRINCIPAL, QUERY_LOG_LOADER_PRINCIPAL};
 
 pub use crate::infra_names::{
-    EXECUTE_QUERY_POLICY_NAME, IMPERSONATE_POLICY_NAME, QUERY_TIMEOUT_POLICY_NAME,
+    EXECUTE_QUERY_POLICY_NAME, IMPERSONATE_POLICY_NAME, QUERY_LOG_DATABASE,
+    QUERY_LOG_LOADER_POLICY_NAME, QUERY_LOG_TABLE, QUERY_TIMEOUT_POLICY_NAME,
     SELF_IMPERSONATE_POLICY_NAME,
 };
 
@@ -115,6 +116,39 @@ pub fn query_timeout_policy(service: &str) -> Value {
         json!([USER_MACRO]),
         "alter",
     )
+}
+
+/// The StarRocks AuditLoader's allow: `egret_query_log` may `insert` into
+/// `default_catalog.starrocks_audit_db__.starrocks_audit_tbl__`, and nothing
+/// else. The item has the shape of the fork's `tests/e2e/policies.py` policy
+/// `audit-loader`, which the fork's e2e measured against the real plugin.
+pub fn query_log_loader_policy(service: &str) -> Value {
+    let one = |v: &str| json!({ "values": [v], "isExcludes": false, "isRecursive": false });
+    json!({
+        "name": QUERY_LOG_LOADER_POLICY_NAME,
+        "service": service,
+        "serviceType": "starrocks",
+        "policyType": 0,
+        "isEnabled": true,
+        "resources": {
+            "catalog": one("default_catalog"),
+            "database": one(QUERY_LOG_DATABASE),
+            "table": one(QUERY_LOG_TABLE),
+            "column": one("*")
+        },
+        "policyItems": [{
+            "users": [QUERY_LOG_LOADER_PRINCIPAL],
+            "groups": [],
+            "roles": [],
+            "accesses": [{ "type": "insert", "isAllowed": true }],
+            "delegateAdmin": false
+        }],
+        "denyPolicyItems": [],
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "isDenyAllElse": false,
+        "policyPriority": 0
+    })
 }
 
 #[cfg(test)]

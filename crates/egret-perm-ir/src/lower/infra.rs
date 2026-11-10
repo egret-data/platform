@@ -2,11 +2,13 @@
 //! enforcement point, derived from the engines bound to it rather than from
 //! any authored model object. Pure; the caller loads [`InfraInputs`].
 
-use egret_core::engine_principals::DELEGATOR_PRINCIPAL;
+use egret_core::engine_principals::{DELEGATOR_PRINCIPAL, QUERY_LOG_LOADER_PRINCIPAL};
 use egret_perm::EngineType;
 
 use crate::audience::{Audience, Member, MemberName, Via};
-use crate::statement::{Derivation, Effect, InfraKind, InfraObject, Source, Statement, Target};
+use crate::statement::{
+    Derivation, Effect, InfraKind, InfraObject, Privilege, Source, Statement, Target,
+};
 
 /// The Trino system session property that bounds a query's run time.
 pub const QUERY_TIMEOUT_PROPERTY: &str = "query_max_run_time";
@@ -21,6 +23,10 @@ pub struct InfraInputs {
     pub delegating: bool,
     /// At least one delegator-impersonating Trino engine is bound.
     pub delegator_impersonates: bool,
+    /// At least one StarRocks engine egret provisioned (origin not external)
+    /// is bound: its AuditLoader writes the query log. Independent of
+    /// `delegating`.
+    pub query_log: bool,
 }
 
 fn user(name: &str) -> Member {
@@ -51,13 +57,15 @@ fn statement(
 }
 
 /// The infrastructure statements for `i`, in the order `AdminAllAccess`,
-/// `DelegatorImpersonate`, `SelfImpersonate`, `ExecuteQuery`, `QueryTimeout`.
+/// `QueryLogLoader`, `QueryLogGuard` (StarRocks only), `DelegatorImpersonate`,
+/// `SelfImpersonate`, `ExecuteQuery`, `QueryTimeout` (Trino only).
+///
+/// `AdminAllAccess` and the Trino statements need a delegating engine; the
+/// two query-log statements need only `query_log`, so a StarRocks engine that
+/// does not delegate still gets its loader allow and its guard.
 pub fn lower_infra(i: &InfraInputs) -> Vec<Statement> {
     let mut out = Vec::new();
-    if !i.delegating {
-        return out;
-    }
-    if !i.admins.is_empty() {
+    if i.delegating && !i.admins.is_empty() {
         out.push(statement(
             InfraKind::AdminAllAccess,
             i.admins.iter().map(|a| user(a)).collect(),
@@ -65,7 +73,32 @@ pub fn lower_infra(i: &InfraInputs) -> Vec<Statement> {
             "all",
         ));
     }
-    if i.engine != EngineType::Trino {
+    if i.engine == EngineType::StarRocks && i.query_log {
+        out.push(statement(
+            InfraKind::QueryLogLoader,
+            vec![user(QUERY_LOG_LOADER_PRINCIPAL)],
+            InfraObject::QueryLogTable,
+            "insert",
+        ));
+        out.push(Statement {
+            source: Source::Infra {
+                kind: InfraKind::QueryLogGuard,
+            },
+            audience: Audience {
+                include: vec![Member {
+                    name: MemberName::Everyone,
+                    via: Via::Direct,
+                }],
+                except: vec![user(QUERY_LOG_LOADER_PRINCIPAL)],
+            },
+            target: Target::Infra(InfraObject::QueryLogDatabase),
+            effect: Effect::Deny {
+                privileges: vec![Privilege::Read, Privilege::Write],
+            },
+            derivation: Derivation::AsDeclared,
+        });
+    }
+    if !i.delegating || i.engine != EngineType::Trino {
         return out;
     }
     if i.delegator_impersonates {
@@ -122,7 +155,12 @@ mod tests {
             admins: admins.iter().map(|s| s.to_string()).collect(),
             delegating,
             delegator_impersonates: imp,
+            query_log: false,
         }
+    }
+    fn with_query_log(mut i: InfraInputs) -> InfraInputs {
+        i.query_log = true;
+        i
     }
 
     #[test]
@@ -191,5 +229,113 @@ mod tests {
     fn starrocks_gets_the_admin_set_only() {
         let s = lower_infra(&inputs(EngineType::StarRocks, &["a"], true, true));
         assert_eq!(kinds(&s), vec![InfraKind::AdminAllAccess]);
+    }
+
+    #[test]
+    fn starrocks_with_the_query_log_gets_the_loader_then_the_guard() {
+        let s = lower_infra(&with_query_log(inputs(
+            EngineType::StarRocks,
+            &["a"],
+            true,
+            false,
+        )));
+        assert_eq!(
+            kinds(&s),
+            vec![
+                InfraKind::AdminAllAccess,
+                InfraKind::QueryLogLoader,
+                InfraKind::QueryLogGuard
+            ]
+        );
+        let loader = &s[1];
+        assert_eq!(loader.target, Target::Infra(InfraObject::QueryLogTable));
+        assert_eq!(
+            loader.effect,
+            Effect::EnginePrivilege {
+                capability: "insert".into()
+            }
+        );
+        assert_eq!(
+            loader
+                .audience
+                .include
+                .iter()
+                .map(|m| m.name.clone())
+                .collect::<Vec<_>>(),
+            vec![MemberName::User(QUERY_LOG_LOADER_PRINCIPAL.into())]
+        );
+        assert!(loader.audience.except.is_empty());
+        let guard = &s[2];
+        assert_eq!(guard.target, Target::Infra(InfraObject::QueryLogDatabase));
+        assert_eq!(
+            guard.effect,
+            Effect::Deny {
+                privileges: vec![Privilege::Read, Privilege::Write]
+            }
+        );
+        assert_eq!(
+            guard
+                .audience
+                .include
+                .iter()
+                .map(|m| m.name.clone())
+                .collect::<Vec<_>>(),
+            vec![MemberName::Everyone]
+        );
+        assert_eq!(
+            guard
+                .audience
+                .except
+                .iter()
+                .map(|m| m.name.clone())
+                .collect::<Vec<_>>(),
+            vec![MemberName::User(QUERY_LOG_LOADER_PRINCIPAL.into())]
+        );
+    }
+
+    #[test]
+    fn starrocks_without_the_query_log_gets_neither_query_log_kind() {
+        let s = lower_infra(&inputs(EngineType::StarRocks, &["a"], true, false));
+        assert_eq!(kinds(&s), vec![InfraKind::AdminAllAccess]);
+    }
+
+    /// Correction 5: the query-log statements do not wait on delegation.
+    #[test]
+    fn a_starrocks_engine_that_does_not_delegate_still_gets_the_query_log() {
+        let s = lower_infra(&with_query_log(inputs(
+            EngineType::StarRocks,
+            &["a"],
+            false,
+            false,
+        )));
+        assert_eq!(
+            kinds(&s),
+            vec![InfraKind::QueryLogLoader, InfraKind::QueryLogGuard],
+            "no AdminAllAccess without delegation, but both query-log statements"
+        );
+    }
+
+    /// The Trino evaluator (`egret-perm-eval`'s `decide`) never sees the
+    /// query-log objects: a Trino profile does not lower them.
+    #[test]
+    fn trino_with_query_log_set_emits_neither_query_log_kind() {
+        for delegating in [true, false] {
+            let s = lower_infra(&with_query_log(inputs(
+                EngineType::Trino,
+                &["a"],
+                delegating,
+                true,
+            )));
+            let k = kinds(&s);
+            assert!(
+                !k.contains(&InfraKind::QueryLogLoader) && !k.contains(&InfraKind::QueryLogGuard),
+                "delegating={delegating}: {k:?}"
+            );
+            assert_eq!(
+                s,
+                lower_infra(&inputs(EngineType::Trino, &["a"], delegating, true)),
+                "query_log changed a Trino lowering"
+            );
+        }
     }
 }

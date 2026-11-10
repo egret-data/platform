@@ -2884,6 +2884,87 @@ async fn an_infra_name_is_refused_with_409_before_the_arbitration_guard() {
     f.store.delete_service(svc_id).await.expect("cleanup");
 }
 
+/// The StarRocks query log (package A, Task 2): a human `POST` of a policy
+/// named `egret-query-log-loader` on a StarRocks profile is the reserved-name
+/// 409, and nothing is stored. Control: the same name on a Trino profile is an
+/// ordinary name (the query-log names are infrastructure on StarRocks only).
+#[tokio::test]
+async fn the_query_log_loader_name_is_reserved_on_a_starrocks_profile_only() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "qlog409", true).await;
+    egret_policy::seed_starrocks(&f.store)
+        .await
+        .expect("seed starrocks def");
+    let sr = format!("sr-qlog-{}", Uuid::new_v4().simple());
+    let sr_id = f
+        .store
+        .create_service(&sr, "starrocks", &serde_json::json!({}))
+        .await
+        .expect("create starrocks profile")
+        .id;
+    let (trino, trino_id) = seed_service(&f).await;
+    let body = |service: &str, resources: serde_json::Value| {
+        serde_json::json!({
+            "kind": "access", "name": "egret-query-log-loader", "service": service,
+            "isEnabled": true, "resources": resources,
+            "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"}]
+        })
+    };
+
+    let (status, resp) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "POST",
+                "/policies",
+                &token,
+                Some(body(
+                    &sr,
+                    serde_json::json!({"catalog": {"values": ["default_catalog"]},
+                                       "database": {"values": ["d"]},
+                                       "table": {"values": ["t"]},
+                                       "column": {"values": ["*"]}}),
+                )),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "body={resp}");
+    assert!(
+        resp.to_string()
+            .contains("reserved for egret's own plumbing"),
+        "must be the InfrastructureOwned refusal: {resp}"
+    );
+    assert!(
+        f.store.list_policies(sr_id).await.expect("list").is_empty(),
+        "a refused POST wrote a row"
+    );
+
+    let (status, resp) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "POST",
+                "/policies",
+                &token,
+                Some(body(
+                    &trino,
+                    serde_json::json!({"catalog": {"values": ["c"]}, "schema": {"values": ["s"]},
+                                       "table": {"values": ["t"]}, "column": {"values": ["*"]}}),
+                )),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "control on trino; body={resp}");
+
+    f.store.delete_service(sr_id).await.expect("cleanup");
+    f.store.delete_service(trino_id).await.expect("cleanup");
+}
+
 /// SP4d-3 final review I-1: seed-defaults builds the Trino default set, so on a
 /// StarRocks profile it is refused with a sentence and writes nothing. The
 /// control (a Trino profile, same caller, same route) seeds, so the 400 is the

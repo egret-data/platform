@@ -1,7 +1,8 @@
 //! The ONLY place egret's own infrastructure policy names are spelled.
 //!
-//! Four shapes exist, from two producers. The `all - …` shape is egret's only
-//! on Trino profiles; see [`is_egret_infrastructure_policy`].
+//! Five shapes exist, from three producers. The `all - …` shape is egret's
+//! only on Trino profiles, and the query-log shapes (3) only on StarRocks
+//! profiles; see [`is_egret_infrastructure_policy`].
 //!
 //! 1. `egret_policy::default_policies::build_default_policies` mints
 //!    `"{prefix} - {resource, chain, ...}"`, once per resource hierarchy, with
@@ -12,6 +13,11 @@
 //!    and the per-user baseline every delegating Trino engine gets,
 //!    [`SELF_IMPERSONATE_POLICY_NAME`], [`EXECUTE_QUERY_POLICY_NAME`] and
 //!    [`QUERY_TIMEOUT_POLICY_NAME`].
+//! 3. The StarRocks query log: the loader's allow
+//!    [`QUERY_LOG_LOADER_POLICY_NAME`] (`infra_bodies::query_log_loader_policy`)
+//!    and the guard `"{QUERY_LOG_GUARD_NAME_PREFIX} - {resource, chain, ...}"`
+//!    (`default_policies::query_log_guard_bodies`), both rendered by the
+//!    permission IR's infrastructure statements.
 //!
 //! **Why this list lives here and not beside either producer.** The predicate
 //! has to cover both, and this leaf contract crate is the only one all three
@@ -65,6 +71,26 @@ pub const SELF_IMPERSONATE_POLICY_NAME: &str = "egret-user-impersonate-self";
 /// `execute`, users `{USER}`) — Trino's `checkCanExecuteQuery`.
 pub const EXECUTE_QUERY_POLICY_NAME: &str = "egret-user-execute-query";
 
+/// The StarRocks AuditLoader's allow: `insert` on the query-log table for
+/// `egret_core::engine_principals::QUERY_LOG_LOADER_PRINCIPAL`
+/// (`infra_bodies::query_log_loader_policy`). StarRocks profiles only.
+pub const QUERY_LOG_LOADER_POLICY_NAME: &str = "egret-query-log-loader";
+
+/// Name prefix of the query-log guard, one row per StarRocks resource
+/// hierarchy under `database` (`default_policies::query_log_guard_bodies`),
+/// spelled `"{prefix} - {resource, chain, ...}"` like the seeded sets.
+/// StarRocks profiles only.
+pub const QUERY_LOG_GUARD_NAME_PREFIX: &str = "egret-query-log-guard";
+
+/// The database the StarRocks AuditLoader plugin writes the query log into.
+pub const QUERY_LOG_DATABASE: &str = "starrocks_audit_db__";
+
+/// The table the StarRocks AuditLoader plugin writes the query log into.
+pub const QUERY_LOG_TABLE: &str = "starrocks_audit_tbl__";
+
+/// The one service type the query-log loader and guard are infrastructure on.
+const QUERY_LOG_SERVICE_TYPE: &str = "starrocks";
+
 /// The separator `build_default_policies` puts between the prefix and the
 /// resource chain: `format!("{} - {}", name_prefix, names.join(", "))`. Matching
 /// on the prefix alone would claim an operator's `"all-hands-reporting"` as
@@ -99,6 +125,13 @@ pub fn is_egret_infrastructure_policy(service_type: &str, name: &str) -> bool {
         || is_seeded_hierarchy_name(name, ADMIN_ALL_ACCESS_NAME_PREFIX)
         || (service_type == DEFAULT_ALL_ACCESS_SERVICE_TYPE
             && is_seeded_hierarchy_name(name, DEFAULT_ALL_ACCESS_NAME_PREFIX))
+        || (service_type == QUERY_LOG_SERVICE_TYPE && is_query_log_name(name))
+}
+
+/// Whether `name` is the query-log loader or one of the query-log guard rows.
+fn is_query_log_name(name: &str) -> bool {
+    name == QUERY_LOG_LOADER_POLICY_NAME
+        || is_seeded_hierarchy_name(name, QUERY_LOG_GUARD_NAME_PREFIX)
 }
 
 /// Whether `name` is one of the `egret-admin - …` per-admin all-access
@@ -115,8 +148,9 @@ fn is_seeded_hierarchy_name(name: &str, prefix: &str) -> bool {
 }
 
 /// Whether `name` is one of the infrastructure policies the permission IR
-/// owns (governance SP2a): an `egret-admin - …` row, or one of the four fixed
-/// names. Convergence reads, writes and deletes exactly these. The `all - …`
+/// owns (governance SP2a): an `egret-admin - …` row, one of the four fixed
+/// names, the query-log loader, or an `egret-query-log-guard - …` row.
+/// Convergence reads, writes and deletes exactly these. The `all - …`
 /// default set is deliberately NOT one: it stays outside the IR, written only
 /// by its own route.
 pub fn is_ir_infra_name(name: &str) -> bool {
@@ -125,6 +159,7 @@ pub fn is_ir_infra_name(name: &str) -> bool {
         || name == SELF_IMPERSONATE_POLICY_NAME
         || name == EXECUTE_QUERY_POLICY_NAME
         || name == QUERY_TIMEOUT_POLICY_NAME
+        || is_query_log_name(name)
 }
 
 #[cfg(test)]
@@ -132,8 +167,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_ir_owns_egret_admin_and_the_four_fixed_names_only() {
+    fn the_ir_owns_egret_admin_the_fixed_names_and_the_query_log_only() {
         assert!(is_ir_infra_name("egret-admin - catalog"));
+        assert!(is_ir_infra_name(QUERY_LOG_LOADER_POLICY_NAME));
+        assert!(is_ir_infra_name(
+            "egret-query-log-guard - catalog, database"
+        ));
+        assert!(!is_ir_infra_name("egret-query-log-guard"), "no separator");
+        assert!(
+            !is_ir_infra_name("egret-query-log-guards - x"),
+            "another prefix"
+        );
+        assert!(!is_ir_infra_name("egret-query-log-loader-2"));
         assert!(is_ir_infra_name("egret-admin - catalog, schema, table"));
         for fixed in [
             IMPERSONATE_POLICY_NAME,
@@ -150,5 +195,26 @@ mod tests {
         assert!(!is_ir_infra_name("egret-admin"), "no separator");
         assert!(!is_ir_infra_name("egret-admins - x"), "another prefix");
         assert!(!is_ir_infra_name("perm-grant-1"));
+    }
+
+    #[test]
+    fn the_query_log_names_are_infrastructure_on_starrocks_only() {
+        let guard = "egret-query-log-guard - catalog, database, table";
+        for name in [QUERY_LOG_LOADER_POLICY_NAME, guard] {
+            assert!(is_egret_infrastructure_policy("starrocks", name), "{name}");
+            assert!(!is_egret_infrastructure_policy("trino", name), "{name}");
+        }
+        assert!(!is_egret_infrastructure_policy(
+            "starrocks",
+            "egret-query-log-guard"
+        ));
+    }
+
+    #[test]
+    fn the_query_log_names_are_stable() {
+        assert_eq!(QUERY_LOG_LOADER_POLICY_NAME, "egret-query-log-loader");
+        assert_eq!(QUERY_LOG_GUARD_NAME_PREFIX, "egret-query-log-guard");
+        assert_eq!(QUERY_LOG_DATABASE, "starrocks_audit_db__");
+        assert_eq!(QUERY_LOG_TABLE, "starrocks_audit_tbl__");
     }
 }

@@ -15,9 +15,11 @@
 
 use crate::infra_names::{
     ADMIN_ALL_ACCESS_NAME_PREFIX, DEFAULT_ALL_ACCESS_NAME_PREFIX, DEFAULT_ALL_ACCESS_SERVICE_TYPE,
+    QUERY_LOG_DATABASE, QUERY_LOG_GUARD_NAME_PREFIX,
 };
 use crate::service_def::{starrocks_service_def, trino_service_def};
 use crate::{PolicyStore, PolicyStoreError};
+use egret_core::engine_principals::QUERY_LOG_LOADER_PRINCIPAL;
 // The hierarchy walker lives in `egret-ranger-eval` (SP4d Task 4), which
 // needs the same walk to reproduce Ranger's resource matching. There is
 // exactly one: a second walker that disagreed with this seeder would hand
@@ -181,6 +183,85 @@ pub fn admin_all_access_bodies(
         users,
         &[],
     ))
+}
+
+/// The query-log guard on a StarRocks profile: one deny row per resource
+/// hierarchy of `starrocks_service_def` whose chain contains `database`, each
+/// pinned to `default_catalog` / [`QUERY_LOG_DATABASE`] and `*` below, named
+/// `"egret-query-log-guard - {chain}"`.
+///
+/// Every row denies group `public` (everyone, engine admins included: open
+/// question 2, ruling (a)) every access type the def allows on its leaf, read
+/// as `build_default_policies` reads it. The table row alone carries a deny
+/// exception: `egret_query_log` keeps `insert`, which the loader's own allow
+/// (`infra_bodies::query_log_loader_policy`) grants. Pure: no database.
+pub fn query_log_guard_bodies(
+    service_name: &str,
+) -> Result<Vec<(String, Value)>, PolicyStoreError> {
+    let def = starrocks_service_def()?;
+    let resources = parse_resources(&def);
+    let fallback_accesses = all_access_types(&def);
+    let star = || json!({ "values": ["*"], "isExcludes": false, "isRecursive": false });
+    let one = |v: &str| json!({ "values": [v], "isExcludes": false, "isRecursive": false });
+
+    let mut rows = Vec::new();
+    for res in &resources {
+        if !is_hierarchy_leaf(res, &resources) {
+            continue;
+        }
+        let chain = hierarchy_chain(res, &resources);
+        if !chain.iter().any(|r| r.name == "database") {
+            continue;
+        }
+        let accesses: &[String] = if res.access_type_restrictions.is_empty() {
+            &fallback_accesses
+        } else {
+            &res.access_type_restrictions
+        };
+        let mut resources_map = Map::new();
+        for r in &chain {
+            let value = match r.name.as_str() {
+                "catalog" => one("default_catalog"),
+                "database" => one(QUERY_LOG_DATABASE),
+                _ => star(),
+            };
+            resources_map.insert(r.name.clone(), value);
+        }
+        let names: Vec<&str> = chain.iter().map(|r| r.name.as_str()).collect();
+        let name = format!("{} - {}", QUERY_LOG_GUARD_NAME_PREFIX, names.join(", "));
+        let deny_exceptions = if res.name == "table" {
+            json!([{
+                "users": [QUERY_LOG_LOADER_PRINCIPAL],
+                "groups": [],
+                "roles": [],
+                "accesses": [{ "type": "insert", "isAllowed": true }],
+                "delegateAdmin": false
+            }])
+        } else {
+            json!([])
+        };
+        let body = json!({
+            "name": name,
+            "service": service_name,
+            "serviceType": "starrocks",
+            "policyType": 0,
+            "isEnabled": true,
+            "resources": Value::Object(resources_map),
+            "policyItems": [],
+            "denyPolicyItems": [{
+                "users": [],
+                "groups": ["public"],
+                "roles": [],
+                "accesses": accesses.iter().map(|a| json!({ "type": a, "isAllowed": true })).collect::<Vec<_>>(),
+                "delegateAdmin": false
+            }],
+            "allowExceptions": [],
+            "denyExceptions": deny_exceptions,
+            "isDenyAllElse": false,
+        });
+        rows.push((name, body));
+    }
+    Ok(rows)
 }
 
 #[cfg(test)]

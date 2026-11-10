@@ -261,10 +261,14 @@ async fn seed_dummy_compiler_policies(pool: &sqlx::PgPool, service_id: i64, coun
 }
 
 /// Policies for `service_id`, scoped — never a bare `policy.authz_policies`
-/// total, which every concurrently-running test in this binary shares.
+/// total, which every concurrently-running test in this binary shares. The
+/// infrastructure rows (`managed_by = 'infra'`: on a StarRocks profile bound to
+/// a provisioned engine, the query-log loader and guard) are left out; these
+/// tests count what the compiler wrote.
 async fn policies_for(pool: &sqlx::PgPool, service_id: i64) -> Vec<(i64, String, Value)> {
     sqlx::query_as(
-        "SELECT id, name, policy_jsonb FROM policy.authz_policies WHERE service_id = $1 ORDER BY id",
+        "SELECT id, name, policy_jsonb FROM policy.authz_policies \
+          WHERE service_id = $1 AND managed_by <> 'infra' ORDER BY id",
     )
     .bind(service_id)
     .fetch_all(pool)
@@ -934,12 +938,14 @@ async fn a_profile_already_over_the_cap_can_still_shrink_by_deleting_a_rule() {
     // recompile is about to desire.
     seed_dummy_compiler_policies(pool, f.service_id, 1649).await;
 
-    let stored_before_first: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM policy.authz_policies WHERE service_id = $1")
-            .bind(f.service_id)
-            .fetch_one(pool)
-            .await
-            .expect("count");
+    let stored_before_first: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM policy.authz_policies \
+              WHERE service_id = $1 AND managed_by <> 'infra'",
+    )
+    .bind(f.service_id)
+    .fetch_one(pool)
+    .await
+    .expect("count");
     assert_eq!(
         stored_before_first, 1651,
         "sanity: 1 masked column + its hidden-column deny + 1649 dummy, already over \

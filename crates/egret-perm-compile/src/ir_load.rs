@@ -557,6 +557,13 @@ pub(crate) struct LoadedInfra {
     pub inputs: egret_perm_ir::lower::infra::InfraInputs,
 }
 
+/// Whether a bound engine of `engine_type` and `origin` writes the StarRocks
+/// query log: a StarRocks engine egret provisioned (its AuditLoader runs as
+/// `QUERY_LOG_LOADER_PRINCIPAL`). An external engine is not egret's to guard.
+pub(crate) fn writes_query_log(engine_type: &str, origin: &str) -> bool {
+    engine_type == "starrocks" && origin != egret_core::engine_delegation::ORIGIN_EXTERNAL
+}
+
 /// Read what the infrastructure statements of profile `service_id` depend on,
 /// on the caller's connection. `None` when the profile is not one this
 /// compiler targets (see [`crate::trigger::engine_type_for`]).
@@ -600,6 +607,9 @@ pub(crate) async fn load_infra_inputs(
     let delegator_impersonates = qualifying
         .iter()
         .any(|(t, _, spec)| delegator_impersonates(t, spec));
+    let query_log = engines
+        .iter()
+        .any(|(t, origin, _)| writes_query_log(t, origin));
     let admins = if delegating {
         crate::members::engine_admin_usernames_via(conn, missing).await?
     } else {
@@ -613,6 +623,7 @@ pub(crate) async fn load_infra_inputs(
             admins,
             delegating,
             delegator_impersonates,
+            query_log,
         },
     }))
 }
@@ -620,6 +631,13 @@ pub(crate) async fn load_infra_inputs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_provisioned_starrocks_engine_writes_the_query_log() {
+        assert!(writes_query_log("starrocks", "provisioned"));
+        assert!(!writes_query_log("starrocks", "external"));
+        assert!(!writes_query_log("trino", "provisioned"));
+    }
 
     #[test]
     fn every_plugin_version_round_trips_through_its_label() {
