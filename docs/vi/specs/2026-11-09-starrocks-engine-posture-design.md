@@ -39,7 +39,8 @@
 **Điều kiện, chỉ áp cho engine do egret provision.** DTO của engine có thêm `securityUpgradeNeeded`, `securityUpgradeReasons`, `securityUpgradeFeImage` (image FE mà nâng cấp sẽ đặt, vắng nếu không đặt gì) và `securityUpgradeBlockedRelease` (bản phát hành mới hơn đang giữ image hiện tại, vắng nếu không có), để hộp xác nhận hiện đích đến trước khi gọi. Có hai lý do nâng cấp:
 - **`unpatchedImage`:** image FE chưa vá đủ.
   - Quy tắc nhận diện chuyển vào `egret-perm::engine_images`.
-  - Image tính là đã vá nếu khớp digest của một image fork đã biết (kể cả khi được mirror sang registry khác), hoặc tag là `4.1.7-egret.4` trở lên, hoặc một bản phát hành mới hơn.
+  - Image tính là đã vá nếu khớp digest của một image fork đã biết (kể cả khi được mirror sang registry khác), hoặc, khi ref không có digest, tag là `4.1.7-egret.4` trở lên, hoặc một bản phát hành mới hơn.
+  - Ref có digest chỉ được xét theo digest, vì node kéo image theo digest: tag đã vá nhưng gắn digest khác (`…:4.1.7-egret.4@<digest egret.3>`) là chưa vá.
 - **`noRootPassword`:** engine không có `root_secret_id`.
 
 **Giao diện:**
@@ -48,15 +49,17 @@
 - Khi cảnh báo này hiện thì cảnh báo cũ không hiện, để trang chỉ có một thông điệp.
 
 **Hành động nâng cấp:** `POST /api/control-plane/engines/{id}/security-upgrade`. Engine ngoài hoặc không phải StarRocks bị trả 409.
-- **Hộp xác nhận** nêu image FE và CN đổi từ đâu sang đâu, và rằng mật khẩu `root` sẽ được đặt. Hộp cảnh báo:
+- **Hộp xác nhận** nêu image FE đổi từ đâu sang đâu, và rằng mật khẩu `root` sẽ được đặt. Với CN, hộp chỉ ghi "The CN image moves to the same release." thay cho dòng `CN image: <hiện tại> → <mặc định>`, vì DTO không mang image CN đích. Khi không có image FE đã lưu, hộp ghi "the current image (not recorded)". Hộp cảnh báo:
   - FE và CN sẽ restart;
-  - client ngoài egret đang dùng `root` không mật khẩu sẽ bị từ chối.
+  - client ngoài egret đang dùng `root` không mật khẩu sẽ bị từ chối;
+  - khi mật khẩu `root` sẽ được đặt: các lệnh quản trị của chính egret trên engine này lỗi cho tới khi FE nhận mật khẩu mới, thường trong vòng một phút.
 - **Các bước,** bước nào cũng idempotent:
   1. tạo mật khẩu `root`;
   2. đổi image FE và CN sang mặc định, nếu không phải hạ cấp;
   3. apply engine. Job `{name}-initpwd` đặt mật khẩu trên FE đang chạy.
 - **Chặn hạ cấp:** nếu bản phát hành của FE mới hơn bản fork mặc định thì không đổi image, vì metadata của FE không hạ phiên bản được. Mật khẩu `root` vẫn được đặt, và lý do `unpatchedImage` vẫn còn.
 - **Không có gì tự động:** không có migration tự đổi image, vì FE sẽ restart.
+- **Giới hạn:** `securityUpgradeNeeded: false` sau khi nâng cấp nghĩa là egret đã ghi nhận một lần apply thành công, không phải đã kiểm tra mật khẩu trên FE. Nếu Job `{name}-initpwd` hết số lần thử, hoặc `root` của FE đã được đặt mật khẩu bằng tay từ trước (script coi lỗi 1045 là "đã đổi" và thoát 0), egret giữ một mật khẩu mà FE không dùng. Một phép thử đăng nhập `root` để đặt lý do nâng cấp trong trường hợp đó là việc làm sau.
 
 ## Kiểm thử
 

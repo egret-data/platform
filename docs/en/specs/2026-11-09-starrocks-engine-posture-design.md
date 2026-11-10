@@ -99,7 +99,10 @@ The reasons:
     complete level. This counts a mirrored image in a private registry, as an air-gapped install
     would have;
   - or it is `ghcr.io/egret-data/egret-starrocks-fe:<release>-egret.<N>`, with release 4.1.7 and
-    N of 4 or more, or any later release.
+    N of 4 or more, or any later release, and carries no digest.
+
+  A ref that carries a digest is judged by the digest alone: the digest is what the node pulls,
+  so a patched tag pinned to another digest (`…:4.1.7-egret.4@<egret.3 digest>`) is unpatched.
 
   Anything else is unpatched, including an image egret does not know.
 - **`noRootPassword`**: the engine has no `root_secret_id`.
@@ -125,9 +128,15 @@ It returns 409 for an external engine or a non-StarRocks engine.
   `DEFAULT_ENGINE_IMAGES`;
 - "root password will be set".
 
+As built, the dialog shows the FE line only and says "The CN image moves to the same release."
+instead of a `CN image: <current> → <default>` line, because the engine DTO carries no CN
+target. When the stored FE image is absent it reads "the current image (not recorded)".
+
 It warns that:
 - the FE and CN pods restart;
-- a client outside egret that logs in as `root` with no password is refused afterwards.
+- a client outside egret that logs in as `root` with no password is refused afterwards;
+- when a root password will be set: egret's own admin statements on this engine fail until the
+  FE takes the new password, usually within a minute.
 
 **Steps**, each one idempotent, so a repeat finishes a partial run:
 1. **No root password:** `ensure_root_password_secret`, which stores `root_secret_id`.
@@ -147,6 +156,12 @@ be downgraded. The root password is still set. The answer and the dialog say:
 
 **Answer:** the engine, with recomputed `securityUpgradeNeeded` and `securityUpgradeReasons`, plus
 `imageChanged: bool` and `rootPasswordSet: bool`.
+
+**Limits.** `securityUpgradeNeeded: false` after an upgrade means egret recorded a successful
+apply, not that it verified the password on the FE. If the `{name}-initpwd` Job exhausts its
+retries, or the FE's `root` already had a password set by hand (the script treats error 1045 as
+"already changed" and exits 0), egret holds a password the FE does not use. A root-login probe
+that sets a reason in that case is a follow-up.
 
 ### Rollout
 
