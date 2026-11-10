@@ -542,7 +542,33 @@ fn fe_error(raw: impl std::fmt::Display) -> FeError {
 pub trait StarRocksDdl: Send + Sync {
     async fn execute(&self, fe: &FeTarget, sql: &str) -> Result<(), FeError>;
     async fn query(&self, fe: &FeTarget, sql: &str) -> Result<Vec<Vec<Option<String>>>, FeError>;
+    /// Like [`Self::query`], but the first row is the result's column names,
+    /// so a caller can find a column by its name instead of a guessed
+    /// position. `SHOW` statements are the use: their column order is the
+    /// FE's to choose.
+    async fn query_with_header(
+        &self,
+        fe: &FeTarget,
+        sql: &str,
+    ) -> Result<Vec<Vec<Option<String>>>, FeError>;
 }
+
+/// The column names a real FE answers `SHOW PLUGINS` with
+/// (`ShowPluginsStmt`). Only `Name` is relied on, by
+/// [`crate::query_log::plugin_step`]; the fork's e2e reads the same header
+/// (`SHOW PLUGINS\G | grep 'Name: AuditLoader'`). The fake answers with it.
+pub const SHOW_PLUGINS_HEADER: [&str; 10] = [
+    "Name",
+    "Type",
+    "Description",
+    "Version",
+    "JavaVersion",
+    "ClassName",
+    "SoName",
+    "Sources",
+    "Status",
+    "Properties",
+];
 
 /// Bounds on the real runner's own connection and per-statement work,
 /// gathered in this one named place (fix round 1 review, I4): before this,
@@ -622,22 +648,57 @@ impl StarRocksDdl for MysqlDdlRunner {
                     )))
                 }
             };
-        let out = rows
-            .into_iter()
-            .map(|row| {
-                (0..row.columns_ref().len())
-                    .map(|i| {
-                        row.as_ref(i)
-                            .cloned()
-                            .and_then(|v| mysql_async::from_value_opt::<Option<String>>(v).ok())
-                            .flatten()
-                    })
-                    .collect()
-            })
-            .collect();
+        let out = rows.into_iter().map(row_as_strings).collect();
         let _ = conn.disconnect().await;
         Ok(out)
     }
+
+    async fn query_with_header(
+        &self,
+        fe: &FeTarget,
+        sql: &str,
+    ) -> Result<Vec<Vec<Option<String>>>, FeError> {
+        use mysql_async::prelude::Queryable;
+        let mut conn = Self::connect(fe).await?;
+        let read = async {
+            let mut result = conn.query_iter(sql).await?;
+            // The columns are read BEFORE the rows: `columns_ref` looks at the
+            // pending result set, and a result with no rows still has them.
+            let header: Vec<Option<String>> = result
+                .columns_ref()
+                .iter()
+                .map(|c| Some(c.name_str().to_string()))
+                .collect();
+            let rows: Vec<mysql_async::Row> = result.collect().await?;
+            Ok::<_, mysql_async::Error>((header, rows))
+        };
+        let (header, rows) = match tokio::time::timeout(FE_STATEMENT_TIMEOUT, read).await {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return Err(fe_error(e)),
+            Err(_) => {
+                return Err(fe_error(format!(
+                    "statement timed out after {FE_STATEMENT_TIMEOUT:?}"
+                )))
+            }
+        };
+        let mut out = vec![header];
+        out.extend(rows.into_iter().map(row_as_strings));
+        let _ = conn.disconnect().await;
+        Ok(out)
+    }
+}
+
+/// One result row as text, `None` for SQL `NULL` (and for a value that is not
+/// text-convertible, which a `SHOW`/admin statement does not return).
+fn row_as_strings(row: mysql_async::Row) -> Vec<Option<String>> {
+    (0..row.columns_ref().len())
+        .map(|i| {
+            row.as_ref(i)
+                .cloned()
+                .and_then(|v| mysql_async::from_value_opt::<Option<String>>(v).ok())
+                .flatten()
+        })
+        .collect()
 }
 
 /// Where and how to reach this engine's FE. The cert is the engine's own
@@ -1172,6 +1233,9 @@ pub struct FakeStarRocksDdl {
     /// could only be expressed with the global `fail`, which also broke
     /// `SHOW CATALOGS`).
     selective_fail: Arc<Mutex<Vec<(String, String)>>>,
+    /// The names `SHOW PLUGINS` lists. An `INSTALL PLUGIN FROM` that the fake
+    /// accepts adds `AuditLoader`, the one plugin egret installs.
+    plugins: Arc<Mutex<Vec<String>>>,
     /// The `FeTarget` of the most recent call, so a test can assert the cert.
     last_target: Arc<Mutex<Option<FeTarget>>>,
     /// Runs on EVERY `execute`, with the statement text, after it is
@@ -1314,6 +1378,27 @@ impl FakeStarRocksDdl {
         self.catalogs.lock().unwrap().remove(name);
     }
 
+    /// List a plugin in `SHOW PLUGINS` from now on, as if it were installed.
+    pub fn seed_plugin(&self, name: &str) {
+        self.plugins.lock().unwrap().push(name.to_string());
+    }
+
+    /// The fake's `SHOW PLUGINS` answer: [`SHOW_PLUGINS_HEADER`], then one row
+    /// per installed plugin, its name in the `Name` column.
+    fn show_plugins(&self) -> Vec<Vec<Option<String>>> {
+        let mut out = vec![SHOW_PLUGINS_HEADER
+            .iter()
+            .map(|c| Some(c.to_string()))
+            .collect::<Vec<_>>()];
+        for name in self.plugins.lock().unwrap().iter() {
+            let mut row = vec![None; SHOW_PLUGINS_HEADER.len()];
+            row[0] = Some(name.clone());
+            row[8] = Some("INSTALLED".to_string());
+            out.push(row);
+        }
+        out
+    }
+
     /// The needle-matched failure for this statement/query text, if any.
     fn selective_failure(&self, sql: &str) -> Option<String> {
         self.selective_fail
@@ -1372,6 +1457,12 @@ impl StarRocksDdl for FakeStarRocksDdl {
             }
         } else if let Some(name) = statement_target("DROP CATALOG IF EXISTS", sql) {
             cats.remove(&name);
+        } else if sql.starts_with("INSTALL PLUGIN FROM") {
+            let mut plugins = self.plugins.lock().unwrap();
+            if plugins.iter().any(|p| p == "AuditLoader") {
+                return Err(fe_error("plugin AuditLoader has already been installed."));
+            }
+            plugins.push("AuditLoader".to_string());
         }
         Ok(())
     }
@@ -1387,6 +1478,10 @@ impl StarRocksDdl for FakeStarRocksDdl {
         }
         if sql == "SELECT 1" {
             return Ok(vec![vec![Some("1".into())]]);
+        }
+        if sql == "SHOW PLUGINS" {
+            // Without the header, as the real runner's `query` answers.
+            return Ok(self.show_plugins().split_off(1));
         }
         if sql == "SHOW CATALOGS" {
             return Ok(self
@@ -1413,6 +1508,30 @@ impl StarRocksDdl for FakeStarRocksDdl {
             ]]);
         }
         Ok(vec![])
+    }
+
+    /// The same failures as `query` (recorded in `queried()` too); only
+    /// `SHOW PLUGINS` has a header here, every other statement answers with
+    /// an empty one.
+    async fn query_with_header(
+        &self,
+        fe: &FeTarget,
+        sql: &str,
+    ) -> Result<Vec<Vec<Option<String>>>, FeError> {
+        if sql == "SHOW PLUGINS" {
+            *self.last_target.lock().unwrap() = Some(fe.clone());
+            self.queried.lock().unwrap().push(sql.to_string());
+            if let Some(msg) = self.fail.lock().unwrap().clone() {
+                return Err(fe_error(msg));
+            }
+            if let Some(msg) = self.selective_failure(sql) {
+                return Err(fe_error(msg));
+            }
+            return Ok(self.show_plugins());
+        }
+        let mut rows = self.query(fe, sql).await?;
+        rows.insert(0, vec![]);
+        Ok(rows)
     }
 }
 

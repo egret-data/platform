@@ -583,6 +583,18 @@ impl EngineMgmtStore {
         Ok(())
     }
 
+    /// Whether an egret user holds `name` as their username (case-insensitive,
+    /// like the column). The query log setup refuses to create its loader
+    /// user on an engine when a human already holds that name.
+    pub async fn username_taken(&self, name: &str) -> Result<bool, EngineMgmtError> {
+        Ok(sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM users WHERE username = $1::citext)",
+        )
+        .bind(name)
+        .fetch_one(self.pool())
+        .await?)
+    }
+
     /// Persist the generated StarRocks query-log loader password secret id for an engine.
     pub async fn set_query_log_secret(
         &self,

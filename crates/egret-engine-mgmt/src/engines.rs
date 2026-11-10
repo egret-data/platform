@@ -2626,8 +2626,6 @@ pub(crate) async fn ensure_root_password_secret(
 /// StarRocks user the AuditLoader plugin loads as; same shape as
 /// [`ensure_root_password_secret`] (idempotent via `query_log_secret_id`,
 /// recovers by the deterministic name `egret-query-log-<engine id>`).
-// Called by the query-log setup added in the next task.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn ensure_query_log_secret(
     st: &CpState,
     engine: &Engine,
@@ -5472,6 +5470,143 @@ const MAX_POLLS: u32 = 30;
 const MAX_POLLS: u32 = 1;
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// The bootstrap's two wait loops, shared with
+/// [`crate::query_log::spawn_query_log_setup`]: poll until an FE pod reports
+/// ready (checkpoint 1 on every poll), re-read the engine and resolve its
+/// [`crate::starrocks_ddl::FeTarget`], then wait for a real `root` login
+/// (checkpoint 2 on every poll). `None` when either budget runs out, the
+/// engine stops being current, or there is no provisioner; each case is
+/// logged here. Moved out of [`spawn_starrocks_catalog_wire`] unchanged.
+pub(crate) async fn wait_for_fe_root_login(
+    st: &CpState,
+    engine_id: Uuid,
+    engine_name: &str,
+    namespace: &str,
+    consecutive_read_errors: &mut u32,
+) -> Option<(Engine, crate::starrocks_ddl::FeTarget)> {
+    let Some(prov) = st.engine_provisioner.clone() else {
+        tracing::warn!(engine = %engine_name,
+            "starrocks bootstrap: kubernetes is not configured; nothing to poll");
+        return None;
+    };
+    let mut fe_ready = false;
+    for poll in 0..MAX_POLLS {
+        if !engine_still_current(
+            &st.engine_mgmt,
+            engine_id,
+            engine_name,
+            consecutive_read_errors,
+        )
+        .await
+        {
+            return None;
+        }
+        match prov.status("starrocks", namespace, engine_name).await {
+            Ok(s) => {
+                if s.pods.iter().any(|p| p.name.contains("-fe-") && p.ready) {
+                    fe_ready = true;
+                    break;
+                }
+            }
+            Err(e) => {
+                tracing::debug!(engine = %engine_name, error = %e,
+                    "starrocks bootstrap: status poll failed");
+            }
+        }
+        // No sleep after the LAST attempt: the budget is exhausted either
+        // way, and waiting one more interval only delays the warning.
+        if poll + 1 < MAX_POLLS {
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+    if !fe_ready {
+        tracing::warn!(engine = %engine_name,
+            "starrocks bootstrap: FE never reported ready within the poll budget; \
+             skipping — every attachment keeps the status it already has and a \
+             Retry converges it");
+        return None;
+    }
+
+    // The engine row itself, for the FE connection (host, port, root
+    // password, pinned certificate) and for the attachments to converge.
+    // A plain read, not an extra checkpoint: the verdict this read cannot
+    // reach — a rename, a `deleting`/`failed` flip — is taken by the root
+    // login loop's own checkpoint immediately below, before anything is
+    // written.
+    let engine = match st.engine_mgmt.get_engine(engine_id).await {
+        Ok(Some(e)) => e,
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::warn!(engine = %engine_name, error = %e,
+                "starrocks bootstrap: could not re-read the engine; stopping");
+            return None;
+        }
+    };
+    let fe = match crate::starrocks_ddl::fe_target(st, &engine).await {
+        Ok(fe) => fe,
+        Err(e) => {
+            tracing::warn!(engine = %engine_name, error = %e,
+                "starrocks bootstrap: could not resolve the FE connection; nothing applied");
+            return None;
+        }
+    };
+
+    // (Everything on this connection logs in as `root`, so the root
+    // password is a secret EVERY error below could quote — a failed login
+    // echoes the credential it was given. This used to be a `fe_secrets`
+    // map assembled here and threaded through each `scrubbed` call by
+    // hand, which is the thing that was forgotten twice; `scrubbed` now
+    // takes `&fe` and derives it. Final whole-branch review, F2.)
+
+    // FE-pod-Ready is NOT root-login-ready: the `{name}-initpwd` Job (#268)
+    // sets root's password via a SEPARATE Job that races the FE coming up, so
+    // the pod reports Ready before the password is set. Running the bootstrap
+    // DDL now would hit `Access denied for user 'root' (using password: YES)`.
+    // Probe a real root login (a trivial `SELECT 1`) until it succeeds, so the
+    // DDL below runs only once initpwd has won. Bounded like the pod poll.
+    let mut auth_ready = false;
+    for poll in 0..MAX_POLLS {
+        if !engine_still_current(
+            &st.engine_mgmt,
+            engine_id,
+            engine_name,
+            consecutive_read_errors,
+        )
+        .await
+        {
+            return None;
+        }
+        match st.starrocks_ddl.query(&fe, "SELECT 1").await {
+            Ok(_) => {
+                auth_ready = true;
+                break;
+            }
+            Err(e) => {
+                // The probe carries the root password and nothing else, so
+                // what comes back can quote it: `scrubbed` is the only way
+                // to read the diagnosis, and the `&fe` it is given is what
+                // closes the module's documented short-unquoted residual
+                // for that value.
+                tracing::debug!(engine = %engine_name,
+                    error = %e.scrubbed(&fe, &std::collections::BTreeMap::new()),
+                    "starrocks bootstrap: root login not ready yet (initpwd race); retrying");
+            }
+        }
+        if poll + 1 < MAX_POLLS {
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+    if !auth_ready {
+        tracing::warn!(engine = %engine_name,
+            "starrocks bootstrap: root login never succeeded within the poll budget \
+             (initpwd race?); skipping — every attachment keeps the status it \
+             already has");
+        return None;
+    }
+
+    Some((engine, fe))
+}
+
 /// Best-effort, non-blocking post-provision convergence: poll until an FE pod
 /// is ready, wait for a real `root` login (the `initpwd` Job races the FE),
 /// then bring EVERY attachment of this engine onto the FE and record the
@@ -5509,17 +5644,19 @@ const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 /// attachments keep the status they already have — they must not claim
 /// `pending`, which is only the create path's starting state.
 ///
-/// **Where the six `engine_still_current` checkpoints sit, and why.** They
+/// **Where the seven `engine_still_current` checkpoints sit, and why.** They
 /// exist so a bootstrap cannot resurrect an engine that was deleted or renamed
 /// while it polled, and a loop over N attachments must not weaken that. One per
-/// iteration of each poll loop (1, 2); one per ATTACHMENT inside
+/// iteration of each poll loop (1, 2), both in [`wait_for_fe_root_login`]; one
+/// per ATTACHMENT inside
 /// [`crate::catalog_apply::converge_starrocks_catalogs`] (3) — where before it
 /// guarded the single catalog statement, so a delete part-way through a
 /// ten-catalog engine now stops at the next catalog instead of finishing the
-/// batch; then one before the security integration (4), one before its repair
-/// (5), and one per remaining delegation statement (6). The rule is the same
-/// everywhere: re-read immediately before a WRITE to the cluster, never once
-/// for a batch of them.
+/// batch; one before the query log setup (4,
+/// [`crate::query_log::ensure_query_log`]); then one before the security
+/// integration (5), one before its repair (6), and one per remaining delegation
+/// statement (7). The rule is the same everywhere: re-read immediately before a
+/// WRITE to the cluster, never once for a batch of them.
 fn spawn_starrocks_catalog_wire(
     st: CpState,
     engine_id: Uuid,
@@ -5528,131 +5665,23 @@ fn spawn_starrocks_catalog_wire(
     delegation: Option<StarRocksDelegationBootstrap>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let Some(prov) = st.engine_provisioner.clone() else {
-            tracing::warn!(engine = %engine_name,
-                "starrocks bootstrap: kubernetes is not configured; nothing to poll");
-            return;
-        };
         // One counter for the whole bootstrap, threaded through every
         // `engine_still_current` checkpoint — including the per-attachment one
         // inside `converge_starrocks_catalogs`, which is why that function
         // borrows it rather than starting a fresh count: see
         // `MAX_CONSECUTIVE_ENGINE_READ_ERRORS`.
         let mut consecutive_read_errors: u32 = 0;
-        let mut fe_ready = false;
-        for poll in 0..MAX_POLLS {
-            if !engine_still_current(
-                &st.engine_mgmt,
-                engine_id,
-                &engine_name,
-                &mut consecutive_read_errors,
-            )
-            .await
-            {
-                return;
-            }
-            match prov.status("starrocks", &namespace, &engine_name).await {
-                Ok(s) => {
-                    if s.pods.iter().any(|p| p.name.contains("-fe-") && p.ready) {
-                        fe_ready = true;
-                        break;
-                    }
-                }
-                Err(e) => {
-                    tracing::debug!(engine = %engine_name, error = %e,
-                        "starrocks bootstrap: status poll failed");
-                }
-            }
-            // No sleep after the LAST attempt: the budget is exhausted either
-            // way, and waiting one more interval only delays the warning.
-            if poll + 1 < MAX_POLLS {
-                tokio::time::sleep(POLL_INTERVAL).await;
-            }
-        }
-        if !fe_ready {
-            tracing::warn!(engine = %engine_name,
-                "starrocks bootstrap: FE never reported ready within the poll budget; \
-                 skipping — every attachment keeps the status it already has and a \
-                 Retry converges it");
+        let Some((engine, fe)) = wait_for_fe_root_login(
+            &st,
+            engine_id,
+            &engine_name,
+            &namespace,
+            &mut consecutive_read_errors,
+        )
+        .await
+        else {
             return;
-        }
-
-        // The engine row itself, for the FE connection (host, port, root
-        // password, pinned certificate) and for the attachments to converge.
-        // A plain read, not a seventh checkpoint: the verdict this read cannot
-        // reach — a rename, a `deleting`/`failed` flip — is taken by the root
-        // login loop's own checkpoint immediately below, before anything is
-        // written.
-        let engine = match st.engine_mgmt.get_engine(engine_id).await {
-            Ok(Some(e)) => e,
-            Ok(None) => return,
-            Err(e) => {
-                tracing::warn!(engine = %engine_name, error = %e,
-                    "starrocks bootstrap: could not re-read the engine; stopping");
-                return;
-            }
         };
-        let fe = match crate::starrocks_ddl::fe_target(&st, &engine).await {
-            Ok(fe) => fe,
-            Err(e) => {
-                tracing::warn!(engine = %engine_name, error = %e,
-                    "starrocks bootstrap: could not resolve the FE connection; nothing applied");
-                return;
-            }
-        };
-
-        // (Everything on this connection logs in as `root`, so the root
-        // password is a secret EVERY error below could quote — a failed login
-        // echoes the credential it was given. This used to be a `fe_secrets`
-        // map assembled here and threaded through each `scrubbed` call by
-        // hand, which is the thing that was forgotten twice; `scrubbed` now
-        // takes `&fe` and derives it. Final whole-branch review, F2.)
-
-        // FE-pod-Ready is NOT root-login-ready: the `{name}-initpwd` Job (#268)
-        // sets root's password via a SEPARATE Job that races the FE coming up, so
-        // the pod reports Ready before the password is set. Running the bootstrap
-        // DDL now would hit `Access denied for user 'root' (using password: YES)`.
-        // Probe a real root login (a trivial `SELECT 1`) until it succeeds, so the
-        // DDL below runs only once initpwd has won. Bounded like the pod poll.
-        let mut auth_ready = false;
-        for poll in 0..MAX_POLLS {
-            if !engine_still_current(
-                &st.engine_mgmt,
-                engine_id,
-                &engine_name,
-                &mut consecutive_read_errors,
-            )
-            .await
-            {
-                return;
-            }
-            match st.starrocks_ddl.query(&fe, "SELECT 1").await {
-                Ok(_) => {
-                    auth_ready = true;
-                    break;
-                }
-                Err(e) => {
-                    // The probe carries the root password and nothing else, so
-                    // what comes back can quote it: `scrubbed` is the only way
-                    // to read the diagnosis, and the `&fe` it is given is what
-                    // closes the module's documented short-unquoted residual
-                    // for that value.
-                    tracing::debug!(engine = %engine_name,
-                        error = %e.scrubbed(&fe, &std::collections::BTreeMap::new()),
-                        "starrocks bootstrap: root login not ready yet (initpwd race); retrying");
-                }
-            }
-            if poll + 1 < MAX_POLLS {
-                tokio::time::sleep(POLL_INTERVAL).await;
-            }
-        }
-        if !auth_ready {
-            tracing::warn!(engine = %engine_name,
-                "starrocks bootstrap: root login never succeeded within the poll budget \
-                 (initpwd race?); skipping — every attachment keeps the status it \
-                 already has");
-            return;
-        }
 
         // Checkpoint 3 lives inside this loop, once per attachment.
         crate::catalog_apply::converge_starrocks_catalogs(
@@ -5662,6 +5691,23 @@ fn spawn_starrocks_catalog_wire(
             &mut consecutive_read_errors,
         )
         .await;
+
+        // Checkpoint 4: the query log writes a database, a user and a plugin.
+        // It does not wait for the first event here (that takes up to three
+        // minutes, and the delegation statements below must not wait on it);
+        // the wait runs after them instead.
+        if !engine_still_current(
+            &st.engine_mgmt,
+            engine_id,
+            &engine_name,
+            &mut consecutive_read_errors,
+        )
+        .await
+        {
+            return;
+        }
+        let query_log = crate::query_log::ensure_query_log(&st, &engine, &fe, false).await;
+        crate::query_log::log_outcome(&engine_name, &query_log);
 
         // Delegation bootstrap (S3-T2 step 3): JWT integration + impersonation
         // service user, best-effort + logged like the catalog convergence above.
@@ -5764,6 +5810,11 @@ fn spawn_starrocks_catalog_wire(
                 tracing::info!(engine = %engine_name,
                     "starrocks delegation bootstrap: JWT integration + impersonation user wired");
             }
+        }
+
+        // The query log's step 6, last: it only reads, and it can take minutes.
+        if query_log == crate::query_log::QueryLogSetup::Ready {
+            crate::query_log::wait_for_events(&st, &fe, &engine_name).await;
         }
     })
 }
@@ -6689,6 +6740,7 @@ async fn update_starrocks_engine(
     // new mode immediately, while (a) is spawned detached and runs against the FE
     // only once it reports Ready (~1-2 min) — so briefly the connections announce
     // a mode the FE has not finished (re)bootstrapping.
+    let mut rebootstrapped = false;
     if deleg_changed {
         // (a) Re-bootstrap, mirroring create's non-blocking post-Ready wire.
         // It reads its own credentials now (SP3b Task 5: the convergence
@@ -6705,7 +6757,20 @@ async fn update_starrocks_engine(
                 engine.namespace.clone(),
                 Some(boot),
             );
+            rebootstrapped = true;
         }
+    }
+    if !rebootstrapped {
+        // An image or config change restarts the FE, and the bootstrap above
+        // (which sets up the query log too) runs only for a delegation change
+        // that leaves delegation on. Not awaited, and its failure is only
+        // logged: the apply succeeded.
+        crate::query_log::spawn_query_log_setup(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+        );
     }
     // (b) Re-materialize the per-workspace connections unconditionally.
     rematerialize_or_400(&st, engine.id).await?;
@@ -12944,7 +13009,7 @@ mod tests {
     /// once; that regression would NOT be caught by the two helper-level
     /// unit tests above it, only by driving the real spawned task.
     ///
-    /// The other five checkpoints are driven by the tests below it, through
+    /// The other six checkpoints are driven by the tests below it, through
     /// the fake FE (D8).
     #[tokio::test]
     async fn bootstrap_stops_before_any_provisioner_call_when_engine_already_gone() {
@@ -13849,12 +13914,15 @@ mod tests {
         );
     }
 
-    /// Checkpoint 4 — the one before `CREATE SECURITY INTEGRATION`.
+    /// Checkpoint 5 — the one before `CREATE SECURITY INTEGRATION`.
     ///
-    /// One attachment, and the engine is flipped while its catalog is being
-    /// created: checkpoint 3 has already passed for that attachment, the loop
-    /// then ends, and checkpoint 4 is the next thing between the bootstrap and
-    /// a write. Nothing of the delegation half may reach the FE.
+    /// The engine is flipped while the query log's last statement (its
+    /// `INSTALL PLUGIN`) is in flight: checkpoints 3 and 4 have already
+    /// passed, and checkpoint 5 is the next thing between the bootstrap and a
+    /// write. Nothing of the delegation half may reach the FE. (Until the
+    /// query log, the flip happened on the catalog's `CREATE`; that now stops
+    /// at checkpoint 4, which `the_bootstrap_stops_before_the_query_log_…`
+    /// pins.)
     #[tokio::test]
     async fn the_delegation_checkpoint_stops_before_the_security_integration() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
@@ -13873,9 +13941,15 @@ mod tests {
 
         let store = st.engine_mgmt.clone();
         let engine_id = engine.id;
-        fake.on_create(move |_name| {
+        // On the query log's last statement, so the next checkpoint is the
+        // one before the security integration and not the query log's own.
+        fake.on_execute(move |sql| {
             let store = store.clone();
-            Box::pin(async move { stop_being_current(&store, engine_id).await })
+            Box::pin(async move {
+                if sql.starts_with("INSTALL PLUGIN") {
+                    stop_being_current(&store, engine_id).await;
+                }
+            })
         });
 
         spawn_starrocks_catalog_wire(
@@ -13890,6 +13964,13 @@ mod tests {
 
         assert_eq!(fake.created().len(), 1, "premise: the catalog ran first");
         assert!(
+            fake.executed()
+                .iter()
+                .any(|s| s.starts_with("INSTALL PLUGIN")),
+            "premise: the query log ran to its last statement: {:?}",
+            fake.executed()
+        );
+        assert!(
             !fake
                 .executed()
                 .iter()
@@ -13899,7 +13980,7 @@ mod tests {
         );
     }
 
-    /// Checkpoint 5 — the one before the repair `ALTER SECURITY INTEGRATION`.
+    /// Checkpoint 6 — the one before the repair `ALTER SECURITY INTEGRATION`.
     ///
     /// The FE answers the `CREATE` with `already exists`, which is the branch
     /// that leads to the repair; the engine stops being current while that
@@ -13928,9 +14009,9 @@ mod tests {
         // Premise: the injected FE message is recognized as already-exists —
         // checked independently of the run below, because if `is_already_exists`
         // ever regressed to `false` here, the general `Err(e)` arm would take
-        // over, stop at its OWN checkpoint before ever reaching checkpoint 5,
+        // over, stop at its OWN checkpoint before ever reaching checkpoint 6,
         // and still send no `ALTER` — leaving every assertion below green while
-        // no longer exercising checkpoint 5 at all.
+        // no longer exercising checkpoint 6 at all.
         let probe_fe = crate::starrocks_ddl::fe_target(&st, &engine)
             .await
             .expect("fe target");
@@ -13979,13 +14060,13 @@ mod tests {
         );
     }
 
-    /// Checkpoint 6 — the one inside the loop over the remaining delegation
+    /// Checkpoint 7 — the one inside the loop over the remaining delegation
     /// statements (`ADMIN SET FRONTEND CONFIG`, `CREATE USER`,
     /// `GRANT IMPERSONATE`).
     ///
     /// Same hook, but the integration SUCCEEDS this time, so the repair branch
     /// is not taken and the next thing between the bootstrap and a write is
-    /// checkpoint 6. None of the three may be sent.
+    /// checkpoint 7. None of the three may be sent.
     #[tokio::test]
     async fn the_remaining_delegation_statements_stop_at_their_own_checkpoint() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
@@ -14028,7 +14109,8 @@ mod tests {
         );
         for stopped in [
             "ADMIN SET FRONTEND CONFIG",
-            "CREATE USER IF NOT EXISTS",
+            // The delegator's, not the query log loader's (which ran before).
+            "CREATE USER IF NOT EXISTS 'egret_delegator'",
             "GRANT IMPERSONATE",
         ] {
             assert!(
@@ -14051,7 +14133,7 @@ mod tests {
         }
     }
 
-    /// Checkpoints 4-6: the delegation half still runs, and `already exists`
+    /// Checkpoints 5-7: the delegation half still runs, and `already exists`
     /// still repairs — driven through the fake runner instead of a real MySQL
     /// port, which is what
     /// `spawn_starrocks_catalog_wire_keeps_all_six_guard_checkpoints` existed
@@ -15467,5 +15549,499 @@ mod tests {
             starrocks_root_conn_opts("fe.svc", STARROCKS_FE_MYSQL_PORT, None, None).into();
         assert_eq!(opts.user(), Some("root"));
         assert_eq!(opts.pass(), None);
+    }
+
+    // ── The query log (package A, Task 3) ──────────────────────────────────
+
+    /// Serializes the query-log tests that read or write the
+    /// `egret_query_log` username: one of them makes it taken, which would
+    /// fail the others' step 1 if they ran meanwhile.
+    static QUERY_LOG_USERNAME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// The engine's loader password, as the setup resolves it (idempotent).
+    async fn loader_password(st: &CpState, engine_id: Uuid) -> String {
+        let engine = st
+            .engine_mgmt
+            .get_engine(engine_id)
+            .await
+            .expect("read engine")
+            .expect("engine present");
+        ensure_query_log_secret(st, &engine)
+            .await
+            .expect("loader password")
+            .1
+    }
+
+    /// An engine whose stored FE image is an official one (no audit plugin).
+    async fn seed_sr_engine_on_official_image(st: &CpState) -> Engine {
+        let engine = seed_sr_engine(st).await;
+        let mut spec = engine.spec.clone();
+        spec["starrocksConfig"]["feImage"] = serde_json::json!("starrocks/fe-ubuntu:4.1.6");
+        assert!(st
+            .engine_mgmt
+            .update_engine(engine.id, &spec, &engine.status)
+            .await
+            .expect("update spec"));
+        st.engine_mgmt
+            .get_engine(engine.id)
+            .await
+            .expect("reload")
+            .expect("engine present")
+    }
+
+    #[tokio::test]
+    async fn the_query_log_setup_runs_its_statements_then_show_plugins_then_install() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping the_query_log_setup_runs_its_statements_then_show_plugins_then_install: DATABASE_URL not set");
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let engine = seed_sr_engine(&st).await;
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe target");
+
+        let setup = crate::query_log::ensure_query_log(&st, &engine, &fe, false).await;
+
+        assert_eq!(setup, crate::query_log::QueryLogSetup::Ready);
+        let pw = loader_password(&st, engine.id).await;
+        let mut expected = crate::query_log::query_log_setup_sql(&pw, false);
+        expected.push(crate::query_log::install_plugin_sql(&pw));
+        assert_eq!(fake.executed(), expected);
+        assert_eq!(fake.queried(), vec!["SHOW PLUGINS".to_string()]);
+        let row = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert!(row.query_log_secret_id.is_some(), "the password is stored");
+
+        // Second run: the FE now lists AuditLoader, so nothing is installed
+        // again, and the rest converges idempotently.
+        fake.clear_executed();
+        let setup = crate::query_log::ensure_query_log(&st, &row, &fe, false).await;
+        assert_eq!(setup, crate::query_log::QueryLogSetup::Ready);
+        assert_eq!(
+            fake.executed(),
+            crate::query_log::query_log_setup_sql(&pw, false)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_fe_that_lists_audit_loader_gets_no_install() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!(
+                "skipping an_fe_that_lists_audit_loader_gets_no_install: DATABASE_URL not set"
+            );
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        fake.seed_plugin("AuditLoader");
+        let engine = seed_sr_engine(&st).await;
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe target");
+
+        let setup = crate::query_log::ensure_query_log(&st, &engine, &fe, false).await;
+
+        assert_eq!(setup, crate::query_log::QueryLogSetup::Ready);
+        assert!(
+            !fake
+                .executed()
+                .iter()
+                .any(|s| s.starts_with("INSTALL PLUGIN")),
+            "{:?}",
+            fake.executed()
+        );
+    }
+
+    /// A bound engine's FE runs Ranger, so the native grant is not sent.
+    #[tokio::test]
+    async fn a_bound_engine_gets_no_native_grant() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping a_bound_engine_gets_no_native_grant: DATABASE_URL not set");
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let mut engine = seed_sr_engine(&st).await;
+        engine.authz_service_id = Some(1);
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe target");
+
+        let setup = crate::query_log::ensure_query_log(&st, &engine, &fe, false).await;
+
+        assert_eq!(setup, crate::query_log::QueryLogSetup::Ready);
+        let sent = fake.executed();
+        assert!(!sent.iter().any(|s| s.starts_with("GRANT")), "{sent:?}");
+        assert!(
+            sent.iter().any(|s| s.starts_with("INSTALL PLUGIN")),
+            "{sent:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_image_without_the_plugin_gets_the_table_and_user_but_no_install() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping an_image_without_the_plugin_gets_the_table_and_user_but_no_install: DATABASE_URL not set");
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let engine = seed_sr_engine_on_official_image(&st).await;
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe target");
+
+        let setup = crate::query_log::ensure_query_log(&st, &engine, &fe, true).await;
+
+        assert_eq!(setup, crate::query_log::QueryLogSetup::PluginNotShipped);
+        let pw = loader_password(&st, engine.id).await;
+        assert_eq!(
+            fake.executed(),
+            crate::query_log::query_log_setup_sql(&pw, false)
+        );
+        assert_eq!(
+            fake.queried(),
+            vec!["SHOW PLUGINS".to_string()],
+            "no install, and no wait for events either"
+        );
+    }
+
+    /// An FE error is `Failed`, with the loader password scrubbed out of the
+    /// message. The password is made short and unquoted in the FE's reply, the
+    /// shape only the scrub map can remove (see `SHORT_ROOT_PW`).
+    #[tokio::test]
+    async fn an_fe_error_is_failed_with_the_loader_password_scrubbed() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping an_fe_error_is_failed_with_the_loader_password_scrubbed: DATABASE_URL not set");
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let engine = seed_sr_engine(&st).await;
+        const SHORT_LOADER_PW: &str = "ld0r-pw";
+        let sid = st
+            .secrets
+            .create(
+                None,
+                &format!("egret-query-log-{}", engine.id),
+                Some("query log loader password (short, for this test)"),
+                SHORT_LOADER_PW,
+            )
+            .await
+            .expect("store the short loader password");
+        st.engine_mgmt
+            .set_query_log_secret(engine.id, sid)
+            .await
+            .expect("set the loader secret");
+        let engine = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe target");
+        let reply = format!(
+            "ERROR 1064 (HY000): plugin install failed for user egret_query_log password {SHORT_LOADER_PW}"
+        );
+        fake.fail_matching("INSTALL PLUGIN", &reply);
+
+        let setup = crate::query_log::ensure_query_log(&st, &engine, &fe, false).await;
+
+        let crate::query_log::QueryLogSetup::Failed(msg) = setup else {
+            panic!("expected Failed, got {setup:?}");
+        };
+        assert!(
+            !msg.contains(SHORT_LOADER_PW),
+            "the loader password leaked: {msg}"
+        );
+        assert!(
+            msg.contains("plugin install failed"),
+            "the diagnosis stays: {msg}"
+        );
+        assert!(
+            fake.executed()
+                .iter()
+                .any(|s| s.starts_with("INSTALL PLUGIN")),
+            "premise: the INSTALL was the statement refused"
+        );
+    }
+
+    /// Step 1: a human holding the loader's name stops the setup before
+    /// anything is created.
+    #[tokio::test]
+    async fn a_taken_loader_name_fails_before_anything_is_created() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping a_taken_loader_name_fails_before_anything_is_created: DATABASE_URL not set");
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let pool = st.engine_mgmt.pool().clone();
+        // A human who held the name before migration 0218 reserved it. The
+        // ledger (append-only) now refuses that name, so the row is written
+        // the way it existed then: with the ledger's triggers off for this
+        // one transaction.
+        let email = format!("ql-{}@example.test", Uuid::new_v4().simple());
+        let mut tx = pool.begin().await.expect("begin");
+        sqlx::query("SET LOCAL session_replication_role = replica")
+            .execute(&mut *tx)
+            .await
+            .expect("triggers off (needs a superuser test role)");
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (provider, email, name, username) \
+             VALUES ('local', $1, 'Query Log Human', 'Egret_Query_Log') RETURNING id",
+        )
+        .bind(&email)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("insert the human");
+        tx.commit().await.expect("commit");
+        let engine = seed_sr_engine(&st).await;
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe target");
+
+        let setup = crate::query_log::ensure_query_log(&st, &engine, &fe, false).await;
+        let taken = st.engine_mgmt.username_taken("egret_query_log").await;
+        let mut tx = pool.begin().await.expect("begin");
+        sqlx::query("SET LOCAL session_replication_role = replica")
+            .execute(&mut *tx)
+            .await
+            .expect("triggers off");
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .expect("remove the human");
+        tx.commit().await.expect("commit");
+
+        assert_eq!(taken.ok(), Some(true), "case-insensitive, like the column");
+        let crate::query_log::QueryLogSetup::Failed(msg) = setup else {
+            panic!("expected Failed, got {setup:?}");
+        };
+        assert!(
+            msg.starts_with("a user named egret_query_log exists;"),
+            "{msg}"
+        );
+        assert!(fake.executed().is_empty(), "{:?}", fake.executed());
+        assert!(fake.queried().is_empty(), "{:?}", fake.queried());
+        let row = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert!(row.query_log_secret_id.is_none(), "no password minted");
+        assert_eq!(
+            st.engine_mgmt.username_taken("egret_query_log").await.ok(),
+            Some(false)
+        );
+    }
+
+    /// Step 6 runs only when asked: the probe and its read-back.
+    #[tokio::test]
+    async fn the_wait_for_events_sends_a_probe_and_reads_it_back_only_when_asked() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping the_wait_for_events_sends_a_probe_and_reads_it_back_only_when_asked: DATABASE_URL not set");
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let engine = seed_sr_engine(&st).await;
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe target");
+
+        crate::query_log::ensure_query_log(&st, &engine, &fe, false).await;
+        assert_eq!(fake.queried(), vec!["SHOW PLUGINS".to_string()]);
+
+        fake.clear_executed();
+        crate::query_log::ensure_query_log(&st, &engine, &fe, true).await;
+        let q = fake.queried();
+        assert_eq!(q.len(), 3, "{q:?}");
+        assert!(q[1].starts_with("SELECT 'egret-query-log-probe-"), "{q:?}");
+        let id = q[1]
+            .trim_start_matches("SELECT 'egret-query-log-probe-")
+            .trim_end_matches('\'');
+        assert!(Uuid::parse_str(id).is_ok(), "a fresh UUID: {q:?}");
+        assert!(
+            q[2].starts_with("SELECT count(*) FROM starrocks_audit_db__.starrocks_audit_tbl__"),
+            "{q:?}"
+        );
+        assert!(
+            !q[2].contains(&format!("egret-query-log-probe-{id}")),
+            "the read-back must not match itself: {q:?}"
+        );
+    }
+
+    /// Checkpoint 4: an engine that stops being current while its
+    /// attachments converge gets no query log statement.
+    #[tokio::test]
+    async fn the_bootstrap_stops_before_the_query_log_when_the_engine_is_deleted() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping the_bootstrap_stops_before_the_query_log_when_the_engine_is_deleted: DATABASE_URL not set");
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st).await;
+        prov.set_status(ready_fe_status(&engine.name));
+        let name = format!("a_{}", Uuid::new_v4().simple());
+        seed_pending_attachments(&st, &engine, wh.id, &[name.as_str()]).await;
+        let store = st.engine_mgmt.clone();
+        let engine_id = engine.id;
+        fake.on_create(move |_name| {
+            let store = store.clone();
+            Box::pin(async move { stop_being_current(&store, engine_id).await })
+        });
+
+        spawn_starrocks_catalog_wire(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+            None,
+        )
+        .await
+        .expect("bootstrap task did not panic");
+
+        assert_eq!(fake.created().len(), 1, "premise: the catalog ran first");
+        let sent = fake.executed();
+        assert!(
+            !sent
+                .iter()
+                .any(|s| s.contains("starrocks_audit_db__") || s.contains("egret_query_log")),
+            "no query log statement may reach an engine that is being deleted: {sent:?}"
+        );
+        assert!(!fake.queried().iter().any(|q| q == "SHOW PLUGINS"));
+    }
+
+    /// The bootstrap of a live engine does set the query log up, after the
+    /// catalogs.
+    #[tokio::test]
+    async fn the_bootstrap_sets_the_query_log_up_after_the_catalogs() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping the_bootstrap_sets_the_query_log_up_after_the_catalogs: DATABASE_URL not set");
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st).await;
+        prov.set_status(ready_fe_status(&engine.name));
+        let name = format!("a_{}", Uuid::new_v4().simple());
+        seed_pending_attachments(&st, &engine, wh.id, &[name.as_str()]).await;
+
+        spawn_starrocks_catalog_wire(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+            None,
+        )
+        .await
+        .expect("bootstrap task did not panic");
+
+        let sent = fake.executed();
+        let catalog = sent
+            .iter()
+            .position(|s| s.starts_with("CREATE EXTERNAL CATALOG"))
+            .expect("the catalog");
+        let database = sent
+            .iter()
+            .position(|s| s == crate::query_log::QUERY_LOG_DATABASE_DDL)
+            .expect("the query log");
+        assert!(catalog < database, "{sent:?}");
+        assert_eq!(
+            sent.last().map(|s| s.starts_with("INSTALL PLUGIN")),
+            Some(true),
+            "{sent:?}"
+        );
+        assert!(
+            fake.queried()
+                .iter()
+                .any(|q| q.starts_with("SELECT 'egret-query-log-probe-")),
+            "the bootstrap waits for the first event, last: {:?}",
+            fake.queried()
+        );
+    }
+
+    /// `spawn_query_log_setup` waits like the bootstrap, then sets up.
+    #[tokio::test]
+    async fn the_spawned_setup_waits_for_the_fe_then_sets_up() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!(
+                "skipping the_spawned_setup_waits_for_the_fe_then_sets_up: DATABASE_URL not set"
+            );
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let engine = seed_sr_engine(&st).await;
+
+        // No FE pod is ready: nothing reaches the FE.
+        crate::query_log::spawn_query_log_setup(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+        )
+        .await
+        .expect("no panic");
+        assert!(fake.executed().is_empty() && fake.queried().is_empty());
+
+        prov.set_status(ready_fe_status(&engine.name));
+        crate::query_log::spawn_query_log_setup(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+        )
+        .await
+        .expect("no panic");
+        let q = fake.queried();
+        assert_eq!(q.first().map(String::as_str), Some("SELECT 1"), "{q:?}");
+        assert!(q.iter().any(|s| s == "SHOW PLUGINS"), "{q:?}");
+        assert_eq!(
+            fake.executed()
+                .last()
+                .map(|s| s.starts_with("INSTALL PLUGIN")),
+            Some(true),
+            "{:?}",
+            fake.executed()
+        );
+    }
+
+    /// The boot pass takes live provisioned StarRocks engines only.
+    #[tokio::test]
+    async fn the_boot_pass_skips_deleting_failed_external_and_trino_engines() {
+        let Some((st, _fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping the_boot_pass_skips_deleting_failed_external_and_trino_engines: DATABASE_URL not set");
+            return;
+        };
+        let live = seed_sr_engine(&st).await;
+        assert!(crate::query_log::boot_pass_takes(&live));
+        for status in [crate::engine_status::DELETING, crate::engine_status::FAILED] {
+            let mut e = live.clone();
+            e.status = status.to_string();
+            assert!(!crate::query_log::boot_pass_takes(&e), "{status}");
+        }
+        let mut external = live.clone();
+        external.origin = crate::external::ORIGIN_EXTERNAL.to_string();
+        assert!(!crate::query_log::boot_pass_takes(&external));
+        let mut trino = live.clone();
+        trino.r#type = "trino".to_string();
+        assert!(!crate::query_log::boot_pass_takes(&trino));
+    }
+
+    /// The Query log's plugin switches are egret's: an `feConfig` override
+    /// of either is refused.
+    #[test]
+    fn feconfig_cannot_switch_the_audit_plugin_off_or_move_it() {
+        for key in ["plugin_enable", "plugin_dir"] {
+            let body = StarRocksConfigBody {
+                fe_config: Some(std::collections::BTreeMap::from([(
+                    key.to_string(),
+                    "false".to_string(),
+                )])),
+                ..Default::default()
+            };
+            match validate_sr_fe_config(&body) {
+                Err(CpError::BadRequest(m)) => assert!(m.contains(key), "msg was: {m}"),
+                other => panic!("expected BadRequest rejecting {key}, got {other:?}"),
+            }
+        }
     }
 }

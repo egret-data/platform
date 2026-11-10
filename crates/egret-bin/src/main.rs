@@ -3216,6 +3216,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // `catalog_admin` below).
     let opa_on = opa.is_some();
     let opa_reapply_state = engine_mgmt.clone();
+    let query_log_state = engine_mgmt.clone();
     let control_plane = Some(egret_controlplane::CpState {
         storage: egret_catalog_engine::CatalogStore::new(db.clone()),
         storage_registry: egret_storage::StorageRegistry::new(db.clone()),
@@ -3684,6 +3685,14 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 }
             });
         }
+    }
+    // Every provisioned StarRocks engine gets its Query log set up once at
+    // start (an engine created before the Query log existed has none), in the
+    // background; each engine logs its own outcome.
+    if let Some(st) = query_log_state {
+        tokio::spawn(async move {
+            egret_engine_mgmt::setup_query_logs(&st).await;
+        });
     }
     if let Some(router) = apps_proxy {
         let apps_addr = config.apps.listen.clone();
