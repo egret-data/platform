@@ -296,6 +296,10 @@ const INITPWD_SCRIPT_KEY: &str = "fe_initpwd.sh";
 /// FE MySQL-protocol query port the initpwd script connects to.
 const INITPWD_FE_QUERY_PORT: &str = "9030";
 
+/// How long a re-provision waits for the old `{name}-initpwd` Job to disappear.
+const INITPWD_JOB_GONE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const INITPWD_JOB_GONE_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// The FE `root` password, or `None` when the engine is legacy/passwordless
 /// (no `root_password`, or an explicitly-empty one). Central gate for all three
 /// initpwd builders.
@@ -1021,8 +1025,9 @@ impl StarRocksProvisioner {
         // configured). The Secret + ConfigMap are mutable and freely
         // re-appliable; the Job's `spec.template` is IMMUTABLE, so on a second
         // provision/update a plain apply would error on immutable fields. Delete
-        // any existing `{name}-initpwd` Job first (best-effort, ignore
-        // not-found) so every provision/update gets a fresh Job running the
+        // any existing `{name}-initpwd` Job first (Background propagation, then
+        // wait until it is really gone: applying onto a terminating Job makes it
+        // vanish) so every provision/update gets a fresh Job running the
         // idempotent SET-PASSWORD script.
         if let Some(secret) = starrocks_root_password_secret(spec) {
             self.kube.apply(&secret).await?;
@@ -1030,15 +1035,16 @@ impl StarRocksProvisioner {
                 self.kube.apply(&cm).await?;
             }
             if let Some(job) = starrocks_initpwd_job(spec) {
-                let _ = self
-                    .kube
-                    .delete(
-                        "batch/v1",
-                        "Job",
-                        &spec.namespace,
-                        &format!("{}-initpwd", spec.name),
-                    )
-                    .await;
+                crate::kube_client::delete_background_and_wait(
+                    self.kube.as_ref(),
+                    "batch/v1",
+                    "Job",
+                    &spec.namespace,
+                    &format!("{}-initpwd", spec.name),
+                    INITPWD_JOB_GONE_TIMEOUT,
+                    INITPWD_JOB_GONE_POLL,
+                )
+                .await?;
                 self.kube.apply(&job).await?;
             }
         }
@@ -2321,6 +2327,68 @@ mod tests {
             assert!(applied.get("ConfigMap/sr1-initpwd-shell").is_none());
             assert!(applied.get("Job/sr1-initpwd").is_none());
         }
+    }
+
+    fn spec_with_root_password() -> EngineSpec {
+        let mut spec = sample_sr_spec();
+        spec.starrocks.as_mut().unwrap().root_password = Some("s3cret".to_string());
+        spec
+    }
+
+    /// The old Job is still terminating after the delete returns: the new Job
+    /// is applied only once it is really gone, never onto the terminating one.
+    #[tokio::test(start_paused = true)]
+    async fn initpwd_job_is_applied_only_after_the_old_one_is_gone() {
+        use crate::kube_client::FakeKube;
+
+        let kube = Arc::new(FakeKube::default());
+        kube.set_live(serde_json::json!({"kind":"Job","metadata":{"name":"sr1-initpwd"}}));
+        kube.terminate_for(3);
+        StarRocksProvisioner::new(kube.clone())
+            .provision(&spec_with_root_password())
+            .await
+            .unwrap();
+        assert!(kube.applied_onto_terminating.lock().unwrap().is_empty());
+        assert!(kube.applied.lock().unwrap().contains_key("Job/sr1-initpwd"));
+        assert_eq!(
+            *kube.deleted_background.lock().unwrap(),
+            vec!["Job/sr1-initpwd"],
+            "Background propagation, so the old pods go with the Job"
+        );
+    }
+
+    /// A Job that never goes away fails the provision, naming the Job, and the
+    /// new Job is not applied.
+    #[tokio::test(start_paused = true)]
+    async fn initpwd_job_that_never_goes_away_fails_the_provision() {
+        use crate::kube_client::FakeKube;
+
+        let kube = Arc::new(FakeKube::default());
+        kube.set_live(serde_json::json!({"kind":"Job","metadata":{"name":"sr1-initpwd"}}));
+        kube.terminate_for(usize::MAX);
+        let err = StarRocksProvisioner::new(kube.clone())
+            .provision(&spec_with_root_password())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Job/sr1-initpwd"), "{err}");
+        assert!(!kube.applied.lock().unwrap().contains_key("Job/sr1-initpwd"));
+    }
+
+    /// A delete error other than NotFound is no longer swallowed.
+    #[tokio::test(start_paused = true)]
+    async fn initpwd_job_delete_error_fails_the_provision() {
+        use crate::kube_client::FakeKube;
+
+        let kube = Arc::new(FakeKube::default());
+        kube.fail_delete("Job", "sr1-initpwd", "forbidden");
+        let err = StarRocksProvisioner::new(kube.clone())
+            .provision(&spec_with_root_password())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("forbidden"), "{err}");
+        assert!(!kube.applied.lock().unwrap().contains_key("Job/sr1-initpwd"));
     }
 
     /// `delete` best-effort cleans up the initpwd Job, ConfigMap, and Secret
