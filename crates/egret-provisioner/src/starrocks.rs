@@ -2181,6 +2181,27 @@ mod tests {
         assert_eq!(merge_fe_conf(base, &overrides, SR_PROTECTED_FE_KEYS), base);
     }
 
+    /// The Query log's audit plugin depends on `plugin_enable` and
+    /// `plugin_dir`: an admin override of either never reaches the rendered
+    /// `fe.conf` (behind the API's 400 guard).
+    #[test]
+    fn fe_configmap_drops_overrides_of_the_plugin_keys() {
+        let mut spec = sample_sr_spec();
+        spec.starrocks.as_mut().unwrap().fe_config = BTreeMap::from([
+            ("plugin_enable".to_string(), "false".to_string()),
+            ("plugin_dir".to_string(), "/tmp/elsewhere".to_string()),
+        ]);
+        let conf = starrocks_fe_configmap(&spec)["data"]["fe.conf"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(!conf.contains("plugin_enable"), "{conf}");
+        assert!(!conf.contains("/tmp/elsewhere"), "{conf}");
+        for key in ["plugin_enable", "plugin_dir"] {
+            assert!(SR_PROTECTED_FE_KEYS.contains(&key), "{key}");
+        }
+    }
+
     /// Integration through `starrocks_fe_configmap`: an admin `feConfig`
     /// override for a non-protected key lands in the rendered `fe.conf` once.
     #[test]

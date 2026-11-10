@@ -506,7 +506,8 @@ pub struct StarRocksPod {
 }
 
 /// `fe.conf` keys egret manages itself (shared-data run mode, object-store
-/// coordinates, TLS keystore, and the wire ports). A user-supplied `feConfig`
+/// coordinates, TLS keystore, the wire ports, and the plugin switches the
+/// Query log's audit plugin depends on). A user-supplied `feConfig`
 /// override for any of these is rejected up front so it can't clobber the
 /// provisioner's own wiring. Shared with the provisioner (which renders the
 /// merged `fe.conf`) via this contract crate so both sides agree on the set.
@@ -530,6 +531,10 @@ pub const SR_PROTECTED_FE_KEYS: &[&str] = &[
     "rpc_port",
     "query_port",
     "edit_log_port",
+    // The audit plugin egret installs for the Query log: an override must not
+    // switch plugins off or move the directory the plugin is installed into.
+    "plugin_enable",
+    "plugin_dir",
 ];
 
 /// StarRocks shared-data engine config (FE + CN). Storage params drive the
