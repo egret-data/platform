@@ -13278,7 +13278,9 @@ async fn a_guarded_bind_whose_check_cannot_complete_binds_nothing() {
     );
 
     let wh_sr = seed_provisioned_warehouse_with_secret(&f).await;
-    let sr_unit = overlap_unit(&f, Some(wh_sr), false).await;
+    // A `starrocks` profile: the create refuses a profile of another type
+    // before the guarded bind, so only a same-type one reaches the check.
+    let sr_profile = seed_typed_profile(&f, &external_name("ovl-sr"), "starrocks").await;
     let sr_name = format!("sr-{}", Uuid::new_v4().simple());
     let count = |sql: &'static str, name: String| {
         let pool = f.db.pool.clone();
@@ -13295,7 +13297,7 @@ async fn a_guarded_bind_whose_check_cannot_complete_binds_nothing() {
         "POST",
         "/engines",
         &token,
-        Some(starrocks_create_body(&sr_name, wh_sr, sr_unit.profile)),
+        Some(starrocks_create_body(&sr_name, wh_sr, sr_profile)),
     )
     .await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
@@ -13404,12 +13406,13 @@ async fn a_late_bind_that_cannot_complete_fails_the_apply_and_leaves_the_engine_
 }
 
 /// A StarRocks engine bound to a Trino profile is refused with the cross-type
-/// message, not created (d-i).
+/// message, not created (d-i). The create refuses it while planning its
+/// profile, before anything is minted (final review I1).
 fn assert_cross_type_refusal(status: StatusCode, body: &serde_json::Value) {
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     let error = body["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains("has type trino, but engine") && error.contains("is a starrocks engine"),
+        error.contains("with type trino, not starrocks"),
         "the refusal names the two types: {body}"
     );
 }
