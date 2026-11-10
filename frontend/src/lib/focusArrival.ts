@@ -21,6 +21,9 @@ export function focusHeadingOnArrival(timeoutMs = 10000): void {
   // heading takes focus, until the deadline.
   let focused: HTMLElement | null = null;
   const tick = () => {
+    // The page can be gone before the deadline: a test environment torn down
+    // mid-wait has no `document`, and the wait ends there.
+    if (typeof document === "undefined") return;
     // Nothing is decided until the new page's heading is there: until then,
     // focus may sit for a moment on the old page (a confirm dialog returning
     // it to its opener) before that page unmounts.
