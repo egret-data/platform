@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import type { ApiError } from "@/api/client";
 import { type Profile, listProfiles } from "@/api/policies";
+import type { SecurityUpgradeReason } from "@/api/generated/model";
 import { WarningCallout, profilesQueryKey } from "./externalEngine";
 
 export const STARROCKS_METADATA_TABLES_SENTENCE =
@@ -24,7 +25,9 @@ export function StarRocksMetadataTablesWarning({ engineType, bound }: { engineTy
  * the engine DTO carries its result in `securityUpgradeReasons`. A payload
  * without the field (an older server, or no read of the engine) settles nothing.
  */
-export function imageVerdict(reasons: readonly string[] | null | undefined): "patched" | "unpatched" | "unknown" {
+export function imageVerdict(
+  reasons: readonly SecurityUpgradeReason[] | null | undefined,
+): "patched" | "unpatched" | "unknown" {
   if (!reasons) return "unknown";
   return reasons.includes("unpatchedImage") ? "unpatched" : "patched";
 }
@@ -47,7 +50,7 @@ export function ProvisionedStarRocksMetadataTablesWarning({
   securityUpgradeReasons,
 }: {
   engineId: string;
-  securityUpgradeReasons?: readonly string[] | null;
+  securityUpgradeReasons?: readonly SecurityUpgradeReason[] | null;
 }) {
   const profilesQ = useQuery<Profile[], ApiError>({ queryKey: profilesQueryKey, queryFn: listProfiles });
   const bound = !!profilesQ.data?.some((p) => p.engines.some((e) => e.id === engineId));

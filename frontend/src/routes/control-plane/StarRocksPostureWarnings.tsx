@@ -45,9 +45,19 @@ export const SECURITY_UPGRADE_REASON_SENTENCE: Record<SecurityUpgradeReason, str
   unpatchedImage:
     "Its FE image is not egret-starrocks-fe 4.1.7-egret.4 or later, so StarRocks lets users past this engine's profile (Iceberg metadata tables, prepared statements, the HTTP SQL API, FILES() and more).",
   noRootPassword:
-    "Its FE `root` account has no password: anyone who reaches port 9030 can log in as root.",
+    "Its FE root account has no password: anyone who reaches port 9030 can log in as root.",
   notApplied: "The last security upgrade did not finish applying. Run it again.",
 };
+
+export const SECURITY_UPGRADE_GENERIC_SENTENCE = "This engine needs a security upgrade.";
+
+export const ROOT_PASSWORD_DELAY_SENTENCE =
+  "egret's own admin statements on this engine fail until the FE takes the new password, usually within a minute.";
+
+/** Whether this client has a sentence for `reason`; a newer server may send one it does not. */
+function isKnownReason(reason: string): reason is SecurityUpgradeReason {
+  return Object.hasOwn(SECURITY_UPGRADE_REASON_SENTENCE, reason);
+}
 
 /**
  * The engine list's posture badges, beside the status: "Not governed" (KI-336)
@@ -120,18 +130,22 @@ export function SecurityUpgradeWarning({ engine }: { engine: Posture }) {
     },
   });
 
-  const reasons = engine.securityUpgradeReasons ?? [];
-  if (!engine.securityUpgradeNeeded || reasons.length === 0) return null;
+  if (!engine.securityUpgradeNeeded) return null;
+  // A reason this client has no sentence for is left out; with none left the
+  // callout's first line alone says the engine needs the upgrade.
+  const reasons = (engine.securityUpgradeReasons ?? []).filter(isKnownReason);
   const noRootPassword = reasons.includes("noRootPassword");
 
   return (
     <WarningCallout testId="starrocks-security-upgrade">
-      This engine needs a security upgrade.
-      <ul className="mt-1 list-disc space-y-1 pl-5">
-        {reasons.map((r) => (
-          <li key={r}>{SECURITY_UPGRADE_REASON_SENTENCE[r]}</li>
-        ))}
-      </ul>
+      {SECURITY_UPGRADE_GENERIC_SENTENCE}
+      {reasons.length > 0 ? (
+        <ul className="mt-1 list-disc space-y-1 pl-5">
+          {reasons.map((r) => (
+            <li key={r}>{SECURITY_UPGRADE_REASON_SENTENCE[r]}</li>
+          ))}
+        </ul>
+      ) : null}
       {canUpdate ? (
         <Button
           type="button"
@@ -162,15 +176,15 @@ export function SecurityUpgradeWarning({ engine }: { engine: Posture }) {
                   {engine.securityUpgradeFeImage ? (
                     <>
                       <li className="break-all">
-                        FE image: {engine.image ?? "unknown"} → {engine.securityUpgradeFeImage}
+                        FE image: {engine.image ?? "the current image (not recorded)"} → {engine.securityUpgradeFeImage}
                       </li>
                       <li>The CN image moves to the same release.</li>
                     </>
                   ) : null}
                   {engine.securityUpgradeBlockedRelease ? (
                     <li>
-                      The image is not changed: no patched image for release{" "}
-                      {engine.securityUpgradeBlockedRelease} yet.
+                      No patched image for release {engine.securityUpgradeBlockedRelease} yet: the image was not
+                      changed.
                     </li>
                   ) : null}
                   {noRootPassword ? <li>root password will be set</li> : null}
@@ -178,7 +192,7 @@ export function SecurityUpgradeWarning({ engine }: { engine: Posture }) {
                 </ul>
                 <p>
                   The FE and CN pods restart. A client outside egret that logs in as root with no password is
-                  refused afterwards.
+                  refused afterwards.{noRootPassword ? ` ${ROOT_PASSWORD_DELAY_SENTENCE}` : null}
                 </p>
               </div>
             </AlertDialogDescription>
