@@ -118,12 +118,19 @@ async fn seed_starrocks_fixture(db: &Db, tag_key: &str) -> Fixture {
     }
 }
 
+/// The compiled policies under `service_id`. The infrastructure rows
+/// (`managed_by = 'infra'`: the query-log loader and guard a provisioned
+/// StarRocks engine brings) are left out; this test counts what the compiler
+/// wrote for the tagged columns.
 async fn policy_count(pool: &sqlx::PgPool, service_id: i64) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM policy.authz_policies WHERE service_id = $1")
-        .bind(service_id)
-        .fetch_one(pool)
-        .await
-        .expect("count policies")
+    sqlx::query_scalar(
+        "SELECT count(*) FROM policy.authz_policies \
+          WHERE service_id = $1 AND managed_by <> 'infra'",
+    )
+    .bind(service_id)
+    .fetch_one(pool)
+    .await
+    .expect("count policies")
 }
 
 /// The `column` resource names of every StarRocks masking policy under
