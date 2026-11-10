@@ -43,4 +43,17 @@ describe("focusHeadingOnArrival", () => {
     vi.advanceTimersByTime(500);
     expect(document.activeElement).toBe(button);
   });
+
+  it("stops quietly once the document is gone (a test environment torn down mid-wait)", () => {
+    vi.useFakeTimers();
+    h1("Old page");
+    focusHeadingOnArrival();
+    vi.stubGlobal("document", undefined);
+    try {
+      expect(() => vi.advanceTimersByTime(200)).not.toThrow();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
