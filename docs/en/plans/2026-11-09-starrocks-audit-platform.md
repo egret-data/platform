@@ -7,10 +7,12 @@
 **Query log** tab on the Engine detail page, naming the person behind a delegated query.
 
 **Spec:** `docs/en/specs/2026-11-09-starrocks-audit-platform-design.md` (and its `docs/vi`
-mirror). Its four open questions must be answered by the user before Tasks 2, 4 and 6 start;
-each task below says which answer it depends on and where the choice lands.
+mirror). Its four open questions were decided on 2026-11-10, each on the recommended option:
+1 (b) `engine:audit`, 2 (a) deny everyone, 3 (a) no Ranger audit, 4 (b) a boot pass, with the
+**Set up query log** button kept. The tasks below implement those answers; the "With (x)"
+alternatives they mention are not built.
 
-**Branch:** `feat/starrocks-query-log`, cut from `main` **after package B is merged** (A
+**Branch:** `feat/starrocks-query-log`, cut from `main` after package B merged (platform #847, `e565d7b4b`; A
 consumes B's `egret_perm::is_patched_starrocks_fe` and B's `security_upgrade.rs`). Docs go to
 `egret-data/docs`, branch `docs/starrocks-query-log`.
 
@@ -34,8 +36,8 @@ consumes B's `egret_perm::is_patched_starrocks_fe` and B's `security_upgrade.rs`
    `spawn_starrocks_catalog_wire` or `catalog_apply.rs`. The setup therefore lives in
    `egret-engine-mgmt`; the spec says so in its section 1.
 2. **The bootstrap does not run after every apply.** `update_starrocks_engine` spawns
-   `spawn_starrocks_catalog_wire` only when `deleg_changed`, and B's `security_upgrade` (on
-   B's branch, `crates/egret-engine-mgmt/src/security_upgrade.rs`) applies and returns. An image
+   `spawn_starrocks_catalog_wire` only when `deleg_changed`, and B's `security_upgrade`
+   (`crates/egret-engine-mgmt/src/security_upgrade.rs`, on `main` since #847) applies and returns. An image
    change restarts the FE without any bootstrap. Hence call site 2 (`spawn_query_log_setup`).
 3. **`build_default_policies` is private** (`crates/egret-policy/src/default_policies.rs`), so
    the guard rows need a new public builder beside `admin_all_access_bodies`, not a call to it.
@@ -47,8 +49,8 @@ consumes B's `egret_perm::is_patched_starrocks_fe` and B's `security_upgrade.rs`
    (`crates/egret-perm-ir/src/lower/infra.rs`), and a StarRocks engine without
    `starrocksConfig.delegation` does not qualify (`egret_core::engine_delegation::qualifies_for_infra`).
    The query-log statements must be emitted on their own flag, before that return.
-6. **Migration numbers:** `main` has 0216; B takes 0217 (`0217_engine_security_upgrade_pending.sql`
-   on B's branch). A takes **0218**. Re-check above `main` and every open PR before committing.
+6. **Migration numbers:** `main` has 0217 (B's `0217_engine_security_upgrade_pending.sql`).
+   A takes **0218**. Re-check above `main` and every open PR before committing.
 
 Task 1 adds a short "Corrections" note to both spec files saying 1, 2 and 4.
 
@@ -138,7 +140,7 @@ pub(crate) async fn ensure_query_log_secret(st: &CpState, engine: &Engine)
 
 ### Task 2: Ranger, the loader allow and the guard as IR infrastructure
 
-**Depends on open question 2.** The recommended (a) is written here. With (b), the guard rows
+**Open question 2: decided (a).** That is what is written here; the alternatives below are not built. With (b), the guard rows
 get a deny exception for the admin set on `select`. With (c), the audience excludes the admins.
 Each is a change to `query_log_guard_bodies` and its test only.
 
@@ -290,7 +292,7 @@ pub(crate) async fn wait_for_fe_root_login(st: &CpState, engine_id: Uuid, name: 
     `deleg_changed` is false (when it is true, call site 1 covers it);
   - `security_upgrade`: spawn it after `apply_built` succeeds;
   - neither waits on the handle, and neither fails on a setup failure.
-- **Open question 4.** With (b), the recommendation, add a boot pass
+- **Open question 4: decided (b).** Add a boot pass
   `pub async fn setup_query_logs(st: &CpState)` in `query_log.rs`, exported from `lib.rs` and
   called from `crates/egret-bin/src/main.rs` beside `reapply_stale_opa_engines` (about line
   3672). It runs `spawn_query_log_setup` for every provisioned StarRocks engine that is not
@@ -320,7 +322,7 @@ pub(crate) async fn wait_for_fe_root_login(st: &CpState, engine_id: Uuid, name: 
 
 ### Task 4: The routes, the read SQL and the redaction
 
-**Depends on open question 1.** The recommended (b) is written here: a new permission
+**Open question 1: decided (b).** That is written here: a new permission
 `engine:audit`. With (a), `statement_visible` returns `true`, and the permission row and its
 migration are dropped. With (c), it returns `command != "MySQL.COM_STMT_EXECUTE"`.
 
@@ -531,7 +533,7 @@ Branch `docs/starrocks-query-log`. Each item goes on its existing page; find the
   - that statements can show parameter values and mask expressions, who may read them (per open
     question 1), and what egret redacts;
   - the `plugin_enable` and `plugin_dir` keys are now refused in `feConfig`.
-- **Permissions:** `engine:audit`, if open question 1 lands on (b).
+- **Permissions:** `engine:audit` (open question 1, decided (b)).
 - **Upgrade notes:** per open question 4. Engines on images before egret.4 need **Upgrade
   security** first.
 - **REST API:** the four routes, their parameters, answers and statuses.

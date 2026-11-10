@@ -2,9 +2,9 @@
 
 > Bản tiếng Việt để tham khảo. Bản gốc là [tiếng Anh](../../en/specs/2026-11-09-starrocks-audit-platform-design.md). Mọi giá trị chính xác nằm ở bản tiếng Anh, và khi hai bản khác nhau thì bản tiếng Anh đúng.
 
-**Trạng thái:** bản nháp chờ người dùng duyệt, 2026-11-09. Bốn câu hỏi mở ở cuối bản tiếng Anh do người dùng quyết.
+**Trạng thái:** người dùng đã duyệt. Bốn câu hỏi mở được quyết ngày 2026-11-10, xem mục cuối.
 
-**Gói:** A trong các follow-up StarRocks. Thứ tự là B (đang làm), A, rồi C. A dùng `egret_perm::is_patched_starrocks_fe` và nút **Upgrade security** của B.
+**Gói:** A trong các follow-up StarRocks. Thứ tự là B (đã merge, platform #847), A, rồi C. A dùng `egret_perm::is_patched_starrocks_fe` và nút **Upgrade security** của B.
 
 ## Vấn đề
 
@@ -66,9 +66,9 @@ Image fork egret.4 trở đi có sẵn plugin AuditLoader ở `/opt/egret/auditl
 - vitest;
 - kiểm tra live trên kind.
 
-## Câu hỏi mở (chi tiết ở bản tiếng Anh)
+## Đã quyết ngày 2026-11-10 (trước là câu hỏi mở)
 
-1. Ai được đọc nội dung statement? Đề xuất: quyền mới `engine:audit`.
-2. Engine admin có được truy cập trực tiếp database audit bằng SQL không? Đề xuất: không ai được, kể cả admin.
-3. Có hiển thị thêm audit của Ranger không? Đề xuất: không.
-4. Engine egret.4 đã có từ trước: có tự setup lúc egret khởi động không? Đề xuất: có, chạy một lần lúc boot.
+1. Ai đọc được nội dung statement: quyền mới `engine:audit`, migration 0218 cấp cho các role có `engine:update`.
+2. Truy cập SQL trực tiếp vào database audit: không ai được, kể cả engine admin.
+3. Audit của Ranger: không hiển thị.
+4. Engine đã có từ trước: egret tự chạy setup một lần lúc khởi động, và nút **Set up query log** vẫn giữ để khôi phục.

@@ -1,9 +1,9 @@
 # StarRocks audit, platform side: the Query log (design)
 
-**Status:** draft for the user's review, 2026-11-09. The decided points below are the user's; the
-"Open questions" section at the end lists what is still the user's to choose.
+**Status:** approved by the user. The four open questions were decided on 2026-11-10; the section
+"Decided on 2026-11-10" at the end records the answers.
 
-**Package:** A of the StarRocks follow-ups. The order is B (engine posture, in progress), then A,
+**Package:** A of the StarRocks follow-ups. The order is B (engine posture, merged as platform #847), then A,
 then C (a probe of the paths no one has measured yet). A builds on two things B adds:
 `egret_perm::is_patched_starrocks_fe` and the `POST /engines/{id}/security-upgrade` action.
 
@@ -380,41 +380,18 @@ gives its duration and its environment.
 - Exporting the log to a store outside the engine (SIEM, object storage), and alerting on it.
 - Ranger's own audit, unless open question 3 brings it in.
 
-## Open questions
+## Decided on 2026-11-10 (formerly the open questions)
 
-1. **Who may read statement text?** Statements carry parameter values (a Data API call's
-   arguments), literals users filtered on, and, for COM_STMT_EXECUTE, the policy-rewritten SQL
-   with mask and row-filter expressions. The Trino Monitor tab shows live query text to
-   `engine:read` today.
-   - **(a)** `engine:read` sees everything. This is consistent with the Trino Monitor.
-   - **(b)** A new platform permission, `engine:audit` ("Read statement text in engine query
-     logs"), granted by migration to the roles that hold `engine:update`. Without it, the tab
-     shows every column but the statement.
-   - **(c)** `engine:read` sees the statement, except for COM_STMT_EXECUTE rows, whose text is
-     replaced by the digest.
-   - **Recommendation: (b).** Thirty days of everyone's literals is more than a live-queries
-     view, and it is one function (`statement_visible`) and one catalog row.
-2. **Engine admins and direct SQL on the audit database.** The guard of section 3 denies group
-   `public`, which beats the engine admins' all-access rows.
-   - **(a)** Deny everyone, admins included. egret is the only reader, through `root`, and no one
-     can delete rows through Ranger.
-   - **(b)** Deny writes to everyone, and let engine admins `SELECT` (a deny exception for the
-     admin set).
-   - **(c)** Deny only users who are not engine admins.
-   - **Recommendation: (a).** The log is evidence; letting the people it records edit it defeats
-     it. Admins still read it in egret.
-3. **Should egret also surface Ranger's own audit?**
-   - **(a)** No. The AuditLoader records every path and every denial with the reason text; keep
-     `xasecure.audit.is.enabled=false`.
-   - **(b)** Turn Ranger audit on to a log4j file on a volume, and add a "Policy decisions" view
-     of which policy allowed or denied each access.
-   - **(c)** Not now; reconsider after package C's probe.
-   - **Recommendation: (a)**, with (c)'s review point: Ranger audit adds per-resource policy ids
-     but needs a store egret does not run.
-4. **Existing engines on egret.4 or later when egret is upgraded.**
-   - **(a)** Nothing automatic; an admin presses **Set up query log** per engine.
-   - **(b)** egret's boot pass runs the setup once for every reachable provisioned StarRocks
-     engine.
-   - **(c)** (a) plus a "Query log not set up" badge in the engine list.
-   - **Recommendation: (b).** The setup restarts nothing and changes no user's access, unlike B's
-     upgrade, so there is no reason to make an admin find each engine.
+1. **Who may read statement text: (b).** A new platform permission, `engine:audit` ("Read
+   statement text in engine query logs"), granted by migration 0218 to the roles that hold
+   `engine:update`. Without it, the tab shows every column but the statement.
+   `statement_visible(st, principal)` checks `engine:audit`.
+2. **Direct SQL on the audit database: (a).** The guard denies everyone, engine admins included.
+   egret is the only reader, through `root`.
+3. **Ranger's own audit: (a).** Not surfaced; `xasecure.audit.is.enabled=false` stays.
+4. **Existing engines when egret is upgraded: (b), plus the button.** egret's boot pass runs the
+   setup once for every reachable provisioned StarRocks engine, and **Set up query log**
+   (section 6) stays for recovery.
+
+The question texts and the options that were not taken are in this file's git history (commit
+`2ec2461dd`).
