@@ -233,6 +233,78 @@ pub fn plugin_version_for_image(
     }
 }
 
+/// The egret FE repository every patched StarRocks image is published under.
+const EGRET_STARROCKS_FE_REPOSITORY: &str = "ghcr.io/egret-data/egret-starrocks-fe";
+
+/// The first patch level of an upstream release that closes every hole the StarRocks warning
+/// names (egret-starrocks patches 0001 to 0009 on 4.1.7, egret.4): `((a, b, c), n)`. A later
+/// upstream release starts at level 1 with every patch rebased onto it, so any level counts.
+pub const FIRST_COMPLETE_STARROCKS_FE: ((u32, u32, u32), u32) = ((4, 1, 7), 4);
+
+/// `a.b.c` to its three numbers; anything else is `None`.
+fn parse_release(s: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = s.split('.');
+    let a = parts.next()?.parse().ok()?;
+    let b = parts.next()?.parse().ok()?;
+    let c = parts.next()?.parse().ok()?;
+    parts.next().is_none().then_some((a, b, c))
+}
+
+/// `<a>.<b>.<c>-egret.<n>` to ((a, b, c), n).
+fn parse_egret_tag(tag: &str) -> Option<((u32, u32, u32), u32)> {
+    let (release, level) = tag.split_once("-egret.")?;
+    Some((parse_release(release)?, level.parse().ok()?))
+}
+
+/// Whether a (release, level) is at or after [`FIRST_COMPLETE_STARROCKS_FE`].
+fn is_complete_level(release: (u32, u32, u32), level: u32) -> bool {
+    let (first_release, first_level) = FIRST_COMPLETE_STARROCKS_FE;
+    release > first_release || (release == first_release && level >= first_level)
+}
+
+/// Whether `image` (a stored FE image ref, tag and/or digest) is an egret FE that closes every
+/// hole the StarRocks warning names: by digest, the digest of a known egret FE row at or after
+/// the first complete level (so a mirrored repository counts); by tag, an egret FE tag at or
+/// after it, read only when the ref carries no digest (a ref with a digest is judged by the
+/// digest alone, whatever its tag says). Anything else, including an image egret does not know,
+/// is unpatched.
+pub fn is_patched_starrocks_fe(image: &str) -> bool {
+    let (repo, tag, digest) = parse(image.trim());
+    let by_digest = digest.is_some_and(|d| {
+        KNOWN_ENGINE_IMAGES.iter().any(|k| {
+            k.repository == EGRET_STARROCKS_FE_REPOSITORY
+                && k.digest == d
+                && parse_egret_tag(k.tag).is_some_and(|(r, n)| is_complete_level(r, n))
+        })
+    });
+    let by_tag = repo == EGRET_STARROCKS_FE_REPOSITORY
+        && tag
+            .and_then(parse_egret_tag)
+            .is_some_and(|(r, n)| is_complete_level(r, n));
+    // A digest is what the node pulls, so it alone decides; the tag counts only without one.
+    digest.map_or(by_tag, |_| by_digest)
+}
+
+/// The release `<a>.<b>.<c>` of an image's tag (`4.1.6`, `4.1.7-egret.3`); a tag such as
+/// `4.1-latest`, or no tag, has none.
+fn image_release(image: &str) -> Option<(u32, u32, u32)> {
+    let (_, tag, _) = parse(image.trim());
+    let tag = tag?;
+    parse_release(tag.split_once("-egret.").map_or(tag, |(r, _)| r))
+}
+
+/// What the security upgrade does with `current`: the default FE image when moving there is not
+/// a downgrade, else `Err(release)` naming the newer release (e.g. "4.1.8"). A StarRocks FE's
+/// metadata cannot be downgraded, so a newer release keeps its image.
+pub fn starrocks_fe_upgrade_target(current: Option<&str>) -> Result<&'static str, String> {
+    let target = DEFAULT_ENGINE_IMAGES.starrocks_fe_image;
+    let current_release = current.and_then(image_release);
+    match (current_release, image_release(target)) {
+        (Some(c), Some(t)) if c > t => Err(format!("{}.{}.{}", c.0, c.1, c.2)),
+        _ => Ok(target),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -564,6 +636,82 @@ mod tests {
         assert_eq!(
             plugin_version_for_image("trino", "  trinodb/trino:483  "),
             Ok("2.8.0")
+        );
+    }
+
+    const EGRET4_DIGEST: &str =
+        "sha256:55ec35ecf6df85320557f017e0c3c16056d82a258cf4a4e79a80a6565ac6fdc5";
+    const EGRET3_DIGEST: &str =
+        "sha256:5c74c820f9b741bc8054247f47f3d54dd9e526710b6fc2b5a7873cae6bb2d2b0";
+    const EGRET_FE: &str = "ghcr.io/egret-data/egret-starrocks-fe";
+
+    #[test]
+    fn the_patched_rule_follows_level_and_release() {
+        assert!(!is_patched_starrocks_fe("starrocks/fe-ubuntu:4.1.6"));
+        assert!(!is_patched_starrocks_fe(&format!(
+            "{EGRET_FE}:4.1.7-egret.3@{EGRET3_DIGEST}"
+        )));
+        assert!(!is_patched_starrocks_fe(&format!(
+            "{EGRET_FE}:4.1.7-egret.3"
+        )));
+        assert!(is_patched_starrocks_fe(&format!(
+            "{EGRET_FE}:4.1.7-egret.4"
+        )));
+        assert!(is_patched_starrocks_fe(&format!(
+            "{EGRET_FE}:4.1.7-egret.4@{EGRET4_DIGEST}"
+        )));
+        assert!(is_patched_starrocks_fe(&format!(
+            "{EGRET_FE}:4.1.8-egret.1"
+        )));
+        assert!(!is_patched_starrocks_fe("trinodb/trino:483"));
+        assert!(!is_patched_starrocks_fe(""));
+    }
+
+    #[test]
+    fn a_digest_decides_over_a_patched_tag() {
+        assert!(!is_patched_starrocks_fe(&format!(
+            "{EGRET_FE}:4.1.7-egret.4@{EGRET3_DIGEST}"
+        )));
+        assert!(!is_patched_starrocks_fe(&format!(
+            "{EGRET_FE}:4.1.7-egret.4@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        )));
+        assert!(is_patched_starrocks_fe(&format!(
+            "{EGRET_FE}:4.1.7-egret.3@{EGRET4_DIGEST}"
+        )));
+    }
+
+    #[test]
+    fn a_mirrored_image_counts_by_its_digest() {
+        assert!(is_patched_starrocks_fe(&format!(
+            "registry.local/mirror/egret-starrocks-fe@{EGRET4_DIGEST}"
+        )));
+        assert!(!is_patched_starrocks_fe(&format!(
+            "registry.local/mirror/egret-starrocks-fe@{EGRET3_DIGEST}"
+        )));
+        assert!(!is_patched_starrocks_fe(
+            "registry.local/mirror/egret-starrocks-fe@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        ));
+    }
+
+    #[test]
+    fn the_upgrade_target_is_the_default_unless_it_would_downgrade() {
+        let default = DEFAULT_ENGINE_IMAGES.starrocks_fe_image;
+        assert_eq!(
+            starrocks_fe_upgrade_target(Some("starrocks/fe-ubuntu:4.1.6")),
+            Ok(default)
+        );
+        assert_eq!(
+            starrocks_fe_upgrade_target(Some("starrocks/fe-ubuntu:4.1-latest")),
+            Ok(default)
+        );
+        assert_eq!(
+            starrocks_fe_upgrade_target(Some(&format!("{EGRET_FE}:4.1.7-egret.3"))),
+            Ok(default)
+        );
+        assert_eq!(starrocks_fe_upgrade_target(None), Ok(default));
+        assert_eq!(
+            starrocks_fe_upgrade_target(Some("starrocks/fe-ubuntu:4.1.8")),
+            Err("4.1.8".to_string())
         );
     }
 }

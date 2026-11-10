@@ -7,6 +7,7 @@
  */
 import type { EngineRuntime } from './engineRuntime';
 import type { EngineSpecDto } from './engineSpecDto';
+import type { SecurityUpgradeReason } from './securityUpgradeReason';
 
 export interface EngineDto {
   id: string;
@@ -96,4 +97,48 @@ export interface EngineDto {
      * unauthenticated requests on port 8080. Re-applying it clears this.
      */
   securityReapplyNeeded: boolean;
+  /**
+     * Provisioned StarRocks only: `true` when `securityUpgradeReasons` is not
+     * empty, i.e. the engine runs an unpatched FE image and/or its FE root has
+     * no password. The security upgrade action
+     * (`POST /api/control-plane/engines/{id}/security-upgrade`) clears it.
+     */
+  securityUpgradeNeeded: boolean;
+  /**
+     * Why the engine needs the security upgrade, in order: `unpatchedImage`
+     * (the stored FE image is absent or not an egret FE with every security
+     * patch), `noRootPassword` (the FE root has no password secret) and
+     * `notApplied` (the last security upgrade stored its changes but did not
+     * finish applying them; run it again). Always present; empty for an external engine, a Trino engine, and an
+     * engine that needs nothing. The security upgrade action
+     * (`POST /api/control-plane/engines/{id}/security-upgrade`) empties it.
+     */
+  securityUpgradeReasons: SecurityUpgradeReason[];
+  /**
+     * The FE image the security upgrade would switch the engine to. Set only
+     * when `unpatchedImage` is a reason and the swap is not a downgrade;
+     * absent otherwise. The security upgrade action
+     * (`POST /api/control-plane/engines/{id}/security-upgrade`) applies it and
+     * clears this field.
+     * @nullable
+     */
+  securityUpgradeFeImage?: string | null;
+  /**
+     * The release (e.g. `4.1.8`) that blocks the FE image swap: set when
+     * `unpatchedImage` is a reason but the engine already runs a release newer
+     * than the default FE, which cannot be downgraded. Absent otherwise. The
+     * security upgrade action
+     * (`POST /api/control-plane/engines/{id}/security-upgrade`) leaves such an
+     * engine on its image, so this stays set until the platform default FE
+     * catches up.
+     * @nullable
+     */
+  securityUpgradeBlockedRelease?: string | null;
+  /**
+     * `true` when Ranger is on and this StarRocks engine (provisioned or
+     * external) is bound to no policy profile, so Ranger governs nothing on
+     * it (KI-336). A Trino engine is never flagged: it late-binds a profile on
+     * its next apply. Set by every response (`with_runtime`); `false` otherwise.
+     */
+  notGoverned: boolean;
 }

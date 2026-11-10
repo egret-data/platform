@@ -5,7 +5,6 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 
 import EngineDetail from "@/routes/control-plane/EngineDetail";
 import EngineRegister from "@/routes/control-plane/EngineRegister";
-import { isPatchedStarRocksImage } from "@/routes/control-plane/StarRocksMetadataTablesWarning";
 import {
   ADMIN,
   CATALOGS,
@@ -101,34 +100,32 @@ describe("StarRocks metadata-table warning, Control plane", () => {
     expect(screen.queryByTestId("starrocks-metadata-tables")).not.toBeInTheDocument();
   });
 
-  test("provisioned StarRocks engine bound to a profile: shown above the tabs", async () => {
+  test("provisioned StarRocks engine with no image verdict in its payload, bound: shown above the tabs", async () => {
     stubFetch(detailRoutes(SR_PROVISIONED, 21));
     renderDetail();
     expect(await screen.findByTestId("starrocks-metadata-tables", {}, T)).toHaveTextContent(WARNING);
   });
 
-  test("provisioned StarRocks engine on the official image, bound: shown", async () => {
-    const official = {
+  // The security-upgrade warning names the image and offers the fix, so the page carries one
+  // message, not two. The image string is the official one the old frontend rule flagged; only
+  // the server's verdict (`securityUpgradeReasons`) is read.
+  test.each([
+    ["the official image", `starrocks/fe-ubuntu:4.1.6@sha256:${"d".repeat(64)}`],
+    ["an earlier patched image (egret.3)", `ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.3@sha256:${"a".repeat(64)}`],
+  ])("provisioned StarRocks engine on %s, bound: hidden while the upgrade warning says it", async (_, feImage) => {
+    const unpatched = {
       ...SR_PROVISIONED,
-      spec: { starrocksConfig: { feImage: `starrocks/fe-ubuntu:4.1.6@sha256:${"d".repeat(64)}` } },
+      image: feImage,
+      spec: { starrocksConfig: { feImage } },
+      securityUpgradeNeeded: true,
+      securityUpgradeReasons: ["unpatchedImage"],
     };
-    stubFetch(detailRoutes(official, 21));
+    const calls = stubFetch(detailRoutes(unpatched, 21));
     renderDetail();
-    expect(await screen.findByTestId("starrocks-metadata-tables", {}, T)).toHaveTextContent(WARNING);
-  });
-
-  test("provisioned StarRocks engine on an earlier patched image (egret.3), bound: shown", async () => {
-    const earlier = {
-      ...SR_PROVISIONED,
-      spec: {
-        starrocksConfig: {
-          feImage: `ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.3@sha256:${"a".repeat(64)}`,
-        },
-      },
-    };
-    stubFetch(detailRoutes(earlier, 21));
-    renderDetail();
-    expect(await screen.findByTestId("starrocks-metadata-tables", {}, T)).toHaveTextContent(WARNING);
+    expect(await screen.findByTestId("starrocks-security-upgrade", {}, T)).toBeInTheDocument();
+    await vi.waitFor(() => expect(calls.some((c) => c.path === "/api/control-plane/policies/services")).toBe(true));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryByTestId("starrocks-metadata-tables")).not.toBeInTheDocument();
   });
 
   test("provisioned StarRocks engine on egret's complete patched image, bound: no warning", async () => {
@@ -139,6 +136,8 @@ describe("StarRocks metadata-table warning, Control plane", () => {
           feImage: `ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.4@sha256:${"a".repeat(64)}`,
         },
       },
+      securityUpgradeNeeded: false,
+      securityUpgradeReasons: [],
     };
     const calls = stubFetch(detailRoutes(patched, 21));
     renderDetail();
@@ -184,33 +183,5 @@ describe("StarRocks metadata-table warning, Control plane", () => {
     await user.click(screen.getByRole("combobox", { name: "Policy profile" }));
     await user.click(await screen.findByRole("option", { name: /sr-main/ }));
     expect(screen.getByTestId("starrocks-metadata-tables")).toHaveTextContent(WARNING);
-  });
-});
-
-describe("isPatchedStarRocksImage", () => {
-  const digest = `@sha256:${"0".repeat(64)}`;
-  test.each([
-    ["ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.4", true],
-    [`ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.12${digest}`, true],
-    [" ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.4 ", true],
-    ["ghcr.io/egret-data/egret-starrocks-fe:4.1.8-egret.1", true],
-    ["ghcr.io/egret-data/egret-starrocks-fe:4.2.0-egret.1", true],
-    ["ghcr.io/egret-data/egret-starrocks-fe:5.0.0-egret.1", true],
-    ["ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.3", false],
-    [`ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.3${digest}`, false],
-    ["ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.1", false],
-    [`ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.2${digest}`, false],
-    ["ghcr.io/egret-data/egret-starrocks-fe:4.1.6-egret.9", false],
-    ["ghcr.io/egret-data/egret-starrocks-fe:3.9.9-egret.9", false],
-    ["ghcr.io/egret-data/egret-starrocks-fe", false],
-    ["ghcr.io/egret-data/egret-starrocks-fe:latest", false],
-    ["ghcr.io/egret-data/egret-starrocks-fe:4.1.7", false],
-    ["ghcr.io/egret-data/egret-starrocks-allin1:4.1.7-egret.1", false],
-    ["mirror.example/egret-data/egret-starrocks-fe:4.1.7-egret.1", false],
-    [`starrocks/fe-ubuntu:4.1.7${digest}`, false],
-    ["", false],
-    [undefined, false],
-  ])("%s -> %s", (image, expected) => {
-    expect(isPatchedStarRocksImage(image)).toBe(expected);
   });
 });

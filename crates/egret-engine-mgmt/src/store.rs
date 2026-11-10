@@ -69,6 +69,12 @@ pub struct Engine {
     /// (`engines::TRINO_SECURITY_REV`); 0 = before the port-8080 hardening or
     /// never applied.
     pub applied_security_rev: i16,
+    /// A security upgrade (`POST /engines/{id}/security-upgrade`) stored its
+    /// changes (root password secret, patched images) but the apply that
+    /// carries them to the cluster has not succeeded yet (migration 0217). Set
+    /// before the upgrade writes anything; cleared by any successful apply of
+    /// the StarRocks engine.
+    pub security_upgrade_pending: bool,
 }
 
 impl Engine {
@@ -249,7 +255,7 @@ impl EngineMgmtStore {
     ) -> Result<Engine, EngineMgmtError> {
         sqlx::query_as::<_, Engine>(
             "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, tls_cert_secret_ref) VALUES ($1,$2,$3,$4,$5) \
-             RETURNING id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev",
+             RETURNING id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev, security_upgrade_pending",
         )
         .bind(name)
         .bind(r#type)
@@ -268,7 +274,7 @@ impl EngineMgmtStore {
 
     pub async fn list_engines(&self) -> Result<Vec<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev \
+            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev, security_upgrade_pending \
              FROM engine_mgmt.engines ORDER BY created_at",
         )
         .fetch_all(self.pool())
@@ -281,7 +287,7 @@ impl EngineMgmtStore {
         &self,
     ) -> Result<Vec<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev \
+            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev, security_upgrade_pending \
              FROM engine_mgmt.engines \
              WHERE ranger_secret_prev_id IS NOT NULL AND origin = 'provisioned' ORDER BY created_at",
         )
@@ -291,7 +297,7 @@ impl EngineMgmtStore {
 
     pub async fn get_engine(&self, id: Uuid) -> Result<Option<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev \
+            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev, security_upgrade_pending \
              FROM engine_mgmt.engines WHERE id = $1",
         )
         .bind(id)
@@ -328,6 +334,38 @@ impl EngineMgmtStore {
                 .bind(status)
                 .execute(self.pool())
                 .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    /// Write a StarRocks engine's FE and CN images into its stored spec
+    /// (`starrocksConfig.feImage` / `.cnImage`), leaving every other spec key
+    /// as the row holds it now, gated on `status` like [`Self::update_engine`].
+    /// Only these two keys are written, so a spec change a concurrent PUT
+    /// commits between the caller's read and this write is kept. Returns
+    /// whether the row was still at `status` (and so was updated).
+    pub async fn set_starrocks_images(
+        &self,
+        id: Uuid,
+        fe_image: &str,
+        cn_image: &str,
+        status: &str,
+    ) -> Result<bool, EngineMgmtError> {
+        let res = sqlx::query(
+            "UPDATE engine_mgmt.engines SET spec = \
+               jsonb_set(jsonb_set( \
+                 jsonb_set(spec, '{starrocksConfig}', \
+                   CASE WHEN jsonb_typeof(spec->'starrocksConfig') = 'object' \
+                        THEN spec->'starrocksConfig' ELSE '{}'::jsonb END), \
+                 '{starrocksConfig,feImage}', to_jsonb($2::text)), \
+               '{starrocksConfig,cnImage}', to_jsonb($3::text)) \
+             WHERE id = $1 AND status = $4",
+        )
+        .bind(id)
+        .bind(fe_image)
+        .bind(cn_image)
+        .bind(status)
+        .execute(self.pool())
+        .await?;
         Ok(res.rows_affected() == 1)
     }
 
@@ -430,7 +468,7 @@ impl EngineMgmtStore {
         service_id: i64,
     ) -> Result<Vec<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev \
+            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev, security_upgrade_pending \
              FROM engine_mgmt.engines WHERE authz_service_id = $1 ORDER BY name",
         )
         .bind(service_id)
@@ -468,6 +506,20 @@ impl EngineMgmtStore {
         Ok(())
     }
 
+    /// Set or clear [`Engine::security_upgrade_pending`].
+    pub async fn set_security_upgrade_pending(
+        &self,
+        id: Uuid,
+        pending: bool,
+    ) -> Result<(), EngineMgmtError> {
+        sqlx::query("UPDATE engine_mgmt.engines SET security_upgrade_pending = $2 WHERE id = $1")
+            .bind(id)
+            .bind(pending)
+            .execute(self.pool())
+            .await?;
+        Ok(())
+    }
+
     /// Record the OPA base URL rendered into this engine's plugin files by the
     /// apply the provisioner accepted (`None`: the engine was not applied on OPA).
     pub async fn set_applied_opa_url(
@@ -491,7 +543,7 @@ impl EngineMgmtStore {
         current: &str,
     ) -> Result<Vec<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT e.id, e.name, e.type, e.namespace, e.spec, e.status, e.authz_service_id, e.delegator_secret_id, e.root_secret_id, e.tls_secret_id, e.coordinator_cert, e.tls_cert_secret_ref, e.internal_secret_id, e.monitor_secret_id, e.created_at, e.origin, e.external_host, e.external_port, e.ranger_plugin_version, e.ranger_secret_id, e.ranger_secret_prev_id, e.applied_security_rev \
+            "SELECT e.id, e.name, e.type, e.namespace, e.spec, e.status, e.authz_service_id, e.delegator_secret_id, e.root_secret_id, e.tls_secret_id, e.coordinator_cert, e.tls_cert_secret_ref, e.internal_secret_id, e.monitor_secret_id, e.created_at, e.origin, e.external_host, e.external_port, e.ranger_plugin_version, e.ranger_secret_id, e.ranger_secret_prev_id, e.applied_security_rev, e.security_upgrade_pending \
              FROM engine_mgmt.engines e JOIN policy.authz_services a ON a.id = e.authz_service_id \
              WHERE a.mechanism = 'opa' AND e.type = 'trino' AND e.applied_opa_url IS DISTINCT FROM $1 ORDER BY e.name",
         )
@@ -745,7 +797,7 @@ impl EngineMgmtStore {
         workspace_id: Uuid,
     ) -> Result<Vec<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT e.id, e.name, e.type, e.namespace, e.spec, e.status, e.authz_service_id, e.delegator_secret_id, e.root_secret_id, e.tls_secret_id, e.coordinator_cert, e.tls_cert_secret_ref, e.internal_secret_id, e.monitor_secret_id, e.created_at, e.origin, e.external_host, e.external_port, e.ranger_plugin_version, e.ranger_secret_id, e.ranger_secret_prev_id, e.applied_security_rev \
+            "SELECT e.id, e.name, e.type, e.namespace, e.spec, e.status, e.authz_service_id, e.delegator_secret_id, e.root_secret_id, e.tls_secret_id, e.coordinator_cert, e.tls_cert_secret_ref, e.internal_secret_id, e.monitor_secret_id, e.created_at, e.origin, e.external_host, e.external_port, e.ranger_plugin_version, e.ranger_secret_id, e.ranger_secret_prev_id, e.applied_security_rev, e.security_upgrade_pending \
              FROM engine_mgmt.engines e JOIN engine_mgmt.engine_workspaces ew ON ew.engine_id = e.id \
              WHERE ew.workspace_id = $1 ORDER BY e.name",
         )
@@ -779,6 +831,7 @@ mod tests {
             ranger_secret_id: None,
             ranger_secret_prev_id: None,
             applied_security_rev: 0,
+            security_upgrade_pending: false,
             created_at: chrono::Utc::now(),
             origin: "provisioned".into(),
             external_host: None,
@@ -810,6 +863,7 @@ mod tests {
             ranger_secret_id: None,
             ranger_secret_prev_id: None,
             applied_security_rev: 0,
+            security_upgrade_pending: false,
             created_at: chrono::Utc::now(),
             origin: "provisioned".into(),
             external_host: None,
@@ -841,6 +895,7 @@ mod tests {
             ranger_secret_id: None,
             ranger_secret_prev_id: None,
             applied_security_rev: 0,
+            security_upgrade_pending: false,
             created_at: chrono::Utc::now(),
             origin: "provisioned".into(),
             external_host: None,
@@ -874,6 +929,7 @@ mod tests {
             ranger_secret_id: None,
             ranger_secret_prev_id: None,
             applied_security_rev: 0,
+            security_upgrade_pending: false,
             created_at: chrono::Utc::now(),
             origin: "provisioned".into(),
             external_host: None,
@@ -916,6 +972,7 @@ mod tests {
             ranger_secret_id: None,
             ranger_secret_prev_id: None,
             applied_security_rev: 0,
+            security_upgrade_pending: false,
             created_at: chrono::Utc::now(),
             origin: "provisioned".into(),
             external_host: None,

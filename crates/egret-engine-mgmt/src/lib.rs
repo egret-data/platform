@@ -15,6 +15,7 @@ pub mod monitor;
 pub mod probe;
 pub mod profile_compiler;
 pub mod ranger_credential;
+pub mod security_upgrade;
 pub mod starrocks_ddl;
 pub mod state;
 pub mod store;
@@ -54,5 +55,6 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     doc.merge(monitor::MonitorApi::openapi());
     doc.merge(catalogs::CatalogRegistryApi::openapi());
     doc.merge(external::ExternalEngineApi::openapi());
+    doc.merge(security_upgrade::SecurityUpgradeApi::openapi());
     doc
 }

@@ -13278,7 +13278,9 @@ async fn a_guarded_bind_whose_check_cannot_complete_binds_nothing() {
     );
 
     let wh_sr = seed_provisioned_warehouse_with_secret(&f).await;
-    let sr_unit = overlap_unit(&f, Some(wh_sr), false).await;
+    // A `starrocks` profile: the create refuses a profile of another type
+    // before the guarded bind, so only a same-type one reaches the check.
+    let sr_profile = seed_typed_profile(&f, &external_name("ovl-sr"), "starrocks").await;
     let sr_name = format!("sr-{}", Uuid::new_v4().simple());
     let count = |sql: &'static str, name: String| {
         let pool = f.db.pool.clone();
@@ -13295,7 +13297,7 @@ async fn a_guarded_bind_whose_check_cannot_complete_binds_nothing() {
         "POST",
         "/engines",
         &token,
-        Some(starrocks_create_body(&sr_name, wh_sr, sr_unit.profile)),
+        Some(starrocks_create_body(&sr_name, wh_sr, sr_profile)),
     )
     .await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
@@ -13404,12 +13406,13 @@ async fn a_late_bind_that_cannot_complete_fails_the_apply_and_leaves_the_engine_
 }
 
 /// A StarRocks engine bound to a Trino profile is refused with the cross-type
-/// message, not created (d-i).
+/// message, not created (d-i). The create refuses it while planning its
+/// profile, before anything is minted (final review I1).
 fn assert_cross_type_refusal(status: StatusCode, body: &serde_json::Value) {
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     let error = body["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains("has type trino, but engine") && error.contains("is a starrocks engine"),
+        error.contains("with type trino, not starrocks"),
         "the refusal names the two types: {body}"
     );
 }
@@ -18018,4 +18021,506 @@ async fn external_and_starrocks_engines_never_ask_to_be_re_applied() {
     for id in [external, sr_id] {
         assert_eq!(security_reapply_needed(&f, &token, id).await, false, "{id}");
     }
+}
+
+// ---- POST /engines/{id}/security-upgrade (StarRocks engine posture, Task 4) ----
+
+/// The images of an engine from before the hardening: the official 4.1.6 FE and CN.
+const LEGACY_SR_FE_IMAGE: &str = "starrocks/fe-ubuntu:4.1.6";
+const LEGACY_SR_CN_IMAGE: &str = "starrocks/cn-ubuntu:4.1.6";
+
+/// Make a freshly created StarRocks engine look legacy: these FE and CN
+/// images on the stored spec, and no root password secret on the row.
+async fn make_legacy_starrocks(f: &Fixture, id: Uuid, fe_image: &str, cn_image: &str) {
+    sqlx::query(
+        "UPDATE engine_mgmt.engines \
+         SET spec = jsonb_set(jsonb_set(spec, '{starrocksConfig,feImage}', to_jsonb($2::text)), \
+                              '{starrocksConfig,cnImage}', to_jsonb($3::text)), \
+             root_secret_id = NULL \
+         WHERE id = $1",
+    )
+    .bind(id)
+    .bind(fe_image)
+    .bind(cn_image)
+    .execute(&f.db.pool)
+    .await
+    .expect("make the engine legacy");
+}
+
+/// The row's `security_upgrade_pending`.
+async fn stored_upgrade_pending(f: &Fixture, id: Uuid) -> bool {
+    sqlx::query_scalar("SELECT security_upgrade_pending FROM engine_mgmt.engines WHERE id = $1")
+        .bind(id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("engine row")
+}
+
+/// The stored spec and root password secret id of an engine row.
+async fn stored_engine_row(f: &Fixture, id: Uuid) -> (serde_json::Value, Option<Uuid>) {
+    sqlx::query_as("SELECT spec, root_secret_id FROM engine_mgmt.engines WHERE id = $1")
+        .bind(id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("engine row")
+}
+
+#[tokio::test]
+async fn security_upgrade_brings_a_legacy_starrocks_engine_to_the_baseline_once() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sr_secup_admin", true).await;
+    let (engine_id, _) = create_starrocks_via_api(&f, &token).await;
+    let id = Uuid::parse_str(&engine_id).unwrap();
+    make_legacy_starrocks(&f, id, LEGACY_SR_FE_IMAGE, LEGACY_SR_CN_IMAGE).await;
+    let updates_before = port.updated.lock().unwrap().len();
+    let uri = format!("/engines/{engine_id}/security-upgrade");
+
+    let (status, j) = call(&f, "POST", &uri, &token, None).await;
+
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["imageChanged"], true, "{j}");
+    assert_eq!(j["rootPasswordSet"], true, "{j}");
+    assert!(j.get("imageKeptBecause").is_none(), "{j}");
+    assert_eq!(j["engine"]["securityUpgradeNeeded"], false, "{j}");
+    assert_eq!(
+        j["engine"]["securityUpgradeReasons"],
+        serde_json::json!([]),
+        "{j}"
+    );
+    let (spec, root_secret_id) = stored_engine_row(&f, id).await;
+    assert_eq!(
+        spec["starrocksConfig"]["feImage"],
+        egret_perm::DEFAULT_ENGINE_IMAGES.starrocks_fe_image
+    );
+    assert_eq!(
+        spec["starrocksConfig"]["cnImage"],
+        egret_perm::DEFAULT_ENGINE_IMAGES.starrocks_cn_image
+    );
+    assert!(
+        root_secret_id.is_some(),
+        "the root password secret is recorded"
+    );
+    // Exactly one apply, carrying the new images and the root password (the
+    // provisioner renders the `{name}-initpwd` Job from it).
+    assert_eq!(port.updated.lock().unwrap().len(), updates_before + 1);
+    let applied = port.last_updated();
+    let sr = applied.starrocks.as_ref().expect("a StarRocks spec");
+    assert_eq!(
+        sr.fe_image,
+        egret_perm::DEFAULT_ENGINE_IMAGES.starrocks_fe_image
+    );
+    assert_eq!(
+        sr.cn_image,
+        egret_perm::DEFAULT_ENGINE_IMAGES.starrocks_cn_image
+    );
+    assert!(
+        sr.root_password.is_some(),
+        "the apply sets the root password"
+    );
+
+    assert!(
+        !stored_upgrade_pending(&f, id).await,
+        "the accepted apply cleared it"
+    );
+
+    // A second call changes nothing but still applies (a repeat is what
+    // finishes a run whose apply failed), and leaves the engine clean.
+    let (status, j) = call(&f, "POST", &uri, &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["imageChanged"], false, "{j}");
+    assert_eq!(j["rootPasswordSet"], false, "{j}");
+    assert!(j.get("imageKeptBecause").is_none(), "{j}");
+    assert_eq!(j["engine"]["securityUpgradeNeeded"], false, "{j}");
+    assert_eq!(
+        j["engine"]["securityUpgradeReasons"],
+        serde_json::json!([]),
+        "{j}"
+    );
+    assert_eq!(port.updated.lock().unwrap().len(), updates_before + 2);
+    assert!(!stored_upgrade_pending(&f, id).await);
+}
+
+#[tokio::test]
+async fn security_upgrade_never_downgrades_a_newer_starrocks_release() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sr_secup_newer_admin", true).await;
+    let (engine_id, _) = create_starrocks_via_api(&f, &token).await;
+    let id = Uuid::parse_str(&engine_id).unwrap();
+    let fe = "starrocks/fe-ubuntu:4.1.8";
+    let cn = "starrocks/cn-ubuntu:4.1.8";
+    make_legacy_starrocks(&f, id, fe, cn).await;
+    let updates_before = port.updated.lock().unwrap().len();
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/security-upgrade"),
+        &token,
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["rootPasswordSet"], true, "{j}");
+    assert_eq!(j["imageChanged"], false, "{j}");
+    assert_eq!(
+        j["imageKeptBecause"], "No patched image for release 4.1.8 yet: the image was not changed.",
+        "{j}"
+    );
+    let (spec, root_secret_id) = stored_engine_row(&f, id).await;
+    assert_eq!(spec["starrocksConfig"]["feImage"], fe);
+    assert_eq!(spec["starrocksConfig"]["cnImage"], cn);
+    assert!(root_secret_id.is_some());
+    // The root password still has to reach the FE: one apply, on the kept image.
+    assert_eq!(port.updated.lock().unwrap().len(), updates_before + 1);
+    let applied = port.last_updated();
+    let sr = applied.starrocks.as_ref().expect("a StarRocks spec");
+    assert_eq!(sr.fe_image, fe);
+    assert!(sr.root_password.is_some());
+}
+
+#[tokio::test]
+async fn security_upgrade_refuses_external_trino_unknown_and_unauthorised() {
+    let port = FakeEnginePort::default();
+    let Some(mut f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sr_secup_refuse_admin", true).await;
+
+    // An external StarRocks engine: 409 `engine_is_external`.
+    let ext_name = format!("sr-ext-{}", Uuid::new_v4().simple());
+    let ext: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, status, origin, \
+         external_host, external_port, ranger_plugin_version) \
+         VALUES ($1,'starrocks','','{}'::jsonb,'running','external','sr.example.com',9030,'2.8.0') \
+         RETURNING id",
+    )
+    .bind(&ext_name)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("external engine row");
+    assert_refused_as_external(
+        &f,
+        &token,
+        &ext_name,
+        "POST",
+        &format!("/engines/{ext}/security-upgrade"),
+        None,
+    )
+    .await;
+
+    // A Trino engine: 409.
+    let trino = mv_engine(&f, "trino", None).await;
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{trino}/security-upgrade"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    assert_ne!(j["code"], "engine_is_external", "{j}");
+
+    // An unknown engine: 404.
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{}/security-upgrade", Uuid::new_v4()),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{j}");
+    assert!(port.updated.lock().unwrap().is_empty(), "nothing applied");
+
+    // No `engine:update`: 403, on an engine that exists and needs the upgrade.
+    let sr = mv_engine(&f, "starrocks", None).await;
+    let reader = session_for_with_permission(&f, "sr_secup_reader", "engine:read").await;
+    attach_real_pdp(&mut f).await;
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{sr}/security-upgrade"),
+        &reader,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{j}");
+    let (_, root_secret_id) = stored_engine_row(&f, sr).await;
+    assert!(root_secret_id.is_none(), "a refused call minted nothing");
+}
+
+/// Fix round 1: an apply that fails after the upgrade stored its changes must
+/// leave the engine flagged (`notApplied`), and a repeat call must finish it.
+#[tokio::test]
+async fn a_failed_security_upgrade_apply_stays_flagged_and_a_repeat_finishes_it() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sr_secup_fail_admin", true).await;
+    let (engine_id, _) = create_starrocks_via_api(&f, &token).await;
+    let id = Uuid::parse_str(&engine_id).unwrap();
+    make_legacy_starrocks(&f, id, LEGACY_SR_FE_IMAGE, LEGACY_SR_CN_IMAGE).await;
+    let uri = format!("/engines/{engine_id}/security-upgrade");
+    port.set_fail_update(true);
+
+    let (status, j) = call(&f, "POST", &uri, &token, None).await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{j}");
+    let (spec, root_secret_id) = stored_engine_row(&f, id).await;
+    assert!(
+        root_secret_id.is_some(),
+        "the root password secret is stored"
+    );
+    assert_eq!(
+        spec["starrocksConfig"]["feImage"],
+        egret_perm::DEFAULT_ENGINE_IMAGES.starrocks_fe_image
+    );
+    assert_eq!(
+        spec["starrocksConfig"]["cnImage"],
+        egret_perm::DEFAULT_ENGINE_IMAGES.starrocks_cn_image
+    );
+    assert!(
+        stored_upgrade_pending(&f, id).await,
+        "the upgrade is unfinished"
+    );
+    let (status, j) = call(&f, "GET", &format!("/engines/{engine_id}"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["securityUpgradeNeeded"], true, "{j}");
+    assert_eq!(
+        j["securityUpgradeReasons"],
+        serde_json::json!(["notApplied"]),
+        "{j}"
+    );
+
+    // With a working provisioner a repeat applies once and clears it.
+    port.set_fail_update(false);
+    let updates_before = port.updated.lock().unwrap().len();
+    let (status, j) = call(&f, "POST", &uri, &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["imageChanged"], false, "{j}");
+    assert_eq!(j["rootPasswordSet"], false, "{j}");
+    assert_eq!(j["engine"]["securityUpgradeNeeded"], false, "{j}");
+    assert_eq!(
+        j["engine"]["securityUpgradeReasons"],
+        serde_json::json!([]),
+        "{j}"
+    );
+    assert_eq!(port.updated.lock().unwrap().len(), updates_before + 1);
+    let applied = port.last_updated();
+    let sr = applied.starrocks.as_ref().expect("a StarRocks spec");
+    assert_eq!(
+        sr.fe_image,
+        egret_perm::DEFAULT_ENGINE_IMAGES.starrocks_fe_image
+    );
+    assert!(sr.root_password.is_some());
+    assert!(!stored_upgrade_pending(&f, id).await);
+}
+
+/// Fix round 1: an ordinary settings PUT of a StarRocks engine applies the
+/// row as it stands, so it also finishes an unfinished security upgrade.
+#[tokio::test]
+async fn a_starrocks_settings_put_clears_an_unfinished_security_upgrade() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sr_secup_put_admin", true).await;
+    let (engine_id, wh_id) = create_starrocks_via_api(&f, &token).await;
+    let id = Uuid::parse_str(&engine_id).unwrap();
+    let name: String = sqlx::query_scalar(
+        "UPDATE engine_mgmt.engines SET security_upgrade_pending = true WHERE id = $1 \
+         RETURNING name",
+    )
+    .bind(id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("flag the engine");
+
+    let (status, j) = call(
+        &f,
+        "PUT",
+        &format!("/engines/{engine_id}"),
+        &token,
+        Some(serde_json::json!({
+            "name": name, "warehouseId": wh_id, "kind": "starrocks",
+            "coordinatorReplicas": 1, "workerReplicas": 1,
+            "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            "starrocks": { "cnReplicas": 2 },
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert!(
+        !stored_upgrade_pending(&f, id).await,
+        "the accepted apply cleared it"
+    );
+}
+
+/// Review Minor 2: a deleting engine gets the apply conflict, and nothing is
+/// written or applied.
+#[tokio::test]
+async fn security_upgrade_refuses_a_deleting_engine() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sr_secup_deleting_admin", true).await;
+    let id = mv_engine(&f, "starrocks", None).await;
+    sqlx::query("UPDATE engine_mgmt.engines SET status = 'deleting' WHERE id = $1")
+        .bind(id)
+        .execute(&f.db.pool)
+        .await
+        .expect("mark deleting");
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{id}/security-upgrade"),
+        &token,
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    assert!(
+        j["error"].as_str().unwrap_or("").contains("engine changed"),
+        "{j}"
+    );
+    let (_, root_secret_id) = stored_engine_row(&f, id).await;
+    assert!(root_secret_id.is_none(), "nothing minted");
+    assert!(!stored_upgrade_pending(&f, id).await, "nothing flagged");
+    assert!(port.updated.lock().unwrap().is_empty(), "nothing applied");
+}
+
+// ---- `notGoverned` on the update and registration responses (final review M4) ----
+
+/// A StarRocks settings PUT answers with the same `notGoverned` (and `runtime`)
+/// the engine's GET reports: an unbound StarRocks engine under Ranger is flagged
+/// in the PUT response too, not only on the next read.
+#[tokio::test]
+async fn a_starrocks_put_response_reports_not_governed_like_the_get() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_with_ranger_converging(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sr_put_notgov_admin", true).await;
+    let (engine_id, wh_id) = create_starrocks_via_api(&f, &token).await;
+    let id = Uuid::parse_str(&engine_id).unwrap();
+    // An engine left with no profile (e.g. created while Ranger was off).
+    let name: String = sqlx::query_scalar(
+        "UPDATE engine_mgmt.engines SET authz_service_id = NULL WHERE id = $1 RETURNING name",
+    )
+    .bind(id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("unbind the engine");
+
+    let (status, put) = call(
+        &f,
+        "PUT",
+        &format!("/engines/{engine_id}"),
+        &token,
+        Some(serde_json::json!({
+            "name": name, "warehouseId": wh_id, "kind": "starrocks",
+            "coordinatorReplicas": 1, "workerReplicas": 1,
+            "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            "starrocks": { "cnReplicas": 2 },
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{put}");
+    assert_eq!(put["notGoverned"], true, "{put}");
+    let (status, get) = call(&f, "GET", &format!("/engines/{engine_id}"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{get}");
+    assert_eq!(put["notGoverned"], get["notGoverned"], "{put} vs {get}");
+    assert_eq!(put["runtime"], get["runtime"], "{put} vs {get}");
+}
+
+/// External registration and PATCH answer with `notGoverned` set: an external
+/// StarRocks engine registered with no profile under Ranger is flagged in both.
+#[tokio::test]
+async fn external_register_and_patch_responses_report_not_governed() {
+    let Some(f) = external_fixture(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ext_notgov_admin", true).await;
+    let name = external_name("ext-notgov");
+    let (status, reg) = call(
+        &f,
+        "POST",
+        "/engines/external",
+        &token,
+        Some(register_body(&name, "starrocks", "2.8.0", None, &[])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{reg}");
+    assert_eq!(reg["notGoverned"], true, "registration response: {reg}");
+    let id = reg["id"].as_str().unwrap();
+
+    let (status, patched) = call(
+        &f,
+        "PATCH",
+        &format!("/engines/{id}/external"),
+        &token,
+        Some(serde_json::json!({ "host": "sr2.example.com" })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    assert_eq!(patched["notGoverned"], true, "PATCH response: {patched}");
 }

@@ -601,6 +601,8 @@ export * from './searchHit';
 export * from './searchResultDto';
 export * from './secretDto';
 export * from './securityMode';
+export * from './securityUpgradeDto';
+export * from './securityUpgradeReason';
 export * from './seededCount';
 export * from './seedResult';
 export * from './selector';

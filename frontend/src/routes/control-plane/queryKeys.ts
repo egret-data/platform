@@ -71,3 +71,10 @@ export const catalogKey = (id: string) =>
  * new writer cannot misspell it.
  */
 export const engineDetailKey = (id: string) => ["cp", "engine", id] as const;
+
+/**
+ * The engine list (`listEngines`, read by `ControlPlaneEngines.tsx`, which
+ * re-exports it). Named here so a writer the list page renders (the StarRocks
+ * security upgrade) can invalidate it without a module cycle.
+ */
+export const enginesQueryKey = ["cp", "engines"] as const;

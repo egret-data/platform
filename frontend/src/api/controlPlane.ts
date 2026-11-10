@@ -86,6 +86,7 @@ import type {
   CreateEngineBody,
   CreateEngineResponse,
   NewEngineCatalog,
+  SecurityUpgradeReason,
 } from "./generated/model";
 import { ApiError } from "./client";
 
@@ -598,6 +599,20 @@ export interface Engine {
    * Re-applying clears it. Absent on older payloads.
    */
   securityReapplyNeeded?: boolean;
+  /**
+   * StarRocks only: Ranger is on and the engine is bound to no policy profile,
+   * so egret's grants, masks and row filters do not reach it (KI-336). The
+   * backend decides; the frontend never reads Ranger's state.
+   */
+  notGoverned?: boolean;
+  /** Provisioned StarRocks only: `securityUpgradeReasons` is not empty. */
+  securityUpgradeNeeded?: boolean;
+  /** Why the security upgrade is needed, in the server's order. Absent on older payloads. */
+  securityUpgradeReasons?: SecurityUpgradeReason[];
+  /** The FE image the security upgrade would set; absent when it would set none. */
+  securityUpgradeFeImage?: string | null;
+  /** The newer release that keeps the current image (egret does not downgrade); absent otherwise. */
+  securityUpgradeBlockedRelease?: string | null;
 }
 
 /** What runs a provisioned engine (`EngineDto.runtime`). */
@@ -956,6 +971,11 @@ export interface CreateEngineInput {
   starrocks?: StarRocksCreateConfig;
   /** Optional `kubernetes.io/tls` named-secret id backing the coordinator TLS. */
   tlsCertSecretRef?: string;
+  /**
+   * StarRocks only: the policy profile to bind. Omitted, the server creates a
+   * profile named after the engine (when Ranger is on).
+   */
+  authzServiceId?: number;
 }
 
 export async function listEngines(): Promise<Engine[]> {

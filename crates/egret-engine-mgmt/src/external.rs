@@ -448,7 +448,7 @@ async fn update_external_engine(
                 authz_service_id = $5 \
           WHERE id = $1 AND origin = 'external' AND status = $6 \
             AND authz_service_id IS NOT DISTINCT FROM $7 \
-        RETURNING id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev",
+        RETURNING id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev, security_upgrade_pending",
     )
     .bind(engine.id)
     .bind(&host)
@@ -476,7 +476,7 @@ async fn update_external_engine(
     }
     tx.commit().await.map_err(crate::http_error::db_error)?;
     tracing::info!(engine = %updated.name, "external engine updated; nothing was sent to the cluster");
-    Ok(Json(updated.into()))
+    Ok(Json(EngineDto::from(updated).with_runtime(&st)))
 }
 
 #[utoipa::path(
@@ -573,7 +573,7 @@ async fn register_external_engine(
         // The body carries a password: no browser or intermediary may keep it.
         [(axum::http::header::CACHE_CONTROL, "no-store")],
         Json(RegisteredExternalEngineDto {
-            engine: engine.into(),
+            engine: EngineDto::from(engine).with_runtime(&st),
             ranger_credential: RangerCredentialDto {
                 username: credential.username.clone(),
                 password: credential.password.clone(),
@@ -645,7 +645,7 @@ async fn insert_external_row_in_tx(
            (id, name, type, namespace, spec, status, origin, external_host, external_port, \
             ranger_plugin_version, ranger_secret_id) \
          VALUES ($6, $1, $2, '', '{}'::jsonb, 'running', 'external', $3, $4, $5, $7) \
-         RETURNING id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev",
+         RETURNING id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev, security_upgrade_pending",
     )
     .bind(&b.name)
     .bind(&b.r#type)

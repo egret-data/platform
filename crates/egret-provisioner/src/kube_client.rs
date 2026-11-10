@@ -43,6 +43,17 @@ pub trait KubeClient: Send + Sync {
         namespace: &str,
         name: &str,
     ) -> anyhow::Result<()>;
+    /// [`delete`](Self::delete) with **Background** propagation: dependents
+    /// (a Job's pods) are garbage-collected with the owner instead of being
+    /// orphaned. The object may still be visible, terminating, when this
+    /// returns; see [`delete_background_and_wait`]. A missing object is `Ok`.
+    async fn delete_background(
+        &self,
+        api_version: &str,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+    ) -> anyhow::Result<()>;
     /// [`delete`](Self::delete) with a `resourceVersion` precondition: the
     /// object is deleted only if it is still the version the caller read
     /// (`None`: no precondition). A missing object is `Ok`; a changed one is an
@@ -221,6 +232,19 @@ pub struct FakeKube {
     pub live_pods: Mutex<Vec<Value>>,
     /// When `Some`, every `get_object*` / `list_pod_objects` read fails with it.
     pub fail_reads: Mutex<Option<String>>,
+    /// When true, every `get_object` never resolves (a hung API read).
+    pub hang_reads: Mutex<bool>,
+    /// Opt-in asynchronous delete: after a `delete_background` of a LIVE object
+    /// the object stays visible to `get_object` for this many reads (it is
+    /// "terminating"), like a Job whose pods are still being collected. `None`:
+    /// deletes are synchronous. Set with [`FakeKube::terminate_for`].
+    pub terminating_polls: Mutex<Option<usize>>,
+    /// `"kind/name"` → reads left before a terminating object disappears.
+    pub terminating: Mutex<BTreeMap<String, usize>>,
+    /// `"kind/name"` of every `apply` that landed on a still-terminating object.
+    pub applied_onto_terminating: Mutex<Vec<String>>,
+    /// `"kind/name"` per `delete_background` call.
+    pub deleted_background: Mutex<Vec<String>>,
 }
 
 impl Default for FakeKube {
@@ -237,6 +261,11 @@ impl Default for FakeKube {
             live: Mutex::new(BTreeMap::new()),
             live_pods: Mutex::new(Vec::new()),
             fail_reads: Mutex::new(None),
+            hang_reads: Mutex::new(false),
+            terminating_polls: Mutex::new(None),
+            terminating: Mutex::new(BTreeMap::new()),
+            applied_onto_terminating: Mutex::new(Vec::new()),
+            deleted_background: Mutex::new(Vec::new()),
         }
     }
 }
@@ -255,6 +284,12 @@ impl FakeKube {
             obj["metadata"]["name"].as_str().unwrap_or("")
         );
         self.live.lock().unwrap().insert(key, obj);
+    }
+
+    /// Make later `delete_background` calls asynchronous: a deleted live object
+    /// stays readable for `polls` reads (`usize::MAX`: never goes away).
+    pub fn terminate_for(&self, polls: usize) {
+        *self.terminating_polls.lock().unwrap() = Some(polls);
     }
 
     fn read_failure(&self) -> anyhow::Result<()> {
@@ -286,6 +321,12 @@ impl KubeClient for FakeKube {
             obj["kind"].as_str().unwrap_or(""),
             obj["metadata"]["name"].as_str().unwrap_or("")
         );
+        if self.terminating.lock().unwrap().contains_key(&key) {
+            self.applied_onto_terminating
+                .lock()
+                .unwrap()
+                .push(key.clone());
+        }
         self.applied.lock().unwrap().insert(key, obj.clone());
         Ok(())
     }
@@ -309,6 +350,28 @@ impl KubeClient for FakeKube {
             anyhow::bail!("{message}");
         }
         self.deleted.lock().unwrap().push(key);
+        Ok(())
+    }
+    async fn delete_background(
+        &self,
+        av: &str,
+        kind: &str,
+        ns: &str,
+        name: &str,
+    ) -> anyhow::Result<()> {
+        self.delete(av, kind, ns, name).await?;
+        let key = format!("{kind}/{name}");
+        self.deleted_background.lock().unwrap().push(key.clone());
+        let polls = *self.terminating_polls.lock().unwrap();
+        let is_live = self.live.lock().unwrap().contains_key(&key);
+        match polls {
+            Some(n) if is_live => {
+                self.terminating.lock().unwrap().insert(key, n);
+            }
+            _ => {
+                self.live.lock().unwrap().remove(&key);
+            }
+        }
         Ok(())
     }
     async fn delete_if_unchanged(
@@ -359,12 +422,22 @@ impl KubeClient for FakeKube {
         name: &str,
     ) -> anyhow::Result<Option<Value>> {
         self.read_failure()?;
-        Ok(self
-            .live
-            .lock()
-            .unwrap()
-            .get(&format!("{kind}/{name}"))
-            .cloned())
+        if *self.hang_reads.lock().unwrap() {
+            std::future::pending::<()>().await;
+        }
+        let key = format!("{kind}/{name}");
+        {
+            let mut terminating = self.terminating.lock().unwrap();
+            if let Some(left) = terminating.get_mut(&key) {
+                if *left == 0 {
+                    terminating.remove(&key);
+                    self.live.lock().unwrap().remove(&key);
+                } else {
+                    *left = left.saturating_sub(1);
+                }
+            }
+        }
+        Ok(self.live.lock().unwrap().get(&key).cloned())
     }
 
     async fn get_object_metadata(
@@ -511,6 +584,48 @@ fn tolerate_not_found(result: Result<(), kube::Error>) -> anyhow::Result<()> {
     }
 }
 
+/// The delete options for [`KubeClient::delete_background`]. A batch/v1 Job
+/// deleted with the default (Orphan) propagation leaves its pods behind.
+fn background_delete_params() -> kube::api::DeleteParams {
+    kube::api::DeleteParams::background()
+}
+
+/// Delete one object with Background propagation and wait until it is really
+/// gone (`get_object` reports `None`), polling every `interval` for at most
+/// `timeout`. Callers that re-create the object under the same name need this:
+/// applying onto a terminating object patches something that is about to vanish.
+/// A delete error, a read error, or the timeout is an `Err` naming the object.
+pub async fn delete_background_and_wait(
+    kube: &dyn KubeClient,
+    api_version: &str,
+    kind: &str,
+    namespace: &str,
+    name: &str,
+    timeout: std::time::Duration,
+    interval: std::time::Duration,
+) -> anyhow::Result<()> {
+    let wait = async {
+        kube.delete_background(api_version, kind, namespace, name)
+            .await
+            .map_err(|e| anyhow::anyhow!("delete {kind}/{name}: {e}"))?;
+        loop {
+            let live = kube
+                .get_object(api_version, kind, namespace, name)
+                .await
+                .map_err(|e| anyhow::anyhow!("read {kind}/{name}: {e}"))?;
+            if live.is_none() {
+                return Ok(());
+            }
+            tokio::time::sleep(interval).await;
+        }
+    };
+    // The bound covers every call, so a hung API request cannot outlast it.
+    match tokio::time::timeout(timeout, wait).await {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!("{kind}/{name} was still terminating after {timeout:?}"),
+    }
+}
+
 /// Delete every `(apiVersion, kind, name)` in `namespace`. All of them are
 /// attempted even after a failure, so a retry has as little left as possible;
 /// the error names every object that failed and why.
@@ -636,6 +751,25 @@ impl KubeClient for LiveKube {
         let ar = Self::api_resource(api_version, kind);
         let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
         tolerate_not_found(api.delete(name, &DeleteParams::default()).await.map(|_| ()))
+    }
+
+    async fn delete_background(
+        &self,
+        api_version: &str,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+    ) -> anyhow::Result<()> {
+        use kube::api::Api;
+        use kube::core::DynamicObject;
+
+        let ar = Self::api_resource(api_version, kind);
+        let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+        tolerate_not_found(
+            api.delete(name, &background_delete_params())
+                .await
+                .map(|_| ()),
+        )
     }
 
     async fn delete_if_unchanged(
@@ -908,6 +1042,99 @@ impl KubeClient for LiveKube {
 mod tests {
     use super::*;
     use futures_util::StreamExt;
+
+    #[test]
+    fn background_delete_uses_background_propagation() {
+        assert_eq!(
+            background_delete_params().propagation_policy,
+            Some(kube::api::PropagationPolicy::Background)
+        );
+    }
+
+    const TICK: std::time::Duration = std::time::Duration::from_millis(1);
+
+    fn job() -> Value {
+        serde_json::json!({"kind":"Job","metadata":{"name":"j"}})
+    }
+
+    #[tokio::test]
+    async fn delete_and_wait_returns_once_the_object_is_gone() {
+        let kube = FakeKube::default();
+        kube.set_live(job());
+        kube.terminate_for(3);
+        delete_background_and_wait(&kube, "batch/v1", "Job", "ns", "j", TICK * 500, TICK)
+            .await
+            .unwrap();
+        assert!(kube
+            .get_object("batch/v1", "Job", "ns", "j")
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(*kube.deleted_background.lock().unwrap(), vec!["Job/j"]);
+    }
+
+    #[tokio::test]
+    async fn delete_and_wait_errors_naming_the_object_when_it_never_goes() {
+        let kube = FakeKube::default();
+        kube.set_live(job());
+        kube.terminate_for(usize::MAX);
+        let err = delete_background_and_wait(&kube, "batch/v1", "Job", "ns", "j", TICK * 20, TICK)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("Job/j") && err.contains("terminating"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_and_wait_read_error_is_an_error_not_gone() {
+        let kube = FakeKube::default();
+        kube.set_live(job());
+        *kube.fail_reads.lock().unwrap() = Some("api down".into());
+        let err = delete_background_and_wait(&kube, "batch/v1", "Job", "ns", "j", TICK * 20, TICK)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("read Job/j") && err.contains("api down"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn delete_and_wait_bounds_a_hung_read() {
+        let kube = FakeKube::default();
+        *kube.hang_reads.lock().unwrap() = true;
+        let err = delete_background_and_wait(
+            &kube,
+            "batch/v1",
+            "Job",
+            "ns",
+            "j",
+            std::time::Duration::from_secs(30),
+            TICK,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("Job/j") && err.contains("terminating"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_and_wait_surfaces_a_delete_error() {
+        let kube = FakeKube::default();
+        kube.fail_delete("Job", "j", "forbidden");
+        let err = delete_background_and_wait(&kube, "batch/v1", "Job", "ns", "j", TICK * 20, TICK)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Job/j") && err.contains("forbidden"), "{err}");
+    }
 
     #[tokio::test]
     async fn fake_kube_pod_logs_stream_yields_canned_line() {

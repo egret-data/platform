@@ -107,6 +107,7 @@ import { EngineSecurity } from "./EngineSecurity";
 import { RotateSecretsSection } from "./RotateSecretsSection";
 import { RangerCredentialSection } from "./RangerCredential";
 import { ProvisionedStarRocksMetadataTablesWarning } from "./StarRocksMetadataTablesWarning";
+import { NotGovernedWarning, SecurityUpgradeWarning } from "./StarRocksPostureWarnings";
 import EngineMonitor from "./EngineMonitor";
 import PodLogsDialog from "./PodLogsDialog";
 import PodTerminalDialog from "./PodTerminalDialog";
@@ -475,7 +476,14 @@ export default function EngineDetail() {
           {data.rangerPluginVersionModelled === false && data.rangerPluginVersionNote && (
             <WarningCallout testId="plugin-version-note">{data.rangerPluginVersionNote}</WarningCallout>
           )}
-          {data.type === "starrocks" && <ProvisionedStarRocksMetadataTablesWarning engineId={id} image={engineImage(data)} />}
+          <NotGovernedWarning engine={data} />
+          <SecurityUpgradeWarning engine={data} />
+          {data.type === "starrocks" && (
+            <ProvisionedStarRocksMetadataTablesWarning
+              engineId={id}
+              securityUpgradeReasons={data.securityUpgradeReasons}
+            />
+          )}
           <EngineTabs engine={data} engineId={id} />
         </>
       )}

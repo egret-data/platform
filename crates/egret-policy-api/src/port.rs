@@ -28,6 +28,11 @@ pub trait PolicyPort: Send + Sync {
     /// before a tag service instance can be created for tag-based policies.
     async fn ensure_tag_def(&self) -> Result<(), PolicyError>;
 
+    /// Ensure the built-in `starrocks` service-def is seeded. Idempotent.
+    /// Required before a `starrocks` profile can be created for a StarRocks
+    /// engine.
+    async fn ensure_starrocks_def(&self) -> Result<(), PolicyError>;
+
     /// List all policy profiles (services).
     async fn list_services(&self) -> Result<Vec<PolicyService>, PolicyError>;
 

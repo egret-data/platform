@@ -291,7 +291,9 @@ describe("the profile page (EP13, EP15)", () => {
 describe("the engine page's StarRocks metadata-table warning", () => {
   const SR_ENGINE = { id: E_TR, name: "lake-sr", type: "starrocks", origin: "provisioned", status: "running" };
   const WARNING = /Unless this engine runs egret-starrocks-fe 4\.1\.7-egret\.4 or later.*metadata tables of Iceberg tables .* without asking Ranger/;
-  const cpEngine = (feImage: string) => ({
+  // `securityUpgradeReasons` is the server's verdict on the image (egret-perm::engine_images);
+  // the page reads it, never the image string.
+  const cpEngine = (feImage: string, securityUpgradeReasons: string[]) => ({
     id: E_TR,
     name: "lake-sr",
     type: "starrocks",
@@ -299,6 +301,24 @@ describe("the engine page's StarRocks metadata-table warning", () => {
     status: { phase: "running", message: null, pods: [] },
     spec: { starrocksConfig: { feImage } },
     origin: "provisioned",
+    securityUpgradeNeeded: securityUpgradeReasons.length > 0,
+    securityUpgradeReasons,
+  });
+
+  it("follows the server's image verdict, not the image string", async () => {
+    // An image string the old frontend rule called unpatched, which the server calls patched
+    // (a mirrored digest, say), with another reason: the verdict alone decides this warning.
+    const asked = serve(
+      engineAnswers({
+        [`/perm/engines/${E_TR}/grants`]: ok(grantsResponse({ engine: SR_ENGINE })),
+        [`/engines/${E_TR}`]: ok(cpEngine(`starrocks/fe-ubuntu:4.1.6@sha256:${"d".repeat(64)}`, ["noRootPassword"])),
+      }),
+    ).asked;
+    openArea(`/governance/engines/${E_TR}`, OPERATOR);
+    expect(await screen.findByRole("heading", { level: 1, name: "lake-sr" }, T)).toBeInTheDocument();
+    await waitFor(() => expect(asked).toContain(`GET /engines/${E_TR}`), T);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryByText(WARNING)).not.toBeInTheDocument();
   });
 
   it("is shown for a StarRocks engine bound to a profile", async () => {
@@ -312,7 +332,7 @@ describe("the engine page's StarRocks metadata-table warning", () => {
       engineAnswers({
         [`/perm/engines/${E_TR}/grants`]: ok(grantsResponse({ engine: SR_ENGINE })),
         [`/engines/${E_TR}`]: ok(
-          cpEngine(`ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.4@sha256:${"a".repeat(64)}`),
+          cpEngine(`ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.4@sha256:${"a".repeat(64)}`, []),
         ),
       }),
     ).asked;
@@ -327,7 +347,7 @@ describe("the engine page's StarRocks metadata-table warning", () => {
     serve(
       engineAnswers({
         [`/perm/engines/${E_TR}/grants`]: ok(grantsResponse({ engine: SR_ENGINE })),
-        [`/engines/${E_TR}`]: ok(cpEngine(`starrocks/fe-ubuntu:4.1.6@sha256:${"d".repeat(64)}`)),
+        [`/engines/${E_TR}`]: ok(cpEngine(`starrocks/fe-ubuntu:4.1.6@sha256:${"d".repeat(64)}`, ["unpatchedImage"])),
       }),
     );
     openArea(`/governance/engines/${E_TR}`, OPERATOR);

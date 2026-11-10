@@ -642,6 +642,7 @@ mod tests {
             ranger_secret_id: None,
             ranger_secret_prev_id: None,
             applied_security_rev: 0,
+            security_upgrade_pending: false,
             created_at: chrono::Utc::now(),
             origin: "provisioned".into(),
             external_host: None,

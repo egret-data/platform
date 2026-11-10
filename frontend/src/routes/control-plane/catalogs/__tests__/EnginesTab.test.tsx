@@ -110,6 +110,9 @@ function engine(over: Partial<EngineDto> = {}): EngineDto {
     origin: "provisioned",
     rangerCredentialPending: false,
     securityReapplyNeeded: false,
+    securityUpgradeNeeded: false,
+    securityUpgradeReasons: [],
+    notGoverned: false,
     spec: {},
     ...over,
   };

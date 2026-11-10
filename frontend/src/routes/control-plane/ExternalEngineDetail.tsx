@@ -75,6 +75,7 @@ import {
 import { catalogKey, catalogsQueryKey, engineDetailKey } from "./queryKeys";
 import { RangerCredentialSection, useRotationToken } from "./RangerCredential";
 import { StarRocksMetadataTablesWarning } from "./StarRocksMetadataTablesWarning";
+import { NotGovernedWarning } from "./StarRocksPostureWarnings";
 import { PageContainer } from "@/components/layout/PageContainer";
 import { DetailHeader } from "@/components/layout/DetailHeader";
 
@@ -140,6 +141,7 @@ export default function ExternalEngineDetail({ engine }: { engine: ExternalEngin
         }
       />
 
+      <NotGovernedWarning engine={engine} />
       <Tabs value={tab} onValueChange={setTab} className="space-y-5">
         <TabsList>
           <TabsTrigger value="overview">Overview</TabsTrigger>

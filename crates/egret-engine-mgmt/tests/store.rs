@@ -190,6 +190,7 @@ fn coordinator_host_and_jwt_check() {
         ranger_secret_id: None,
         ranger_secret_prev_id: None,
         applied_security_rev: 0,
+        security_upgrade_pending: false,
         created_at: chrono::Utc::now(),
         origin: "provisioned".into(),
         external_host: None,
@@ -333,4 +334,110 @@ async fn internal_secret_ids_round_trip_on_the_engine_row() {
     let got = engine_mgmt.get_engine(e.id).await.unwrap().unwrap();
     assert_eq!(got.internal_secret_id, Some(internal3));
     assert_eq!(got.monitor_secret_id, Some(monitor3));
+}
+
+/// The security upgrade's image write (`set_starrocks_images`) writes the two
+/// image keys and nothing else: a spec change committed after the route read
+/// the engine (here a direct write, standing in for a concurrent PUT) is kept,
+/// where writing back the spec the route read would erase it.
+#[tokio::test]
+async fn set_starrocks_images_keeps_a_spec_change_made_after_the_read() {
+    let Some((_catalog, engine_mgmt)) = stores().await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    let name = format!("sr-{}", Uuid::new_v4().simple());
+    let created = engine_mgmt
+        .create_engine(
+            &name,
+            "starrocks",
+            "egret-engines",
+            &serde_json::json!({
+                "starrocksConfig": { "feImage": "fe:old", "cnImage": "cn:old", "cnReplicas": 1 }
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    // The route's read.
+    let read = engine_mgmt.get_engine(created.id).await.unwrap().unwrap();
+    // A concurrent PUT lands between that read and the image write.
+    let concurrent = serde_json::json!({
+        "starrocksConfig": { "feImage": "fe:old", "cnImage": "cn:old", "cnReplicas": 3 },
+        "catalogs": ["extra"]
+    });
+    assert!(engine_mgmt
+        .update_engine(created.id, &concurrent, &read.status)
+        .await
+        .unwrap());
+
+    let written = engine_mgmt
+        .set_starrocks_images(created.id, "fe:new", "cn:new", &read.status)
+        .await
+        .unwrap();
+
+    assert!(written);
+    let spec = engine_mgmt
+        .get_engine(created.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .spec;
+    assert_eq!(
+        spec,
+        serde_json::json!({
+            "starrocksConfig": { "feImage": "fe:new", "cnImage": "cn:new", "cnReplicas": 3 },
+            "catalogs": ["extra"]
+        })
+    );
+}
+
+/// A spec with no `starrocksConfig` object gets one holding the two images, and
+/// a row no longer at the caller's status is not written.
+#[tokio::test]
+async fn set_starrocks_images_creates_the_config_and_honours_the_status_guard() {
+    let Some((_catalog, engine_mgmt)) = stores().await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    let name = format!("sr-{}", Uuid::new_v4().simple());
+    let created = engine_mgmt
+        .create_engine(
+            &name,
+            "starrocks",
+            "egret-engines",
+            &serde_json::json!({ "x": 1 }),
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert!(!engine_mgmt
+        .set_starrocks_images(created.id, "fe:new", "cn:new", "deleting")
+        .await
+        .unwrap());
+    assert_eq!(
+        engine_mgmt
+            .get_engine(created.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .spec,
+        serde_json::json!({ "x": 1 }),
+        "a stale status writes nothing"
+    );
+
+    assert!(engine_mgmt
+        .set_starrocks_images(created.id, "fe:new", "cn:new", &created.status)
+        .await
+        .unwrap());
+    assert_eq!(
+        engine_mgmt
+            .get_engine(created.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .spec,
+        serde_json::json!({ "x": 1, "starrocksConfig": { "feImage": "fe:new", "cnImage": "cn:new" } })
+    );
 }
