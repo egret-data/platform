@@ -1557,7 +1557,7 @@ async fn refuse_leftover_fe_metadata(st: &CpState, name: &str) -> Result<(), CpE
     let Some(kube) = st.kube.as_ref() else {
         return Ok(());
     };
-    let claim = format!("fe-meta-{name}-fe-0");
+    let claim = egret_provisioner::starrocks::fe_meta_claim_name(name, 0);
     match kube
         .get_object("v1", "PersistentVolumeClaim", DEFAULT_NAMESPACE, &claim)
         .await
@@ -4937,6 +4937,17 @@ async fn create_starrocks_engine(
     // The operator names each FE pod volume `<object>-<4 chars>`, a DNS label:
     // `{name}-ranger-cm` and `{name}-rc-{tag}` fit only up to this bound.
     check_starrocks_engine_name(&b.name)?;
+    // A name a live engine holds answers the ordinary "exists" refusal: its
+    // own claim is not a leftover, and the advice to delete it would be wrong.
+    if st
+        .engine_mgmt
+        .list_engines()
+        .await?
+        .iter()
+        .any(|e| e.name == b.name)
+    {
+        return Err(crate::EngineMgmtError::AlreadyExists(b.name.clone()).into());
+    }
     refuse_leftover_fe_metadata(&st, &b.name).await?;
     let sc = st
         .storage_registry
@@ -11626,9 +11637,6 @@ mod tests {
         }
     }
 
-    /// Secure-by-default: `create_starrocks_engine` mints + persists a
-    /// `root_secret_id` on the created engine UNCONDITIONALLY (no delegation, no
-    /// opt-in).
     /// Package D, decided on 2026-11-11 (4): a claim a previous engine of this
     /// name left would be rebound by the new FE, with the old root password.
     #[tokio::test]
@@ -11711,6 +11719,99 @@ mod tests {
         assert_eq!(code, StatusCode::CREATED);
     }
 
+    #[tokio::test]
+    async fn a_starrocks_create_of_a_live_engines_name_is_the_exists_refusal() {
+        let Some(mut st) = test_state().await else {
+            eprintln!("skipping a_starrocks_create_of_a_live_engines_name_is_the_exists_refusal: DATABASE_URL not set");
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
+        let kube = std::sync::Arc::new(egret_provisioner::kube_client::FakeKube::default());
+        st.kube = Some(kube.clone() as std::sync::Arc<dyn egret_provisioner::KubeClient>);
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let mut body = sr_update_body(None);
+        body.name = format!("sr-{}", Uuid::new_v4().simple());
+        let name = body.name.clone();
+        let (code, _dto) = create_starrocks_engine(st.clone(), body, wh.clone(), Vec::new())
+            .await
+            .expect("first create");
+        assert_eq!(code, StatusCode::CREATED);
+        // The live engine's own claim exists, as it does in a cluster.
+        let claim = format!("fe-meta-{name}-fe-0");
+        kube.set_live(
+            serde_json::json!({"kind": "PersistentVolumeClaim", "metadata": {"name": claim}}),
+        );
+
+        let mut again = sr_update_body(None);
+        again.name = name.clone();
+        let Err(err) = create_starrocks_engine(st.clone(), again, wh, Vec::new()).await else {
+            panic!("the second create must be refused");
+        };
+
+        assert!(
+            matches!(&err, CpError::AlreadyExists(n) if n == &name),
+            "{err:?}"
+        );
+        let resp = axum::response::IntoResponse::into_response(err);
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains("kubectl delete pvc"), "{text}");
+        assert!(!text.contains("engine_metadata_left_over"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_starrocks_create_whose_claim_read_fails_is_a_502() {
+        let Some(mut st) = test_state().await else {
+            eprintln!(
+                "skipping a_starrocks_create_whose_claim_read_fails_is_a_502: DATABASE_URL not set"
+            );
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
+        let kube = std::sync::Arc::new(egret_provisioner::kube_client::FakeKube::default());
+        *kube.fail_reads.lock().unwrap() = Some("api down".into());
+        st.kube = Some(kube as std::sync::Arc<dyn egret_provisioner::KubeClient>);
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let mut body = sr_update_body(None);
+        body.name = format!("sr-{}", Uuid::new_v4().simple());
+        let name = body.name.clone();
+
+        let Err(err) = create_starrocks_engine(st.clone(), body, wh, Vec::new()).await else {
+            panic!("an unreadable claim must refuse the create");
+        };
+
+        let resp = axum::response::IntoResponse::into_response(err);
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["code"], "engine_cluster_apply_failed");
+        assert!(
+            st.engine_mgmt
+                .list_engines()
+                .await
+                .unwrap()
+                .iter()
+                .all(|e| e.name != name),
+            "no engine row may exist"
+        );
+    }
+
+    /// Secure-by-default: `create_starrocks_engine` mints + persists a
+    /// `root_secret_id` on the created engine UNCONDITIONALLY (no delegation, no
+    /// opt-in).
     #[tokio::test]
     async fn create_starrocks_engine_mints_root_password() {
         let Some(mut st) = test_state().await else {

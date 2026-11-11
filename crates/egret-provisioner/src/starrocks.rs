@@ -445,7 +445,7 @@ const FE_META_CLAIM_PROBE_LIMIT: u32 = 16;
 /// The claim the StatefulSet makes for FE `ordinal`:
 /// `<volumeClaimTemplate>-<statefulset>-<ordinal>`, the StatefulSet being
 /// `<engine>-fe`.
-fn fe_meta_claim_name(engine: &str, ordinal: u32) -> String {
+pub fn fe_meta_claim_name(engine: &str, ordinal: u32) -> String {
     format!("{FE_META_VOLUME_NAME}-{engine}-fe-{ordinal}")
 }
 

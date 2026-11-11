@@ -392,6 +392,16 @@ impl IntoResponse for EngineHttpError {
     }
 }
 
+/// The 409's message: what is left, why it matters, and the command that
+/// removes it.
+pub(crate) fn leftover_fe_metadata_message(name: &str, claim: &str, namespace: &str) -> String {
+    format!(
+        "A previous StarRocks engine named \"{name}\" left its front-end metadata volume \
+         {claim}. A new engine would start with the old engine's users, catalogs and root \
+         password. Delete it first: kubectl delete pvc {claim} -n {namespace}"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     /// Live check F1: a catalog-workspace write whose recompile crosses an
@@ -475,14 +485,4 @@ mod tests {
             serde_json::json!({ "error": "secret is in use by 2 connection(s)" })
         );
     }
-}
-
-/// The 409's message: what is left, why it matters, and the command that
-/// removes it.
-pub(crate) fn leftover_fe_metadata_message(name: &str, claim: &str, namespace: &str) -> String {
-    format!(
-        "A previous StarRocks engine named \"{name}\" left its front-end metadata volume \
-         {claim}. A new engine would start with the old engine's users, catalogs and root \
-         password. Delete it first: kubectl delete pvc {claim} -n {namespace}"
-    )
 }
