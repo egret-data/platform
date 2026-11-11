@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -109,7 +109,6 @@ import { RangerCredentialSection } from "./RangerCredential";
 import { ProvisionedStarRocksMetadataTablesWarning } from "./StarRocksMetadataTablesWarning";
 import { NotGovernedWarning, SecurityUpgradeWarning } from "./StarRocksPostureWarnings";
 import EngineMonitor from "./EngineMonitor";
-import { QueryLogTab } from "./QueryLogTab";
 import PodLogsDialog from "./PodLogsDialog";
 import PodTerminalDialog from "./PodTerminalDialog";
 import ExternalEngineDetail from "./ExternalEngineDetail";
@@ -492,6 +491,11 @@ export default function EngineDetail() {
   );
 }
 
+// The Query log tab loads when it is opened: only StarRocks engines have it, and
+// its copy and code stay out of the entry chunk this page is part of (the
+// workflows bundle test marks its own module by the "Last 24 hours" label).
+const QueryLogTab = lazy(() => import("./QueryLogTab").then((m) => ({ default: m.QueryLogTab })));
+
 /** The valid top-level `?tab=` values (drives normalization of stale/legacy
  * bookmarks so a controlled Radix `<Tabs>` never gets an unmatched value). */
 const KNOWN_TABS = new Set([
@@ -620,7 +624,9 @@ function EngineTabs({
 
       {isStarRocks && (
         <TabsContent value="query-log">
-          <QueryLogTab engine={engine} />
+          <Suspense fallback={<ListSkeleton rows={6} cols={8} />}>
+            <QueryLogTab engine={engine} />
+          </Suspense>
         </TabsContent>
       )}
     </Tabs>

@@ -1,6 +1,6 @@
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Route, Routes } from "react-router-dom";
+import { Route, Routes, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -128,6 +128,16 @@ function routes(engine: unknown, extra: Record<string, Handler> = {}): Record<st
   };
 }
 
+/** The browser's Back button, for the history FE-PAGE-2 asks the filters and the panel to write. */
+function BackProbe() {
+  const navigate = useNavigate();
+  return (
+    <button type="button" data-testid="history-back" onClick={() => navigate(-1)}>
+      history back
+    </button>
+  );
+}
+
 function renderTab(me = ADMIN, search = "?tab=query-log") {
   return render(
     <Harness me={me} entry={`/control-plane/engines/x1${search}`}>
@@ -138,6 +148,7 @@ function renderTab(me = ADMIN, search = "?tab=query-log") {
             <>
               <EngineDetail />
               <LocationProbe />
+              <BackProbe />
             </>
           }
         />
@@ -372,7 +383,43 @@ describe("the table", () => {
     expect(first.query.cursor).toBeUndefined();
     expect(second.query.cursor).toBe("c2");
     expect(second.query.from).toBe(first.query.from);
+    expect(second.query.to).toBe(first.query.to);
     expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+  });
+
+  test("a filter change after Load more starts again at the first page, with no cursor", async () => {
+    const calls = stubFetch(
+      routes(SR, {
+        [`GET ${BASE}`]: (req) =>
+          req.query.cursor === "c2"
+            ? { body: { entries: [DIRECT_FAILED], nextCursor: null } }
+            : { body: { entries: [DELEGATED], nextCursor: "c2" } },
+      }),
+    );
+    renderTab();
+    await rowsShown();
+    await userEvent.click(screen.getByRole("button", { name: "Load more" }));
+    await waitFor(async () => expect(await rowsShown()).toHaveLength(2), T);
+    const before = listCalls(calls).length;
+
+    await userEvent.click(screen.getByRole("combobox", { name: "State" }));
+    await userEvent.click(await screen.findByRole("option", { name: "Failed" }));
+
+    await waitFor(() => expect(listCalls(calls).length).toBe(before + 1), T);
+    const next = listCalls(calls).at(-1)!.query;
+    expect(next.state).toBe("error");
+    expect(next.cursor).toBeUndefined();
+    await waitFor(async () => expect(await rowsShown()).toHaveLength(1), T);
+    expect(screen.getByRole("button", { name: "Load more" })).toBeInTheDocument();
+  });
+
+  test("a row's open button names what it opens", async () => {
+    stubFetch(routes(SR));
+    renderTab();
+    const [delegated] = await rowsShown();
+    const button = within(delegated).getByRole("button");
+    expect(button).toHaveAccessibleName(/^Open statement at \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} by bob$/);
+    expect(button).toHaveAttribute("aria-haspopup", "dialog");
   });
 
   test("User is the person; Connected as only when the session user differs", async () => {
@@ -446,5 +493,114 @@ describe("the side panel", () => {
     const panel = await screen.findByRole("dialog", {}, T);
     const error = await within(panel).findByRole("region", { name: "Error" }, T);
     expect(error).toHaveTextContent("None");
+  });
+});
+
+describe("URL values the server would refuse", () => {
+  test("a bad from, to, state and an over-long user fall back to the defaults", async () => {
+    const calls = stubFetch(routes(SR, { [`GET ${BASE}`]: { body: { entries: [], nextCursor: null } } }));
+    renderTab(ADMIN, `?tab=query-log&from=garbage&to=nope&state=bogus&user=${"u".repeat(129)}`);
+    // Nothing the reader can see narrows the view, so the empty state is the unfiltered one.
+    expect(await screen.findByText("No statements in the last 24 hours", {}, T)).toBeInTheDocument();
+    const q = listCalls(calls).at(-1)!.query;
+    expect(Date.parse(q.to) - Date.parse(q.from)).toBe(24 * 3600 * 1000);
+    expect(q.state).toBeUndefined();
+    expect(q.user).toBeUndefined();
+    expect(screen.getByRole("combobox", { name: "Time range" })).toHaveTextContent("Last 24 hours");
+    expect(screen.getByRole("combobox", { name: "State" })).toHaveTextContent("All");
+    expect(screen.getByLabelText("User")).toHaveValue("");
+  });
+
+  test("a preset from ignores a to beside it", async () => {
+    const calls = stubFetch(routes(SR));
+    renderTab(ADMIN, "?tab=query-log&from=1h&to=2026-11-02T00:00:00.000Z");
+    await rowsShown();
+    const q = listCalls(calls).at(-1)!.query;
+    expect(Date.parse(q.to) - Date.parse(q.from)).toBe(3600 * 1000);
+    expect(q.to).not.toBe("2026-11-02T00:00:00.000Z");
+  });
+});
+
+describe("history (FE-PAGE-2)", () => {
+  test("Back undoes a filter change", async () => {
+    stubFetch(routes(SR));
+    renderTab();
+    await rowsShown();
+    await userEvent.click(screen.getByRole("combobox", { name: "State" }));
+    await userEvent.click(await screen.findByRole("option", { name: "Failed" }));
+    await waitFor(() => expect(urlParams().get("state")).toBe("error"), T);
+    await userEvent.click(screen.getByTestId("history-back"));
+    await waitFor(() => expect(urlParams().has("state")).toBe(false), T);
+    expect(urlParams().get("tab")).toBe("query-log");
+    expect(screen.getByRole("combobox", { name: "State" })).toHaveTextContent("All");
+  });
+
+  test("Back puts the typed User back to what the URL held", async () => {
+    stubFetch(routes(SR));
+    renderTab();
+    await rowsShown();
+    await userEvent.type(screen.getByLabelText("User"), "bob{Enter}");
+    await waitFor(() => expect(urlParams().get("user")).toBe("bob"), T);
+    await userEvent.click(screen.getByTestId("history-back"));
+    await waitFor(() => expect(screen.getByLabelText("User")).toHaveValue(""), T);
+  });
+
+  test("Back closes an opened statement", async () => {
+    stubFetch(routes(SR, { [`GET ${BASE}/${DELEGATED.queryId}`]: { body: DELEGATED } }));
+    renderTab();
+    const [delegated] = await rowsShown();
+    await userEvent.click(within(delegated).getByRole("button"));
+    expect(await screen.findByRole("dialog", {}, T)).toBeInTheDocument();
+    // The panel is modal; the probe sits under it, so it is fired directly.
+    screen.getByTestId("history-back").click();
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument(), T);
+    expect(urlParams().has("entry")).toBe(false);
+  });
+});
+
+describe("partial text and the panel's facts", () => {
+  /** An audit holder's row whose `stmt` column was NULL: the error is delivered, the statement is not. */
+  const ERROR_ONLY = { ...DIRECT_FAILED_WITHHELD, errorMessage: "Unexpected input 'xyz'" };
+
+  test("a delivered error is shown even when the statement is absent, and nothing reads Hidden", async () => {
+    stubFetch(
+      routes(SR, {
+        [`GET ${BASE}`]: { body: { entries: [ERROR_ONLY], nextCursor: null } },
+        [`GET ${BASE}/${DIRECT_FAILED.queryId}`]: { body: ERROR_ONLY },
+      }),
+    );
+    renderTab(ADMIN, `?tab=query-log&entry=${DIRECT_FAILED.queryId}`);
+    const panel = await screen.findByRole("dialog", {}, T);
+    expect(await within(panel).findByTestId("query-log-error", {}, T)).toHaveTextContent("Unexpected input 'xyz'");
+    expect(within(panel).getByRole("region", { name: "Statement" })).toHaveTextContent("Not recorded");
+    expect(within(panel).queryByText(HIDDEN)).not.toBeInTheDocument();
+    expect(screen.queryByText(HIDDEN)).not.toBeInTheDocument();
+  });
+
+  test("Connected as appears in the panel only when it differs", async () => {
+    stubFetch(
+      routes(SR, {
+        [`GET ${BASE}/${DIRECT_FAILED.queryId}`]: { body: DIRECT_FAILED },
+        [`GET ${BASE}/${DELEGATED.queryId}`]: { body: DELEGATED },
+      }),
+    );
+    renderTab(ADMIN, `?tab=query-log&entry=${DIRECT_FAILED.queryId}`);
+    let panel = await screen.findByRole("dialog", {}, T);
+    await within(panel).findByTestId("query-log-statement", {}, T);
+    expect(within(panel).queryByText("Connected as")).not.toBeInTheDocument();
+    cleanup();
+
+    renderTab(ADMIN, `?tab=query-log&entry=${DELEGATED.queryId}`);
+    panel = await screen.findByRole("dialog", {}, T);
+    await within(panel).findByTestId("query-log-statement", {}, T);
+    expect(within(panel).getByText("Connected as").nextElementSibling).toHaveTextContent("egret_svc");
+  });
+
+  test("a state this client does not know gets a neutral line, not 'did not answer'", async () => {
+    stubFetch(routes(SR, { [`GET ${BASE}/status`]: { body: { state: "somethingNew", retentionDays: 30 } } }));
+    renderTab();
+    const line = await screen.findByTestId("query-log-status", {}, T);
+    expect(line).toHaveTextContent("The query log reports a state this page does not know (somethingNew).");
+    expect(line).not.toHaveTextContent("did not answer");
   });
 });

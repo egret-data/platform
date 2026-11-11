@@ -77,14 +77,38 @@ interface Filters {
 
 const FILTER_PARAMS = ["from", "to", "user", "state"] as const;
 
+/** The server's limit on the User filter. */
+const USER_MAX = 128;
+
+function isInstant(v: string | null): v is string {
+  return v !== null && v !== "" && !Number.isNaN(Date.parse(v));
+}
+
+/**
+ * The URL's filters, with every value the server would refuse read as "not
+ * set", so a hand-edited or stale link falls back to the defaults instead of
+ * reaching the server: `from` is a preset token or an instant, `to` an
+ * instant and only beside an instant `from` or none, `state` one of the
+ * picker's values, and `user` at most 128 characters.
+ */
 function readFilters(sp: URLSearchParams): Filters {
+  const rawFrom = sp.get("from");
+  const rawTo = sp.get("to");
+  const user = sp.get("user")?.trim() ?? "";
   const state = sp.get("state");
+  const from = isPreset(rawFrom) ? (rawFrom === DEFAULT_PRESET ? null : rawFrom) : isInstant(rawFrom) ? rawFrom : null;
+  const to = isInstant(rawTo) && !isPreset(rawFrom) ? rawTo : null;
   return {
-    from: sp.get("from"),
-    to: sp.get("to"),
-    user: sp.get("user"),
+    from,
+    to,
+    user: user !== "" && user.length <= USER_MAX ? user : null,
     state: isStateFilter(state) ? state : "all",
   };
+}
+
+/** Whether any filter narrows the default view (read from the parsed values, not the raw URL). */
+function isFiltered(f: Filters): boolean {
+  return f.from !== null || f.to !== null || f.user !== null || f.state !== "all";
 }
 
 /** Which range the picker shows: a preset token, else custom when either end is an instant. */
@@ -165,12 +189,14 @@ function connectedAs(e: QueryLogEntryDto): string | null {
 
 /**
  * The server drops `statement` and `errorMessage` together for a caller
- * without `engine:audit` (spec, "Decided on 2026-11-11" 1). A statement is
- * always there for one who has it, so an absent statement is the sign the
- * text was withheld; `errorMessage` alone is also absent on every success.
+ * without `engine:audit` (spec, "Decided on 2026-11-11" 1). Either one present
+ * means the text was not withheld: `errorMessage` alone is absent on every
+ * success, and `statement` alone on a row whose `stmt` column is NULL. Only
+ * both absent reads as withheld (an audit holder's NULL-`stmt` success looks
+ * the same, and is too rare to tell apart from the content).
  */
 function textWithheld(e: QueryLogEntryDto): boolean {
-  return e.statement === undefined;
+  return e.statement == null && e.errorMessage == null;
 }
 
 function stateBadge(state: string | null | undefined) {
@@ -207,7 +233,7 @@ function isNotReady(error: unknown): boolean {
 export function QueryLogTab({ engine }: { engine: Pick<Engine, "id" | "securityUpgradeNeeded"> }) {
   const [sp, setSp] = useSearchParams();
   const filters = readFilters(sp);
-  const filtered = FILTER_PARAMS.some((k) => sp.has(k));
+  const filtered = isFiltered(filters);
   const selected = sp.get("entry");
 
   const update = (patch: Record<string, string | null>) =>
@@ -220,7 +246,7 @@ export function QueryLogTab({ engine }: { engine: Pick<Engine, "id" | "securityU
         }
         return n;
       },
-      { replace: true },
+      // FE-PAGE-2: a filter or an opened statement is a history entry, so Back walks them.
     );
 
   const clearFilters = () => update(Object.fromEntries(FILTER_PARAMS.map((k) => [k, null])));
@@ -293,7 +319,6 @@ function QueryLogStatusLine({ engine }: { engine: Pick<Engine, "id" | "securityU
         </WarningCallout>
       );
     case "unreachable":
-    default:
       return (
         <Alert variant="destructive" data-testid="query-log-status">
           <AlertDescription className="flex flex-wrap items-center gap-2">
@@ -301,6 +326,13 @@ function QueryLogStatusLine({ engine }: { engine: Pick<Engine, "id" | "securityU
             <RetryButton onRetry={() => void status.refetch()} busy={status.isFetching} />
           </AlertDescription>
         </Alert>
+      );
+    default:
+      // A state newer than this client: say only what is known.
+      return (
+        <p className="text-sm text-muted-foreground" data-testid="query-log-status">
+          The query log reports a state this page does not know ({String(s.state)}).
+        </p>
       );
   }
 }
@@ -606,6 +638,8 @@ function QueryLogRow({ entry: e, onOpen }: { entry: QueryLogEntryDto; onOpen: ()
           type="button"
           className="text-left tabular-nums underline-offset-4 hover:underline focus-visible:underline"
           title={utcInstant(e.timestamp)}
+          aria-label={`Open statement at ${localTime(e.timestamp)} by ${userOf(e)}`}
+          aria-haspopup="dialog"
           onClick={onOpen}
         >
           {localTime(e.timestamp)}
@@ -618,12 +652,14 @@ function QueryLogRow({ entry: e, onOpen }: { entry: QueryLogEntryDto; onOpen: ()
       <TableCell className="text-right tabular-nums">{formatMs(e.queryTimeMs)}</TableCell>
       <TableCell className="text-right tabular-nums">{formatCount(e.returnRows)}</TableCell>
       <TableCell className="max-w-md">
-        {textWithheld(e) ? (
+        {e.statement ? (
+          <span className="block truncate font-mono text-xs" title={e.statement}>
+            {firstLine(e.statement, e.statementTruncated)}
+          </span>
+        ) : textWithheld(e) ? (
           <span className="text-muted-foreground italic">{HIDDEN_TEXT}</span>
         ) : (
-          <span className="block truncate font-mono text-xs" title={e.statement ?? undefined}>
-            {firstLine(e.statement ?? "", e.statementTruncated)}
-          </span>
+          <span className="text-muted-foreground">—</span>
         )}
       </TableCell>
     </TableRow>
@@ -672,10 +708,11 @@ function QueryLogEntryPanel({
 
 function EntryDetail({ entry: e }: { entry: QueryLogEntryDto }) {
   const withheld = textWithheld(e);
+  const delegatedFrom = connectedAs(e);
   const facts: [string, ReactNode][] = [
     ["Time", <span title={utcInstant(e.timestamp)}>{localTime(e.timestamp)}</span>],
     ["User", userOf(e)],
-    ["Connected as", e.user ?? "—"],
+    ...(delegatedFrom ? [["Connected as", delegatedFrom] as [string, ReactNode]] : []),
     ["State", stateBadge(e.state)],
     ["Command", e.command ?? "—"],
     ["Catalog", e.catalog ?? "—"],
@@ -702,24 +739,26 @@ function EntryDetail({ entry: e }: { entry: QueryLogEntryDto }) {
       </dl>
       <section className="space-y-1.5" aria-label="Error">
         <h3 className="text-sm font-medium">Error</h3>
-        {withheld ? (
-          <p className="text-sm text-muted-foreground italic">{HIDDEN_TEXT}</p>
-        ) : e.errorMessage ? (
+        {e.errorMessage ? (
           <pre className="rounded bg-muted p-3 font-mono text-xs whitespace-pre-wrap break-all" data-testid="query-log-error">
             {e.errorMessage}
           </pre>
+        ) : withheld ? (
+          <p className="text-sm text-muted-foreground italic">{HIDDEN_TEXT}</p>
         ) : (
           <p className="text-sm text-muted-foreground">None</p>
         )}
       </section>
       <section className="space-y-1.5" aria-label="Statement">
         <h3 className="text-sm font-medium">Statement</h3>
-        {withheld ? (
-          <p className="text-sm text-muted-foreground italic">{HIDDEN_TEXT}</p>
-        ) : (
+        {e.statement ? (
           <pre className="rounded bg-muted p-3 font-mono text-xs whitespace-pre-wrap break-all" data-testid="query-log-statement">
             {e.statement}
           </pre>
+        ) : withheld ? (
+          <p className="text-sm text-muted-foreground italic">{HIDDEN_TEXT}</p>
+        ) : (
+          <p className="text-sm text-muted-foreground">Not recorded</p>
         )}
       </section>
     </div>

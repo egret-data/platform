@@ -58,7 +58,11 @@ Image fork egret.4 trở đi có sẵn plugin AuditLoader ở `/opt/egret/auditl
    - chi tiết một query.
 
    Giá trị request đều đi qua `quote_string`. Statement bị cắt ở 2.000 ký tự, và được che mật khẩu theo giá trị chính xác lẫn theo dạng. Các lần đọc của chính egret bị loại khỏi kết quả.
-6. **Tab:** chỉ có ở engine StarRocks. Tab có bộ lọc trong URL, bảng ưu tiên cột User (`authorizedUser`), panel chi tiết, và nút **Load more**.
+6. **Tab:** chỉ có ở engine StarRocks. Tab có bộ lọc trong URL, bảng ưu tiên cột User (`authorizedUser`), panel chi tiết, và nút **Load more**. Text của dòng trạng thái giữ nguyên tiếng Anh như trên giao diện:
+   - `notSetUp`: "The query log is not set up on this engine: its audit plugin or its log table is missing.", kèm nút **Set up query log** (cần `engine:update`; khi bị tắt, nút ghi lý do "Setting it up needs the engine:update permission.");
+   - `pluginNotShipped`, có hai biến thể (Task 6):
+     - khi engine mang cờ `securityUpgradeNeeded` của B, text chỉ tới nút của B nằm trong cảnh báo bảo mật phía trên các tab: "This engine's image has no audit plugin. **Upgrade security**, in the security warning on this page, moves it to egret's image, and the Query log starts after that.";
+     - khi không có cờ đó thì không có nút để nhắc tới: "This engine's image has no audit plugin. The Query log starts once the engine runs egret's image."
 7. **Gia cố:** `plugin_enable` và `plugin_dir` bị cấm trong `feConfig`. Cần đo xem plugin còn sau khi FE khởi động lại hay không.
 
 **Đã đo ở Task 5** (2026-11-10, image egret.4; chi tiết và text lỗi chính xác ở bản tiếng Anh):

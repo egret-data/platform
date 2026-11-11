@@ -310,9 +310,17 @@ included, is shown.
 - **Above the table:** a status line from `/query-log/status`.
   - `ready`: "Kept 30 days. Latest event: <time>." When `lastEventAt` is absent: "No events
     yet. Events reach the log about a minute after a statement runs."
-  - `notSetUp`: a `WarningCallout` with **Set up query log**, which calls `POST …/setup` and
-    needs `engine:update`. When the button is disabled, it says why.
-  - `pluginNotShipped`: the section 4 text.
+  - `notSetUp`: a `WarningCallout` that says "The query log is not set up on this engine: its
+    audit plugin or its log table is missing.", with **Set up query log**, which calls
+    `POST …/setup` and needs `engine:update`. When the button is disabled, it says why ("Setting
+    it up needs the engine:update permission.").
+  - `pluginNotShipped`: section 4's text, in one of two variants (Task 6):
+    - when the engine carries B's `securityUpgradeNeeded`, the callout points at B's button, which
+      sits in the security warning above the tabs: "This engine's image has no audit plugin.
+      **Upgrade security**, in the security warning on this page, moves it to egret's image, and
+      the Query log starts after that.";
+    - without that flag there is no button to name: "This engine's image has no audit plugin.
+      The Query log starts once the engine runs egret's image."
   - `unreachable`: the message, with a retry.
 - **Filters**, kept in the URL: a time range (last hour, last 24 hours, last 7 days, last 30
   days, custom), User, and State (All / Succeeded / Failed).
