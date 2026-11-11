@@ -74,11 +74,16 @@ pub fn trino_auth_enabled(spec: &Value) -> bool {
 }
 
 /// Whether applying this engine provisions the `egret_delegator` service user
-/// and its impersonation grant: a Trino engine in `impersonate` mode with auth.
+/// and its impersonation grant: a Trino engine in `impersonate` mode with
+/// auth, or a StarRocks engine in `impersonate` mode, whose post-Ready
+/// bootstrap creates the delegator (package D).
 pub fn delegator_impersonates(engine_type: &str, spec: &Value) -> bool {
-    engine_type == "trino"
-        && delegation_mode(engine_type, spec) == "impersonate"
-        && trino_auth_enabled(spec)
+    let impersonate = delegation_mode(engine_type, spec) == "impersonate";
+    match engine_type {
+        "trino" => impersonate && trino_auth_enabled(spec),
+        "starrocks" => impersonate,
+        _ => false,
+    }
 }
 
 /// Whether an engine contributes infrastructure policies to its bound profile:
@@ -115,6 +120,17 @@ mod tests {
         assert!(!delegator_impersonates("starrocks", &auth));
         let jwt = json!({"trinoConfig": {"delegationMode": "jwt", "auth": {"jwt": {}}}});
         assert!(!delegator_impersonates("trino", &jwt));
+        // Package D: a StarRocks engine in impersonate mode creates the delegator
+        // in its bootstrap, so it impersonates with it.
+        assert!(delegator_impersonates(
+            "starrocks",
+            &json!({"starrocksConfig": {"delegation": {"mode": "impersonate"}}})
+        ));
+        assert!(!delegator_impersonates(
+            "starrocks",
+            &json!({"starrocksConfig": {"delegation": {"mode": "jwt"}}})
+        ));
+        assert!(!delegator_impersonates("starrocks", &json!({})));
     }
 
     #[test]

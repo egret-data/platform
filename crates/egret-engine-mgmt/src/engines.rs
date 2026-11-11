@@ -9279,10 +9279,14 @@ mod tests {
             serde_json::json!({"starrocksConfig": {"delegation": {"mode": "impersonate"}}}),
             serde_json::json!({"starrocksConfig": {"delegation": {"mode": "jwt"}}}),
         ] {
-            assert!(!ed::delegator_impersonates("starrocks", &spec), "{spec}");
             let mut e = dummy_engine();
             e.r#type = "starrocks".into();
             e.spec = spec.clone();
+            assert_eq!(
+                ed::delegator_impersonates("starrocks", &spec),
+                e.is_impersonate_delegation(),
+                "{spec}"
+            );
             assert_eq!(
                 ed::supports_delegation("starrocks", &spec),
                 e.supports_delegation(),

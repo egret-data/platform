@@ -352,6 +352,9 @@ impl Snapshot {
                 };
                 self.infra_where(user, |o| match o {
                     InfraObject::AnyUser => true,
+                    InfraObject::AnyUserExcept(excluded) => {
+                        !excluded.iter().any(|e| eq_ci(e, target))
+                    }
                     InfraObject::SessionUser => eq_ci(target, user),
                     _ => false,
                 })

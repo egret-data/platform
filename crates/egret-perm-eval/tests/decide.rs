@@ -450,6 +450,42 @@ fn impersonation_rules() {
     );
 }
 
+/// Package D, D1b: the StarRocks delegator may become anyone but the
+/// reserved users, matched like Ranger's `ignoreCase` `user` resource.
+#[test]
+fn the_starrocks_delegator_may_become_anyone_but_the_reserved_users() {
+    let s = snap(
+        vec![infra(
+            InfraKind::DelegatorImpersonate,
+            who(&["egret_delegator"], &[]),
+            InfraObject::AnyUserExcept(vec![
+                "egret_delegator".into(),
+                "egret_query_log".into(),
+                "root".into(),
+            ]),
+            "impersonate",
+        )],
+        vec![],
+    );
+    let op = "ImpersonateUser";
+    assert!(allowed(&s.decide(
+        "egret_delegator",
+        op,
+        &Resource::User("ann".into())
+    )));
+    for target in ["root", "ROOT", "egret_query_log", "egret_delegator"] {
+        assert!(
+            !allowed(&s.decide("egret_delegator", op, &Resource::User(target.into()))),
+            "{target}"
+        );
+    }
+    assert!(!allowed(&s.decide(
+        "ann",
+        op,
+        &Resource::User("bob".into())
+    )));
+}
+
 #[test]
 fn an_engine_capability_allows_exactly_its_values() {
     let s = snap(

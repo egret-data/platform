@@ -2,7 +2,9 @@
 //! enforcement point, derived from the engines bound to it rather than from
 //! any authored model object. Pure; the caller loads [`InfraInputs`].
 
-use egret_core::engine_principals::{DELEGATOR_PRINCIPAL, QUERY_LOG_LOADER_PRINCIPAL};
+use egret_core::engine_principals::{
+    DELEGATOR_PRINCIPAL, QUERY_LOG_LOADER_PRINCIPAL, STARROCKS_RESERVED_USERS,
+};
 use egret_perm::EngineType;
 
 use crate::audience::{Audience, Member, MemberName, Via};
@@ -21,7 +23,8 @@ pub struct InfraInputs {
     pub admins: Vec<String>,
     /// At least one qualifying engine is bound.
     pub delegating: bool,
-    /// At least one delegator-impersonating Trino engine is bound.
+    /// At least one bound engine impersonates with `egret_delegator`
+    /// (`egret_core::engine_delegation::delegator_impersonates`).
     pub delegator_impersonates: bool,
     /// At least one StarRocks engine egret provisioned (origin not external)
     /// is bound: its AuditLoader writes the query log. Independent of
@@ -58,7 +61,8 @@ fn statement(
 
 /// The infrastructure statements for `i`, in the order `AdminAllAccess`,
 /// `QueryLogLoader`, `QueryLogGuard` (StarRocks only), `DelegatorImpersonate`,
-/// `SelfImpersonate`, `ExecuteQuery`, `QueryTimeout` (Trino only).
+/// `SelfImpersonate`, `ExecuteQuery`, `QueryTimeout` (the last three Trino
+/// only).
 ///
 /// `AdminAllAccess` and the Trino statements need a delegating engine; the
 /// two query-log statements need only `query_log`, so a StarRocks engine that
@@ -97,6 +101,19 @@ pub fn lower_infra(i: &InfraInputs) -> Vec<Statement> {
             },
             derivation: Derivation::AsDeclared,
         });
+    }
+    if i.engine == EngineType::StarRocks && i.delegating && i.delegator_impersonates {
+        out.push(statement(
+            InfraKind::DelegatorImpersonate,
+            vec![user(DELEGATOR_PRINCIPAL)],
+            InfraObject::AnyUserExcept(
+                STARROCKS_RESERVED_USERS
+                    .iter()
+                    .map(|u| u.to_string())
+                    .collect(),
+            ),
+            "impersonate",
+        ));
     }
     if !i.delegating || i.engine != EngineType::Trino {
         return out;
@@ -225,10 +242,62 @@ mod tests {
         assert!(!kinds(&s).contains(&InfraKind::AdminAllAccess));
     }
 
+    fn reserved() -> Vec<String> {
+        vec![
+            "egret_delegator".into(),
+            "egret_query_log".into(),
+            "root".into(),
+        ]
+    }
+
+    /// Package D, D1b: a StarRocks profile whose engine impersonates with the
+    /// delegator gets the delegator's impersonation, with root, the delegator and
+    /// the query-log loader excluded, and none of the Trino baseline.
     #[test]
-    fn starrocks_gets_the_admin_set_only() {
+    fn starrocks_impersonate_emits_the_delegator_row_without_the_reserved_users() {
         let s = lower_infra(&inputs(EngineType::StarRocks, &["a"], true, true));
+        assert_eq!(
+            kinds(&s),
+            vec![InfraKind::AdminAllAccess, InfraKind::DelegatorImpersonate]
+        );
+        assert_eq!(
+            s[1].target,
+            Target::Infra(InfraObject::AnyUserExcept(reserved()))
+        );
+        assert_eq!(s[1].audience.include, vec![user("egret_delegator")]);
+        assert!(s[1].audience.except.is_empty());
+        assert_eq!(
+            s[1].effect,
+            Effect::EnginePrivilege {
+                capability: "impersonate".into()
+            }
+        );
+    }
+
+    #[test]
+    fn starrocks_with_the_query_log_orders_the_delegator_row_after_it() {
+        let s = lower_infra(&with_query_log(inputs(
+            EngineType::StarRocks,
+            &["a"],
+            true,
+            true,
+        )));
+        assert_eq!(
+            kinds(&s),
+            vec![
+                InfraKind::AdminAllAccess,
+                InfraKind::QueryLogLoader,
+                InfraKind::QueryLogGuard,
+                InfraKind::DelegatorImpersonate
+            ]
+        );
+    }
+
+    #[test]
+    fn starrocks_without_the_delegator_or_not_delegating_emits_no_impersonation() {
+        let s = lower_infra(&inputs(EngineType::StarRocks, &["a"], true, false));
         assert_eq!(kinds(&s), vec![InfraKind::AdminAllAccess]);
+        assert!(lower_infra(&inputs(EngineType::StarRocks, &["a"], false, true)).is_empty());
     }
 
     #[test]
