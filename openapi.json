@@ -4095,7 +4095,7 @@
             }
           },
           "409": {
-            "description": "An engine with this name already exists, or its same-name policy profile is bound to another engine",
+            "description": "An engine with this name already exists, its same-name policy profile is bound to another engine, or (StarRocks, `code` = `engine_metadata_left_over`) a previous engine of this name left its front-end metadata volume; the message carries the `kubectl` command that removes it",
             "content": {
               "application/json": {
                 "schema": {
