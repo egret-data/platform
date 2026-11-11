@@ -227,6 +227,26 @@ pub struct EngineWorkspace {
     pub assigned_at: DateTime<Utc>,
 }
 
+/// One engine's StarRocks user sync lock ([`EngineMgmtStore::try_lock_user_sync`]).
+pub(crate) struct UserSyncLock {
+    conn: sqlx::pool::PoolConnection<sqlx::Postgres>,
+    key: String,
+}
+
+impl UserSyncLock {
+    /// Release the lock. A failure is logged: the connection closes on drop,
+    /// which releases it anyway.
+    pub(crate) async fn release(mut self) {
+        if let Err(e) = sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+            .bind(&self.key)
+            .execute(&mut *self.conn)
+            .await
+        {
+            tracing::warn!(error = %e, "starrocks users: the sync lock was not released cleanly");
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct EngineMgmtStore {
     db: Db,
@@ -593,6 +613,101 @@ impl EngineMgmtStore {
         .bind(name)
         .fetch_one(self.pool())
         .await?)
+    }
+
+    /// The egret users who may query `engine_id` through a workspace connection
+    /// (package D, D1a): active users holding a live `allow` workspace grant,
+    /// directly or through a group, on a workspace the engine is assigned to —
+    /// the same membership `egret_perm_compile::members::workspace_members_via`
+    /// expands. `None` for a user not minted a username yet.
+    pub(crate) async fn starrocks_user_candidates(
+        &self,
+        engine_id: Uuid,
+    ) -> Result<Vec<(Uuid, Option<String>)>, EngineMgmtError> {
+        Ok(sqlx::query_as(
+            "SELECT u.id, u.username::text \
+               FROM engine_mgmt.engine_workspaces ew \
+               JOIN access_grants ag ON ag.scope_type = 'workspace' AND ag.scope_id = ew.workspace_id \
+               JOIN users u ON ag.principal_type = 'user' AND u.id = ag.principal_id \
+              WHERE ew.engine_id = $1 AND u.status = 'active' \
+                AND ag.effect = 'allow' AND (ag.expires_at IS NULL OR ag.expires_at > now()) \
+             UNION \
+             SELECT u.id, u.username::text \
+               FROM engine_mgmt.engine_workspaces ew \
+               JOIN access_grants ag ON ag.scope_type = 'workspace' AND ag.scope_id = ew.workspace_id \
+               JOIN user_groups ug ON ag.principal_type = 'group' AND ug.group_id = ag.principal_id \
+               JOIN users u ON u.id = ug.user_id \
+              WHERE ew.engine_id = $1 AND u.status = 'active' \
+                AND ag.effect = 'allow' AND (ag.expires_at IS NULL OR ag.expires_at > now())",
+        )
+        .bind(engine_id)
+        .fetch_all(self.pool())
+        .await?)
+    }
+
+    /// The StarRocks users egret created on `engine_id` (migration 0219).
+    pub(crate) async fn recorded_starrocks_users(
+        &self,
+        engine_id: Uuid,
+    ) -> Result<std::collections::BTreeSet<String>, EngineMgmtError> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT username FROM engine_mgmt.starrocks_users WHERE engine_id = $1",
+        )
+        .bind(engine_id)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows.into_iter().collect())
+    }
+
+    /// Record that egret creates `username` on `engine_id`; `true` when this call
+    /// inserted the row (the caller forgets it again if its `CREATE USER` fails).
+    pub(crate) async fn record_starrocks_user(
+        &self,
+        engine_id: Uuid,
+        username: &str,
+    ) -> Result<bool, EngineMgmtError> {
+        let r = sqlx::query(
+            "INSERT INTO engine_mgmt.starrocks_users (engine_id, username) VALUES ($1, $2) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(engine_id)
+        .bind(username)
+        .execute(self.pool())
+        .await?;
+        Ok(r.rows_affected() == 1)
+    }
+
+    pub(crate) async fn forget_starrocks_user(
+        &self,
+        engine_id: Uuid,
+        username: &str,
+    ) -> Result<(), EngineMgmtError> {
+        sqlx::query(
+            "DELETE FROM engine_mgmt.starrocks_users WHERE engine_id = $1 AND username = $2",
+        )
+        .bind(engine_id)
+        .bind(username)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Take `engine_id`'s StarRocks user sync lock, a session advisory lock on a
+    /// connection of its own, or `None` when another session holds it. The
+    /// connection closes instead of returning to the pool, so a guard dropped
+    /// without [`UserSyncLock::release`] (a panic) still frees the lock.
+    pub(crate) async fn try_lock_user_sync(
+        &self,
+        engine_id: Uuid,
+    ) -> Result<Option<UserSyncLock>, EngineMgmtError> {
+        let mut conn = self.pool().acquire().await?;
+        conn.close_on_drop();
+        let key = format!("egret-starrocks-users:{engine_id}");
+        let got: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(hashtextextended($1, 0))")
+            .bind(&key)
+            .fetch_one(&mut *conn)
+            .await?;
+        Ok(got.then_some(UserSyncLock { conn, key }))
     }
 
     /// Persist the generated StarRocks query-log loader password secret id for an engine.
