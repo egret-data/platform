@@ -199,7 +199,15 @@ pub(crate) async fn sync_starrocks_users(st: &CpState, engine: &Engine, fe: &FeT
         Ok(None) => return UserSync::Busy,
         Err(e) => return UserSync::Failed(format!("the sync lock could not be taken: {e}")),
     };
-    let outcome = sync_locked(st, engine, fe).await;
+    // Plan from the row as it is under the lock, never from `engine`: a
+    // snapshot that no longer reads as impersonate-mode would plan an empty
+    // desired set and drop every user egret recorded. A fresh row that left
+    // impersonate mode drops them, as spec 2.4 ("Mode changes") decides.
+    let outcome = match st.engine_mgmt.get_engine(engine.id).await {
+        Ok(Some(fresh)) if wants_user_sync(st, &fresh).await => sync_locked(st, &fresh, fe).await,
+        Ok(_) => UserSync::NotNeeded,
+        Err(e) => UserSync::Failed(format!("the engine could not be re-read: {e}")),
+    };
     lock.release().await;
     outcome
 }
@@ -207,7 +215,8 @@ pub(crate) async fn sync_starrocks_users(st: &CpState, engine: &Engine, fe: &FeT
 /// The desired names: empty unless impersonate-mode; the members, and the
 /// platform admins when the engine serves at least one workspace (decided on
 /// 2026-11-11, 1). A user with no username yet is minted, as the permission
-/// compiler does.
+/// compiler does. Any error but "the user is gone" fails the whole read: a
+/// candidate silently left out would have their StarRocks user dropped.
 async fn desired_users(st: &CpState, engine: &Engine) -> Result<BTreeSet<String>, String> {
     if !engine.is_impersonate_delegation() {
         return Ok(BTreeSet::new());
@@ -230,11 +239,20 @@ async fn desired_users(st: &CpState, engine: &Engine) -> Result<BTreeSet<String>
             .acquire()
             .await
             .map_err(|e| e.to_string())?;
-        let admins = egret_auth::roles::engine_admin_user_ids_via(&mut conn)
+        let admins: Vec<Uuid> = egret_auth::roles::engine_admin_user_ids_via(&mut conn)
             .await
-            .map_err(|e| e.to_string())?;
-        // `None`: `ensure_username_via` below returns the stored name or mints one.
-        candidates.extend(admins.into_iter().map(|u| (u.0, None)));
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|u| u.0)
+            .collect();
+        // Their stored names in one read; only a NULL one is minted below.
+        let named: Vec<(Uuid, Option<String>)> =
+            sqlx::query_as("SELECT id, username::text FROM users WHERE id = ANY($1)")
+                .bind(&admins)
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(|e| e.to_string())?;
+        candidates.extend(named);
     }
     let mut out = BTreeSet::new();
     for (id, username) in candidates {
@@ -252,8 +270,9 @@ async fn desired_users(st: &CpState, engine: &Engine) -> Result<BTreeSet<String>
             Ok(u) => {
                 out.insert(u);
             }
-            Err(e) => tracing::warn!(engine = %engine.name, user = %id, error = %e,
-                "starrocks users: a member's username could not be minted; skipped"),
+            // Deleted since the candidates were read: no longer desired.
+            Err(egret_core::Error::NotFound(_)) => {}
+            Err(e) => return Err(format!("user {id}: the username could not be minted: {e}")),
         }
     }
     Ok(out)
@@ -293,8 +312,10 @@ async fn sync_locked(st: &CpState, engine: &Engine, fe: &FeTarget) -> UserSync {
             Ok(()) => created += 1,
             Err(e) => {
                 // Never adopt a user that appeared between the read and the
-                // create: forget the record if this call made it.
-                if inserted {
+                // create: forget the record if this call made it, or if the
+                // FE says the user exists (this call did not create it: a
+                // recorded user the FE had lost, re-created by someone else).
+                if inserted || e.is_already_exists() {
                     if let Err(f) = st.engine_mgmt.forget_starrocks_user(engine.id, name).await {
                         failed.push(format!("{name}: forget: {f}"));
                     }
