@@ -16071,6 +16071,599 @@ mod tests {
             .1
     }
 
+    // ---- Package D, Task 8: the StarRocks user sync ----
+
+    /// `seed_sr_engine` in impersonate mode.
+    async fn seed_impersonate_sr_engine(st: &CpState) -> Engine {
+        let engine = seed_sr_engine(st).await;
+        let mut spec = engine.spec.clone();
+        spec["starrocksConfig"]["delegation"] = serde_json::json!({"mode": "impersonate"});
+        assert!(st
+            .engine_mgmt
+            .update_engine(engine.id, &spec, &engine.status)
+            .await
+            .expect("update spec"));
+        st.engine_mgmt
+            .get_engine(engine.id)
+            .await
+            .expect("reload")
+            .expect("present")
+    }
+
+    /// A user with `username` and `status`, a direct `ws_viewer` of `ws`.
+    async fn seed_member(st: &CpState, ws: Uuid, username: &str, status: &str) -> Uuid {
+        let pool = st.engine_mgmt.pool();
+        let id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (provider, email, username, status) VALUES ('local', $1, $2, $3) \
+             RETURNING id",
+        )
+        .bind(format!("{username}@{}.test", Uuid::new_v4().simple()))
+        .bind(username)
+        .bind(status)
+        .fetch_one(pool)
+        .await
+        .expect("user");
+        sqlx::query(
+            "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+             SELECT 'user', $1, id, 'workspace', $2 FROM roles \
+              WHERE scope = 'workspace' AND name = 'ws_viewer'",
+        )
+        .bind(id)
+        .bind(ws)
+        .execute(pool)
+        .await
+        .expect("grant");
+        id
+    }
+
+    /// A workspace assigned to `engine`.
+    async fn seed_assigned_workspace(st: &CpState, engine: &Engine) -> Uuid {
+        let pool = st.engine_mgmt.pool();
+        let ws: Uuid =
+            sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1, $1) RETURNING id")
+                .bind(format!("ws-{}", Uuid::new_v4().simple()))
+                .fetch_one(pool)
+                .await
+                .expect("workspace");
+        sqlx::query(
+            "INSERT INTO engine_mgmt.engine_workspaces (engine_id, workspace_id) VALUES ($1, $2)",
+        )
+        .bind(engine.id)
+        .bind(ws)
+        .execute(pool)
+        .await
+        .expect("assign");
+        ws
+    }
+
+    fn uname(prefix: &str) -> String {
+        format!("{prefix}_{}", &Uuid::new_v4().simple().to_string()[..10])
+    }
+
+    /// Package D, D1a: active members get a StarRocks user; a disabled one does
+    /// not; a second sync changes nothing.
+    #[tokio::test]
+    async fn the_sync_creates_the_members_users_once() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping the_sync_creates_the_members_users_once: DATABASE_URL not set");
+            return;
+        };
+        let engine = seed_impersonate_sr_engine(&st).await;
+        let ws = seed_assigned_workspace(&st, &engine).await;
+        let (alice, carol) = (uname("alice"), uname("carol"));
+        seed_member(&st, ws, &alice, "active").await;
+        seed_member(&st, ws, &carol, "disabled").await;
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe");
+
+        let first = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+        let second = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+
+        // The test database's platform admins are synced too (decided on
+        // 2026-11-11, 1), so these assertions name the test's own users only.
+        assert!(
+            matches!(first, crate::starrocks_users::UserSync::Done { .. }),
+            "{first:?}"
+        );
+        assert!(
+            matches!(
+                second,
+                crate::starrocks_users::UserSync::Done {
+                    created: 0,
+                    dropped: 0,
+                    ..
+                }
+            ),
+            "{second:?}"
+        );
+        let users = fake.users();
+        assert!(
+            users.contains(&alice) && !users.contains(&carol),
+            "{users:?}"
+        );
+        let recorded = st
+            .engine_mgmt
+            .recorded_starrocks_users(engine.id)
+            .await
+            .unwrap();
+        assert!(
+            recorded.contains(&alice) && !recorded.contains(&carol),
+            "{recorded:?}"
+        );
+        let creates: Vec<_> = fake
+            .executed()
+            .into_iter()
+            .filter(|s| s.starts_with(&format!("CREATE USER '{alice}'@")))
+            .collect();
+        assert_eq!(creates.len(), 1, "{creates:?}");
+        assert!(!creates[0].contains("IF NOT EXISTS"));
+    }
+
+    /// A member who leaves is dropped; a same-name user egret did not create is
+    /// left alone even when its holder leaves.
+    #[tokio::test]
+    async fn the_sync_drops_who_left_and_never_touches_a_foreign_user() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping the_sync_drops_who_left_and_never_touches_a_foreign_user: DATABASE_URL not set");
+            return;
+        };
+        let engine = seed_impersonate_sr_engine(&st).await;
+        let ws = seed_assigned_workspace(&st, &engine).await;
+        let (bob, theirs) = (uname("bob"), uname("theirs"));
+        let bob_id = seed_member(&st, ws, &bob, "active").await;
+        let theirs_id = seed_member(&st, ws, &theirs, "active").await;
+        fake.seed_user(&theirs);
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe");
+        let first = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+        assert!(
+            matches!(&first, crate::starrocks_users::UserSync::Done { foreign, .. } if foreign == &vec![theirs.clone()]),
+            "{first:?}"
+        );
+
+        sqlx::query("DELETE FROM access_grants WHERE principal_id = ANY($1)")
+            .bind(vec![bob_id, theirs_id])
+            .execute(st.engine_mgmt.pool())
+            .await
+            .unwrap();
+        let second = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+
+        assert!(
+            matches!(
+                second,
+                crate::starrocks_users::UserSync::Done { dropped: 1, .. }
+            ),
+            "{second:?}"
+        );
+        let users = fake.users();
+        assert!(
+            users.contains(&theirs) && !users.contains(&bob),
+            "bob dropped, theirs kept: {users:?}"
+        );
+        assert!(!st
+            .engine_mgmt
+            .recorded_starrocks_users(engine.id)
+            .await
+            .unwrap()
+            .contains(&bob));
+    }
+
+    /// A user someone else creates between the sync's `SHOW USERS` and its
+    /// `CREATE USER` is not adopted: the plain `CREATE USER` fails ("already
+    /// exists", measured in Task 1, M3) and the record it made is forgotten. An
+    /// `IF NOT EXISTS` would succeed and record someone else's user as egret's.
+    #[tokio::test]
+    async fn a_user_that_appears_before_the_create_is_not_adopted() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping a_user_that_appears_before_the_create_is_not_adopted: DATABASE_URL not set");
+            return;
+        };
+        let engine = seed_impersonate_sr_engine(&st).await;
+        let ws = seed_assigned_workspace(&st, &engine).await;
+        let ray = uname("ray");
+        seed_member(&st, ws, &ray, "active").await;
+        // Runs before the fake decides: the user exists by the time it does.
+        let other = fake.clone();
+        let prefix = format!("CREATE USER '{ray}'@");
+        let name = ray.clone();
+        fake.on_execute(move |sql| {
+            if sql.starts_with(&prefix) {
+                other.seed_user(&name);
+            }
+            Box::pin(std::future::ready(()))
+        });
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe");
+
+        let out = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+
+        let crate::starrocks_users::UserSync::Done { failed, .. } = &out else {
+            panic!("{out:?}");
+        };
+        let rays: Vec<&String> = failed
+            .iter()
+            .filter(|f| f.starts_with(&format!("{ray}:")))
+            .collect();
+        assert_eq!(rays.len(), 1, "{failed:?}");
+        assert!(rays[0].contains("already exists"), "{rays:?}");
+        assert!(
+            !st.engine_mgmt
+                .recorded_starrocks_users(engine.id)
+                .await
+                .unwrap()
+                .contains(&ray),
+            "someone else's user must not be recorded as egret's"
+        );
+        assert!(fake.users().contains(&ray));
+    }
+
+    /// A create that fails forgets only the record it made, and the FE's error
+    /// reaches the outcome scrubbed of the password it carried.
+    #[tokio::test]
+    async fn a_failed_create_forgets_its_record_and_is_scrubbed() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!(
+                "skipping a_failed_create_forgets_its_record_and_is_scrubbed: DATABASE_URL not set"
+            );
+            return;
+        };
+        let engine = seed_impersonate_sr_engine(&st).await;
+        let ws = seed_assigned_workspace(&st, &engine).await;
+        let dan = uname("dan");
+        seed_member(&st, ws, &dan, "active").await;
+        // The FE rejects the create and quotes the password back (not in the
+        // `IDENTIFIED BY` shape, so only the exact-value scrub can hide it).
+        // The needle is the whole statement, so each create gets its own echo.
+        let echo = fake.clone();
+        fake.on_execute(move |sql| {
+            if let Some(pw) = sql
+                .strip_prefix("CREATE USER '")
+                .and_then(|_| sql.rsplit("IDENTIFIED BY '").next())
+            {
+                let pw = pw.trim_end_matches('\'');
+                echo.fail_matching(&sql, &format!("rejected; it was {pw}"));
+            }
+            Box::pin(std::future::ready(()))
+        });
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe");
+
+        let out = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+
+        let crate::starrocks_users::UserSync::Done {
+            created: 0, failed, ..
+        } = &out
+        else {
+            panic!("{out:?}");
+        };
+        let dans: Vec<&String> = failed
+            .iter()
+            .filter(|f| f.starts_with(&format!("{dan}:")))
+            .collect();
+        assert_eq!(dans.len(), 1, "{failed:?}");
+        assert!(!st
+            .engine_mgmt
+            .recorded_starrocks_users(engine.id)
+            .await
+            .unwrap()
+            .contains(&dan));
+        let sent = fake
+            .executed()
+            .into_iter()
+            .find(|s| s.starts_with(&format!("CREATE USER '{dan}'@")))
+            .unwrap();
+        let password = sent
+            .rsplit("IDENTIFIED BY '")
+            .next()
+            .unwrap()
+            .trim_end_matches('\'');
+        assert!(!dans[0].contains(password), "the password leaked: {dans:?}");
+    }
+
+    /// An engine with no delegation (so no delegator) and nothing recorded costs
+    /// no FE call.
+    #[tokio::test]
+    async fn an_engine_without_delegation_or_records_makes_no_fe_call() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping an_engine_without_delegation_or_records_makes_no_fe_call: DATABASE_URL not set");
+            return;
+        };
+        let engine = seed_sr_engine(&st).await;
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe");
+        let out = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+        assert_eq!(out, crate::starrocks_users::UserSync::NotNeeded);
+        assert!(fake.queried().is_empty() && fake.executed().is_empty());
+    }
+
+    /// Another session holding the engine's lock: `Busy`, nothing done.
+    #[tokio::test]
+    async fn a_held_lock_makes_the_sync_busy() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping a_held_lock_makes_the_sync_busy: DATABASE_URL not set");
+            return;
+        };
+        let engine = seed_impersonate_sr_engine(&st).await;
+        let held = st
+            .engine_mgmt
+            .try_lock_user_sync(engine.id)
+            .await
+            .unwrap()
+            .expect("lock");
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe");
+        let out = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+        held.release().await;
+        assert_eq!(out, crate::starrocks_users::UserSync::Busy);
+        assert!(fake.queried().is_empty());
+    }
+
+    /// A member reached through a group is synced; an expired grant is not.
+    #[tokio::test]
+    async fn group_members_count_and_expired_grants_do_not() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!(
+                "skipping group_members_count_and_expired_grants_do_not: DATABASE_URL not set"
+            );
+            return;
+        };
+        let engine = seed_impersonate_sr_engine(&st).await;
+        let ws = seed_assigned_workspace(&st, &engine).await;
+        let pool = st.engine_mgmt.pool();
+        let (gina, eve) = (uname("gina"), uname("eve"));
+        let gina_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (provider, email, username) VALUES ('local', $1, $2) RETURNING id",
+        )
+        .bind(format!("{gina}@g.test"))
+        .bind(&gina)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let group: Uuid = sqlx::query_scalar("INSERT INTO groups (name) VALUES ($1) RETURNING id")
+            .bind(uname("grp"))
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+            .bind(gina_id)
+            .bind(group)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+             SELECT 'group', $1, id, 'workspace', $2 FROM roles \
+              WHERE scope = 'workspace' AND name = 'ws_viewer'",
+        )
+        .bind(group)
+        .bind(ws)
+        .execute(pool)
+        .await
+        .unwrap();
+        let eve_id = seed_member(&st, ws, &eve, "active").await;
+        sqlx::query("UPDATE access_grants SET expires_at = now() - interval '1 minute' WHERE principal_id = $1")
+            .bind(eve_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe");
+
+        crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+
+        let users = fake.users();
+        assert!(users.contains(&gina) && !users.contains(&eve), "{users:?}");
+    }
+
+    /// Decided on 2026-11-11 (1): a platform admin who is no member gets a user
+    /// on an engine that serves a workspace, and none on one assigned nowhere.
+    #[tokio::test]
+    async fn platform_admins_are_synced_where_the_engine_serves_a_workspace() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping platform_admins_are_synced_where_the_engine_serves_a_workspace: DATABASE_URL not set");
+            return;
+        };
+        let pool = st.engine_mgmt.pool();
+        let admin = uname("padmin");
+        let admin_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (provider, email, username) VALUES ('local', $1, $2) RETURNING id",
+        )
+        .bind(format!("{admin}@p.test"))
+        .bind(&admin)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+             SELECT 'user', $1, id, 'platform', NULL FROM roles \
+              WHERE scope = 'platform' AND name = 'platform_admin'",
+        )
+        .bind(admin_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        let serving = seed_impersonate_sr_engine(&st).await;
+        seed_assigned_workspace(&st, &serving).await;
+        let lonely = seed_impersonate_sr_engine(&st).await;
+
+        let fe = crate::starrocks_ddl::fe_target(&st, &serving)
+            .await
+            .expect("fe");
+        crate::starrocks_users::sync_starrocks_users(&st, &serving, &fe).await;
+        assert!(fake.users().contains(&admin), "{:?}", fake.users());
+        let fe = crate::starrocks_ddl::fe_target(&st, &lonely)
+            .await
+            .expect("fe");
+        let out = crate::starrocks_users::sync_starrocks_users(&st, &lonely, &fe).await;
+        // Both engines share the one fake FE, which already has the admin's
+        // user from the first sync: a desired admin would be planned `foreign`
+        // there, not created, so the records alone cannot tell.
+        let crate::starrocks_users::UserSync::Done { foreign, .. } = &out else {
+            panic!("{out:?}");
+        };
+        assert!(
+            !foreign.contains(&admin),
+            "an engine assigned nowhere does not want the platform admin: {foreign:?}"
+        );
+        assert!(
+            !st.engine_mgmt
+                .recorded_starrocks_users(lonely.id)
+                .await
+                .unwrap()
+                .contains(&admin),
+            "an engine assigned nowhere gets no platform admin"
+        );
+
+        sqlx::query("DELETE FROM access_grants WHERE principal_id = $1")
+            .bind(admin_id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    /// Task 7's store, directly: a second record of the same name inserts
+    /// nothing, forget removes it, and the sync lock is exclusive until released.
+    #[tokio::test]
+    async fn the_starrocks_user_records_and_the_sync_lock() {
+        let Some((st, _fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!(
+                "skipping the_starrocks_user_records_and_the_sync_lock: DATABASE_URL not set"
+            );
+            return;
+        };
+        let engine = seed_sr_engine(&st).await;
+        let name = uname("rec");
+
+        let first = st
+            .engine_mgmt
+            .record_starrocks_user(engine.id, &name)
+            .await
+            .unwrap();
+        let again = st
+            .engine_mgmt
+            .record_starrocks_user(engine.id, &name)
+            .await
+            .unwrap();
+        let recorded = st
+            .engine_mgmt
+            .recorded_starrocks_users(engine.id)
+            .await
+            .unwrap();
+        st.engine_mgmt
+            .forget_starrocks_user(engine.id, &name)
+            .await
+            .unwrap();
+        let after = st
+            .engine_mgmt
+            .recorded_starrocks_users(engine.id)
+            .await
+            .unwrap();
+        let held = st
+            .engine_mgmt
+            .try_lock_user_sync(engine.id)
+            .await
+            .unwrap()
+            .expect("lock");
+        let while_held = st.engine_mgmt.try_lock_user_sync(engine.id).await.unwrap();
+        let busy = while_held.is_none();
+        held.release().await;
+        let retaken = st.engine_mgmt.try_lock_user_sync(engine.id).await.unwrap();
+
+        assert!(first && !again, "first {first}, again {again}");
+        assert_eq!(recorded, std::collections::BTreeSet::from([name.clone()]));
+        assert!(after.is_empty(), "{after:?}");
+        assert!(busy, "a second session must not take a held lock");
+        let retaken = retaken.expect("a released lock can be taken again");
+        retaken.release().await;
+    }
+
+    /// Package D (Task 7 review): a person who already holds the name `root`
+    /// (from before migration 0219 reserved it) is a member, yet no StarRocks
+    /// user is created or recorded for them: the sync refuses the name.
+    #[tokio::test]
+    async fn a_member_holding_root_is_refused_never_created() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!(
+                "skipping a_member_holding_root_is_refused_never_created: DATABASE_URL not set"
+            );
+            return;
+        };
+        let engine = seed_impersonate_sr_engine(&st).await;
+        let ws = seed_assigned_workspace(&st, &engine).await;
+        let pool = st.engine_mgmt.pool();
+        // The ledger refuses `root` now, so the holder is written the way it
+        // existed before 0219: with the ledger's triggers off for this one
+        // transaction (the query-log test's precedent).
+        let mut tx = pool.begin().await.expect("begin");
+        sqlx::query("SET LOCAL session_replication_role = replica")
+            .execute(&mut *tx)
+            .await
+            .expect("triggers off (needs a superuser test role)");
+        let root_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (provider, email, username) VALUES ('local', $1, 'root') \
+             RETURNING id",
+        )
+        .bind(format!("root-{}@example.test", Uuid::new_v4().simple()))
+        .fetch_one(&mut *tx)
+        .await
+        .expect("insert the holder");
+        tx.commit().await.expect("commit");
+        sqlx::query(
+            "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+             SELECT 'user', $1, id, 'workspace', $2 FROM roles \
+              WHERE scope = 'workspace' AND name = 'ws_viewer'",
+        )
+        .bind(root_id)
+        .bind(ws)
+        .execute(pool)
+        .await
+        .expect("grant");
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe");
+
+        let out = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+        let recorded = st.engine_mgmt.recorded_starrocks_users(engine.id).await;
+        // Clean up before asserting: the holder must not outlive the test.
+        sqlx::query("DELETE FROM access_grants WHERE principal_id = $1")
+            .bind(root_id)
+            .execute(pool)
+            .await
+            .expect("remove the grant");
+        let mut tx = pool.begin().await.expect("begin");
+        sqlx::query("SET LOCAL session_replication_role = replica")
+            .execute(&mut *tx)
+            .await
+            .expect("triggers off");
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(root_id)
+            .execute(&mut *tx)
+            .await
+            .expect("remove the holder");
+        tx.commit().await.expect("commit");
+
+        let crate::starrocks_users::UserSync::Done { refused, .. } = &out else {
+            panic!("{out:?}");
+        };
+        assert!(
+            refused.contains(&"root: reserved for StarRocks or egret".to_string()),
+            "{refused:?}"
+        );
+        assert!(!recorded.unwrap().contains("root"));
+        let sent = fake.executed();
+        assert!(
+            !sent.iter().any(|s| s.contains("'root'@")),
+            "no statement names root: {sent:?}"
+        );
+    }
+
     /// An engine whose stored FE image is an official one (no audit plugin).
     async fn seed_sr_engine_on_official_image(st: &CpState) -> Engine {
         let engine = seed_sr_engine(st).await;

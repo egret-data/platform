@@ -1341,6 +1341,9 @@ pub struct FakeStarRocksDdl {
     >,
     /// The `FeTarget` of the most recent call, so a test can assert the cert.
     last_target: Arc<Mutex<Option<FeTarget>>>,
+    /// The StarRocks users this FE has besides `root` (package D): `CREATE
+    /// USER` adds one, `DROP USER` removes one, `SHOW USERS` lists them.
+    users: Arc<Mutex<BTreeSet<String>>>,
     /// Runs on EVERY `execute`, with the statement text, after it is
     /// recorded and BEFORE the fail/succeed decision — so a hook can fire for
     /// a statement the FE is about to reject, which is what the delegation
@@ -1496,6 +1499,17 @@ impl FakeStarRocksDdl {
         self.catalogs.lock().unwrap().remove(name);
     }
 
+    /// A StarRocks user that exists on this FE from now on, as if someone else
+    /// had created it (package D: a "foreign" user).
+    pub fn seed_user(&self, name: &str) {
+        self.users.lock().unwrap().insert(name.to_string());
+    }
+
+    /// The users this FE has, `root` not included.
+    pub fn users(&self) -> BTreeSet<String> {
+        self.users.lock().unwrap().clone()
+    }
+
     /// List a plugin in `SHOW PLUGINS` from now on, as if it were installed.
     pub fn seed_plugin(&self, name: &str) {
         self.seed_plugin_with_status(name, "INSTALLED");
@@ -1623,6 +1637,32 @@ impl StarRocksDdl for FakeStarRocksDdl {
                 return Err(fe_error(msg));
             }
         }
+        if let Some(name) = user_target("CREATE USER IF NOT EXISTS ", sql) {
+            self.users.lock().unwrap().insert(name);
+            return Ok(());
+        }
+        if let Some(name) = user_target("CREATE USER ", sql) {
+            let mut users = self.users.lock().unwrap();
+            if name == "root" || users.contains(&name) {
+                // Measured in Task 1 (M3) on `4.1.7-egret.4`.
+                return Err(fe_error(format!(
+                    "ERROR 1064 (HY000): Getting analyzing error. Detail message: \
+                     user '{name}'@'%' already exists!."
+                )));
+            }
+            users.insert(name);
+            return Ok(());
+        }
+        if let Some(name) = user_target("DROP USER ", sql) {
+            if !self.users.lock().unwrap().remove(&name) {
+                // Measured in Task 1 (M3) on `4.1.7-egret.4`.
+                return Err(fe_error(format!(
+                    "ERROR 1064 (HY000): Getting analyzing error. Detail message: \
+                     cannot find user '{name}'@'%'!."
+                )));
+            }
+            return Ok(());
+        }
         let mut cats = self.catalogs.lock().unwrap();
         if let Some(name) = statement_target("CREATE EXTERNAL CATALOG", sql) {
             if cats.contains_key(&name) {
@@ -1689,6 +1729,18 @@ impl StarRocksDdl for FakeStarRocksDdl {
         if sql == "SHOW PLUGINS" {
             // Without the header, as the real runner's `query` answers.
             return Ok(self.show_plugins().split_off(1));
+        }
+        if sql == crate::starrocks_users::SHOW_USERS_SQL {
+            // One column, header `User`, `'<name>'@'<host>'` (Task 1, M2).
+            let mut rows = vec![vec![Some("'root'@'%'".to_string())]];
+            rows.extend(
+                self.users
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|u| vec![Some(format!("'{}'@'%'", u.replace('\'', "''")))]),
+            );
+            return Ok(rows);
         }
         if sql == "SHOW CATALOGS" {
             return Ok(self
@@ -1778,6 +1830,13 @@ fn without_read_marker(sql: &str) -> &str {
     sql.strip_prefix(crate::query_log::READ_MARKER)
         .map(str::trim_start)
         .unwrap_or(sql)
+}
+
+/// The user name out of `<prefix>'<name>'@'<host>' …`, `''` read as `'`.
+fn user_target(prefix: &str, sql: &str) -> Option<String> {
+    let rest = sql.strip_prefix(prefix)?;
+    let identity = rest.split(" IDENTIFIED").next()?.trim();
+    crate::query_log::authorized_name(identity)
 }
 
 /// The backtick-quoted name out of a statement that starts with `prefix`,

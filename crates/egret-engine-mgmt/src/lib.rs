@@ -18,6 +18,7 @@ pub(crate) mod query_log;
 pub mod ranger_credential;
 pub mod security_upgrade;
 pub mod starrocks_ddl;
+pub(crate) mod starrocks_users;
 pub mod state;
 pub mod store;
 pub mod tls_cert;
