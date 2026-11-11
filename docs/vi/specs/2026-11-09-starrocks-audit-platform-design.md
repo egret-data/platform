@@ -61,6 +61,12 @@ Image fork egret.4 trở đi có sẵn plugin AuditLoader ở `/opt/egret/auditl
 6. **Tab:** chỉ có ở engine StarRocks. Tab có bộ lọc trong URL, bảng ưu tiên cột User (`authorizedUser`), panel chi tiết, và nút **Load more**.
 7. **Gia cố:** `plugin_enable` và `plugin_dir` bị cấm trong `feConfig`. Cần đo xem plugin còn sau khi FE khởi động lại hay không.
 
+**Đã đo ở Task 5** (2026-11-10, image egret.4; chi tiết và text lỗi chính xác ở bản tiếng Anh):
+- StarRocks tự che mật khẩu trong `stmt` của audit (`IDENTIFIED BY '***'`, `"password" = ***`);
+- lỗi khi thiếu zip, khi plugin đã cài, khi thiếu database (5501) và thiếu bảng (5502) đã được ghi lại và ghim trong test;
+- múi giờ của FE là `Etc/UTC`, nên các lần đọc giữ UTC;
+- vẫn chưa đo: plugin có còn sau khi FE khởi động lại hay không.
+
 ## Kiểm thử
 
 - unit;

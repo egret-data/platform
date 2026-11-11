@@ -72,13 +72,32 @@ From the fork's e2e (`tests/e2e/run.sh`, `audit_checks.py`) and earlier sessions
   no native privilege (`policies.py`, policy `audit-loader`).
 - `root` is not checked by Ranger (fork README, "Known limits"; upstream #72198).
 
-**Not measured yet** (each is a step in the plan, before the code depends on it):
+**Not measured yet** (a step in the plan, before the code depends on it):
 1. whether a plugin installed from a local path survives an FE pod restart, since the FE's
-   `plugin_dir` is not on a volume;
-2. whether StarRocks redacts the `"password"` property of `INSTALL PLUGIN` and the
-   `IDENTIFIED BY` literal of `CREATE USER`/`ALTER USER` in the audit event;
-3. the exact FE error when `/opt/egret/auditloader.zip` is absent;
-4. the time zone of the `timestamp` column (the FE pod's JVM zone).
+   `plugin_dir` is not on a volume.
+
+**Measured in Task 5** (2026-11-10, `ghcr.io/egret-data/egret-starrocks-allin1:4.1.7-egret.4`;
+the setup and the read are also run by `crates/egret-engine-mgmt/tests/query_log_live.rs`
+against it and against the official `starrocks/allin1-ubuntu:4.1.7`):
+2. StarRocks redacts the passwords itself before the audit event: the stored `stmt` reads
+   `CREATE USER … IDENTIFIED BY '***'`, `ALTER USER … IDENTIFIED BY '***'`,
+   `SET PASSWORD FOR … = PASSWORD('***')` and `INSTALL PLUGIN … PROPERTIES (…, "password" = ***)`.
+   egret's exact-value redaction stays as a second layer.
+3. An absent zip answers `ERROR 1064 (HY000): Download plugin zip failed. zip file does not
+   exist. source: <path>`. A second `INSTALL` answers `ERROR 1064 (HY000): plugin AuditLoader has
+   already been installed.` An absent database answers `ERROR 5501 (3F000): Getting analyzing
+   error. Detail message: Unknown database '<db>'.`, an absent table `ERROR 5502 (42602): …
+   Unknown table '<db>.<table>'.`
+4. `@@time_zone` and `@@system_time_zone` are `Etc/UTC`, and an event's `timestamp` matches
+   `date -u` to the second, so the reads keep UTC.
+
+Also measured: the `SHOW PLUGINS` header is `Name Type Description Version JavaVersion
+ClassName SoName Sources Status Properties`; the audit `stmt` keeps a leading
+`/* egret-query-log-read */` comment verbatim; `EXECUTE AS bob WITH NO REVERT` run by `carol`
+records `user` = `carol` and `authorizedUser` = `'bob'@'%'`; `state` is `EOF` for a query, `OK`
+for DDL and `ERR` for an error; events sent before the plugin's first refresh (about a minute
+after `INSTALL`) are never loaded, and an `UNINSTALL` then `INSTALL` loses the events queued in
+between; a user name cannot contain `'` (`invalid user name`).
 
 ## Design
 
@@ -212,8 +231,8 @@ that drives B's `unpatchedImage`: the AuditLoader arrived at egret.4, the first 
 - After the upgrade, call site 2 of section 1 runs the setup again, and the plugin is installed.
 
 A patched image that answers `INSTALL` with an error (a hand-built image without the file) is
-`Failed` with the scrubbed FE message. Its text is pinned by a test after it is measured
-(unmeasured fact 3).
+`Failed` with the scrubbed FE message. Its text, measured in Task 5 (fact 3), is pinned by the
+test `a_missing_plugin_zip_is_failed_with_the_fes_diagnosis`.
 
 ### 5. Reading the log
 
@@ -355,7 +374,7 @@ gives its duration and its environment.
   - the read API's SQL returns it with the right `authorizedUser` for an `EXECUTE AS` statement;
   - egret's own read is excluded;
   - the same run against the official `starrocks/allin1-ubuntu:4.1.7` gives `pluginNotShipped`;
-  - this run also measures unmeasured facts 2 to 4.
+  - this run also measured facts 2 to 4 (see "Measured facts this builds on").
 - **Fork e2e:** the guard and loader bodies, rendered by egret, are dropped into the fork's
   `policies.py` run (a controller step) to prove, on the real plugin, that an all-access admin
   and `eve` are denied `SELECT` and `DROP`, and that the loader still loads.
