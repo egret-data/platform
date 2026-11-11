@@ -5205,12 +5205,6 @@ async fn create_starrocks_engine(
     ))
 }
 
-/// StarRocks' session default `max_allowed_packet` (32 MiB), set on the root
-/// connection so the driver does not ask the FE for it.
-const STARROCKS_MAX_ALLOWED_PACKET: usize = 32 * 1024 * 1024;
-/// StarRocks' session default `wait_timeout` (8 hours), likewise.
-const STARROCKS_WAIT_TIMEOUT_SECS: usize = 28_800;
-
 /// Build the `mysql_async` connection options for egret's own FE `root`
 /// bootstrap connection. Factored out (and pure) so the password/user/TLS
 /// wiring is unit-testable without a live FE — the wire path itself is
@@ -5249,14 +5243,16 @@ pub(crate) fn starrocks_root_conn_opts(
         // matches `StarRocksConnector::new`'s own workaround.
         .prefer_socket(false)
         // Both set, so the driver skips its connection preamble `SELECT
-        // @@max_allowed_packet,@@wait_timeout` (`Conn::read_settings` in the
-        // vendored mysql_async 0.37.0 loads only what the opts leave unset,
-        // and `@@socket` only with `prefer_socket`). That statement carries no
-        // read marker, so on an engine with a Query log every root connection
-        // logged it, and it drove "Latest event" (live check, 2026-11-11).
-        // The values are StarRocks' own session defaults.
-        .max_allowed_packet(Some(STARROCKS_MAX_ALLOWED_PACKET))
-        .wait_timeout(Some(STARROCKS_WAIT_TIMEOUT_SECS));
+        // @@max_allowed_packet,@@wait_timeout`, which carries no read marker
+        // and drove the Query log's "Latest event" (live check, 2026-11-11).
+        // See `egret_query_api::starrocks_session`, shared with egret-query's
+        // `StarRocksConnector`.
+        .max_allowed_packet(Some(
+            egret_query_api::starrocks_session::STARROCKS_MAX_ALLOWED_PACKET,
+        ))
+        .wait_timeout(Some(
+            egret_query_api::starrocks_session::STARROCKS_WAIT_TIMEOUT_SECS,
+        ));
     if let Some(pw) = root_password {
         opts = opts.pass(Some(pw));
     }
@@ -5669,11 +5665,13 @@ pub(crate) async fn wait_for_fe_root_login(
 /// [`crate::catalog_apply::converge_starrocks_catalogs`] (3) — where before it
 /// guarded the single catalog statement, so a delete part-way through a
 /// ten-catalog engine now stops at the next catalog instead of finishing the
-/// batch; one before the query log setup (4,
-/// [`crate::query_log::ensure_query_log`]); then one before the security
-/// integration (5), one before its repair (6), and one per remaining delegation
-/// statement (7). The rule is the same everywhere: re-read immediately before a
-/// WRITE to the cluster, never once for a batch of them.
+/// batch; then one before the security integration (4), one before its repair
+/// (5), and one per remaining delegation statement (6); and last, one before
+/// the query log setup (7, [`crate::query_log::ensure_query_log`]), which runs
+/// after the delegation statements because its wait for an alive compute node
+/// can take minutes and they need no node. The rule is the same everywhere:
+/// re-read immediately before a WRITE to the cluster, never once for a batch
+/// of them.
 fn spawn_starrocks_catalog_wire(
     st: CpState,
     engine_id: Uuid,
@@ -5708,23 +5706,6 @@ fn spawn_starrocks_catalog_wire(
             &mut consecutive_read_errors,
         )
         .await;
-
-        // Checkpoint 4: the query log writes a database, a user and a plugin.
-        // It does not wait for the first event here (that takes up to three
-        // minutes, and the delegation statements below must not wait on it);
-        // the wait runs after them instead.
-        if !engine_still_current(
-            &st.engine_mgmt,
-            engine_id,
-            &engine_name,
-            &mut consecutive_read_errors,
-        )
-        .await
-        {
-            return;
-        }
-        let query_log = crate::query_log::ensure_query_log(&st, &engine, &fe, false).await;
-        crate::query_log::log_outcome(&engine_name, &query_log);
 
         // Delegation bootstrap (S3-T2 step 3): JWT integration + impersonation
         // service user, best-effort + logged like the catalog convergence above.
@@ -5829,7 +5810,25 @@ fn spawn_starrocks_catalog_wire(
             }
         }
 
-        // The query log's step 6, last: it only reads, and it can take minutes.
+        // Checkpoint 7, then the query log, LAST (live check, 2026-11-11):
+        // its setup waits up to about five minutes for an alive compute node
+        // (a shared-data `CREATE TABLE` needs one), and its step 6 up to three
+        // minutes for the first event. The delegation statements above need
+        // neither, so nothing of the query log may stand in front of them.
+        if !engine_still_current(
+            &st.engine_mgmt,
+            engine_id,
+            &engine_name,
+            &mut consecutive_read_errors,
+        )
+        .await
+        {
+            return;
+        }
+        let query_log = crate::query_log::ensure_query_log(&st, &engine, &fe, false).await;
+        crate::query_log::log_outcome(&engine_name, &query_log);
+
+        // The query log's step 6: it only reads, and it can take minutes.
         // A failed first try gets the after-apply path's bounded retry
         // (final review, M2): a delegation update that also changes the image
         // can reach the old FE pod, as the update's own spawn can.
@@ -13947,15 +13946,13 @@ mod tests {
         );
     }
 
-    /// Checkpoint 5 — the one before `CREATE SECURITY INTEGRATION`.
+    /// Checkpoint 4 — the one before `CREATE SECURITY INTEGRATION`.
     ///
-    /// The engine is flipped while the query log's last statement (its
-    /// `INSTALL PLUGIN`) is in flight: checkpoints 3 and 4 have already
-    /// passed, and checkpoint 5 is the next thing between the bootstrap and a
-    /// write. Nothing of the delegation half may reach the FE. (Until the
-    /// query log, the flip happened on the catalog's `CREATE`; that now stops
-    /// at checkpoint 4, which `the_bootstrap_stops_before_the_query_log_…`
-    /// pins.)
+    /// The engine is flipped while the catalog's `CREATE` (the last write of
+    /// the catalog half, with one attachment) is in flight: checkpoint 3 has
+    /// already passed for that attachment, and checkpoint 4 is the next thing
+    /// between the bootstrap and a write. Nothing of the delegation half may
+    /// reach the FE, and nothing of the query log, which runs after it.
     #[tokio::test]
     async fn the_delegation_checkpoint_stops_before_the_security_integration() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
@@ -13974,15 +13971,11 @@ mod tests {
 
         let store = st.engine_mgmt.clone();
         let engine_id = engine.id;
-        // On the query log's last statement, so the next checkpoint is the
-        // one before the security integration and not the query log's own.
-        fake.on_execute(move |sql| {
+        // On the catalog's CREATE, the last write before the delegation half,
+        // so the next checkpoint is the one before the security integration.
+        fake.on_create(move |_name| {
             let store = store.clone();
-            Box::pin(async move {
-                if sql.starts_with("INSTALL PLUGIN") {
-                    stop_being_current(&store, engine_id).await;
-                }
-            })
+            Box::pin(async move { stop_being_current(&store, engine_id).await })
         });
 
         spawn_starrocks_catalog_wire(
@@ -13996,24 +13989,20 @@ mod tests {
         .expect("bootstrap task did not panic");
 
         assert_eq!(fake.created().len(), 1, "premise: the catalog ran first");
+        let sent = fake.executed();
         assert!(
-            fake.executed()
-                .iter()
-                .any(|s| s.starts_with("INSTALL PLUGIN")),
-            "premise: the query log ran to its last statement: {:?}",
-            fake.executed()
+            !sent.iter().any(|s| s.contains("SECURITY INTEGRATION")),
+            "no delegation statement may reach an engine that is being deleted: {sent:?}"
         );
         assert!(
-            !fake
-                .executed()
+            !sent
                 .iter()
-                .any(|s| s.contains("SECURITY INTEGRATION")),
-            "no delegation statement may reach an engine that is being deleted: {:?}",
-            fake.executed()
+                .any(|s| s.contains("starrocks_audit_db__") || s.contains("egret_query_log")),
+            "nor any query log statement: {sent:?}"
         );
     }
 
-    /// Checkpoint 6 — the one before the repair `ALTER SECURITY INTEGRATION`.
+    /// Checkpoint 5 — the one before the repair `ALTER SECURITY INTEGRATION`.
     ///
     /// The FE answers the `CREATE` with `already exists`, which is the branch
     /// that leads to the repair; the engine stops being current while that
@@ -14042,9 +14031,9 @@ mod tests {
         // Premise: the injected FE message is recognized as already-exists —
         // checked independently of the run below, because if `is_already_exists`
         // ever regressed to `false` here, the general `Err(e)` arm would take
-        // over, stop at its OWN checkpoint before ever reaching checkpoint 6,
+        // over, stop at its OWN checkpoint before ever reaching checkpoint 5,
         // and still send no `ALTER` — leaving every assertion below green while
-        // no longer exercising checkpoint 6 at all.
+        // no longer exercising checkpoint 5 at all.
         let probe_fe = crate::starrocks_ddl::fe_target(&st, &engine)
             .await
             .expect("fe target");
@@ -14093,13 +14082,13 @@ mod tests {
         );
     }
 
-    /// Checkpoint 7 — the one inside the loop over the remaining delegation
+    /// Checkpoint 6 — the one inside the loop over the remaining delegation
     /// statements (`ADMIN SET FRONTEND CONFIG`, `CREATE USER`,
     /// `GRANT IMPERSONATE`).
     ///
     /// Same hook, but the integration SUCCEEDS this time, so the repair branch
     /// is not taken and the next thing between the bootstrap and a write is
-    /// checkpoint 7. None of the three may be sent.
+    /// checkpoint 6. None of the three may be sent.
     #[tokio::test]
     async fn the_remaining_delegation_statements_stop_at_their_own_checkpoint() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
@@ -14142,7 +14131,8 @@ mod tests {
         );
         for stopped in [
             "ADMIN SET FRONTEND CONFIG",
-            // The delegator's, not the query log loader's (which ran before).
+            // The delegator's. The query log loader's runs after the
+            // delegation half, so it is not sent either (asserted below).
             "CREATE USER IF NOT EXISTS 'egret_delegator'",
             "GRANT IMPERSONATE",
         ] {
@@ -14151,6 +14141,10 @@ mod tests {
                 "{stopped} must not be sent to an engine that is being deleted: {sent:?}"
             );
         }
+        assert!(
+            !sent.iter().any(|s| s.contains("egret_query_log")),
+            "no query log statement either: {sent:?}"
+        );
     }
 
     /// The delegation bundle every bootstrap test passes. Its
@@ -14166,7 +14160,7 @@ mod tests {
         }
     }
 
-    /// Checkpoints 5-7: the delegation half still runs, and `already exists`
+    /// Checkpoints 4-6: the delegation half still runs, and `already exists`
     /// still repairs — driven through the fake runner instead of a real MySQL
     /// port, which is what
     /// `spawn_starrocks_catalog_wire_keeps_all_six_guard_checkpoints` existed
@@ -16209,7 +16203,139 @@ mod tests {
         );
     }
 
-    /// Checkpoint 4: an engine that stops being current while its
+    /// Checkpoint 7, on a delegating engine: the query log now runs after
+    /// the delegation half, so the engine is flipped on the LAST delegation
+    /// write (`GRANT IMPERSONATE`). Checkpoints 4 to 6 have passed by then,
+    /// and checkpoint 7 is the only thing left between the bootstrap and the
+    /// query log's writes.
+    #[tokio::test]
+    async fn the_bootstrap_stops_before_the_query_log_after_the_delegation_statements() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping the_bootstrap_stops_before_the_query_log_after_the_delegation_statements: DATABASE_URL not set");
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let engine = seed_sr_delegating_engine(&st, "CERTPEM").await;
+        prov.set_status(ready_fe_status(&engine.name));
+        let store = st.engine_mgmt.clone();
+        let engine_id = engine.id;
+        fake.on_execute(move |sql| {
+            let store = store.clone();
+            Box::pin(async move {
+                if sql.contains("GRANT IMPERSONATE") {
+                    stop_being_current(&store, engine_id).await;
+                }
+            })
+        });
+
+        spawn_starrocks_catalog_wire(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+            Some(test_delegation()),
+        )
+        .await
+        .expect("bootstrap task did not panic");
+
+        let sent = fake.executed();
+        assert_eq!(
+            sent.last().map(|s| s.contains("GRANT IMPERSONATE")),
+            Some(true),
+            "premise: the delegation half ran to its last statement, and nothing followed: \
+             {sent:?}"
+        );
+        assert!(
+            !sent
+                .iter()
+                .any(|s| s.contains("starrocks_audit_db__") || s.contains("egret_query_log")),
+            "no query log statement may reach an engine that is being deleted: {sent:?}"
+        );
+        let q = fake.queried();
+        assert!(
+            !q.iter()
+                .any(|q| q.contains("SHOW COMPUTE NODES") || q == "SHOW PLUGINS"),
+            "not even the query log's reads: {q:?}"
+        );
+    }
+
+    /// Concern 4 of the live fix: the delegation statements do not wait
+    /// behind the query log's poll for an alive compute node. With no node
+    /// ever alive, every delegation statement is sent before the first node
+    /// check, and the query log then gives up as `Failed` (after its retry).
+    #[tokio::test]
+    async fn the_delegation_statements_are_sent_while_no_node_is_alive() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping the_delegation_statements_are_sent_while_no_node_is_alive: DATABASE_URL not set");
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let engine = seed_sr_delegating_engine(&st, "CERTPEM").await;
+        prov.set_status(ready_fe_status(&engine.name));
+        fake.no_node_ever_alive();
+        // How many node checks had been made when each delegation statement
+        // was sent.
+        let checks_at_delegation = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        {
+            let seen = checks_at_delegation.clone();
+            let probe = fake.clone();
+            fake.on_execute(move |sql| {
+                if sql.contains("SECURITY INTEGRATION")
+                    || sql.contains("'egret_delegator'")
+                    || sql.contains("GRANT IMPERSONATE")
+                {
+                    let n = probe
+                        .queried()
+                        .iter()
+                        .filter(|q| q.contains("SHOW COMPUTE NODES"))
+                        .count();
+                    seen.lock().unwrap().push(n);
+                }
+                Box::pin(std::future::ready(()))
+            });
+        }
+
+        spawn_starrocks_catalog_wire(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+            Some(test_delegation()),
+        )
+        .await
+        .expect("bootstrap task did not panic");
+
+        let sent = fake.executed();
+        for needed in [
+            "CREATE SECURITY INTEGRATION",
+            "CREATE USER IF NOT EXISTS 'egret_delegator'",
+            "GRANT IMPERSONATE",
+        ] {
+            assert!(
+                sent.iter().any(|s| s.contains(needed)),
+                "{needed}: {sent:?}"
+            );
+        }
+        let at = checks_at_delegation.lock().unwrap().clone();
+        assert!(!at.is_empty(), "premise: the hook saw them: {sent:?}");
+        assert!(
+            at.iter().all(|n| *n == 0),
+            "every delegation statement precedes the first node check: {at:?}"
+        );
+        assert!(
+            fake.queried()
+                .iter()
+                .any(|q| q.contains("SHOW COMPUTE NODES")),
+            "premise: the query log did poll for a node afterwards: {:?}",
+            fake.queried()
+        );
+        assert!(
+            !sent.iter().any(|s| s.contains("starrocks_audit_db__")),
+            "no node ever alive, so no query log statement: {sent:?}"
+        );
+    }
+
+    /// Checkpoint 7 (no delegation): an engine that stops being current while its
     /// attachments converge gets no query log statement.
     #[tokio::test]
     async fn the_bootstrap_stops_before_the_query_log_when_the_engine_is_deleted() {

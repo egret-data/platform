@@ -119,8 +119,10 @@ pub(crate) async fn ensure_query_log(st: &CpState, engine: &Engine, fe: &FeTarge
 It is called from three places:
 
 1. **The post-Ready bootstrap** (`spawn_starrocks_catalog_wire`), after
-   `converge_starrocks_catalogs` and before the delegation statements, behind its own
-   `engine_still_current` checkpoint. This covers create and a delegation-changing update.
+   `converge_starrocks_catalogs` and after the delegation statements (moved there on
+   2026-11-11: the wait for an alive node below can take minutes, and the delegation statements
+   need no node), behind its own `engine_still_current` checkpoint. This covers create and a
+   delegation-changing update.
 2. **After any accepted StarRocks apply that may restart the FE**, which the bootstrap does not
    cover: an image or config update in `update_starrocks_engine` and B's `security_upgrade`. Both
    spawn `spawn_query_log_setup(st, engine_id, name, namespace)`. It is the bootstrap's two wait
@@ -485,4 +487,5 @@ From the live check of this package on kind (`4.1.7-egret.4` FE, 1 FE and 1 CN, 
 4. **The bootstrap waits for an alive compute node.** The first setup ran right after the root
    login, before the CN registered, and failed with "Number of available CN nodes is 0", so a
    new engine stayed `notSetUp`. The setup now waits for an alive compute node or backend before
-   step 2 (section 1).
+   step 2 (section 1). The bootstrap runs the query log after the delegation statements, so that
+   wait never delays them.
