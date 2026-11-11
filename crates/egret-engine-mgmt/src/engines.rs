@@ -5815,8 +5815,24 @@ fn spawn_starrocks_catalog_wire(
         }
 
         // The query log's step 6, last: it only reads, and it can take minutes.
-        if query_log == crate::query_log::QueryLogSetup::Ready {
-            crate::query_log::wait_for_events(&st, &fe, &engine_name).await;
+        // A failed first try gets the after-apply path's bounded retry
+        // (final review, M2): a delegation update that also changes the image
+        // can reach the old FE pod, as the update's own spawn can.
+        match query_log {
+            crate::query_log::QueryLogSetup::Ready => {
+                crate::query_log::wait_for_events(&st, &fe, &engine_name).await;
+            }
+            crate::query_log::QueryLogSetup::Failed(_) => {
+                crate::query_log::retry_query_log_setup(
+                    &st,
+                    engine_id,
+                    &engine_name,
+                    &namespace,
+                    2,
+                )
+                .await;
+            }
+            crate::query_log::QueryLogSetup::PluginNotShipped => {}
         }
     })
 }
@@ -15653,6 +15669,69 @@ mod tests {
         );
     }
 
+    /// Final review, I1: an `AuditLoader` row the FE lists but could not load
+    /// (`Status` `ERROR`) is uninstalled, then installed again, and is
+    /// `INSTALLED` afterwards.
+    #[tokio::test]
+    async fn a_listed_audit_loader_in_error_is_reinstalled() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!(
+                "skipping a_listed_audit_loader_in_error_is_reinstalled: DATABASE_URL not set"
+            );
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        fake.seed_plugin_with_status("AuditLoader", "ERROR");
+        let engine = seed_sr_engine(&st).await;
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe target");
+
+        let setup = crate::query_log::ensure_query_log(&st, &engine, &fe, false).await;
+
+        assert_eq!(setup, crate::query_log::QueryLogSetup::Ready);
+        let pw = loader_password(&st, engine.id).await;
+        let mut expected = crate::query_log::query_log_setup_sql(&pw, false);
+        expected.push("UNINSTALL PLUGIN AuditLoader".to_string());
+        expected.push(crate::query_log::install_plugin_sql(&pw));
+        assert_eq!(fake.executed(), expected);
+        let plugins = st
+            .starrocks_ddl
+            .query_with_header(&fe, "SHOW PLUGINS")
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::query_log::plugin_step(&plugins, None),
+            crate::query_log::PluginStep::AlreadyInstalled,
+            "the row is INSTALLED now: {plugins:?}"
+        );
+    }
+
+    /// On an image without the plugin an `ERROR` row is left alone: there is
+    /// nothing to install in its place.
+    #[tokio::test]
+    async fn a_listed_audit_loader_in_error_on_an_official_image_is_not_shipped() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping a_listed_audit_loader_in_error_on_an_official_image_is_not_shipped: DATABASE_URL not set");
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        fake.seed_plugin_with_status("AuditLoader", "ERROR");
+        let engine = seed_sr_engine_on_official_image(&st).await;
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe target");
+
+        let setup = crate::query_log::ensure_query_log(&st, &engine, &fe, false).await;
+
+        assert_eq!(setup, crate::query_log::QueryLogSetup::PluginNotShipped);
+        assert!(
+            !fake.executed().iter().any(|s| s.contains("INSTALL PLUGIN")),
+            "{:?}",
+            fake.executed()
+        );
+    }
+
     /// A bound engine's FE runs Ranger, so the native grant is not sent.
     #[tokio::test]
     async fn a_bound_engine_gets_no_native_grant() {
@@ -15890,15 +15969,23 @@ mod tests {
         crate::query_log::ensure_query_log(&st, &engine, &fe, true).await;
         let q = fake.queried();
         assert_eq!(q.len(), 3, "{q:?}");
-        assert!(q[1].starts_with("SELECT 'egret-query-log-probe-"), "{q:?}");
-        let id = q[1]
-            .trim_start_matches("SELECT 'egret-query-log-probe-")
-            .trim_end_matches('\'');
+        // Both carry the read marker (final review, M1), so the list and
+        // the newest event leave them out.
+        let probe = "/* egret-query-log-read */ SELECT 'egret-query-log-probe-";
+        assert!(q[1].starts_with(probe), "{q:?}");
+        let id = q[1].trim_start_matches(probe).trim_end_matches('\'');
         assert!(Uuid::parse_str(id).is_ok(), "a fresh UUID: {q:?}");
         assert!(
-            q[2].starts_with("SELECT count(*) FROM starrocks_audit_db__.starrocks_audit_tbl__"),
+            q[2].starts_with(
+                "/* egret-query-log-read */ SELECT count(*) \
+                 FROM starrocks_audit_db__.starrocks_audit_tbl__"
+            ),
             "{q:?}"
         );
+        // The poll finds the marked probe by its UUID, without the exclusion
+        // of egret's own reads.
+        assert!(q[2].contains(&format!("'{id}'")), "{q:?}");
+        assert!(!q[2].contains("NOT (`user` = 'root'"), "{q:?}");
         assert!(
             !q[2].contains(&format!("egret-query-log-probe-{id}")),
             "the read-back must not match itself: {q:?}"
@@ -15998,10 +16085,82 @@ mod tests {
         assert!(
             fake.queried()
                 .iter()
-                .any(|q| q.starts_with("SELECT 'egret-query-log-probe-")),
+                .any(|q| q.contains("SELECT 'egret-query-log-probe-")),
             "the bootstrap waits for the first event, last: {:?}",
             fake.queried()
         );
+    }
+
+    /// Final review, M2: the bootstrap's failed first try (the old pod
+    /// refusing the `INSTALL`) gets the after-apply path's bounded retry,
+    /// which reaches the new pod, installs, and waits for the first event.
+    #[tokio::test]
+    async fn the_bootstrap_retries_a_failed_query_log_setup() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!(
+                "skipping the_bootstrap_retries_a_failed_query_log_setup: DATABASE_URL not set"
+            );
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let engine = seed_sr_engine(&st).await;
+        prov.set_status(ready_fe_status(&engine.name));
+        fake.fail_matching_once("INSTALL PLUGIN", MISSING_ZIP_ERROR);
+
+        spawn_starrocks_catalog_wire(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+            None,
+        )
+        .await
+        .expect("bootstrap task did not panic");
+
+        let installs = fake
+            .executed()
+            .iter()
+            .filter(|s| s.starts_with("INSTALL PLUGIN"))
+            .count();
+        assert_eq!(installs, 2, "{:?}", fake.executed());
+        assert!(
+            fake.queried()
+                .iter()
+                .any(|q| q.contains("SELECT 'egret-query-log-probe-")),
+            "the retry that succeeded waits for the first event: {:?}",
+            fake.queried()
+        );
+    }
+
+    /// The bootstrap's retry is bounded like the after-apply path's: five
+    /// tries in all, its own first one included.
+    #[tokio::test]
+    async fn the_bootstrap_gives_up_on_the_query_log_after_five_tries() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping the_bootstrap_gives_up_on_the_query_log_after_five_tries: DATABASE_URL not set");
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let engine = seed_sr_engine(&st).await;
+        prov.set_status(ready_fe_status(&engine.name));
+        fake.fail_matching("INSTALL PLUGIN", MISSING_ZIP_ERROR);
+
+        spawn_starrocks_catalog_wire(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+            None,
+        )
+        .await
+        .expect("bootstrap task did not panic");
+
+        let installs = fake
+            .executed()
+            .iter()
+            .filter(|s| s.starts_with("INSTALL PLUGIN"))
+            .count();
+        assert_eq!(installs, 5, "{:?}", fake.executed());
     }
 
     /// `spawn_query_log_setup` waits like the bootstrap, then sets up.
@@ -16127,7 +16286,7 @@ mod tests {
         assert!(
             fake.queried()
                 .iter()
-                .any(|q| q.starts_with("SELECT 'egret-query-log-probe-")),
+                .any(|q| q.contains("SELECT 'egret-query-log-probe-")),
             "Ready waits for the first event: {:?}",
             fake.queried()
         );
@@ -16163,7 +16322,7 @@ mod tests {
         assert!(!fake
             .queried()
             .iter()
-            .any(|q| q.starts_with("SELECT 'egret-query-log-probe-")));
+            .any(|q| q.contains("SELECT 'egret-query-log-probe-")));
     }
 
     /// The retries stop once the engine is no longer current.

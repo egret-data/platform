@@ -97,6 +97,11 @@ const AUDIT_LOADER_PLUGIN: &str = "AuditLoader";
 /// The `SHOW PLUGINS` column that carries a plugin's name.
 const SHOW_PLUGINS_NAME_COLUMN: &str = "Name";
 
+/// The `SHOW PLUGINS` column that carries a plugin's load state, and the
+/// value a loaded plugin has there (measured in Task 5 on `4.1.7-egret.4`).
+const SHOW_PLUGINS_STATUS_COLUMN: &str = "Status";
+const PLUGIN_STATUS_INSTALLED: &str = "INSTALLED";
+
 /// The probe statement's marker; a fresh UUID follows it on every run.
 const PROBE_MARKER: &str = "egret-query-log-probe-";
 
@@ -149,6 +154,10 @@ pub enum QueryLogSetup {
 pub(crate) enum PluginStep {
     AlreadyInstalled,
     Install,
+    /// Listed, but not loaded (a `Status` other than `INSTALLED`, `ERROR`
+    /// say: an FE that replayed the `INSTALL` from its meta after its pod was
+    /// re-created, without the plugin files). `UNINSTALL`, then `INSTALL`.
+    Reinstall,
     NotShipped,
 }
 
@@ -195,28 +204,45 @@ pub(crate) fn install_plugin_sql(password: &str) -> String {
 
 /// Step 5's decision, from the `SHOW PLUGINS` answer of
 /// [`crate::starrocks_ddl::StarRocksDdl::query_with_header`] (its first row is
-/// the header) and the engine's stored FE image. The name is read from the
-/// column whose header is `Name`, wherever the FE puts it; an answer with no
-/// such column lists nothing.
+/// the header) and the engine's stored FE image. The name and the status are
+/// read from the columns whose headers are `Name` and `Status`, wherever the FE
+/// puts them; an answer with no `Name` column lists nothing.
+///
+/// Only an `AuditLoader` row whose `Status` is `INSTALLED` is installed. A row
+/// with any other status is a plugin the FE could not load, so it is
+/// re-installed where the image ships the plugin ([`PluginStep::Reinstall`])
+/// and [`PluginStep::NotShipped`] elsewhere. An answer with no `Status` column
+/// (not what any measured FE answers) keeps the older reading: a listed name
+/// is installed.
 pub(crate) fn plugin_step(
     show_plugins: &[Vec<Option<String>>],
     fe_image: Option<&str>,
 ) -> PluginStep {
-    let listed = show_plugins.split_first().is_some_and(|(header, rows)| {
-        header
+    let column = |header: &[Option<String>], name: &str| {
+        header.iter().position(|c| c.as_deref() == Some(name))
+    };
+    // `None`: not listed; `Some(loaded)`: listed, and whether it is loaded.
+    let listed: Option<bool> = show_plugins.split_first().and_then(|(header, rows)| {
+        let name = column(header, SHOW_PLUGINS_NAME_COLUMN)?;
+        let status = column(header, SHOW_PLUGINS_STATUS_COLUMN);
+        let row = rows
             .iter()
-            .position(|c| c.as_deref() == Some(SHOW_PLUGINS_NAME_COLUMN))
-            .is_some_and(|i| {
-                rows.iter()
-                    .any(|r| r.get(i).and_then(|v| v.as_deref()) == Some(AUDIT_LOADER_PLUGIN))
-            })
+            .find(|r| r.get(name).and_then(|v| v.as_deref()) == Some(AUDIT_LOADER_PLUGIN))?;
+        Some(match status {
+            Some(i) => row
+                .get(i)
+                .and_then(|v| v.as_deref())
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case(PLUGIN_STATUS_INSTALLED)),
+            // No `Status` column to read: trust the listing.
+            None => true,
+        })
     });
-    if listed {
-        PluginStep::AlreadyInstalled
-    } else if fe_image.is_none_or(|i| !egret_perm::is_patched_starrocks_fe(i)) {
-        PluginStep::NotShipped
-    } else {
-        PluginStep::Install
+    let ships = fe_image.is_some_and(egret_perm::is_patched_starrocks_fe);
+    match listed {
+        Some(true) => PluginStep::AlreadyInstalled,
+        Some(false) | None if !ships => PluginStep::NotShipped,
+        Some(false) => PluginStep::Reinstall,
+        None => PluginStep::Install,
     }
 }
 
@@ -286,10 +312,19 @@ async fn setup_steps(st: &CpState, engine: &Engine, fe: &FeTarget) -> QueryLogSe
         Err(e) => return failed(e),
     };
     let image = egret_perm::stored_engine_image("starrocks", &engine.spec);
-    match plugin_step(&plugins, image.as_deref()) {
+    let step = plugin_step(&plugins, image.as_deref());
+    if step == PluginStep::Reinstall {
+        // A listed row refuses a second `INSTALL` ("already installed"), so
+        // the row the FE could not load goes first.
+        let uninstall = format!("UNINSTALL PLUGIN {AUDIT_LOADER_PLUGIN}");
+        if let Err(e) = st.starrocks_ddl.execute(fe, &uninstall).await {
+            return failed(e);
+        }
+    }
+    match step {
         PluginStep::AlreadyInstalled => QueryLogSetup::Ready,
         PluginStep::NotShipped => QueryLogSetup::PluginNotShipped,
-        PluginStep::Install => match st
+        PluginStep::Install | PluginStep::Reinstall => match st
             .starrocks_ddl
             .execute(fe, &install_plugin_sql(&password))
             .await
@@ -308,16 +343,17 @@ async fn setup_steps(st: &CpState, engine: &Engine, fe: &FeTarget) -> QueryLogSe
 /// logs; whether the row arrived changes nothing. The poll's own text does not
 /// contain the marker (it is split across `concat`), so the poll is never
 /// mistaken for the probe once it is logged itself.
+///
+/// Both statements start with [`READ_MARKER`], like every read of the log, so
+/// the list, the detail and the status's newest event leave them out (final
+/// review, M1): they run after every create, update, security upgrade and
+/// start, and would otherwise fill the log and keep "Latest event" fresh with
+/// no user activity. The poll still finds its probe: it matches the probe's
+/// UUID and does not apply that exclusion.
 pub(crate) async fn wait_for_events(st: &CpState, fe: &FeTarget, engine_name: &str) -> bool {
     let id = Uuid::new_v4();
-    let probe = format!(
-        "SELECT {}",
-        quote_string(QueryEngine::StarRocks, &format!("{PROBE_MARKER}{id}"))
-    );
-    let check = format!(
-        "SELECT count(*) FROM {QUERY_LOG_DATABASE}.{QUERY_LOG_TABLE} \
-         WHERE stmt LIKE concat('%{PROBE_MARKER}', '{id}', '%')"
-    );
+    let probe = probe_sql(&id);
+    let check = probe_check_sql(&id);
     let no_secrets = BTreeMap::new();
     for poll in 0..PROBE_MAX_POLLS {
         if sends_probe(poll) {
@@ -355,6 +391,27 @@ pub(crate) async fn wait_for_events(st: &CpState, fe: &FeTarget, engine_name: &s
     false
 }
 
+/// Step 6's probe: a statement whose audit row carries `id` after
+/// [`PROBE_MARKER`], marked as egret's own read.
+pub(crate) fn probe_sql(id: &Uuid) -> String {
+    format!(
+        "{READ_MARKER} SELECT {}",
+        quote_string(QueryEngine::StarRocks, &format!("{PROBE_MARKER}{id}"))
+    )
+}
+
+/// Step 6's poll: how many audit rows carry the probe `id`. It matches the
+/// probe by its UUID alone, without [`own_reads_excluded`], so it finds the
+/// marked probe; its own text splits the marker from the UUID, so it never
+/// counts itself.
+pub(crate) fn probe_check_sql(id: &Uuid) -> String {
+    format!(
+        "{READ_MARKER} SELECT count(*) FROM {QUERY_LOG_DATABASE}.{QUERY_LOG_TABLE} \
+         WHERE stmt LIKE concat('%{PROBE_MARKER}', {}, '%')",
+        quote_string(QueryEngine::StarRocks, &id.to_string())
+    )
+}
+
 /// Log what a background setup came to. `Failed` is logged where it is
 /// decided: by [`ensure_query_log`], or by [`spawn_query_log_setup`]'s last try.
 pub(crate) fn log_outcome(engine_name: &str, setup: &QueryLogSetup) {
@@ -372,64 +429,77 @@ pub(crate) fn log_outcome(engine_name: &str, setup: &QueryLogSetup) {
 /// After an apply that may restart the FE, and at boot: wait for the FE pod
 /// and a real `root` login exactly as the bootstrap does
 /// ([`wait_for_fe_root_login`]), run the setup, and on `Failed` try again,
-/// up to [`SETUP_ATTEMPTS`] times [`SETUP_RETRY_DELAY`] apart, each try
-/// behind the same waits and checkpoints, so a retry stops when the engine is
-/// deleted, renamed or failed. `Ready` waits for the first event (step 6);
-/// `Ready` and `PluginNotShipped` end it. Only the last `Failed` is a warning.
-/// Spawned, never awaited by a request; the handle is for tests.
+/// up to [`SETUP_ATTEMPTS`] times [`SETUP_RETRY_DELAY`] apart
+/// ([`retry_query_log_setup`]). Spawned, never awaited by a request; the
+/// handle is for tests.
 pub(crate) fn spawn_query_log_setup(
     st: CpState,
     engine_id: Uuid,
     name: String,
     namespace: String,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut consecutive_read_errors: u32 = 0;
-        for attempt in 1..=SETUP_ATTEMPTS {
-            let Some((engine, fe)) = wait_for_fe_root_login(
-                &st,
-                engine_id,
-                &name,
-                &namespace,
-                &mut consecutive_read_errors,
-            )
-            .await
-            else {
-                return;
-            };
-            if !engine_still_current(
-                &st.engine_mgmt,
-                engine_id,
-                &name,
-                &mut consecutive_read_errors,
-            )
-            .await
-            {
+    tokio::spawn(async move { retry_query_log_setup(&st, engine_id, &name, &namespace, 1).await })
+}
+
+/// The setup's bounded retry, shared by [`spawn_query_log_setup`] (from the
+/// first try) and the bootstrap (`engines::spawn_starrocks_catalog_wire`, from
+/// the second, after its own first try failed). Tries `first_attempt` to
+/// [`SETUP_ATTEMPTS`], [`SETUP_RETRY_DELAY`] apart (a `first_attempt` after
+/// the first waits that delay before it too), each behind the waits and
+/// checkpoints of [`wait_for_fe_root_login`] and [`engine_still_current`], so
+/// a retry stops when the engine is deleted, renamed or failed. `Ready` waits
+/// for the first event (step 6); `Ready` and `PluginNotShipped` end it. Only
+/// the last `Failed` is a warning.
+pub(crate) async fn retry_query_log_setup(
+    st: &CpState,
+    engine_id: Uuid,
+    name: &str,
+    namespace: &str,
+    first_attempt: u32,
+) {
+    if first_attempt > 1 {
+        tokio::time::sleep(SETUP_RETRY_DELAY).await;
+    }
+    let mut consecutive_read_errors: u32 = 0;
+    for attempt in first_attempt..=SETUP_ATTEMPTS {
+        let Some((engine, fe)) =
+            wait_for_fe_root_login(st, engine_id, name, namespace, &mut consecutive_read_errors)
+                .await
+        else {
+            return;
+        };
+        if !engine_still_current(
+            &st.engine_mgmt,
+            engine_id,
+            name,
+            &mut consecutive_read_errors,
+        )
+        .await
+        {
+            return;
+        }
+        match setup_steps(st, &engine, &fe).await {
+            QueryLogSetup::Failed(why) if attempt < SETUP_ATTEMPTS => {
+                tracing::info!(engine = %name, attempt, error = %why,
+                    "query log setup failed; trying again");
+                tokio::time::sleep(SETUP_RETRY_DELAY).await;
+            }
+            QueryLogSetup::Failed(why) => {
+                tracing::warn!(engine = %name, attempts = attempt, error = %why,
+                    "query log setup failed");
                 return;
             }
-            match setup_steps(&st, &engine, &fe).await {
-                QueryLogSetup::Failed(why) if attempt < SETUP_ATTEMPTS => {
-                    tracing::info!(engine = %name, attempt, error = %why,
-                        "query log setup failed; trying again");
-                    tokio::time::sleep(SETUP_RETRY_DELAY).await;
-                }
-                QueryLogSetup::Failed(why) => {
-                    tracing::warn!(engine = %name, attempts = attempt, error = %why,
-                        "query log setup failed");
-                    return;
-                }
-                setup @ QueryLogSetup::Ready => {
-                    log_outcome(&name, &setup);
-                    wait_for_events(&st, &fe, &name).await;
-                    return;
-                }
-                setup @ QueryLogSetup::PluginNotShipped => {
-                    log_outcome(&name, &setup);
-                    return;
-                }
+            setup @ QueryLogSetup::Ready => {
+                log_outcome(name, &setup);
+                wait_for_events(st, &fe, name).await;
+                return;
+            }
+            setup @ QueryLogSetup::PluginNotShipped => {
+                log_outcome(name, &setup);
+                return;
             }
         }
-    })
+    }
 }
 
 /// Whether the boot pass sets this engine's Query log up: a StarRocks engine
@@ -1060,7 +1130,9 @@ async fn read_status(st: &CpState, engine: &Engine, cx: &ReadContext) -> QueryLo
     let image = egret_perm::stored_engine_image("starrocks", &engine.spec);
     let state = match plugin_step(&plugins, image.as_deref()) {
         PluginStep::AlreadyInstalled if has_table => QueryLogState::Ready,
-        PluginStep::AlreadyInstalled | PluginStep::Install => QueryLogState::NotSetUp,
+        PluginStep::AlreadyInstalled | PluginStep::Install | PluginStep::Reinstall => {
+            QueryLogState::NotSetUp
+        }
         PluginStep::NotShipped => QueryLogState::PluginNotShipped,
     };
     let last_event_at = if has_table {
@@ -1445,10 +1517,18 @@ mod tests {
         );
     }
 
+    /// A row of the measured header: `Name` and `Status` set, the rest NULL.
+    fn plugin_row(name: &'static str, status: Option<&'static str>) -> Vec<Option<&'static str>> {
+        let mut row = vec![None; real_header().len()];
+        let at = |c: &str| real_header().iter().position(|h| *h == c).unwrap();
+        row[at("Name")] = Some(name);
+        row[at("Status")] = status;
+        row
+    }
+
     #[test]
     fn a_listed_audit_loader_is_already_installed_even_on_an_unpatched_image() {
-        let mut row = vec![None; 10];
-        row[0] = Some("AuditLoader");
+        let row = plugin_row("AuditLoader", Some("INSTALLED"));
         let rows = show_plugins(&real_header(), &[&row]);
         for image in [Some(OFFICIAL_416), Some(EGRET_4), None] {
             assert_eq!(plugin_step(&rows, image), PluginStep::AlreadyInstalled);
@@ -1466,9 +1546,69 @@ mod tests {
         assert_eq!(plugin_step(&rows, None), PluginStep::NotShipped);
     }
 
-    /// The name is read by header, not by position: the same row with the
-    /// columns reordered is still found, and `AuditLoader` in another column
-    /// (a description, say) is not a listing.
+    /// Final review, I1: a listed row the FE could not load (`ERROR`, or any
+    /// status but `INSTALLED`, or none) is re-installed on an image that ships
+    /// the plugin, and is `NotShipped` on one that does not.
+    #[test]
+    fn a_listed_audit_loader_that_is_not_loaded_is_reinstalled() {
+        for status in [Some("ERROR"), Some("UNINSTALLED"), Some(""), None] {
+            let row = plugin_row("AuditLoader", status);
+            let rows = show_plugins(&real_header(), &[&row]);
+            assert_eq!(
+                plugin_step(&rows, Some(EGRET_4)),
+                PluginStep::Reinstall,
+                "{status:?}"
+            );
+            assert_eq!(
+                plugin_step(&rows, Some(OFFICIAL_416)),
+                PluginStep::NotShipped,
+                "{status:?}"
+            );
+            assert_eq!(plugin_step(&rows, None), PluginStep::NotShipped);
+        }
+        // The status is read by header too, and from the AuditLoader row only.
+        let reordered = show_plugins(
+            &["Status", "Name"],
+            &[
+                &[Some("INSTALLED"), Some("other")],
+                &[Some("ERROR"), Some("AuditLoader")],
+            ],
+        );
+        assert_eq!(
+            plugin_step(&reordered, Some(EGRET_4)),
+            PluginStep::Reinstall
+        );
+    }
+
+    /// No `Status` column (no measured FE answers so): a listed name is
+    /// installed, as before the column was read.
+    #[test]
+    fn without_a_status_column_a_listed_name_is_installed() {
+        let rows = show_plugins(&["Name", "Type"], &[&[Some("AuditLoader"), None]]);
+        assert_eq!(
+            plugin_step(&rows, Some(EGRET_4)),
+            PluginStep::AlreadyInstalled
+        );
+    }
+
+    /// Final review, M1: the probe and its poll are marked as egret's own
+    /// reads, so the list and the newest event leave them out; the poll
+    /// matches the probe's UUID without that exclusion, and not itself.
+    #[test]
+    fn the_probe_and_its_poll_carry_the_read_marker() {
+        let id = Uuid::new_v4();
+        let probe = probe_sql(&id);
+        let check = probe_check_sql(&id);
+        assert_eq!(
+            probe,
+            format!("/* egret-query-log-read */ SELECT 'egret-query-log-probe-{id}'")
+        );
+        assert!(check.starts_with(READ_MARKER), "{check}");
+        assert!(check.contains(&format!("'{id}'")), "{check}");
+        assert!(!check.contains(&own_reads_excluded()), "{check}");
+        assert!(!check.contains(&format!("{PROBE_MARKER}{id}")), "{check}");
+    }
+
     #[test]
     fn the_probe_is_sent_on_the_first_poll_then_once_a_minute() {
         let sent: Vec<u32> = (0..PROBE_MAX_POLLS.max(36))
@@ -1477,6 +1617,9 @@ mod tests {
         assert_eq!(sent, vec![0, 12, 24]);
     }
 
+    /// The name is read by header, not by position: the same row with the
+    /// columns reordered is still found, and `AuditLoader` in another column
+    /// (a description, say) is not a listing.
     #[test]
     fn the_name_column_is_found_by_its_header() {
         let reordered = show_plugins(

@@ -368,13 +368,16 @@ async fn egret_4_sets_up_the_query_log_and_reads_it_back() {
             .any(|s| s.starts_with("CREATE TABLE IF NOT EXISTS") && s.ends_with(");")),
         "premise: the real runner was sent the table DDL with its trailing `;`"
     );
+    // The probe is marked as egret's own read (final review, M1): it is in
+    // the table, under the marker, and step 4 checks it is not in the list.
     let probes = eventually("the probe row", || async {
         let n = first_cell(
             &root_query(
                 &fe,
                 &format!(
                     "SELECT count(*) FROM starrocks_audit_db__.starrocks_audit_tbl__ \
-                     WHERE stmt LIKE concat('%egret-query-log-', 'probe-%') \
+                     WHERE stmt LIKE concat('{READ_MARKER} SELECT ''egret-query-log-', \
+                     'probe-%') \
                      AND timestamp >= '{}'",
                     since.format("%Y-%m-%d %H:%M:%S")
                 ),
@@ -504,6 +507,12 @@ async fn egret_4_sets_up_the_query_log_and_reads_it_back() {
                 .as_deref()
                 .is_some_and(|s| s.starts_with(READ_MARKER)),
             "egret's own read in the list: {e:?}"
+        );
+        assert!(
+            !e.statement
+                .as_deref()
+                .is_some_and(|s| s.contains("egret-query-log-probe-")),
+            "egret's probe or its poll in the list: {e:?}"
         );
     }
 

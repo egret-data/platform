@@ -18971,6 +18971,55 @@ async fn query_log_status_follows_the_fe_and_a_missing_table_is_not_ready() {
     );
 }
 
+/// Final review, I1: a listed `AuditLoader` the FE could not load (`Status`
+/// `ERROR`) is not set up, even with the table there; the setup route then
+/// re-installs it and the status reads `ready`.
+#[tokio::test]
+async fn query_log_status_of_a_plugin_in_error_is_not_set_up_until_set_up_again() {
+    let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ql_status_err", true).await;
+    let id = seed_query_log_engine(&f, "starrocks").await;
+    f.starrocks_ddl
+        .seed_plugin_with_status("AuditLoader", "ERROR");
+    f.starrocks_ddl.answer_matching(
+        "SHOW TABLES FROM starrocks_audit_db__",
+        vec![vec![Some("starrocks_audit_tbl__".into())]],
+    );
+    let status_path = format!("/engines/{id}/query-log/status");
+
+    let (status, body) = call(&f, "GET", &status_path, &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "notSetUp", "{body}");
+
+    let (status, body) = call(
+        &f,
+        "POST",
+        &format!("/engines/{id}/query-log/setup"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "ready", "{body}");
+    let executed = f.starrocks_ddl.executed();
+    let uninstall = executed
+        .iter()
+        .position(|s| s == "UNINSTALL PLUGIN AuditLoader")
+        .expect("the row in error is uninstalled");
+    let install = executed
+        .iter()
+        .position(|s| s.starts_with("INSTALL PLUGIN"))
+        .expect("and installed again");
+    assert!(uninstall < install, "{executed:?}");
+
+    let (status, body) = call(&f, "GET", &status_path, &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "ready", "{body}");
+}
+
 #[tokio::test]
 async fn the_setup_route_sets_the_query_log_up_and_a_failure_is_a_scrubbed_502() {
     let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), None).await else {

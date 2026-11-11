@@ -606,8 +606,8 @@ pub trait StarRocksDdl: Send + Sync {
 /// The column names a real FE answers `SHOW PLUGINS` with
 /// (`ShowPluginsStmt`), measured in Task 5 on `4.1.7-egret.4`: `Name Type
 /// Description Version JavaVersion ClassName SoName Sources Status
-/// Properties`. Only `Name` is relied on, by
-/// [`crate::query_log::plugin_step`]; the fork's e2e reads the same header
+/// Properties`. [`crate::query_log::plugin_step`] reads `Name` and `Status`
+/// (`INSTALLED` on a healthy row); the fork's e2e reads the same header
 /// (`SHOW PLUGINS\G | grep 'Name: AuditLoader'`). The fake answers with it.
 pub const SHOW_PLUGINS_HEADER: [&str; 10] = [
     "Name",
@@ -1293,9 +1293,10 @@ pub struct FakeStarRocksDdl {
     /// `needle` fails with `message` and the entry is consumed. An FE that
     /// refuses a statement and then, on a retry, accepts it.
     fail_once: Arc<Mutex<Vec<(String, String)>>>,
-    /// The names `SHOW PLUGINS` lists. An `INSTALL PLUGIN FROM` that the fake
-    /// accepts adds `AuditLoader`, the one plugin egret installs.
-    plugins: Arc<Mutex<Vec<String>>>,
+    /// The `(Name, Status)` rows `SHOW PLUGINS` lists. An `INSTALL PLUGIN
+    /// FROM` that the fake accepts adds `AuditLoader` as `INSTALLED`, the one
+    /// plugin egret installs; `UNINSTALL PLUGIN <name>` removes the row.
+    plugins: Arc<Mutex<Vec<(String, String)>>>,
     /// The `FeTarget` of the most recent call, so a test can assert the cert.
     last_target: Arc<Mutex<Option<FeTarget>>>,
     /// Runs on EVERY `execute`, with the statement text, after it is
@@ -1455,20 +1456,36 @@ impl FakeStarRocksDdl {
 
     /// List a plugin in `SHOW PLUGINS` from now on, as if it were installed.
     pub fn seed_plugin(&self, name: &str) {
-        self.plugins.lock().unwrap().push(name.to_string());
+        self.seed_plugin_with_status(name, "INSTALLED");
+    }
+
+    /// List a plugin in `SHOW PLUGINS` with this `Status` (`ERROR`, say: a
+    /// plugin the FE replayed from its meta but could not load).
+    pub fn seed_plugin_with_status(&self, name: &str, status: &str) {
+        self.plugins
+            .lock()
+            .unwrap()
+            .push((name.to_string(), status.to_string()));
     }
 
     /// The fake's `SHOW PLUGINS` answer: [`SHOW_PLUGINS_HEADER`], then one row
-    /// per installed plugin, its name in the `Name` column.
+    /// per listed plugin, its name in the `Name` column and its status in the
+    /// `Status` column.
     fn show_plugins(&self) -> Vec<Vec<Option<String>>> {
         let mut out = vec![SHOW_PLUGINS_HEADER
             .iter()
             .map(|c| Some(c.to_string()))
             .collect::<Vec<_>>()];
-        for name in self.plugins.lock().unwrap().iter() {
+        let column = |name: &str| {
+            SHOW_PLUGINS_HEADER
+                .iter()
+                .position(|c| *c == name)
+                .expect("a measured SHOW PLUGINS column")
+        };
+        for (name, status) in self.plugins.lock().unwrap().iter() {
             let mut row = vec![None; SHOW_PLUGINS_HEADER.len()];
-            row[0] = Some(name.clone());
-            row[8] = Some("INSTALLED".to_string());
+            row[column("Name")] = Some(name.clone());
+            row[column("Status")] = Some(status.clone());
             out.push(row);
         }
         out
@@ -1541,13 +1558,24 @@ impl StarRocksDdl for FakeStarRocksDdl {
             cats.remove(&name);
         } else if sql.starts_with("INSTALL PLUGIN FROM") {
             let mut plugins = self.plugins.lock().unwrap();
-            if plugins.iter().any(|p| p == "AuditLoader") {
+            // A listed row refuses a second INSTALL whatever its status.
+            if plugins.iter().any(|(p, _)| p == "AuditLoader") {
                 // Measured in Task 5 on `4.1.7-egret.4`.
                 return Err(fe_error(
                     "ERROR 1064 (HY000): plugin AuditLoader has already been installed.",
                 ));
             }
-            plugins.push("AuditLoader".to_string());
+            plugins.push(("AuditLoader".to_string(), "INSTALLED".to_string()));
+        } else if let Some(name) = sql.strip_prefix("UNINSTALL PLUGIN ") {
+            let mut plugins = self.plugins.lock().unwrap();
+            let before = plugins.len();
+            plugins.retain(|(p, _)| p != name.trim());
+            if plugins.len() == before {
+                return Err(fe_error(format!(
+                    "ERROR 1064 (HY000): plugin {} is not installed.",
+                    name.trim()
+                )));
+            }
         }
         Ok(())
     }
