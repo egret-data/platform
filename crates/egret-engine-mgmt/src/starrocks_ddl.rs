@@ -314,6 +314,24 @@ pub struct FeError {
     /// a predicate on a string built to be printed, and the branch claimed
     /// in two places that no such predicate was left.
     unknown_catalog: bool,
+    /// Whether the FE said the plugin is already installed (StarRocks'
+    /// `PluginMgr`: `plugin <name> has already been installed.`), decided
+    /// from the RAW message like the two above. The query log's `INSTALL`
+    /// branches on it: a concurrent setup that installed it first is not a
+    /// failure.
+    already_installed: bool,
+    /// Whether the FE said the database or table does not exist
+    /// (`Unknown database '…'`, `Unknown table '…'`), decided from the RAW
+    /// message like the three above. The query log's reads branch on it: no
+    /// audit table is "not set up", not an FE failure.
+    unknown_relation: bool,
+    /// Whether the FE said it has no alive compute node (`Number of available
+    /// CN nodes is 0, less than 1.`, measured on kind on 2026-11-11 for a
+    /// shared-data `CREATE TABLE` sent before the CN registered), decided
+    /// from the RAW message like the four above. The query log's setup
+    /// answers `Failed` on it with a message that says so, so the bounded
+    /// retry tries again once a node has joined.
+    no_alive_node: bool,
 }
 
 impl FeError {
@@ -411,6 +429,24 @@ impl FeError {
     pub fn is_unknown_catalog(&self) -> bool {
         self.unknown_catalog
     }
+
+    /// Did the FE mean "that plugin is already installed"? Read off
+    /// [`Self::already_installed`], decided from the unredacted message.
+    pub fn is_already_installed(&self) -> bool {
+        self.already_installed
+    }
+
+    /// Did the FE mean "there is no such database or table"? Read off
+    /// [`Self::unknown_relation`], decided from the unredacted message.
+    pub fn is_unknown_relation(&self) -> bool {
+        self.unknown_relation
+    }
+
+    /// Did the FE mean "there is no alive compute node yet"? Read off
+    /// [`Self::no_alive_node`], decided from the unredacted message.
+    pub fn is_no_alive_node(&self) -> bool {
+        self.no_alive_node
+    }
 }
 
 /// Does this FE message mean "the object is already there"? StarRocks answers
@@ -437,6 +473,36 @@ fn says_already_exists(raw: &str) -> bool {
 /// call site, which is where it used to be — see [`FeError::unknown_catalog`].
 fn says_unknown_catalog(raw: &str) -> bool {
     raw.to_ascii_lowercase().contains("unknown catalog")
+}
+
+/// Does this FE message mean "that plugin is already installed"? StarRocks'
+/// `PluginMgr` refuses a second `INSTALL PLUGIN` of a name it holds with
+/// `plugin <name> has already been installed.`; matched on the phrase,
+/// case-insensitively. Measured in Task 5 on `4.1.7-egret.4`: `ERROR 1064
+/// (HY000): plugin AuditLoader has already been installed.`
+fn says_already_installed(raw: &str) -> bool {
+    raw.to_ascii_lowercase().contains("already been installed")
+}
+
+/// Does this FE message mean "there is no such database or table"?
+/// StarRocks answers an absent database with `Unknown database '<db>'` and an
+/// absent table with `Unknown table '<db>.<table>'`. Matched on the phrases,
+/// case-insensitively. Measured in Task 5 on `4.1.7-egret.4`: `ERROR 5501
+/// (3F000): Getting analyzing error. Detail message: Unknown database
+/// 'nodb__'.` and `ERROR 5502 (42602): Getting analyzing error. Detail
+/// message: Unknown table 'starrocks_audit_db__.nope'.`
+fn says_unknown_relation(raw: &str) -> bool {
+    let raw = raw.to_ascii_lowercase();
+    raw.contains("unknown database") || raw.contains("unknown table")
+}
+
+/// Does this FE message mean "no compute node is alive"? A shared-data FE
+/// answers a `CREATE TABLE` sent before any CN registered with `Getting
+/// analyzing error. Detail message: Number of available CN nodes is 0, less
+/// than 1.` (measured on kind, 2026-11-11). Matched on the phrase,
+/// case-insensitively.
+fn says_no_alive_node(raw: &str) -> bool {
+    raw.to_ascii_lowercase().contains("available cn nodes is 0")
 }
 
 /// The FE's error code and nothing else. Deliberately NOT the excerpt: this
@@ -478,6 +544,9 @@ impl std::fmt::Debug for FeError {
             )
             .field("already_exists", &self.already_exists)
             .field("unknown_catalog", &self.unknown_catalog)
+            .field("already_installed", &self.already_installed)
+            .field("unknown_relation", &self.unknown_relation)
+            .field("no_alive_node", &self.no_alive_node)
             .finish()
     }
 }
@@ -516,6 +585,9 @@ fn fe_error(raw: impl std::fmt::Display) -> FeError {
     // redacted form is allowed to be lossy — capped, or withheld entirely.
     let already_exists = says_already_exists(&raw);
     let unknown_catalog = says_unknown_catalog(&raw);
+    let already_installed = says_already_installed(&raw);
+    let unknown_relation = says_unknown_relation(&raw);
+    let no_alive_node = says_no_alive_node(&raw);
 
     let redacted = normalize_mysql_async_wrapper(&raw);
     let redacted = redact_quoted(&redacted);
@@ -532,6 +604,9 @@ fn fe_error(raw: impl std::fmt::Display) -> FeError {
         excerpt,
         already_exists,
         unknown_catalog,
+        already_installed,
+        unknown_relation,
+        no_alive_node,
     }
 }
 
@@ -542,7 +617,35 @@ fn fe_error(raw: impl std::fmt::Display) -> FeError {
 pub trait StarRocksDdl: Send + Sync {
     async fn execute(&self, fe: &FeTarget, sql: &str) -> Result<(), FeError>;
     async fn query(&self, fe: &FeTarget, sql: &str) -> Result<Vec<Vec<Option<String>>>, FeError>;
+    /// Like [`Self::query`], but the first row is the result's column names,
+    /// so a caller can find a column by its name instead of a guessed
+    /// position. `SHOW` statements are the use: their column order is the
+    /// FE's to choose.
+    async fn query_with_header(
+        &self,
+        fe: &FeTarget,
+        sql: &str,
+    ) -> Result<Vec<Vec<Option<String>>>, FeError>;
 }
+
+/// The column names a real FE answers `SHOW PLUGINS` with
+/// (`ShowPluginsStmt`), measured in Task 5 on `4.1.7-egret.4`: `Name Type
+/// Description Version JavaVersion ClassName SoName Sources Status
+/// Properties`. [`crate::query_log::plugin_step`] reads `Name` and `Status`
+/// (`INSTALLED` on a healthy row); the fork's e2e reads the same header
+/// (`SHOW PLUGINS\G | grep 'Name: AuditLoader'`). The fake answers with it.
+pub const SHOW_PLUGINS_HEADER: [&str; 10] = [
+    "Name",
+    "Type",
+    "Description",
+    "Version",
+    "JavaVersion",
+    "ClassName",
+    "SoName",
+    "Sources",
+    "Status",
+    "Properties",
+];
 
 /// Bounds on the real runner's own connection and per-statement work,
 /// gathered in this one named place (fix round 1 review, I4): before this,
@@ -622,22 +725,57 @@ impl StarRocksDdl for MysqlDdlRunner {
                     )))
                 }
             };
-        let out = rows
-            .into_iter()
-            .map(|row| {
-                (0..row.columns_ref().len())
-                    .map(|i| {
-                        row.as_ref(i)
-                            .cloned()
-                            .and_then(|v| mysql_async::from_value_opt::<Option<String>>(v).ok())
-                            .flatten()
-                    })
-                    .collect()
-            })
-            .collect();
+        let out = rows.into_iter().map(row_as_strings).collect();
         let _ = conn.disconnect().await;
         Ok(out)
     }
+
+    async fn query_with_header(
+        &self,
+        fe: &FeTarget,
+        sql: &str,
+    ) -> Result<Vec<Vec<Option<String>>>, FeError> {
+        use mysql_async::prelude::Queryable;
+        let mut conn = Self::connect(fe).await?;
+        let read = async {
+            let mut result = conn.query_iter(sql).await?;
+            // The columns are read BEFORE the rows: `columns_ref` looks at the
+            // pending result set, and a result with no rows still has them.
+            let header: Vec<Option<String>> = result
+                .columns_ref()
+                .iter()
+                .map(|c| Some(c.name_str().to_string()))
+                .collect();
+            let rows: Vec<mysql_async::Row> = result.collect().await?;
+            Ok::<_, mysql_async::Error>((header, rows))
+        };
+        let (header, rows) = match tokio::time::timeout(FE_STATEMENT_TIMEOUT, read).await {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return Err(fe_error(e)),
+            Err(_) => {
+                return Err(fe_error(format!(
+                    "statement timed out after {FE_STATEMENT_TIMEOUT:?}"
+                )))
+            }
+        };
+        let mut out = vec![header];
+        out.extend(rows.into_iter().map(row_as_strings));
+        let _ = conn.disconnect().await;
+        Ok(out)
+    }
+}
+
+/// One result row as text, `None` for SQL `NULL` (and for a value that is not
+/// text-convertible, which a `SHOW`/admin statement does not return).
+fn row_as_strings(row: mysql_async::Row) -> Vec<Option<String>> {
+    (0..row.columns_ref().len())
+        .map(|i| {
+            row.as_ref(i)
+                .cloned()
+                .and_then(|v| mysql_async::from_value_opt::<Option<String>>(v).ok())
+                .flatten()
+        })
+        .collect()
 }
 
 /// Where and how to reach this engine's FE. The cert is the engine's own
@@ -1164,6 +1302,10 @@ pub struct FakeStarRocksDdl {
     materialized_views: Arc<Mutex<MaterializedViewRows>>,
     /// Canned answers to `query`, by exact statement text.
     answers: Arc<Mutex<BTreeMap<String, MaterializedViewRows>>>,
+    /// `(needle, rows)`: canned answers to any `query` containing `needle`,
+    /// first match wins, consulted after the exact `answers`. For statements
+    /// whose text carries a time the test does not control.
+    matching_answers: Arc<Mutex<Vec<(String, MaterializedViewRows)>>>,
     /// When set, every `execute`/`query` fails with this message.
     fail: Arc<Mutex<Option<String>>>,
     /// `(needle, message)`: fail only the statements containing `needle` —
@@ -1172,6 +1314,31 @@ pub struct FakeStarRocksDdl {
     /// could only be expressed with the global `fail`, which also broke
     /// `SHOW CATALOGS`).
     selective_fail: Arc<Mutex<Vec<(String, String)>>>,
+    /// `(needle, message)`, each used ONCE: the first `execute` containing
+    /// `needle` fails with `message` and the entry is consumed. An FE that
+    /// refuses a statement and then, on a retry, accepts it.
+    fail_once: Arc<Mutex<Vec<(String, String)>>>,
+    /// The `(Name, Status)` rows `SHOW PLUGINS` lists. An `INSTALL PLUGIN
+    /// FROM` that the fake accepts adds `AuditLoader` as `INSTALLED`, the one
+    /// plugin egret installs; `UNINSTALL PLUGIN <name>` removes the row.
+    plugins: Arc<Mutex<Vec<(String, String)>>>,
+    /// How many more `SHOW COMPUTE NODES` answers list the one compute node
+    /// as not alive. `None` (the default): it is alive from the start, so a
+    /// test that is not about the query log's node wait never meets it.
+    /// `Some(u32::MAX)`: it never turns alive. `SHOW BACKENDS` lists none
+    /// (a shared-data FE).
+    dead_node_polls: Arc<Mutex<Option<u32>>>,
+    /// Runs on every `SHOW COMPUTE NODES` / `SHOW BACKENDS`, with the
+    /// statement text, before the fake answers it: how a test makes the
+    /// engine vanish while the query log's node wait is polling.
+    #[allow(clippy::type_complexity)]
+    on_node_check: Arc<
+        Mutex<
+            Option<
+                Arc<dyn Fn(String) -> futures_util::future::BoxFuture<'static, ()> + Send + Sync>,
+            >,
+        >,
+    >,
     /// The `FeTarget` of the most recent call, so a test can assert the cert.
     last_target: Arc<Mutex<Option<FeTarget>>>,
     /// Runs on EVERY `execute`, with the statement text, after it is
@@ -1225,6 +1392,13 @@ impl FakeStarRocksDdl {
     /// `SHOW CREATE CATALOG` among several `SHOW CATALOGS` calls).
     pub fn fail_matching(&self, needle: &str, msg: &str) {
         self.selective_fail
+            .lock()
+            .unwrap()
+            .push((needle.to_string(), msg.to_string()));
+    }
+    /// Fail the next `execute` containing `needle` with `msg`, once.
+    pub fn fail_matching_once(&self, needle: &str, msg: &str) {
+        self.fail_once
             .lock()
             .unwrap()
             .push((needle.to_string(), msg.to_string()));
@@ -1304,6 +1478,14 @@ impl FakeStarRocksDdl {
         self.answers.lock().unwrap().insert(sql.to_string(), rows);
     }
 
+    /// Answer every `query` containing `needle` with `rows` from now on.
+    pub fn answer_matching(&self, needle: &str, rows: Vec<Vec<Option<String>>>) {
+        self.matching_answers
+            .lock()
+            .unwrap()
+            .push((needle.to_string(), rows));
+    }
+
     pub fn seed_raw_materialized_view_row(&self, row: Vec<Option<String>>) {
         self.materialized_views.lock().unwrap().push(row);
     }
@@ -1312,6 +1494,92 @@ impl FakeStarRocksDdl {
     /// someone else's `DROP`, which is what detach must tolerate (D7).
     pub fn forget(&self, name: &str) {
         self.catalogs.lock().unwrap().remove(name);
+    }
+
+    /// List a plugin in `SHOW PLUGINS` from now on, as if it were installed.
+    pub fn seed_plugin(&self, name: &str) {
+        self.seed_plugin_with_status(name, "INSTALLED");
+    }
+
+    /// List a plugin in `SHOW PLUGINS` with this `Status` (`ERROR`, say: a
+    /// plugin the FE replayed from its meta but could not load).
+    pub fn seed_plugin_with_status(&self, name: &str, status: &str) {
+        self.plugins
+            .lock()
+            .unwrap()
+            .push((name.to_string(), status.to_string()));
+    }
+
+    /// The compute node answers `Alive` = `false` to the next `polls`
+    /// `SHOW COMPUTE NODES`, then `true`: a CN that registers late.
+    pub fn nodes_alive_after(&self, polls: u32) {
+        *self.dead_node_polls.lock().unwrap() = Some(polls);
+    }
+
+    /// The compute node never turns alive.
+    pub fn no_node_ever_alive(&self) {
+        self.nodes_alive_after(u32::MAX);
+    }
+
+    /// Run this on every node listing (`SHOW COMPUTE NODES`, `SHOW
+    /// BACKENDS`), receiving its text, before the fake answers it.
+    pub fn on_node_check(
+        &self,
+        hook: impl Fn(String) -> futures_util::future::BoxFuture<'static, ()> + Send + Sync + 'static,
+    ) {
+        *self.on_node_check.lock().unwrap() = Some(Arc::new(hook));
+    }
+
+    /// The fake's `SHOW COMPUTE NODES` answer: a header with an `Alive`
+    /// column (not in the FE's position: the reader goes by name), then one
+    /// node, alive or not per [`Self::nodes_alive_after`].
+    fn show_compute_nodes(&self) -> Vec<Vec<Option<String>>> {
+        let alive = {
+            let mut dead = self.dead_node_polls.lock().unwrap();
+            match dead.as_mut() {
+                None | Some(0) => true,
+                Some(&mut u32::MAX) => false,
+                Some(n) => {
+                    *n -= 1;
+                    false
+                }
+            }
+        };
+        vec![
+            ["ComputeNodeId", "IP", "Alive", "Status"]
+                .iter()
+                .map(|c| Some(c.to_string()))
+                .collect(),
+            vec![
+                Some("10001".into()),
+                Some("cn-0".into()),
+                Some(alive.to_string()),
+                Some("OK".into()),
+            ],
+        ]
+    }
+
+    /// The fake's `SHOW PLUGINS` answer: [`SHOW_PLUGINS_HEADER`], then one row
+    /// per listed plugin, its name in the `Name` column and its status in the
+    /// `Status` column.
+    fn show_plugins(&self) -> Vec<Vec<Option<String>>> {
+        let mut out = vec![SHOW_PLUGINS_HEADER
+            .iter()
+            .map(|c| Some(c.to_string()))
+            .collect::<Vec<_>>()];
+        let column = |name: &str| {
+            SHOW_PLUGINS_HEADER
+                .iter()
+                .position(|c| *c == name)
+                .expect("a measured SHOW PLUGINS column")
+        };
+        for (name, status) in self.plugins.lock().unwrap().iter() {
+            let mut row = vec![None; SHOW_PLUGINS_HEADER.len()];
+            row[column("Name")] = Some(name.clone());
+            row[column("Status")] = Some(status.clone());
+            out.push(row);
+        }
+        out
     }
 
     /// The needle-matched failure for this statement/query text, if any.
@@ -1348,6 +1616,13 @@ impl StarRocksDdl for FakeStarRocksDdl {
         if let Some(msg) = self.selective_failure(sql) {
             return Err(fe_error(msg));
         }
+        {
+            let mut once = self.fail_once.lock().unwrap();
+            if let Some(i) = once.iter().position(|(n, _)| sql.contains(n.as_str())) {
+                let (_, msg) = once.remove(i);
+                return Err(fe_error(msg));
+            }
+        }
         let mut cats = self.catalogs.lock().unwrap();
         if let Some(name) = statement_target("CREATE EXTERNAL CATALOG", sql) {
             if cats.contains_key(&name) {
@@ -1372,6 +1647,26 @@ impl StarRocksDdl for FakeStarRocksDdl {
             }
         } else if let Some(name) = statement_target("DROP CATALOG IF EXISTS", sql) {
             cats.remove(&name);
+        } else if sql.starts_with("INSTALL PLUGIN FROM") {
+            let mut plugins = self.plugins.lock().unwrap();
+            // A listed row refuses a second INSTALL whatever its status.
+            if plugins.iter().any(|(p, _)| p == "AuditLoader") {
+                // Measured in Task 5 on `4.1.7-egret.4`.
+                return Err(fe_error(
+                    "ERROR 1064 (HY000): plugin AuditLoader has already been installed.",
+                ));
+            }
+            plugins.push(("AuditLoader".to_string(), "INSTALLED".to_string()));
+        } else if let Some(name) = sql.strip_prefix("UNINSTALL PLUGIN ") {
+            let mut plugins = self.plugins.lock().unwrap();
+            let before = plugins.len();
+            plugins.retain(|(p, _)| p != name.trim());
+            if plugins.len() == before {
+                return Err(fe_error(format!(
+                    "ERROR 1064 (HY000): plugin {} is not installed.",
+                    name.trim()
+                )));
+            }
         }
         Ok(())
     }
@@ -1385,8 +1680,15 @@ impl StarRocksDdl for FakeStarRocksDdl {
         if let Some(msg) = self.selective_failure(sql) {
             return Err(fe_error(msg));
         }
+        // The query log's reads lead with their marker comment, which a real
+        // FE skips; the fake's built-in answers are keyed on the bare text.
+        let sql = without_read_marker(sql);
         if sql == "SELECT 1" {
             return Ok(vec![vec![Some("1".into())]]);
+        }
+        if sql == "SHOW PLUGINS" {
+            // Without the header, as the real runner's `query` answers.
+            return Ok(self.show_plugins().split_off(1));
         }
         if sql == "SHOW CATALOGS" {
             return Ok(self
@@ -1403,6 +1705,15 @@ impl StarRocksDdl for FakeStarRocksDdl {
         if let Some(rows) = self.answers.lock().unwrap().get(sql) {
             return Ok(rows.clone());
         }
+        if let Some((_, rows)) = self
+            .matching_answers
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(needle, _)| sql.contains(needle.as_str()))
+        {
+            return Ok(rows.clone());
+        }
         if let Some(name) = statement_target("SHOW CREATE CATALOG", sql) {
             let Some(props) = self.catalogs.lock().unwrap().get(&name).cloned() else {
                 return Err(fe_error(format!("Unknown catalog '{name}'")));
@@ -1414,6 +1725,59 @@ impl StarRocksDdl for FakeStarRocksDdl {
         }
         Ok(vec![])
     }
+
+    /// The same failures as `query` (recorded in `queried()` too); only
+    /// `SHOW PLUGINS`, `SHOW COMPUTE NODES` and `SHOW BACKENDS` have a header
+    /// here, every other statement answers with an empty one.
+    async fn query_with_header(
+        &self,
+        fe: &FeTarget,
+        sql: &str,
+    ) -> Result<Vec<Vec<Option<String>>>, FeError> {
+        if without_read_marker(sql) == "SHOW PLUGINS" {
+            *self.last_target.lock().unwrap() = Some(fe.clone());
+            self.queried.lock().unwrap().push(sql.to_string());
+            if let Some(msg) = self.fail.lock().unwrap().clone() {
+                return Err(fe_error(msg));
+            }
+            if let Some(msg) = self.selective_failure(sql) {
+                return Err(fe_error(msg));
+            }
+            return Ok(self.show_plugins());
+        }
+        let bare = without_read_marker(sql);
+        if bare == "SHOW COMPUTE NODES" || bare == "SHOW BACKENDS" {
+            *self.last_target.lock().unwrap() = Some(fe.clone());
+            self.queried.lock().unwrap().push(sql.to_string());
+            let hook = self.on_node_check.lock().unwrap().clone();
+            if let Some(hook) = hook {
+                hook(sql.to_string()).await;
+            }
+            if let Some(msg) = self.fail.lock().unwrap().clone() {
+                return Err(fe_error(msg));
+            }
+            if let Some(msg) = self.selective_failure(sql) {
+                return Err(fe_error(msg));
+            }
+            if bare == "SHOW BACKENDS" {
+                return Ok(vec![["BackendId", "IP", "Alive"]
+                    .iter()
+                    .map(|c| Some(c.to_string()))
+                    .collect()]);
+            }
+            return Ok(self.show_compute_nodes());
+        }
+        let mut rows = self.query(fe, sql).await?;
+        rows.insert(0, vec![]);
+        Ok(rows)
+    }
+}
+
+/// `sql` without the query log's leading read marker comment, if it has one.
+fn without_read_marker(sql: &str) -> &str {
+    sql.strip_prefix(crate::query_log::READ_MARKER)
+        .map(str::trim_start)
+        .unwrap_or(sql)
 }
 
 /// The backtick-quoted name out of a statement that starts with `prefix`,
@@ -2045,6 +2409,53 @@ mod tests {
         assert!(!fe_error("Connection refused (os error 111)").is_already_exists());
     }
 
+    /// The query log's `INSTALL` is `Ready` on this answer (fix round 1, M1).
+    #[test]
+    fn already_installed_is_decided_from_the_raw_message() {
+        assert!(
+            fe_error("ERROR 1064 (HY000): plugin AuditLoader has already been installed.")
+                .is_already_installed()
+        );
+        // The missing-zip answer, measured in Task 5.
+        assert!(!fe_error(
+            "ERROR 1064 (HY000): Download plugin zip failed. zip file does not exist. \
+             source: /nonexistent.zip"
+        )
+        .is_already_installed());
+        assert!(!fe_error("Catalog 'x' already exists").is_already_installed());
+    }
+
+    /// D1 (live check, 2026-11-11): the FE's answer to a `CREATE TABLE` sent
+    /// before any CN registered.
+    #[test]
+    fn no_alive_node_is_decided_from_the_raw_message() {
+        assert!(fe_error(
+            "ERROR 1064 (HY000): Getting analyzing error. Detail message: Number of \
+             available CN nodes is 0, less than 1."
+        )
+        .is_no_alive_node());
+        assert!(!fe_error("ERROR 1064 (HY000): available CN nodes is 1").is_no_alive_node());
+        assert!(!fe_error("Connection refused (os error 111)").is_no_alive_node());
+    }
+
+    /// The query log reads answer "not set up" on this, not a 502. The texts
+    /// are the FE's, measured in Task 5 on `4.1.7-egret.4`.
+    #[test]
+    fn unknown_relation_is_decided_from_the_raw_message() {
+        assert!(fe_error(
+            "ERROR 5501 (3F000): Getting analyzing error. Detail message: Unknown database \
+             'starrocks_audit_db__'."
+        )
+        .is_unknown_relation());
+        assert!(fe_error(
+            "ERROR 5502 (42602): Getting analyzing error. Detail message: Unknown table \
+             'starrocks_audit_db__.starrocks_audit_tbl__'."
+        )
+        .is_unknown_relation());
+        assert!(!fe_error("Access denied for user 'root'").is_unknown_relation());
+        assert!(!fe_error("Unknown catalog 'x'").is_unknown_relation());
+    }
+
     /// Fix round 1, F2 — the regression this decision was moved to prevent.
     /// An FE message whose quoting this module cannot pair (a SQL-escaped
     /// apostrophe, the shape the module doc names as reachable from egret's
@@ -2216,6 +2627,9 @@ mod tests {
                 excerpt: "whatever".into(),
                 already_exists: false,
                 unknown_catalog: false,
+                already_installed: false,
+                unknown_relation: false,
+                no_alive_node: false,
             }
             .to_string(),
             "FE error (no code)"

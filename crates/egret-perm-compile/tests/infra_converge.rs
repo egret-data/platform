@@ -1,5 +1,6 @@
 //! Governance SP2a (D4): a profile's IR-owned infrastructure policies (the
-//! `egret-admin - …` set and the four fixed names) are derived from the store
+//! `egret-admin - …` set, the four fixed names and, on StarRocks, the query-log
+//! loader and guard) are derived from the store
 //! and reconciled by name: updated in place (id kept), inserted when missing,
 //! deleted when extra, with `policy_version` bumped once only when something
 //! changed. The `all - …` default set is never touched.
@@ -15,11 +16,11 @@ use std::collections::BTreeMap;
 
 use egret_metastore::Db;
 use egret_perm::PermStore;
-use egret_perm_compile::{converge_infra_policy, recompile_service};
-use egret_policy::default_policies::admin_all_access_bodies;
+use egret_perm_compile::{converge_infra_policies, converge_infra_policy, recompile_service};
+use egret_policy::default_policies::{admin_all_access_bodies, query_log_guard_bodies};
 use egret_policy::infra_names::{
     is_ir_infra_name, EXECUTE_QUERY_POLICY_NAME, IMPERSONATE_POLICY_NAME,
-    QUERY_TIMEOUT_POLICY_NAME, SELF_IMPERSONATE_POLICY_NAME,
+    QUERY_LOG_LOADER_POLICY_NAME, QUERY_TIMEOUT_POLICY_NAME, SELF_IMPERSONATE_POLICY_NAME,
 };
 use egret_policy::PolicyStore;
 use serde_json::{json, Value};
@@ -182,12 +183,18 @@ async fn all_rows(db: &Db, svc: i64) -> BTreeMap<String, Row> {
         .collect()
 }
 
-/// The IR-owned infra rows of `svc`, by name.
+/// The IR-owned infra rows of `svc`, by name (the predicate is type-aware).
 async fn infra_rows(db: &Db, svc: i64) -> BTreeMap<String, Row> {
+    let service_type: String =
+        sqlx::query_scalar("SELECT type FROM policy.authz_services WHERE id = $1")
+            .bind(svc)
+            .fetch_one(&db.pool)
+            .await
+            .expect("service type");
     all_rows(db, svc)
         .await
         .into_iter()
-        .filter(|(name, _)| is_ir_infra_name(name))
+        .filter(|(name, _)| is_ir_infra_name(&service_type, name))
         .collect()
 }
 
@@ -387,8 +394,21 @@ async fn unbinding_the_last_qualifying_engine_removes_every_ir_infra_row_but_not
     );
 }
 
+/// The query-log rows a StarRocks profile `service` gets: the loader and
+/// one guard row per hierarchy under `database`.
+fn query_log_names(service: &str) -> Vec<String> {
+    let mut names = vec![QUERY_LOG_LOADER_POLICY_NAME.to_string()];
+    names.extend(
+        query_log_guard_bodies(service)
+            .expect("guard bodies")
+            .into_iter()
+            .map(|(name, _)| name),
+    );
+    names
+}
+
 #[tokio::test]
-async fn a_starrocks_profile_gets_egret_admin_only() {
+async fn a_starrocks_profile_gets_egret_admin_and_the_query_log() {
     let _serial = SERIAL.lock().await;
     let Some(db) = test_db().await else { return };
     let admin = one_admin(&db).await;
@@ -406,19 +426,105 @@ async fn a_starrocks_profile_gets_egret_admin_only() {
         .expect("converge");
 
     let rows = infra_rows(&db, svc).await;
-    let mut want = admin_names("starrocks", &name);
+    let admin_rows = admin_names("starrocks", &name);
+    assert_eq!(
+        admin_rows.len(),
+        13,
+        "the StarRocks def builds 13 hierarchies"
+    );
+    let mut want = admin_rows.clone();
+    want.extend(query_log_names(&name));
     want.sort();
-    assert_eq!(want.len(), 13, "the StarRocks def builds 13 hierarchies");
     assert_eq!(
         rows.keys().cloned().collect::<Vec<_>>(),
         want,
-        "a StarRocks profile gets the StarRocks-def egret-admin rows and nothing else"
+        "a StarRocks profile gets the StarRocks-def egret-admin rows and the query-log rows"
     );
     for (row_name, row) in &rows {
         assert_eq!(row.managed_by, "infra", "{row_name}");
         assert_eq!(row.body["serviceType"], "starrocks", "{row_name}");
-        assert_eq!(users_of(&row.body), vec![admin.clone()], "{row_name}");
     }
+    for row_name in &admin_rows {
+        assert_eq!(
+            users_of(&rows[row_name].body),
+            vec![admin.clone()],
+            "{row_name}"
+        );
+    }
+}
+
+/// Package A, Task 2: binding a provisioned StarRocks engine, delegating or
+/// not, adds the query-log loader and guard rows `managed_by = 'infra'`, the
+/// boot pass sees the profile, and unbinding removes the rows again.
+#[tokio::test]
+async fn a_provisioned_starrocks_engine_brings_the_query_log_rows_and_takes_them_away() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else { return };
+    one_admin(&db).await;
+    let (svc, name) = profile(&db, "starrocks").await;
+    // Not delegating: the rows must not wait on delegation (correction 5).
+    let engine = bind_engine(&db, svc, "starrocks", json!({})).await;
+    assert!(
+        egret_perm_compile::infra::infra_services(&db.pool)
+            .await
+            .expect("services")
+            .contains(&svc),
+        "the boot pass must visit a profile bound to a non-delegating StarRocks engine"
+    );
+
+    let sync = converge_infra_policy(&db.pool, svc)
+        .await
+        .expect("converge");
+
+    let rows = infra_rows(&db, svc).await;
+    let mut want = query_log_names(&name);
+    assert_eq!(want.len(), 7, "the loader and six guard rows");
+    assert_eq!(sync.added, want, "inserted in render order");
+    want.sort();
+    assert_eq!(
+        rows.keys().cloned().collect::<Vec<_>>(),
+        want,
+        "no egret-admin rows without delegation; the query-log rows only"
+    );
+    for (row_name, row) in &rows {
+        assert_eq!(row.managed_by, "infra", "{row_name}");
+    }
+
+    sqlx::query("UPDATE engine_mgmt.engines SET authz_service_id = NULL WHERE id = $1")
+        .bind(engine)
+        .execute(&db.pool)
+        .await
+        .expect("unbind");
+    let sync = converge_infra_policy(&db.pool, svc)
+        .await
+        .expect("converge after unbind");
+
+    assert!(
+        infra_rows(&db, svc).await.is_empty(),
+        "the query-log rows outlived the engine"
+    );
+    assert_eq!(sync.removed, want, "{sync:?}");
+}
+
+#[tokio::test]
+async fn an_external_starrocks_engine_gets_no_query_log_rows() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else { return };
+    one_admin(&db).await;
+    let (svc, _) = profile(&db, "starrocks").await;
+    bind_external_engine(&db, svc, "starrocks").await;
+    let v0 = policy_version(&db, svc).await;
+
+    let sync = converge_infra_policy(&db.pool, svc)
+        .await
+        .expect("converge");
+
+    assert!(
+        infra_rows(&db, svc).await.is_empty(),
+        "an external StarRocks engine got infra rows"
+    );
+    assert!(!sync.changed, "{sync:?}");
+    assert_eq!(policy_version(&db, svc).await, v0, "bumped");
 }
 
 #[tokio::test]
@@ -517,4 +623,65 @@ async fn an_existing_row_is_adopted_in_place() {
         "the existing row was inserted again: {sync:?}"
     );
     assert_eq!(after.len(), 17, "the other rows were added around it");
+}
+
+/// Fix round 1, Important 1: the query-log names are reserved on StarRocks
+/// only, so on a Trino profile `egret-query-log-loader` is a human's policy.
+/// Convergence (on its own and in the boot pass) must neither delete nor adopt
+/// it, and the boot pass must not pull in a Trino profile for holding it.
+#[tokio::test]
+async fn a_human_query_log_named_policy_on_a_trino_profile_survives_convergence() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else { return };
+    one_admin(&db).await;
+    let store = PolicyStore::new(db.clone());
+    let body = json!({"name": QUERY_LOG_LOADER_POLICY_NAME, "policyItems": []});
+    // A Trino profile with a qualifying engine: convergence has work there.
+    let (bound, _) = profile(&db, "trino").await;
+    bind_engine(&db, bound, "trino", impersonate_with_auth()).await;
+    let human = store
+        .create_policy(bound, QUERY_LOG_LOADER_POLICY_NAME, &body)
+        .await
+        .expect("a human name on trino");
+    // A Trino profile holding only that human row, no engine.
+    let (idle, _) = profile(&db, "trino").await;
+    let idle_human = store
+        .create_policy(idle, QUERY_LOG_LOADER_POLICY_NAME, &body)
+        .await
+        .expect("a human name on trino");
+    let before = all_rows(&db, bound).await[QUERY_LOG_LOADER_POLICY_NAME].clone();
+    assert_eq!(before.id, human, "the arrangement");
+    assert_eq!(before.managed_by, "operator", "the arrangement");
+
+    let sync = converge_infra_policy(&db.pool, bound)
+        .await
+        .expect("converge");
+    assert!(
+        !egret_perm_compile::infra::infra_services(&db.pool)
+            .await
+            .expect("services")
+            .contains(&idle),
+        "the boot pass pulled in a Trino profile for a human query-log-named row"
+    );
+    converge_infra_policies(&db.pool).await.expect("boot pass");
+
+    assert!(
+        !sync
+            .removed
+            .contains(&QUERY_LOG_LOADER_POLICY_NAME.to_string()),
+        "convergence deleted a human policy: {sync:?}"
+    );
+    assert_eq!(
+        all_rows(&db, bound).await.get(QUERY_LOG_LOADER_POLICY_NAME),
+        Some(&before),
+        "the human row was deleted, adopted or rewritten"
+    );
+    let idle_rows = all_rows(&db, idle).await;
+    assert_eq!(
+        idle_rows
+            .get(QUERY_LOG_LOADER_POLICY_NAME)
+            .map(|r| (r.id, r.managed_by.as_str())),
+        Some((idle_human, "operator")),
+        "the boot pass touched the idle profile's human row"
+    );
 }

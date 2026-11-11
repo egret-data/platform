@@ -46,6 +46,9 @@ use egret_core::{ColumnMeta, TabularResult};
 use super::{ConnSpec, Connector};
 use crate::execution::error::EngineError;
 use crate::execution::model::Limits;
+use egret_query_api::starrocks_session::{
+    STARROCKS_MAX_ALLOWED_PACKET, STARROCKS_WAIT_TIMEOUT_SECS,
+};
 use egret_query_api::Param;
 
 /// Refuse any submission that could be split into more than one statement.
@@ -164,7 +167,13 @@ impl StarRocksConnector {
             .ip_or_hostname(spec.host.clone())
             .tcp_port(u16::try_from(spec.port).unwrap_or(9030))
             .user(Some(user))
-            .prefer_socket(false);
+            .prefer_socket(false)
+            // Both set, so the driver does not run `SELECT
+            // @@max_allowed_packet,@@wait_timeout` on connect: that statement
+            // would land in the engine's Query log under the user's (or the
+            // delegator's) name. See `egret_query_api::starrocks_session`.
+            .max_allowed_packet(Some(STARROCKS_MAX_ALLOWED_PACKET))
+            .wait_timeout(Some(STARROCKS_WAIT_TIMEOUT_SECS));
         if let Some(jwt) = &spec.bearer_token {
             // StarRocks `authentication_jwt`: present the OIDC JWT as the cleartext
             // "password" via the mysql_clear_password client plugin. mysql_async sends
@@ -769,6 +778,23 @@ mod tests {
             StarRocksConnector::new(&spec(Some("eyJ.jwt.sig".into()), Some("native-pw".into())));
         assert!(c.opts().enable_cleartext_plugin());
         assert_eq!(c.opts().pass(), Some("eyJ.jwt.sig"));
+    }
+
+    /// Live check, 2026-11-11: every connection pins the two settings the
+    /// driver would otherwise read with `SELECT @@max_allowed_packet,
+    /// @@wait_timeout`, so no user or delegated session logs that statement
+    /// in the engine's Query log. Bearer, native and impersonate logins alike.
+    #[test]
+    fn every_login_pins_the_settings_the_driver_would_query() {
+        for c in [
+            StarRocksConnector::new(&spec(Some("eyJ.jwt.sig".into()), None)),
+            StarRocksConnector::new(&spec(None, Some("native-pw".into()))),
+            StarRocksConnector::new(&spec_distinct(None)),
+        ] {
+            assert_eq!(c.opts().max_allowed_packet(), Some(33_554_432));
+            assert_eq!(c.opts().wait_timeout(), Some(28_800));
+            assert!(!c.opts().prefer_socket(), "or the driver reads @@socket");
+        }
     }
 
     #[test]

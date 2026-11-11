@@ -748,6 +748,446 @@
     ],
     "served": [
       {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 0,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-query-log-loader",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "insert"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "egret_query_log"
+            ]
+          }
+        ],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "default_catalog"
+            ]
+          },
+          "database": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "starrocks_audit_db__"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "starrocks_audit_tbl__"
+            ]
+          }
+        },
+        "service": "{g18.starrocks}",
+        "serviceType": "starrocks",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "create table"
+              },
+              {
+                "isAllowed": true,
+                "type": "drop"
+              },
+              {
+                "isAllowed": true,
+                "type": "alter"
+              },
+              {
+                "isAllowed": true,
+                "type": "create view"
+              },
+              {
+                "isAllowed": true,
+                "type": "create function"
+              },
+              {
+                "isAllowed": true,
+                "type": "create materialized view"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "id": 1,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-query-log-guard - catalog, database",
+        "policyItems": [],
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "default_catalog"
+            ]
+          },
+          "database": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "starrocks_audit_db__"
+            ]
+          }
+        },
+        "service": "{g18.starrocks}",
+        "serviceType": "starrocks",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "insert"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "egret_query_log"
+            ]
+          }
+        ],
+        "denyPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "delete"
+              },
+              {
+                "isAllowed": true,
+                "type": "drop"
+              },
+              {
+                "isAllowed": true,
+                "type": "insert"
+              },
+              {
+                "isAllowed": true,
+                "type": "alter"
+              },
+              {
+                "isAllowed": true,
+                "type": "export"
+              },
+              {
+                "isAllowed": true,
+                "type": "update"
+              },
+              {
+                "isAllowed": true,
+                "type": "refresh"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "id": 2,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-query-log-guard - catalog, database, table",
+        "policyItems": [],
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "default_catalog"
+            ]
+          },
+          "database": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "starrocks_audit_db__"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g18.starrocks}",
+        "serviceType": "starrocks",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "id": 3,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-query-log-guard - catalog, database, table, column",
+        "policyItems": [],
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "default_catalog"
+            ]
+          },
+          "column": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          },
+          "database": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "starrocks_audit_db__"
+            ]
+          },
+          "table": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g18.starrocks}",
+        "serviceType": "starrocks",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "drop"
+              },
+              {
+                "isAllowed": true,
+                "type": "alter"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "id": 4,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-query-log-guard - catalog, database, view",
+        "policyItems": [],
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "default_catalog"
+            ]
+          },
+          "database": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "starrocks_audit_db__"
+            ]
+          },
+          "view": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g18.starrocks}",
+        "serviceType": "starrocks",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "refresh"
+              },
+              {
+                "isAllowed": true,
+                "type": "drop"
+              },
+              {
+                "isAllowed": true,
+                "type": "alter"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "id": 5,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-query-log-guard - catalog, database, materialized_view",
+        "policyItems": [],
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "default_catalog"
+            ]
+          },
+          "database": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "starrocks_audit_db__"
+            ]
+          },
+          "materialized_view": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g18.starrocks}",
+        "serviceType": "starrocks",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "usage"
+              },
+              {
+                "isAllowed": true,
+                "type": "drop"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "id": 6,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-query-log-guard - catalog, database, function",
+        "policyItems": [],
+        "policyType": 0,
+        "resources": {
+          "catalog": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "default_catalog"
+            ]
+          },
+          "database": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "starrocks_audit_db__"
+            ]
+          },
+          "function": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g18.starrocks}",
+        "serviceType": "starrocks",
+        "version": 1
+      },
+      {
         "additionalResources": [],
         "allowExceptions": [],
         "denyExceptions": [
@@ -783,7 +1223,7 @@
           }
         ],
         "description": "",
-        "id": 0,
+        "id": 7,
         "isDenyAllElse": false,
         "isEnabled": true,
         "name": "perm-clearance-{g18.secret}-gold_g18_cat.sales.orders.*",
@@ -861,7 +1301,7 @@
           }
         ],
         "description": "",
-        "id": 1,
+        "id": 8,
         "isDenyAllElse": false,
         "isEnabled": true,
         "name": "perm-clearance-{g18.secret}-gold_g18_cat.sales.orders_v2.*",
@@ -940,7 +1380,7 @@
         ],
         "denyPolicyItems": [],
         "description": "",
-        "id": 2,
+        "id": 9,
         "isEnabled": true,
         "name": "perm-clearance-{g18.secret}-mask-gold_g18_cat.sales.orders_v2.email",
         "policyItems": [],
@@ -1018,7 +1458,7 @@
         ],
         "denyPolicyItems": [],
         "description": "",
-        "id": 3,
+        "id": 10,
         "isEnabled": true,
         "name": "perm-clearance-{g18.secret}-mask-gold_g18_cat.sales.orders_v2.id",
         "policyItems": [],
@@ -1095,7 +1535,7 @@
           }
         ],
         "description": "",
-        "id": 4,
+        "id": 11,
         "isDenyAllElse": false,
         "isEnabled": true,
         "name": "perm-clearance-mv",
@@ -1129,7 +1569,7 @@
         "denyExceptions": [],
         "denyPolicyItems": [],
         "description": "",
-        "id": 5,
+        "id": 12,
         "isDenyAllElse": false,
         "isEnabled": true,
         "name": "perm-grant-{g18.read}",
@@ -1220,7 +1660,7 @@
           }
         ],
         "description": "",
-        "id": 6,
+        "id": 13,
         "isDenyAllElse": false,
         "isEnabled": true,
         "name": "perm-hidden-gold_g18_cat.sales.orders",
@@ -1297,7 +1737,7 @@
           }
         ],
         "description": "",
-        "id": 7,
+        "id": 14,
         "isDenyAllElse": false,
         "isEnabled": true,
         "name": "perm-hidden-gold_g18_cat.sales.orders_v2",
@@ -1361,7 +1801,7 @@
         ],
         "denyPolicyItems": [],
         "description": "",
-        "id": 8,
+        "id": 15,
         "isEnabled": true,
         "name": "perm-rule-{g18.mask}-gold_g18_cat.sales.orders.email",
         "policyItems": [],
@@ -1423,7 +1863,7 @@
         ],
         "denyPolicyItems": [],
         "description": "",
-        "id": 9,
+        "id": 16,
         "isEnabled": true,
         "name": "perm-rule-{g18.mask}-gold_g18_cat.sales.orders_v2.email",
         "policyItems": [],

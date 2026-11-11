@@ -49,6 +49,8 @@ const EXTRA_FILES: &[&str] = &[
     "../egret-workspace/src/routes.rs",
     "../egret-engine-mgmt/src/engines.rs",
     "../egret-engine-mgmt/src/monitor.rs",
+    // `engine:audit` gates the statement text of the StarRocks query log.
+    "../egret-engine-mgmt/src/query_log.rs",
     // `catalog_registry:*` (SP3) are gated in the engine seam's registry routes.
     "../egret-engine-mgmt/src/catalogs.rs",
     "../egret-policy/src/admin/mod.rs",

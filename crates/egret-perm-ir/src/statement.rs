@@ -38,6 +38,10 @@ pub enum InfraKind {
     SelfImpersonate,
     ExecuteQuery,
     QueryTimeout,
+    /// The StarRocks AuditLoader's `insert` on the query-log table.
+    QueryLogLoader,
+    /// The deny on the query-log database for everyone but the loader.
+    QueryLogGuard,
 }
 
 /// One level of a [`Path`]: a value the author wrote, or none.
@@ -88,6 +92,10 @@ pub enum InfraObject {
     AnyQuery,
     /// One system session property.
     SystemProperty(String),
+    /// The StarRocks query-log table (`starrocks_audit_db__.starrocks_audit_tbl__`).
+    QueryLogTable,
+    /// The StarRocks query-log database (`starrocks_audit_db__`) and everything in it.
+    QueryLogDatabase,
 }
 
 /// A privilege a statement allows, denies or withholds.

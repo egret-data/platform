@@ -83,7 +83,7 @@ pub(crate) struct SecurityUpgradeDto {
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
-async fn security_upgrade(
+pub(crate) async fn security_upgrade(
     State(st): State<CpState>,
     Auth(p): Auth,
     Path(id): Path<Uuid>,
@@ -172,6 +172,15 @@ async fn security_upgrade(
             }
             ApplyBuiltError::Failed(msg) => CpError::ClusterApplyFailed(msg),
         })?;
+    // The FE restarts, possibly onto an image that ships the audit plugin:
+    // set the query log up again once it answers. Not awaited; a failure is
+    // only logged.
+    crate::query_log::spawn_query_log_setup(
+        st.clone(),
+        engine.id,
+        engine.name.clone(),
+        engine.namespace.clone(),
+    );
     let engine = st
         .engine_mgmt
         .get_engine(id)

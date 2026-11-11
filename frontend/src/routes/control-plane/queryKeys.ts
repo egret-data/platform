@@ -25,6 +25,8 @@
  * paths still resolve.
  */
 import { getControlPlaneCatalogRegistryGetRegistryCatalogQueryKey } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
+import { getControlPlaneEnginesListQueryLogQueryKey } from "@/api/generated/control-plane-engines/control-plane-engines";
+import type { ControlPlaneEnginesListQueryLogParams } from "@/api/generated/model";
 
 /** The hand-written `listWarehouses` query (`api/controlPlane.ts`). */
 export const warehousesQueryKey = ["control-plane", "warehouses"] as const;
@@ -78,3 +80,15 @@ export const engineDetailKey = (id: string) => ["cp", "engine", id] as const;
  * security upgrade) can invalidate it without a module cycle.
  */
 export const enginesQueryKey = ["cp", "engines"] as const;
+
+/**
+ * The Query log tab's paged list (`QueryLogTab.tsx`, a `useInfiniteQuery`
+ * over the generated fetcher). It DELEGATES to the generated builder, so
+ * `queryLogListKey(id)` is the prefix of every filter's pages and the setup
+ * invalidates them all; the trailing `"pages"` keeps the infinite cache apart
+ * from a plain query on the same URL.
+ */
+export const queryLogListKey = (id: string, params?: ControlPlaneEnginesListQueryLogParams) =>
+  params
+    ? ([...getControlPlaneEnginesListQueryLogQueryKey(id, params), "pages"] as const)
+    : getControlPlaneEnginesListQueryLogQueryKey(id);

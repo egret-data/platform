@@ -5749,6 +5749,452 @@
         }
       }
     },
+    "/api/control-plane/engines/{id}/query-log": {
+      "get": {
+        "tags": [
+          "control-plane-engines"
+        ],
+        "operationId": "list_query_log",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Engine id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "RFC 3339; rows with `from <= timestamp`. Default: `to` minus 24 hours.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "RFC 3339; rows with `timestamp < to`. Default: now. At most 31 days\nafter `from`.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "user",
+            "in": "query",
+            "description": "The session user or the user inside `authorizedUser`, exact and\ncase-insensitive; at most 128 characters.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "`ok`, `error` or `all` (default).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Rows per page, 1 to 200 (default 50).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "maximum": 200,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The previous page's `nextCursor`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of the engine's statements, newest first. `statement` and `errorMessage` are absent without engine:audit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryLogPageDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A malformed parameter; the message names it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing engine:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The engine is external (`code` = `engine_is_external`), not a StarRocks engine, or its query log table does not exist (`code` = `query_log_not_ready`, with `state`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The FE did not answer or refused the read (`code` = `engine_fe_error`, scrubbed message)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/engines/{id}/query-log/setup": {
+      "post": {
+        "tags": [
+          "control-plane-engines"
+        ],
+        "operationId": "setup_query_log",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Engine id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Set up: state `ready`, or `pluginNotShipped` when the engine's image has no plugin (the table and loader user were still created)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryLogStatusDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing engine:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The engine is external (`code` = `engine_is_external`), not a StarRocks engine, or being deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "A setup step failed (`code` = `engine_fe_error`, scrubbed message)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/engines/{id}/query-log/status": {
+      "get": {
+        "tags": [
+          "control-plane-engines"
+        ],
+        "operationId": "query_log_status",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Engine id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The query log's state, read from the FE now. An FE that does not answer is state `unreachable` with its scrubbed message, still a 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryLogStatusDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing engine:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The engine is external (`code` = `engine_is_external`), or not a StarRocks engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/engines/{id}/query-log/{queryId}": {
+      "get": {
+        "tags": [
+          "control-plane-engines"
+        ],
+        "operationId": "get_query_log_entry",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Engine id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "queryId",
+            "in": "path",
+            "description": "The statement's query id (a UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One statement, whole. `statement` and `errorMessage` are absent without engine:audit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryLogEntryDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`queryId` is not a UUID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing engine:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such engine, or no such statement in the log",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The engine is external (`code` = `engine_is_external`), not a StarRocks engine, or its query log table does not exist (`code` = `query_log_not_ready`, with `state`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The FE did not answer or refused the read (`code` = `engine_fe_error`, scrubbed message)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/engines/{id}/ranger-plugin-config": {
       "get": {
         "tags": [
@@ -52329,6 +52775,212 @@
           "submitted_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "QueryLogEntryDto": {
+        "type": "object",
+        "description": "One statement the engine ran.",
+        "required": [
+          "queryId",
+          "timestamp",
+          "statementTruncated"
+        ],
+        "properties": {
+          "queryId": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string",
+            "description": "When the statement ended (RFC 3339)."
+          },
+          "user": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The session user (\"Connected as\")."
+          },
+          "authorizedUser": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The bare name of the user the statement ran for (\"User\"), parsed from\n`'bob'@'%'`; `null` when empty."
+          },
+          "clientIp": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "catalog": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "db": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`EOF` or `OK` for a success, `ERR` for a failure."
+          },
+          "errorMessage": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The FE's error, redacted. Absent (not `null`) for a caller without\n`engine:audit`: StarRocks errors quote the statement's text."
+          },
+          "queryTimeMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "scanRows": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "scanBytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "returnRows": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "cpuCostNs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "memCostBytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "command": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "querySource": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "isQuery": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "statement": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The statement, redacted: its first 2,000 characters on a page, whole\non the detail route. Absent for a caller without `engine:audit`."
+          },
+          "statementTruncated": {
+            "type": "boolean",
+            "description": "Whether `statement` was cut. Always false when it is absent."
+          }
+        }
+      },
+      "QueryLogPageDto": {
+        "type": "object",
+        "description": "`GET …/query-log`.",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QueryLogEntryDto"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass it as `cursor` for the next page; `null` on the last."
+          }
+        }
+      },
+      "QueryLogState": {
+        "type": "string",
+        "description": "The query log's state, as the Query log tab shows it (design section 5).",
+        "enum": [
+          "ready",
+          "notSetUp",
+          "pluginNotShipped",
+          "unreachable"
+        ]
+      },
+      "QueryLogStatusDto": {
+        "type": "object",
+        "description": "`GET …/query-log/status` and `POST …/query-log/setup`.",
+        "required": [
+          "state",
+          "retentionDays"
+        ],
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/QueryLogState"
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the state is `unreachable` (the FE's message, scrubbed). `null`\notherwise."
+          },
+          "lastEventAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The newest event in the last day (RFC 3339); `null` when there is none\nor the table does not exist."
+          },
+          "retentionDays": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many days of events the table keeps.",
+            "minimum": 0
           }
         }
       },

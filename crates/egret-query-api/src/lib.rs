@@ -37,6 +37,8 @@ pub mod port;
 pub use port::QueryExecPort;
 
 pub mod owner;
+
+pub mod starrocks_session;
 pub use owner::DatabaseOwnerPort;
 
 pub mod failure;

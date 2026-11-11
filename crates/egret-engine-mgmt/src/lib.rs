@@ -14,6 +14,7 @@ pub mod log_redaction;
 pub mod monitor;
 pub mod probe;
 pub mod profile_compiler;
+pub(crate) mod query_log;
 pub mod ranger_credential;
 pub mod security_upgrade;
 pub mod starrocks_ddl;
@@ -34,6 +35,12 @@ pub use http_error::EngineHttpError;
 // this crate via `crate::starrocks_ddl::fe_target`) and is not re-exported here.
 pub use probe::{tcp_probe, ProbeOutcome, PROBE_TIMEOUT};
 pub use profile_compiler::{OverlapSnapshot, ProfileCompilerPort};
+/// Test-only (feature `test-util`): the query log's setup and list read for
+/// the live suite `tests/query_log_live.rs`.
+#[cfg(feature = "test-util")]
+#[doc(hidden)]
+pub use query_log::live_testing as query_log_live_testing;
+pub use query_log::setup_query_logs;
 pub use starrocks_ddl::{
     compare_to_fe, list_catalog_level, list_materialized_views, parse_base_tables,
     parse_show_create_properties, select_materialized_views, show_catalogs, show_create_catalog,
@@ -53,6 +60,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     use utoipa::OpenApi as _;
     let mut doc = engines::EngineMgmtApi::openapi();
     doc.merge(monitor::MonitorApi::openapi());
+    doc.merge(query_log::QueryLogApi::openapi());
     doc.merge(catalogs::CatalogRegistryApi::openapi());
     doc.merge(external::ExternalEngineApi::openapi());
     doc.merge(security_upgrade::SecurityUpgradeApi::openapi());

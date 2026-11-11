@@ -78,6 +78,16 @@ pub enum EngineHttpError {
     /// the perm routes answer (`code: "rule_overlap"`).
     #[error("rule overlap: {0}")]
     RuleOverlap(serde_json::Value),
+    /// A StarRocks FE did not answer or refused a statement egret sent it.
+    /// 502, `code: "engine_fe_error"`. The text MUST already be
+    /// [`crate::FeError::scrubbed`]: it is answered verbatim.
+    #[error("engine FE error: {0}")]
+    FeFailed(String),
+    /// The engine's query log table does not exist, so there is nothing to
+    /// read. 409, `code: "query_log_not_ready"`, with the query log's state
+    /// (`notSetUp`, `pluginNotShipped`, …) as `state`.
+    #[error("the query log is not set up on this engine")]
+    QueryLogNotReady(&'static str),
     #[error("internal error")]
     Internal,
 }
@@ -331,6 +341,20 @@ impl IntoResponse for EngineHttpError {
             EngineHttpError::RuleOverlap(body) => {
                 (StatusCode::CONFLICT, Json(body)).into_response()
             }
+            EngineHttpError::FeFailed(_) => (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": msg, "code": "engine_fe_error" })),
+            )
+                .into_response(),
+            EngineHttpError::QueryLogNotReady(state) => (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": msg,
+                    "code": "query_log_not_ready",
+                    "state": state,
+                })),
+            )
+                .into_response(),
             EngineHttpError::Forbidden => error_json(StatusCode::FORBIDDEN, msg),
             EngineHttpError::NotFound | EngineHttpError::NotFoundNamed(_) => {
                 error_json(StatusCode::NOT_FOUND, msg)
