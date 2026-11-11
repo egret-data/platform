@@ -133,7 +133,7 @@ fn sends_probe(poll: u32) -> bool {
 
 /// What [`ensure_query_log`] answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum QueryLogSetup {
+pub enum QueryLogSetup {
     /// The table, the loader user and the plugin are in place. Not yet "events
     /// are flowing": that is step 6's to observe.
     Ready,
@@ -693,7 +693,9 @@ pub(crate) fn parse_filter(
 
 /// An instant as a `DATETIME` literal for the FE.
 fn sql_datetime(t: &NaiveDateTime) -> String {
-    // UTC until Task 5 measures the FE's time zone; this is the one place the
+    // UTC: measured in Task 5 on egret's `4.1.7-egret.4` image, whose
+    // `@@time_zone` and `@@system_time_zone` are `Etc/UTC` and whose audit
+    // `timestamp` matched `date -u` to the second. This is the one place the
     // instants of a read become FE wall-clock text.
     format!("'{}'", t.format(SQL_DATETIME))
 }
@@ -913,7 +915,7 @@ pub(crate) async fn statement_visible(st: &CpState, p: &Principal) -> bool {
 /// A `DATETIME` the FE returned, as RFC 3339.
 fn rfc3339(raw: &str) -> Option<(NaiveDateTime, String)> {
     let t = NaiveDateTime::parse_from_str(raw, SQL_DATETIME_IN).ok()?;
-    // The FE's wall clock read as UTC until Task 5 measures its zone.
+    // The FE's wall clock is UTC (measured in Task 5; see `sql_datetime`).
     let s = Utc
         .from_utc_datetime(&t)
         .to_rfc3339_opts(SecondsFormat::AutoSi, true);
@@ -1163,12 +1165,23 @@ async fn list_query_log(
     let engine = load_engine(&st, id, false).await?;
     let filter = parse_filter(&params, Utc::now())?;
     let cx = ReadContext::new(&st, &engine).await?;
-    let rows = match st.starrocks_ddl.query(&cx.fe, &list_sql(&filter)).await {
-        Ok(rows) => rows,
-        Err(e) => return Err(read_failure(&st, &engine, &cx, e).await),
-    };
     let visible = statement_visible(&st, &p).await;
-    let exact = cx.exact();
+    match read_page(&*st.starrocks_ddl, &cx.fe, &filter, visible, &cx.exact()).await {
+        Ok(page) => Ok(Json(page)),
+        Err(e) => Err(read_failure(&st, &engine, &cx, e).await),
+    }
+}
+
+/// One page of the log: [`list_sql`] on the FE, the rows as entries, and the
+/// cursor of the last row shown when there are more.
+async fn read_page(
+    ddl: &dyn crate::starrocks_ddl::StarRocksDdl,
+    fe: &FeTarget,
+    filter: &QueryLogFilter,
+    visible: bool,
+    exact: &[&str],
+) -> Result<QueryLogPageDto, FeError> {
+    let rows = ddl.query(fe, &list_sql(filter)).await?;
     let limit = filter.limit as usize;
     let next_cursor = if rows.len() > limit {
         // The last row shown; a row whose key does not parse ends the paging
@@ -1192,12 +1205,12 @@ async fn list_query_log(
     let entries = rows
         .iter()
         .take(limit)
-        .map(|r| entry_from_row(r, visible, &exact))
+        .map(|r| entry_from_row(r, visible, exact))
         .collect();
-    Ok(Json(QueryLogPageDto {
+    Ok(QueryLogPageDto {
         entries,
         next_cursor,
-    }))
+    })
 }
 
 #[utoipa::path(
@@ -1290,6 +1303,56 @@ async fn setup_query_log(
 )]
 pub struct QueryLogApi;
 
+/// Test-only (feature `test-util`): the setup and the list read, for the
+/// engine-gated live suite `tests/query_log_live.rs`, which runs them against
+/// a real FE through a state it builds itself. Every function here is the
+/// crate's own, unchanged: the setup is [`ensure_query_log`], and a page is
+/// [`parse_filter`] then the list route's own [`read_page`]. Nothing in
+/// production reaches this module.
+#[cfg(feature = "test-util")]
+#[doc(hidden)]
+pub mod live_testing {
+    use super::*;
+
+    pub use super::{QueryLogEntryDto, QueryLogParams, QueryLogSetup};
+
+    /// [`super::READ_MARKER`].
+    pub const READ_MARKER: &str = super::READ_MARKER;
+
+    /// [`super::ensure_query_log`].
+    pub async fn ensure_query_log(
+        st: &CpState,
+        engine: &Engine,
+        fe: &FeTarget,
+        wait_for_events: bool,
+    ) -> QueryLogSetup {
+        super::ensure_query_log(st, engine, fe, wait_for_events).await
+    }
+
+    /// One page as `GET …/query-log` reads it, statements visible. A bad
+    /// parameter or an FE error (scrubbed) is the `Err`.
+    pub async fn list_page(
+        st: &CpState,
+        fe: &FeTarget,
+        params: &QueryLogParams,
+    ) -> Result<QueryLogPageDto, String> {
+        let filter = parse_filter(params, Utc::now()).map_err(|e| format!("{e:?}"))?;
+        read_page(&*st.starrocks_ddl, fe, &filter, true, &[])
+            .await
+            .map_err(|e| e.scrubbed(fe, &BTreeMap::new()))
+    }
+
+    /// The detail route's SQL.
+    pub fn detail_sql(query_id: &Uuid) -> String {
+        super::detail_sql(query_id)
+    }
+
+    /// The status route's newest-event SQL.
+    pub fn last_event_sql(now: DateTime<Utc>) -> String {
+        super::last_event_sql(now)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1306,6 +1369,7 @@ mod tests {
         out
     }
 
+    /// The header measured on a real FE in Task 5 (`4.1.7-egret.4`).
     fn real_header() -> Vec<&'static str> {
         crate::starrocks_ddl::SHOW_PLUGINS_HEADER.to_vec()
     }

@@ -35,6 +35,11 @@ pub use http_error::EngineHttpError;
 // this crate via `crate::starrocks_ddl::fe_target`) and is not re-exported here.
 pub use probe::{tcp_probe, ProbeOutcome, PROBE_TIMEOUT};
 pub use profile_compiler::{OverlapSnapshot, ProfileCompilerPort};
+/// Test-only (feature `test-util`): the query log's setup and list read for
+/// the live suite `tests/query_log_live.rs`.
+#[cfg(feature = "test-util")]
+#[doc(hidden)]
+pub use query_log::live_testing as query_log_live_testing;
 pub use query_log::setup_query_logs;
 pub use starrocks_ddl::{
     compare_to_fe, list_catalog_level, list_materialized_views, parse_base_tables,

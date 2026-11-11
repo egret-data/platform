@@ -465,16 +465,19 @@ fn says_unknown_catalog(raw: &str) -> bool {
 /// Does this FE message mean "that plugin is already installed"? StarRocks'
 /// `PluginMgr` refuses a second `INSTALL PLUGIN` of a name it holds with
 /// `plugin <name> has already been installed.`; matched on the phrase,
-/// case-insensitively. The exact wording is pinned live in Task 5.
+/// case-insensitively. Measured in Task 5 on `4.1.7-egret.4`: `ERROR 1064
+/// (HY000): plugin AuditLoader has already been installed.`
 fn says_already_installed(raw: &str) -> bool {
     raw.to_ascii_lowercase().contains("already been installed")
 }
 
 /// Does this FE message mean "there is no such database or table"?
-/// StarRocks answers `SHOW TABLES FROM <db>` on an absent database with
-/// `Unknown database '<db>'` (MySQL's 1049), and a `SELECT` from an absent
-/// table with `Unknown table '<db>.<table>'`. Matched on the phrases,
-/// case-insensitively. The exact wording is pinned live in Task 5.
+/// StarRocks answers an absent database with `Unknown database '<db>'` and an
+/// absent table with `Unknown table '<db>.<table>'`. Matched on the phrases,
+/// case-insensitively. Measured in Task 5 on `4.1.7-egret.4`: `ERROR 5501
+/// (3F000): Getting analyzing error. Detail message: Unknown database
+/// 'nodb__'.` and `ERROR 5502 (42602): Getting analyzing error. Detail
+/// message: Unknown table 'starrocks_audit_db__.nope'.`
 fn says_unknown_relation(raw: &str) -> bool {
     let raw = raw.to_ascii_lowercase();
     raw.contains("unknown database") || raw.contains("unknown table")
@@ -601,7 +604,9 @@ pub trait StarRocksDdl: Send + Sync {
 }
 
 /// The column names a real FE answers `SHOW PLUGINS` with
-/// (`ShowPluginsStmt`). Only `Name` is relied on, by
+/// (`ShowPluginsStmt`), measured in Task 5 on `4.1.7-egret.4`: `Name Type
+/// Description Version JavaVersion ClassName SoName Sources Status
+/// Properties`. Only `Name` is relied on, by
 /// [`crate::query_log::plugin_step`]; the fork's e2e reads the same header
 /// (`SHOW PLUGINS\G | grep 'Name: AuditLoader'`). The fake answers with it.
 pub const SHOW_PLUGINS_HEADER: [&str; 10] = [
@@ -1537,7 +1542,10 @@ impl StarRocksDdl for FakeStarRocksDdl {
         } else if sql.starts_with("INSTALL PLUGIN FROM") {
             let mut plugins = self.plugins.lock().unwrap();
             if plugins.iter().any(|p| p == "AuditLoader") {
-                return Err(fe_error("plugin AuditLoader has already been installed."));
+                // Measured in Task 5 on `4.1.7-egret.4`.
+                return Err(fe_error(
+                    "ERROR 1064 (HY000): plugin AuditLoader has already been installed.",
+                ));
             }
             plugins.push("AuditLoader".to_string());
         }
@@ -2267,19 +2275,26 @@ mod tests {
             fe_error("ERROR 1064 (HY000): plugin AuditLoader has already been installed.")
                 .is_already_installed()
         );
-        assert!(!fe_error("ERROR 1064 (HY000): plugin file does not exist").is_already_installed());
+        // The missing-zip answer, measured in Task 5.
+        assert!(!fe_error(
+            "ERROR 1064 (HY000): Download plugin zip failed. zip file does not exist. \
+             source: /nonexistent.zip"
+        )
+        .is_already_installed());
         assert!(!fe_error("Catalog 'x' already exists").is_already_installed());
     }
 
-    /// The query log reads answer "not set up" on this, not a 502.
+    /// The query log reads answer "not set up" on this, not a 502. The texts
+    /// are the FE's, measured in Task 5 on `4.1.7-egret.4`.
     #[test]
     fn unknown_relation_is_decided_from_the_raw_message() {
-        assert!(
-            fe_error("ERROR 1049 (42000): Unknown database 'starrocks_audit_db__'")
-                .is_unknown_relation()
-        );
         assert!(fe_error(
-            "ERROR 5502 (HY000): Getting analyzing error. Detail message: Unknown table \
+            "ERROR 5501 (3F000): Getting analyzing error. Detail message: Unknown database \
+             'starrocks_audit_db__'."
+        )
+        .is_unknown_relation());
+        assert!(fe_error(
+            "ERROR 5502 (42602): Getting analyzing error. Detail message: Unknown table \
              'starrocks_audit_db__.starrocks_audit_tbl__'."
         )
         .is_unknown_relation());

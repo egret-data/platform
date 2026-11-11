@@ -18938,7 +18938,9 @@ async fn query_log_status_follows_the_fe_and_a_missing_table_is_not_ready() {
     // The list then answers 409 with the state.
     f.starrocks_ddl.fail_matching(
         "left(stmt, 2000)",
-        "ERROR 5502 (HY000): Unknown table 'starrocks_audit_db__.starrocks_audit_tbl__'",
+        // The FE's text, measured in Task 5.
+        "ERROR 5502 (42602): Getting analyzing error. Detail message: Unknown table \
+         'starrocks_audit_db__.starrocks_audit_tbl__'.",
     );
     let (status, body) = call(&f, "GET", &format!("/engines/{id}/query-log"), &token, None).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
@@ -19044,7 +19046,9 @@ async fn a_missing_table_on_an_fe_that_then_stops_answering_is_a_502() {
     let id = seed_query_log_engine(&f, "starrocks").await;
     f.starrocks_ddl.fail_matching(
         "left(stmt, 2000)",
-        "ERROR 5502 (HY000): Unknown table 'starrocks_audit_db__.starrocks_audit_tbl__'",
+        // The FE's text, measured in Task 5.
+        "ERROR 5502 (42602): Getting analyzing error. Detail message: Unknown table \
+         'starrocks_audit_db__.starrocks_audit_tbl__'.",
     );
     f.starrocks_ddl
         .fail_matching("SHOW PLUGINS", "connect to the FE timed out after 10s");

@@ -15761,6 +15761,37 @@ mod tests {
         );
     }
 
+    /// The FE's answer to an `INSTALL PLUGIN` whose zip is absent (a hand-built
+    /// image without the file), measured in Task 5 on `4.1.7-egret.4`.
+    const MISSING_ZIP_ERROR: &str = "ERROR 1064 (HY000): Download plugin zip failed. zip file \
+         does not exist. source: /opt/egret/auditloader.zip";
+
+    /// Design section 4: a patched image that answers `INSTALL` with an error
+    /// is `Failed`, and the message keeps the FE's diagnosis.
+    #[tokio::test]
+    async fn a_missing_plugin_zip_is_failed_with_the_fes_diagnosis() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping a_missing_plugin_zip_is_failed_with_the_fes_diagnosis: DATABASE_URL not set");
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let engine = seed_sr_engine(&st).await;
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe target");
+        fake.fail_matching("INSTALL PLUGIN", MISSING_ZIP_ERROR);
+
+        let setup = crate::query_log::ensure_query_log(&st, &engine, &fe, false).await;
+
+        let crate::query_log::QueryLogSetup::Failed(msg) = setup else {
+            panic!("expected Failed, got {setup:?}");
+        };
+        assert!(
+            msg.contains("Download plugin zip failed. zip file does not exist."),
+            "{msg}"
+        );
+    }
+
     /// Step 1: a human holding the loader's name stops the setup before
     /// anything is created.
     #[tokio::test]
@@ -16063,10 +16094,7 @@ mod tests {
         let _guard = QUERY_LOG_USERNAME.lock().await;
         let engine = seed_sr_engine(&st).await;
         prov.set_status(ready_fe_status(&engine.name));
-        fake.fail_matching_once(
-            "INSTALL PLUGIN",
-            "ERROR 1064 (HY000): plugin file /opt/egret/auditloader.zip does not exist",
-        );
+        fake.fail_matching_once("INSTALL PLUGIN", MISSING_ZIP_ERROR);
 
         crate::query_log::spawn_query_log_setup(
             st.clone(),
@@ -16115,7 +16143,7 @@ mod tests {
         let _guard = QUERY_LOG_USERNAME.lock().await;
         let engine = seed_sr_engine(&st).await;
         prov.set_status(ready_fe_status(&engine.name));
-        fake.fail_matching("INSTALL PLUGIN", "ERROR 1064 (HY000): no such file");
+        fake.fail_matching("INSTALL PLUGIN", MISSING_ZIP_ERROR);
 
         crate::query_log::spawn_query_log_setup(
             st.clone(),
@@ -16148,7 +16176,7 @@ mod tests {
         let _guard = QUERY_LOG_USERNAME.lock().await;
         let engine = seed_sr_engine(&st).await;
         prov.set_status(ready_fe_status(&engine.name));
-        fake.fail_matching("INSTALL PLUGIN", "ERROR 1064 (HY000): no such file");
+        fake.fail_matching("INSTALL PLUGIN", MISSING_ZIP_ERROR);
         let store = st.engine_mgmt.clone();
         let engine_id = engine.id;
         fake.on_execute(move |sql| {
