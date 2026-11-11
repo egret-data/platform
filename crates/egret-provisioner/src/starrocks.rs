@@ -437,6 +437,55 @@ const SSL_KEYSTORE_MOUNT_PATH: &str = "/etc/starrocks/ssl";
 const FE_META_VOLUME_NAME: &str = "fe-meta";
 const FE_META_MOUNT_PATH: &str = "/opt/starrocks/fe/meta";
 
+/// How many FE ordinals [`delete_fe_meta_claims`] probes at most. Ordinals are
+/// created from 0 and kept from 0 to the highest ever, so the probe stops at
+/// the first one that does not exist long before this.
+const FE_META_CLAIM_PROBE_LIMIT: u32 = 16;
+
+/// The claim the StatefulSet makes for FE `ordinal`:
+/// `<volumeClaimTemplate>-<statefulset>-<ordinal>`, the StatefulSet being
+/// `<engine>-fe`.
+fn fe_meta_claim_name(engine: &str, ordinal: u32) -> String {
+    format!("{FE_META_VOLUME_NAME}-{engine}-fe-{ordinal}")
+}
+
+/// Delete the engine's FE metadata claims (D3, for engines never re-applied
+/// since the retention policy): probe ordinals from 0, delete each claim that
+/// exists, stop at the first that does not. Every failure is collected.
+async fn delete_fe_meta_claims(
+    kube: &dyn KubeClient,
+    namespace: &str,
+    engine: &str,
+) -> anyhow::Result<()> {
+    let mut failures = Vec::new();
+    for ordinal in 0..FE_META_CLAIM_PROBE_LIMIT {
+        let claim = fe_meta_claim_name(engine, ordinal);
+        match kube
+            .get_object("v1", "PersistentVolumeClaim", namespace, &claim)
+            .await
+        {
+            Ok(None) => break,
+            Ok(Some(_)) => {
+                if let Err(e) = kube
+                    .delete("v1", "PersistentVolumeClaim", namespace, &claim)
+                    .await
+                {
+                    failures.push(format!("PersistentVolumeClaim/{claim}: {e:#}"));
+                }
+            }
+            Err(e) => {
+                failures.push(format!("PersistentVolumeClaim/{claim}: read: {e:#}"));
+                break;
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("failed to delete {}", failures.join("; "))
+    }
+}
+
 /// Pod-template annotation key stamped onto BOTH the FE and CN roles to force a
 /// rolling restart. The kube-starrocks operator copies each role spec's
 /// `annotations` map straight onto that role's pod-template `ObjectMeta`
@@ -825,6 +874,11 @@ pub fn starrocks_cluster_cr(spec: &EngineSpec) -> Value {
             fe_meta["storageClassName"] = json!(class);
         }
         storage_volumes.push(fe_meta);
+        // D3 (package D): the claim goes when the FE StatefulSet goes. A
+        // mutable StatefulSet field, so an existing engine takes it on its
+        // next apply without the `volumeClaimTemplates` trap above, and it is
+        // not part of the pod template (no roll).
+        fe_spec["persistentVolumeClaimRetentionPolicy"] = json!({ "whenDeleted": "Delete" });
     }
 
     let tls_enabled = starrocks_ssl_secret(spec).is_some();
@@ -1281,8 +1335,8 @@ impl EngineProvisioner for StarRocksProvisioner {
     }
     async fn delete(&self, namespace: &str, name: &str) -> anyhow::Result<()> {
         // The CR first (the operator tears down FE/CN), then the objects egret
-        // applies beside it. A 404 is success; any other failure is returned,
-        // after the remaining objects have still been attempted.
+        // applies beside it. A 404 is success; every step is attempted and
+        // every failure is returned together.
         let objects = [
             ("starrocks.com/v1", "StarRocksCluster", name.to_string()),
             ("v1", "ConfigMap", format!("{name}-fe-cm")),
@@ -1291,13 +1345,37 @@ impl EngineProvisioner for StarRocksProvisioner {
             ("v1", "Secret", format!("{name}-ranger-secret")),
             ("v1", "ConfigMap", format!("{name}-ssl-cm")),
             ("v1", "Secret", format!("{name}-ssl-secret")),
-            ("batch/v1", "Job", format!("{name}-initpwd")),
             ("v1", "ConfigMap", format!("{name}-initpwd-shell")),
             ("v1", "Secret", format!("{name}-initpwd-secret")),
             ("networking.k8s.io/v1", "Ingress", format!("{name}-fe")),
             ("v1", "Secret", format!("{name}-ingress-tls")),
         ];
-        crate::rollout::delete_with_ranger_secrets(&*self.kube, namespace, name, &objects).await
+        let mut failures = Vec::new();
+        if let Err(e) =
+            crate::rollout::delete_with_ranger_secrets(&*self.kube, namespace, name, &objects).await
+        {
+            failures.push(format!("{e:#}"));
+        }
+        // D3: Background, or the Job's pods are orphaned (a Job's default).
+        let job = format!("{name}-initpwd");
+        if let Err(e) = self
+            .kube
+            .delete_background("batch/v1", "Job", namespace, &job)
+            .await
+        {
+            failures.push(format!("Job/{job}: {e:#}"));
+        }
+        // D3: the FE metadata, for engines never re-applied since the
+        // retention policy. A deleted engine's FE metadata is gone; its table
+        // data stays in object storage.
+        if let Err(e) = delete_fe_meta_claims(&*self.kube, namespace, name).await {
+            failures.push(format!("{e:#}"));
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!("{}", failures.join("; "))
+        }
     }
 }
 
@@ -2529,12 +2607,119 @@ mod tests {
             .unwrap();
         let deleted = kube.deleted.lock().unwrap();
         assert!(deleted.contains(&"Job/sr1-initpwd".to_string()));
+        assert_eq!(
+            *kube.deleted_background.lock().unwrap(),
+            vec!["Job/sr1-initpwd".to_string()]
+        );
         assert!(deleted.contains(&"ConfigMap/sr1-initpwd-shell".to_string()));
         assert!(deleted.contains(&"Secret/sr1-initpwd-secret".to_string()));
         assert!(
             deleted.contains(&"Secret/sr1-ranger-secret".to_string()),
             "engine teardown removes the Ranger credential Secret"
         );
+    }
+
+    /// Package D, D3: the operator copies this onto the FE StatefulSet, so its
+    /// metadata claims go with the engine.
+    #[test]
+    fn a_meta_persistent_fe_deletes_its_claims_with_the_statefulset() {
+        let cr = starrocks_cluster_cr(&sample_sr_spec());
+        assert_eq!(
+            cr["spec"]["starRocksFeSpec"]["persistentVolumeClaimRetentionPolicy"],
+            serde_json::json!({"whenDeleted": "Delete"})
+        );
+        assert!(cr["spec"]["starRocksCnSpec"]
+            .get("persistentVolumeClaimRetentionPolicy")
+            .is_none());
+    }
+
+    #[test]
+    fn an_unmarked_fe_renders_no_retention_policy() {
+        let cr = starrocks_cluster_cr(&sample_sr_spec_unmarked());
+        assert!(cr["spec"]["starRocksFeSpec"]
+            .get("persistentVolumeClaimRetentionPolicy")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_takes_the_initpwd_jobs_pods_with_it() {
+        use crate::kube_client::FakeKube;
+        let kube = Arc::new(FakeKube::default());
+        StarRocksProvisioner::new(kube.clone())
+            .delete("egret-engines", "sr1")
+            .await
+            .unwrap();
+        assert_eq!(
+            *kube.deleted_background.lock().unwrap(),
+            vec!["Job/sr1-initpwd".to_string()],
+            "Background propagation: a Job's default is orphan, which leaves its pods"
+        );
+    }
+
+    fn live_claim(kube: &crate::kube_client::FakeKube, name: &str) {
+        kube.set_live(
+            serde_json::json!({"kind": "PersistentVolumeClaim", "metadata": {"name": name}}),
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_removes_every_fe_meta_claim_and_probes_no_further() {
+        use crate::kube_client::FakeKube;
+        let kube = Arc::new(FakeKube::default());
+        for i in 0..3 {
+            live_claim(&kube, &format!("fe-meta-sr1-fe-{i}"));
+        }
+        live_claim(&kube, "fe-meta-sr1-fe-5"); // past a gap: not ours to guess at
+        StarRocksProvisioner::new(kube.clone())
+            .delete("egret-engines", "sr1")
+            .await
+            .unwrap();
+        let deleted = kube.deleted.lock().unwrap();
+        for i in 0..3 {
+            assert!(
+                deleted.contains(&format!("PersistentVolumeClaim/fe-meta-sr1-fe-{i}")),
+                "{deleted:?}"
+            );
+        }
+        assert!(
+            !deleted.iter().any(|d| d.ends_with("fe-meta-sr1-fe-5")),
+            "{deleted:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_with_no_claims_deletes_none() {
+        use crate::kube_client::FakeKube;
+        let kube = Arc::new(FakeKube::default());
+        StarRocksProvisioner::new(kube.clone())
+            .delete("egret-engines", "sr1")
+            .await
+            .unwrap();
+        assert!(!kube
+            .deleted
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|d| d.starts_with("PersistentVolumeClaim/")));
+    }
+
+    #[tokio::test]
+    async fn a_claim_that_cannot_be_deleted_is_reported_after_the_rest() {
+        use crate::kube_client::FakeKube;
+        let kube = Arc::new(FakeKube::default());
+        live_claim(&kube, "fe-meta-sr1-fe-0");
+        kube.fail_delete("PersistentVolumeClaim", "fe-meta-sr1-fe-0", "forbidden");
+        let err = StarRocksProvisioner::new(kube.clone())
+            .delete("egret-engines", "sr1")
+            .await
+            .expect_err("a failed claim delete must surface");
+        assert!(
+            format!("{err:#}").contains("PersistentVolumeClaim/fe-meta-sr1-fe-0: forbidden"),
+            "{err:#}"
+        );
+        let deleted = kube.deleted.lock().unwrap();
+        assert!(deleted.contains(&"StarRocksCluster/sr1".to_string()));
+        assert!(deleted.contains(&"Job/sr1-initpwd".to_string()));
     }
 
     /// D5/D6: a failed CR delete surfaces, and no longer aborts the cleanup of the
