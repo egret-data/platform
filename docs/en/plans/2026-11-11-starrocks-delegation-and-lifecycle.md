@@ -9,9 +9,12 @@ its CN survives the root password, and deleting it leaves no Job pods and no FE 
 - **D1b:** a new IR object `InfraObject::AnyUserExcept`, emitted for StarRocks impersonate profiles
   and rendered as `egret-delegator-impersonate` on resource `user` with `isExcludes: true`.
 - **D1a:** a new engine-mgmt module `starrocks_users.rs` reconciles one engine's StarRocks users
-  against the workspace members, recorded in `engine_mgmt.starrocks_users`. It is woken by
+  against the workspace members and the platform admins, recorded in `engine_mgmt.starrocks_users`. It is woken by
   `pg_notify` triggers (migration 0219), a 10-minute sweep, every StarRocks apply, and the bootstrap.
-- **D2 and D3:** provisioner changes in `crates/egret-provisioner/src/starrocks.rs`.
+- **Native access control** (an engine bound to no profile): the same sync grants the delegator
+  `IMPERSONATE` per managed user and revokes `ON ALL USERS`, which the bootstrap stops granting.
+- **D2 and D3:** provisioner changes in `crates/egret-provisioner/src/starrocks.rs`, and a StarRocks
+  create refuses (409) a name whose old FE metadata claim still exists.
 
 **Tech stack:** Rust (sqlx 0.9, tokio, axum), PostgreSQL triggers, the kube-starrocks operator,
 StarRocks 4.1.7 (egret's fork), Apache Ranger 2.9.0 plugin.
@@ -27,6 +30,23 @@ branch `docs/starrocks-delegation-and-lifecycle`, after the platform PR merges.
 **Task reports** go to `.superpowers/sdd/2026-11-11-starrocks-delegation-and-lifecycle/task-<n>-report.md`
 (git-ignored).
 
+## Decided on 2026-11-11
+
+The user ruled on the spec's four open questions (spec, "Decided on 2026-11-11"):
+
+1. **Platform admins are synced** on every impersonate engine assigned to at least one workspace,
+   with trigger coverage for platform-role grants and revokes (`access_grants`) and the role table
+   (`roles`). Tasks 7, 8, 13.
+2. **Native access control is fixed here**: the sync grants `IMPERSONATE ON USER` per user it
+   manages and revokes `ON ALL USERS`; reserved users are never granted; the bootstrap stops granting
+   `ON ALL USERS`; existing engines converge on their next apply or sweep. Tasks 1 (M6, M7), 10, 12,
+   13.
+3. **Users egret did not create stay untouched**, logged, with the handover documented. Tasks 8, 10,
+   14.
+4. **`POST /engines` (StarRocks) answers 409 `engine_metadata_left_over`** when
+   `fe-meta-<name>-fe-0` exists, with the `kubectl` cleanup in the message; the upgrade note stays.
+   Tasks 6, 13, 14.
+
 ## Global Constraints
 
 - **Build:** your own target directory, `CARGO_TARGET_DIR=$PWD/target-srd`, run from the worktree
@@ -40,8 +60,10 @@ branch `docs/starrocks-delegation-and-lifecycle`, after the platform PR merges.
   `just reset-testdata`.
 - **StarRocks images:** only egret's fork images (`ghcr.io/egret-data/egret-starrocks-fe`,
   `-cn`, `-allin1`), never the official ones.
-- **Frontend client:** if it is ever regenerated, only with `npm run gen:api` in `frontend/`. This
-  package changes no API, so it should not be.
+- **Frontend client:** regenerated only with `npm run gen:api` in `frontend/`. Task 6 changes one
+  response description of `POST /engines`; regenerate `openapi.json`
+  (`CARGO_TARGET_DIR=$PWD/target-srd cargo run -q -p egret-bin -- openapi > openapi.json`), then run
+  `npm run gen:api` and commit whatever it changes.
 - **SQL quoting:** every user name and password reaches StarRocks SQL only through
   `egret_query_api::quote_string(Engine::StarRocks, …)` (it doubles `'` and escapes `\`). An
   identifier in backticks goes through `egret_catalog_registry::escape_ident`.
@@ -58,7 +80,7 @@ branch `docs/starrocks-delegation-and-lifecycle`, after the platform PR merges.
   4. pass on OPA: `EGRET_GOLDEN_MECHANISM=opa cargo test -p egret-perm-compile --features harness --test golden_compile --no-fail-fast`.
 - **Migration number:** 0219. Before committing it, check that no file `migrations/0219_*` exists on
   `main` or on any open PR (`gh pr list --state open --json files`); renumber above both if taken.
-- **CI parity before finishing** (Task 9 runs it, and any later code change re-runs it):
+- **CI parity before finishing** (Task 11 runs it, and any later code change re-runs it):
   `cargo fmt --all -- --check`; `cargo clippy --workspace --all-targets -- -D warnings`; the policy
   suites `egret-perm-compile --features harness`, `egret-perm-eval`, `egret-policy` and
   `egret-ranger-eval`, including the `EGRET_TEST_RANGER_E2E=1` gates CI runs.
@@ -67,9 +89,9 @@ branch `docs/starrocks-delegation-and-lifecycle`, after the platform PR merges.
 
 ---
 
-### Task 1: Measure M1 to M3 before code depends on them (controller)
+### Task 1: Measure M1 to M3, M6 and M7 before code depends on them (controller)
 
-The spec's "Not measured yet" M1 to M3. Tasks 2 and 7 build on them; if a result differs from what
+The spec's "Not measured yet" M1 to M3, M6 and M7. Tasks 2, 8 and 10 build on them; if a result differs from what
 they assume, stop and tell the user before Task 2.
 
 **Files:** none in git. Write
@@ -131,8 +153,8 @@ command and its verbatim output.
   $M --column-names -e "SHOW USERS"
   ```
 
-  Record the header and two values verbatim. Task 7's `listed_users` assumes one column whose
-  values read `'pkgd_bob'@'%'`; if the shape differs, write the measured shape into Task 7's report
+  Record the header and two values verbatim. Task 8's `listed_users` assumes one column whose
+  values read `'pkgd_bob'@'%'`; if the shape differs, write the measured shape into Task 8's report
   and adjust `listed_users` and its test to it there.
 
 - [ ] **Step 4: M3, the two error texts.**
@@ -142,9 +164,39 @@ command and its verbatim output.
   $M -e "DROP USER 'pkgd_absent'@'%'" 2>&1
   ```
 
-  Record both. Task 7's `FakeStarRocksDdl` answers with these exact texts.
+  Record both. Task 8's `FakeStarRocksDdl` answers with these exact texts.
 
-- [ ] **Step 5: Tear down.** `docker rm -f egs-e2e-sr egs-e2e-rest egs-e2e-s3`,
+- [ ] **Step 5: M6 and M7, native access control.** The fork e2e runs Ranger, so use a plain
+  allin1 container (native access control by default), your own:
+
+  ```bash
+  docker run -d --name pkgd-native -p 19230:9030 ghcr.io/egret-data/egret-starrocks-allin1:4.1.7-egret.4
+  N="mysql -h127.0.0.1 -P19230 -uroot"
+  until $N -e 'SELECT 1' >/dev/null 2>&1; do sleep 5; done
+  $N -e "CREATE USER 'egret_delegator'@'%' IDENTIFIED BY 'pkgd-d'; \
+         CREATE USER 'pkgd_a'@'%' IDENTIFIED BY 'a'; CREATE USER 'pkgd_b'@'%' IDENTIFIED BY 'b';"
+  $N -e "GRANT IMPERSONATE ON ALL USERS TO USER 'egret_delegator'@'%'; \
+         GRANT IMPERSONATE ON USER 'pkgd_a'@'%' TO USER 'egret_delegator'@'%';"
+  echo "== M6"; $N --column-names -e "SHOW GRANTS FOR 'egret_delegator'@'%'"
+  $N -e "REVOKE IMPERSONATE ON ALL USERS FROM USER 'egret_delegator'@'%'" 2>&1
+  echo "== M7a: is pkgd_a still granted?"; $N --column-names -e "SHOW GRANTS FOR 'egret_delegator'@'%'"
+  echo "== M7b: revoke of nothing"; $N -e "REVOKE IMPERSONATE ON ALL USERS FROM USER 'egret_delegator'@'%'" 2>&1
+  echo "== M7c: repeated grant"; $N -e "GRANT IMPERSONATE ON USER 'pkgd_a'@'%' TO USER 'egret_delegator'@'%'" 2>&1
+  $N -e "GRANT IMPERSONATE ON USER 'pkgd_a'@'%' TO USER 'egret_delegator'@'%'" 2>&1
+  D="mysql -h127.0.0.1 -P19230 -uegret_delegator -ppkgd-d"
+  for t in pkgd_a pkgd_b root; do
+    echo "== EXECUTE AS $t"; $D -e "EXECUTE AS \`$t\` WITH NO REVERT; SELECT current_user();" 2>&1
+  done
+  docker rm -f pkgd-native
+  ```
+
+  Record every answer verbatim. Expected: `pkgd_a` allowed; `pkgd_b` and `root` refused (with
+  M7a's answer deciding whether `pkgd_a` needed the grant again). Task 10's parser
+  (`delegator_impersonation`) and its fake answers follow M6's `Grants` text and M7's answers; if the
+  `Grants` column does not contain `IMPERSONATE ON ALL USERS` / `IMPERSONATE ON USER '<u>'@'%'`
+  verbatim, write the measured form into Task 10's report and adjust the parser there.
+
+- [ ] **Step 6: Tear down.** `docker rm -f egs-e2e-sr egs-e2e-rest egs-e2e-s3`,
   `docker network rm egs-e2e-net`, kill the fake Ranger pid from step 1. Remove `$SCRATCH`'s
   `.venv` only if you created it.
 
@@ -1224,7 +1276,213 @@ command and its verbatim output.
 
 ---
 
-### Task 6: Migration 0219 and the store
+### Task 6: `POST /engines` refuses a leftover FE metadata claim (decided 2026-11-11, 4)
+
+**Files:**
+- Modify: `crates/egret-engine-mgmt/src/http_error.rs` (variant, response, message helper)
+- Modify: `crates/egret-engine-mgmt/src/engines.rs` (`refuse_leftover_fe_metadata`, its call in
+  `create_starrocks_engine` right after `check_starrocks_engine_name(&b.name)?;`, the create route's
+  409 description, tests)
+- Modify: `openapi.json`, and `frontend/src/api/generated/**` only through `npm run gen:api`
+
+**Interfaces:**
+- Consumes: `CpState::kube` (`Option<Arc<dyn egret_provisioner::KubeClient>>`), `DEFAULT_NAMESPACE`.
+- Produces:
+
+  ```rust
+  // http_error.rs
+  EngineHttpError::LeftoverFeMetadata { name: String, claim: String, namespace: String } // 409
+  pub(crate) fn leftover_fe_metadata_message(name: &str, claim: &str, namespace: &str) -> String;
+  // engines.rs
+  async fn refuse_leftover_fe_metadata(st: &CpState, name: &str) -> Result<(), CpError>;
+  ```
+
+- [ ] **Step 1: Write the failing tests** in `engines.rs`'s `mod tests`, beside
+  `create_starrocks_engine_mints_root_password`:
+
+  ```rust
+  /// Package D, decided on 2026-11-11 (4): a claim a previous engine of this
+  /// name left would be rebound by the new FE, with the old root password.
+  #[tokio::test]
+  async fn a_starrocks_create_refuses_a_leftover_metadata_claim() {
+      let Some(mut st) = test_state().await else {
+          eprintln!("skipping a_starrocks_create_refuses_a_leftover_metadata_claim: DATABASE_URL not set");
+          return;
+      };
+      st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
+      let kube = std::sync::Arc::new(egret_provisioner::kube_client::FakeKube::default());
+      st.kube = Some(kube.clone() as std::sync::Arc<dyn egret_provisioner::KubeClient>);
+      let dsn = egret_test_db::url().await.unwrap();
+      let db = egret_metastore::Db::connect(&dsn, 5).await.expect("connect");
+      let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+      let mut body = sr_update_body(None);
+      body.name = format!("sr-{}", Uuid::new_v4().simple());
+      let name = body.name.clone();
+      let claim = format!("fe-meta-{name}-fe-0");
+      kube.set_live(serde_json::json!({"kind": "PersistentVolumeClaim", "metadata": {"name": claim}}));
+
+      let err = create_starrocks_engine(st.clone(), body, wh, Vec::new())
+          .await
+          .expect_err("the create must be refused");
+
+      assert!(
+          matches!(&err, CpError::LeftoverFeMetadata { claim: c, .. } if c == &claim),
+          "{err:?}"
+      );
+      assert!(
+          st.engine_mgmt.list_engines().await.unwrap().iter().all(|e| e.name != name),
+          "no engine row may exist"
+      );
+      let resp = axum::response::IntoResponse::into_response(err);
+      assert_eq!(resp.status(), StatusCode::CONFLICT);
+      let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+      let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+      assert_eq!(v["code"], "engine_metadata_left_over");
+      assert_eq!(v["claim"], claim);
+      assert!(
+          v["error"]
+              .as_str()
+              .unwrap()
+              .contains(&format!("kubectl delete pvc {claim} -n egret-engines")),
+          "{v}"
+      );
+  }
+
+  #[tokio::test]
+  async fn a_starrocks_create_without_a_leftover_claim_proceeds() {
+      let Some(mut st) = test_state().await else {
+          eprintln!("skipping a_starrocks_create_without_a_leftover_claim_proceeds: DATABASE_URL not set");
+          return;
+      };
+      st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
+      let kube = std::sync::Arc::new(egret_provisioner::kube_client::FakeKube::default());
+      st.kube = Some(kube as std::sync::Arc<dyn egret_provisioner::KubeClient>);
+      let dsn = egret_test_db::url().await.unwrap();
+      let db = egret_metastore::Db::connect(&dsn, 5).await.expect("connect");
+      let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+      let mut body = sr_update_body(None);
+      body.name = format!("sr-{}", Uuid::new_v4().simple());
+
+      let (code, _dto) = create_starrocks_engine(st.clone(), body, wh, Vec::new())
+          .await
+          .expect("create");
+
+      assert_eq!(code, StatusCode::CREATED);
+  }
+  ```
+
+  (If `axum::body::to_bytes` is not how this crate's other tests read a response body, use the
+  helper they use.)
+
+- [ ] **Step 2: Run them; the first fails** (the variant does not exist yet: a compile failure).
+
+  ```bash
+  env -u EGRET_ALLOW_DB_SKIP DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test \
+    CARGO_TARGET_DIR=$PWD/target-srd cargo test -p egret-engine-mgmt --lib leftover
+  ```
+
+- [ ] **Step 3: Implement.** `http_error.rs`, in `EngineHttpError` before `Internal`:
+
+  ```rust
+      /// A previous StarRocks engine of this name left its FE metadata claim,
+      /// which a new FE of the same name would rebind, with the old users,
+      /// catalogs and root password (package D, decided on 2026-11-11, 4).
+      /// 409, `code: "engine_metadata_left_over"`.
+      #[error("a previous engine left its front-end metadata volume {claim}")]
+      LeftoverFeMetadata {
+          name: String,
+          claim: String,
+          namespace: String,
+      },
+  ```
+
+  In `IntoResponse`, beside `EngineIsExternal`:
+
+  ```rust
+              EngineHttpError::LeftoverFeMetadata {
+                  name,
+                  claim,
+                  namespace,
+              } => (
+                  StatusCode::CONFLICT,
+                  Json(serde_json::json!({
+                      "error": leftover_fe_metadata_message(&name, &claim, &namespace),
+                      "code": "engine_metadata_left_over",
+                      "claim": claim,
+                  })),
+              )
+                  .into_response(),
+  ```
+
+  At module level:
+
+  ```rust
+  /// The 409's message: what is left, why it matters, and the command that
+  /// removes it.
+  pub(crate) fn leftover_fe_metadata_message(name: &str, claim: &str, namespace: &str) -> String {
+      format!(
+          "A previous StarRocks engine named \"{name}\" left its front-end metadata volume \
+           {claim}. A new engine would start with the old engine's users, catalogs and root \
+           password. Delete it first: kubectl delete pvc {claim} -n {namespace}"
+      )
+  }
+  ```
+
+  `engines.rs`, beside `check_starrocks_engine_name`:
+
+  ```rust
+  /// Package D, decided on 2026-11-11 (4): refuse a StarRocks create whose
+  /// name left an FE metadata claim. Without a Kubernetes client (the Docker
+  /// provisioner) there is no claim to find. A read failure refuses too: the
+  /// create does not guess.
+  async fn refuse_leftover_fe_metadata(st: &CpState, name: &str) -> Result<(), CpError> {
+      let Some(kube) = st.kube.as_ref() else {
+          return Ok(());
+      };
+      let claim = format!("fe-meta-{name}-fe-0");
+      match kube
+          .get_object("v1", "PersistentVolumeClaim", DEFAULT_NAMESPACE, &claim)
+          .await
+      {
+          Ok(None) => Ok(()),
+          Ok(Some(_)) => Err(CpError::LeftoverFeMetadata {
+              name: name.to_string(),
+              claim,
+              namespace: DEFAULT_NAMESPACE.to_string(),
+          }),
+          Err(e) => Err(CpError::ClusterApplyFailed(format!(
+              "could not check for a leftover front-end metadata volume {claim}: {e:#}"
+          ))),
+      }
+  }
+  ```
+
+  In `create_starrocks_engine`, after `check_starrocks_engine_name(&b.name)?;`:
+  `refuse_leftover_fe_metadata(&st, &b.name).await?;`. In the create route's `#[utoipa::path]`,
+  change the 409 description to "An engine with this name already exists, its same-name policy
+  profile is bound to another engine, or (StarRocks, `code` = `engine_metadata_left_over`) a
+  previous engine of this name left its front-end metadata volume; the message carries the
+  `kubectl` command that removes it". Regenerate `openapi.json` and the client (Global Constraints).
+
+- [ ] **Step 4: Run them; both pass.** Same command as Step 2, plus
+  `CARGO_TARGET_DIR=$PWD/target-srd cargo test -p egret-engine-mgmt --lib create_starrocks`.
+
+- [ ] **Step 5: Mutants:** drop the call in `create_starrocks_engine` (the refusal test fails);
+  answer `Ok(None)` with the refusal too (the proceed test fails); drop `-n {namespace}` from the
+  message (the refusal test fails).
+
+- [ ] **Step 6: Commit.**
+
+  ```bash
+  git add crates/egret-engine-mgmt openapi.json frontend/src/api/generated
+  git commit -m "feat(engine-mgmt): refuse a StarRocks create whose name left a front-end metadata volume
+
+  Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+  ```
+
+---
+
+### Task 7: Migration 0219 and the store
 
 **Files:**
 - Create: `migrations/0219_starrocks_users.sql`
@@ -1255,7 +1513,7 @@ command and its verbatim output.
   ```
 
   The channel name `egret_starrocks_user_sync` is fixed here and becomes
-  `starrocks_users::USER_SYNC_CHANNEL` in Task 7.
+  `starrocks_users::USER_SYNC_CHANNEL` in Task 8.
 
 - [ ] **Step 1: Write the migration.** Check the number first (Global Constraints).
 
@@ -1303,6 +1561,12 @@ command and its verbatim output.
       FOR EACH STATEMENT EXECUTE FUNCTION engine_mgmt.notify_starrocks_user_sync();
   CREATE TRIGGER starrocks_user_sync_engine_workspaces
       AFTER INSERT OR DELETE ON engine_mgmt.engine_workspaces
+      FOR EACH STATEMENT EXECUTE FUNCTION engine_mgmt.notify_starrocks_user_sync();
+  -- Platform admins are synced too (decided on 2026-11-11, 1): their grants are `access_grants`
+  -- rows (scope 'platform', above); the role that makes them admins is the `roles` row named
+  -- `platform_admin`, so a rename or delete of a role wakes the sync as well.
+  CREATE TRIGGER starrocks_user_sync_roles
+      AFTER UPDATE OF name OR DELETE ON roles
       FOR EACH STATEMENT EXECUTE FUNCTION engine_mgmt.notify_starrocks_user_sync();
   ```
 
@@ -1434,6 +1698,37 @@ command and its verbatim output.
           .await
           .unwrap();
       assert!(notified(&mut l).await, "group membership");
+  }
+
+  /// Decided on 2026-11-11 (1): a platform-role grant and a write to the
+  /// role table wake the sync, since platform admins are synced.
+  #[tokio::test]
+  async fn a_platform_admin_grant_and_a_role_write_notify() {
+      let Some(db) = db().await else { return };
+      let user = new_user(&db).await;
+      let mut l = listening(&db).await;
+      sqlx::query(
+          "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+           SELECT 'user', $1, id, 'platform', NULL FROM roles \
+            WHERE scope = 'platform' AND name = 'platform_admin'",
+      )
+      .bind(user)
+      .execute(&db.pool)
+      .await
+      .unwrap();
+      assert!(notified(&mut l).await, "a platform_admin grant");
+      sqlx::query("DELETE FROM access_grants WHERE principal_id = $1")
+          .bind(user)
+          .execute(&db.pool)
+          .await
+          .unwrap();
+      assert!(notified(&mut l).await, "its revoke");
+      // A no-op rename still runs the trigger, and changes nothing shared.
+      sqlx::query("UPDATE roles SET name = name WHERE name = 'platform_admin'")
+          .execute(&db.pool)
+          .await
+          .unwrap();
+      assert!(notified(&mut l).await, "a write to the role table");
   }
 
   #[tokio::test]
@@ -1599,10 +1894,11 @@ command and its verbatim output.
   }
   ```
 
-  Store tests come with Task 7's DB tests, which exercise every method.
+  Store tests come with Task 8's DB tests, which exercise every method.
 
-- [ ] **Step 5: Mutants:** remove the `access_grants` trigger (the membership test fails); change
-  `'root'` to `'roo'` in the ledger insert (the ledger test fails).
+- [ ] **Step 5: Mutants:** remove the `access_grants` trigger (the membership and platform-grant
+  tests fail); remove the `roles` trigger (the role-write assertion fails); change `'root'` to
+  `'roo'` in the ledger insert (the ledger test fails).
 
 - [ ] **Step 6: Commit.**
 
@@ -1615,7 +1911,7 @@ command and its verbatim output.
 
 ---
 
-### Task 7: The StarRocks user sync
+### Task 8: The StarRocks user sync
 
 **Files:**
 - Create: `crates/egret-engine-mgmt/src/starrocks_users.rs`; register `pub(crate) mod starrocks_users;`
@@ -1625,9 +1921,11 @@ command and its verbatim output.
   query-log tests
 
 **Interfaces:**
-- Consumes: Task 2 (`is_starrocks_reserved_user`); Task 6 (the store methods, `UserSyncLock`);
+- Consumes: Task 2 (`is_starrocks_reserved_user`); Task 7 (the store methods, `UserSyncLock`);
   `crate::query_log::authorized_name`; `crate::engines::random_internal_secret`;
-  `egret_auth::users::ensure_username_via`; Task 1's M2 and M3.
+  `egret_auth::users::ensure_username_via`; `egret_auth::roles::engine_admin_user_ids_via` (the one
+  definition of the platform admins, decided on 2026-11-11, 1);
+  `EngineMgmtStore::list_engine_workspace_ids`; Task 1's M2 and M3.
 - Produces:
 
   ```rust
@@ -1639,12 +1937,13 @@ command and its verbatim output.
   pub(crate) fn drop_user_sql(name: &str) -> String;
   pub(crate) fn listed_users(rows: &[Vec<Option<String>>]) -> BTreeSet<String>;
   #[derive(Debug, Default, PartialEq, Eq)]
-  pub(crate) struct UserPlan { pub create: Vec<String>, pub drop: Vec<String>,
+  pub(crate) struct UserPlan { pub kept: Vec<String>, pub create: Vec<String>, pub drop: Vec<String>,
       pub forget: Vec<String>, pub foreign: Vec<String>, pub refused: Vec<String> }
   pub(crate) fn plan_users(desired: &BTreeSet<String>, recorded: &BTreeSet<String>,
       on_fe: &BTreeSet<String>) -> UserPlan;
   #[derive(Debug, PartialEq, Eq)]
   pub(crate) enum UserSync { NotNeeded, Busy, Done { created: usize, dropped: usize,
+      granted: usize, revoked_all: bool, // filled by Task 10; 0 and false until then
       foreign: Vec<String>, refused: Vec<String>, failed: Vec<String> }, Failed(String) }
   pub(crate) async fn wants_user_sync(st: &CpState, engine: &Engine) -> bool;
   pub(crate) async fn sync_starrocks_users(st: &CpState, engine: &Engine, fe: &FeTarget) -> UserSync;
@@ -1821,6 +2120,8 @@ command and its verbatim output.
   /// What one reconcile does (spec section 2.3's table), every list sorted.
   #[derive(Debug, Default, PartialEq, Eq)]
   pub(crate) struct UserPlan {
+      /// Desired, recorded and on the FE: nothing to do (Task 10 grants these).
+      pub kept: Vec<String>,
       /// Desired and absent from the FE: record, then `CREATE USER`.
       pub create: Vec<String>,
       /// Recorded, no longer desired, on the FE: `DROP USER`, then forget.
@@ -1851,7 +2152,7 @@ command and its verbatim output.
               continue;
           }
           match (recorded.contains(name), on_fe.contains(name)) {
-              (true, true) => {}
+              (true, true) => plan.kept.push(name.clone()),
               (false, true) => plan.foreign.push(name.clone()),
               (_, false) => plan.create.push(name.clone()),
           }
@@ -1876,6 +2177,10 @@ command and its verbatim output.
       Done {
           created: usize,
           dropped: usize,
+          /// Native `GRANT IMPERSONATE ON USER` statements sent (Task 10).
+          granted: usize,
+          /// Whether `ON ALL USERS` was revoked (Task 10).
+          revoked_all: bool,
           foreign: Vec<String>,
           refused: Vec<String>,
           /// One scrubbed message per statement or record that failed.
@@ -1886,8 +2191,9 @@ command and its verbatim output.
   }
 
   /// Whether `engine` gets a reconcile at all: a provisioned StarRocks engine,
-  /// not deleting or failed, that is in impersonate mode or still has users
-  /// egret created (a move to jwt drops them).
+  /// not deleting or failed, whose bootstrap created `egret_delegator`
+  /// (`impersonate` or `jwt` mode: Task 10 converges its native grants), or
+  /// that still has users egret created.
   pub(crate) async fn wants_user_sync(st: &CpState, engine: &Engine) -> bool {
       if !engine.is_starrocks()
           || crate::external::is_external(engine)
@@ -1896,7 +2202,7 @@ command and its verbatim output.
       {
           return false;
       }
-      if engine.is_impersonate_delegation() {
+      if matches!(engine.delegation_mode(), "impersonate" | "jwt") {
           return true;
       }
       match st.engine_mgmt.recorded_starrocks_users(engine.id).await {
@@ -1924,17 +2230,38 @@ command and its verbatim output.
       outcome
   }
 
-  /// The desired names: empty unless impersonate-mode; a member with no
-  /// username yet is minted, as the permission compiler does.
+  /// The desired names: empty unless impersonate-mode; the members, and the
+  /// platform admins when the engine serves at least one workspace (decided on
+  /// 2026-11-11, 1). A user with no username yet is minted, as the permission
+  /// compiler does.
   async fn desired_users(st: &CpState, engine: &Engine) -> Result<BTreeSet<String>, String> {
       if !engine.is_impersonate_delegation() {
           return Ok(BTreeSet::new());
       }
-      let candidates = st
+      let mut candidates = st
           .engine_mgmt
           .starrocks_user_candidates(engine.id)
           .await
           .map_err(|e| e.to_string())?;
+      let serves_a_workspace = !st
+          .engine_mgmt
+          .list_engine_workspace_ids(engine.id)
+          .await
+          .map_err(|e| e.to_string())?
+          .is_empty();
+      if serves_a_workspace {
+          let mut conn = st
+              .engine_mgmt
+              .pool()
+              .acquire()
+              .await
+              .map_err(|e| e.to_string())?;
+          let admins = egret_auth::roles::engine_admin_user_ids_via(&mut conn)
+              .await
+              .map_err(|e| e.to_string())?;
+          // `None`: `ensure_username_via` below returns the stored name or mints one.
+          candidates.extend(admins.into_iter().map(|u| (u.0, None)));
+      }
       let mut out = BTreeSet::new();
       for (id, username) in candidates {
           if let Some(u) = username {
@@ -2021,6 +2348,8 @@ command and its verbatim output.
       UserSync::Done {
           created,
           dropped,
+          granted: 0,
+          revoked_all: false,
           foreign: plan.foreign,
           refused: plan.refused,
           failed,
@@ -2032,9 +2361,10 @@ command and its verbatim output.
           UserSync::NotNeeded => {}
           UserSync::Busy => tracing::debug!(engine = %engine_name,
               "starrocks users: another sync of this engine is running"),
-          UserSync::Done { created, dropped, foreign, refused, failed } => {
-              if *created > 0 || *dropped > 0 {
-                  tracing::info!(engine = %engine_name, created, dropped, "starrocks users synced");
+          UserSync::Done { created, dropped, granted, revoked_all, foreign, refused, failed } => {
+              if *created > 0 || *dropped > 0 || *granted > 0 || *revoked_all {
+                  tracing::info!(engine = %engine_name, created, dropped, granted, revoked_all,
+                      "starrocks users synced");
               }
               if !foreign.is_empty() {
                   tracing::warn!(engine = %engine_name, users = ?foreign,
@@ -2056,9 +2386,9 @@ command and its verbatim output.
   }
   ```
 
-  (Task 8 adds `spawn_user_sync`, `sync_all_starrocks_users` and `spawn_starrocks_user_sync` to this
+  (Task 9 adds `spawn_user_sync`, `sync_all_starrocks_users` and `spawn_starrocks_user_sync` to this
   file; until then `Arc`, `Duration` constants, `fe_target`, `engine_still_current` and
-  `wait_for_fe_root_login` are unused: add the imports in Task 8 instead if clippy complains.)
+  `wait_for_fe_root_login` are unused: add the imports in Task 9 instead if clippy complains.)
 
   Pure tests at the bottom of the file:
 
@@ -2110,6 +2440,7 @@ command and its verbatim output.
           assert_eq!(
               plan_users(&desired, &recorded, &on_fe),
               UserPlan {
+                  kept: vec!["keep".into()],
                   create: vec!["lost".into(), "new".into()],
                   drop: vec!["gone".into()],
                   forget: vec!["left".into()],
@@ -2228,14 +2559,19 @@ command and its verbatim output.
       let first = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
       let second = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
 
-      assert!(matches!(first, crate::starrocks_users::UserSync::Done { created: 1, dropped: 0, .. }), "{first:?}");
+      // The test database's platform admins are synced too (decided on
+      // 2026-11-11, 1), so these assertions name the test's own users only.
+      assert!(matches!(first, crate::starrocks_users::UserSync::Done { .. }), "{first:?}");
       assert!(matches!(second, crate::starrocks_users::UserSync::Done { created: 0, dropped: 0, .. }), "{second:?}");
-      assert_eq!(fake.users(), [alice.clone()].into_iter().collect());
-      assert_eq!(
-          st.engine_mgmt.recorded_starrocks_users(engine.id).await.unwrap(),
-          [alice].into_iter().collect()
-      );
-      let creates: Vec<_> = fake.executed().into_iter().filter(|s| s.starts_with("CREATE USER")).collect();
+      let users = fake.users();
+      assert!(users.contains(&alice) && !users.contains(&carol), "{users:?}");
+      let recorded = st.engine_mgmt.recorded_starrocks_users(engine.id).await.unwrap();
+      assert!(recorded.contains(&alice) && !recorded.contains(&carol), "{recorded:?}");
+      let creates: Vec<_> = fake
+          .executed()
+          .into_iter()
+          .filter(|s| s.starts_with(&format!("CREATE USER '{alice}'@")))
+          .collect();
       assert_eq!(creates.len(), 1, "{creates:?}");
       assert!(!creates[0].contains("IF NOT EXISTS"));
   }
@@ -2269,8 +2605,9 @@ command and its verbatim output.
       let second = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
 
       assert!(matches!(second, crate::starrocks_users::UserSync::Done { dropped: 1, .. }), "{second:?}");
-      assert_eq!(fake.users(), [theirs].into_iter().collect(), "bob dropped, theirs kept");
-      assert!(st.engine_mgmt.recorded_starrocks_users(engine.id).await.unwrap().is_empty());
+      let users = fake.users();
+      assert!(users.contains(&theirs) && !users.contains(&bob), "bob dropped, theirs kept: {users:?}");
+      assert!(!st.engine_mgmt.recorded_starrocks_users(engine.id).await.unwrap().contains(&bob));
   }
 
   /// A create that fails forgets only the record it made, and the FE's error
@@ -2287,6 +2624,7 @@ command and its verbatim output.
       seed_member(&st, ws, &dan, "active").await;
       // The FE rejects the create and quotes the password back (not in the
       // `IDENTIFIED BY` shape, so only the exact-value scrub can hide it).
+      // The needle is the whole statement, so each create gets its own echo.
       let echo = fake.clone();
       fake.on_execute(move |sql| {
           if let Some(pw) = sql
@@ -2294,7 +2632,7 @@ command and its verbatim output.
               .and_then(|_| sql.rsplit("IDENTIFIED BY '").next())
           {
               let pw = pw.trim_end_matches('\'');
-              echo.fail_matching("CREATE USER '", &format!("rejected; it was {pw}"));
+              echo.fail_matching(&sql, &format!("rejected; it was {pw}"));
           }
           Box::pin(std::future::ready(()))
       });
@@ -2305,18 +2643,24 @@ command and its verbatim output.
       let crate::starrocks_users::UserSync::Done { created: 0, failed, .. } = &out else {
           panic!("{out:?}");
       };
-      assert_eq!(failed.len(), 1, "{failed:?}");
-      assert!(st.engine_mgmt.recorded_starrocks_users(engine.id).await.unwrap().is_empty());
-      let sent = fake.executed().into_iter().find(|s| s.starts_with("CREATE USER")).unwrap();
+      let dans: Vec<&String> = failed.iter().filter(|f| f.starts_with(&format!("{dan}:"))).collect();
+      assert_eq!(dans.len(), 1, "{failed:?}");
+      assert!(!st.engine_mgmt.recorded_starrocks_users(engine.id).await.unwrap().contains(&dan));
+      let sent = fake
+          .executed()
+          .into_iter()
+          .find(|s| s.starts_with(&format!("CREATE USER '{dan}'@")))
+          .unwrap();
       let password = sent.rsplit("IDENTIFIED BY '").next().unwrap().trim_end_matches('\'');
-      assert!(!failed[0].contains(password), "the password leaked: {failed:?}");
+      assert!(!dans[0].contains(password), "the password leaked: {dans:?}");
   }
 
-  /// An engine not in impersonate mode with nothing recorded costs no FE call.
+  /// An engine with no delegation (so no delegator) and nothing recorded costs
+  /// no FE call.
   #[tokio::test]
-  async fn a_jwt_engine_with_no_records_makes_no_fe_call() {
+  async fn an_engine_without_delegation_or_records_makes_no_fe_call() {
       let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
-          eprintln!("skipping a_jwt_engine_with_no_records_makes_no_fe_call: DATABASE_URL not set");
+          eprintln!("skipping an_engine_without_delegation_or_records_makes_no_fe_call: DATABASE_URL not set");
           return;
       };
       let engine = seed_sr_engine(&st).await;
@@ -2392,7 +2736,56 @@ command and its verbatim output.
 
       crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
 
-      assert_eq!(fake.users(), [gina].into_iter().collect());
+      let users = fake.users();
+      assert!(users.contains(&gina) && !users.contains(&eve), "{users:?}");
+  }
+
+  /// Decided on 2026-11-11 (1): a platform admin who is no member gets a user
+  /// on an engine that serves a workspace, and none on one assigned nowhere.
+  #[tokio::test]
+  async fn platform_admins_are_synced_where_the_engine_serves_a_workspace() {
+      let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+          eprintln!("skipping platform_admins_are_synced_where_the_engine_serves_a_workspace: DATABASE_URL not set");
+          return;
+      };
+      let pool = st.engine_mgmt.pool();
+      let admin = uname("padmin");
+      let admin_id: Uuid = sqlx::query_scalar(
+          "INSERT INTO users (provider, email, username) VALUES ('local', $1, $2) RETURNING id",
+      )
+      .bind(format!("{admin}@p.test"))
+      .bind(&admin)
+      .fetch_one(pool)
+      .await
+      .unwrap();
+      sqlx::query(
+          "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+           SELECT 'user', $1, id, 'platform', NULL FROM roles \
+            WHERE scope = 'platform' AND name = 'platform_admin'",
+      )
+      .bind(admin_id)
+      .execute(pool)
+      .await
+      .unwrap();
+      let serving = seed_impersonate_sr_engine(&st).await;
+      seed_assigned_workspace(&st, &serving).await;
+      let lonely = seed_impersonate_sr_engine(&st).await;
+
+      let fe = crate::starrocks_ddl::fe_target(&st, &serving).await.expect("fe");
+      crate::starrocks_users::sync_starrocks_users(&st, &serving, &fe).await;
+      assert!(fake.users().contains(&admin), "{:?}", fake.users());
+      let fe = crate::starrocks_ddl::fe_target(&st, &lonely).await.expect("fe");
+      crate::starrocks_users::sync_starrocks_users(&st, &lonely, &fe).await;
+      assert!(
+          !st.engine_mgmt.recorded_starrocks_users(lonely.id).await.unwrap().contains(&admin),
+          "an engine assigned nowhere gets no platform admin"
+      );
+
+      sqlx::query("DELETE FROM access_grants WHERE principal_id = $1")
+          .bind(admin_id)
+          .execute(pool)
+          .await
+          .unwrap();
   }
   ```
 
@@ -2400,7 +2793,7 @@ command and its verbatim output.
 
   ```bash
   env -u EGRET_ALLOW_DB_SKIP DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test \
-    CARGO_TARGET_DIR=$PWD/target-srd cargo test -p egret-engine-mgmt --lib -- sync_ held_lock group_members jwt_engine_with failed_create
+    CARGO_TARGET_DIR=$PWD/target-srd cargo test -p egret-engine-mgmt --lib -- sync_ held_lock group_members engine_without_delegation failed_create platform_admins
   ```
 
   Expected: all pass; report the durations.
@@ -2408,10 +2801,14 @@ command and its verbatim output.
 - [ ] **Step 4: Mutants:**
   - `CREATE USER IF NOT EXISTS` in `create_user_sql`: `the_sync_drops_who_left…` fails (the foreign
     user is adopted) and the quoting test fails;
-  - drop `u.status = 'active'` from both halves of the candidates query: the first test fails;
+  - drop `u.status = 'active'` from both halves of the candidates query: the first test fails
+    (`carol` is created);
   - drop the group half of the `UNION`: the group test fails;
   - drop the `if inserted { forget }` block: the failed-create test fails;
-  - call `wants_user_sync` after taking the lock and querying `SHOW USERS`: the jwt test fails;
+  - call `wants_user_sync` after taking the lock and querying `SHOW USERS`: the no-delegation test
+    fails;
+  - drop the platform-admin block in `desired_users`: the platform-admin test fails; drop its
+    `serves_a_workspace` condition: its "assigned nowhere" assertion fails;
   - drop the lock: the busy test fails;
   - replace `&secrets` with `&BTreeMap::new()` in the create branch: the scrub test fails.
 
@@ -2426,7 +2823,7 @@ command and its verbatim output.
 
 ---
 
-### Task 8: Wire the sync: the bootstrap, every apply, the listener and the sweep
+### Task 9: Wire the sync: the bootstrap, every apply, the listener and the sweep
 
 **Files:**
 - Modify: `crates/egret-engine-mgmt/src/starrocks_users.rs` (three functions)
@@ -2436,7 +2833,7 @@ command and its verbatim output.
 - Modify: `crates/egret-bin/src/main.rs` (about line 3692, beside `setup_query_logs`)
 
 **Interfaces:**
-- Consumes: Task 7.
+- Consumes: Task 8.
 - Produces:
 
   ```rust
@@ -2475,12 +2872,15 @@ command and its verbatim output.
       .expect("bootstrap task did not panic");
 
       let sent = fake.executed();
-      let grant = sent.iter().position(|s| s.starts_with("GRANT IMPERSONATE")).expect("grant");
+      let delegator = sent
+          .iter()
+          .position(|s| s.contains("CREATE USER IF NOT EXISTS 'egret_delegator'"))
+          .expect("the delegator");
       let create = sent
           .iter()
           .position(|s| s.starts_with(&format!("CREATE USER '{alice}'@'%'")))
           .expect("the member's user");
-      assert!(grant < create, "{sent:?}");
+      assert!(delegator < create, "{sent:?}");
       assert!(fake.users().contains(&alice));
       // Before the query log, whose node wait can take minutes.
       let q = fake.queried();
@@ -2495,7 +2895,7 @@ command and its verbatim output.
       assert!(users_at < nodes_at, "{q:?}");
   }
 
-  /// Checkpoint 7: an engine deleted during the delegation statements gets no
+  /// Checkpoint 7: an engine deleted on the last delegation statement gets no
   /// user sync.
   #[tokio::test]
   async fn a_deleted_engine_gets_no_user_sync_from_the_bootstrap() {
@@ -2510,7 +2910,9 @@ command and its verbatim output.
       fake.on_execute(move |sql| {
           let store = store.clone();
           Box::pin(async move {
-              if sql.starts_with("GRANT IMPERSONATE") {
+              // The LAST delegation statement. Task 10 removes the `ON ALL USERS`
+              // grant and moves this to the delegator's `CREATE USER`.
+              if sql.contains("GRANT IMPERSONATE ON ALL USERS") {
                   store.delete_engine(engine_id).await.unwrap();
               }
           })
@@ -2793,8 +3195,10 @@ command and its verbatim output.
     CARGO_TARGET_DIR=$PWD/target-srd cargo test -p egret-engine-mgmt --no-fail-fast
   ```
 
-  Expected: all pass, the existing bootstrap and query-log tests unchanged (their engines are not
-  impersonate-mode and have no records, so the sync makes no FE call).
+  Expected: all pass. Engines with no delegation get no FE call from the sync. A delegating test
+  engine (`seed_sr_delegating_engine`, jwt mode) now also sees the sync's `SHOW USERS` (and, after
+  Task 10, `SHOW GRANTS FOR …`): a test that asserts an exact `queried()` list for one gains those
+  entries in its expected list, and nothing else changes.
 
 - [ ] **Step 4: Mutants:** remove checkpoint 7 (the deleted-engine test fails); remove the
   `finish_apply` hook (the apply test fails); move the sync after the query log (the first new
@@ -2812,7 +3216,484 @@ command and its verbatim output.
 
 ---
 
-### Task 9: CI parity gate
+### Task 10: Native access control: per-user IMPERSONATE, `ON ALL USERS` revoked (decided 2026-11-11, 2)
+
+**Files:**
+- Modify: `crates/egret-engine-mgmt/src/starrocks_users.rs` (builders, parser,
+  `converge_native_impersonation`, its call in `sync_locked`, tests)
+- Modify: `crates/egret-engine-mgmt/src/starrocks_ddl.rs` (`FakeStarRocksDdl`: impersonation grants)
+- Modify: `crates/egret-engine-mgmt/src/engines.rs`:
+  - delete `starrocks_impersonation_grant_sql` (about line 5368), its push in
+    `spawn_starrocks_catalog_wire` (about line 5718) and its test
+    `starrocks_impersonation_grant_sql_renders_and_escapes` (about line 15548);
+  - the comment in `build_starrocks_provision_req` (about line 4271) that says the bootstrap creates
+    "the service user + GRANT IMPERSONATE": now "the service user";
+  - the existing bootstrap tests that name `GRANT IMPERSONATE` (Step 1);
+  - new DB tests.
+
+**Interfaces:**
+- Consumes: Task 8 (`sync_locked`, `UserPlan::kept`, `UserSync::Done { granted, revoked_all, .. }`),
+  Task 9 (the bootstrap's checkpoint 7), Task 1's M6 and M7.
+- Produces:
+
+  ```rust
+  pub(crate) fn show_delegator_grants_sql() -> String;
+  pub(crate) fn revoke_all_impersonation_sql() -> String;
+  /// `None` for a reserved user.
+  pub(crate) fn grant_impersonation_sql(name: &str) -> Option<String>;
+  /// `(ON ALL USERS granted, users named by ON USER …)`
+  pub(crate) fn delegator_impersonation(rows: &[Vec<Option<String>>]) -> (bool, BTreeSet<String>);
+  // FakeStarRocksDdl
+  pub fn seed_impersonate_all(&self);
+  pub fn impersonation(&self) -> (bool, BTreeSet<String>);
+  ```
+
+- [ ] **Step 1: The fake learns impersonation grants, and the existing bootstrap tests move.**
+
+  `FakeStarRocksDdl`: fields `impersonate_all: Arc<Mutex<bool>>` and
+  `impersonable: Arc<Mutex<BTreeSet<String>>>`, and:
+
+  ```rust
+  /// The delegator holds `IMPERSONATE ON ALL USERS`, as every engine
+  /// bootstrapped before package D does.
+  pub fn seed_impersonate_all(&self) {
+      *self.impersonate_all.lock().unwrap() = true;
+  }
+
+  /// `(ON ALL USERS, the users named by ON USER …)` the delegator holds.
+  pub fn impersonation(&self) -> (bool, BTreeSet<String>) {
+      (
+          *self.impersonate_all.lock().unwrap(),
+          self.impersonable.lock().unwrap().clone(),
+      )
+  }
+  ```
+
+  In `execute`, before the user branches of Task 8 (answers per M7):
+
+  ```rust
+          if sql.starts_with("GRANT IMPERSONATE ON ALL USERS") {
+              *self.impersonate_all.lock().unwrap() = true;
+              return Ok(());
+          }
+          if sql.starts_with("REVOKE IMPERSONATE ON ALL USERS") {
+              // M7: whether per-user grants survive, and what a revoke of
+              // nothing answers, replace this behaviour if they differ.
+              *self.impersonate_all.lock().unwrap() = false;
+              return Ok(());
+          }
+          if let Some(rest) = sql.strip_prefix("GRANT IMPERSONATE ON USER ") {
+              if let Some(name) = rest
+                  .split(" TO ")
+                  .next()
+                  .and_then(|i| crate::query_log::authorized_name(i.trim()))
+              {
+                  self.impersonable.lock().unwrap().insert(name);
+              }
+              return Ok(());
+          }
+  ```
+
+  In the `DROP USER` branch, after the remove: `self.impersonable.lock().unwrap().remove(&name);`.
+  In `query`, beside `SHOW USERS` (rows per M6):
+
+  ```rust
+          if sql.starts_with("SHOW GRANTS FOR ") {
+              let me = "'egret_delegator'@'%'".to_string();
+              let mut rows = Vec::new();
+              if *self.impersonate_all.lock().unwrap() {
+                  rows.push(vec![
+                      Some(me.clone()),
+                      None,
+                      Some(format!("GRANT IMPERSONATE ON ALL USERS TO USER {me}")),
+                  ]);
+              }
+              let users = self.impersonable.lock().unwrap().clone();
+              if !users.is_empty() {
+                  let list: Vec<String> = users
+                      .iter()
+                      .map(|u| format!("'{}'@'%'", u.replace('\'', "''")))
+                      .collect();
+                  rows.push(vec![
+                      Some(me.clone()),
+                      None,
+                      Some(format!("GRANT IMPERSONATE ON USER {} TO USER {me}", list.join(", "))),
+                  ]);
+              }
+              return Ok(rows);
+          }
+  ```
+
+  Existing tests in `engines.rs` that name `GRANT IMPERSONATE` (the bootstrap stops sending it):
+  - `the_delegation_bootstrap_still_creates_then_repairs` (about line 14169): replace
+    `assert!(sent.iter().any(|s| s.contains("GRANT IMPERSONATE")), "{sent:?}");` with
+    `assert!(!sent.iter().any(|s| s.contains("ON ALL USERS") && s.starts_with("GRANT")), "{sent:?}");`;
+  - `the_bootstrap_stops_before_the_query_log_after_the_delegation_statements` (about line 16270):
+    the hook and the premise name `"CREATE USER IF NOT EXISTS 'egret_delegator'"` instead of
+    `"GRANT IMPERSONATE"`; add `|| q == crate::starrocks_users::SHOW_USERS_SQL` to the reads that
+    must not happen; its doc says "Checkpoints 7 and 8" (the user sync and the query log);
+  - `the_delegation_statements_are_sent_while_no_node_is_alive` (about line 16340): drop
+    `"GRANT IMPERSONATE"` from the `needed` list and from the hook's condition;
+  - Task 9's `a_deleted_engine_gets_no_user_sync_from_the_bootstrap`: the hook condition becomes
+    `sql.contains("CREATE USER IF NOT EXISTS 'egret_delegator'")`, now the last delegation statement;
+  - `the_remaining_delegation_statements_stop_at_their_own_checkpoint` keeps `"GRANT IMPERSONATE"` in
+    its not-sent list: still true.
+
+- [ ] **Step 2: Write the failing tests.** Pure, in `starrocks_users.rs`'s `mod tests`:
+
+  ```rust
+  #[test]
+  fn the_native_statements_name_the_delegator_and_refuse_reserved_users() {
+      assert_eq!(show_delegator_grants_sql(), "SHOW GRANTS FOR 'egret_delegator'@'%'");
+      assert_eq!(
+          revoke_all_impersonation_sql(),
+          "REVOKE IMPERSONATE ON ALL USERS FROM USER 'egret_delegator'@'%'"
+      );
+      assert_eq!(
+          grant_impersonation_sql("o'b").as_deref(),
+          Some("GRANT IMPERSONATE ON USER 'o''b'@'%' TO USER 'egret_delegator'@'%'")
+      );
+      for reserved in ["root", "ROOT", "egret_delegator", "egret_query_log"] {
+          assert_eq!(grant_impersonation_sql(reserved), None, "{reserved}");
+      }
+  }
+
+  #[test]
+  fn the_grants_parser_reads_all_users_and_per_user_lists() {
+      let row = |g: &str| vec![Some("'egret_delegator'@'%'".to_string()), None, Some(g.to_string())];
+      let rows = vec![
+          row("GRANT IMPERSONATE ON ALL USERS TO USER 'egret_delegator'@'%'"),
+          row("GRANT IMPERSONATE ON USER 'a'@'%', 'o''b'@'%' TO USER 'egret_delegator'@'%'"),
+          row("GRANT SELECT ON ALL TABLES IN ALL DATABASES TO USER 'egret_delegator'@'%'"),
+      ];
+      let (all, users) = delegator_impersonation(&rows);
+      assert!(all);
+      assert_eq!(users, ["a", "o'b"].iter().map(|s| s.to_string()).collect());
+      assert_eq!(delegator_impersonation(&[]), (false, BTreeSet::new()));
+  }
+  ```
+
+  DB, in `engines.rs`'s `mod tests` (fixtures from Task 8):
+
+  ```rust
+  /// Decided on 2026-11-11 (2): on an engine bound to no profile, the sync
+  /// revokes `ON ALL USERS` first, then grants each user egret manages; a
+  /// second sync sends neither.
+  #[tokio::test]
+  async fn an_unbound_engine_trades_all_users_for_per_user_grants() {
+      let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+          eprintln!("skipping an_unbound_engine_trades_all_users_for_per_user_grants: DATABASE_URL not set");
+          return;
+      };
+      let engine = seed_impersonate_sr_engine(&st).await;
+      assert!(engine.authz_service_id.is_none(), "premise: bound to no profile");
+      let ws = seed_assigned_workspace(&st, &engine).await;
+      let (alice, theirs) = (uname("alice"), uname("theirs"));
+      seed_member(&st, ws, &alice, "active").await;
+      seed_member(&st, ws, &theirs, "active").await;
+      fake.seed_user(&theirs);
+      fake.seed_impersonate_all();
+      let fe = crate::starrocks_ddl::fe_target(&st, &engine).await.expect("fe");
+
+      let first = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+
+      assert!(
+          matches!(first, crate::starrocks_users::UserSync::Done { revoked_all: true, .. }),
+          "{first:?}"
+      );
+      let sent = fake.executed();
+      let revoke = sent
+          .iter()
+          .position(|s| s.starts_with("REVOKE IMPERSONATE ON ALL USERS"))
+          .expect("the revoke");
+      let grant = sent
+          .iter()
+          .position(|s| s == &format!(
+              "GRANT IMPERSONATE ON USER '{alice}'@'%' TO USER 'egret_delegator'@'%'"
+          ))
+          .expect("alice's grant");
+      assert!(revoke < grant, "{sent:?}");
+      let (all, users) = fake.impersonation();
+      assert!(!all);
+      assert!(users.contains(&alice), "{users:?}");
+      assert!(!users.contains(&theirs), "a user egret did not create is never granted");
+      assert!(!users.iter().any(|u| egret_core::engine_principals::is_starrocks_reserved_user(u)));
+
+      fake.clear_executed();
+      let second = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+      assert!(
+          matches!(second, crate::starrocks_users::UserSync::Done { granted: 0, revoked_all: false, .. }),
+          "{second:?}"
+      );
+      assert!(!fake.executed().iter().any(|s| s.contains("IMPERSONATE")), "{:?}", fake.executed());
+  }
+
+  /// On an engine bound to a profile, Ranger decides: no native grant or
+  /// revoke is sent.
+  #[tokio::test]
+  async fn a_bound_engine_gets_no_native_impersonation_statement() {
+      let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+          eprintln!("skipping a_bound_engine_gets_no_native_impersonation_statement: DATABASE_URL not set");
+          return;
+      };
+      let dsn = egret_test_db::url().await.unwrap();
+      let db = egret_metastore::Db::connect(&dsn, 5).await.expect("connect");
+      let policy = egret_policy::PolicyStore::new(db.clone());
+      egret_policy::seed_starrocks(&policy).await.expect("def");
+      let svc = policy
+          .create_service(&uname("pkgd_sr"), "starrocks", &serde_json::json!({}))
+          .await
+          .expect("service");
+      let engine = seed_impersonate_sr_engine(&st).await;
+      sqlx::query("UPDATE engine_mgmt.engines SET authz_service_id = $2 WHERE id = $1")
+          .bind(engine.id)
+          .bind(svc.id)
+          .execute(st.engine_mgmt.pool())
+          .await
+          .unwrap();
+      let engine = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+      let ws = seed_assigned_workspace(&st, &engine).await;
+      seed_member(&st, ws, &uname("bob"), "active").await;
+      fake.seed_impersonate_all();
+      let fe = crate::starrocks_ddl::fe_target(&st, &engine).await.expect("fe");
+
+      crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+
+      assert!(!fake.executed().iter().any(|s| s.contains("IMPERSONATE")), "{:?}", fake.executed());
+      assert!(!fake.queried().iter().any(|q| q.starts_with("SHOW GRANTS")));
+  }
+
+  /// A jwt engine (no users to manage) still loses `ON ALL USERS`.
+  #[tokio::test]
+  async fn a_jwt_engine_loses_all_users_and_gets_no_grant() {
+      let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+          eprintln!("skipping a_jwt_engine_loses_all_users_and_gets_no_grant: DATABASE_URL not set");
+          return;
+      };
+      let engine = seed_sr_delegating_engine(&st, "CERTPEM").await;
+      fake.seed_impersonate_all();
+      let fe = crate::starrocks_ddl::fe_target(&st, &engine).await.expect("fe");
+
+      let out = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+
+      assert!(
+          matches!(out, crate::starrocks_users::UserSync::Done { granted: 0, revoked_all: true, .. }),
+          "{out:?}"
+      );
+      assert_eq!(fake.impersonation(), (false, BTreeSet::new()));
+  }
+
+  /// The bootstrap grants no `ON ALL USERS` any more; the sync right after it
+  /// grants the members.
+  #[tokio::test]
+  async fn the_bootstrap_grants_per_user_never_all_users() {
+      let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+          eprintln!("skipping the_bootstrap_grants_per_user_never_all_users: DATABASE_URL not set");
+          return;
+      };
+      let engine = seed_impersonate_sr_engine(&st).await;
+      prov.set_status(ready_fe_status(&engine.name));
+      let ws = seed_assigned_workspace(&st, &engine).await;
+      let alice = uname("alice");
+      seed_member(&st, ws, &alice, "active").await;
+
+      spawn_starrocks_catalog_wire(
+          st.clone(),
+          engine.id,
+          engine.name.clone(),
+          engine.namespace.clone(),
+          Some(test_delegation()),
+      )
+      .await
+      .expect("bootstrap task did not panic");
+
+      let sent = fake.executed();
+      assert!(
+          !sent.iter().any(|s| s.starts_with("GRANT") && s.contains("ON ALL USERS")),
+          "{sent:?}"
+      );
+      assert!(fake.impersonation().1.contains(&alice), "{sent:?}");
+  }
+  ```
+
+  (Use `std::collections::BTreeSet` in the test module if it is not imported.) Run them; they fail.
+
+  ```bash
+  env -u EGRET_ALLOW_DB_SKIP DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test \
+    CARGO_TARGET_DIR=$PWD/target-srd cargo test -p egret-engine-mgmt --lib -- \
+    native_statements grants_parser unbound_engine bound_engine jwt_engine_loses bootstrap_grants
+  ```
+
+- [ ] **Step 3: Implement.** In `starrocks_users.rs` (import
+  `egret_core::engine_principals::DELEGATOR_PRINCIPAL`):
+
+  ```rust
+  fn delegator_identity() -> String {
+      user_identity(DELEGATOR_PRINCIPAL)
+  }
+
+  pub(crate) fn show_delegator_grants_sql() -> String {
+      format!("SHOW GRANTS FOR {}", delegator_identity())
+  }
+
+  pub(crate) fn revoke_all_impersonation_sql() -> String {
+      format!(
+          "REVOKE IMPERSONATE ON ALL USERS FROM USER {}",
+          delegator_identity()
+      )
+  }
+
+  /// The delegator may become `name`. `None` for a reserved user: egret never
+  /// lets the delegator become root or one of egret's own users.
+  pub(crate) fn grant_impersonation_sql(name: &str) -> Option<String> {
+      (!is_starrocks_reserved_user(name)).then(|| {
+          format!(
+              "GRANT IMPERSONATE ON USER {} TO USER {}",
+              user_identity(name),
+              delegator_identity()
+          )
+      })
+  }
+
+  /// The delegator's IMPERSONATE grants out of `SHOW GRANTS FOR` rows (M6),
+  /// read from the last column (`Grants`).
+  pub(crate) fn delegator_impersonation(rows: &[Vec<Option<String>>]) -> (bool, BTreeSet<String>) {
+      const ON_USER: &str = "IMPERSONATE ON USER ";
+      let mut all = false;
+      let mut users = BTreeSet::new();
+      for grant in rows.iter().filter_map(|r| r.last().cloned().flatten()) {
+          if grant.contains("IMPERSONATE ON ALL USERS") {
+              all = true;
+              continue;
+          }
+          let Some(at) = grant.find(ON_USER) else {
+              continue;
+          };
+          let list = grant[at + ON_USER.len()..].split(" TO ").next().unwrap_or("");
+          for identity in list.split(", ") {
+              if let Some(name) = crate::query_log::authorized_name(identity.trim()) {
+                  users.insert(name);
+              }
+          }
+      }
+      (all, users)
+  }
+
+  /// Spec 2.7: on an engine bound to no profile whose bootstrap created the
+  /// delegator, the delegator may impersonate exactly the users egret manages
+  /// and the FE has. `ON ALL USERS` is revoked first and the grants read again
+  /// (M7), so the result is right whether or not the revoke took per-user
+  /// grants with it. Returns `(granted, revoked_all)`; failures go to `failed`.
+  async fn converge_native_impersonation(
+      st: &CpState,
+      engine: &Engine,
+      fe: &FeTarget,
+      managed: &BTreeSet<String>,
+      failed: &mut Vec<String>,
+  ) -> (usize, bool) {
+      if engine.authz_service_id.is_some()
+          || !matches!(engine.delegation_mode(), "impersonate" | "jwt")
+      {
+          return (0, false);
+      }
+      let none = BTreeMap::new();
+      let read = |rows: Result<Vec<Vec<Option<String>>>, crate::FeError>| {
+          rows.map(|r| delegator_impersonation(&r))
+              .map_err(|e| format!("{DELEGATOR_PRINCIPAL}: grants: {}", e.scrubbed(fe, &none)))
+      };
+      let mut grants = match read(st.starrocks_ddl.query(fe, &show_delegator_grants_sql()).await) {
+          Ok(g) => g,
+          Err(e) => {
+              failed.push(e);
+              return (0, false);
+          }
+      };
+      let mut revoked_all = false;
+      if grants.0 {
+          if let Err(e) = st
+              .starrocks_ddl
+              .execute(fe, &revoke_all_impersonation_sql())
+              .await
+          {
+              failed.push(format!(
+                  "{DELEGATOR_PRINCIPAL}: revoke on all users: {}",
+                  e.scrubbed(fe, &none)
+              ));
+              return (0, false);
+          }
+          revoked_all = true;
+          grants = match read(st.starrocks_ddl.query(fe, &show_delegator_grants_sql()).await) {
+              Ok(g) => g,
+              Err(e) => {
+                  failed.push(e);
+                  return (0, true);
+              }
+          };
+      }
+      let mut granted = 0;
+      for name in managed.difference(&grants.1) {
+          let Some(sql) = grant_impersonation_sql(name) else {
+              continue;
+          };
+          match st.starrocks_ddl.execute(fe, &sql).await {
+              Ok(()) => granted += 1,
+              Err(e) => failed.push(format!("{name}: grant: {}", e.scrubbed(fe, &none))),
+          }
+      }
+      (granted, revoked_all)
+  }
+  ```
+
+  In `sync_locked`: collect the created names (`let mut created_names = Vec::new();`, push `name`
+  where `created += 1`), and before building `UserSync::Done`:
+
+  ```rust
+      let managed: BTreeSet<String> = plan
+          .kept
+          .iter()
+          .chain(created_names.iter())
+          .cloned()
+          .collect();
+      let (granted, revoked_all) =
+          converge_native_impersonation(st, engine, fe, &managed, &mut failed).await;
+  ```
+
+  and use `granted, revoked_all` in `Done` instead of `0, false`.
+
+  In `engines.rs`: delete `starrocks_impersonation_grant_sql`, the
+  `stmts.push(starrocks_impersonation_grant_sql(&d.service_user));` line and the function's test;
+  fix the `build_starrocks_provision_req` comment; make the Step 1 test edits.
+
+- [ ] **Step 4: Run the engine-mgmt suite.**
+
+  ```bash
+  env -u EGRET_ALLOW_DB_SKIP DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test \
+    CARGO_TARGET_DIR=$PWD/target-srd cargo test -p egret-engine-mgmt --no-fail-fast
+  ```
+
+  Expected: all pass, the moved bootstrap tests included.
+
+- [ ] **Step 5: Mutants:**
+  - put the `ON ALL USERS` push back in the bootstrap: `the_bootstrap_grants_per_user_never_all_users`
+    and `the_delegation_bootstrap_still_creates_then_repairs` fail;
+  - drop the `authz_service_id.is_some()` guard: the bound test fails;
+  - drop the revoke: the unbound and jwt tests fail;
+  - grant before the revoke: the unbound test's `revoke < grant` fails;
+  - drop the reserved check in `grant_impersonation_sql`: the pure test fails;
+  - grant `plan.foreign` too: the unbound test's `theirs` assertion fails.
+
+- [ ] **Step 6: Commit.**
+
+  ```bash
+  git add crates/egret-engine-mgmt
+  git commit -m "fix(engine-mgmt): grant the StarRocks delegator per-user IMPERSONATE, revoke ON ALL USERS
+
+  Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+  ```
+
+---
+
+### Task 11: CI parity gate
 
 Run, one at a time, from the worktree root with `CARGO_TARGET_DIR=$PWD/target-srd` and the DB env
 for every suite. Record each command, its result and its duration in the report.
@@ -2856,7 +3737,7 @@ for every suite. Record each command, its result and its duration in the report.
 
 ---
 
-### Task 10: Against a real StarRocks (controller)
+### Task 12: Against a real StarRocks (controller)
 
 - [ ] **Step 1: Start the FE.** Your own container, a name you choose:
 
@@ -2869,14 +3750,24 @@ for every suite. Record each command, its result and its duration in the report.
 - [ ] **Step 2: Add `crates/egret-engine-mgmt/tests/starrocks_users_live.rs`,** gated on
   `EGRET_TEST_STARROCKS_URL` like `query_log_live.rs` (its `fe_from` and `MysqlDdlRunner` pattern),
   through a `test-util` entry point `egret_engine_mgmt::starrocks_users_live_testing` that exposes
-  `sync_starrocks_users`, `UserSync` and `SHOW_USERS_SQL` (mirror `query_log::live_testing`). With
+  `sync_starrocks_users`, `UserSync`, `SHOW_USERS_SQL` and `show_delegator_grants_sql` (mirror
+  `query_log::live_testing`). With
   the test database for the store:
   - an impersonate engine row with one workspace and two members (`pkgd_live_<suffix>_a`, `_b`),
     and a third name seeded on the FE by the test as root (`CREATE USER … IDENTIFIED BY 'x'`);
-  - the first sync: `Done { created: 2, foreign: [third], .. }`; the second: `created: 0`;
+  - the first sync: `Done { foreign: [third], revoked_all: true, .. }` with both members created; the
+    second: `created: 0, granted: 0, revoked_all: false`;
   - `SHOW USERS` lists both members; logging in as a member with any password fails;
   - remove one member's grant; the next sync drops that user and only that one;
-  - the test drops what it created at the end.
+  - **native access control** (the allin1 FE runs it; decided on 2026-11-11, 2): before the first
+    sync the test creates `egret_delegator` with a password it chooses and
+    `GRANT IMPERSONATE ON ALL USERS TO USER 'egret_delegator'@'%'` (an engine bootstrapped before
+    this package); after the sync, `SHOW GRANTS FOR 'egret_delegator'@'%'` has no `ON ALL USERS`
+    and names both members, logging in as `egret_delegator` and running
+    ``EXECUTE AS `<member>` WITH NO REVERT`` succeeds, and ``EXECUTE AS `root` `` and
+    ``EXECUTE AS `<third>` `` (the foreign user) are refused;
+  - assertions name the test's own users only: the test database's platform admins are synced too;
+  - the test drops what it created at the end (the delegator included).
 
   Run it with the variable set, and report its duration:
 
@@ -2904,11 +3795,11 @@ for every suite. Record each command, its result and its duration in the report.
 
 ---
 
-### Task 11: Live check on the kind cluster `egret` (controller)
+### Task 13: Live check on the kind cluster `egret` (controller)
 
 The existing cluster (`kind-egret`), egret in `egret-system` with OIDC, ingress and Ranger, SPA at
 `http://egret.localtest.me`. Record every command and output under
-`.superpowers/sdd/2026-11-11-starrocks-delegation-and-lifecycle/task-11/`.
+`.superpowers/sdd/2026-11-11-starrocks-delegation-and-lifecycle/task-13/`.
 
 - [ ] **Step 1: Build and load the backend from this branch, proven fresh.**
 
@@ -2965,12 +3856,41 @@ The existing cluster (`kind-egret`), egret in `egret-system` with OIDC, ingress 
   password logs in as root, and `SHOW USERS` does not list users of the old engine (only `root`,
   `egret_delegator`, `egret_query_log`, and the members if assigned).
 
-- [ ] **Step 6: Clean up** the engines this task created. Write the summary (four proofs, M4, M5)
-  into the task report and the PR description.
+- [ ] **Step 6: Native access control on an engine bound to no profile** (decided on 2026-11-11, 2).
+  - Create a StarRocks engine in impersonate mode with **no** policy profile (package B's "Not
+    governed" choice on create), assign it to the workspace with `member-sso`.
+  - As root on its FE: `SHOW GRANTS FOR 'egret_delegator'@'%'` shows no `ON ALL USERS` and names
+    `'member-sso'@'%'` (and the platform admins' users); `SHOW USERS` lists the platform admins'
+    users too (decided 1).
+  - Sign in as `member-sso`, SQL Lab on this engine: `SELECT current_user()` answers
+    `'member-sso'@'%'`.
+  - As `egret_delegator` (its secret): ``EXECUTE AS `root` WITH NO REVERT`` is refused.
+  - If a StarRocks engine created before this image exists on the cluster and is bound to no profile,
+    record its `SHOW GRANTS FOR 'egret_delegator'@'%'` before the image and again at most ten minutes
+    after (one sweep): `ON ALL USERS` is gone. If none exists, say so in the report.
+
+- [ ] **Step 7: The create refusal** (decided on 2026-11-11, 4). With a name no engine has:
+
+  ```bash
+  N=pkgd-leftover
+  kubectl apply -n egret-engines -f - <<EOF
+  apiVersion: v1
+  kind: PersistentVolumeClaim
+  metadata: { name: fe-meta-$N-fe-0 }
+  spec: { accessModes: [ReadWriteOnce], resources: { requests: { storage: 1Gi } } }
+  EOF
+  ```
+
+  Create a StarRocks engine named `pkgd-leftover` in the UI: the dialog shows the 409 message with
+  `kubectl delete pvc fe-meta-pkgd-leftover-fe-0 -n egret-engines`, and no engine row appears. Run
+  that command; the same create then succeeds. Delete the engine.
+
+- [ ] **Step 8: Clean up** the engines this task created. Write the summary (four proofs, native
+  access control, the create refusal, M4, M5) into the task report and the PR description.
 
 ---
 
-### Task 12: Docs (in `egret-data/docs`)
+### Task 14: Docs (in `egret-data/docs`)
 
 Branch `docs/starrocks-delegation-and-lifecycle` in a fresh worktree of
 `/Users/1pro-l4r8/Documents/github/data-portal/docs`, after the platform PR merges. Find each page
@@ -2984,14 +3904,22 @@ with grep; edit it in place. Every code fence has a language. `npm run build` pa
   nobody knows; drops it when they leave, are disabled or deleted, or the engine is unassigned or
   moved to JWT; never touches a user it did not create (and logs a warning naming it); refuses
   `root` and egret's own users; when (membership writes, every apply, at start, every 10 minutes).
+  Platform admins get a user on every impersonate engine assigned to a workspace. On an engine bound
+  to no profile, the delegator holds `IMPERSONATE` on exactly those users, never `ON ALL USERS`.
+  **Handing over a user egret did not create:** egret leaves it untouched and logs a warning naming
+  it; drop it as root, and the next sync creates egret's.
 - [ ] **Step 2: `platform/workspace-settings/databases.md`:** the StarRocks text of **Run queries
   as the logged-in user** no longer asks for a hand-configured service user; egret creates the users.
 - [ ] **Step 3: `platform/control-plane/query-engines/engine-detail.md`, "Delete":** deleting a
   StarRocks engine destroys its FE metadata (users, catalogs, the root password, the query log);
   table data stays in object storage under the engine's storage path.
 - [ ] **Step 4: `platform/deploy-operate/upgrade.md`:** a new section "StarRocks impersonation,
-  CN password and engine delete (platform #<PR>)" with the spec's five upgrade notes, the
+  CN password and engine delete (platform #<PR>)" with the spec's eight upgrade notes, the
   `kubectl get pvc -n egret-engines | grep '^fe-meta-'` command in a `bash` fence.
+- [ ] **Step 4b: `platform/reference/rest-api/control-plane-engines.md`:** `POST /engines` (StarRocks)
+  can answer 409 `engine_metadata_left_over` with `claim`, and a message carrying the
+  `kubectl delete pvc … -n …` command. `platform/control-plane/query-engines/provision.md`: the
+  same, as what the create dialog says.
 - [ ] **Step 5: `platform/known-issues.md`:** KI-335 gets *Status: fixed in platform #<PR>*. Two
   new rows (numbers above the highest on docs `main` and every open docs PR): impersonate-mode
   StarRocks under Ranger could not run a query (`cannot find user`, then `IMPERSONATE`), and engine
@@ -3011,12 +3939,22 @@ with grep; edit it in place. Every code fence has a language. `npm run build` pa
 
 ## Self-review
 
-- **Spec coverage:** D1b → Tasks 2, 3, 10 (step 3), 11 (step 2); D1a → Tasks 6, 7, 8, 10, 11
-  (step 2); the ledger decision → Task 6; D2 → Tasks 4, 11 (step 3); D3 → Tasks 5, 11 (steps 4, 5);
-  M1 to M3 → Task 1; M4, M5 → Task 11; upgrade notes and docs → Task 12; golden and CI gates →
-  Tasks 3, 9. The spec's open questions are not built.
+- **Spec coverage:**
+  - D1b → Tasks 2, 3, 12 (step 3), 13 (step 2).
+  - D1a → Tasks 7, 8, 9, 12, 13 (step 2); the ledger decision → Task 7.
+  - Decided on 2026-11-11: (1) platform admins → Tasks 7 (the `roles` and platform-grant triggers),
+    8, 13 (step 6); (2) native access control → Tasks 1 (M6, M7), 10, 12, 13 (step 6); (3) users
+    egret did not create → Tasks 8, 10 (never granted), 14; (4) the create refusal → Tasks 6, 13
+    (step 7), 14.
+  - D2 → Tasks 4, 13 (step 3). D3 → Tasks 5, 13 (steps 4, 5).
+  - M1 to M3, M6, M7 → Task 1; M4, M5 → Task 13. Upgrade notes and docs → Task 14. Golden and CI
+    gates → Tasks 3, 11.
 - **Names used across tasks:** `STARROCKS_RESERVED_USERS`, `is_starrocks_reserved_user`,
-  `InfraObject::AnyUserExcept`, `starrocks_delegator_impersonate_policy`, the five store methods and
-  `UserSyncLock`, `USER_SYNC_CHANNEL`, `SHOW_USERS_SQL`, `sync_starrocks_users`, `UserSync`,
-  `spawn_user_sync`, `sync_all_starrocks_users`, `spawn_starrocks_user_sync`,
-  `FakeStarRocksDdl::{seed_user, users}`.
+  `InfraObject::AnyUserExcept`, `starrocks_delegator_impersonate_policy`,
+  `EngineHttpError::LeftoverFeMetadata`, `leftover_fe_metadata_message`,
+  `refuse_leftover_fe_metadata`, the five store methods and `UserSyncLock`, `USER_SYNC_CHANNEL`,
+  `SHOW_USERS_SQL`, `UserPlan::kept`, `sync_starrocks_users`,
+  `UserSync::Done { granted, revoked_all, .. }`, `spawn_user_sync`, `sync_all_starrocks_users`,
+  `spawn_starrocks_user_sync`, `show_delegator_grants_sql`, `revoke_all_impersonation_sql`,
+  `grant_impersonation_sql`, `delegator_impersonation`,
+  `FakeStarRocksDdl::{seed_user, users, seed_impersonate_all, impersonation}`.
