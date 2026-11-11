@@ -434,11 +434,12 @@ async fn a_starrocks_profile_gets_egret_admin_and_the_query_log() {
     );
     let mut want = admin_rows.clone();
     want.extend(query_log_names(&name));
+    want.push(IMPERSONATE_POLICY_NAME.to_string());
     want.sort();
     assert_eq!(
         rows.keys().cloned().collect::<Vec<_>>(),
         want,
-        "a StarRocks profile gets the StarRocks-def egret-admin rows and the query-log rows"
+        "a StarRocks impersonate profile gets the StarRocks-def egret-admin rows, the query-log rows and the delegator's impersonation"
     );
     for (row_name, row) in &rows {
         assert_eq!(row.managed_by, "infra", "{row_name}");
@@ -451,6 +452,58 @@ async fn a_starrocks_profile_gets_egret_admin_and_the_query_log() {
             "{row_name}"
         );
     }
+}
+
+/// Package D, D1b: a StarRocks engine in impersonate mode brings the
+/// delegator's impersonation, StarRocks-shaped, excluding root, the
+/// delegator and the query-log loader; moving it to jwt takes only that row
+/// away.
+#[tokio::test]
+async fn a_starrocks_impersonate_engine_brings_the_delegator_row_and_jwt_takes_it_away() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else { return };
+    one_admin(&db).await;
+    let (svc, name) = profile(&db, "starrocks").await;
+    let engine = bind_engine(
+        &db,
+        svc,
+        "starrocks",
+        json!({"starrocksConfig": {"delegation": {"mode": "impersonate"}}}),
+    )
+    .await;
+    converge_infra_policy(&db.pool, svc)
+        .await
+        .expect("converge");
+
+    let before = infra_rows(&db, svc).await;
+    let row = before
+        .get(IMPERSONATE_POLICY_NAME)
+        .expect("the delegator's impersonation row");
+    assert_eq!(row.managed_by, "infra");
+    let excluded: Vec<String> = vec![
+        "egret_delegator".into(),
+        "egret_query_log".into(),
+        "root".into(),
+    ];
+    assert_eq!(
+        row.body,
+        egret_policy_api::infra_bodies::starrocks_delegator_impersonate_policy(&name, &excluded)
+    );
+
+    sqlx::query("UPDATE engine_mgmt.engines SET spec = $2 WHERE id = $1")
+        .bind(engine)
+        .bind(json!({"starrocksConfig": {"delegation": {"mode": "jwt"}}}))
+        .execute(&db.pool)
+        .await
+        .expect("to jwt");
+    let sync = converge_infra_policy(&db.pool, svc)
+        .await
+        .expect("converge");
+
+    assert_eq!(sync.removed, vec![IMPERSONATE_POLICY_NAME.to_string()]);
+    let after = infra_rows(&db, svc).await;
+    assert!(!after.contains_key(IMPERSONATE_POLICY_NAME));
+    assert_eq!(after.len(), before.len() - 1, "only the delegator row went");
 }
 
 /// Package A, Task 2: binding a provisioned StarRocks engine, delegating or
