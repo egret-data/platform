@@ -36,7 +36,8 @@
    - **Điểm kích hoạt:** migration 0219 thêm trigger cấp statement trên `access_grants` (kể cả grant role platform như `platform_admin`), `roles` (đổi tên, xoá), `user_groups`, `users` (status, username, delete) và `engine_mgmt.engine_workspaces`, gửi `pg_notify` lúc commit. Một listener trong engine-mgmt nghe kênh đó, kèm vòng quét 10 phút (lần đầu chạy ngay, tức là đối soát lúc khởi động). Ngoài ra còn đồng bộ sau mỗi lần apply StarRocks, và trong bootstrap sau các lệnh delegation (checkpoint thứ tám).
    - **Sổ username:** dựa vào bảo đảm "tên không bao giờ được cấp lại" của nó. Migration 0219 giữ chỗ thêm `root`.
 3. **`MYSQL_PWD` (D2):** thêm vào `feEnvVars` và `cnEnvVars` dạng `secretKeyRef`, trừ khi admin đã đặt. FE và CN roll một lần ở lần apply kế tiếp.
-4. **Access control gốc (engine không gắn profile):** bootstrap thôi cấp `GRANT IMPERSONATE ON ALL USERS`. Việc đồng bộ đọc `SHOW GRANTS FOR 'egret_delegator'@'%'`, thu hồi `ON ALL USERS` nếu còn, đọc lại, rồi cấp `GRANT IMPERSONATE ON USER '<u>'@'%' TO USER 'egret_delegator'@'%'` cho từng user egret quản lý. User dành riêng không bao giờ được cấp. Engine gắn profile (Ranger) không nhận lệnh native nào. Engine có sẵn hội tụ ở lần apply hoặc lần quét kế tiếp.
+4. **Access control gốc (engine không gắn profile):** bootstrap thôi cấp `GRANT IMPERSONATE ON ALL USERS`. Việc đồng bộ đọc `SHOW GRANTS FOR 'egret_delegator'@'%'` một lần (theo cột `Grants` của header), **cấp trước** `GRANT IMPERSONATE ON USER '<u>'@'%' TO USER 'egret_delegator'@'%'` cho từng user egret quản lý còn thiếu, **rồi mới thu hồi** `ON ALL USERS`, và chỉ thu hồi khi mọi lệnh cấp đều thành công (grant theo user không mất khi thu hồi, M7a; nên không cần đọc lại, và lỗi giữa chừng không làm thành viên mất quyền impersonate). User dành riêng không bao giờ được cấp. Engine gắn profile (Ranger) không nhận lệnh cấp hay thu hồi `ON ALL USERS` nào. Engine có sẵn hội tụ ở lần apply hoặc lần quét kế tiếp.
+   - **`DROP USER` không xoá grant** (đo ở Task 10): grant `IMPERSONATE ON USER 'u'@'%'` của delegator vẫn còn sau khi drop `u`, có hiệu lực lại nếu ai đó tạo lại `u`, và khi `u` không còn thì `REVOKE` lỗi `cannot find user`. Vì vậy trước mỗi `DROP USER`, đồng bộ thu hồi grant của user đó nếu `SHOW GRANTS` liệt kê, trên mọi engine có delegator, kể cả engine gắn profile (grant có thể còn từ lúc chưa gắn). Không đọc được hoặc không thu hồi được thì không drop user đó; lần đồng bộ sau thử lại.
 5. **Tạo engine cùng tên khi PVC cũ còn:** `POST /engines` (StarRocks) trả 409, code `engine_metadata_left_over`, kèm lệnh `kubectl delete pvc <claim> -n <namespace>` trong thông báo. Lỗi khi đọc PVC trả 502.
 6. **Xoá engine (D3):** Job xoá bằng `delete_background`; chính sách giữ PVC trên FE khi fe-meta bền vững; dò và xoá `fe-meta-<name>-fe-0`, `-1`, … đến ordinal đầu tiên không tồn tại (tối đa 16).
 
@@ -56,3 +57,15 @@
 2. **Sửa access control gốc ngay trong gói D.** Đồng bộ cấp `IMPERSONATE ON USER` theo từng user và thu hồi `ON ALL USERS`; không bao giờ cấp cho user dành riêng; bootstrap thôi cấp `ON ALL USERS`; engine có sẵn hội tụ ở lần apply hoặc quét kế tiếp. M6 và M7 đo câu trả lời của FE.
 3. **User không do egret tạo được để yên.** Ghi log và có tài liệu cách bàn giao (root drop user đó, lần đồng bộ sau tạo user của egret).
 4. **`POST /engines` trả 409 khi PVC cũ còn**, code `engine_metadata_left_over`, thông báo có lệnh dọn bằng `kubectl`. Ghi chú nâng cấp vẫn giữ.
+
+## Đã quyết ngày 2026-11-12
+
+1. **Grant mồ côi là known issue có tài liệu; đồng bộ không dọn.** Grant theo user trên một tên mà user đã không còn (bị drop trước gói D, hoặc do người khác drop) không thu hồi được, và sẽ cho delegator thành bất kỳ ai sau này tạo tay user cùng tên. Chỉ engine không gắn profile bị ảnh hưởng (dưới Ranger grant native không được đọc). Cách dọn tay, chạy bằng `root` trên FE, cho mỗi tên `SHOW GRANTS FOR 'egret_delegator'@'%'` liệt kê mà `SHOW USERS` không có:
+
+   ```sql
+   CREATE USER 'u'@'%' IDENTIFIED BY '<mật khẩu ngẫu nhiên dài>';
+   REVOKE IMPERSONATE ON USER 'u'@'%' FROM USER 'egret_delegator'@'%';
+   DROP USER 'u'@'%';
+   ```
+
+2. **Cấp theo user trước, rồi mới thu hồi `ON ALL USERS`** (controller, Task 10 fix round 1), và chỉ khi mọi lệnh cấp đều thành công.

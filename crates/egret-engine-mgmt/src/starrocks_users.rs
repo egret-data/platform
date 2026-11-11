@@ -126,6 +126,30 @@ pub(crate) fn revoke_impersonation_sql(name: &str) -> String {
     )
 }
 
+/// The name out of `'<name>'@'<host>'`, the exact inverse of
+/// [`user_identity`]'s `quote_string`: `''` is `'` and `\\` is `\`. `None`
+/// when `raw` has not that form, or the name is empty.
+pub(crate) fn identity_name(raw: &str) -> Option<String> {
+    let rest = raw.strip_prefix('\'')?;
+    let mut name = String::new();
+    let mut chars = rest.char_indices();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '\\' => name.push(chars.next()?.1),
+            '\'' if rest[i + 1..].starts_with('\'') => {
+                name.push('\'');
+                chars.next();
+            }
+            '\'' => {
+                let host = rest[i + 1..].strip_prefix("@'")?;
+                return (host.ends_with('\'') && !name.is_empty()).then_some(name);
+            }
+            c => name.push(c),
+        }
+    }
+    None
+}
+
 /// The delegator's IMPERSONATE grants out of `SHOW GRANTS FOR` rows (M6),
 /// header first, read from the column named `Grants`: `(ON ALL USERS
 /// granted, the users named by ON USER …)`. An answer with no such column is
@@ -156,14 +180,15 @@ pub(crate) fn delegator_impersonation(
         let Some(at) = grant.find(ON_USER) else {
             continue;
         };
-        // One user per row as measured; a list is read too. A name this
-        // misreads is only granted again, which is idempotent (M7).
+        // One user per row as measured; a list is read too. Names egret
+        // manages pass `is_starrocks_user_name` (no quote, comma or
+        // backslash), so they split and unquote exactly.
         let list = grant[at + ON_USER.len()..]
             .split(" TO ")
             .next()
             .unwrap_or("");
         for identity in list.split(", ") {
-            if let Some(name) = crate::query_log::authorized_name(identity.trim()) {
+            if let Some(name) = identity_name(identity.trim()) {
                 users.insert(name);
             }
         }
@@ -171,11 +196,14 @@ pub(crate) fn delegator_impersonation(
     Ok((all, users))
 }
 
-/// Whether the sync manages this engine's native IMPERSONATE grants: bound to
-/// no profile (Ranger decides on a bound one and reads no native grant), and
-/// the FE has the delegator (no delegator, no grant to manage).
-fn manages_native_grants(engine: &Engine, on_fe: &BTreeSet<String>) -> bool {
-    engine.authz_service_id.is_none() && on_fe.contains(DELEGATOR_PRINCIPAL)
+/// Whether the sync converges this engine's native IMPERSONATE grants (spec
+/// 2.7): bound to no profile (Ranger decides on a bound one and reads no
+/// native grant), in a mode whose bootstrap created the delegator, and the
+/// FE has the delegator (no delegator, no grant to manage).
+fn converges_native_grants(engine: &Engine, on_fe: &BTreeSet<String>) -> bool {
+    engine.authz_service_id.is_none()
+        && matches!(engine.delegation_mode(), "impersonate" | "jwt")
+        && on_fe.contains(DELEGATOR_PRINCIPAL)
 }
 
 /// The delegator's grants, read as `root`; a failure is scrubbed.
@@ -196,67 +224,53 @@ async fn read_delegator_grants(
     delegator_impersonation(&rows).map_err(|e| format!("{DELEGATOR_PRINCIPAL}: grants: {e}"))
 }
 
-/// Spec 2.7: on an engine bound to no profile, in `impersonate` or `jwt`
-/// mode, the delegator may impersonate exactly the users egret manages and
-/// the FE has. `ON ALL USERS` is revoked first and the grants read again
-/// (M7), so the result is right whether or not the revoke took per-user
-/// grants with it. Returns `(granted, revoked_all)`; failures go to `failed`.
+/// Spec 2.7: the delegator may impersonate exactly the users egret manages
+/// and the FE has. Each missing per-user grant is sent FIRST, then `ON ALL
+/// USERS` is revoked, and only when every grant landed: per-user grants
+/// survive that revoke (M7a), so no member is left un-impersonatable by a
+/// failure, and no read is needed after it. `grants` is the read the sync
+/// made before its drops (a drop only takes names out of `managed`'s
+/// complement). Returns `(granted, revoked_all)`; failures go to `failed`.
 async fn converge_native_impersonation(
     st: &CpState,
-    engine: &Engine,
     fe: &FeTarget,
-    on_fe: &BTreeSet<String>,
+    grants: &(bool, BTreeSet<String>),
     managed: &BTreeSet<String>,
     failed: &mut Vec<String>,
 ) -> (usize, bool) {
-    if !manages_native_grants(engine, on_fe)
-        || !matches!(engine.delegation_mode(), "impersonate" | "jwt")
-    {
-        return (0, false);
-    }
-    let mut grants = match read_delegator_grants(st, fe).await {
-        Ok(g) => g,
-        Err(e) => {
-            failed.push(e);
-            return (0, false);
-        }
-    };
-    let mut revoked_all = false;
-    if grants.0 {
-        if let Err(e) = st
-            .starrocks_ddl
-            .execute(fe, &revoke_all_impersonation_sql())
-            .await
-        {
-            failed.push(format!(
-                "{DELEGATOR_PRINCIPAL}: revoke on all users: {}",
-                e.scrubbed(fe, &BTreeMap::new())
-            ));
-            return (0, false);
-        }
-        revoked_all = true;
-        grants = match read_delegator_grants(st, fe).await {
-            Ok(g) => g,
-            Err(e) => {
-                failed.push(e);
-                return (0, true);
-            }
-        };
-    }
-    let mut granted = 0;
+    let (mut granted, mut every_grant_landed) = (0, true);
     for name in managed.difference(&grants.1) {
         let Some(sql) = grant_impersonation_sql(name) else {
             continue;
         };
         match st.starrocks_ddl.execute(fe, &sql).await {
             Ok(()) => granted += 1,
-            Err(e) => failed.push(format!(
-                "{name}: grant: {}",
-                e.scrubbed(fe, &BTreeMap::new())
-            )),
+            Err(e) => {
+                every_grant_landed = false;
+                failed.push(format!(
+                    "{name}: grant: {}",
+                    e.scrubbed(fe, &BTreeMap::new())
+                ));
+            }
         }
     }
-    (granted, revoked_all)
+    if !grants.0 || !every_grant_landed {
+        return (granted, false);
+    }
+    match st
+        .starrocks_ddl
+        .execute(fe, &revoke_all_impersonation_sql())
+        .await
+    {
+        Ok(()) => (granted, true),
+        Err(e) => {
+            failed.push(format!(
+                "{DELEGATOR_PRINCIPAL}: revoke on all users: {}",
+                e.scrubbed(fe, &BTreeMap::new())
+            ));
+            (granted, false)
+        }
+    }
 }
 
 /// The user names `SHOW USERS` lists: the first column, read as `'<name>'@'<host>'`
@@ -506,25 +520,37 @@ async fn sync_locked(st: &CpState, engine: &Engine, fe: &FeTarget) -> UserSync {
             }
         }
     }
-    // A dropped user keeps the delegator's grant on its name, revocable only
-    // while the user exists: revoke first, and never drop a user whose grant
-    // could not be revoked, or read, on an engine whose grants egret manages.
-    // `None`: no native grants to mind.
-    let mut granted_before_drop = None;
-    let mut drops: &[String] = &plan.drop;
-    if !drops.is_empty() && manages_native_grants(engine, &on_fe) {
+    // One read of the delegator's grants, only when something needs it: the
+    // drops below, or the convergence after them. A dropped user keeps the
+    // delegator's grant on its name, revocable only while the user exists
+    // (measured in Task 10), so a granted user's grant is revoked before its
+    // drop, on a bound engine too (a grant left from an unbound period); a
+    // user whose grant could not be read or revoked is not dropped.
+    let delegator_on_fe = on_fe.contains(DELEGATOR_PRINCIPAL);
+    let converges = converges_native_grants(engine, &on_fe);
+    let grants = if delegator_on_fe && (converges || !plan.drop.is_empty()) {
         match read_delegator_grants(st, fe).await {
-            Ok((_, users)) => granted_before_drop = Some(users),
+            Ok(g) => Some(g),
             Err(e) => {
-                failed.push(format!("{e} (no user dropped: {})", drops.join(", ")));
-                drops = &[];
+                failed.push(e);
+                None
             }
         }
+    } else {
+        None
+    };
+    let mut drops: &[String] = &plan.drop;
+    if delegator_on_fe && grants.is_none() && !drops.is_empty() {
+        failed.push(format!(
+            "no user dropped while the grants are unread: {}",
+            drops.join(", ")
+        ));
+        drops = &[];
     }
     for name in drops {
-        if granted_before_drop
+        if grants
             .as_ref()
-            .is_some_and(|users| users.contains(name))
+            .is_some_and(|(_, users)| users.contains(name))
         {
             if let Err(e) = st
                 .starrocks_ddl
@@ -559,8 +585,12 @@ async fn sync_locked(st: &CpState, engine: &Engine, fe: &FeTarget) -> UserSync {
         .chain(created_names.iter())
         .cloned()
         .collect();
-    let (granted, revoked_all) =
-        converge_native_impersonation(st, engine, fe, &on_fe, &managed, &mut failed).await;
+    let (granted, revoked_all) = match &grants {
+        Some(grants) if converges => {
+            converge_native_impersonation(st, fe, grants, &managed, &mut failed).await
+        }
+        _ => (0, false),
+    };
     UserSync::Done {
         created,
         dropped,
@@ -943,6 +973,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn identity_name_is_the_inverse_of_user_identity() {
+        for name in ["bob", "o'b", "b\\x", "x\\'", "''", "\\", "a@'b"] {
+            assert_eq!(
+                identity_name(&user_identity(name)).as_deref(),
+                Some(name),
+                "{name}"
+            );
+        }
+        assert_eq!(identity_name("'bob'@'10.%'").as_deref(), Some("bob"));
+        for bad in ["", "bob", "'bob", "'bob'", "'bob'@", "''@'%'", "'b\\"] {
+            assert_eq!(identity_name(bad), None, "{bad}");
+        }
+    }
+
     /// Read by the header, as measured (Task 1, M6): the `Grants` column,
     /// wherever it is.
     #[test]
@@ -975,6 +1020,17 @@ mod tests {
             ],
         ];
         assert_eq!(delegator_impersonation(&moved), Ok((false, set(&["z"]))));
+
+        // Unquoted as `quote_string` quoted: `''` and `\\` both undone.
+        let odd = ["b\\x", "o'b\\'c", "a\\\\"];
+        let mut escaped = vec![header(&["UserIdentity", "Catalog", "Grants"])];
+        for name in odd {
+            escaped.push(row(&format!(
+                "GRANT IMPERSONATE ON USER {} TO USER 'egret_delegator'@'%'",
+                user_identity(name)
+            )));
+        }
+        assert_eq!(delegator_impersonation(&escaped), Ok((false, set(&odd))));
 
         assert_eq!(
             delegator_impersonation(&[header(&["UserIdentity", "Catalog", "Grants"])]),

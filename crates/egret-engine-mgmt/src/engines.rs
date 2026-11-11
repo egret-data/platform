@@ -17149,8 +17149,8 @@ mod tests {
     }
 
     /// Decided on 2026-11-11 (2): on an engine bound to no profile, the sync
-    /// revokes `ON ALL USERS` first, then grants each user egret manages; a
-    /// second sync sends neither.
+    /// grants each user egret manages, then revokes `ON ALL USERS`; a second
+    /// sync sends neither.
     #[tokio::test]
     async fn an_unbound_engine_trades_all_users_for_per_user_grants() {
         let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
@@ -17198,7 +17198,9 @@ mod tests {
                 )
             })
             .expect("alice's grant");
-        assert!(revoke < grant, "{sent:?}");
+        // Grant first, then revoke (controller, fix round 1): per-user
+        // grants survive the revoke (M7a).
+        assert!(grant < revoke, "{sent:?}");
         let (all, users) = fake.impersonation();
         assert!(!all);
         assert!(users.contains(&alice), "{users:?}");
@@ -17231,7 +17233,7 @@ mod tests {
     }
 
     /// On an engine bound to a profile, Ranger decides: no native grant or
-    /// revoke is sent, not even before a drop.
+    /// revoke is sent, and with nothing to drop the grants are not even read.
     #[tokio::test]
     async fn a_bound_engine_gets_no_native_impersonation_statement() {
         let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
@@ -17259,7 +17261,56 @@ mod tests {
         let ws = seed_assigned_workspace(&st, &engine).await;
         let bob = uname("bob");
         seed_member(&st, ws, &bob, "active").await;
-        // And one recorded user to drop, holding a native grant.
+        fake.seed_impersonate_all();
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe");
+
+        let out = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+
+        assert!(
+            matches!(
+                out,
+                crate::starrocks_users::UserSync::Done { created: 1, .. }
+            ),
+            "premise: the user steps ran: {out:?}"
+        );
+        assert!(
+            !fake.executed().iter().any(|s| s.contains("IMPERSONATE")),
+            "{:?}",
+            fake.executed()
+        );
+        assert!(!fake.queried().iter().any(|q| q.starts_with("SHOW GRANTS")));
+    }
+
+    /// Fix round 1 (4): a bound engine may hold a native per-user grant left
+    /// from an unbound period. A user about to be dropped loses it first (it
+    /// outlives a `DROP USER`), from one read of the grants; nothing else
+    /// native is sent.
+    #[tokio::test]
+    async fn a_bound_engine_revokes_a_left_over_grant_before_the_drop() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping a_bound_engine_revokes_a_left_over_grant_before_the_drop: DATABASE_URL not set");
+            return;
+        };
+        let _pass = USER_SYNC_PASS.read().await;
+        st.authz
+            .ensure_starrocks_def()
+            .await
+            .expect("seed starrocks service-def");
+        let svc = st
+            .authz
+            .create_service(&uname("pkgd_sr"), "starrocks", &serde_json::json!({}))
+            .await
+            .expect("service");
+        let engine = seed_impersonate_sr_engine(&st).await;
+        sqlx::query("UPDATE engine_mgmt.engines SET authz_service_id = $2 WHERE id = $1")
+            .bind(engine.id)
+            .bind(svc.id)
+            .execute(st.engine_mgmt.pool())
+            .await
+            .unwrap();
+        let engine = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
         let gone = uname("gone");
         st.engine_mgmt
             .record_starrocks_user(engine.id, &gone)
@@ -17276,21 +17327,161 @@ mod tests {
 
         assert!(
             matches!(
-                out,
+                &out,
+                crate::starrocks_users::UserSync::Done {
+                    dropped: 1,
+                    granted: 0,
+                    revoked_all: false,
+                    failed,
+                    ..
+                } if failed.is_empty()
+            ),
+            "{out:?}"
+        );
+        let sent = fake.executed();
+        let revoke = sent
+            .iter()
+            .position(|s| {
+                s == &format!(
+                    "REVOKE IMPERSONATE ON USER '{gone}'@'%' FROM USER 'egret_delegator'@'%'"
+                )
+            })
+            .expect("the left-over grant's revoke");
+        let drop = sent
+            .iter()
+            .position(|s| s == &format!("DROP USER '{gone}'@'%'"))
+            .expect("the drop");
+        assert!(revoke < drop, "{sent:?}");
+        assert_eq!(
+            sent.iter().filter(|s| s.contains("IMPERSONATE")).count(),
+            1,
+            "no other native statement on a bound engine: {sent:?}"
+        );
+        assert_eq!(
+            fake.queried()
+                .iter()
+                .filter(|q| q.starts_with("SHOW GRANTS"))
+                .count(),
+            1,
+            "{:?}",
+            fake.queried()
+        );
+        assert_eq!(
+            fake.impersonation(),
+            (true, std::collections::BTreeSet::new()),
+            "ON ALL USERS is Ranger's business here"
+        );
+    }
+
+    /// Fix round 1 (2): a per-user grant that fails leaves `ON ALL USERS` in
+    /// place, so no member loses impersonation until the next sync.
+    #[tokio::test]
+    async fn a_failed_grant_keeps_all_users() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping a_failed_grant_keeps_all_users: DATABASE_URL not set");
+            return;
+        };
+        let _pass = USER_SYNC_PASS.read().await;
+        let engine = seed_impersonate_sr_engine(&st).await;
+        let ws = seed_assigned_workspace(&st, &engine).await;
+        let alice = uname("alice");
+        seed_member(&st, ws, &alice, "active").await;
+        fake.seed_impersonate_all();
+        fake.fail_matching_once("GRANT IMPERSONATE ON USER", "ERROR 1064 (HY000): boom");
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe");
+
+        let out = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+
+        assert!(
+            matches!(
+                &out,
                 crate::starrocks_users::UserSync::Done {
                     created: 1,
-                    dropped: 1,
+                    granted: 0,
+                    revoked_all: false,
+                    failed,
                     ..
-                }
+                } if !failed.is_empty()
             ),
-            "premise: the user steps ran: {out:?}"
+            "{out:?}"
         );
         assert!(
-            !fake.executed().iter().any(|s| s.contains("IMPERSONATE")),
+            !fake
+                .executed()
+                .iter()
+                .any(|s| s.starts_with("REVOKE IMPERSONATE ON ALL USERS")),
             "{:?}",
             fake.executed()
         );
-        assert!(!fake.queried().iter().any(|q| q.starts_with("SHOW GRANTS")));
+        assert!(fake.impersonation().0, "ON ALL USERS still held");
+
+        // The next sync grants, then revokes.
+        let again = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+        assert!(
+            matches!(
+                again,
+                crate::starrocks_users::UserSync::Done {
+                    granted: 1,
+                    revoked_all: true,
+                    ..
+                }
+            ),
+            "{again:?}"
+        );
+        assert_eq!(
+            fake.impersonation(),
+            (false, std::collections::BTreeSet::from([alice]))
+        );
+    }
+
+    /// Review Important 1: a `none`-mode engine (its delegation turned off)
+    /// that still has the delegator and a recorded user is synced for the
+    /// user, but its native grants are not converged: `ON ALL USERS` stays.
+    #[tokio::test]
+    async fn a_none_mode_engine_keeps_all_users() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping a_none_mode_engine_keeps_all_users: DATABASE_URL not set");
+            return;
+        };
+        let _pass = USER_SYNC_PASS.read().await;
+        let engine = seed_sr_engine(&st).await;
+        assert_eq!(engine.delegation_mode(), "none", "premise");
+        assert!(engine.authz_service_id.is_none(), "premise: unbound");
+        let left = uname("left");
+        st.engine_mgmt
+            .record_starrocks_user(engine.id, &left)
+            .await
+            .expect("record");
+        fake.seed_user(&left);
+        fake.seed_impersonate_all();
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe");
+
+        let out = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+
+        assert!(
+            matches!(
+                out,
+                crate::starrocks_users::UserSync::Done {
+                    dropped: 1,
+                    revoked_all: false,
+                    ..
+                }
+            ),
+            "premise: the recorded user was synced (dropped): {out:?}"
+        );
+        assert!(fake.impersonation().0, "ON ALL USERS still held");
+        assert!(
+            !fake
+                .executed()
+                .iter()
+                .any(|s| s.starts_with("REVOKE IMPERSONATE ON ALL USERS")),
+            "{:?}",
+            fake.executed()
+        );
     }
 
     /// A jwt engine (no users to manage) still loses `ON ALL USERS`.

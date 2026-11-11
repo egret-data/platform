@@ -3218,6 +3218,23 @@ command and its verbatim output.
 
 ### Task 10: Native access control: per-user IMPERSONATE, `ON ALL USERS` revoked (decided 2026-11-11, 2)
 
+> **Amended by fix round 1 (2026-11-12); these points override the steps below** (spec 2.7 and
+> "Decided on 2026-11-12"):
+>
+> - **Order:** grant each missing per-user grant FIRST, then `REVOKE IMPERSONATE ON ALL USERS`, and
+>   only when every grant landed. No read after the revoke (M7a: per-user grants survive it). The
+>   unbound test asserts `grant < revoke`; mutant "revoke first" is killed by
+>   `a_failed_grant_keeps_all_users` (a failed per-user grant leaves `ON ALL USERS` held).
+> - **`DROP USER` keeps the delegator's per-user grant** (measured), and a `REVOKE` for a missing
+>   user fails with `cannot find user`. The fake keeps the grant on `DROP USER`. Before each drop the
+>   sync revokes the user's listed grant, on bound engines too; one `SHOW GRANTS` read per sync,
+>   only when there is something to drop or converge; a user whose grant cannot be read or revoked
+>   is not dropped.
+> - **Parser:** reads the `Grants` column by header, returns `Result`, and unquotes with
+>   `identity_name`, the exact inverse of `quote_string` (`''` and `\\`).
+> - **Mode check:** `none`-mode engines are not converged (`a_none_mode_engine_keeps_all_users`).
+> - **Orphan grants** on users already gone are a known issue; the sync does not clean them up.
+
 **Files:**
 - Modify: `crates/egret-engine-mgmt/src/starrocks_users.rs` (builders, parser,
   `converge_native_impersonation`, its call in `sync_locked`, tests)
@@ -3294,7 +3311,7 @@ command and its verbatim output.
           }
   ```
 
-  In the `DROP USER` branch, after the remove: `self.impersonable.lock().unwrap().remove(&name);`.
+  (Superseded by fix round 1: `DROP USER` keeps the grant, as measured.) In the `DROP USER` branch, after the remove: `self.impersonable.lock().unwrap().remove(&name);`.
   In `query`, beside `SHOW USERS` (rows per M6):
 
   ```rust
@@ -3377,7 +3394,7 @@ command and its verbatim output.
 
   ```rust
   /// Decided on 2026-11-11 (2): on an engine bound to no profile, the sync
-  /// revokes `ON ALL USERS` first, then grants each user egret manages; a
+  /// (superseded: grants first, then revokes) revokes `ON ALL USERS` first, then grants each user egret manages; a
   /// second sync sends neither.
   #[tokio::test]
   async fn an_unbound_engine_trades_all_users_for_per_user_grants() {
@@ -3678,7 +3695,8 @@ command and its verbatim output.
     and `the_delegation_bootstrap_still_creates_then_repairs` fail;
   - drop the `authz_service_id.is_some()` guard: the bound test fails;
   - drop the revoke: the unbound and jwt tests fail;
-  - grant before the revoke: the unbound test's `revoke < grant` fails;
+  - (superseded by fix round 1) grant before the revoke: the unbound test's `revoke < grant` fails;
+    now: revoke first: `a_failed_grant_keeps_all_users` and the unbound test's `grant < revoke` fail;
   - drop the reserved check in `grant_impersonation_sql`: the pure test fails;
   - grant `plan.foreign` too: the unbound test's `theirs` assertion fails.
 

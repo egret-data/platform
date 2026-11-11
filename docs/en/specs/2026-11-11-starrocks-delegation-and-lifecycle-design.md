@@ -372,23 +372,43 @@ lets the delegator become `root`. So:
 
 - **The bootstrap stops granting `ON ALL USERS`**: `starrocks_impersonation_grant_sql` and its push
   go. The sync, which the bootstrap runs right after (checkpoint 7), grants what is needed.
-- **The sync**, on an engine with `authz_service_id = NULL` and a delegation mode of `impersonate`
-  or `jwt`, after the user steps:
-  1. reads `SHOW GRANTS FOR 'egret_delegator'@'%'` (M6) into `(all_users, per_user)`;
-  2. if `all_users`: `REVOKE IMPERSONATE ON ALL USERS FROM USER 'egret_delegator'@'%'`, then reads
-     the grants again (M7: the revoke may or may not have taken per-user grants with it);
-  3. for each user egret manages and the FE has (kept plus created this run) and that is not yet in
+- **The sync**, on an engine with `authz_service_id = NULL`, a delegation mode of `impersonate`
+  or `jwt`, and the delegator on the FE, after the user steps:
+  1. reads `SHOW GRANTS FOR 'egret_delegator'@'%'` (M6) into `(all_users, per_user)`, by the
+     header's `Grants` column. One read per sync serves the drops and this step;
+  2. for each user egret manages and the FE has (kept plus created this run) and that is not yet in
      `per_user`: `GRANT IMPERSONATE ON USER '<u>'@'%' TO USER 'egret_delegator'@'%'`. A reserved
-     user is never granted (it is never managed; the grant builder also refuses one).
-  Grants to users egret did not create are neither added nor removed. A dropped user takes its
-  grant with it.
-- **On a bound engine** (Ranger), the sync issues no native grant or revoke: Ranger does not read
-  them, and D1b's row is the control. An engine whose profile is later unbound converges on its next
+     user is never granted (it is never managed; the grant builder also refuses one);
+  3. if `all_users` **and every grant of step 2 landed**: `REVOKE IMPERSONATE ON ALL USERS FROM USER
+     'egret_delegator'@'%'`.
+
+  **Grant first, then revoke** (decided on 2026-11-12, controller, fix round 1 of Task 10). M7a
+  measured that per-user grants survive the revoke, so no read is needed after it, and a failed
+  grant leaves `ON ALL USERS` in place: no member is ever left un-impersonatable for up to a sweep
+  (600 s) by a partial failure. The plan's first order (revoke, read again, grant) had that window.
+
+  Grants to users egret did not create are neither added nor removed.
+- **A dropped user does NOT take its grant with it** (measured in Task 10 on `4.1.7-egret.4`,
+  native access control): after `DROP USER 'u'@'%'`, `SHOW GRANTS FOR 'egret_delegator'@'%'` still
+  lists `GRANT IMPERSONATE ON USER 'u'@'%'`; if anyone re-creates `u`, the delegator can
+  `EXECUTE AS u` again. Once `u` is gone, `REVOKE IMPERSONATE ON USER 'u'@'%' FROM …` fails with
+  `cannot find user 'u'@'%'!.` So the sync, before each `DROP USER`, revokes that user's per-user
+  grant when the read lists one, **on every engine whose FE has the delegator, bound or not** (a
+  bound engine can hold a native grant left from an unbound period). The grants are read once, and
+  only when there is something to drop or to converge. A user whose grant could not be read or
+  revoked is not dropped; the next sync tries again. A revoke of a grant that is not there fails
+  with `There is no such grant defined on USER 'u'@'%'`, so the revoke is sent only for a listed
+  grant.
+- **On a bound engine** (Ranger), the sync issues no native grant and no `ON ALL USERS` revoke:
+  Ranger does not read them, and D1b's row is the control. The only native statement it sends is
+  the revoke before a drop above. An engine whose profile is later unbound converges on its next
   sync.
 - **Existing engines** converge on their next apply or sweep (at most ten minutes after the
-  upgrade): `ON ALL USERS` is revoked and the per-user grants appear.
-- Failures go into `Done.failed`, scrubbed, and the next sync tries again. In the window between
-  the revoke and the grants, a member's `EXECUTE AS` is refused; it lasts one sync.
+  upgrade): the per-user grants appear and `ON ALL USERS` is revoked.
+- Failures go into `Done.failed`, scrubbed, and the next sync tries again.
+- **Orphan grants are a known issue** (decided on 2026-11-12, see the end of this spec): a per-user
+  grant on a name whose user is already gone (dropped before package D, or by someone other than
+  egret) cannot be revoked and is not cleaned up by the sync.
 
 ### 3. `MYSQL_PWD` for the FE and the CN (D2)
 
@@ -520,6 +540,8 @@ gives its duration.
 - **Platform admins get a StarRocks user** on every impersonate-mode engine assigned to a workspace.
 - **Engines bound to no profile lose `GRANT IMPERSONATE ON ALL USERS`**: on their next apply or sweep
   the delegator gets per-user grants for egret's users instead, and can no longer become `root`.
+- **Orphan IMPERSONATE grants** on users dropped before the upgrade stay; see the known issue in
+  "Decided on 2026-11-12" for the manual cleanup.
 - **Creating a StarRocks engine whose name left a metadata claim** answers 409 with the `kubectl`
   command to remove it.
 
@@ -560,3 +582,23 @@ gives its duration.
    `kubectl` cleanup in the message (section 5). The upgrade note stays.
 
 The question texts are in this file's git history (commit `acbc223cd`).
+
+## Decided on 2026-11-12
+
+1. **Orphan per-user grants are a documented known issue; the sync does not clean them up.**
+   StarRocks keeps the delegator's `IMPERSONATE ON USER 'u'@'%'` after `DROP USER 'u'@'%'` and
+   refuses to revoke it while `u` does not exist (measured in Task 10). egret revokes before its own
+   drops (2.7), but a grant on a name whose user is already gone (dropped before package D, or
+   dropped by someone else) remains, and would let the delegator become anyone who later creates a
+   user of that name by hand. Only engines bound to no profile are affected: under Ranger the native
+   grant is not read. Manual cleanup, as `root` on the FE, for each name `SHOW GRANTS FOR
+   'egret_delegator'@'%'` lists that `SHOW USERS` does not:
+
+   ```sql
+   CREATE USER 'u'@'%' IDENTIFIED BY '<a long random password>';
+   REVOKE IMPERSONATE ON USER 'u'@'%' FROM USER 'egret_delegator'@'%';
+   DROP USER 'u'@'%';
+   ```
+
+2. **Grant per user first, then revoke `ON ALL USERS`** (controller, Task 10 fix round 1), and only
+   when every per-user grant landed (2.7).

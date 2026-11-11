@@ -1835,8 +1835,8 @@ impl StarRocksDdl for FakeStarRocksDdl {
                 .iter()
                 .map(|u| {
                     row(format!(
-                        "GRANT IMPERSONATE ON USER '{}'@'%' TO USER {me}",
-                        u.replace('\'', "''")
+                        "GRANT IMPERSONATE ON USER {} TO USER {me}",
+                        crate::starrocks_users::user_identity(u)
                     ))
                 })
                 .collect();
@@ -1950,10 +1950,10 @@ fn user_target(prefix: &str, sql: &str) -> Option<String> {
     crate::query_log::authorized_name(identity)
 }
 
-/// The user name out of `<prefix>'<name>'@'<host>'<until>…`, `''` read as `'`.
+/// The user name out of `<prefix>'<name>'@'<host>'<until>…`, unquoted exactly.
 fn impersonation_target(prefix: &str, until: &str, sql: &str) -> Option<String> {
     let rest = sql.strip_prefix(prefix)?;
-    crate::query_log::authorized_name(rest.split(until).next()?.trim())
+    crate::starrocks_users::identity_name(rest.split(until).next()?.trim())
 }
 
 /// The backtick-quoted name out of a statement that starts with `prefix`,
