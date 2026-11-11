@@ -17228,10 +17228,63 @@ mod tests {
         let fay = uname("fay");
         seed_member(&st, ws, &fay, "active").await;
 
-        let synced = crate::starrocks_users::sync_all_starrocks_users(&st).await;
+        let report = crate::starrocks_users::sync_all_starrocks_users(&st).await;
 
-        assert!(synced >= 1);
+        assert!(report.synced >= 1);
         assert!(fake.users().contains(&fay));
+    }
+
+    /// Fix round 1, folded minor: a pass that finds an engine `Busy` asks for
+    /// another pass, so the write that woke it is not left for the ten-minute
+    /// sweep. The worker here gets ONE wake-up and has no listener or sweep:
+    /// once the lock is released, only its own retry can sync the member.
+    #[tokio::test]
+    async fn a_busy_engine_gets_another_pass() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping a_busy_engine_gets_another_pass: DATABASE_URL not set");
+            return;
+        };
+        let _pass = USER_SYNC_PASS.write().await;
+        let engine = seed_impersonate_sr_engine(&st).await;
+        let ws = seed_assigned_workspace(&st, &engine).await;
+        let lia = uname("lia");
+        seed_member(&st, ws, &lia, "active").await;
+        let lock = st
+            .engine_mgmt
+            .try_lock_user_sync(engine.id)
+            .await
+            .expect("lock")
+            .expect("the lock is free");
+        let (wake, wakes) = tokio::sync::mpsc::channel(1);
+        let worker = tokio::spawn(crate::starrocks_users::run_sync_worker(
+            st.clone(),
+            wake.clone(),
+            wakes,
+            std::time::Duration::from_millis(10),
+            std::time::Duration::from_millis(200),
+        ));
+
+        wake.try_send(()).expect("the one wake-up");
+        // The worker took it; give its pass time to meet the held lock.
+        while wake.capacity() == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        assert!(
+            !fake.users().contains(&lia),
+            "premise: the lock kept the first pass out"
+        );
+        lock.release().await;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !fake.users().contains(&lia) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a Busy engine was left for the sweep"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        worker.abort();
     }
 
     /// The worker hears migration 0219's NOTIFY: once the boot reconcile has
@@ -17669,10 +17722,11 @@ mod tests {
     }
 
     /// Checkpoint 8, on a delegating engine: the query log runs after the
-    /// delegation half and the user sync, so the engine is flipped on the
-    /// user sync's LAST write (the member's `CREATE USER`). Checkpoints 4 to
-    /// 7 have passed by then, and checkpoint 8 is the only thing left between
-    /// the bootstrap and the query log's writes. (Flipped any earlier,
+    /// delegation half and the user sync, so the engine is flipped on a write
+    /// of the user sync (the member's `CREATE USER`). Checkpoints 4 to 7 have
+    /// passed by then, and checkpoint 8 is the only thing left between the
+    /// bootstrap and the query log's writes; the sync's later writes (Task
+    /// 10's grants) do not change that. (Flipped any earlier,
     /// checkpoint 7 would stop it first: see
     /// `a_deleted_engine_gets_no_user_sync_from_the_bootstrap`.)
     #[tokio::test]
@@ -17716,12 +17770,12 @@ mod tests {
             sent.iter().any(|s| s.contains("GRANT IMPERSONATE")),
             "premise: the delegation half ran: {sent:?}"
         );
-        assert_eq!(
-            sent.last()
-                .map(|s| s.starts_with(&format!("CREATE USER '{ivy}'@'%'"))),
-            Some(true),
-            "premise: the user sync ran to its last statement, and nothing followed: \
-             {sent:?}"
+        // Robust to statements the sync sends after the member's create
+        // (Task 10's grants): only the query log's statements must be absent.
+        assert!(
+            sent.iter()
+                .any(|s| s.starts_with(&format!("CREATE USER '{ivy}'@'%'"))),
+            "premise: the user sync reached the member's create: {sent:?}"
         );
         assert!(
             !sent

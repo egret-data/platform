@@ -45,6 +45,11 @@ const LISTEN_RETRY: Duration = Duration::from_secs(5);
 /// run of unrelated grant writes) costs one pass.
 const SYNC_DEBOUNCE: Duration = Duration::from_secs(1);
 
+/// How long the worker waits before another pass when this one found an
+/// engine `Busy`: the holder (a bootstrap, an apply, a request) may have
+/// read the membership before the write that woke this pass committed.
+const BUSY_RETRY: Duration = Duration::from_secs(5);
+
 pub(crate) const SHOW_USERS_SQL: &str = "SHOW USERS";
 
 /// Whether StarRocks accepts `name` as a user name: `FeNameFormat.checkUserName`,
@@ -447,17 +452,24 @@ async fn current_engine(st: &CpState, engine_id: Uuid) -> Option<Engine> {
     }
 }
 
-/// One pass over every engine that wants a sync, one at a time. Returns how
-/// many reconciled (`Done`).
-pub(crate) async fn sync_all_starrocks_users(st: &CpState) -> usize {
+/// What one pass did: how many engines reconciled (`Done`), and how many
+/// were `Busy` (another sync of the engine held its lock).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PassReport {
+    pub(crate) synced: usize,
+    pub(crate) busy: usize,
+}
+
+/// One pass over every engine that wants a sync, one at a time.
+pub(crate) async fn sync_all_starrocks_users(st: &CpState) -> PassReport {
     let engines = match st.engine_mgmt.list_engines().await {
         Ok(engines) => engines,
         Err(e) => {
             tracing::warn!(error = %e, "starrocks users: listing the engines failed");
-            return 0;
+            return PassReport::default();
         }
     };
-    let mut synced = 0;
+    let mut report = PassReport::default();
     for listed in engines {
         // The pass is serial, so a listed row can be minutes old by its turn.
         let Some(engine) = current_engine(st, listed.id).await else {
@@ -476,11 +488,13 @@ pub(crate) async fn sync_all_starrocks_users(st: &CpState) -> usize {
         };
         let outcome = sync_starrocks_users(st, &engine, &fe).await;
         log_outcome(&engine.name, &outcome);
-        if matches!(outcome, UserSync::Done { .. }) {
-            synced += 1;
+        match outcome {
+            UserSync::Done { .. } => report.synced += 1,
+            UserSync::Busy => report.busy += 1,
+            _ => {}
         }
     }
-    synced
+    report
 }
 
 /// Ask the worker for a pass. The channel holds one wake-up, so a full
@@ -507,63 +521,104 @@ async fn run_coalesced<F, Fut>(
     }
 }
 
-/// Start the sync's three tasks: a `LISTEN` on [`USER_SYNC_CHANNEL`], a
-/// sweep every [`SWEEP_INTERVAL`] whose first tick is immediate (the boot
-/// reconcile), and the worker that runs [`sync_all_starrocks_users`] once per
-/// burst of wake-ups ([`run_coalesced`]): migration 0219's triggers are
+/// The worker: one [`sync_all_starrocks_users`] per burst of wake-ups
+/// ([`run_coalesced`]). A pass that found an engine `Busy` asks for another
+/// pass `busy_retry` later, so the write that woke it is not left for the
+/// sweep: the lock's holder may have read the membership before it.
+pub(crate) async fn run_sync_worker(
+    st: CpState,
+    wake: tokio::sync::mpsc::Sender<()>,
+    wakes: tokio::sync::mpsc::Receiver<()>,
+    debounce: Duration,
+    busy_retry: Duration,
+) {
+    run_coalesced(wakes, debounce, move || {
+        let (st, wake) = (st.clone(), wake.clone());
+        async move {
+            let report = sync_all_starrocks_users(&st).await;
+            tracing::debug!(
+                engines = report.synced,
+                busy = report.busy,
+                "starrocks users: sync pass done"
+            );
+            if report.busy > 0 {
+                tokio::time::sleep(busy_retry).await;
+                wake_worker(&wake);
+            }
+        }
+    })
+    .await
+}
+
+/// `LISTEN` on `channel` and wake the worker on every notification, and on
+/// every (re)connect, since notifications sent while the connection was down
+/// are lost. sqlx's `recv()` would reconnect silently, so this loops on
+/// `try_recv()`, whose `Ok(None)` is exactly "the connection was lost and
+/// (eagerly) re-established". A failed reconnect is an `Err`: wait, then
+/// build a new listener. Ends when the pool is closed (shutdown).
+async fn run_listener(pool: sqlx::PgPool, channel: String, wake: tokio::sync::mpsc::Sender<()>) {
+    loop {
+        let mut listener = match sqlx::postgres::PgListener::connect_with(&pool).await {
+            Ok(l) => l,
+            Err(sqlx::Error::PoolClosed) => return,
+            Err(e) => {
+                tracing::warn!(error = %e, "starrocks users: cannot connect the listener");
+                tokio::time::sleep(LISTEN_RETRY).await;
+                continue;
+            }
+        };
+        if let Err(e) = listener.listen(&channel).await {
+            tracing::warn!(error = %e, "starrocks users: LISTEN failed");
+            tokio::time::sleep(LISTEN_RETRY).await;
+            continue;
+        }
+        // A (re)connect may have missed notifications.
+        wake_worker(&wake);
+        loop {
+            match listener.try_recv().await {
+                Ok(Some(_)) => wake_worker(&wake),
+                Ok(None) => {
+                    tracing::info!("starrocks users: the listener reconnected");
+                    wake_worker(&wake);
+                }
+                Err(sqlx::Error::PoolClosed) => return,
+                Err(e) => {
+                    tracing::warn!(error = %e, "starrocks users: listener error");
+                    tokio::time::sleep(LISTEN_RETRY).await;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Start the sync's three tasks: a `LISTEN` on [`USER_SYNC_CHANNEL`]
+/// ([`run_listener`]), a sweep every [`SWEEP_INTERVAL`] whose first tick is
+/// immediate (the boot reconcile), and the worker ([`run_sync_worker`]) that
+/// runs one pass per burst of wake-ups: migration 0219's triggers are
 /// statement-level and also fire on unrelated `access_grants` writes and on
-/// writes that change no row, so N notifications must not cost N passes. The
-/// listener reconnects on its own; what it misses meanwhile, the sweep
-/// catches. Returns the worker's handle.
+/// writes that change no row, so N notifications must not cost N passes.
+/// What the listener misses while it cannot reconnect, the sweep catches.
+/// The returned handle is the WORKER's only; the listener and the sweep
+/// run until the process ends (the listener stops once the pool closes).
 pub fn spawn_starrocks_user_sync(st: CpState) -> tokio::task::JoinHandle<()> {
     let (wake, wakes) = tokio::sync::mpsc::channel::<()>(1);
+    tokio::spawn(run_listener(
+        st.engine_mgmt.pool().clone(),
+        USER_SYNC_CHANNEL.to_string(),
+        wake.clone(),
+    ));
     {
         let wake = wake.clone();
-        let pool = st.engine_mgmt.pool().clone();
         tokio::spawn(async move {
+            let mut tick = tokio::time::interval(SWEEP_INTERVAL);
             loop {
-                let mut listener = match sqlx::postgres::PgListener::connect_with(&pool).await {
-                    Ok(l) => l,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "starrocks users: cannot connect the listener");
-                        tokio::time::sleep(LISTEN_RETRY).await;
-                        continue;
-                    }
-                };
-                if let Err(e) = listener.listen(USER_SYNC_CHANNEL).await {
-                    tracing::warn!(error = %e, "starrocks users: LISTEN failed");
-                    tokio::time::sleep(LISTEN_RETRY).await;
-                    continue;
-                }
-                // A (re)connect may have missed notifications.
+                tick.tick().await;
                 wake_worker(&wake);
-                loop {
-                    match listener.recv().await {
-                        Ok(_) => wake_worker(&wake),
-                        Err(e) => {
-                            tracing::warn!(error = %e, "starrocks users: listener error");
-                            tokio::time::sleep(LISTEN_RETRY).await;
-                            break;
-                        }
-                    }
-                }
             }
         });
     }
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(SWEEP_INTERVAL);
-        loop {
-            tick.tick().await;
-            wake_worker(&wake);
-        }
-    });
-    tokio::spawn(run_coalesced(wakes, SYNC_DEBOUNCE, move || {
-        let st = st.clone();
-        async move {
-            let synced = sync_all_starrocks_users(&st).await;
-            tracing::debug!(engines = synced, "starrocks users: sync pass done");
-        }
-    }))
+    tokio::spawn(run_sync_worker(st, wake, wakes, SYNC_DEBOUNCE, BUSY_RETRY))
 }
 
 #[cfg(test)]
@@ -681,7 +736,7 @@ mod tests {
     /// grant writes and on writes that change no row) runs ONE pass, even
     /// when it is spread over the debounce; and wake-ups during a pass run
     /// exactly one more.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_burst_of_wake_ups_runs_one_pass() {
         let passes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (wake, wakes) = tokio::sync::mpsc::channel(1);
@@ -723,6 +778,76 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(800)).await;
         assert_eq!(count(), 3, "and nothing more");
         worker.abort();
+    }
+
+    async fn woken(wakes: &mut tokio::sync::mpsc::Receiver<()>, what: &str) {
+        tokio::time::timeout(Duration::from_secs(20), wakes.recv())
+            .await
+            .unwrap_or_else(|_| panic!("no wake-up: {what}"))
+            .expect("the listener is alive");
+    }
+
+    /// Fix round 1, Important 1: a listener whose connection is killed wakes
+    /// the worker once it is back (what was notified meanwhile is lost), and
+    /// still hears later notifications. A private channel, so no other test's
+    /// write can be the wake-up.
+    #[tokio::test]
+    async fn a_dropped_listener_reconnects_wakes_and_keeps_listening() {
+        let Some(url) = egret_test_db::url().await else {
+            eprintln!("skipping a_dropped_listener_reconnects_wakes_and_keeps_listening: DATABASE_URL not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .expect("pool");
+        let channel = format!("egret_test_{}", Uuid::new_v4().simple());
+        let (wake, mut wakes) = tokio::sync::mpsc::channel(1);
+        let listener = tokio::spawn(run_listener(pool.clone(), channel.clone(), wake));
+        let listening_pid = || {
+            let (pool, channel) = (pool.clone(), channel.clone());
+            async move {
+                let deadline = std::time::Instant::now() + Duration::from_secs(20);
+                loop {
+                    let pid: Option<i32> = sqlx::query_scalar(
+                        "SELECT pid FROM pg_stat_activity \
+                          WHERE datname = current_database() AND pid <> pg_backend_pid() \
+                            AND query LIKE 'LISTEN %' AND strpos(query, $1) > 0",
+                    )
+                    .bind(&channel)
+                    .fetch_optional(&pool)
+                    .await
+                    .expect("pg_stat_activity");
+                    if let Some(pid) = pid {
+                        return pid;
+                    }
+                    assert!(std::time::Instant::now() < deadline, "no LISTEN backend");
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        };
+
+        woken(&mut wakes, "the first connect").await;
+        let first = listening_pid().await;
+        let killed: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+            .bind(first)
+            .fetch_one(&pool)
+            .await
+            .expect("terminate");
+        assert!(killed, "premise: the listener's backend was terminated");
+        woken(&mut wakes, "the reconnect").await;
+        let second = listening_pid().await;
+        assert_ne!(first, second, "premise: a new backend listens");
+        sqlx::query("SELECT pg_notify($1, '')")
+            .bind(&channel)
+            .execute(&pool)
+            .await
+            .expect("notify");
+        woken(&mut wakes, "a notification after the reconnect").await;
+
+        listener.abort();
+        pool.close().await;
     }
 
     #[test]
