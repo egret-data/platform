@@ -58,13 +58,13 @@ Image fork egret.4 trở đi có sẵn plugin AuditLoader ở `/opt/egret/auditl
    - danh sách: lọc theo `from`, `to` (tối đa 31 ngày), `user`, `state`, `limit` (tối đa 200), phân trang bằng cursor;
    - chi tiết một query.
 
-   Giá trị request đều đi qua `quote_string`. Statement bị cắt ở 2.000 ký tự, và được che mật khẩu theo giá trị chính xác lẫn theo dạng. Các lần đọc của chính egret bị loại khỏi kết quả. Kết nối `root` của egret tự đặt `max_allowed_packet` và `wait_timeout`, nên driver MySQL không gửi câu `SELECT @@max_allowed_packet,@@wait_timeout` (không có marker) khi kết nối (thêm ngày 2026-11-11).
+   Giá trị request đều đi qua `quote_string`. Statement bị cắt ở 2.000 ký tự, và được che mật khẩu theo giá trị chính xác lẫn theo dạng. Các lần đọc của chính egret bị loại khỏi kết quả. Mọi kết nối MySQL mà egret mở tới FE StarRocks, gồm kết nối `root` của egret lẫn kết nối của user và kết nối uỷ quyền qua connector StarRocks của egret-query, đều tự đặt `max_allowed_packet` và `wait_timeout`, nên driver không gửi câu `SELECT @@max_allowed_packet,@@wait_timeout` khi kết nối, và log không có dòng đó dưới tên `root` hay tên user (thêm ngày 2026-11-11).
 6. **Tab:** chỉ có ở engine StarRocks. Tab có bộ lọc trong URL, bảng ưu tiên cột User (`authorizedUser`), panel chi tiết, và nút **Load more**. Text của dòng trạng thái giữ nguyên tiếng Anh như trên giao diện:
    - `notSetUp`: "The query log is not set up on this engine: its audit plugin or its log table is missing.", kèm nút **Set up query log** (cần `engine:update`; khi bị tắt, nút ghi lý do "Setting it up needs the engine:update permission.");
    - `pluginNotShipped`, có hai biến thể (Task 6):
      - khi engine mang cờ `securityUpgradeNeeded` của B, text chỉ tới nút của B nằm trong cảnh báo bảo mật phía trên các tab: "This engine's image has no audit plugin. **Upgrade security**, in the security warning on this page, moves it to egret's image, and the Query log starts after that.";
      - khi không có cờ đó thì không có nút để nhắc tới: "This engine's image has no audit plugin. The Query log starts once the engine runs egret's image."
-7. **Gia cố:** `plugin_enable` và `plugin_dir` bị cấm trong `feConfig`. Cần đo xem plugin còn sau khi FE khởi động lại hay không.
+7. **Gia cố:** `plugin_enable` và `plugin_dir` bị cấm trong `feConfig`. Đã đo ngày 2026-11-11: plugin còn sau khi FE khởi động lại, nên không cần chuyển `plugin_dir` (xem mục "Đo trên kind, 2026-11-11").
 
 **Đã đo ở Task 5** (2026-11-10, image egret.4; chi tiết và text lỗi chính xác ở bản tiếng Anh):
 - StarRocks tự che mật khẩu trong `stmt` của audit (`IDENTIFIED BY '***'`, `"password" = ***`);
@@ -99,6 +99,6 @@ Image fork egret.4 trở đi có sẵn plugin AuditLoader ở `/opt/egret/auditl
 Từ đợt kiểm tra live của gói này trên kind (FE `4.1.7-egret.4`, 1 FE và 1 CN, bật Ranger):
 
 1. **Fact 1: plugin còn sau khi pod FE bị tạo lại.** FE giải nén lại plugin từ file zip trong image (`/opt/egret/auditloader.zip`), và meta của FE nằm trên PVC. Khoảng 2 phút event quanh lúc khởi động lại bị mất. Không cần chuyển `plugin_dir`.
-2. **Dòng audit không có text lỗi.** `errorCode` chỉ chứa mã lỗi, ví dụ `INTERNAL_ERR` khi Ranger từ chối. Không có cột chứa thông báo, nên UI hiển thị mã lỗi chứ không phải "Access denied". Dòng "Access denied" trong phần facts của bản tiếng Anh đã được đính chính.
-3. **Giới hạn đã biết: `count(*)` trên bảng audit không bị chặn.** StarRocks kiểm tra `SELECT` theo từng cột được tham chiếu, và `SELECT count(*)` không tham chiếu cột nào, nên guard theo cột không áp dụng. Ai kết nối được cũng biết số dòng. Đây là việc follow-up.
+2. **Dòng audit không có text lỗi.** `errorCode` chỉ chứa mã lỗi. Đã đo: `INTERNAL_ERR` khi Ranger từ chối (`SELECT` trên cột bị cấm), và `ANALYSIS_ERR` khi `EXECUTE AS` một user không tồn tại. Không có cột chứa thông báo, nên UI hiển thị mã lỗi chứ không phải "Access denied". Dòng "Access denied" trong phần facts của bản tiếng Anh đã được đính chính.
+3. **Giới hạn đã biết: `count(*)` trên bảng audit không bị chặn.** StarRocks kiểm tra `SELECT` theo từng cột được tham chiếu, và `SELECT count(*)` không tham chiếu cột nào, nên guard theo cột không áp dụng. Ai kết nối được cũng biết số dòng của bảng. Chưa đo trường hợp có `WHERE`; một `WHERE` nhắc tới cột thì tham chiếu cột đó và có lẽ bị chặn. Đây là việc follow-up.
 4. **Bootstrap giờ chờ có compute node đang sống** trước khi tạo bảng (lần chạy live đầu tiên thất bại với "Number of available CN nodes is 0"). Bootstrap chạy query log sau các lệnh delegation, nên việc chờ này không làm chậm chúng.

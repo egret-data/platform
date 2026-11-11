@@ -15702,6 +15702,63 @@ mod tests {
         );
     }
 
+    /// Review I1: the engine stops being current while the node wait is
+    /// polling (deleted after the first, dead, poll). The checkpoint after
+    /// the wait answers `Failed` and no audit DDL reaches the FE, though the
+    /// node turned alive on the second poll.
+    #[tokio::test]
+    async fn an_engine_deleted_during_the_node_wait_gets_no_audit_ddl() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping an_engine_deleted_during_the_node_wait_gets_no_audit_ddl: DATABASE_URL not set");
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let engine = seed_sr_engine(&st).await;
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe target");
+        fake.nodes_alive_after(1);
+        let store = st.engine_mgmt.clone();
+        let engine_id = engine.id;
+        fake.on_node_check(move |sql| {
+            let store = store.clone();
+            Box::pin(async move {
+                // The first poll's first listing: the engine is deleted
+                // while the wait is under way.
+                if sql.contains("SHOW COMPUTE NODES") {
+                    stop_being_current(&store, engine_id).await;
+                }
+            })
+        });
+
+        let setup = crate::query_log::ensure_query_log(&st, &engine, &fe, false).await;
+
+        let checks = fake.queried().iter().filter(|q| *q == NODE_CHECK).count();
+        assert_eq!(
+            checks,
+            2,
+            "premise: the wait polled twice: {:?}",
+            fake.queried()
+        );
+        let crate::query_log::QueryLogSetup::Failed(msg) = setup else {
+            panic!("expected Failed, got {setup:?}");
+        };
+        assert!(
+            msg.starts_with("the engine changed while the setup waited"),
+            "{msg}"
+        );
+        assert!(
+            fake.executed().is_empty(),
+            "no audit DDL: {:?}",
+            fake.executed()
+        );
+        assert!(
+            !fake.queried().iter().any(|q| q == "SHOW PLUGINS"),
+            "{:?}",
+            fake.queried()
+        );
+    }
+
     /// D1: a failing listing is scrubbed into the timeout's message.
     #[tokio::test]
     async fn the_node_wait_scrubs_the_last_listing_error() {

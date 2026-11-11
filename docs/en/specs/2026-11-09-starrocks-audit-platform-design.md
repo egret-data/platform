@@ -308,9 +308,11 @@ rules to `statement` and `errorMessage` before they leave the server:
 
 **egret's own reads** are left out: rows with `user = 'root'` whose statement starts with the
 marker comment are excluded in the SQL. Every other `root` statement, egret's own bootstrap DDL
-included, is shown. egret's root connection sets `max_allowed_packet` and `wait_timeout` itself,
-so the MySQL driver sends no unmarked `SELECT @@max_allowed_packet,@@wait_timeout` on connect
-(added 2026-11-11).
+included, is shown. Every MySQL connection egret opens to a StarRocks FE, egret's own `root`
+connection and the user and delegated connections of egret-query's StarRocks connector alike,
+sets `max_allowed_packet` and `wait_timeout` itself, so the driver sends no
+`SELECT @@max_allowed_packet,@@wait_timeout` on connect, and no such row reaches the log under
+`root` or a user's name (added 2026-11-11).
 
 **Errors:**
 - 404 for an unknown engine;
@@ -475,14 +477,16 @@ From the live check of this package on kind (`4.1.7-egret.4` FE, 1 FE and 1 CN, 
    `/opt/egret/auditloader.zip`, which is in the image, and FE meta is on a PVC. About 2 minutes
    of events around the restart are lost (those queued in the old FE and those sent before the
    new plugin's first load). No `plugin_dir` move is needed.
-2. **The audit row has no error text.** `errorCode` holds only the code: `INTERNAL_ERR` for a
-   Ranger deny, `ANALYSIS_ERR` for an analysis error. The row has no message column, so the
+2. **The audit row has no error text.** `errorCode` holds only the code. Measured: `INTERNAL_ERR`
+   for a Ranger deny (`SELECT` on a denied column), and `ANALYSIS_ERR` for `EXECUTE AS` on a user
+   that does not exist. The row has no message column, so the
    Query log shows the code as `errorMessage`, not "Access denied". The earlier line of
    "Measured facts this builds on" that said otherwise is corrected above.
 3. **Known limit: `count(*)` on the audit table is not denied.** StarRocks checks `SELECT` per
    referenced column, and `SELECT count(*) FROM starrocks_audit_db__.starrocks_audit_tbl__`
    references none, so the column-level guard never fires. Anyone who can connect can learn the
-   row count (and counts behind a `WHERE`). The statements and every column stay denied. This
+   table's row count. A `WHERE` was not measured; one that names a column references it and is
+   probably denied. The statements and every column stay denied. This
    is a StarRocks and Ranger property; closing it is a follow-up.
 4. **The bootstrap waits for an alive compute node.** The first setup ran right after the root
    login, before the CN registered, and failed with "Number of available CN nodes is 0", so a

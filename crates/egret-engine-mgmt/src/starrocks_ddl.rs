@@ -1328,6 +1328,17 @@ pub struct FakeStarRocksDdl {
     /// `Some(u32::MAX)`: it never turns alive. `SHOW BACKENDS` lists none
     /// (a shared-data FE).
     dead_node_polls: Arc<Mutex<Option<u32>>>,
+    /// Runs on every `SHOW COMPUTE NODES` / `SHOW BACKENDS`, with the
+    /// statement text, before the fake answers it: how a test makes the
+    /// engine vanish while the query log's node wait is polling.
+    #[allow(clippy::type_complexity)]
+    on_node_check: Arc<
+        Mutex<
+            Option<
+                Arc<dyn Fn(String) -> futures_util::future::BoxFuture<'static, ()> + Send + Sync>,
+            >,
+        >,
+    >,
     /// The `FeTarget` of the most recent call, so a test can assert the cert.
     last_target: Arc<Mutex<Option<FeTarget>>>,
     /// Runs on EVERY `execute`, with the statement text, after it is
@@ -1508,6 +1519,15 @@ impl FakeStarRocksDdl {
     /// The compute node never turns alive.
     pub fn no_node_ever_alive(&self) {
         self.nodes_alive_after(u32::MAX);
+    }
+
+    /// Run this on every node listing (`SHOW COMPUTE NODES`, `SHOW
+    /// BACKENDS`), receiving its text, before the fake answers it.
+    pub fn on_node_check(
+        &self,
+        hook: impl Fn(String) -> futures_util::future::BoxFuture<'static, ()> + Send + Sync + 'static,
+    ) {
+        *self.on_node_check.lock().unwrap() = Some(Arc::new(hook));
     }
 
     /// The fake's `SHOW COMPUTE NODES` answer: a header with an `Alive`
@@ -1729,6 +1749,10 @@ impl StarRocksDdl for FakeStarRocksDdl {
         if bare == "SHOW COMPUTE NODES" || bare == "SHOW BACKENDS" {
             *self.last_target.lock().unwrap() = Some(fe.clone());
             self.queried.lock().unwrap().push(sql.to_string());
+            let hook = self.on_node_check.lock().unwrap().clone();
+            if let Some(hook) = hook {
+                hook(sql.to_string()).await;
+            }
             if let Some(msg) = self.fail.lock().unwrap().clone() {
                 return Err(fe_error(msg));
             }

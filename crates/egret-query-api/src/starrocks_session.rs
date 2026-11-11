@@ -10,7 +10,11 @@
 //! row in the user's log (live check, 2026-11-11). Setting both skips it.
 //!
 //! The values are StarRocks' own session defaults, so a connection behaves as
-//! it did when the driver read them from the FE.
+//! it did when the driver read them from the FE. One difference: the driver
+//! rejects a packet larger than `max_allowed_packet`, so on an FE where an
+//! operator raised `max_allowed_packet` above 32 MiB, a result row or
+//! statement above 32 MiB now fails where it used to pass. `wait_timeout` only
+//! feeds the driver's pool TTL, and neither crate pools these connections.
 
 /// StarRocks' session default `max_allowed_packet`: 32 MiB.
 pub const STARROCKS_MAX_ALLOWED_PACKET: usize = 32 * 1024 * 1024;

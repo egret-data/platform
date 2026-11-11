@@ -19082,6 +19082,55 @@ async fn the_setup_route_sets_the_query_log_up_and_a_failure_is_a_scrubbed_502()
     assert!(!body.to_string().contains(ROOT_PW), "{body}");
 }
 
+/// Review I2: the setup route checks once for an alive node and does not
+/// wait. This binary builds the crate without `cfg(test)`, so the node wait's
+/// production bound (30 polls, 10 s apart) applies here: a route that used it
+/// would answer after about 290 s, not within the timeout below.
+#[tokio::test]
+async fn the_setup_route_checks_once_for_a_node_and_does_not_wait() {
+    let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ql_nonode", true).await;
+    let id = seed_query_log_engine(&f, "starrocks").await;
+    f.starrocks_ddl.no_node_ever_alive();
+
+    let (status, body) = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        call(
+            &f,
+            "POST",
+            &format!("/engines/{id}/query-log/setup"),
+            &token,
+            None,
+        ),
+    )
+    .await
+    .expect("the route answers without waiting the node wait's full bound");
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(body["code"], "engine_fe_error", "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("no compute node or backend of this engine is alive;")),
+        "{body}"
+    );
+    let checks = f
+        .starrocks_ddl
+        .queried()
+        .iter()
+        .filter(|q| q.ends_with("SHOW COMPUTE NODES"))
+        .count();
+    assert_eq!(checks, 1, "{:?}", f.starrocks_ddl.queried());
+    assert!(
+        f.starrocks_ddl.executed().is_empty(),
+        "{:?}",
+        f.starrocks_ddl.executed()
+    );
+}
+
 /// The FE stops answering between the list read (no table) and the status
 /// read that would name the state: a 502 with the scrubbed message, not a 409
 /// carrying `unreachable`.
