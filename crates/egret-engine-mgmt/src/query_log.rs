@@ -130,6 +130,29 @@ const SETUP_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(60
 #[cfg(test)]
 const SETUP_RETRY_DELAY: std::time::Duration = std::time::Duration::ZERO;
 
+/// The wait before step 2 for an alive compute node or backend: a
+/// shared-data FE refuses the audit table's `CREATE TABLE` with "Number of
+/// available CN nodes is 0" until a CN has registered, and on kind the CN
+/// joined after the FE's root login (live check, 2026-11-11). Polled every
+/// [`NODE_POLL_INTERVAL`] for up to [`NODE_MAX_POLLS`] polls, about five
+/// minutes; the test build keeps three polls (so a test can see the wait
+/// end) and drops the sleep.
+#[cfg(not(test))]
+const NODE_MAX_POLLS: u32 = 30;
+#[cfg(test)]
+const NODE_MAX_POLLS: u32 = 3;
+#[cfg(not(test))]
+const NODE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+#[cfg(test)]
+const NODE_POLL_INTERVAL: std::time::Duration = std::time::Duration::ZERO;
+/// The node listings the wait reads, compute nodes first (a shared-data FE,
+/// egret's default), then backends (a shared-nothing FE).
+const NODE_LISTINGS: [&str; 2] = ["SHOW COMPUTE NODES", "SHOW BACKENDS"];
+/// The column of both listings that says whether the node is alive, and the
+/// value an alive node has there.
+const NODE_ALIVE_COLUMN: &str = "Alive";
+const NODE_ALIVE: &str = "true";
+
 /// Whether step 6 sends the probe (again) on this poll: on the first, then
 /// once every [`PROBE_RESEND_EVERY`] polls (a minute).
 fn sends_probe(poll: u32) -> bool {
@@ -246,18 +269,83 @@ pub(crate) fn plugin_step(
     }
 }
 
+/// Whether a node listing (`SHOW COMPUTE NODES` or `SHOW BACKENDS`, as
+/// [`crate::starrocks_ddl::StarRocksDdl::query_with_header`] answers it, its
+/// first row the header) lists a node whose `Alive` column is `true`. The
+/// column is found by its header; an answer without one lists no alive node.
+pub(crate) fn lists_an_alive_node(listing: &[Vec<Option<String>>]) -> bool {
+    let Some((header, rows)) = listing.split_first() else {
+        return false;
+    };
+    let Some(alive) = header
+        .iter()
+        .position(|c| c.as_deref() == Some(NODE_ALIVE_COLUMN))
+    else {
+        return false;
+    };
+    rows.iter().any(|r| {
+        r.get(alive)
+            .and_then(|v| v.as_deref())
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case(NODE_ALIVE))
+    })
+}
+
+/// Wait, up to `max_polls` polls [`NODE_POLL_INTERVAL`] apart, until the FE
+/// lists an alive compute node or backend. `Ok` says how many polls it took;
+/// `Err` carries the last listing error, scrubbed, if there was one. Both
+/// listings start with
+/// [`READ_MARKER`], so these polls stay out of the log's list and its
+/// newest event.
+async fn wait_for_an_alive_node(
+    st: &CpState,
+    fe: &FeTarget,
+    secrets: &BTreeMap<Uuid, String>,
+    max_polls: u32,
+) -> Result<u32, Option<String>> {
+    let mut last_error = None;
+    for poll in 0..max_polls {
+        for listing in NODE_LISTINGS {
+            let sql = format!("{READ_MARKER} {listing}");
+            match st.starrocks_ddl.query_with_header(fe, &sql).await {
+                Ok(rows) if lists_an_alive_node(&rows) => return Ok(poll + 1),
+                Ok(_) => {}
+                Err(e) => last_error = Some(e.scrubbed(fe, secrets)),
+            }
+        }
+        if poll + 1 < max_polls {
+            tokio::time::sleep(NODE_POLL_INTERVAL).await;
+        }
+    }
+    Err(last_error)
+}
+
 /// Set up `engine`'s Query log on the FE `fe` (design section 1, steps 1 to
 /// 6). Idempotent, so any caller may run it any number of times. It never
 /// fails its caller: what went wrong comes back as [`QueryLogSetup::Failed`]
-/// with a scrubbed message, and is logged here. `wait_for_events` runs step 6
-/// (up to three minutes) and is for background callers only.
+/// with a scrubbed message, and is logged here. Before step 2 it waits, up
+/// to about five minutes, for an alive compute node or backend
+/// ([`NODE_MAX_POLLS`]). `wait_for_events` runs step 6 (up to three minutes)
+/// and is for background callers only.
 pub(crate) async fn ensure_query_log(
     st: &CpState,
     engine: &Engine,
     fe: &FeTarget,
     wait_for_events: bool,
 ) -> QueryLogSetup {
-    let setup = setup_steps(st, engine, fe).await;
+    ensure_query_log_within(st, engine, fe, wait_for_events, NODE_MAX_POLLS).await
+}
+
+/// [`ensure_query_log`] with the node wait bounded to `node_polls` polls.
+/// The synchronous setup route checks once (`1`): a request must not hang
+/// for five minutes on an engine with no node, and its `Failed` says why.
+async fn ensure_query_log_within(
+    st: &CpState,
+    engine: &Engine,
+    fe: &FeTarget,
+    wait_for_events: bool,
+    node_polls: u32,
+) -> QueryLogSetup {
+    let setup = setup_steps(st, engine, fe, node_polls).await;
     if let QueryLogSetup::Failed(why) = &setup {
         tracing::warn!(engine = %engine.name, error = %why, "query log setup failed");
     }
@@ -267,8 +355,14 @@ pub(crate) async fn ensure_query_log(
     setup
 }
 
-/// Steps 1 to 5.
-async fn setup_steps(st: &CpState, engine: &Engine, fe: &FeTarget) -> QueryLogSetup {
+/// Steps 1 to 5, with the wait for an alive node (`node_polls` polls at most)
+/// before step 2.
+async fn setup_steps(
+    st: &CpState,
+    engine: &Engine,
+    fe: &FeTarget,
+    node_polls: u32,
+) -> QueryLogSetup {
     // 1. A human who already holds the loader's name (from before migration
     //    0218 reserved it) would be handed the loader's privileges on the FE.
     match st
@@ -299,9 +393,51 @@ async fn setup_steps(st: &CpState, engine: &Engine, fe: &FeTarget) -> QueryLogSe
     let secrets = BTreeMap::from([(secret_id, password.clone())]);
     let failed = |e: FeError| QueryLogSetup::Failed(e.scrubbed(fe, &secrets));
 
+    // The table's `CREATE` needs an alive compute node (or backend).
+    match wait_for_an_alive_node(st, fe, &secrets, node_polls).await {
+        Ok(1) => {}
+        // It waited: the engine may have been deleted, renamed or failed
+        // meanwhile, and the statements below write to its FE.
+        Ok(_) => {
+            let mut read_errors = 0;
+            if !engine_still_current(&st.engine_mgmt, engine.id, &engine.name, &mut read_errors)
+                .await
+            {
+                return QueryLogSetup::Failed(
+                    "the engine changed while the setup waited for a compute node; nothing \
+                     was created"
+                        .to_string(),
+                );
+            }
+        }
+        Err(last_error) => {
+            let waited = if node_polls > 1 {
+                format!(" after {:?}", NODE_POLL_INTERVAL * (node_polls - 1))
+            } else {
+                String::new()
+            };
+            return QueryLogSetup::Failed(format!(
+                "no compute node or backend of this engine is alive{waited}; the query log \
+                 table needs one. Set up the query log again once a node has joined{}",
+                last_error
+                    .map(|e| format!(" (last check: {e})"))
+                    .unwrap_or_default()
+            ));
+        }
+    }
+
     // 2-4. The table, the loader user, the native grant when unbound.
     for stmt in query_log_setup_sql(&password, engine.authz_service_id.is_some()) {
         if let Err(e) = st.starrocks_ddl.execute(fe, &stmt).await {
+            // A node that was alive above and is gone again: the same
+            // retryable `Failed`, said plainly.
+            if e.is_no_alive_node() {
+                return QueryLogSetup::Failed(format!(
+                    "the FE has no alive compute node, so the query log table could not be \
+                     created; it is set up again once a node has joined: {}",
+                    e.scrubbed(fe, &secrets)
+                ));
+            }
             return failed(e);
         }
     }
@@ -478,7 +614,7 @@ pub(crate) async fn retry_query_log_setup(
         {
             return;
         }
-        match setup_steps(st, &engine, &fe).await {
+        match setup_steps(st, &engine, &fe, NODE_MAX_POLLS).await {
             QueryLogSetup::Failed(why) if attempt < SETUP_ATTEMPTS => {
                 tracing::info!(engine = %name, attempt, error = %why,
                     "query log setup failed; trying again");
@@ -1347,7 +1483,7 @@ async fn setup_query_log(
     egret_core::authz::require(&*st.pdp, &p, "engine:update").await?;
     let engine = load_engine(&st, id, true).await?;
     let fe = fe_target(&st, &engine).await?;
-    let state = match ensure_query_log(&st, &engine, &fe, false).await {
+    let state = match ensure_query_log_within(&st, &engine, &fe, false, 1).await {
         QueryLogSetup::Ready => QueryLogState::Ready,
         QueryLogSetup::PluginNotShipped => QueryLogState::PluginNotShipped,
         QueryLogSetup::Failed(why) => return Err(CpError::FeFailed(why)),
@@ -1620,6 +1756,44 @@ mod tests {
     /// The name is read by header, not by position: the same row with the
     /// columns reordered is still found, and `AuditLoader` in another column
     /// (a description, say) is not a listing.
+    /// D1: the node wait reads `Alive` by its header, wherever it is.
+    #[test]
+    fn an_alive_node_is_read_by_the_alive_header() {
+        let listing = |header: &[&str], rows: &[&[&str]]| -> Vec<Vec<Option<String>>> {
+            std::iter::once(header.iter().map(|c| Some(c.to_string())).collect())
+                .chain(
+                    rows.iter()
+                        .map(|r| r.iter().map(|c| Some(c.to_string())).collect()),
+                )
+                .collect()
+        };
+        let header = ["ComputeNodeId", "IP", "LastHeartbeat", "Alive", "Status"];
+        assert!(lists_an_alive_node(&listing(
+            &header,
+            &[
+                &["1", "a", "x", "false", "OK"],
+                &["2", "b", "x", "true", "OK"]
+            ]
+        )));
+        assert!(!lists_an_alive_node(&listing(
+            &header,
+            &[&["1", "a", "x", "false", "OK"]]
+        )));
+        // No rows (a shared-data FE's SHOW BACKENDS), no answer, no column.
+        assert!(!lists_an_alive_node(&listing(&header, &[])));
+        assert!(!lists_an_alive_node(&[]));
+        assert!(!lists_an_alive_node(&listing(
+            &["Id", "Status"],
+            &[&["1", "true"]]
+        )));
+        // A `true` in another column is not an alive node.
+        assert!(!lists_an_alive_node(&listing(
+            &["Alive", "Other"],
+            &[&["false", "true"]]
+        )));
+        assert!(lists_an_alive_node(&listing(&["Alive"], &[&["TRUE"]])));
+    }
+
     #[test]
     fn the_name_column_is_found_by_its_header() {
         let reordered = show_plugins(

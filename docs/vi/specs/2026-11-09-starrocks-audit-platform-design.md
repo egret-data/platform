@@ -40,6 +40,7 @@ Image fork egret.4 trở đi có sẵn plugin AuditLoader ở `/opt/egret/auditl
 
    Các bước, theo thứ tự:
    - từ chối nếu tên user nạp đã thuộc về một người;
+   - chờ có compute node hoặc backend đang sống (thêm ngày 2026-11-11): đọc `SHOW COMPUTE NODES` và `SHOW BACKENDS` (cột `Alive`, tìm theo header) mỗi 10 giây, tối đa khoảng 5 phút. Hết hạn thì setup trả `Failed` với thông báo rõ ràng, và cơ chế thử lại vẫn áp dụng. Route đồng bộ chỉ kiểm tra một lần. Lỗi "available CN nodes is 0" của FE cũng là `Failed`, không phải trạng thái cuối;
    - tạo database và bảng;
    - tạo user `egret_query_log`, rồi `ALTER USER` để mật khẩu khớp;
    - chỉ khi engine không gắn profile: `GRANT INSERT`;
@@ -57,7 +58,7 @@ Image fork egret.4 trở đi có sẵn plugin AuditLoader ở `/opt/egret/auditl
    - danh sách: lọc theo `from`, `to` (tối đa 31 ngày), `user`, `state`, `limit` (tối đa 200), phân trang bằng cursor;
    - chi tiết một query.
 
-   Giá trị request đều đi qua `quote_string`. Statement bị cắt ở 2.000 ký tự, và được che mật khẩu theo giá trị chính xác lẫn theo dạng. Các lần đọc của chính egret bị loại khỏi kết quả.
+   Giá trị request đều đi qua `quote_string`. Statement bị cắt ở 2.000 ký tự, và được che mật khẩu theo giá trị chính xác lẫn theo dạng. Các lần đọc của chính egret bị loại khỏi kết quả. Kết nối `root` của egret tự đặt `max_allowed_packet` và `wait_timeout`, nên driver MySQL không gửi câu `SELECT @@max_allowed_packet,@@wait_timeout` (không có marker) khi kết nối (thêm ngày 2026-11-11).
 6. **Tab:** chỉ có ở engine StarRocks. Tab có bộ lọc trong URL, bảng ưu tiên cột User (`authorizedUser`), panel chi tiết, và nút **Load more**. Text của dòng trạng thái giữ nguyên tiếng Anh như trên giao diện:
    - `notSetUp`: "The query log is not set up on this engine: its audit plugin or its log table is missing.", kèm nút **Set up query log** (cần `engine:update`; khi bị tắt, nút ghi lý do "Setting it up needs the engine:update permission.");
    - `pluginNotShipped`, có hai biến thể (Task 6):
@@ -69,7 +70,7 @@ Image fork egret.4 trở đi có sẵn plugin AuditLoader ở `/opt/egret/auditl
 - StarRocks tự che mật khẩu trong `stmt` của audit (`IDENTIFIED BY '***'`, `"password" = ***`);
 - lỗi khi thiếu zip, khi plugin đã cài, khi thiếu database (5501) và thiếu bảng (5502) đã được ghi lại và ghim trong test;
 - múi giờ của FE là `Etc/UTC`, nên các lần đọc giữ UTC;
-- vẫn chưa đo: plugin có còn sau khi FE khởi động lại hay không.
+- vẫn chưa đo: plugin có còn sau khi FE khởi động lại hay không (đã đo ngày 2026-11-11, xem mục cuối).
 
 ## Kiểm thử
 
@@ -92,3 +93,12 @@ Image fork egret.4 trở đi có sẵn plugin AuditLoader ở `/opt/egret/auditl
 
 1. **Nội dung lỗi cũng cần `engine:audit`.** Thông báo lỗi của StarRocks trích lại statement bị từ chối (`Unexpected input 'xyz'`, `Cast '<literal>' to INT failed`), nên `errorMessage` cũng là nội dung statement. Không có `engine:audit` thì entry không có cả `statement` lẫn `errorMessage` (không có trong JSON, chứ không phải `null`), và `statementTruncated` là false. Các trường khác giữ nguyên, kể cả `state`, nên statement lỗi vẫn hiện là lỗi. Áp dụng cho cả route danh sách lẫn chi tiết.
 2. **Bộ lọc `user` đọc `authorizedUser` giống như UI hiển thị.** Tên là phần giữa dấu `'` đầu tiên và `'@'<host>'` cuối cùng, `''` được đọc thành một dấu nháy, rồi chuyển chữ thường: `` lower(replace(regexp_extract(authorizedUser, '^''(.*)''@''[^'']*''$', 1), '''''', '''')) ``. Nhờ vậy `'o''brien'@'10.%'` được tìm thấy bằng user `o'brien`, đúng tên mà `authorizedUser` hiển thị.
+
+## Đo trên kind, 2026-11-11
+
+Từ đợt kiểm tra live của gói này trên kind (FE `4.1.7-egret.4`, 1 FE và 1 CN, bật Ranger):
+
+1. **Fact 1: plugin còn sau khi pod FE bị tạo lại.** FE giải nén lại plugin từ file zip trong image (`/opt/egret/auditloader.zip`), và meta của FE nằm trên PVC. Khoảng 2 phút event quanh lúc khởi động lại bị mất. Không cần chuyển `plugin_dir`.
+2. **Dòng audit không có text lỗi.** `errorCode` chỉ chứa mã lỗi, ví dụ `INTERNAL_ERR` khi Ranger từ chối. Không có cột chứa thông báo, nên UI hiển thị mã lỗi chứ không phải "Access denied". Dòng "Access denied" trong phần facts của bản tiếng Anh đã được đính chính.
+3. **Giới hạn đã biết: `count(*)` trên bảng audit không bị chặn.** StarRocks kiểm tra `SELECT` theo từng cột được tham chiếu, và `SELECT count(*)` không tham chiếu cột nào, nên guard theo cột không áp dụng. Ai kết nối được cũng biết số dòng. Đây là việc follow-up.
+4. **Bootstrap giờ chờ có compute node đang sống** trước khi tạo bảng (lần chạy live đầu tiên thất bại với "Number of available CN nodes is 0").

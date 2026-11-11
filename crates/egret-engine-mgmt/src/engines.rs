@@ -5205,6 +5205,12 @@ async fn create_starrocks_engine(
     ))
 }
 
+/// StarRocks' session default `max_allowed_packet` (32 MiB), set on the root
+/// connection so the driver does not ask the FE for it.
+const STARROCKS_MAX_ALLOWED_PACKET: usize = 32 * 1024 * 1024;
+/// StarRocks' session default `wait_timeout` (8 hours), likewise.
+const STARROCKS_WAIT_TIMEOUT_SECS: usize = 28_800;
+
 /// Build the `mysql_async` connection options for egret's own FE `root`
 /// bootstrap connection. Factored out (and pure) so the password/user/TLS
 /// wiring is unit-testable without a live FE — the wire path itself is
@@ -5241,7 +5247,16 @@ pub(crate) fn starrocks_root_conn_opts(
         // StarRocks' `mysql_service_nio_enabled` handshake rejects the
         // `prefer_socket` capability with "unknown variable 'socket'" —
         // matches `StarRocksConnector::new`'s own workaround.
-        .prefer_socket(false);
+        .prefer_socket(false)
+        // Both set, so the driver skips its connection preamble `SELECT
+        // @@max_allowed_packet,@@wait_timeout` (`Conn::read_settings` in the
+        // vendored mysql_async 0.37.0 loads only what the opts leave unset,
+        // and `@@socket` only with `prefer_socket`). That statement carries no
+        // read marker, so on an engine with a Query log every root connection
+        // logged it, and it drove "Latest event" (live check, 2026-11-11).
+        // The values are StarRocks' own session defaults.
+        .max_allowed_packet(Some(STARROCKS_MAX_ALLOWED_PACKET))
+        .wait_timeout(Some(STARROCKS_WAIT_TIMEOUT_SECS));
     if let Some(pw) = root_password {
         opts = opts.pass(Some(pw));
     }
@@ -15558,6 +15573,19 @@ mod tests {
         assert_eq!(opts.pass(), Some("s3cr3t"));
     }
 
+    /// D2 (live check, 2026-11-11): both settings the driver would otherwise
+    /// read with `SELECT @@max_allowed_packet,@@wait_timeout` are pinned, so
+    /// no root connection logs that statement in the Query log.
+    #[test]
+    fn starrocks_root_conn_opts_pin_the_settings_the_driver_would_query() {
+        let opts: mysql_async::Opts =
+            starrocks_root_conn_opts("fe.svc", STARROCKS_FE_MYSQL_PORT, Some("s3cr3t"), None)
+                .into();
+        assert_eq!(opts.max_allowed_packet(), Some(33_554_432));
+        assert_eq!(opts.wait_timeout(), Some(28_800));
+        assert!(!opts.prefer_socket(), "or the driver reads @@socket");
+    }
+
     /// Legacy engines (no `root_secret_id` -> `root_password` `None`) stay
     /// passwordless: the connection presents no password, exactly as before the
     /// root-password hardening. `user()` still `root`, `pass()` `None`.
@@ -15575,6 +15603,195 @@ mod tests {
     /// `egret_query_log` username: one of them makes it taken, which would
     /// fail the others' step 1 if they ran meanwhile.
     static QUERY_LOG_USERNAME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// The node wait's first listing, read-marked.
+    const NODE_CHECK: &str = "/* egret-query-log-read */ SHOW COMPUTE NODES";
+
+    /// What a setup on an FE whose node is alive asks: the node wait's one
+    /// listing (the compute node is alive at once), then `SHOW PLUGINS`.
+    fn node_check_then_show_plugins() -> Vec<String> {
+        vec![NODE_CHECK.to_string(), "SHOW PLUGINS".to_string()]
+    }
+
+    /// D1 (live check, 2026-11-11): a CN that registers after the FE's root
+    /// login. The setup waits, polling the node listings, and creates the
+    /// table only once a node is alive.
+    #[tokio::test]
+    async fn the_setup_waits_for_an_alive_node_then_proceeds() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!(
+                "skipping the_setup_waits_for_an_alive_node_then_proceeds: DATABASE_URL not set"
+            );
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let engine = seed_sr_engine(&st).await;
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe target");
+        // Two polls see the CN dead; the third (the test build's last) alive.
+        fake.nodes_alive_after(2);
+        // The table's CREATE must come after the node turned alive.
+        let polls_at_create = std::sync::Arc::new(std::sync::Mutex::new(None));
+        {
+            let seen = polls_at_create.clone();
+            let probe = fake.clone();
+            fake.on_execute(move |sql| {
+                if sql.contains("CREATE TABLE") {
+                    let n = probe.queried().iter().filter(|q| *q == NODE_CHECK).count();
+                    *seen.lock().unwrap() = Some(n);
+                }
+                Box::pin(std::future::ready(()))
+            });
+        }
+
+        let setup = crate::query_log::ensure_query_log(&st, &engine, &fe, false).await;
+
+        assert_eq!(setup, crate::query_log::QueryLogSetup::Ready);
+        let q = fake.queried();
+        let listing_checks: Vec<&String> = q.iter().filter(|s| s.contains("SHOW ")).collect();
+        assert_eq!(
+            listing_checks,
+            vec![
+                NODE_CHECK,
+                "/* egret-query-log-read */ SHOW BACKENDS",
+                NODE_CHECK,
+                "/* egret-query-log-read */ SHOW BACKENDS",
+                NODE_CHECK,
+                "SHOW PLUGINS",
+            ],
+            "{q:?}"
+        );
+        assert_eq!(
+            *polls_at_create.lock().unwrap(),
+            Some(3),
+            "the CREATE TABLE ran after the third poll saw the node alive"
+        );
+        assert!(fake
+            .executed()
+            .iter()
+            .any(|s| s.starts_with("INSTALL PLUGIN")));
+    }
+
+    /// D1: a node that never turns alive. The setup gives up after the
+    /// bound with `Failed` (so the retry helper tries again), says why, and
+    /// writes nothing.
+    #[tokio::test]
+    async fn the_setup_fails_after_the_bound_when_no_node_is_ever_alive() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping the_setup_fails_after_the_bound_when_no_node_is_ever_alive: DATABASE_URL not set");
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let engine = seed_sr_engine(&st).await;
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe target");
+        fake.no_node_ever_alive();
+
+        let setup = crate::query_log::ensure_query_log(&st, &engine, &fe, true).await;
+
+        let crate::query_log::QueryLogSetup::Failed(msg) = setup else {
+            panic!("expected Failed, got {setup:?}");
+        };
+        assert!(
+            msg.starts_with("no compute node or backend of this engine is alive"),
+            "{msg}"
+        );
+        assert!(fake.executed().is_empty(), "{:?}", fake.executed());
+        let checks = fake.queried().iter().filter(|q| *q == NODE_CHECK).count();
+        assert_eq!(checks, 3, "the test build's bound: {:?}", fake.queried());
+        assert!(
+            !fake.queried().iter().any(|q| q == "SHOW PLUGINS"),
+            "nothing after the wait: {:?}",
+            fake.queried()
+        );
+    }
+
+    /// D1: a failing listing is scrubbed into the timeout's message.
+    #[tokio::test]
+    async fn the_node_wait_scrubs_the_last_listing_error() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping the_node_wait_scrubs_the_last_listing_error: DATABASE_URL not set");
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let engine = seed_sr_engine(&st).await;
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe target");
+        // The loader password, minted now; the setup reuses it.
+        let loader_pw = loader_password(&st, engine.id).await;
+        let engine = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        fake.fail_matching(
+            "SHOW ",
+            &format!("ERROR 1045 (28000): Access denied, password {loader_pw}"),
+        );
+
+        let setup = crate::query_log::ensure_query_log(&st, &engine, &fe, false).await;
+
+        let crate::query_log::QueryLogSetup::Failed(msg) = setup else {
+            panic!("expected Failed, got {setup:?}");
+        };
+        assert!(msg.contains("(last check: FE error 1045"), "{msg}");
+        assert!(
+            !msg.contains(&loader_pw),
+            "the loader password leaked: {msg}"
+        );
+        assert!(fake.executed().is_empty(), "{:?}", fake.executed());
+    }
+
+    /// D1: the FE's own "no CN" answer to the CREATE TABLE (a node that went
+    /// away after the wait saw it) is `Failed`, not terminal: the after-apply
+    /// path's retry sets the query log up on its next try.
+    #[tokio::test]
+    async fn no_available_cn_is_failed_and_the_retry_sets_it_up() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!(
+                "skipping no_available_cn_is_failed_and_the_retry_sets_it_up: DATABASE_URL not set"
+            );
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let engine = seed_sr_engine(&st).await;
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe target");
+        const NO_CN: &str = "ERROR 1064 (HY000): Getting analyzing error. Detail message: \
+             Number of available CN nodes is 0, less than 1.";
+        fake.fail_matching_once("CREATE TABLE", NO_CN);
+
+        let setup = crate::query_log::ensure_query_log(&st, &engine, &fe, false).await;
+        let crate::query_log::QueryLogSetup::Failed(msg) = setup else {
+            panic!("expected Failed, got {setup:?}");
+        };
+        assert!(msg.starts_with("the FE has no alive compute node"), "{msg}");
+
+        fake.clear_executed();
+        fake.fail_matching_once("CREATE TABLE", NO_CN);
+        prov.set_status(ready_fe_status(&engine.name));
+        crate::query_log::spawn_query_log_setup(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+        )
+        .await
+        .expect("no panic");
+        let creates = fake
+            .executed()
+            .iter()
+            .filter(|s| s.contains("CREATE TABLE"))
+            .count();
+        assert_eq!(creates, 2, "{:?}", fake.executed());
+        assert!(
+            fake.executed()
+                .iter()
+                .any(|s| s.starts_with("INSTALL PLUGIN")),
+            "the second try set it up: {:?}",
+            fake.executed()
+        );
+    }
 
     /// The engine's loader password, as the setup resolves it (idempotent).
     async fn loader_password(st: &CpState, engine_id: Uuid) -> String {
@@ -15626,7 +15843,7 @@ mod tests {
         let mut expected = crate::query_log::query_log_setup_sql(&pw, false);
         expected.push(crate::query_log::install_plugin_sql(&pw));
         assert_eq!(fake.executed(), expected);
-        assert_eq!(fake.queried(), vec!["SHOW PLUGINS".to_string()]);
+        assert_eq!(fake.queried(), node_check_then_show_plugins());
         let row = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
         assert!(row.query_log_secret_id.is_some(), "the password is stored");
 
@@ -15779,7 +15996,7 @@ mod tests {
         );
         assert_eq!(
             fake.queried(),
-            vec!["SHOW PLUGINS".to_string()],
+            node_check_then_show_plugins(),
             "no install, and no wait for events either"
         );
     }
@@ -15963,20 +16180,20 @@ mod tests {
             .expect("fe target");
 
         crate::query_log::ensure_query_log(&st, &engine, &fe, false).await;
-        assert_eq!(fake.queried(), vec!["SHOW PLUGINS".to_string()]);
+        assert_eq!(fake.queried(), node_check_then_show_plugins());
 
         fake.clear_executed();
         crate::query_log::ensure_query_log(&st, &engine, &fe, true).await;
         let q = fake.queried();
-        assert_eq!(q.len(), 3, "{q:?}");
+        assert_eq!(q.len(), 4, "{q:?}");
         // Both carry the read marker (final review, M1), so the list and
         // the newest event leave them out.
         let probe = "/* egret-query-log-read */ SELECT 'egret-query-log-probe-";
-        assert!(q[1].starts_with(probe), "{q:?}");
-        let id = q[1].trim_start_matches(probe).trim_end_matches('\'');
+        assert!(q[2].starts_with(probe), "{q:?}");
+        let id = q[2].trim_start_matches(probe).trim_end_matches('\'');
         assert!(Uuid::parse_str(id).is_ok(), "a fresh UUID: {q:?}");
         assert!(
-            q[2].starts_with(
+            q[3].starts_with(
                 "/* egret-query-log-read */ SELECT count(*) \
                  FROM starrocks_audit_db__.starrocks_audit_tbl__"
             ),
@@ -15984,10 +16201,10 @@ mod tests {
         );
         // The poll finds the marked probe by its UUID, without the exclusion
         // of egret's own reads.
-        assert!(q[2].contains(&format!("'{id}'")), "{q:?}");
-        assert!(!q[2].contains("NOT (`user` = 'root'"), "{q:?}");
+        assert!(q[3].contains(&format!("'{id}'")), "{q:?}");
+        assert!(!q[3].contains("NOT (`user` = 'root'"), "{q:?}");
         assert!(
-            !q[2].contains(&format!("egret-query-log-probe-{id}")),
+            !q[3].contains(&format!("egret-query-log-probe-{id}")),
             "the read-back must not match itself: {q:?}"
         );
     }

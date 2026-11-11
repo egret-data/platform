@@ -325,6 +325,13 @@ pub struct FeError {
     /// message like the three above. The query log's reads branch on it: no
     /// audit table is "not set up", not an FE failure.
     unknown_relation: bool,
+    /// Whether the FE said it has no alive compute node (`Number of available
+    /// CN nodes is 0, less than 1.`, measured on kind on 2026-11-11 for a
+    /// shared-data `CREATE TABLE` sent before the CN registered), decided
+    /// from the RAW message like the four above. The query log's setup
+    /// answers `Failed` on it with a message that says so, so the bounded
+    /// retry tries again once a node has joined.
+    no_alive_node: bool,
 }
 
 impl FeError {
@@ -434,6 +441,12 @@ impl FeError {
     pub fn is_unknown_relation(&self) -> bool {
         self.unknown_relation
     }
+
+    /// Did the FE mean "there is no alive compute node yet"? Read off
+    /// [`Self::no_alive_node`], decided from the unredacted message.
+    pub fn is_no_alive_node(&self) -> bool {
+        self.no_alive_node
+    }
 }
 
 /// Does this FE message mean "the object is already there"? StarRocks answers
@@ -483,6 +496,15 @@ fn says_unknown_relation(raw: &str) -> bool {
     raw.contains("unknown database") || raw.contains("unknown table")
 }
 
+/// Does this FE message mean "no compute node is alive"? A shared-data FE
+/// answers a `CREATE TABLE` sent before any CN registered with `Getting
+/// analyzing error. Detail message: Number of available CN nodes is 0, less
+/// than 1.` (measured on kind, 2026-11-11). Matched on the phrase,
+/// case-insensitively.
+fn says_no_alive_node(raw: &str) -> bool {
+    raw.to_ascii_lowercase().contains("available cn nodes is 0")
+}
+
 /// The FE's error code and nothing else. Deliberately NOT the excerpt: this
 /// is what `format!("{e}")` and `e.to_string()` produce, and those are exactly
 /// the expressions a caller reaches for when assembling an `apply_error`. A
@@ -524,6 +546,7 @@ impl std::fmt::Debug for FeError {
             .field("unknown_catalog", &self.unknown_catalog)
             .field("already_installed", &self.already_installed)
             .field("unknown_relation", &self.unknown_relation)
+            .field("no_alive_node", &self.no_alive_node)
             .finish()
     }
 }
@@ -564,6 +587,7 @@ fn fe_error(raw: impl std::fmt::Display) -> FeError {
     let unknown_catalog = says_unknown_catalog(&raw);
     let already_installed = says_already_installed(&raw);
     let unknown_relation = says_unknown_relation(&raw);
+    let no_alive_node = says_no_alive_node(&raw);
 
     let redacted = normalize_mysql_async_wrapper(&raw);
     let redacted = redact_quoted(&redacted);
@@ -582,6 +606,7 @@ fn fe_error(raw: impl std::fmt::Display) -> FeError {
         unknown_catalog,
         already_installed,
         unknown_relation,
+        no_alive_node,
     }
 }
 
@@ -1297,6 +1322,12 @@ pub struct FakeStarRocksDdl {
     /// FROM` that the fake accepts adds `AuditLoader` as `INSTALLED`, the one
     /// plugin egret installs; `UNINSTALL PLUGIN <name>` removes the row.
     plugins: Arc<Mutex<Vec<(String, String)>>>,
+    /// How many more `SHOW COMPUTE NODES` answers list the one compute node
+    /// as not alive. `None` (the default): it is alive from the start, so a
+    /// test that is not about the query log's node wait never meets it.
+    /// `Some(u32::MAX)`: it never turns alive. `SHOW BACKENDS` lists none
+    /// (a shared-data FE).
+    dead_node_polls: Arc<Mutex<Option<u32>>>,
     /// The `FeTarget` of the most recent call, so a test can assert the cert.
     last_target: Arc<Mutex<Option<FeTarget>>>,
     /// Runs on EVERY `execute`, with the statement text, after it is
@@ -1468,6 +1499,46 @@ impl FakeStarRocksDdl {
             .push((name.to_string(), status.to_string()));
     }
 
+    /// The compute node answers `Alive` = `false` to the next `polls`
+    /// `SHOW COMPUTE NODES`, then `true`: a CN that registers late.
+    pub fn nodes_alive_after(&self, polls: u32) {
+        *self.dead_node_polls.lock().unwrap() = Some(polls);
+    }
+
+    /// The compute node never turns alive.
+    pub fn no_node_ever_alive(&self) {
+        self.nodes_alive_after(u32::MAX);
+    }
+
+    /// The fake's `SHOW COMPUTE NODES` answer: a header with an `Alive`
+    /// column (not in the FE's position: the reader goes by name), then one
+    /// node, alive or not per [`Self::nodes_alive_after`].
+    fn show_compute_nodes(&self) -> Vec<Vec<Option<String>>> {
+        let alive = {
+            let mut dead = self.dead_node_polls.lock().unwrap();
+            match dead.as_mut() {
+                None | Some(0) => true,
+                Some(&mut u32::MAX) => false,
+                Some(n) => {
+                    *n -= 1;
+                    false
+                }
+            }
+        };
+        vec![
+            ["ComputeNodeId", "IP", "Alive", "Status"]
+                .iter()
+                .map(|c| Some(c.to_string()))
+                .collect(),
+            vec![
+                Some("10001".into()),
+                Some("cn-0".into()),
+                Some(alive.to_string()),
+                Some("OK".into()),
+            ],
+        ]
+    }
+
     /// The fake's `SHOW PLUGINS` answer: [`SHOW_PLUGINS_HEADER`], then one row
     /// per listed plugin, its name in the `Name` column and its status in the
     /// `Status` column.
@@ -1636,8 +1707,8 @@ impl StarRocksDdl for FakeStarRocksDdl {
     }
 
     /// The same failures as `query` (recorded in `queried()` too); only
-    /// `SHOW PLUGINS` has a header here, every other statement answers with
-    /// an empty one.
+    /// `SHOW PLUGINS`, `SHOW COMPUTE NODES` and `SHOW BACKENDS` have a header
+    /// here, every other statement answers with an empty one.
     async fn query_with_header(
         &self,
         fe: &FeTarget,
@@ -1653,6 +1724,24 @@ impl StarRocksDdl for FakeStarRocksDdl {
                 return Err(fe_error(msg));
             }
             return Ok(self.show_plugins());
+        }
+        let bare = without_read_marker(sql);
+        if bare == "SHOW COMPUTE NODES" || bare == "SHOW BACKENDS" {
+            *self.last_target.lock().unwrap() = Some(fe.clone());
+            self.queried.lock().unwrap().push(sql.to_string());
+            if let Some(msg) = self.fail.lock().unwrap().clone() {
+                return Err(fe_error(msg));
+            }
+            if let Some(msg) = self.selective_failure(sql) {
+                return Err(fe_error(msg));
+            }
+            if bare == "SHOW BACKENDS" {
+                return Ok(vec![["BackendId", "IP", "Alive"]
+                    .iter()
+                    .map(|c| Some(c.to_string()))
+                    .collect()]);
+            }
+            return Ok(self.show_compute_nodes());
         }
         let mut rows = self.query(fe, sql).await?;
         rows.insert(0, vec![]);
@@ -2312,6 +2401,19 @@ mod tests {
         assert!(!fe_error("Catalog 'x' already exists").is_already_installed());
     }
 
+    /// D1 (live check, 2026-11-11): the FE's answer to a `CREATE TABLE` sent
+    /// before any CN registered.
+    #[test]
+    fn no_alive_node_is_decided_from_the_raw_message() {
+        assert!(fe_error(
+            "ERROR 1064 (HY000): Getting analyzing error. Detail message: Number of \
+             available CN nodes is 0, less than 1."
+        )
+        .is_no_alive_node());
+        assert!(!fe_error("ERROR 1064 (HY000): available CN nodes is 1").is_no_alive_node());
+        assert!(!fe_error("Connection refused (os error 111)").is_no_alive_node());
+    }
+
     /// The query log reads answer "not set up" on this, not a 502. The texts
     /// are the FE's, measured in Task 5 on `4.1.7-egret.4`.
     #[test]
@@ -2503,6 +2605,7 @@ mod tests {
                 unknown_catalog: false,
                 already_installed: false,
                 unknown_relation: false,
+                no_alive_node: false,
             }
             .to_string(),
             "FE error (no code)"

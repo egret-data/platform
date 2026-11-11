@@ -62,7 +62,9 @@ From the fork's e2e (`tests/e2e/run.sh`, `audit_checks.py`) and earlier sessions
   (`HTTP.Query`), Arrow Flight SQL (`ARROW_FLIGHT_SQL.Query`) and materialized-view refresh
   (`querySource = MV`).
 - `EXECUTE AS bob` by `svc` records `user = svc` and `authorizedUser = 'bob'@'%'`.
-- A denial records `state = ERR` with the "Access denied ..." text in `errorCode`.
+- A denial records `state = ERR`. (Corrected on 2026-11-11: `errorCode` holds only the code,
+  `INTERNAL_ERR` for a Ranger deny, not the "Access denied ..." text. See "Measured on kind,
+  2026-11-11".)
 - Secrets in `FILES()` and catalog properties are redacted by StarRocks before the event.
 - COM_STMT_EXECUTE records the policy-rewritten statement with the parameter values inlined, so
   its text shows mask and row-filter expressions and the values a user filtered on.
@@ -74,7 +76,8 @@ From the fork's e2e (`tests/e2e/run.sh`, `audit_checks.py`) and earlier sessions
 
 **Not measured yet** (a step in the plan, before the code depends on it):
 1. whether a plugin installed from a local path survives an FE pod restart, since the FE's
-   `plugin_dir` is not on a volume.
+   `plugin_dir` is not on a volume. (Measured on 2026-11-11: it does. See "Measured on kind,
+   2026-11-11".)
 
 **Measured in Task 5** (2026-11-10, `ghcr.io/egret-data/egret-starrocks-allin1:4.1.7-egret.4`;
 the setup and the read are also run by `crates/egret-engine-mgmt/tests/query_log_live.rs`
@@ -131,6 +134,14 @@ Every step is idempotent, so any of the three may run any number of times:
 
 1. **Refuse a taken name.** If a human user holds the loader's username (section 2), stop with
    a failure that says so. Nothing is created.
+
+   **Then wait for an alive node** (added 2026-11-11). A shared-data FE refuses the table's
+   `CREATE` with "Number of available CN nodes is 0" until a compute node has registered. The
+   setup polls `SHOW COMPUTE NODES` and `SHOW BACKENDS` (read-marked, the `Alive` column read
+   by its header) every 10 seconds for up to about 5 minutes, until one lists `Alive = true`.
+   If none does, the setup is `Failed` with a message that says so, and the bounded retry
+   applies. The synchronous route checks once and does not wait. The FE's own "available CN
+   nodes is 0" answer to a statement is also `Failed`, never a terminal state.
 2. **Database and table:** `CREATE DATABASE IF NOT EXISTS starrocks_audit_db__`, then the fork's
    `CREATE TABLE IF NOT EXISTS` (copied byte for byte from `tests/e2e/audit-table.sql` at fork
    commit `d77446e`, held as one constant).
@@ -269,7 +280,8 @@ value is a 400 naming the parameter.
 
 **Each entry has:** `queryId`, `timestamp`, `user` (the session user), `authorizedUser` (the
 bare name parsed from `'bob'@'%'`; absent when empty), `clientIp`, `catalog`, `db`, `state`,
-`errorMessage` (from `errorCode`), `queryTimeMs`, `scanRows`, `scanBytes`, `returnRows`,
+`errorMessage` (from `errorCode`, which holds only the error code, such as `INTERNAL_ERR`; see
+"Measured on kind, 2026-11-11"), `queryTimeMs`, `scanRows`, `scanBytes`, `returnRows`,
 `cpuCostNs`, `memCostBytes`, `command`, `querySource`, `isQuery`, `digest`, and the statement:
 `statement` cut to 2,000 characters, with `statementTruncated: bool`. The UI labels
 `authorizedUser` as **User** and the session user as **Connected as**, so a delegated query
@@ -294,7 +306,9 @@ rules to `statement` and `errorMessage` before they leave the server:
 
 **egret's own reads** are left out: rows with `user = 'root'` whose statement starts with the
 marker comment are excluded in the SQL. Every other `root` statement, egret's own bootstrap DDL
-included, is shown.
+included, is shown. egret's root connection sets `max_allowed_packet` and `wait_timeout` itself,
+so the MySQL driver sends no unmarked `SELECT @@max_allowed_packet,@@wait_timeout` on connect
+(added 2026-11-11).
 
 **Errors:**
 - 404 for an unknown engine;
@@ -341,7 +355,8 @@ included, is shown.
   re-installs it on every apply and on **Set up query log**. An FE that restarts on its own,
   outside an apply, shows `notSetUp` until then. The plan's measurement step decides whether
   this package also moves `plugin_dir` onto the FE meta volume for meta-persistent engines; the
-  result is recorded and the user is told before that is built.
+  result is recorded and the user is told before that is built. (Measured on 2026-11-11: the
+  plugin survives, so no `plugin_dir` move is needed. See "Measured on kind, 2026-11-11".)
 
 ## Error handling
 
@@ -447,3 +462,27 @@ The question texts and the options that were not taken are in this file's git hi
    lowercased: `` lower(replace(regexp_extract(authorizedUser, '^''(.*)''@''[^'']*''$', 1),
    '''''', '''')) ``. So `'o''brien'@'10.%'` is found by the user `o'brien`, the same name
    `authorizedUser` shows.
+
+## Measured on kind, 2026-11-11
+
+From the live check of this package on kind (`4.1.7-egret.4` FE, 1 FE and 1 CN, Ranger on):
+
+1. **Fact 1: the plugin survives FE pod re-creation.** After `kubectl delete pod <name>-fe-0`,
+   `SHOW PLUGINS` lists `AuditLoader … INSTALLED` again with no setup run by egret. The FE
+   re-extracts the plugin into the default `plugin_dir` on start from the recorded source
+   `/opt/egret/auditloader.zip`, which is in the image, and FE meta is on a PVC. About 2 minutes
+   of events around the restart are lost (those queued in the old FE and those sent before the
+   new plugin's first load). No `plugin_dir` move is needed.
+2. **The audit row has no error text.** `errorCode` holds only the code: `INTERNAL_ERR` for a
+   Ranger deny, `ANALYSIS_ERR` for an analysis error. The row has no message column, so the
+   Query log shows the code as `errorMessage`, not "Access denied". The earlier line of
+   "Measured facts this builds on" that said otherwise is corrected above.
+3. **Known limit: `count(*)` on the audit table is not denied.** StarRocks checks `SELECT` per
+   referenced column, and `SELECT count(*) FROM starrocks_audit_db__.starrocks_audit_tbl__`
+   references none, so the column-level guard never fires. Anyone who can connect can learn the
+   row count (and counts behind a `WHERE`). The statements and every column stay denied. This
+   is a StarRocks and Ranger property; closing it is a follow-up.
+4. **The bootstrap waits for an alive compute node.** The first setup ran right after the root
+   login, before the CN registered, and failed with "Number of available CN nodes is 0", so a
+   new engine stayed `notSetUp`. The setup now waits for an alive compute node or backend before
+   step 2 (section 1).
