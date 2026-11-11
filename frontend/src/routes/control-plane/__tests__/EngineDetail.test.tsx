@@ -465,7 +465,7 @@ describe("EngineDetail — StarRocks engine", () => {
     } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
   });
 
-  test("exposes exactly 5 tabs with a merged Settings (no Configuration/Security tabs)", async () => {
+  test("exposes exactly 6 tabs, Query log last, with a merged Settings (no Configuration/Security tabs)", async () => {
     renderDetail();
     await screen.findByRole("heading", { name: "analytics-trino" });
 
@@ -477,6 +477,7 @@ describe("EngineDetail — StarRocks engine", () => {
       "Workspaces",
       "Settings",
       "Monitor",
+      "Query log",
     ]);
     expect(
       screen.queryByRole("tab", { name: "Configuration" }),

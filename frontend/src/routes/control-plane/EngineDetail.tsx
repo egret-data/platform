@@ -109,6 +109,7 @@ import { RangerCredentialSection } from "./RangerCredential";
 import { ProvisionedStarRocksMetadataTablesWarning } from "./StarRocksMetadataTablesWarning";
 import { NotGovernedWarning, SecurityUpgradeWarning } from "./StarRocksPostureWarnings";
 import EngineMonitor from "./EngineMonitor";
+import { QueryLogTab } from "./QueryLogTab";
 import PodLogsDialog from "./PodLogsDialog";
 import PodTerminalDialog from "./PodTerminalDialog";
 import ExternalEngineDetail from "./ExternalEngineDetail";
@@ -499,10 +500,15 @@ const KNOWN_TABS = new Set([
   "workspaces",
   "settings",
   "monitor",
+  "query-log",
 ]);
 
+/** Tabs only a StarRocks engine has; on any other engine their `?tab=` falls back to `overview`. */
+const STARROCKS_ONLY_TABS = new Set(["query-log"]);
+
 /**
- * Top-level engine tabs: Overview / Catalogs / Workspaces / Settings / Monitor.
+ * Top-level engine tabs: Overview / Catalogs / Workspaces / Settings / Monitor,
+ * and Query log on a StarRocks engine.
  * The config form hook is instantiated here so the merged Settings tab — which
  * folds the former Configuration and Security & Exposure views under one
  * left-nav — shares a single form state (and a single Save action).
@@ -541,7 +547,7 @@ function EngineTabs({
   // merged) map to "settings"; anything else unknown falls back to "overview".
   const raw = sp.get("tab");
   const tab =
-    raw && KNOWN_TABS.has(raw)
+    raw && KNOWN_TABS.has(raw) && (isStarRocks || !STARROCKS_ONLY_TABS.has(raw))
       ? raw
       : raw === "configuration" || raw === "security"
         ? "settings"
@@ -564,6 +570,7 @@ function EngineTabs({
         <TabsTrigger value="workspaces">Workspaces</TabsTrigger>
         <TabsTrigger value="settings">Settings</TabsTrigger>
         <TabsTrigger value="monitor">Monitor</TabsTrigger>
+        {isStarRocks && <TabsTrigger value="query-log">Query log</TabsTrigger>}
       </TabsList>
 
       <TabsContent value="overview" className="space-y-4">
@@ -610,6 +617,12 @@ function EngineTabs({
           <EngineMonitor engineId={engineId} />
         )}
       </TabsContent>
+
+      {isStarRocks && (
+        <TabsContent value="query-log">
+          <QueryLogTab engine={engine} />
+        </TabsContent>
+      )}
     </Tabs>
   );
 }
