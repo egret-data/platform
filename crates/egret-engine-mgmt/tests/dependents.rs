@@ -226,7 +226,9 @@ async fn set_null_children_have_no_check_that_needs_the_column() {
     }
 }
 
-/// Deleting the engine row cascades these four; nothing else may reference it.
+/// Deleting the engine row cascades these five; nothing else may reference it.
+/// `engine_mgmt.starrocks_users` (migration 0219): egret's record of the
+/// StarRocks users it created on the engine goes with it.
 /// `perm.engine_grants` (migration 0195, engine grants spec §3.2): an engine's
 /// grants go with it, and the former profile is recompiled when another engine
 /// still binds it.
@@ -235,6 +237,7 @@ async fn every_fk_child_of_engines_cascades() {
     let (db, _store) = harness_or_skip!();
     let expected: BTreeSet<FkRow> = [
         ("engine_mgmt.engine_workspaces", "engine_id", "c", true),
+        ("engine_mgmt.starrocks_users", "engine_id", "c", true),
         ("perm.engine_grants", "engine_id", "c", true),
         ("query.databases", "engine_id", "c", false),
         (
