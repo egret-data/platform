@@ -21,7 +21,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use egret_core::engine_principals::is_starrocks_reserved_user;
+use egret_core::engine_principals::{is_starrocks_reserved_user, DELEGATOR_PRINCIPAL};
 use egret_query_api::{quote_string, Engine as QueryEngine};
 use uuid::Uuid;
 
@@ -87,6 +87,178 @@ pub(crate) fn drop_user_sql(name: &str) -> String {
     format!("DROP USER {}", user_identity(name))
 }
 
+fn delegator_identity() -> String {
+    user_identity(DELEGATOR_PRINCIPAL)
+}
+
+pub(crate) fn show_delegator_grants_sql() -> String {
+    format!("SHOW GRANTS FOR {}", delegator_identity())
+}
+
+pub(crate) fn revoke_all_impersonation_sql() -> String {
+    format!(
+        "REVOKE IMPERSONATE ON ALL USERS FROM USER {}",
+        delegator_identity()
+    )
+}
+
+/// The delegator may become `name`. `None` for a reserved user: egret never
+/// lets the delegator become root or one of egret's own users.
+pub(crate) fn grant_impersonation_sql(name: &str) -> Option<String> {
+    (!is_starrocks_reserved_user(name)).then(|| {
+        format!(
+            "GRANT IMPERSONATE ON USER {} TO USER {}",
+            user_identity(name),
+            delegator_identity()
+        )
+    })
+}
+
+/// Sent before `DROP USER`: StarRocks keeps the delegator's grant on a
+/// dropped user (measured on `4.1.7-egret.4`, package D Task 10), listed and live
+/// again once someone re-creates the name, and refuses to revoke it while
+/// the user is gone (`cannot find user`).
+pub(crate) fn revoke_impersonation_sql(name: &str) -> String {
+    format!(
+        "REVOKE IMPERSONATE ON USER {} FROM USER {}",
+        user_identity(name),
+        delegator_identity()
+    )
+}
+
+/// The delegator's IMPERSONATE grants out of `SHOW GRANTS FOR` rows (M6),
+/// header first, read from the column named `Grants`: `(ON ALL USERS
+/// granted, the users named by ON USER …)`. An answer with no such column is
+/// an error, never "no grants".
+pub(crate) fn delegator_impersonation(
+    rows: &[Vec<Option<String>>],
+) -> Result<(bool, BTreeSet<String>), String> {
+    const ON_USER: &str = "IMPERSONATE ON USER ";
+    let column = rows
+        .first()
+        .and_then(|header| {
+            header.iter().position(|c| {
+                c.as_deref()
+                    .is_some_and(|c| c.eq_ignore_ascii_case("Grants"))
+            })
+        })
+        .ok_or("SHOW GRANTS answered no `Grants` column")?;
+    let mut all = false;
+    let mut users = BTreeSet::new();
+    for grant in rows[1..]
+        .iter()
+        .filter_map(|r| r.get(column).cloned().flatten())
+    {
+        if grant.contains("IMPERSONATE ON ALL USERS") {
+            all = true;
+            continue;
+        }
+        let Some(at) = grant.find(ON_USER) else {
+            continue;
+        };
+        // One user per row as measured; a list is read too. A name this
+        // misreads is only granted again, which is idempotent (M7).
+        let list = grant[at + ON_USER.len()..]
+            .split(" TO ")
+            .next()
+            .unwrap_or("");
+        for identity in list.split(", ") {
+            if let Some(name) = crate::query_log::authorized_name(identity.trim()) {
+                users.insert(name);
+            }
+        }
+    }
+    Ok((all, users))
+}
+
+/// Whether the sync manages this engine's native IMPERSONATE grants: bound to
+/// no profile (Ranger decides on a bound one and reads no native grant), and
+/// the FE has the delegator (no delegator, no grant to manage).
+fn manages_native_grants(engine: &Engine, on_fe: &BTreeSet<String>) -> bool {
+    engine.authz_service_id.is_none() && on_fe.contains(DELEGATOR_PRINCIPAL)
+}
+
+/// The delegator's grants, read as `root`; a failure is scrubbed.
+async fn read_delegator_grants(
+    st: &CpState,
+    fe: &FeTarget,
+) -> Result<(bool, BTreeSet<String>), String> {
+    let rows = st
+        .starrocks_ddl
+        .query_with_header(fe, &show_delegator_grants_sql())
+        .await
+        .map_err(|e| {
+            format!(
+                "{DELEGATOR_PRINCIPAL}: grants: {}",
+                e.scrubbed(fe, &BTreeMap::new())
+            )
+        })?;
+    delegator_impersonation(&rows).map_err(|e| format!("{DELEGATOR_PRINCIPAL}: grants: {e}"))
+}
+
+/// Spec 2.7: on an engine bound to no profile, in `impersonate` or `jwt`
+/// mode, the delegator may impersonate exactly the users egret manages and
+/// the FE has. `ON ALL USERS` is revoked first and the grants read again
+/// (M7), so the result is right whether or not the revoke took per-user
+/// grants with it. Returns `(granted, revoked_all)`; failures go to `failed`.
+async fn converge_native_impersonation(
+    st: &CpState,
+    engine: &Engine,
+    fe: &FeTarget,
+    on_fe: &BTreeSet<String>,
+    managed: &BTreeSet<String>,
+    failed: &mut Vec<String>,
+) -> (usize, bool) {
+    if !manages_native_grants(engine, on_fe)
+        || !matches!(engine.delegation_mode(), "impersonate" | "jwt")
+    {
+        return (0, false);
+    }
+    let mut grants = match read_delegator_grants(st, fe).await {
+        Ok(g) => g,
+        Err(e) => {
+            failed.push(e);
+            return (0, false);
+        }
+    };
+    let mut revoked_all = false;
+    if grants.0 {
+        if let Err(e) = st
+            .starrocks_ddl
+            .execute(fe, &revoke_all_impersonation_sql())
+            .await
+        {
+            failed.push(format!(
+                "{DELEGATOR_PRINCIPAL}: revoke on all users: {}",
+                e.scrubbed(fe, &BTreeMap::new())
+            ));
+            return (0, false);
+        }
+        revoked_all = true;
+        grants = match read_delegator_grants(st, fe).await {
+            Ok(g) => g,
+            Err(e) => {
+                failed.push(e);
+                return (0, true);
+            }
+        };
+    }
+    let mut granted = 0;
+    for name in managed.difference(&grants.1) {
+        let Some(sql) = grant_impersonation_sql(name) else {
+            continue;
+        };
+        match st.starrocks_ddl.execute(fe, &sql).await {
+            Ok(()) => granted += 1,
+            Err(e) => failed.push(format!(
+                "{name}: grant: {}",
+                e.scrubbed(fe, &BTreeMap::new())
+            )),
+        }
+    }
+    (granted, revoked_all)
+}
+
 /// The user names `SHOW USERS` lists: the first column, read as `'<name>'@'<host>'`
 /// when it has that form (measured in Task 1, M2), as is otherwise.
 pub(crate) fn listed_users(rows: &[Vec<Option<String>>]) -> BTreeSet<String> {
@@ -99,7 +271,8 @@ pub(crate) fn listed_users(rows: &[Vec<Option<String>>]) -> BTreeSet<String> {
 /// What one reconcile does (spec section 2.3's table), every list sorted.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct UserPlan {
-    /// Desired, recorded and on the FE: nothing to do (Task 10 grants these).
+    /// Desired, recorded and on the FE: no user statement (granted IMPERSONATE
+    /// on a native engine).
     pub kept: Vec<String>,
     /// Desired and absent from the FE: record, then `CREATE USER`.
     pub create: Vec<String>,
@@ -156,9 +329,9 @@ pub(crate) enum UserSync {
     Done {
         created: usize,
         dropped: usize,
-        /// Native `GRANT IMPERSONATE ON USER` statements sent (Task 10).
+        /// Native `GRANT IMPERSONATE ON USER` statements sent (spec 2.7).
         granted: usize,
-        /// Whether `ON ALL USERS` was revoked (Task 10).
+        /// Whether `ON ALL USERS` was revoked (spec 2.7).
         revoked_all: bool,
         foreign: Vec<String>,
         refused: Vec<String>,
@@ -171,7 +344,7 @@ pub(crate) enum UserSync {
 
 /// Whether `engine` gets a reconcile at all: a provisioned StarRocks engine,
 /// not deleting or failed, whose bootstrap created `egret_delegator`
-/// (`impersonate` or `jwt` mode: Task 10 converges its native grants), or
+/// (`impersonate` or `jwt` mode: the sync converges its native grants), or
 /// that still has users egret created.
 pub(crate) async fn wants_user_sync(st: &CpState, engine: &Engine) -> bool {
     if !engine.is_starrocks()
@@ -298,6 +471,7 @@ async fn sync_locked(st: &CpState, engine: &Engine, fe: &FeTarget) -> UserSync {
     };
     let plan = plan_users(&desired, &recorded, &on_fe);
     let (mut created, mut dropped, mut failed) = (0, 0, Vec::new());
+    let mut created_names = Vec::new();
     for name in &plan.create {
         let inserted = match st.engine_mgmt.record_starrocks_user(engine.id, name).await {
             Ok(inserted) => inserted,
@@ -314,7 +488,10 @@ async fn sync_locked(st: &CpState, engine: &Engine, fe: &FeTarget) -> UserSync {
             .execute(fe, &create_user_sql(name, &password))
             .await
         {
-            Ok(()) => created += 1,
+            Ok(()) => {
+                created += 1;
+                created_names.push(name.clone());
+            }
             Err(e) => {
                 // Never adopt a user that appeared between the read and the
                 // create: forget the record if this call made it, or if the
@@ -329,7 +506,38 @@ async fn sync_locked(st: &CpState, engine: &Engine, fe: &FeTarget) -> UserSync {
             }
         }
     }
-    for name in &plan.drop {
+    // A dropped user keeps the delegator's grant on its name, revocable only
+    // while the user exists: revoke first, and never drop a user whose grant
+    // could not be revoked, or read, on an engine whose grants egret manages.
+    // `None`: no native grants to mind.
+    let mut granted_before_drop = None;
+    let mut drops: &[String] = &plan.drop;
+    if !drops.is_empty() && manages_native_grants(engine, &on_fe) {
+        match read_delegator_grants(st, fe).await {
+            Ok((_, users)) => granted_before_drop = Some(users),
+            Err(e) => {
+                failed.push(format!("{e} (no user dropped: {})", drops.join(", ")));
+                drops = &[];
+            }
+        }
+    }
+    for name in drops {
+        if granted_before_drop
+            .as_ref()
+            .is_some_and(|users| users.contains(name))
+        {
+            if let Err(e) = st
+                .starrocks_ddl
+                .execute(fe, &revoke_impersonation_sql(name))
+                .await
+            {
+                failed.push(format!(
+                    "{name}: revoke before drop: {}",
+                    e.scrubbed(fe, &BTreeMap::new())
+                ));
+                continue;
+            }
+        }
         match st.starrocks_ddl.execute(fe, &drop_user_sql(name)).await {
             Ok(()) => {
                 dropped += 1;
@@ -345,11 +553,19 @@ async fn sync_locked(st: &CpState, engine: &Engine, fe: &FeTarget) -> UserSync {
             failed.push(format!("{name}: forget: {e}"));
         }
     }
+    let managed: BTreeSet<String> = plan
+        .kept
+        .iter()
+        .chain(created_names.iter())
+        .cloned()
+        .collect();
+    let (granted, revoked_all) =
+        converge_native_impersonation(st, engine, fe, &on_fe, &managed, &mut failed).await;
     UserSync::Done {
         created,
         dropped,
-        granted: 0,
-        revoked_all: false,
+        granted,
+        revoked_all,
         foreign: plan.foreign,
         refused: plan.refused,
         failed,
@@ -697,6 +913,78 @@ mod tests {
                     "root: reserved for StarRocks or egret".into(),
                 ],
             }
+        );
+    }
+
+    #[test]
+    fn the_native_statements_name_the_delegator_and_refuse_reserved_users() {
+        assert_eq!(
+            show_delegator_grants_sql(),
+            "SHOW GRANTS FOR 'egret_delegator'@'%'"
+        );
+        assert_eq!(
+            revoke_all_impersonation_sql(),
+            "REVOKE IMPERSONATE ON ALL USERS FROM USER 'egret_delegator'@'%'"
+        );
+        assert_eq!(
+            grant_impersonation_sql("o'b").as_deref(),
+            Some("GRANT IMPERSONATE ON USER 'o''b'@'%' TO USER 'egret_delegator'@'%'")
+        );
+        assert_eq!(
+            grant_impersonation_sql("b\\'x").as_deref(),
+            Some("GRANT IMPERSONATE ON USER 'b\\\\''x'@'%' TO USER 'egret_delegator'@'%'")
+        );
+        assert_eq!(
+            revoke_impersonation_sql("o'b"),
+            "REVOKE IMPERSONATE ON USER 'o''b'@'%' FROM USER 'egret_delegator'@'%'"
+        );
+        for reserved in ["root", "ROOT", "egret_delegator", "egret_query_log"] {
+            assert_eq!(grant_impersonation_sql(reserved), None, "{reserved}");
+        }
+    }
+
+    /// Read by the header, as measured (Task 1, M6): the `Grants` column,
+    /// wherever it is.
+    #[test]
+    fn the_grants_parser_reads_all_users_and_per_user_lists() {
+        let header = |cols: &[&str]| cols.iter().map(|c| Some(c.to_string())).collect::<Vec<_>>();
+        let row = |g: &str| {
+            vec![
+                Some("'egret_delegator'@'%'".to_string()),
+                Some("default_catalog".to_string()),
+                Some(g.to_string()),
+            ]
+        };
+        let rows = vec![
+            header(&["UserIdentity", "Catalog", "Grants"]),
+            row("GRANT IMPERSONATE ON USER 'pkgd_a'@'%' TO USER 'egret_delegator'@'%'"),
+            row("GRANT IMPERSONATE ON ALL USERS TO USER 'egret_delegator'@'%'"),
+            row("GRANT IMPERSONATE ON USER 'a'@'%', 'o''b'@'%' TO USER 'egret_delegator'@'%'"),
+            row("GRANT SELECT ON ALL TABLES IN ALL DATABASES TO USER 'egret_delegator'@'%'"),
+        ];
+        let (all, users) = delegator_impersonation(&rows).expect("parsed");
+        assert!(all);
+        assert_eq!(users, set(&["a", "o'b", "pkgd_a"]));
+
+        // The column is found by name, not position.
+        let moved = vec![
+            header(&["Grants", "UserIdentity"]),
+            vec![
+                Some("GRANT IMPERSONATE ON USER 'z'@'%' TO USER 'egret_delegator'@'%'".into()),
+                Some("'egret_delegator'@'%'".into()),
+            ],
+        ];
+        assert_eq!(delegator_impersonation(&moved), Ok((false, set(&["z"]))));
+
+        assert_eq!(
+            delegator_impersonation(&[header(&["UserIdentity", "Catalog", "Grants"])]),
+            Ok((false, BTreeSet::new()))
+        );
+        assert!(delegator_impersonation(&[]).is_err(), "no header");
+        assert!(
+            delegator_impersonation(&[vec![], row("GRANT IMPERSONATE ON ALL USERS TO USER x")])
+                .is_err(),
+            "a header without `Grants` is an error, never \"no grants\""
         );
     }
 

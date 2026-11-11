@@ -1344,6 +1344,13 @@ pub struct FakeStarRocksDdl {
     /// The StarRocks users this FE has besides `root` (package D): `CREATE
     /// USER` adds one, `DROP USER` removes one, `SHOW USERS` lists them.
     users: Arc<Mutex<BTreeSet<String>>>,
+    /// Whether `egret_delegator` holds `IMPERSONATE ON ALL USERS`.
+    impersonate_all: Arc<Mutex<bool>>,
+    /// The users `egret_delegator` holds `IMPERSONATE ON USER` on. As on a
+    /// real FE (measured in package D, Task 10), `DROP USER` leaves the
+    /// grant in place; only `REVOKE … ON USER` removes it, and only while
+    /// the user exists.
+    impersonable: Arc<Mutex<BTreeSet<String>>>,
     /// Runs on EVERY `execute`, with the statement text, after it is
     /// recorded and BEFORE the fail/succeed decision — so a hook can fire for
     /// a statement the FE is about to reject, which is what the delegation
@@ -1510,6 +1517,27 @@ impl FakeStarRocksDdl {
         self.users.lock().unwrap().clone()
     }
 
+    /// The delegator exists and holds `IMPERSONATE ON ALL USERS`, as on
+    /// every engine bootstrapped before package D.
+    pub fn seed_impersonate_all(&self) {
+        self.seed_user(egret_core::engine_principals::DELEGATOR_PRINCIPAL);
+        *self.impersonate_all.lock().unwrap() = true;
+    }
+
+    /// The delegator holds `IMPERSONATE ON USER '<name>'@'%'`, whether or not
+    /// the user exists (a grant left behind by a `DROP USER`).
+    pub fn seed_impersonation(&self, name: &str) {
+        self.impersonable.lock().unwrap().insert(name.to_string());
+    }
+
+    /// `(ON ALL USERS, the users named by ON USER …)` the delegator holds.
+    pub fn impersonation(&self) -> (bool, BTreeSet<String>) {
+        (
+            *self.impersonate_all.lock().unwrap(),
+            self.impersonable.lock().unwrap().clone(),
+        )
+    }
+
     /// List a plugin in `SHOW PLUGINS` from now on, as if it were installed.
     pub fn seed_plugin(&self, name: &str) {
         self.seed_plugin_with_status(name, "INSTALLED");
@@ -1637,6 +1665,42 @@ impl StarRocksDdl for FakeStarRocksDdl {
                 return Err(fe_error(msg));
             }
         }
+        // The delegator's IMPERSONATE grants; answers measured in Task 1 (M7)
+        // and Task 10 on `4.1.7-egret.4`.
+        if sql.starts_with("GRANT IMPERSONATE ON ALL USERS") {
+            *self.impersonate_all.lock().unwrap() = true;
+            return Ok(());
+        }
+        if sql.starts_with("REVOKE IMPERSONATE ON ALL USERS") {
+            // Per-user grants survive it (M7a).
+            let mut all = self.impersonate_all.lock().unwrap();
+            if !*all {
+                return Err(fe_error(
+                    "ERROR 1064 (HY000): There is no such grant defined on ALL USERS",
+                ));
+            }
+            *all = false;
+            return Ok(());
+        }
+        if let Some(name) = impersonation_target("GRANT IMPERSONATE ON USER ", " TO ", sql) {
+            // Idempotent (M7c).
+            self.impersonable.lock().unwrap().insert(name);
+            return Ok(());
+        }
+        if let Some(name) = impersonation_target("REVOKE IMPERSONATE ON USER ", " FROM ", sql) {
+            if name != "root" && !self.users.lock().unwrap().contains(&name) {
+                return Err(fe_error(format!(
+                    "ERROR 1064 (HY000): Getting analyzing error. Detail message: \
+                     cannot find user '{name}'@'%'!."
+                )));
+            }
+            if !self.impersonable.lock().unwrap().remove(&name) {
+                return Err(fe_error(format!(
+                    "ERROR 1064 (HY000): There is no such grant defined on USER '{name}'@'%'"
+                )));
+            }
+            return Ok(());
+        }
         if let Some(name) = user_target("CREATE USER IF NOT EXISTS ", sql) {
             self.users.lock().unwrap().insert(name);
             return Ok(());
@@ -1742,6 +1806,45 @@ impl StarRocksDdl for FakeStarRocksDdl {
             );
             return Ok(rows);
         }
+        if let Some(identity) = sql.strip_prefix("SHOW GRANTS FOR ") {
+            // Without the header (`UserIdentity`, `Catalog`, `Grants`), as the
+            // real runner's `query` answers; one row per grant (Task 1, M6;
+            // Task 10: one row per user named by ON USER).
+            let name = crate::query_log::authorized_name(identity.trim()).unwrap_or_default();
+            if name != "root" && !self.users.lock().unwrap().contains(&name) {
+                return Err(fe_error(format!(
+                    "ERROR 1064 (HY000): Getting analyzing error. Detail message: \
+                     cannot find user '{name}'@'%'!."
+                )));
+            }
+            if name != egret_core::engine_principals::DELEGATOR_PRINCIPAL {
+                return Ok(vec![]);
+            }
+            let me = "'egret_delegator'@'%'".to_string();
+            let row = |grant: String| {
+                vec![
+                    Some(me.clone()),
+                    Some("default_catalog".to_string()),
+                    Some(grant),
+                ]
+            };
+            let mut rows: Vec<_> = self
+                .impersonable
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|u| {
+                    row(format!(
+                        "GRANT IMPERSONATE ON USER '{}'@'%' TO USER {me}",
+                        u.replace('\'', "''")
+                    ))
+                })
+                .collect();
+            if *self.impersonate_all.lock().unwrap() {
+                rows.push(row(format!("GRANT IMPERSONATE ON ALL USERS TO USER {me}")));
+            }
+            return Ok(rows);
+        }
         if sql == "SHOW CATALOGS" {
             return Ok(self
                 .catalogs
@@ -1819,8 +1922,16 @@ impl StarRocksDdl for FakeStarRocksDdl {
             }
             return Ok(self.show_compute_nodes());
         }
+        let header = if bare.starts_with("SHOW GRANTS FOR ") {
+            ["UserIdentity", "Catalog", "Grants"]
+                .iter()
+                .map(|c| Some(c.to_string()))
+                .collect()
+        } else {
+            vec![]
+        };
         let mut rows = self.query(fe, sql).await?;
-        rows.insert(0, vec![]);
+        rows.insert(0, header);
         Ok(rows)
     }
 }
@@ -1837,6 +1948,12 @@ fn user_target(prefix: &str, sql: &str) -> Option<String> {
     let rest = sql.strip_prefix(prefix)?;
     let identity = rest.split(" IDENTIFIED").next()?.trim();
     crate::query_log::authorized_name(identity)
+}
+
+/// The user name out of `<prefix>'<name>'@'<host>'<until>…`, `''` read as `'`.
+fn impersonation_target(prefix: &str, until: &str, sql: &str) -> Option<String> {
+    let rest = sql.strip_prefix(prefix)?;
+    crate::query_log::authorized_name(rest.split(until).next()?.trim())
 }
 
 /// The backtick-quoted name out of a statement that starts with `prefix`,

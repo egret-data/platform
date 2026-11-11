@@ -4304,8 +4304,8 @@ async fn build_starrocks_provision_req_with(
     // secret the runtime `StarRocksDelegation` + post-Ready bootstrap need,
     // reusing the SAME generic helpers the Trino path uses (both key off just
     // `&Engine`). Minted for EITHER delegation mode (the bootstrap creates the
-    // service user + GRANT IMPERSONATE alongside the JWT integration regardless
-    // of mode).
+    // service user alongside the JWT integration regardless of mode; its
+    // IMPERSONATE grants are the user sync's, spec 2.7).
     let mut delegation_cert_pem: Option<String> = None;
     let mut delegation_keystore_pem: Option<String> = None;
     if tls_enabled {
@@ -5405,21 +5405,6 @@ fn starrocks_create_service_user_sql(service_user: &str, password: &str) -> Stri
     )
 }
 
-/// Build the `GRANT IMPERSONATE` DDL authorizing the service user to run
-/// `EXECUTE AS <any user> WITH NO REVERT` (the impersonate-mode primitive —
-/// see `crate::execution::connector::starrocks::StarRocksConnector::switch_identity`
-/// in `egret-query`). Backticks in the identifier are doubled (MySQL/StarRocks
-/// identifier-escaping rule) by [`egret_catalog_registry::escape_ident`] —
-/// the function itself since fix round 1 (F6), not a local copy of it under a
-/// comment claiming to match its "convention", which a future edit could
-/// falsify without anything noticing.
-fn starrocks_impersonation_grant_sql(service_user: &str) -> String {
-    format!(
-        "GRANT IMPERSONATE ON ALL USERS TO `{}`",
-        egret_catalog_registry::escape_ident(service_user)
-    )
-}
-
 /// Runtime bundle for the post-Ready delegation bootstrap (S3-T2 step 3,
 /// wired up in S3-T2b): the JWT security integration + the impersonation
 /// service user. `None` on [`spawn_starrocks_catalog_wire`]'s `delegation`
@@ -5764,7 +5749,6 @@ fn spawn_starrocks_catalog_wire(
                 &d.service_user,
                 &d.service_password,
             ));
-            stmts.push(starrocks_impersonation_grant_sql(&d.service_user));
             let mut all_ok = true;
             // The service user's password is inline in `CREATE USER … IDENTIFIED
             // BY` (D6), so every FE error below is scrubbed against it before it
@@ -14326,12 +14310,12 @@ mod tests {
     }
 
     /// Checkpoint 6 — the one inside the loop over the remaining delegation
-    /// statements (`ADMIN SET FRONTEND CONFIG`, `CREATE USER`,
-    /// `GRANT IMPERSONATE`).
+    /// statements (`ADMIN SET FRONTEND CONFIG`, `CREATE USER`).
     ///
     /// Same hook, but the integration SUCCEEDS this time, so the repair branch
     /// is not taken and the next thing between the bootstrap and a write is
-    /// checkpoint 6. None of the three may be sent.
+    /// checkpoint 6. Neither may be sent, nor any `GRANT IMPERSONATE` of the
+    /// user sync after them.
     #[tokio::test]
     async fn the_remaining_delegation_statements_stop_at_their_own_checkpoint() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
@@ -14423,7 +14407,7 @@ mod tests {
         prov.set_status(ready_fe_status(&engine.name));
         let delegation = test_delegation();
 
-        // First run: the integration is created, the user and grant follow.
+        // First run: the integration is created, the user follows.
         spawn_starrocks_catalog_wire(
             st.clone(),
             engine.id,
@@ -14443,8 +14427,12 @@ mod tests {
             sent.iter().any(|s| s.contains("CREATE USER IF NOT EXISTS")),
             "{sent:?}"
         );
+        // Spec 2.7: the bootstrap grants no `ON ALL USERS` any more; the
+        // user sync grants per user.
         assert!(
-            sent.iter().any(|s| s.contains("GRANT IMPERSONATE")),
+            !sent
+                .iter()
+                .any(|s| s.contains("ON ALL USERS") && s.starts_with("GRANT")),
             "{sent:?}"
         );
 
@@ -15783,20 +15771,6 @@ mod tests {
         );
     }
 
-    /// [`starrocks_impersonation_grant_sql`] (S3-T2) renders `GRANT
-    /// IMPERSONATE ON ALL USERS` for the backtick-quoted service user; a
-    /// backtick in the identifier must be doubled, not close the identifier
-    /// quoting early (this DDL runs as `root`).
-    #[test]
-    fn starrocks_impersonation_grant_sql_renders_and_escapes() {
-        assert_eq!(
-            starrocks_impersonation_grant_sql("egret_delegator"),
-            "GRANT IMPERSONATE ON ALL USERS TO `egret_delegator`"
-        );
-        let evil = starrocks_impersonation_grant_sql("a`.evil");
-        assert_eq!(evil, "GRANT IMPERSONATE ON ALL USERS TO `a``.evil`");
-    }
-
     /// The FE root bootstrap connection (RP-T4) must present the minted `root`
     /// password when the engine carries one, so a passworded FE (T1-T3) accepts
     /// egret's own post-Ready catalog-wire + delegation-bootstrap DDL. `Some(pw)`
@@ -17009,9 +16983,9 @@ mod tests {
         fake.on_execute(move |sql| {
             let store = store.clone();
             Box::pin(async move {
-                // The LAST delegation statement. Task 10 removes the `ON ALL USERS`
-                // grant and moves this to the delegator's `CREATE USER`.
-                if sql.contains("GRANT IMPERSONATE ON ALL USERS") {
+                // The LAST delegation statement (spec 2.7: the bootstrap
+                // sends no `GRANT IMPERSONATE` any more).
+                if sql.contains("CREATE USER IF NOT EXISTS 'egret_delegator'") {
                     store.delete_engine(engine_id).await.unwrap();
                 }
             })
@@ -17058,7 +17032,7 @@ mod tests {
         fake.on_execute(move |sql| {
             let pool = pool.clone();
             Box::pin(async move {
-                if sql.contains("GRANT IMPERSONATE ON ALL USERS") {
+                if sql.contains("CREATE USER IF NOT EXISTS 'egret_delegator'") {
                     sqlx::query("UPDATE engine_mgmt.engines SET name = $2 WHERE id = $1")
                         .bind(engine_id)
                         .bind(format!("sr-{}", Uuid::new_v4().simple()))
@@ -17082,7 +17056,7 @@ mod tests {
         assert!(
             fake.executed()
                 .iter()
-                .any(|s| s.contains("GRANT IMPERSONATE ON ALL USERS")),
+                .any(|s| s.contains("CREATE USER IF NOT EXISTS 'egret_delegator'")),
             "premise: the delegation half ran: {:?}",
             fake.executed()
         );
@@ -17134,7 +17108,7 @@ mod tests {
         fake.on_execute(move |sql| {
             let (store, impersonate, status) = (store.clone(), impersonate.clone(), status.clone());
             Box::pin(async move {
-                if sql.contains("GRANT IMPERSONATE") {
+                if sql.contains("CREATE USER IF NOT EXISTS 'egret_delegator'") {
                     store
                         .update_engine(engine_id, &impersonate, &status)
                         .await
@@ -17172,6 +17146,365 @@ mod tests {
             .await
             .expect("records")
             .contains(&jo));
+    }
+
+    /// Decided on 2026-11-11 (2): on an engine bound to no profile, the sync
+    /// revokes `ON ALL USERS` first, then grants each user egret manages; a
+    /// second sync sends neither.
+    #[tokio::test]
+    async fn an_unbound_engine_trades_all_users_for_per_user_grants() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping an_unbound_engine_trades_all_users_for_per_user_grants: DATABASE_URL not set");
+            return;
+        };
+        let _pass = USER_SYNC_PASS.read().await;
+        let engine = seed_impersonate_sr_engine(&st).await;
+        assert!(
+            engine.authz_service_id.is_none(),
+            "premise: bound to no profile"
+        );
+        let ws = seed_assigned_workspace(&st, &engine).await;
+        let (alice, theirs) = (uname("alice"), uname("theirs"));
+        seed_member(&st, ws, &alice, "active").await;
+        seed_member(&st, ws, &theirs, "active").await;
+        fake.seed_user(&theirs);
+        fake.seed_impersonate_all();
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe");
+
+        let first = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+
+        assert!(
+            matches!(
+                first,
+                crate::starrocks_users::UserSync::Done {
+                    revoked_all: true,
+                    ..
+                }
+            ),
+            "{first:?}"
+        );
+        let sent = fake.executed();
+        let revoke = sent
+            .iter()
+            .position(|s| s.starts_with("REVOKE IMPERSONATE ON ALL USERS"))
+            .expect("the revoke");
+        let grant = sent
+            .iter()
+            .position(|s| {
+                s == &format!(
+                    "GRANT IMPERSONATE ON USER '{alice}'@'%' TO USER 'egret_delegator'@'%'"
+                )
+            })
+            .expect("alice's grant");
+        assert!(revoke < grant, "{sent:?}");
+        let (all, users) = fake.impersonation();
+        assert!(!all);
+        assert!(users.contains(&alice), "{users:?}");
+        assert!(
+            !users.contains(&theirs),
+            "a user egret did not create is never granted"
+        );
+        assert!(!users
+            .iter()
+            .any(|u| egret_core::engine_principals::is_starrocks_reserved_user(u)));
+
+        fake.clear_executed();
+        let second = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+        assert!(
+            matches!(
+                second,
+                crate::starrocks_users::UserSync::Done {
+                    granted: 0,
+                    revoked_all: false,
+                    ..
+                }
+            ),
+            "{second:?}"
+        );
+        assert!(
+            !fake.executed().iter().any(|s| s.contains("IMPERSONATE")),
+            "{:?}",
+            fake.executed()
+        );
+    }
+
+    /// On an engine bound to a profile, Ranger decides: no native grant or
+    /// revoke is sent, not even before a drop.
+    #[tokio::test]
+    async fn a_bound_engine_gets_no_native_impersonation_statement() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping a_bound_engine_gets_no_native_impersonation_statement: DATABASE_URL not set");
+            return;
+        };
+        let _pass = USER_SYNC_PASS.read().await;
+        st.authz
+            .ensure_starrocks_def()
+            .await
+            .expect("seed starrocks service-def");
+        let svc = st
+            .authz
+            .create_service(&uname("pkgd_sr"), "starrocks", &serde_json::json!({}))
+            .await
+            .expect("service");
+        let engine = seed_impersonate_sr_engine(&st).await;
+        sqlx::query("UPDATE engine_mgmt.engines SET authz_service_id = $2 WHERE id = $1")
+            .bind(engine.id)
+            .bind(svc.id)
+            .execute(st.engine_mgmt.pool())
+            .await
+            .unwrap();
+        let engine = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        let ws = seed_assigned_workspace(&st, &engine).await;
+        let bob = uname("bob");
+        seed_member(&st, ws, &bob, "active").await;
+        // And one recorded user to drop, holding a native grant.
+        let gone = uname("gone");
+        st.engine_mgmt
+            .record_starrocks_user(engine.id, &gone)
+            .await
+            .expect("record");
+        fake.seed_user(&gone);
+        fake.seed_impersonation(&gone);
+        fake.seed_impersonate_all();
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe");
+
+        let out = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+
+        assert!(
+            matches!(
+                out,
+                crate::starrocks_users::UserSync::Done {
+                    created: 1,
+                    dropped: 1,
+                    ..
+                }
+            ),
+            "premise: the user steps ran: {out:?}"
+        );
+        assert!(
+            !fake.executed().iter().any(|s| s.contains("IMPERSONATE")),
+            "{:?}",
+            fake.executed()
+        );
+        assert!(!fake.queried().iter().any(|q| q.starts_with("SHOW GRANTS")));
+    }
+
+    /// A jwt engine (no users to manage) still loses `ON ALL USERS`.
+    #[tokio::test]
+    async fn a_jwt_engine_loses_all_users_and_gets_no_grant() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!(
+                "skipping a_jwt_engine_loses_all_users_and_gets_no_grant: DATABASE_URL not set"
+            );
+            return;
+        };
+        let _pass = USER_SYNC_PASS.read().await;
+        let engine = seed_sr_delegating_engine(&st, "CERTPEM").await;
+        fake.seed_impersonate_all();
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe");
+
+        let out = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+
+        assert!(
+            matches!(
+                out,
+                crate::starrocks_users::UserSync::Done {
+                    granted: 0,
+                    revoked_all: true,
+                    ..
+                }
+            ),
+            "{out:?}"
+        );
+        assert_eq!(
+            fake.impersonation(),
+            (false, std::collections::BTreeSet::new())
+        );
+    }
+
+    /// StarRocks keeps the delegator's grant on a dropped user and refuses to
+    /// revoke it once the user is gone (measured in Task 10), so the sync
+    /// revokes it BEFORE the drop. Spec 2.4's mode change is the case: an
+    /// engine switched to jwt drops every recorded user, and their grants go
+    /// first; `ON ALL USERS` goes too.
+    #[tokio::test]
+    async fn a_dropped_user_loses_its_grant_before_the_drop() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!(
+                "skipping a_dropped_user_loses_its_grant_before_the_drop: DATABASE_URL not set"
+            );
+            return;
+        };
+        let _pass = USER_SYNC_PASS.read().await;
+        let engine = seed_sr_delegating_engine(&st, "CERTPEM").await;
+        assert!(engine.is_jwt_delegation(), "premise: jwt mode");
+        let ws = seed_assigned_workspace(&st, &engine).await;
+        let (left, never) = (uname("left"), uname("never"));
+        // `left` was granted while the engine was impersonate-mode; `never`
+        // was not. Both are recorded and on the FE, and both are members:
+        // jwt mode wants nobody.
+        for name in [&left, &never] {
+            seed_member(&st, ws, name, "active").await;
+            st.engine_mgmt
+                .record_starrocks_user(engine.id, name)
+                .await
+                .expect("record");
+            fake.seed_user(name);
+        }
+        fake.seed_impersonate_all();
+        fake.seed_impersonation(&left);
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe");
+
+        let out = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+
+        assert!(
+            matches!(
+                &out,
+                crate::starrocks_users::UserSync::Done {
+                    dropped: 2,
+                    granted: 0,
+                    revoked_all: true,
+                    failed,
+                    ..
+                } if failed.is_empty()
+            ),
+            "{out:?}"
+        );
+        let sent = fake.executed();
+        let revoke = sent
+            .iter()
+            .position(|s| {
+                s == &format!(
+                    "REVOKE IMPERSONATE ON USER '{left}'@'%' FROM USER 'egret_delegator'@'%'"
+                )
+            })
+            .expect("left's revoke");
+        let drop = sent
+            .iter()
+            .position(|s| s == &format!("DROP USER '{left}'@'%'"))
+            .expect("left's drop");
+        assert!(revoke < drop, "{sent:?}");
+        assert!(
+            !sent
+                .iter()
+                .any(|s| s.starts_with("REVOKE IMPERSONATE ON USER") && s.contains(&never)),
+            "no revoke of a grant that is not there: {sent:?}"
+        );
+        assert_eq!(
+            fake.impersonation(),
+            (false, std::collections::BTreeSet::new())
+        );
+        assert!(!fake.users().contains(&left) && !fake.users().contains(&never));
+        assert!(st
+            .engine_mgmt
+            .recorded_starrocks_users(engine.id)
+            .await
+            .expect("records")
+            .is_empty());
+    }
+
+    /// A drop whose grant cannot be read, or revoked, does not happen: the
+    /// grant would outlive the user, irrevocably. The next sync tries again.
+    #[tokio::test]
+    async fn a_user_whose_grant_cannot_be_revoked_is_not_dropped() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping a_user_whose_grant_cannot_be_revoked_is_not_dropped: DATABASE_URL not set");
+            return;
+        };
+        let _pass = USER_SYNC_PASS.read().await;
+        let engine = seed_impersonate_sr_engine(&st).await;
+        let left = uname("left");
+        st.engine_mgmt
+            .record_starrocks_user(engine.id, &left)
+            .await
+            .expect("record");
+        fake.seed_user(&left);
+        fake.seed_impersonation(&left);
+        fake.seed_impersonate_all();
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe");
+
+        // The revoke fails: no drop.
+        fake.fail_matching_once("REVOKE IMPERSONATE ON USER", "ERROR 1064 (HY000): boom");
+        let out = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+        assert!(
+            matches!(&out, crate::starrocks_users::UserSync::Done { dropped: 0, failed, .. } if !failed.is_empty()),
+            "{out:?}"
+        );
+        assert!(
+            !fake.executed().iter().any(|s| s.starts_with("DROP USER")),
+            "{:?}",
+            fake.executed()
+        );
+        assert!(fake.users().contains(&left));
+
+        // The grants cannot be read: no drop either.
+        fake.clear_executed();
+        fake.fail_matching("SHOW GRANTS", "ERROR 1064 (HY000): boom");
+        let out = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+        assert!(
+            matches!(&out, crate::starrocks_users::UserSync::Done { dropped: 0, failed, .. } if !failed.is_empty()),
+            "{out:?}"
+        );
+        assert!(
+            !fake.executed().iter().any(|s| s.starts_with("DROP USER")),
+            "{:?}",
+            fake.executed()
+        );
+        assert!(fake.users().contains(&left));
+        assert!(st
+            .engine_mgmt
+            .recorded_starrocks_users(engine.id)
+            .await
+            .expect("records")
+            .contains(&left));
+    }
+
+    /// The bootstrap grants no `ON ALL USERS` any more; the sync right after it
+    /// grants the members.
+    #[tokio::test]
+    async fn the_bootstrap_grants_per_user_never_all_users() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!(
+                "skipping the_bootstrap_grants_per_user_never_all_users: DATABASE_URL not set"
+            );
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let _pass = USER_SYNC_PASS.read().await;
+        let engine = seed_impersonate_sr_engine(&st).await;
+        prov.set_status(ready_fe_status(&engine.name));
+        let ws = seed_assigned_workspace(&st, &engine).await;
+        let alice = uname("alice");
+        seed_member(&st, ws, &alice, "active").await;
+
+        spawn_starrocks_catalog_wire(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+            Some(test_delegation()),
+        )
+        .await
+        .expect("bootstrap task did not panic");
+
+        let sent = fake.executed();
+        assert!(
+            !sent
+                .iter()
+                .any(|s| s.starts_with("GRANT") && s.contains("ON ALL USERS")),
+            "{sent:?}"
+        );
+        assert!(fake.impersonation().1.contains(&alice), "{sent:?}");
     }
 
     /// Every StarRocks apply reconciles the users: `apply_built` with
@@ -17725,8 +18058,8 @@ mod tests {
     /// delegation half and the user sync, so the engine is flipped on a write
     /// of the user sync (the member's `CREATE USER`). Checkpoints 4 to 7 have
     /// passed by then, and checkpoint 8 is the only thing left between the
-    /// bootstrap and the query log's writes; the sync's later writes (Task
-    /// 10's grants) do not change that. (Flipped any earlier,
+    /// bootstrap and the query log's writes; the sync's later writes (its
+    /// native IMPERSONATE grants) do not change that. (Flipped any earlier,
     /// checkpoint 7 would stop it first: see
     /// `a_deleted_engine_gets_no_user_sync_from_the_bootstrap`.)
     #[tokio::test]
@@ -17767,11 +18100,12 @@ mod tests {
 
         let sent = fake.executed();
         assert!(
-            sent.iter().any(|s| s.contains("GRANT IMPERSONATE")),
+            sent.iter()
+                .any(|s| s.contains("CREATE USER IF NOT EXISTS 'egret_delegator'")),
             "premise: the delegation half ran: {sent:?}"
         );
         // Robust to statements the sync sends after the member's create
-        // (Task 10's grants): only the query log's statements must be absent.
+        // (its native IMPERSONATE grants): only the query log's statements must be absent.
         assert!(
             sent.iter()
                 .any(|s| s.starts_with(&format!("CREATE USER '{ivy}'@'%'"))),
@@ -17812,10 +18146,7 @@ mod tests {
             let seen = checks_at_delegation.clone();
             let probe = fake.clone();
             fake.on_execute(move |sql| {
-                if sql.contains("SECURITY INTEGRATION")
-                    || sql.contains("'egret_delegator'")
-                    || sql.contains("GRANT IMPERSONATE")
-                {
+                if sql.contains("SECURITY INTEGRATION") || sql.contains("'egret_delegator'") {
                     let n = probe
                         .queried()
                         .iter()
@@ -17841,7 +18172,6 @@ mod tests {
         for needed in [
             "CREATE SECURITY INTEGRATION",
             "CREATE USER IF NOT EXISTS 'egret_delegator'",
-            "GRANT IMPERSONATE",
         ] {
             assert!(
                 sent.iter().any(|s| s.contains(needed)),
