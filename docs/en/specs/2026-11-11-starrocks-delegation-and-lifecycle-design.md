@@ -1,8 +1,8 @@
 # StarRocks delegation and engine lifecycle (package D): design
 
 **Status:** the user ruled on D1a, D1b, D2 and D3 on 2026-11-11 (section "Decided by the user").
-The questions this design could not settle from those rulings are in "Open questions", each with a
-recommendation. Nothing in that section is built until the user answers it.
+The four questions this design raised were decided by the user on 2026-11-11 as well (section
+"Decided on 2026-11-11"); the design below includes the answers.
 
 **Package:** D of the StarRocks follow-ups. It is based on package A's branch
 (`feat/starrocks-query-log`, platform PR #849, migration 0218), which is not merged yet. D takes
@@ -85,7 +85,12 @@ Read from source (the root-cause report and this design's own reading):
 3. **Who may query a workspace connection** is the workspace's members: live `allow` workspace
    grants held directly or through a group (`egret_perm_compile::members::workspace_members_via`,
    `egret_workspace::members::MemberRepo`). A platform admin also passes the workspace gate without
-   being a member (`egret_workspace::context`, the `platform_admin` bypass). See open question 1.
+   being a member (`egret_workspace::context`, the `platform_admin` bypass), so platform admins are
+   synced too (decided on 2026-11-11, 1). Who is a platform admin is one query,
+   `egret_auth::roles::engine_admin_user_ids_via`: active users holding a live `allow` grant in
+   `access_grants` (`scope_type = 'platform'`) of the role named `platform_admin` in `roles`,
+   directly or through a group. `platform_role_assignments` is legacy (migration 0068 backfilled
+   `access_grants` from it); no code in `crates/` reads or writes it.
 4. **Membership is written in several crates** (`egret-workspace` members, `egret-auth` groups and
    user delete and status, the access-request approval, the hourly expiry sweep), none of which may
    depend on `egret-engine-mgmt`. Engine assignment is written by
@@ -113,6 +118,13 @@ Read from source (the root-cause report and this design's own reading):
 9. **The NOTIFY-at-commit pattern exists:** `egret_perm_compile::view_tags::notify_classification_in_tx`
    and `egret_catalog_engine::spawn_classification_sweeps` (a `PgListener` loop plus a scheduled
    sweep for notifications lost while it reconnects).
+10. **Native StarRocks grammar** (`fe/fe-grammar/src/main/antlr/com/starrocks/grammar/StarRocks.g4:1893,1907,1915`):
+   `GRANT IMPERSONATE ON USER <user> TO [USER] <user>`, `REVOKE IMPERSONATE ON USER <user> FROM …`,
+   and `REVOKE <privs> ON ALL <plural> FROM …` (so `REVOKE IMPERSONATE ON ALL USERS FROM USER …`).
+   `SHOW GRANTS FOR <user>` answers `UserIdentity`, `Catalog`, `Grants`
+   (`ShowResultMetaFactory.java:1163-1168`). Today the bootstrap issues
+   `GRANT IMPERSONATE ON ALL USERS TO egret_delegator` on every delegating engine, bound or not
+   (`engines.rs` `starrocks_impersonation_grant_sql`, pushed in `spawn_starrocks_catalog_wire`).
 
 **Not measured yet** (Task 1 of the plan measures each before code depends on it):
 
@@ -124,6 +136,11 @@ Read from source (the root-cause report and this design's own reading):
   not.
 - M4. On kind: a CN that starts with `MYSQL_PWD` before the initpwd Job has set the password is
   refused, restarts, and joins once the Job has run (the helm chart's behaviour).
+- M6. On native access control: what `SHOW GRANTS FOR 'egret_delegator'@'%'` answers, and how
+  `IMPERSONATE ON ALL USERS` and `IMPERSONATE ON USER '<u>'@'%'` read in its `Grants` column.
+- M7. On native access control: whether `REVOKE IMPERSONATE ON ALL USERS` leaves per-user grants in
+  place; what it answers when nothing is granted; what a repeated per-user `GRANT` answers. The
+  sync's order (revoke, re-read, grant) is correct whatever M7 shows; M7 pins the fake's answers.
 - M5. On kind: after a delete, the claims go, and a same-name re-create gets a fresh FE with egret's
   root password.
 
@@ -207,12 +224,18 @@ where a fixture binds a StarRocks impersonate engine (G22 at least).
 
 #### 2.1 What is synced, on which engines
 
-- **Engines:** provisioned (not external) StarRocks engines that are not `deleting` or `failed`.
-  The **desired set** is empty unless the engine is in `impersonate` mode.
+- **Engines:** provisioned (not external) StarRocks engines that are not `deleting` or `failed`,
+  whose delegation mode is `impersonate` or `jwt` (both bootstraps create `egret_delegator`, so
+  both need 2.7's revoke), or on which egret has users recorded. The **desired set** is empty unless
+  the engine is in `impersonate` mode.
 - **Desired users:** the egret users who are active (`users.status = 'active'`) and hold a live
   `allow` workspace grant, directly or through a group, on a workspace the engine is assigned to
-  (fact 3). A member with no username yet is minted with `ensure_username_via`, as the compiler
-  does, so their StarRocks user exists before their first query.
+  (fact 3).
+- **Platform admins** (decided on 2026-11-11, 1): every user `engine_admin_user_ids_via` returns
+  (fact 3), when the engine is assigned to at least one workspace. An engine assigned nowhere has no
+  connection to query through, so it gets none.
+- A user with no username yet is minted with `ensure_username_via`, as the compiler does, so their
+  StarRocks user exists before their first query.
 - **A disabled user** has no access, so their StarRocks user is dropped, and re-created on
   re-enable.
 - **The StarRocks name** is the username verbatim (fact 1).
@@ -249,7 +272,8 @@ StarRocks user it did not create.
    | no | yes | no | **forget** the record |
 
    "Recorded, desired, absent from the FE" is an FE that lost its metadata (an engine without a
-   persistent fe-meta whose FE pod was replaced); it is created again.
+   persistent fe-meta whose FE pod was replaced); it is created again. The plan also lists **kept**
+   (desired, recorded, on the FE), which 2.7 needs.
 4. **Execute:**
    - create: insert the record (`ON CONFLICT DO NOTHING`, noting whether this call inserted it),
      then `CREATE USER '<name>'@'%' IDENTIFIED BY '<password>'`, **without** `IF NOT EXISTS`. A
@@ -262,14 +286,15 @@ StarRocks user it did not create.
    - Every literal goes through `egret_query_api::quote_string` (StarRocks dialect: `'` doubled,
      `\` escaped). Every FE error reaches a log only through `FeError::scrubbed(&fe, &secrets)`,
      with the statement's password in `secrets`.
-5. **Release** the lock and answer:
+5. **Native impersonation** (2.7), on an engine bound to no profile.
+6. **Release** the lock and answer:
 
 ```rust
 pub(crate) enum UserSync {
-    NotNeeded,            // not impersonate and nothing recorded: no FE call at all
+    NotNeeded,            // no delegator and nothing recorded: no FE call at all
     Busy,                 // another process holds the engine's lock
-    Done { created: usize, dropped: usize, foreign: Vec<String>,
-           refused: Vec<String>, failed: Vec<String> },
+    Done { created: usize, dropped: usize, granted: usize, revoked_all: bool,
+           foreign: Vec<String>, refused: Vec<String>, failed: Vec<String> },
     Failed(String),       // the read of the FE or of the database failed (scrubbed)
 }
 ```
@@ -289,7 +314,8 @@ on an FE. So the writes **notify**, and engine-mgmt **listens**:
 
   | Table | Events | What it covers |
   |---|---|---|
-  | `access_grants` | INSERT, UPDATE, DELETE | workspace membership add, remove and role change (`MemberRepo`), the access-request approval, group grants, user delete's grant cleanup |
+  | `access_grants` | INSERT, UPDATE, DELETE | workspace membership add, remove and role change (`MemberRepo`), the access-request approval, group grants, user delete's grant cleanup, and platform-role grants and revokes (`platform_admin` included) |
+  | `roles` | UPDATE OF `name`; DELETE | the row named `platform_admin` renamed or removed (its grants cascade from `access_grants.role_id`) |
   | `user_groups` | INSERT, UPDATE, DELETE | membership through a group, group delete (its rows cascade) |
   | `users` | UPDATE OF `status`, `username`; DELETE | disable and enable, an operator's rename by SQL (fact 2: no egret path renames), user delete |
   | `engine_mgmt.engine_workspaces` | INSERT, DELETE | engine assigned to or unassigned from a workspace (all three routes), workspace delete (cascade) |
@@ -308,7 +334,7 @@ on an FE. So the writes **notify**, and engine-mgmt **listens**:
 - **The post-Ready bootstrap** (`spawn_starrocks_catalog_wire`, create and delegation change): a new
   checkpoint and the sync right after the delegation statements (which create `egret_delegator`)
   and before the query log (whose node wait can take minutes). The function's checkpoint list grows
-  from seven to eight.
+  from seven to eight. The bootstrap no longer sends `GRANT IMPERSONATE ON ALL USERS` (2.7).
 - **Engine delete:** nothing to do on the FE (the cluster goes); the records cascade with the row.
 
 **Mode changes.** impersonate → jwt runs the bootstrap (delegation changed), whose sync has an empty
@@ -329,11 +355,40 @@ minted `root`. After 0219 they get `root-2`. A person who already holds `root` k
 refuses that name and logs it (2.3, the reserved row). Their queries on an impersonate-mode StarRocks
 engine are denied by D1b's row (`EXECUTE AS root`) instead of running as StarRocks' superuser.
 
-#### 2.6 Root stays out of the query path
+#### 2.6 Root stays out of the query path (and users egret did not create stay untouched)
 
 The query path is unchanged: egret-query logs in as `egret_delegator` and runs `EXECUTE AS`. Only
 engine-mgmt holds root, for the sync, as it already does for the bootstrap and the query log. D1b
 makes `EXECUTE AS root` impossible for the delegator under Ranger.
+
+Users egret did not create (decided on 2026-11-11, 3) are never altered, granted or dropped. The
+sync logs a warning naming each, every run. The handover is documented: drop the user as root, and
+the next sync creates egret's.
+
+#### 2.7 Native access control: per-user IMPERSONATE (decided on 2026-11-11, 2)
+
+An engine bound to no profile runs native access control, where `GRANT IMPERSONATE ON ALL USERS`
+lets the delegator become `root`. So:
+
+- **The bootstrap stops granting `ON ALL USERS`**: `starrocks_impersonation_grant_sql` and its push
+  go. The sync, which the bootstrap runs right after (checkpoint 7), grants what is needed.
+- **The sync**, on an engine with `authz_service_id = NULL` and a delegation mode of `impersonate`
+  or `jwt`, after the user steps:
+  1. reads `SHOW GRANTS FOR 'egret_delegator'@'%'` (M6) into `(all_users, per_user)`;
+  2. if `all_users`: `REVOKE IMPERSONATE ON ALL USERS FROM USER 'egret_delegator'@'%'`, then reads
+     the grants again (M7: the revoke may or may not have taken per-user grants with it);
+  3. for each user egret manages and the FE has (kept plus created this run) and that is not yet in
+     `per_user`: `GRANT IMPERSONATE ON USER '<u>'@'%' TO USER 'egret_delegator'@'%'`. A reserved
+     user is never granted (it is never managed; the grant builder also refuses one).
+  Grants to users egret did not create are neither added nor removed. A dropped user takes its
+  grant with it.
+- **On a bound engine** (Ranger), the sync issues no native grant or revoke: Ranger does not read
+  them, and D1b's row is the control. An engine whose profile is later unbound converges on its next
+  sync.
+- **Existing engines** converge on their next apply or sweep (at most ten minutes after the
+  upgrade): `ON ALL USERS` is revoked and the per-user grants appear.
+- Failures go into `Done.failed`, scrubbed, and the next sync tries again. In the window between
+  the revoke and the grants, a member's `EXECUTE AS` is refused; it lasts one sync.
 
 ### 3. `MYSQL_PWD` for the FE and the CN (D2)
 
@@ -382,6 +437,21 @@ appears in no rendered manifest.
 grants, the root password, the query log table). Table data in object storage stays under the
 engine's storage path.
 
+### 5. A same-name create refuses a leftover claim (decided on 2026-11-11, 4)
+
+`create_starrocks_engine`, right after `check_starrocks_engine_name` and before any row exists,
+reads `fe-meta-<name>-fe-0` in the engine namespace through `st.kube` (no Kubernetes client, as on
+the Docker provisioner: no check). If the claim exists, the create answers **409** with
+`code: "engine_metadata_left_over"`, `claim: "<claim>"`, and the message:
+
+> A previous StarRocks engine named "<name>" left its front-end metadata volume <claim>. A new
+> engine would start with the old engine's users, catalogs and root password. Delete it first:
+> kubectl delete pvc <claim> -n <namespace>
+
+A failure to read the claim answers 502 (`ClusterApplyFailed`) naming the claim: the create does
+not guess. This covers claims from deletes before this package and a claim still terminating
+seconds after a delete.
+
 ## Error handling
 
 - Nothing in this package fails a create, an apply, a delete's success path, or a membership write
@@ -407,20 +477,28 @@ gives its duration.
   (passworded, passwordless, admin env kept, admin `MYSQL_PWD` kept); the retention key (marked,
   unmarked); delete (Job by background, claims 0..n deleted and n+1 not probed past, no claims, a
   failing claim reported after the rest).
+- **Unit (2.7 and 5):** the grant, revoke and `SHOW GRANTS FOR` builders (quoting, a reserved user
+  refused); the `SHOW GRANTS` parser (all-users, per-user lists, other rows); the 409's body.
 - **DB:** convergence adds the StarRocks delegator row and removes it on impersonate → jwt;
   migration 0219 reserves `root` (minting `root@…` gives `root-2`) and each trigger notifies at
   commit and not on rollback; the store's desired set (direct, through a group, expired, deny,
   disabled, unassigned); `sync_starrocks_users` against `FakeStarRocksDdl` (create, drop, forget,
   foreign untouched, reserved refused, create failure forgets its own record, FE error scrubbed,
-  `Busy` under a held lock, `NotNeeded` makes no FE call); the bootstrap stops before the sync when
-  the engine is deleted; an apply spawns a sync.
+  `Busy` under a held lock, `NotNeeded` makes no FE call); platform admins synced on an assigned
+  engine and not on an unassigned one; the `roles` and platform-grant triggers notify; on an unbound
+  engine the sync revokes `ON ALL USERS` and grants per user, and on a bound one it issues neither;
+  the bootstrap no longer grants `ON ALL USERS`; the bootstrap stops before the sync when the
+  engine is deleted; an apply spawns a sync; a create with a leftover claim answers 409 and creates
+  no row.
 - **Goldens:** re-blessed with `EGRET_GOLDEN_BLESS=1` and checked semantically: the only change is
   the new row on StarRocks impersonate profiles (and the served list's ordinals behind it). Then the
   corpus passes unblessed, and with `EGRET_GOLDEN_MECHANISM=opa`.
 - **Real StarRocks** (`EGRET_TEST_STARROCKS_URL`, egret's allin1 `4.1.7-egret.4`): the sync twice
-  (the second changes nothing), a foreign user left alone, a drop; M2 and M3 pinned.
+  (the second changes nothing), a foreign user left alone, a drop, the native grants and the revoke;
+  M2, M3, M6 and M7 pinned.
 - **Fork e2e:** the rendered row in the fork's fake Ranger; M1.
-- **Live on kind:** the four proofs of the plan's controller task (M4, M5).
+- **Live on kind:** the plan's controller task: the four proofs, native impersonation on an
+  engine bound to no profile, and the create refusal (M4, M5).
 
 ## Upgrade notes (for the docs)
 
@@ -439,6 +517,11 @@ gives its duration.
   exists, before re-creating an engine with the same name.
 - **A user named `root`** cannot be minted any more (they get `root-2`); one who already holds it
   keeps it, and is not synced to StarRocks.
+- **Platform admins get a StarRocks user** on every impersonate-mode engine assigned to a workspace.
+- **Engines bound to no profile lose `GRANT IMPERSONATE ON ALL USERS`**: on their next apply or sweep
+  the delegator gets per-user grants for egret's users instead, and can no longer become `root`.
+- **Creating a StarRocks engine whose name left a metadata claim** answers 409 with the `kubectl`
+  command to remove it.
 
 ## Documentation (egret-data/docs, Platform section)
 
@@ -448,41 +531,32 @@ gives its duration.
 - **Workspace settings, Databases:** the StarRocks impersonation row no longer asks for a hand-made
   service user.
 - **Engine detail, Delete:** FE metadata is destroyed; table data stays.
-- **Upgrade notes:** the five notes above.
+- **Upgrade notes:** the eight notes above.
+- **Handover of a hand-made user:** egret leaves a StarRocks user it did not create untouched and
+  logs it; to hand it over, drop it as root, and the next sync creates egret's.
+- **REST API:** `POST /engines` can answer 409 `engine_metadata_left_over`.
 - **Known issues:** KI-335 fixed; new rows for defect 1 and defect 3, each marked fixed by this
   package.
 
 ## Out of scope
 
-- Native access control (an engine bound to no profile): `GRANT IMPERSONATE ON ALL USERS` stays.
-  See open question 2.
 - External StarRocks engines: egret is not their root.
 - A user-visible sync status (API or UI). The outcome is logged.
 - Clearer error text for the seconds between a membership write and its sync.
 - `egret-ranger-eval`'s `PluginVersion` for StarRocks says 2.8.0 while the fork's pom pins 2.9.0
   (fact 7). Recorded, not changed here.
 
-## Open questions
+## Decided on 2026-11-11 (formerly the open questions)
 
-1. **Platform admins who are not members.** A platform admin passes every workspace gate
-   (`egret_workspace::context`, the `platform_admin` bypass) and can run a query on a workspace's
-   StarRocks connection without being a member, but the ruling syncs members only, so that query
-   fails with `cannot find user`. **Recommendation:** add holders of a live `allow`
-   `platform_admin` grant (direct or through a group, the set `egret-admin` follows) to the desired
-   set of every impersonate-mode engine that is assigned to at least one workspace. Not built until
-   the user rules.
-2. **Native access control still lets the delegator become root.** An engine bound to no profile
-   runs native access control, where `GRANT IMPERSONATE ON ALL USERS TO egret_delegator` includes
-   `root`. D1b covers Ranger only. **Recommendation:** in a follow-up, replace the native grant with
-   per-user `GRANT IMPERSONATE ON USER '<name>'@'%' TO egret_delegator` issued by the sync for the
-   users it creates, and `REVOKE IMPERSONATE ON ALL USERS` once.
-3. **Same-name users egret did not create.** The design leaves them untouched and logs a warning,
-   so a person's `EXECUTE AS` runs as that pre-existing user, with whatever password it has (on kind
-   today, a passwordless `member-sso` made by hand). **Recommendation:** keep "untouched" (an admin
-   may have made it on purpose, and the engine NetworkPolicy of #828 limits who reaches :9030), and
-   document how to hand it over: drop it as root, and the next sync creates egret's.
-4. **A same-name re-create while old claims still exist.** A claim from a delete before this
-   package, or one still terminating seconds after a delete, would be rebound by a new engine of the
-   same name, with the old root password. **Recommendation:** refuse `POST /engines` with 409 while a
-   `fe-meta-<name>-fe-0` claim exists in the engine namespace, naming the claim. Not built until the
-   user rules; the upgrade note covers old claims meanwhile.
+1. **Platform admins are synced.** Every live `platform_admin` holder joins the desired set of every
+   impersonate-mode engine assigned to at least one workspace (2.1). Triggers cover platform-role
+   grants and revokes (`access_grants`) and the role table (`roles`) (2.4).
+2. **Native access control is fixed in this package.** The sync grants `IMPERSONATE ON USER` per
+   user it manages and revokes `ON ALL USERS`; reserved users are never granted; the bootstrap stops
+   granting `ON ALL USERS`; existing engines converge on their next apply or sweep (2.7). M6 and M7
+   measure the FE's answers.
+3. **Users egret did not create stay untouched.** Logged, and the handover is documented (2.6).
+4. **`POST /engines` answers 409 on a leftover claim**, code `engine_metadata_left_over`, with the
+   `kubectl` cleanup in the message (section 5). The upgrade note stays.
+
+The question texts are in this file's git history (commit `acbc223cd`).
