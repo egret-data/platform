@@ -10,7 +10,7 @@
 //! `engine_mgmt.starrocks_users`, and drops only what it recorded. It runs as
 //! `root` from engine-mgmt, never from the query path.
 //!
-//! Woken by (wired in Task 9): the `pg_notify` triggers of migration 0219
+//! Woken by: the `pg_notify` triggers of migration 0219
 //! (membership, groups, user status and delete, engine assignment), a periodic
 //! sweep whose first tick is the boot reconcile, every StarRocks apply, and
 //! the post-Ready bootstrap. Those triggers are statement-level and also fire
@@ -19,20 +19,31 @@
 //! sends `SHOW USERS` and no statement.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 use egret_core::engine_principals::is_starrocks_reserved_user;
 use egret_query_api::{quote_string, Engine as QueryEngine};
 use uuid::Uuid;
 
-use crate::engines::random_internal_secret;
-use crate::starrocks_ddl::FeTarget;
+use crate::engines::{engine_still_current, random_internal_secret, wait_for_fe_root_login};
+use crate::starrocks_ddl::{fe_target, FeTarget};
 use crate::EngineMgmtState as CpState;
 use crate::{engine_status, Engine};
 
 /// The channel migration 0219's triggers notify.
-// Task 9 wires the listener, the sweep and the apply hook that call this.
-#[allow(dead_code)]
 pub const USER_SYNC_CHANNEL: &str = "egret_starrocks_user_sync";
+
+/// How often every engine is reconciled whatever was notified: what a
+/// listener that was down missed, and an FE that lost its users on a roll.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(600);
+
+/// How long the listener waits before reconnecting after an error.
+const LISTEN_RETRY: Duration = Duration::from_secs(5);
+
+/// How long the worker waits after a wake-up before its pass, so that a
+/// burst of notifications (one per statement of a multi-statement write, or a
+/// run of unrelated grant writes) costs one pass.
+const SYNC_DEBOUNCE: Duration = Duration::from_secs(1);
 
 pub(crate) const SHOW_USERS_SQL: &str = "SHOW USERS";
 
@@ -179,8 +190,6 @@ pub(crate) async fn wants_user_sync(st: &CpState, engine: &Engine) -> bool {
 }
 
 /// Reconcile `engine`'s StarRocks users (spec section 2.3) as `root` on `fe`.
-// Task 9 wires the listener, the sweep and the apply hook that call this.
-#[allow(dead_code)]
 pub(crate) async fn sync_starrocks_users(st: &CpState, engine: &Engine, fe: &FeTarget) -> UserSync {
     if !wants_user_sync(st, engine).await {
         return UserSync::NotNeeded;
@@ -321,8 +330,6 @@ async fn sync_locked(st: &CpState, engine: &Engine, fe: &FeTarget) -> UserSync {
     }
 }
 
-// Task 9 wires the listener, the sweep and the apply hook that call this.
-#[allow(dead_code)]
 pub(crate) fn log_outcome(engine_name: &str, outcome: &UserSync) {
     match outcome {
         UserSync::NotNeeded => {}
@@ -360,9 +367,188 @@ pub(crate) fn log_outcome(engine_name: &str, outcome: &UserSync) {
     }
 }
 
+/// After a StarRocks apply (`engines::finish_apply`): if the engine wants a
+/// sync, wait for the FE and a real root login exactly as the bootstrap does,
+/// pass a checkpoint, and reconcile. Spawned, never awaited by a request.
+pub(crate) fn spawn_user_sync(
+    st: CpState,
+    engine_id: Uuid,
+    name: String,
+    namespace: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let Ok(Some(engine)) = st.engine_mgmt.get_engine(engine_id).await else {
+            return;
+        };
+        if !wants_user_sync(&st, &engine).await {
+            return;
+        }
+        let mut errors: u32 = 0;
+        let Some((_, fe)) =
+            wait_for_fe_root_login(&st, engine_id, &name, &namespace, &mut errors).await
+        else {
+            return;
+        };
+        if !engine_still_current(&st.engine_mgmt, engine_id, &name, &mut errors).await {
+            return;
+        }
+        sync_current_engine(&st, engine_id, &fe).await;
+    })
+}
+
+/// Re-read the engine, then reconcile THAT row and log the outcome. Every
+/// caller goes through here (or re-reads the same way, as the pass does), so
+/// no sync ever plans from a snapshot taken earlier: a stale snapshot that no
+/// longer reads as impersonate-mode would plan an empty desired set and drop
+/// every user egret recorded. `None` when the engine is gone or cannot be
+/// read; it is skipped, not synced.
+pub(crate) async fn sync_current_engine(
+    st: &CpState,
+    engine_id: Uuid,
+    fe: &FeTarget,
+) -> Option<UserSync> {
+    let engine = current_engine(st, engine_id).await?;
+    let outcome = sync_starrocks_users(st, &engine, fe).await;
+    log_outcome(&engine.name, &outcome);
+    Some(outcome)
+}
+
+/// The engine row as it is now; `None` (logged) when gone or unreadable.
+async fn current_engine(st: &CpState, engine_id: Uuid) -> Option<Engine> {
+    match st.engine_mgmt.get_engine(engine_id).await {
+        Ok(Some(engine)) => Some(engine),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(%engine_id, error = %e,
+                "starrocks users: the engine could not be re-read; skipped");
+            None
+        }
+    }
+}
+
+/// One pass over every engine that wants a sync, one at a time. Returns how
+/// many reconciled (`Done`).
+pub(crate) async fn sync_all_starrocks_users(st: &CpState) -> usize {
+    let engines = match st.engine_mgmt.list_engines().await {
+        Ok(engines) => engines,
+        Err(e) => {
+            tracing::warn!(error = %e, "starrocks users: listing the engines failed");
+            return 0;
+        }
+    };
+    let mut synced = 0;
+    for listed in engines {
+        // The pass is serial, so a listed row can be minutes old by its turn.
+        let Some(engine) = current_engine(st, listed.id).await else {
+            continue;
+        };
+        if !wants_user_sync(st, &engine).await {
+            continue;
+        }
+        let fe = match fe_target(st, &engine).await {
+            Ok(fe) => fe,
+            Err(e) => {
+                tracing::warn!(engine = %engine.name, error = ?e,
+                    "starrocks users: the FE connection could not be resolved");
+                continue;
+            }
+        };
+        let outcome = sync_starrocks_users(st, &engine, &fe).await;
+        log_outcome(&engine.name, &outcome);
+        if matches!(outcome, UserSync::Done { .. }) {
+            synced += 1;
+        }
+    }
+    synced
+}
+
+/// Ask the worker for a pass. The channel holds one wake-up, so a full
+/// channel already holds this one: dropping it is the coalescing.
+fn wake_worker(wake: &tokio::sync::mpsc::Sender<()>) {
+    let _ = wake.try_send(());
+}
+
+/// The worker: on a wake-up, wait `debounce`, take every wake-up that came
+/// meanwhile, then run one `pass`. Wake-ups during a pass leave one queued,
+/// which costs exactly one more pass. Ends when every sender is gone.
+async fn run_coalesced<F, Fut>(
+    mut wakes: tokio::sync::mpsc::Receiver<()>,
+    debounce: Duration,
+    mut pass: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    while wakes.recv().await.is_some() {
+        tokio::time::sleep(debounce).await;
+        while wakes.try_recv().is_ok() {}
+        pass().await;
+    }
+}
+
+/// Start the sync's three tasks: a `LISTEN` on [`USER_SYNC_CHANNEL`], a
+/// sweep every [`SWEEP_INTERVAL`] whose first tick is immediate (the boot
+/// reconcile), and the worker that runs [`sync_all_starrocks_users`] once per
+/// burst of wake-ups ([`run_coalesced`]): migration 0219's triggers are
+/// statement-level and also fire on unrelated `access_grants` writes and on
+/// writes that change no row, so N notifications must not cost N passes. The
+/// listener reconnects on its own; what it misses meanwhile, the sweep
+/// catches. Returns the worker's handle.
+pub fn spawn_starrocks_user_sync(st: CpState) -> tokio::task::JoinHandle<()> {
+    let (wake, wakes) = tokio::sync::mpsc::channel::<()>(1);
+    {
+        let wake = wake.clone();
+        let pool = st.engine_mgmt.pool().clone();
+        tokio::spawn(async move {
+            loop {
+                let mut listener = match sqlx::postgres::PgListener::connect_with(&pool).await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "starrocks users: cannot connect the listener");
+                        tokio::time::sleep(LISTEN_RETRY).await;
+                        continue;
+                    }
+                };
+                if let Err(e) = listener.listen(USER_SYNC_CHANNEL).await {
+                    tracing::warn!(error = %e, "starrocks users: LISTEN failed");
+                    tokio::time::sleep(LISTEN_RETRY).await;
+                    continue;
+                }
+                // A (re)connect may have missed notifications.
+                wake_worker(&wake);
+                loop {
+                    match listener.recv().await {
+                        Ok(_) => wake_worker(&wake),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "starrocks users: listener error");
+                            tokio::time::sleep(LISTEN_RETRY).await;
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(SWEEP_INTERVAL);
+        loop {
+            tick.tick().await;
+            wake_worker(&wake);
+        }
+    });
+    tokio::spawn(run_coalesced(wakes, SYNC_DEBOUNCE, move || {
+        let st = st.clone();
+        async move {
+            let synced = sync_all_starrocks_users(&st).await;
+            tracing::debug!(engines = synced, "starrocks users: sync pass done");
+        }
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn set(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|s| s.to_string()).collect()
@@ -468,6 +654,54 @@ mod tests {
                 ..UserPlan::default()
             }
         );
+    }
+
+    /// A burst of wake-ups (the statement triggers also fire on unrelated
+    /// grant writes and on writes that change no row) runs ONE pass, even
+    /// when it is spread over the debounce; and wake-ups during a pass run
+    /// exactly one more.
+    #[tokio::test]
+    async fn a_burst_of_wake_ups_runs_one_pass() {
+        let passes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (wake, wakes) = tokio::sync::mpsc::channel(1);
+        let worker = {
+            let passes = passes.clone();
+            tokio::spawn(run_coalesced(
+                wakes,
+                Duration::from_millis(300),
+                move || {
+                    let passes = passes.clone();
+                    async move {
+                        passes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                    }
+                },
+            ))
+        };
+        let count = || passes.load(std::sync::atomic::Ordering::SeqCst);
+        let burst = || async {
+            for _ in 0..10 {
+                wake_worker(&wake);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+
+        // A burst inside the debounce, then quiet.
+        burst().await;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(count(), 1, "a burst coalesces into one pass");
+
+        // One wake-up, then a burst while its pass runs (300 ms after it).
+        wake_worker(&wake);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(count(), 2, "premise: the pass is running");
+        burst().await;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(count(), 3, "a burst during a pass costs one more pass");
+
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert_eq!(count(), 3, "and nothing more");
+        worker.abort();
     }
 
     #[test]

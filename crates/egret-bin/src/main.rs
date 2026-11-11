@@ -3688,8 +3688,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     }
     // Every provisioned StarRocks engine gets its Query log set up once at
     // start (an engine created before the Query log existed has none), in the
-    // background; each engine logs its own outcome.
+    // background; each engine logs its own outcome. The StarRocks user sync
+    // (package D) starts here too: its first sweep is the boot reconcile.
     if let Some(st) = query_log_state {
+        egret_engine_mgmt::spawn_starrocks_user_sync(st.clone());
         tokio::spawn(async move {
             egret_engine_mgmt::setup_query_logs(&st).await;
         });

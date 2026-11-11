@@ -1123,6 +1123,17 @@ async fn finish_apply(
         ApplyOp::Provision => prov.provision(&built.req).await,
         ApplyOp::Update => prov.update(&built.req).await,
     };
+    // Package D, D1a: every StarRocks apply reconciles the engine's users
+    // once the FE answers (an FE without persistent metadata loses them on a
+    // roll). Not awaited.
+    if res.is_ok() && engine.is_starrocks() && op == ApplyOp::Update {
+        crate::starrocks_users::spawn_user_sync(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+        );
+    }
     // Every attachment this request rendered is now on the engine (Trino renders
     // them all on every apply), so their failed flags — Retry's subject — clear.
     if res.is_ok() && !engine.is_starrocks() {
@@ -5694,7 +5705,7 @@ pub(crate) async fn wait_for_fe_root_login(
 /// attachments keep the status they already have — they must not claim
 /// `pending`, which is only the create path's starting state.
 ///
-/// **Where the seven `engine_still_current` checkpoints sit, and why.** They
+/// **Where the eight `engine_still_current` checkpoints sit, and why.** They
 /// exist so a bootstrap cannot resurrect an engine that was deleted or renamed
 /// while it polled, and a loop over N attachments must not weaken that. One per
 /// iteration of each poll loop (1, 2), both in [`wait_for_fe_root_login`]; one
@@ -5703,10 +5714,11 @@ pub(crate) async fn wait_for_fe_root_login(
 /// guarded the single catalog statement, so a delete part-way through a
 /// ten-catalog engine now stops at the next catalog instead of finishing the
 /// batch; then one before the security integration (4), one before its repair
-/// (5), and one per remaining delegation statement (6); and last, one before
-/// the query log setup (7, [`crate::query_log::ensure_query_log`]), which runs
-/// after the delegation statements because its wait for an alive compute node
-/// can take minutes and they need no node. The rule is the same everywhere:
+/// (5), and one per remaining delegation statement (6); then one before the
+/// user sync (7, [`crate::starrocks_users::sync_starrocks_users`]); and last,
+/// one before the query log setup (8, [`crate::query_log::ensure_query_log`]),
+/// which runs after the delegation statements and the user sync because its
+/// wait for an alive compute node can take minutes and they need no node. The rule is the same everywhere:
 /// re-read immediately before a WRITE to the cluster, never once for a batch
 /// of them.
 fn spawn_starrocks_catalog_wire(
@@ -5847,11 +5859,29 @@ fn spawn_starrocks_catalog_wire(
             }
         }
 
-        // Checkpoint 7, then the query log, LAST (live check, 2026-11-11):
+        // Checkpoint 7, then the StarRocks users of the people who may query
+        // this engine (package D, D1a): after the delegation statements,
+        // which create the delegator, and before the query log, whose node
+        // wait can take minutes. The sync plans from the engine row re-read
+        // now, never from the snapshot `wait_for_fe_root_login` returned.
+        if !engine_still_current(
+            &st.engine_mgmt,
+            engine_id,
+            &engine_name,
+            &mut consecutive_read_errors,
+        )
+        .await
+        {
+            return;
+        }
+        crate::starrocks_users::sync_current_engine(&st, engine_id, &fe).await;
+
+        // Checkpoint 8, then the query log, LAST (live check, 2026-11-11):
         // its setup waits up to about five minutes for an alive compute node
         // (a shared-data `CREATE TABLE` needs one), and its step 6 up to three
-        // minutes for the first event. The delegation statements above need
-        // neither, so nothing of the query log may stand in front of them.
+        // minutes for the first event. The delegation statements and the
+        // users above need neither, so nothing of the query log may stand in
+        // front of them.
         if !engine_still_current(
             &st.engine_mgmt,
             engine_id,
@@ -16073,6 +16103,14 @@ mod tests {
 
     // ---- Package D, Task 8: the StarRocks user sync ----
 
+    /// A sync PASS (`sync_all_starrocks_users`, the worker) reconciles every
+    /// engine in the shared test database against its own test's fake FE and
+    /// takes each engine's sync lock while it does. A test that asserts on
+    /// one engine's sync holds this for reading; a test that runs a pass holds
+    /// it for writing, so no pass can make another test's sync `Busy` or
+    /// change its records mid-test.
+    static USER_SYNC_PASS: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+
     /// `seed_sr_engine` in impersonate mode.
     async fn seed_impersonate_sr_engine(st: &CpState) -> Engine {
         let engine = seed_sr_engine(st).await;
@@ -16148,6 +16186,7 @@ mod tests {
             eprintln!("skipping the_sync_creates_the_members_users_once: DATABASE_URL not set");
             return;
         };
+        let _pass = USER_SYNC_PASS.read().await;
         let engine = seed_impersonate_sr_engine(&st).await;
         let ws = seed_assigned_workspace(&st, &engine).await;
         let (alice, carol) = (uname("alice"), uname("carol"));
@@ -16208,6 +16247,7 @@ mod tests {
             eprintln!("skipping the_sync_drops_who_left_and_never_touches_a_foreign_user: DATABASE_URL not set");
             return;
         };
+        let _pass = USER_SYNC_PASS.read().await;
         let engine = seed_impersonate_sr_engine(&st).await;
         let ws = seed_assigned_workspace(&st, &engine).await;
         let (bob, theirs) = (uname("bob"), uname("theirs"));
@@ -16260,6 +16300,7 @@ mod tests {
             eprintln!("skipping a_user_that_appears_before_the_create_is_not_adopted: DATABASE_URL not set");
             return;
         };
+        let _pass = USER_SYNC_PASS.read().await;
         let engine = seed_impersonate_sr_engine(&st).await;
         let ws = seed_assigned_workspace(&st, &engine).await;
         let ray = uname("ray");
@@ -16310,6 +16351,7 @@ mod tests {
             );
             return;
         };
+        let _pass = USER_SYNC_PASS.read().await;
         let engine = seed_impersonate_sr_engine(&st).await;
         let ws = seed_assigned_workspace(&st, &engine).await;
         let dan = uname("dan");
@@ -16372,6 +16414,7 @@ mod tests {
             eprintln!("skipping an_engine_without_delegation_or_records_makes_no_fe_call: DATABASE_URL not set");
             return;
         };
+        let _pass = USER_SYNC_PASS.read().await;
         let engine = seed_sr_engine(&st).await;
         let fe = crate::starrocks_ddl::fe_target(&st, &engine)
             .await
@@ -16388,6 +16431,7 @@ mod tests {
             eprintln!("skipping a_held_lock_makes_the_sync_busy: DATABASE_URL not set");
             return;
         };
+        let _pass = USER_SYNC_PASS.read().await;
         let engine = seed_impersonate_sr_engine(&st).await;
         let held = st
             .engine_mgmt
@@ -16413,6 +16457,7 @@ mod tests {
             );
             return;
         };
+        let _pass = USER_SYNC_PASS.read().await;
         let engine = seed_impersonate_sr_engine(&st).await;
         let ws = seed_assigned_workspace(&st, &engine).await;
         let pool = st.engine_mgmt.pool();
@@ -16470,6 +16515,7 @@ mod tests {
             eprintln!("skipping platform_admins_are_synced_where_the_engine_serves_a_workspace: DATABASE_URL not set");
             return;
         };
+        let _pass = USER_SYNC_PASS.read().await;
         let pool = st.engine_mgmt.pool();
         let admin = uname("padmin");
         let admin_id: Uuid = sqlx::query_scalar(
@@ -16538,6 +16584,7 @@ mod tests {
             );
             return;
         };
+        let _pass = USER_SYNC_PASS.read().await;
         let engine = seed_sr_engine(&st).await;
         let name = uname("rec");
 
@@ -16595,6 +16642,7 @@ mod tests {
             );
             return;
         };
+        let _pass = USER_SYNC_PASS.read().await;
         let engine = seed_impersonate_sr_engine(&st).await;
         let ws = seed_assigned_workspace(&st, &engine).await;
         let pool = st.engine_mgmt.pool();
@@ -16662,6 +16710,333 @@ mod tests {
             !sent.iter().any(|s| s.contains("'root'@")),
             "no statement names root: {sent:?}"
         );
+    }
+
+    // ---- Package D, Task 9: the sync is wired ----
+
+    /// Package D: the bootstrap creates the members' StarRocks users right after
+    /// the delegation statements, which create the delegator.
+    #[tokio::test]
+    async fn the_bootstrap_syncs_the_members_after_the_delegation_statements() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping the_bootstrap_syncs_the_members_after_the_delegation_statements: DATABASE_URL not set");
+            return;
+        };
+        let _guard = QUERY_LOG_USERNAME.lock().await;
+        let _pass = USER_SYNC_PASS.read().await;
+        let engine = seed_impersonate_sr_engine(&st).await;
+        prov.set_status(ready_fe_status(&engine.name));
+        let ws = seed_assigned_workspace(&st, &engine).await;
+        let alice = uname("alice");
+        seed_member(&st, ws, &alice, "active").await;
+
+        spawn_starrocks_catalog_wire(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+            Some(test_delegation()),
+        )
+        .await
+        .expect("bootstrap task did not panic");
+
+        let sent = fake.executed();
+        let delegator = sent
+            .iter()
+            .position(|s| s.contains("CREATE USER IF NOT EXISTS 'egret_delegator'"))
+            .expect("the delegator");
+        let create = sent
+            .iter()
+            .position(|s| s.starts_with(&format!("CREATE USER '{alice}'@'%'")))
+            .expect("the member's user");
+        assert!(delegator < create, "{sent:?}");
+        assert!(fake.users().contains(&alice));
+        // Before the query log, whose node wait can take minutes.
+        let q = fake.queried();
+        let users_at = q
+            .iter()
+            .position(|s| s == crate::starrocks_users::SHOW_USERS_SQL)
+            .expect("SHOW USERS");
+        let nodes_at = q
+            .iter()
+            .position(|s| s.ends_with("SHOW COMPUTE NODES"))
+            .expect("the query log's node wait");
+        assert!(users_at < nodes_at, "{q:?}");
+    }
+
+    /// Checkpoint 7 and the sync's re-read of the row: an engine deleted on
+    /// the last delegation statement gets no user sync. Either alone stops
+    /// it; `a_renamed_engine_gets_no_user_sync_from_the_bootstrap` isolates
+    /// the checkpoint.
+    #[tokio::test]
+    async fn a_deleted_engine_gets_no_user_sync_from_the_bootstrap() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping a_deleted_engine_gets_no_user_sync_from_the_bootstrap: DATABASE_URL not set");
+            return;
+        };
+        let _pass = USER_SYNC_PASS.read().await;
+        let engine = seed_impersonate_sr_engine(&st).await;
+        prov.set_status(ready_fe_status(&engine.name));
+        let store = st.engine_mgmt.clone();
+        let engine_id = engine.id;
+        fake.on_execute(move |sql| {
+            let store = store.clone();
+            Box::pin(async move {
+                // The LAST delegation statement. Task 10 removes the `ON ALL USERS`
+                // grant and moves this to the delegator's `CREATE USER`.
+                if sql.contains("GRANT IMPERSONATE ON ALL USERS") {
+                    store.delete_engine(engine_id).await.unwrap();
+                }
+            })
+        });
+
+        spawn_starrocks_catalog_wire(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+            Some(test_delegation()),
+        )
+        .await
+        .expect("bootstrap task did not panic");
+
+        assert!(
+            !fake
+                .queried()
+                .iter()
+                .any(|q| q == crate::starrocks_users::SHOW_USERS_SQL),
+            "{:?}",
+            fake.queried()
+        );
+    }
+
+    /// Checkpoint 7 alone: an engine RENAMED on the last delegation statement
+    /// gets no user sync. (Deleted or `deleting`, the sync's own re-read of
+    /// the row would also skip it, so the test above cannot tell the
+    /// checkpoint from the re-read; a renamed row is still impersonate-mode,
+    /// and only the checkpoint knows the bootstrap's `fe` is the old name's.)
+    #[tokio::test]
+    async fn a_renamed_engine_gets_no_user_sync_from_the_bootstrap() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping a_renamed_engine_gets_no_user_sync_from_the_bootstrap: DATABASE_URL not set");
+            return;
+        };
+        let _pass = USER_SYNC_PASS.read().await;
+        let engine = seed_impersonate_sr_engine(&st).await;
+        prov.set_status(ready_fe_status(&engine.name));
+        let ws = seed_assigned_workspace(&st, &engine).await;
+        seed_member(&st, ws, &uname("kai"), "active").await;
+        let pool = st.engine_mgmt.pool().clone();
+        let engine_id = engine.id;
+        fake.on_execute(move |sql| {
+            let pool = pool.clone();
+            Box::pin(async move {
+                if sql.contains("GRANT IMPERSONATE ON ALL USERS") {
+                    sqlx::query("UPDATE engine_mgmt.engines SET name = $2 WHERE id = $1")
+                        .bind(engine_id)
+                        .bind(format!("sr-{}", Uuid::new_v4().simple()))
+                        .execute(&pool)
+                        .await
+                        .expect("rename");
+                }
+            })
+        });
+
+        spawn_starrocks_catalog_wire(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+            Some(test_delegation()),
+        )
+        .await
+        .expect("bootstrap task did not panic");
+
+        assert!(
+            fake.executed()
+                .iter()
+                .any(|s| s.contains("GRANT IMPERSONATE ON ALL USERS")),
+            "premise: the delegation half ran: {:?}",
+            fake.executed()
+        );
+        assert!(
+            !fake
+                .queried()
+                .iter()
+                .any(|q| q == crate::starrocks_users::SHOW_USERS_SQL),
+            "{:?}",
+            fake.queried()
+        );
+    }
+
+    /// The sync plans from the engine row as it is when it runs, never from the
+    /// bootstrap's earlier snapshot (Task 8 review). The bootstrap starts on a
+    /// `jwt`-mode row and the row turns `impersonate` during the delegation
+    /// statements: a sync that planned from the snapshot would want nobody and
+    /// drop the member's recorded user.
+    #[tokio::test]
+    async fn the_bootstrap_syncs_from_the_row_not_its_snapshot() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!(
+                "skipping the_bootstrap_syncs_from_the_row_not_its_snapshot: DATABASE_URL not set"
+            );
+            return;
+        };
+        let _pass = USER_SYNC_PASS.read().await;
+        let engine = seed_impersonate_sr_engine(&st).await;
+        let impersonate = engine.spec.clone();
+        let mut jwt = impersonate.clone();
+        jwt["starrocksConfig"]["delegation"] = serde_json::json!({"mode": "jwt"});
+        assert!(st
+            .engine_mgmt
+            .update_engine(engine.id, &jwt, &engine.status)
+            .await
+            .expect("to jwt"));
+        prov.set_status(ready_fe_status(&engine.name));
+        let ws = seed_assigned_workspace(&st, &engine).await;
+        let jo = uname("jo");
+        seed_member(&st, ws, &jo, "active").await;
+        assert!(st
+            .engine_mgmt
+            .record_starrocks_user(engine.id, &jo)
+            .await
+            .expect("record"));
+        fake.seed_user(&jo);
+        let store = st.engine_mgmt.clone();
+        let (engine_id, status) = (engine.id, engine.status.clone());
+        fake.on_execute(move |sql| {
+            let (store, impersonate, status) = (store.clone(), impersonate.clone(), status.clone());
+            Box::pin(async move {
+                if sql.contains("GRANT IMPERSONATE") {
+                    store
+                        .update_engine(engine_id, &impersonate, &status)
+                        .await
+                        .expect("back to impersonate");
+                }
+            })
+        });
+
+        spawn_starrocks_catalog_wire(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+            Some(test_delegation()),
+        )
+        .await
+        .expect("bootstrap task did not panic");
+
+        assert!(
+            fake.queried()
+                .iter()
+                .any(|q| q == crate::starrocks_users::SHOW_USERS_SQL),
+            "premise: the sync ran: {:?}",
+            fake.queried()
+        );
+        let sent = fake.executed();
+        assert!(
+            !sent.iter().any(|s| s.starts_with("DROP USER")),
+            "a sync planned from the row keeps the member: {sent:?}"
+        );
+        assert!(fake.users().contains(&jo));
+        assert!(st
+            .engine_mgmt
+            .recorded_starrocks_users(engine.id)
+            .await
+            .expect("records")
+            .contains(&jo));
+    }
+
+    /// Every StarRocks apply reconciles the users: `apply_built` with
+    /// `ApplyOp::Update`, the path update, restart, rebind, catalog apply and
+    /// security upgrade all take.
+    #[tokio::test]
+    async fn an_apply_syncs_the_users() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping an_apply_syncs_the_users: DATABASE_URL not set");
+            return;
+        };
+        let _pass = USER_SYNC_PASS.read().await;
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_impersonate_sr_engine(&st).await;
+        attach_primary_warehouse_catalog(&st, &engine, wh.id).await;
+        prov.set_status(ready_fe_status(&engine.name));
+        let ws = seed_assigned_workspace(&st, &engine).await;
+        let erin = uname("erin");
+        seed_member(&st, ws, &erin, "active").await;
+
+        let built = build_provision_req_with(&st, &engine, BuildOpts::default())
+            .await
+            .expect("build");
+        let port: std::sync::Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort> = prov.clone();
+        apply_built(&st, port, &engine, &built, ApplyOp::Update)
+            .await
+            .expect("apply");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !fake.users().contains(&erin) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no sync after the apply: {:?}",
+                fake.executed()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// The sweep's pass reconciles every engine that wants it.
+    #[tokio::test]
+    async fn the_pass_syncs_every_engine_that_wants_it() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping the_pass_syncs_every_engine_that_wants_it: DATABASE_URL not set");
+            return;
+        };
+        let _pass = USER_SYNC_PASS.write().await;
+        let engine = seed_impersonate_sr_engine(&st).await;
+        let ws = seed_assigned_workspace(&st, &engine).await;
+        let fay = uname("fay");
+        seed_member(&st, ws, &fay, "active").await;
+
+        let synced = crate::starrocks_users::sync_all_starrocks_users(&st).await;
+
+        assert!(synced >= 1);
+        assert!(fake.users().contains(&fay));
+    }
+
+    /// The worker hears migration 0219's NOTIFY: once the boot reconcile has
+    /// run, a new member gets a user long before the ten-minute sweep, so
+    /// only the `LISTEN` can have woken it.
+    #[tokio::test]
+    async fn a_membership_write_wakes_the_sync() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping a_membership_write_wakes_the_sync: DATABASE_URL not set");
+            return;
+        };
+        let _pass = USER_SYNC_PASS.write().await;
+        let engine = seed_impersonate_sr_engine(&st).await;
+        let ws = seed_assigned_workspace(&st, &engine).await;
+        let (gil, hal) = (uname("gil"), uname("hal"));
+        seed_member(&st, ws, &gil, "active").await;
+        let wait_for = |name: String, what: &'static str| {
+            let fake = fake.clone();
+            async move {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while !fake.users().contains(&name) {
+                    assert!(std::time::Instant::now() < deadline, "{what}: {name}");
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+        };
+
+        let worker = crate::starrocks_users::spawn_starrocks_user_sync(st.clone());
+        wait_for(gil, "the boot reconcile").await;
+        seed_member(&st, ws, &hal, "active").await;
+        wait_for(hal, "the NOTIFY woke no sync").await;
+        worker.abort();
     }
 
     /// An engine whose stored FE image is an official one (no audit plugin).
@@ -17066,11 +17441,13 @@ mod tests {
         );
     }
 
-    /// Checkpoint 7, on a delegating engine: the query log now runs after
-    /// the delegation half, so the engine is flipped on the LAST delegation
-    /// write (`GRANT IMPERSONATE`). Checkpoints 4 to 6 have passed by then,
-    /// and checkpoint 7 is the only thing left between the bootstrap and the
-    /// query log's writes.
+    /// Checkpoint 8, on a delegating engine: the query log runs after the
+    /// delegation half and the user sync, so the engine is flipped on the
+    /// user sync's LAST write (the member's `CREATE USER`). Checkpoints 4 to
+    /// 7 have passed by then, and checkpoint 8 is the only thing left between
+    /// the bootstrap and the query log's writes. (Flipped any earlier,
+    /// checkpoint 7 would stop it first: see
+    /// `a_deleted_engine_gets_no_user_sync_from_the_bootstrap`.)
     #[tokio::test]
     async fn the_bootstrap_stops_before_the_query_log_after_the_delegation_statements() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
@@ -17078,14 +17455,20 @@ mod tests {
             return;
         };
         let _guard = QUERY_LOG_USERNAME.lock().await;
-        let engine = seed_sr_delegating_engine(&st, "CERTPEM").await;
+        let _pass = USER_SYNC_PASS.read().await;
+        let engine = seed_impersonate_sr_engine(&st).await;
         prov.set_status(ready_fe_status(&engine.name));
+        let ws = seed_assigned_workspace(&st, &engine).await;
+        let ivy = uname("ivy");
+        seed_member(&st, ws, &ivy, "active").await;
         let store = st.engine_mgmt.clone();
         let engine_id = engine.id;
+        let member_create = format!("CREATE USER '{ivy}'@'%'");
         fake.on_execute(move |sql| {
             let store = store.clone();
+            let flip = sql.starts_with(&member_create);
             Box::pin(async move {
-                if sql.contains("GRANT IMPERSONATE") {
+                if flip {
                     stop_being_current(&store, engine_id).await;
                 }
             })
@@ -17102,10 +17485,15 @@ mod tests {
         .expect("bootstrap task did not panic");
 
         let sent = fake.executed();
+        assert!(
+            sent.iter().any(|s| s.contains("GRANT IMPERSONATE")),
+            "premise: the delegation half ran: {sent:?}"
+        );
         assert_eq!(
-            sent.last().map(|s| s.contains("GRANT IMPERSONATE")),
+            sent.last()
+                .map(|s| s.starts_with(&format!("CREATE USER '{ivy}'@'%'"))),
             Some(true),
-            "premise: the delegation half ran to its last statement, and nothing followed: \
+            "premise: the user sync ran to its last statement, and nothing followed: \
              {sent:?}"
         );
         assert!(
@@ -17198,8 +17586,11 @@ mod tests {
         );
     }
 
-    /// Checkpoint 7 (no delegation): an engine that stops being current while its
-    /// attachments converge gets no query log statement.
+    /// Checkpoints 7 and 8 (no delegation): an engine that stops being current
+    /// while its attachments converge gets no query log statement. Checkpoint
+    /// 7 is the one that stops it (this engine wants no user sync, so nothing
+    /// reaches the FE between 7 and 8); checkpoint 8 alone is proven by
+    /// `the_bootstrap_stops_before_the_query_log_after_the_delegation_statements`.
     #[tokio::test]
     async fn the_bootstrap_stops_before_the_query_log_when_the_engine_is_deleted() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
