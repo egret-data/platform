@@ -1509,7 +1509,18 @@ pub fn g13_engine_grants(db: &Db) -> Fut<'_> {
         catalog(&mut tx, "g13.cat", wh, &[tr_engine, sr_engine], &mut names).await;
         user(&mut tx, "g13.alice", Some("g13_alice"), &mut names).await;
         let bob = user(&mut tx, "g13.bob", Some("g13_bob"), &mut names).await;
+        // A person who held `root` before migration 0219 reserved it: the
+        // ledger now refuses the name, so the row is written with its triggers
+        // off for this one insert (the transaction rolls back).
+        sqlx::query("SET LOCAL session_replication_role = replica")
+            .execute(&mut *tx)
+            .await
+            .expect("replica role");
         let root = user(&mut tx, "g13.root", Some("root"), &mut names).await;
+        sqlx::query("SET LOCAL session_replication_role = origin")
+            .execute(&mut *tx)
+            .await
+            .expect("origin role");
         // `root` is left as written: replaced, it would rewrite every `root`
         // substring in the output.
         names.0.remove("root");

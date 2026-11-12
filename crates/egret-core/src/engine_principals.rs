@@ -29,6 +29,27 @@ pub const DELEGATOR_PRINCIPAL: &str = "egret_delegator";
 /// Reserved by migration 0218's `username_ledger` row, like [`DELEGATOR_PRINCIPAL`].
 pub const QUERY_LOG_LOADER_PRINCIPAL: &str = "egret_query_log";
 
+/// StarRocks' built-in superuser. Never an impersonation target and never a
+/// user egret creates for a person (package D).
+pub const STARROCKS_ROOT_USER: &str = "root";
+
+/// The StarRocks users egret's delegator may never become (the D1b Ranger
+/// row's exclusion) and that egret never creates or drops for a person (the
+/// D1a user sync). Sorted, so a rendered body is byte-stable.
+pub const STARROCKS_RESERVED_USERS: [&str; 3] = [
+    DELEGATOR_PRINCIPAL,
+    QUERY_LOG_LOADER_PRINCIPAL,
+    STARROCKS_ROOT_USER,
+];
+
+/// Whether `name` is one of [`STARROCKS_RESERVED_USERS`], ignoring ASCII
+/// case like the Ranger `user` resource (`ignoreCase: true`).
+pub fn is_starrocks_reserved_user(name: &str) -> bool {
+    STARROCKS_RESERVED_USERS
+        .iter()
+        .any(|r| r.eq_ignore_ascii_case(name))
+}
+
 /// Usernames no human may hold (see the module doc).
 pub const RESERVED_ENGINE_USERNAMES: &[&str] = &[LINEAGE_PRINCIPAL];
 
@@ -62,5 +83,20 @@ mod tests {
         assert!(is_reserved_engine_username("egret-lineage"));
         assert!(!is_reserved_engine_username("egret-lineage-2"));
         assert!(!is_reserved_engine_username("alice"));
+    }
+
+    /// Package D: one list for the Ranger exclusion (D1b) and the user sync
+    /// (D1a). Sorted, so a rendered body is byte-stable.
+    #[test]
+    fn the_starrocks_reserved_users_are_sorted_and_name_root_and_egrets_own() {
+        assert_eq!(
+            STARROCKS_RESERVED_USERS,
+            ["egret_delegator", "egret_query_log", "root"]
+        );
+        assert!(is_starrocks_reserved_user("root"));
+        assert!(is_starrocks_reserved_user("ROOT"));
+        assert!(is_starrocks_reserved_user("egret_query_log"));
+        assert!(!is_starrocks_reserved_user("root-2"));
+        assert!(!is_starrocks_reserved_user("alice"));
     }
 }

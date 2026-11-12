@@ -350,6 +350,21 @@ async fn the_query_log_loader_name_is_reserved() {
     assert!(got.starts_with("egret_query_log-"), "{got}");
 }
 
+/// Package D: `root` is StarRocks' superuser.
+#[tokio::test]
+async fn the_starrocks_root_name_is_reserved() {
+    let Some(db) = connect().await else { return };
+    let held: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM username_ledger WHERE username = 'root'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(held, 1);
+    let got = mint(&db, &format!("root@{}.test", t())).await;
+    assert_ne!(got, "root");
+    assert!(got.starts_with("root-"), "{got}");
+}
+
 #[tokio::test]
 async fn the_ledger_is_append_only() {
     let Some(db) = connect().await else { return };

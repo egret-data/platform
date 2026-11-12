@@ -6,7 +6,7 @@
 
 use egret_perm::{CompileError, EngineType};
 use egret_perm_ir::audience::MemberName;
-use egret_perm_ir::statement::{InfraKind, Source, Statement};
+use egret_perm_ir::statement::{InfraKind, InfraObject, Source, Statement, Target};
 use egret_policy_api::infra_bodies as bodies;
 use serde_json::Value;
 
@@ -48,10 +48,24 @@ pub(crate) fn render(
             )
             .map_err(|e| CompileError::Db(format!("admin all-access bodies: {e}")))
         }
-        InfraKind::DelegatorImpersonate => one(
-            bodies::IMPERSONATE_POLICY_NAME,
-            bodies::delegator_impersonate_policy(service_name),
-        ),
+        InfraKind::DelegatorImpersonate => match (&s.target, engine) {
+            (Target::Infra(InfraObject::AnyUser), EngineType::Trino) => one(
+                bodies::IMPERSONATE_POLICY_NAME,
+                bodies::delegator_impersonate_policy(service_name),
+            ),
+            (Target::Infra(InfraObject::AnyUserExcept(excluded)), EngineType::StarRocks)
+                if !excluded.is_empty() =>
+            {
+                one(
+                    bodies::IMPERSONATE_POLICY_NAME,
+                    bodies::starrocks_delegator_impersonate_policy(service_name, excluded),
+                )
+            }
+            (target, engine) => Err(CompileError::Db(format!(
+                "ranger::infra::render: no delegator impersonation body for {target:?} on \
+                 {engine:?} (an empty exclusion would exclude nothing)"
+            ))),
+        },
         InfraKind::SelfImpersonate => one(
             bodies::SELF_IMPERSONATE_POLICY_NAME,
             bodies::self_impersonate_policy(service_name),
@@ -327,5 +341,67 @@ mod tests {
                 assert_eq!(exceptions, &serde_json::json!([]), "{name}: no exception");
             }
         }
+    }
+
+    fn sr_delegator(delegating: bool, imp: bool) -> Vec<Statement> {
+        lower_infra(&InfraInputs {
+            engine: EngineType::StarRocks,
+            admins: vec![],
+            delegating,
+            delegator_impersonates: imp,
+            query_log: false,
+        })
+    }
+
+    /// Package D, D1b.
+    #[test]
+    fn starrocks_renders_the_delegator_row_on_the_user_resource() {
+        let rows: Vec<_> = sr_delegator(true, true)
+            .iter()
+            .flat_map(|s| render(s, "sr", EngineType::StarRocks).unwrap())
+            .collect();
+        let excluded: Vec<String> = egret_core::engine_principals::STARROCKS_RESERVED_USERS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            rows,
+            vec![(
+                b::IMPERSONATE_POLICY_NAME.to_string(),
+                b::starrocks_delegator_impersonate_policy("sr", &excluded)
+            )]
+        );
+    }
+
+    #[test]
+    fn a_delegator_row_whose_object_does_not_fit_the_engine_is_refused() {
+        let trino = lower_infra(&InfraInputs {
+            engine: EngineType::Trino,
+            admins: vec![],
+            delegating: true,
+            delegator_impersonates: true,
+            query_log: false,
+        });
+        let delegator = trino
+            .iter()
+            .find(|s| {
+                matches!(
+                    s.source,
+                    Source::Infra {
+                        kind: InfraKind::DelegatorImpersonate
+                    }
+                )
+            })
+            .unwrap();
+        assert!(render(delegator, "sr", EngineType::StarRocks).is_err());
+        let sr = sr_delegator(true, true).remove(0);
+        assert!(render(&sr, "svc", EngineType::Trino).is_err());
+    }
+
+    #[test]
+    fn an_empty_exclusion_list_is_refused() {
+        let mut s = sr_delegator(true, true).remove(0);
+        s.target = Target::Infra(InfraObject::AnyUserExcept(vec![]));
+        assert!(render(&s, "sr", EngineType::StarRocks).is_err());
     }
 }

@@ -586,7 +586,27 @@ async fn a_target_whose_username_is_root_is_skipped() {
         .expect("read");
     let root = match existing {
         Some(id) => id,
-        None => user(pool, Some("root")).await,
+        // A person who held `root` before migration 0219 reserved it. The
+        // ledger (append-only) now refuses that name, so the row is written
+        // the way it existed then: with the ledger's triggers off for this one
+        // transaction.
+        None => {
+            let mut tx = pool.begin().await.expect("begin");
+            sqlx::query("SET LOCAL session_replication_role = replica")
+                .execute(&mut *tx)
+                .await
+                .expect("triggers off (needs a superuser test role)");
+            let id: Uuid = sqlx::query_scalar(
+                "INSERT INTO users (provider, email, name, username) \
+                 VALUES ('local', $1, 'Engine grant test', 'root') RETURNING id",
+            )
+            .bind(format!("{}@egret.local", unique("eg")))
+            .fetch_one(&mut *tx)
+            .await
+            .expect("user");
+            tx.commit().await.expect("commit");
+            id
+        }
     };
     let id = create(
         pool,

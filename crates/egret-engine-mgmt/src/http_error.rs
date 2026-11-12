@@ -73,6 +73,16 @@ pub enum EngineHttpError {
     /// lifecycle route refuses (SP4d-4 Part C). 409, `code: "engine_is_external"`.
     #[error("engine is external: {0}")]
     EngineIsExternal(String),
+    /// A previous StarRocks engine of this name left its FE metadata claim,
+    /// which a new FE of the same name would rebind, with the old users,
+    /// catalogs and root password (package D, decided on 2026-11-11, 4).
+    /// 409, `code: "engine_metadata_left_over"`.
+    #[error("a previous engine left its front-end metadata volume {claim}")]
+    LeftoverFeMetadata {
+        name: String,
+        claim: String,
+        namespace: String,
+    },
     /// The write would create an order-ambiguous mask or row-filter pair
     /// (`CompileError::AmbiguousMaskOrFilterArbitration`). 409 with the body
     /// the perm routes answer (`code: "rule_overlap"`).
@@ -338,6 +348,19 @@ impl IntoResponse for EngineHttpError {
                 Json(serde_json::json!({ "error": reason, "code": "engine_is_external" })),
             )
                 .into_response(),
+            EngineHttpError::LeftoverFeMetadata {
+                name,
+                claim,
+                namespace,
+            } => (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": leftover_fe_metadata_message(&name, &claim, &namespace),
+                    "code": "engine_metadata_left_over",
+                    "claim": claim,
+                })),
+            )
+                .into_response(),
             EngineHttpError::RuleOverlap(body) => {
                 (StatusCode::CONFLICT, Json(body)).into_response()
             }
@@ -367,6 +390,16 @@ impl IntoResponse for EngineHttpError {
             EngineHttpError::Internal => error_json(StatusCode::INTERNAL_SERVER_ERROR, msg),
         }
     }
+}
+
+/// The 409's message: what is left, why it matters, and the command that
+/// removes it.
+pub(crate) fn leftover_fe_metadata_message(name: &str, claim: &str, namespace: &str) -> String {
+    format!(
+        "A previous StarRocks engine named \"{name}\" left its front-end metadata volume \
+         {claim}. A new engine would start with the old engine's users, catalogs and root \
+         password. Delete it first: kubectl delete pvc {claim} -n {namespace}"
+    )
 }
 
 #[cfg(test)]

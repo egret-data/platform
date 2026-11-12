@@ -54,6 +54,36 @@ pub fn delegator_impersonate_policy(service: &str) -> Value {
     )
 }
 
+/// `egret_delegator` may impersonate every StarRocks user except `excluded`
+/// (package D, D1b): resource `user` with `isExcludes: true`, which the
+/// StarRocks service def allows (`excludesSupported`) and matches without
+/// regard to case (`ignoreCase`). Measured on the fork's plugin in package
+/// D's Task 1 (M1).
+pub fn starrocks_delegator_impersonate_policy(service: &str, excluded: &[String]) -> Value {
+    json!({
+        "name": IMPERSONATE_POLICY_NAME,
+        "service": service,
+        "serviceType": "starrocks",
+        "policyType": 0,
+        "isEnabled": true,
+        "resources": {
+            "user": { "values": excluded, "isExcludes": true, "isRecursive": false }
+        },
+        "policyItems": [{
+            "users": [DELEGATOR_PRINCIPAL],
+            "groups": [],
+            "roles": [],
+            "accesses": [{ "type": "impersonate", "isAllowed": true }],
+            "delegateAdmin": false
+        }],
+        "denyPolicyItems": [],
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "isDenyAllElse": false,
+        "policyPriority": 0
+    })
+}
+
 /// Every user may become THEMSELF: `trinouser = {USER}`, `impersonate`, users
 /// `{USER}`. Trino 483 checks `checkCanSetUser` as an `impersonate` on
 /// `trinouser=<user>` for every session, principal == user included; without
@@ -262,5 +292,44 @@ mod tests {
         }
         // The delegator's grant is NOT part of the per-user baseline.
         assert!(!names.contains(&IMPERSONATE_POLICY_NAME));
+    }
+
+    /// Package D, D1b: the StarRocks body, whole, so any drift shows.
+    #[test]
+    fn the_starrocks_delegator_body_excludes_the_reserved_users() {
+        let excluded: Vec<String> = vec![
+            "egret_delegator".into(),
+            "egret_query_log".into(),
+            "root".into(),
+        ];
+        assert_eq!(
+            starrocks_delegator_impersonate_policy("sr", &excluded),
+            json!({
+                "name": "egret-delegator-impersonate",
+                "service": "sr",
+                "serviceType": "starrocks",
+                "policyType": 0,
+                "isEnabled": true,
+                "resources": {
+                    "user": {
+                        "values": ["egret_delegator", "egret_query_log", "root"],
+                        "isExcludes": true,
+                        "isRecursive": false
+                    }
+                },
+                "policyItems": [{
+                    "users": ["egret_delegator"],
+                    "groups": [],
+                    "roles": [],
+                    "accesses": [{ "type": "impersonate", "isAllowed": true }],
+                    "delegateAdmin": false
+                }],
+                "denyPolicyItems": [],
+                "allowExceptions": [],
+                "denyExceptions": [],
+                "isDenyAllElse": false,
+                "policyPriority": 0
+            })
+        );
     }
 }

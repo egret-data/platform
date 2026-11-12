@@ -2137,6 +2137,47 @@
         "service": "{g22.starrocks}",
         "serviceType": "starrocks",
         "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 20,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-delegator-impersonate",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "impersonate"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "egret_delegator"
+            ]
+          }
+        ],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "user": {
+            "isExcludes": true,
+            "isRecursive": false,
+            "values": [
+              "egret_delegator",
+              "egret_query_log",
+              "root"
+            ]
+          }
+        },
+        "service": "{g22.starrocks}",
+        "serviceType": "starrocks",
+        "version": 1
       }
     ]
   }

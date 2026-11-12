@@ -86,6 +86,10 @@ pub enum InfraObject {
     WholeEp,
     /// Any user, as the object of impersonation.
     AnyUser,
+    /// Any user except these, as the object of impersonation (StarRocks: the
+    /// delegator may not become root or egret's own users). Matched without
+    /// regard to ASCII case, like Ranger's `user` resource.
+    AnyUserExcept(Vec<String>),
     /// The session user themself, as the object of impersonation.
     SessionUser,
     /// Any query.
