@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { CheckCircle2, Cog, FileText, Loader2, Lock, Server, Undo2, User } from "lucide-react";
 import {
   type ClassifiedPolicy,
+  type EpMigrationStatus,
   type GatedProfile,
   type MigrateResponse,
   type UndoResponse,
@@ -12,6 +13,8 @@ import {
   classifyQueryKey,
   classifyServicePolicies,
   migrateServicePolicies,
+  migrationStatusQueryKey,
+  serviceMigrationStatus,
   undoServicePolicyMigration,
 } from "@/api/policies";
 import type { ApiError } from "@/api/client";
@@ -93,6 +96,15 @@ export function MigrateTab({
   });
   const rows = classified.data ?? [];
 
+  // The EP's standing, from the server's rollup. A failed read shows no badge
+  // rather than a wrong one: the table below is still the source of truth.
+  const status = useQuery<EpMigrationStatus, ApiError>({
+    queryKey: migrationStatusQueryKey(serviceId ?? 0),
+    queryFn: () => serviceMigrationStatus(serviceId as number),
+    enabled: serviceId !== undefined,
+    retry: false,
+  });
+
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [preview, setPreview] = useState<MigrateResponse | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -117,6 +129,7 @@ export function MigrateTab({
   const invalidate = () => {
     if (serviceId !== undefined) {
       void queryClient.invalidateQueries({ queryKey: classifyQueryKey(serviceId) });
+      void queryClient.invalidateQueries({ queryKey: migrationStatusQueryKey(serviceId) });
     }
     // A migration flips profiles to `generated` and switches originals off.
     void queryClient.invalidateQueries({ queryKey: ["control-plane", "profiles"] });
@@ -285,6 +298,8 @@ export function MigrateTab({
         {`Enforcement point ${service}: who owns each policy, whether it can move into the permission model, and a proof before it does.`}
       </p>
       <div className="space-y-4">
+        {status.data && <MigrationStatusBadge status={status.data} />}
+
         {!canWrite && (
           <Alert>
             <AlertDescription>
@@ -867,4 +882,35 @@ function readErrorMessage(e: ApiError | null | undefined): string {
   if (e.status === 403) return "This account cannot read policies: it needs the policy:read permission.";
   if (e.status === 404) return "This enforcement point no longer exists. Go back to Policies and pick another.";
   return e.message;
+}
+
+/** The EP's migration standing: complete, or how many remain and which are blocked (and why, verbatim). */
+function MigrationStatusBadge({ status }: { status: EpMigrationStatus }) {
+  if (status.complete) {
+    return (
+      <StatusBadge tone="success" icon={CheckCircle2}>
+        Migration complete — every manual policy is in the model
+      </StatusBadge>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <StatusBadge tone="highlight">{`${status.pending} to migrate`}</StatusBadge>
+        {status.blocked.length > 0 && (
+          <StatusBadge tone="destructive">{`${status.blocked.length} blocked`}</StatusBadge>
+        )}
+      </div>
+      {status.blocked.length > 0 && (
+        <ul className="space-y-1 text-sm text-muted-foreground">
+          {status.blocked.map((b) => (
+            <li key={b.id}>
+              <span className="font-medium text-foreground">{b.name}</span>
+              {` — ${b.reason}`}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }

@@ -11,6 +11,7 @@ import type { ClassifiedPolicy, MigrateResponse, UndoResponse } from "@/api/poli
 import {
   classifyServicePolicies,
   migrateServicePolicies,
+  serviceMigrationStatus,
   undoServicePolicyMigration,
 } from "@/api/policies";
 import { MigrateTab } from "@/routes/governance/engines/tabs/MigrateTab";
@@ -158,6 +159,7 @@ vi.mock("@/api/policies", async (orig) => ({
     ]),
   classifyServicePolicies: vi.fn(),
   migrateServicePolicies: vi.fn(),
+  serviceMigrationStatus: vi.fn(),
   undoServicePolicyMigration: vi.fn(),
 }));
 
@@ -215,6 +217,37 @@ beforeEach(() => {
   vi.mocked(classifyServicePolicies).mockReset().mockResolvedValue(ROWS);
   vi.mocked(migrateServicePolicies).mockReset().mockResolvedValue(proved());
   vi.mocked(undoServicePolicyMigration).mockReset();
+  vi.mocked(serviceMigrationStatus)
+    .mockReset()
+    .mockResolvedValue({ complete: false, migrated: 0, pending: 0, blocked: [] });
+});
+
+describe("MigrateTab — migration status badge", () => {
+  it("shows migration complete when the EP has no remaining operator policy", async () => {
+    vi.mocked(serviceMigrationStatus).mockResolvedValue({ complete: true, migrated: 1, pending: 0, blocked: [] });
+    renderPage();
+    expect(await screen.findByText(/migration complete/i)).toBeInTheDocument();
+  });
+
+  it("shows the count still to migrate", async () => {
+    vi.mocked(serviceMigrationStatus).mockResolvedValue({ complete: false, migrated: 0, pending: 1, blocked: [] });
+    renderPage();
+    expect(await screen.findByText(/1 .*to migrate/i)).toBeInTheDocument();
+    expect(screen.queryByText(/migration complete/i)).not.toBeInTheDocument();
+  });
+
+  it("lists a blocked operator policy with its reason", async () => {
+    vi.mocked(serviceMigrationStatus).mockResolvedValue({
+      complete: false,
+      migrated: 0,
+      pending: 0,
+      blocked: [{ id: 7, name: "legacy x", reason: "Clearance is not expressible here." }],
+    });
+    renderPage();
+    expect(await screen.findByText("legacy x")).toBeInTheDocument();
+    expect(screen.getByText(/Clearance is not expressible here\./)).toBeInTheDocument();
+    expect(screen.getByText(/1 blocked/i)).toBeInTheDocument();
+  });
 });
 
 describe("MigrateTab — what each policy is", () => {
