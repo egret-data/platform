@@ -53,7 +53,28 @@ pub struct CatalogEnforcement {
     pub not_enforced: Option<NotEnforcedReason>,
 }
 
-fn enforces(a: &AttachedEngine, classification_selector: bool, effect: RuleEffectKind) -> bool {
+/// The image level the lowering of `a`'s EP assumes: the most restrictive
+/// across the engines attached on this catalog with the same profile kind
+/// (`EpInput::effective_image_level`'s rule: `None` beats any `Some`, else the
+/// minimum). The enforcement report must agree with the compiled output, which
+/// is EP-wide.
+fn effective_image_level(a: &AttachedEngine, here: &[&AttachedEngine]) -> Option<u32> {
+    here.iter()
+        .filter(|b| b.profile == a.profile)
+        .map(|b| b.egret_image_level)
+        .reduce(|acc, l| match (acc, l) {
+            (Some(x), Some(y)) => Some(x.min(y)),
+            _ => None,
+        })
+        .unwrap_or(a.egret_image_level)
+}
+
+fn enforces(
+    a: &AttachedEngine,
+    here: &[&AttachedEngine],
+    classification_selector: bool,
+    effect: RuleEffectKind,
+) -> bool {
     match a.profile {
         None => false,
         Some(None) => true,
@@ -66,7 +87,7 @@ fn enforces(a: &AttachedEngine, classification_selector: bool, effect: RuleEffec
                             mechanism: Mechanism::Ranger,
                         },
                         None,
-                        a.egret_image_level,
+                        effective_image_level(a, here),
                         a.classification_channel,
                         &Capability::ClassificationSelector(effect),
                     ),
@@ -97,7 +118,7 @@ pub fn rule_enforcement(
         let bound = here.iter().any(|a| a.profile.is_some());
         let engines: Vec<(Uuid, String, String)> = here
             .iter()
-            .filter(|a| enforces(a, classification_selector, effect))
+            .filter(|a| enforces(a, &here, classification_selector, effect))
             .map(|a| (a.engine_id, a.engine_name.clone(), a.engine_type.clone()))
             .collect();
         engine_ids.extend(engines.iter().map(|e| e.0));
@@ -247,6 +268,33 @@ mod tests {
             Some(ReasonCode::WithholdExemptionByGroupOnly)
         );
         assert_eq!(withhold_engine_reason(false, true), None);
+    }
+
+    #[test]
+    fn one_engine_below_the_gate_makes_the_whole_catalog_unenforced() {
+        let c = Uuid::from_u128(100);
+        let reached = [(c, "sales".to_string())];
+        let mk = |n: u128, level| {
+            let mut e = engine(c, n, Some(Some(EngineType::StarRocks)), false);
+            e.egret_image_level = level;
+            e
+        };
+        // [egret.2, egret.4]: the lowering is EP-wide most restrictive, so the
+        // rule is not enforced by either engine.
+        let attached = [mk(1, Some(2)), mk(2, Some(4))];
+        let (_, by, why) = rule_enforcement(&reached, &attached, true, RuleEffectKind::Mask);
+        assert_eq!(
+            (by, why),
+            (0, Some(NotEnforcedReason::NoClassificationChannel))
+        );
+        // An unknown level beats a known one too.
+        let attached = [mk(1, None), mk(2, Some(4))];
+        let (_, by, _) = rule_enforcement(&reached, &attached, true, RuleEffectKind::Mask);
+        assert_eq!(by, 0);
+        // [egret.3, egret.4]: enforced by both.
+        let attached = [mk(1, Some(3)), mk(2, Some(4))];
+        let (_, by, why) = rule_enforcement(&reached, &attached, true, RuleEffectKind::Mask);
+        assert_eq!((by, why), (2, None));
     }
 
     #[test]

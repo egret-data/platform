@@ -504,7 +504,7 @@ pub fn support_for_kind(
         return Support::Missing(ReasonCode::NotMeasured);
     };
     if let Some(min) = e.min_egret_image {
-        if image_level.map_or(true, |lvl| lvl < min) {
+        if image_level.is_none_or(|lvl| lvl < min) {
             return Support::Missing(ReasonCode::NotMeasured);
         }
     }
