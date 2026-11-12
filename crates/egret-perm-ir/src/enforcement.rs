@@ -7,9 +7,7 @@ use egret_perm::EngineType;
 use uuid::Uuid;
 
 use crate::ep::{EpKind, Mechanism};
-use crate::matrix::{
-    support_for_kind, Capability, RuleEffectKind, Support, STARROCKS_MASK_MIN_EGRET_IMAGE,
-};
+use crate::matrix::{support_for_kind, Capability, RuleEffectKind, Support};
 use crate::statement::ReasonCode;
 
 /// An engine attached to a catalog, with its profile's kind when bound.
@@ -25,6 +23,10 @@ pub struct AttachedEngine {
     /// The profile can resolve classifications itself (a `tagService` naming
     /// an existing service).
     pub classification_channel: bool,
+    /// The egret fork patch level of the engine's image (`…-egret.N`); `None`
+    /// when unknown (official image, Trino). StarRocks mask / row-filter
+    /// selectors are enforced only at or above the matrix's minimum.
+    pub egret_image_level: Option<u32>,
 }
 
 /// Why nothing enforces a rule, on one catalog or on the whole.
@@ -64,10 +66,7 @@ fn enforces(a: &AttachedEngine, classification_selector: bool, effect: RuleEffec
                             mechanism: Mechanism::Ranger,
                         },
                         None,
-                        // AttachedEngine carries no image level: ask at the
-                        // enabling level, so this keeps answering "does the
-                        // kind model the selector", as before the image gate.
-                        Some(STARROCKS_MASK_MIN_EGRET_IMAGE),
+                        a.egret_image_level,
                         a.classification_channel,
                         &Capability::ClassificationSelector(effect),
                     ),
@@ -179,6 +178,7 @@ mod tests {
             engine_type: "trino".into(),
             profile,
             classification_channel: channel,
+            egret_image_level: Some(4),
         }
     }
 
@@ -247,5 +247,17 @@ mod tests {
             Some(ReasonCode::WithholdExemptionByGroupOnly)
         );
         assert_eq!(withhold_engine_reason(false, true), None);
+    }
+
+    #[test]
+    fn a_starrocks_classification_rule_below_the_image_gate_is_not_enforced() {
+        let c = Uuid::from_u128(100);
+        let reached = [(c, "sales".to_string())];
+        for (level, enforced) in [(Some(2), 0), (None, 0), (Some(3), 1), (Some(4), 1)] {
+            let mut sr = engine(c, 2, Some(Some(EngineType::StarRocks)), false);
+            sr.egret_image_level = level;
+            let (_, by, _) = rule_enforcement(&reached, &[sr], true, RuleEffectKind::Mask);
+            assert_eq!(by, enforced, "egret image level {level:?}");
+        }
     }
 }

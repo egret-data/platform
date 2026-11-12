@@ -99,7 +99,7 @@ async fn bind(db: &Db, service_id: i64, engine_type: &str) -> Uuid {
     .expect("warehouse");
     let engine: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,$3,'egret','{}'::jsonb,$2) RETURNING id",
+         VALUES ($1,$3,'egret',CASE WHEN $3 = 'starrocks' THEN '{\"starrocksConfig\":{\"feImage\":\"ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.4\"}}'::jsonb ELSE '{}'::jsonb END,$2) RETURNING id",
     )
     .bind(unique("pathmask-eng"))
     .bind(service_id)

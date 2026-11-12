@@ -181,22 +181,7 @@
               "groups": [],
               "roles": [],
               "users": [
-                "{g17.alice.username}"
-              ]
-            },
-            {
-              "accesses": [
-                {
-                  "isAllowed": true,
-                  "type": "select"
-                }
-              ],
-              "dataMaskInfo": {
-                "dataMaskType": "MASK_HASH"
-              },
-              "groups": [],
-              "roles": [],
-              "users": [
+                "{g17.alice.username}",
                 "{g17.bob.username}"
               ]
             },
@@ -425,7 +410,8 @@
               "groups": [],
               "roles": [],
               "users": [
-                "{g17.alice.username}"
+                "{g17.alice.username}",
+                "{g17.bob.username}"
               ]
             }
           ],
@@ -569,89 +555,15 @@
           "service": "{g17.starrocks}",
           "serviceType": "starrocks"
         }
-      },
-      {
-        "service": "{g17.starrocks}",
-        "name": "perm-rule-{g17.hash}",
-        "body": {
-          "dataMaskPolicyItems": [
-            {
-              "accesses": [
-                {
-                  "isAllowed": true,
-                  "type": "select"
-                }
-              ],
-              "dataMaskInfo": {
-                "dataMaskType": "MASK_NONE"
-              },
-              "groups": [],
-              "roles": [],
-              "users": [
-                "{g17.alice.username}"
-              ]
-            },
-            {
-              "accesses": [
-                {
-                  "isAllowed": true,
-                  "type": "select"
-                }
-              ],
-              "dataMaskInfo": {
-                "dataMaskType": "MASK_HASH"
-              },
-              "groups": [
-                "public"
-              ],
-              "roles": [],
-              "users": []
-            }
-          ],
-          "denyPolicyItems": [],
-          "description": "",
-          "isEnabled": true,
-          "name": "perm-rule-{g17.hash}",
-          "policyItems": [],
-          "policyLabels": [],
-          "policyPriority": 0,
-          "policyType": 1,
-          "resources": {
-            "catalog": {
-              "isExcludes": false,
-              "isRecursive": false,
-              "values": [
-                "gold_g17_cat_a"
-              ]
-            },
-            "column": {
-              "isExcludes": false,
-              "isRecursive": false,
-              "values": [
-                "ssn"
-              ]
-            },
-            "database": {
-              "isExcludes": false,
-              "isRecursive": false,
-              "values": [
-                "sales"
-              ]
-            },
-            "table": {
-              "isExcludes": false,
-              "isRecursive": false,
-              "values": [
-                "orders"
-              ]
-            }
-          },
-          "service": "{g17.starrocks}",
-          "serviceType": "starrocks"
-        }
       }
     ],
-    "skipped": [],
+    "skipped": [
+      {
+        "kind": "Rule",
+        "id": "{g17.hash}",
+        "reason": "rule \"g17.hash\" is not enforced: a StarRocks engine enforces masks and row filters only from egret.3 (this EP's least capable engine is not an egret fork image); upgrade the engine to the egret-starrocks image"
+      }
+    ],
     "served": [
       {
         "allowExceptions": [],
@@ -1266,22 +1178,7 @@
             "groups": [],
             "roles": [],
             "users": [
-              "{g17.alice.username}"
-            ]
-          },
-          {
-            "accesses": [
-              {
-                "isAllowed": true,
-                "type": "select"
-              }
-            ],
-            "dataMaskInfo": {
-              "dataMaskType": "MASK_HASH"
-            },
-            "groups": [],
-            "roles": [],
-            "users": [
+              "{g17.alice.username}",
               "{g17.bob.username}"
             ]
           },
@@ -1504,7 +1401,8 @@
             "groups": [],
             "roles": [],
             "users": [
-              "{g17.alice.username}"
+              "{g17.alice.username}",
+              "{g17.bob.username}"
             ]
           }
         ],
@@ -1641,84 +1539,6 @@
             "isRecursive": false,
             "values": [
               "staff"
-            ]
-          }
-        },
-        "service": "{g17.starrocks}",
-        "serviceType": "starrocks",
-        "version": 1
-      },
-      {
-        "dataMaskPolicyItems": [
-          {
-            "accesses": [
-              {
-                "isAllowed": true,
-                "type": "select"
-              }
-            ],
-            "dataMaskInfo": {
-              "dataMaskType": "MASK_NONE"
-            },
-            "groups": [],
-            "roles": [],
-            "users": [
-              "{g17.alice.username}"
-            ]
-          },
-          {
-            "accesses": [
-              {
-                "isAllowed": true,
-                "type": "select"
-              }
-            ],
-            "dataMaskInfo": {
-              "dataMaskType": "MASK_HASH"
-            },
-            "groups": [
-              "public"
-            ],
-            "roles": [],
-            "users": []
-          }
-        ],
-        "denyPolicyItems": [],
-        "description": "",
-        "id": 14,
-        "isEnabled": true,
-        "name": "perm-rule-{g17.hash}",
-        "policyItems": [],
-        "policyLabels": [],
-        "policyPriority": 0,
-        "policyType": 1,
-        "resources": {
-          "catalog": {
-            "isExcludes": false,
-            "isRecursive": false,
-            "values": [
-              "gold_g17_cat_a"
-            ]
-          },
-          "column": {
-            "isExcludes": false,
-            "isRecursive": false,
-            "values": [
-              "ssn"
-            ]
-          },
-          "database": {
-            "isExcludes": false,
-            "isRecursive": false,
-            "values": [
-              "sales"
-            ]
-          },
-          "table": {
-            "isExcludes": false,
-            "isRecursive": false,
-            "values": [
-              "orders"
             ]
           }
         },
@@ -1877,170 +1697,14 @@
           "service": "{g17.unmeasured}",
           "serviceType": "starrocks"
         }
-      },
-      {
-        "service": "{g17.unmeasured}",
-        "name": "perm-hidden-gold_g17_cat_a.sales.orders",
-        "body": {
-          "additionalResources": [],
-          "allowExceptions": [],
-          "denyExceptions": [
-            {
-              "accesses": [
-                {
-                  "isAllowed": true,
-                  "type": "select"
-                }
-              ],
-              "delegateAdmin": false,
-              "groups": [],
-              "roles": [],
-              "users": [
-                "{g17.alice.username}"
-              ]
-            }
-          ],
-          "denyPolicyItems": [
-            {
-              "accesses": [
-                {
-                  "isAllowed": true,
-                  "type": "select"
-                }
-              ],
-              "delegateAdmin": false,
-              "groups": [
-                "public"
-              ],
-              "roles": [],
-              "users": []
-            }
-          ],
-          "description": "",
-          "isDenyAllElse": false,
-          "isEnabled": true,
-          "name": "perm-hidden-gold_g17_cat_a.sales.orders",
-          "policyItems": [],
-          "policyLabels": [],
-          "policyPriority": 0,
-          "policyType": 0,
-          "resources": {
-            "catalog": {
-              "isExcludes": false,
-              "isRecursive": false,
-              "values": [
-                "gold_g17_cat_a"
-              ]
-            },
-            "column": {
-              "isExcludes": false,
-              "isRecursive": false,
-              "values": [
-                "_file",
-                "_pos"
-              ]
-            },
-            "database": {
-              "isExcludes": false,
-              "isRecursive": false,
-              "values": [
-                "sales"
-              ]
-            },
-            "table": {
-              "isExcludes": false,
-              "isRecursive": false,
-              "values": [
-                "orders"
-              ]
-            }
-          },
-          "service": "{g17.unmeasured}",
-          "serviceType": "starrocks"
-        }
-      },
-      {
-        "service": "{g17.unmeasured}",
-        "name": "perm-rule-{g17.hash}",
-        "body": {
-          "dataMaskPolicyItems": [
-            {
-              "accesses": [
-                {
-                  "isAllowed": true,
-                  "type": "select"
-                }
-              ],
-              "dataMaskInfo": {
-                "dataMaskType": "MASK_NONE"
-              },
-              "groups": [],
-              "roles": [],
-              "users": [
-                "{g17.alice.username}"
-              ]
-            },
-            {
-              "accesses": [
-                {
-                  "isAllowed": true,
-                  "type": "select"
-                }
-              ],
-              "dataMaskInfo": {
-                "dataMaskType": "MASK_HASH"
-              },
-              "groups": [
-                "public"
-              ],
-              "roles": [],
-              "users": []
-            }
-          ],
-          "denyPolicyItems": [],
-          "description": "",
-          "isEnabled": true,
-          "name": "perm-rule-{g17.hash}",
-          "policyItems": [],
-          "policyLabels": [],
-          "policyPriority": 0,
-          "policyType": 1,
-          "resources": {
-            "catalog": {
-              "isExcludes": false,
-              "isRecursive": false,
-              "values": [
-                "gold_g17_cat_a"
-              ]
-            },
-            "column": {
-              "isExcludes": false,
-              "isRecursive": false,
-              "values": [
-                "ssn"
-              ]
-            },
-            "database": {
-              "isExcludes": false,
-              "isRecursive": false,
-              "values": [
-                "sales"
-              ]
-            },
-            "table": {
-              "isExcludes": false,
-              "isRecursive": false,
-              "values": [
-                "orders"
-              ]
-            }
-          },
-          "service": "{g17.unmeasured}",
-          "serviceType": "starrocks"
-        }
       }
     ],
     "skipped": [
+      {
+        "kind": "Rule",
+        "id": "{g17.hash}",
+        "reason": "rule \"g17.hash\" is not enforced: a StarRocks engine enforces masks and row filters only from egret.3 (this EP's least capable engine is not an egret fork image); upgrade the engine to the egret-starrocks image"
+      },
       {
         "kind": "Clearance",
         "id": "{g17.secret}",
@@ -2625,163 +2289,6 @@
             "isRecursive": false,
             "values": [
               "*"
-            ]
-          }
-        },
-        "service": "{g17.unmeasured}",
-        "serviceType": "starrocks",
-        "version": 1
-      },
-      {
-        "additionalResources": [],
-        "allowExceptions": [],
-        "denyExceptions": [
-          {
-            "accesses": [
-              {
-                "isAllowed": true,
-                "type": "select"
-              }
-            ],
-            "delegateAdmin": false,
-            "groups": [],
-            "roles": [],
-            "users": [
-              "{g17.alice.username}"
-            ]
-          }
-        ],
-        "denyPolicyItems": [
-          {
-            "accesses": [
-              {
-                "isAllowed": true,
-                "type": "select"
-              }
-            ],
-            "delegateAdmin": false,
-            "groups": [
-              "public"
-            ],
-            "roles": [],
-            "users": []
-          }
-        ],
-        "description": "",
-        "id": 9,
-        "isDenyAllElse": false,
-        "isEnabled": true,
-        "name": "perm-hidden-gold_g17_cat_a.sales.orders",
-        "policyItems": [],
-        "policyLabels": [],
-        "policyPriority": 0,
-        "policyType": 0,
-        "resources": {
-          "catalog": {
-            "isExcludes": false,
-            "isRecursive": false,
-            "values": [
-              "gold_g17_cat_a"
-            ]
-          },
-          "column": {
-            "isExcludes": false,
-            "isRecursive": false,
-            "values": [
-              "_file",
-              "_pos"
-            ]
-          },
-          "database": {
-            "isExcludes": false,
-            "isRecursive": false,
-            "values": [
-              "sales"
-            ]
-          },
-          "table": {
-            "isExcludes": false,
-            "isRecursive": false,
-            "values": [
-              "orders"
-            ]
-          }
-        },
-        "service": "{g17.unmeasured}",
-        "serviceType": "starrocks",
-        "version": 1
-      },
-      {
-        "dataMaskPolicyItems": [
-          {
-            "accesses": [
-              {
-                "isAllowed": true,
-                "type": "select"
-              }
-            ],
-            "dataMaskInfo": {
-              "dataMaskType": "MASK_NONE"
-            },
-            "groups": [],
-            "roles": [],
-            "users": [
-              "{g17.alice.username}"
-            ]
-          },
-          {
-            "accesses": [
-              {
-                "isAllowed": true,
-                "type": "select"
-              }
-            ],
-            "dataMaskInfo": {
-              "dataMaskType": "MASK_HASH"
-            },
-            "groups": [
-              "public"
-            ],
-            "roles": [],
-            "users": []
-          }
-        ],
-        "denyPolicyItems": [],
-        "description": "",
-        "id": 10,
-        "isEnabled": true,
-        "name": "perm-rule-{g17.hash}",
-        "policyItems": [],
-        "policyLabels": [],
-        "policyPriority": 0,
-        "policyType": 1,
-        "resources": {
-          "catalog": {
-            "isExcludes": false,
-            "isRecursive": false,
-            "values": [
-              "gold_g17_cat_a"
-            ]
-          },
-          "column": {
-            "isExcludes": false,
-            "isRecursive": false,
-            "values": [
-              "ssn"
-            ]
-          },
-          "database": {
-            "isExcludes": false,
-            "isRecursive": false,
-            "values": [
-              "sales"
-            ]
-          },
-          "table": {
-            "isExcludes": false,
-            "isRecursive": false,
-            "values": [
-              "orders"
             ]
           }
         },

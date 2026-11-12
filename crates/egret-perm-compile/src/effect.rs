@@ -392,6 +392,7 @@ struct AttachedRow {
     engine_type: String,
     bound: bool,
     profile_type: Option<String>,
+    spec: serde_json::Value,
     /// The profile's `config_jsonb.tagService` is a string naming an existing
     /// `policy.authz_services` row (what the compiler checks, `trigger.rs`
     /// `tag_service`). `None` with no profile.
@@ -408,7 +409,7 @@ async fn attached_engines(
     }
     let rows: Vec<AttachedRow> = sqlx::query_as(
         "SELECT a.catalog_id, e.id AS engine_id, e.name AS engine_name, e.type AS engine_type, \
-                e.authz_service_id IS NOT NULL AS bound, s.type AS profile_type, \
+                e.authz_service_id IS NOT NULL AS bound, s.type AS profile_type, e.spec, \
                 (jsonb_typeof(s.config_jsonb -> 'tagService') = 'string' \
                  AND EXISTS (SELECT 1 FROM policy.authz_services t \
                               WHERE t.name = s.config_jsonb ->> 'tagService')) AS channel \
@@ -423,19 +424,26 @@ async fn attached_engines(
     .map_err(PermHttpError::db)?;
     Ok(rows
         .into_iter()
-        .map(|r| AttachedEngine {
-            catalog_id: r.catalog_id,
-            engine_id: r.engine_id,
-            engine_name: r.engine_name,
-            engine_type: r.engine_type,
-            // A profile of a type no EP kind models is `Some(None)`: it counts
-            // as enforcing, as the SQL did (`s.type IS DISTINCT FROM 'trino'`).
-            profile: r.bound.then(|| {
-                r.profile_type
-                    .as_deref()
-                    .and_then(crate::trigger::engine_type_for)
-            }),
-            classification_channel: r.channel.unwrap_or(false),
+        .map(|r| {
+            let egret_image_level = egret_perm::starrocks_egret_image_level(
+                egret_perm::stored_engine_image(&r.engine_type, &r.spec).as_deref(),
+            );
+            AttachedEngine {
+                catalog_id: r.catalog_id,
+                engine_id: r.engine_id,
+                engine_name: r.engine_name,
+                engine_type: r.engine_type,
+                // A profile of a type no EP kind models is `Some(None)`: it counts
+                // as enforcing, as the SQL did (`s.type IS DISTINCT FROM 'trino'`).
+                profile: r.bound.then(|| {
+                    r.profile_type
+                        .as_deref()
+                        .and_then(crate::trigger::engine_type_for)
+                }),
+                classification_channel: r.channel.unwrap_or(false),
+                // The same accessor as `BoundEngine::egret_image_level`.
+                egret_image_level,
+            }
         })
         .collect())
 }

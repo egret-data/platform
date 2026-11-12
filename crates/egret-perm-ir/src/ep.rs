@@ -49,3 +49,23 @@ pub struct EpInput {
     /// Catalog scope: registry catalog id → engine-facing name.
     pub catalogs: BTreeMap<Uuid, String>,
 }
+
+impl EpInput {
+    /// The image level the EP's lowering must assume: the most restrictive
+    /// (lowest, and `None` beats any `Some`) across its bound engines, or the
+    /// default image when none is bound. Below a gated capability's minimum,
+    /// the capability lowers to deny (fail-closed).
+    pub fn effective_image_level(&self) -> Option<u32> {
+        if self.engines.is_empty() {
+            return self.default_image_level;
+        }
+        let mut acc = self.engines[0].egret_image_level;
+        for e in &self.engines[1..] {
+            acc = match (acc, e.egret_image_level) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                _ => None, // any unknown level is most restrictive
+            };
+        }
+        acc
+    }
+}

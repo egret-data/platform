@@ -237,11 +237,14 @@ async fn profile_on(e: &Env, engine: &str, tag_service: Option<&str>) -> Profile
     .expect("warehouse");
     let engine_id: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,$2,'egret',CASE WHEN $2 = 'trino' THEN '{\"imageVersion\":\"483\"}'::jsonb ELSE '{\"starrocksConfig\":{\"feImage\":\"starrocks/fe-ubuntu:4.1.4\"}}'::jsonb END,$3) RETURNING id",
+         VALUES ($1,$2,'egret',CASE WHEN $2 = 'trino' THEN '{\"imageVersion\":\"483\"}'::jsonb ELSE jsonb_build_object('starrocksConfig', jsonb_build_object('feImage', $4::text)) END,$3) RETURNING id",
     )
     .bind(unique("ovl-eng"))
     .bind(engine)
     .bind(svc.id)
+    // egret's own fork image: a StarRocks engine enforces masks only from
+    // egret.3 (SP3a image gate), so an official image would skip the rules.
+    .bind(egret_perm::DEFAULT_ENGINE_IMAGES.starrocks_fe_image)
     .fetch_one(pool)
     .await
     .expect("engine");
