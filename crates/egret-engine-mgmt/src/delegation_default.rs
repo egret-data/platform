@@ -94,10 +94,26 @@ mod tests {
 
     #[test]
     fn egret_image_level_parse() {
-        assert_eq!(starrocks_egret_image_level(Some("ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.4")), Some(4));
-        assert_eq!(starrocks_egret_image_level(Some("ghcr.io/egret-data/egret-starrocks-allin1:4.1.7-egret.5@sha256:abc")), Some(5));
-        assert_eq!(starrocks_egret_image_level(Some("starrocks/allin1-ubuntu:4.1.7")), None); // official, no fork suffix
-        assert_eq!(starrocks_egret_image_level(Some("starrocks/fe-ubuntu:4.1.7-egret.notanumber")), None);
+        assert_eq!(
+            starrocks_egret_image_level(Some(
+                "ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.4"
+            )),
+            Some(4)
+        );
+        assert_eq!(
+            starrocks_egret_image_level(Some(
+                "ghcr.io/egret-data/egret-starrocks-allin1:4.1.7-egret.5@sha256:abc"
+            )),
+            Some(5)
+        );
+        assert_eq!(
+            starrocks_egret_image_level(Some("starrocks/allin1-ubuntu:4.1.7")),
+            None
+        ); // official, no fork suffix
+        assert_eq!(
+            starrocks_egret_image_level(Some("starrocks/fe-ubuntu:4.1.7-egret.notanumber")),
+            None
+        );
         assert_eq!(starrocks_egret_image_level(None), None);
     }
 
