@@ -70,3 +70,7 @@ Mỗi kết quả thuộc một trong ba loại:
 
 Người dùng đã trả lời các câu hỏi mở: 1 (b), 2 (b), 3 (a), 4 (b), 5 (a), 6 (a). Chi tiết ở mục
 "Rulings" của bản tiếng Anh.
+
+**Bỏ probe 1 (2026-11-12).** Probe UDF ra khỏi gói này theo lựa chọn của người dùng; báo cáo ghi là
+ranh giới đã chọn, kèm follow-up: FE phân tích câu lệnh trước khi kiểm tra quyền, nên có thể tải file
+jar của UDF cả khi người gọi bị từ chối (chưa đo). Chi tiết ở bản tiếng Anh.

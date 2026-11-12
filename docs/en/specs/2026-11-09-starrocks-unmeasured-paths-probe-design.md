@@ -499,3 +499,11 @@ The user answered the open questions:
    chosen boundary with a follow-up; no Spark or Flink.
 5. **(a)**: run probe 4 on kind (Task 7), without N11.
 6. **(a)**: run both mitigation variants in this package.
+
+**Probe 1 dropped (2026-11-12).** The UDF probe (U0 to U10, P0 to P4) is out of this package, by the
+user's choice. The report lists it as a chosen boundary. It carries one unmeasured lead from the 4.1.7
+source as a follow-up: `StmtExecutor` analyses a statement before it checks privileges (lines 817-818),
+so the FE may fetch a Java UDF's `file` URL even for a caller who is then refused. The
+`UDF_JAVA_POLICY` variant goes with it. For reference, `UDFClassLoader` (line 37) installs the BE's own
+`UDFSecurityManager` only when no SecurityManager is set and `java.security.policy` is, so a future
+variant must not add `-Djava.security.manager`.
