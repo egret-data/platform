@@ -308,6 +308,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
+### Task 3B (inserted 2026-11-12): Wire the image gate into the compile + enforcement paths
+
+Task 3 added the matrix image dimension but `support(ep, cap)` (the only function reading the real per-engine image level) has no production caller — every compile/enforcement site hardcodes `Some(STARROCKS_MASK_MIN_EGRET_IMAGE)`, so the gate is inert (a below-level StarRocks EP is not denied), which fails this package's "Done when". This task wires the real **effective image level** (most restrictive across the EP's engines) into the lowering path (`lower_rules` → `lower_rule`/`ensure_mask_type_declared`/`needs_tagged_tables`, via a new `EpInput::effective_image_level`) and onto `AttachedEngine` (so `enforces`/the NotEnforced reason matches the output). Byte-identical on fork images must still hold (corpus/demo are egret.4 ≥ 3). Full steps + code: the task-3b brief in this plan's SDD workspace.
+
+**Done when:** a StarRocks EP whose engine runs below egret.3 lowers its mask/row-filter to deny in the compiled output AND in the NotEnforced reason; at/above egret.3 the output is byte-identical to today; `support(ep, cap)` (or the effective level) is consulted by production code.
+
 ### Task 4: Prove byte-identical on the corpus and demo stack
 
 **Files:**
