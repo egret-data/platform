@@ -20,12 +20,12 @@ import type { FrameProfile } from "@/routes/governance/engines/PageFrame";
 export const NO_TAG_SERVICE = "__none__";
 
 export const NO_TAG_SERVICE_SENTENCE =
-  "This profile has no tag service, so no engine can be bound to it: classification masks and row filters would reach nothing.";
+  "This enforcement point has no tag service, so no engine can be bound to it: classification masks and row filters would reach nothing.";
 export const TAG_SERVICE_EXPLAINED =
-  "The tag profile that holds this profile's tag-based policies. Only a profile of type Tag can be named.";
+  "The tag enforcement point that holds this enforcement point's tag-based policies. Only an enforcement point of type Tag can be named.";
 export const BOUND_READ_ONLY =
-  "An engine downloads this profile, so its tag service is not changed here. Unbind the engine to change it.";
-export const GENERATED_READ_ONLY = "egret compiles this profile, so its tag service is not changed here.";
+  "An engine downloads this enforcement point, so its tag service is not changed here. Unbind the engine to change it.";
+export const GENERATED_READ_ONLY = "egret compiles this enforcement point, so its tag service is not changed here.";
 
 /**
  * Tag service (#786): the `tag` profile a Trino profile's tag-based policies
@@ -112,7 +112,7 @@ export function TagServiceSection({ profile }: { profile: FrameProfile }) {
           </div>
           {tagProfiles.length === 0 && profilesQ.data ? (
             <p className="text-sm text-muted-foreground">
-              There is no tag profile yet. Create one with New profile on{" "}
+              There is no tag enforcement point yet. Create one with New enforcement point on{" "}
               <Link to={ENGINES_BASE} className="text-primary underline focus-visible:ring-2 focus-visible:ring-ring">
                 Engine &amp; policy
               </Link>

@@ -25,7 +25,7 @@ import { Section } from "@/routes/governance/tabParts";
 import type { FrameProfile } from "@/routes/governance/engines/PageFrame";
 
 export const MECHANISM_RESTARTS =
-  "Every engine bound to this profile restarts its coordinator to load the new access control. Queries running on it fail.";
+  "Every engine bound to this enforcement point restarts its coordinator to load the new access control. Queries running on it fail.";
 export const MECHANISM_EXTERNAL =
   "External engines are not restarted by egret. Their operator must install the new plugin files, and run Trino 483 or later with plugin/opa.";
 export const MECHANISM_NEEDS_UPDATE = "You need policy:update to change this.";
@@ -159,7 +159,7 @@ export function MechanismSection({ profile }: { profile: FrameProfile }) {
             </div>
           ))}
         </RadioGroup>
-        {!dto ? <p className="text-sm text-muted-foreground">The profile has not loaded yet.</p> : null}
+        {!dto ? <p className="text-sm text-muted-foreground">The enforcement point has not loaded yet.</p> : null}
         {dto && current === null ? (
           <p className="text-sm text-muted-foreground">Current mechanism: Unknown ({dto.mechanism}).</p>
         ) : null}

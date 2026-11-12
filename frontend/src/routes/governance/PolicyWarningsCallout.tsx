@@ -53,7 +53,7 @@ export function PolicyWarningsCallout({
     return (
       <Alert variant="destructive">
         <AlertDescription>
-          Could not check this profile&apos;s stored policies for level warnings. Reload the page to
+          Could not check this enforcement point&apos;s stored policies for level warnings. Reload the page to
           try again.
         </AlertDescription>
       </Alert>

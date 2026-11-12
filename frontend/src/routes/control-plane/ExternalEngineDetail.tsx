@@ -227,7 +227,7 @@ function ExternalEngineActions({ engine }: { engine: ExternalEngine }) {
         onConfirm={() => del.mutate(engine.id)}
       >
         <ul className="list-disc space-y-1 pl-5">
-          <li>The bound policy profile is unbound, not deleted.</li>
+          <li>The bound enforcement point is unbound, not deleted.</li>
           <li>Declared catalog attachments are removed; the catalogs themselves are kept.</li>
           <li>The Ranger plugin you installed keeps running until you remove it from your engine.</li>
         </ul>
@@ -275,7 +275,7 @@ function Overview({
           </dd>
           <dt className="text-muted-foreground">Ranger plugin version</dt>
           <dd className="tabular-nums">{engine.rangerPluginVersion}</dd>
-          <dt className="text-muted-foreground">Policy profile</dt>
+          <dt className="text-muted-foreground">Enforcement point</dt>
           <dd>
             {bound ? (
               <PolicyProfileLink name={bound.name} />
@@ -319,7 +319,7 @@ function PluginConfigTab({
       <Alert variant="destructive" data-testid="plugin-config-profiles-error">
         <AlertDescription className="space-y-2">
           <p>
-            Could not read the policy profiles, so egret cannot tell which plugin this engine uses:{" "}
+            Could not read the enforcement points, so egret cannot tell which plugin this engine uses:{" "}
             {profilesQ.error?.message ?? "the request failed"}. Try again.
           </p>
           <Button size="sm" variant="outline" onClick={() => void profilesQ.refetch()}>
@@ -334,15 +334,15 @@ function PluginConfigTab({
       <Alert data-testid="plugin-config-no-profile">
         <AlertDescription className="space-y-2">
           <p>
-            No policy profile is bound to this engine yet, or this account cannot see the one that is. The plugin
-            configuration comes from the bound profile, so bind a profile in Settings first.
+            No enforcement point is bound to this engine yet, or this account cannot see the one that is. The plugin
+            configuration comes from the bound enforcement point, so bind an enforcement point in Settings first.
           </p>
           <div className="flex gap-2">
             <Button size="sm" variant="outline" onClick={onOpenSettings}>
               Open Settings
             </Button>
             <Button size="sm" variant="ghost" onClick={() => void profilesQ.refetch()}>
-              Reload profiles
+              Reload enforcement points
             </Button>
           </div>
         </AlertDescription>
@@ -415,7 +415,7 @@ function DeclaredCatalogs({ engine }: { engine: ExternalEngine }) {
   return (
     <section className="space-y-3">
       <p className="text-sm text-muted-foreground">
-        These catalogs are declared as served by this engine, so grants on them reach its policy profile. egret does
+        These catalogs are declared as served by this engine, so grants on them reach its enforcement point. egret does
         not create these catalogs on your engine — create them there with the same names.
       </p>
 
@@ -507,7 +507,7 @@ function DeclaredCatalogs({ engine }: { engine: ExternalEngine }) {
           <AlertDialogHeader>
             <AlertDialogTitle>Detach «{detachTarget?.name}» from «{engine.name}»?</AlertDialogTitle>
             <AlertDialogDescription>
-              egret stops treating this engine as serving the catalog and recompiles the bound profile. Nothing changes
+              egret stops treating this engine as serving the catalog and recompiles the bound enforcement point. Nothing changes
               on your cluster, and the catalog itself is kept.
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -545,7 +545,7 @@ function ExternalSettings({
     return (
       <Alert data-testid="settings-readonly">
         <AlertDescription>
-          Changing the address, plugin version or policy profile of an external engine needs the engine:update
+          Changing the address, plugin version or enforcement point of an external engine needs the engine:update
           permission, which this account does not have. A platform administrator can grant it.
         </AlertDescription>
       </Alert>
@@ -699,18 +699,18 @@ function SettingsForm({
 
       <section className="space-y-3 rounded-lg border p-4" aria-labelledby="es-profile-h">
         <h2 id="es-profile-h" className="text-base font-semibold">
-          Policy profile
+          Enforcement point
         </h2>
         {profiles === null ? (
           <Alert variant="destructive">
             <AlertDescription>
-              The policy profiles could not be read, so the binding cannot be changed now. Reload the page to try
+              The enforcement points could not be read, so the binding cannot be changed now. Reload the page to try
               again.
             </AlertDescription>
           </Alert>
         ) : (
           <div className="space-y-1.5">
-            <Label htmlFor="es-profile">Policy profile</Label>
+            <Label htmlFor="es-profile">Enforcement point</Label>
             <Select
               value={profileId === "" ? NO_PROFILE : profileId}
               onValueChange={(v) => setProfileId(v === NO_PROFILE ? "" : v)}
@@ -719,7 +719,7 @@ function SettingsForm({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value={NO_PROFILE}>No profile</SelectItem>
+                <SelectItem value={NO_PROFILE}>No enforcement point</SelectItem>
                 {profilesOfType.map((p) => {
                   const owner = p.engines.find((e) => e.id !== engine.id);
                   return (
@@ -732,7 +732,7 @@ function SettingsForm({
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">
-              Changing or removing the profile recompiles both the old and the new one. If that would leave two mask or
+              Changing or removing the enforcement point recompiles both the old and the new one. If that would leave two mask or
               row-filter rules deciding one column differently, egret refuses and changes nothing.
             </p>
             <StarRocksMetadataTablesWarning engineType={engine.type} bound={profileId !== ""} />

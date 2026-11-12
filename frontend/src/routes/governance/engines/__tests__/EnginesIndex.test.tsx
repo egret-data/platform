@@ -88,14 +88,14 @@ function answers(over: Record<string, Answer> = {}): Record<string, Answer> {
       pluginResponse({ judged: { state: "not_judged", reason: "external", sentence: "egret does not judge external engines." } }),
     ),
     [`/governance/engines/${E_OTHER}/plugin`]: ok(
-      pluginResponse({ profile: null, judged: { state: "not_judged", reason: "no_profile", sentence: "No profile." } }),
+      pluginResponse({ profile: null, judged: { state: "not_judged", reason: "no_profile", sentence: "No enforcement point." } }),
     ),
     ...over,
   };
 }
 
 const enginesSection = () => screen.getByRole("region", { name: "Engines" });
-const orphansSection = () => screen.getByRole("region", { name: "Profiles without an engine" });
+const orphansSection = () => screen.getByRole("region", { name: "Enforcement points without an engine" });
 const rowOf = (section: HTMLElement, name: string) => {
   const link = within(section).getByRole("link", { name });
   const row = link.closest("tr");
@@ -121,11 +121,11 @@ describe("the Engine & policy index (spec §5)", () => {
     expect(await screen.findByText("engines", {}, T)).toBeInTheDocument();
     const strip = screen.getByText("engines").parentElement!.parentElement!;
     expect(strip).toHaveTextContent("3engines");
-    expect(strip).toHaveTextContent("1profile without an engine");
+    expect(strip).toHaveTextContent("1enforcement point without an engine");
     expect(strip).toHaveTextContent("4manual policies");
   });
 
-  it("counts a tag service's manual policies once when two profiles name it", async () => {
+  it("counts a tag service's manual policies once when two enforcement points name it", async () => {
     // Nothing makes a tag service one profile's own: `config.tagService` is free
     // JSON, and migration 0182 bumps every profile linking one. lake-tr-b's 2
     // is its own 1 plus the shared tag service's 1, which lake-tr's 3 holds too.
@@ -146,7 +146,7 @@ describe("the Engine & policy index (spec §5)", () => {
     expect(strip).toHaveTextContent("5manual policies");
   });
 
-  it("with engine:read lists every engine, an unbound one as No profile, with plugin state and grant counts", async () => {
+  it("with engine:read lists every engine, an unbound one as No enforcement point, with plugin state and grant counts", async () => {
     serve(answers());
     openArea(INDEX, WITH_ENGINE_READ);
     await screen.findByRole("link", { name: "unbound-rw" }, T);
@@ -173,15 +173,15 @@ describe("the Engine & policy index (spec §5)", () => {
     expect(cellText(section, sr, "Manual policies")).toBe("1");
 
     const un = rowOf(section, "unbound-rw");
-    expect(within(un).getByText("No profile")).toBeInTheDocument();
-    expect(within(un).getByRole("link", { name: "Bind a profile in Control plane" })).toHaveAttribute(
+    expect(within(un).getByText("No enforcement point")).toBeInTheDocument();
+    expect(within(un).getByRole("link", { name: "Bind an enforcement point in Control plane" })).toHaveAttribute(
       "href",
       `/control-plane/engines/${E_OTHER}?tab=settings`,
     );
     expect(cellText(section, un, "Engine grants")).toBe("0");
   });
 
-  it("without engine:read lists only the bound engines, from the profiles, with no plugin column and no engines request", async () => {
+  it("without engine:read lists only the bound engines, from the enforcement points, with no plugin column and no engines request", async () => {
     const served = serve(answers());
     openArea(INDEX, READER);
     await screen.findByRole("link", { name: "lake-trino" }, T);
@@ -196,10 +196,10 @@ describe("the Engine & policy index (spec §5)", () => {
     expect(served.asked.some((k) => k.includes("/plugin"))).toBe(false);
   });
 
-  it("lists an unbound profile under Profiles without an engine, never a tag service or a bound profile", async () => {
+  it("lists an unbound enforcement point under Enforcement points without an engine, never a tag service or a bound enforcement point", async () => {
     serve(answers());
     openArea(INDEX, READER);
-    const link = await within(await screen.findByRole("region", { name: "Profiles without an engine" }, T)).findByRole(
+    const link = await within(await screen.findByRole("region", { name: "Enforcement points without an engine" }, T)).findByRole(
       "link",
       { name: "orphan" },
       T,
@@ -214,10 +214,10 @@ describe("the Engine & policy index (spec §5)", () => {
     expect(cellText(section, row, "Policies")).toBe("2");
   });
 
-  it("says every profile is bound when none is unbound", async () => {
+  it("says every enforcement point is bound when none is unbound", async () => {
     serve(answers({ "/policies/services": ok(profiles().filter((p) => p.name !== "orphan")) }));
     openArea(INDEX, READER);
-    expect(await screen.findByText("Every profile is bound to an engine.", {}, T)).toBeInTheDocument();
+    expect(await screen.findByText("Every enforcement point is bound to an engine.", {}, T)).toBeInTheDocument();
   });
 
   it("says no engine is recorded when there is none", async () => {
@@ -229,11 +229,11 @@ describe("the Engine & policy index (spec §5)", () => {
   });
 });
 
-describe("deleting a profile without an engine", () => {
+describe("deleting an enforcement point without an engine", () => {
   it("is not offered without policy:delete", async () => {
     serve(answers());
     openArea(INDEX, READER);
-    await within(await screen.findByRole("region", { name: "Profiles without an engine" }, T)).findByRole(
+    await within(await screen.findByRole("region", { name: "Enforcement points without an engine" }, T)).findByRole(
       "link",
       { name: "orphan" },
       T,
@@ -241,7 +241,7 @@ describe("deleting a profile without an engine", () => {
     expect(screen.queryByRole("button", { name: /delete/i })).toBeNull();
   });
 
-  it("is confirmed by typing the profile's name, and the list is read again", async () => {
+  it("is confirmed by typing the enforcement point's name, and the list is read again", async () => {
     const a = answers({ "DELETE /policies/services/orphan": { status: 204, body: null } });
     const served = serve(a);
     openArea(INDEX, DELETER);
@@ -260,7 +260,7 @@ describe("deleting a profile without an engine", () => {
     a["/policies/services"] = ok(profiles().filter((p) => p.name !== "orphan"));
     await user.click(confirm);
     await waitFor(() => expect(served.asked).toContain("DELETE /policies/services/orphan"));
-    expect(await screen.findByText("Every profile is bound to an engine.", {}, T)).toBeInTheDocument();
+    expect(await screen.findByText("Every enforcement point is bound to an engine.", {}, T)).toBeInTheDocument();
   });
 
   it("shows the server's refusal", async () => {
@@ -268,7 +268,7 @@ describe("deleting a profile without an engine", () => {
       answers({
         "DELETE /policies/services/orphan": {
           status: 409,
-          body: { error: "profile orphan is generated; it cannot be deleted" },
+          body: { error: "enforcement point orphan is generated; it cannot be deleted" },
         },
       }),
     );
@@ -278,7 +278,7 @@ describe("deleting a profile without an engine", () => {
     const dialog = await screen.findByRole("alertdialog");
     await user.type(within(dialog).getByRole("textbox"), "orphan");
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
-    expect(await screen.findByText("profile orphan is generated; it cannot be deleted", {}, T)).toBeInTheDocument();
+    expect(await screen.findByText("enforcement point orphan is generated; it cannot be deleted", {}, T)).toBeInTheDocument();
     expect(within(orphansSection()).getByRole("link", { name: "orphan" })).toBeInTheDocument();
   });
   // Ported from Policies.test.tsx: a 403 names the permission, never echoes "forbidden".
@@ -295,39 +295,39 @@ describe("deleting a profile without an engine", () => {
   });
 });
 
-describe("creating a profile", () => {
+describe("creating an enforcement point", () => {
   it("is not offered without policy:create", async () => {
     serve(answers());
     openArea(INDEX, READER);
     await screen.findByRole("link", { name: "lake-trino" }, T);
-    expect(screen.queryByRole("button", { name: "New profile" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "New enforcement point" })).toBeNull();
   });
 
-  it("creates the profile, which then appears among the unbound ones", async () => {
+  it("creates the enforcement point, which then appears among the unbound ones", async () => {
     const a = answers({
       "POST /policies/services": ok({ id: 9, name: "sr-ext", type: "starrocks" }),
     });
     const served = serve(a);
     openArea(INDEX, CREATOR);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "New profile" }, T));
+    await user.click(await screen.findByRole("button", { name: "New enforcement point" }, T));
     const dialog = await screen.findByRole("dialog");
     await user.type(within(dialog).getByLabelText("Name"), "sr-ext");
     a["/policies/services"] = ok([...profiles(), profileDto("sr-ext", { type: "starrocks", origin: "manual" })]);
-    await user.click(within(dialog).getByRole("button", { name: "Create profile" }));
+    await user.click(within(dialog).getByRole("button", { name: "Create enforcement point" }));
     await waitFor(() => expect(served.bodies["POST /policies/services"]).toEqual([{ name: "sr-ext", type: "trino" }]));
     expect(await within(orphansSection()).findByRole("link", { name: "sr-ext" }, T)).toBeInTheDocument();
   });
 
   it("keeps the dialog open with the server's message on a refusal", async () => {
-    serve(answers({ "POST /policies/services": { status: 409, body: { error: "a profile named orphan exists" } } }));
+    serve(answers({ "POST /policies/services": { status: 409, body: { error: "an enforcement point named orphan exists" } } }));
     openArea(INDEX, CREATOR);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "New profile" }, T));
+    await user.click(await screen.findByRole("button", { name: "New enforcement point" }, T));
     const dialog = await screen.findByRole("dialog");
     await user.type(within(dialog).getByLabelText("Name"), "orphan");
-    await user.click(within(dialog).getByRole("button", { name: "Create profile" }));
-    expect(await within(dialog).findByText("a profile named orphan exists", {}, T)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Create enforcement point" }));
+    expect(await within(dialog).findByText("an enforcement point named orphan exists", {}, T)).toBeInTheDocument();
     expect(within(dialog).getByLabelText("Name")).toHaveValue("orphan");
   });
 
@@ -336,29 +336,29 @@ describe("creating a profile", () => {
     serve(answers({ "POST /policies/services": { status: 403, body: { error: "forbidden" } } }));
     openArea(INDEX, CREATOR);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "New profile" }, T));
+    await user.click(await screen.findByRole("button", { name: "New enforcement point" }, T));
     const dialog = await screen.findByRole("dialog");
     await user.type(within(dialog).getByLabelText("Name"), "sr-2");
-    await user.click(within(dialog).getByRole("button", { name: "Create profile" }));
+    await user.click(within(dialog).getByRole("button", { name: "Create enforcement point" }));
     expect(await within(dialog).findByText(/needs the policy:create permission/, {}, T)).toBeInTheDocument();
   });
 });
 
 // #786 / KI-125: a Trino profile made here can name a tag service, so an engine can be bound to it.
-describe("creating a tag-capable Trino profile (#786)", () => {
-  it("offers Tag as a type and the existing tag profiles as the Trino profile's tag service", async () => {
+describe("creating a tag-capable Trino enforcement point (#786)", () => {
+  it("offers Tag as a type and the existing tag enforcement points as the Trino enforcement point's tag service", async () => {
     const a = answers({ "POST /policies/services": ok({ id: 9, name: "ext-tr", type: "trino" }) });
     const served = serve(a);
     openArea(INDEX, CREATOR);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "New profile" }, T));
+    await user.click(await screen.findByRole("button", { name: "New enforcement point" }, T));
     const dialog = await screen.findByRole("dialog");
     await user.type(within(dialog).getByLabelText("Name"), "ext-tr");
     await user.click(within(dialog).getByRole("combobox", { name: "Tag service" }));
     const options = (await screen.findAllByRole("option", {}, T)).map((o) => o.textContent);
     expect(options).toEqual(["None", "lake-tr-tag"]);
     await user.click(screen.getByRole("option", { name: "lake-tr-tag" }));
-    await user.click(within(dialog).getByRole("button", { name: "Create profile" }));
+    await user.click(within(dialog).getByRole("button", { name: "Create enforcement point" }));
     await waitFor(() =>
       expect(served.bodies["POST /policies/services"]).toEqual([
         { name: "ext-tr", type: "trino", config: { tagService: "lake-tr-tag" } },
@@ -366,30 +366,30 @@ describe("creating a tag-capable Trino profile (#786)", () => {
     );
   });
 
-  it("creates the tag profile first, then comes back to the Trino profile with it picked", async () => {
+  it("creates the tag enforcement point first, then comes back to the Trino enforcement point with it picked", async () => {
     const a = answers({ "POST /policies/services": ok({ id: 9, name: "ext-tr_tag", type: "tag" }) });
     const served = serve(a);
     openArea(INDEX, CREATOR);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "New profile" }, T));
+    await user.click(await screen.findByRole("button", { name: "New enforcement point" }, T));
     const dialog = await screen.findByRole("dialog");
     await user.type(within(dialog).getByLabelText("Name"), "ext-tr");
-    await user.click(within(dialog).getByRole("button", { name: "New tag profile" }));
+    await user.click(within(dialog).getByRole("button", { name: "New tag enforcement point" }));
     expect(within(dialog).getByLabelText("Name")).toHaveValue("ext-tr_tag");
     expect(within(dialog).getByRole("combobox", { name: "Type" })).toHaveTextContent("Tag");
     a["/policies/services"] = ok([...profiles(), profileDto("ext-tr_tag", { type: "tag", origin: "manual" })]);
-    await user.click(within(dialog).getByRole("button", { name: "Create profile" }));
+    await user.click(within(dialog).getByRole("button", { name: "Create enforcement point" }));
     await waitFor(() =>
       expect(served.bodies["POST /policies/services"]).toEqual([{ name: "ext-tr_tag", type: "tag" }]),
     );
-    expect(await within(dialog).findByText("Tag profile ext-tr_tag created.", {}, T)).toBeInTheDocument();
+    expect(await within(dialog).findByText("Tag enforcement point ext-tr_tag created.", {}, T)).toBeInTheDocument();
     expect(within(dialog).getByLabelText("Name")).toHaveValue("ext-tr");
     expect(within(dialog).getByRole("combobox", { name: "Type" })).toHaveTextContent("Trino");
     await waitFor(() =>
       expect(within(dialog).getByRole("combobox", { name: "Tag service" })).toHaveTextContent("ext-tr_tag"),
     );
     a["POST /policies/services"] = ok({ id: 10, name: "ext-tr", type: "trino" });
-    await user.click(within(dialog).getByRole("button", { name: "Create profile" }));
+    await user.click(within(dialog).getByRole("button", { name: "Create enforcement point" }));
     await waitFor(() =>
       expect(served.bodies["POST /policies/services"]?.[1]).toEqual({
         name: "ext-tr",
@@ -399,11 +399,11 @@ describe("creating a tag-capable Trino profile (#786)", () => {
     );
   });
 
-  it("asks no tag service of a StarRocks or tag profile", async () => {
+  it("asks no tag service of a StarRocks or tag enforcement point", async () => {
     serve(answers());
     openArea(INDEX, CREATOR);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "New profile" }, T));
+    await user.click(await screen.findByRole("button", { name: "New enforcement point" }, T));
     const dialog = await screen.findByRole("dialog");
     await user.click(within(dialog).getByRole("combobox", { name: "Type" }));
     await user.click(await screen.findByRole("option", { name: "StarRocks" }, T));
@@ -417,11 +417,11 @@ describe("each section's states (FE-STATE-1)", () => {
     const { container } = openArea(INDEX, WITH_ENGINE_READ);
     await screen.findByRole("heading", { level: 1, name: "Engine & policy" }, T);
     expect(container.querySelectorAll('[data-slot="skeleton"], .animate-pulse').length).toBeGreaterThan(0);
-    expect(screen.queryByText("Every profile is bound to an engine.")).toBeNull();
+    expect(screen.queryByText("Every enforcement point is bound to an engine.")).toBeNull();
     expect(screen.queryByText(/No engine is recorded/)).toBeNull();
   });
 
-  it("a failing engines read leaves the profiles section rendered, and Retry reads again", async () => {
+  it("a failing engines read leaves the enforcement points section rendered, and Retry reads again", async () => {
     const a = answers({ "/engines": fail(500) });
     const served = serve(a);
     openArea(INDEX, WITH_ENGINE_READ);
@@ -434,10 +434,10 @@ describe("each section's states (FE-STATE-1)", () => {
     expect(served.asked.filter((k) => k === "GET /engines").length).toBeGreaterThan(1);
   });
 
-  it("a failing profiles read shows its error with Retry and keeps the engine table", async () => {
+  it("a failing enforcement points read shows its error with Retry and keeps the engine table", async () => {
     serve(answers({ "/policies/services": fail(500) }));
     openArea(INDEX, WITH_ENGINE_READ);
-    const section = await screen.findByRole("region", { name: "Profiles without an engine" }, T);
+    const section = await screen.findByRole("region", { name: "Enforcement points without an engine" }, T);
     expect(await within(section).findByRole("button", { name: "Retry" }, T)).toBeInTheDocument();
     expect(await within(enginesSection()).findByRole("link", { name: "lake-trino" }, T)).toBeInTheDocument();
   });

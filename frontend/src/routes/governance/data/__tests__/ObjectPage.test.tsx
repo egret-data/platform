@@ -1154,7 +1154,7 @@ describe("MasksFiltersTab", () => {
     );
     renderPage("/governance/data/ice/sales/orders?tab=masks", EDITOR);
     const here = await within(panel()).findByRole("table", { name: "Here" });
-    await waitFor(() => expect(within(here).getAllByRole("row")[1]).toHaveTextContent("Not enforced yet — its engines have no policy profile"));
+    await waitFor(() => expect(within(here).getAllByRole("row")[1]).toHaveTextContent("Not enforced yet — its engines have no enforcement point"));
     expect(within(within(panel()).getByRole("table", { name: "Inherited" })).queryByText(/Not enforced/)).not.toBeInTheDocument();
     expect(permCalls.filter((c) => c.call === "GET /perm/rules/enforcement")).toHaveLength(1);
   });
@@ -1385,7 +1385,7 @@ describe("MasksFiltersTab", () => {
     expect(within(dialog).getByText(/This rule selects every table matching “ord\*”, not one object\./)).toHaveTextContent(
       "This rule selects every table matching “ord*”, not one object. It is permanently removed, and the engines that enforce it stop applying it.",
     );
-    expect(dialog).not.toHaveTextContent(/profile|recompile/);
+    expect(dialog).not.toHaveTextContent(/profile|enforcement point|recompile/);
   });
 
   it("shows a refused delete's reason and keeps the rule", async () => {

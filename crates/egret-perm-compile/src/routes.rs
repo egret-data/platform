@@ -1924,7 +1924,7 @@ async fn list_grants(
     tag = "perm",
     request_body = NewGrant,
     responses(
-        (status = 201, description = "Grant created AND the profiles it affects recompiled, in one transaction"),
+        (status = 201, description = "Grant created AND the enforcement points it affects recompiled, in one transaction"),
         (status = 400, description = "The grant names a scope level as \"\" (Ranger's \"every value at that level\", not a resource name — it would be enforced across the whole catalog), names a level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), or cannot be compiled for a profile it affects", body = ErrorBody),
         (status = 409, description = "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
@@ -1975,7 +1975,7 @@ async fn create_grant(
                    nobody compiles to nothing, so accepting one here would silently revoke \
                    the grant it replaces.",
     responses(
-        (status = 200, description = "Grant updated AND every affected profile recompiled, in one transaction", body = CompileResponse),
+        (status = 200, description = "Grant updated AND every affected enforcement point recompiled, in one transaction", body = CompileResponse),
         (status = 400, description = "The patched grant names a scope level as \"\" (Ranger's \"every value at that level\", not a resource name), names a level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), cannot be compiled, names no principal or no action, or is owned by the workspace-assignment sync", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
@@ -2059,7 +2059,7 @@ async fn delete_grant(
     path = "/api/control-plane/perm/overlaps",
     tag = "perm",
     responses(
-        (status = 200, description = "Every overlapping mask or row-filter pair stored in a profile's download, compiled or hand-written, with the profile that serves it", body = Vec<crate::overlap::StoredOverlap>),
+        (status = 200, description = "Every overlapping mask or row-filter pair stored in an enforcement point's download, compiled or hand-written, with the enforcement point that serves it", body = Vec<crate::overlap::StoredOverlap>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -2285,13 +2285,13 @@ async fn rules_enforcement(
     post,
     path = "/api/control-plane/perm/rules",
     tag = "perm",
-    description = "Create a named mask or row-filter rule and recompile the profiles it affects, \
+    description = "Create a named mask or row-filter rule and recompile the enforcement points it affects, \
                    in one transaction. A tag-selected rule is installation-wide: it recompiles \
                    every Trino and StarRocks profile an engine binds, and a compile failure on any \
                    one of them fails this request and rolls the rule back.",
     request_body = NewRule,
     responses(
-        (status = 201, description = "Rule created AND the profiles it affects recompiled, in one transaction"),
+        (status = 201, description = "Rule created AND the enforcement points it affects recompiled, in one transaction"),
         (status = 400, description = "The rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), names a path level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), is a tag-addressed mask whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked; code `table_tag_mask_conflict`, with `tag`, `tagId`, `warehouseId`, `schema`, `table`, `mask`, `maskOrigin`, `moreTables`), or cannot be compiled for a profile it affects", body = ErrorBody),
         (status = 409, description = "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
@@ -2335,7 +2335,7 @@ async fn create_rule(
                    preserved — including `exempt`, where an omitted set means no exemptions \
                    at all.",
     responses(
-        (status = 200, description = "Rule updated AND every affected profile recompiled, in one transaction", body = CompileResponse),
+        (status = 200, description = "Rule updated AND every affected enforcement point recompiled, in one transaction", body = CompileResponse),
         (status = 400, description = "The patched rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), names a path level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), is a tag-addressed mask whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked; code `table_tag_mask_conflict`, with `tag`, `tagId`, `warehouseId`, `schema`, `table`, `mask`, `maskOrigin`, `moreTables`), or cannot be compiled for a profile it affects", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
@@ -2457,12 +2457,12 @@ async fn name_profiles(
     path = "/api/control-plane/perm/preview",
     tag = "perm",
     request_body = PreviewRequest,
-    description = "Dry-run a grant or rule write: report the policy profiles it would recompile, \
+    description = "Dry-run a grant or rule write: report the enforcement points it would recompile, \
                    and the compile error it would fail with, without storing anything. Runs the \
                    real write in a transaction that is rolled back, so the answer cannot differ \
                    from what the write would do.",
     responses(
-        (status = 200, description = "The profiles the write would touch, and what its recompile would do", body = PreviewResponse),
+        (status = 200, description = "The enforcement points the write would touch, and what its recompile would do", body = PreviewResponse),
         (status = 400, description = "The same refusal the write itself would have returned (including code `table_tag_mask_conflict` for a tag-addressed mask over a table-level attachment)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
@@ -4939,7 +4939,7 @@ fn clearing_roles(tag: Option<&str>, gates: &[(String, Vec<String>)]) -> Option<
         (status = 409, description = "A rule overlap: two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
-        (status = 404, description = "No such policy profile", body = ErrorBody),
+        (status = 404, description = "No such enforcement point", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -5036,10 +5036,10 @@ async fn record_failed_compile(
     tag = "perm",
     params(("service_id" = i64, Path, description = "policy.authz_services id")),
     responses(
-        (status = 200, description = "Every policy of the profile, ordered by id, with its owner, verdict and blocker sentences", body = Vec<crate::classify::ClassifiedPolicy>),
+        (status = 200, description = "Every policy of the enforcement point, ordered by id, with its owner, verdict and blocker sentences", body = Vec<crate::classify::ClassifiedPolicy>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read permission", body = ErrorBody),
-        (status = 404, description = "No such policy profile", body = ErrorBody),
+        (status = 404, description = "No such enforcement point", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -5067,10 +5067,10 @@ async fn classify_service_policies(
     tag = "perm",
     params(("service_id" = i64, Path, description = "policy.authz_services id")),
     responses(
-        (status = 200, description = "`warningCount` and, ordered by id, the policies of the profile that carry a warning", body = crate::classify::ProfileWarnings),
+        (status = 200, description = "`warningCount` and, ordered by id, the policies of the enforcement point that carry a warning", body = crate::classify::ProfileWarnings),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read permission", body = ErrorBody),
-        (status = 404, description = "No such policy profile", body = ErrorBody),
+        (status = 404, description = "No such enforcement point", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -5103,13 +5103,13 @@ async fn service_policy_warnings(
     params(("service_id" = i64, Path, description = "policy.authz_services id")),
     request_body = crate::migrate::MigrateRequest,
     responses(
-        (status = 200, description = "Proved equivalent on every affected profile; committed unless `dry_run`", body = crate::migrate::MigrateResponse),
+        (status = 200, description = "Proved equivalent on every affected enforcement point; committed unless `dry_run`", body = crate::migrate::MigrateResponse),
         (status = 400, description = "A named policy is not migratable (the classifier's sentences), or the request names no policy / a policy twice", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
-        (status = 404, description = "No such profile, or no policy of that name in it", body = ErrorBody),
+        (status = 404, description = "No such enforcement point, or no policy of that name in it", body = ErrorBody),
         (status = 409, description = "Already migrated, not hand-written (compiler or infra owned), or a rule name it would create is taken; or two mask (or two row-filter) rules would decide one request differently: this write would compile such a pair, or a profile it recompiles already holds one, which refuses every recompile of that profile until one rule is narrowed, deleted or made to agree, or a tag unassigned. The body adds `code: \"rule_overlap\"`, `rules` (both members, `id` null for a hand-written policy, and `name`), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
-        (status = 422, description = "Not proved: the disagreements on any affected profile, or why the gate could not answer. Nothing was written", body = crate::migrate::MigrateResponse),
+        (status = 422, description = "Not proved: the disagreements on any affected enforcement point, or why the gate could not answer. Nothing was written", body = crate::migrate::MigrateResponse),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]

@@ -208,7 +208,7 @@ describe("GrantDialog — initialPrincipals (a People page's Grant access)", () 
 });
 
 describe("GrantDialog — the preview result is shown before the write (D2)", () => {
-  test("Save is disabled until a matching preview has run, then shows the affected profiles", async () => {
+  test("Save is disabled until a matching preview has run, then shows the affected enforcement points", async () => {
     const user = userEvent.setup();
     renderDialog({ existing: EXISTING });
 
@@ -271,7 +271,7 @@ describe("GrantDialog — a refusal is surfaced verbatim (D8)", () => {
   test("the server's own message appears, not a generic failure", async () => {
     const user = userEvent.setup();
     patchMutateAsync.mockRejectedValueOnce(
-      new ApiError(409, "rule 'r1' would push profile 'trino-prod' to 501 policies, over its 500 ceiling"),
+      new ApiError(409, "rule 'r1' would push enforcement point 'trino-prod' to 501 policies, over its 500 ceiling"),
     );
     renderDialog({ existing: EXISTING });
 
@@ -282,7 +282,7 @@ describe("GrantDialog — a refusal is surfaced verbatim (D8)", () => {
 
     expect(
       await screen.findByText(
-        "rule 'r1' would push profile 'trino-prod' to 501 policies, over its 500 ceiling",
+        "rule 'r1' would push enforcement point 'trino-prod' to 501 policies, over its 500 ceiling",
       ),
     ).toBeInTheDocument();
   });
@@ -313,7 +313,7 @@ describe("GrantDialog — two identical skip lines (SP4b-2 finding 4)", () => {
     const skip = {
       source_kind: "grant",
       id: "e615e686-215b-4513-85bd-15cbc7310cc0",
-      reason: "profile cannot express this grant",
+      reason: "enforcement point cannot express this grant",
     };
     previewMutateAsync.mockResolvedValue({
       status: 200,

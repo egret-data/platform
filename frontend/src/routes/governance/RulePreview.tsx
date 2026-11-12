@@ -175,7 +175,7 @@ export function RecompileDetails({ preview, open }: { preview: PreviewResponse; 
       <div className="mt-1 space-y-1">
         <p>
           Would recompile{" "}
-          {preview.affected.length === 0 ? "no profiles" : preview.affected.map((p) => p.name).join(", ")}.
+          {preview.affected.length === 0 ? "no enforcement points" : preview.affected.map((p) => p.name).join(", ")}.
         </p>
         <p className="text-muted-foreground">
           created {preview.compile.created} · updated {preview.compile.updated} · deleted {preview.compile.deleted} ·

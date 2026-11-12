@@ -55,7 +55,7 @@ export default function PolicyRedirect({ to }: { to: PolicyRedirectTarget }) {
   if (profiles.isError) {
     return (
       <PageContainer>
-        <TabError what="list of policy profiles" onRetry={() => void profiles.refetch()} />
+        <TabError what="list of enforcement points" onRetry={() => void profiles.refetch()} />
       </PageContainer>
     );
   }

@@ -24,7 +24,7 @@ import { engineUrl } from "@/routes/governance/engines/engineUrl";
 import type { TabContext } from "@/routes/governance/engines/PageFrame";
 
 export const NO_PROFILE_SENTENCE =
-  "This engine downloads no policy profile, so nothing can be granted on it. Bind a profile in Control plane.";
+  "This engine downloads no enforcement point, so nothing can be granted on it. Bind an enforcement point in Control plane.";
 export const NOTHING_GRANTED = "No engine permission has been granted on this engine.";
 
 /** The kinds of egret-seeded engine policy (spec §6.1). */
@@ -231,7 +231,7 @@ export function EnginePermissionsTab({
 
       <Section title="Managed by egret">
         {grants.managed.length === 0 ? (
-          <p className="text-sm text-muted-foreground">egret seeds no engine policy on this profile.</p>
+          <p className="text-sm text-muted-foreground">egret seeds no engine policy on this enforcement point.</p>
         ) : (
           <Table className={STACKED_TABLE}>
             <TableHeader>
@@ -317,7 +317,7 @@ export function EnginePermissionsTab({
         title="Delete engine permission"
         description={
           deleting
-            ? `Delete ${deleting.policyName}? egret recompiles the profile; the engine drops it at its next plugin download.`
+            ? `Delete ${deleting.policyName}? egret recompiles the enforcement point; the engine drops it at its next plugin download.`
             : ""
         }
         onConfirm={() => {

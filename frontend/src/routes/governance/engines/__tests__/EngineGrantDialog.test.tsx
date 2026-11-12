@@ -246,7 +246,7 @@ describe("Grant dialog: writes and the three outcomes (Q4)", () => {
     await addRole(dialog, "etl");
   }
 
-  it("creates with the target as a username and no targetUserId; compiled → toast naming the profile", async () => {
+  it("creates with the target as a username and no targetUserId; compiled → toast naming the enforcement point", async () => {
     const { bodies, asked } = serve(answers({ [`POST /perm/engines/${E_TR}/grants`]: created(writeResponse()) }));
     openArea(`/governance/engines/${E_TR}`, STEWARD);
     const dialog = await openGrant();
@@ -332,7 +332,7 @@ describe("Grant dialog: writes and the three outcomes (Q4)", () => {
   it("not saved: a 409 (a compile failure) keeps the dialog open with the server's reason and every input", async () => {
     serve(
       answers({
-        [`POST /perm/engines/${E_TR}/grants`]: fail(409, "the profile failed to compile: target ub is a platform admin"),
+        [`POST /perm/engines/${E_TR}/grants`]: fail(409, "the enforcement point failed to compile: target ub is a platform admin"),
       }),
     );
     openArea(`/governance/engines/${E_TR}`, STEWARD);
@@ -340,7 +340,7 @@ describe("Grant dialog: writes and the three outcomes (Q4)", () => {
     await fillImpersonation(dialog);
     await userEvent.click(within(dialog).getByRole("button", { name: "Grant" }));
     expect(
-      await within(dialog).findByText("Not saved: the profile failed to compile: target ub is a platform admin", {}, T),
+      await within(dialog).findByText("Not saved: the enforcement point failed to compile: target ub is a platform admin", {}, T),
     ).toBeInTheDocument();
     expect(screen.getByRole("dialog", { name: "Grant engine permission" })).toBeInTheDocument();
     expect(within(dialog).getByLabelText("Target user")).toHaveValue("ub");

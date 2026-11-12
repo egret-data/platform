@@ -81,17 +81,17 @@ describe("refUrl", () => {
     expect(through(refUrl({ type: "role", name })!)).toBe(name);
   });
 
-  it.each([["a/b"], ["50% off"], [".."]])("keeps a profile named %j through the router", (name) => {
+  it.each([["a/b"], ["50% off"], [".."]])("keeps an enforcement point named %j through the router", (name) => {
     expect(through(refUrl({ type: "profile", name })!)).toBe(name);
   });
 
   // #4a spec §3: the Overview opens a profile on the tab where its finding is fixed.
-  it("puts the tab on a profile link", () => {
+  it("puts the tab on an enforcement point link", () => {
     expect(refUrl({ type: "profile", name: "a/b" }, "plugin")).toBe("/governance/engines/profiles/a%2Fb?tab=plugin");
     expect(refUrl({ type: "profile", name: "p" }, "overlaps")).toBe("/governance/engines/profiles/p?tab=overlaps");
   });
 
-  it("ignores the tab on a ref that is not a profile", () => {
+  it("ignores the tab on a ref that is not an enforcement point", () => {
     expect(refUrl({ type: "profiles" }, "plugin")).toBe("/governance/engines");
     expect(refUrl({ type: "engine", id: "e-1", name: "sr" }, "plugin")).toBe("/control-plane/engines/e-1");
     expect(refUrl({ type: "rule", id: "r-1" }, "overlaps")).toBe("/governance/rules/r-1");

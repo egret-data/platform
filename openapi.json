@@ -4095,7 +4095,7 @@
             }
           },
           "409": {
-            "description": "An engine with this name already exists, its same-name policy profile is bound to another engine, or (StarRocks, `code` = `engine_metadata_left_over`) a previous engine of this name left its front-end metadata volume; the message carries the `kubectl` command that removes it",
+            "description": "An engine with this name already exists, its same-name enforcement point is bound to another engine, or (StarRocks, `code` = `engine_metadata_left_over`) a previous engine of this name left its front-end metadata volume; the message carries the `kubectl` command that removes it",
             "content": {
               "application/json": {
                 "schema": {
@@ -4135,7 +4135,7 @@
         },
         "responses": {
           "201": {
-            "description": "Registered. Nothing was provisioned: egret holds a row (`origin: external`), optionally bound to a policy profile, with the given catalogs declared attached (`applyStatus: declared`). The bound profile was recompiled in the same transaction, so its download carries the catalogs' grants at once. `rangerPluginVersionModelled` is false when egret's evaluator has not been read against the (type, declared version) pair (only the pairs in `egret_perm::MODELLED_RANGER_PLUGINS` are): a migration to that profile is then refused, never evaluated at a guessed version. `rangerCredential` is the engine's Ranger plugin credential, committed with the row and **shown only here**: no other response carries the password",
+            "description": "Registered. Nothing was provisioned: egret holds a row (`origin: external`), optionally bound to an enforcement point, with the given catalogs declared attached (`applyStatus: declared`). The bound enforcement point was recompiled in the same transaction, so its download carries the catalogs' grants at once. `rangerPluginVersionModelled` is false when egret's evaluator has not been read against the (type, declared version) pair (only the pairs in `egret_perm::MODELLED_RANGER_PLUGINS` are): a migration to that enforcement point is then refused, never evaluated at a guessed version. `rangerCredential` is the engine's Ranger plugin credential, committed with the row and **shown only here**: no other response carries the password",
             "content": {
               "application/json": {
                 "schema": {
@@ -4145,7 +4145,7 @@
             }
           },
           "400": {
-            "description": "Invalid name, type, host, port or plugin version; a catalog the engine cannot read; `authzServiceId` naming no policy profile or a Trino profile with no usable tag service; or Kubernetes-free registration was malformed",
+            "description": "Invalid name, type, host, port or plugin version; a catalog the engine cannot read; `authzServiceId` naming no enforcement point or a Trino enforcement point with no usable tag service; or Kubernetes-free registration was malformed",
             "content": {
               "application/json": {
                 "schema": {
@@ -4185,7 +4185,7 @@
             }
           },
           "409": {
-            "description": "The name is taken, the profile has another type or is bound to another engine, or binding it would create an order-ambiguous mask or row-filter pair (`code: rule_overlap`); nothing was written",
+            "description": "The name is taken, the enforcement point has another type or is bound to another engine, or binding it would create an order-ambiguous mask or row-filter pair (`code: rule_overlap`); nothing was written",
             "content": {
               "application/json": {
                 "schema": {
@@ -4360,7 +4360,7 @@
             }
           },
           "400": {
-            "description": "Invalid config, Kubernetes not configured, `catalogs` sent (create-only — attach through POST /engines/{id}/catalogs/{cid}), `starrocks.feMetaStorageClass`/`feMetaStorageSize` sent (create-only — they render into the FE StatefulSet's immutable `volumeClaimTemplates`; the message says what to do instead), `authz_service_id` naming no policy profile or one with no usable tag service, or re-materializing workspace connections failed",
+            "description": "Invalid config, Kubernetes not configured, `catalogs` sent (create-only — attach through POST /engines/{id}/catalogs/{cid}), `starrocks.feMetaStorageClass`/`feMetaStorageSize` sent (create-only — they render into the FE StatefulSet's immutable `volumeClaimTemplates`; the message says what to do instead), `authz_service_id` naming no enforcement point or one with no usable tag service, or re-materializing workspace connections failed",
             "content": {
               "application/json": {
                 "schema": {
@@ -4400,7 +4400,7 @@
             }
           },
           "409": {
-            "description": "The engine changed concurrently (e.g. a delete in progress), or `authz_service_id` names a profile of the wrong type or one another engine already binds; retry; The engine is external (`code` = `engine_is_external`): egret does not update, restart, scale or delete the cluster of it",
+            "description": "The engine changed concurrently (e.g. a delete in progress), or `authz_service_id` names an enforcement point of the wrong type or one another engine already binds; retry; The engine is external (`code` = `engine_is_external`): egret does not update, restart, scale or delete the cluster of it",
             "content": {
               "application/json": {
                 "schema": {
@@ -4450,7 +4450,7 @@
         ],
         "responses": {
           "204": {
-            "description": "For an external engine: egret's rows only (the engine, its declared attachments and its profile binding) are removed and nothing is sent to any cluster or provisioner, and Kubernetes need not be configured. For a provisioned engine: cluster deleted, engine row removed (its catalogs, workspace connections, query history and notebook access cascade), engine-generated secrets and minted Catalog Clients cleaned up; the engine's own Ranger profile is unbound, not deleted"
+            "description": "For an external engine: egret's rows only (the engine, its declared attachments and its enforcement point binding) are removed and nothing is sent to any cluster or provisioner, and Kubernetes need not be configured. For a provisioned engine: cluster deleted, engine row removed (its catalogs, workspace connections, query history and notebook access cascade), engine-generated secrets and minted Catalog Clients cleaned up; the engine's own Ranger enforcement point is unbound, not deleted"
           },
           "400": {
             "description": "Kubernetes not configured",
@@ -4976,7 +4976,7 @@
         },
         "responses": {
           "200": {
-            "description": "Updated. Egret's row only: nothing is sent to the engine, a provisioner or Kubernetes. The policy profile it was or is bound to were recompiled in the same transaction. `rangerPluginVersionModelled` is as at registration",
+            "description": "Updated. Egret's row only: nothing is sent to the engine, a provisioner or Kubernetes. The enforcement point it was or is bound to were recompiled in the same transaction. `rangerPluginVersionModelled` is as at registration",
             "content": {
               "application/json": {
                 "schema": {
@@ -4986,7 +4986,7 @@
             }
           },
           "400": {
-            "description": "The engine is not external; nothing to update; invalid host, port or plugin version; or `authzServiceId` naming no profile, one of the wrong type, or a Trino profile with no usable tag service",
+            "description": "The engine is not external; nothing to update; invalid host, port or plugin version; or `authzServiceId` naming no enforcement point, one of the wrong type, or a Trino enforcement point with no usable tag service",
             "content": {
               "application/json": {
                 "schema": {
@@ -5026,7 +5026,7 @@
             }
           },
           "409": {
-            "description": "The engine changed concurrently (e.g. a delete); the profile is bound to another engine; or the change would create an order-ambiguous mask or row-filter pair (`code: rule_overlap`). Nothing was written",
+            "description": "The engine changed concurrently (e.g. a delete); the enforcement point is bound to another engine; or the change would create an order-ambiguous mask or row-filter pair (`code: rule_overlap`). Nothing was written",
             "content": {
               "application/json": {
                 "schema": {
@@ -6256,7 +6256,7 @@
             }
           },
           "409": {
-            "description": "The engine is provisioned (egret mounts these files itself), or it is bound to no policy profile (bind one first)",
+            "description": "The engine is provisioned (egret mounts these files itself), or it is bound to no enforcement point (bind one first)",
             "content": {
               "application/json": {
                 "schema": {
@@ -6506,7 +6506,7 @@
             "description": "Provisioned engine: Kubernetes accepted the apply of a new Ranger plugin credential; the engine's pods restart. The previous credential remains valid until the rollout is observed complete (every pod that runs the Ranger plugin runs the new credential and none of an older template is left); egret then retires it. Until then a further rotation is refused"
           },
           "400": {
-            "description": "Provisioned engine bound to no policy profile (it has no Ranger credential), or Kubernetes is not configured",
+            "description": "Provisioned engine bound to no enforcement point (it has no Ranger credential), or Kubernetes is not configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -7251,7 +7251,7 @@
           "control-plane-governance"
         ],
         "summary": "What the Ranger plugins of an engine's profile report downloading.",
-        "description": "The plugin download ledger of the engine's policy profile, judged by the same rules as the Governance Overview's plugin findings. Records what plugins report holding. Requires policy:read and engine:read.",
+        "description": "The plugin download ledger of the engine's enforcement point, judged by the same rules as the Governance Overview's plugin findings. Records what plugins report holding. Requires policy:read and engine:read.",
         "operationId": "engine_plugin",
         "parameters": [
           {
@@ -7445,7 +7445,7 @@
           "control-plane-governance"
         ],
         "summary": "Hand-written policies that reach a Data object.",
-        "description": "Every hand-written (operator) Ranger policy of the profiles whose engines reach the catalog, and of their tag services, that reaches the object: `applies` (the policy names this object, or it and everything below it), `part` (it names something below), `parent` (it names a parent only, which engines do not apply to this object's data) or `unknown` (the body cannot be read). A resource match, not an access decision. egret-seeded policies are counted per profile. External engines are read from the database only. Requires policy:read.",
+        "description": "Every hand-written (operator) Ranger policy of the enforcement points whose engines reach the catalog, and of their tag services, that reaches the object: `applies` (the policy names this object, or it and everything below it), `part` (it names something below), `parent` (it names a parent only, which engines do not apply to this object's data) or `unknown` (the body cannot be read). A resource match, not an access decision. egret-seeded policies are counted per profile. External engines are read from the database only. Requires policy:read.",
         "operationId": "object_handwritten",
         "parameters": [
           {
@@ -7556,7 +7556,7 @@
           "control-plane-governance"
         ],
         "summary": "Hand-written policies that name a principal.",
-        "description": "Every hand-written (operator) Ranger policy, in every profile and tag service, with an item naming the principal: a user's username (`direct`), or a group or role the user holds (`group` / `role`, with `onEngines: false`: engines resolve no groups or roles, so such an item reaches nobody there). Items naming `public` or `{USER}` are reported under `everyone`, never attributed. A user with no username is `no_username` with only the `everyone` policies. Requires policy:read.",
+        "description": "Every hand-written (operator) Ranger policy, in every enforcement point and tag service, with an item naming the principal: a user's username (`direct`), or a group or role the user holds (`group` / `role`, with `onEngines: false`: engines resolve no groups or roles, so such an item reaches nobody there). Items naming `public` or `{USER}` are reported under `everyone`, never attributed. A user with no username is `no_username` with only the `everyone` policies. Requires policy:read.",
         "operationId": "principal_handwritten",
         "parameters": [
           {
@@ -8584,7 +8584,7 @@
             }
           },
           "404": {
-            "description": "No such policy profile",
+            "description": "No such enforcement point",
             "content": {
               "application/json": {
                 "schema": {
@@ -8789,7 +8789,7 @@
         },
         "responses": {
           "200": {
-            "description": "Engine grant replaced (the engine is fixed) AND its profile recompiled",
+            "description": "Engine grant replaced (the engine is fixed) AND its enforcement point recompiled",
             "content": {
               "application/json": {
                 "schema": {
@@ -8871,7 +8871,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The engine, its profile, every engine it shares that profile with, its engine grants and the profile's seeded (managed) policies",
+            "description": "The engine, its enforcement point, every engine it shares that enforcement point with, its engine grants and the enforcement point's seeded (managed) policies",
             "content": {
               "application/json": {
                 "schema": {
@@ -8941,7 +8941,7 @@
         },
         "responses": {
           "201": {
-            "description": "Engine grant created AND the engine's profile recompiled, in one transaction",
+            "description": "Engine grant created AND the engine's enforcement point recompiled, in one transaction",
             "content": {
               "application/json": {
                 "schema": {
@@ -8991,7 +8991,7 @@
             }
           },
           "409": {
-            "description": "The engine has no profile, is being deleted or is RisingWave; the impersonation target is reserved or an engine admin; the engine already has that grant; or the recompile refused (overlap, ceiling)",
+            "description": "The engine has no enforcement point, is being deleted or is RisingWave; the impersonation target is reserved or an engine admin; the engine already has that grant; or the recompile refused (overlap, ceiling)",
             "content": {
               "application/json": {
                 "schema": {
@@ -9144,7 +9144,7 @@
             }
           },
           "409": {
-            "description": "The profile's engines run a plugin version egret does not model",
+            "description": "The enforcement point's engines run a plugin version egret does not model",
             "content": {
               "application/json": {
                 "schema": {
@@ -9295,7 +9295,7 @@
         },
         "responses": {
           "201": {
-            "description": "Grant created AND the profiles it affects recompiled, in one transaction"
+            "description": "Grant created AND the enforcement points it affects recompiled, in one transaction"
           },
           "400": {
             "description": "The grant names a scope level as \"\" (Ranger's \"every value at that level\", not a resource name — it would be enforced across the whole catalog), names a level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), or cannot be compiled for a profile it affects",
@@ -9455,7 +9455,7 @@
         },
         "responses": {
           "200": {
-            "description": "Grant updated AND every affected profile recompiled, in one transaction",
+            "description": "Grant updated AND every affected enforcement point recompiled, in one transaction",
             "content": {
               "application/json": {
                 "schema": {
@@ -9536,7 +9536,7 @@
         "operationId": "list_overlaps",
         "responses": {
           "200": {
-            "description": "Every overlapping mask or row-filter pair stored in a profile's download, compiled or hand-written, with the profile that serves it",
+            "description": "Every overlapping mask or row-filter pair stored in an enforcement point's download, compiled or hand-written, with the enforcement point that serves it",
             "content": {
               "application/json": {
                 "schema": {
@@ -10016,7 +10016,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Every policy of the profile, ordered by id, with its owner, verdict and blocker sentences",
+            "description": "Every policy of the enforcement point, ordered by id, with its owner, verdict and blocker sentences",
             "content": {
               "application/json": {
                 "schema": {
@@ -10049,7 +10049,7 @@
             }
           },
           "404": {
-            "description": "No such policy profile",
+            "description": "No such enforcement point",
             "content": {
               "application/json": {
                 "schema": {
@@ -10103,7 +10103,7 @@
         },
         "responses": {
           "200": {
-            "description": "Proved equivalent on every affected profile; committed unless `dry_run`",
+            "description": "Proved equivalent on every affected enforcement point; committed unless `dry_run`",
             "content": {
               "application/json": {
                 "schema": {
@@ -10143,7 +10143,7 @@
             }
           },
           "404": {
-            "description": "No such profile, or no policy of that name in it",
+            "description": "No such enforcement point, or no policy of that name in it",
             "content": {
               "application/json": {
                 "schema": {
@@ -10163,7 +10163,7 @@
             }
           },
           "422": {
-            "description": "Not proved: the disagreements on any affected profile, or why the gate could not answer. Nothing was written",
+            "description": "Not proved: the disagreements on any affected enforcement point, or why the gate could not answer. Nothing was written",
             "content": {
               "application/json": {
                 "schema": {
@@ -10309,7 +10309,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`warningCount` and, ordered by id, the policies of the profile that carry a warning",
+            "description": "`warningCount` and, ordered by id, the policies of the enforcement point that carry a warning",
             "content": {
               "application/json": {
                 "schema": {
@@ -10339,7 +10339,7 @@
             }
           },
           "404": {
-            "description": "No such policy profile",
+            "description": "No such enforcement point",
             "content": {
               "application/json": {
                 "schema": {
@@ -10367,7 +10367,7 @@
           "perm"
         ],
         "summary": "**The dry run — SP4b D2. It runs the REAL write and rolls it back.**",
-        "description": "Dry-run a grant or rule write: report the policy profiles it would recompile, and the compile error it would fail with, without storing anything. Runs the real write in a transaction that is rolled back, so the answer cannot differ from what the write would do.",
+        "description": "Dry-run a grant or rule write: report the enforcement points it would recompile, and the compile error it would fail with, without storing anything. Runs the real write in a transaction that is rolled back, so the answer cannot differ from what the write would do.",
         "operationId": "preview",
         "requestBody": {
           "content": {
@@ -10381,7 +10381,7 @@
         },
         "responses": {
           "200": {
-            "description": "The profiles the write would touch, and what its recompile would do",
+            "description": "The enforcement points the write would touch, and what its recompile would do",
             "content": {
               "application/json": {
                 "schema": {
@@ -10509,7 +10509,7 @@
         "tags": [
           "perm"
         ],
-        "description": "Create a named mask or row-filter rule and recompile the profiles it affects, in one transaction. A tag-selected rule is installation-wide: it recompiles every Trino and StarRocks profile an engine binds, and a compile failure on any one of them fails this request and rolls the rule back.",
+        "description": "Create a named mask or row-filter rule and recompile the enforcement points it affects, in one transaction. A tag-selected rule is installation-wide: it recompiles every Trino and StarRocks profile an engine binds, and a compile failure on any one of them fails this request and rolls the rule back.",
         "operationId": "create_rule",
         "requestBody": {
           "content": {
@@ -10523,7 +10523,7 @@
         },
         "responses": {
           "201": {
-            "description": "Rule created AND the profiles it affects recompiled, in one transaction"
+            "description": "Rule created AND the enforcement points it affects recompiled, in one transaction"
           },
           "400": {
             "description": "The rule names a path level as \"\" (Ranger's \"every value at that level\", not a resource name), names a path level beneath a \"*\" one (a path cannot skip a level, and a \"*\" names none), is a tag-addressed mask whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked; code `table_tag_mask_conflict`, with `tag`, `tagId`, `warehouseId`, `schema`, `table`, `mask`, `maskOrigin`, `moreTables`), or cannot be compiled for a profile it affects",
@@ -10758,7 +10758,7 @@
         },
         "responses": {
           "200": {
-            "description": "Rule updated AND every affected profile recompiled, in one transaction",
+            "description": "Rule updated AND every affected enforcement point recompiled, in one transaction",
             "content": {
               "application/json": {
                 "schema": {
@@ -11133,7 +11133,7 @@
             }
           },
           "404": {
-            "description": "No such policy profile",
+            "description": "No such enforcement point",
             "content": {
               "application/json": {
                 "schema": {
@@ -11183,7 +11183,7 @@
             }
           },
           "400": {
-            "description": "Invalid editor input (including a Ranger-shaped body, i.e. `policyItems`, `denyPolicyItems`, `dataMaskPolicyItems` or `rowFilterPolicyItems`, which is refused naming the keys because the form's grants are `items`; an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a tag policy whose profile has no configured `tagService` (the plugin download would carry no `tagPolicies` block, so the policy could never be enforced), or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked; code `table_tag_mask_conflict`, with `tag`, `tagId`, `warehouseId`, `schema`, `table`, `mask`, `maskOrigin`, `moreTables`)",
+            "description": "Invalid editor input (including a Ranger-shaped body, i.e. `policyItems`, `denyPolicyItems`, `dataMaskPolicyItems` or `rowFilterPolicyItems`, which is refused naming the keys because the form's grants are `items`; an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a tag policy whose enforcement point has no configured `tagService` (the plugin download would carry no `tagPolicies` block, so the policy could never be enforced), or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked; code `table_tag_mask_conflict`, with `tag`, `tagId`, `warehouseId`, `schema`, `table`, `mask`, `maskOrigin`, `moreTables`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -11213,7 +11213,7 @@
             }
           },
           "404": {
-            "description": "No such policy profile",
+            "description": "No such enforcement point",
             "content": {
               "application/json": {
                 "schema": {
@@ -11343,7 +11343,7 @@
             }
           },
           "404": {
-            "description": "No such policy profile",
+            "description": "No such enforcement point",
             "content": {
               "application/json": {
                 "schema": {
@@ -11376,7 +11376,7 @@
           {
             "name": "name",
             "in": "path",
-            "description": "Profile name (resolved to its service-def) or a def name directly",
+            "description": "Enforcement point name (resolved to its service-def) or a def name directly",
             "required": true,
             "schema": {
               "type": "string"
@@ -11446,7 +11446,7 @@
         "operationId": "list_profiles",
         "responses": {
           "200": {
-            "description": "Policy profiles with their linked engines and policy counts",
+            "description": "Enforcement points with their linked engines and policy counts",
             "content": {
               "application/json": {
                 "schema": {
@@ -11509,7 +11509,7 @@
         },
         "responses": {
           "200": {
-            "description": "Profile created",
+            "description": "Enforcement point created",
             "content": {
               "application/json": {
                 "schema": {
@@ -11519,7 +11519,7 @@
             }
           },
           "400": {
-            "description": "Invalid type (must be `trino`, `starrocks` or `tag`), missing name, a `tagService` that names a profile that is missing or not of type `tag`, a `tagService` in `config` on a profile whose type is not `trino` (its service-def has no `schema` resource, so every tag policy under it would be silently inert), or a `tagService` whose value is not a non-empty string (it names no policy profile, and the plugin download would carry no `tagPolicies` block)",
+            "description": "Invalid type (must be `trino`, `starrocks` or `tag`), missing name, a `tagService` that names an enforcement point that is missing or not of type `tag`, a `tagService` in `config` on an enforcement point whose type is not `trino` (its service-def has no `schema` resource, so every tag policy under it would be silently inert), or a `tagService` whose value is not a non-empty string (it names no enforcement point, and the plugin download would carry no `tagPolicies` block)",
             "content": {
               "application/json": {
                 "schema": {
@@ -11549,7 +11549,7 @@
             }
           },
           "409": {
-            "description": "A profile with this name already exists",
+            "description": "An enforcement point with this name already exists",
             "content": {
               "application/json": {
                 "schema": {
@@ -11583,7 +11583,7 @@
           {
             "name": "service",
             "in": "path",
-            "description": "Policy profile (Ranger service) name",
+            "description": "Enforcement point (Ranger service) name",
             "required": true,
             "schema": {
               "type": "string"
@@ -11592,7 +11592,7 @@
         ],
         "responses": {
           "204": {
-            "description": "Profile deleted"
+            "description": "Enforcement point deleted"
           },
           "401": {
             "description": "Not authenticated",
@@ -11615,7 +11615,7 @@
             }
           },
           "404": {
-            "description": "No such policy profile",
+            "description": "No such enforcement point",
             "content": {
               "application/json": {
                 "schema": {
@@ -11625,7 +11625,7 @@
             }
           },
           "409": {
-            "description": "Profile is still enforced by an engine, or is compiled by the SP4a permission model (generated) and cannot be deleted through the editor",
+            "description": "Enforcement point is still enforced by an engine, or is compiled by the SP4a permission model (generated) and cannot be deleted through the editor",
             "content": {
               "application/json": {
                 "schema": {
@@ -11657,7 +11657,7 @@
           {
             "name": "service",
             "in": "path",
-            "description": "Policy profile (Ranger service) name",
+            "description": "Enforcement point (Ranger service) name",
             "required": true,
             "schema": {
               "type": "string"
@@ -11676,7 +11676,7 @@
         },
         "responses": {
           "200": {
-            "description": "The coordinator of every bound egret-provisioned engine restarts to load the new access control; queries running on it fail. External engines are listed in `external_engines_unchanged`, and `external_engines_warning` says what their operator must do: after a switch to OPA they keep enforcing the Ranger policies until the OPA plugin files are installed (Trino 483 or later with `plugin/opa`); after a switch to Ranger, those running the OPA plugin fail every query until the Ranger plugin files are re-installed. `no_tag_service_warning` is present when the profile is a Trino profile with no tag service, so classification rules and clearances do not apply to its engines.",
+            "description": "The coordinator of every bound egret-provisioned engine restarts to load the new access control; queries running on it fail. External engines are listed in `external_engines_unchanged`, and `external_engines_warning` says what their operator must do: after a switch to OPA they keep enforcing the Ranger policies until the OPA plugin files are installed (Trino 483 or later with `plugin/opa`); after a switch to Ranger, those running the OPA plugin fail every query until the Ranger plugin files are re-installed. `no_tag_service_warning` is present when the enforcement point is a Trino enforcement point with no tag service, so classification rules and clearances do not apply to its engines.",
             "content": {
               "application/json": {
                 "schema": {
@@ -11706,7 +11706,7 @@
             }
           },
           "404": {
-            "description": "No such policy profile",
+            "description": "No such enforcement point",
             "content": {
               "application/json": {
                 "schema": {
@@ -11759,7 +11759,7 @@
           {
             "name": "service",
             "in": "path",
-            "description": "Policy profile (Ranger service) name",
+            "description": "Enforcement point (Ranger service) name",
             "required": true,
             "schema": {
               "type": "string"
@@ -11768,7 +11768,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Number of default policies created (0 if the profile already had policies)",
+            "description": "Number of default policies created (0 if the enforcement point already had policies)",
             "content": {
               "application/json": {
                 "schema": {
@@ -11778,7 +11778,7 @@
             }
           },
           "400": {
-            "description": "The profile is not of type trino; the default set is Trino-shaped and its engine would reject it. Nothing is written",
+            "description": "The enforcement point is not of type trino; the default set is Trino-shaped and its engine would reject it. Nothing is written",
             "content": {
               "application/json": {
                 "schema": {
@@ -11808,7 +11808,7 @@
             }
           },
           "404": {
-            "description": "No such policy profile",
+            "description": "No such enforcement point",
             "content": {
               "application/json": {
                 "schema": {
@@ -11818,7 +11818,7 @@
             }
           },
           "409": {
-            "description": "The profile is compiled by the SP4a permission model (generated) and cannot be hand-edited",
+            "description": "The enforcement point is compiled by the SP4a permission model (generated) and cannot be hand-edited",
             "content": {
               "application/json": {
                 "schema": {
@@ -11852,7 +11852,7 @@
           {
             "name": "service",
             "in": "path",
-            "description": "Policy profile (Ranger service) name",
+            "description": "Enforcement point (Ranger service) name",
             "required": true,
             "schema": {
               "type": "string"
@@ -11871,7 +11871,7 @@
         },
         "responses": {
           "200": {
-            "description": "The profile's tag service after the write. Setting the value it already has writes nothing",
+            "description": "The enforcement point's tag service after the write. Setting the value it already has writes nothing",
             "content": {
               "application/json": {
                 "schema": {
@@ -11881,7 +11881,7 @@
             }
           },
           "400": {
-            "description": "The profile is not of type `trino`; the value is not a non-empty string or `null`; or it names a profile that is missing or not of type `tag`. Nothing is written",
+            "description": "The enforcement point is not of type `trino`; the value is not a non-empty string or `null`; or it names an enforcement point that is missing or not of type `tag`. Nothing is written",
             "content": {
               "application/json": {
                 "schema": {
@@ -11911,7 +11911,7 @@
             }
           },
           "404": {
-            "description": "No such policy profile",
+            "description": "No such enforcement point",
             "content": {
               "application/json": {
                 "schema": {
@@ -11921,7 +11921,7 @@
             }
           },
           "409": {
-            "description": "An engine downloads the profile (unbind it first), or egret compiles it (`generated`)",
+            "description": "An engine downloads the enforcement point (unbind it first), or egret compiles it (`generated`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -11955,7 +11955,7 @@
           {
             "name": "service",
             "in": "path",
-            "description": "Policy profile (Ranger service) name",
+            "description": "Enforcement point (Ranger service) name",
             "required": true,
             "schema": {
               "type": "string"
@@ -11994,7 +11994,7 @@
             }
           },
           "404": {
-            "description": "No such policy profile",
+            "description": "No such enforcement point",
             "content": {
               "application/json": {
                 "schema": {
@@ -12129,7 +12129,7 @@
             }
           },
           "400": {
-            "description": "Invalid editor input (including a Ranger-shaped body, i.e. `policyItems`, `denyPolicyItems`, `dataMaskPolicyItems` or `rowFilterPolicyItems`, which is refused naming the keys because the form's grants are `items`; an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a `service` that is not the profile this policy belongs to (a policy cannot be moved between profiles by editing it, and every guard here would otherwise be evaluated against the wrong profile's policy set), a tag policy whose profile has no configured `tagService`, or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked; code `table_tag_mask_conflict`, with `tag`, `tagId`, `warehouseId`, `schema`, `table`, `mask`, `maskOrigin`, `moreTables`)",
+            "description": "Invalid editor input (including a Ranger-shaped body, i.e. `policyItems`, `denyPolicyItems`, `dataMaskPolicyItems` or `rowFilterPolicyItems`, which is refused naming the keys because the form's grants are `items`; an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a `service` that is not the enforcement point this policy belongs to (a policy cannot be moved between enforcement points by editing it, and every guard here would otherwise be evaluated against the wrong enforcement point's policy set), a tag policy whose enforcement point has no configured `tagService`, or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked; code `table_tag_mask_conflict`, with `tag`, `tagId`, `warehouseId`, `schema`, `table`, `mask`, `maskOrigin`, `moreTables`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -12243,7 +12243,7 @@
             }
           },
           "409": {
-            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the change is a data mask on a StarRocks profile and the profile cannot be recompiled with it (its classification masks fold the profile's other masks, so the write recompiles the profile in the same transaction and is refused when that recompile is)",
+            "description": "The policy's enforcement point is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the change is a data mask on a StarRocks enforcement point and the enforcement point cannot be recompiled with it (its classification masks fold the enforcement point's other masks, so the write recompiles the enforcement point in the same transaction and is refused when that recompile is)",
             "content": {
               "application/json": {
                 "schema": {
@@ -12329,7 +12329,7 @@
             }
           },
           "409": {
-            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the change is a data mask on a StarRocks profile and the profile cannot be recompiled with it (its classification masks fold the profile's other masks, so the write recompiles the profile in the same transaction and is refused when that recompile is)",
+            "description": "The policy's enforcement point is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the change is a data mask on a StarRocks enforcement point and the enforcement point cannot be recompiled with it (its classification masks fold the enforcement point's other masks, so the write recompiles the enforcement point in the same transaction and is refused when that recompile is)",
             "content": {
               "application/json": {
                 "schema": {
@@ -13669,7 +13669,7 @@
             }
           },
           "409": {
-            "description": "`code` is `tag_in_use`: `rules` lists the rules that still select this classification. Or `code: \"profile_set_changed\"` with `retryable: true`: an engine was bound, or a policy profile created, while this write ran, so a profile it recompiles was not locked first (#792); nothing was written, and the same request succeeds when retried",
+            "description": "`code` is `tag_in_use`: `rules` lists the rules that still select this classification. Or `code: \"profile_set_changed\"` with `retryable: true`: an engine was bound, or an enforcement point created, while this write ran, so an enforcement point it recompiles was not locked first (#792); nothing was written, and the same request succeeds when retried",
             "content": {
               "application/json": {
                 "schema": {
@@ -13851,7 +13851,7 @@
             }
           },
           "409": {
-            "description": "`code` is `expansion_ceiling` or `rule_overlap` (the gate cannot be compiled), or `profile_set_changed` with `retryable: true`: an engine was bound, or a policy profile created, while this write ran (#792); nothing was written, and the same request succeeds when retried",
+            "description": "`code` is `expansion_ceiling` or `rule_overlap` (the gate cannot be compiled), or `profile_set_changed` with `retryable: true`: an engine was bound, or an enforcement point created, while this write ran (#792); nothing was written, and the same request succeeds when retried",
             "content": {
               "application/json": {
                 "schema": {
@@ -16265,7 +16265,7 @@
             }
           },
           "409": {
-            "description": "A view on a catalog whose profile has classified columns: a restored view would bypass the classification hold, so it is refused; re-create it with CREATE VIEW",
+            "description": "A view on a catalog whose enforcement point has classified columns: a restored view would bypass the classification hold, so it is refused; re-create it with CREATE VIEW",
             "content": {
               "application/json": {
                 "schema": {
@@ -16548,7 +16548,7 @@
             }
           },
           "409": {
-            "description": "A rule overlap that the unassignment does not remove: a profile it recompiles already holds two mask (or two row-filter) rules that decide one request differently. Same body as the assignment's 409. Or `code: \"profile_set_changed\"` with `retryable: true`: an engine was bound, or a policy profile created, while this write ran, so a profile it recompiles was not locked first (#792); nothing was written, and the same request succeeds when retried",
+            "description": "A rule overlap that the unassignment does not remove: an enforcement point it recompiles already holds two mask (or two row-filter) rules that decide one request differently. Same body as the assignment's 409. Or `code: \"profile_set_changed\"` with `retryable: true`: an engine was bound, or an enforcement point created, while this write ran, so an enforcement point it recompiles was not locked first (#792); nothing was written, and the same request succeeds when retried",
             "content": {
               "application/json": {
                 "schema": {
@@ -38785,7 +38785,7 @@
           {
             "name": "service",
             "in": "path",
-            "description": "Policy profile (Ranger service) name",
+            "description": "Enforcement point (Ranger service) name",
             "required": true,
             "schema": {
               "type": "string"
@@ -38830,7 +38830,7 @@
             }
           },
           "404": {
-            "description": "No such policy profile",
+            "description": "No such enforcement point",
             "content": {
               "application/json": {
                 "schema": {
@@ -38918,7 +38918,7 @@
         "operationId": "list_services",
         "responses": {
           "200": {
-            "description": "All policy profiles (Ranger services)",
+            "description": "All enforcement points (Ranger services)",
             "content": {
               "application/json": {
                 "schema": {
@@ -38961,7 +38961,7 @@
           {
             "name": "service",
             "in": "path",
-            "description": "Policy profile (Ranger service) name",
+            "description": "Enforcement point (Ranger service) name",
             "required": true,
             "schema": {
               "type": "string"
@@ -39006,7 +39006,7 @@
             }
           },
           "404": {
-            "description": "No such policy profile",
+            "description": "No such enforcement point",
             "content": {
               "application/json": {
                 "schema": {
@@ -62178,7 +62178,7 @@
     },
     {
       "name": "policy-admin",
-      "description": "Data-governance policy console: access/masking/row-filter policy CRUD, profiles, and the principal picker"
+      "description": "Data-governance policy console: access/masking/row-filter policy CRUD, enforcement points, and the principal picker"
     },
     {
       "name": "ranger",

@@ -116,7 +116,7 @@ describe("the Effect strip", () => {
     });
     openArea("/governance/classifications/t-pii", ADMIN);
     // One of two not enforced: said as a count, never as the rule shown first.
-    await waitFor(() => expect(strip()).toHaveTextContent("Not enforced yet — 1 of 2 rules: its engines have no policy profile"), T);
+    await waitFor(() => expect(strip()).toHaveTextContent("Not enforced yet — 1 of 2 rules: its engines have no enforcement point"), T);
 
     serve({ "/tags": ok([PII]), "/classifications/t-pii/usage": ok(USAGE_TWO), "/perm/rules": ok([HASH]), "/perm/rules/enforcement?ids=r1": "never" });
     openArea("/governance/classifications/t-pii", ADMIN);

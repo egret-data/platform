@@ -26,9 +26,9 @@ afterEach(() => {
 
 const T = { timeout: 3000 };
 const NOT_GOVERNED =
-  "Not governed: this engine is bound to no policy profile, so egret's grants, masks and row filters do not reach it. Bind it to a StarRocks profile in its settings.";
+  "Not governed: this engine is bound to no enforcement point, so egret's grants, masks and row filters do not reach it. Bind it to a StarRocks enforcement point in its settings.";
 const UNPATCHED =
-  "Its FE image is not egret-starrocks-fe 4.1.7-egret.4 or later, so StarRocks lets users past this engine's profile (Iceberg metadata tables, prepared statements, the HTTP SQL API, FILES() and more).";
+  "Its FE image is not egret-starrocks-fe 4.1.7-egret.4 or later, so StarRocks lets users past this engine's enforcement point (Iceberg metadata tables, prepared statements, the HTTP SQL API, FILES() and more).";
 const NO_ROOT = "Its FE root account has no password: anyone who reaches port 9030 can log in as root.";
 const NOT_APPLIED = "The last security upgrade did not finish applying. Run it again.";
 const ROOT_DELAY =

@@ -76,16 +76,16 @@ export function notEnforcedWarning(e: RuleEffect, appliesTo: "tag" | "path" = "t
   if (noProfile.length > 0) {
     const one = noProfile.length === 1;
     lines.push(
-      `${one ? `${noProfile[0]}'s engines` : `The engines of ${listOf(noProfile)}`} are not in a policy profile, ${stored} ` +
-        `${one ? "Its" : "Their"} engines have no policy profile; bind one in Governance > Engine & policy.`,
+      `${one ? `${noProfile[0]}'s engines` : `The engines of ${listOf(noProfile)}`} are not in an enforcement point, ${stored} ` +
+        `${one ? "Its" : "Their"} engines have no enforcement point; bind one in Governance > Engine & policy.`,
     );
   }
   const noTagService = named("no_tag_service");
   if (noTagService.length > 0) {
     const one = noTagService.length === 1;
     lines.push(
-      `${one ? `${noTagService[0]}'s engines are` : `The engines of ${listOf(noTagService)} are`} in a policy profile with no tag service, ${stored} ` +
-        "Classification rules reach a Trino engine only through its profile's tag service; see the profile in Governance > Engine & policy.",
+      `${one ? `${noTagService[0]}'s engines are` : `The engines of ${listOf(noTagService)} are`} in an enforcement point with no tag service, ${stored} ` +
+        "Classification rules reach a Trino engine only through its enforcement point's tag service; see the enforcement point in Governance > Engine & policy.",
     );
   }
   const noEngine = named("no_engine");
@@ -132,9 +132,9 @@ export function notEnforcedReason(reason: NotEnforced | null | undefined, applie
     case "no_engine":
       return "no engine attached";
     case "no_profile":
-      return "its engines have no policy profile";
+      return "its engines have no enforcement point";
     case "no_tag_service":
-      return "the engines' policy profile has no tag service, so classification rules are not applied";
+      return "the engines' enforcement point has no tag service, so classification rules are not applied";
     case "no_assignment":
       return appliesTo === "tag"
         ? "this classification is not attached to any data a catalog serves"

@@ -174,7 +174,7 @@ describe("ResourceSelector — absent levels (SP4d-4 B1)", () => {
         value={{ catalog: { values: [] }, schema: star }} onChange={vi.fn()} />,
     );
     expect(
-      screen.getByText("Name a catalog. It is required: * here would cover every catalog this profile serves."),
+      screen.getByText("Name a catalog. It is required: * here would cover every catalog this enforcement point serves."),
     ).toBeInTheDocument();
     // The root never gets the "saved as *" hint.
     expect(screen.queryByText(/Empty means every catalog/)).not.toBeInTheDocument();
@@ -217,7 +217,7 @@ describe("ResourceSelector — absent levels (SP4d-4 B1)", () => {
     expect(screen.getByText(STOPS)).toBeInTheDocument();
   });
 
-  it("says Trino still allows count(*) on a Trino profile, and does not say StarRocks does", () => {
+  it("says Trino still allows count(*) on a Trino enforcement point, and does not say StarRocks does", () => {
     wrap(
       <ResourceSelector resourceDefs={RESOURCE_DEFS} service="p" engine="trino" value={AT_TABLE}
         onChange={vi.fn()} grantedAccessTypes={["select"]} />,
@@ -227,7 +227,7 @@ describe("ResourceSelector — absent levels (SP4d-4 B1)", () => {
     expect(note).not.toHaveTextContent(/StarRocks/);
   });
 
-  it("says StarRocks denies even count(*) on a StarRocks profile, and does not promise it", () => {
+  it("says StarRocks denies even count(*) on a StarRocks enforcement point, and does not promise it", () => {
     wrap(
       <ResourceSelector resourceDefs={RESOURCE_DEFS} service="p" engine="starrocks" value={AT_TABLE}
         onChange={vi.fn()} grantedAccessTypes={["select"]} />,

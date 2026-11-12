@@ -241,7 +241,7 @@ describe("HandWrittenSection", () => {
     );
   });
 
-  it("links a tag service's seeded count to the engines (or profile) whose tag service it is, never a page named after it", async () => {
+  it("links a tag service's seeded count to the engines (or enforcement point) whose tag service it is, never a page named after it", async () => {
     open(
       ok(
         answer({
@@ -274,10 +274,10 @@ describe("HandWrittenSection", () => {
 
   it.each([
     ["no_engine_attached", "No engine is attached to this catalog, so no manual policy reaches it."],
-    ["no_profile", "The engines attached to this catalog have no policy profile, so no manual policy reaches it."],
+    ["no_profile", "The engines attached to this catalog have no enforcement point, so no manual policy reaches it."],
     [
       "catalog_not_in_profile",
-      "No policy profile of the attached engines lists this catalog, so manual policies could not be matched to it.",
+      "No enforcement point of the attached engines lists this catalog, so manual policies could not be matched to it.",
     ],
   ] as const)("not_determined %s says why", async (reason, sentence) => {
     open(ok(answer({ state: "not_determined", reason, profiles: [] })));

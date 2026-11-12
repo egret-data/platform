@@ -612,7 +612,7 @@ fn values_at(res: Option<&serde_json::Map<String, Value>>, k: &str) -> Vec<Strin
         (status = 200, description = "Suggested resource values for the given level (max 50)", body = Vec<String>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read permission", body = ErrorBody),
-        (status = 404, description = "No such policy profile", body = ErrorBody),
+        (status = 404, description = "No such enforcement point", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -727,7 +727,7 @@ async fn resource_lookup(
         (status = 200, description = "Policy summaries for the profile, filtered", body = Vec<PolicySummary>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read permission", body = ErrorBody),
-        (status = 404, description = "No such policy profile", body = ErrorBody),
+        (status = 404, description = "No such enforcement point", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -795,7 +795,7 @@ async fn get_policy(
     path = "/api/control-plane/policies/services",
     tag = "policy-admin",
     responses(
-        (status = 200, description = "Policy profiles with their linked engines and policy counts", body = Vec<ProfileDto>),
+        (status = 200, description = "Enforcement points with their linked engines and policy counts", body = Vec<ProfileDto>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -944,11 +944,11 @@ pub struct CreatedProfile {
     tag = "policy-admin",
     request_body = CreateProfileBody,
     responses(
-        (status = 200, description = "Profile created", body = CreatedProfile),
-        (status = 400, description = "Invalid type (must be `trino`, `starrocks` or `tag`), missing name, a `tagService` that names a profile that is missing or not of type `tag`, a `tagService` in `config` on a profile whose type is not `trino` (its service-def has no `schema` resource, so every tag policy under it would be silently inert), or a `tagService` whose value is not a non-empty string (it names no policy profile, and the plugin download would carry no `tagPolicies` block)", body = ErrorBody),
+        (status = 200, description = "Enforcement point created", body = CreatedProfile),
+        (status = 400, description = "Invalid type (must be `trino`, `starrocks` or `tag`), missing name, a `tagService` that names an enforcement point that is missing or not of type `tag`, a `tagService` in `config` on an enforcement point whose type is not `trino` (its service-def has no `schema` resource, so every tag policy under it would be silently inert), or a `tagService` whose value is not a non-empty string (it names no enforcement point, and the plugin download would carry no `tagPolicies` block)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:create permission", body = ErrorBody),
-        (status = 409, description = "A profile with this name already exists", body = ErrorBody),
+        (status = 409, description = "An enforcement point with this name already exists", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -991,13 +991,13 @@ async fn create_profile(
     delete,
     path = "/api/control-plane/policies/services/{service}",
     tag = "policy-admin",
-    params(("service" = String, Path, description = "Policy profile (Ranger service) name")),
+    params(("service" = String, Path, description = "Enforcement point (Ranger service) name")),
     responses(
-        (status = 204, description = "Profile deleted"),
+        (status = 204, description = "Enforcement point deleted"),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:delete permission", body = ErrorBody),
-        (status = 404, description = "No such policy profile", body = ErrorBody),
-        (status = 409, description = "Profile is still enforced by an engine, or is compiled by the SP4a permission model (generated) and cannot be deleted through the editor", body = ErrorBody),
+        (status = 404, description = "No such enforcement point", body = ErrorBody),
+        (status = 409, description = "Enforcement point is still enforced by an engine, or is compiled by the SP4a permission model (generated) and cannot be deleted through the editor", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1084,15 +1084,15 @@ pub struct ProfileTagService {
     put,
     path = "/api/control-plane/policies/services/{service}/tag-service",
     tag = "policy-admin",
-    params(("service" = String, Path, description = "Policy profile (Ranger service) name")),
+    params(("service" = String, Path, description = "Enforcement point (Ranger service) name")),
     request_body = SetTagServiceBody,
     responses(
-        (status = 200, description = "The profile's tag service after the write. Setting the value it already has writes nothing", body = ProfileTagService),
-        (status = 400, description = "The profile is not of type `trino`; the value is not a non-empty string or `null`; or it names a profile that is missing or not of type `tag`. Nothing is written", body = ErrorBody),
+        (status = 200, description = "The enforcement point's tag service after the write. Setting the value it already has writes nothing", body = ProfileTagService),
+        (status = 400, description = "The enforcement point is not of type `trino`; the value is not a non-empty string or `null`; or it names an enforcement point that is missing or not of type `tag`. Nothing is written", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
-        (status = 404, description = "No such policy profile", body = ErrorBody),
-        (status = 409, description = "An engine downloads the profile (unbind it first), or egret compiles it (`generated`)", body = ErrorBody),
+        (status = 404, description = "No such enforcement point", body = ErrorBody),
+        (status = 409, description = "An engine downloads the enforcement point (unbind it first), or egret compiles it (`generated`)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1166,12 +1166,12 @@ async fn set_tag_service(
     get,
     path = "/api/control-plane/policies/services/{service}/trino-config",
     tag = "policy-admin",
-    params(("service" = String, Path, description = "Policy profile (Ranger service) name")),
+    params(("service" = String, Path, description = "Enforcement point (Ranger service) name")),
     responses(
         (status = 200, description = "The Trino coordinator config files for this profile's native ranger plugin (for a profile whose `mechanism` is `opa`: the OPA plugin's `access-control.properties` and `egret-opa-context.properties`, with the engine id and secret as placeholders, and `warnings` adding the log-requests warning and the Trino 483 note), from the same renderer that writes the files egret mounts into its own engines (`access-control.properties` and `ranger-trino-security.xml`), and `warnings`: the same download-URL warning as the external engine's plugin configuration (a loopback or unparseable `[catalog] public_url`). Since SP4d-4 the security file also carries the policy source, cache directory and client timeouts, the properties file points at `/etc/trino/ranger-trino-security.xml`, and the poll interval is 30000 ms. Before KI-149 the body was the bare array of files", body = TrinoConfigResponse),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read permission", body = ErrorBody),
-        (status = 404, description = "No such policy profile", body = ErrorBody),
+        (status = 404, description = "No such enforcement point", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1235,14 +1235,14 @@ async fn trino_config(
     post,
     path = "/api/control-plane/policies/services/{service}/seed-defaults",
     tag = "policy-admin",
-    params(("service" = String, Path, description = "Policy profile (Ranger service) name")),
+    params(("service" = String, Path, description = "Enforcement point (Ranger service) name")),
     responses(
-        (status = 200, description = "Number of default policies created (0 if the profile already had policies)", body = SeedResult),
-        (status = 400, description = "The profile is not of type trino; the default set is Trino-shaped and its engine would reject it. Nothing is written", body = ErrorBody),
+        (status = 200, description = "Number of default policies created (0 if the enforcement point already had policies)", body = SeedResult),
+        (status = 400, description = "The enforcement point is not of type trino; the default set is Trino-shaped and its engine would reject it. Nothing is written", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:seed permission", body = ErrorBody),
-        (status = 404, description = "No such policy profile", body = ErrorBody),
-        (status = 409, description = "The profile is compiled by the SP4a permission model (generated) and cannot be hand-edited", body = ErrorBody),
+        (status = 404, description = "No such enforcement point", body = ErrorBody),
+        (status = 409, description = "The enforcement point is compiled by the SP4a permission model (generated) and cannot be hand-edited", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1268,7 +1268,7 @@ async fn seed_defaults(
     get,
     path = "/api/control-plane/policies/service-def/{name}",
     tag = "policy-admin",
-    params(("name" = String, Path, description = "Profile name (resolved to its service-def) or a def name directly")),
+    params(("name" = String, Path, description = "Enforcement point name (resolved to its service-def) or a def name directly")),
     responses(
         (status = 200, description = "The raw Ranger service-definition the editor renders from", body = Object),
         (status = 401, description = "Not authenticated", body = ErrorBody),
@@ -2101,10 +2101,10 @@ fn require_service(v: &Value) -> Result<&str, PolicyHttpError> {
     request_body = Object,
     responses(
         (status = 200, description = "Policy created. When the save stored an emptied resource level as `*`, the body adds `filledLevels`, a `note` (the broader policy is evaluated first within a priority band) and, where the fill moved this policy ahead of another same-band policy that may decide the same request, `warnings`", body = CreatedPolicyId),
-        (status = 400, description = "Invalid editor input (including a Ranger-shaped body, i.e. `policyItems`, `denyPolicyItems`, `dataMaskPolicyItems` or `rowFilterPolicyItems`, which is refused naming the keys because the form's grants are `items`; an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a tag policy whose profile has no configured `tagService` (the plugin download would carry no `tagPolicies` block, so the policy could never be enforced), or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked; code `table_tag_mask_conflict`, with `tag`, `tagId`, `warehouseId`, `schema`, `table`, `mask`, `maskOrigin`, `moreTables`)", body = ErrorBody),
+        (status = 400, description = "Invalid editor input (including a Ranger-shaped body, i.e. `policyItems`, `denyPolicyItems`, `dataMaskPolicyItems` or `rowFilterPolicyItems`, which is refused naming the keys because the form's grants are `items`; an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a tag policy whose enforcement point has no configured `tagService` (the plugin download would carry no `tagPolicies` block, so the policy could never be enforced), or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked; code `table_tag_mask_conflict`, with `tag`, `tagId`, `warehouseId`, `schema`, `table`, `mask`, `maskOrigin`, `moreTables`)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:create permission", body = ErrorBody),
-        (status = 404, description = "No such policy profile", body = ErrorBody),
+        (status = 404, description = "No such enforcement point", body = ErrorBody),
         (status = 409, description = "A policy with this name already exists, the target profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or a mask/row-filter policy would form a rule overlap with another policy or compiled rule that may decide the same request with different items (which of the two the engine applies is not something either policy expresses; the sentence names both and suggests Override where a priority can fix it). An overlap body adds `code: \"rule_overlap\"`, `rules` (both members: a compiled rule's `id` and name, `id` null for a hand-written policy), `coordinate` and `kind` (`mask` | `row_filter`)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -2187,7 +2187,7 @@ async fn create_policy(
     request_body = Object,
     responses(
         (status = 200, description = "Policy replaced. Same optional `filledLevels` / `note` / `warnings` as create", body = CreatedPolicyId),
-        (status = 400, description = "Invalid editor input (including a Ranger-shaped body, i.e. `policyItems`, `denyPolicyItems`, `dataMaskPolicyItems` or `rowFilterPolicyItems`, which is refused naming the keys because the form's grants are `items`; an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a `service` that is not the profile this policy belongs to (a policy cannot be moved between profiles by editing it, and every guard here would otherwise be evaluated against the wrong profile's policy set), a tag policy whose profile has no configured `tagService`, or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked; code `table_tag_mask_conflict`, with `tag`, `tagId`, `warehouseId`, `schema`, `table`, `mask`, `maskOrigin`, `moreTables`)", body = ErrorBody),
+        (status = 400, description = "Invalid editor input (including a Ranger-shaped body, i.e. `policyItems`, `denyPolicyItems`, `dataMaskPolicyItems` or `rowFilterPolicyItems`, which is refused naming the keys because the form's grants are `items`; an EMPTY catalog level, which `*` would turn into every catalog, and a named resource level beneath an absent one), missing policy name, a `service` that is not the enforcement point this policy belongs to (a policy cannot be moved between enforcement points by editing it, and every guard here would otherwise be evaluated against the wrong enforcement point's policy set), a tag policy whose enforcement point has no configured `tagService`, or a tag masking policy whose tag is attached to a whole TABLE (which makes that table unreadable rather than masked; code `table_tag_mask_conflict`, with `tag`, `tagId`, `warehouseId`, `schema`, `table`, `mask`, `maskOrigin`, `moreTables`)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such policy", body = ErrorBody),
@@ -2260,7 +2260,7 @@ async fn update_policy(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:delete permission", body = ErrorBody),
         (status = 404, description = "No such policy", body = ErrorBody),
-        (status = 409, description = "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the change is a data mask on a StarRocks profile and the profile cannot be recompiled with it (its classification masks fold the profile's other masks, so the write recompiles the profile in the same transaction and is refused when that recompile is)", body = ErrorBody),
+        (status = 409, description = "The policy's enforcement point is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the change is a data mask on a StarRocks enforcement point and the enforcement point cannot be recompiled with it (its classification masks fold the enforcement point's other masks, so the write recompiles the enforcement point in the same transaction and is refused when that recompile is)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -2311,7 +2311,7 @@ pub struct EnabledBody {
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such policy", body = ErrorBody),
-        (status = 409, description = "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the change is a data mask on a StarRocks profile and the profile cannot be recompiled with it (its classification masks fold the profile's other masks, so the write recompiles the profile in the same transaction and is refused when that recompile is)", body = ErrorBody),
+        (status = 409, description = "The policy's enforcement point is compiled by the SP4a permission model (generated) and cannot be hand-edited, or the change is a data mask on a StarRocks enforcement point and the enforcement point cannot be recompiled with it (its classification masks fold the enforcement point's other masks, so the write recompiles the enforcement point in the same transaction and is refused when that recompile is)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -2397,7 +2397,7 @@ async fn set_policy_enabled(
         ranger_json::RowFilterItemInput,
         ErrorBody,
     )),
-    tags((name = "policy-admin", description = "Data-governance policy console: access/masking/row-filter policy CRUD, profiles, and the principal picker")),
+    tags((name = "policy-admin", description = "Data-governance policy console: access/masking/row-filter policy CRUD, enforcement points, and the principal picker")),
 )]
 pub struct PolicyAdminApi;
 

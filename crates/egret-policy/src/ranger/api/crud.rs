@@ -74,7 +74,7 @@ pub async fn get_def(
     path = "/ranger/service/plugins/services",
     tag = "ranger",
     responses(
-        (status = 200, description = "All policy profiles (Ranger services)", body = Vec<RangerServiceRef>),
+        (status = 200, description = "All enforcement points (Ranger services)", body = Vec<RangerServiceRef>),
         (status = 401, description = "Missing or invalid credential while `ranger.auth_mode` is `required`"),
         (status = 403, description = "An engine credential: these routes are for the operator bearer only"),
         (status = 500, description = "Internal error", body = RangerErrorBody),

@@ -117,7 +117,7 @@ function KindsTable({ kinds }: { kinds: KindReport[] }) {
 
 function RawRows({ rows }: { rows: LedgerRowDto[] }) {
   if (rows.length === 0) {
-    return <EmptyState title="No plugin has downloaded from this profile in the last 24 hours." />;
+    return <EmptyState title="No plugin has downloaded from this enforcement point in the last 24 hours." />;
   }
   return (
     <Table aria-label="Downloads reported by plugins" className={STACKED_TABLE}>

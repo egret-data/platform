@@ -63,14 +63,14 @@ const calloutOf = async (title: string) =>
   (await screen.findByText(title, {}, T)).closest('[role="alert"]') as HTMLElement;
 
 describe("the policy warnings callout on the Policies tab (SP4d-4 B1)", () => {
-  it("shows no callout for a profile with warningCount 0", async () => {
+  it("shows no callout for an enforcement point with warningCount 0", async () => {
     serve(answers(ok({ warningCount: 0, policies: [] })));
     open();
     await screen.findByText("allow-analysts", {}, T);
     expect(screen.queryByText(/stored polic(y|ies)$/)).not.toBeInTheDocument();
   });
 
-  it("asks for the warnings of THIS profile's id", async () => {
+  it("asks for the warnings of THIS enforcement point's id", async () => {
     const served = serve(answers(ok({ warningCount: 0, policies: [] })));
     open();
     await screen.findByText("allow-analysts", {}, T);
@@ -111,7 +111,7 @@ describe("the policy warnings callout on the Policies tab (SP4d-4 B1)", () => {
   it.each([
     ["trino", E_TR, "Trino still allows table-level checks such as count(*)", /StarRocks denies/],
     ["starrocks", E_SR, "StarRocks denies even count(*)", /Trino still allows/],
-  ])("words the count(*) consequence for a %s profile", async (type, engine, said, unsaid) => {
+  ])("words the count(*) consequence for a %s enforcement point", async (type, engine, said, unsaid) => {
     serve(
       answers(
         ok({

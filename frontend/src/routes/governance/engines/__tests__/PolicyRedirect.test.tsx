@@ -62,16 +62,16 @@ describe("old Policies URLs", () => {
   }, 15_000);
 
   it.each([["/governance/policies/zz"], ["/governance/policies/zz/migrate"], ["/governance/policies/zz/access/3"]])(
-    "%s, naming no profile, lands on the index with a notice",
+    "%s, naming no enforcement point, lands on the index with a notice",
     async (from) => {
       openApp(from, POLICY_READER, PROFILES);
       await waitFor(() => expect(currentUrl()).toBe("/governance/engines"), TIMEOUT);
-      expect(await screen.findByText("No policy profile named zz.", {}, TIMEOUT)).toBeInTheDocument();
+      expect(await screen.findByText("No enforcement point named zz.", {}, TIMEOUT)).toBeInTheDocument();
     },
     15_000,
   );
 
-  it("says why while the profile list cannot be read, with Retry, and stays on the old URL", async () => {
+  it("says why while the enforcement point list cannot be read, with Retry, and stays on the old URL", async () => {
     openApp("/governance/policies/p1", POLICY_READER, "error");
     expect(await screen.findByRole("button", { name: "Retry" }, { timeout: 8000 })).toBeInTheDocument();
     expect(currentUrl()).toBe("/governance/policies/p1");

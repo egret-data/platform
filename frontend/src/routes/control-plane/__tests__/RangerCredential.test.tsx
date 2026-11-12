@@ -405,7 +405,7 @@ describe("Ranger credential — provisioned engine", () => {
     renderProvisioned({ rangerCredentialId: null });
     expect(screen.getByText("No credential")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Rotate credential" })).toHaveAccessibleDescription(
-      /bound to a policy profile/,
+      /bound to an enforcement point/,
     );
   });
 });

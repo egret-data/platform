@@ -451,7 +451,7 @@ describe("ColumnPanel", () => {
 });
 
 describe("Who can read?", () => {
-  it("explains read for exactly this column, and renders the verdict per profile", async () => {
+  it("explains read for exactly this column, and renders the verdict per enforcement point", async () => {
     const { permCalls } = serveData(fixture());
     const user = userEvent.setup();
     renderPage("/governance/data/ice/sales/orders?column=email");

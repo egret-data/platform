@@ -61,7 +61,7 @@ describe("TrinoConfigDialog", () => {
     expect(screen.getByText("ranger-trino-security.xml")).toBeInTheDocument();
   });
 
-  it("for an OPA profile shows both OPA files, the plugin/opa description and the warnings verbatim", async () => {
+  it("for an OPA enforcement point shows both OPA files, the plugin/opa description and the warnings verbatim", async () => {
     const LOG = "Do not enable opa.log-requests: every request carries egret.secret in input.context.properties, and the coordinator log would hold it.";
     const KEEP = "Do not remove opa.policy.batched-uri from access-control.properties: without it Trino sends one request per object.";
     getTrinoConfig.mockResolvedValueOnce({
@@ -88,7 +88,7 @@ describe("TrinoConfigDialog", () => {
     expect(document.body.textContent).not.toMatch(/native ranger plugin/);
   });
 
-  it("for a Ranger profile keeps the Ranger description", async () => {
+  it("for a Ranger enforcement point keeps the Ranger description", async () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={qc}>

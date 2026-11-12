@@ -188,7 +188,7 @@ pub struct LedgerRowDto {
     path = "/api/control-plane/governance/engines/{id}/plugin",
     tag = "control-plane-governance",
     params(("id" = Uuid, Path, description = "Engine id")),
-    description = "The plugin download ledger of the engine's policy profile, judged by the same \
+    description = "The plugin download ledger of the engine's enforcement point, judged by the same \
                    rules as the Governance Overview's plugin findings. Records what plugins report \
                    holding. Requires policy:read and engine:read.",
     responses(

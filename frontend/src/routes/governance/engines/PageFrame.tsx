@@ -83,7 +83,7 @@ export function FrameHeader({
   facts,
   actions,
 }: {
-  label: "Engine" | "Profile";
+  label: "Engine" | "Enforcement point";
   title: ReactNode;
   facts: ReactNode;
   actions?: ReactNode;
@@ -121,7 +121,7 @@ export function Fact({ label, children }: { label: string; children: ReactNode }
 
 /** EP14: a legacy shared profile reaches every engine bound to it. */
 export function sharedSentence(profile: string, others: string[]): string {
-  return `Profile ${profile} is shared with engines ${others.join(", ")}. Everything on this page applies to all of them.`;
+  return `Enforcement point ${profile} is shared with engines ${others.join(", ")}. Everything on this page applies to all of them.`;
 }
 
 /** EP19: what the plugin version and the Plugin tab say without `engine:read`. */

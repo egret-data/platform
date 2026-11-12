@@ -241,7 +241,7 @@ async fn update_tag(
         (status = 204, description = "Tag deleted"),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing tag:manage permission", body = ErrorBody),
-        (status = 409, description = "`code` is `tag_in_use`: `rules` lists the rules that still select this classification. Or `code: \"profile_set_changed\"` with `retryable: true`: an engine was bound, or a policy profile created, while this write ran, so a profile it recompiles was not locked first (#792); nothing was written, and the same request succeeds when retried", body = ErrorBody),
+        (status = 409, description = "`code` is `tag_in_use`: `rules` lists the rules that still select this classification. Or `code: \"profile_set_changed\"` with `retryable: true`: an engine was bound, or an enforcement point created, while this write ran, so an enforcement point it recompiles was not locked first (#792); nothing was written, and the same request succeeds when retried", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -310,7 +310,7 @@ impl AccessPolicyWritten {
         (status = 200, description = "Classification access policy set", body = AccessPolicyWritten),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing tag:manage permission", body = ErrorBody),
-        (status = 409, description = "`code` is `expansion_ceiling` or `rule_overlap` (the gate cannot be compiled), or `profile_set_changed` with `retryable: true`: an engine was bound, or a policy profile created, while this write ran (#792); nothing was written, and the same request succeeds when retried", body = ErrorBody),
+        (status = 409, description = "`code` is `expansion_ceiling` or `rule_overlap` (the gate cannot be compiled), or `profile_set_changed` with `retryable: true`: an engine was bound, or an enforcement point created, while this write ran (#792); nothing was written, and the same request succeeds when retried", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]

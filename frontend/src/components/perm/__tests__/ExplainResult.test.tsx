@@ -129,9 +129,9 @@ beforeEach(() => {
   } as Awaited<ReturnType<typeof policyAdminListPrincipals>>);
 });
 
-describe("ExplainResultView — one answer per profile, over the artifact the engine downloads", () => {
+describe("ExplainResultView — one answer per enforcement point, over the artifact the engine downloads", () => {
   /** Item 1. Two profiles are two results, each naming itself and its engine. */
-  test("two profiles render as two results, each naming its profile and engine", async () => {
+  test("two enforcement points render as two results, each naming its enforcement point and engine", async () => {
     await renderAnswer();
 
     await screen.findByTestId("explain-result");
@@ -186,7 +186,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
   });
 
   /** Item 2. Nothing enforcing is a different fact from something refusing. */
-  test("a catalog no profile serves is its own state, not a denial", async () => {
+  test("a catalog no enforcement point serves is its own state, not a denial", async () => {
     answer.mockResolvedValueOnce({
       status: 200,
       data: { outcome: "no_profile_serves_the_catalog", profiles: [] },
@@ -318,7 +318,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
     expect(cause).toHaveTextContent("Ranger 2.9.0");
     // A provisioned engine's version comes from its image, not from a
     // declaration on the profile; an external one's from its operator.
-    expect(cause).not.toHaveTextContent(/This profile declares/);
+    expect(cause).not.toHaveTextContent(/This enforcement point declares/);
     expect(cause).toHaveTextContent(/image/);
     expect(cause).toHaveTextContent(/declared/);
   });
@@ -408,7 +408,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
     expect(raw).toHaveAttribute("data-kind", "seeded-admin");
     expect(raw).toHaveTextContent("egret-admin - catalog, schema, table, column");
     expect(raw).toHaveTextContent(/expected/i);
-    expect(raw).toHaveTextContent(/every generated profile/i);
+    expect(raw).toHaveTextContent(/every generated enforcement point/i);
     // Reassuring, not an alarm: it is not dressed as a misconfiguration.
     expect(raw).not.toHaveTextContent(/unexpected|misconfigured/i);
     expect(within(result).getByTestId("decision-badge")).toHaveTextContent("Allowed");
@@ -798,8 +798,8 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
     // satisfied by whichever of the two still carries the words (SP4d-2b Task 7 —
     // a mutation that emptied the sentence survived a suite that did this).
     const scope0 = within(causes[0]).getByTestId("undecidable-cause-scope");
-    expect(scope0).toHaveTextContent(/every catalog this profile serves/i);
-    expect(scope0).toHaveTextContent(/tag-policy download this profile received/i);
+    expect(scope0).toHaveTextContent(/every catalog this enforcement point serves/i);
+    expect(scope0).toHaveTextContent(/tag-policy download this enforcement point received/i);
     // ⚠ The claim SP4d-2a's note made and Task 7 removed. A tag policy in a
     // profile's block no longer costs every verdict in the installation an
     // answer, so a note still saying so would be a measured statement that has
@@ -807,7 +807,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
     // superseded branch.
     expect(causes[0]).not.toHaveTextContent(/installation/i);
     // Content-derived, not stapled onto every undecidable cause.
-    expect(causes[1]).not.toHaveTextContent(/every catalog this profile serves/i);
+    expect(causes[1]).not.toHaveTextContent(/every catalog this enforcement point serves/i);
     expect(causes[1]).not.toHaveTextContent(/not specific to your target/i);
   });
 
@@ -984,7 +984,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
     // The sibling cause still carries its own note, so "no note" above is
     // content-derived rather than the element having gone missing everywhere.
     const scope1 = within(causes[1]).getByTestId("undecidable-cause-scope");
-    expect(scope1).toHaveTextContent(/tag-policy download this profile received/i);
+    expect(scope1).toHaveTextContent(/tag-policy download this enforcement point received/i);
     expect(sentence.textContent).not.toEqual(scope1.textContent);
   });
 
@@ -1727,7 +1727,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
     // "Nothing is enforcing", where there are no profiles and no lists. The limits
     // that still hold stay (they are about the page, not about the answer).
     const limits = within(result).getByTestId("honest-limits");
-    expect(limits).not.toHaveTextContent(/each profile’s tag list/i);
+    expect(limits).not.toHaveTextContent(/each enforcement point’s tag list/i);
     expect(limits).not.toHaveTextContent(/those sets are for the resource/i);
     expect(limits).toHaveTextContent(/an error from a mask the engine cannot apply/i);
   });
@@ -1743,7 +1743,7 @@ describe("ExplainResultView — one answer per profile, over the artifact the en
    * Both halves are asserted in ONE render, because the defect was exactly that
    * the two profiles shared a claim: the first must say so, the second must not.
    */
-  test("a profile whose download carries no tag policies says so instead of listing tags", async () => {
+  test("an enforcement point whose download carries no tag policies says so instead of listing tags", async () => {
     answer.mockResolvedValueOnce({
       status: 200,
       data: {
@@ -2040,7 +2040,7 @@ describe("ExplainResultView — the StarRocks mask and the materialized-view rul
     expect(within(profile).queryByTestId("explain-mask-provisional")).not.toBeInTheDocument();
   });
 
-  test("a profile with no mask verdict shows no mask line", async () => {
+  test("an enforcement point with no mask verdict shows no mask line", async () => {
     await renderAnswer();
 
     await screen.findByTestId("explain-result");
@@ -2185,7 +2185,7 @@ describe("ExplainResultView — verdict first, internals folded (C12)", () => {
     wrap(<ExplainResultView result={{ outcome: "no_profile_serves_the_catalog", profiles: [] }} />);
     expect(
       within(screen.getByTestId("no-profile-state")).getByText(
-        "No engine with a policy profile serves this catalog, so nothing is enforced here (this is not a refusal). Attach an engine to govern it.",
+        "No engine with an enforcement point serves this catalog, so nothing is enforced here (this is not a refusal). Attach an engine to govern it.",
       ),
     ).toBeVisible();
     // Said once: with no effect line the state carries the sentence, and the
@@ -2256,7 +2256,7 @@ describe("ExplainResultView — the effect lines first (Package 2)", () => {
     ],
   };
 
-  test("a profile shows its lines before a closed disclosure holding the access rows", () => {
+  test("an enforcement point shows its lines before a closed disclosure holding the access rows", () => {
     wrap(<ExplainResultView result={MASKED} />);
     const profile = screen.getByTestId("explain-profile");
     const lines = within(profile).getAllByTestId("effect-line");

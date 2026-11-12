@@ -123,7 +123,7 @@ describe("Check (spec §6.1)", () => {
     expect(within(answer).getByText("No policy grants it.")).toBeInTheDocument();
   });
 
-  it("Undecidable on a delegating Trino profile: the words and the impersonation sentence", async () => {
+  it("Undecidable on a delegating Trino enforcement point: the words and the impersonation sentence", async () => {
     const { answer } = await ask(
       explain({
         decision: {
@@ -168,9 +168,9 @@ describe("Check (spec §6.1)", () => {
     expect(within(answer).getByText(source)).toBeInTheDocument();
   });
 
-  it("no profile and declined tags have their sentences", async () => {
+  it("no enforcement point and declined tags have their sentences", async () => {
     const { answer } = await ask(explain({ outcome: "no_profile", profile: null }));
-    expect(within(answer).getByText("This engine has no profile to ask.")).toBeInTheDocument();
+    expect(within(answer).getByText("This engine has no enforcement point to ask.")).toBeInTheDocument();
     vi.unstubAllGlobals();
   });
 

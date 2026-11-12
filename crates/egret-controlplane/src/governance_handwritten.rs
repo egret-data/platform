@@ -103,7 +103,7 @@ pub struct ObjectQuery {
     path = "/api/control-plane/governance/objects/{catalog_id}/handwritten",
     tag = "control-plane-governance",
     params(("catalog_id" = Uuid, Path, description = "Registry catalog id"), ObjectQuery),
-    description = "Every hand-written (operator) Ranger policy of the profiles whose engines reach \
+    description = "Every hand-written (operator) Ranger policy of the enforcement points whose engines reach \
                    the catalog, and of their tag services, that reaches the object: `applies` \
                    (the policy names this object, or it and everything below it), `part` (it \
                    names something below), `parent` (it names a parent only, which engines do not \
@@ -147,7 +147,7 @@ async fn object_handwritten(
         ("kind" = String, Path, description = "`user`, `group` or `role`"),
         ("id" = String, Path, description = "A user's id, or a group's or role's name"),
     ),
-    description = "Every hand-written (operator) Ranger policy, in every profile and tag service, \
+    description = "Every hand-written (operator) Ranger policy, in every enforcement point and tag service, \
                    with an item naming the principal: a user's username (`direct`), or a group or \
                    role the user holds (`group` / `role`, with `onEngines: false`: engines resolve \
                    no groups or roles, so such an item reaches nobody there). Items naming `public` \

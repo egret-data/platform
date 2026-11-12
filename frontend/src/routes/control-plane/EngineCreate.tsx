@@ -650,7 +650,7 @@ export default function EngineCreate() {
               </div>
             )}
             <div className="space-y-1.5 sm:col-span-2">
-              <Label htmlFor="ec-sr-profile">Policy profile</Label>
+              <Label htmlFor="ec-sr-profile">Enforcement point</Label>
               <Select value={profileId} onValueChange={setProfileId}>
                 <SelectTrigger
                   id="ec-sr-profile"
@@ -661,7 +661,7 @@ export default function EngineCreate() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value={NEW_PROFILE}>
-                    Create a profile named after the engine
+                    Create an enforcement point named after the engine
                   </SelectItem>
                   {freeProfiles.map((p) => (
                     <SelectItem key={p.id} value={String(p.id)}>
@@ -671,11 +671,11 @@ export default function EngineCreate() {
                 </SelectContent>
               </Select>
               <p id="ec-sr-profile-hint" className="text-xs text-muted-foreground">
-                Without a profile, egret's grants, masks and row filters do not reach this engine.
+                Without an enforcement point, egret's grants, masks and row filters do not reach this engine.
               </p>
               {profilesQ.isError && (
                 <p className="text-xs text-destructive">
-                  The profile list could not be read, so only a new profile is offered. Reload
+                  The enforcement point list could not be read, so only a new enforcement point is offered. Reload
                   the page to try again.
                 </p>
               )}

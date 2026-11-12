@@ -238,21 +238,21 @@ describe("EngineCreate", () => {
     expect(body.starrocks).not.toHaveProperty("cnImage");
   });
 
-  test("StarRocks: the policy profile picker lists only free StarRocks profiles and says what no profile means", async () => {
+  test("StarRocks: the enforcement point picker lists only free StarRocks enforcement points and says what no enforcement point means", async () => {
     const user = userEvent.setup();
     renderCreate("starrocks");
-    const picker = screen.getByRole("combobox", { name: "Policy profile" });
-    expect(picker).toHaveTextContent("Create a profile named after the engine");
+    const picker = screen.getByRole("combobox", { name: "Enforcement point" });
+    expect(picker).toHaveTextContent("Create an enforcement point named after the engine");
     expect(picker).toHaveAccessibleDescription(
-      "Without a profile, egret's grants, masks and row filters do not reach this engine.",
+      "Without an enforcement point, egret's grants, masks and row filters do not reach this engine.",
     );
     await waitFor(() => expect(policies.listProfiles).toHaveBeenCalled());
     await user.click(picker);
     const options = (await screen.findAllByRole("option")).map((o) => o.textContent);
-    expect(options).toEqual(["Create a profile named after the engine", "sr-free", "sr-spare"]);
+    expect(options).toEqual(["Create an enforcement point named after the engine", "sr-free", "sr-spare"]);
   });
 
-  test("StarRocks: the default profile option sends no authzServiceId", async () => {
+  test("StarRocks: the default enforcement point option sends no authzServiceId", async () => {
     const user = userEvent.setup();
     renderCreate("starrocks");
     await user.type(screen.getByLabelText("Name"), "sr1");
@@ -262,22 +262,22 @@ describe("EngineCreate", () => {
     expect(vi.mocked(api.createEngine).mock.calls[0][0]).not.toHaveProperty("authzServiceId");
   });
 
-  test("StarRocks: a picked profile sends its id", async () => {
+  test("StarRocks: a picked enforcement point sends its id", async () => {
     const user = userEvent.setup();
     renderCreate("starrocks");
     await user.type(screen.getByLabelText("Name"), "sr1");
     await makePrimary(user, "demo-catalog");
-    await user.click(screen.getByRole("combobox", { name: "Policy profile" }));
+    await user.click(screen.getByRole("combobox", { name: "Enforcement point" }));
     await user.click(await screen.findByRole("option", { name: "sr-spare" }));
     await user.click(screen.getByRole("button", { name: "Create engine" }));
     await waitFor(() => expect(api.createEngine).toHaveBeenCalledTimes(1));
     expect(vi.mocked(api.createEngine).mock.calls[0][0].authzServiceId).toBe(23);
   });
 
-  test("Trino: no policy profile picker, and no authzServiceId", async () => {
+  test("Trino: no enforcement point picker, and no authzServiceId", async () => {
     const user = userEvent.setup();
     renderCreate("trino");
-    expect(screen.queryByRole("combobox", { name: "Policy profile" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Enforcement point" })).not.toBeInTheDocument();
     await user.type(screen.getByLabelText("Name"), "t1");
     await makePrimary(user, "demo-catalog");
     await user.click(screen.getByRole("button", { name: "Create engine" }));

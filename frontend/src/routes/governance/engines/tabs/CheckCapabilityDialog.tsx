@@ -35,7 +35,7 @@ import {
 } from "@/routes/governance/engines/tabs/capabilityValues";
 
 export const UNDECIDABLE_WORDS = "Cannot be decided ahead of time";
-export const NO_PROFILE_TO_ASK = "This engine has no profile to ask.";
+export const NO_PROFILE_TO_ASK = "This engine has no enforcement point to ask.";
 export const TAGS_DECLINED = "egret cannot resolve classification tags for this question.";
 /** F11 §5.4 (E13): every Trino impersonation question on a delegating profile. */
 export const TRINO_IMPERSONATION_SENTENCE =

@@ -83,12 +83,12 @@ async function fillRequired(user: ReturnType<typeof userEvent.setup>, version = 
 }
 
 describe("EngineRegister", () => {
-  test("the profile picker lists only profiles of the chosen type, and switching type clears an incompatible pick", async () => {
+  test("the enforcement point picker lists only enforcement points of the chosen type, and switching type clears an incompatible pick", async () => {
     stubFetch(READS);
     const user = userEvent.setup();
     renderRegister();
 
-    await user.click(await screen.findByRole("combobox", { name: "Policy profile" }));
+    await user.click(await screen.findByRole("combobox", { name: "Enforcement point" }));
     expect(await screen.findByRole("option", { name: /trino-main/ })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: /sr-main/ })).not.toBeInTheDocument();
     // A profile another engine already binds is shown, disabled, with the reason.
@@ -100,13 +100,13 @@ describe("EngineRegister", () => {
     expect(tagless).toHaveAttribute("aria-disabled", "true");
     expect(tagless).toHaveTextContent(/no tag service/);
     await user.click(screen.getByRole("option", { name: /trino-main/ }));
-    expect(screen.getByRole("combobox", { name: "Policy profile" })).toHaveTextContent("trino-main");
+    expect(screen.getByRole("combobox", { name: "Enforcement point" })).toHaveTextContent("trino-main");
 
     await user.click(screen.getByRole("combobox", { name: "Engine type" }));
     await user.click(await screen.findByRole("option", { name: "StarRocks" }));
 
-    expect(screen.getByRole("combobox", { name: "Policy profile" })).not.toHaveTextContent("trino-main");
-    await user.click(screen.getByRole("combobox", { name: "Policy profile" }));
+    expect(screen.getByRole("combobox", { name: "Enforcement point" })).not.toHaveTextContent("trino-main");
+    await user.click(screen.getByRole("combobox", { name: "Enforcement point" }));
     expect(await screen.findByRole("option", { name: /sr-main/ })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: /trino-main/ })).not.toBeInTheDocument();
   });
@@ -120,7 +120,7 @@ describe("EngineRegister", () => {
     renderRegister();
 
     await fillRequired(user);
-    await user.click(await screen.findByRole("combobox", { name: "Policy profile" }));
+    await user.click(await screen.findByRole("combobox", { name: "Enforcement point" }));
     await user.click(await screen.findByRole("option", { name: /trino-main/ }));
     await user.click(await screen.findByRole("checkbox", { name: "Declare lake attached" }));
     await user.click(screen.getByRole("button", { name: "Register engine" }));
@@ -183,7 +183,7 @@ describe("EngineRegister", () => {
     await user.keyboard("{Escape}");
     expect(screen.getByRole("alertdialog")).toBeInTheDocument();
     // Registered without a profile: the next step is binding one (KI-204), not the plugin files.
-    const done = within(dialog).getByRole("button", { name: "Bind a policy profile" });
+    const done = within(dialog).getByRole("button", { name: "Bind an enforcement point" });
     expect(done).toBeDisabled();
     expect(done).toHaveAccessibleDescription(/does not show this password again/);
 
@@ -202,7 +202,7 @@ describe("EngineRegister", () => {
     expect(logged.some((line) => line.includes(CRED.password))).toBe(false);
   });
 
-  test("registered with a profile, the credential dialog leads to the plugin configuration", async () => {
+  test("registered with an enforcement point, the credential dialog leads to the plugin configuration", async () => {
     stubFetch({
       ...READS,
       "POST /api/control-plane/engines/external": { status: 201, body: registered("x1") },
@@ -217,7 +217,7 @@ describe("EngineRegister", () => {
       </Harness>,
     );
     await fillRequired(user);
-    await user.click(await screen.findByRole("combobox", { name: "Policy profile" }));
+    await user.click(await screen.findByRole("combobox", { name: "Enforcement point" }));
     await user.click(await screen.findByRole("option", { name: /trino-main/ }));
     await user.click(screen.getByRole("button", { name: "Register engine" }));
     const dialog = await screen.findByRole("alertdialog");
@@ -328,7 +328,7 @@ describe("EngineRegister", () => {
     expect(screen.getByRole("button", { name: "Register engine" })).toBeDisabled();
     await user.type(field, ".1");
     expect(screen.getByRole("button", { name: "Register engine" })).toBeEnabled();
-    expect(screen.getByText(/migrations into the bound profile will be refused/i)).toBeInTheDocument();
+    expect(screen.getByText(/migrations into the bound enforcement point will be refused/i)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Register engine" }));
     await waitFor(() => expect(calls.some((c) => c.method === "POST")).toBe(true));
