@@ -10288,6 +10288,79 @@
         }
       }
     },
+    "/api/control-plane/perm/policies/services/{service_id}/migration-status": {
+      "get": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "SP3b: the enforcement point's migration standing — how many of its operator\npolicies are migrated, pending or blocked, and whether it is complete (every\noperator policy migrated). Read-only; rolled up from the same classification\n`GET .../classify` returns.",
+        "operationId": "service_migration_status",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "description": "policy.authz_services id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The profile's migration standing: migrated/pending counts, the blocked operator policies, and whether it is complete",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EpMigrationStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such policy profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/perm/policies/services/{service_id}/warnings": {
       "get": {
         "tags": [
@@ -40551,6 +40624,28 @@
           }
         }
       },
+      "BlockedPolicy": {
+        "type": "object",
+        "description": "One operator policy that cannot be migrated, for the per-EP rollup.",
+        "required": [
+          "id",
+          "name",
+          "reason"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "description": "The first blocker sentence from classification, for the operator."
+          }
+        }
+      },
       "Branch": {
         "type": "string",
         "enum": [
@@ -46105,6 +46200,38 @@
           "assignedAt": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "EpMigrationStatus": {
+        "type": "object",
+        "description": "An enforcement point's migration standing, rolled up from its classified\npolicies. Only `operator` policies count — `compiler`/`infra` rows are\negret's own and never migration candidates. This is the signal SP3d's\nper-EP gate consumes: `complete` is true only when every operator policy is\nmigrated (fail-closed — any pending or blocked policy leaves it false).",
+        "required": [
+          "complete",
+          "migrated",
+          "pending",
+          "blocked"
+        ],
+        "properties": {
+          "complete": {
+            "type": "boolean"
+          },
+          "migrated": {
+            "type": "integer",
+            "description": "Operator policies already migrated (recorded in `perm.migrated_from`).",
+            "minimum": 0
+          },
+          "pending": {
+            "type": "integer",
+            "description": "Operator policies that are convertible but not yet migrated.",
+            "minimum": 0
+          },
+          "blocked": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BlockedPolicy"
+            },
+            "description": "Operator policies that cannot be migrated at all; each blocks\ncompleteness until the operator removes or rewrites it."
           }
         }
       },

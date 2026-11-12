@@ -33,6 +33,7 @@ import type {
   EngineGrantView,
   EngineGrantWriteResponse,
   EngineGrantsResponse,
+  EpMigrationStatus,
   ErrorBody,
   ExplainCapabilityRequest,
   ExplainCapabilityResponse,
@@ -2954,7 +2955,147 @@ export const usePermUndoServicePolicyMigration = <TError = ErrorBody,
       > => {
       return useMutation(getPermUndoServicePolicyMigrationMutationOptions(options), queryClient);
     }
-    export type permServicePolicyWarningsResponse200 = {
+    export type permServiceMigrationStatusResponse200 = {
+  data: EpMigrationStatus
+  status: 200
+}
+
+export type permServiceMigrationStatusResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permServiceMigrationStatusResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permServiceMigrationStatusResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type permServiceMigrationStatusResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permServiceMigrationStatusResponseSuccess = (permServiceMigrationStatusResponse200) & {
+  headers: Headers;
+};
+export type permServiceMigrationStatusResponseError = (permServiceMigrationStatusResponse401 | permServiceMigrationStatusResponse403 | permServiceMigrationStatusResponse404 | permServiceMigrationStatusResponse500) & {
+  headers: Headers;
+};
+
+export type permServiceMigrationStatusResponse = (permServiceMigrationStatusResponseSuccess | permServiceMigrationStatusResponseError)
+
+export const getPermServiceMigrationStatusUrl = (serviceId: number,) => {
+
+
+
+
+  return `/api/control-plane/perm/policies/services/${encodeURIComponent(serviceId)}/migration-status`
+}
+
+/**
+ * @summary SP3b: the enforcement point's migration standing — how many of its operator
+policies are migrated, pending or blocked, and whether it is complete (every
+operator policy migrated). Read-only; rolled up from the same classification
+`GET .../classify` returns.
+ */
+export const permServiceMigrationStatus = async (serviceId: number, options?: Parameters<typeof customInstance>[1]): Promise<permServiceMigrationStatusResponse> => {
+
+  return customInstance<permServiceMigrationStatusResponse>(getPermServiceMigrationStatusUrl(serviceId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermServiceMigrationStatusQueryKey = (serviceId: number,) => {
+    return [
+    `/api/control-plane/perm/policies/services/${encodeURIComponent(serviceId)}/migration-status`
+    ] as const;
+    }
+
+
+export const getPermServiceMigrationStatusQueryOptions = <TData = Awaited<ReturnType<typeof permServiceMigrationStatus>>, TError = ErrorBody>(serviceId: number, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permServiceMigrationStatus>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getPermServiceMigrationStatusQueryKey(serviceId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof permServiceMigrationStatus>>> = ({ signal }) => permServiceMigrationStatus(serviceId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: serviceId !== null && serviceId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof permServiceMigrationStatus>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type PermServiceMigrationStatusQueryResult = NonNullable<Awaited<ReturnType<typeof permServiceMigrationStatus>>>
+export type PermServiceMigrationStatusQueryError = ErrorBody
+
+
+export function usePermServiceMigrationStatus<TData = Awaited<ReturnType<typeof permServiceMigrationStatus>>, TError = ErrorBody>(
+ serviceId: number, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof permServiceMigrationStatus>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permServiceMigrationStatus>>,
+          TError,
+          Awaited<ReturnType<typeof permServiceMigrationStatus>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermServiceMigrationStatus<TData = Awaited<ReturnType<typeof permServiceMigrationStatus>>, TError = ErrorBody>(
+ serviceId: number, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permServiceMigrationStatus>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permServiceMigrationStatus>>,
+          TError,
+          Awaited<ReturnType<typeof permServiceMigrationStatus>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermServiceMigrationStatus<TData = Awaited<ReturnType<typeof permServiceMigrationStatus>>, TError = ErrorBody>(
+ serviceId: number, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permServiceMigrationStatus>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary SP3b: the enforcement point's migration standing — how many of its operator
+policies are migrated, pending or blocked, and whether it is complete (every
+operator policy migrated). Read-only; rolled up from the same classification
+`GET .../classify` returns.
+ */
+
+export function usePermServiceMigrationStatus<TData = Awaited<ReturnType<typeof permServiceMigrationStatus>>, TError = ErrorBody>(
+ serviceId: number, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permServiceMigrationStatus>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getPermServiceMigrationStatusQueryOptions(serviceId,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type permServicePolicyWarningsResponse200 = {
   data: ProfileWarnings
   status: 200
 }
