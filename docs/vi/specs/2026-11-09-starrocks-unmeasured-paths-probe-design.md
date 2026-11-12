@@ -65,3 +65,8 @@ Mỗi kết quả thuộc một trong ba loại:
 4. **Nạp dữ liệu Paimon khi `pypaimon` không ghi được.** Đề xuất: ghi thành ranh giới đã chọn, không thêm Spark hay Flink.
 5. **Chạy probe 4 trên kind.** Đề xuất: có chạy, nhưng không chạy N11 trên kind.
 6. **Chạy biến thể giảm thiểu ngay trong gói này.** Đề xuất: có.
+
+## Quyết định (2026-11-12)
+
+Người dùng đã trả lời các câu hỏi mở: 1 (b), 2 (b), 3 (a), 4 (b), 5 (a), 6 (a). Chi tiết ở mục
+"Rulings" của bản tiếng Anh.

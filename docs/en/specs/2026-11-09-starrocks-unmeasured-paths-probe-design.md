@@ -486,3 +486,16 @@ under the next free KI numbers, in a docs PR of this package.
    - (b) Leave them to the follow-up specs.
 
    **Recommendation: (a).** Each is one config line, and it is what proves the checks can flip.
+
+## Rulings (2026-11-12)
+
+The user answered the open questions:
+
+1. **(b)**: the harness and the enforced or out-of-model checks may be pushed; the checks of
+   confirmed leaks stay on a local branch until each is reported and its patch is ready.
+2. **(b)**: local only; `probe.sh` is not in the fork CI.
+3. **(a)**: measure creation, and record execution as `N/A` with P0's measured reason.
+4. **(b)**: if `pypaimon` cannot write the S3 warehouse, the write-dependent Paimon checks are a
+   chosen boundary with a follow-up; no Spark or Flink.
+5. **(a)**: run probe 4 on kind (Task 7), without N11.
+6. **(a)**: run both mitigation variants in this package.
