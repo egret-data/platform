@@ -1107,7 +1107,8 @@ async fn an_engine_not_yet_reapplied_to_the_profiles_mechanism_is_named() {
     );
 }
 
-const NO_TAG_WARNING: &str = "This enforcement point has no tag service, so classification rules and \
+const NO_TAG_WARNING: &str =
+    "This enforcement point has no tag service, so classification rules and \
                               clearances do not apply to its engines. Bind a tag service in the \
                               profile's settings.";
 
