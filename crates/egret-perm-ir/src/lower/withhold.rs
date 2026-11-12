@@ -834,6 +834,7 @@ mod tests {
             },
             engines: Vec::new(),
             default_version: Err("not read".into()),
+            default_image_level: None,
             classification_channel: channel,
             catalogs: Default::default(),
         }
@@ -1118,6 +1119,7 @@ mod tests {
         crate::ep::BoundEngine {
             name: name.into(),
             version: version.map(str::to_string),
+            egret_image_level: None,
         }
     }
 

@@ -185,6 +185,7 @@ pub(crate) async fn load_ep(
         },
         engines: Vec::new(),
         default_version: Err(NOT_READ.to_string()),
+        default_image_level: None,
         classification_channel: tag_service.is_some(),
         catalogs: catalog_names,
     };
@@ -522,6 +523,7 @@ pub(crate) async fn bound_engines(
             version: e
                 .plugin_version()
                 .map(|v| plugin_version_label(v).to_string()),
+            egret_image_level: e.egret_image_level(),
         })
         .collect();
     ep.default_version =

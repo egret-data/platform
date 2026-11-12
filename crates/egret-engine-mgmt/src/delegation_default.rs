@@ -46,11 +46,7 @@ pub fn starrocks_image_is_pre_3_5(image: Option<&str>) -> bool {
 /// The egret fork patch level `N` in an image tag `…-egret.N`, else `None`
 /// (an official image, a Trino engine, no tag, or an unparseable suffix).
 pub fn starrocks_egret_image_level(image: Option<&str>) -> Option<u32> {
-    let image = image?;
-    let image = image.split('@').next().unwrap_or(image); // drop a @sha256: digest
-    let tag = image.rsplit_once(':').map(|(_, t)| t).unwrap_or(image);
-    let suffix = tag.rsplit_once("-egret.").map(|(_, s)| s)?;
-    suffix.parse::<u32>().ok()
+    egret_perm::starrocks_egret_image_level(image)
 }
 
 /// Resolve the effective delegation mode.

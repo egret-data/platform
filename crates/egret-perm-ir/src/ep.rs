@@ -26,6 +26,9 @@ pub struct EpKind {
 pub struct BoundEngine {
     pub name: String,
     pub version: Result<String, String>,
+    /// The egret fork patch level `N` of the engine's image (`…-egret.N`), or
+    /// `None` for an official image / Trino. Orthogonal to `version`.
+    pub egret_image_level: Option<u32>,
 }
 
 /// Everything about one enforcement point (today: one profile) the lowering needs.
@@ -38,6 +41,8 @@ pub struct EpInput {
     pub engines: Vec<BoundEngine>,
     /// The version egret's default image runs, used when `engines` is empty.
     pub default_version: Result<String, String>,
+    /// The egret image level egret's default image runs, used when `engines` is empty.
+    pub default_image_level: Option<u32>,
     /// The EP can resolve classifications itself (today: a Trino profile whose
     /// `tagService` names an existing service).
     pub classification_channel: bool,

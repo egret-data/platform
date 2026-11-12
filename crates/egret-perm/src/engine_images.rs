@@ -114,6 +114,16 @@ fn trino_image_override(spec: &serde_json::Value) -> Option<&str> {
     non_blank(tc.get("image"))
 }
 
+/// The egret fork patch level `N` in an image tag `…-egret.N`, else `None`
+/// (an official image, a Trino engine, no tag, or an unparseable suffix).
+pub fn starrocks_egret_image_level(image: Option<&str>) -> Option<u32> {
+    let image = image?;
+    let image = image.split('@').next().unwrap_or(image); // drop a @sha256: digest
+    let tag = image.rsplit_once(':').map(|(_, t)| t).unwrap_or(image);
+    let suffix = tag.rsplit_once("-egret.").map(|(_, s)| s)?;
+    suffix.parse::<u32>().ok()
+}
+
 /// The full image ref an engine's stored spec runs, or `None` when the spec
 /// carries no image for this engine type (absent or blank). For Trino a
 /// `trinoConfig.image` override wins over `imageVersion`, as it does in the

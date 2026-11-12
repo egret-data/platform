@@ -683,9 +683,11 @@ mod tests {
                 .map(|(i, v)| crate::ep::BoundEngine {
                     name: format!("e{i}"),
                     version: v.map(str::to_string).map_err(str::to_string),
+                    egret_image_level: None,
                 })
                 .collect(),
             default_version: default_version.map(str::to_string).map_err(str::to_string),
+            default_image_level: None,
             classification_channel: false,
             catalogs: Default::default(),
         }

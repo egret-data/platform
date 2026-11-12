@@ -3555,6 +3555,13 @@ pub(crate) struct BoundEngine {
 }
 
 impl BoundEngine {
+    /// The egret fork patch level of this engine's StarRocks image, if any.
+    pub(crate) fn egret_image_level(&self) -> Option<u32> {
+        egret_perm::starrocks_egret_image_level(
+            egret_perm::stored_engine_image(&self.r#type, &self.spec).as_deref(),
+        )
+    }
+
     pub(crate) fn plugin_version(&self) -> Result<egret_ranger_eval::eval::PluginVersion, String> {
         engine_plugin_version(
             &self.name,
