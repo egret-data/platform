@@ -7,7 +7,9 @@ use egret_perm::EngineType;
 use uuid::Uuid;
 
 use crate::ep::{EpKind, Mechanism};
-use crate::matrix::{support_for_kind, Capability, RuleEffectKind, Support};
+use crate::matrix::{
+    support_for_kind, Capability, RuleEffectKind, Support, STARROCKS_MASK_MIN_EGRET_IMAGE,
+};
 use crate::statement::ReasonCode;
 
 /// An engine attached to a catalog, with its profile's kind when bound.
@@ -62,6 +64,10 @@ fn enforces(a: &AttachedEngine, classification_selector: bool, effect: RuleEffec
                             mechanism: Mechanism::Ranger,
                         },
                         None,
+                        // AttachedEngine carries no image level: ask at the
+                        // enabling level, so this keeps answering "does the
+                        // kind model the selector", as before the image gate.
+                        Some(STARROCKS_MASK_MIN_EGRET_IMAGE),
                         a.classification_channel,
                         &Capability::ClassificationSelector(effect),
                     ),
@@ -150,7 +156,7 @@ pub fn withhold_engine_reason(
         engine: EngineType::Trino,
         mechanism: Mechanism::Ranger,
     };
-    match support_for_kind(k, None, true, &Capability::WithholdExemptionByGroup) {
+    match support_for_kind(k, None, None, true, &Capability::WithholdExemptionByGroup) {
         Support::Missing(r) => Some(r),
         _ => None,
     }

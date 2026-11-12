@@ -100,7 +100,9 @@ use uuid::Uuid;
 use crate::audience::{audience_from_expanded, Audience};
 use crate::ep::{EpInput, EpKind};
 use crate::lower::rules::{CeilingCount, TaggedColumn, TaggedTable};
-use crate::matrix::{support_for_kind, Capability, LoweringKind, Support};
+use crate::matrix::{
+    support_for_kind, Capability, LoweringKind, Support, STARROCKS_MASK_MIN_EGRET_IMAGE,
+};
 use crate::statement::{
     Derivation, Effect, Level, Lowered, Lowering, Path, Privilege, ReasonCode, Source, Statement,
     Target,
@@ -188,7 +190,13 @@ pub struct WithholdLowered {
 }
 
 fn ask(kind: EpKind, channel: bool, cap: &Capability) -> Support {
-    support_for_kind(kind, None, channel, cap)
+    support_for_kind(
+        kind,
+        None,
+        Some(STARROCKS_MASK_MIN_EGRET_IMAGE),
+        channel,
+        cap,
+    )
 }
 
 /// Whether this EP expands a withhold per column (M7) rather than resolving
@@ -299,6 +307,7 @@ pub fn view_guard_versions(ep: &EpInput) -> Result<Vec<String>, String> {
         if support_for_kind(
             ep.kind,
             Some(v),
+            None,
             ep.classification_channel,
             &Capability::WithholdThroughView,
         ) == Support::Lowered(LoweringKind::ViewGuardMask)

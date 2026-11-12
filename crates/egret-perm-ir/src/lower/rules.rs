@@ -50,7 +50,10 @@ use crate::audience::{
 };
 use crate::ep::{EpInput, EpKind};
 use crate::lower::grants::{ensure_scope_levels_are_named, validate_user_ref};
-use crate::matrix::{support_for_kind, Capability, LoweringKind, RuleEffectKind, Support};
+use crate::matrix::{
+    support_for_kind, Capability, LoweringKind, RuleEffectKind, Support,
+    STARROCKS_MASK_MIN_EGRET_IMAGE,
+};
 use crate::statement::{
     Derivation, Effect, Level, LowerResult, Lowered, Lowering, Path, ReasonCode, Source, Statement,
     Target,
@@ -270,6 +273,7 @@ fn ensure_mask_type_declared(
     match support_for_kind(
         kind,
         None,
+        Some(STARROCKS_MASK_MIN_EGRET_IMAGE),
         false,
         &Capability::MaskType(mask_type.to_string()),
     ) {
@@ -416,7 +420,13 @@ pub fn needs_tagged_tables(ep: &EpInput, r: &Rule) -> bool {
     let effect = effect_kind(&r.kind);
     let lowered = |cap: &Capability| {
         matches!(
-            support_for_kind(ep.kind, None, ep.classification_channel, cap),
+            support_for_kind(
+                ep.kind,
+                None,
+                Some(STARROCKS_MASK_MIN_EGRET_IMAGE),
+                ep.classification_channel,
+                cap,
+            ),
             Support::Lowered(_)
         )
     };
@@ -604,6 +614,7 @@ pub fn lower_rule(
     match support_for_kind(
         ep_kind,
         None,
+        Some(STARROCKS_MASK_MIN_EGRET_IMAGE),
         classification_channel,
         &Capability::ClassificationSelector(effect),
     ) {
@@ -627,6 +638,7 @@ pub fn lower_rule(
                 && support_for_kind(
                     ep_kind,
                     None,
+                    Some(STARROCKS_MASK_MIN_EGRET_IMAGE),
                     classification_channel,
                     &Capability::ClassificationRowFilterOnColumnAttachment,
                 ) == Support::Lowered(LoweringKind::ExpandColumnOnlyTablesPerTable)
