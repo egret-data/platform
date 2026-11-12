@@ -1126,7 +1126,7 @@ async fn finish_apply(
     // Package D, D1a: every StarRocks apply reconciles the engine's users
     // once the FE answers (an FE without persistent metadata loses them on a
     // roll). Not awaited.
-    if res.is_ok() && engine.is_starrocks() && op == ApplyOp::Update {
+    if res.is_ok() && engine.is_starrocks() && matches!(op, ApplyOp::Update) {
         crate::starrocks_users::spawn_user_sync(
             st.clone(),
             engine.id,
