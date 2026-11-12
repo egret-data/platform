@@ -224,8 +224,9 @@ async fn read_delegator_grants(
     delegator_impersonation(&rows).map_err(|e| format!("{DELEGATOR_PRINCIPAL}: grants: {e}"))
 }
 
-/// Spec 2.7: the delegator may impersonate exactly the users egret manages
-/// and the FE has. Each missing per-user grant is sent FIRST, then `ON ALL
+/// Spec 2.7: the delegator may impersonate the users egret manages and the
+/// FE has. It only ever adds per-user grants (and revokes them before a
+/// drop); it does not revoke a grant for a user egret does not manage. Each missing per-user grant is sent FIRST, then `ON ALL
 /// USERS` is revoked, and only when every grant landed: per-user grants
 /// survive that revoke (M7a), so no member is left un-impersonatable by a
 /// failure, and no read is needed after it. `grants` is the read the sync

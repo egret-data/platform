@@ -6854,6 +6854,15 @@ async fn update_starrocks_engine(
             engine.name.clone(),
             engine.namespace.clone(),
         );
+        // The same roll loses the users of an FE without persistent
+        // metadata, and this path never reaches `finish_apply`. (A
+        // re-bootstrap runs the user sync itself, at its checkpoint 7.)
+        crate::starrocks_users::spawn_user_sync(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+        );
     }
     // (b) Re-materialize the per-workspace connections unconditionally.
     rematerialize_or_400(&st, engine.id).await?;
@@ -18825,6 +18834,52 @@ mod tests {
         assert!(
             eventually_sent(&fake, crate::query_log::QUERY_LOG_DATABASE_DDL).await,
             "the update starts the query log setup: {:?}",
+            fake.executed()
+        );
+    }
+
+    /// Final review I1: a PUT that rolls the FE without a delegation change
+    /// (no bootstrap) re-syncs the engine's users, as `finish_apply` does for
+    /// every other StarRocks apply.
+    #[tokio::test]
+    async fn a_starrocks_update_syncs_the_users_again() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping a_starrocks_update_syncs_the_users_again: DATABASE_URL not set");
+            return;
+        };
+        let _pass = USER_SYNC_PASS.read().await;
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_impersonate_sr_engine(&st).await;
+        attach_primary_warehouse_catalog(&st, &engine, wh.id).await;
+        let ws = seed_assigned_workspace(&st, &engine).await;
+        let alice = uname("alice");
+        seed_member(&st, ws, &alice, "active").await;
+        prov.set_status(ready_fe_status(&engine.name));
+        let body = sr_update_body(Some(StarRocksConfigBody {
+            fe_replicas: Some(2),
+            ..Default::default()
+        }));
+
+        if let Err(e) = update_starrocks_engine(st.clone(), engine.clone(), body).await {
+            panic!("update failed: {e}");
+        }
+
+        let create = format!("CREATE USER '{alice}'@'%'");
+        let mut created = false;
+        for _ in 0..250 {
+            if fake.executed().iter().any(|s| s.starts_with(&create)) {
+                created = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            created,
+            "the update re-syncs the users: {:?}",
             fake.executed()
         );
     }
