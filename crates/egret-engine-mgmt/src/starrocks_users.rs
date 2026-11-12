@@ -335,7 +335,7 @@ pub(crate) fn plan_users(
 
 /// The outcome of one engine's reconcile.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum UserSync {
+pub enum UserSync {
     /// Not impersonate-mode and nothing recorded: no FE call was made.
     NotNeeded,
     /// Another egret session holds this engine's sync lock.
@@ -865,6 +865,30 @@ pub fn spawn_starrocks_user_sync(st: CpState) -> tokio::task::JoinHandle<()> {
         });
     }
     tokio::spawn(run_sync_worker(st, wake, wakes, SYNC_DEBOUNCE, BUSY_RETRY))
+}
+
+/// Test-only (feature `test-util`): the sync and what it sends, for the live
+/// suite `tests/starrocks_users_live.rs`. Nothing but a test reaches this
+/// module.
+#[cfg(feature = "test-util")]
+#[doc(hidden)]
+pub mod live_testing {
+    use super::*;
+
+    pub use super::UserSync;
+
+    /// [`super::SHOW_USERS_SQL`].
+    pub const SHOW_USERS_SQL: &str = super::SHOW_USERS_SQL;
+
+    /// [`super::show_delegator_grants_sql`].
+    pub fn show_delegator_grants_sql() -> String {
+        super::show_delegator_grants_sql()
+    }
+
+    /// [`super::sync_starrocks_users`].
+    pub async fn sync_starrocks_users(st: &CpState, engine: &Engine, fe: &FeTarget) -> UserSync {
+        super::sync_starrocks_users(st, engine, fe).await
+    }
 }
 
 #[cfg(test)]

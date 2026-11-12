@@ -48,6 +48,11 @@ pub use starrocks_ddl::{
     Drift, FakeStarRocksDdl, FeError, FeTarget, MaterializedViewRow, MysqlDdlRunner, StarRocksDdl,
     FE_ERROR_EXCERPT_MAX, FE_MASKED_KEYS, FE_UNCOMPARABLE_KEYS, MATERIALIZED_VIEWS_SQL,
 };
+/// Test-only (feature `test-util`): the StarRocks user sync for the live suite
+/// `tests/starrocks_users_live.rs`.
+#[cfg(feature = "test-util")]
+#[doc(hidden)]
+pub use starrocks_users::live_testing as starrocks_users_live_testing;
 pub use starrocks_users::{spawn_starrocks_user_sync, USER_SYNC_CHANNEL};
 pub use state::EngineMgmtState;
 pub use store::{engine_status, Engine, EngineMgmtStore};
