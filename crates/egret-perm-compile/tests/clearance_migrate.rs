@@ -99,3 +99,50 @@ async fn a_withhold_rule_must_be_tag_selected() {
         "expected the withhold CHECK to fire: {err}"
     );
 }
+
+#[tokio::test]
+async fn the_clearance_migration_table_records_a_run() {
+    let Some(pool) = pool().await else { return };
+    let ids = vec![Uuid::new_v4(), Uuid::new_v4()];
+    let tags = vec!["pii".to_string(), "secret".to_string()];
+    let hashes = vec!["h1".to_string(), "h2".to_string()];
+    let rules = serde_json::json!([{"tag": "pii"}]);
+    let original = serde_json::json!([{"tag": "pii", "min_clearance": 2}]);
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO perm.clearance_migration \
+         (tags, rules, rule_ids, exemption_hashes, original, migrated_by) \
+         VALUES ($1, $2, $3, $4, $5, 'test') RETURNING id",
+    )
+    .bind(&tags)
+    .bind(&rules)
+    .bind(&ids)
+    .bind(&hashes)
+    .bind(&original)
+    .fetch_one(&pool)
+    .await
+    .expect("insert");
+    let row: (
+        Vec<String>,
+        serde_json::Value,
+        Vec<Uuid>,
+        Vec<String>,
+        serde_json::Value,
+        String,
+    ) = sqlx::query_as(
+        "SELECT tags, rules, rule_ids, exemption_hashes, original, migrated_by \
+             FROM perm.clearance_migration WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .expect("read");
+    assert_eq!(
+        row,
+        (tags, rules, ids, hashes, original, "test".to_string())
+    );
+    sqlx::query("DELETE FROM perm.clearance_migration WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
