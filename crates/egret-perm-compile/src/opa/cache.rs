@@ -644,6 +644,7 @@ pub(crate) fn compile_error_class(e: &CompileError) -> &'static str {
         CompileError::HiddenColumnsUnenumerable { .. } => "HiddenColumnsUnenumerable",
         CompileError::InvalidEngineGrant { .. } => "InvalidEngineGrant",
         CompileError::ProfileSetChanged { .. } => "ProfileSetChanged",
+        CompileError::HolderGroupNameCollision { .. } => "HolderGroupNameCollision",
     }
 }
 

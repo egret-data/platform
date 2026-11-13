@@ -20,14 +20,24 @@ pub async fn sync_role_holder_group_in_tx(
     role: &str,
 ) -> Result<Uuid, CompileError> {
     let name = role_holder_group_name(role);
-    let group_id: Uuid = sqlx::query_scalar(
+    // Create the managed group, or adopt one that is ALREADY managed. A
+    // pre-existing group of this exact name with a `local`/`oidc` source is NOT
+    // adopted: the `WHERE groups.source = 'managed'` guard makes the conflicting
+    // UPDATE affect no row, so `RETURNING` yields nothing and we refuse the
+    // collision (SP3c-1 review Fix 2). Silently flipping such a group to managed
+    // and reconciling its members to the role's holders would be an access change
+    // outside the migration's equivalence gate.
+    let group_id: Option<Uuid> = sqlx::query_scalar(
         "INSERT INTO public.groups (id, name, source) VALUES (gen_random_uuid(), $1, 'managed') \
-         ON CONFLICT (name) DO UPDATE SET source = 'managed' RETURNING id",
+         ON CONFLICT (name) DO UPDATE SET source = 'managed' WHERE groups.source = 'managed' \
+         RETURNING id",
     )
     .bind(&name)
-    .fetch_one(&mut **tx)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(CompileError::from_db)?;
+    let group_id =
+        group_id.ok_or_else(|| CompileError::HolderGroupNameCollision { name: name.clone() })?;
 
     let roles = [role.to_string()];
     let mut want: std::collections::BTreeSet<Uuid> = std::collections::BTreeSet::new();

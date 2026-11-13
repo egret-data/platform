@@ -616,6 +616,20 @@ pub enum CompileError {
         added.iter().map(i64::to_string).collect::<Vec<_>>().join(", ")
     )]
     ProfileSetChanged { added: Vec<i64> },
+
+    /// SP3c-1: the managed `role:<name> holders` group could not be created
+    /// because a group of that exact name already exists with a non-`managed`
+    /// source (`local` or `oidc`). Adopting it would flip an operator-owned or
+    /// IdP-synced group to `managed` and reconcile its members to the role's
+    /// holders — a silent access change outside the migration's equivalence
+    /// gate (a grant naming that group directly would recompile to different
+    /// members, un-gated). The collision is refused; rename or remove the
+    /// pre-existing group so the managed one can be created.
+    #[error(
+        "a group named {name:?} already exists with a non-managed source; refusing to adopt it \
+         as a role holder group (SP3c-1) — rename or remove it first"
+    )]
+    HolderGroupNameCollision { name: String },
 }
 
 /// SQLSTATE `lock_not_available`: a lock wait ran past `lock_timeout`.

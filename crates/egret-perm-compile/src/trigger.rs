@@ -1810,16 +1810,28 @@ pub async fn affected_services_for_classification(
 ///   bound to that grant's catalog.
 /// - **Engine-grant arm** (F11): the profile of the grant's engine.
 ///
-/// **There is deliberately no rule-EXEMPTION arm**, and that is not the
-/// defensive omission it looks like. `validate_rule_shape` refuses a `Role` in
-/// an exemption and `compile_rule` answers
-/// [`CompileError::UnexpressibleExemption`] for one that got in anyway — so such
-/// a row has never compiled to anything that could be stale, and adding the arm
-/// would make every membership write on that role FAIL the compile it triggered,
-/// turning an unreachable row into an outage on an unrelated path.
+/// **No role-kind rule-EXEMPTION arm**, and that is not the defensive omission
+/// it looks like. `validate_rule_shape` refuses a `Role` in an exemption and
+/// `compile_rule` answers [`CompileError::UnexpressibleExemption`] for one that
+/// got in anyway — so such a row has never compiled to anything that could be
+/// stale, and adding a `kind='role'` arm would make every membership write on
+/// that role FAIL the compile it triggered, turning an unreachable row into an
+/// outage on an unrelated path.
 ///
-/// Empty when nothing in the installation names the role, which is the common
-/// case: then a membership write compiles nothing and costs two queries.
+/// **SP3c-1 managed-holder-group arms.** After the role-principal migration
+/// ([`crate::role_principal_migrate`]) every `kind='role'` principal in all three
+/// tables is rewritten to a `kind='group'` ref at `role:<name> holders`, so the
+/// role arms above match nothing for a migrated installation. A holder change
+/// must then recompile whatever references that managed group, or a revoke fails
+/// OPEN. So this UNIONs in the group arms for that one managed name — grants and
+/// path rule-exemptions (catalog-scoped), tag rule-exemptions (installation-wide)
+/// and engine grants (F11) — which, unlike a bare `Role`, DO compile to the
+/// enumerated members and so can go stale. Keeping the managed group fresh before
+/// the recompile is the role-membership path's job
+/// ([`crate::role_membership::with_recompile_in_tx`]).
+///
+/// Empty when nothing in the installation names the role or its holder group,
+/// which is the common case: then a membership write compiles nothing.
 pub async fn affected_services_for_role_membership(
     conn: &mut sqlx::PgConnection,
     role_name: &str,
@@ -1864,6 +1876,57 @@ pub async fn affected_services_for_role_membership(
     }
     // F11: the profile of every engine whose engine grants name the role.
     ids.extend(engine_grant_profiles_naming_via(conn, "role", &[role_name]).await?);
+
+    // SP3c-1: after the role-principal migration (`crate::role_principal_migrate`)
+    // the role arms above match NOTHING — every `kind='role'` principal was
+    // rewritten to a `kind='group'` ref at `role:<name> holders`, whose
+    // membership mirrors the role's holders. A change to who holds the role must
+    // therefore ALSO recompile the profiles that reference that managed group, or
+    // a revoke fails OPEN: the ex-holder stays named in the group-ref grant's
+    // compiled policy until the next restart. These arms mirror the group arms of
+    // [`affected_services_for_group_membership`] for the one managed group name,
+    // UNIONed in (the final sort/dedup reaps any overlap with the role arms).
+    let holder_group = crate::role_holder_group::role_holder_group_name(role_name);
+    let group_catalogs: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT g.catalog_id FROM perm.grants g \
+           JOIN perm.grant_principals p ON p.grant_id = g.id \
+          WHERE p.kind = 'group'::perm.principal_kind AND p.ref = $1 \
+         UNION \
+         SELECT r.catalog_id FROM perm.rules r \
+           JOIN perm.rule_exemptions e ON e.rule_id = r.id \
+          WHERE e.kind = 'group'::perm.principal_kind AND e.ref = $1 \
+            AND r.selector_kind = 'path' AND r.catalog_id IS NOT NULL",
+    )
+    .bind(&holder_group)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    let holder_group_tag_exempts: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM perm.rules r \
+           JOIN perm.rule_exemptions e ON e.rule_id = r.id \
+          WHERE e.kind = 'group'::perm.principal_kind AND e.ref = $1 \
+            AND r.selector_kind = 'tag')",
+    )
+    .bind(&holder_group)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    if holder_group_tag_exempts {
+        ids.extend(
+            compiler_targeted_services_via(conn)
+                .await
+                .map_err(crate::db_error::from_store)?,
+        );
+    }
+    for catalog_id in group_catalogs {
+        ids.extend(
+            services_for_catalog_via(conn, catalog_id)
+                .await
+                .map_err(crate::db_error::from_store)?,
+        );
+    }
+    ids.extend(engine_grant_profiles_naming_via(conn, "group", &[holder_group.as_str()]).await?);
+
     // F11: a platform admin is near-root as an impersonation target (egret
     // seeds them engine admin), so a change of who holds the role re-checks
     // every impersonation grant's target.

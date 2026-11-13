@@ -739,3 +739,168 @@ async fn explain_is_byte_identical_across_the_role_migration() {
 
     cleanup(&pool, seeded.grant_id).await;
 }
+
+// ---------------------------------------------------------------------------
+// SP3c-1 final review Fix 1: the LIVE role-holder-change path must re-sync the
+// managed holder group AND recompile the group-ref grant, or a revoke after the
+// migration fails OPEN (the ex-holder keeps the access until restart).
+// ---------------------------------------------------------------------------
+
+/// The stored (already-committed) compiled artifact for `service_id`, WITHOUT
+/// recompiling — so a test asserts what the path under test wrote, not what a
+/// fresh compile would write.
+async fn read_compiled_json(pool: &PgPool, service_id: i64) -> Value {
+    let rows: Vec<(String, Value)> = sqlx::query_as(
+        "SELECT name, policy_jsonb FROM policy.authz_policies WHERE service_id = $1 ORDER BY name",
+    )
+    .bind(service_id)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    Value::Array(
+        rows.into_iter()
+            .map(|(name, body)| json!({ "name": name, "body": body }))
+            .collect(),
+    )
+}
+
+async fn group_has_user(pool: &PgPool, group_name: &str, user: Uuid) -> bool {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM public.user_groups ug \
+         JOIN public.groups g ON g.id = ug.group_id \
+         WHERE g.name = $1 AND ug.user_id = $2)",
+    )
+    .bind(group_name)
+    .bind(user)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn revoking_a_role_via_the_live_path_resyncs_and_recompiles_the_holder_group() {
+    let Some(dsn) = egret_test_db::url().await else {
+        return;
+    };
+    let db = Db::connect(&dsn, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let pool = db.pool.clone();
+    let seeded = seed_service_with_role_grant(&db).await;
+
+    // The role id and its one holder (carol), for the live revoke path.
+    let role_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM roles WHERE name = $1 AND scope = 'platform'")
+            .bind(&seeded.role)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let carol: Uuid = sqlx::query_scalar(
+        "SELECT principal_id FROM access_grants WHERE role_id = $1 AND principal_type = 'user'",
+    )
+    .bind(role_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // Compile once so carol's missing username is minted, then capture it.
+    let compiled = compile_service_to_ranger_json(&pool, seeded.service_id).await;
+    assert!(!compiled.as_array().unwrap().is_empty(), "{compiled}");
+    let username: String = sqlx::query_scalar("SELECT username FROM users WHERE id = $1")
+        .bind(carol)
+        .fetch_one(&pool)
+        .await
+        .expect("the compile minted carol's username");
+
+    // Migrate: the grant now names the managed `role:<role> holders` group.
+    let mut tx = pool.begin().await.unwrap();
+    migrate_role_principals_in_tx(&mut tx, "tester")
+        .await
+        .expect("migrate");
+    tx.commit().await.unwrap();
+
+    let gname = role_holder_group_name(&seeded.role);
+    assert!(
+        group_has_user(&pool, &gname, carol).await,
+        "carol must be in the holder group right after the migration"
+    );
+    let before_revoke = read_compiled_json(&pool, seeded.service_id).await;
+    assert!(
+        before_revoke.to_string().contains(&username),
+        "the migrated group-ref grant must still grant carol before the revoke: {before_revoke}"
+    );
+
+    // REVOKE via the LIVE control-plane path (not the migration, not the boot repair).
+    egret_perm_compile::unassign_platform_role_and_recompile(&pool, "user", carol, role_id)
+        .await
+        .expect("live unassign");
+
+    // Fail-CLOSED: the holder group drops carol, and the committed compiled
+    // artifact no longer names her — in the same path, without a restart.
+    assert!(
+        !group_has_user(&pool, &gname, carol).await,
+        "the live revoke must drop carol from the managed holder group"
+    );
+    let after_revoke = read_compiled_json(&pool, seeded.service_id).await;
+    assert!(
+        !after_revoke.to_string().contains(&username),
+        "the live revoke must recompile the group-ref grant so carol is no longer granted: \
+         {after_revoke}"
+    );
+    assert_ne!(
+        before_revoke, after_revoke,
+        "the live revoke must have recompiled the profile (it did not)"
+    );
+
+    cleanup(&pool, seeded.grant_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// SP3c-1 final review Fix 2: never adopt a pre-existing local/oidc group that
+// happens to carry the managed name — that would be a silent, un-gated access
+// change. Refuse the collision instead.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sync_refuses_to_adopt_a_preexisting_non_managed_group() {
+    let Some(dsn) = egret_test_db::url().await else {
+        return;
+    };
+    let db = Db::connect(&dsn, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let pool = db.pool.clone();
+    let (role, _role_id, _u1) = seed_role_with_one_user_holder(&pool).await;
+
+    // A pre-existing LOCAL group squats the managed name.
+    let name = role_holder_group_name(&role);
+    sqlx::query(
+        "INSERT INTO public.groups (id, name, source) VALUES (gen_random_uuid(), $1, 'local')",
+    )
+    .bind(&name)
+    .execute(&pool)
+    .await
+    .expect("seed a local group of the managed name");
+
+    let mut tx = pool.begin().await.unwrap();
+    let err = sync_role_holder_group_in_tx(&mut tx, &role)
+        .await
+        .expect_err("a non-managed group of the same name must be refused");
+    drop(tx);
+    assert!(
+        matches!(
+            err,
+            egret_perm::CompileError::HolderGroupNameCollision { .. }
+        ),
+        "the collision must be refused as HolderGroupNameCollision, not adopted: {err:?}"
+    );
+
+    // The squatting group is untouched: still local (not flipped to managed).
+    let source: String = sqlx::query_scalar("SELECT source FROM public.groups WHERE name = $1")
+        .bind(&name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        source, "local",
+        "the pre-existing group must NOT be flipped to managed"
+    );
+}
