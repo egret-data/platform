@@ -198,6 +198,10 @@ pub fn perm_router() -> Router<PermState> {
             get(service_policy_warnings),
         )
         .route(
+            "/perm/policies/services/{service_id}/migration-status",
+            get(service_migration_status),
+        )
+        .route(
             "/perm/policies/services/{service_id}/migrate",
             post(migrate_service_policies),
         )
@@ -250,6 +254,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         compile,
         classify_service_policies,
         service_policy_warnings,
+        service_migration_status,
         migrate_service_policies,
         undo_service_policy_migration
     ),
@@ -371,6 +376,8 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         crate::classify::PolicyWarning,
         crate::classify::ProfileWarnings,
         crate::classify::WarnedPolicy,
+        crate::classify::EpMigrationStatus,
+        crate::classify::BlockedPolicy,
         crate::classify::ProposedObjects,
         crate::classify::MigrationRecord,
         crate::migrate::MigrateRequest,
@@ -5084,6 +5091,34 @@ async fn service_policy_warnings(
     Ok(Json(
         crate::classify::profile_warnings(&mut conn, service_id).await?,
     ))
+}
+
+/// SP3b: the enforcement point's migration standing — how many of its operator
+/// policies are migrated, pending or blocked, and whether it is complete (every
+/// operator policy migrated). Read-only; rolled up from the same classification
+/// `GET .../classify` returns.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/perm/policies/services/{service_id}/migration-status",
+    tag = "perm",
+    params(("service_id" = i64, Path, description = "policy.authz_services id")),
+    responses(
+        (status = 200, description = "The profile's migration standing: migrated/pending counts, the blocked operator policies, and whether it is complete", body = crate::classify::EpMigrationStatus),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 404, description = "No such policy profile", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn service_migration_status(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+    Path(service_id): Path<i64>,
+) -> Result<Json<crate::classify::EpMigrationStatus>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
+    let mut conn = st.perm.pool().acquire().await.map_err(PermHttpError::db)?;
+    let classified = crate::classify::classify_service(&mut conn, service_id).await?;
+    Ok(Json(crate::classify::ep_migration_status(&classified)))
 }
 
 /// SP4d-3 Task 7: migrate hand-written policies of one profile into the

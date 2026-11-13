@@ -157,6 +157,67 @@ pub struct ProposedObjects {
     pub rules: usize,
 }
 
+/// One operator policy that cannot be migrated, for the per-EP rollup.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+pub struct BlockedPolicy {
+    pub id: i64,
+    pub name: String,
+    /// The first blocker sentence from classification, for the operator.
+    pub reason: String,
+}
+
+/// An enforcement point's migration standing, rolled up from its classified
+/// policies. Only `operator` policies count — `compiler`/`infra` rows are
+/// egret's own and never migration candidates. This is the signal SP3d's
+/// per-EP gate consumes: `complete` is true only when every operator policy is
+/// migrated (fail-closed — any pending or blocked policy leaves it false).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+pub struct EpMigrationStatus {
+    pub complete: bool,
+    /// Operator policies already migrated (recorded in `perm.migrated_from`).
+    pub migrated: usize,
+    /// Operator policies that are convertible but not yet migrated.
+    pub pending: usize,
+    /// Operator policies that cannot be migrated at all; each blocks
+    /// completeness until the operator removes or rewrites it.
+    pub blocked: Vec<BlockedPolicy>,
+}
+
+/// Roll up a profile's classified policies into its migration status.
+/// A migrated operator policy is never `migratable` (see [`ClassifiedPolicy`]),
+/// so `migrated` is checked first.
+pub fn ep_migration_status(policies: &[ClassifiedPolicy]) -> EpMigrationStatus {
+    let mut migrated = 0usize;
+    let mut pending = 0usize;
+    let mut blocked = Vec::new();
+    for p in policies {
+        if p.managed_by != "operator" {
+            continue;
+        }
+        if p.migrated.is_some() {
+            migrated += 1;
+        } else if p.migratable {
+            pending += 1;
+        } else {
+            blocked.push(BlockedPolicy {
+                id: p.id,
+                name: p.name.clone(),
+                reason: p
+                    .blockers
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "This policy cannot be migrated.".to_string()),
+            });
+        }
+    }
+    EpMigrationStatus {
+        complete: pending == 0 && blocked.is_empty(),
+        migrated,
+        pending,
+        blocked,
+    }
+}
+
 /// One `policy.authz_policies` row, as the classifier reads it.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct PolicyRecord {
@@ -977,5 +1038,85 @@ mod tests {
             service_target("trino", true),
             Some((ServiceKind::Tag, EngineType::Trino))
         );
+    }
+}
+
+#[cfg(test)]
+mod ep_status_tests {
+    use super::*;
+
+    fn pol(
+        id: i64,
+        managed_by: &str,
+        migratable: bool,
+        migrated: bool,
+        blocker: Option<&str>,
+    ) -> ClassifiedPolicy {
+        ClassifiedPolicy {
+            id,
+            name: format!("p{id}"),
+            managed_by: managed_by.to_string(),
+            enabled: true,
+            migratable,
+            blockers: blocker.into_iter().map(|s| s.to_string()).collect(),
+            proposed: None,
+            migrated: migrated.then(|| MigrationRecord {
+                policy_name: format!("p{id}"),
+                grant_ids: vec![],
+                rule_ids: vec![],
+                probes_proved: 0,
+                migrated_by: "someone".into(),
+                migrated_at: "2026-11-13T00:00:00Z".into(),
+            }),
+            warnings: vec![],
+        }
+    }
+
+    #[test]
+    fn empty_profile_is_complete() {
+        let s = ep_migration_status(&[]);
+        assert!(s.complete);
+        assert_eq!((s.migrated, s.pending, s.blocked.len()), (0, 0, 0));
+    }
+
+    #[test]
+    fn one_pending_operator_policy_is_incomplete() {
+        // The demo-stack shape: operator, convertible, not yet migrated.
+        let s = ep_migration_status(&[pol(1, "operator", true, false, None)]);
+        assert!(!s.complete);
+        assert_eq!((s.migrated, s.pending, s.blocked.len()), (0, 1, 0));
+    }
+
+    #[test]
+    fn one_migrated_operator_policy_is_complete() {
+        let s = ep_migration_status(&[pol(1, "operator", false, true, None)]);
+        assert!(s.complete);
+        assert_eq!((s.migrated, s.pending, s.blocked.len()), (1, 0, 0));
+    }
+
+    #[test]
+    fn a_blocked_operator_policy_is_listed_and_blocks_completeness() {
+        let s = ep_migration_status(&[pol(
+            7,
+            "operator",
+            false,
+            false,
+            Some("Clearance is not expressible here."),
+        )]);
+        assert!(!s.complete);
+        assert_eq!(s.blocked.len(), 1);
+        assert_eq!(s.blocked[0].id, 7);
+        assert_eq!(s.blocked[0].reason, "Clearance is not expressible here.");
+    }
+
+    #[test]
+    fn compiler_and_infra_rows_are_ignored() {
+        let s = ep_migration_status(&[
+            pol(1, "compiler", false, false, Some("compiler-owned")),
+            pol(2, "infra", false, false, Some("infra-owned")),
+            pol(3, "operator", false, true, None),
+        ]);
+        assert!(s.complete);
+        assert_eq!((s.migrated, s.pending, s.blocked.len()), (1, 0, 0));
     }
 }

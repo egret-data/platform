@@ -38,13 +38,16 @@ import {
 } from "./generated/policy-admin/policy-admin";
 import {
   getPermClassifyServicePoliciesQueryKey,
+  getPermServiceMigrationStatusQueryKey,
   permClassifyServicePolicies,
   permMigrateServicePolicies,
+  permServiceMigrationStatus,
   permUndoServicePolicyMigration,
 } from "./generated/perm/perm";
 import type {
   ClassifiedPolicy,
   CreatedPolicyId,
+  EpMigrationStatus,
   CreatedProfile,
   MigrateResponse,
   UndoResponse,
@@ -271,6 +274,7 @@ export function compilerOwnedConflict(err: unknown): string | null {
 
 export type {
   ClassifiedPolicy,
+  EpMigrationStatus,
   GatedProfile,
   MigrateResponse,
   MigratedPolicy,
@@ -288,6 +292,16 @@ export async function classifyServicePolicies(serviceId: number): Promise<Classi
  *  migrate or undo invalidates exactly what the page reads. */
 export function classifyQueryKey(serviceId: number) {
   return getPermClassifyServicePoliciesQueryKey(serviceId);
+}
+
+/** One enforcement point's migration standing: is every manual policy in the model. */
+export async function serviceMigrationStatus(serviceId: number): Promise<EpMigrationStatus> {
+  return (await permServiceMigrationStatus(serviceId)).data as EpMigrationStatus;
+}
+
+/** The key the standing is cached under; a migrate or undo invalidates it. */
+export function migrationStatusQueryKey(serviceId: number) {
+  return getPermServiceMigrationStatusQueryKey(serviceId);
 }
 
 function isMigrateResponse(body: unknown): body is MigrateResponse {
