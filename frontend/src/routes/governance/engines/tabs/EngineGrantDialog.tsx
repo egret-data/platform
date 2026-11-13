@@ -267,7 +267,7 @@ function GrantForm({
         <fieldset className="space-y-1.5" aria-describedby="engine-grant-principals-help">
           <legend className="text-sm font-medium">Granted to</legend>
           <p id="engine-grant-principals-help" className="text-xs text-muted-foreground">
-            Users, groups or roles. A group is expanded to its current members.
+            Users or groups. A group is expanded to its current members.
           </p>
           <PrincipalPicker
             includeOnly
