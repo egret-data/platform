@@ -43,7 +43,7 @@ Spec: `docs/en/specs/2026-11-13-workflow-execution-ops-restart-design.md`. Its Q
 
 - [ ] Start the test containers. Follow the `docker run` lines used by earlier packages, which a grep for `egret-loopout-postgres` finds in the memory notes or shell history. Use image `postgres:16` on host port **5465**, user/password/db `egret`/`egret`/`egret_test`, and a Valkey container on host port **6465**.
 - [ ] Run the executor ratchet and census: `cargo test -p egret-workflow --test executor -- --nocapture`. Record the tuple.
-- [ ] Re-read migration numbers: `git ls-tree --name-only origin/main migrations/ | tail -1` and every local branch. `0220` must be free (spec D12).
+- [ ] Re-read migration numbers: `git ls-tree --name-only origin/main migrations/ | tail -1` and every local branch. `0225` must be free (spec D12).
 - **Accept:** ratchet 301 / 25 / 25 / 0; census 295 / 25 / 21; the highest migration is `0219`. Report all three, as measured.
 
 ## A. Engine
@@ -123,10 +123,10 @@ Command::OverwriteLastAttempt { run: RunIx, state: RunState } // mark_as: set th
 
 **Files:**
 - Create:
-  - `migrations/0220_workflow_restart_attempt_number.sql`
+  - `migrations/0225_workflow_restart_attempt_number.sql`
   - `crates/egret-workflow/src/worker/restart.rs`
   - `crates/egret-workflow/tests/restart.rs`
-  - `crates/egret-workflow/tests/migration_0220_restart_attempt.rs`
+  - `crates/egret-workflow/tests/migration_0225_restart_attempt.rs`
 - Modify:
   - `crates/egret-workflow/src/worker/mod.rs`: re-exports.
   - `crates/egret-workflow/src/worker/claim.rs`: only if a helper must become `pub(crate)`.
@@ -141,7 +141,7 @@ pub enum RestartRefused { NotRestartable(String /*state*/), NothingToRestart,
 /// Unscoped by workspace, like every worker entry point; the route scopes first.
 pub async fn restart_execution(pool: &PgPool, id: Uuid) -> egret_core::Result<Restarted>;
 ```
-- **Migration 0220.** Drop and re-add `workflow_executions_metadata_belongs_to_a_replay` (0139:141-146) as
+- **Migration 0225.** Drop and re-add `workflow_executions_metadata_belongs_to_a_replay` (0139:141-146) as
   ```sql
   CHECK (attempt_number >= 1 AND (origin_offset_ms = 0 OR (attempt_number > 1 AND parent_execution_id IS NOT NULL AND parent_run_ix IS NULL)))
   ```
@@ -173,7 +173,7 @@ pub async fn restart_execution(pool: &PgPool, id: Uuid) -> egret_core::Result<Re
   10. A retry: a run whose `retry: maxAttempts: 2` was spent fails again after restart without retrying (D5 consequence).
   11. `restartOrReplayLoopUntil` (Kestra `RestartCaseTest:463-505`): a `LoopUntil` whose child failed waits again from the restart; its `maxDuration` is measured from the restart's tick, not the first start (D6).
   12. D7 side effects: an `EXECUTION_ASSERTION` SLA is evaluated again while the restarted execution runs; flow `outputs:` are re-evaluated at the new terminal state (the old value stays visible until then).
-- [ ] `tests/migration_0220_restart_attempt.rs`:
+- [ ] `tests/migration_0225_restart_attempt.rs`:
   - a top-level row may now hold `attempt_number = 3, origin_offset_ms = 0`;
   - `origin_offset_ms > 0` without the replay shape is still refused.
 - [ ] Commit: `feat(workflow): restart an execution in place (package 7a)`.

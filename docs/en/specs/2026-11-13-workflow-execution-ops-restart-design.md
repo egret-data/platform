@@ -82,7 +82,7 @@ Taken under the autonomy rules (follow Kestra unless there is a reason; keep saf
     4. The execution then goes `RESTARTED` and the executor carries on.
     5. A `CANCELLED` target makes the execution `CANCELLED` at once. *Final review I3:* it reopens no ancestor (see §6 item 10).
   - **Execution status** appends one state to the history and touches no run. A parent whose `Subflow` run is already terminal ignores the child's new state (`subflow.rs:731-737`), as Kestra's does in practice (`ChangeStateTestCase:43-68`, whose FIXME records it).
-- **D12. One migration**, provisionally **0220** (main is at 0219 and no open PR adds one; re-check before push, per the shared-namespace rule). It relaxes the 0139 CHECK so that `attempt_number > 1` is allowed on any execution, keeping `origin_offset_ms <> 0` for the replay shape only.
+- **D12. One migration**, **0225** (written as 0220; renumbered before push on 2026-11-14, when main was at 0221 (#858) and open PR #859 held 0222 to 0224, per the shared-namespace rule). It relaxes the 0139 CHECK so that `attempt_number > 1` is allowed on any execution, keeping `origin_offset_ms <> 0` for the replay shape only.
 - **D13. Routes, permission and audit.** These are egret-style paths, as kill and resume are, not Kestra's `/actions/` paths:
   - `POST /api/ws/{ws}/workflows/executions/{id}/restart`. The `revision` query parameter is refused with 400, naming 7b.
   - `POST /api/ws/{ws}/workflows/executions/{id}/task-runs/{task_run_id}/state`, body `{ "state": … }`.
@@ -103,7 +103,7 @@ Taken under the autonomy rules (follow Kestra unless there is a reason; keep saf
 
   Each action uses a `ConfirmAction` with the reasons for a disabled button, invalidates the execution query so polling resumes, and maps the coded 409s. The client is regenerated with `npm run gen:api`, never bare orval.
 - **D15 (2026-11-13, during A1). `mark_as` under a `WorkingDirectory` is refused** (`inside_working_directory`, 409). A run inside the block cannot be overridden without breaking the block's single-directory invariant, and D10's rule 2 already empties such blocks on restart. `EW src/executor/restart.rs`; commit `e371889f`.
-- **D16 (2026-11-13, during A2). Migration 0220 also redefines `workflow.execution_is_idle`** to skip runs with an empty history. Emptied end-hook runs persist as `CREATED` with history `[]`, and the old function never saw them as idle, so they were never rebuilt. `migrations/0220_workflow_restart_attempt_number.sql`; commit `50872d45`.
+- **D16 (2026-11-13, during A2). Migration 0225 also redefines `workflow.execution_is_idle`** to skip runs with an empty history. Emptied end-hook runs persist as `CREATED` with history `[]`, and the old function never saw them as idle, so they were never rebuilt. `migrations/0225_workflow_restart_attempt_number.sql`; commit `50872d45`.
 - **D17 (2026-11-13, during A2). Reset and emptied runs get `claimed_at` cleared.** A stale lease on a reset run stalled a `Parallel` waiting on it. `EW src/worker/restart.rs`; commit `50872d45`.
 - **D18 (2026-11-13, during A5). `set_execution_status` refuses loop iterations and a running `afterExecution:`, not pruned files.** An iteration's state belongs to its Loop, and `afterExecution:` owns the final state while it runs; a status change appends one state and re-runs nothing, so pruned files do not matter. `EW src/worker/restart.rs`; commit `cffe6172`.
 - **D19 (2026-11-13, during A3). A Loop iteration that ends after its Loop run is terminal is still recorded** (outputs entry and counters), without moving the Loop. Otherwise a restarted Loop finished with a list missing that iteration and counters that disagreed with the rows. Kestra's `handleTerminated` also records it. `EW src/worker/spawn.rs`; commit `10124879`.
@@ -120,7 +120,7 @@ Taken under the autonomy rules (follow Kestra unless there is a reason; keep saf
 | `executor` (pure) | New `restart.rs`:<br>• `restart(plan, &state) -> Result<Vec<Command>, NothingToRestart>`<br>• `mark_as(plan, &state, run, target) -> Vec<Command>`<br>• a shared "reset set" (D2), "end-hook set" (D4) and state mapping (D3)<br>• a new `Command::EmptyRun(RunIx)` (or a generalised `RestartLoop`) and `Command::OpenFlowableAttempt` (D6)<br>• unit tests over hand-built states, no DB |
 | `worker` | `restart_execution`, `set_task_run_state`, `set_execution_status`:<br>• `transaction!`, then `load` (lock), re-check, apply, `settle`, as `resume_by_hand` does<br>• Loop (D8) and Subflow (D9) in place<br>• `outputs`/`message`/`secret_outputs` cleared on reset and emptied runs<br>• `attempt_number`, label |
 | `routes` | Three handlers (D13), OpenAPI, audit; coded 409s (`nothing_to_restart`, `after_execution_running`, `files_pruned`, `not_restartable`, `state_unchanged`) |
-| migration | 0220 (D12) |
+| migration | 0225 (D12) |
 | frontend | D14; `npm run gen:api` |
 | docs | `egret-data/docs` Platform → Workflows → executions page; screenshots of the three actions |
 
@@ -147,7 +147,7 @@ egret-only tests:
 - `WorkingDirectory` re-run in a fresh directory;
 - a `delete: false` container is not re-attached (D5);
 - the 409 refusals of D10 and D11;
-- the 0220 CHECK both ways;
+- the 0225 CHECK both ways;
 - flow-trigger events per appended state;
 - a foreign-workspace id is 404;
 - the frontend button logic (vitest);
@@ -177,14 +177,14 @@ egret-only tests:
 
 ## 7. As built
 
-Built 2026-11-13 on `feat/workflow-execution-ops`, base `origin/main` `9996fde4`. Every commit below is on that branch. Migration `0220_workflow_restart_attempt_number.sql` (the number is re-checked against main and open PRs before push). The executor ratchet is **301 / 25 / 25 / 0** and the census **295 / 25 / 21**, measured at T0 and unchanged at each task.
+Built 2026-11-13 on `feat/workflow-execution-ops`, base `origin/main` `9996fde4`. Every commit below is on that branch. Migration `0225_workflow_restart_attempt_number.sql` (renumbered from 0220 before push, see D12). The executor ratchet is **301 / 25 / 25 / 0** and the census **295 / 25 / 21**, measured at T0 and unchanged at each task.
 
 | Task | Commits | What landed | Tests added | Fix rounds |
 |---|---|---|---|---|
 | Spec, plan | `5c440e09`, `a3bb2ee7` | This spec and its plan. | – | – |
 | T0 | – | Containers, baseline ratchet and census. | – | – |
 | A1 | `a3bb2ee7..e371889f` (`878d09a8`, `e371889f`) | Pure `executor::restart` commands (restart and mark-as); Pause `needPause` (D23); `SetRunState{Created}` clears `working_dir`. | `executor::restart::tests` in `src/executor/restart.rs`, 20 | 1: restarted `LoopUntil` iteration is not counted again; `mark_as` under a `WorkingDirectory` refused (D15) |
-| A2 | `e371889f..50872d45` (`50872d45`) | `restart_execution` in place: resets, end-hook runs emptied with renewed ids, label, `attempt_number` + 1, side writes, SLA re-evaluation; migration 0220 (relaxes the 0139 CHECK, D12; redefines `execution_is_idle`, D16). | `tests/restart.rs` 20, `tests/migration_0220_restart_attempt.rs` 5; `tests/worker.rs` replay-metadata test updated | 0 |
+| A2 | `e371889f..50872d45` (`50872d45`) | `restart_execution` in place: resets, end-hook runs emptied with renewed ids, label, `attempt_number` + 1, side writes, SLA re-evaluation; migration 0225 (relaxes the 0139 CHECK, D12; redefines `execution_is_idle`, D16). | `tests/restart.rs` 20, `tests/migration_0225_restart_attempt.rs` 5; `tests/worker.rs` replay-metadata test updated | 0 |
 | A3 | `50872d45..10124879` (`e5f24b50`, `10124879`) | Loop restart from the failing iteration; counters re-based per index for restarted iterations. | `tests/restart.rs` +4 (to 24 after the fix) | 1: late iteration recorded (D19) |
 | A4 | `10124879..2c511ad9` (`1ed811fa`, `2c511ad9`) | Subflow child restarted in place through a walk job (D20). | `tests/restart.rs` +7 (to 31) | 0 (one pre-review fix: unloadable child spawns a new one) |
 | A5 | `2c511ad9..cffe6172` (`cffe6172`) | `set_task_run_state` (mark-as) and `set_execution_status` (D11, D18). | `tests/mark_as.rs` 17 | 0 |
@@ -204,7 +204,7 @@ The final review (`069613b19`) found three Important and ten Minor items; the fi
 - `6f6dd4558` (I1, D24): restart and task-run state pass replay's two doors, the flow's current state and the `egret.sql` creator gate; change status passes neither. Route tests in `tests/restart_routes.rs` (+9); the routes' OpenAPI descriptions name the new answers.
 - `6b9d80b8f` (I2, M2, M3, M8): a `PAUSED` `Subflow` child is not restarted (D9 amended); the child's state is parsed with `from_wire`, an unknown one spawns a new child; an unloadable `Loop` iteration falls back to the D8 "No restartable…" line instead of failing the call, and the refused-iteration log is `warn`. **A retried restarted `Subflow` run restarts the same child again** (the gate is any terminal-then-`CREATED` window, not the latest transition): Kestra's `RETRY_FAILED` behaviour, documented on `restart_earlier_child`.
 - `6876b089a` (I3, M5): a `CANCELLED` mark reopens no ancestor; the SLA is not evaluated in the first settle of a restart or mark (§6 items 10 and 12); a marked run inside an end-hook branch is emptied with the branch, as Kestra's `changeTaskRunState`. The "still `PAUSED`" shape (triage row 19) needs no change: D10 refuses it before `mark_as` runs. Each test asserts `execution_is_idle` and, where it applies, that a later status change is accepted.
-- `d05e693ee` (M6): `workflow.run_is_live(state, history)` in migration 0220, shared by `execution_is_idle`, the kill's descendants and phase count, and the force-close.
+- `d05e693ee` (M6): `workflow.run_is_live(state, history)` in migration 0225, shared by `execution_is_idle`, the kill's descendants and phase count, and the force-close.
 - `eae2d1118` (M10): the `task_runs` doc comment. M1 (the D11.3 citation) is corrected above. M4, M7 and the rows marked Leave are left as the review advised.
 
 ### Deferred findings
@@ -222,7 +222,7 @@ Every `minor (deferred)` line of the controller's ledger, for the final review.
 - Clearing `claimed_at` lets a rule-1-failed sibling run twice (now §6 item 9).
 - `a_loop_restart_is_not_built_yet` and `a_subflow_restart_is_not_built_yet` assert only `exec_meta` (A3 and A4 replaced them).
 - `side_writes` converts `i32` twice; the per-run id `UPDATE` could be one statement.
-- Naming of `Row0220`.
+- Naming of `Row0225`.
 - The SLA test pins a history tail of `RESTARTED CANCELLED` (no `RUNNING`): the SLA fires in the restart's own settle. Confirm this is intended (final review).
 - `working_dir_snapshot` keeps the old URI until the new prepare; undocumented in code.
 

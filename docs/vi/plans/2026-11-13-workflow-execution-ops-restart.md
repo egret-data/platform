@@ -45,7 +45,7 @@ Spec: `docs/en/specs/2026-11-13-workflow-execution-ops-restart-design.md`. Q1–
 
 - [ ] Khởi động các container test. Theo các dòng `docker run` mà các gói trước dùng, có thể tìm bằng grep `egret-loopout-postgres` trong ghi chú memory hoặc lịch sử shell. Dùng image `postgres:16` trên cổng host **5465**, user/password/db `egret`/`egret`/`egret_test`, và một container Valkey trên cổng host **6465**.
 - [ ] Chạy ratchet và census của executor: `cargo test -p egret-workflow --test executor -- --nocapture`. Ghi lại bộ số.
-- [ ] Đọc lại số migration: `git ls-tree --name-only origin/main migrations/ | tail -1` và mọi nhánh local. `0220` phải còn trống (spec D12).
+- [ ] Đọc lại số migration: `git ls-tree --name-only origin/main migrations/ | tail -1` và mọi nhánh local. `0225` phải còn trống (spec D12).
 - **Chấp nhận:** ratchet 301 / 25 / 25 / 0; census 295 / 25 / 21; migration cao nhất là `0219`. Báo cáo cả ba, đúng như đo được.
 
 ## A. Engine
@@ -125,10 +125,10 @@ Command::OverwriteLastAttempt { run: RunIx, state: RunState } // mark_as: set th
 
 **File:**
 - Tạo:
-  - `migrations/0220_workflow_restart_attempt_number.sql`
+  - `migrations/0225_workflow_restart_attempt_number.sql`
   - `crates/egret-workflow/src/worker/restart.rs`
   - `crates/egret-workflow/tests/restart.rs`
-  - `crates/egret-workflow/tests/migration_0220_restart_attempt.rs`
+  - `crates/egret-workflow/tests/migration_0225_restart_attempt.rs`
 - Sửa:
   - `crates/egret-workflow/src/worker/mod.rs`: re-export.
   - `crates/egret-workflow/src/worker/claim.rs`: chỉ khi một helper phải thành `pub(crate)`.
@@ -143,7 +143,7 @@ pub enum RestartRefused { NotRestartable(String /*state*/), NothingToRestart,
 /// Unscoped by workspace, like every worker entry point; the route scopes first.
 pub async fn restart_execution(pool: &PgPool, id: Uuid) -> egret_core::Result<Restarted>;
 ```
-- **Migration 0220.** Drop và thêm lại `workflow_executions_metadata_belongs_to_a_replay` (0139:141-146) thành
+- **Migration 0225.** Drop và thêm lại `workflow_executions_metadata_belongs_to_a_replay` (0139:141-146) thành
   ```sql
   CHECK (attempt_number >= 1 AND (origin_offset_ms = 0 OR (attempt_number > 1 AND parent_execution_id IS NOT NULL AND parent_run_ix IS NULL)))
   ```
@@ -175,7 +175,7 @@ pub async fn restart_execution(pool: &PgPool, id: Uuid) -> egret_core::Result<Re
   10. Một retry: một run có `retry: maxAttempts: 2` đã dùng hết fail lại sau restart mà không retry (hệ quả của D5).
   11. `restartOrReplayLoopUntil` (Kestra `RestartCaseTest:463-505`): một `LoopUntil` có child lỗi chờ lại từ lúc restart; `maxDuration` của nó được đo từ tick của restart, không phải lần start đầu (D6).
   12. Các side effect D7: một SLA `EXECUTION_ASSERTION` được đánh giá lại khi execution được restart đang chạy; flow `outputs:` được đánh giá lại ở state terminal mới (giá trị cũ vẫn hiển thị cho đến lúc đó).
-- [ ] `tests/migration_0220_restart_attempt.rs`:
+- [ ] `tests/migration_0225_restart_attempt.rs`:
   - một row top-level giờ có thể giữ `attempt_number = 3, origin_offset_ms = 0`;
   - `origin_offset_ms > 0` mà không có dạng replay vẫn bị từ chối.
 - [ ] Commit: `feat(workflow): restart an execution in place (package 7a)`.

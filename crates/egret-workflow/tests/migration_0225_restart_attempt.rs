@@ -1,4 +1,4 @@
-//! Migration 0220 (workflow package 7a, spec D7 and D12): a restart in place
+//! Migration 0225 (workflow package 7a, spec D7 and D12): a restart in place
 //! raises `attempt_number` on any execution, so 0139's
 //! `workflow_executions_metadata_belongs_to_a_replay` no longer ties
 //! `attempt_number > 1` to the replay shape. `origin_offset_ms` stays the
@@ -40,7 +40,7 @@ async fn insert_top_level(
         "INSERT INTO workflow.executions \
            (workspace_id, namespace, flow_key, source, state, history, inputs, \
             attempt_number, origin_offset_ms) \
-         VALUES ($1, 'w', 'm0220', 'id: m0220', 'FAILED', '[\"FAILED\"]'::jsonb, '{}'::jsonb, \
+         VALUES ($1, 'w', 'm0225', 'id: m0225', 'FAILED', '[\"FAILED\"]'::jsonb, '{}'::jsonb, \
                  $2, $3) \
          RETURNING id",
     )

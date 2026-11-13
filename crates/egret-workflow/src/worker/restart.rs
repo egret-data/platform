@@ -119,7 +119,7 @@ pub(super) enum Nested {
 }
 
 /// The facts of the execution row the checks read, beside what `load` holds.
-struct Row0220 {
+struct Row0225 {
     loop_root: Option<Uuid>,
     files_pruned: bool,
     idle: bool,
@@ -251,7 +251,7 @@ struct Locked {
     ctx: claim::ExecutionCtx,
     state: crate::executor::ExecutionState,
     now: crate::executor::Tick,
-    row: Row0220,
+    row: Row0225,
 }
 
 /// `load` takes the execution's lock (`FOR NO KEY UPDATE`); the run rows are
@@ -280,7 +280,7 @@ async fn lock(conn: &mut PgConnection, id: Uuid, stack: Stack) -> Result<Locked>
         ctx,
         state,
         now,
-        row: Row0220 {
+        row: Row0225 {
             loop_root: row.get("loop_root"),
             files_pruned: row.get("files_pruned"),
             idle: row.get("idle"),
@@ -321,7 +321,7 @@ impl From<D10> for StateChangeRefused {
 /// the restart through its root), the files pruned, an `afterExecution:`
 /// still running.
 fn d10_refusal(
-    row: &Row0220,
+    row: &Row0225,
     state: &crate::executor::ExecutionState,
     nested: Nested,
 ) -> Option<D10> {

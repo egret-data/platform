@@ -7194,7 +7194,7 @@ tasks:
 }
 
 /// **Migration 0139's CHECK: the replay metadata is unrepresentable on a row
-/// that is not a replay.** Since 0220 (package 7a) that is the
+/// that is not a replay.** Since 0225 (package 7a) that is the
 /// `origin_offset_ms` alone: a restart raises `attempt_number` on any row.
 ///
 /// A guard nobody has seen fail is a guard nobody has seen, and this one cannot
@@ -7244,16 +7244,16 @@ async fn the_replay_metadata_is_unrepresentable_on_anything_but_a_replay(pool: s
         .await
         .expect("a replay -- a parent, no loop index, attempt 2 -- is legal");
     assert_ne!(replay, root);
-    // **Migration 0220 (package 7a, spec D7/D12): a restart in place raises
+    // **Migration 0225 (package 7a, spec D7/D12): a restart in place raises
     // `attempt_number` on ANY execution**, so attempt 2 with no offset is
     // legal on a top-level execution and on a loop iteration alike. The
     // offset stays the replay's alone, which the refused cases below pin.
     insert(&pool, ws, None, None, 2, 0)
         .await
-        .expect("a top-level execution restarted once is legal (0220)");
+        .expect("a top-level execution restarted once is legal (0225)");
     insert(&pool, ws, Some(root), Some(0), 2, 0)
         .await
-        .expect("a loop iteration restarted once is legal (0220)");
+        .expect("a loop iteration restarted once is legal (0225)");
 
     let cases = [
         (
@@ -7288,7 +7288,7 @@ async fn the_replay_metadata_is_unrepresentable_on_anything_but_a_replay(pool: s
     for (what, parent, loop_ix, attempt, offset) in cases {
         let refused = insert(&pool, ws, parent, loop_ix, attempt, offset).await;
         let Err(e) = refused else {
-            panic!("{what} was ACCEPTED; migration 0139/0220's CHECK did not refuse it");
+            panic!("{what} was ACCEPTED; migration 0139/0225's CHECK did not refuse it");
         };
         assert!(
             e.to_string()

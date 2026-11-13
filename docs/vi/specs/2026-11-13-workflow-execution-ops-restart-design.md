@@ -84,7 +84,7 @@ Phần còn lại của dòng #7 thuộc các gói con 7b–7f (§8).
     4. Sau đó execution chuyển `RESTARTED` và executor chạy tiếp.
     5. Đích `CANCELLED` làm execution `CANCELLED` ngay lập tức. *Review cuối I3:* nó không mở lại tổ tiên nào (xem §6 mục 10).
   - **Execution status** nối thêm một state vào history và không đụng đến run nào. Một parent mà run `Subflow` đã terminal thì bỏ qua state mới của child (`subflow.rs:731-737`), như Kestra trên thực tế (`ChangeStateTestCase:43-68`, mà FIXME của nó ghi lại điều này).
-- **D12. Một migration**, tạm thời là **0220** (main đang ở 0219 và không PR mở nào thêm migration; kiểm tra lại trước khi push, theo quy tắc namespace dùng chung). Nó nới lỏng CHECK của 0139 để `attempt_number > 1` được phép trên mọi execution, giữ `origin_offset_ms <> 0` chỉ cho dạng replay.
+- **D12. Một migration**, **0225** (viết ban đầu là 0220; đổi số trước khi push ngày 2026-11-14, khi main ở 0221 (#858) và PR mở #859 đã giữ 0222 đến 0224, theo quy tắc namespace dùng chung). Nó nới lỏng CHECK của 0139 để `attempt_number > 1` được phép trên mọi execution, giữ `origin_offset_ms <> 0` chỉ cho dạng replay.
 - **D13. Route, permission và audit.** Đây là các path kiểu egret, như kill và resume, không phải các path `/actions/` của Kestra:
   - `POST /api/ws/{ws}/workflows/executions/{id}/restart`. Tham số query `revision` bị từ chối với 400, nêu tên 7b.
   - `POST /api/ws/{ws}/workflows/executions/{id}/task-runs/{task_run_id}/state`, body `{ "state": … }`.
@@ -105,7 +105,7 @@ Phần còn lại của dòng #7 thuộc các gói con 7b–7f (§8).
 
   Mỗi action dùng một `ConfirmAction` với lý do cho nút bị vô hiệu, invalidate query của execution để polling tiếp tục, và ánh xạ các 409 có mã. Client được sinh lại bằng `npm run gen:api`, không bao giờ dùng orval trần.
 - **D15 (2026-11-13, trong A1). `mark_as` dưới một `WorkingDirectory` bị từ chối** (`inside_working_directory`, 409). Một run bên trong block không thể bị ghi đè mà không phá bất biến một-thư-mục của block, và quy tắc 2 của D10 đã làm rỗng các block như vậy khi restart. `EW src/executor/restart.rs`; commit `e371889f`.
-- **D16 (2026-11-13, trong A2). Migration 0220 cũng định nghĩa lại `workflow.execution_is_idle`** để bỏ qua các run có history rỗng. Các run end-hook bị làm rỗng được lưu là `CREATED` với history `[]`, và hàm cũ không bao giờ coi chúng là idle, nên chúng không bao giờ được dựng lại. `migrations/0220_workflow_restart_attempt_number.sql`; commit `50872d45`.
+- **D16 (2026-11-13, trong A2). Migration 0225 cũng định nghĩa lại `workflow.execution_is_idle`** để bỏ qua các run có history rỗng. Các run end-hook bị làm rỗng được lưu là `CREATED` với history `[]`, và hàm cũ không bao giờ coi chúng là idle, nên chúng không bao giờ được dựng lại. `migrations/0225_workflow_restart_attempt_number.sql`; commit `50872d45`.
 - **D17 (2026-11-13, trong A2). Các run bị reset và bị làm rỗng được xoá `claimed_at`.** Một lease cũ trên run bị reset làm một `Parallel` đang chờ nó bị đứng. `EW src/worker/restart.rs`; commit `50872d45`.
 - **D18 (2026-11-13, trong A5). `set_execution_status` từ chối iteration của loop và `afterExecution:` đang chạy, không từ chối file đã bị dọn.** State của một iteration thuộc về Loop của nó, và `afterExecution:` sở hữu state cuối cùng khi nó chạy; đổi status chỉ nối thêm một state và không chạy lại gì, nên file bị dọn không quan trọng. `EW src/worker/restart.rs`; commit `cffe6172`.
 - **D19 (2026-11-13, trong A3). Một iteration của Loop kết thúc sau khi run Loop của nó đã terminal vẫn được ghi nhận** (entry outputs và bộ đếm), mà không làm Loop di chuyển. Nếu không, một Loop được restart xong sẽ có danh sách thiếu iteration đó và bộ đếm không khớp với các row. `handleTerminated` của Kestra cũng ghi nhận nó. `EW src/worker/spawn.rs`; commit `10124879`.
@@ -122,7 +122,7 @@ Phần còn lại của dòng #7 thuộc các gói con 7b–7f (§8).
 | `executor` (thuần) | `restart.rs` mới:<br>• `restart(plan, &state) -> Result<Vec<Command>, NothingToRestart>`<br>• `mark_as(plan, &state, run, target) -> Vec<Command>`<br>• một "reset set" chung (D2), "end-hook set" (D4) và ánh xạ state (D3)<br>• một `Command::EmptyRun(RunIx)` mới (hoặc `RestartLoop` được tổng quát hoá) và `Command::OpenFlowableAttempt` (D6)<br>• unit test trên các state dựng tay, không DB |
 | `worker` | `restart_execution`, `set_task_run_state`, `set_execution_status`:<br>• `transaction!`, rồi `load` (lock), kiểm tra lại, apply, `settle`, như `resume_by_hand`<br>• Loop (D8) và Subflow (D9) tại chỗ<br>• `outputs`/`message`/`secret_outputs` bị xoá trên các run bị reset và bị làm rỗng<br>• `attempt_number`, label |
 | `routes` | Ba handler (D13), OpenAPI, audit; các 409 có mã (`nothing_to_restart`, `after_execution_running`, `files_pruned`, `not_restartable`, `state_unchanged`) |
-| migration | 0220 (D12) |
+| migration | 0225 (D12) |
 | frontend | D14; `npm run gen:api` |
 | docs | `egret-data/docs` Platform → Workflows → trang executions; ảnh chụp màn hình của ba action |
 
@@ -149,7 +149,7 @@ Các test chỉ có ở egret:
 - `WorkingDirectory` chạy lại trong một thư mục mới;
 - một container `delete: false` không được gắn lại (D5);
 - các từ chối 409 của D10 và D11;
-- CHECK 0220 theo cả hai chiều;
+- CHECK 0225 theo cả hai chiều;
 - flow-trigger event cho mỗi state được nối thêm;
 - một id ngoài workspace là 404;
 - logic nút ở frontend (vitest);
@@ -179,14 +179,14 @@ Các test chỉ có ở egret:
 
 ## 7. Như đã xây
 
-Xây 2026-11-13 trên `feat/workflow-execution-ops`, base `origin/main` `9996fde4`. Mọi commit bên dưới đều nằm trên nhánh đó. Migration `0220_workflow_restart_attempt_number.sql` (số được kiểm tra lại với main và các PR mở trước khi push). Ratchet của executor là **301 / 25 / 25 / 0** và census **295 / 25 / 21**, đo tại T0 và không đổi ở mỗi task.
+Xây 2026-11-13 trên `feat/workflow-execution-ops`, base `origin/main` `9996fde4`. Mọi commit bên dưới đều nằm trên nhánh đó. Migration `0225_workflow_restart_attempt_number.sql` (đổi số từ 0220 trước khi push, xem D12). Ratchet của executor là **301 / 25 / 25 / 0** và census **295 / 25 / 21**, đo tại T0 và không đổi ở mỗi task.
 
 | Task | Commit | Đã vào những gì | Test thêm | Vòng sửa |
 |---|---|---|---|---|
 | Spec, plan | `5c440e09`, `a3bb2ee7` | Spec này và plan của nó. | – | – |
 | T0 | – | Container, ratchet và census nền. | – | – |
 | A1 | `a3bb2ee7..e371889f` (`878d09a8`, `e371889f`) | Các command thuần `executor::restart` (restart và mark-as); Pause `needPause` (D23); `SetRunState{Created}` xoá `working_dir`. | `executor::restart::tests` trong `src/executor/restart.rs`, 20 | 1: iteration `LoopUntil` được restart không bị đếm lại; `mark_as` dưới một `WorkingDirectory` bị từ chối (D15) |
-| A2 | `e371889f..50872d45` (`50872d45`) | `restart_execution` tại chỗ: reset, run end-hook bị làm rỗng với id mới, label, `attempt_number` + 1, side write, đánh giá lại SLA; migration 0220 (nới lỏng CHECK 0139, D12; định nghĩa lại `execution_is_idle`, D16). | `tests/restart.rs` 20, `tests/migration_0220_restart_attempt.rs` 5; test replay-metadata của `tests/worker.rs` được cập nhật | 0 |
+| A2 | `e371889f..50872d45` (`50872d45`) | `restart_execution` tại chỗ: reset, run end-hook bị làm rỗng với id mới, label, `attempt_number` + 1, side write, đánh giá lại SLA; migration 0225 (nới lỏng CHECK 0139, D12; định nghĩa lại `execution_is_idle`, D16). | `tests/restart.rs` 20, `tests/migration_0225_restart_attempt.rs` 5; test replay-metadata của `tests/worker.rs` được cập nhật | 0 |
 | A3 | `50872d45..10124879` (`e5f24b50`, `10124879`) | Restart Loop từ iteration lỗi; bộ đếm được tính lại theo từng index cho các iteration được restart. | `tests/restart.rs` +4 (lên 24 sau khi sửa) | 1: iteration đến muộn được ghi nhận (D19) |
 | A4 | `10124879..2c511ad9` (`1ed811fa`, `2c511ad9`) | Child Subflow được restart tại chỗ qua một walk job (D20). | `tests/restart.rs` +7 (lên 31) | 0 (một sửa trước review: child không load được thì spawn child mới) |
 | A5 | `2c511ad9..cffe6172` (`cffe6172`) | `set_task_run_state` (mark-as) và `set_execution_status` (D11, D18). | `tests/mark_as.rs` 17 | 0 |
@@ -206,7 +206,7 @@ Review cuối (`069613b19`) tìm ra ba mục Important và mười mục Minor; 
 - `6f6dd4558` (I1, D24): restart và task-run state đi qua hai cửa của replay, state hiện tại của flow và cổng creator `egret.sql`; đổi status thì không qua cửa nào. Test route trong `tests/restart_routes.rs` (+9); mô tả OpenAPI của các route nêu tên các câu trả lời mới.
 - `6b9d80b8f` (I2, M2, M3, M8): một child `Subflow` `PAUSED` không được restart (D9 được sửa); state của child được parse bằng `from_wire`, state lạ spawn child mới; một iteration `Loop` không tải được rơi về dòng "No restartable…" của D8 thay vì làm hỏng lời gọi, và log iteration bị từ chối là `warn`. **Một run `Subflow` đã restart được retry sẽ restart lại cùng child đó** (cổng là mọi cửa sổ terminal-rồi-`CREATED`, không phải transition mới nhất): hành vi `RETRY_FAILED` của Kestra, được ghi trên `restart_earlier_child`.
 - `6876b089a` (I3, M5): mark `CANCELLED` không mở lại tổ tiên nào; SLA không được đánh giá trong settle đầu tiên của một restart hay mark (§6 mục 10 và 12); một run được mark nằm trong nhánh end-hook bị làm rỗng cùng nhánh, như `changeTaskRunState` của Kestra. Dạng "vẫn `PAUSED`" (hàng triage 19) không cần đổi: D10 từ chối nó trước khi `mark_as` chạy. Mỗi test khẳng định `execution_is_idle` và, khi áp dụng, rằng một lần đổi status sau đó được chấp nhận.
-- `d05e693ee` (M6): `workflow.run_is_live(state, history)` trong migration 0220, dùng chung bởi `execution_is_idle`, descendants và phase count của kill, và force-close.
+- `d05e693ee` (M6): `workflow.run_is_live(state, history)` trong migration 0225, dùng chung bởi `execution_is_idle`, descendants và phase count của kill, và force-close.
 - `eae2d1118` (M10): doc comment của `task_runs`. M1 (citation D11.3) được sửa ở trên. M4, M7 và các hàng đánh dấu Leave được để nguyên như review khuyên.
 
 ### Phát hiện hoãn lại
@@ -224,7 +224,7 @@ Mọi dòng `minor (deferred)` của sổ cái controller, cho review cuối.
 - Xoá `claimed_at` cho phép một sibling đã fail theo rule 1 chạy hai lần (nay là §6 mục 9).
 - `a_loop_restart_is_not_built_yet` và `a_subflow_restart_is_not_built_yet` chỉ assert `exec_meta` (A3 và A4 đã thay chúng).
 - `side_writes` chuyển đổi `i32` hai lần; `UPDATE` id cho từng run có thể gộp thành một câu lệnh.
-- Cách đặt tên `Row0220`.
+- Cách đặt tên `Row0225`.
 - Test SLA cố định phần đuôi history là `RESTARTED CANCELLED` (không có `RUNNING`): SLA bắn trong settle của chính restart. Xác nhận đây là chủ ý (review cuối).
 - `working_dir_snapshot` giữ URI cũ cho đến lần prepare mới; chưa được ghi chú trong code.
 
