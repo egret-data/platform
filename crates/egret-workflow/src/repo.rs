@@ -1474,10 +1474,11 @@ impl ExecutionRepo {
     }
 
     /// Every task run of `execution`, ordered by `run_ix` -- their CREATION
-    /// order, **except a run a restart emptied** (empty `history`, state
-    /// `CREATED`): Kestra removes those, egret keeps the row so run indices
-    /// stay stable, and a reader must not see a run that never ran again. which is the order `advance()` addresses them in and the order
-    /// the oracle compares.
+    /// order, which is the order `advance()` addresses them in and the order
+    /// the oracle compares -- **except a run a restart emptied** (empty
+    /// `history`, state `CREATED`): Kestra removes those, egret keeps the row
+    /// so run indices stay stable, and a reader must not see a run that never
+    /// ran again.
     ///
     /// A foreign `execution` and one that never existed both answer an empty
     /// `Vec`, indistinguishably, for the same reason [`Self::get`] answers
