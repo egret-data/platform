@@ -1521,9 +1521,9 @@ pub struct ClearedPeople {
     pub people: Vec<ClearedPerson>,
     /// More people are listed than `people` carries.
     pub truncated: bool,
-    /// Whether engines enforce the clearance at all: true when it names at
-    /// least one required role. False means anyone with SQL access reads the
-    /// data on engines.
+    /// Whether engines enforce the clearance at all: true when it names a
+    /// required role or group. False means the clearance names neither, so
+    /// anyone with SQL access reads the data on engines.
     pub engines_enforce: bool,
     /// How many of `count` are `onEngines`, independent of the 200 cap.
     pub on_engines_count: u32,
@@ -1609,9 +1609,9 @@ pub async fn cleared_people_via(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    // `egret_perm_ir::lower::withhold`: a gate with no required role compiles to nothing
-    // on engines.
-    let engines_enforce = !roles.is_empty();
+    // `egret_perm_ir::lower::withhold`: a gate naming a role or a group is
+    // enforced on engines (a group member is excepted like a role holder).
+    let engines_enforce = !roles.is_empty() || !group_ids.is_empty();
     // A gate stores group ids; membership is read by name, the key the
     // compiler expands. An id no group has any more admits nobody.
     let groups: Vec<String> = if group_ids.is_empty() {
@@ -1660,13 +1660,15 @@ pub async fn cleared_people_via(
         });
     }
     for m in group_members_via(conn, &groups).await? {
-        listed.entry(m.user_id).or_default().via.insert(ClearedVia {
+        let l = listed.entry(m.user_id).or_default();
+        l.via.insert(ClearedVia {
             kind: ClearedViaKind::Group,
             name: m.group_name,
             scope: None,
             scope_id: None,
             through_group: None,
         });
+        l.on_engines |= m.username.is_some();
     }
 
     let count = u32::try_from(listed.len()).unwrap_or(u32::MAX);

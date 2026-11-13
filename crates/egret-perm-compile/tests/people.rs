@@ -1530,10 +1530,10 @@ async fn cleared_people_lists_each_population_of_a_mixed_gate_once() {
     );
 }
 
-/// A gate naming only groups compiles to nothing on engines: nobody is
-/// withheld there, so `enginesEnforce` is false and no member is `onEngines`.
+/// A gate naming only groups is enforced on engines: `enginesEnforce` is true
+/// and a member with a username is `onEngines`.
 #[tokio::test]
-async fn cleared_people_group_only_gate_is_not_enforced_on_engines() {
+async fn cleared_people_group_only_gate_is_enforced_on_engines() {
     let Some(e) = env().await else { return };
     let p = &e.db.pool;
     let t = tag();
@@ -1548,10 +1548,10 @@ async fn cleared_people_group_only_gate_is_not_enforced_on_engines() {
     let group = insert_group(p, &group_name, &[member]).await;
     let tag_id = insert_tag_with_clearance(p, &[], &[group]).await;
     let body = principal(&e, &format!("/perm/clearances/{tag_id}/people")).await;
-    assert_eq!(body["enginesEnforce"], false, "{body}");
+    assert_eq!(body["enginesEnforce"], true, "{body}");
     assert_eq!(body["count"], 1);
-    assert_eq!(body["onEnginesCount"], 0);
-    assert_eq!(body["people"][0]["onEngines"], false);
+    assert_eq!(body["onEnginesCount"], 1);
+    assert_eq!(body["people"][0]["onEngines"], true);
     assert_eq!(body["people"][0]["via"], json!([group_via(&group_name)]));
 }
 

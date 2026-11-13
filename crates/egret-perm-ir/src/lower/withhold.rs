@@ -3,22 +3,18 @@
 //! [`Statement`]s with [`Effect::Withhold`]. Which gates a profile lowers,
 //! which it skips and why, the ceiling refusal, and how a classification is
 //! withheld on an enforcement point that cannot resolve one itself (the
-//! capability matrix, M6/M7, M10–M12, M15). The reads are the loader's
+//! capability matrix, M6/M7, M11–M12, M15). The reads are the loader's
 //! (`egret-perm-compile`'s `ir_load::load_withhold_inputs`); the rendering of
 //! a statement into a target's shape is the target's (`ranger::withhold`,
 //! whose module doc carries why a clearance is a DENY on `{public}` with the
 //! cleared users enumerated as exceptions, and SP4a D2's amendment).
 //!
-//! # A tag gated ONLY by `required_groups` compiles to NOTHING, and says so
+//! # Groups are exemptions like roles
 //!
-//! D7 measured that a Ranger item naming a GROUP matches nobody either (no
-//! group provider on Trino, no usersync in egret). A group-only gate would
-//! therefore compile to a deny whose exceptions except nobody — a control that
-//! withholds the column from everybody — or, if the group were put on the deny
-//! side, to one that withholds nothing. Neither is the clearance that was
-//! authored, so nothing is emitted and the skip is REPORTED (a [`Lowering`],
-//! matrix M10) and logged rather than being silent. SP4c Task 5 says the same
-//! thing in the UI, where the clearance is set.
+//! A gate's exemption set is the holders of `required_roles` UNION the members
+//! of every `required_groups` group, resolved to usernames at compile time
+//! (a Ranger item cannot name a group). A gate naming only groups is therefore
+//! enforced like any other; one that names neither is no gate.
 //!
 //! # Two shapes, because the two engines resolve a tag differently
 //!
@@ -130,7 +126,7 @@ pub struct Gate {
     /// UNION the members of every `required_groups` group
     /// (`ClassificationPolicyRepo`'s semantics: `>= 1` role OR `>= 1` group),
     /// sorted and deduplicated so a recompile that changed nothing writes
-    /// nothing. A group cannot be named in a Ranger item (M10), so it is
+    /// nothing. A group cannot be named in a Ranger item, so it is
     /// resolved to its members here, like a role.
     pub cleared: Vec<String>,
     /// The tables the classification reaches on the EP, at either level; read
@@ -459,7 +455,7 @@ fn largest(mut tables: Vec<TableCount>) -> Vec<TableCount> {
 /// `fold` is the EP's identifier fold (`egret_ranger_eval::resource::fold_identifier`
 /// on the Ranger target), passed by the caller so the IR does not depend on
 /// the evaluator. Lowerings come in the order the old compiler reported them:
-/// every gate's group-only or no-channel lowering first, then the expanding
+/// every gate's no-channel lowering first, then the expanding
 /// EP's per-target lowerings in gate order.
 pub fn lower_withholds(
     ep: &EpInput,
@@ -750,9 +746,7 @@ fn lower_expanded_gate(
 /// not cleared for every classification on the engine cannot create any
 /// materialized view there, including over unclassified data.
 ///
-/// A group-only gate is skipped before it contributes, so it neither creates
-/// the guard nor narrows its exceptions (the same skip as the column
-/// withhold). An EP with no classification gets no guard. The statement's
+/// An EP with no classification gets no guard. The statement's
 /// source is the first gate that reached the EP; the guard has no tag of its
 /// own.
 fn materialized_view_guard(ep: &EpInput, reached: &[(&Gate, Vec<String>)]) -> Option<Statement> {
