@@ -129,6 +129,7 @@ pub mod lineage;
 #[cfg(test)]
 mod lineage_compile_tests;
 pub(crate) mod members;
+pub mod role_holder_group;
 // SP4d-3 Task 7: the migration transaction (re-classify, write, recompile,
 // switch off, provenance, re-gate every affected profile) and its undo.
 pub mod migrate;
