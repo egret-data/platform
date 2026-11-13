@@ -57,7 +57,10 @@
 //!   through since J-F3 Task 1b: a non-`public` group is expanded into its
 //!   members' usernames (`crate::members`, `user_groups` joined to
 //!   `groups.name`), so a name with no row expands to nobody — on an exclude,
-//!   the same fail open.
+//!   the same fail open. A managed `role:<name> holders` group (SP3c-1,
+//!   [`is_role_holder_group_ref`]) is accepted the way [`PUBLIC_GROUP`] is —
+//!   egret maintains its membership, so it is valid even before its row is
+//!   materialised — and is expanded by group name like any other group.
 //! - **`role`** — `roles.name`, in any scope (`migrations/0003_workspace_rbac.sql:21-27`).
 //!   A role is NOT free text: it is expanded at compile time into its holders'
 //!   usernames by `crate::members::role_usernames`, which joins `roles` by name
@@ -260,6 +263,14 @@ async fn lookup(conn: &mut PgConnection, p: &Principal) -> Result<Lookup, PermHt
         PrincipalKind::User => lookup_user(conn, p).await,
         PrincipalKind::Group => {
             if p.r#ref == PUBLIC_GROUP {
+                return Ok(found(p));
+            }
+            if is_role_holder_group_ref(&p.r#ref) {
+                // SP3c-1: a managed `role:<name> holders` group. egret maintains
+                // its membership (`role_holder_group::sync_role_holder_group_in_tx`),
+                // so it is a valid principal even before its row is materialised;
+                // it is expanded by group NAME like any other group (no
+                // special-case expansion — `crate::members`).
                 return Ok(found(p));
             }
             let found: bool =
@@ -602,6 +613,14 @@ pub async fn warn_fail_open_principals(
         );
     }
     Ok(open)
+}
+
+/// A managed `role:<name> holders` group ref (SP3c-1), matching `^role:.* holders$`
+/// — the shape `role_holder_group::role_holder_group_name` produces. Such a group
+/// is maintained by egret, so principal-ref validation accepts it the way it
+/// accepts [`PUBLIC_GROUP`], without requiring a `groups` row to be present yet.
+fn is_role_holder_group_ref(r: &str) -> bool {
+    r.starts_with("role:") && r.ends_with(" holders")
 }
 
 fn dedup_keeping_first(list: &mut Vec<Principal>) {

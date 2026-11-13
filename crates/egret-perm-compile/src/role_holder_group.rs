@@ -31,10 +31,10 @@ pub async fn sync_role_holder_group_in_tx(
 
     let roles = [role.to_string()];
     let mut want: std::collections::BTreeSet<Uuid> = std::collections::BTreeSet::new();
-    for m in members::role_holders_via(&mut **tx, &roles).await? {
+    for m in members::role_holders_via(tx, &roles).await? {
         want.insert(m.user_id);
     }
-    for m in members::role_group_holders_via(&mut **tx, &roles).await? {
+    for m in members::role_group_holders_via(tx, &roles).await? {
         want.insert(m.user_id);
     }
     let want: Vec<Uuid> = want.into_iter().collect();
