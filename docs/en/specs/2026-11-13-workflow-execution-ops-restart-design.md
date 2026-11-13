@@ -58,12 +58,13 @@ Taken under the autonomy rules (follow Kestra unless there is a reason; keep saf
   - **`attempt_number` goes up by one** (`ES:358`, `ExecutionMetadata.nextAttempt()`). Migration 0139's CHECK `workflow_executions_metadata_belongs_to_a_replay` allows this only on a replay row, so the package's migration (D12) relaxes it. `origin_offset_ms` is unchanged, so a `CREATE_NEW_EXECUTION` retry still measures `maxDuration` from creation.
   - **Label `system.restarted: "true"`** is added if absent (`ES:360-364`). Only the engine may write `system.*` labels (`EW src/labels.rs:52`). The `Subflow` restart (D9) keys off it, as Kestra's does.
   - **Flow triggers fire again.** The outbox writes one event per appended state (`claim.rs:3869-3933`), so `RESTARTED`, `RUNNING` and the new terminal state each reach a listener. Kestra does the same.
-  - **SLA** `EXECUTION_ASSERTION` is evaluated again while the execution is live (`claim.rs:3830-3835`). Kestra re-creates the monitors (`ExecutionEventMessageHandler:160`).
+  - **SLA** `EXECUTION_ASSERTION` is evaluated again while the execution is live (`claim.rs:3830-3835`). Kestra re-creates the monitors (`ExecutionEventMessageHandler:160`). *Final review I3:* not in the restart's (or task-run state change's) own first settle, but from the next one on; see §6 item 12.
   - **Flow outputs** keep their old value until the new terminal state, which re-evaluates them (`became_terminal`, `claim.rs:3713-3722`).
 - **D8. `Loop`: restart the last failing iteration in place.** As Kestra (`ES:985-991`, `ExS:735-762`): the iteration with the highest `loop_index` whose state is `FAILED` or `PAUSED` is restarted by the same function, in place, under its own lock. The `Loop` run goes back to `RUNNING` and does not spawn. If no iteration qualifies, the `Loop` run ends `FAILED` with the log line "No restartable loop sub-execution found", as Kestra does. Because `spawn::on_execution_terminal` returns at once while the loop run is terminal (`spawn.rs:634-640`), the loop run must be `RUNNING` before the iteration can end again. The plan pins how the loop's counters and its #6 outputs list treat an iteration that ends a second time (one entry per index, not two).
 - **D9. `Subflow`: restart the failed child in place (Q1).** When the walk opens a reset `Subflow` run of an execution labelled `system.restarted`, it looks for the earlier child, linked by `trigger_execution_id`/`trigger_run_ix` (`EW src/worker/subflow.rs`) with the same `value` and iteration; only exactly one match counts.
-  - The child is `FAILED` or `PAUSED`: restart it in place with the same function, and the `Subflow` run waits for it as for a fresh child.
-  - The child is in any other terminal state: the `Subflow` run ends `SUCCESS`. Kestra does this, with the comment "don't restart it as it's terminated successfully" (`ExS:1311-1318`).
+  - The child is `FAILED`: restart it in place with the same function, and the `Subflow` run waits for it as for a fresh child.
+  - The child is in any other terminal state, or `PAUSED`: the `Subflow` run ends `SUCCESS`. Kestra does this, with the comment "don't restart it as it's terminated successfully" (`ExS:1311-1318`); its `isFailed()` is `== FAILED` (`ExecutableUtils.java:126-129`), so a `PAUSED` child is not restarted either (Q1). *Amended at the final review (I2): this bullet first restarted a `PAUSED` child too, which reopened its `Pause` and passed a person's approval with no `onResume` inputs.*
+  - The child is in a state this build does not know: a fault in the row's content, so a new child is spawned with a `warn` (final review M2).
   - No match or several: spawn a new child, as today.
   - Lock order is parent then child, as kill's cascade takes it (`EW src/worker/kill.rs:82-104`). The plan reuses kill's deadlock retry.
 - **D10. Refusals beyond Kestra.**
@@ -74,12 +75,12 @@ Taken under the autonomy rules (follow Kestra unless there is a reason; keep saf
   - **Target states.** Both routes take `SUCCESS`, `WARNING`, `FAILED` or `CANCELLED`, the four Kestra's UI offers (`ui/src/components/executions/ChangeStatus.vue:101-121`, `ChangeExecutionStatus.vue:96-97`). Kestra's server takes any state for a task run and any terminal state for an execution. egret keeps the narrower door; a state outside the four is 400.
   - **Source state.** Both require an execution that has ended and is not `KILLED` (`KS:189-191`). A loop iteration is changed through its root.
   - **No-op.** A target equal to the current state is 409. Kestra logs a warning and returns unchanged (`KS:73-77`); egret's resume already answers 409 to a call that changes nothing (`routes.rs:3125`).
-  - **Task-run state** follows `markAs` (`ES:603-662`):
+  - **Task-run state** follows `changeTaskRunState` (`ES:521-559`, the method Kestra's `ChangeTaskRunState` command calls), which calls `markAs` (`ES:603-662`):
     1. The run gets the target state and its last attempt's state is overwritten, with no new attempt.
-    2. Its ancestors go `RUNNING` and the end-hook runs are emptied (D4).
-    3. The execution gets the `system.restarted` label and `attempt_number + 1`.
+    2. Its ancestors go `RUNNING` and the end-hook runs are emptied (D4, `ES:532-552`). *Final review M5:* the marked run is emptied with them when it lies in an `errors:`/`finally:`/`afterExecution:` branch, as Kestra's `removeIf` runs after `markAs` and spares none, so the branch runs again.
+    3. The execution gets the `system.restarted` label (`changeTaskRunState`, `ES:526-530`) and `attempt_number + 1` (`markAs`, `ES:610`). *Citation corrected at the final review (M1): the label is not `markAs`'s.*
     4. The execution then goes `RESTARTED` and the executor carries on.
-    5. A `CANCELLED` target makes the execution `CANCELLED` at once.
+    5. A `CANCELLED` target makes the execution `CANCELLED` at once. *Final review I3:* it reopens no ancestor (see §6 item 10).
   - **Execution status** appends one state to the history and touches no run. A parent whose `Subflow` run is already terminal ignores the child's new state (`subflow.rs:731-737`), as Kestra's does in practice (`ChangeStateTestCase:43-68`, whose FIXME records it).
 - **D12. One migration**, provisionally **0220** (main is at 0219 and no open PR adds one; re-check before push, per the shared-namespace rule). It relaxes the 0139 CHECK so that `attempt_number > 1` is allowed on any execution, keeping `origin_offset_ms <> 0` for the replay shape only.
 - **D13. Routes, permission and audit.** These are egret-style paths, as kill and resume are, not Kestra's `/actions/` paths:
@@ -170,7 +171,9 @@ egret-only tests:
 7. A `Subflow` inside a `LoopUntil` is matched to its earlier child by `run_ix` only, so a restarted iteration spawns a new child. The child row carries no iteration id; a fix needs a migration (follow-up, roadmap row #12). Recorded 2026-11-13, A4.
 8. A restarted `Subflow` whose child is still running waits for it. Kestra ends the run `SUCCESS`. Recorded 2026-11-13, A4.
 9. Clearing `claimed_at` (D17) lets a sibling that already failed rule 1 run twice: the old handler is fenced at commit, but its side effects may repeat. Kestra behaves the same. Recorded 2026-11-13, A2.
-10. Marking a run `CANCELLED`, or leaving a run still `PAUSED`, leaves the reopened ancestors `RUNNING` under a terminal execution. This is Kestra-faithful and a known issue; it is untested at worker level. Recorded 2026-11-13, A1 and A5.
+10. Marking a run `CANCELLED` reopens none of its ancestors (final review I3). Kestra reopens them and cancels the execution at once; in egret those runs stayed `RUNNING` for good under a terminal execution, which then was never idle (never pruned, every later change refused `after_execution_running`). The "still `PAUSED`" shape needs no change: a terminal execution with a `PAUSED` run is not idle, so D10 refuses the mark (`after_execution_running`) before `mark_as` is reached. First recorded 2026-11-13, A1 and A5, as Kestra-faithful.
+11. Restart and task-run state answer to the flow's current state and the `egret.sql` creator gate, as replay does (D24). Kestra has neither gate; security-driven.
+12. An `EXECUTION_ASSERTION` SLA is not evaluated in the first settle of a restart or task-run state change, only from the next settle on (final review I3). Kestra evaluates it on the `RESTARTED` message and leaves the reset runs behind, live under a cancelled execution.
 
 ## 7. As built
 
@@ -193,6 +196,16 @@ Measured at the end of each task, `cargo test -p egret-workflow`: `--test restar
 Also from the build: under `transmitFailed: true` a sibling that ends `SUCCESS` after the first failure is now counted and listed (matches Kestra's `handleTerminated`); the counters of a restarted iteration are re-based from the rows, so an earlier iteration that the 16 MiB cap read as `FAILED` is recounted `SUCCESS`. The frontend browser check (FE-TEST-2, light and dark) is owed at Z.
 
 Gates at Z (2026-11-13, on `a28207d9`, the last code commit): `cargo fmt --check` clean; `cargo clippy -p egret-workflow -p egret-server -p egret-config -p egret-metastore --all-targets -- -D warnings` clean; `cargo check -p egret-bin` clean; `cargo test -p egret-workflow --no-fail-fast` 3684 passed, 55 ignored, 7 failed, all seven in `sql_starrocks_live` (no StarRocks engine on the test host); `cargo test -p egret-config -p egret-server -p egret-metastore` 179 passed, including `committed_openapi_json_is_current`. Ratchet 301/25/25/0 and census 295/25/21, unchanged from T0.
+
+### Final review fixes
+
+The final review (`069613b19`) found three Important and ten Minor items; the fix wave landed on the same branch.
+
+- `6f6dd4558` (I1, D24): restart and task-run state pass replay's two doors, the flow's current state and the `egret.sql` creator gate; change status passes neither. Route tests in `tests/restart_routes.rs` (+9); the routes' OpenAPI descriptions name the new answers.
+- `6b9d80b8f` (I2, M2, M3, M8): a `PAUSED` `Subflow` child is not restarted (D9 amended); the child's state is parsed with `from_wire`, an unknown one spawns a new child; an unloadable `Loop` iteration falls back to the D8 "No restartable…" line instead of failing the call, and the refused-iteration log is `warn`. **A retried restarted `Subflow` run restarts the same child again** (the gate is any terminal-then-`CREATED` window, not the latest transition): Kestra's `RETRY_FAILED` behaviour, documented on `restart_earlier_child`.
+- `6876b089a` (I3, M5): a `CANCELLED` mark reopens no ancestor; the SLA is not evaluated in the first settle of a restart or mark (§6 items 10 and 12); a marked run inside an end-hook branch is emptied with the branch, as Kestra's `changeTaskRunState`. The "still `PAUSED`" shape (triage row 19) needs no change: D10 refuses it before `mark_as` runs. Each test asserts `execution_is_idle` and, where it applies, that a later status change is accepted.
+- `d05e693ee` (M6): `workflow.run_is_live(state, history)` in migration 0220, shared by `execution_is_idle`, the kill's descendants and phase count, and the force-close.
+- `eae2d1118` (M10): the `task_runs` doc comment. M1 (the D11.3 citation) is corrected above. M4, M7 and the rows marked Leave are left as the review advised.
 
 ### Deferred findings
 
