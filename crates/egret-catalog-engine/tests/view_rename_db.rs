@@ -273,7 +273,7 @@ async fn env() -> Option<Env> {
         (
             "starrocks",
             starrocks.id,
-            json!({"starrocksConfig": {"feImage": "starrocks/fe-ubuntu:4.1.4"}}),
+            json!({"starrocksConfig": {"feImage": "ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.4"}}),
         ),
     ] {
         let id: Uuid = sqlx::query_scalar(
