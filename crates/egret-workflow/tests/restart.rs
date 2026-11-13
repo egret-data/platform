@@ -1818,3 +1818,166 @@ async fn flow_outputs_are_evaluated_again_at_the_new_terminal_state(pool: sqlx::
         Some(json!({ "o": format!("b-{attempt}") }))
     );
 }
+
+// ── Final review fixes ─────────────────────────────────────────────────────
+
+async fn is_idle(pool: &sqlx::PgPool, id: Uuid) -> bool {
+    sqlx::query_scalar("SELECT workflow.execution_is_idle($1)")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("execution_is_idle")
+}
+
+/// Set the only child's state by hand (appended to its history).
+async fn set_child_state(pool: &sqlx::PgPool, child: Uuid, state: &str) {
+    sqlx::query(
+        "UPDATE workflow.executions SET state = $2, history = history || jsonb_build_array($2::text), \
+                ended_at = CASE WHEN workflow.state_is_terminal($2) THEN ended_at END \
+          WHERE id = $1",
+    )
+    .bind(child)
+    .bind(state)
+    .execute(pool)
+    .await
+    .expect("set the child's state");
+}
+
+/// The parent of [`a_successful_child_is_not_restarted_and_its_run_ends_success`]:
+/// its `Subflow` run FAILED (as a `set_task_run_state` leaves it) beside a
+/// FAILED `boom`, its child then put in `child_state`.
+async fn parent_with_child_in(
+    pool: &sqlx::PgPool,
+    child_state: &str,
+) -> (Uuid, Vec<ChildRow>, Flaky) {
+    let (db, ws, user) = setup(pool).await;
+    seed_restart_child(&db, ws, user).await;
+    let reg = Flaky::new(&[("boom", 1)]);
+    let source = format!(
+        "id: restart-parent\nnamespace: t\ntasks:\n{}{}",
+        call_subflow("  "),
+        tasks(&["boom"])
+    );
+    let root = start(pool, ws, &source).await;
+    drive(pool, &reg, root).await;
+    assert_eq!(exec_state(pool, root).await, "FAILED");
+    let kids = children(pool).await;
+    assert_eq!(kids.len(), 1);
+    set_child_state(pool, kids[0].0, child_state).await;
+    mark_run(pool, root, "callSubflow", "FAILED").await;
+    (root, children(pool).await, reg)
+}
+
+/// **Final review I2 (Q1; Kestra `ExecutableUtils.java:126-129`, `isFailed()`
+/// is `== FAILED`).** A `PAUSED` child is not restarted in place: the
+/// `Subflow` run ends `SUCCESS` at once, as for any child that is not
+/// `FAILED`, and the child's pause is left for a person to resume.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_paused_child_is_not_restarted_and_its_run_ends_success(pool: sqlx::PgPool) {
+    // Arrange
+    let (root, kids, reg) = parent_with_child_in(&pool, "PAUSED").await;
+
+    // Act
+    let out = restart(&pool, root).await;
+
+    // Assert
+    assert_eq!(out, Restarted::Done);
+    assert_eq!(
+        children(&pool).await,
+        kids,
+        "the PAUSED child is not touched"
+    );
+    let sub = run(&runs_of(&pool, root).await, "callSubflow").clone();
+    assert_eq!(
+        history_tail(&sub.4, 3),
+        ["CREATED", "RUNNING", "SUCCESS"],
+        "{sub:?}"
+    );
+    assert_eq!(sub.6.as_ref().unwrap()["state"], "PAUSED");
+    drive(&pool, &reg, root).await;
+    assert_eq!(exec_state(&pool, root).await, "SUCCESS");
+    assert_eq!(children(&pool).await, kids, "nothing restarted or spawned");
+}
+
+/// **Final review M2.** A child state this build does not know is a fault
+/// in the row's content, not a state to wait on forever: the child is left
+/// alone and a new one is spawned, as for a child that cannot be loaded.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_child_in_an_unknown_state_is_replaced(pool: sqlx::PgPool) {
+    // Arrange
+    let (root, kids, reg) = parent_with_child_in(&pool, "NOT_A_STATE").await;
+
+    // Act
+    let out = restart(&pool, root).await;
+    drive(&pool, &reg, root).await;
+
+    // Assert
+    assert_eq!(out, Restarted::Done);
+    assert_eq!(exec_state(&pool, root).await, "SUCCESS");
+    let after = children(&pool).await;
+    assert_eq!(after.len(), 2, "{after:?}");
+    assert_eq!(after.iter().find(|k| k.0 == kids[0].0), Some(&kids[0]));
+    let new = after.iter().find(|k| k.0 != kids[0].0).unwrap();
+    assert_eq!(new.1, "SUCCESS");
+    let sub = run(&runs_of(&pool, root).await, "callSubflow").clone();
+    assert_eq!(sub.6.as_ref().unwrap()["executionId"], new.0.to_string());
+}
+
+/// **Final review M3.** A `Loop`'s last failing iteration whose row cannot
+/// be loaded (its frozen source no longer plans) does not fail the restart
+/// call: the `Loop` run falls back as when no iteration qualifies (D8),
+/// `FAILED` with Kestra's line, and the iteration is not touched.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_unloadable_iteration_fails_the_loop_with_the_log_line(pool: sqlx::PgPool) {
+    // Arrange
+    let (_db, ws, _) = setup(&pool).await;
+    let reg = Flaky::new(&[]).failing_first_attempt_of(&["failFirstTime"]);
+    let root = start(&pool, ws, &restart_loop("")).await;
+    drive(&pool, &reg, root).await;
+    assert_eq!(exec_state(&pool, root).await, "FAILED");
+    let before = iterations(&pool, root).await;
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].2, "FAILED");
+    sqlx::query("UPDATE workflow.executions SET source = 'tasks: [' WHERE id = $1")
+        .bind(before[0].1)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Act
+    let out = restart_execution(&pool, root).await;
+
+    // Assert
+    assert_eq!(
+        out.expect("the restart call does not fail"),
+        Restarted::Done
+    );
+    let lp = run(&runs_of(&pool, root).await, "loop").clone();
+    assert_eq!(
+        history_tail(&lp.4, 3),
+        ["FAILED", "RUNNING", "FAILED"],
+        "reopened, then failed: {lp:?}"
+    );
+    let lines: Vec<String> = sqlx::query_scalar(
+        "SELECT message FROM workflow.task_logs WHERE execution_id = $1 AND task_run_id = $2",
+    )
+    .bind(root)
+    .bind(lp.2)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l == "No restartable loop sub-execution found"),
+        "{lines:?}"
+    );
+    assert_eq!(
+        iterations(&pool, root).await,
+        before,
+        "the iteration is not touched"
+    );
+    drive(&pool, &reg, root).await;
+    assert_eq!(exec_state(&pool, root).await, "FAILED");
+    assert!(is_idle(&pool, root).await);
+}

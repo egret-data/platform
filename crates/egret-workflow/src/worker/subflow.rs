@@ -664,21 +664,33 @@ pub(super) async fn spawn_one(
 ///
 /// Then, by the child's state:
 ///
-/// - `FAILED` or `PAUSED`: the child is locked (parent, then child) and
-///   restarted in place by the restart's own function; the run stays
-///   `RUNNING` and waits for it as for a fresh child, and its terminal
-///   reaches [`on_child_terminal`], which takes it because the run is not
-///   terminal. A refused restart (files pruned, `afterExecution:` still
-///   running), or a child row that cannot be loaded at all
-///   (`claim::row_content_fault`), leaves the child alone and spawns a new
-///   one, logged at warn.
-/// - any other terminal state: the run ends `SUCCESS` at once with the
-///   child's outputs copied as [`on_child_terminal`] copies them ("don't
-///   restart it as it's terminated successfully").
+/// - `FAILED` (Kestra's `isFailed()`, `== FAILED`, `ExecutableUtils.java:126-129`):
+///   the child is locked (parent, then child) and restarted in place by the
+///   restart's own function; the run stays `RUNNING` and waits for it as for
+///   a fresh child, and its terminal reaches [`on_child_terminal`], which
+///   takes it because the run is not terminal. A refused restart (files
+///   pruned, `afterExecution:` still running), or a child row that cannot be
+///   loaded at all (`claim::row_content_fault`), leaves the child alone and
+///   spawns a new one, logged at warn.
+/// - any other terminal state, and `PAUSED` (final review I2, Q1): the run
+///   ends `SUCCESS` at once with the child's outputs copied as
+///   [`on_child_terminal`] copies them ("don't restart it as it's terminated
+///   successfully"). A `PAUSED` child is not restarted: that would reopen its
+///   `Pause` and pass a person's approval with no `onResume` inputs; it is
+///   left for a person to resume.
 /// - not terminal (still running): nothing to restart and nothing to spawn;
 ///   the run waits for its terminal. Kestra would end the run `SUCCESS`
 ///   (`!isFailed()`) and leave the child running unwatched; the spec names
 ///   only terminal states, so egret keeps the link.
+/// - a state this build does not know (final review M2): a fault in the
+///   row's content, so the child is left alone and a new one is spawned,
+///   logged at warn -- never a wait that no terminal can end.
+///
+/// **A retried run restarts the same child again** (final review M8): the
+/// gate below is "some terminal-then-`CREATED` window in the run's history",
+/// not "the latest transition", so a `retry:` of a restarted `Subflow` run
+/// still passes it and restarts the same `FAILED` child in place -- Kestra's
+/// `RETRY_FAILED` behaviour, which is what is wanted.
 ///
 /// `wait: false` completes the run `SUCCESS` beside the restart, as a fresh
 /// spawn does, with the state the restart leaves the child in at this
@@ -726,8 +738,15 @@ async fn restart_earlier_child(
         return Ok(None);
     };
     let child = *child;
-    match child_state.as_str() {
-        "FAILED" | "PAUSED" => {
+    let Some(child_state_parsed) = super::from_wire(child_state) else {
+        tracing::warn!(
+            execution = %ctx.id, run = r.run, %child, state = %child_state,
+            "a Subflow's earlier child is in a state this build does not know; a new child is spawned"
+        );
+        return Ok(None);
+    };
+    match child_state_parsed {
+        RunState::Failed => {
             let restarting =
                 match super::restart::restart_subflow_child(conn, child, ctx.caller()).await {
                     Ok(answer) => answer,
@@ -770,7 +789,7 @@ async fn restart_earlier_child(
                 }
             }
         }
-        "SUCCESS" | "WARNING" | "KILLED" | "CANCELLED" | "SKIPPED" | "RETRIED" => {
+        s if s.is_terminal() || s == RunState::Paused => {
             let (outputs, sealed) = match child_outputs(conn, child).await? {
                 ChildOutputs::Copied { outputs, sealed } => (Some(outputs), sealed),
                 ChildOutputs::Failed(_) => (None, None),

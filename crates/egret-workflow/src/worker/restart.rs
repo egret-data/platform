@@ -396,15 +396,31 @@ pub(super) async fn open(
         let prepared = match last {
             Some(iteration) => {
                 let stack = Stack::Nested(ctx.caller());
-                match prepare(conn, iteration, stack, Nested::LoopIteration).await? {
-                    Ok(p) => Some((iteration, p)),
-                    Err(refused) => {
-                        tracing::info!(
+                match prepare(conn, iteration, stack, Nested::LoopIteration).await {
+                    Ok(Ok(p)) => Some((iteration, p)),
+                    Ok(Err(refused)) => {
+                        tracing::warn!(
                             execution = %id, %iteration, ?refused,
                             "a Loop's last failing iteration cannot be restarted"
                         );
                         None
                     }
+                    // **An iteration row that cannot be loaded** (its frozen
+                    // source no longer plans, a history it cannot parse)
+                    // falls back as D9's child does (final review M3): the
+                    // `Loop` run fails with Kestra's line and the parent's
+                    // restart goes on, instead of the whole call failing.
+                    // Only a fault in the row's own content: a SQL error has
+                    // aborted the transaction, and a deadlock must reach
+                    // `restart_execution`'s retry.
+                    Err(e) if claim::row_content_fault(&e) => {
+                        tracing::warn!(
+                            execution = %id, %iteration, error = %e,
+                            "a Loop's last failing iteration cannot be loaded"
+                        );
+                        None
+                    }
+                    Err(e) => return Err(e),
                 }
             }
             None => None,
