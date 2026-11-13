@@ -33302,6 +33302,129 @@
         }
       }
     },
+    "/api/ws/{workspace}/workflows/executions/{id}/restart": {
+      "post": {
+        "tags": [
+          "workflow"
+        ],
+        "summary": "Restart a `FAILED` or `PAUSED` execution in place (Kestra's restart).",
+        "description": "The scoped read keeps a foreign id from reaching the worker, which is\nunscoped; every other check is\n[`worker::restart_execution`](crate::worker::restart_execution)'s, made under\nthe execution's lock, and its answer is authoritative.",
+        "operationId": "restart_execution",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Execution id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "revision",
+            "in": "query",
+            "description": "**Not supported.** Restarting from an older revision of the flow\narrives with package 7b; any value answers 400\n`restart_revision_unsupported`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The execution was restarted in place, as Kestra restarts one: it keeps its id, its `FAILED` and `PAUSED` runs are reset, runs that ended `SUCCESS` keep their outputs and are not run again, and it carries the label `system.restarted: true` and `attempt_number + 1`. The body is its detail afterwards.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query has a `revision` (code `restart_revision_unsupported`; restarting an older revision is package 7b); or the execution is a **loop iteration** (no code; the message names its loop root, which is restarted instead)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such execution in this workspace, indistinguishably from one that never existed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Nothing is written. `not_restartable`: the execution is not `FAILED` or `PAUSED` (the message names its state). `nothing_to_restart`: no run is `FAILED` or `PAUSED`. `after_execution_running`: the execution has ended but its `afterExecution:` tasks still run. `files_pruned`: the retention pruner deleted the execution's files.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/workflows/executions/{id}/resume": {
       "post": {
         "tags": [
@@ -33382,6 +33505,257 @@
           },
           "409": {
             "description": "The execution is not PAUSED (or its pause ended before the resume took the execution's lock), or it is PAUSED only because a `LoopUntil` waits for its next iteration and no `Pause` task is waiting. A resume that changes nothing must not answer 200.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/workflows/executions/{id}/status": {
+      "post": {
+        "tags": [
+          "workflow"
+        ],
+        "summary": "Change a finished execution's status (Kestra's change-state).",
+        "operationId": "set_execution_status",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Execution id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StateChangeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The execution took the status (Kestra's change-state): the state is appended to its history and the execution settles on from it; no task run is touched and no label is added. The body is its detail afterwards.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body is not valid JSON, is not `{\"state\": ...}` with exactly one of `SUCCESS`, `WARNING`, `FAILED`, `CANCELLED` (upper case), or has another field (always 400, never 422); or the execution is a **loop iteration** (no code; the message names its loop root)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such execution in this workspace, indistinguishably from one that never existed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Nothing is written. The worker checks, in this order: loop iteration (the 400 above), `not_restartable` (the execution has not ended, or ended `KILLED`; the message names its state), `after_execution_running` (the execution has ended but its `afterExecution:` still runs), `state_unchanged` (it is already in that state). `files_pruned` does not apply here: nothing runs again.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/workflows/executions/{id}/task-runs/{task_run_id}/state": {
+      "post": {
+        "tags": [
+          "workflow"
+        ],
+        "summary": "Set one task run's state (Kestra's mark-as).",
+        "description": "The scoped read keeps a foreign execution, and a run that is not this\nexecution's, from reaching the worker. The worker decides the rest under\nthe execution's lock. The audit record's `from_state` is the RUN's state\nbefore the change.",
+        "operationId": "set_task_run_state",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Execution id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "task_run_id",
+            "in": "path",
+            "description": "Task run id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StateChangeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The task run took the state (Kestra's mark-as): its outputs are kept, its ancestors are reopened and the execution runs on from `RESTARTED` (or ends `CANCELLED` for a `CANCELLED` target), with the label `system.restarted: true`. The body is the execution's detail afterwards.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body is not valid JSON, is not `{\"state\": ...}` with exactly one of `SUCCESS`, `WARNING`, `FAILED`, `CANCELLED` (upper case), or has another field (always 400, never 422); or the execution is a **loop iteration** (no code; the message names its loop root)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such execution in this workspace, or no task run of it with this id (one removed by a restart counts as none)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Nothing is written. The worker checks, in this order: loop iteration (the 400 above), `files_pruned`, `after_execution_running` (the execution has ended but its `afterExecution:` still runs), `not_restartable` (the execution has not ended, or ended `KILLED`; the message names its state), then the run itself: no such run (the 404 above), `state_unchanged` (the run is already in that state), `inside_working_directory` (the run is inside a `WorkingDirectory`; restart the execution instead).",
             "content": {
               "application/json": {
                 "schema": {
@@ -57144,6 +57518,30 @@
             "description": "Required for a local-auth caller (step-up). OIDC callers re-auth via OIDC."
           }
         }
+      },
+      "StateChangeBody": {
+        "type": "object",
+        "description": "Body of the task-run-state and status routes.",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/StateChangeTarget",
+            "description": "The state to set: `SUCCESS`, `WARNING`, `FAILED` or `CANCELLED`."
+          }
+        },
+        "additionalProperties": false
+      },
+      "StateChangeTarget": {
+        "type": "string",
+        "description": "The four states Kestra's UI offers as the target of a state change (D11).",
+        "enum": [
+          "SUCCESS",
+          "WARNING",
+          "FAILED",
+          "CANCELLED"
+        ]
       },
       "StatementMeta": {
         "type": "object",
