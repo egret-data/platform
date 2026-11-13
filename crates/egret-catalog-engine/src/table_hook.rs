@@ -780,7 +780,7 @@ async fn drop_registered(
         .clone()
         .oneshot(req)
         .await
-        .map_err(|e| e.to_string())?;
+        .unwrap_or_else(|e| match e {});
     if response.status().is_success() {
         Ok(())
     } else {
