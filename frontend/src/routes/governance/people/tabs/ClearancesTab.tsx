@@ -10,29 +10,23 @@ import { TERM } from "@/routes/governance/glossary";
 import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
 import { cn } from "@/lib/utils";
 
-/** The verbatim sentence for a gate that names only groups (spec §2): the compiler emits nothing for it. */
-export const GROUPS_ONLY_GATE = "Engines do not enforce this gate (it names only groups)";
-
 /**
  * The engines' answer, in words, as the server gives it. The compiler enforces
- * only a gate's roles, as a deny excepting the roles' direct holders with a
- * username (`clearance.rs:33-58`); a gate naming only groups compiles to
- * nothing (`clearance.rs:61-70`).
+ * both halves of a gate: a role holder and a member of a required group are
+ * excepted from the withhold.
  */
 export function enginesText(e: EngineClearance): string {
   switch (e.kind) {
     case "cleared":
       return `Cleared through role ${e.role}`;
-    case "not_enforced_groups_only":
-      return GROUPS_ONLY_GATE;
+    case "cleared_via_group":
+      return `Cleared through group ${e.group}`;
     case "not_cleared":
       switch (e.because) {
         case "expired":
           return "Not cleared: the required role has expired. Engines may apply it until the next recompile.";
         case "no_username":
           return "Not cleared: no username yet";
-        case "groups_not_enforced":
-          return "Not cleared: engines enforce only the gate's roles, not its groups";
         default:
           return "Not cleared";
       }

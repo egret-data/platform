@@ -14,8 +14,9 @@ export type EngineClearance = {
   role: string;
   kind: 'cleared';
 } | {
+  group: string;
+  kind: 'cleared_via_group';
+} | {
   because?: null | EngineNotClearedReason;
   kind: 'not_cleared';
-} | {
-  kind: 'not_enforced_groups_only';
 };

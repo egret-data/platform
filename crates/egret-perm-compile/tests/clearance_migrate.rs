@@ -928,6 +928,10 @@ async fn explain_is_byte_identical_across_the_clearance_migration() {
         before.0.contains("trino") && before.1.contains("trino"),
         "the explain must actually answer for the profile: {before:?}"
     );
+    assert_ne!(
+        before.0, before.1,
+        "cleared and uncleared explains must differ, or byte-identity below is vacuous"
+    );
 
     let mut tx = pool.begin().await.unwrap();
     let out = migrate_clearances_in_tx(&mut tx, "test")

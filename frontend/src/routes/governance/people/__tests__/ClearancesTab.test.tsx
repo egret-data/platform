@@ -69,7 +69,7 @@ const CLEARANCES: ClearanceFact[] = [
   }),
   fact("t-hr", "HR", {
     requiredGroups: ["hr"],
-    engines: { kind: "not_enforced_groups_only" },
+    engines: { kind: "cleared_via_group", group: "hr" },
     egret: { kind: "cleared", via: { kind: "group", name: "hr" } },
   }),
   fact("t-fin", "Finance", {
@@ -84,7 +84,7 @@ const CLEARANCES: ClearanceFact[] = [
   fact("t-sec", "Secret", {
     requiredRoles: ["sec"],
     requiredGroups: ["sec_team"],
-    engines: { kind: "not_cleared", because: "groups_not_enforced" },
+    engines: { kind: "cleared_via_group", group: "sec_team" },
     egret: { kind: "cleared", via: { kind: "group", name: "sec_team" } },
   }),
   fact("t-top", "Top", {
@@ -130,7 +130,7 @@ describe("a principal's Clearances tab", () => {
     expect(rowOf("HR")).toEqual([
       "HR",
       "Groups: hr",
-      "Engines do not enforce this gate (it names only groups)",
+      "Cleared through group hr",
       "Cleared through group hr",
     ]);
     expect(rowOf("Finance")).toEqual([
@@ -142,7 +142,7 @@ describe("a principal's Clearances tab", () => {
     expect(rowOf("Secret")).toEqual([
       "Secret",
       "Roles: secGroups: sec_team",
-      "Not cleared: engines enforce only the gate's roles, not its groups",
+      "Cleared through group sec_team",
       "Cleared through group sec_team",
     ]);
     expect(rowOf("Top")).toEqual(["Top", "Roles: top", "Not cleared", "Not cleared"]);
@@ -231,7 +231,7 @@ describe("a principal's Clearances tab", () => {
         fact("t-hr", "HR", {
           requiredRoles: ["hr_reader"],
           requiredGroups: ["hr"],
-          engines: { kind: "not_cleared", because: "groups_not_enforced" },
+          engines: { kind: "cleared_via_group", group: "hr" },
           egret: { kind: "cleared", via: { kind: "itself" } },
         }),
       ],

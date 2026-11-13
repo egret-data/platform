@@ -45859,7 +45859,26 @@
           },
           {
             "type": "object",
-            "description": "Not excepted; `because` says why when they hold a required role in a\nway engines do not apply, or are in a required group (whose half of\nthe gate engines never enforce).",
+            "description": "In a required group (and without a cleared role): the gate's group\nexemption is enforced on engines, like a role holder's.",
+            "required": [
+              "group",
+              "kind"
+            ],
+            "properties": {
+              "group": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "cleared_via_group"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Not excepted; `because` says why when they hold a required role in a\nway engines do not apply.",
             "required": [
               "kind"
             ],
@@ -45878,21 +45897,6 @@
                 "type": "string",
                 "enum": [
                   "not_cleared"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "The gate names only groups, so nothing is compiled for it\n(`clearance.rs:266-276`; measured, live doc §1.1 C6).",
-            "required": [
-              "kind"
-            ],
-            "properties": {
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "not_enforced_groups_only"
                 ]
               }
             }
@@ -46287,8 +46291,7 @@
         "description": "Why engines do not clear a principal egret may clear.",
         "enum": [
           "expired",
-          "no_username",
-          "groups_not_enforced"
+          "no_username"
         ]
       },
       "EnginePluginResponse": {

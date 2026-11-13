@@ -15,5 +15,4 @@ export type EngineNotClearedReason = typeof EngineNotClearedReason[keyof typeof 
 export const EngineNotClearedReason = {
   expired: 'expired',
   no_username: 'no_username',
-  groups_not_enforced: 'groups_not_enforced',
 } as const;

@@ -1070,7 +1070,7 @@ async fn clearances_answer_for_engines_and_for_egret_per_gate() {
     };
     let not_cleared = json!({"kind": "not_cleared"});
     let engines_no = |because: Value| json!({"kind": "not_cleared", "because": because});
-    let groups_only = json!({"kind": "not_enforced_groups_only"});
+    let via_group = |g: &str| json!({"kind": "cleared_via_group", "group": g});
 
     // ua: cleared directly.
     let ua = principal(&e, &user(o.ua)).await;
@@ -1093,7 +1093,7 @@ async fn clearances_answer_for_engines_and_for_egret_per_gate() {
     assert_eq!(
         both(&ua, b),
         (
-            groups_only.clone(),
+            via_group(&o.n("g1")),
             json!({"kind": "cleared", "via": {"kind": "group", "name": o.n("g1")}, "scope": null})
         )
     );
@@ -1108,13 +1108,13 @@ async fn clearances_answer_for_engines_and_for_egret_per_gate() {
             json!({"kind": "cleared", "via": {"kind": "group_role", "group": o.n("g2"), "role": o.n("r1")}, "scope": {"type": "platform"}})
         )
     );
-    assert_eq!(both(&uc, b), (groups_only.clone(), not_cleared.clone()));
-    // Cleared in egret through a required group; engines enforce only the
-    // gate's role half, and say so.
+    assert_eq!(both(&uc, b), (engines_no(Value::Null), not_cleared.clone()));
+    // Cleared through a required group: engines enforce the group exemption
+    // too, so they clear it the same way.
     assert_eq!(
         both(&uc, c),
         (
-            engines_no(json!("groups_not_enforced")),
+            via_group(&o.n("g2")),
             json!({"kind": "cleared", "via": {"kind": "group", "name": o.n("g2")}, "scope": null})
         )
     );
@@ -1122,7 +1122,7 @@ async fn clearances_answer_for_engines_and_for_egret_per_gate() {
     // ud: cleared nowhere (its r1 grant is a deny).
     let ud = principal(&e, &user(o.ud)).await;
     assert_eq!(both(&ud, a), (engines_no(Value::Null), not_cleared.clone()));
-    assert_eq!(both(&ud, b), (groups_only.clone(), not_cleared.clone()));
+    assert_eq!(both(&ud, b), (engines_no(Value::Null), not_cleared.clone()));
     assert_eq!(both(&ud, c), (engines_no(Value::Null), not_cleared.clone()));
 
     // ub holds r1 but has no username; ue's r1 is expired.
@@ -1146,7 +1146,7 @@ async fn clearances_answer_for_engines_and_for_egret_per_gate() {
     assert_eq!(
         both(&g2, c),
         (
-            engines_no(json!("groups_not_enforced")),
+            via_group(&o.n("g2")),
             json!({"kind": "cleared", "via": {"kind": "itself"}, "scope": null})
         )
     );
@@ -1158,7 +1158,7 @@ async fn clearances_answer_for_engines_and_for_egret_per_gate() {
             json!({"kind": "cleared", "via": {"kind": "itself"}, "scope": null})
         )
     );
-    assert_eq!(both(&r1, b), (groups_only, not_cleared));
+    assert_eq!(both(&r1, b), (engines_no(Value::Null), not_cleared));
 }
 
 #[tokio::test]
