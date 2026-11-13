@@ -127,6 +127,11 @@ class Server {
     return { status: 404, body: { error: `no route ${method} ${path}` } };
   }
 
+  /** The reads of the executions list (the children query shares its key prefix). */
+  listReads(): number {
+    return this.calls.filter((c) => c.method === "GET" && c.path === `${BASE}/executions`).length;
+  }
+
   /** The reads of the execution itself, not of its children. */
   executionReads(): number {
     return this.calls.filter((c) => c.method === "GET" && c.path === EXEC_PATH).length;
@@ -920,9 +925,12 @@ describe("ExecutionDetail: Restart, Change status and Change state (execution op
     await userEvent.click(await screen.findByRole("button", { name: "Restart" }));
     const dialog = await screen.findByRole("alertdialog", { name: "Restart this execution?" });
     expect(posts(server, "/restart")).toHaveLength(0);
+    await waitFor(() => expect(server.listReads()).toBeGreaterThan(0));
+    const listBefore = server.listReads();
     await userEvent.click(within(dialog).getByRole("button", { name: "Restart" }));
     await waitFor(() => expect(posts(server, "/restart")).toHaveLength(1));
     await waitFor(() => expect(server.executionReads()).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(server.listReads()).toBeGreaterThan(listBefore));
     expect(toast.success).toHaveBeenCalledWith("Restarted the execution");
   });
 
@@ -943,6 +951,8 @@ describe("ExecutionDetail: Restart, Change status and Change state (execution op
     renderPage();
     await userEvent.click(await screen.findByRole("button", { name: "Change status" }));
     const dialog = await screen.findByRole("alertdialog", { name: "Change the status of this execution?" });
+    await waitFor(() => expect(server.listReads()).toBeGreaterThan(0));
+    const listBefore = server.listReads();
     await userEvent.click(within(dialog).getByRole("combobox", { name: "New state" }));
     const options = (await screen.findAllByRole("option")).map((o) => o.textContent);
     expect(options).toEqual(["Success", "Warning", "Cancelled"]);
@@ -951,6 +961,7 @@ describe("ExecutionDetail: Restart, Change status and Change state (execution op
     await waitFor(() => expect(posts(server, "/status")).toHaveLength(1));
     expect(bodyOf(`${EXEC_PATH}/status`)).toEqual({ state: "SUCCESS" });
     await waitFor(() => expect(server.executionReads()).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(server.listReads()).toBeGreaterThan(listBefore));
     expect(toast.success).toHaveBeenCalledWith("Changed the status to Success");
   });
 
@@ -972,6 +983,8 @@ describe("ExecutionDetail: Restart, Change status and Change state (execution op
     renderPage();
     await userEvent.click(await screen.findByRole("button", { name: "Change state of load" }));
     const dialog = await screen.findByRole("alertdialog", { name: "Change the state of load?" });
+    await waitFor(() => expect(server.listReads()).toBeGreaterThan(0));
+    const listBefore = server.listReads();
     expect(dialog).toHaveTextContent("last attempt only");
     await userEvent.click(within(dialog).getByRole("combobox", { name: "New state" }));
     // The run is SUCCESS: the select never offers it.
@@ -981,6 +994,7 @@ describe("ExecutionDetail: Restart, Change status and Change state (execution op
     await waitFor(() => expect(posts(server, "/task-runs/r-1/state")).toHaveLength(1));
     expect(bodyOf(`${EXEC_PATH}/task-runs/r-1/state`)).toEqual({ state: "FAILED" });
     await waitFor(() => expect(server.executionReads()).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(server.listReads()).toBeGreaterThan(listBefore));
     expect(toast.success).toHaveBeenCalledWith("Changed load to Failed");
   });
 

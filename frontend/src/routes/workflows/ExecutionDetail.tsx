@@ -60,6 +60,7 @@ import {
   stateChangeRefusal,
 } from "@/components/workflows/executions/actions";
 import { ChangeStateDialog } from "@/components/workflows/executions/ChangeStateDialog";
+import { runExecutionAction, useRefreshExecution } from "@/components/workflows/executions/useExecutionAction";
 import { nextExecutionPollMs, staleNote, useNow } from "@/components/workflows/executions/polling";
 import {
   ESTIMATED_DURATION_TITLE,
@@ -368,6 +369,7 @@ const KILL_NOT_APPLIED = "kill_not_applied";
 function ExecutionActions({ ws, execution, now }: { ws: string; execution: ExecutionDto; now: number }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const refresh = useRefreshExecution(ws, execution.id);
   const resume = useWorkflowResumeExecution();
   const replay = useWorkflowReplayExecution();
   const kill = useWorkflowKillExecution();
@@ -396,8 +398,7 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
   const runResume = async () => {
     const res = await resume.mutateAsync({ workspace: ws, id: execution.id });
     if (res.status !== 200) throw new Error("The execution could not be resumed. Try again.");
-    void queryClient.invalidateQueries({ queryKey: workflowsKeys.execution(execution.id) });
-    void queryClient.invalidateQueries({ queryKey: workflowsKeys.executions(ws) });
+    refresh();
     // The page stays, so a toast confirms it (FE-ACTION-2), in terms of the
     // state the route answered, not of what was asked.
     const feedback = resumeFeedback(res.data.state);
@@ -405,43 +406,26 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
     else toast.warning(feedback.message);
   };
 
-  const refresh = () => {
-    void queryClient.invalidateQueries({ queryKey: workflowsKeys.execution(execution.id) });
-    void queryClient.invalidateQueries({ queryKey: workflowsKeys.executions(ws) });
-  };
-
-  const runRestart = async () => {
-    try {
-      const res = await restart.mutateAsync({ workspace: ws, id: execution.id });
-      if (res.status !== 200) throw new Error("The execution could not be restarted. Try again.");
+  const runRestart = () =>
+    runExecutionAction({
+      call: () => restart.mutateAsync({ workspace: ws, id: execution.id }),
+      expected: 200,
+      failure: "The execution could not be restarted. Try again.",
+      refresh,
+      refusal: restartRefusal,
       // Live again, so polling resumes from the refetched state.
-      refresh();
-      toast.success("Restarted the execution");
-    } catch (e) {
-      const sentence = e instanceof ApiError ? restartRefusal(e.code) : null;
-      if (sentence) {
-        refresh();
-        throw new Error(sentence, { cause: e });
-      }
-      throw e;
-    }
-  };
+      onSuccess: () => toast.success("Restarted the execution"),
+    });
 
-  const runSetStatus = async (state: ChangeTarget) => {
-    try {
-      const res = await setStatus.mutateAsync({ workspace: ws, id: execution.id, data: { state } });
-      if (res.status !== 200) throw new Error("The status could not be changed. Try again.");
-      refresh();
-      toast.success(`Changed the status to ${state.charAt(0)}${state.slice(1).toLowerCase()}`);
-    } catch (e) {
-      const sentence = e instanceof ApiError ? stateChangeRefusal("status", e.code) : null;
-      if (sentence) {
-        refresh();
-        throw new Error(sentence, { cause: e });
-      }
-      throw e;
-    }
-  };
+  const runSetStatus = (state: ChangeTarget) =>
+    runExecutionAction({
+      call: () => setStatus.mutateAsync({ workspace: ws, id: execution.id, data: { state } }),
+      expected: 200,
+      failure: "The status could not be changed. Try again.",
+      refresh,
+      refusal: (code) => stateChangeRefusal("status", code),
+      onSuccess: () => toast.success(`Changed the status to ${state.charAt(0)}${state.slice(1).toLowerCase()}`),
+    });
 
   const runReplay = async () => {
     const res = await replay.mutateAsync({ workspace: ws, id: execution.id });
@@ -452,10 +436,6 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
   };
 
   const runKill = async () => {
-    const refresh = () => {
-      void queryClient.invalidateQueries({ queryKey: workflowsKeys.execution(execution.id) });
-      void queryClient.invalidateQueries({ queryKey: workflowsKeys.executions(ws) });
-    };
     // Kill of an execution that has ended: it can only reach its afterExecution run.
     try {
       const res = await kill.mutateAsync({ workspace: ws, id: execution.id, params: { cascade } });

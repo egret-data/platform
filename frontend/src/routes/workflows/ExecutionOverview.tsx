@@ -1,9 +1,7 @@
 import { useId, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ChevronDown, ChevronRight, GitFork, ListTree, Pencil, RotateCw, TextCursorInput } from "lucide-react";
-import { ApiError } from "@/api/client";
 import { useWorkflowListExecutions, useWorkflowSetTaskRunState } from "@/api/generated/workflow/workflow";
 import type { ExecutionDto, ExecutionListItemDto, TaskRunDto } from "@/api/generated/model";
 import { EmptyState } from "@/components/explore/EmptyState";
@@ -22,6 +20,7 @@ import {
   type ChangeTarget,
 } from "@/components/workflows/executions/actions";
 import { ChangeStateDialog } from "@/components/workflows/executions/ChangeStateDialog";
+import { runExecutionAction, useRefreshExecution } from "@/components/workflows/executions/useExecutionAction";
 import { FileRow, FileRowList } from "@/components/workflows/executions/files/FileRow";
 import { findFileUris, isFileUri, pathSteps } from "@/components/workflows/executions/outputs/outputsModel";
 import { nextPollMs } from "@/components/workflows/executions/polling";
@@ -360,31 +359,22 @@ function RunDuration({ run, now }: { run: TaskRunDto; now: number }) {
  * with that run selected (`gantt?run=<run_ix>`, spec §6.4).
  */
 function TaskRuns({ ws, execution, now, canManage }: { ws: string; execution: ExecutionDto; now: number; canManage: boolean }) {
-  const queryClient = useQueryClient();
+  const refresh = useRefreshExecution(ws, execution.id);
   const setState = useWorkflowSetTaskRunState();
   const [changing, setChanging] = useState<TaskRunDto | null>(null);
   // The route refuses each of these too; the page offers the action only where it can work (D11).
   const changeable = canManage && showsChangeTaskRunState(execution) && canChangeTaskRunState(execution).ok;
 
-  const runChange = async (run: TaskRunDto, state: ChangeTarget) => {
-    const refresh = () => {
-      void queryClient.invalidateQueries({ queryKey: workflowsKeys.execution(execution.id) });
-      void queryClient.invalidateQueries({ queryKey: workflowsKeys.executions(ws) });
-    };
-    try {
-      const res = await setState.mutateAsync({ workspace: ws, id: execution.id, taskRunId: run.id, data: { state } });
-      if (res.status !== 200) throw new Error("The task run state could not be changed. Try again.");
-      refresh();
-      toast.success(`Changed ${run.task_id} to ${state.charAt(0)}${state.slice(1).toLowerCase()}`);
-    } catch (e) {
-      const sentence = e instanceof ApiError ? stateChangeRefusal("task_run", e.code) : null;
-      if (sentence) {
-        refresh();
-        throw new Error(sentence, { cause: e });
-      }
-      throw e;
-    }
-  };
+  const runChange = (run: TaskRunDto, state: ChangeTarget) =>
+    runExecutionAction({
+      call: () => setState.mutateAsync({ workspace: ws, id: execution.id, taskRunId: run.id, data: { state } }),
+      expected: 200,
+      failure: "The task run state could not be changed. Try again.",
+      refresh,
+      refusal: (code) => stateChangeRefusal("task_run", code),
+      onSuccess: () => toast.success(`Changed ${run.task_id} to ${state.charAt(0)}${state.slice(1).toLowerCase()}`),
+    });
+
   const gantt = `/explore/${ws}/workflows/executions/${encodeURIComponent(execution.id)}/gantt`;
   if (execution.runs.length === 0) {
     return (
