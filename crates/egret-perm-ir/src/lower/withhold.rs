@@ -126,13 +126,12 @@ pub struct Gate {
     /// the name (the same resolution a tag-selected rule uses).
     pub classification_name: String,
     pub required_roles: Vec<String>,
-    /// `required_groups` is empty. The groups themselves are never needed: a
-    /// group cannot except anybody on any EP egret provisions (M10).
-    pub required_groups_empty: bool,
-    /// The users holding at least one of `required_roles`
+    /// The exemption set: the users holding at least one of `required_roles`
+    /// UNION the members of every `required_groups` group
     /// (`ClassificationPolicyRepo`'s semantics: `>= 1` role OR `>= 1` group),
-    /// the UNION of their member sets, sorted and deduplicated so a recompile
-    /// that changed nothing writes nothing.
+    /// sorted and deduplicated so a recompile that changed nothing writes
+    /// nothing. A group cannot be named in a Ranger item (M10), so it is
+    /// resolved to its members here, like a role.
     pub cleared: Vec<String>,
     /// The tables the classification reaches on the EP, at either level; read
     /// only when [`needs_targets`] says so, else empty.
@@ -210,10 +209,10 @@ fn expands(ep: &EpInput) -> bool {
 }
 
 /// Whether the loader must read the tables carrying `gate`'s classification:
-/// the EP expands withholds per column (M7), and the gate names a role, so it
-/// is not skipped (an informational tag, or a group-only gate, M10).
-pub fn needs_targets(ep: &EpInput, gate: &Gate) -> bool {
-    expands(ep) && !gate.required_roles.is_empty()
+/// the EP expands withholds per column (M7). Every gate the loader hands over
+/// names a role or a group, so none is skipped.
+pub fn needs_targets(ep: &EpInput) -> bool {
+    expands(ep)
 }
 
 /// Whether the loader must ask the catalog about the targets' tables: the EP
@@ -454,9 +453,8 @@ fn largest(mut tables: Vec<TableCount>) -> Vec<TableCount> {
 ///
 /// A gate naming no role and no group is NO gate — an informational tag
 /// (`egret_bi::tags::ClassificationPolicyRepo`'s own semantics, and the Cedar
-/// loader's) — and lowers to nothing, silently: there is no control to report
-/// the absence of. A gate naming groups only is a
-/// [`ReasonCode::WithholdExemptionByGroupOnly`] lowering (M10).
+/// loader's) — and the loader never hands it over. A gate naming groups only
+/// is an ordinary gate: the loader resolves the groups into `cleared`.
 ///
 /// `fold` is the EP's identifier fold (`egret_ranger_eval::resource::fold_identifier`
 /// on the Ranger target), passed by the caller so the IR does not depend on
@@ -483,35 +481,6 @@ pub fn lower_withholds(
     let mut expanding: Vec<&Gate> = Vec::new();
 
     for g in gates {
-        if g.required_roles.is_empty() && g.required_groups_empty {
-            continue;
-        }
-        if g.required_roles.is_empty() {
-            match ask(
-                ep.kind,
-                ep.classification_channel,
-                &Capability::WithholdExemptionByGroup,
-            ) {
-                Support::Missing(code) => out.lowered.lowerings.push(skip(
-                    ep,
-                    g,
-                    code,
-                    "the tag's clearance names only `required_groups`, and D7 measured that a \
-                     Ranger item naming a group matches nobody on any engine egret provisions — \
-                     so a deny emitted for it would withhold the column from everybody, and the \
-                     gate stays enforced on object access (Cedar) only"
-                        .to_string(),
-                )),
-                other => {
-                    return Err(CompileError::Db(format!(
-                        "the capability matrix answers {other:?} for a group exemption on {:?}, \
-                         which no withhold lowering handles (tag {:?})",
-                        ep.kind, g.classification_name
-                    )))
-                }
-            }
-            continue;
-        }
         if g.cleared.is_empty() {
             // NOT a lowering, and not a defect: nobody holds the clearing
             // role, so nobody is cleared, and a withhold standing for
@@ -863,12 +832,11 @@ mod tests {
             columns: columns.iter().map(|c| c.to_string()).collect(),
         }
     }
-    fn gate(name: &str, roles: &[&str], groups_empty: bool, cleared: Vec<String>) -> Gate {
+    fn gate(name: &str, roles: &[&str], cleared: Vec<String>) -> Gate {
         Gate {
             classification_id: Uuid::from_u128(9),
             classification_name: name.into(),
             required_roles: roles.iter().map(|r| r.to_string()).collect(),
-            required_groups_empty: groups_empty,
             cleared,
             targets: Vec::new(),
         }
@@ -881,24 +849,27 @@ mod tests {
     ) -> Gate {
         Gate {
             targets,
-            ..gate(name, roles, true, cleared)
+            ..gate(name, roles, cleared)
         }
     }
 
     #[test]
-    fn a_groups_only_gate_is_not_compiled_m10() {
-        let g = gate("pii", &[], false, vec![]);
+    fn a_groups_only_gate_lowers_like_any_other_excepting_its_resolved_members() {
+        // The loader resolves `required_groups` into `cleared`, so a gate with
+        // no roles but cleared members is an ordinary withhold.
+        let g = gate("pii", &[], vec!["bob".into()]);
         let out = lower_withholds(&trino_ep(true), &[g], fold, 500, &Always).unwrap();
-        assert!(out.lowered.statements.is_empty());
+        assert!(out.lowered.lowerings.is_empty());
+        assert_eq!(out.lowered.statements.len(), 1);
         assert_eq!(
-            out.lowered.lowerings[0].code,
-            ReasonCode::WithholdExemptionByGroupOnly
+            out.lowered.statements[0].audience.except[0].name,
+            MemberName::User("bob".into())
         );
     }
 
     #[test]
     fn trino_withholds_read_and_write_on_the_classification() {
-        let g = gate("pii", &["analyst"], true, vec!["ann".into()]);
+        let g = gate("pii", &["analyst"], vec!["ann".into()]);
         let s = &lower_withholds(&trino_ep(true), &[g], fold, 500, &Always)
             .unwrap()
             .lowered
@@ -1002,27 +973,13 @@ mod tests {
 
     #[test]
     fn a_trino_profile_without_a_channel_lowers_to_a_skip() {
-        let g = gate("pii", &["analyst"], true, vec![]);
+        let g = gate("pii", &["analyst"], vec![]);
         let out = lower_withholds(&trino_ep(false), &[g], fold, 500, &Always).unwrap();
         assert!(out.lowered.statements.is_empty());
         assert_eq!(
             out.lowered.lowerings[0].code,
             ReasonCode::NoClassificationChannel
         );
-    }
-
-    #[test]
-    fn an_informational_tag_lowers_to_nothing_and_says_nothing() {
-        let out = lower_withholds(
-            &trino_ep(true),
-            &[gate("pii", &[], true, vec![])],
-            fold,
-            500,
-            &Always,
-        )
-        .unwrap();
-        assert!(out.lowered.statements.is_empty());
-        assert!(out.lowered.lowerings.is_empty());
     }
 
     #[test]

@@ -377,14 +377,15 @@ struct GateRow {
 ///    follows their first query). This runs after the model expansion's
 ///    mints ([`load_ep`]), as it always has;
 /// 3. per gate, in order, the tables carrying its tag on this service, when
-///    [`needs_targets`] (StarRocks, a gate naming a role);
+///    [`needs_targets`] (StarRocks);
 /// 4. when [`needs_table_shapes`]: one column read for every table any gate
 ///    classifies as a whole (folded, first spelling), then one view read for
 ///    the names the column read did not find — a name with no columns may be
 ///    a VIEW, which never becomes a table (KI-307 follow-up).
 ///
-/// `cleared` is the UNION of the gate's roles' holders, sorted and
-/// deduplicated.
+/// `cleared` is the UNION of the gate's roles' holders and its groups'
+/// members, sorted and deduplicated. A row naming neither is no gate and is
+/// not read.
 pub(crate) async fn load_withhold_inputs(
     conn: &mut sqlx::PgConnection,
     ep: &EpInput,
@@ -398,6 +399,7 @@ pub(crate) async fn load_withhold_inputs(
                 cp.required_groups \
            FROM classification_policies cp \
            JOIN tags t ON t.id = cp.tag_id \
+          WHERE cardinality(cp.required_roles) > 0 OR cardinality(cp.required_groups) > 0 \
           ORDER BY cp.tag_id",
     )
     .fetch_all(&mut *conn)
@@ -415,6 +417,14 @@ pub(crate) async fn load_withhold_inputs(
         .into_iter()
         .collect();
     let members = crate::members::role_usernames(conn, &wanted, missing).await?;
+    let wanted_groups: Vec<Uuid> = rows
+        .iter()
+        .flat_map(|g| g.required_groups.iter().copied())
+        .collect::<std::collections::BTreeSet<Uuid>>()
+        .into_iter()
+        .collect();
+    let group_members =
+        crate::members::group_usernames_by_id(conn, &wanted_groups, missing).await?;
 
     let mut gates: Vec<Gate> = Vec::with_capacity(rows.len());
     // Each gate's targets with their warehouse, which the catalog reads need.
@@ -426,17 +436,21 @@ pub(crate) async fn load_withhold_inputs(
                 cleared.extend(names.iter().cloned());
             }
         }
+        for group in &row.required_groups {
+            if let Some(names) = group_members.get(group) {
+                cleared.extend(names.iter().cloned());
+            }
+        }
         cleared.sort();
         cleared.dedup();
         let gate = Gate {
             classification_id: row.tag_id,
             classification_name: row.tag_name,
             required_roles: row.required_roles,
-            required_groups_empty: row.required_groups.is_empty(),
             cleared,
             targets: Vec::new(),
         };
-        let read = if needs_targets(ep, &gate) {
+        let read = if needs_targets(ep) {
             crate::rules::group_by_table(
                 tag_assignments_for_service_via(conn, service_id, &row.tag_key)
                     .await
