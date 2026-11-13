@@ -489,60 +489,68 @@ async fn rewritten_row_present(
 }
 
 /// Restore one rewritten row from its holder-group ref back to its role ref.
+/// Asserts it changed EXACTLY one row: the undo already held the row `FOR UPDATE`
+/// through [`rewritten_row_present`], so an affected count other than 1 means it
+/// slipped away in the gap — the undo refuses and rolls back rather than deleting
+/// the provenance and reporting a success that restored nothing.
 async fn restore_row(tx: &mut Transaction<'_, Postgres>, r: &Rewrite) -> Result<(), PermHttpError> {
-    match (r.table.as_str(), &r.mode) {
-        ("grant_principals", Some(mode)) => {
-            sqlx::query(
-                "UPDATE perm.grant_principals \
-                    SET kind = $4::perm.principal_kind, ref = $5 \
-                  WHERE grant_id = $1 AND kind = 'group'::perm.principal_kind AND ref = $2 \
-                    AND mode = $3::perm.principal_mode",
-            )
-            .bind(r.id)
-            .bind(&r.group_name)
-            .bind(mode)
-            .bind(&r.prev_kind)
-            .bind(&r.prev_ref)
-            .execute(&mut **tx)
-            .await
-            .map_err(PermHttpError::db)?;
-        }
-        ("rule_exemptions", Some(mode)) => {
-            sqlx::query(
-                "UPDATE perm.rule_exemptions \
-                    SET kind = $4::perm.principal_kind, ref = $5 \
-                  WHERE rule_id = $1 AND kind = 'group'::perm.principal_kind AND ref = $2 \
-                    AND mode = $3::perm.principal_mode",
-            )
-            .bind(r.id)
-            .bind(&r.group_name)
-            .bind(mode)
-            .bind(&r.prev_kind)
-            .bind(&r.prev_ref)
-            .execute(&mut **tx)
-            .await
-            .map_err(PermHttpError::db)?;
-        }
-        ("engine_grant_principals", None) => {
-            sqlx::query(
-                "UPDATE perm.engine_grant_principals \
-                    SET kind = $3::perm.principal_kind, ref = $4 \
-                  WHERE engine_grant_id = $1 AND kind = 'group'::perm.principal_kind AND ref = $2",
-            )
-            .bind(r.id)
-            .bind(&r.group_name)
-            .bind(&r.prev_kind)
-            .bind(&r.prev_ref)
-            .execute(&mut **tx)
-            .await
-            .map_err(PermHttpError::db)?;
-        }
+    let affected = match (r.table.as_str(), &r.mode) {
+        ("grant_principals", Some(mode)) => sqlx::query(
+            "UPDATE perm.grant_principals \
+                SET kind = $4::perm.principal_kind, ref = $5 \
+              WHERE grant_id = $1 AND kind = 'group'::perm.principal_kind AND ref = $2 \
+                AND mode = $3::perm.principal_mode",
+        )
+        .bind(r.id)
+        .bind(&r.group_name)
+        .bind(mode)
+        .bind(&r.prev_kind)
+        .bind(&r.prev_ref)
+        .execute(&mut **tx)
+        .await
+        .map_err(PermHttpError::db)?
+        .rows_affected(),
+        ("rule_exemptions", Some(mode)) => sqlx::query(
+            "UPDATE perm.rule_exemptions \
+                SET kind = $4::perm.principal_kind, ref = $5 \
+              WHERE rule_id = $1 AND kind = 'group'::perm.principal_kind AND ref = $2 \
+                AND mode = $3::perm.principal_mode",
+        )
+        .bind(r.id)
+        .bind(&r.group_name)
+        .bind(mode)
+        .bind(&r.prev_kind)
+        .bind(&r.prev_ref)
+        .execute(&mut **tx)
+        .await
+        .map_err(PermHttpError::db)?
+        .rows_affected(),
+        ("engine_grant_principals", None) => sqlx::query(
+            "UPDATE perm.engine_grant_principals \
+                SET kind = $3::perm.principal_kind, ref = $4 \
+              WHERE engine_grant_id = $1 AND kind = 'group'::perm.principal_kind AND ref = $2",
+        )
+        .bind(r.id)
+        .bind(&r.group_name)
+        .bind(&r.prev_kind)
+        .bind(&r.prev_ref)
+        .execute(&mut **tx)
+        .await
+        .map_err(PermHttpError::db)?
+        .rows_affected(),
         _ => {
             return Err(PermHttpError::db(format!(
                 "role-principal migration provenance has a malformed rewrite for table {:?}",
                 r.table
             )))
         }
+    };
+    if affected != 1 {
+        return Err(PermHttpError::Conflict(format!(
+            "undo refused, nothing was changed: restoring {} affected {affected} row(s), expected \
+             exactly 1 — the rewritten row changed under the undo. Reconcile by hand first.",
+            describe(r)
+        )));
     }
     Ok(())
 }

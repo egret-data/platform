@@ -57,10 +57,10 @@
 //!   through since J-F3 Task 1b: a non-`public` group is expanded into its
 //!   members' usernames (`crate::members`, `user_groups` joined to
 //!   `groups.name`), so a name with no row expands to nobody — on an exclude,
-//!   the same fail open. A managed `role:<name> holders` group (SP3c-1,
-//!   [`is_role_holder_group_ref`]) is accepted the way [`PUBLIC_GROUP`] is —
-//!   egret maintains its membership, so it is valid even before its row is
-//!   materialised — and is expanded by group name like any other group.
+//!   the same fail open. A managed `role:<name> holders` group (SP3c-1) is a
+//!   group like any other here: it is accepted only when its `groups` row exists
+//!   (the role-principal migration syncs it before storing any ref to it) and is
+//!   flagged fail-open when it does not, never silently accepted.
 //! - **`role`** — `roles.name`, in any scope (`migrations/0003_workspace_rbac.sql:21-27`).
 //!   A role is NOT free text: it is expanded at compile time into its holders'
 //!   usernames by `crate::members::role_usernames`, which joins `roles` by name
@@ -265,14 +265,14 @@ async fn lookup(conn: &mut PgConnection, p: &Principal) -> Result<Lookup, PermHt
             if p.r#ref == PUBLIC_GROUP {
                 return Ok(found(p));
             }
-            if is_role_holder_group_ref(&p.r#ref) {
-                // SP3c-1: a managed `role:<name> holders` group. egret maintains
-                // its membership (`role_holder_group::sync_role_holder_group_in_tx`),
-                // so it is a valid principal even before its row is materialised;
-                // it is expanded by group NAME like any other group (no
-                // special-case expansion — `crate::members`).
-                return Ok(found(p));
-            }
+            // SP3c-1: a managed `role:<name> holders` group is a group like any
+            // other — accepted ONLY when its `groups` row exists, so a ref to a
+            // holder group of a role that was never synced is flagged (it fails
+            // open on an exclude). The migration syncs the holder group in the
+            // same transaction BEFORE it stores any ref to it, so the row is
+            // always present by then; no carve-out that skips this check is safe,
+            // because it would let an author name a never-synced holder group and
+            // have the exclude silently evaporate (the J-F3 fail-open hole).
             let found: bool =
                 sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM groups WHERE name = $1)")
                     .bind(&p.r#ref)
@@ -615,14 +615,6 @@ pub async fn warn_fail_open_principals(
     Ok(open)
 }
 
-/// A managed `role:<name> holders` group ref (SP3c-1), matching `^role:.* holders$`
-/// — the shape `role_holder_group::role_holder_group_name` produces. Such a group
-/// is maintained by egret, so principal-ref validation accepts it the way it
-/// accepts [`PUBLIC_GROUP`], without requiring a `groups` row to be present yet.
-fn is_role_holder_group_ref(r: &str) -> bool {
-    r.starts_with("role:") && r.ends_with(" holders")
-}
-
 fn dedup_keeping_first(list: &mut Vec<Principal>) {
     let mut seen = std::collections::HashSet::new();
     list.retain(|p| seen.insert((p.kind.as_str(), p.r#ref.clone())));
@@ -907,6 +899,50 @@ mod tests {
         .await
         .expect("classify");
         assert!(matches!(stored, Stored::Unresolved(_)), "{username}");
+    }
+
+    /// SP3c-1 (review Fix 1): a `role:<name> holders` group ref whose row was
+    /// never synced must NOT be silently accepted — an author naming it in an
+    /// exclude would have the subtract evaporate (the J-F3 fail-open hole). An
+    /// authoring write is refused, and the stored-ref report classifies it
+    /// `Unresolved` (fails open), never `Empty`.
+    #[tokio::test]
+    async fn a_ghost_role_holder_group_ref_is_not_silently_accepted() {
+        let Some(dsn) = egret_test_db::url().await else {
+            return;
+        };
+        let db = egret_metastore::Db::connect(&dsn, 2)
+            .await
+            .expect("connect");
+        db.migrate().await.expect("migrate");
+        let mut conn = db.pool.acquire().await.expect("conn");
+
+        // Managed-shaped, but no `groups` row has ever been synced for it.
+        let ghost = Principal {
+            kind: PrincipalKind::Group,
+            r#ref: format!(
+                "role:ghost-{} holders",
+                &Uuid::new_v4().simple().to_string()[..12]
+            ),
+        };
+
+        // The authoring boundary refuses it rather than storing a ref that
+        // expands to nobody.
+        let mut set = PrincipalSet {
+            include: vec![ghost.clone()],
+            exclude: Vec::new(),
+        };
+        let err = resolve_principal_refs(&mut conn, "principals", &mut set, None)
+            .await
+            .expect_err("a never-synced holder-group ref must be refused, not accepted");
+        assert!(matches!(err, PermHttpError::BadRequest(_)), "{err}");
+
+        // The stored-ref report flags it fail-open (Unresolved), not Empty.
+        let stored = classify_stored(&mut conn, &ghost).await.expect("classify");
+        assert!(
+            matches!(stored, Stored::Unresolved(_)),
+            "a never-synced holder group must be Unresolved (fails open), never silently Empty"
+        );
     }
 
     fn user(r: &str) -> Principal {
