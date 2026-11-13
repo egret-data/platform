@@ -106,7 +106,7 @@ describe("PrincipalPicker", () => {
     await user.click(screen.getByRole("combobox", { name: "Include kind" }));
     expect(await screen.findByRole("option", { name: "user" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "group" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "role" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "role" })).not.toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "workspace_members" })).not.toBeInTheDocument();
   });
 
@@ -126,7 +126,7 @@ describe("PrincipalPicker", () => {
     expect(screen.queryByText(/Not enforced yet/)).not.toBeInTheDocument();
   });
 
-  test("includeOnly renders no Exclude list and still offers user, group and role; without it Exclude is there", async () => {
+  test("includeOnly renders no Exclude list and offers user and group but never role; without it Exclude is there", async () => {
     const user = userEvent.setup();
     renderPicker({ includeOnly: true });
 
@@ -135,7 +135,7 @@ describe("PrincipalPicker", () => {
     await user.click(screen.getByRole("combobox", { name: "Include kind" }));
     expect(await screen.findByRole("option", { name: "user" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "group" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "role" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "role" })).not.toBeInTheDocument();
   });
 
   test("without includeOnly the Exclude list is rendered", () => {

@@ -147,6 +147,12 @@ pub async fn delete_platform_role_and_recompile(
         RoleRepo::delete_in_tx(&mut tx, role_id)
             .await
             .map_err(crate::db_error::from_core)?;
+        // SP3c-1: a role delete cascades `access_grants`, so it revokes the role
+        // from every holder at once — the same fail-open-revoke shape as an
+        // explicit unassign. Re-sync the managed holder group (now empty) before
+        // the recompile re-expands it, in this same transaction (no-op before the
+        // migration has run).
+        crate::role_holder_group::sync_role_holder_group_if_present_in_tx(&mut tx, name).await?;
         for summary in recompile_services_in_tx(&mut tx, &services).await? {
             if !summary.skipped.is_empty() {
                 tracing::warn!(
@@ -214,6 +220,17 @@ async fn with_recompile_in_tx(
         let services = affected_services_for_role_membership(tx, name).await?;
         lock_services_in_tx(tx, &services).await?;
         apply(tx, op, ptype, pid, role_id).await?;
+        // SP3c-1: after the role-principal migration a grant that used to name
+        // this role now names its managed `role:<name> holders` group, whose
+        // membership mirrors the holders. The recompile below re-expands that
+        // group from `user_groups`, so the group must be re-synced from the
+        // just-written holder set FIRST — in this same transaction — or the
+        // revoke fails open (the ex-holder stays in the group's `user_groups`
+        // and so in the compiled policy). `affected_services_for_role_membership`
+        // already added the group-ref profiles to `services`, so this is a single
+        // recompile, not a double one. The helper is guarded on the group already
+        // existing (no-op before the migration has run).
+        crate::role_holder_group::sync_role_holder_group_if_present_in_tx(tx, name).await?;
         for summary in recompile_services_in_tx(tx, &services).await? {
             if !summary.skipped.is_empty() {
                 tracing::warn!(
@@ -267,6 +284,19 @@ pub async fn recompile_role_referencing_profiles(pool: &PgPool) -> Result<Vec<i6
     let db = CompileError::from_db;
     let mut tx = pool.begin().await.map_err(db)?;
 
+    // Keep every `role:<name> holders` managed group fresh before the recompile
+    // reads group membership (SP3c-1). Same transaction as the recompile.
+    let managed_roles: Vec<String> = sqlx::query_scalar(
+        "SELECT substring(name from 'role:(.*) holders$') FROM public.groups \
+         WHERE source = 'managed' AND name LIKE 'role:% holders'",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(db)?;
+    for role in &managed_roles {
+        crate::role_holder_group::sync_role_holder_group_in_tx(&mut tx, role).await?;
+    }
+
     let roles: Vec<String> = sqlx::query_scalar(
         "SELECT ref FROM perm.grant_principals WHERE kind = 'role'::perm.principal_kind \
          UNION \
@@ -286,6 +316,8 @@ pub async fn recompile_role_referencing_profiles(pool: &PgPool) -> Result<Vec<i6
     services.sort_unstable();
     services.dedup();
     if services.is_empty() {
+        // Commit, so the holder-group syncs above are not rolled back.
+        tx.commit().await.map_err(db)?;
         return Ok(services);
     }
 

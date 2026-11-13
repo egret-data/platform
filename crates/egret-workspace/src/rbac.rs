@@ -164,6 +164,31 @@ impl Authorizer {
             .map_err(db_err)?;
         }
         guard.refuse_if_emptied_via(&mut tx).await?;
+        // SP3c-1 (review Fix 1): after the role-principal migration each role this
+        // bulk replace touches is referenced by its managed `role:<name> holders`
+        // group, and the recompile below re-expands that group from
+        // `public.user_groups`. So every changed role's holder group must be
+        // re-synced from the just-written `access_grants` FIRST — in this same
+        // transaction, before the single recompile — or revoking a platform role
+        // through this path fails OPEN (the ex-holder lingers in the group until
+        // the boot repair). Pre-migration this path was fail-CLOSED (the
+        // `kind='role'` grant expanded straight from `access_grants`), so the
+        // migration would otherwise turn a safe admin path into an open one. The
+        // helper is guarded on the managed group already existing, so it is a
+        // no-op before the migration has run; it does not recompile (one recompile
+        // below over the `affected` set, which already includes the group-ref
+        // profiles via `affected_services_for_role_membership`).
+        for name in losing
+            .iter()
+            .map(String::as_str)
+            .chain(roles.iter().map(String::as_str))
+        {
+            egret_perm_compile::role_holder_group::sync_role_holder_group_if_present_in_tx(
+                &mut tx, name,
+            )
+            .await
+            .map_err(|e| Error::Internal(anyhow::anyhow!(e)))?;
+        }
         // A recompile FAILURE fails the whole replace, deliberately: a committed
         // role set whose engine policies were never rewritten is worse than a
         // rejected one, because egret's UI shows the new set as in force.

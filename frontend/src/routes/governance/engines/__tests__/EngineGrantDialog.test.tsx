@@ -110,6 +110,7 @@ function answers(over: Record<string, Answer> = {}): Record<string, Answer> {
     ]),
     "/policies?service=lake-tr": ok([policy(1, "compiler")]),
     "/policies?service=lake-sr": ok([]),
+    "/principals?q=etl&kind=group": ok([{ kind: "group", name: "etl", label: "etl" }]),
     ...over,
   };
 }
@@ -124,11 +125,11 @@ async function pickCapability(dialog: HTMLElement, label: string) {
   await userEvent.click(await screen.findByRole("option", { name: new RegExp(`^${label}`) }));
 }
 
-async function addRole(dialog: HTMLElement, role: string) {
+async function addGroup(dialog: HTMLElement, group: string) {
   await userEvent.click(within(dialog).getByRole("combobox", { name: "Include kind" }));
-  await userEvent.click(await screen.findByRole("option", { name: "role" }));
-  await userEvent.type(within(dialog).getByRole("textbox", { name: "Include role name" }), role);
-  await userEvent.click(within(dialog).getByRole("button", { name: "Add" }));
+  await userEvent.click(await screen.findByRole("option", { name: "group" }));
+  await userEvent.type(within(dialog).getByRole("combobox", { name: "Include group search" }), group);
+  await userEvent.click(await screen.findByRole("option", { name: new RegExp(`^${group}`) }, T));
 }
 
 describe("Grant dialog: who sees it", () => {
@@ -219,7 +220,7 @@ describe("Grant dialog: client checks (F11 §2)", () => {
     const dialog = await openGrant();
     await pickCapability(dialog, "Impersonate a user");
     await userEvent.type(within(dialog).getByLabelText("Target user"), value.replace(/[{]/g, "{{"));
-    await addRole(dialog, "etl");
+    await addGroup(dialog, "etl");
     await userEvent.click(within(dialog).getByRole("button", { name: "Grant" }));
     const field = within(dialog).getByLabelText("Target user");
     expect(field).toHaveAttribute("aria-invalid", "true");
@@ -243,7 +244,7 @@ describe("Grant dialog: writes and the three outcomes (Q4)", () => {
   async function fillImpersonation(dialog: HTMLElement) {
     await pickCapability(dialog, "Impersonate a user");
     await userEvent.type(within(dialog).getByLabelText("Target user"), "ub");
-    await addRole(dialog, "etl");
+    await addGroup(dialog, "etl");
   }
 
   it("creates with the target as a username and no targetUserId; compiled → toast naming the enforcement point", async () => {
@@ -260,7 +261,7 @@ describe("Grant dialog: writes and the three outcomes (Q4)", () => {
       ),
     );
     expect(bodies[`POST /perm/engines/${E_TR}/grants`]).toEqual([
-      { capability: "trino.impersonate_user", values: ["ub"], principals: [{ kind: "role", ref: "etl" }] },
+      { capability: "trino.impersonate_user", values: ["ub"], principals: [{ kind: "group", ref: "etl" }] },
     ]);
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     await waitFor(() =>

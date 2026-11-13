@@ -55,7 +55,7 @@ import { TERM } from "@/routes/governance/glossary";
  * enum member from the three a human can actually use, so the exclusion has
  * to live here, in code, rather than being derived from the response.
  */
-type OfferableKind = "user" | "group" | "role";
+type OfferableKind = "user" | "group";
 
 /**
  * What a chip stores a `ref` as, for a given kind — the value
@@ -106,7 +106,7 @@ export interface PrincipalPickerProps {
   exempt?: boolean;
   /**
    * Edits the Include list only (an engine grant's principals, spec EP21):
-   * no Exclude list is rendered, and `user`/`group`/`role` stay offered.
+   * no Exclude list is rendered, and only `user`/`group` are offered (a role principal can no longer be authored).
    */
   includeOnly?: boolean;
   disabled?: boolean;
@@ -124,7 +124,7 @@ export function PrincipalPicker({
   includeOnly = false,
   disabled = false,
 }: PrincipalPickerProps) {
-  const kinds: OfferableKind[] = exempt ? ["user", "group"] : ["user", "group", "role"];
+  const kinds: OfferableKind[] = ["user", "group"];
 
   return (
     <div className="space-y-4">
@@ -182,12 +182,10 @@ function PrincipalListEditor({
 }) {
   const [kind, setKind] = useState<OfferableKind>(kinds[0]);
   const effectiveKind = kinds.includes(kind) ? kind : kinds[0];
-  const [roleRef, setRoleRef] = useState("");
 
   function add(p: PermPrincipal) {
     if (principals.some((x) => x.kind === p.kind && x.ref === p.ref)) return;
     onChange([...principals, p]);
-    setRoleRef("");
   }
 
   function removeAt(i: number) {
@@ -269,26 +267,6 @@ function PrincipalListEditor({
               </SelectContent>
             </Select>
 
-            {effectiveKind === "role" ? (
-              <>
-                <Input
-                  value={roleRef}
-                  onChange={(e) => setRoleRef(e.target.value)}
-                  placeholder="Role name"
-                  aria-label={`${label} role name`}
-                  className="flex-1"
-                />
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => add({ kind: "role", ref: roleRef.trim() })}
-                  disabled={!roleRef.trim()}
-                >
-                  Add
-                </Button>
-              </>
-            ) : (
               <PrincipalSearchField
                 key={effectiveKind}
                 kind={effectiveKind}
@@ -298,7 +276,6 @@ function PrincipalListEditor({
                 help={listInFlow ? groupHelp : undefined}
                 listInFlow={listInFlow}
               />
-            )}
             </>
             )}
           </div>

@@ -1054,6 +1054,7 @@ describe("PermissionsTab", () => {
         grants: [ok([]), ok([created])],
         preview: ok({ affected: [], compile: { services: [], created: 0, updated: 0, deleted: 0, unchanged: 0, skipped: [] } }),
         grantWrite: { status: 201, body: { id: "g-new" } },
+        principals: ok([{ kind: "group", name: "analysts", label: "analysts" }]),
       }),
     );
     const user = userEvent.setup();
@@ -1063,9 +1064,9 @@ describe("PermissionsTab", () => {
     await user.click(await within(header()).findByRole("button", { name: "Grant access" }));
     const dialog = await screen.findByRole("dialog");
     await user.click(within(dialog).getByRole("combobox", { name: "Include kind" }));
-    await user.click(await screen.findByRole("option", { name: "role" }));
-    await user.type(within(dialog).getByRole("textbox", { name: "Include role name" }), "analyst");
-    await user.click(within(dialog).getByRole("button", { name: "Add" }));
+    await user.click(await screen.findByRole("option", { name: "group" }));
+    await user.type(within(dialog).getByRole("combobox", { name: "Include group search" }), "analyst");
+    await user.click(await screen.findByRole("option", { name: /^analysts/ }));
     await user.click(within(dialog).getByRole("button", { name: "Preview" }));
     const create = within(dialog).getByRole("button", { name: "Create" });
     await waitFor(() => expect(create).toBeEnabled());
@@ -1076,7 +1077,7 @@ describe("PermissionsTab", () => {
       effect: "allow",
       actions: ["read"],
       scope: { catalog_id: "c-ice", schema: "sales", table: "orders" },
-      principals: { include: [{ kind: "role", ref: "analyst" }], exclude: [] },
+      principals: { include: [{ kind: "group", ref: "analysts" }], exclude: [] },
     });
     expect(toast.success).toHaveBeenCalledWith("Grant created.");
     await within(panel()).findByRole("table", { name: "Here" });

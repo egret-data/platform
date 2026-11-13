@@ -9527,6 +9527,141 @@
         }
       }
     },
+    "/api/control-plane/perm/migrate/role-principals": {
+      "post": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "SP3c-1: rewrite every `role` principal (grants, rule exemptions, engine\ngrants) into a ref to that role's managed `role:<name> holders` group,\nPROVABLY — the compiled artifact of every affected profile is fingerprinted\nbefore and after and the whole transaction rolls back on any difference.\nReversible via the `undo` route.",
+        "operationId": "migrate_role_principals",
+        "responses": {
+          "200": {
+            "description": "Every role principal rewritten; the compiled output of each affected profile is byte-identical",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RolePrincipalMigration"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Nothing was changed: the equivalence gate refused, or a recompile it needed was refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/migrate/role-principals/undo": {
+      "post": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "SP3c-1: undo one role-principal migration, restoring the `role` refs it\nrewrote. Refuses, changing nothing, if a rewritten row changed since.",
+        "operationId": "undo_role_principals",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UndoRolePrincipalsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The migration undone"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such migration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Nothing was changed: a rewritten row was edited since",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/perm/overlaps": {
       "get": {
         "tags": [
@@ -54679,6 +54814,31 @@
           }
         }
       },
+      "RolePrincipalMigration": {
+        "type": "object",
+        "description": "What one migration run did: its provenance id, the roles it rewrote, and how\nmany principal rows changed.",
+        "required": [
+          "id",
+          "roles",
+          "rewritten"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "rewritten": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
       "RoleSource": {
         "type": "object",
         "required": [
@@ -58486,6 +58646,20 @@
               "type": "string"
             },
             "description": "Consequences that outlive the undo (review I-2)."
+          }
+        }
+      },
+      "UndoRolePrincipalsRequest": {
+        "type": "object",
+        "description": "`POST …/migrate/role-principals/undo`.",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The `id` the migration answered with."
           }
         }
       },
