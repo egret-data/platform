@@ -3122,6 +3122,7 @@ pub(super) async fn settle(
             jobs: VecDeque::new(),
             phase: Phase::Begin,
             kill_children: false,
+            sla: true,
         },
     )
     .await
@@ -3194,6 +3195,10 @@ pub(super) struct Frame<'a> {
     /// itself, and never a `KILLED` reached by aggregation -- so the
     /// execution's live child executions are killed too ([`Phase::Cascade`]).
     kill_children: bool,
+    /// Whether this settle evaluates the flow's `EXECUTION_ASSERTION` SLA
+    /// ([`sla_terminal`]). Always, except the first settle of a restart or a
+    /// task run's state change ([`Frame::without_sla`]).
+    sla: bool,
 }
 
 impl Frame<'static> {
@@ -3211,6 +3216,7 @@ impl Frame<'static> {
             jobs: VecDeque::new(),
             phase: Phase::Begin,
             kill_children: false,
+            sla: true,
         }
     }
 
@@ -3231,7 +3237,26 @@ impl Frame<'static> {
             jobs: VecDeque::new(),
             phase: Phase::Begin,
             kill_children: false,
+            sla: true,
         }
+    }
+}
+
+impl<'a> Frame<'a> {
+    /// **This settle does not evaluate the SLA** (final review I3): the first
+    /// settle of a restart or of a task run's state change
+    /// (`restart::open`). Its runs have just been reset to `CREATED` or
+    /// reopened in memory; an SLA that ended the execution here would leave
+    /// them live under a terminal execution, since `advance()` does nothing
+    /// for one -- never idle, never pruned, every later change refused
+    /// `after_execution_running`. The next settle, the first one a reset run
+    /// makes, evaluates it as every settle does, on runs that are real again.
+    /// Kestra evaluates it on the `RESTARTED` message itself
+    /// (`ExecutionEventMessageHandler`, `handleExecutionChangedSLA`) and
+    /// leaves the reset runs behind; egret is one settle later.
+    pub(super) fn without_sla(mut self) -> Self {
+        self.sla = false;
+        self
     }
 }
 
@@ -3539,12 +3564,13 @@ async fn advance_frame(conn: &mut PgConnection, frame: &mut Frame<'_>) -> Result
         jobs,
         phase,
         kill_children,
+        sla,
     } = frame;
     let ctx: &ExecutionCtx = ctx;
     match std::mem::replace(phase, Phase::Begin) {
         Phase::Begin => {
             let (surface, spawns, subflows, killed) =
-                begin(conn, ctx, before, state, *now, *release).await?;
+                begin(conn, ctx, before, state, *now, *release, *sla).await?;
             *kill_children = killed;
             // Grouped by the loop run, because the index is per loop run and
             // two `Loop`s can be in flight in one execution.
@@ -3788,6 +3814,7 @@ async fn begin(
     state: &mut ExecutionState,
     now: Tick,
     release: Option<Lease>,
+    sla: bool,
 ) -> Result<(Surface, Vec<Requested>, Vec<subflow::Requested>, bool)> {
     let mut surface = Surface::load(conn, ctx).await?;
     // W9a Task 4: the snapshot every render of this settle reads files
@@ -3842,7 +3869,7 @@ async fn begin(
     // terminal execution -- which is what produces the golden's
     // `["CREATED","CANCELLED"]` with no runs, rather than a `RUNNING` that has
     // to be taken back.
-    if let Some(terminal) = sla_terminal(&surface, ctx, state) {
+    if let Some(terminal) = sla.then(|| sla_terminal(&surface, ctx, state)).flatten() {
         let snapshot = state.clone();
         seq += 1;
         apply(state, &Command::SetExecutionState { state: terminal });

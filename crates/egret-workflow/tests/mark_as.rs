@@ -822,3 +822,108 @@ async fn a_subflow_childs_task_run_marked_leaves_its_parent_alone(pool: sqlx::Pg
         "the parent is unchanged"
     );
 }
+
+// ── Final review fixes ─────────────────────────────────────────────────────
+
+async fn is_idle(pool: &sqlx::PgPool, id: Uuid) -> bool {
+    sqlx::query_scalar("SELECT workflow.execution_is_idle($1)")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("execution_is_idle")
+}
+
+/// **Final review I3.** Marking a NESTED run `CANCELLED` ends the execution
+/// `CANCELLED` and must not reopen the run's ancestors: `advance()` does
+/// nothing for a terminal execution, so a reopened `Sequential` would stay
+/// `RUNNING` for good -- the execution never idle, never pruned, and every
+/// later status change refused `after_execution_running`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn marking_a_nested_run_cancelled_leaves_no_live_run(pool: sqlx::PgPool) {
+    // Arrange
+    let (_db, ws, _) = setup(&pool).await;
+    let reg = Flaky::new(&[("b", 1)]);
+    let inner: String = ["a", "b", "c"]
+        .iter()
+        .map(|id| format!("      - id: {id}\n        type: {LOG}\n        message: {id}\n"))
+        .collect();
+    let source = format!(
+        "id: nested-cancel\nnamespace: t\ntasks:\n  - id: seq\n    \
+         type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n{inner}"
+    );
+    let ex = start(&pool, ws, &source).await;
+    drive(&pool, &reg, ex).await;
+    assert_eq!(exec_state(&pool, ex).await, "FAILED");
+    let b = run(&runs_of(&pool, ex).await, "b").2;
+
+    // Act
+    let out = mark(&pool, ex, b, RunState::Cancelled).await;
+    drive(&pool, &reg, ex).await;
+
+    // Assert
+    assert_eq!(out, Ok(()));
+    assert_eq!(exec_state(&pool, ex).await, "CANCELLED");
+    let runs = runs_of(&pool, ex).await;
+    assert_eq!(run(&runs, "b").3, "CANCELLED");
+    assert_ne!(run(&runs, "seq").3, "RUNNING", "{runs:?}");
+    assert!(is_idle(&pool, ex).await, "no run is left live: {runs:?}");
+    assert_eq!(reg.seen(), ["a", "b"], "nothing else runs");
+    assert_eq!(
+        status(&pool, ex, RunState::Success).await,
+        Ok(()),
+        "a later status change is not refused after_execution_running"
+    );
+}
+
+/// **Final review M5 (Kestra `changeTaskRunState`, `ES:532-552`).** A marked
+/// run inside an `errors:` branch is removed with the rest of the end-hook
+/// runs -- Kestra's `removeIf` runs after `markAs` and spares none -- so the
+/// branch runs again when the execution fails again.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_marked_run_inside_an_errors_branch_is_emptied_and_runs_again(pool: sqlx::PgPool) {
+    // Arrange
+    let (_db, ws, _) = setup(&pool).await;
+    let reg = Flaky::new(&[("make_error", 1)]);
+    let ex = start(&pool, ws, &change_state_errors()).await;
+    drive(&pool, &reg, ex).await;
+    assert_eq!(exec_state(&pool, ex).await, "FAILED");
+    let err = run(&runs_of(&pool, ex).await, "print_error_log").clone();
+    assert_eq!(err.3, "SUCCESS");
+
+    // Act
+    let out = mark(&pool, ex, err.2, RunState::Failed).await;
+
+    // Assert: emptied under a new id, as Kestra removes it -- and already
+    // built again by the same settle, since `make_error` is still FAILED and
+    // the execution goes to its `errors:` again. The mark itself is gone.
+    assert_eq!(out, Ok(()));
+    let after = runs_of(&pool, ex).await;
+    let row = after
+        .iter()
+        .find(|r| r.0 == err.0)
+        .expect("the error run's row");
+    assert_ne!(row.2, err.2, "an emptied run gets a new id");
+    assert!(
+        !row.4
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s == "FAILED" || s == "SUCCESS"),
+        "a fresh run, not the marked one: {row:?}"
+    );
+
+    drive(&pool, &reg, ex).await;
+    assert_eq!(exec_state(&pool, ex).await, "FAILED");
+    let end = runs_of(&pool, ex).await;
+    assert_eq!(run(&end, "print_error_log").3, "SUCCESS");
+    assert_eq!(
+        reg.seen()
+            .iter()
+            .filter(|t| *t == "print_error_log")
+            .count(),
+        2,
+        "the errors branch runs again: {:?}",
+        reg.seen()
+    );
+    assert!(is_idle(&pool, ex).await);
+}

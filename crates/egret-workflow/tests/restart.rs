@@ -1746,7 +1746,11 @@ async fn a_loop_until_waits_again_from_the_restart(pool: sqlx::PgPool) {
 
 /// Spec D7: an `EXECUTION_ASSERTION` SLA is evaluated again while the
 /// restarted execution runs. The assertion holds until the execution carries
-/// `system.restarted`, so the restart's own settle violates it.
+/// `system.restarted`, so the first settle after the restart's own violates
+/// it. **Final review I3:** not the restart's own settle, which would end the
+/// execution `CANCELLED` with the reset run left `CREATED` -- live under a
+/// terminal execution, never idle, and every later status change refused
+/// `after_execution_running`.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_execution_assertion_sla_is_evaluated_again(pool: sqlx::PgPool) {
     // Arrange
@@ -1768,10 +1772,31 @@ async fn an_execution_assertion_sla_is_evaluated_again(pool: sqlx::PgPool) {
 
     // Act
     assert_eq!(restart(&pool, ex).await, Restarted::Done);
+    drive(&pool, &reg, ex).await;
 
     // Assert
     let h = exec_history(&pool, ex).await;
-    assert_eq!(history_tail(&h, 2), ["RESTARTED", "CANCELLED"], "{h}");
+    assert_eq!(exec_state(&pool, ex).await, "CANCELLED", "{h}");
+    assert!(
+        history_tail(&h, 4).contains(&"RESTARTED".to_string()),
+        "the SLA cancels the restarted run: {h}"
+    );
+    assert!(
+        is_idle(&pool, ex).await,
+        "no run is left live: {:?}",
+        runs_of(&pool, ex).await
+    );
+    assert_eq!(
+        egret_workflow::worker::set_execution_status(
+            &pool,
+            ex,
+            egret_workflow::executor::RunState::Success
+        )
+        .await
+        .expect("status change"),
+        Ok(()),
+        "a later status change is not refused after_execution_running"
+    );
 }
 
 /// Spec D7: flow `outputs:` keep their old value until the new terminal

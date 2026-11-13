@@ -471,7 +471,11 @@ pub(super) async fn open(
         )
         .await?;
     }
-    Ok((claim::Frame::loaded(ctx, before, state, now), iterations))
+    // Final review I3: the SLA waits for the next settle (`without_sla`).
+    Ok((
+        claim::Frame::loaded(ctx, before, state, now).without_sla(),
+        iterations,
+    ))
 }
 
 /// D7 and D4's writes beside the state, in the restart's transaction and

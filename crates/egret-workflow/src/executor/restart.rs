@@ -123,11 +123,14 @@ pub fn restart(
 /// onto the run and onto the last attempt whether that attempt has closed or
 /// not, which is Kestra's `attempts.getLast().withState(targetState)` (an
 /// append). A second variant would duplicate it. Its flowable ancestors are
-/// reopened as [`restart`] reopens them, and the end-hook set is emptied --
-/// except the run itself and its ancestors, which this call has just given a
-/// state. The execution then goes `CANCELLED` for a `CANCELLED` target,
-/// stays as it is while any run is still `PAUSED` (Kestra: "there are still
-/// some tasks paused"), and goes `RESTARTED` otherwise.
+/// reopened as [`restart`] reopens them -- except for a `CANCELLED` target,
+/// which ends the execution at once and reopens nothing (final review I3) --
+/// and the end-hook set is emptied, the run itself included when it lies in
+/// an `errors:`/`finally:`/`afterExecution:` branch (Kestra's
+/// `changeTaskRunState`, final review M5): such a run takes no state, and the
+/// branch runs again. The execution then goes `CANCELLED` for a `CANCELLED`
+/// target, stays as it is while any run is still `PAUSED` (Kestra: "there
+/// are still some tasks paused"), and goes `RESTARTED` otherwise.
 ///
 /// Refuses [`RestartRefusal::NotRestartable`] unless the execution is
 /// terminal and not `KILLED` (`State.java:189-191`),
@@ -158,23 +161,39 @@ pub fn mark_as(
     }) {
         return Err(RestartRefusal::InsideWorkingDirectory);
     }
-    let mut to_empty = end_hook_runs(plan, state);
-    to_empty.remove(&run);
-    for a in &above {
-        to_empty.remove(a);
-    }
+    // Kestra's `changeTaskRunState` removes every end-hook run AFTER
+    // `markAs`, the marked run included (`ES:532-552`, final review M5): a
+    // marked run inside an `errors:`/`finally:`/`afterExecution:` branch is
+    // emptied with the rest, and so are its ancestors inside that branch
+    // (the set is closed under the plan's children), so the branch runs
+    // again. It then takes no state of its own.
+    let to_empty = end_hook_runs(plan, state);
 
     let mut out = RestartCommands::default();
     empty(state, &to_empty, &mut out);
-    out.commands.push(Command::CompleteRun {
-        run,
-        run_state: target,
-        attempt: target,
-    });
-    let mut above = above;
-    above.sort_unstable();
-    for a in above {
-        reopen(state, a, now, &mut out);
+    if !to_empty.contains(&run) {
+        out.commands.push(Command::CompleteRun {
+            run,
+            run_state: target,
+            attempt: target,
+        });
+    }
+    // **A `CANCELLED` target reopens nothing** (final review I3). The
+    // execution ends `CANCELLED` in this same list, and `advance()` does
+    // nothing for a terminal execution, so a reopened ancestor would stay
+    // `RUNNING` for good: the execution never idle, never pruned, every
+    // later change refused `after_execution_running`. Kestra reopens them
+    // and cancels at once, "so the executor will not process the next task";
+    // not reopening them is the same outcome without the stranded runs.
+    if target != RunState::Cancelled {
+        let mut above: Vec<RunIx> = above
+            .into_iter()
+            .filter(|a| !to_empty.contains(a))
+            .collect();
+        above.sort_unstable();
+        for a in above {
+            reopen(state, a, now, &mut out);
+        }
     }
 
     let mut projected = state.clone();
