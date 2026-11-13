@@ -7194,7 +7194,8 @@ tasks:
 }
 
 /// **Migration 0139's CHECK: the replay metadata is unrepresentable on a row
-/// that is not a replay.**
+/// that is not a replay.** Since 0220 (package 7a) that is the
+/// `origin_offset_ms` alone: a restart raises `attempt_number` on any row.
 ///
 /// A guard nobody has seen fail is a guard nobody has seen, and this one cannot
 /// be reached through `src/` at all: `worker::replay::spawn_one` is the only
@@ -7243,15 +7244,18 @@ async fn the_replay_metadata_is_unrepresentable_on_anything_but_a_replay(pool: s
         .await
         .expect("a replay -- a parent, no loop index, attempt 2 -- is legal");
     assert_ne!(replay, root);
+    // **Migration 0220 (package 7a, spec D7/D12): a restart in place raises
+    // `attempt_number` on ANY execution**, so attempt 2 with no offset is
+    // legal on a top-level execution and on a loop iteration alike. The
+    // offset stays the replay's alone, which the refused cases below pin.
+    insert(&pool, ws, None, None, 2, 0)
+        .await
+        .expect("a top-level execution restarted once is legal (0220)");
+    insert(&pool, ws, Some(root), Some(0), 2, 0)
+        .await
+        .expect("a loop iteration restarted once is legal (0220)");
 
     let cases = [
-        (
-            "a top-level execution claiming to be attempt 2",
-            None,
-            None,
-            2,
-            0,
-        ),
         (
             "a top-level execution carrying an origin offset",
             None,
@@ -7260,11 +7264,18 @@ async fn the_replay_metadata_is_unrepresentable_on_anything_but_a_replay(pool: s
             5,
         ),
         (
-            "a LOOP iteration claiming to be attempt 2",
-            Some(root),
-            Some(0),
+            "a restarted top-level execution carrying an origin offset",
+            None,
+            None,
             2,
-            0,
+            5,
+        ),
+        (
+            "a LOOP iteration carrying an origin offset",
+            Some(root),
+            Some(1),
+            2,
+            7,
         ),
         (
             "a replay claiming to be attempt 1 while carrying an offset",
@@ -7277,7 +7288,7 @@ async fn the_replay_metadata_is_unrepresentable_on_anything_but_a_replay(pool: s
     for (what, parent, loop_ix, attempt, offset) in cases {
         let refused = insert(&pool, ws, parent, loop_ix, attempt, offset).await;
         let Err(e) = refused else {
-            panic!("{what} was ACCEPTED; migration 0139's CHECK did not refuse it");
+            panic!("{what} was ACCEPTED; migration 0139/0220's CHECK did not refuse it");
         };
         assert!(
             e.to_string()

@@ -157,7 +157,7 @@ pub enum KillOutcome {
 
 /// How many times a kill that Postgres chose as a deadlock's victim is run
 /// again. See the module doc's last paragraph.
-const DEADLOCK_RETRIES: usize = 3;
+pub(super) const DEADLOCK_RETRIES: usize = 3;
 
 /// **Kill `execution`** in `workspace`, and with `cascade` every live loop
 /// and `Subflow` descendant, in one transaction (spec §3.2). `NotFound` for
