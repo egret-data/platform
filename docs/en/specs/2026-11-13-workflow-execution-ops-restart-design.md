@@ -1,6 +1,6 @@
 # Workflow package #7a "Restart, task-run state and execution status"
 
-**Status:** designed 2026-11-13. Branch `feat/workflow-execution-ops`, one PR. Roadmap row #7 and note 7 of `docs/en/plans/2026-10-18-workflow-kestra-parity-roadmap.md`. Row #7 is size L and is split into six sub-packages (user decision, 2026-11-13); this is the first. Plan: `docs/en/plans/2026-11-13-workflow-execution-ops-restart.md`. Kestra is the checkout at `data-portal/kestra`, `96893b58` (2.0.0-SNAPSHOT).
+**Status:** designed 2026-11-13; built 2026-11-13 (Tasks T0, A1–A5, B1, C1; §7). Branch `feat/workflow-execution-ops`, one PR. Roadmap row #7 and note 7 of `docs/en/plans/2026-10-18-workflow-kestra-parity-roadmap.md`. Row #7 is size L and is split into six sub-packages (user decision, 2026-11-13); this is the first. Plan: `docs/en/plans/2026-11-13-workflow-execution-ops-restart.md`. Kestra is the checkout at `data-portal/kestra`, `96893b58` (2.0.0-SNAPSHOT).
 
 Abbreviations: `EW` = `crates/egret-workflow/`; `ES` = `kestra/core/src/main/java/io/kestra/core/services/ExecutionService.java`; `EC` = `kestra/webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java`; `ExS` = `kestra/executor/src/main/java/io/kestra/executor/ExecutorService.java`; `KS` = `kestra/core/src/main/java/io/kestra/core/models/flows/State.java`.
 
@@ -101,6 +101,15 @@ Taken under the autonomy rules (follow Kestra unless there is a reason; keep saf
   - a **Change state** item on each task run row of a terminal non-`KILLED` execution, which edits the last attempt only, as Kestra's UI does.
 
   Each action uses a `ConfirmAction` with the reasons for a disabled button, invalidates the execution query so polling resumes, and maps the coded 409s. The client is regenerated with `npm run gen:api`, never bare orval.
+- **D15 (2026-11-13, during A1). `mark_as` under a `WorkingDirectory` is refused** (`inside_working_directory`, 409). A run inside the block cannot be overridden without breaking the block's single-directory invariant, and D10's rule 2 already empties such blocks on restart. `EW src/executor/restart.rs`; commit `e371889f`.
+- **D16 (2026-11-13, during A2). Migration 0220 also redefines `workflow.execution_is_idle`** to skip runs with an empty history. Emptied end-hook runs persist as `CREATED` with history `[]`, and the old function never saw them as idle, so they were never rebuilt. `migrations/0220_workflow_restart_attempt_number.sql`; commit `50872d45`.
+- **D17 (2026-11-13, during A2). Reset and emptied runs get `claimed_at` cleared.** A stale lease on a reset run stalled a `Parallel` waiting on it. `EW src/worker/restart.rs`; commit `50872d45`.
+- **D18 (2026-11-13, during A5). `set_execution_status` refuses loop iterations and a running `afterExecution:`, not pruned files.** An iteration's state belongs to its Loop, and `afterExecution:` owns the final state while it runs; a status change appends one state and re-runs nothing, so pruned files do not matter. `EW src/worker/restart.rs`; commit `cffe6172`.
+- **D19 (2026-11-13, during A3). A Loop iteration that ends after its Loop run is terminal is still recorded** (outputs entry and counters), without moving the Loop. Otherwise a restarted Loop finished with a list missing that iteration and counters that disagreed with the rows. Kestra's `handleTerminated` also records it. `EW src/worker/spawn.rs`; commit `10124879`.
+- **D20 (2026-11-13, during A4). A `Subflow` child is restarted through a walk job, with no nested settle.** `claim::walk` forbids a nested settle, so the commit opens `claim::Job::Restart` and the walk performs the child's restart. The lookup applies only to a run that was reset (terminal, then `CREATED`) and carries the `system.restarted` label; without that gate a fresh `LoopUntil` iteration in a restarted execution would reuse the previous iteration's child. A child row that cannot be loaded gets a new child and a `warn`. `EW src/worker/claim.rs`, `EW src/worker/restart.rs`; commits `1ed811fa`, `2c511ad9`.
+- **D21 (2026-11-13, during B1). Task-run state and execution status body errors answer 400, never 422.** Plain `axum::Json` answers 422 on a bad body; the handlers take `JsonRejection` and map it to `InvalidInput`, the pattern of `triggers/routes.rs::body_refusal`. `EW src/routes.rs`; commit `6e094226`.
+- **D22 (2026-11-13, during B1). Emptied runs are hidden from the execution detail and the graph read model.** They persist as `CREATED` with an empty history, and Kestra removes them. `ExecutionRepo::task_runs` and `GRAPH_RUNS_SQL` filter `history <> '[]'`; worker-side reads are untouched. `EW src/repo.rs`, `EW src/routes.rs`; commit `d686973a`.
+- **D23 (2026-11-13, during A1). A `Pause` whose history already holds `PAUSED` proceeds** (Kestra's `needPause`). egret's `pause::drive` had no such check and would have paused again, so a restarted Pause is set `SUCCESS` as a `SetRunState`. It cannot fire outside a restart: a resume ends the run straight from `PAUSED`. This changes `advance`; the ratchet did not move. `EW src/executor/flowable/pause.rs`; commit `878d09a8`.
 
 ## 3. Shape of the change
 
@@ -157,10 +166,88 @@ egret-only tests:
 4. A reset run's `outputs` are cleared at restart. Kestra keeps them, keyed by the task-run id, until the run writes again.
 5. The operations answer synchronously; Kestra uses a command queue (D13).
 6. Routes use egret's paths, not `/actions/…` (D13).
+7. A `Subflow` inside a `LoopUntil` is matched to its earlier child by `run_ix` only, so a restarted iteration spawns a new child. The child row carries no iteration id; a fix needs a migration (follow-up, roadmap row #12). Recorded 2026-11-13, A4.
+8. A restarted `Subflow` whose child is still running waits for it. Kestra ends the run `SUCCESS`. Recorded 2026-11-13, A4.
+9. Clearing `claimed_at` (D17) lets a sibling that already failed rule 1 run twice: the old handler is fenced at commit, but its side effects may repeat. Kestra behaves the same. Recorded 2026-11-13, A2.
+10. Marking a run `CANCELLED`, or leaving a run still `PAUSED`, leaves the reopened ancestors `RUNNING` under a terminal execution. This is Kestra-faithful and a known issue; it is untested at worker level. Recorded 2026-11-13, A1 and A5.
 
 ## 7. As built
 
-(Filled in when the PR lands.)
+Built 2026-11-13 on `feat/workflow-execution-ops`, base `origin/main` `9996fde4`. Every commit below is on that branch. Migration `0220_workflow_restart_attempt_number.sql` (the number is re-checked against main and open PRs before push). The executor ratchet is **301 / 25 / 25 / 0** and the census **295 / 25 / 21**, measured at T0 and unchanged at each task.
+
+| Task | Commits | What landed | Tests added | Fix rounds |
+|---|---|---|---|---|
+| Spec, plan | `5c440e09`, `a3bb2ee7` | This spec and its plan. | – | – |
+| T0 | – | Containers, baseline ratchet and census. | – | – |
+| A1 | `a3bb2ee7..e371889f` (`878d09a8`, `e371889f`) | Pure `executor::restart` commands (restart and mark-as); Pause `needPause` (D23); `SetRunState{Created}` clears `working_dir`. | `executor::restart::tests` in `src/executor/restart.rs`, 20 | 1: restarted `LoopUntil` iteration is not counted again; `mark_as` under a `WorkingDirectory` refused (D15) |
+| A2 | `e371889f..50872d45` (`50872d45`) | `restart_execution` in place: resets, end-hook runs emptied with renewed ids, label, `attempt_number` + 1, side writes, SLA re-evaluation; migration 0220 (relaxes the 0139 CHECK, D12; redefines `execution_is_idle`, D16). | `tests/restart.rs` 20, `tests/migration_0220_restart_attempt.rs` 5; `tests/worker.rs` replay-metadata test updated | 0 |
+| A3 | `50872d45..10124879` (`e5f24b50`, `10124879`) | Loop restart from the failing iteration; counters re-based per index for restarted iterations. | `tests/restart.rs` +4 (to 24 after the fix) | 1: late iteration recorded (D19) |
+| A4 | `10124879..2c511ad9` (`1ed811fa`, `2c511ad9`) | Subflow child restarted in place through a walk job (D20). | `tests/restart.rs` +7 (to 31) | 0 (one pre-review fix: unloadable child spawns a new one) |
+| A5 | `2c511ad9..cffe6172` (`cffe6172`) | `set_task_run_state` (mark-as) and `set_execution_status` (D11, D18). | `tests/mark_as.rs` 17 | 0 |
+| B1 | `cffe6172..6e094226` (`d686973a`, `6e094226`) | Routes `restart_execution`, `set_task_run_state`, `set_execution_status` in `EW src/routes.rs`; refusals mapped to coded 409s; emptied runs hidden (D22); OpenAPI and audit. | `tests/restart_routes.rs` 21 | 1: 400, not 422 (D21) |
+| C1 | `2f44ed20..a28207d9` (`2f44ed20` client regeneration, `ddbd58ca`, `a28207d9`) | Execution page actions: restart, change status, task-run state dialogs; `useExecutionAction.ts` shared hook. | `actions.ops.test.ts` 9; `ExecutionDetail.test.tsx` 9 new (66 in file) | 1: shared hook and helper |
+
+Measured at the end of each task, `cargo test -p egret-workflow`: `--test restart` 31, `--test mark_as` 17, `--test worker` 169, `--test kill_route` 29, `--test end_hooks` 20, `--test executor` 62; at B1 `--test restart_routes` 21, `--test executions_routes` 42, `--test routes` 47.
+
+Also from the build: under `transmitFailed: true` a sibling that ends `SUCCESS` after the first failure is now counted and listed (matches Kestra's `handleTerminated`); the counters of a restarted iteration are re-based from the rows, so an earlier iteration that the 16 MiB cap read as `FAILED` is recounted `SUCCESS`. The frontend browser check (FE-TEST-2, light and dark) is owed at Z.
+
+Gates at Z: (filled in by the controller)
+
+### Deferred findings
+
+Every `minor (deferred)` line of the controller's ledger, for the final review.
+
+**A1**
+- The ancestor-already-`RUNNING` guard (`restart.rs`) has no test (Pause inside Sequential).
+- Test 14 (`mark_as` `CANCELLED`) has no advance round showing `b` is not created.
+- `mark_as` accepts a run with an empty history (carried to A5, which refuses it).
+- `mark_as` `CANCELLED` leaves reopened ancestors `RUNNING`; the `CANCELLED`-before-`PAUSED` order differs from Kestra `ES:656-661` (now §6 item 10).
+- Duplicate `WorkingDirectory` `matches!` in `restart.rs`; `pub mod restart` versus `pub(crate)`.
+
+**A2**
+- Clearing `claimed_at` lets a rule-1-failed sibling run twice (now §6 item 9).
+- `a_loop_restart_is_not_built_yet` and `a_subflow_restart_is_not_built_yet` assert only `exec_meta` (A3 and A4 replaced them).
+- `side_writes` converts `i32` twice; the per-run id `UPDATE` could be one statement.
+- Naming of `Row0220`.
+- The SLA test pins a history tail of `RESTARTED CANCELLED` (no `RUNNING`): the SLA fires in the restart's own settle. Confirm this is intended (final review).
+- `working_dir_snapshot` keeps the old URI until the new prepare; undocumented in code.
+
+**A3**
+- A re-terminated iteration that yields no entry leaves the stale entry (a null marker was suggested).
+- An iteration that the cap read as `FAILED` is recounted `SUCCESS`; under `transmitFailed: true` a cap failure answers "No restartable…"; untested.
+- No test for the "iteration's own restart refused" branch, nor for the SECRET frame replacement path.
+- Under `transmitFailed: true` a re-failing iteration is not recounted (cosmetic); the terminal-state list is duplicated in `terminated_by_state`; deadlock comment at iteration prepare; the refused-iteration log should be `warn`, not `info`.
+- No test for a terminal-Loop late iteration with over-cap, SECRET or `transmitFailed`.
+
+**A4**
+- `RestartCommands.subflows` is no longer read in production (the history gate replaced it): use or document.
+- Child states are matched as strings, and an unknown state falls into `_ if wait` and waits forever: parse to `RunState` and treat unknown as a content fault (final review).
+- Untested: `wait: false` `RESTARTED` completion, a `PAUSED` child, a `KILLED` or `WARNING` child copied as `SUCCESS`, a still-running wait.
+- A refused child restart logs only `tracing::warn`, with no `task_logs` line on the run.
+- The deadlock test simulates the child's settle with raw locks.
+- An unloadable Loop iteration fails the restart call (no wedge; the Subflow path spawns instead).
+
+**A5**
+- `mark_as` with a still-`PAUSED` run keeps the terminal state; only unit-tested (A1), no worker test.
+- Marking `CANCELLED` with a nested or still-`PAUSED` run leaves reopened ancestors `RUNNING` under a terminal execution (Kestra-faithful; now §6 item 10; untested at worker level).
+- The `MarkAs` path in `open` asserts nothing about how it ends (a positive check was suggested).
+- The deadlock-retry loop is written three times (`restart`, `set_task_run_state`, `set_execution_status`); `set_execution_status` restates two D10 predicates inline (final review).
+- Refusal order differs: `mark_as` checks D10 before `NotChangeable`, the status change checks `NotChangeable` before `afterExecution`.
+- The run lookup assumes `run_ix` equals the index in `state.runs`.
+
+**B1**
+- Garbled doc comment at `repo.rs:29-31`; a conditional assertion (`if let Some`) in `restart_routes.rs`; test cruft near three spots.
+- The entitlement-gate test exists only for restart.
+- The 409 tests for `files_pruned`, `after_execution_running` and `inside_working_directory` do not assert an empty audit or unchanged state.
+- No loop-iteration test for the task-run-state route; the graph assertion is negative-only.
+- `from_state` is read before the lock (race: stale audit).
+- A body-size rejection is now 400, not 413 (negligible).
+
+**C1**
+- Refusal-sentence distinctness is tested only for the restart codes; no polling-resumes test.
+- `stateWord` is duplicated three times; Overview fragment indent; an `as TaskRunDto` cast; the dialog title flips during the exit animation; the dialog can be closed mid-request.
+- FE-TEST-2 browser check, light and dark, is owed (Z live check).
+- `listReads` counts by path prefix (the children query too); the helper in `components` imports `routes/workflows/queryKeys`.
 
 ## 8. Rest of row #7
 

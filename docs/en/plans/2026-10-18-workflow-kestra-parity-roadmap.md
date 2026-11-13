@@ -149,6 +149,8 @@ Each package goes through the usual flow: spec (or a spec section) → plan → 
 - **egret-only limits and divergences** (spec §6): `Loop` outputs capped at 1 MiB per iteration and 16 MiB per `Loop`, flow outputs at 16 MiB per execution; FILE outputs confined to the execution's `Loop` family (§3.1); SECRET outputs refused under STORE; duplicate output ids refused inside a `Loop`; STORE file named `outputs.ion`; the parent flow's `outputs:` not evaluated inside a `Loop` iteration.
 - **Bug fix besides the banks:** a failed flowable under an ancestor's or the flow's `retry:` no longer leaves its parent `RUNNING` forever (`retry::is_retried_kind`).
 
+**Row #7, 2026-11-13:** split into 7a–7f (user decision); 7a (restart in place, task-run state, execution status) built on `feat/workflow-execution-ops`, PR in review. Spec `docs/en/specs/2026-11-13-workflow-execution-ops-restart-design.md` (§7 "As built"), plan `docs/en/plans/2026-11-13-workflow-execution-ops-restart.md`. Migration `0220_workflow_restart_attempt_number.sql`. Executor ratchet 301 / 25 / 25 / 0 unchanged.
+
 **Notes, 2026-10-29 (package #6, spec §5 and §7; the rows above are not edited).**
 13. **#11 gains: `trigger` bound in the fired flow's task renders.** #6 binds `trigger.outputs` only in a Flow trigger's `inputs:`; `worker::render` binds no `trigger` root for any trigger type, so `{{ trigger.outputs.x }}` (or `{{ trigger.date }}`) in a task of the fired flow still fails to render.
 14. **KI-112 follow-up:** SECRET inputs are still revealed in a Flow trigger's render context (#6 masks the SECRET outputs there).
@@ -173,7 +175,7 @@ Each package goes through the usual flow: spec (or a spec section) → plan → 
 
 **Notes, 2026-10-27 (package #2, end-hooks spec §7.1, §9 and §4.1 as-built).**
 6. **#6:** gains flow-level `outputs:` evaluation. `valids/after-execution` stays baselined because its `afterExecution:` renders `{{ execution.outputs.final }}` and egret never evaluates flow `outputs:` (`worker/render.rs:279-284`). *Closed 2026-10-29: #6 evaluates them and `after-execution` banked (Task B2).*
-7. **#7:** when it builds restart in place it must remove the `errors`, `finally` and `afterExecution` runs, as Kestra's `ExecutionService` does (`ExS:339-351`). Latent today: `run_of` takes a task's first run, so an execution-level restart would read a stale end-hook run.
+7. **#7:** when it builds restart in place it must remove the `errors`, `finally` and `afterExecution` runs, as Kestra's `ExecutionService` does (`ExS:339-351`). Latent today: `run_of` takes a task's first run, so an execution-level restart would read a stale end-hook run. *Closed 2026-11-13: 7a removes those runs (emptied, with renewed task-run ids) on restart.*
 8. **#9:** owns `Pause` `finally:` (refused naming #9 until then).
 9. **#17:** a `WorkingDirectory` block whose prepare or finish claim fails ends `FAILED` without running its `errors`/`finally` (the V3 rule, pinned by a test in `tests/working_dir_claims.rs`); revisit with the Kubernetes runner.
 10. **#5:** owns `valids/task-runif-taskswithstate` (Pebble `empty` test in `runIf`).
@@ -553,8 +555,8 @@ egret routes are under `/api/ws/{ws}/workflows`.
 | POST /{id}/actions/pause | missing | – |
 | DELETE /{id}/actions/kill (cascade) | supported (KILLING to KILLED, cascade default true) | routes.rs:3025; kill-and-exit spec D1-D6 |
 | POST /{id}/actions/replay | partial: egret's "replay" re-runs the WHOLE execution from the frozen source. There is no replay from a chosen taskRunId, no replay-with-inputs and no revision choice | routes.rs:2822-2850 |
-| POST /{id}/actions/restart (resume failed tasks in place) | **missing** | – |
-| POST /{id}/actions/change-status, /actions/state (force a task-run state) | **missing** | – |
+| POST /{id}/actions/restart (resume failed tasks in place) | **missing** *(2026-11-13, 7a: supported. Restart in place of a FAILED or PAUSED execution, same ids; end-hook runs removed; no `revision`, 7b)* | `routes.rs` `restart_execution` (`POST /executions/{id}/restart`) |
+| POST /{id}/actions/change-status, /actions/state (force a task-run state) | **missing** *(2026-11-13, 7a: supported (7a). Task-run state to SUCCESS, WARNING, FAILED or CANCELLED, then restart in place; execution status; no-op change is 409)* | `routes.rs` `set_task_run_state` (`POST /executions/{id}/task-runs/{task_run_id}/state`), `set_execution_status` (`POST /executions/{id}/status`) |
 | POST /{id}/actions/labels | missing (C2 adds the task, not the API) | – |
 | DELETE /{id} (delete execution + logs/metrics/storage) | **missing** | – |
 | POST /{id}/actions/eval (expression debugger) | missing (`ExpressionController.render` is missing too) | – |
