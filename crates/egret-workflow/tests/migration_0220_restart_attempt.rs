@@ -169,3 +169,27 @@ async fn an_emptied_run_does_not_keep_a_terminal_execution_live(pool: sqlx::PgPo
     assert_eq!(idle(&pool, emptied).await, Some(true));
     assert_eq!(idle(&pool, live).await, Some(false));
 }
+
+/// **Final review M6: one predicate for "this run is live"**, which every
+/// live-run query shares (`execution_is_idle`, the kill's descendants and
+/// phase count, the force-close): not terminal, and not an emptied row.
+#[sqlx::test(migrations = "../../migrations")]
+async fn run_is_live_excludes_terminal_and_emptied_rows(pool: sqlx::PgPool) {
+    let cases = [
+        ("CREATED", "[]", false),
+        ("CREATED", r#"["CREATED"]"#, true),
+        ("RUNNING", r#"["CREATED","RUNNING"]"#, true),
+        ("PAUSED", r#"["CREATED","RUNNING","PAUSED"]"#, true),
+        ("SUCCESS", r#"["CREATED","RUNNING","SUCCESS"]"#, false),
+        ("KILLED", r#"["CREATED","KILLED"]"#, false),
+    ];
+    for (state, history, want) in cases {
+        let live: bool = sqlx::query_scalar("SELECT workflow.run_is_live($1, $2::jsonb)")
+            .bind(state)
+            .bind(history)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(live, want, "{state} {history}");
+    }
+}

@@ -32,6 +32,19 @@ ALTER TABLE workflow.executions
 -- sweep and a later restart all saw it as still running. Such a row is not a
 -- run at all (Kestra has none), so it is left out here. No other row has an
 -- empty history: `Command::CreateRun` writes `[CREATED]`.
+--
+-- The predicate is ONE function, `workflow.run_is_live`, shared by every
+-- query that asks whether a run is still live work: this one, the kill's
+-- descendants and its `afterExecution:` phase count, and the force-close
+-- (final review M6). Before it, those three still read an emptied row as
+-- live, and the force-close wrote a `[KILLED]` history onto it.
+CREATE FUNCTION workflow.run_is_live(state text, history jsonb)
+RETURNS boolean
+LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
+AS $$
+  SELECT NOT workflow.state_is_terminal(state) AND jsonb_array_length(history) > 0
+$$;
+
 CREATE OR REPLACE FUNCTION workflow.execution_is_idle(execution uuid)
 RETURNS boolean
 LANGUAGE sql STABLE
@@ -40,8 +53,7 @@ AS $$
      AND NOT EXISTS (
        SELECT 1 FROM workflow.task_runs r
         WHERE r.execution_id = e.id
-          AND NOT workflow.state_is_terminal(r.state)
-          AND jsonb_array_length(r.history) > 0)
+          AND workflow.run_is_live(r.state, r.history))
     FROM workflow.executions e
    WHERE e.id = execution
 $$;

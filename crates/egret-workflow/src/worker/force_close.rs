@@ -194,7 +194,7 @@ pub(super) async fn close(
 
     let runs: Vec<Run> = sqlx::query(
         "SELECT id, state, history, attempts, claimed_at, \
-                NOT workflow.state_is_terminal(state) AS live, \
+                workflow.run_is_live(state, history) AS live, \
                 type_id IS NOT NULL AS leaf \
            FROM workflow.task_runs WHERE execution_id = $1 ORDER BY run_ix FOR UPDATE",
     )

@@ -306,7 +306,7 @@ async fn kill_in(
         let live: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM workflow.task_runs \
               WHERE execution_id = $1 AND run_ix = ANY($2) \
-                AND NOT workflow.state_is_terminal(state)",
+                AND workflow.run_is_live(state, history)",
         )
         .bind(execution)
         .bind(&runs)
@@ -486,7 +486,7 @@ const DESCENDANTS: &str = "WITH RECURSIVE tree (id, depth) AS ( \
         AND (NOT workflow.state_is_terminal(e.state) \
              OR EXISTS (SELECT 1 FROM workflow.task_runs r \
                          WHERE r.execution_id = e.id \
-                           AND NOT workflow.state_is_terminal(r.state))) \
+                           AND workflow.run_is_live(r.state, r.history))) \
       ORDER BY t.depth, t.id";
 
 /// **Whether a phase kill of `state` does anything** (fix round 1, I1): it
