@@ -267,6 +267,19 @@ pub async fn recompile_role_referencing_profiles(pool: &PgPool) -> Result<Vec<i6
     let db = CompileError::from_db;
     let mut tx = pool.begin().await.map_err(db)?;
 
+    // Keep every `role:<name> holders` managed group fresh before the recompile
+    // reads group membership (SP3c-1). Same transaction as the recompile.
+    let managed_roles: Vec<String> = sqlx::query_scalar(
+        "SELECT substring(name from 'role:(.*) holders$') FROM public.groups \
+         WHERE source = 'managed' AND name LIKE 'role:% holders'",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(db)?;
+    for role in &managed_roles {
+        crate::role_holder_group::sync_role_holder_group_in_tx(&mut tx, role).await?;
+    }
+
     let roles: Vec<String> = sqlx::query_scalar(
         "SELECT ref FROM perm.grant_principals WHERE kind = 'role'::perm.principal_kind \
          UNION \
@@ -286,6 +299,8 @@ pub async fn recompile_role_referencing_profiles(pool: &PgPool) -> Result<Vec<i6
     services.sort_unstable();
     services.dedup();
     if services.is_empty() {
+        // Commit, so the holder-group syncs above are not rolled back.
+        tx.commit().await.map_err(db)?;
         return Ok(services);
     }
 

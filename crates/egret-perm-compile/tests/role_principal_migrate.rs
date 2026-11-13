@@ -133,3 +133,36 @@ async fn re_syncing_reconciles_added_and_removed_holders() {
             .unwrap();
     assert_eq!(members, vec![u2]);
 }
+
+#[tokio::test]
+async fn a_holder_change_resyncs_the_managed_group_via_the_chokepoint() {
+    let Some(dsn) = egret_test_db::url().await else {
+        return;
+    };
+    let db = Db::connect(&dsn, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let pool = db.pool.clone();
+    let (role, role_id, _u1) = seed_role_with_one_user_holder(&pool).await;
+
+    let mut tx = pool.begin().await.unwrap();
+    sync_role_holder_group_in_tx(&mut tx, &role).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let u2 = seed_user(&pool).await;
+    grant_role(&pool, role_id, u2).await;
+    egret_perm_compile::role_membership::recompile_role_referencing_profiles(&pool)
+        .await
+        .unwrap();
+
+    let present: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM public.user_groups ug \
+         JOIN public.groups g ON g.id = ug.group_id \
+         WHERE g.name = $1 AND ug.user_id = $2)",
+    )
+    .bind(role_holder_group_name(&role))
+    .bind(u2)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(present, "chokepoint must resync the holder group");
+}
