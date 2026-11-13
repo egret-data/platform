@@ -71,7 +71,7 @@ use crate::trigger::{
 
 /// What one migration run did: its provenance id, the roles it rewrote, and how
 /// many principal rows changed.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct RolePrincipalMigration {
     pub id: i64,
     pub roles: Vec<String>,

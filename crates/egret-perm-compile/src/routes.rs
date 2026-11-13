@@ -209,6 +209,14 @@ pub fn perm_router() -> Router<PermState> {
             "/perm/policies/services/{service_id}/migrate/undo",
             post(undo_service_policy_migration),
         )
+        .route(
+            "/perm/migrate/role-principals",
+            post(migrate_role_principals),
+        )
+        .route(
+            "/perm/migrate/role-principals/undo",
+            post(undo_role_principals),
+        )
 }
 
 /// The `perm` surface's OpenAPI document, merged into the top-level doc by
@@ -256,6 +264,8 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         service_policy_warnings,
         service_migration_status,
         migrate_service_policies,
+        migrate_role_principals,
+        undo_role_principals,
         undo_service_policy_migration
     ),
     components(schemas(
@@ -388,6 +398,8 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         crate::migrate::WireCheck,
         crate::migrate::WireTagging,
         crate::migrate::UndoRequest,
+        crate::role_principal_migrate::RolePrincipalMigration,
+        UndoRolePrincipalsRequest,
         crate::migrate::UndoResponse,
         crate::migrate::UndonePolicy,
         CreatedResponse,
@@ -6654,4 +6666,69 @@ mod engine_plugin_version_tests {
             engine_plugin_version("edge", "provisioned", "risingwave", None, &NO_SPEC).is_err()
         );
     }
+}
+
+/// `POST …/migrate/role-principals/undo`.
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct UndoRolePrincipalsRequest {
+    /// The `id` the migration answered with.
+    pub id: i64,
+}
+
+/// SP3c-1: rewrite every `role` principal (grants, rule exemptions, engine
+/// grants) into a ref to that role's managed `role:<name> holders` group,
+/// PROVABLY — the compiled artifact of every affected profile is fingerprinted
+/// before and after and the whole transaction rolls back on any difference.
+/// Reversible via the `undo` route.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/perm/migrate/role-principals",
+    tag = "perm",
+    responses(
+        (status = 200, description = "Every role principal rewritten; the compiled output of each affected profile is byte-identical", body = crate::role_principal_migrate::RolePrincipalMigration),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:update permission", body = ErrorBody),
+        (status = 409, description = "Nothing was changed: the equivalence gate refused, or a recompile it needed was refused", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn migrate_role_principals(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+) -> Result<Json<crate::role_principal_migrate::RolePrincipalMigration>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    let migrated_by = p.email.clone();
+    let response =
+        crate::role_principal_migrate::migrate_role_principals_in_tx(&mut tx, &migrated_by).await?;
+    tx.commit().await.map_err(PermHttpError::db)?;
+    Ok(Json(response))
+}
+
+/// SP3c-1: undo one role-principal migration, restoring the `role` refs it
+/// rewrote. Refuses, changing nothing, if a rewritten row changed since.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/perm/migrate/role-principals/undo",
+    tag = "perm",
+    request_body = UndoRolePrincipalsRequest,
+    responses(
+        (status = 200, description = "The migration undone"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:update permission", body = ErrorBody),
+        (status = 404, description = "No such migration", body = ErrorBody),
+        (status = 409, description = "Nothing was changed: a rewritten row was edited since", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn undo_role_principals(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+    Json(body): Json<UndoRolePrincipalsRequest>,
+) -> Result<axum::http::StatusCode, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    crate::role_principal_migrate::undo_role_principals_in_tx(&mut tx, body.id).await?;
+    tx.commit().await.map_err(PermHttpError::db)?;
+    Ok(axum::http::StatusCode::OK)
 }

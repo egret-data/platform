@@ -8410,7 +8410,9 @@ async fn a_patch_and_a_preview_naming_nobody_are_refused() {
 }
 
 /// The refs that DO resolve are accepted: `public` (no `groups` row, and every
-/// engine resolves it), a group in `groups`, a role in `roles`, and a username.
+/// engine resolves it), a group in `groups` and a username. A role in `roles`
+/// is past the existence check too, but SP3c-1's write-seam guard refuses it as
+/// a NEW principal (role principals are migrated to managed groups).
 /// A `workspace_members` ref naming a REAL workspace is past this check and
 /// refused by the shape check instead (no authoring path may write one), which
 /// is what tells R4's "unknown workspace" refusal apart from that one.
@@ -8436,7 +8438,6 @@ async fn refs_that_resolve_are_accepted() {
     for exclude in [
         json!([{ "kind": "group", "ref": "public" }]),
         json!([{ "kind": "group", "ref": group }]),
-        json!([{ "kind": "role", "ref": role }]),
     ] {
         create_grant_returning_id(
             &f,
@@ -8450,6 +8451,28 @@ async fn refs_that_resolve_are_accepted() {
         )
         .await;
     }
+
+    let (status, body) = send(
+        &f,
+        "POST",
+        "/perm/grants",
+        &token,
+        grant_with(
+            f.catalog_id,
+            "deny",
+            json!([{ "kind": "user", "ref": "analyst" }]),
+            json!([{ "kind": "role", "ref": role }]),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("grant to a group instead"),
+        "body: {body}"
+    );
 
     let ws = new_workspace(&f, "jf3_ws").await;
     let (status, body) = send(

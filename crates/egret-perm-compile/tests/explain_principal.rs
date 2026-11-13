@@ -247,6 +247,17 @@ async fn explain_principal(e: &Env, token: &str, kind: &str, r: &str) -> (Status
 }
 
 async fn grant_to(e: &Env, effect: &str, kind: &str, r: &str) {
+    let tmp = (kind == "role").then(|| format!("gt_{}", Uuid::new_v4().simple()));
+    if let Some(tmp) = &tmp {
+        // SP3c-1: the write seam refuses NEW role principals, so a test that
+        // needs a legacy one stores a throwaway group ref and flips its kind,
+        // then recompiles the profiles that now reference a role.
+        group_with(&e.db.pool, tmp, &[]).await;
+    }
+    let (kind, r2) = match &tmp {
+        Some(tmp) => ("group", tmp.as_str()),
+        None => (kind, r),
+    };
     let (status, body) = post(
         e,
         &e.admin,
@@ -255,11 +266,25 @@ async fn grant_to(e: &Env, effect: &str, kind: &str, r: &str) {
             "effect": effect,
             "actions": ["read"],
             "scope": target(e),
-            "principals": { "include": [{ "kind": kind, "ref": r }], "exclude": [] }
+            "principals": { "include": [{ "kind": kind, "ref": r2 }], "exclude": [] }
         }),
     )
     .await;
-    assert!(status.is_success(), "grant to {kind}:{r}: {status} {body}");
+    assert!(status.is_success(), "grant to {kind}:{r2}: {status} {body}");
+    if let Some(tmp) = &tmp {
+        sqlx::query(
+            "UPDATE perm.grant_principals SET kind = 'role', ref = $1 \
+              WHERE kind = 'group' AND ref = $2",
+        )
+        .bind(r)
+        .bind(tmp)
+        .execute(&e.db.pool)
+        .await
+        .expect("flip to a legacy role principal");
+        egret_perm_compile::role_membership::recompile_role_referencing_profiles(&e.db.pool)
+            .await
+            .expect("recompile");
+    }
 }
 
 async fn group_with(pool: &sqlx::PgPool, name: &str, members: &[Uuid]) {

@@ -191,6 +191,13 @@ pub(crate) async fn resolve_principal_refs(
             if kept.contains(p) {
                 continue;
             }
+            if let Some(why) = refused_for_authoring(p) {
+                return Err(PermHttpError::BadRequest(format!(
+                    "{} {:?} ({field}.{mode}[{i}]): {why}",
+                    p.kind.as_str(),
+                    p.r#ref
+                )));
+            }
             let found = match lookup(conn, p).await? {
                 Lookup::Found { canonical } => {
                     p.r#ref = canonical;
@@ -229,6 +236,26 @@ pub(crate) async fn resolve_principal_refs(
     }
     msg.pop();
     Err(PermHttpError::BadRequest(msg))
+}
+
+/// SP3c-1 transitional write-seam guard: why a NEW principal may not be
+/// authored, if it may not. Role principals are migrated to managed
+/// `role:<name> holders` groups, and those groups are migration targets only.
+/// Lives here, not in [`lookup`], so refs the migration already stored (kept
+/// on a patch, or listed by the unresolved report) keep resolving.
+fn refused_for_authoring(p: &Principal) -> Option<&'static str> {
+    match p.kind {
+        PrincipalKind::Role => {
+            Some("role principals are migrated to managed groups; grant to a group instead")
+        }
+        PrincipalKind::Group if p.r#ref.starts_with("role:") && p.r#ref.ends_with(" holders") => {
+            Some(
+                "role:<name> holders groups are managed migration targets; grant to the \
+                 role's intended group directly",
+            )
+        }
+        _ => None,
+    }
 }
 
 /// What one ref resolves to, read without writing anything — the single

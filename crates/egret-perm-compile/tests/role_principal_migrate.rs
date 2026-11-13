@@ -188,6 +188,7 @@ fn uniq(prefix: &str) -> String {
 
 struct Seeded {
     service_id: i64,
+    catalog_id: Uuid,
     role: String,
     grant_id: Uuid,
 }
@@ -285,6 +286,7 @@ async fn seed_service_with_role_grant(db: &Db) -> Seeded {
 
     Seeded {
         service_id: service.id,
+        catalog_id,
         role,
         grant_id,
     }
@@ -465,4 +467,196 @@ async fn undo_refuses_when_a_rewritten_row_changed() {
     );
 
     cleanup(&pool, seeded.grant_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// SP3c-1 Task 5: the admin endpoints and the transitional write-seam guards,
+// driven through the real router.
+// ---------------------------------------------------------------------------
+
+use axum::body::Body;
+use axum::http::{Request as HttpRequest, StatusCode};
+use egret_auth::session::SessionService;
+use egret_perm_compile::{perm_router, PermState};
+use http_body_util::BodyExt;
+use std::sync::Arc;
+use tower::ServiceExt; // oneshot
+
+async fn admin_app(db: &Db) -> (axum::Router, String) {
+    let uid: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (provider, email, name) VALUES ('local', $1, 'T') RETURNING id",
+    )
+    .bind(format!("{}@rolemig.egret.local", Uuid::new_v4().simple()))
+    .fetch_one(&db.pool)
+    .await
+    .expect("user");
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         SELECT 'user', $1, id, 'platform', NULL FROM roles \
+          WHERE scope='platform' AND name='platform_admin'",
+    )
+    .bind(uid)
+    .execute(&db.pool)
+    .await
+    .expect("grant platform_admin");
+    let sessions = SessionService::new(
+        db.clone(),
+        chrono::Duration::hours(24),
+        chrono::Duration::minutes(60),
+    );
+    let token = sessions
+        .create(egret_core::UserId(uid), "test", "127.0.0.1")
+        .await
+        .expect("session")
+        .token;
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    let app = perm_router().with_state(PermState {
+        opa_cache: None,
+        perm: PermStore::new(db.pool.clone()),
+        policy: PolicyStore::new(db.clone()),
+        sessions,
+        pdp,
+    });
+    (app, token)
+}
+
+async fn post_json(app: &axum::Router, uri: &str, token: &str, body: Value) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri(uri)
+                .header("Cookie", format!("egret_session={token}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let json = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| json!({ "_raw": String::from_utf8_lossy(&bytes).to_string() }));
+    (status, json)
+}
+
+fn grant_body(catalog_id: Uuid, kind: &str, r#ref: &str) -> Value {
+    json!({
+        "effect": "allow",
+        "actions": ["read"],
+        "scope": { "catalog_id": catalog_id, "schema": null, "table": null, "column": null },
+        "principals": { "include": [{ "kind": kind, "ref": r#ref }], "exclude": [] }
+    })
+}
+
+#[tokio::test]
+async fn writing_a_new_role_principal_is_refused() {
+    let Some(dsn) = egret_test_db::url().await else {
+        return;
+    };
+    let db = Db::connect(&dsn, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let seeded = seed_service_with_role_grant(&db).await;
+    let (app, token) = admin_app(&db).await;
+
+    let (status, body) = post_json(
+        &app,
+        "/perm/grants",
+        &token,
+        grant_body(seeded.catalog_id, "role", &seeded.role),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.to_string().contains("grant to a group instead"),
+        "{body}"
+    );
+    cleanup(&db.pool, seeded.grant_id).await;
+}
+
+#[tokio::test]
+async fn writing_a_new_ref_to_a_holder_group_is_refused() {
+    let Some(dsn) = egret_test_db::url().await else {
+        return;
+    };
+    let db = Db::connect(&dsn, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let seeded = seed_service_with_role_grant(&db).await;
+    let (app, token) = admin_app(&db).await;
+
+    // A REAL holder group (it exists and validates as a group) is still refused.
+    let mut tx = db.pool.begin().await.unwrap();
+    sync_role_holder_group_in_tx(&mut tx, &seeded.role)
+        .await
+        .expect("sync");
+    tx.commit().await.unwrap();
+    let real = role_holder_group_name(&seeded.role);
+    for name in [real, "role:ghost_role holders".to_string()] {
+        let (status, body) = post_json(
+            &app,
+            "/perm/grants",
+            &token,
+            grant_body(seeded.catalog_id, "group", &name),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name}: {body}");
+        assert!(
+            body.to_string().contains("managed migration targets"),
+            "{name}: {body}"
+        );
+    }
+    cleanup(&db.pool, seeded.grant_id).await;
+}
+
+#[tokio::test]
+async fn the_migrate_endpoint_removes_role_refs_and_undo_restores_them() {
+    let Some(dsn) = egret_test_db::url().await else {
+        return;
+    };
+    let db = Db::connect(&dsn, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let seeded = seed_service_with_role_grant(&db).await;
+    let (app, token) = admin_app(&db).await;
+    let count_sql =
+        "SELECT count(*) FROM perm.grant_principals WHERE grant_id = $1 AND kind::text = 'role'";
+    let roles_of = |id: Uuid| {
+        let pool = db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(count_sql)
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(roles_of(seeded.grant_id).await, 1);
+
+    let (status, body) = post_json(&app, "/perm/migrate/role-principals", &token, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == seeded.role.as_str()),
+        "{body}"
+    );
+    assert!(body["rewritten"].as_u64().unwrap() >= 1, "{body}");
+    assert_eq!(roles_of(seeded.grant_id).await, 0, "role ref removed");
+
+    let (status, body2) = post_json(
+        &app,
+        "/perm/migrate/role-principals/undo",
+        &token,
+        json!({ "id": body["id"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body2}");
+    assert_eq!(roles_of(seeded.grant_id).await, 1, "role ref restored");
+    cleanup(&db.pool, seeded.grant_id).await;
 }

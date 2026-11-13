@@ -55,6 +55,7 @@ import type {
   PreviewResponse,
   ProfileWarnings,
   RolePrincipal,
+  RolePrincipalMigration,
   RuleEffect,
   RuleEnforcement,
   RuleView,
@@ -62,6 +63,7 @@ import type {
   StoredOverlap,
   UndoRequest,
   UndoResponse,
+  UndoRolePrincipalsRequest,
   UnresolvedPrincipal,
   UserPrincipal,
   UsernameReuseReport
@@ -1806,6 +1808,229 @@ export const usePermPatchGrant = <TError = ErrorBody,
         TContext
       > => {
       return useMutation(getPermPatchGrantMutationOptions(options), queryClient);
+    }
+    export type permMigrateRolePrincipalsResponse200 = {
+  data: RolePrincipalMigration
+  status: 200
+}
+
+export type permMigrateRolePrincipalsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permMigrateRolePrincipalsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permMigrateRolePrincipalsResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type permMigrateRolePrincipalsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permMigrateRolePrincipalsResponseSuccess = (permMigrateRolePrincipalsResponse200) & {
+  headers: Headers;
+};
+export type permMigrateRolePrincipalsResponseError = (permMigrateRolePrincipalsResponse401 | permMigrateRolePrincipalsResponse403 | permMigrateRolePrincipalsResponse409 | permMigrateRolePrincipalsResponse500) & {
+  headers: Headers;
+};
+
+export type permMigrateRolePrincipalsResponse = (permMigrateRolePrincipalsResponseSuccess | permMigrateRolePrincipalsResponseError)
+
+export const getPermMigrateRolePrincipalsUrl = () => {
+
+
+
+
+  return `/api/control-plane/perm/migrate/role-principals`
+}
+
+/**
+ * @summary SP3c-1: rewrite every `role` principal (grants, rule exemptions, engine
+grants) into a ref to that role's managed `role:<name> holders` group,
+PROVABLY — the compiled artifact of every affected profile is fingerprinted
+before and after and the whole transaction rolls back on any difference.
+Reversible via the `undo` route.
+ */
+export const permMigrateRolePrincipals = async ( options?: Parameters<typeof customInstance>[1]): Promise<permMigrateRolePrincipalsResponse> => {
+
+  return customInstance<permMigrateRolePrincipalsResponse>(getPermMigrateRolePrincipalsUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermMigrateRolePrincipalsMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permMigrateRolePrincipals>>, TError,void, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof permMigrateRolePrincipals>>, TError,void, TContext> => {
+
+const mutationKey = ['permMigrateRolePrincipals'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof permMigrateRolePrincipals>>, void> = () => {
+
+
+          return  permMigrateRolePrincipals(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PermMigrateRolePrincipalsMutationResult = NonNullable<Awaited<ReturnType<typeof permMigrateRolePrincipals>>>
+
+    export type PermMigrateRolePrincipalsMutationError = ErrorBody
+
+    /**
+ * @summary SP3c-1: rewrite every `role` principal (grants, rule exemptions, engine
+grants) into a ref to that role's managed `role:<name> holders` group,
+PROVABLY — the compiled artifact of every affected profile is fingerprinted
+before and after and the whole transaction rolls back on any difference.
+Reversible via the `undo` route.
+ */
+export const usePermMigrateRolePrincipals = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permMigrateRolePrincipals>>, TError,void, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof permMigrateRolePrincipals>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getPermMigrateRolePrincipalsMutationOptions(options), queryClient);
+    }
+    export type permUndoRolePrincipalsResponse200 = {
+  data: void
+  status: 200
+}
+
+export type permUndoRolePrincipalsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permUndoRolePrincipalsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permUndoRolePrincipalsResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type permUndoRolePrincipalsResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type permUndoRolePrincipalsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permUndoRolePrincipalsResponseSuccess = (permUndoRolePrincipalsResponse200) & {
+  headers: Headers;
+};
+export type permUndoRolePrincipalsResponseError = (permUndoRolePrincipalsResponse401 | permUndoRolePrincipalsResponse403 | permUndoRolePrincipalsResponse404 | permUndoRolePrincipalsResponse409 | permUndoRolePrincipalsResponse500) & {
+  headers: Headers;
+};
+
+export type permUndoRolePrincipalsResponse = (permUndoRolePrincipalsResponseSuccess | permUndoRolePrincipalsResponseError)
+
+export const getPermUndoRolePrincipalsUrl = () => {
+
+
+
+
+  return `/api/control-plane/perm/migrate/role-principals/undo`
+}
+
+/**
+ * @summary SP3c-1: undo one role-principal migration, restoring the `role` refs it
+rewrote. Refuses, changing nothing, if a rewritten row changed since.
+ */
+export const permUndoRolePrincipals = async (undoRolePrincipalsRequest: UndoRolePrincipalsRequest, options?: Parameters<typeof customInstance>[1]): Promise<permUndoRolePrincipalsResponse> => {
+
+  return customInstance<permUndoRolePrincipalsResponse>(getPermUndoRolePrincipalsUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(undoRolePrincipalsRequest)
+  }
+);}
+
+
+
+
+
+export const getPermUndoRolePrincipalsMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permUndoRolePrincipals>>, TError,{data: UndoRolePrincipalsRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof permUndoRolePrincipals>>, TError,{data: UndoRolePrincipalsRequest}, TContext> => {
+
+const mutationKey = ['permUndoRolePrincipals'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof permUndoRolePrincipals>>, {data: UndoRolePrincipalsRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  permUndoRolePrincipals(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PermUndoRolePrincipalsMutationResult = NonNullable<Awaited<ReturnType<typeof permUndoRolePrincipals>>>
+    export type PermUndoRolePrincipalsMutationBody = UndoRolePrincipalsRequest
+    export type PermUndoRolePrincipalsMutationError = ErrorBody
+
+    /**
+ * @summary SP3c-1: undo one role-principal migration, restoring the `role` refs it
+rewrote. Refuses, changing nothing, if a rewritten row changed since.
+ */
+export const usePermUndoRolePrincipals = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permUndoRolePrincipals>>, TError,{data: UndoRolePrincipalsRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof permUndoRolePrincipals>>,
+        TError,
+        {data: UndoRolePrincipalsRequest},
+        TContext
+      > => {
+      return useMutation(getPermUndoRolePrincipalsMutationOptions(options), queryClient);
     }
     export type permListOverlapsResponse200 = {
   data: StoredOverlap[]
