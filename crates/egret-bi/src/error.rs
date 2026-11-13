@@ -92,6 +92,24 @@ impl From<egret_query::EngineError> for BiError {
     }
 }
 
+/// SP3c-2 Task 6: a clearance write maintains its withhold rule through the
+/// perm-compile helpers, whose refusals (a dangling group, a missing tag) must
+/// keep their meaning rather than collapse into an opaque 500.
+impl From<egret_perm_compile::PermHttpError> for BiError {
+    fn from(e: egret_perm_compile::PermHttpError) -> Self {
+        use egret_perm_compile::PermHttpError as P;
+        match e {
+            P::NotFound => BiError::NotFound("tag".into()),
+            P::Missing(s) => BiError::NotFound(s),
+            P::BadRequest(s) => BiError::BadRequest(s),
+            P::Conflict(s) => BiError::Conflict(s),
+            P::Overlap { body } => BiError::Overlap { body },
+            P::Coded { status, body } => BiError::Coded { status, body },
+            other => BiError::Engine(other.to_string()),
+        }
+    }
+}
+
 /// SP4a Task 7: a catalog-tag write recompiles every StarRocks profile it can
 /// stale (D5), and a genuine `CompileError` (an authoring/resolution bug —
 /// `WorkspaceMembers` is skipped, not surfaced as an error; see

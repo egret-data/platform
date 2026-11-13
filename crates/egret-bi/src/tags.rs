@@ -820,6 +820,14 @@ impl ClassificationPolicyRepo {
         .bind(actor.user_id.0)
         .execute(&mut *tx)
         .await?;
+        // SP3c-2: enforcement reads the withhold rule, so it follows the write.
+        egret_perm_compile::clearance_migrate::upsert_clearance_withhold_rule_in_tx(
+            &mut tx,
+            tag_id,
+            required_roles,
+            required_groups,
+        )
+        .await?;
         reach.retag_and_bump(&mut tx).await?;
         let skipped = Self::recompile_for_clearance_in_tx(&mut tx).await?;
         reach.refuse_created_overlaps(&mut tx).await?;
@@ -856,6 +864,12 @@ impl ClassificationPolicyRepo {
             .bind(tag_id)
             .execute(&mut *tx)
             .await?;
+        // SP3c-2: drop the withhold rule with its table row, or the clearance
+        // would stay enforced from the rule.
+        egret_perm_compile::clearance_migrate::remove_clearance_withhold_rule_in_tx(
+            &mut tx, tag_id,
+        )
+        .await?;
         reach.retag_and_bump(&mut tx).await?;
         let skipped = Self::recompile_for_clearance_in_tx(&mut tx).await?;
         reach.refuse_created_overlaps(&mut tx).await?;

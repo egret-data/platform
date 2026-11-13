@@ -143,6 +143,9 @@ tower.workspace = true
 async-trait.workspace = true
 http-body-util = "0.1"
 egret-events.workspace = true
+# SP3c-2 Task 6: `tests/clearance_migrate.rs` authors clearances through the
+# real `ClassificationPolicyRepo` write path (a dev-only dependency cycle).
+egret-bi.workspace = true
 egret-secrets.workspace = true
 chrono.workspace = true
 serde_json.workspace = true

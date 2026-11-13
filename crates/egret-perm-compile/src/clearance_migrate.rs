@@ -157,8 +157,51 @@ async fn group_name_for_id(
         })
 }
 
+/// REPLACE a withhold rule's exemptions with exactly the cleared principals:
+/// each required role → its managed `role:<name> holders` group (ensured here so
+/// the ref resolves), each required group UUID → that group's `groups.name`.
+/// Every one is an `include` group exemption. The single source of truth for what
+/// a clearance's exemptions are, shared by the bulk migration and by authoring.
+async fn replace_rule_exemptions(
+    tx: &mut Transaction<'_, Postgres>,
+    rule_id: Uuid,
+    required_roles: &[String],
+    required_groups: &[Uuid],
+) -> Result<(), PermHttpError> {
+    let mut refs: Vec<String> = Vec::new();
+    for role in required_roles {
+        // Ensure the managed holder group exists so the ref resolves (SP3c-1).
+        sync_role_holder_group_in_tx(tx, role).await?;
+        refs.push(role_holder_group_name(role));
+    }
+    for group_id in required_groups {
+        refs.push(group_name_for_id(tx, *group_id).await?);
+    }
+    sqlx::query("DELETE FROM perm.rule_exemptions WHERE rule_id = $1")
+        .bind(rule_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(PermHttpError::db)?;
+    // PK (rule_id, kind, ref, mode) dedups a role and a group that resolve to
+    // the same name.
+    for r in refs {
+        sqlx::query(
+            "INSERT INTO perm.rule_exemptions (rule_id, kind, ref, mode) \
+             VALUES ($1, 'group'::perm.principal_kind, $2, 'include'::perm.principal_mode) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(rule_id)
+        .bind(&r)
+        .execute(&mut **tx)
+        .await
+        .map_err(PermHttpError::db)?;
+    }
+    Ok(())
+}
+
 /// Create the withhold rule for one clearance and its `include` exemptions,
-/// returning the new rule id.
+/// returning the new rule id. Refuses `409` if the rule already exists (the bulk
+/// migration must not silently re-migrate).
 async fn create_withhold_rule(
     tx: &mut Transaction<'_, Postgres>,
     row: &ClearanceRow,
@@ -182,32 +225,78 @@ async fn create_withhold_rule(
         }
         Err(e) => return Err(PermHttpError::db(e)),
     };
+    replace_rule_exemptions(tx, rule_id, &row.required_roles, &row.required_groups).await?;
+    Ok(rule_id)
+}
 
-    // Each cleared principal → an `include` group exemption. PK
-    // (rule_id, kind, ref, mode) dedups a role and a group that resolve to the
-    // same name, and the collisions a run cannot otherwise rule out.
-    let mut refs: Vec<String> = Vec::new();
-    for role in &row.required_roles {
-        // Ensure the managed holder group exists so the ref resolves (SP3c-1).
-        sync_role_holder_group_in_tx(tx, role).await?;
-        refs.push(role_holder_group_name(role));
+/// SP3c-2 Task 6: make a tag's withhold rule match its authored clearance.
+/// Called by the clearance authoring path in the same transaction that writes
+/// `classification_policies`, so the table (the author store) and the rule (what
+/// enforcement reads) never diverge. Creates the rule if absent, then REPLACES
+/// its exemptions with exactly the cleared principals. An empty clearance (no
+/// roles AND no groups) is no gate, so the rule is removed instead — a withhold
+/// rule with no exemption would withhold from everyone.
+pub async fn upsert_clearance_withhold_rule_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    tag_id: Uuid,
+    required_roles: &[String],
+    required_groups: &[Uuid],
+) -> Result<(), PermHttpError> {
+    if required_roles.is_empty() && required_groups.is_empty() {
+        return remove_clearance_withhold_rule_in_tx(tx, tag_id).await;
     }
-    for group_id in &row.required_groups {
-        refs.push(group_name_for_id(tx, *group_id).await?);
-    }
-    for r in refs {
-        sqlx::query(
-            "INSERT INTO perm.rule_exemptions (rule_id, kind, ref, mode) \
-             VALUES ($1, 'group'::perm.principal_kind, $2, 'include'::perm.principal_mode) \
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(rule_id)
-        .bind(&r)
+    let Some(tag_key) = tag_key_for_id(tx, tag_id).await? else {
+        return Err(PermHttpError::NotFound);
+    };
+    let name = withhold_rule_name(&tag_key);
+    let rule_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO perm.rules (name, kind, selector_kind, tag_key) \
+         VALUES ($1, 'withhold', 'tag', $2) \
+         ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
+    )
+    .bind(&name)
+    .bind(&tag_key)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(PermHttpError::db)?;
+    replace_rule_exemptions(tx, rule_id, required_roles, required_groups).await
+}
+
+/// SP3c-2 Task 6: remove a tag's withhold rule and its exemptions (idempotent).
+/// Called when a clearance is cleared, so enforcement drops with it.
+pub async fn remove_clearance_withhold_rule_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    tag_id: Uuid,
+) -> Result<(), PermHttpError> {
+    let Some(tag_key) = tag_key_for_id(tx, tag_id).await? else {
+        return Ok(());
+    };
+    let name = withhold_rule_name(&tag_key);
+    sqlx::query(
+        "DELETE FROM perm.rule_exemptions WHERE rule_id IN \
+           (SELECT id FROM perm.rules WHERE kind = 'withhold' AND name = $1)",
+    )
+    .bind(&name)
+    .execute(&mut **tx)
+    .await
+    .map_err(PermHttpError::db)?;
+    sqlx::query("DELETE FROM perm.rules WHERE kind = 'withhold' AND name = $1")
+        .bind(&name)
         .execute(&mut **tx)
         .await
         .map_err(PermHttpError::db)?;
-    }
-    Ok(rule_id)
+    Ok(())
+}
+
+async fn tag_key_for_id(
+    tx: &mut Transaction<'_, Postgres>,
+    tag_id: Uuid,
+) -> Result<Option<String>, PermHttpError> {
+    sqlx::query_scalar("SELECT key FROM public.tags WHERE id = $1")
+        .bind(tag_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(PermHttpError::db)
 }
 
 /// Migrate every gated clearance into a withhold rule, prove the compiled output
