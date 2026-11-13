@@ -21,6 +21,11 @@ pub enum RestartRefusal {
     /// The execution is in a state the operation does not act on; the state
     /// it is in.
     NotRestartable(RunState),
+    /// [`mark_as`] only: the run has a `WorkingDirectory` ancestor. The
+    /// block's directory is closed once its phase is Finished; marking a child
+    /// would reopen the block with no directory. Restart the execution
+    /// instead, which re-runs the block whole (spec D3).
+    InsideWorkingDirectory,
 }
 
 /// The commands a restart or a mark applies, in order, and the runs the
@@ -113,9 +118,11 @@ pub fn restart(
 /// Spec D11 (Kestra `markAs`). `target` is one of SUCCESS/WARNING/FAILED/CANCELLED.
 ///
 /// The run takes `target` on its history and on its last attempt, with no new
-/// attempt ([`Command::CompleteRun`] with the same state twice: it pushes onto
-/// the last attempt whether it has closed or not, which is Kestra's
-/// `attempts.getLast().withState(targetState)`). Its flowable ancestors are
+/// attempt. **There is no `OverwriteLastAttempt` command, by decision:** the
+/// existing [`Command::CompleteRun`] with the same state twice already pushes
+/// onto the run and onto the last attempt whether that attempt has closed or
+/// not, which is Kestra's `attempts.getLast().withState(targetState)` (an
+/// append). A second variant would duplicate it. Its flowable ancestors are
 /// reopened as [`restart`] reopens them, and the end-hook set is emptied --
 /// except the run itself and its ancestors, which this call has just given a
 /// state. The execution then goes `CANCELLED` for a `CANCELLED` target,
@@ -123,8 +130,10 @@ pub fn restart(
 /// some tasks paused"), and goes `RESTARTED` otherwise.
 ///
 /// Refuses [`RestartRefusal::NotRestartable`] unless the execution is
-/// terminal and not `KILLED` (`State.java:189-191`), and
-/// [`RestartRefusal::NothingToRestart`] for a run that does not exist. A
+/// terminal and not `KILLED` (`State.java:189-191`),
+/// [`RestartRefusal::NothingToRestart`] for a run that does not exist, and
+/// [`RestartRefusal::InsideWorkingDirectory`] for a run beneath a
+/// `WorkingDirectory`. A
 /// target equal to the run's state is the caller's to refuse (D11's no-op).
 pub fn mark_as(
     plan: &Plan,
@@ -141,6 +150,14 @@ pub fn mark_as(
         return Err(RestartRefusal::NothingToRestart);
     }
     let above = ancestors(state, run);
+    if above.iter().any(|&a| {
+        matches!(
+            kind(plan, state, a),
+            Some(TaskKind::WorkingDirectory { .. })
+        )
+    }) {
+        return Err(RestartRefusal::InsideWorkingDirectory);
+    }
     let mut to_empty = end_hook_runs(plan, state);
     to_empty.remove(&run);
     for a in &above {
@@ -331,8 +348,29 @@ mod tests {
     /// `SUCCESS`); a `WorkingDirectory` claim completes; a `Loop` gets its
     /// values rendered; a `LoopUntil` condition is answered `false`.
     fn drive(plan: &Plan, state: &mut ExecutionState, outcomes: &[(&str, RunState)]) {
+        let mut outcome = |id: &str| {
+            outcomes
+                .iter()
+                .find(|(t, _)| *t == id)
+                .map_or(RunState::Success, |(_, s)| *s)
+        };
+        drive_from(plan, state, T0, false, &mut outcome);
+    }
+
+    /// [`drive`] from `start`, with each leaf's outcome asked of `outcome`
+    /// (by task id), and -- when `pass_time` -- the clock moved to the
+    /// earliest `not_before` once nothing else moves, as the oracle's driver
+    /// does. Returns the tick it came to rest at.
+    fn drive_from(
+        plan: &Plan,
+        state: &mut ExecutionState,
+        start: Tick,
+        pass_time: bool,
+        outcome: &mut dyn FnMut(&str) -> RunState,
+    ) -> Tick {
+        let mut now = start;
         for _ in 0..500 {
-            let cmds = advance(plan, state, T0);
+            let cmds = advance(plan, state, now);
             if !cmds.is_empty() {
                 for c in &cmds {
                     apply(state, c);
@@ -362,7 +400,7 @@ mod tests {
             let condition = (0..n).find(|&ix| {
                 last(state, ix) == Some(RunState::Running)
                     && state.runs[ix].rendered.is_none()
-                    && loop_condition_is_asked(plan, state, ix, state.runs[ix].task, T0)
+                    && loop_condition_is_asked(plan, state, ix, state.runs[ix].task, now)
             });
             if let Some(ix) = condition {
                 state.runs[ix].rendered = Some("false".into());
@@ -375,21 +413,20 @@ mod tests {
                 ) && last(state, ix) == Some(RunState::Running)
             });
             if let Some(run) = running_leaf {
-                let id = plan.tasks[state.runs[run].task].id.as_str();
-                let outcome = outcomes
-                    .iter()
-                    .find(|(t, _)| *t == id)
-                    .map_or(RunState::Success, |(_, s)| *s);
-                apply(
-                    state,
-                    &Command::SetRunState {
-                        run,
-                        state: outcome,
-                    },
-                );
+                let ended = outcome(plan.tasks[state.runs[run].task].id.as_str());
+                apply(state, &Command::SetRunState { run, state: ended });
                 continue;
             }
-            return;
+            let due = state
+                .runs
+                .iter()
+                .filter_map(|r| r.not_before)
+                .filter(|&t| t > now)
+                .min();
+            match due {
+                Some(t) if pass_time => now = t,
+                _ => return now,
+            }
         }
         panic!("the drive did not come to rest");
     }
@@ -916,6 +953,84 @@ mod tests {
         let s = applied(&state, &out);
         assert_eq!(last(&s, a), Some(RunState::Cancelled));
         assert_eq!(s.history.last(), Some(&RunState::Cancelled));
+    }
+
+    /// `LoopUntil` over `body`, `maxIterations: 3`, condition never true.
+    fn loop_until_three() -> String {
+        flow(&format!(
+            "tasks:\n  - id: lu\n    type: io.kestra.plugin.core.flow.LoopUntil\n    condition: \"{{{{ false }}}}\"\n    checkFrequency:\n      interval: PT1S\n      maxIterations: 3\n    tasks:\n{}",
+            leaf("body", 6)
+        ))
+    }
+
+    /// Controller fix 1: a restarted `LoopUntil` iteration is the SAME
+    /// iteration (Kestra keeps the run's `iteration`, `RestartCaseTest`
+    /// `restartOrReplayLoopUntil`), so `iterationCount` does not move and
+    /// `maxIterations` is reached exactly where a run that never failed
+    /// reaches it.
+    #[test]
+    fn a_restarted_loop_until_iteration_is_not_a_new_iteration() {
+        use crate::executor::loop_iteration;
+        let src = loop_until_three();
+        let plan = build_plan(&src).expect("plans");
+
+        // The control: the same loop with a body that never fails.
+        let mut control = ExecutionState::new(&plan);
+        drive_from(&plan, &mut control, T0, true, &mut |_| RunState::Success);
+        let lu = run(&plan, &control, "lu");
+        assert!(is_terminal(&control, lu));
+
+        // The body fails on its second end, i.e. in iteration 2.
+        let mut state = ExecutionState::new(&plan);
+        let mut ends = 0;
+        let rest = drive_from(&plan, &mut state, T0, true, &mut |_| {
+            ends += 1;
+            if ends == 2 {
+                RunState::Failed
+            } else {
+                RunState::Success
+            }
+        });
+        assert_eq!(last(&state, lu), Some(RunState::Failed));
+        let before = loop_iteration(&state, lu);
+        assert_eq!(before, 2);
+
+        let at = Tick(rest.0 + 1_000);
+        let out = restart(&plan, &state, at).expect("restartable");
+        let mut s = applied(&state, &out);
+        assert_eq!(
+            loop_iteration(&s, lu),
+            before,
+            "the restarted iteration is the same iteration"
+        );
+
+        drive_from(&plan, &mut s, at, true, &mut |_| RunState::Success);
+        assert_eq!(last(&s, lu), last(&control, lu));
+        assert_eq!(
+            loop_iteration(&s, lu),
+            loop_iteration(&control, lu),
+            "maxIterations is reached exactly when it would have been"
+        );
+    }
+
+    /// Controller fix 2: a run beneath a `WorkingDirectory` is not marked.
+    #[test]
+    fn mark_as_refuses_a_run_inside_a_working_directory() {
+        let src = flow(&format!(
+            "tasks:\n  - id: block\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n    tasks:\n{}{}",
+            leaf("a", 6),
+            leaf("b", 6)
+        ));
+        let (plan, state) = driven(&src, &[("a", RunState::Failed)]);
+        let a = run(&plan, &state, "a");
+        assert_eq!(last(&state, a), Some(RunState::Failed));
+        assert_eq!(
+            mark_as(&plan, &state, a, RunState::Success, NOW),
+            Err(RestartRefusal::InsideWorkingDirectory)
+        );
+        // The block itself is not inside one, and is still markable.
+        let block = run(&plan, &state, "block");
+        assert!(mark_as(&plan, &state, block, RunState::Success, NOW).is_ok());
     }
 
     // 15.
