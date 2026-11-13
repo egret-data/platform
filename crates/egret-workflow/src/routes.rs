@@ -2457,6 +2457,52 @@ async fn startable_flow(
     Ok(flow)
 }
 
+/// **The doors a run of the flow passes, for an operation that runs tasks
+/// again** -- restart and a task run's state change (spec D24, final review
+/// I1). Replay passes the same two (`replay_execution`):
+///
+/// - the flow's current state ([`startable_flow`]): a trashed flow, or one
+///   whose execution names no flow any more (purged), is 404; a disabled one
+///   is 409;
+/// - the `egret.sql` creator gate (`sql_principal::check_start`, door 2):
+///   the caller re-runs the creator's SQL under the creator's identity, so
+///   on a flow that runs `egret.sql` only its creator may.
+///
+/// The frozen source is what is judged, as it is what runs again. A loop
+/// iteration is left to the worker, which refuses it naming its root before
+/// anything runs. Change status runs no task and passes neither door.
+async fn rerun_gate(
+    st: &WorkflowState,
+    ws: Uuid,
+    caller: Uuid,
+    detail: &crate::repo::ExecutionDetail,
+) -> EgretResult<()> {
+    if detail.execution.loop_index.is_some() {
+        return Ok(());
+    }
+    let flow_id = detail
+        .execution
+        .flow_id
+        .ok_or_else(|| Error::NotFound("flow".into()))?;
+    let _ = startable_flow(st, ws, flow_id).await?;
+    let flow = parse(&detail.source)
+        .map_err(|e| Error::InvalidInput(format!("the flow does not parse: {}", e.message)))?;
+    let mut conn = st
+        .db
+        .pool
+        .acquire()
+        .await
+        .map_err(|e| Error::Internal(anyhow::Error::new(e)))?;
+    crate::worker::sql_principal::check_start(
+        &mut conn,
+        &flow,
+        Some(flow_id),
+        &detail.source,
+        Some(caller),
+    )
+    .await
+}
+
 /// The `inputs` object a start will actually run with.
 ///
 /// Split out so the refusal has one site and both routes that need the empty
@@ -3717,11 +3763,11 @@ fn state_change_body_refusal(r: axum::extract::rejection::JsonRejection) -> Exec
     ),
     responses(
         (status = 200, description = "The execution was restarted in place, as Kestra restarts one: it keeps its id, its `FAILED` and `PAUSED` runs are reset, runs that ended `SUCCESS` keep their outputs and are not run again, and it carries the label `system.restarted: true` and `attempt_number + 1`. The body is its detail afterwards.", body = ExecutionDto),
-        (status = 400, description = "The query has a `revision` (code `restart_revision_unsupported`; restarting an older revision is package 7b); or the execution is a **loop iteration** (no code; the message names its loop root, which is restarted instead)", body = egret_core::http::ErrorBody),
+        (status = 400, description = "The query has a `revision` (code `restart_revision_unsupported`; restarting an older revision is package 7b); or the execution is a **loop iteration** (no code; the message names its loop root, which is restarted instead); or the flow runs `egret.sql` and the caller is not its creator (no code; the tasks run as the creator, as for a replay)", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
-        (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed", body = egret_core::http::ErrorBody),
-        (status = 409, description = "Nothing is written. `not_restartable`: the execution is not `FAILED` or `PAUSED` (the message names its state). `nothing_to_restart`: no run is `FAILED` or `PAUSED`. `after_execution_running`: the execution has ended but its `afterExecution:` tasks still run. `files_pruned`: the retention pruner deleted the execution's files.", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed; or its flow is in the trash or was deleted (as for a replay)", body = egret_core::http::ErrorBody),
+        (status = 409, description = "Nothing is written. The flow is disabled (no code, as for a replay). `not_restartable`: the execution is not `FAILED` or `PAUSED` (the message names its state). `nothing_to_restart`: no run is `FAILED` or `PAUSED`. `after_execution_running`: the execution has ended but its `afterExecution:` tasks still run. `files_pruned`: the retention pruner deleted the execution's files.", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
@@ -3746,6 +3792,7 @@ async fn restart_execution(
             "restarting from a revision is not supported yet; it arrives with package 7b".into(),
         ));
     }
+    rerun_gate(&st, ctx.workspace_id.0, ctx.principal.user_id.0, &before).await?;
     match crate::worker::restart_execution(&st.db.pool, id).await? {
         crate::worker::Restarted::Done => {}
         crate::worker::Restarted::Refused(r) => {
@@ -3780,11 +3827,11 @@ async fn restart_execution(
     request_body = StateChangeBody,
     responses(
         (status = 200, description = "The task run took the state (Kestra's mark-as): its outputs are kept, its ancestors are reopened and the execution runs on from `RESTARTED` (or ends `CANCELLED` for a `CANCELLED` target), with the label `system.restarted: true`. The body is the execution's detail afterwards.", body = ExecutionDto),
-        (status = 400, description = "The body is not valid JSON, is not `{\"state\": ...}` with exactly one of `SUCCESS`, `WARNING`, `FAILED`, `CANCELLED` (upper case), or has another field (always 400, never 422); or the execution is a **loop iteration** (no code; the message names its loop root)", body = egret_core::http::ErrorBody),
+        (status = 400, description = "The body is not valid JSON, is not `{\"state\": ...}` with exactly one of `SUCCESS`, `WARNING`, `FAILED`, `CANCELLED` (upper case), or has another field (always 400, never 422); or the execution is a **loop iteration** (no code; the message names its loop root); or the flow runs `egret.sql` and the caller is not its creator (no code; the tasks run as the creator, as for a replay)", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
-        (status = 404, description = "No such execution in this workspace, or no task run of it with this id (one removed by a restart counts as none)", body = egret_core::http::ErrorBody),
-        (status = 409, description = "Nothing is written. The worker checks, in this order: loop iteration (the 400 above), `files_pruned`, `after_execution_running` (the execution has ended but its `afterExecution:` still runs), `not_restartable` (the execution has not ended, or ended `KILLED`; the message names its state), then the run itself: no such run (the 404 above), `state_unchanged` (the run is already in that state), `inside_working_directory` (the run is inside a `WorkingDirectory`; restart the execution instead).", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace, or no task run of it with this id (one removed by a restart counts as none); or its flow is in the trash or was deleted (as for a replay)", body = egret_core::http::ErrorBody),
+        (status = 409, description = "Nothing is written. The flow is disabled (no code, as for a replay). The worker then checks, in this order: loop iteration (the 400 above), `files_pruned`, `after_execution_running` (the execution has ended but its `afterExecution:` still runs), `not_restartable` (the execution has not ended, or ended `KILLED`; the message names its state), then the run itself: no such run (the 404 above), `state_unchanged` (the run is already in that state), `inside_working_directory` (the run is inside a `WorkingDirectory`; restart the execution instead).", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
@@ -3810,6 +3857,7 @@ async fn set_task_run_state(
         .ok_or_else(|| Error::NotFound("task run".into()))?;
     let from_state = run.state.clone();
     let target = body.state.run_state();
+    rerun_gate(&st, ctx.workspace_id.0, ctx.principal.user_id.0, &before).await?;
     match crate::worker::set_task_run_state(&st.db.pool, id, task_run_id, target).await? {
         Ok(()) => {}
         Err(r) => return Err(ExecOpError::from_state_change_refusal(id, r)),

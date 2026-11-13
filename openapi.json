@@ -33363,7 +33363,7 @@
             }
           },
           "400": {
-            "description": "The query has a `revision` (code `restart_revision_unsupported`; restarting an older revision is package 7b); or the execution is a **loop iteration** (no code; the message names its loop root, which is restarted instead)",
+            "description": "The query has a `revision` (code `restart_revision_unsupported`; restarting an older revision is package 7b); or the execution is a **loop iteration** (no code; the message names its loop root, which is restarted instead); or the flow runs `egret.sql` and the caller is not its creator (no code; the tasks run as the creator, as for a replay)",
             "content": {
               "application/json": {
                 "schema": {
@@ -33393,7 +33393,7 @@
             }
           },
           "404": {
-            "description": "No such execution in this workspace, indistinguishably from one that never existed",
+            "description": "No such execution in this workspace, indistinguishably from one that never existed; or its flow is in the trash or was deleted (as for a replay)",
             "content": {
               "application/json": {
                 "schema": {
@@ -33403,7 +33403,7 @@
             }
           },
           "409": {
-            "description": "Nothing is written. `not_restartable`: the execution is not `FAILED` or `PAUSED` (the message names its state). `nothing_to_restart`: no run is `FAILED` or `PAUSED`. `after_execution_running`: the execution has ended but its `afterExecution:` tasks still run. `files_pruned`: the retention pruner deleted the execution's files.",
+            "description": "Nothing is written. The flow is disabled (no code, as for a replay). `not_restartable`: the execution is not `FAILED` or `PAUSED` (the message names its state). `nothing_to_restart`: no run is `FAILED` or `PAUSED`. `after_execution_running`: the execution has ended but its `afterExecution:` tasks still run. `files_pruned`: the retention pruner deleted the execution's files.",
             "content": {
               "application/json": {
                 "schema": {
@@ -33715,7 +33715,7 @@
             }
           },
           "400": {
-            "description": "The body is not valid JSON, is not `{\"state\": ...}` with exactly one of `SUCCESS`, `WARNING`, `FAILED`, `CANCELLED` (upper case), or has another field (always 400, never 422); or the execution is a **loop iteration** (no code; the message names its loop root)",
+            "description": "The body is not valid JSON, is not `{\"state\": ...}` with exactly one of `SUCCESS`, `WARNING`, `FAILED`, `CANCELLED` (upper case), or has another field (always 400, never 422); or the execution is a **loop iteration** (no code; the message names its loop root); or the flow runs `egret.sql` and the caller is not its creator (no code; the tasks run as the creator, as for a replay)",
             "content": {
               "application/json": {
                 "schema": {
@@ -33745,7 +33745,7 @@
             }
           },
           "404": {
-            "description": "No such execution in this workspace, or no task run of it with this id (one removed by a restart counts as none)",
+            "description": "No such execution in this workspace, or no task run of it with this id (one removed by a restart counts as none); or its flow is in the trash or was deleted (as for a replay)",
             "content": {
               "application/json": {
                 "schema": {
@@ -33755,7 +33755,7 @@
             }
           },
           "409": {
-            "description": "Nothing is written. The worker checks, in this order: loop iteration (the 400 above), `files_pruned`, `after_execution_running` (the execution has ended but its `afterExecution:` still runs), `not_restartable` (the execution has not ended, or ended `KILLED`; the message names its state), then the run itself: no such run (the 404 above), `state_unchanged` (the run is already in that state), `inside_working_directory` (the run is inside a `WorkingDirectory`; restart the execution instead).",
+            "description": "Nothing is written. The flow is disabled (no code, as for a replay). The worker then checks, in this order: loop iteration (the 400 above), `files_pruned`, `after_execution_running` (the execution has ended but its `afterExecution:` still runs), `not_restartable` (the execution has not ended, or ended `KILLED`; the message names its state), then the run itself: no such run (the 404 above), `state_unchanged` (the run is already in that state), `inside_working_directory` (the run is inside a `WorkingDirectory`; restart the execution instead).",
             "content": {
               "application/json": {
                 "schema": {

@@ -83,10 +83,40 @@ async fn setup(pool: &sqlx::PgPool) -> (Db, Uuid, egret_core::UserId, common::Ap
     (db, ws, user, app)
 }
 
+/// Start `source` as an execution of a real, open flow the workspace's
+/// creator owns: restart and a task run's state change answer to the flow's
+/// current state as replay does (final review I1), and refuse an execution
+/// whose flow is gone.
 async fn start(pool: &sqlx::PgPool, ws: Uuid, source: &str) -> Uuid {
-    egret_workflow::worker::start_execution(pool, ws, None, source, json!({}))
+    let flow = flow_of(pool, ws, source).await;
+    egret_workflow::worker::start_execution(pool, ws, Some(flow), source, json!({}))
         .await
         .expect("start execution")
+}
+
+/// The flow row `source` is a draft of, created on first use (the workspace's
+/// creator owns it).
+async fn flow_of(pool: &sqlx::PgPool, ws: Uuid, source: &str) -> Uuid {
+    let parsed = egret_workflow::spec::parse(source).expect("parse");
+    let found: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM workflow.flows WHERE workspace_id = $1 AND namespace = $2 AND flow_id = $3",
+    )
+    .bind(ws)
+    .bind(&parsed.namespace)
+    .bind(&parsed.id)
+    .fetch_optional(pool)
+    .await
+    .expect("look up the flow");
+    if let Some(id) = found {
+        return id;
+    }
+    let owner: Uuid = sqlx::query_scalar("SELECT created_by FROM workspaces WHERE id = $1")
+        .bind(ws)
+        .fetch_one(pool)
+        .await
+        .expect("workspace owner");
+    let db = Db { pool: pool.clone() };
+    common::seed_flow(&db, ws, egret_core::UserId(owner), source, "draft").await
 }
 
 async fn exec_state(pool: &sqlx::PgPool, id: Uuid) -> String {
@@ -719,3 +749,215 @@ async fn an_emptied_run_is_not_shown_in_the_detail_or_the_graph(pool: sqlx::PgPo
 
 #[allow(dead_code)]
 fn _unused(_: Value) {}
+
+// ── Final review I1: the flow's current state and the `egret.sql` gate ──────
+
+/// The flow of `ex`.
+async fn flow_id_of(pool: &sqlx::PgPool, ex: Uuid) -> Uuid {
+    sqlx::query_scalar("SELECT flow_id FROM workflow.executions WHERE id = $1")
+        .bind(ex)
+        .fetch_one(pool)
+        .await
+        .expect("flow id")
+}
+
+/// A second person in `ws` with `workflow:manage`, who did not create its flows.
+async fn other_manager(db: &Db, ws: Uuid) -> egret_core::UserId {
+    let uid: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (email, name, provider, status, password_hash) \
+         VALUES ($1, 't', 'local', 'active', 'x') RETURNING id",
+    )
+    .bind(format!("u_{}@t.local", Uuid::new_v4().simple()))
+    .fetch_one(&db.pool)
+    .await
+    .expect("seed user");
+    let user = egret_core::UserId(uid);
+    common::grant(db, ws, user, &["workflow:manage", "workflow:read"]).await;
+    user
+}
+
+/// The FAILED execution of [`failed_execution`], its frozen source then
+/// given an `egret.sql` task at `c` (the run not reached yet), as if the
+/// creator had started a flow that runs SQL as them.
+async fn failed_sql_execution(pool: &sqlx::PgPool, ws: Uuid) -> Uuid {
+    let (ex, _reg) = failed_execution(pool, ws).await;
+    let source = format!(
+        "id: ops\nnamespace: t\ntasks:\n  - id: a\n    type: {LOG}\n    message: a\n\
+         \x20 - id: b\n    type: {LOG}\n    message: b\n\
+         \x20 - id: c\n    type: egret.sql\n    database: trino_prod\n    sql: SELECT 1\n"
+    );
+    sqlx::query("UPDATE workflow.executions SET source = $2 WHERE id = $1")
+        .bind(ex)
+        .bind(&source)
+        .execute(pool)
+        .await
+        .unwrap();
+    ex
+}
+
+/// Which operation a gate test sends.
+#[derive(Clone, Copy, Debug)]
+enum Op {
+    Restart,
+    MarkB,
+}
+
+async fn send(
+    app: &common::App,
+    pool: &sqlx::PgPool,
+    op: Op,
+    ws: Uuid,
+    ex: Uuid,
+    user: egret_core::UserId,
+) -> axum::response::Response {
+    match op {
+        Op::Restart => common::post_no_body(app, &restart_path(ws, ex), user).await,
+        Op::MarkB => {
+            let b = task_run_id(pool, ex, "b").await;
+            common::post(
+                app,
+                &run_state_path(ws, ex, b),
+                user,
+                json!({ "state": "SUCCESS" }),
+            )
+            .await
+        }
+    }
+}
+
+async fn a_trashed_flow_is_refused_404(op: Op, pool: sqlx::PgPool) {
+    let (_db, ws, user, app) = setup(&pool).await;
+    let (ex, _reg) = failed_execution(&pool, ws).await;
+    sqlx::query("UPDATE workflow.flows SET deleted_at = now() WHERE id = $1")
+        .bind(flow_id_of(&pool, ex).await)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let res = send(&app, &pool, op, ws, ex, user).await;
+
+    assert_eq!(res.status(), 404, "{op:?}");
+    assert_eq!(exec_state(&pool, ex).await, "FAILED", "{op:?}");
+    assert!(common::audit_mutations(&app).is_empty(), "{op:?}");
+}
+
+async fn a_disabled_flow_is_refused_409(op: Op, pool: sqlx::PgPool) {
+    let (_db, ws, user, app) = setup(&pool).await;
+    let (ex, _reg) = failed_execution(&pool, ws).await;
+    sqlx::query("UPDATE workflow.flows SET state = 'disabled' WHERE id = $1")
+        .bind(flow_id_of(&pool, ex).await)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let res = send(&app, &pool, op, ws, ex, user).await;
+
+    let msg = expect_error(res, 409, None).await;
+    assert!(msg.contains("disabled"), "{op:?}: {msg}");
+    assert_eq!(exec_state(&pool, ex).await, "FAILED", "{op:?}");
+    assert!(common::audit_mutations(&app).is_empty(), "{op:?}");
+}
+
+async fn a_flow_less_execution_is_refused_404(op: Op, pool: sqlx::PgPool) {
+    let (_db, ws, user, app) = setup(&pool).await;
+    let (ex, _reg) = failed_execution(&pool, ws).await;
+    sqlx::query("UPDATE workflow.executions SET flow_id = NULL WHERE id = $1")
+        .bind(ex)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let res = send(&app, &pool, op, ws, ex, user).await;
+
+    assert_eq!(res.status(), 404, "{op:?}");
+    assert_eq!(exec_state(&pool, ex).await, "FAILED", "{op:?}");
+}
+
+async fn a_non_creator_cannot_rerun_an_egret_sql_flow(op: Op, pool: sqlx::PgPool) {
+    let (db, ws, creator, _app) = setup(&pool).await;
+    let ex = failed_sql_execution(&pool, ws).await;
+    let other = other_manager(&db, ws).await;
+    // An app built after the grant, which it reads at build.
+    let app = common::app(&db).await;
+
+    let res = send(&app, &pool, op, ws, ex, other).await;
+
+    let msg = expect_error(res, 400, None).await;
+    assert!(
+        msg.contains("only its creator can start it"),
+        "{op:?}: {msg}"
+    );
+    assert_eq!(exec_state(&pool, ex).await, "FAILED", "{op:?}");
+    assert!(common::audit_mutations(&app).is_empty(), "{op:?}");
+
+    // The control: the creator passes the same gate.
+    let res = send(&app, &pool, op, ws, ex, creator).await;
+    assert_eq!(res.status(), 200, "{op:?}");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn restart_of_an_execution_of_a_trashed_flow_is_404(pool: sqlx::PgPool) {
+    a_trashed_flow_is_refused_404(Op::Restart, pool).await;
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn marking_a_run_of_a_trashed_flow_is_404(pool: sqlx::PgPool) {
+    a_trashed_flow_is_refused_404(Op::MarkB, pool).await;
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn restart_of_an_execution_of_a_disabled_flow_is_409(pool: sqlx::PgPool) {
+    a_disabled_flow_is_refused_409(Op::Restart, pool).await;
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn marking_a_run_of_a_disabled_flow_is_409(pool: sqlx::PgPool) {
+    a_disabled_flow_is_refused_409(Op::MarkB, pool).await;
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn restart_of_an_execution_whose_flow_was_purged_is_404(pool: sqlx::PgPool) {
+    a_flow_less_execution_is_refused_404(Op::Restart, pool).await;
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn marking_a_run_whose_flow_was_purged_is_404(pool: sqlx::PgPool) {
+    a_flow_less_execution_is_refused_404(Op::MarkB, pool).await;
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn restart_of_an_egret_sql_flow_by_a_non_creator_is_400(pool: sqlx::PgPool) {
+    a_non_creator_cannot_rerun_an_egret_sql_flow(Op::Restart, pool).await;
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn marking_a_run_of_an_egret_sql_flow_by_a_non_creator_is_400(pool: sqlx::PgPool) {
+    a_non_creator_cannot_rerun_an_egret_sql_flow(Op::MarkB, pool).await;
+}
+
+/// Change status runs no task, so neither gate applies to it (final review
+/// I1): a disabled flow's execution, changed by a person who did not create
+/// its `egret.sql` flow, still takes the status.
+#[sqlx::test(migrations = "../../migrations")]
+async fn changing_the_status_needs_neither_gate(pool: sqlx::PgPool) {
+    let (db, ws, _creator, _app) = setup(&pool).await;
+    let ex = failed_sql_execution(&pool, ws).await;
+    sqlx::query("UPDATE workflow.flows SET state = 'disabled' WHERE id = $1")
+        .bind(flow_id_of(&pool, ex).await)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let other = other_manager(&db, ws).await;
+    let app = common::app(&db).await;
+
+    let res = common::post(
+        &app,
+        &status_path(ws, ex),
+        other,
+        json!({ "state": "SUCCESS" }),
+    )
+    .await;
+
+    assert_eq!(res.status(), 200);
+    assert_eq!(exec_state(&pool, ex).await, "SUCCESS");
+}
