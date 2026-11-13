@@ -191,7 +191,7 @@ Measured at the end of each task, `cargo test -p egret-workflow`: `--test restar
 
 Also from the build: under `transmitFailed: true` a sibling that ends `SUCCESS` after the first failure is now counted and listed (matches Kestra's `handleTerminated`); the counters of a restarted iteration are re-based from the rows, so an earlier iteration that the 16 MiB cap read as `FAILED` is recounted `SUCCESS`. The frontend browser check (FE-TEST-2, light and dark) is owed at Z.
 
-Gates at Z: (filled in by the controller)
+Gates at Z (2026-11-13, on `a28207d9`, the last code commit): `cargo fmt --check` clean; `cargo clippy -p egret-workflow -p egret-server -p egret-config -p egret-metastore --all-targets -- -D warnings` clean; `cargo check -p egret-bin` clean; `cargo test -p egret-workflow --no-fail-fast` 3684 passed, 55 ignored, 7 failed, all seven in `sql_starrocks_live` (no StarRocks engine on the test host); `cargo test -p egret-config -p egret-server -p egret-metastore` 179 passed, including `committed_openapi_json_is_current`. Ratchet 301/25/25/0 and census 295/25/21, unchanged from T0.
 
 ### Deferred findings
 
