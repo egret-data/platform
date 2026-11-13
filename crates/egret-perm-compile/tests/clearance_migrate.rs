@@ -6,7 +6,7 @@ use egret_metastore::Db;
 use egret_perm::PermStore;
 use egret_perm_compile::clearance_migrate::{migrate_clearances_in_tx, undo_clearances_in_tx};
 use egret_perm_compile::{recompile_service, PermHttpError};
-use egret_policy::PolicyStore;
+use egret_policy::{PolicyStore, COMPILER_CLEARANCE_PREFIX};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -193,6 +193,8 @@ struct RoleClearance {
     perm: PermStore,
     policy: PolicyStore,
     profile_id: i64,
+    tag_service_id: i64,
+    tag_id: Uuid,
     tag_key: String,
     role_name: String,
 }
@@ -207,7 +209,7 @@ async fn seed_role_clearance(db: &Db) -> RoleClearance {
 
     let profile_name = unique("clrmig");
     let tag_service_name = format!("{profile_name}_tag");
-    policy
+    let tag_service = policy
         .create_service(&tag_service_name, "tag", &serde_json::json!({}))
         .await
         .expect("create tag service");
@@ -280,9 +282,28 @@ async fn seed_role_clearance(db: &Db) -> RoleClearance {
         perm,
         policy,
         profile_id: profile.id,
+        tag_service_id: tag_service.id,
+        tag_id,
         tag_key,
         role_name,
     }
+}
+
+/// Whether a clearance deny for `tag_id` is compiled into the TAG service — a
+/// Trino clearance is installation-wide and lands in the tag service, not the
+/// resource profile (`a tag policy filed under the profile is served to nobody`,
+/// SP4a Task 10 T3). This is the enforcement the read switch must preserve.
+async fn clearance_enforced(pool: &PgPool, tag_service_id: i64, tag_id: Uuid) -> bool {
+    let name = format!("{COMPILER_CLEARANCE_PREFIX}{tag_id}");
+    sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
+    )
+    .bind(tag_service_id)
+    .bind(&name)
+    .fetch_one(pool)
+    .await
+    .expect("count clearance policy")
+        > 0
 }
 
 /// A fingerprint of a profile's compiled bodies, as the migration gates on.
@@ -442,5 +463,130 @@ async fn undo_409s_when_a_rule_changed() {
     assert!(
         matches!(err, PermHttpError::Conflict(_)),
         "expected a 409 Conflict, got {err:?}"
+    );
+}
+
+// ── SP3c-2 Task 5: enforcement reads the withhold rules ────────────────────
+
+/// The real equivalence proof the Task-4 gate could not give: with the read
+/// path switched, migrating a role clearance reproduces the clearance deny
+/// EXACTLY. The deny lives in the tag service (installation-wide Trino
+/// clearance), so the fingerprint is taken there.
+#[tokio::test]
+async fn migrating_a_role_clearance_is_byte_identical_after_read_switch() {
+    let Some(pool) = pool().await else { return };
+    let _serial = SERIAL.lock().await;
+    reset(&pool).await;
+    let db = Db::connect(&egret_test_db::url().await.unwrap(), 5)
+        .await
+        .unwrap();
+    let f = seed_role_clearance(&db).await;
+
+    // Baseline: compile from `classification_policies` (no withhold rule yet).
+    recompile_service(&f.perm, &f.policy, f.profile_id)
+        .await
+        .expect("baseline recompile");
+    assert!(
+        clearance_enforced(&pool, f.tag_service_id, f.tag_id).await,
+        "the clearance deny must exist before the migration — a vacuous before \
+         would make the byte-identity assertion meaningless"
+    );
+    let before = profile_fingerprint(&pool, f.tag_service_id).await;
+    assert!(
+        withhold_rule(&pool, &f.tag_key).await.is_none(),
+        "no withhold rule exists before the migration"
+    );
+
+    // Migrate, then recompile reading the withhold rule (the NOT EXISTS fallback
+    // now excludes the tag, so enforcement comes solely from the rule).
+    let mut tx = pool.begin().await.unwrap();
+    migrate_clearances_in_tx(&mut tx, "test")
+        .await
+        .expect("migrate");
+    tx.commit().await.unwrap();
+    assert!(
+        withhold_rule(&pool, &f.tag_key).await.is_some(),
+        "the withhold rule exists after the migration"
+    );
+    recompile_service(&f.perm, &f.policy, f.profile_id)
+        .await
+        .expect("recompile after the read switch");
+
+    let after = profile_fingerprint(&pool, f.tag_service_id).await;
+    assert_eq!(
+        after, before,
+        "the withhold rule must reproduce the clearance deny byte-for-byte"
+    );
+    assert!(
+        clearance_enforced(&pool, f.tag_service_id, f.tag_id).await,
+        "the clearance is still enforced after the read switch"
+    );
+}
+
+/// No fail-open window: a clearance that has NOT been migrated (no withhold
+/// rule) is still enforced, through the transition fallback that reads
+/// `classification_policies` for a tag with no rule.
+#[tokio::test]
+async fn an_unmigrated_clearance_is_still_enforced() {
+    let Some(pool) = pool().await else { return };
+    let _serial = SERIAL.lock().await;
+    reset(&pool).await;
+    let db = Db::connect(&egret_test_db::url().await.unwrap(), 5)
+        .await
+        .unwrap();
+    let f = seed_role_clearance(&db).await;
+
+    recompile_service(&f.perm, &f.policy, f.profile_id)
+        .await
+        .expect("compile");
+
+    assert!(
+        withhold_rule(&pool, &f.tag_key).await.is_none(),
+        "this clearance was never migrated, so it has no withhold rule"
+    );
+    assert!(
+        clearance_enforced(&pool, f.tag_service_id, f.tag_id).await,
+        "an un-migrated clearance must still be enforced — the fallback path"
+    );
+}
+
+/// Enforcement comes from the rule, not the table: after migrating and then
+/// DELETING the `classification_policies` row, a recompile still produces the
+/// clearance deny.
+#[tokio::test]
+async fn a_migrated_clearance_is_enforced_from_the_rule_after_the_table_row_is_gone() {
+    let Some(pool) = pool().await else { return };
+    let _serial = SERIAL.lock().await;
+    reset(&pool).await;
+    let db = Db::connect(&egret_test_db::url().await.unwrap(), 5)
+        .await
+        .unwrap();
+    let f = seed_role_clearance(&db).await;
+    recompile_service(&f.perm, &f.policy, f.profile_id)
+        .await
+        .expect("baseline recompile");
+
+    let mut tx = pool.begin().await.unwrap();
+    migrate_clearances_in_tx(&mut tx, "test")
+        .await
+        .expect("migrate");
+    tx.commit().await.unwrap();
+
+    // Delete the clearance's table row entirely; only the withhold rule remains.
+    let deleted = sqlx::query("DELETE FROM classification_policies WHERE tag_id = $1")
+        .bind(f.tag_id)
+        .execute(&pool)
+        .await
+        .expect("delete gate")
+        .rows_affected();
+    assert_eq!(deleted, 1, "the clearance's table row must have existed");
+
+    recompile_service(&f.perm, &f.policy, f.profile_id)
+        .await
+        .expect("recompile with no table row");
+
+    assert!(
+        clearance_enforced(&pool, f.tag_service_id, f.tag_id).await,
+        "the clearance is enforced from the withhold rule with the table row gone"
     );
 }

@@ -726,6 +726,16 @@ pub async fn get_rule_via(
     else {
         return Ok(None);
     };
+    // SP3c-2: a `withhold` row is a clearance's home, not a mask/row_filter, and
+    // `rule_from_row` cannot represent it. It is read by its own loader
+    // (`egret-perm-compile`'s `ir_load::load_withhold_inputs`), never by id
+    // through this generic path — the mask/row_filter callers (grant delete,
+    // table-hook copy, migration) only ever hold a mask/row_filter id. Should
+    // one reach here, answer a clean `None` (the caller's 404) rather than the
+    // "unknown rule kind" error `rule_from_row` would raise.
+    if row.kind == "withhold" {
+        return Ok(None);
+    }
     let exemption_rows: Vec<RuleExemptionRow> = sqlx::query_as(
         "SELECT rule_id, kind::text AS kind, ref AS principal_ref, mode::text AS mode \
          FROM perm.rule_exemptions WHERE rule_id = $1",

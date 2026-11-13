@@ -297,10 +297,22 @@ pub async fn recompile_role_referencing_profiles(pool: &PgPool) -> Result<Vec<i6
         crate::role_holder_group::sync_role_holder_group_in_tx(&mut tx, role).await?;
     }
 
+    // SP3c-2 Task 5: a migrated clearance's clearing roles are named only by its
+    // withhold rule's `role:<name> holders` group exemptions, so extract the role
+    // from those refs — the primary arm. The `classification_policies` arm is the
+    // transition fallback for a clearance not yet migrated (consistent with
+    // `ir_load::load_withhold_inputs`); it is dead once every clearance is
+    // migrated and `classification_policies` is gone.
     let roles: Vec<String> = sqlx::query_scalar(
         "SELECT ref FROM perm.grant_principals WHERE kind = 'role'::perm.principal_kind \
          UNION \
          SELECT ref FROM perm.engine_grant_principals WHERE kind = 'role'::perm.principal_kind \
+         UNION \
+         SELECT substring(e.ref from 'role:(.*) holders$') \
+           FROM perm.rule_exemptions e JOIN perm.rules r ON r.id = e.rule_id \
+          WHERE r.kind = 'withhold'::perm.rule_kind \
+            AND e.kind = 'group'::perm.principal_kind \
+            AND e.ref LIKE 'role:% holders' \
          UNION \
          SELECT unnest(required_roles) FROM classification_policies \
          ORDER BY 1",
