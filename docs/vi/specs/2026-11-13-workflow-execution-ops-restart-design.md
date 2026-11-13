@@ -60,12 +60,13 @@ Phần còn lại của dòng #7 thuộc các gói con 7b–7f (§8).
   - **`attempt_number` tăng một** (`ES:358`, `ExecutionMetadata.nextAttempt()`). CHECK `workflow_executions_metadata_belongs_to_a_replay` của migration 0139 chỉ cho phép điều này trên một row replay, nên migration của gói (D12) nới lỏng nó. `origin_offset_ms` không đổi, để một retry `CREATE_NEW_EXECUTION` vẫn đo `maxDuration` từ lúc tạo.
   - **Label `system.restarted: "true"`** được thêm nếu chưa có (`ES:360-364`). Chỉ engine được ghi label `system.*` (`EW src/labels.rs:52`). Restart `Subflow` (D9) dựa vào nó, như của Kestra.
   - **Flow trigger bắn lại.** Outbox ghi một event cho mỗi state được nối thêm (`claim.rs:3869-3933`), nên `RESTARTED`, `RUNNING` và state kết thúc mới đều đến được một listener. Kestra làm như vậy.
-  - **SLA** `EXECUTION_ASSERTION` được đánh giá lại khi execution còn sống (`claim.rs:3830-3835`). Kestra tạo lại các monitor (`ExecutionEventMessageHandler:160`).
+  - **SLA** `EXECUTION_ASSERTION` được đánh giá lại khi execution còn sống (`claim.rs:3830-3835`). Kestra tạo lại các monitor (`ExecutionEventMessageHandler:160`). *Review cuối I3:* không phải trong settle đầu tiên của chính restart (hay của đổi task-run state), mà từ settle kế tiếp trở đi; xem §6 mục 12.
   - **Flow outputs** giữ giá trị cũ cho đến state kết thúc mới, lúc đó chúng được đánh giá lại (`became_terminal`, `claim.rs:3713-3722`).
 - **D8. `Loop`: restart iteration lỗi cuối cùng tại chỗ.** Như Kestra (`ES:985-991`, `ExS:735-762`): iteration có `loop_index` cao nhất mà state là `FAILED` hoặc `PAUSED` được restart bằng cùng hàm đó, tại chỗ, dưới lock của chính nó. Run `Loop` quay lại `RUNNING` và không spawn. Nếu không iteration nào đủ điều kiện, run `Loop` kết thúc `FAILED` với dòng log "No restartable loop sub-execution found", như Kestra. Vì `spawn::on_execution_terminal` return ngay khi run loop đang terminal (`spawn.rs:634-640`), run loop phải `RUNNING` trước khi iteration có thể kết thúc lần nữa. Plan chốt cách bộ đếm của loop và danh sách outputs #6 của nó xử lý một iteration kết thúc lần thứ hai (một entry cho mỗi index, không phải hai).
 - **D9. `Subflow`: restart child bị lỗi tại chỗ (Q1).** Khi walk mở một run `Subflow` bị reset của một execution có label `system.restarted`, nó tìm child trước đó, được liên kết bằng `trigger_execution_id`/`trigger_run_ix` (`EW src/worker/subflow.rs`) với cùng `value` và iteration; chỉ khớp đúng một thì mới tính.
-  - Child là `FAILED` hoặc `PAUSED`: restart nó tại chỗ bằng cùng hàm, và run `Subflow` chờ nó như chờ một child mới.
-  - Child ở bất kỳ state kết thúc nào khác: run `Subflow` kết thúc `SUCCESS`. Kestra làm vậy, với comment "don't restart it as it's terminated successfully" (`ExS:1311-1318`).
+  - Child là `FAILED`: restart nó tại chỗ bằng cùng hàm, và run `Subflow` chờ nó như chờ một child mới.
+  - Child ở bất kỳ state kết thúc nào khác, hoặc `PAUSED`: run `Subflow` kết thúc `SUCCESS`. Kestra làm vậy, với comment "don't restart it as it's terminated successfully" (`ExS:1311-1318`); `isFailed()` của nó là `== FAILED` (`ExecutableUtils.java:126-129`), nên một child `PAUSED` cũng không được restart (Q1). *Được sửa ở review cuối (I2): bullet này ban đầu restart cả child `PAUSED`, việc đó mở lại `Pause` của nó và cho qua phê duyệt của một người mà không có input `onResume`.*
+  - Child ở một state mà bản build này không biết: đó là lỗi trong nội dung của row, nên spawn child mới kèm một `warn` (review cuối M2).
   - Không khớp hoặc khớp nhiều: spawn child mới, như hiện nay.
   - Thứ tự lock là parent rồi child, như cascade của kill (`EW src/worker/kill.rs:82-104`). Plan dùng lại cơ chế retry deadlock của kill.
 - **D10. Các từ chối vượt ngoài Kestra.**
@@ -76,12 +77,12 @@ Phần còn lại của dòng #7 thuộc các gói con 7b–7f (§8).
   - **State đích.** Cả hai route nhận `SUCCESS`, `WARNING`, `FAILED` hoặc `CANCELLED`, bốn state mà UI của Kestra đưa ra (`ui/src/components/executions/ChangeStatus.vue:101-121`, `ChangeExecutionStatus.vue:96-97`). Server của Kestra nhận bất kỳ state nào cho một task run và bất kỳ state kết thúc nào cho một execution. egret giữ cánh cửa hẹp hơn; state ngoài bốn state đó là 400.
   - **State nguồn.** Cả hai yêu cầu một execution đã kết thúc và không phải `KILLED` (`KS:189-191`). Một iteration của loop được đổi thông qua root của nó.
   - **No-op.** State đích bằng state hiện tại là 409. Kestra ghi một cảnh báo và trả về không đổi (`KS:73-77`); resume của egret đã trả 409 cho một lời gọi không thay đổi gì (`routes.rs:3125`).
-  - **Task-run state** theo `markAs` (`ES:603-662`):
+  - **Task-run state** theo `changeTaskRunState` (`ES:521-559`, phương thức mà command `ChangeTaskRunState` của Kestra gọi), gọi `markAs` (`ES:603-662`):
     1. Run nhận state đích và state của attempt cuối cùng của nó bị ghi đè, không có attempt mới.
-    2. Các tổ tiên của nó chuyển `RUNNING` và các run end-hook bị làm rỗng (D4).
-    3. Execution nhận label `system.restarted` và `attempt_number + 1`.
+    2. Các tổ tiên của nó chuyển `RUNNING` và các run end-hook bị làm rỗng (D4, `ES:532-552`). *Review cuối M5:* run được mark cũng bị làm rỗng cùng chúng khi nó nằm trong một nhánh `errors:`/`finally:`/`afterExecution:`, vì `removeIf` của Kestra chạy sau `markAs` và không chừa run nào, nên nhánh đó chạy lại.
+    3. Execution nhận label `system.restarted` (`changeTaskRunState`, `ES:526-530`) và `attempt_number + 1` (`markAs`, `ES:610`). *Citation được sửa ở review cuối (M1): label không thuộc `markAs`.*
     4. Sau đó execution chuyển `RESTARTED` và executor chạy tiếp.
-    5. Đích `CANCELLED` làm execution `CANCELLED` ngay lập tức.
+    5. Đích `CANCELLED` làm execution `CANCELLED` ngay lập tức. *Review cuối I3:* nó không mở lại tổ tiên nào (xem §6 mục 10).
   - **Execution status** nối thêm một state vào history và không đụng đến run nào. Một parent mà run `Subflow` đã terminal thì bỏ qua state mới của child (`subflow.rs:731-737`), như Kestra trên thực tế (`ChangeStateTestCase:43-68`, mà FIXME của nó ghi lại điều này).
 - **D12. Một migration**, tạm thời là **0220** (main đang ở 0219 và không PR mở nào thêm migration; kiểm tra lại trước khi push, theo quy tắc namespace dùng chung). Nó nới lỏng CHECK của 0139 để `attempt_number > 1` được phép trên mọi execution, giữ `origin_offset_ms <> 0` chỉ cho dạng replay.
 - **D13. Route, permission và audit.** Đây là các path kiểu egret, như kill và resume, không phải các path `/actions/` của Kestra:
@@ -112,6 +113,7 @@ Phần còn lại của dòng #7 thuộc các gói con 7b–7f (§8).
 - **D21 (2026-11-13, trong B1). Lỗi body của task-run state và execution status trả 400, không bao giờ 422.** `axum::Json` trơn trả 422 với body sai; các handler nhận `JsonRejection` và ánh xạ nó sang `InvalidInput`, theo mẫu của `triggers/routes.rs::body_refusal`. `EW src/routes.rs`; commit `6e094226`.
 - **D22 (2026-11-13, trong B1). Các run bị làm rỗng bị ẩn khỏi chi tiết execution và graph read model.** Chúng được lưu là `CREATED` với history rỗng, còn Kestra gỡ chúng. `ExecutionRepo::task_runs` và `GRAPH_RUNS_SQL` lọc `history <> '[]'`; các lần đọc phía worker không bị đụng đến. `EW src/repo.rs`, `EW src/routes.rs`; commit `d686973a`.
 - **D23 (2026-11-13, trong A1). Một `Pause` mà history đã chứa `PAUSED` thì đi tiếp** (`needPause` của Kestra). `pause::drive` của egret không có kiểm tra này và sẽ pause lại, nên một Pause được restart được đặt `SUCCESS` dưới dạng `SetRunState`. Nó không thể kích hoạt ngoài một restart: resume kết thúc run thẳng từ `PAUSED`. Điều này thay đổi `advance`; ratchet không dịch chuyển. `EW src/executor/flowable/pause.rs`; commit `878d09a8`.
+- **D24 (2026-11-13, review cuối I1). Restart và task-run state đi qua hai cửa của replay; đổi status thì không qua cửa nào.** Khác biệt do bảo mật: Kestra không có cổng này. Một restart chạy lại các task `FAILED` và mọi thứ sau chúng, còn một lần đổi task-run state có thể ghi đè một task guard đang lỗi để các task sau của creator chạy; cả hai chạy dưới danh tính creator của flow, nên chúng trả lời câu hỏi confused-deputy mà cửa 2 của `sql_principal` sinh ra để xử lý, như replay. Trước khi gọi worker, cả hai route kiểm tra state hiện tại của flow (`startable_flow`: flow đã vào thùng rác, hoặc execution có flow đã bị purge, là 404; flow bị disable là 409, cùng câu trả lời replay đưa ra) và `sql_principal::check_start` với người gọi là `started_by` trên source đã đóng băng (một flow chạy `egret.sql` chỉ creator của nó mới được chạy lại; 400 với câu của replay). Một iteration của loop được để cho worker, nơi từ chối nó và nêu tên root của nó. Đổi status (`/status`) thêm một state và không chạy task nào, nên không cần cửa nào (`changing_the_status_needs_neither_gate`). `EW src/routes.rs` (`rerun_gate`); test trong `tests/restart_routes.rs`.
 
 ## 3. Hình dạng của thay đổi
 
@@ -171,7 +173,9 @@ Các test chỉ có ở egret:
 7. Một `Subflow` bên trong `LoopUntil` chỉ được khớp với child trước đó theo `run_ix`, nên một iteration được restart sẽ spawn child mới. Row child không mang iteration id; sửa cần một migration (follow-up, dòng roadmap #12). Ghi nhận 2026-11-13, A4.
 8. Một `Subflow` được restart mà child vẫn đang chạy thì chờ nó. Kestra kết thúc run `SUCCESS`. Ghi nhận 2026-11-13, A4.
 9. Xoá `claimed_at` (D17) cho phép một sibling đã fail theo rule 1 chạy hai lần: handler cũ bị chặn lúc commit, nhưng side effect của nó có thể lặp lại. Kestra cư xử giống vậy. Ghi nhận 2026-11-13, A2.
-10. Mark một run `CANCELLED`, hoặc để một run vẫn `PAUSED`, để lại các tổ tiên được mở lại ở `RUNNING` dưới một execution terminal. Điều này trung thành với Kestra và là một vấn đề đã biết; nó chưa được test ở mức worker. Ghi nhận 2026-11-13, A1 và A5.
+10. Mark một run `CANCELLED` không mở lại tổ tiên nào của nó (review cuối I3). Kestra mở lại chúng và cancel execution ngay; trong egret các run đó ở `RUNNING` mãi dưới một execution terminal, execution này khi đó không bao giờ idle (không bao giờ bị prune, mọi thay đổi sau đó bị từ chối với `after_execution_running`). Dạng "vẫn `PAUSED`" không cần đổi: một execution terminal có run `PAUSED` thì không idle, nên D10 từ chối mark (`after_execution_running`) trước khi tới `mark_as`. Ghi nhận lần đầu 2026-11-13, A1 và A5, là trung thành với Kestra.
+11. Restart và task-run state chịu cổng state hiện tại của flow và cổng creator `egret.sql`, như replay (D24). Kestra không có cổng nào; do bảo mật.
+12. SLA `EXECUTION_ASSERTION` không được đánh giá trong settle đầu tiên của một restart hay đổi task-run state, chỉ từ settle kế tiếp trở đi (review cuối I3). Kestra đánh giá nó trên message `RESTARTED` và để các run đã reset lại, còn sống dưới một execution đã bị cancel.
 
 ## 7. Như đã xây
 
@@ -194,6 +198,16 @@ Xây 2026-11-13 trên `feat/workflow-execution-ops`, base `origin/main` `9996fde
 Cũng từ quá trình xây: dưới `transmitFailed: true`, một sibling kết thúc `SUCCESS` sau lỗi đầu tiên nay được đếm và liệt kê (khớp `handleTerminated` của Kestra); bộ đếm của một iteration được restart được tính lại từ các row, nên một iteration trước đó mà giới hạn 16 MiB đọc là `FAILED` được đếm lại là `SUCCESS`. Kiểm tra trình duyệt cho frontend (FE-TEST-2, sáng và tối) còn nợ ở Z.
 
 Các cổng ở Z (2026-11-13, trên `a28207d9`, commit code cuối cùng): `cargo fmt --check` sạch; `cargo clippy -p egret-workflow -p egret-server -p egret-config -p egret-metastore --all-targets -- -D warnings` sạch; `cargo check -p egret-bin` sạch; `cargo test -p egret-workflow --no-fail-fast` 3684 passed, 55 ignored, 7 failed, cả bảy trong `sql_starrocks_live` (không có engine StarRocks trên máy test); `cargo test -p egret-config -p egret-server -p egret-metastore` 179 passed, gồm `committed_openapi_json_is_current`. Ratchet 301/25/25/0 và census 295/25/21, không đổi so với T0.
+
+### Các sửa lỗi của review cuối
+
+Review cuối (`069613b19`) tìm ra ba mục Important và mười mục Minor; đợt sửa đã vào cùng branch.
+
+- `6f6dd4558` (I1, D24): restart và task-run state đi qua hai cửa của replay, state hiện tại của flow và cổng creator `egret.sql`; đổi status thì không qua cửa nào. Test route trong `tests/restart_routes.rs` (+9); mô tả OpenAPI của các route nêu tên các câu trả lời mới.
+- `6b9d80b8f` (I2, M2, M3, M8): một child `Subflow` `PAUSED` không được restart (D9 được sửa); state của child được parse bằng `from_wire`, state lạ spawn child mới; một iteration `Loop` không tải được rơi về dòng "No restartable…" của D8 thay vì làm hỏng lời gọi, và log iteration bị từ chối là `warn`. **Một run `Subflow` đã restart được retry sẽ restart lại cùng child đó** (cổng là mọi cửa sổ terminal-rồi-`CREATED`, không phải transition mới nhất): hành vi `RETRY_FAILED` của Kestra, được ghi trên `restart_earlier_child`.
+- `6876b089a` (I3, M5): mark `CANCELLED` không mở lại tổ tiên nào; SLA không được đánh giá trong settle đầu tiên của một restart hay mark (§6 mục 10 và 12); một run được mark nằm trong nhánh end-hook bị làm rỗng cùng nhánh, như `changeTaskRunState` của Kestra. Dạng "vẫn `PAUSED`" (hàng triage 19) không cần đổi: D10 từ chối nó trước khi `mark_as` chạy. Mỗi test khẳng định `execution_is_idle` và, khi áp dụng, rằng một lần đổi status sau đó được chấp nhận.
+- `d05e693ee` (M6): `workflow.run_is_live(state, history)` trong migration 0220, dùng chung bởi `execution_is_idle`, descendants và phase count của kill, và force-close.
+- `eae2d1118` (M10): doc comment của `task_runs`. M1 (citation D11.3) được sửa ở trên. M4, M7 và các hàng đánh dấu Leave được để nguyên như review khuyên.
 
 ### Phát hiện hoãn lại
 
