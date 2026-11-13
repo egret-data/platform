@@ -3141,6 +3141,7 @@ pub(super) async fn run_job(conn: &mut PgConnection, job: Job) -> Result<()> {
             }
         }
         Job::Report(settled) => walk_tail(conn, settled).await,
+        job @ Job::Restart(_) => walk_from(conn, vec![Step::Job(job)]).await,
     }
 }
 
@@ -3249,6 +3250,13 @@ pub(super) enum Job {
     /// so a parent whose own kill settles earlier in the same walk is read
     /// as that settle left it.
     Report(Settled),
+    /// Package 7a: an execution's restart in place, locked and checked
+    /// already (`restart::Opening`). Opened when the walk reaches it
+    /// (`restart::open`): its commands applied, its side writes made, and its
+    /// settle run as a frame, then the restarts of the `Loop` iterations it
+    /// chose (D8). A `Subflow` child's restart (D9) is one of these, made by
+    /// `subflow::spawn_one` where a fresh child's first settle would be.
+    Restart(Box<super::restart::Opening>),
 }
 
 impl Job {
@@ -3379,6 +3387,13 @@ async fn walk_from<'a>(conn: &mut PgConnection, mut steps: Vec<Step<'a>>) -> Res
             }
             Step::Job(Job::Settle(frame)) => steps.push(Step::Frame(frame)),
             Step::Job(Job::Report(settled)) => steps.push(Step::Loop(settled)),
+            // The restarts it opens run after its frame and that frame's
+            // whole tail: they are pushed below it.
+            Step::Job(Job::Restart(opening)) => {
+                let (frame, after) = Box::pin(super::restart::open(conn, *opening)).await?;
+                steps.extend(after.into_iter().rev().map(Step::Job));
+                steps.push(Step::Frame(Box::new(frame)));
+            }
             Step::Job(Job::Complete(completion)) => {
                 if let Some(frame) = Box::pin(subflow::open_completion(conn, completion)).await? {
                     steps.push(Step::Frame(Box::new(frame)));

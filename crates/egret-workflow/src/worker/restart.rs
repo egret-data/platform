@@ -21,9 +21,18 @@
 //!    executor on from there.
 //!
 //! A `Loop` run the restart reopens has its last failing iteration
-//! restarted in place by the same function ([`restart_locked`] with
+//! restarted in place by the same function ([`prepare`] and [`open`] with
 //! [`Nested::LoopIteration`]), in the same transaction, the parent locked
-//! first (D8).
+//! first (D8). A reset `Subflow` run's earlier child is restarted the same
+//! way, with [`Nested::SubflowChild`], when the walk opens the run
+//! (`subflow::spawn_one`, D9).
+//!
+//! **Every restart is opened by the walk** (`claim::Job::Restart`): the
+//! commands are applied and the side writes made when the walk reaches the
+//! job, and the settle is a frame of that walk. A restart reached from
+//! inside a settle -- a `Subflow` child's, which `spawn_one` asks for while
+//! its parent settles -- cannot run a settle of its own, since only the walk
+//! runs one (`claim::walk`).
 //!
 //! A deadlock's victim is run again, as the kill's is
 //! ([`kill::DEADLOCK_RETRIES`]).
@@ -94,7 +103,6 @@ pub async fn restart_execution(pool: &PgPool, id: Uuid) -> Result<Restarted> {
 /// the parent's lock (taken first: parent, then the nested execution, the
 /// order kill's cascade takes, `kill.rs`).
 ///
-/// A4 (`Subflow`, D9) adds its child here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Nested {
     /// The execution a person named: every check of D10 applies.
@@ -103,6 +111,11 @@ pub(super) enum Nested {
     /// reopened (D8). The loop-iteration refusal is skipped: this IS the
     /// restart through the loop root that refusal points to.
     LoopIteration,
+    /// The earlier child of a reset `Subflow` run, which the walk restarts in
+    /// place when it opens that run (D9, `subflow::spawn_one`). Every check
+    /// of D10 applies: a refusal leaves the child alone and a new child is
+    /// spawned, as before D9.
+    SubflowChild,
 }
 
 /// The facts of the execution row the checks read, beside what `load` holds.
@@ -114,7 +127,7 @@ struct Row0220 {
 }
 
 /// One execution's restart, checked and computed under its lock, nothing
-/// written yet: what [`prepare`] answers and [`commit`] writes.
+/// written yet: what [`prepare`] answers and [`open`] writes.
 struct Prepared {
     ctx: claim::ExecutionCtx,
     state: crate::executor::ExecutionState,
@@ -123,12 +136,11 @@ struct Prepared {
     labels: Option<serde_json::Value>,
 }
 
-/// **Restart `id` in place, its lock already held or taken here** -- the
-/// body of [`restart_execution`], and of every restart it reaches into
-/// (D8; A4's `Subflow` child, D9). `stack` is [`Stack::Fresh`] for the
-/// execution a person named and [`Stack::Nested`] for one reached from its
-/// parent's restart. A refusal writes nothing.
-pub(super) async fn restart_locked(
+/// **Restart `id` in place, its lock taken here** -- the body of
+/// [`restart_execution`], which owns the transaction: prepared, then opened
+/// and settled by a walk of its own (`claim::run_job`). A refusal writes
+/// nothing.
+async fn restart_locked(
     conn: &mut PgConnection,
     id: Uuid,
     stack: Stack,
@@ -136,11 +148,45 @@ pub(super) async fn restart_locked(
 ) -> Result<Restarted> {
     match prepare(conn, id, stack, nested).await? {
         Ok(prepared) => {
-            Box::pin(commit(conn, id, prepared)).await?;
+            claim::run_job(
+                conn,
+                claim::Job::Restart(Box::new(Opening { id, prepared })),
+            )
+            .await?;
             Ok(Restarted::Done)
         }
         Err(refused) => Ok(Restarted::Refused(refused)),
     }
+}
+
+/// A restart checked and computed under its execution's lock, for the walk
+/// to open (`claim::Job::Restart`, [`open`]).
+pub(super) struct Opening {
+    id: Uuid,
+    prepared: Prepared,
+}
+
+/// **D9: restart a reset `Subflow` run's earlier child in place**, from
+/// inside its parent's settle (`subflow::spawn_one`). The child is locked
+/// and checked now, the parent already locked by its own settle: parent,
+/// then child, the order kill's cascade takes (`kill.rs`). The answer is the
+/// job that restarts it, for the walk to run where a fresh child's first
+/// settle would run, or why its restart is refused (nothing written).
+pub(super) async fn restart_subflow_child(
+    conn: &mut PgConnection,
+    child: Uuid,
+    caller: claim::Caller,
+) -> Result<std::result::Result<claim::Job, RestartRefused>> {
+    Ok(
+        prepare(conn, child, Stack::Nested(caller), Nested::SubflowChild)
+            .await?
+            .map(|prepared| {
+                claim::Job::Restart(Box::new(Opening {
+                    id: child,
+                    prepared,
+                }))
+            }),
+    )
 }
 
 /// Lock `id` and its runs, run the checks and compute the commands. Writes
@@ -201,15 +247,9 @@ async fn prepare(
             )))
         }
     };
-    // **Temporary refusal, removed by A4 (Subflow, D9).** Restarting a
-    // `Subflow`'s failed child in place is the next task; until it lands, a
-    // restart that would need it writes nothing rather than half of one.
-    if !cmds.subflows.is_empty() {
-        return Err(Error::Internal(anyhow::anyhow!(
-            "restarting execution {id} needs a Subflow child restarted in place, which is not \
-             built yet (handled by A4 (Subflow))"
-        )));
-    }
+    // A reset `Subflow` run (`cmds.subflows`) needs nothing here: the
+    // settle's walk opens it, and `subflow::spawn_one` looks up its earlier
+    // child there (D9), keyed off the label the side writes add.
     Ok(Ok(Prepared {
         ctx,
         state,
@@ -223,9 +263,11 @@ async fn prepare(
 /// (`ExecutorService:735-762`; spec D8).
 pub const NO_RESTARTABLE_ITERATION: &str = "No restartable loop sub-execution found";
 
-/// Apply a prepared restart: the `Loop` iterations first chosen and locked
-/// (D8), then this execution's commands, side writes and `settle`, then each
-/// chosen iteration's own restart.
+/// **Open a prepared restart, when the walk reaches it**: the `Loop`
+/// iterations first chosen and locked (D8), then this execution's commands
+/// and side writes. The answer is this execution's settle, as a frame, and
+/// each chosen iteration's own restart, as jobs the walk runs AFTER that
+/// frame and its whole tail (`claim::walk_from`).
 ///
 /// **Why the iterations settle after the parent.** An iteration's restart
 /// settles it, and a settle that ends it reports to its parent
@@ -235,7 +277,11 @@ pub const NO_RESTARTABLE_ITERATION: &str = "No restartable loop sub-execution fo
 /// again. They are *locked and checked* before the parent settles, so a
 /// refused iteration's `Loop` run can still be failed in the parent's own
 /// settle.
-async fn commit(conn: &mut PgConnection, id: Uuid, prepared: Prepared) -> Result<()> {
+pub(super) async fn open(
+    conn: &mut PgConnection,
+    opening: Opening,
+) -> Result<(claim::Frame<'static>, Vec<claim::Job>)> {
+    let Opening { id, prepared } = opening;
     let Prepared {
         ctx,
         mut state,
@@ -281,7 +327,12 @@ async fn commit(conn: &mut PgConnection, id: Uuid, prepared: Prepared) -> Result
             None => None,
         };
         match prepared {
-            Some(p) => iterations.push(p),
+            Some((iteration, prepared)) => {
+                iterations.push(claim::Job::Restart(Box::new(Opening {
+                    id: iteration,
+                    prepared,
+                })))
+            }
             None => {
                 cmds.commands.push(Command::SetRunState {
                     run,
@@ -322,12 +373,7 @@ async fn commit(conn: &mut PgConnection, id: Uuid, prepared: Prepared) -> Result
         )
         .await?;
     }
-    claim::settle(conn, &ctx, &before, state, now, None).await?;
-
-    for (iteration, p) in iterations {
-        Box::pin(commit(conn, iteration, p)).await?;
-    }
-    Ok(())
+    Ok((claim::Frame::loaded(ctx, before, state, now), iterations))
 }
 
 /// D7 and D4's writes beside the state, in the restart's transaction and

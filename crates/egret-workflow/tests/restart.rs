@@ -1133,32 +1133,468 @@ async fn no_restartable_iteration_fails_the_loop_with_the_log_line(pool: sqlx::P
     );
 }
 
-/// **Pins A2's temporary refusal, which A4 (Subflow, D9) must flip.**
-#[sqlx::test(migrations = "../../migrations")]
-async fn a_subflow_restart_is_not_built_yet(pool: sqlx::PgPool) {
-    let (db, ws, user) = setup(&pool).await;
-    common::seed_flow(
-        &db,
-        ws,
-        user,
-        &format!("id: child\nnamespace: t\ntasks:\n{}", tasks(&["body"])),
-        "draft",
+// ── Subflow (spec D9, Q1) ──────────────────────────────────────────────────
+
+/// Kestra's `restart-child` (`RestartCaseTest:339-395`): its middle task
+/// fails on its first attempt and passes after.
+fn restart_child() -> String {
+    format!(
+        "id: restart-child\nnamespace: t\ntasks:\n{}",
+        tasks(&["helloSubflow1", "failFirstTime", "helloSubflow2"])
     )
-    .await;
-    let reg = Flaky::new(&[("body", 1)]);
-    let source = "id: parent\nnamespace: t\ntasks:\n  - id: sub\n    \
-                  type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    flowId: child\n";
-    let root = start(&pool, ws, source).await;
+}
+
+/// The `Subflow` task, indented under `pad`.
+fn call_subflow(pad: &str) -> String {
+    format!(
+        "{pad}- id: callSubflow\n{pad}  type: io.kestra.plugin.core.flow.Subflow\n{pad}  \
+         namespace: t\n{pad}  flowId: restart-child\n{pad}  wait: true\n{pad}  \
+         transmitFailed: true\n"
+    )
+}
+
+/// Kestra's `restart-parent`.
+fn restart_parent() -> String {
+    format!(
+        "id: restart-parent\nnamespace: t\ntasks:\n{}{}{}",
+        tasks(&["hello"]),
+        call_subflow("  "),
+        tasks(&["helloParent2"])
+    )
+}
+
+async fn seed_restart_child(db: &Db, ws: Uuid, user: egret_core::UserId) {
+    common::seed_flow(db, ws, user, &restart_child(), "draft").await;
+}
+
+/// One child row: `(id, state, history, attempt_number, labels,
+/// trigger_execution_id, trigger_run_ix)`.
+type ChildRow = (
+    Uuid,
+    String,
+    Value,
+    i32,
+    Option<Value>,
+    Option<Uuid>,
+    Option<i32>,
+);
+
+/// Every execution of `restart-child`, oldest first.
+async fn children(pool: &sqlx::PgPool) -> Vec<ChildRow> {
+    sqlx::query_as(
+        "SELECT id, state, history, attempt_number, labels, trigger_execution_id, trigger_run_ix \
+           FROM workflow.executions WHERE flow_key = 'restart-child' ORDER BY created_at, id",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("children")
+}
+
+/// **Test 1, Kestra `restartSubflow` (`RestartCaseTest:339-357`).** The
+/// failed child is restarted in place, never replaced: one child row, the
+/// same id, `RESTARTED RUNNING` on it, its `attempt_number` 2 and the label;
+/// the parent's `Subflow` run keeps its id and waits for it, and takes its
+/// report (`on_child_terminal`) because the run is not terminal any more.
+#[sqlx::test(migrations = "../../migrations")]
+async fn restart_subflow_restarts_the_failed_child_in_place(pool: sqlx::PgPool) {
+    // Arrange
+    let (db, ws, user) = setup(&pool).await;
+    seed_restart_child(&db, ws, user).await;
+    let reg = Flaky::new(&[]).failing_first_attempt_of(&["failFirstTime"]);
+    let root = start(&pool, ws, &restart_parent()).await;
     drive(&pool, &reg, root).await;
     assert_eq!(exec_state(&pool, root).await, "FAILED");
-    let before = exec_meta(&pool, root).await;
+    assert_eq!(runs_of(&pool, root).await.len(), 2, "hello + callSubflow");
+    let kids = children(&pool).await;
+    assert_eq!(kids.len(), 1);
+    let child = kids[0].0;
+    assert_eq!(kids[0].1, "FAILED");
+    let sub_id = run(&runs_of(&pool, root).await, "callSubflow").2;
 
-    let err = restart_execution(&pool, root)
+    // Act
+    let out = restart(&pool, root).await;
+
+    // Assert: the child is restarted in place, nothing is spawned.
+    assert_eq!(out, Restarted::Done);
+    let kids = children(&pool).await;
+    assert_eq!(kids.len(), 1, "no child is spawned: {kids:?}");
+    assert_eq!(kids[0].0, child, "the same child");
+    assert_eq!(
+        history_tail(&kids[0].2, 3),
+        ["FAILED", "RESTARTED", "RUNNING"]
+    );
+    assert_eq!(kids[0].3, 2, "the child's attempt_number goes up");
+    assert!(has_restarted_label(&kids[0].4));
+    let sub = run(&runs_of(&pool, root).await, "callSubflow").clone();
+    assert_eq!(sub.2, sub_id, "the Subflow run keeps its id");
+    assert_eq!(sub.3, "RUNNING", "it waits for the child: {sub:?}");
+
+    drive(&pool, &reg, root).await;
+    assert_eq!(exec_state(&pool, root).await, "SUCCESS");
+    let kids = children(&pool).await;
+    assert_eq!(kids.len(), 1, "never replaced: {kids:?}");
+    assert_eq!(kids[0].0, child);
+    assert_eq!(kids[0].1, "SUCCESS");
+    let runs = runs_of(&pool, root).await;
+    assert_eq!(runs.len(), 3, "hello + callSubflow + helloParent2");
+    let sub = run(&runs, "callSubflow");
+    assert_eq!(sub.3, "SUCCESS");
+    let outputs = sub.6.as_ref().expect("the child's report");
+    assert_eq!(outputs["executionId"], child.to_string());
+    assert_eq!(outputs["state"], "SUCCESS");
+    assert_eq!(reg.attempts_of("failFirstTime"), vec![1, 2]);
+}
+
+/// **Test 2, Kestra `restartSubflowWithLoop` (`RestartCaseTest:359-395`).**
+/// A `Loop` of three values over the `Subflow`: each restart restarts the
+/// last failing iteration (D8), whose `Subflow` restarts that iteration's
+/// child (D9). Three restarts and exactly three children, all `SUCCESS`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn restart_subflow_with_loop(pool: sqlx::PgPool) {
+    // Arrange
+    let (db, ws, user) = setup(&pool).await;
+    seed_restart_child(&db, ws, user).await;
+    let reg = Flaky::new(&[]).failing_first_attempt_of(&["failFirstTime"]);
+    let source = format!(
+        "id: restart-parent-loop\nnamespace: t\ntasks:\n{}  - id: each\n    \
+         type: io.kestra.plugin.core.flow.Loop\n    values: '[\"1\", \"2\", \"3\"]'\n    \
+         tasks:\n{}{}",
+        tasks(&["hello"]),
+        call_subflow("      "),
+        tasks(&["helloParent2"])
+    );
+    let root = start(&pool, ws, &source).await;
+    drive(&pool, &reg, root).await;
+    assert_eq!(exec_state(&pool, root).await, "FAILED");
+    assert_eq!(children(&pool).await.len(), 1);
+
+    for round in 1..=3usize {
+        // Act
+        let before = children(&pool).await;
+        let out = restart(&pool, root).await;
+
+        // Assert
+        assert_eq!(out, Restarted::Done, "round {round}");
+        let now = children(&pool).await;
+        assert_eq!(now.len(), round, "round {round}: no child is spawned");
+        assert_eq!(now[round - 1].0, before[round - 1].0, "round {round}");
+        assert_eq!(
+            history_tail(&now[round - 1].2, 3),
+            ["FAILED", "RESTARTED", "RUNNING"],
+            "round {round}: the failing child is restarted in place"
+        );
+
+        drive(&pool, &reg, root).await;
+        let want = if round < 3 { "FAILED" } else { "SUCCESS" };
+        assert_eq!(exec_state(&pool, root).await, want, "round {round}");
+        let n = if round < 3 { round + 1 } else { 3 };
+        assert_eq!(children(&pool).await.len(), n, "round {round}");
+    }
+
+    let kids = children(&pool).await;
+    assert_eq!(kids.len(), 3, "exactly three children");
+    assert!(kids.iter().all(|k| k.1 == "SUCCESS"), "{kids:?}");
+    assert!(
+        kids.iter().all(|k| k.3 == 2),
+        "each restarted once: {kids:?}"
+    );
+    assert_eq!(
+        runs_of(&pool, root).await.len(),
+        3,
+        "hello + each + helloParent2"
+    );
+}
+
+/// Write `state` onto `task`'s run and its last attempt, and onto the
+/// execution, as `set_task_run_state` (A5, D11) would leave them.
+async fn mark_run(pool: &sqlx::PgPool, ex: Uuid, task: &str, state: &str) {
+    sqlx::query(
+        "UPDATE workflow.task_runs SET state = $3, history = history || jsonb_build_array($3::text), \
+                attempts = jsonb_set(attempts, \
+                    ARRAY[(jsonb_array_length(attempts) - 1)::text, 'history'], \
+                    (attempts -> -1 -> 'history') || jsonb_build_array($3::text)) \
+          WHERE execution_id = $1 AND task_id = $2",
+    )
+    .bind(ex)
+    .bind(task)
+    .bind(state)
+    .execute(pool)
+    .await
+    .expect("mark the run");
+}
+
+/// **Test 3 (Q1, Kestra `ExS:1311-1318`: "don't restart it as it's
+/// terminated successfully").** The child ended `SUCCESS` but its `Subflow`
+/// run is `FAILED` (as a `set_task_run_state` leaves it), and the parent
+/// failed elsewhere too. The restart ends the `Subflow` run `SUCCESS` at
+/// once with the child's outputs copied, and no child is restarted or
+/// spawned.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_successful_child_is_not_restarted_and_its_run_ends_success(pool: sqlx::PgPool) {
+    // Arrange
+    let (db, ws, user) = setup(&pool).await;
+    seed_restart_child(&db, ws, user).await;
+    let reg = Flaky::new(&[("boom", 1)]);
+    let source = format!(
+        "id: restart-parent\nnamespace: t\ntasks:\n{}{}",
+        call_subflow("  "),
+        tasks(&["boom"])
+    );
+    let root = start(&pool, ws, &source).await;
+    drive(&pool, &reg, root).await;
+    assert_eq!(exec_state(&pool, root).await, "FAILED");
+    let kids = children(&pool).await;
+    assert_eq!(kids.len(), 1);
+    assert_eq!(kids[0].1, "SUCCESS");
+    mark_run(&pool, root, "callSubflow", "FAILED").await;
+
+    // Act
+    let out = restart(&pool, root).await;
+
+    // Assert
+    assert_eq!(out, Restarted::Done);
+    assert_eq!(children(&pool).await, kids, "the child is not touched");
+    let sub = run(&runs_of(&pool, root).await, "callSubflow").clone();
+    assert_eq!(
+        history_tail(&sub.4, 3),
+        ["CREATED", "RUNNING", "SUCCESS"],
+        "{sub:?}"
+    );
+    let outputs = sub.6.as_ref().expect("the child's outputs, copied");
+    assert_eq!(outputs["executionId"], kids[0].0.to_string());
+    assert_eq!(outputs["state"], "SUCCESS");
+
+    drive(&pool, &reg, root).await;
+    assert_eq!(exec_state(&pool, root).await, "SUCCESS");
+    assert_eq!(children(&pool).await, kids, "nothing restarted or spawned");
+}
+
+/// **Test 4: two children match**, so neither is restarted and a new child
+/// is spawned, as before D9 (Kestra: "if there are more than one, we ignore
+/// the results and create a new one").
+#[sqlx::test(migrations = "../../migrations")]
+async fn two_matching_children_spawn_a_new_one(pool: sqlx::PgPool) {
+    // Arrange: the child's run fails twice in all, then passes.
+    let (db, ws, user) = setup(&pool).await;
+    seed_restart_child(&db, ws, user).await;
+    let reg = Flaky::new(&[("failFirstTime", 2)]);
+    let root = start(&pool, ws, &restart_parent()).await;
+    drive(&pool, &reg, root).await;
+    assert_eq!(exec_state(&pool, root).await, "FAILED");
+    let sub_ix = run(&runs_of(&pool, root).await, "callSubflow").0;
+    let other = start(&pool, ws, &restart_child()).await;
+    drive(&pool, &reg, other).await;
+    assert_eq!(exec_state(&pool, other).await, "FAILED");
+    sqlx::query(
+        "UPDATE workflow.executions SET trigger_execution_id = $1, trigger_run_ix = $2 \
+          WHERE id = $3",
+    )
+    .bind(root)
+    .bind(sub_ix)
+    .bind(other)
+    .execute(&pool)
+    .await
+    .expect("link a second child");
+    let before = children(&pool).await;
+    assert_eq!(before.len(), 2);
+
+    // Act
+    let out = restart(&pool, root).await;
+    drive(&pool, &reg, root).await;
+
+    // Assert
+    assert_eq!(out, Restarted::Done);
+    assert_eq!(exec_state(&pool, root).await, "SUCCESS");
+    let after = children(&pool).await;
+    assert_eq!(after.len(), 3, "a new child: {after:?}");
+    for old in &before {
+        let now = after.iter().find(|k| k.0 == old.0).unwrap();
+        assert_eq!(now, old, "an earlier child is not touched");
+    }
+    let new = after
+        .iter()
+        .find(|k| !before.iter().any(|b| b.0 == k.0))
+        .unwrap();
+    assert_eq!(new.1, "SUCCESS");
+    assert_eq!(new.3, 1);
+    let sub = run(&runs_of(&pool, root).await, "callSubflow").clone();
+    assert_eq!(sub.6.as_ref().unwrap()["executionId"], new.0.to_string());
+}
+
+/// **A child whose own restart is refused** (here: its files were pruned,
+/// D10) is left alone, and a new child is spawned as before D9.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_child_whose_restart_is_refused_is_replaced(pool: sqlx::PgPool) {
+    // Arrange
+    let (db, ws, user) = setup(&pool).await;
+    seed_restart_child(&db, ws, user).await;
+    let reg = Flaky::new(&[("failFirstTime", 1)]);
+    let root = start(&pool, ws, &restart_parent()).await;
+    drive(&pool, &reg, root).await;
+    assert_eq!(exec_state(&pool, root).await, "FAILED");
+    let first = children(&pool).await;
+    assert_eq!(first.len(), 1);
+    sqlx::query("UPDATE workflow.executions SET files_pruned_at = now() WHERE id = $1")
+        .bind(first[0].0)
+        .execute(&pool)
         .await
-        .expect_err("a Subflow restart is not built yet");
+        .unwrap();
 
-    assert!(err.to_string().contains("A4 (Subflow)"), "{err}");
-    assert_eq!(exec_meta(&pool, root).await, before, "nothing written");
+    // Act
+    let out = restart(&pool, root).await;
+    drive(&pool, &reg, root).await;
+
+    // Assert
+    assert_eq!(out, Restarted::Done);
+    assert_eq!(exec_state(&pool, root).await, "SUCCESS");
+    let after = children(&pool).await;
+    assert_eq!(after.len(), 2, "{after:?}");
+    assert_eq!(after.iter().find(|k| k.0 == first[0].0), Some(&first[0]));
+    let new = after.iter().find(|k| k.0 != first[0].0).unwrap();
+    assert_eq!(new.1, "SUCCESS");
+    let sub = run(&runs_of(&pool, root).await, "callSubflow").clone();
+    assert_eq!(sub.6.as_ref().unwrap()["executionId"], new.0.to_string());
+}
+
+/// **Only a run the restart reset looks up a child (D9).** In a restarted
+/// execution, a `Subflow` run inside a `LoopUntil` is emptied and built
+/// again for each iteration (a new task-run id, as Kestra's new taskrun), so
+/// iteration 2 finds iteration 1's child under the same `run_ix` and must
+/// still spawn its own: two iterations, two children.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_run_built_fresh_after_a_restart_spawns_its_own_child(pool: sqlx::PgPool) {
+    // Arrange
+    let (db, ws, user) = setup(&pool).await;
+    seed_restart_child(&db, ws, user).await;
+    let reg = Flaky::new(&[("boom", 1)]);
+    let source = format!(
+        "id: restart-parent-until\nnamespace: t\ntasks:\n{}  - id: until\n    \
+         type: io.kestra.plugin.core.flow.LoopUntil\n    \
+         condition: \"{{{{ outputs.until.iterationCount >= 2 }}}}\"\n    \
+         checkFrequency:\n      interval: PT0S\n    tasks:\n{}",
+        tasks(&["boom"]),
+        call_subflow("      "),
+    );
+    let root = start(&pool, ws, &source).await;
+    drive(&pool, &reg, root).await;
+    assert_eq!(exec_state(&pool, root).await, "FAILED");
+    assert!(children(&pool).await.is_empty(), "boom failed first");
+
+    // Act
+    assert_eq!(restart(&pool, root).await, Restarted::Done);
+    drive(&pool, &reg, root).await;
+
+    // Assert
+    assert_eq!(exec_state(&pool, root).await, "SUCCESS");
+    let kids = children(&pool).await;
+    assert_eq!(kids.len(), 2, "one child per iteration: {kids:?}");
+    assert!(
+        kids.iter().all(|k| k.1 == "SUCCESS" && k.3 == 1),
+        "{kids:?}"
+    );
+}
+
+/// The deadlocks Postgres has detected in this test's own database (each
+/// `#[sqlx::test]` has its own). The victim's backend reports it after it
+/// flushes its statistics, so a caller polls.
+async fn deadlocks(pool: &sqlx::PgPool) -> i64 {
+    sqlx::query_scalar("SELECT deadlocks FROM pg_stat_database WHERE datname = current_database()")
+        .fetch_one(pool)
+        .await
+        .expect("pg_stat_database")
+}
+
+/// **Test 5: a restart that loses a deadlock to the child's own settle is
+/// run again, and both finish.** The restart locks the parent, then the
+/// child (D9, kill's order). A child's settle that ends it reports to its
+/// parent: child, then parent, the reverse. A test transaction plays that
+/// settle: it holds the child, waits until the restart blocks on it, then
+/// locks the parent. Its `deadlock_timeout` is raised so the restart is the
+/// `40P01` victim; `restart_execution` runs it again (kill's retry), and it
+/// finishes once the test transaction commits. The positive control is
+/// Postgres's own deadlock count: exactly one.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_restart_that_loses_a_deadlock_to_the_childs_settle_still_finishes(pool: sqlx::PgPool) {
+    // Arrange
+    let (db, ws, user) = setup(&pool).await;
+    seed_restart_child(&db, ws, user).await;
+    let reg = Flaky::new(&[]).failing_first_attempt_of(&["failFirstTime"]);
+    let root = start(&pool, ws, &restart_parent()).await;
+    drive(&pool, &reg, root).await;
+    assert_eq!(exec_state(&pool, root).await, "FAILED");
+    let child = children(&pool).await[0].0;
+    assert_eq!(deadlocks(&pool).await, 0, "the fixture: no deadlock yet");
+
+    // The child's "settle": hold the child first.
+    let mut settle_tx = pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL deadlock_timeout = '60s'")
+        .execute(&mut *settle_tx)
+        .await
+        .unwrap();
+    let settle_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *settle_tx)
+        .await
+        .unwrap();
+    sqlx::query("SELECT 1 FROM workflow.executions WHERE id = $1 FOR UPDATE")
+        .bind(child)
+        .execute(&mut *settle_tx)
+        .await
+        .unwrap();
+
+    // Act: the restart holds the parent and blocks on the child.
+    let restarting = {
+        let pool = pool.clone();
+        tokio::spawn(async move { restart_execution(&pool, root).await })
+    };
+    let waited = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let blocked: Option<i32> = sqlx::query_scalar(
+                "SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))",
+            )
+            .bind(settle_pid)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+            if blocked.is_some() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(waited.is_ok(), "the restart never waited on the child");
+    // The "settle" now wants the parent, which the restart holds.
+    sqlx::query("SELECT 1 FROM workflow.executions WHERE id = $1 FOR UPDATE")
+        .bind(root)
+        .execute(&mut *settle_tx)
+        .await
+        .expect("the settle gets the parent once the restart is aborted");
+    settle_tx.commit().await.unwrap();
+
+    // Assert
+    let out = tokio::time::timeout(Duration::from_secs(30), restarting)
+        .await
+        .expect("the restart returns")
+        .expect("the restart task");
+    assert_eq!(out.expect("the victim is run again"), Restarted::Done);
+    let counted = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let n = deadlocks(&pool).await;
+            if n > 0 {
+                return n;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the positive control: Postgres counted a deadlock");
+    assert_eq!(counted, 1, "one deadlock: the restart's first attempt");
+    drive(&pool, &reg, root).await;
+    assert_eq!(exec_state(&pool, root).await, "SUCCESS");
+    let kids = children(&pool).await;
+    assert_eq!(kids.len(), 1);
+    assert_eq!(kids[0].0, child);
+    assert_eq!(kids[0].1, "SUCCESS");
 }
 
 // ── 10. A spent retry does not retry again (D5) ────────────────────────────

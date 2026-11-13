@@ -310,6 +310,13 @@ pub(super) async fn spawn_one(
         ))
     })?;
 
+    // **D9: a reset run of a restarted execution restarts its earlier child
+    // in place**, before the target is even rendered, as Kestra's
+    // `ExecutableUtils.subflowExecutions` (`:91-170`) looks it up first.
+    if let Some(jobs) = restart_earlier_child(conn, ctx, state, r, sub.wait).await? {
+        return Ok(jobs);
+    }
+
     let cx = surface.context(&ctx.plan, state, Some(r.run));
 
     // Rendered, because Kestra renders them:
@@ -631,6 +638,157 @@ pub(super) async fn spawn_one(
         }));
     }
     Ok(jobs)
+}
+
+/// **Spec D9 (user decision Q1): a reset `Subflow` run restarts its
+/// earlier child in place** -- Kestra's `restartBehavior: RETRY_FAILED`
+/// (`ExecutableUtils.java:91-170`, `ExecutorService:1311-1318`).
+///
+/// `None` -- spawn a new child, as before D9 -- unless all of these hold:
+///
+/// - the run was **reset by a restart**: its history has a terminal state
+///   followed by `CREATED` (D3). A run built fresh -- emptied by D4 or by a
+///   `LoopUntil`'s next iteration, both of which give it a new task-run id
+///   -- never had this child, as Kestra's `taskRunId` match says;
+/// - the execution is labelled `system.restarted: "true"` (D7);
+/// - **exactly one** earlier child is linked to it by
+///   `trigger_execution_id = <this execution>` and `trigger_run_ix = <run>`.
+///   That pair is the whole of what a child row records of its run, and
+///   `run_ix` identifies one run within one execution: a `Loop` iteration
+///   is an execution of its own, so the iteration is in
+///   `trigger_execution_id`, and egret's `TaskRun::value` is never set on a
+///   `Subflow` run. Two children under one run (a `retry:` that spawned
+///   again, or a `LoopUntil` whose iterations reused the run) are
+///   "several": Kestra creates a new one. The run's `outputs.executionId`
+///   is not read: the restart cleared it (D7 side writes).
+///
+/// Then, by the child's state:
+///
+/// - `FAILED` or `PAUSED`: the child is locked (parent, then child) and
+///   restarted in place by the restart's own function; the run stays
+///   `RUNNING` and waits for it as for a fresh child, and its terminal
+///   reaches [`on_child_terminal`], which takes it because the run is not
+///   terminal. A refused restart (files pruned, `afterExecution:` still
+///   running) leaves the child alone and spawns a new one, logged at warn.
+/// - any other terminal state: the run ends `SUCCESS` at once with the
+///   child's outputs copied as [`on_child_terminal`] copies them ("don't
+///   restart it as it's terminated successfully").
+/// - not terminal (still running): nothing to restart and nothing to spawn;
+///   the run waits for its terminal. Kestra would end the run `SUCCESS`
+///   (`!isFailed()`) and leave the child running unwatched; the spec names
+///   only terminal states, so egret keeps the link.
+///
+/// `wait: false` completes the run `SUCCESS` beside the restart, as a fresh
+/// spawn does, with the state the restart leaves the child in at this
+/// instant, `RESTARTED`.
+async fn restart_earlier_child(
+    conn: &mut PgConnection,
+    ctx: &claim::ExecutionCtx,
+    state: &ExecutionState,
+    r: &Requested,
+    wait: bool,
+) -> Result<Option<Vec<claim::Job>>> {
+    let reset = state.runs.get(r.run).is_some_and(|run| {
+        run.history
+            .windows(2)
+            .any(|w| w[0].is_terminal() && w[1] == RunState::Created)
+    });
+    // The backstop of `spawn_one` holds here too: the child's restart is a
+    // settle nested one deeper, and the fresh path refuses it with its reason.
+    if !reset || ctx.depth + 1 > MAX_SPAWN_CHAIN {
+        return Ok(None);
+    }
+    let labels: Option<Value> =
+        sqlx::query_scalar("SELECT labels FROM workflow.executions WHERE id = $1")
+            .bind(ctx.id)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(db_err)?;
+    let restarted = crate::labels::own_labels(labels.as_ref()).iter().any(|l| {
+        l.key == super::restart::RESTARTED_LABEL_KEY
+            && l.value == super::restart::RESTARTED_LABEL_VALUE
+    });
+    if !restarted {
+        return Ok(None);
+    }
+    let found: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, state FROM workflow.executions \
+          WHERE trigger_execution_id = $1 AND trigger_run_ix = $2 LIMIT 2",
+    )
+    .bind(ctx.id)
+    .bind(r.run as i32)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    let [(child, child_state)] = found.as_slice() else {
+        return Ok(None);
+    };
+    let child = *child;
+    match child_state.as_str() {
+        "FAILED" | "PAUSED" => {
+            match super::restart::restart_subflow_child(conn, child, ctx.caller()).await? {
+                Ok(job) => {
+                    let mut jobs = vec![job];
+                    if !wait {
+                        jobs.push(succeed(
+                            ctx,
+                            r.run,
+                            json!({"executionId": child.to_string(), "state": "RESTARTED"}),
+                            None,
+                        ));
+                    }
+                    Ok(Some(jobs))
+                }
+                Err(refused) => {
+                    tracing::warn!(
+                        execution = %ctx.id, run = r.run, %child, ?refused,
+                        "a Subflow's earlier child cannot be restarted; a new child is spawned"
+                    );
+                    Ok(None)
+                }
+            }
+        }
+        "SUCCESS" | "WARNING" | "KILLED" | "CANCELLED" | "SKIPPED" | "RETRIED" => {
+            let (outputs, sealed) = match child_outputs(conn, child).await? {
+                ChildOutputs::Copied { outputs, sealed } => (Some(outputs), sealed),
+                ChildOutputs::Failed(_) => (None, None),
+            };
+            let mut report = json!({"executionId": child.to_string(), "state": child_state});
+            if let Some(outputs) = outputs {
+                report["outputs"] = outputs;
+            }
+            Ok(Some(vec![succeed(ctx, r.run, report, sealed)]))
+        }
+        _ if wait => Ok(Some(Vec::new())),
+        _ => Ok(Some(vec![succeed(
+            ctx,
+            r.run,
+            json!({"executionId": child.to_string(), "state": child_state}),
+            None,
+        )])),
+    }
+}
+
+/// End one `Subflow` run `SUCCESS` with `outputs`, from inside its own
+/// execution's settle (`spawn_one`).
+fn succeed(
+    ctx: &claim::ExecutionCtx,
+    run: RunIx,
+    outputs: Value,
+    secret_outputs: Option<Vec<u8>>,
+) -> claim::Job {
+    claim::Job::Complete(Completion {
+        execution_id: ctx.id,
+        run,
+        states: vec![RunState::Success],
+        outputs: Some(outputs),
+        secret_outputs,
+        keep_outputs: false,
+        outputs_failed: None,
+        message: None,
+        stack: claim::Stack::Nested(ctx.caller()),
+        unless_terminal: false,
+    })
 }
 
 /// One subflow child has reached a terminal state: tell the run that started it.
