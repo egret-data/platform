@@ -3628,7 +3628,6 @@ dependencies = [
  "chrono",
  "egret-audit",
  "egret-auth",
- "egret-bi",
  "egret-catalog-registry",
  "egret-core",
  "egret-engine-mgmt-api",

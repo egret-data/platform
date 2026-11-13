@@ -19,6 +19,16 @@ async fn seed_user(db: &Db) -> Uuid {
         .expect("insert user")
 }
 
+/// A real group: since SP3c-2 a clearance's required group becomes a withhold-rule
+/// exemption, so authoring refuses a group id that names no group.
+async fn seed_group(db: &Db) -> Uuid {
+    sqlx::query_scalar("INSERT INTO groups (name) VALUES ($1) RETURNING id")
+        .bind(format!("cpdb-grp-{}", Uuid::new_v4().simple()))
+        .fetch_one(&db.pool)
+        .await
+        .expect("insert group")
+}
+
 #[tokio::test]
 async fn set_get_update_clear_and_cascade() {
     let Some(url) = egret_test_db::url().await else {
@@ -42,8 +52,8 @@ async fn set_get_update_clear_and_cascade() {
 
     // set_policy inserts the required-role + required-group lists; get round-trips.
     let roles = vec!["clearance_high".to_string(), "auditor".to_string()];
-    let g1 = Uuid::new_v4();
-    let g2 = Uuid::new_v4();
+    let g1 = seed_group(&db).await;
+    let g2 = seed_group(&db).await;
     let groups = vec![g1, g2];
     pol.set_policy(tag.id, &roles, &groups, &principal_of(by))
         .await
@@ -55,7 +65,7 @@ async fn set_get_update_clear_and_cascade() {
 
     // set_policy again UPSERTS (updates) BOTH lists for the same tag.
     let roles2 = vec!["clearance_top".to_string()];
-    let groups2 = vec![Uuid::new_v4()];
+    let groups2 = vec![seed_group(&db).await];
     pol.set_policy(tag.id, &roles2, &groups2, &principal_of(by))
         .await
         .expect("update policy");
@@ -65,7 +75,7 @@ async fn set_get_update_clear_and_cascade() {
     );
 
     // A GROUP-ONLY policy (no roles) is a legal gate.
-    let group_only = vec![Uuid::new_v4()];
+    let group_only = vec![seed_group(&db).await];
     pol.set_policy(tag.id, &[], &group_only, &principal_of(by))
         .await
         .expect("set group-only");
@@ -195,7 +205,7 @@ async fn set_policy_rejects_injection_payloads() {
         "data_steward".to_string(),
         "role:sub-team".to_string(),
     ];
-    let good_groups = vec![Uuid::new_v4()];
+    let good_groups = vec![seed_group(&db).await];
     pol.set_policy(tag.id, &good, &good_groups, &principal_of(by))
         .await
         .expect("valid clearance role names must be accepted");

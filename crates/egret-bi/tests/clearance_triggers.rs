@@ -474,7 +474,7 @@ async fn deleting_a_gated_tag_reaps_its_clearance() {
 /// checked the group-only case is also passed by an implementation that reports
 /// every write as skipped.
 #[tokio::test]
-async fn a_group_only_gate_reports_its_skip_to_the_author() {
+async fn a_group_only_gate_is_enforced_and_not_reported_skipped() {
     let Some(db) = connect().await else { return };
     let _permit = SERIAL.acquire().await.expect("permit");
     let f = seed(&db, "trino").await;
@@ -506,34 +506,32 @@ async fn a_group_only_gate_reports_its_skip_to_the_author() {
 
     // The same tag, re-gated on a GROUP alone. Nothing can be compiled for it,
     // and the author must be told so on the write itself.
-    let group_id = Uuid::new_v4();
+    // A real group: authoring now mirrors the gate into a withhold rule whose
+    // exemption must resolve (SP3c-2).
+    let group_id: Uuid = sqlx::query_scalar("INSERT INTO groups (name) VALUES ($1) RETURNING id")
+        .bind(format!("clrtrig-grp-{}", Uuid::new_v4().simple()))
+        .fetch_one(&db.pool)
+        .await
+        .expect("insert group");
     let skipped = pol
         .set_policy(tag.id, &[], &[group_id], &test_actor(&db.pool).await)
         .await
         .expect("set a group-only gate");
-    let mine: Vec<_> = skipped.iter().filter(|s| s.id == tag.id).collect();
+    // SP3c-2: a group-only gate is now ENFORCED (its group is a withhold-rule
+    // exemption), so the write has nothing to report as skipped and the
+    // clearance deny stays compiled. (The role-gate half above still proves the
+    // report is not simply empty by construction; the stale "not enforced"
+    // signal itself is removed in SP3c-2 Task 8.)
+    assert!(
+        skipped.iter().all(|s| s.id != tag.id),
+        "a group-only gate is enforced from its withhold rule, so it is not skipped: {skipped:?}"
+    );
     assert_eq!(
-        mine.len(),
-        1,
-        "a group-only gate compiles to nothing, and the write must SAY so rather than answering \
-         ok over a clearance no engine will ever enforce: {skipped:?}"
-    );
-    assert!(
-        matches!(
-            mine[0].source_kind,
-            egret_perm_compile::SourceKind::Clearance
-        ),
-        "the skip is a CLEARANCE skip, and `id` is the tags.id: {mine:?}"
-    );
-    assert!(
-        mine[0].reason.contains("required_groups"),
-        "the reason must name what could not be expressed, not merely that something was: {mine:?}"
-    );
-    assert!(
         clearance_policies(&db, f.tag_service_id, tag.id)
             .await
-            .is_empty(),
-        "and the earlier role gate's deny must be gone — the gate no longer names a role"
+            .len(),
+        1,
+        "the group-only gate compiles a clearance deny"
     );
 }
 

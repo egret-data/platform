@@ -151,8 +151,7 @@ async fn group_name_for_id(
         .map_err(PermHttpError::db)?
         .ok_or_else(|| {
             PermHttpError::BadRequest(format!(
-                "a clearance names group {group_id}, which no longer exists; its clearance cannot \
-                 be migrated to a withhold rule until the reference is fixed"
+                "group {group_id} not found: a clearance cannot name a group that no longer exists"
             ))
         })
 }
@@ -162,6 +161,8 @@ async fn group_name_for_id(
 /// the ref resolves), each required group UUID → that group's `groups.name`.
 /// Every one is an `include` group exemption. The single source of truth for what
 /// a clearance's exemptions are, shared by the bulk migration and by authoring.
+/// The withhold rule is managed-only: egret owns its exemptions and deletes all
+/// then rewrites them, so dropping any non-managed exemption is intended.
 async fn replace_rule_exemptions(
     tx: &mut Transaction<'_, Postgres>,
     rule_id: Uuid,

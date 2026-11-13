@@ -591,142 +591,80 @@ async fn a_migrated_clearance_is_enforced_from_the_rule_after_the_table_row_is_g
     );
 }
 
-// ── SP3c-2 Task 6: authoring keeps the withhold rule in step ───────────────
+// ── SP3c-2 Task 6: the authoring helpers, called directly ──────────────────
+// (The end-to-end authoring tests live in
+// `egret-bi/tests/clearance_withhold_authoring.rs`.)
 
-async fn test_actor(pool: &PgPool) -> egret_core::Principal {
-    let id: Uuid =
-        sqlx::query_scalar("INSERT INTO users (provider, email) VALUES ('local', $1) RETURNING id")
-            .bind(format!("actor_{}@egret.local", Uuid::new_v4().simple()))
-            .fetch_one(pool)
-            .await
-            .expect("insert actor");
-    egret_core::Principal {
-        user_id: egret_core::UserId(id),
-        email: "actor@egret.local".into(),
-        platform_roles: vec![],
-        permissions: vec![],
-        group_ids: vec![],
-        impersonator: None,
-    }
-}
-
-/// A second role with a holder-less definition, to edit a clearance onto.
-async fn extra_role(pool: &PgPool) -> String {
-    let name = unique("clrmig-role2");
-    sqlx::query("INSERT INTO roles (scope, name) VALUES ('platform', $1)")
-        .bind(&name)
-        .execute(pool)
-        .await
-        .expect("insert role");
-    name
-}
-
-/// Author a clearance through the real write path on a fixture whose seeded
-/// table row is first removed, so the rule is born of the authoring call alone.
-async fn authoring_fixture() -> Option<(
-    PgPool,
-    Db,
-    RoleClearance,
-    egret_bi::ClassificationPolicyRepo,
-    egret_core::Principal,
-)> {
-    let pool = pool().await?;
+#[tokio::test]
+async fn the_authoring_helpers_replace_exemptions_remove_and_refuse_a_dangling_group() {
+    use egret_perm_compile::clearance_migrate::{
+        remove_clearance_withhold_rule_in_tx, upsert_clearance_withhold_rule_in_tx,
+    };
+    let Some(pool) = pool().await else { return };
+    let _serial = SERIAL.lock().await;
     reset(&pool).await;
     let db = Db::connect(&egret_test_db::url().await.unwrap(), 5)
         .await
         .unwrap();
     let f = seed_role_clearance(&db).await;
-    sqlx::query("DELETE FROM classification_policies WHERE tag_id = $1")
-        .bind(f.tag_id)
+    let role2 = unique("clrmig-role2");
+    sqlx::query("INSERT INTO roles (scope, name) VALUES ('platform', $1)")
+        .bind(&role2)
         .execute(&pool)
         .await
         .unwrap();
-    let repo = egret_bi::ClassificationPolicyRepo::new(db.clone(), egret_events::EventBus::new());
-    let actor = test_actor(&pool).await;
-    Some((pool, db, f, repo, actor))
-}
 
-#[tokio::test]
-async fn authoring_a_clearance_creates_its_withhold_rule_and_enforces_from_it() {
-    let _serial = SERIAL.lock().await;
-    let Some((pool, _db, f, repo, actor)) = authoring_fixture().await else {
-        return;
-    };
-    assert!(withhold_rule(&pool, &f.tag_key).await.is_none());
-
-    repo.set_policy(f.tag_id, std::slice::from_ref(&f.role_name), &[], &actor)
-        .await
-        .expect("author clearance");
-
-    let (_, refs) = withhold_rule(&pool, &f.tag_key)
-        .await
-        .expect("authoring created the withhold rule");
+    // Create, then replace (not append).
+    let mut tx = pool.begin().await.unwrap();
+    upsert_clearance_withhold_rule_in_tx(
+        &mut tx,
+        f.tag_id,
+        std::slice::from_ref(&f.role_name),
+        &[],
+    )
+    .await
+    .expect("create");
+    tx.commit().await.unwrap();
+    let (_, refs) = withhold_rule(&pool, &f.tag_key).await.expect("rule");
     assert_eq!(refs, vec![format!("role:{} holders", f.role_name)]);
-    assert!(clearance_enforced(&pool, f.tag_service_id, f.tag_id).await);
 
-    // Enforced FROM THE RULE: drop the table row behind the rule's back and a
-    // recompile still produces the deny.
-    sqlx::query("DELETE FROM classification_policies WHERE tag_id = $1")
-        .bind(f.tag_id)
-        .execute(&pool)
+    let mut tx = pool.begin().await.unwrap();
+    upsert_clearance_withhold_rule_in_tx(&mut tx, f.tag_id, std::slice::from_ref(&role2), &[])
         .await
-        .unwrap();
-    recompile_service(&f.perm, &f.policy, f.profile_id)
-        .await
-        .expect("recompile");
-    assert!(
-        clearance_enforced(&pool, f.tag_service_id, f.tag_id).await,
-        "enforced from the rule, not the fallback"
-    );
-}
+        .expect("replace");
+    tx.commit().await.unwrap();
+    let (_, refs) = withhold_rule(&pool, &f.tag_key).await.expect("rule");
+    assert_eq!(refs, vec![format!("role:{role2} holders")]);
 
-#[tokio::test]
-async fn editing_a_clearance_replaces_the_rules_exemptions() {
-    let _serial = SERIAL.lock().await;
-    let Some((pool, _db, f, repo, actor)) = authoring_fixture().await else {
-        return;
-    };
-    let other = extra_role(&pool).await;
-
-    repo.set_policy(f.tag_id, std::slice::from_ref(&f.role_name), &[], &actor)
+    // A dangling group UUID is refused as a BadRequest, writing nothing.
+    let mut tx = pool.begin().await.unwrap();
+    let err = upsert_clearance_withhold_rule_in_tx(&mut tx, f.tag_id, &[], &[Uuid::new_v4()])
         .await
-        .expect("author");
-    repo.set_policy(f.tag_id, std::slice::from_ref(&other), &[], &actor)
-        .await
-        .expect("edit");
-
+        .expect_err("dangling group");
+    assert!(matches!(err, PermHttpError::BadRequest(_)), "{err:?}");
+    drop(tx);
     let (_, refs) = withhold_rule(&pool, &f.tag_key).await.expect("rule");
     assert_eq!(
         refs,
-        vec![format!("role:{other} holders")],
-        "the edit replaced the exemptions rather than appending"
+        vec![format!("role:{role2} holders")],
+        "refusal rolled back"
     );
-    assert!(clearance_enforced(&pool, f.tag_service_id, f.tag_id).await);
-}
 
-#[tokio::test]
-async fn clearing_a_clearance_removes_its_rule_and_enforcement() {
-    let _serial = SERIAL.lock().await;
-    let Some((pool, _db, f, repo, actor)) = authoring_fixture().await else {
-        return;
-    };
-
-    repo.set_policy(f.tag_id, std::slice::from_ref(&f.role_name), &[], &actor)
+    // Empty roles+groups removes the rule; so does an explicit remove.
+    let mut tx = pool.begin().await.unwrap();
+    upsert_clearance_withhold_rule_in_tx(&mut tx, f.tag_id, &[], &[])
         .await
-        .expect("author");
-    assert!(withhold_rule(&pool, &f.tag_key).await.is_some());
-
-    repo.clear_policy(f.tag_id, &actor).await.expect("clear");
-
+        .expect("empty removes");
+    tx.commit().await.unwrap();
     assert!(withhold_rule(&pool, &f.tag_key).await.is_none());
-    assert!(!clearance_enforced(&pool, f.tag_service_id, f.tag_id).await);
 
-    // Authoring an empty clearance is also "no gate": it removes the rule.
-    repo.set_policy(f.tag_id, std::slice::from_ref(&f.role_name), &[], &actor)
+    let mut tx = pool.begin().await.unwrap();
+    upsert_clearance_withhold_rule_in_tx(&mut tx, f.tag_id, std::slice::from_ref(&role2), &[])
         .await
-        .expect("re-author");
-    repo.set_policy(f.tag_id, &[], &[], &actor)
+        .unwrap();
+    remove_clearance_withhold_rule_in_tx(&mut tx, f.tag_id)
         .await
-        .expect("empty");
+        .expect("remove");
+    tx.commit().await.unwrap();
     assert!(withhold_rule(&pool, &f.tag_key).await.is_none());
 }

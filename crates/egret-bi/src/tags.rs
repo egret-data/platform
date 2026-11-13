@@ -564,6 +564,12 @@ impl TagRepo {
             egret_perm_compile::lock_services_in_tx(&mut tx, &services).await?;
             egret_perm_compile::lock_compile_mints_in_tx(&mut tx).await?;
         }
+        // SP3c-2: the tag's clearance is a managed withhold rule that cascades
+        // away with the tag exactly as its `classification_policies` row does,
+        // so it must not count as a rule "still using" the tag. Removed before
+        // the check (a refusal below rolls this back with the transaction).
+        egret_perm_compile::clearance_migrate::remove_clearance_withhold_rule_in_tx(&mut tx, id)
+            .await?;
         let rules: Vec<(Uuid, String)> = sqlx::query_as(
             "SELECT r.id, r.name FROM perm.rules r JOIN tags t ON t.key = r.tag_key \
               WHERE t.id = $1 ORDER BY r.name",
