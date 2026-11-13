@@ -3695,6 +3695,17 @@ pub struct StateChangeBody {
     pub state: StateChangeTarget,
 }
 
+/// A body axum's `Json` refused, mapped after the permission check as the
+/// trigger and KV routes do: malformed JSON, a state outside the four (or in
+/// the wrong case), an unknown field and a missing content type are all 400
+/// (axum's own answer to a well-formed but wrong body is 422).
+fn state_change_body_refusal(r: axum::extract::rejection::JsonRejection) -> ExecOpError {
+    ExecOpError::Core(Error::InvalidInput(format!(
+        "the body is not `{{\"state\": \"SUCCESS\"|\"WARNING\"|\"FAILED\"|\"CANCELLED\"}}`: {}",
+        r.body_text()
+    )))
+}
+
 #[utoipa::path(
     post,
     path = "/api/ws/{workspace}/workflows/executions/{id}/restart",
@@ -3769,11 +3780,11 @@ async fn restart_execution(
     request_body = StateChangeBody,
     responses(
         (status = 200, description = "The task run took the state (Kestra's mark-as): its outputs are kept, its ancestors are reopened and the execution runs on from `RESTARTED` (or ends `CANCELLED` for a `CANCELLED` target), with the label `system.restarted: true`. The body is the execution's detail afterwards.", body = ExecutionDto),
-        (status = 400, description = "The body is not `{\"state\": ...}` with exactly one of `SUCCESS`, `WARNING`, `FAILED`, `CANCELLED`, or has another field; or the execution is a **loop iteration** (no code; the message names its loop root)", body = egret_core::http::ErrorBody),
+        (status = 400, description = "The body is not valid JSON, is not `{\"state\": ...}` with exactly one of `SUCCESS`, `WARNING`, `FAILED`, `CANCELLED` (upper case), or has another field (always 400, never 422); or the execution is a **loop iteration** (no code; the message names its loop root)", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such execution in this workspace, or no task run of it with this id (one removed by a restart counts as none)", body = egret_core::http::ErrorBody),
-        (status = 409, description = "Nothing is written. Checked in this order: loop iteration (400 above), `files_pruned`, `after_execution_running`, `not_restartable` (the execution has not ended, or ended `KILLED`; the message names its state), `inside_working_directory` (the run is inside a `WorkingDirectory`; restart the execution instead), `state_unchanged` (the run is already in that state).", body = egret_core::http::ErrorBody),
+        (status = 409, description = "Nothing is written. The worker checks, in this order: loop iteration (the 400 above), `files_pruned`, `after_execution_running` (the execution has ended but its `afterExecution:` still runs), `not_restartable` (the execution has not ended, or ended `KILLED`; the message names its state), then the run itself: no such run (the 404 above), `state_unchanged` (the run is already in that state), `inside_working_directory` (the run is inside a `WorkingDirectory`; restart the execution instead).", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
@@ -3787,9 +3798,10 @@ async fn set_task_run_state(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
     Path((_ws, id, task_run_id)): Path<(String, Uuid, Uuid)>,
-    Json(body): Json<StateChangeBody>,
+    body: std::result::Result<Json<StateChangeBody>, axum::extract::rejection::JsonRejection>,
 ) -> std::result::Result<Json<ExecutionDto>, ExecOpError> {
     egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    let Json(body) = body.map_err(state_change_body_refusal)?;
     let before = st.executions.get(ctx.workspace_id.0, id).await?;
     let run = before
         .runs
@@ -3833,11 +3845,11 @@ async fn set_task_run_state(
     request_body = StateChangeBody,
     responses(
         (status = 200, description = "The execution took the status (Kestra's change-state): the state is appended to its history and the execution settles on from it; no task run is touched and no label is added. The body is its detail afterwards.", body = ExecutionDto),
-        (status = 400, description = "The body is not `{\"state\": ...}` with exactly one of `SUCCESS`, `WARNING`, `FAILED`, `CANCELLED`, or has another field; or the execution is a **loop iteration** (no code; the message names its loop root)", body = egret_core::http::ErrorBody),
+        (status = 400, description = "The body is not valid JSON, is not `{\"state\": ...}` with exactly one of `SUCCESS`, `WARNING`, `FAILED`, `CANCELLED` (upper case), or has another field (always 400, never 422); or the execution is a **loop iteration** (no code; the message names its loop root)", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed", body = egret_core::http::ErrorBody),
-        (status = 409, description = "Nothing is written. Checked in this order: loop iteration (400 above), `not_restartable` (the execution has not ended, or ended `KILLED`; the message names its state), `after_execution_running`, `files_pruned`, `state_unchanged` (it is already in that state).", body = egret_core::http::ErrorBody),
+        (status = 409, description = "Nothing is written. The worker checks, in this order: loop iteration (the 400 above), `not_restartable` (the execution has not ended, or ended `KILLED`; the message names its state), `after_execution_running` (the execution has ended but its `afterExecution:` still runs), `state_unchanged` (it is already in that state). `files_pruned` does not apply here: nothing runs again.", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
@@ -3846,9 +3858,10 @@ async fn set_execution_status(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
-    Json(body): Json<StateChangeBody>,
+    body: std::result::Result<Json<StateChangeBody>, axum::extract::rejection::JsonRejection>,
 ) -> std::result::Result<Json<ExecutionDto>, ExecOpError> {
     egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    let Json(body) = body.map_err(state_change_body_refusal)?;
     let before = st.executions.get(ctx.workspace_id.0, id).await?;
     let target = body.state.run_state();
     match crate::worker::set_execution_status(&st.db.pool, id, target).await? {

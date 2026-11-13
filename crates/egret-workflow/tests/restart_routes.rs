@@ -362,32 +362,38 @@ async fn marking_a_failed_run_success_answers_200_and_is_audited(pool: sqlx::PgP
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_target_outside_the_four_is_400(pool: sqlx::PgPool) {
+async fn a_bad_body_is_exactly_400_and_changes_nothing(pool: sqlx::PgPool) {
     let (_db, ws, user, app) = setup(&pool).await;
     let (ex, _reg) = failed_execution(&pool, ws).await;
     let b = task_run_id(&pool, ex, "b").await;
+    let bodies = [
+        "{\"state\": ",
+        "{\"state\":\"RUNNING\"}",
+        "{\"state\":\"KILLED\"}",
+        "{\"state\":\"success\"}",
+        "{\"state\":\"SUCCESS\",\"x\":1}",
+        "{}",
+    ];
+    let before = exec_state(&pool, ex).await;
 
-    for state in ["RUNNING", "KILLED", "nonsense"] {
-        let res = common::post(
-            &app,
-            &run_state_path(ws, ex, b),
-            user,
-            json!({ "state": state }),
-        )
-        .await;
-        assert!(res.status().is_client_error(), "{state}");
-        let res = common::post(&app, &status_path(ws, ex), user, json!({ "state": state })).await;
-        assert!(res.status().is_client_error(), "{state}");
+    for path in [run_state_path(ws, ex, b), status_path(ws, ex)] {
+        for body in bodies {
+            let res = common::send_raw(
+                &app,
+                "POST",
+                &path,
+                user,
+                "application/json",
+                body.as_bytes().to_vec(),
+            )
+            .await;
+            assert_eq!(res.status(), 400, "{path} {body}");
+            let json = common::json(res).await;
+            assert!(json["error"].is_string(), "{json}");
+            assert_eq!(exec_state(&pool, ex).await, before, "{path} {body}");
+        }
     }
-    let res = common::post(
-        &app,
-        &status_path(ws, ex),
-        user,
-        json!({ "state": "SUCCESS", "extra": 1 }),
-    )
-    .await;
-    assert!(res.status().is_client_error());
-    assert_eq!(exec_state(&pool, ex).await, "FAILED");
+    assert!(common::audit_mutations(&app).is_empty());
 }
 
 #[sqlx::test(migrations = "../../migrations")]
