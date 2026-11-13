@@ -128,7 +128,23 @@ pub(crate) fn release_now(state: &mut ExecutionState, now: Tick) -> Vec<RunIx> {
 /// The pause is entered in the same round the run is descended into for the
 /// first time, which is why the golden never holds a `RUNNING` that lasted a
 /// round on its own.
+///
+/// **A `Pause` that has already paused does not pause again** -- package 7a
+/// (spec D3). Kestra's `Pause.needPause` pauses only a run whose history holds
+/// no `PAUSED`, and its `resolveState` then ends it in the resumed terminal,
+/// `SUCCESS` when nothing chose another (`Pause.java:269-272`, `findTerminalState`).
+/// The only way a `Pause` is `RUNNING` with `PAUSED` behind it is a restart
+/// (`restart::restart`'s `ReopenFlowable`): a resume ends the run straight
+/// from `PAUSED`, and a `Pause` is never retried (`retry::is_retried_kind`).
+/// It is a run command and not a `Step::Done`, because `descend` returns this
+/// step unmapped and a `Done` would end the enclosing list instead.
 pub(crate) fn drive(plan: &Plan, state: &ExecutionState, run: RunIx, task: TaskIx) -> Step {
+    if state.runs[run].history.contains(&RunState::Paused) {
+        return Step::Commands(vec![Command::SetRunState {
+            run,
+            state: RunState::Success,
+        }]);
+    }
     let Some(started) = state.runs[run].attempt_started_at() else {
         // A `Pause` run reaches `RUNNING` only through
         // `flowable::start`'s `Command::StartRun`, which opens an attempt in
