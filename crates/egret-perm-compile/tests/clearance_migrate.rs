@@ -74,14 +74,17 @@ async fn a_withhold_rule_with_a_payload_is_rejected() {
 #[tokio::test]
 async fn a_withhold_rule_must_be_tag_selected() {
     let Some(pool) = pool().await else { return };
-    let catalog_id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM registry.catalogs LIMIT 1")
-        .fetch_optional(&pool)
-        .await
-        .expect("catalogs");
-    let Some(catalog_id) = catalog_id else {
-        // No catalog to anchor a path selector on in this database.
-        return;
-    };
+    let catalog_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config) \
+         VALUES ($1, 'iceberg', '{}'::jsonb) RETURNING id",
+    )
+    .bind(format!(
+        "wh_cat_{}",
+        &Uuid::new_v4().simple().to_string()[..12]
+    ))
+    .fetch_one(&pool)
+    .await
+    .expect("seed catalog");
     let err = sqlx::query(
         "INSERT INTO perm.rules (name, kind, selector_kind, catalog_id) \
          VALUES ($1, 'withhold', 'path', $2)",
