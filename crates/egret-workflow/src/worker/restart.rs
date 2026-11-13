@@ -20,6 +20,11 @@
 //!    (the outbox writes one Flow-trigger event for each) and drives the
 //!    executor on from there.
 //!
+//! A `Loop` run the restart reopens has its last failing iteration
+//! restarted in place by the same function ([`restart_locked`] with
+//! [`Nested::LoopIteration`]), in the same transaction, the parent locked
+//! first (D8).
+//!
 //! A deadlock's victim is run again, as the kill's is
 //! ([`kill::DEADLOCK_RETRIES`]).
 
@@ -30,7 +35,8 @@ use uuid::Uuid;
 use super::claim::{self, Stack};
 use super::kill::{is_deadlock, DEADLOCK_RETRIES};
 use super::txn::{transaction, InTxn};
-use crate::executor::{apply, RestartCommands, RestartRefusal, RunState};
+use crate::executor::{apply, Command, RestartCommands, RestartRefusal, RunState};
+use crate::logs::LogLevel;
 use crate::models::Label;
 
 /// The label a restart puts on the execution (spec D7, Kestra `ES:360-364`).
@@ -71,7 +77,7 @@ pub async fn restart_execution(pool: &PgPool, id: Uuid) -> Result<Restarted> {
     loop {
         let restarted = transaction!(pool, |at| {
             let (conn, gate) = at.parts();
-            restart_in(conn, id, Stack::Fresh(gate.clone())).await
+            restart_locked(conn, id, Stack::Fresh(gate.clone()), Nested::No).await
         });
         match restarted {
             Err(e) if retries < DEADLOCK_RETRIES && is_deadlock(&e) => {
@@ -83,6 +89,22 @@ pub async fn restart_execution(pool: &PgPool, id: Uuid) -> Result<Restarted> {
     }
 }
 
+/// **Which restart this is**: of an execution a person named, or of one the
+/// restart of its parent reaches into, in the same transaction and under
+/// the parent's lock (taken first: parent, then the nested execution, the
+/// order kill's cascade takes, `kill.rs`).
+///
+/// A4 (`Subflow`, D9) adds its child here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Nested {
+    /// The execution a person named: every check of D10 applies.
+    No,
+    /// The last failing iteration of a `Loop` run its parent's restart
+    /// reopened (D8). The loop-iteration refusal is skipped: this IS the
+    /// restart through the loop root that refusal points to.
+    LoopIteration,
+}
+
 /// The facts of the execution row the checks read, beside what `load` holds.
 struct Row0220 {
     loop_root: Option<Uuid>,
@@ -91,8 +113,45 @@ struct Row0220 {
     labels: Option<serde_json::Value>,
 }
 
-async fn restart_in(conn: &mut PgConnection, id: Uuid, stack: Stack) -> Result<Restarted> {
-    let (ctx, mut state, now) = claim::load(conn, id, stack).await?;
+/// One execution's restart, checked and computed under its lock, nothing
+/// written yet: what [`prepare`] answers and [`commit`] writes.
+struct Prepared {
+    ctx: claim::ExecutionCtx,
+    state: crate::executor::ExecutionState,
+    now: crate::executor::Tick,
+    cmds: RestartCommands,
+    labels: Option<serde_json::Value>,
+}
+
+/// **Restart `id` in place, its lock already held or taken here** -- the
+/// body of [`restart_execution`], and of every restart it reaches into
+/// (D8; A4's `Subflow` child, D9). `stack` is [`Stack::Fresh`] for the
+/// execution a person named and [`Stack::Nested`] for one reached from its
+/// parent's restart. A refusal writes nothing.
+pub(super) async fn restart_locked(
+    conn: &mut PgConnection,
+    id: Uuid,
+    stack: Stack,
+    nested: Nested,
+) -> Result<Restarted> {
+    match prepare(conn, id, stack, nested).await? {
+        Ok(prepared) => {
+            Box::pin(commit(conn, id, prepared)).await?;
+            Ok(Restarted::Done)
+        }
+        Err(refused) => Ok(Restarted::Refused(refused)),
+    }
+}
+
+/// Lock `id` and its runs, run the checks and compute the commands. Writes
+/// nothing, so a refusal leaves the execution as it was.
+async fn prepare(
+    conn: &mut PgConnection,
+    id: Uuid,
+    stack: Stack,
+    nested: Nested,
+) -> Result<std::result::Result<Prepared, RestartRefused>> {
+    let (ctx, state, now) = claim::load(conn, id, stack).await?;
     sqlx::query(
         "SELECT 1 FROM workflow.task_runs WHERE execution_id = $1 ORDER BY run_ix FOR UPDATE",
     )
@@ -119,25 +178,21 @@ async fn restart_in(conn: &mut PgConnection, id: Uuid, stack: Stack) -> Result<R
     };
 
     // The checks, in the spec's order (D10, then the executor's).
-    if let Some(root) = row.loop_root {
-        return Ok(Restarted::Refused(RestartRefused::LoopIteration { root }));
+    if let (Some(root), Nested::No) = (row.loop_root, nested) {
+        return Ok(Err(RestartRefused::LoopIteration { root }));
     }
     if row.files_pruned {
-        return Ok(Restarted::Refused(RestartRefused::FilesPruned));
+        return Ok(Err(RestartRefused::FilesPruned));
     }
     let terminal = state.history.last().is_some_and(|s| s.is_terminal());
     if terminal && !row.idle {
-        return Ok(Restarted::Refused(RestartRefused::AfterExecutionRunning));
+        return Ok(Err(RestartRefused::AfterExecutionRunning));
     }
     let cmds = match crate::executor::restart(&ctx.plan, &state, now) {
         Ok(cmds) => cmds,
-        Err(RestartRefusal::NothingToRestart) => {
-            return Ok(Restarted::Refused(RestartRefused::NothingToRestart))
-        }
+        Err(RestartRefusal::NothingToRestart) => return Ok(Err(RestartRefused::NothingToRestart)),
         Err(RestartRefusal::NotRestartable(s)) => {
-            return Ok(Restarted::Refused(RestartRefused::NotRestartable(
-                s.wire().to_string(),
-            )))
+            return Ok(Err(RestartRefused::NotRestartable(s.wire().to_string())))
         }
         Err(RestartRefusal::InsideWorkingDirectory) => {
             return Err(Error::Internal(anyhow::anyhow!(
@@ -146,15 +201,95 @@ async fn restart_in(conn: &mut PgConnection, id: Uuid, stack: Stack) -> Result<R
             )))
         }
     };
-    // **Temporary refusal, removed by A3 (Loop, D8) and A4 (Subflow, D9).**
-    // Restarting a `Loop`'s last failing iteration and a `Subflow`'s failed
-    // child in place are the next two tasks; until they land, a restart that
-    // would need either writes nothing rather than half of one.
-    if !cmds.loops.is_empty() || !cmds.subflows.is_empty() {
+    // **Temporary refusal, removed by A4 (Subflow, D9).** Restarting a
+    // `Subflow`'s failed child in place is the next task; until it lands, a
+    // restart that would need it writes nothing rather than half of one.
+    if !cmds.subflows.is_empty() {
         return Err(Error::Internal(anyhow::anyhow!(
-            "restarting execution {id} needs a Loop iteration or a Subflow child restarted in \
-             place, which is not built yet (handled by A3 (Loop) / A4 (Subflow))"
+            "restarting execution {id} needs a Subflow child restarted in place, which is not \
+             built yet (handled by A4 (Subflow))"
         )));
+    }
+    Ok(Ok(Prepared {
+        ctx,
+        state,
+        now,
+        cmds,
+        labels: row.labels,
+    }))
+}
+
+/// Kestra's line when a reopened `Loop` has no iteration to restart
+/// (`ExecutorService:735-762`; spec D8).
+pub const NO_RESTARTABLE_ITERATION: &str = "No restartable loop sub-execution found";
+
+/// Apply a prepared restart: the `Loop` iterations first chosen and locked
+/// (D8), then this execution's commands, side writes and `settle`, then each
+/// chosen iteration's own restart.
+///
+/// **Why the iterations settle after the parent.** An iteration's restart
+/// settles it, and a settle that ends it reports to its parent
+/// (`spawn::on_execution_terminal`), which reads the parent's rows and
+/// returns at once while the `Loop` run is terminal. So the parent's reopened
+/// `Loop` run must be persisted (`RUNNING`) before any iteration can end
+/// again. They are *locked and checked* before the parent settles, so a
+/// refused iteration's `Loop` run can still be failed in the parent's own
+/// settle.
+async fn commit(conn: &mut PgConnection, id: Uuid, prepared: Prepared) -> Result<()> {
+    let Prepared {
+        ctx,
+        mut state,
+        now,
+        mut cmds,
+        labels,
+    } = prepared;
+
+    // D8: for each reopened `Loop` run, its last failing iteration -- the
+    // highest `loop_index` whose own state is `FAILED` or `PAUSED`
+    // (Kestra `ES:985-991`, `findLastFailingLoopSubExecution`) -- locked and
+    // checked by the same function. None, or one whose own restart is
+    // refused (nothing in it to restart from), fails the `Loop` run with
+    // Kestra's line, and the parent's restart goes on.
+    let mut iterations = Vec::new();
+    let mut no_iteration = Vec::new();
+    for &run in &cmds.loops {
+        let last: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM workflow.executions \
+              WHERE parent_execution_id = $1 AND parent_run_ix = $2 \
+                AND loop_index IS NOT NULL AND state IN ('FAILED', 'PAUSED') \
+              ORDER BY loop_index DESC LIMIT 1",
+        )
+        .bind(id)
+        .bind(i32::try_from(run).expect("a run index fits the column"))
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        let prepared = match last {
+            Some(iteration) => {
+                let stack = Stack::Nested(ctx.caller());
+                match prepare(conn, iteration, stack, Nested::LoopIteration).await? {
+                    Ok(p) => Some((iteration, p)),
+                    Err(refused) => {
+                        tracing::info!(
+                            execution = %id, %iteration, ?refused,
+                            "a Loop's last failing iteration cannot be restarted"
+                        );
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+        match prepared {
+            Some(p) => iterations.push(p),
+            None => {
+                cmds.commands.push(Command::SetRunState {
+                    run,
+                    state: RunState::Failed,
+                });
+                no_iteration.push(run);
+            }
+        }
     }
 
     let before = state.clone();
@@ -166,9 +301,33 @@ async fn restart_in(conn: &mut PgConnection, id: Uuid, stack: Stack) -> Result<R
         Some(&RunState::Restarted),
         "executor::restart ends on RESTARTED"
     );
-    side_writes(conn, id, &cmds, row.labels.as_ref()).await?;
+    side_writes(conn, id, &cmds, labels.as_ref()).await?;
+    for run in no_iteration {
+        let run_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM workflow.task_runs WHERE execution_id = $1 AND run_ix = $2",
+        )
+        .bind(id)
+        .bind(i32::try_from(run).expect("a run index fits the column"))
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        super::spawn::log_line(
+            conn,
+            ctx.workspace_id,
+            id,
+            Some(run_id),
+            LogLevel::Error,
+            NO_RESTARTABLE_ITERATION,
+            &[],
+        )
+        .await?;
+    }
     claim::settle(conn, &ctx, &before, state, now, None).await?;
-    Ok(Restarted::Done)
+
+    for (iteration, p) in iterations {
+        Box::pin(commit(conn, iteration, p)).await?;
+    }
+    Ok(())
 }
 
 /// D7 and D4's writes beside the state, in the restart's transaction and
@@ -215,21 +374,34 @@ async fn side_writes(
     // stalled). Clearing it is safe for the same reason: a worker still
     // holding that old lease commits fenced on `claimed_at = <its lease>`,
     // which no longer matches, and loses it.
+    //
+    // **Except a reopened `Loop` run's `outputs`** (D8, A3): they hold its
+    // counters and its #6 list, which the iterations that are not restarted
+    // still account for. They stay; the restarted iteration's end replaces
+    // its own index's count and entry (`spawn::on_execution_terminal`).
     let cleared: Vec<i32> = cmds
         .reset
         .iter()
         .chain(&cmds.emptied)
         .map(|&ix| i32::try_from(ix).expect("a run index fits the column"))
         .collect();
+    let loops: Vec<i32> = cmds
+        .loops
+        .iter()
+        .map(|&ix| i32::try_from(ix).expect("a run index fits the column"))
+        .collect();
     if !cleared.is_empty() {
         sqlx::query(
             "UPDATE workflow.task_runs \
-                SET outputs = NULL, message = NULL, secret_outputs = NULL, outputs_bytes = NULL, \
-                    claimed_at = NULL \
+                SET outputs = CASE WHEN run_ix = ANY($3) THEN outputs END, \
+                    secret_outputs = CASE WHEN run_ix = ANY($3) THEN secret_outputs END, \
+                    outputs_bytes = CASE WHEN run_ix = ANY($3) THEN outputs_bytes END, \
+                    message = NULL, claimed_at = NULL \
               WHERE execution_id = $1 AND run_ix = ANY($2)",
         )
         .bind(id)
         .bind(&cleared)
+        .bind(&loops)
         .execute(&mut *conn)
         .await
         .map_err(db_err)?;

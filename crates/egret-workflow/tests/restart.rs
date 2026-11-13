@@ -36,6 +36,9 @@ const RETURN: &str = "io.kestra.plugin.core.debug.Return";
 /// was handed as `(task_id, attempt)`.
 struct Flaky {
     fails: Mutex<HashMap<String, usize>>,
+    /// Tasks that fail on their first attempt and pass on any later one
+    /// (Kestra's `restart-loop`: `{{ 1 / taskrun.attemptsCount }}`).
+    first_attempt: Vec<String>,
     seen: Mutex<Vec<(String, usize)>>,
     inner: Option<egret_workflow::worker::Handlers>,
 }
@@ -44,9 +47,16 @@ impl Flaky {
     fn new(fails: &[(&str, usize)]) -> Self {
         Self {
             fails: Mutex::new(fails.iter().map(|(t, n)| (t.to_string(), *n)).collect()),
+            first_attempt: Vec::new(),
             seen: Mutex::new(Vec::new()),
             inner: None,
         }
+    }
+
+    /// Each of `tasks` fails on attempt 1 of its run and passes after.
+    fn failing_first_attempt_of(mut self, tasks: &[&str]) -> Self {
+        self.first_attempt = tasks.iter().map(|t| t.to_string()).collect();
+        self
     }
 
     fn over(mut self, inner: egret_workflow::worker::Handlers) -> Self {
@@ -73,7 +83,7 @@ impl Registry for Flaky {
             .lock()
             .unwrap()
             .push((task.task_id.clone(), task.attempt));
-        let fail = {
+        let fail = (task.attempt == 1 && self.first_attempt.contains(&task.task_id)) || {
             let mut fails = self.fails.lock().unwrap();
             match fails.get_mut(&task.task_id) {
                 Some(n) if *n > 0 => {
@@ -762,29 +772,318 @@ async fn a_loop_iteration_is_refused_naming_its_root(pool: sqlx::PgPool) {
     assert_refused(&pool, iteration, RestartRefused::LoopIteration { root }).await;
 }
 
-/// **Pins A2's temporary refusal, which A3 (Loop, D8) must flip:** a restart
-/// that needs a `Loop` iteration restarted in place is an internal error and
-/// writes nothing.
+// ── Loop (spec D8) ─────────────────────────────────────────────────────────
+
+/// One iteration row: `(loop_index, id, state, history, attempt_number)`.
+type IterRow = (i32, Uuid, String, Value, i32);
+
+async fn iterations(pool: &sqlx::PgPool, root: Uuid) -> Vec<IterRow> {
+    sqlx::query_as(
+        "SELECT loop_index, id, state, history, attempt_number FROM workflow.executions \
+          WHERE parent_execution_id = $1 AND loop_index IS NOT NULL ORDER BY loop_index",
+    )
+    .bind(root)
+    .fetch_all(pool)
+    .await
+    .expect("iterations")
+}
+
+/// The `Loop` run's stored `outputs` (counters and list).
+async fn loop_book(pool: &sqlx::PgPool, root: Uuid) -> Value {
+    sqlx::query_scalar::<_, Option<Value>>(
+        "SELECT outputs FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'loop'",
+    )
+    .bind(root)
+    .fetch_one(pool)
+    .await
+    .expect("loop run")
+    .unwrap_or(Value::Null)
+}
+
+/// The iteration indexes of the `Loop` run's list, in list order.
+fn listed_iterations(book: &Value) -> Vec<i64> {
+    book["outputs"]
+        .as_array()
+        .map(|l| {
+            l.iter()
+                .map(|e| e["item"]["iteration"].as_i64().expect("an iteration"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Kestra's `restart-loop` (`RestartCaseTest:224-311`): three values, the
+/// middle body task failing on each iteration's first attempt.
+fn restart_loop(extra: &str) -> String {
+    format!(
+        "id: restart-loop\nnamespace: t\ntasks:\n  - id: loop\n    \
+         type: io.kestra.plugin.core.flow.Loop\n    values: '[\"1\", \"2\", \"3\"]'\n{extra}    \
+         tasks:\n{}",
+        ["inLoop", "failFirstTime", "logSuccess"]
+            .iter()
+            .map(|id| format!("      - id: {id}\n        type: {LOG}\n        message: {id}\n"))
+            .collect::<String>()
+    )
+}
+
+/// An output of the iteration's value, which renders whether its body
+/// failed or not.
+const ITEM_OUTPUT: &str =
+    "    outputs:\n      - id: v\n        type: STRING\n        value: \"{{ item.value }}\"\n";
+
+/// **Test 1, Kestra `restartLoop` (`RestartCaseTest:224-311`), and test 4.**
+/// Three restarts, each continuing from the failing iteration: the restart
+/// restarts iteration k in place (it passes on its second attempt), the
+/// `Loop` spawns k+1, which fails on its first. The `Loop` run keeps its id
+/// through all three, exactly N iteration rows exist after each (no
+/// re-spawn), and an iteration already `SUCCESS` is never touched again.
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_loop_restart_is_not_built_yet(pool: sqlx::PgPool) {
+async fn restart_loop_continues_from_the_failing_iteration(pool: sqlx::PgPool) {
+    // Arrange
     let (_db, ws, _) = setup(&pool).await;
-    let reg = Flaky::new(&[("body", 1)]);
-    let source = format!(
-        "id: loop-root\nnamespace: t\ntasks:\n  - id: loop\n    type: io.kestra.plugin.core.flow.Loop\n\
-         \x20   values: '[\"1\"]'\n    tasks:\n      - id: body\n        type: {LOG}\n        \
-         message: hi\n"
-    );
-    let root = start(&pool, ws, &source).await;
+    let reg = Flaky::new(&[]).failing_first_attempt_of(&["failFirstTime"]);
+    let root = start(&pool, ws, &restart_loop("")).await;
     drive(&pool, &reg, root).await;
     assert_eq!(exec_state(&pool, root).await, "FAILED");
-    let before = exec_meta(&pool, root).await;
+    assert_eq!(iterations(&pool, root).await.len(), 1);
+    let loop_id = run(&runs_of(&pool, root).await, "loop").2;
 
-    let err = restart_execution(&pool, root)
+    for round in 1..=3usize {
+        // Act
+        let before = iterations(&pool, root).await;
+        let out = restart(&pool, root).await;
+
+        // Assert: restarted in place, the failing iteration with it.
+        assert_eq!(out, Restarted::Done, "round {round}");
+        let runs = runs_of(&pool, root).await;
+        assert_eq!(runs.len(), 1, "round {round}: {runs:?}");
+        let lp = run(&runs, "loop");
+        assert_eq!(lp.2, loop_id, "round {round}: the Loop run keeps its id");
+        assert_eq!(lp.3, "RUNNING", "round {round}: {lp:?}");
+        assert_eq!(
+            history_tail(&exec_history(&pool, root).await, 3),
+            ["FAILED", "RESTARTED", "RUNNING"],
+            "round {round}"
+        );
+        let now = iterations(&pool, root).await;
+        assert_eq!(now.len(), round, "round {round}: no iteration is spawned");
+        let failing = &now[round - 1];
+        assert_eq!(failing.1, before[round - 1].1, "restarted in place");
+        assert_eq!(
+            history_tail(&failing.3, 3),
+            ["FAILED", "RESTARTED", "RUNNING"],
+            "round {round}: the last failing iteration is restarted"
+        );
+        assert_eq!(failing.4, 2, "its attempt_number goes up");
+        for done in &now[..round - 1] {
+            let was = before.iter().find(|b| b.0 == done.0).unwrap();
+            assert_eq!(
+                done, was,
+                "round {round}: a SUCCESS iteration is not touched"
+            );
+            assert_eq!(done.2, "SUCCESS");
+        }
+
+        drive(&pool, &reg, root).await;
+        let want = if round < 3 { "FAILED" } else { "SUCCESS" };
+        assert_eq!(exec_state(&pool, root).await, want, "round {round}");
+        let after = iterations(&pool, root).await;
+        let n = if round < 3 { round + 1 } else { 3 };
+        assert_eq!(after.len(), n, "round {round}: exactly N iteration rows");
+        assert_eq!(run(&runs_of(&pool, root).await, "loop").2, loop_id);
+    }
+
+    let iters = iterations(&pool, root).await;
+    assert!(iters.iter().all(|i| i.2 == "SUCCESS"), "{iters:?}");
+    let (_, attempt_number, labels) = exec_meta(&pool, root).await;
+    assert_eq!(attempt_number, 4);
+    assert!(has_restarted_label(&labels));
+}
+
+/// **Test 2: the counters and the list after a restarted iteration
+/// succeeds** (#6 D3/D4): one entry and one count per index.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_counters_and_the_list_after_a_restarted_iteration_succeeds(pool: sqlx::PgPool) {
+    // Arrange
+    let (_db, ws, _) = setup(&pool).await;
+    let reg = Flaky::new(&[]).failing_first_attempt_of(&["failFirstTime"]);
+    let root = start(&pool, ws, &restart_loop(ITEM_OUTPUT)).await;
+    drive(&pool, &reg, root).await;
+
+    // Act
+    for _ in 0..3 {
+        assert_eq!(restart(&pool, root).await, Restarted::Done);
+        drive(&pool, &reg, root).await;
+    }
+
+    // Assert
+    assert_eq!(exec_state(&pool, root).await, "SUCCESS");
+    let book = loop_book(&pool, root).await;
+    assert_eq!(book["iterationCount"], json!(3), "{book}");
+    assert_eq!(book["runningIterations"], json!(0), "{book}");
+    assert_eq!(
+        book["terminatedIterations"],
+        json!({"SUCCESS": 3}),
+        "{book}"
+    );
+    assert_eq!(listed_iterations(&book), [0, 1, 2], "{book}");
+    let values: Vec<&str> = book["outputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["outputs"]["v"].as_str().unwrap())
+        .collect();
+    assert_eq!(values, ["1", "2", "3"]);
+}
+
+/// `Parallel [loop, boom]`: the `Loop` (concurrency 1, `transmitFailed:
+/// false`, two values) beside a task that fails.
+fn loop_beside_boom(values: &str) -> String {
+    format!(
+        "id: loop-boom\nnamespace: t\ntasks:\n  - id: par\n    \
+         type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      - id: loop\n        \
+         type: io.kestra.plugin.core.flow.Loop\n        values: '{values}'\n        \
+         concurrencyLimit: 1\n        transmitFailed: false\n        outputs:\n          \
+         - id: v\n            type: STRING\n            value: \"{{{{ item.value }}}}\"\n        \
+         tasks:\n          - id: body\n            type: {LOG}\n            message: hi\n      \
+         - id: boom\n        type: {LOG}\n        message: boom\n"
+    )
+}
+
+/// Claim what is claimable now and commit `task`'s claim with `outcome`.
+async fn commit_one(pool: &sqlx::PgPool, task: &str, outcome: &Outcome) {
+    let claimed = egret_workflow::worker::claim(pool, 64)
         .await
-        .expect_err("a Loop restart is not built yet");
+        .expect("claim");
+    let c = claimed
+        .iter()
+        .find(|c| c.task_id == task)
+        .unwrap_or_else(|| panic!("{task} is not claimable: {claimed:?}"));
+    egret_workflow::worker::commit_outcome(pool, c, outcome)
+        .await
+        .expect("commit");
+    // Hand the other leases back, so a later claim takes them again.
+    for other in claimed.iter().filter(|c| c.task_id != task) {
+        sqlx::query("UPDATE workflow.task_runs SET claimed_at = NULL WHERE id = $1")
+            .bind(other.id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+}
 
-    assert!(err.to_string().contains("A3 (Loop)"), "{err}");
-    assert_eq!(exec_meta(&pool, root).await, before, "nothing written");
+/// **The #6 double count (red first).** Iteration 0 FAILS and is counted
+/// (`transmitFailed: false`), iteration 1 starts, then `boom` fails and
+/// `Parallel` rule 1 fails the live `Loop` run; iteration 1 ends after it,
+/// uncounted. The restart restarts iteration 0 (the last failing one),
+/// which then succeeds: it is counted once, under its new state, and its
+/// list entry is replaced, not appended a second time.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_iteration_that_ends_twice_is_counted_and_listed_once(pool: sqlx::PgPool) {
+    // Arrange
+    let (_db, ws, _) = setup(&pool).await;
+    let root = start(&pool, ws, &loop_beside_boom(r#"["a", "b"]"#)).await;
+    commit_one(&pool, "body", &Outcome::failed()).await;
+    let book = loop_book(&pool, root).await;
+    assert_eq!(book["terminatedIterations"], json!({"FAILED": 1}), "{book}");
+    assert_eq!(listed_iterations(&book), [0], "{book}");
+    commit_one(&pool, "boom", &Outcome::failed()).await;
+    assert_eq!(run(&runs_of(&pool, root).await, "loop").3, "FAILED");
+    let reg = Flaky::new(&[]);
+    drive(&pool, &reg, root).await;
+    assert_eq!(exec_state(&pool, root).await, "FAILED");
+    let iters = iterations(&pool, root).await;
+    assert_eq!(
+        iters.iter().map(|i| i.2.as_str()).collect::<Vec<_>>(),
+        ["FAILED", "SUCCESS"]
+    );
+
+    // Act
+    assert_eq!(restart(&pool, root).await, Restarted::Done);
+    drive(&pool, &reg, root).await;
+
+    // Assert
+    assert_eq!(exec_state(&pool, root).await, "SUCCESS");
+    assert_eq!(iterations(&pool, root).await.len(), 2, "no re-spawn");
+    let book = loop_book(&pool, root).await;
+    assert_eq!(
+        book["terminatedIterations"],
+        json!({"SUCCESS": 2}),
+        "counted per index, once each: {book}"
+    );
+    assert_eq!(book["runningIterations"], json!(0), "{book}");
+    assert_eq!(
+        listed_iterations(&book),
+        [0],
+        "iteration 0's entry replaced in place, not appended again: {book}"
+    );
+}
+
+/// **Test 3: no iteration is restartable.** `boom` fails the live `Loop`
+/// run, and its only iteration then ends `SUCCESS`, uncounted. The restart
+/// finds no `FAILED`/`PAUSED` iteration: the `Loop` run ends `FAILED` with
+/// Kestra's log line on it, its counters are kept, nothing is spawned, and
+/// the restart itself still succeeds (`Done`); the execution ends `FAILED`
+/// again.
+#[sqlx::test(migrations = "../../migrations")]
+async fn no_restartable_iteration_fails_the_loop_with_the_log_line(pool: sqlx::PgPool) {
+    // Arrange
+    let (_db, ws, _) = setup(&pool).await;
+    let root = start(&pool, ws, &loop_beside_boom(r#"["a"]"#)).await;
+    commit_one(&pool, "boom", &Outcome::failed()).await;
+    assert_eq!(run(&runs_of(&pool, root).await, "loop").3, "FAILED");
+    let reg = Flaky::new(&[]);
+    drive(&pool, &reg, root).await;
+    assert_eq!(exec_state(&pool, root).await, "FAILED");
+    let before = iterations(&pool, root).await;
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].2, "SUCCESS");
+    let book_before = loop_book(&pool, root).await;
+
+    // Act
+    let out = restart(&pool, root).await;
+
+    // Assert
+    assert_eq!(out, Restarted::Done);
+    let runs = runs_of(&pool, root).await;
+    let lp = run(&runs, "loop");
+    assert_eq!(lp.3, "FAILED", "{lp:?}");
+    assert_eq!(
+        history_tail(&lp.4, 3),
+        ["FAILED", "RUNNING", "FAILED"],
+        "reopened, then failed: {lp:?}"
+    );
+    assert_eq!(
+        lp.6.clone().unwrap_or(Value::Null),
+        book_before,
+        "the counters are kept"
+    );
+    let lines: Vec<String> = sqlx::query_scalar(
+        "SELECT message FROM workflow.task_logs WHERE execution_id = $1 AND task_run_id = $2",
+    )
+    .bind(root)
+    .bind(lp.2)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l == "No restartable loop sub-execution found"),
+        "{lines:?}"
+    );
+    drive(&pool, &reg, root).await;
+    assert_eq!(exec_state(&pool, root).await, "FAILED");
+    assert_eq!(
+        run(&runs_of(&pool, root).await, "boom").3,
+        "FAILED",
+        "Parallel rule 1 fails `boom` again beside the FAILED Loop run"
+    );
+    assert_eq!(
+        iterations(&pool, root).await,
+        before,
+        "the iteration is not touched"
+    );
 }
 
 /// **Pins A2's temporary refusal, which A4 (Subflow, D9) must flip.**
