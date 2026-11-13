@@ -139,6 +139,7 @@ async fn a_holder_change_resyncs_the_managed_group_via_the_chokepoint() {
     let Some(dsn) = egret_test_db::url().await else {
         return;
     };
+    let _serial = SERIAL.lock().await;
     let db = Db::connect(&dsn, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     let pool = db.pool.clone();
@@ -181,6 +182,11 @@ use egret_perm_compile::role_principal_migrate::{
 use egret_policy::PolicyStore;
 use serde_json::{json, Value};
 use sqlx::PgPool;
+
+/// `migrate_role_principals_in_tx` is global (every service, every role) and its
+/// equivalence gate checks the whole affected profile set, so tests that migrate
+/// or seed role principals run one at a time within this binary.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn uniq(prefix: &str) -> String {
     format!("{prefix}_{}", &Uuid::new_v4().simple().to_string()[..12])
@@ -316,8 +322,12 @@ async fn compile_service_to_ranger_json(pool: &PgPool, service_id: i64) -> Value
 
 /// Count rows with `kind='role'` via a literal query (sqlx 0.9 wants a
 /// `&'static str`).
-async fn role_kind_count(pool: &PgPool, sql: &'static str) -> i64 {
-    sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
+async fn role_kind_count(pool: &PgPool, role: &str, sql: &'static str) -> i64 {
+    sqlx::query_scalar(sql)
+        .bind(role)
+        .fetch_one(pool)
+        .await
+        .unwrap()
 }
 
 /// Delete the seeded grant (cascades its principals) so a global role-ref count
@@ -335,6 +345,7 @@ async fn migrating_role_refs_leaves_the_compile_byte_identical_and_removes_role_
     let Some(dsn) = egret_test_db::url().await else {
         return;
     };
+    let _serial = SERIAL.lock().await;
     let db = Db::connect(&dsn, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     let pool = db.pool.clone();
@@ -352,33 +363,23 @@ async fn migrating_role_refs_leaves_the_compile_byte_identical_and_removes_role_
         .expect("migrate");
     tx.commit().await.unwrap();
 
-    for (tbl, n) in [
+    // Scoped to THIS test's fresh role name, not a global count.
+    for (tbl, sql) in [
         (
             "perm.grant_principals",
-            role_kind_count(
-                &pool,
-                "SELECT count(*) FROM perm.grant_principals WHERE kind::text = 'role'",
-            )
-            .await,
+            "SELECT count(*) FROM perm.grant_principals WHERE kind::text = 'role' AND ref = $1",
         ),
         (
             "perm.rule_exemptions",
-            role_kind_count(
-                &pool,
-                "SELECT count(*) FROM perm.rule_exemptions WHERE kind::text = 'role'",
-            )
-            .await,
+            "SELECT count(*) FROM perm.rule_exemptions WHERE kind::text = 'role' AND ref = $1",
         ),
         (
             "perm.engine_grant_principals",
-            role_kind_count(
-                &pool,
-                "SELECT count(*) FROM perm.engine_grant_principals WHERE kind::text = 'role'",
-            )
-            .await,
+            "SELECT count(*) FROM perm.engine_grant_principals WHERE kind::text = 'role' AND ref = $1",
         ),
     ] {
-        assert_eq!(n, 0, "{tbl} still has role refs");
+        let n = role_kind_count(&pool, &seeded.role, sql).await;
+        assert_eq!(n, 0, "{tbl} still has role refs to {}", seeded.role);
     }
     assert!(
         m.roles.contains(&seeded.role),
@@ -400,6 +401,7 @@ async fn undo_restores_role_refs_when_rows_are_untouched() {
     let Some(dsn) = egret_test_db::url().await else {
         return;
     };
+    let _serial = SERIAL.lock().await;
     let db = Db::connect(&dsn, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     let pool = db.pool.clone();
@@ -434,6 +436,7 @@ async fn undo_refuses_when_a_rewritten_row_changed() {
     let Some(dsn) = egret_test_db::url().await else {
         return;
     };
+    let _serial = SERIAL.lock().await;
     let db = Db::connect(&dsn, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     let pool = db.pool.clone();
@@ -559,6 +562,7 @@ async fn writing_a_new_role_principal_is_refused() {
     let Some(dsn) = egret_test_db::url().await else {
         return;
     };
+    let _serial = SERIAL.lock().await;
     let db = Db::connect(&dsn, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     let seeded = seed_service_with_role_grant(&db).await;
@@ -584,6 +588,7 @@ async fn writing_a_new_ref_to_a_holder_group_is_refused() {
     let Some(dsn) = egret_test_db::url().await else {
         return;
     };
+    let _serial = SERIAL.lock().await;
     let db = Db::connect(&dsn, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     let seeded = seed_service_with_role_grant(&db).await;
@@ -618,6 +623,7 @@ async fn the_migrate_endpoint_removes_role_refs_and_undo_restores_them() {
     let Some(dsn) = egret_test_db::url().await else {
         return;
     };
+    let _serial = SERIAL.lock().await;
     let db = Db::connect(&dsn, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     let seeded = seed_service_with_role_grant(&db).await;
@@ -699,6 +705,7 @@ async fn explain_is_byte_identical_across_the_role_migration() {
     let Some(dsn) = egret_test_db::url().await else {
         return;
     };
+    let _serial = SERIAL.lock().await;
     let db = Db::connect(&dsn, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     let pool = db.pool.clone();
@@ -782,6 +789,7 @@ async fn revoking_a_role_via_the_live_path_resyncs_and_recompiles_the_holder_gro
     let Some(dsn) = egret_test_db::url().await else {
         return;
     };
+    let _serial = SERIAL.lock().await;
     let db = Db::connect(&dsn, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     let pool = db.pool.clone();
