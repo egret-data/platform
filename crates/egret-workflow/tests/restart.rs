@@ -1014,9 +1014,56 @@ async fn an_iteration_that_ends_twice_is_counted_and_listed_once(pool: sqlx::PgP
     assert_eq!(book["runningIterations"], json!(0), "{book}");
     assert_eq!(
         listed_iterations(&book),
-        [0],
-        "iteration 0's entry replaced in place, not appended again: {book}"
+        [0, 1],
+        "iteration 0's entry replaced in place, not appended again, and iteration 1's \
+         entry, recorded when it ended after the Loop run had failed: {book}"
     );
+    let values: Vec<&str> = book["outputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["outputs"]["v"].as_str().unwrap())
+        .collect();
+    assert_eq!(values, ["a", "b"]);
+}
+
+/// **An iteration that ends after its `Loop` run has already failed, with
+/// no restart at all** (A3 fix round 1, option (a)): it is recorded as a
+/// live `Loop` would record it -- counted, its entry appended -- and the
+/// `Loop` run's state and history are not changed by it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_iteration_ending_after_its_loop_failed_is_recorded_without_moving_the_loop(
+    pool: sqlx::PgPool,
+) {
+    // Arrange
+    let (_db, ws, _) = setup(&pool).await;
+    let root = start(&pool, ws, &loop_beside_boom(r#"["a", "b"]"#)).await;
+    commit_one(&pool, "body", &Outcome::failed()).await;
+    commit_one(&pool, "boom", &Outcome::failed()).await;
+    let failed_loop = run(&runs_of(&pool, root).await, "loop").clone();
+    assert_eq!(failed_loop.3, "FAILED");
+    let iters = iterations(&pool, root).await;
+    assert_eq!(iters.len(), 2);
+    assert_ne!(iters[1].2, "SUCCESS", "iteration 1 is still live");
+
+    // Act: iteration 1 ends after its Loop run failed.
+    drive(&pool, &Flaky::new(&[]), root).await;
+
+    // Assert
+    assert_eq!(exec_state(&pool, root).await, "FAILED");
+    assert_eq!(iterations(&pool, root).await[1].2, "SUCCESS");
+    let lp = run(&runs_of(&pool, root).await, "loop").clone();
+    assert_eq!(lp.3, failed_loop.3, "the Loop run's state is unchanged");
+    assert_eq!(lp.4, failed_loop.4, "and its history");
+    let book = loop_book(&pool, root).await;
+    assert_eq!(
+        book["terminatedIterations"],
+        json!({"FAILED": 1, "SUCCESS": 1}),
+        "{book}"
+    );
+    assert_eq!(book["runningIterations"], json!(0), "{book}");
+    assert_eq!(listed_iterations(&book), [0, 1], "{book}");
+    assert_eq!(iterations(&pool, root).await.len(), 2, "nothing is spawned");
 }
 
 /// **Test 3: no iteration is restartable.** `boom` fails the live `Loop`

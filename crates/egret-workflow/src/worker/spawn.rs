@@ -631,13 +631,20 @@ async fn on_execution_terminal_inner(
     // Already decided. A `transmitFailed` loop ends on the FIRST failure and
     // its siblings terminate afterwards; without this they would each try to
     // re-terminate a finished run and the last one would win.
-    if state.runs[run]
+    //
+    // **Package 7a A3 fix round 1 (option (a)): decided, but still
+    // recorded.** An iteration that ends after its `Loop` run is terminal
+    // (a sibling failure, `Parallel` rule 1, failed the live `Loop`) is
+    // counted and listed below exactly as a live `Loop` would record it --
+    // the same cap, SECRET sealing and `transmitFailed` rule -- so a restart
+    // that later completes the `Loop` holds every iteration's entry. Only
+    // `decide` is skipped: nothing is started and the run's state is not
+    // touched (the early return after the book). Covered by the parent row
+    // lock `claim::load` took above, as every book write is.
+    let decided = state.runs[run]
         .history
         .last()
-        .is_some_and(|s| s.is_terminal())
-    {
-        return Ok(None);
-    }
+        .is_some_and(|s| s.is_terminal());
 
     let values = values_of(&ctx, &state, run)?;
     let started = spawned_count(conn, parent_id, run).await?;
@@ -704,7 +711,8 @@ async fn on_execution_terminal_inner(
         }
         if !(transmit && terminated_in_error(child)) {
             let next = decide(transmit, child, started, terminated, values.len());
-            let started_after = started + usize::from(matches!(next, Next::Start(_)));
+            let starts = !decided && matches!(next, Next::Start(_));
+            let started_after = started + usize::from(starts);
             let running = started_after.saturating_sub(terminated);
             match again {
                 Some(index) => {
@@ -718,6 +726,9 @@ async fn on_execution_terminal_inner(
             }
             book.store(conn).await?;
         }
+    }
+    if decided {
+        return Ok(None);
     }
 
     let terminal = match decide(transmit, child, started, terminated, values.len()) {
