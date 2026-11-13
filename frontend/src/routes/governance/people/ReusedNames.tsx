@@ -31,7 +31,7 @@ function PlaceLink({ p }: { p: Place }) {
         ? ["Rule", p.id ? `/governance/rules/${encodeURIComponent(p.id)}` : null]
         : p.type === "engine_grant"
           ? ["Engine grant", p.engineId && p.id ? engineUrl(p.engineId, "engine-permissions", { grant: p.id }) : null]
-          : [`Policy ${p.name ?? p.policyId ?? ""} on ${p.service ?? "an unknown profile"}`, p.service ? profileUrl(p.service, "policies") : null];
+          : [`Policy ${p.name ?? p.policyId ?? ""} on ${p.service ?? "an unknown enforcement point"}`, p.service ? profileUrl(p.service, "policies") : null];
   return to ? (
     <Link to={to} className="break-all text-primary hover:underline">
       {label}

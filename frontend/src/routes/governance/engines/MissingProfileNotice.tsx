@@ -15,7 +15,7 @@ export function MissingProfileNotice() {
   if (name === null) return null;
   return (
     <Alert role="status">
-      <AlertDescription>{`No policy profile named ${name}.`}</AlertDescription>
+      <AlertDescription>{`No enforcement point named ${name}.`}</AlertDescription>
     </Alert>
   );
 }

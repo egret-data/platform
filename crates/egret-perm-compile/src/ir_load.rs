@@ -173,7 +173,7 @@ pub(crate) async fn load_ep(
     )
     .await?;
 
-    let ep = EpInput {
+    let mut ep = EpInput {
         profile_id: service_id,
         profile_name: svc.name.clone(),
         kind: EpKind {
@@ -185,9 +185,11 @@ pub(crate) async fn load_ep(
         },
         engines: Vec::new(),
         default_version: Err(NOT_READ.to_string()),
+        default_image_level: None,
         classification_channel: tag_service.is_some(),
         catalogs: catalog_names,
     };
+    load_image_levels(conn, &mut ep).await?;
     Ok(Some(Loaded {
         ep,
         profile_name: svc.name,
@@ -497,6 +499,45 @@ pub(crate) async fn load_withhold_inputs(
     Ok(gates)
 }
 
+/// Fill the image level the lowering gates on (`ep.engines[..].egret_image_level`
+/// and `ep.default_image_level`) BEFORE any rule is lowered or its tagged tables
+/// are read: `lower_rules` and `needs_tagged_tables` consult
+/// [`EpInput::effective_image_level`], and an unread level is `None`, the most
+/// restrictive, which would deny every StarRocks mask and row filter. Only a
+/// StarRocks EP is image-gated (the matrix rows for Trino ignore the level), so
+/// only it pays the one SELECT. The engines get `version: Err(NOT_READ)`;
+/// [`bound_engines`] later replaces them with the full read.
+async fn load_image_levels(
+    conn: &mut sqlx::PgConnection,
+    ep: &mut EpInput,
+) -> Result<(), CompileError> {
+    if ep.kind.engine != EngineType::StarRocks {
+        return Ok(());
+    }
+    ep.default_image_level = egret_perm::starrocks_egret_image_level(Some(
+        egret_perm::DEFAULT_ENGINE_IMAGES.starrocks_fe_image,
+    ));
+    let rows: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT name, type, spec FROM engine_mgmt.engines \
+          WHERE authz_service_id = $1 ORDER BY name",
+    )
+    .bind(ep.profile_id)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(CompileError::from_db)?;
+    ep.engines = rows
+        .into_iter()
+        .map(|(name, r#type, spec)| BoundEngine {
+            name,
+            version: Err(NOT_READ.to_string()),
+            egret_image_level: egret_perm::starrocks_egret_image_level(
+                egret_perm::stored_engine_image(&r#type, &spec).as_deref(),
+            ),
+        })
+        .collect();
+    Ok(())
+}
+
 /// Fill `ep.engines` (each engine bound to the profile, by name, with the
 /// plugin version it runs or why that is unknown) and `ep.default_version`
 /// (the plugin of egret's default image for the engine type). One SELECT on
@@ -522,8 +563,16 @@ pub(crate) async fn bound_engines(
             version: e
                 .plugin_version()
                 .map(|v| plugin_version_label(v).to_string()),
+            egret_image_level: e.egret_image_level(),
         })
         .collect();
+    ep.default_image_level = (ep.kind.engine == EngineType::StarRocks)
+        .then(|| {
+            egret_perm::starrocks_egret_image_level(Some(
+                egret_perm::DEFAULT_ENGINE_IMAGES.starrocks_fe_image,
+            ))
+        })
+        .flatten();
     ep.default_version =
         crate::routes::default_image_plugin_version(crate::routes::ranger_engine(ep.kind.engine))
             .map(|v| plugin_version_label(v).to_string());

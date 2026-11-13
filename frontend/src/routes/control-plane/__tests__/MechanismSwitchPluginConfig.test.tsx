@@ -106,7 +106,7 @@ describe("a mechanism switch reaches the external engine's Plugin config tab wit
     expect(screen.queryByText("ranger-trino-security.xml")).not.toBeInTheDocument();
   });
 
-  test("OPA to Ranger: no OPA request after the switch, and no false 'no profile bound'", async () => {
+  test("OPA to Ranger: no OPA request after the switch, and no false 'no enforcement point bound'", async () => {
     const calls = world("opa");
     const user = userEvent.setup();
     renderBoth(new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 30_000 } } }));
@@ -119,6 +119,6 @@ describe("a mechanism switch reaches the external engine's Plugin config tab wit
 
     expect(await screen.findByText("ranger-trino-security.xml")).toBeInTheDocument();
     expect(calls.slice(mark).some((c) => c.path.endsWith("/opa-plugin-config"))).toBe(false);
-    expect(document.body.textContent).not.toContain("No policy profile is bound");
+    expect(document.body.textContent).not.toContain("No enforcement point is bound");
   });
 });

@@ -82,7 +82,7 @@ function opaHint(d: WireDecision): string {
   if (d.kind === "denied" && d.reason === "deny_policy_item") {
     return "Somebody forbade this: a deny grant or a withheld classification in the permission model refuses it.";
   }
-  return "egret refuses this access: nothing in the permission model allows it, or the profile could not be answered at all (named below). The engine's OPA plugin is refused too.";
+  return "egret refuses this access: nothing in the permission model allows it, or the enforcement point could not be answered at all (named below). The engine's OPA plugin is refused too.";
 }
 
 /** The server appends this to every `ir_reason` of a snapshot built from the previous data. */
@@ -98,7 +98,7 @@ function isSpliced(irReason: string | null | undefined): boolean {
 /** An `ir_reason` in the page's words: the splice note is said once, above the fold, and a
  *  database error says what to do (FE-COPY-2). */
 function irReasonText(irReason: string): string {
-  if (irReason === UNREAD_REASON) return "Could not read the profile’s current state; try again.";
+  if (irReason === UNREAD_REASON) return "Could not read the enforcement point’s current state; try again.";
   const at = irReason.indexOf(SPLICED_MARKER);
   return at < 0 ? irReason : irReason.slice(0, at);
 }
@@ -405,7 +405,7 @@ function causeScopeNote(c: WireUndecidableCause, declined?: ExplainTagDecline): 
   // `policies` — a block that WAS read. One note, two blocks: say the part that
   // holds for both (it is a property of the download, not of the target) and
   // leave the specific remedy to the sentence above, which names the block.
-  return "This is not specific to your target: it is a property of the tag-policy download this profile received, so every access on every catalog this profile serves answers the same way while that download is in this state.";
+  return "This is not specific to your target: it is a property of the tag-policy download this enforcement point received, so every access on every catalog this enforcement point serves answers the same way while that download is in this state.";
 }
 
 /**
@@ -423,7 +423,7 @@ export function causeSentence(c: WireUndecidableCause, declined?: ExplainTagDecl
     case "policy_construct":
       return `Ranger policy ${policyRef(c.policy_name, c.policy_id)} carries ${unmodelledPhrase(c.construct)} — so this access cannot be decided.`;
     case "service_def":
-      return `This profile's service definition cannot be evaluated around: ${serviceDefIssuePhrase(c.issue)}.`;
+      return `This enforcement point's service definition cannot be evaluated around: ${serviceDefIssuePhrase(c.issue)}.`;
     case "resource_owner_unknown":
       return `Ranger policy ${policyRef(c.policy_name, c.policy_id)} decides by the resource's owner, and egret does not record a table owner.`;
     case "super_users_unknown":
@@ -441,12 +441,12 @@ export function causeSentence(c: WireUndecidableCause, declined?: ExplainTagDecl
     case "eval_order_ambiguous":
       return `Several policies could decide this and their evaluation order is ambiguous: ${c.policy_names.join(", ")} (policy ids ${c.policy_ids.map((id) => id ?? "unknown").join(", ")}).`;
     case "engine_mismatch":
-      return `This profile declares ${ENGINE_LABEL[c.declared]} but carries the service definition “${c.service_def_name}”, whose resource levels are a different vocabulary.`;
+      return `This enforcement point declares ${ENGINE_LABEL[c.declared]} but carries the service definition “${c.service_def_name}”, whose resource levels are a different vocabulary.`;
     case "plugin_version_mismatch":
       // `declared` is the version egret reads the bound engine at: for an
       // external engine, the one its operator declared; for a provisioned one,
       // the one its exact image ships. The profile itself declares nothing.
-      return `The ${ENGINE_LABEL[c.engine]} engine bound to this profile runs ${PLUGIN_LABEL[c.declared]} (the version its image ships, or for an external engine the version its operator declared), and egret's evaluator has not been verified against that version, so no verdict here could be relied on.`;
+      return `The ${ENGINE_LABEL[c.engine]} engine bound to this enforcement point runs ${PLUGIN_LABEL[c.declared]} (the version its image ships, or for an external engine the version its operator declared), and egret's evaluator has not been verified against that version, so no verdict here could be relied on.`;
     case "tags_unresolved": {
       // ⚠ Rewritten TWICE. Task 7 changed the cause's meaning (it used to be
       // unconditional, because `explain` never resolved tags); fix round 3 moved
@@ -457,7 +457,7 @@ export function causeSentence(c: WireUndecidableCause, declined?: ExplainTagDecl
       // none", since an empty set would have been an ANSWER — stays here, where it
       // is true of every one of them.
       const head =
-        "This profile's tag service carries policies that would be evaluated against this resource's tags, and egret declined to resolve them";
+        "This enforcement point's tag service carries policies that would be evaluated against this resource's tags, and egret declined to resolve them";
       const tail =
         "“Declined to resolve” is not the same as there being none, so no verdict here could be relied on.";
       return declined ? `${head}: ${tagDeclineSentence(declined)}. ${tail}` : `${head}. ${tail}`;
@@ -491,7 +491,7 @@ export function causeSentence(c: WireUndecidableCause, declined?: ExplainTagDecl
       const shape = `Tag policy ${policyRef(c.tag_policy_name, c.tag_policy_id)} denies this and the higher-priority Ranger policy ${policyRef(c.resource_policy_name, c.resource_policy_id)} allows it, and Ranger 2.5.0 and 2.8.0 resolve that combination differently`;
       return c.plugin_version
         ? `${shape}. This engine runs ${PLUGIN_LABEL[c.plugin_version]}, which keeps the tag deny here where 2.8.0 would reopen it — egret does not yet reproduce 2.5.0's side of that split, so it will not guess. Levelling the two priorities, or removing one of the two policies, makes this decidable.`
-        : `${shape}, so it cannot be answered until this profile records which plugin version its engine is running.`;
+        : `${shape}, so it cannot be answered until this enforcement point records which plugin version its engine is running.`;
     }
     // ⚠ **"tag policies" is correct again, and the round trip is the lesson.** The
     // concurrent Critical first rode this wire tag as a documented ALIAS, which made
@@ -639,8 +639,8 @@ function RawPolicy({
       <p className="text-xs text-muted-foreground">
         {seeded
           ? seededByAutoBind
-            ? "egret seeds this policy itself, outside the permission model: auto-bind puts thirteen admin-all-access hierarchies onto every generated profile, granting its platform admins all access. For an administrator this is the expected explanation."
-            : "egret seeds this policy itself, outside the permission model: it belongs to the default Trino policy set, which is seeded onto a profile egret did not generate. For an administrator this is the expected explanation."
+            ? "egret seeds this policy itself, outside the permission model: auto-bind puts thirteen admin-all-access hierarchies onto every generated enforcement point, granting its platform admins all access. For an administrator this is the expected explanation."
+            : "egret seeds this policy itself, outside the permission model: it belongs to the default Trino policy set, which is seeded onto an enforcement point egret did not generate. For an administrator this is the expected explanation."
           : "egret’s compiler did not mint this policy, so it is outside the permission model and has no governance page to open. It is reported by its Ranger name and id, because it decided this access."}
       </p>
       <p className="text-xs text-muted-foreground">
@@ -944,7 +944,7 @@ function ProfileBlock({
   return (
     <section
       data-testid="explain-profile"
-      aria-label={`Profile ${profile.service_name}`}
+      aria-label={`Enforcement point ${profile.service_name}`}
       className="space-y-2 rounded-lg border border-border p-3 md:p-4"
     >
       <div className="flex flex-wrap items-center gap-2">
@@ -993,8 +993,8 @@ function ProfileBlock({
         <div className="mt-2 space-y-2">
           <p className="text-xs text-muted-foreground">
             {isOpa
-              ? "Evaluated by egret over this profile’s permission model: the answer its engines’ OPA plugin gets."
-              : "Evaluated over the policy set this profile’s plugin downloads."}
+              ? "Evaluated by egret over this enforcement point’s permission model: the answer its engines’ OPA plugin gets."
+              : "Evaluated over the policy set this enforcement point’s plugin downloads."}
           </p>
           <ul className="space-y-2">
             {profile.accesses.map((verdict) => (
@@ -1040,9 +1040,9 @@ function ProfileBlock({
               states the rule instead of a verdict for one database. */}
           {profile.engine === "starrocks" && (
             <p data-testid="explain-mv-rule" className="text-xs text-muted-foreground">
-              Materialized views: when this profile holds a classified column, StarRocks refuses{" "}
+              Materialized views: when this enforcement point holds a classified column, StarRocks refuses{" "}
               <span className="font-mono">create materialized view</span> in every database to anyone
-              not cleared for every classification on the profile. Explain does not answer it per
+              not cleared for every classification on the enforcement point. Explain does not answer it per
               database.
             </p>
           )}
@@ -1231,7 +1231,7 @@ function ProfileTags({
         </p>
       ) : noTagPolicies ? (
         <p data-testid="profile-tags-no-policies" className="text-xs text-muted-foreground">
-          None: this profile’s download carries no tag policies, so no tag decided anything
+          None: this enforcement point’s download carries no tag policies, so no tag decided anything
           here — whatever is stored on the resource.
         </p>
       ) : profile.tags.length > 0 ? (
@@ -1409,7 +1409,7 @@ export function SubjectUserField({
 export const NOT_ENFORCED_TITLE = "Not enforced";
 /** The state's sentence when the answer carries no effect line to say it with. */
 export const NOTHING_ENFORCING_TEXT =
-  "No engine with a policy profile serves this catalog, so nothing is enforced here (this is not a refusal). Attach an engine to govern it.";
+  "No engine with an enforcement point serves this catalog, so nothing is enforced here (this is not a refusal). Attach an engine to govern it.";
 
 /**
  * The `no_profile_serves_the_catalog` state (see `ExplainResultView`): a
@@ -1474,7 +1474,7 @@ export function ExplainResultView({ result }: { result: ExplainResponse }) {
           ))}
           {result.profiles.length === 0 && (
             <p className="text-sm text-muted-foreground">
-              The answer names no profile, which should not happen for this outcome.
+              The answer names no enforcement point, which should not happen for this outcome.
             </p>
           )}
         </div>
@@ -1551,10 +1551,10 @@ export function ExplainResultView({ result }: { result: ExplainResponse }) {
                       Each profile now carries its own set, so this says what is true
                       of all of them and claims nothing about any one. */}
                   <p>
-                    Each profile’s tag list is the set egret resolved for this target, rolled up
+                    Each enforcement point’s tag list is the set egret resolved for this target, rolled up
                     the resource hierarchy the way the engine’s own enricher rolls it: a tag
                     marked <span className="italic">on the table</span> reaches this column
-                    because the assignment names the table. A profile whose download carries no
+                    because the assignment names the table. An enforcement point whose download carries no
                     tag policies shows none, because nothing there could consult them. Tags
                     populate only when the target names both a schema and a table — a
                     catalog-only target carries none, because assignments attach to tables and

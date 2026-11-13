@@ -41,7 +41,7 @@ import { engineUrl, profileUrl } from "@/routes/governance/engines/engineUrl";
 import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
 
 export const NO_ENGINE_RECORDED = "No engine is recorded. Engines are created in Control plane.";
-export const EVERY_PROFILE_BOUND = "Every profile is bound to an engine.";
+export const EVERY_PROFILE_BOUND = "Every enforcement point is bound to an engine.";
 
 /** One row of the Engines table, from Control plane's engine list or, without engine:read, a profile's binding. */
 interface EngineRow {
@@ -63,7 +63,7 @@ const STATE_ORDER: KindStateDto[] = ["silent", "behind", "quiet", "not_reported"
 const NOT_JUDGED_WORD: Record<string, string> = {
   external: "Not judged: external",
   not_running: "Not judged: not running",
-  no_profile: "Not judged: no profile",
+  no_profile: "Not judged: no enforcement point",
 };
 
 /** The plugin column's word for one engine's plugin route answer. */
@@ -173,7 +173,7 @@ export default function EnginesIndex() {
     },
     {
       key: "profile",
-      label: "Profile",
+      label: "Enforcement point",
       sortable: true,
       value: (r) => r.profile?.name ?? "",
       cell: (r) =>
@@ -183,13 +183,13 @@ export default function EnginesIndex() {
           <span>{r.profile.name}</span>
         ) : (
           <span className="flex flex-wrap items-center gap-x-2">
-            <span className="text-muted-foreground">No profile</span>
+            <span className="text-muted-foreground">No enforcement point</span>
             {engineRead ? (
               <Link
                 to={`/control-plane/engines/${encodeURIComponent(r.id)}?tab=settings`}
                 className="text-sm text-primary hover:underline"
               >
-                Bind a profile in Control plane
+                Bind an enforcement point in Control plane
               </Link>
             ) : null}
           </span>
@@ -248,7 +248,7 @@ export default function EnginesIndex() {
 
   let orphansBody: ReactNode;
   if (profilesQ.isError) {
-    orphansBody = <TabError what="list of policy profiles" onRetry={() => void profilesQ.refetch()} />;
+    orphansBody = <TabError what="list of enforcement points" onRetry={() => void profilesQ.refetch()} />;
   } else if (!orphans) {
     orphansBody = <ListSkeleton rows={3} cols={5} />;
   } else if (orphans.length === 0) {
@@ -261,7 +261,7 @@ export default function EnginesIndex() {
     engineRows && orphans
       ? [
           { label: "engines", singular: "engine", value: engineRows.length },
-          { label: "profiles without an engine", singular: "profile without an engine", value: orphans.length },
+          { label: "enforcement points without an engine", singular: "enforcement point without an engine", value: orphans.length },
           ...(handWritten !== null
             ? [{ label: "manual policies", singular: "manual policy", value: handWritten }]
             : []),
@@ -271,12 +271,12 @@ export default function EnginesIndex() {
   return (
     <ListPageShell
       title="Engine & policy"
-      description="Each engine downloads one policy profile. Open an engine to grant engine permissions and see its policies."
+      description="Each engine downloads one enforcement point. Open an engine to grant engine permissions and see its policies."
       action={
         can("policy:create") ? (
           <Button size="sm" variant="outline" onClick={() => setCreating(true)}>
             <Plus className="mr-1 h-4 w-4" aria-hidden />
-            New profile
+            New enforcement point
           </Button>
         ) : null
       }
@@ -285,7 +285,7 @@ export default function EnginesIndex() {
         <MissingProfileNotice />
         {strip ? <SummaryStrip items={strip} /> : null}
         <Section title="Engines">{enginesBody}</Section>
-        <Section title="Profiles without an engine">{orphansBody}</Section>
+        <Section title="Enforcement points without an engine">{orphansBody}</Section>
       </div>
       <NewProfileDialog open={creating} onOpenChange={setCreating} />
     </ListPageShell>
@@ -305,16 +305,16 @@ function OrphanProfiles({ rows, canDelete }: { rows: ProfileDto[]; canDelete: bo
         onSuccess: () => {
           setError(null);
           void qc.invalidateQueries({ queryKey: getPolicyAdminListProfilesQueryKey() });
-          toast.success(`Profile ${service} deleted.`);
+          toast.success(`Enforcement point ${service} deleted.`);
         },
-        onError: (e) => setError(refusalMessage(e, "policy:delete", "The profile could not be deleted.")),
+        onError: (e) => setError(refusalMessage(e, "policy:delete", "The enforcement point could not be deleted.")),
       },
     );
 
   const columns: Column<ProfileDto>[] = [
     {
       key: "name",
-      label: "Profile",
+      label: "Enforcement point",
       sortable: true,
       value: (p) => p.name,
       cell: (p) => (
@@ -368,18 +368,18 @@ function OrphanProfiles({ rows, canDelete }: { rows: ProfileDto[]; canDelete: bo
         rows={rows}
         columns={columns}
         getId={(p) => String(p.id)}
-        searchPlaceholder="Search profiles…"
+        searchPlaceholder="Search enforcement points…"
         initialSort={{ key: "name", dir: "asc" }}
         bordered
-        noMatchText="No profile matches this search."
+        noMatchText="No enforcement point matches this search."
       />
       <ConfirmDeleteDialog
         open={target !== null}
         onOpenChange={(o) => {
           if (!o) setTarget(null);
         }}
-        title={target ? `Delete profile ${target}?` : "Delete profile?"}
-        description="The profile and every policy in it are removed. No engine downloads it."
+        title={target ? `Delete enforcement point ${target}?` : "Delete enforcement point?"}
+        description="The enforcement point and every policy in it are removed. No engine downloads it."
         confirmText={target ?? ""}
         onConfirm={() => {
           if (target) remove(target);
@@ -394,7 +394,7 @@ type ProfileType = "trino" | "starrocks" | "tag";
 const NO_TAG_SERVICE = "__none__";
 
 export const TRINO_NEEDS_TAG_SERVICE =
-  "An engine can be bound to a Trino profile only once it names a tag service: the tag profile its classification masks and row filters live in.";
+  "An engine can be bound to a Trino enforcement point only once it names a tag service: the tag enforcement point its classification masks and row filters live in.";
 
 /**
  * New profile (moved from the old Policies page): a profile for an engine egret
@@ -462,13 +462,13 @@ function NewProfileDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
             setType("trino");
             setTagService(trimmed);
             setReturnTo(null);
-            setNote(`Tag profile ${trimmed} created.`);
+            setNote(`Tag enforcement point ${trimmed} created.`);
             return;
           }
-          toast.success(`Profile ${trimmed} created.`);
+          toast.success(`Enforcement point ${trimmed} created.`);
           close(false);
         },
-        onError: (err) => setError(refusalMessage(err, "policy:create", "The profile could not be created.")),
+        onError: (err) => setError(refusalMessage(err, "policy:create", "The enforcement point could not be created.")),
       },
     );
   };
@@ -478,9 +478,9 @@ function NewProfileDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
       <DialogContent>
         <form onSubmit={submit}>
           <DialogHeader>
-            <DialogTitle>New profile</DialogTitle>
+            <DialogTitle>New enforcement point</DialogTitle>
             <DialogDescription>
-              A policy profile for an engine egret does not provision. Provisioning an engine creates its profile.
+              An enforcement point for an engine egret does not provision. Provisioning an engine creates its enforcement point.
             </DialogDescription>
           </DialogHeader>
           <div className="my-4 space-y-4">
@@ -515,7 +515,7 @@ function NewProfileDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
               </Select>
               {type === "tag" ? (
                 <p className="text-xs text-muted-foreground">
-                  A Tag profile holds a Trino profile&apos;s tag-based policies. No engine is bound to it.
+                  A Tag enforcement point holds a Trino enforcement point&apos;s tag-based policies. No engine is bound to it.
                 </p>
               ) : null}
             </div>
@@ -538,7 +538,7 @@ function NewProfileDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
                   </Select>
                   <Button type="button" size="sm" variant="outline" onClick={startTagProfile}>
                     <Plus className="mr-1 h-4 w-4" aria-hidden />
-                    New tag profile
+                    New tag enforcement point
                   </Button>
                 </div>
                 <p className="text-xs text-muted-foreground">{TRINO_NEEDS_TAG_SERVICE}</p>
@@ -559,7 +559,7 @@ function NewProfileDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
             </Button>
             <Button type="submit" disabled={create.isPending || !name.trim()}>
               {create.isPending ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : null}
-              Create profile
+              Create enforcement point
             </Button>
           </DialogFooter>
         </form>

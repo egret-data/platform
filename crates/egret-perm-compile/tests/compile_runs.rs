@@ -140,7 +140,7 @@ async fn profile(e: &Env) -> Profile {
     let engine_id: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
          VALUES ($1,'starrocks','egret', \
-                 '{\"starrocksConfig\":{\"feImage\":\"starrocks/fe-ubuntu:4.1.4\"}}'::jsonb,$2) \
+                 '{\"starrocksConfig\":{\"feImage\":\"ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.4\"}}'::jsonb,$2) \
          RETURNING id",
     )
     .bind(unique("runs-eng"))

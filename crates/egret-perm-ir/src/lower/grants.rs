@@ -549,6 +549,7 @@ mod tests {
             },
             engines: vec![],
             default_version: Err("unread".into()),
+            default_image_level: None,
             classification_channel: false,
             catalogs: [(catalog, "sales".to_string())].into_iter().collect(),
         }

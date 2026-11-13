@@ -50,7 +50,10 @@ use crate::audience::{
 };
 use crate::ep::{EpInput, EpKind};
 use crate::lower::grants::{ensure_scope_levels_are_named, validate_user_ref};
-use crate::matrix::{support_for_kind, Capability, LoweringKind, RuleEffectKind, Support};
+use crate::matrix::{
+    support_for_kind, Capability, LoweringKind, RuleEffectKind, Support,
+    STARROCKS_MASK_MIN_EGRET_IMAGE,
+};
 use crate::statement::{
     Derivation, Effect, Level, LowerResult, Lowered, Lowering, Path, ReasonCode, Source, Statement,
     Target,
@@ -267,9 +270,13 @@ fn ensure_mask_type_declared(
     mask_type: &str,
     kind: EpKind,
 ) -> Result<(), CompileError> {
+    // Asked at the gate's enabling level: whether the engine DECLARES the type
+    // does not depend on the image. A rule on a below-level image is not
+    // refused here; it lowers to a deny ([`lower_rule`]).
     match support_for_kind(
         kind,
         None,
+        Some(STARROCKS_MASK_MIN_EGRET_IMAGE),
         false,
         &Capability::MaskType(mask_type.to_string()),
     ) {
@@ -416,7 +423,16 @@ pub fn needs_tagged_tables(ep: &EpInput, r: &Rule) -> bool {
     let effect = effect_kind(&r.kind);
     let lowered = |cap: &Capability| {
         matches!(
-            support_for_kind(ep.kind, None, ep.classification_channel, cap),
+            support_for_kind(
+                ep.kind,
+                None,
+                // The enabling level: a below-level rule still lowers by
+                // expansion (to a deny, see [`lower_rule`]), so its tagged
+                // tables are read whatever the image.
+                Some(STARROCKS_MASK_MIN_EGRET_IMAGE),
+                ep.classification_channel,
+                cap,
+            ),
             Support::Lowered(_)
         )
     };
@@ -519,6 +535,7 @@ pub fn lower_rule(
     r: &Rule,
     exempt: &Audience,
     ep_kind: EpKind,
+    image_level: Option<u32>,
     classification_channel: bool,
     catalog: &str,
     inputs: &RuleInputs,
@@ -573,6 +590,84 @@ pub fn lower_rule(
         })
     };
 
+    // The image gate (SP3a). A StarRocks mask / row filter on an image below
+    // the level that enforces it through every protocol must DENY, never fall
+    // away: a missing mask policy leaves the column served in cleartext. The
+    // matrix: "mask on a column -> DENY that column to everyone but the
+    // exemptions; row filter on a table -> DENY the table to everyone but the
+    // exemptions". The deny is a `Withhold` (the clearance effect), addressed
+    // exactly where the rule's own policy would have been.
+    if is_image_denied(r, ep_kind, image_level) {
+        let deny = |audience: &Audience, target: Target, derivation: Derivation| Statement {
+            source: Source::Rule {
+                rule_id: r.id,
+                rule_name: r.name.clone(),
+            },
+            audience: audience.clone(),
+            target,
+            effect: Effect::Withhold {
+                privileges: crate::lower::withhold::withheld_privileges(ep_kind),
+            },
+            derivation,
+        };
+        let audience = exempt_audience(r, exempt)?;
+        let level = |v: &Option<String>| v.clone().map_or(Level::Unnamed, Level::Named);
+        if let Selector::Path(scope) = &r.selector {
+            return Ok(vec![deny(
+                &audience,
+                Target::Path(Path {
+                    catalog_id: Some(scope.catalog_id),
+                    catalog: catalog.to_string(),
+                    schema: level(&scope.schema),
+                    table: level(&scope.table),
+                    column: level(&scope.column),
+                }),
+                Derivation::AsDeclared,
+            )]);
+        }
+        if inputs.classification_name.is_none() {
+            return Err(CompileError::MissingTagName {
+                rule: r.name.clone(),
+            });
+        }
+        let mut out = Vec::new();
+        if matches!(r.kind, RuleKind::Mask { .. }) {
+            let mut columns = Vec::new();
+            for t in &inputs.tagged {
+                for c in &t.columns {
+                    columns.push(TaggedColumn::new(&t.catalog, &t.schema, &t.table, c)?);
+                }
+            }
+            let count = columns
+                .iter()
+                .filter(|c| counts.counts(&c.catalog, &c.schema, &c.table, Some(&c.column)))
+                .count();
+            ensure_within_ceiling(r, count, ceiling)?;
+            for c in &columns {
+                out.push(deny(
+                    &audience,
+                    expanded_path(&c.catalog, &c.schema, &c.table, Some(&c.column)),
+                    Derivation::ExpandedFromClassification,
+                ));
+            }
+        } else {
+            let count = inputs
+                .tagged
+                .iter()
+                .filter(|t| counts.counts(&t.catalog, &t.schema, &t.table, None))
+                .count();
+            ensure_within_ceiling(r, count, ceiling)?;
+            for t in &inputs.tagged {
+                out.push(deny(
+                    &audience,
+                    expanded_path(&t.catalog, &t.schema, &t.table, None),
+                    Derivation::ExpandedFromClassification,
+                ));
+            }
+        }
+        return Ok(out);
+    }
+
     if let Selector::Path(scope) = &r.selector {
         let level = |v: &Option<String>| v.clone().map_or(Level::Unnamed, Level::Named);
         let audience = exempt_audience(r, exempt)?;
@@ -604,6 +699,7 @@ pub fn lower_rule(
     match support_for_kind(
         ep_kind,
         None,
+        image_level,
         classification_channel,
         &Capability::ClassificationSelector(effect),
     ) {
@@ -627,6 +723,7 @@ pub fn lower_rule(
                 && support_for_kind(
                     ep_kind,
                     None,
+                    image_level,
                     classification_channel,
                     &Capability::ClassificationRowFilterOnColumnAttachment,
                 ) == Support::Lowered(LoweringKind::ExpandColumnOnlyTablesPerTable)
@@ -714,6 +811,40 @@ pub fn lower_rule(
     }
 }
 
+/// The capability whose image gate (`matrix::Entry::min_egret_image`) decides
+/// whether `r` can be enforced on a StarRocks EP: its mask type, or the
+/// classification selector of a tag rule. `None` for a rule the gate never
+/// touches (a path row filter).
+fn image_gated_capability(r: &Rule) -> Option<Capability> {
+    match (&r.kind, &r.selector) {
+        (RuleKind::Mask { mask_type, .. }, _) => Some(Capability::MaskType(mask_type.clone())),
+        (RuleKind::RowFilter { .. }, Selector::Tag { .. }) => Some(
+            Capability::ClassificationSelector(RuleEffectKind::RowFilter),
+        ),
+        (RuleKind::RowFilter { .. }, Selector::Path(_)) => None,
+    }
+}
+
+/// Whether the image gate, and nothing else, is what makes `cap` unanswerable
+/// on this EP: the matrix answers it at the gate's minimum level but not at
+/// `image_level`. A mask type the engine never declares is a different refusal
+/// (`UnsupportedMaskType`) and is NOT this.
+fn denied_by_image_level(kind: EpKind, image_level: Option<u32>, cap: &Capability) -> bool {
+    let ask = |level| support_for_kind(kind, None, level, true, cap);
+    matches!(ask(image_level), Support::Missing(_))
+        && !matches!(
+            ask(Some(STARROCKS_MASK_MIN_EGRET_IMAGE)),
+            Support::Missing(_)
+        )
+}
+
+/// Whether `r` is a StarRocks mask / row filter the image gate denies on this
+/// EP: [`lower_rule`] then lowers it to a deny of what it would have masked or
+/// filtered.
+pub fn is_image_denied(r: &Rule, kind: EpKind, image_level: Option<u32>) -> bool {
+    image_gated_capability(r).is_some_and(|cap| denied_by_image_level(kind, image_level, &cap))
+}
+
 /// Lower `rules` for the enforcement point `ep`, in rule order. Each rule's
 /// exempt set is expanded against `dir` ([`audience`]), every rule's, before
 /// anything else about it is looked at.
@@ -738,6 +869,7 @@ pub fn lower_rules(
     counts: &dyn CeilingCount,
 ) -> LowerResult {
     let none = RuleInputs::default();
+    let image_level = ep.effective_image_level();
     let mut out = Lowered::default();
     for r in rules {
         let exempt = audience(&r.exempt, dir);
@@ -757,6 +889,7 @@ pub fn lower_rules(
             r,
             &exempt,
             ep.kind,
+            image_level,
             ep.classification_channel,
             catalog,
             rule_inputs,
@@ -765,6 +898,27 @@ pub fn lower_rules(
         ) {
             Ok(statements) => {
                 out.statements.extend(statements);
+                if is_image_denied(r, ep.kind, image_level) {
+                    // Visible in `CompileSummary::skipped`, though the output
+                    // is a deny (`lower_rule`), not an absence.
+                    let have = image_level.map_or("not an egret fork image".to_string(), |n| {
+                        format!("egret.{n}")
+                    });
+                    out.lowerings.push(Lowering {
+                        source: Source::Rule {
+                            rule_id: r.id,
+                            rule_name: r.name.clone(),
+                        },
+                        code: ReasonCode::NotMeasured,
+                        detail: format!(
+                            "rule {:?} is enforced as a deny, not as a mask / row filter: a \
+                             StarRocks engine enforces those only from \
+                             egret.{STARROCKS_MASK_MIN_EGRET_IMAGE} (this EP's least capable \
+                             engine is {have}); upgrade the engine to the egret-starrocks image",
+                            r.name
+                        ),
+                    });
+                }
                 continue;
             }
             Err(CompileError::UnexpandedPrincipalKind { kind }) => (
@@ -836,7 +990,7 @@ pub fn lower_rules(
 mod tests {
     use super::*;
     use crate::audience::MemberName;
-    use crate::ep::{EpKind, Mechanism};
+    use crate::ep::{BoundEngine, EpInput, EpKind, Mechanism};
     use crate::statement::{Derivation, Level, Target};
     use egret_perm::{CompileError, EngineType, PrincipalSet, Rule, RuleKind, Selector};
     use uuid::Uuid;
@@ -908,6 +1062,7 @@ mod tests {
             &r,
             &audience_from_expanded(&r.exempt),
             trino(),
+            Some(STARROCKS_MASK_MIN_EGRET_IMAGE),
             true,
             "",
             &inputs("PII", vec![]),
@@ -932,6 +1087,7 @@ mod tests {
             &r,
             &audience_from_expanded(&r.exempt),
             trino(),
+            Some(STARROCKS_MASK_MIN_EGRET_IMAGE),
             true,
             "",
             &inputs("PII", tagged),
@@ -959,6 +1115,7 @@ mod tests {
                 &r,
                 &audience_from_expanded(&r.exempt),
                 starrocks(),
+                Some(STARROCKS_MASK_MIN_EGRET_IMAGE),
                 false,
                 "",
                 &inputs("PII", tagged.clone()),
@@ -974,6 +1131,7 @@ mod tests {
                 &r,
                 &audience_from_expanded(&r.exempt),
                 starrocks(),
+                Some(STARROCKS_MASK_MIN_EGRET_IMAGE),
                 false,
                 "",
                 &inputs("PII", tagged),
@@ -996,6 +1154,7 @@ mod tests {
                 &r,
                 &audience_from_expanded(&r.exempt),
                 trino(),
+                Some(STARROCKS_MASK_MIN_EGRET_IMAGE),
                 false,
                 "",
                 &inputs("PII", vec![]),
@@ -1024,6 +1183,7 @@ mod tests {
                 &r,
                 &audience_from_expanded(&r.exempt),
                 starrocks(),
+                Some(STARROCKS_MASK_MIN_EGRET_IMAGE),
                 false,
                 "",
                 &inputs("PII", tagged),
@@ -1034,5 +1194,167 @@ mod tests {
             .len(),
             3
         );
+    }
+
+    fn starrocks_ep(levels: &[Option<u32>]) -> EpInput {
+        EpInput {
+            profile_id: 1,
+            profile_name: "p".into(),
+            kind: starrocks(),
+            engines: levels
+                .iter()
+                .enumerate()
+                .map(|(i, l)| BoundEngine {
+                    name: format!("e{i}"),
+                    version: Ok("2.8.0".into()),
+                    egret_image_level: *l,
+                })
+                .collect(),
+            default_version: Ok("2.8.0".into()),
+            default_image_level: Some(4),
+            classification_channel: false,
+            catalogs: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn effective_image_level_is_the_most_restrictive_and_unknown_wins() {
+        assert_eq!(starrocks_ep(&[]).effective_image_level(), Some(4));
+        assert_eq!(starrocks_ep(&[Some(4)]).effective_image_level(), Some(4));
+        assert_eq!(
+            starrocks_ep(&[Some(4), Some(2)]).effective_image_level(),
+            Some(2)
+        );
+        assert_eq!(starrocks_ep(&[Some(4), None]).effective_image_level(), None);
+        assert_eq!(starrocks_ep(&[None, Some(4)]).effective_image_level(), None);
+    }
+
+    /// The gate is live in lowering: below egret.3 (or unknown) a StarRocks
+    /// mask / row-filter rule lowers to a DENY of its columns / tables to
+    /// everyone but the exemptions (never to nothing: no mask policy would mean
+    /// cleartext), and `lower_rules` also reports it; at egret.3/4 the same rule
+    /// lowers by the normal expansion.
+    #[test]
+    fn starrocks_mask_and_row_filter_below_image_level_are_not_lowered() {
+        let mask = tag_mask_rule("pii", "MASK_NULL");
+        let filter = tag_row_filter_rule("pii", "region = 'us'");
+        let tagged = vec![table("c", "s", "t", false, &["a", "b"])];
+        let lower = |r: &Rule, ep: &EpInput| {
+            lower_rule(
+                r,
+                &audience_from_expanded(&r.exempt),
+                ep.kind,
+                ep.effective_image_level(),
+                false,
+                "",
+                &inputs("PII", tagged.clone()),
+                500,
+                &Always,
+            )
+        };
+        let lower_all = |ep: &EpInput| {
+            let rules = [mask.clone(), filter.clone()];
+            let by_rule: BTreeMap<Uuid, RuleInputs> = rules
+                .iter()
+                .map(|r| (r.id, inputs("PII", tagged.clone())))
+                .collect();
+            lower_rules(
+                ep,
+                &rules,
+                &Directory::default(),
+                &by_rule,
+                BTreeMap::new(),
+                500,
+                &Always,
+            )
+            .unwrap()
+        };
+        let is_deny = |st: &Statement| matches!(st.effect, Effect::Withhold { .. });
+        for below in [Some(2), None] {
+            let ep = starrocks_ep(&[Some(4), below]);
+            // A mask denies each tagged column, a row filter its table; the
+            // exemptions are the deny's exceptions. Never an empty output.
+            let m = lower(&mask, &ep).unwrap();
+            assert_eq!(m.len(), 2, "mask at {below:?}");
+            assert!(m.iter().all(is_deny), "mask denies at {below:?}");
+            assert!(m.iter().all(|st| matches!(
+                &st.target,
+                Target::Path(p) if p.column != Level::Unnamed
+            )));
+            let f = lower(&filter, &ep).unwrap();
+            assert_eq!(f.len(), 1, "row filter at {below:?}");
+            assert!(f.iter().all(is_deny), "row filter denies at {below:?}");
+            assert!(matches!(
+                &f[0].target,
+                Target::Path(p) if p.column == Level::Unnamed
+            ));
+            assert_eq!(f[0].audience.include[0].name, MemberName::Everyone);
+            assert!(
+                needs_tagged_tables(&ep, &mask) && needs_tagged_tables(&ep, &filter),
+                "a denied rule still expands its tagged tables at {below:?}"
+            );
+            let all = lower_all(&ep);
+            assert_eq!(all.statements.len(), 3, "deny statements at {below:?}");
+            assert!(all.statements.iter().all(is_deny));
+            assert_eq!(all.lowerings.len(), 2, "both rules are reported");
+            assert!(all
+                .lowerings
+                .iter()
+                .all(|l| l.code == ReasonCode::NotMeasured && l.detail.contains("egret.3")));
+        }
+        for at in [3, 4] {
+            let ep = starrocks_ep(&[Some(at)]);
+            assert_eq!(lower(&mask, &ep).unwrap().len(), 2, "mask at egret.{at}");
+            assert_eq!(
+                lower(&filter, &ep).unwrap().len(),
+                1,
+                "filter at egret.{at}"
+            );
+            assert!(needs_tagged_tables(&ep, &mask));
+            let all = lower_all(&ep);
+            assert_eq!(all.statements.len(), 3, "unchanged at egret.{at}");
+            assert!(all.statements.iter().all(|st| !is_deny(st)));
+            assert!(all.lowerings.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_path_mask_below_the_image_level_denies_its_column() {
+        let r = Rule {
+            id: Uuid::from_u128(9),
+            name: "p".into(),
+            kind: RuleKind::Mask {
+                mask_type: "MASK_NULL".into(),
+                value_expr: None,
+            },
+            selector: Selector::Path(egret_perm::Scope {
+                catalog_id: Uuid::from_u128(1),
+                schema: Some("s".into()),
+                table: Some("t".into()),
+                column: Some("ssn".into()),
+            }),
+            exempt: PrincipalSet::default(),
+        };
+        let run = |level| {
+            lower_rule(
+                &r,
+                &audience_from_expanded(&r.exempt),
+                starrocks(),
+                level,
+                false,
+                "c",
+                &RuleInputs::default(),
+                500,
+                &Always,
+            )
+            .unwrap()
+        };
+        for below in [Some(2), None] {
+            let s = run(below);
+            assert_eq!(s.len(), 1);
+            assert!(matches!(s[0].effect, Effect::Withhold { .. }), "{below:?}");
+            assert_eq!(s[0].derivation, Derivation::AsDeclared);
+        }
+        assert!(matches!(run(Some(3))[0].effect, Effect::Mask { .. }));
     }
 }

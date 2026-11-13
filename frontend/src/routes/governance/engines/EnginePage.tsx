@@ -107,7 +107,7 @@ export default function EnginePage() {
     <>
       <TypeBadge type={engine.type} />
       <OriginBadge origin={engine.origin} />
-      <Fact label="Profile">{profileName ?? "No profile"}</Fact>
+      <Fact label="Enforcement point">{profileName ?? "No enforcement point"}</Fact>
       {pluginFact}
     </>
   ) : (

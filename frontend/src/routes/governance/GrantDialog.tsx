@@ -293,7 +293,7 @@ function GrantForm({
                 <p>
                   Would recompile{" "}
                   {preview.affected.length === 0
-                    ? "no profiles"
+                    ? "no enforcement points"
                     : preview.affected.map((p) => p.name).join(", ")}
                   .
                 </p>

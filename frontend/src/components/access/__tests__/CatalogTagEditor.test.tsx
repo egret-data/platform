@@ -285,11 +285,11 @@ describe("CatalogTagEditor", () => {
     // Arm 2: anything else shows the backend's own sentence, unparaphrased.
     unassignState = {
       isError: true,
-      error: new ApiError(500, "recompiling the bound policy profiles failed"),
+      error: new ApiError(500, "recompiling the bound enforcement points failed"),
     };
     renderEditor();
     const alert500 = screen.getByTestId("catalog-tag-unassign-error");
-    expect(alert500).toHaveTextContent("recompiling the bound policy profiles failed");
+    expect(alert500).toHaveTextContent("recompiling the bound enforcement points failed");
     expect(alert500).not.toHaveTextContent("catalog_registry:update");
   });
 

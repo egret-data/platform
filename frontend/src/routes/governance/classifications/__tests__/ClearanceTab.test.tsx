@@ -40,9 +40,9 @@ const GROUP_WARNING = /not enforced in the engine: no group provider or usersync
 const READS_ONLY = /this clearance withholds reads only, on trino and on starrocks alike: a user without it can still overwrite a column they cannot read/i;
 const VIEWS = /trino views in egret.s catalogs carry the classification/i;
 // D2 review: a whole table costs 1 plus its column count, not one policy.
-const CEILING = /one policy per tagged column, and 1 plus the table.s column count for a classification on a whole table: if that comes to more than 500 for one starrocks profile, the write that would cause it is refused/i;
+const CEILING = /one policy per tagged column, and 1 plus the table.s column count for a classification on a whole table: if that comes to more than 500 for one starrocks enforcement point, the write that would cause it is refused/i;
 const COMPILES =
-  "Compiles to one deny tag policy in each Trino profile's tag service. On StarRocks it compiles to a select deny and a NULL mask per tagged column, or, on a whole table, one select deny on the table and a NULL mask per column. StarRocks does not access-check a masked column, so an uncleared reader reads NULL in a classified column rather than being refused, unless the classification is on the whole table.";
+  "Compiles to one deny tag policy in each Trino enforcement point's tag service. On StarRocks it compiles to a select deny and a NULL mask per tagged column, or, on a whole table, one select deny on the table and a NULL mask per column. StarRocks does not access-check a masked column, so an uncleared reader reads NULL in a classified column rather than being refused, unless the classification is on the whole table.";
 
 async function pickAndAdd(user: ReturnType<typeof userEvent.setup>, type: "Role" | "Group", label: string) {
   if (type === "Group") {
@@ -126,7 +126,7 @@ describe("Clearance tab: the editor (ported from TagDetail)", () => {
           {
             source_kind: "clearance",
             id: "t-pii",
-            reason: "this Trino profile has no usable `tagService`, and a Trino clearance is a TAG policy",
+            reason: "this Trino enforcement point has no usable `tagService`, and a Trino clearance is a TAG policy",
           },
         ],
       }),
@@ -246,7 +246,7 @@ describe("Clearance tab: what the engines do not enforce (premise 3)", () => {
     expect(box).toHaveTextContent(/existing starrocks materialized views, and views of other connectors, are not covered/i);
     expect(box).toHaveTextContent(/an uncleared owner.s definer view blocks everybody, the cleared included/i);
     expect(screen.getByText(CEILING)).toBeInTheDocument();
-    expect(screen.getByText(/profiles that see fewer are unaffected/i)).toBeInTheDocument();
+    expect(screen.getByText(/enforcement points that see fewer are unaffected/i)).toBeInTheDocument();
     expect(screen.getByText(COMPILES)).toBeInTheDocument();
     expect(screen.queryByText(GROUP_WARNING)).not.toBeInTheDocument();
   });

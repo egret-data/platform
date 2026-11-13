@@ -50,7 +50,7 @@ export function TrinoConfigDialog({ open, service, onOpenChange }: Props) {
           ) : (
             <DialogDescription>
               Drop these into the Trino coordinator&apos;s <code>etc/</code>. The native ranger plugin then enforces
-              this profile. (Assumes anonymous <code>/service</code>; a Ranger auth token needs extra proxy setup.)
+              this enforcement point. (Assumes anonymous <code>/service</code>; a Ranger auth token needs extra proxy setup.)
             </DialogDescription>
           )}
         </DialogHeader>

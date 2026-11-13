@@ -105,7 +105,7 @@ async fn authorize_service(
     path = "/ranger/service/plugins/policies/download/{service}",
     tag = "ranger",
     params(
-        ("service" = String, Path, description = "Policy profile (Ranger service) name"),
+        ("service" = String, Path, description = "Enforcement point (Ranger service) name"),
         DownloadParams,
     ),
     responses(
@@ -113,7 +113,7 @@ async fn authorize_service(
         (status = 304, description = "Not modified — the plugin's lastKnownVersion matches the current policy version"),
         (status = 401, description = "Missing or invalid credential (engine Basic or operator bearer) while `ranger.auth_mode` is `required`"),
         (status = 403, description = "An engine credential asked for a profile its engine is not bound to", body = RangerErrorBody),
-        (status = 404, description = "No such policy profile", body = RangerErrorBody),
+        (status = 404, description = "No such enforcement point", body = RangerErrorBody),
         (status = 500, description = "Internal error", body = RangerErrorBody),
     ),
 )]
@@ -261,7 +261,7 @@ pub async fn download_policies(
     path = "/ranger/service/tags/download/{service}",
     tag = "ranger",
     params(
-        ("service" = String, Path, description = "Policy profile (Ranger service) name"),
+        ("service" = String, Path, description = "Enforcement point (Ranger service) name"),
         DownloadParams,
     ),
     responses(
@@ -269,7 +269,7 @@ pub async fn download_policies(
         (status = 304, description = "Not modified — the plugin's lastKnownVersion matches the current tag version"),
         (status = 401, description = "Missing or invalid credential (engine Basic or operator bearer) while `ranger.auth_mode` is `required`"),
         (status = 403, description = "An engine credential asked for a profile its engine is not bound to", body = RangerErrorBody),
-        (status = 404, description = "No such policy profile", body = RangerErrorBody),
+        (status = 404, description = "No such enforcement point", body = RangerErrorBody),
         (status = 500, description = "Internal error", body = RangerErrorBody),
     ),
 )]

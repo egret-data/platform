@@ -35,7 +35,7 @@ type Posture = Pick<
 >;
 
 export const NOT_GOVERNED_SENTENCE =
-  "Not governed: this engine is bound to no policy profile, so egret's grants, masks and row filters do not reach it. Bind it to a StarRocks profile in its settings.";
+  "Not governed: this engine is bound to no enforcement point, so egret's grants, masks and row filters do not reach it. Bind it to a StarRocks enforcement point in its settings.";
 
 export const SECURITY_UPGRADE_BADGE_TITLE =
   "This StarRocks engine runs without some of egret's security fixes. Open it and press Upgrade security.";
@@ -43,7 +43,7 @@ export const SECURITY_UPGRADE_BADGE_TITLE =
 /** One sentence per reason, in the server's order. */
 export const SECURITY_UPGRADE_REASON_SENTENCE: Record<SecurityUpgradeReason, string> = {
   unpatchedImage:
-    "Its FE image is not egret-starrocks-fe 4.1.7-egret.4 or later, so StarRocks lets users past this engine's profile (Iceberg metadata tables, prepared statements, the HTTP SQL API, FILES() and more).",
+    "Its FE image is not egret-starrocks-fe 4.1.7-egret.4 or later, so StarRocks lets users past this engine's enforcement point (Iceberg metadata tables, prepared statements, the HTTP SQL API, FILES() and more).",
   noRootPassword:
     "Its FE root account has no password: anyone who reaches port 9030 can log in as root.",
   notApplied: "The last security upgrade did not finish applying. Run it again.",

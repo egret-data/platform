@@ -207,7 +207,7 @@ function MemberCounts({ allowed, refused, undecidable, masked }: { allowed: numb
         {(
           [
             // Each count is of members, so none reads as the group's own access.
-            ["Members allowed by every profile", allowed],
+            ["Members allowed by every enforcement point", allowed],
             ["Members refused by at least one", refused],
             ["Members undecidable on at least one", undecidable],
             ["Members whose read is masked on at least one", masked],
@@ -237,7 +237,7 @@ function MemberRows({ member, expanded, onToggle }: { member: MemberVerdict; exp
             r.effect_line ? (
               <EffectLine line={r.effect_line} />
             ) : (
-              <p className="text-sm">Not enforced: no engine with a policy profile serves this catalog.</p>
+              <p className="text-sm">Not enforced: no engine with an enforcement point serves this catalog.</p>
             )
           ) : (
             <ul role="list" className="space-y-1 text-sm">
@@ -251,7 +251,7 @@ function MemberRows({ member, expanded, onToggle }: { member: MemberVerdict; exp
                     {first ? (
                       <EffectLine line={first} />
                     ) : (
-                      <p className="text-muted-foreground">No answer line was sent for this profile.</p>
+                      <p className="text-muted-foreground">No answer line was sent for this enforcement point.</p>
                     )}
                   </li>
                 );

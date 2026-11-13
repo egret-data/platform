@@ -51,13 +51,13 @@ async function renderOpen(result: ExplainResponse) {
   await userEvent.click(screen.getByText("Which policies decided this"));
 }
 
-describe("ExplainResultView — an OPA profile", () => {
-  test("names the mechanism on the profile header", async () => {
+describe("ExplainResultView — an OPA enforcement point", () => {
+  test("names the mechanism on the enforcement point header", async () => {
     await renderOpen(one(opaProfile()));
     expect(screen.getByTestId("explain-mechanism")).toHaveTextContent("OPA");
   });
 
-  test("names the engines not yet re-applied to the profile's mechanism", async () => {
+  test("names the engines not yet re-applied to the enforcement point's mechanism", async () => {
     await renderOpen(one(opaProfile({ engines_not_reapplied: ["trino-a", "trino-b"] })));
     expect(screen.getByTestId("explain-not-reapplied")).toHaveTextContent(
       "Not re-applied yet: trino-a, trino-b still run the previous plugin, so they may answer " +
@@ -65,14 +65,14 @@ describe("ExplainResultView — an OPA profile", () => {
     );
   });
 
-  test("shows the no-tag-service warning once on the profile that carries it", async () => {
-    const warning = "This profile has no tag service, so classification rules and clearances do not apply to its engines.";
+  test("shows the no-tag-service warning once on the enforcement point that carries it", async () => {
+    const warning = "This enforcement point has no tag service, so classification rules and clearances do not apply to its engines.";
     await renderOpen(one(opaProfile({ no_tag_service_warning: warning })));
     expect(screen.getAllByText(warning)).toHaveLength(1);
     expect(screen.getByTestId("explain-no-tag-service")).toHaveTextContent(warning);
   });
 
-  test("shows no tag-service warning on a profile without one", async () => {
+  test("shows no tag-service warning on an enforcement point without one", async () => {
     await renderOpen(one(opaProfile()));
     expect(screen.queryByTestId("explain-no-tag-service")).toBeNull();
   });
@@ -82,7 +82,7 @@ describe("ExplainResultView — an OPA profile", () => {
     expect(screen.queryByTestId("explain-not-reapplied")).toBeNull();
   });
 
-  test("a Ranger profile's header says Ranger", async () => {
+  test("a Ranger enforcement point's header says Ranger", async () => {
     await renderOpen(one(opaProfile({ mechanism: "ranger", opa: undefined })));
     expect(screen.getByTestId("explain-mechanism")).toHaveTextContent("Ranger");
   });
@@ -162,7 +162,7 @@ describe("ExplainResultView — an OPA profile", () => {
       ),
     );
     const reason = screen.getByTestId("explain-ir-reason");
-    expect(reason).toHaveTextContent("Could not read the profile’s current state; try again.");
+    expect(reason).toHaveTextContent("Could not read the enforcement point’s current state; try again.");
     expect(reason).not.toHaveTextContent(/Unread|build failed/);
   });
 
@@ -200,7 +200,7 @@ describe("ExplainResultView — an OPA profile", () => {
     expect(screen.queryByTestId("explain-spliced")).toBeNull();
   });
 
-  test("a refused profile shows the refusal class as its reason", async () => {
+  test("a refused enforcement point shows the refusal class as its reason", async () => {
     await renderOpen(
       one(
         opaProfile({

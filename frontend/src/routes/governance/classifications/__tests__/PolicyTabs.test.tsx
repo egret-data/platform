@@ -142,7 +142,7 @@ describe("Manual policies tab (route D)", () => {
       "href",
       "/governance/engines/profiles/spare-tr/advanced/policies/masking/42?scope=tag",
     );
-    expect(rowOf("mask-pii")).toHaveTextContent("No engine downloads profile spare-tr");
+    expect(rowOf("mask-pii")).toHaveTextContent("No engine downloads enforcement point spare-tr");
     expect(rowOf("mask-pii")).toHaveTextContent("Mask: Everyone — mask MASK_NULL");
   });
 
@@ -250,10 +250,10 @@ describe("Manual policies tab (route D)", () => {
     expect(screen.getByText("No readable manual tag policy names this classification.")).toBeInTheDocument();
   });
 
-  it("says when no profile has a tag service", async () => {
+  it("says when no enforcement point has a tag service", async () => {
     open("handwritten", STEWARD, { [HW]: ok(handwritten({ state: "no_tag_service" })) });
     expect(
-      await screen.findByText("No engine profile has a tag service, so no engine downloads tag policies.", {}, T),
+      await screen.findByText("No engine enforcement point has a tag service, so no engine downloads tag policies.", {}, T),
     ).toBeInTheDocument();
     expect(screen.queryByText("No manual tag policy names this classification.")).not.toBeInTheDocument();
   });

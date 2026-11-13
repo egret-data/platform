@@ -65,7 +65,7 @@ pub(crate) fn passes(kind: EpKind) -> Vec<Pass> {
     ]
     .into_iter()
     .filter(|(cap, lowering, _)| {
-        support_for_kind(kind, None, false, cap) == Support::Lowered(*lowering)
+        support_for_kind(kind, None, None, false, cap) == Support::Lowered(*lowering)
     })
     .map(|(_, _, pass)| pass)
     .collect()
@@ -597,6 +597,7 @@ mod tests {
         assert_eq!(
             support_for_kind(
                 k(egret_perm::EngineType::StarRocks),
+                None,
                 None,
                 false,
                 &Capability::MaskCoversHiddenColumns

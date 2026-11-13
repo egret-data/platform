@@ -169,7 +169,7 @@ export default function EngineRegister() {
         description={
           <>
             Record a Trino or StarRocks cluster that you run yourself. egret does not provision, restart or monitor
-            it; it holds the record so a policy profile can be bound to the engine and you can read the Ranger plugin
+            it; it holds the record so an enforcement point can be bound to the engine and you can read the Ranger plugin
             configuration to install on it.
           </>
         }
@@ -296,24 +296,24 @@ export default function EngineRegister() {
 
           <section className="space-y-3 rounded-lg border p-4" aria-labelledby="er-profile-h">
             <h2 id="er-profile-h" className="text-base font-semibold">
-              Policy profile
+              Enforcement point
             </h2>
             <p className="text-sm text-muted-foreground">
-              Bind a {ENGINE_TYPE_LABEL[type]} profile now, or leave it and bind one later from the engine&apos;s
-              Settings tab. A profile can belong to one engine.
+              Bind a {ENGINE_TYPE_LABEL[type]} enforcement point now, or leave it and bind one later from the engine&apos;s
+              Settings tab. An enforcement point can belong to one engine.
             </p>
             {profilesQ.isLoading ? (
               <Skeleton className="h-9 w-72" />
             ) : profilesQ.isError ? (
               <Alert variant="destructive">
                 <AlertDescription>
-                  Could not read the policy profiles: {profilesQ.error?.message ?? "the request failed"}. You can still
-                  register the engine and bind a profile later.
+                  Could not read the enforcement points: {profilesQ.error?.message ?? "the request failed"}. You can still
+                  register the engine and bind an enforcement point later.
                 </AlertDescription>
               </Alert>
             ) : (
               <div className="space-y-1.5">
-                <Label htmlFor="er-profile">Policy profile</Label>
+                <Label htmlFor="er-profile">Enforcement point</Label>
                 <Select
                   value={profileId === "" ? NO_PROFILE : profileId}
                   onValueChange={(v) => setProfileId(v === NO_PROFILE ? "" : v)}
@@ -322,7 +322,7 @@ export default function EngineRegister() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value={NO_PROFILE}>No profile yet</SelectItem>
+                    <SelectItem value={NO_PROFILE}>No enforcement point yet</SelectItem>
                     {profilesOfType.map((p) => {
                       const owner = p.engines[0];
                       return (
@@ -336,7 +336,7 @@ export default function EngineRegister() {
                 </Select>
                 {profilesOfType.length === 0 && (
                   <p className="text-xs text-muted-foreground">
-                    There is no {ENGINE_TYPE_LABEL[type]} profile yet. Create one under Governance → Policies.
+                    There is no {ENGINE_TYPE_LABEL[type]} enforcement point yet. Create one under Governance → Policies.
                   </p>
                 )}
                 <StarRocksMetadataTablesWarning engineType={type} bound={!!chosenProfile} />
@@ -349,7 +349,7 @@ export default function EngineRegister() {
               Catalogs
             </h2>
             <p className="text-sm text-muted-foreground">
-              Declare which registry catalogs this engine serves, so grants on them reach its profile. egret does not
+              Declare which registry catalogs this engine serves, so grants on them reach its enforcement point. egret does not
               create these catalogs on your engine — create them there with the same names.
             </p>
             {catalogsQ.isLoading ? (
@@ -410,7 +410,7 @@ export default function EngineRegister() {
         intro="Copy it now: egret shows this password once. The engine's Ranger plugin presents it to egret to download policies; without it, the download is refused."
         // Without a profile the plugin configuration cannot be rendered, so the
         // next step is binding one, on the engine's Settings tab (KI-204).
-        doneLabel={issued?.profiled === false ? "Bind a policy profile" : "Open plugin configuration"}
+        doneLabel={issued?.profiled === false ? "Bind an enforcement point" : "Open plugin configuration"}
         onDone={() => {
           const id = issued?.engineId;
           const tab = issued?.profiled === false ? "settings" : "plugin-config";

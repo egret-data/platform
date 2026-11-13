@@ -9,7 +9,7 @@ import { TabError } from "@/routes/governance/tabParts";
 import { editorUrl, type EditorSubject } from "@/routes/governance/engines/engineUrl";
 import type { TabContext } from "@/routes/governance/engines/PageFrame";
 
-export const NO_OVERLAPS = "No overlapping rules on this profile.";
+export const NO_OVERLAPS = "No overlapping rules on this enforcement point.";
 
 /**
  * A profile's stored mask and row-filter pairs that can decide one request two
@@ -45,7 +45,7 @@ export function OverlapsTab({ ctx }: { ctx: TabContext }) {
   const profile = ctx.profile?.name ?? null;
   const { q, pairs } = useProfileOverlaps(profile);
 
-  if (!profile) return <EmptyState icon={Layers} title="This engine downloads no policy profile, so no rule overlaps." />;
+  if (!profile) return <EmptyState icon={Layers} title="This engine downloads no enforcement point, so no rule overlaps." />;
   if (q.isError) return <TabError what="overlaps" onRetry={() => void q.refetch()} />;
   if (!pairs) return <ListSkeleton rows={3} cols={2} />;
   if (pairs.length === 0) return <EmptyState icon={Layers} title={NO_OVERLAPS} />;
@@ -55,7 +55,7 @@ export function OverlapsTab({ ctx }: { ctx: TabContext }) {
       <p className="text-sm text-muted-foreground">
         Each pair can decide one request two different ways, and the engine&apos;s choice between them is not
         something either one says. They were stored before overlaps were refused. A pair in which one mask names no
-        column (a mask on a whole table, schema or catalog) blocks every write that recompiles this profile, and that
+        column (a mask on a whole table, schema or catalog) blocks every write that recompiles this enforcement point, and that
         mask stays inert, until the pair is broken; other stored pairs block nothing. Break each pair to fix it.
       </p>
       <ul role="list" className="space-y-3">

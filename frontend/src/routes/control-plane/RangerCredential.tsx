@@ -352,7 +352,7 @@ export function RangerCredentialSection({
       ? "Rotation is blocked until you retire the previous credential."
       : "Rotation is blocked until the rollout of the current credential completes and egret retires the previous one."
     : !external && !currentId
-      ? "This engine has no Ranger credential yet: egret creates one when the engine is applied bound to a policy profile."
+      ? "This engine has no Ranger credential yet: egret creates one when the engine is applied bound to an enforcement point."
       : null;
 
   let state: { badge: string; tone: "success" | "neutral"; text: string };
@@ -372,7 +372,7 @@ export function RangerCredentialSection({
       tone: "neutral",
       text: external
         ? "This engine was registered before engine credentials existed. Rotate to create one, then install it on the engine."
-        : "egret creates one when the engine is applied bound to a policy profile.",
+        : "egret creates one when the engine is applied bound to an enforcement point.",
     };
 
   return (

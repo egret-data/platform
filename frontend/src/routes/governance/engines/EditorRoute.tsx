@@ -9,7 +9,7 @@ import PolicyEditorPage from "@/routes/governance/engines/PolicyEditorPage";
 import { engineUrl, profileParam } from "@/routes/governance/engines/engineUrl";
 import { PageContainer } from "@/components/layout/PageContainer";
 
-export const NO_PROFILE_TO_EDIT = "This engine downloads no policy profile, so it has no policy to edit.";
+export const NO_PROFILE_TO_EDIT = "This engine downloads no enforcement point, so it has no policy to edit.";
 
 /**
  * The editor under an engine's page (spec §2, Q2):

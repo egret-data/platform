@@ -76,9 +76,9 @@ export function patternLevels(scope: Scope): PatternLevel[] {
 
 /** A grant's delete confirmation text; a pattern grant says how far it reaches. */
 export function grantDeleteDescription(g: GrantView | null): string {
-  const removed = "It is permanently removed and every profile it reaches recompiles.";
+  const removed = "It is permanently removed and every enforcement point it reaches recompiles.";
   const patterns = g ? patternLevels(g.scope) : [];
-  if (patterns.length === 0) return "This grant is permanently removed and every profile it reaches recompiles.";
+  if (patterns.length === 0) return "This grant is permanently removed and every enforcement point it reaches recompiles.";
   const reach = patterns.map((p) => `every ${p.level} matching “${p.value}”`).join(" and ");
   return `This grant covers ${reach}, not one object. ${removed}`;
 }

@@ -930,7 +930,7 @@ export const getControlPlaneGovernanceEnginePluginUrl = (id: string,) => {
 }
 
 /**
- * The plugin download ledger of the engine's policy profile, judged by the same rules as the Governance Overview's plugin findings. Records what plugins report holding. Requires policy:read and engine:read.
+ * The plugin download ledger of the engine's enforcement point, judged by the same rules as the Governance Overview's plugin findings. Records what plugins report holding. Requires policy:read and engine:read.
  * @summary What the Ranger plugins of an engine's profile report downloading.
  */
 export const controlPlaneGovernanceEnginePlugin = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneGovernanceEnginePluginResponse> => {
@@ -1236,7 +1236,7 @@ export const getControlPlaneGovernanceObjectHandwrittenUrl = (catalogId: string,
 }
 
 /**
- * Every hand-written (operator) Ranger policy of the profiles whose engines reach the catalog, and of their tag services, that reaches the object: `applies` (the policy names this object, or it and everything below it), `part` (it names something below), `parent` (it names a parent only, which engines do not apply to this object's data) or `unknown` (the body cannot be read). A resource match, not an access decision. egret-seeded policies are counted per profile. External engines are read from the database only. Requires policy:read.
+ * Every hand-written (operator) Ranger policy of the enforcement points whose engines reach the catalog, and of their tag services, that reaches the object: `applies` (the policy names this object, or it and everything below it), `part` (it names something below), `parent` (it names a parent only, which engines do not apply to this object's data) or `unknown` (the body cannot be read). A resource match, not an access decision. egret-seeded policies are counted per profile. External engines are read from the database only. Requires policy:read.
  * @summary Hand-written policies that reach a Data object.
  */
 export const controlPlaneGovernanceObjectHandwritten = async (catalogId: string,
@@ -1384,7 +1384,7 @@ export const getControlPlaneGovernancePrincipalHandwrittenUrl = (kind: string,
 }
 
 /**
- * Every hand-written (operator) Ranger policy, in every profile and tag service, with an item naming the principal: a user's username (`direct`), or a group or role the user holds (`group` / `role`, with `onEngines: false`: engines resolve no groups or roles, so such an item reaches nobody there). Items naming `public` or `{USER}` are reported under `everyone`, never attributed. A user with no username is `no_username` with only the `everyone` policies. Requires policy:read.
+ * Every hand-written (operator) Ranger policy, in every enforcement point and tag service, with an item naming the principal: a user's username (`direct`), or a group or role the user holds (`group` / `role`, with `onEngines: false`: engines resolve no groups or roles, so such an item reaches nobody there). Items naming `public` or `{USER}` are reported under `everyone`, never attributed. A user with no username is `no_username` with only the `everyone` policies. Requires policy:read.
  * @summary Hand-written policies that name a principal.
  */
 export const controlPlaneGovernancePrincipalHandwritten = async (kind: string,

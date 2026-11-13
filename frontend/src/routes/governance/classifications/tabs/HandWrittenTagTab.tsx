@@ -73,7 +73,7 @@ function Body({ tagId }: { tagId: string }) {
   if (d.state === "no_tag_service") {
     return (
       <p className="text-sm text-muted-foreground">
-        No engine profile has a tag service, so no engine downloads tag policies.
+        No engine enforcement point has a tag service, so no engine downloads tag policies.
       </p>
     );
   }
@@ -82,7 +82,7 @@ function Body({ tagId }: { tagId: string }) {
   return (
     <div className="space-y-3">
       <p className="text-sm text-muted-foreground">
-        Manual tag policies, written in an engine profile&apos;s own editor, that the engines apply to this
+        Manual tag policies, written in an engine enforcement point&apos;s own editor, that the engines apply to this
         classification&apos;s name. A listed policy names the classification; it may still be disabled or outranked on
         the engine.
       </p>
@@ -146,7 +146,7 @@ function Body({ tagId }: { tagId: string }) {
                         : profiles.map((pr, i) => (
                             <Fragment key={pr.name}>
                               {i > 0 ? " " : null}
-                              {`No engine downloads profile ${pr.name}.`}
+                              {`No engine downloads enforcement point ${pr.name}.`}
                             </Fragment>
                           ))}
                     </TableCell>

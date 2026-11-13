@@ -207,7 +207,8 @@ pub struct ProfileMechanism {
 
 /// What a Trino profile with no tag service is told (`no_tag_service_warning`
 /// on the switch answer and on explain's profile).
-pub const NO_TAG_SERVICE_WARNING: &str = "This profile has no tag service, so classification \
+pub const NO_TAG_SERVICE_WARNING: &str =
+    "This enforcement point has no tag service, so classification \
     rules and clearances do not apply to its engines. Bind a tag service in the profile's \
     settings.";
 
@@ -286,13 +287,13 @@ impl MechanismName {
     patch,
     path = "/api/control-plane/policies/services/{service}",
     tag = "policy-admin",
-    params(("service" = String, Path, description = "Policy profile (Ranger service) name")),
+    params(("service" = String, Path, description = "Enforcement point (Ranger service) name")),
     request_body = SetMechanismBody,
     responses(
-        (status = 200, description = "The coordinator of every bound egret-provisioned engine restarts to load the new access control; queries running on it fail. External engines are listed in `external_engines_unchanged`, and `external_engines_warning` says what their operator must do: after a switch to OPA they keep enforcing the Ranger policies until the OPA plugin files are installed (Trino 483 or later with `plugin/opa`); after a switch to Ranger, those running the OPA plugin fail every query until the Ranger plugin files are re-installed. `no_tag_service_warning` is present when the profile is a Trino profile with no tag service, so classification rules and clearances do not apply to its engines.", body = ProfileMechanism),
+        (status = 200, description = "The coordinator of every bound egret-provisioned engine restarts to load the new access control; queries running on it fail. External engines are listed in `external_engines_unchanged`, and `external_engines_warning` says what their operator must do: after a switch to OPA they keep enforcing the Ranger policies until the OPA plugin files are installed (Trino 483 or later with `plugin/opa`); after a switch to Ranger, those running the OPA plugin fail every query until the Ranger plugin files are re-installed. `no_tag_service_warning` is present when the enforcement point is a Trino enforcement point with no tag service, so classification rules and clearances do not apply to its engines.", body = ProfileMechanism),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
-        (status = 404, description = "No such policy profile", body = ErrorBody),
+        (status = 404, description = "No such enforcement point", body = ErrorBody),
         (status = 409, description = "The switch to OPA is refused: `{error, code: \"mechanism_refused\", refusals}`, `refusals` naming every condition that holds (`error` is the first). Nothing is written", body = Object),
         (status = 500, description = "Internal error", body = ErrorBody),
         (status = 502, description = "The switch is committed, but some bound engines were not reconfigured: `{error, engines_reconfigured, engines_failed: [{engine, error}], external_engines_unchanged, external_engines_warning?, no_tag_service_warning?}`. Send the same PATCH again to retry", body = Object),

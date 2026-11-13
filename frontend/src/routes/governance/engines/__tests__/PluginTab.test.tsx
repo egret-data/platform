@@ -105,7 +105,7 @@ describe("the Plugin tab (spec §6.5, EP17–EP19)", () => {
   });
 
   it("renders a tags kind the server judges not expected with its word, an icon and the server's sentence", async () => {
-    const sentence = "Profile lake-sr has no tag service, so its plugins are not expected to download tags.";
+    const sentence = "Enforcement point lake-sr has no tag service, so its plugins are not expected to download tags.";
     serve(
       answers(
         ok(
@@ -216,7 +216,7 @@ describe("the Plugin tab (spec §6.5, EP17–EP19)", () => {
     ).toBeInTheDocument();
   });
 
-  it("on a shared profile says the rows may come from any engine bound to it", async () => {
+  it("on a shared enforcement point says the rows may come from any engine bound to it", async () => {
     serve(answers(ok(pluginResponse({ sharedWith: [{ id: E_SR, name: "lake-trino-2", origin: "provisioned" }] }))));
     open();
     expect(
@@ -228,7 +228,7 @@ describe("the Plugin tab (spec §6.5, EP17–EP19)", () => {
     ).toBeInTheDocument();
   });
 
-  it("offers Download Trino config on a Trino profile and opens the config dialog", async () => {
+  it("offers Download Trino config on a Trino enforcement point and opens the config dialog", async () => {
     serve(answers(ok(pluginResponse()), { "/policies/services/lake-tr/trino-config": ok({ files: [], warnings: [] }) }));
     open();
     const btn = await within(await screen.findByRole("tabpanel", {}, T)).findByRole("button", { name: "Download Trino config" }, T);

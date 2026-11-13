@@ -64,7 +64,7 @@ function renderDetail(entry = "/control-plane/engines/x1") {
 }
 
 describe("StarRocks metadata-table warning, Control plane", () => {
-  test("external StarRocks engine with a bound profile: Overview shows it", async () => {
+  test("external StarRocks engine with a bound enforcement point: Overview shows it", async () => {
     stubFetch(detailRoutes(SR_EXTERNAL, 21));
     renderDetail();
     expect(await screen.findByRole("link", { name: "sr-main" }, T)).toBeInTheDocument();
@@ -72,31 +72,31 @@ describe("StarRocks metadata-table warning, Control plane", () => {
     expect(screen.getByTestId("starrocks-metadata-tables")).toHaveTextContent(/serve masked or filtered data through Trino/);
   });
 
-  test("external StarRocks engine without a profile: no warning", async () => {
+  test("external StarRocks engine without an enforcement point: no warning", async () => {
     stubFetch(detailRoutes(SR_EXTERNAL, null));
     renderDetail();
     expect(await screen.findByText("None bound. Bind one on the Settings tab.", {}, T)).toBeInTheDocument();
     expect(screen.queryByTestId("starrocks-metadata-tables")).not.toBeInTheDocument();
   });
 
-  test("external Trino engine with a bound profile: no warning", async () => {
+  test("external Trino engine with a bound enforcement point: no warning", async () => {
     stubFetch(detailRoutes(EXTERNAL_ENGINE, 11));
     renderDetail();
     expect(await screen.findByRole("link", { name: "trino-main" }, T)).toBeInTheDocument();
     expect(screen.queryByTestId("starrocks-metadata-tables")).not.toBeInTheDocument();
   });
 
-  test("external StarRocks Settings: shown when a profile is picked, gone when it is cleared", async () => {
+  test("external StarRocks Settings: shown when an enforcement point is picked, gone when it is cleared", async () => {
     stubFetch(detailRoutes(SR_EXTERNAL, null));
     const user = userEvent.setup();
     renderDetail("/control-plane/engines/x1?tab=settings");
-    const picker = await screen.findByRole("combobox", { name: "Policy profile" }, T);
+    const picker = await screen.findByRole("combobox", { name: "Enforcement point" }, T);
     expect(screen.queryByTestId("starrocks-metadata-tables")).not.toBeInTheDocument();
     await user.click(picker);
     await user.click(await screen.findByRole("option", { name: /sr-main/ }));
     expect(screen.getByTestId("starrocks-metadata-tables")).toHaveTextContent(WARNING);
-    await user.click(screen.getByRole("combobox", { name: "Policy profile" }));
-    await user.click(await screen.findByRole("option", { name: "No profile" }));
+    await user.click(screen.getByRole("combobox", { name: "Enforcement point" }));
+    await user.click(await screen.findByRole("option", { name: "No enforcement point" }));
     expect(screen.queryByTestId("starrocks-metadata-tables")).not.toBeInTheDocument();
   });
 
@@ -147,7 +147,7 @@ describe("StarRocks metadata-table warning, Control plane", () => {
     expect(screen.queryByTestId("starrocks-metadata-tables")).not.toBeInTheDocument();
   });
 
-  test("provisioned StarRocks engine bound to no profile: no warning", async () => {
+  test("provisioned StarRocks engine bound to no enforcement point: no warning", async () => {
     const calls = stubFetch(detailRoutes(SR_PROVISIONED, null));
     renderDetail();
     expect(await screen.findByRole("heading", { name: "lake-sr", level: 1 }, T)).toBeInTheDocument();
@@ -157,7 +157,7 @@ describe("StarRocks metadata-table warning, Control plane", () => {
     expect(screen.queryByTestId("starrocks-metadata-tables")).not.toBeInTheDocument();
   });
 
-  test("Register: shown only for StarRocks with a profile picked", async () => {
+  test("Register: shown only for StarRocks with an enforcement point picked", async () => {
     stubFetch({
       "GET /api/control-plane/policies/services": { body: PROFILES },
       "GET /api/control-plane/catalogs": { body: CATALOGS },
@@ -172,7 +172,7 @@ describe("StarRocks metadata-table warning, Control plane", () => {
       </Harness>,
     );
     // Trino with a Trino profile: nothing.
-    await user.click(await screen.findByRole("combobox", { name: "Policy profile" }, T));
+    await user.click(await screen.findByRole("combobox", { name: "Enforcement point" }, T));
     await user.click(await screen.findByRole("option", { name: /trino-main/ }));
     expect(screen.queryByTestId("starrocks-metadata-tables")).not.toBeInTheDocument();
     // StarRocks, no profile yet: nothing.
@@ -180,7 +180,7 @@ describe("StarRocks metadata-table warning, Control plane", () => {
     await user.click(await screen.findByRole("option", { name: "StarRocks" }));
     expect(screen.queryByTestId("starrocks-metadata-tables")).not.toBeInTheDocument();
     // StarRocks with a profile: the warning.
-    await user.click(screen.getByRole("combobox", { name: "Policy profile" }));
+    await user.click(screen.getByRole("combobox", { name: "Enforcement point" }));
     await user.click(await screen.findByRole("option", { name: /sr-main/ }));
     expect(screen.getByTestId("starrocks-metadata-tables")).toHaveTextContent(WARNING);
   });

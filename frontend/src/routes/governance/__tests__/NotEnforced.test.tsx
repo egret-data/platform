@@ -12,11 +12,11 @@ afterEach(() => vi.unstubAllGlobals());
 describe("notEnforcedReason", () => {
   it("names each reason in the preview's words, by what the rule is written on", () => {
     expect(notEnforcedReason("no_engine", "tag")).toBe("no engine attached");
-    expect(notEnforcedReason("no_profile", "path")).toBe("its engines have no policy profile");
+    expect(notEnforcedReason("no_profile", "path")).toBe("its engines have no enforcement point");
     expect(notEnforcedReason("no_assignment", "tag")).toBe("this classification is not attached to any data a catalog serves");
     expect(notEnforcedReason("no_assignment", "path")).toBe("no catalog egret knows serves this path");
     expect(notEnforcedReason("no_tag_service", "tag")).toBe(
-      "the engines' policy profile has no tag service, so classification rules are not applied",
+      "the engines' enforcement point has no tag service, so classification rules are not applied",
     );
     expect(notEnforcedReason(null, "tag")).toBe("no engine enforces it");
   });
@@ -72,7 +72,7 @@ describe("useRuleEnforcement", () => {
       ]),
     });
     renderProbe(["b", "a", "b"], me(["policy:read"]));
-    await waitFor(() => expect(screen.getAllByRole("listitem")[1]).toHaveTextContent("a: Not enforced yet — its engines have no policy profile"));
+    await waitFor(() => expect(screen.getAllByRole("listitem")[1]).toHaveTextContent("a: Not enforced yet — its engines have no enforcement point"));
     expect(screen.getAllByRole("listitem")[0]).toHaveTextContent(/^b:\s*$/);
     expect(asked.filter((k) => k.includes("/perm/rules/enforcement"))).toEqual(["GET /perm/rules/enforcement?ids=a,b"]);
   });

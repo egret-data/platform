@@ -26,6 +26,9 @@ pub struct EpKind {
 pub struct BoundEngine {
     pub name: String,
     pub version: Result<String, String>,
+    /// The egret fork patch level `N` of the engine's image (`…-egret.N`), or
+    /// `None` for an official image / Trino. Orthogonal to `version`.
+    pub egret_image_level: Option<u32>,
 }
 
 /// Everything about one enforcement point (today: one profile) the lowering needs.
@@ -38,9 +41,31 @@ pub struct EpInput {
     pub engines: Vec<BoundEngine>,
     /// The version egret's default image runs, used when `engines` is empty.
     pub default_version: Result<String, String>,
+    /// The egret image level egret's default image runs, used when `engines` is empty.
+    pub default_image_level: Option<u32>,
     /// The EP can resolve classifications itself (today: a Trino profile whose
     /// `tagService` names an existing service).
     pub classification_channel: bool,
     /// Catalog scope: registry catalog id → engine-facing name.
     pub catalogs: BTreeMap<Uuid, String>,
+}
+
+impl EpInput {
+    /// The image level the EP's lowering must assume: the most restrictive
+    /// (lowest, and `None` beats any `Some`) across its bound engines, or the
+    /// default image when none is bound. Below a gated capability's minimum,
+    /// the capability lowers to deny (fail-closed).
+    pub fn effective_image_level(&self) -> Option<u32> {
+        if self.engines.is_empty() {
+            return self.default_image_level;
+        }
+        let mut acc = self.engines[0].egret_image_level;
+        for e in &self.engines[1..] {
+            acc = match (acc, e.egret_image_level) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                _ => None, // any unknown level is most restrictive
+            };
+        }
+        acc
+    }
 }

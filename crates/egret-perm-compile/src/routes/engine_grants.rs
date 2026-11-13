@@ -514,7 +514,7 @@ pub(crate) async fn list_engine_capabilities(
     tag = "perm",
     params(("engine_id" = Uuid, Path, description = "Engine id")),
     responses(
-        (status = 200, description = "The engine, its profile, every engine it shares that profile with, its engine grants and the profile's seeded (managed) policies", body = EngineGrantsResponse),
+        (status = 200, description = "The engine, its enforcement point, every engine it shares that enforcement point with, its engine grants and the enforcement point's seeded (managed) policies", body = EngineGrantsResponse),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
@@ -937,12 +937,12 @@ pub(crate) async fn audit_engine_grant_write(
     params(("engine_id" = Uuid, Path, description = "Engine id")),
     request_body = NewEngineGrant,
     responses(
-        (status = 201, description = "Engine grant created AND the engine's profile recompiled, in one transaction", body = EngineGrantWriteResponse),
+        (status = 201, description = "Engine grant created AND the engine's enforcement point recompiled, in one transaction", body = EngineGrantWriteResponse),
         (status = 400, description = "Unknown capability, a capability of another engine type, a value that breaks the catalogue's rules, a catalog the engine does not reach, or empty/invalid/unresolvable principals", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
-        (status = 409, description = "The engine has no profile, is being deleted or is RisingWave; the impersonation target is reserved or an engine admin; the engine already has that grant; or the recompile refused (overlap, ceiling)", body = ErrorBody),
+        (status = 409, description = "The engine has no enforcement point, is being deleted or is RisingWave; the impersonation target is reserved or an engine admin; the engine already has that grant; or the recompile refused (overlap, ceiling)", body = ErrorBody),
     ),
 )]
 pub(crate) async fn create_engine_grant(
@@ -981,7 +981,7 @@ pub(crate) async fn create_engine_grant(
     params(("id" = Uuid, Path, description = "Engine grant id")),
     request_body = NewEngineGrant,
     responses(
-        (status = 200, description = "Engine grant replaced (the engine is fixed) AND its profile recompiled", body = EngineGrantWriteResponse),
+        (status = 200, description = "Engine grant replaced (the engine is fixed) AND its enforcement point recompiled", body = EngineGrantWriteResponse),
         (status = 400, description = "As for create", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
@@ -1203,7 +1203,7 @@ pub struct ExplainCapabilityResponse {
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
-        (status = 409, description = "The profile's engines run a plugin version egret does not model", body = ErrorBody),
+        (status = 409, description = "The enforcement point's engines run a plugin version egret does not model", body = ErrorBody),
     ),
 )]
 pub(crate) async fn explain_capability(

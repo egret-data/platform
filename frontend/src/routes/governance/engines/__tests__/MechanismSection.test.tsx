@@ -23,7 +23,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 const T = { timeout: 3000 };
 const RESTART =
-  "Every engine bound to this profile restarts its coordinator to load the new access control. Queries running on it fail.";
+  "Every engine bound to this enforcement point restarts its coordinator to load the new access control. Queries running on it fail.";
 const EXTERNAL =
   "External engines are not restarted by egret. Their operator must install the new plugin files, and run Trino 483 or later with plugin/opa.";
 const PATCH = "PATCH /policies/services/lake-tr";
@@ -61,7 +61,7 @@ async function chooseOpa(user: ReturnType<typeof userEvent.setup>) {
 const dialog = () => screen.findByRole("alertdialog", {}, T);
 
 const NO_TAG =
-  "This profile has no tag service, so classification rules and clearances do not apply to its engines. Bind a tag service in the profile's settings.";
+  "This enforcement point has no tag service, so classification rules and clearances do not apply to its engines. Bind a tag service in the enforcement point's settings.";
 
 describe("the Ranger | OPA selector (SP2b Task 23)", () => {
   it("shows the stored mechanism and asks before switching", async () => {
@@ -131,7 +131,7 @@ describe("the Ranger | OPA selector (SP2b Task 23)", () => {
               error: "the switch is refused",
               code: "mechanism_refused",
               refusals: [
-                "the profile holds the `all - …` default policies (13); delete them first",
+                "the enforcement point holds the `all - …` default policies (13); delete them first",
                 "OPA is not running on this installation",
               ],
             },
@@ -144,7 +144,7 @@ describe("the Ranger | OPA selector (SP2b Task 23)", () => {
     await chooseOpa(user);
     await user.click(within(await dialog()).getByRole("button", { name: "Switch" }));
     const s = await section();
-    expect(await s.findByText("the profile holds the `all - …` default policies (13); delete them first", {}, T)).toBeVisible();
+    expect(await s.findByText("the enforcement point holds the `all - …` default policies (13); delete them first", {}, T)).toBeVisible();
     expect(s.getByText("OPA is not running on this installation")).toBeVisible();
     expect(s.getByLabelText("Ranger")).toBeChecked();
     expect(s.getByLabelText("OPA")).not.toBeChecked();
@@ -197,7 +197,7 @@ describe("the Ranger | OPA selector (SP2b Task 23)", () => {
         return {
           status: 502,
           body: {
-            error: "the profile is now on opa; engines not reconfigured: trino-b. Send the same PATCH again to retry.",
+            error: "the enforcement point is now on opa; engines not reconfigured: trino-b. Send the same PATCH again to retry.",
             engines_reconfigured: ["trino-a"],
             engines_failed: [{ engine: "trino-b", error: "timeout" }],
             external_engines_unchanged: [],

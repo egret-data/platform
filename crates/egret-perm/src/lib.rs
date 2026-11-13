@@ -37,9 +37,10 @@ pub use engine_grants::{
 };
 pub use engine_images::{
     is_patched_starrocks_fe, plugin_version_for_image, ships_opa_plugin,
-    starrocks_fe_upgrade_target, stored_engine_image, trino_image_ref, unsupported_engine_image,
-    DefaultEngineImages, KnownEngineImage, DEFAULT_ENGINE_IMAGES, DROPPED_ENGINE_IMAGES,
-    FIRST_COMPLETE_STARROCKS_FE, KNOWN_ENGINE_IMAGES, MIN_SUPPORTED_RANGER_PLUGIN,
+    starrocks_egret_image_level, starrocks_fe_upgrade_target, stored_engine_image, trino_image_ref,
+    unsupported_engine_image, DefaultEngineImages, KnownEngineImage, DEFAULT_ENGINE_IMAGES,
+    DROPPED_ENGINE_IMAGES, FIRST_COMPLETE_STARROCKS_FE, KNOWN_ENGINE_IMAGES,
+    MIN_SUPPORTED_RANGER_PLUGIN,
 };
 pub use error::PermError;
 pub use plugin_report::{ranger_plugin_report, PluginReport};

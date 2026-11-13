@@ -203,7 +203,7 @@ function GrantForm({
       <DialogHeader>
         <DialogTitle>{title}</DialogTitle>
         <DialogDescription>
-          {`On ${engine.name}, through profile ${profile}. egret compiles it into the profile; the engine applies it at its next plugin download.`}
+          {`On ${engine.name}, through enforcement point ${profile}. egret compiles it into the enforcement point; the engine applies it at its next plugin download.`}
         </DialogDescription>
       </DialogHeader>
       <form

@@ -123,7 +123,7 @@ function OpaEnginePluginConfig({ engineId, onReload }: { engineId: string; onRel
   if (q.isError && q.error?.status === 409)
     return (
       <Disagreement testId="plugin-config-not-opa" onReload={onReload}>
-        This engine&apos;s profile is no longer on OPA: its mechanism was changed after this page loaded. Reload to
+        This engine&apos;s enforcement point is no longer on OPA: its mechanism was changed after this page loaded. Reload to
         see the plugin configuration for the current mechanism.
       </Disagreement>
     );
@@ -194,8 +194,8 @@ function RangerEnginePluginConfig({ engineId, onOpenSettings, onReload }: { engi
   if (q.isError && q.error?.status === 409)
     return (
       <Disagreement testId="plugin-config-no-profile" onReload={onReload} onOpenSettings={onOpenSettings}>
-        egret reports no policy profile bound to this engine, which differs from this page&apos;s profile list. Reload
-        to check, or bind a profile in Settings.
+        egret reports no enforcement point bound to this engine, which differs from this page&apos;s enforcement point list. Reload
+        to check, or bind an enforcement point in Settings.
       </Disagreement>
     );
   if (q.isError)

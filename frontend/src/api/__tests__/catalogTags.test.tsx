@@ -114,7 +114,7 @@ describe("useUnassignResourceTag", () => {
 
   it("surfaces a 500's own sentence verbatim", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ error: "recompiling the bound policy profiles failed" }), {
+      new Response(JSON.stringify({ error: "recompiling the bound enforcement points failed" }), {
         status: 500,
       }),
     );
@@ -124,7 +124,7 @@ describe("useUnassignResourceTag", () => {
 
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect((result.current.error as ApiError).status).toBe(500);
-    expect(result.current.error?.message).toBe("recompiling the bound policy profiles failed");
+    expect(result.current.error?.message).toBe("recompiling the bound enforcement points failed");
   });
 
   it("reports no error for a removal the backend accepts", async () => {

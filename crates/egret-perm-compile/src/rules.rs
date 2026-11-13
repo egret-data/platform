@@ -159,6 +159,11 @@ pub fn compile_rule(
         r,
         &egret_perm_ir::audience::audience_from_expanded(&r.exempt),
         kind,
+        // `compile_rule` has no engine row (no I/O here): it answers for an
+        // image at the gate's enabling level, the same stance the enforcement
+        // and recompile paths take for fork images. The recompile path lowers
+        // through `lower_rules`, which uses the EP's real effective level.
+        Some(egret_perm_ir::matrix::STARROCKS_MASK_MIN_EGRET_IMAGE),
         tag_service.is_some(),
         resolved.catalog_name,
         &inputs,

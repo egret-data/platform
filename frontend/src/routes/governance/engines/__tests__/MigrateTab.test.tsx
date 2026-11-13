@@ -37,11 +37,11 @@ const CATALOG_BLOCKER =
 const MIGRATED_SENTENCE =
   "This policy was migrated into egret's permission model on 2026-10-10T08:00:00Z by admin@egret.local (1 grant, 0 rules); undo the migration to restore it.";
 const GENERATED_NOTICE =
-  "After this migration every listed profile is compiled by egret's permission model. Its remaining manual policies can still be edited and deleted, but a NEW manual policy can no longer be created in it — add grants or rules instead.";
+  "After this migration every listed enforcement point is compiled by egret's permission model. Its remaining manual policies can still be edited and deleted, but a NEW manual policy can no longer be created in it — add grants or rules instead.";
 const UNDO_NOTICE =
-  "Every profile this migration recompiled stays compiled by egret's permission model after the undo: its manual policies can be edited and deleted, but a NEW manual policy still cannot be created in it.";
+  "Every enforcement point this migration recompiled stays compiled by egret's permission model after the undo: its manual policies can be edited and deleted, but a NEW manual policy still cannot be created in it.";
 const BUDGET_REFUSAL =
-  "proving this migration needs 15000 probe evaluations across 2 profile(s), 3100000 units of work (probe evaluations x the policies each visits), over the limit of 1300000. The work grows with the size of each affected profile's download (the largest serves 340 policies), roughly with its square, not with how many policies this request migrates. The probe set is never cut short — a partial proof would be reported as a whole one — so this migration cannot be proved until those profiles are smaller.";
+  "proving this migration needs 15000 probe evaluations across 2 profile(s), 3100000 units of work (probe evaluations x the policies each visits), over the limit of 1300000. The work grows with the size of each affected enforcement point's download (the largest serves 340 policies), roughly with its square, not with how many policies this request migrates. The probe set is never cut short — a partial proof would be reported as a whole one — so this migration cannot be proved until those enforcement points are smaller.";
 
 const ROWS: ClassifiedPolicy[] = [
   {
@@ -314,15 +314,15 @@ describe("MigrateTab — preview before migrate", () => {
     );
   });
 
-  it("lists every profile the migration changes, the other ones marked, and says the profile becomes generated", async () => {
+  it("lists every enforcement point the migration changes, the other ones marked, and says the enforcement point becomes generated", async () => {
     const user = userEvent.setup();
     renderPage();
     await rowOf("allow-analysts");
     await user.click(screen.getByRole("checkbox", { name: "Select allow-analysts" }));
     await user.click(screen.getByRole("button", { name: "Preview migration" }));
 
-    const panel = await screen.findByRole("region", { name: "Affected profiles" });
-    expect(within(panel).getByText("This migration changes 2 profiles")).toBeInTheDocument();
+    const panel = await screen.findByRole("region", { name: "Affected enforcement points" });
+    expect(within(panel).getByText("This migration changes 2 enforcement points")).toBeInTheDocument();
     const other = within(panel).getByText("trino-analytics").closest("tr") as HTMLElement;
     expect(within(other).getByText("Also changed")).toBeInTheDocument();
     expect(within(other).getByText("Ranger 2.8.0")).toBeInTheDocument();
@@ -355,7 +355,7 @@ describe("MigrateTab — preview before migrate", () => {
     await user.click(screen.getByRole("checkbox", { name: "Select allow-analysts" }));
     await user.click(screen.getByRole("button", { name: "Preview migration" }));
 
-    const panel = await screen.findByRole("region", { name: "Affected profiles" });
+    const panel = await screen.findByRole("region", { name: "Affected enforcement points" });
     const pruned = within(panel).getByText("trino-prod").closest("tr") as HTMLElement;
     expect(within(pruned).getByText("6210")).toBeInTheDocument();
     expect(within(pruned).getByText("of 273240 without pruning")).toBeInTheDocument();
@@ -380,7 +380,7 @@ describe("MigrateTab — preview before migrate", () => {
     await user.click(screen.getByRole("checkbox", { name: "Select allow-analysts" }));
     await user.click(screen.getByRole("button", { name: "Preview migration" }));
 
-    const panel = await screen.findByRole("region", { name: "Affected profiles" });
+    const panel = await screen.findByRole("region", { name: "Affected enforcement points" });
     const self = within(panel).getByText("trino-prod").closest("tr") as HTMLElement;
     expect(
       within(self).getByText("1 compiled grant policy (named when written)"),
@@ -407,7 +407,7 @@ describe("MigrateTab — preview before migrate", () => {
     await user.click(screen.getByRole("checkbox", { name: "Select allow-analysts" }));
     await user.click(screen.getByRole("button", { name: "Preview migration" }));
 
-    const panel = await screen.findByRole("region", { name: "Affected profiles" });
+    const panel = await screen.findByRole("region", { name: "Affected enforcement points" });
     const self = within(panel).getByText("trino-prod").closest("tr") as HTMLElement;
     expect(
       within(self).getByText("1 compiled grant policy, 1 compiled engine grant policy (named when written)"),
@@ -491,7 +491,7 @@ describe("MigrateTab — preview before migrate", () => {
 });
 
 describe("MigrateTab — undo", () => {
-  it("undoes after confirmation and says the profile stays generated", async () => {
+  it("undoes after confirmation and says the enforcement point stays generated", async () => {
     const user = userEvent.setup();
     const undone: UndoResponse = {
       policies: [{ policy_id: 15, policy_name: "old-sales", grants_deleted: 1, rules_deleted: 0 }],
@@ -584,7 +584,7 @@ describe("MigrateTab — in the tab frame", () => {
 });
 
 describe("MigrateTab — on the engine page", () => {
-  it("the Migrate tab classifies the engine's profile by its id", async () => {
+  it("the Migrate tab classifies the engine's enforcement point by its id", async () => {
     serve({
       [`/perm/engines/${E_TR}/grants`]: ok(grantsResponse({ profile: { serviceId: 7, name: "trino-prod" } })),
       "/policies/services": ok([

@@ -3151,7 +3151,7 @@ export const getPermPreviewUrl = () => {
 }
 
 /**
- * Dry-run a grant or rule write: report the policy profiles it would recompile, and the compile error it would fail with, without storing anything. Runs the real write in a transaction that is rolled back, so the answer cannot differ from what the write would do.
+ * Dry-run a grant or rule write: report the enforcement points it would recompile, and the compile error it would fail with, without storing anything. Runs the real write in a transaction that is rolled back, so the answer cannot differ from what the write would do.
  * @summary **The dry run — SP4b D2. It runs the REAL write and rolls it back.**
  */
 export const permPreview = async (previewRequest: PreviewRequest, options?: Parameters<typeof customInstance>[1]): Promise<permPreviewResponse> => {
@@ -3384,7 +3384,7 @@ export const getPermCreateRuleUrl = () => {
 }
 
 /**
- * Create a named mask or row-filter rule and recompile the profiles it affects, in one transaction. A tag-selected rule is installation-wide: it recompiles every Trino and StarRocks profile an engine binds, and a compile failure on any one of them fails this request and rolls the rule back.
+ * Create a named mask or row-filter rule and recompile the enforcement points it affects, in one transaction. A tag-selected rule is installation-wide: it recompiles every Trino and StarRocks profile an engine binds, and a compile failure on any one of them fails this request and rolls the rule back.
  */
 export const permCreateRule = async (newRule: NewRule, options?: Parameters<typeof customInstance>[1]): Promise<permCreateRuleResponse> => {
 

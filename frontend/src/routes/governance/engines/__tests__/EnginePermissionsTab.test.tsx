@@ -160,12 +160,12 @@ describe("Engine permissions: granted (spec §6.1)", () => {
     ).toBeInTheDocument();
   });
 
-  it("says nothing can be granted on an engine with no profile", async () => {
+  it("says nothing can be granted on an engine with no enforcement point", async () => {
     serve(answers({ [`/perm/engines/${E_TR}/grants`]: ok(grantsResponse({ profile: null })) }));
     openArea(`/governance/engines/${E_TR}`, STEWARD);
     expect(
       await screen.findByText(
-        "This engine downloads no policy profile, so nothing can be granted on it. Bind a profile in Control plane.",
+        "This engine downloads no enforcement point, so nothing can be granted on it. Bind an enforcement point in Control plane.",
         {},
         T,
       ),
@@ -208,7 +208,7 @@ describe("Engine permissions: writes", () => {
   });
 
   it("shows the server's refusal", async () => {
-    serve(answers({ "DELETE /perm/engine-grants/g-sess": fail(409, "the profile failed to compile: overlap") }));
+    serve(answers({ "DELETE /perm/engine-grants/g-sess": fail(409, "the enforcement point failed to compile: overlap") }));
     openArea(`/governance/engines/${E_TR}`, STEWARD);
     await userEvent.click(
       await screen.findByRole("button", { name: "Delete engine permission perm-engine-g-sess" }, T),
@@ -216,7 +216,7 @@ describe("Engine permissions: writes", () => {
     const dialog = await screen.findByRole("alertdialog");
     await userEvent.type(within(dialog).getByRole("textbox"), "delete");
     await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
-    await waitFor(() => expect(toast.error).toHaveBeenCalledWith("the profile failed to compile: overlap"));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith("the enforcement point failed to compile: overlap"));
   });
 });
 

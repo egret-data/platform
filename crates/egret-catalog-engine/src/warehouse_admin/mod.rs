@@ -1240,7 +1240,7 @@ struct UndropBody {
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing catalog_registry:update permission", body = ErrorBody),
         (status = 404, description = "No such warehouse/browser or tabular", body = ErrorBody),
-        (status = 409, description = "A view on a catalog whose profile has classified columns: a restored view would bypass the classification hold, so it is refused; re-create it with CREATE VIEW", body = ErrorBody),
+        (status = 409, description = "A view on a catalog whose enforcement point has classified columns: a restored view would bypass the classification hold, so it is refused; re-create it with CREATE VIEW", body = ErrorBody),
         (status = 502, description = "Embedded catalog unreachable", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),

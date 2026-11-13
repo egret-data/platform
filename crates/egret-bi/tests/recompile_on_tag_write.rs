@@ -70,7 +70,8 @@ async fn seed_starrocks_fixture(db: &Db, tag_key: &str) -> Fixture {
     .expect("warehouse");
     let engine_id: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,'starrocks','egret','{}'::jsonb,$2) RETURNING id",
+         VALUES ($1,'starrocks','egret',\
+         '{\"starrocksConfig\":{\"feImage\":\"ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.4\"}}'::jsonb,$2) RETURNING id",
     )
     .bind(unique("wire-eng"))
     .bind(service.id)

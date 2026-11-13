@@ -43,6 +43,12 @@ pub fn starrocks_image_is_pre_3_5(image: Option<&str>) -> bool {
     maj < 3 || (maj == 3 && min < 5)
 }
 
+/// The egret fork patch level `N` in an image tag `…-egret.N`, else `None`
+/// (an official image, a Trino engine, no tag, or an unparseable suffix).
+pub fn starrocks_egret_image_level(image: Option<&str>) -> Option<u32> {
+    egret_perm::starrocks_egret_image_level(image)
+}
+
 /// Resolve the effective delegation mode.
 ///
 /// - `explicit`: the raw wire `delegationMode` (`"jwt"|"impersonate"|"none"`), or
@@ -81,6 +87,31 @@ pub fn resolve_delegation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn egret_image_level_parse() {
+        assert_eq!(
+            starrocks_egret_image_level(Some(
+                "ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.4"
+            )),
+            Some(4)
+        );
+        assert_eq!(
+            starrocks_egret_image_level(Some(
+                "ghcr.io/egret-data/egret-starrocks-allin1:4.1.7-egret.5@sha256:abc"
+            )),
+            Some(5)
+        );
+        assert_eq!(
+            starrocks_egret_image_level(Some("starrocks/allin1-ubuntu:4.1.7")),
+            None
+        ); // official, no fork suffix
+        assert_eq!(
+            starrocks_egret_image_level(Some("starrocks/fe-ubuntu:4.1.7-egret.notanumber")),
+            None
+        );
+        assert_eq!(starrocks_egret_image_level(None), None);
+    }
 
     #[test]
     fn image_pre_3_5_parse() {

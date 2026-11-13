@@ -19,7 +19,7 @@ import { useProfilePolicies } from "@/routes/governance/engines/profilePolicies"
 import { useProfileOverlaps } from "@/routes/governance/engines/tabs/OverlapsTab";
 import { PageContainer } from "@/components/layout/PageContainer";
 
-export const NO_ENGINE_BOUND = "No engine is bound to this profile.";
+export const NO_ENGINE_BOUND = "No engine is bound to this enforcement point.";
 
 /**
  * A profile's page (EP13, EP15): `/governance/engines/profiles/:service`. A
@@ -46,11 +46,11 @@ export default function ProfilePage() {
 
   let body;
   if (profilesQ.isError) {
-    body = <TabError what="list of policy profiles" onRetry={() => void profilesQ.refetch()} />;
+    body = <TabError what="list of enforcement points" onRetry={() => void profilesQ.refetch()} />;
   } else if (dto === undefined) {
     body = <ListSkeleton rows={4} cols={3} />;
   } else if (dto === null) {
-    body = <NotFound sentence={`No policy profile named ${name}.`} />;
+    body = <NotFound sentence={`No enforcement point named ${name}.`} />;
   } else {
     const ctx: TabContext = {
       subject: { profile: name },
@@ -73,7 +73,7 @@ export default function ProfilePage() {
   return (
     <PageContainer className="space-y-6">
       <FrameHeader
-        label="Profile"
+        label="Enforcement point"
         title={name}
         facts={
           dto ? (

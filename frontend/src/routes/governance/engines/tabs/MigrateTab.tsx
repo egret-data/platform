@@ -282,7 +282,7 @@ export function MigrateTab({
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        {`Profile ${service}: who owns each policy, whether it can move into the permission model, and a proof before it does.`}
+        {`Enforcement point ${service}: who owns each policy, whether it can move into the permission model, and a proof before it does.`}
       </p>
       <div className="space-y-4">
         {!canWrite && (
@@ -312,15 +312,15 @@ export function MigrateTab({
           isLoading={serviceId === undefined || classified.isLoading}
           isError={classified.isError}
           error={{ message: readErrorMessage(classified.error) }}
-          errorText="The policies of this profile could not be loaded. Reload the page to try again."
+          errorText="The policies of this enforcement point could not be loaded. Reload the page to try again."
           hasData={rows.length > 0}
           skeletonCols={5}
           empty={
             <EmptyState
               icon={FileText}
               variant="dashed"
-              title="No policies in this profile"
-              description="There is nothing to migrate: this profile holds no policies."
+              title="No policies in this enforcement point"
+              description="There is nothing to migrate: this enforcement point holds no policies."
             />
           }
         >
@@ -627,7 +627,7 @@ function PreviewResult({
         <Alert variant="destructive">
           <AlertDescription>
             {notCommitted
-              ? "Migrating found that the profiles changed since the preview: "
+              ? "Migrating found that the enforcement points changed since the preview: "
               : ""}
             The migration would change who can do what on{" "}
             {plural(preview.disagreements.length, "probe", "probes")}, listed below. Nothing was
@@ -638,7 +638,7 @@ function PreviewResult({
         <p>
           Proved equivalent:{" "}
           <span className="tabular-nums">{preview.probe_evaluations}</span> probe evaluations
-          agreed on every affected profile. Nothing has been written yet.
+          agreed on every affected enforcement point. Nothing has been written yet.
         </p>
       ) : null}
 
@@ -699,15 +699,15 @@ function AffectedProfiles({
 }) {
   const n = profiles.length;
   return (
-    <section aria-label="Affected profiles" className="space-y-2">
+    <section aria-label="Affected enforcement points" className="space-y-2">
       <h3 className="font-medium">
-        This migration changes {n} {n === 1 ? "profile" : "profiles"}
+        This migration changes {n} {n === 1 ? "enforcement point" : "enforcement points"}
       </h3>
       <div className="rounded-md border bg-background">
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Profile</TableHead>
+              <TableHead>Enforcement point</TableHead>
               <TableHead>Plugin versions</TableHead>
               <TableHead className="text-right">Probes</TableHead>
               <TableHead className="text-right">Disagreements</TableHead>
@@ -777,7 +777,7 @@ function Disagreements({ rows }: { rows: WireDisagreement[] }) {
         <Table aria-label="Disagreements">
           <TableHeader>
             <TableRow>
-              <TableHead>Profile</TableHead>
+              <TableHead>Enforcement point</TableHead>
               <TableHead>Plugin version</TableHead>
               <TableHead>Check</TableHead>
               <TableHead>User</TableHead>
@@ -854,7 +854,7 @@ function UndoSummary({ result }: { result: UndoResponse }) {
 function writeErrorMessage(e: unknown, fallback: string): string {
   const status = (e as ApiError | undefined)?.status;
   if (status === 404) {
-    return "The profile, or one of these policies, no longer exists. Reload the page to see the current list.";
+    return "The enforcement point, or one of these policies, no longer exists. Reload the page to see the current list.";
   }
   if (status === 500) {
     return "The server failed while doing this, and nothing was written. Try again; if it keeps failing, check the server log.";
@@ -865,6 +865,6 @@ function writeErrorMessage(e: unknown, fallback: string): string {
 function readErrorMessage(e: ApiError | null | undefined): string {
   if (!e) return "";
   if (e.status === 403) return "This account cannot read policies: it needs the policy:read permission.";
-  if (e.status === 404) return "This profile no longer exists. Go back to Policies and pick another.";
+  if (e.status === 404) return "This enforcement point no longer exists. Go back to Policies and pick another.";
   return e.message;
 }

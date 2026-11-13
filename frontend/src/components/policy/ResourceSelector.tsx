@@ -183,7 +183,7 @@ export function ResourceSelector({
         const levelName = labelFor(name).toLowerCase();
         // The root cannot be left empty (`*` would cover every one this
         // profile serves); any deeper level can, and is saved as `*`.
-        const rootMessage = `Name a ${levelName}. It is required: * here would cover every ${levelName} this profile serves.`;
+        const rootMessage = `Name a ${levelName}. It is required: * here would cover every ${levelName} this enforcement point serves.`;
         const emptyHint =
           index > 0 && empty
             ? `Empty means every ${levelName} — saved as *.${

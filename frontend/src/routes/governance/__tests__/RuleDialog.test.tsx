@@ -349,8 +349,8 @@ describe("RuleDialog — a row filter cannot be scoped to a column (D6)", () => 
   });
 });
 
-describe("RuleDialog — the preview of a tag rule can fan out to every profile (D2)", () => {
-  test("shows more than one profile when several would recompile", async () => {
+describe("RuleDialog — the preview of a tag rule can fan out to every enforcement point (D2)", () => {
+  test("shows more than one enforcement point when several would recompile", async () => {
     const user = userEvent.setup();
     previewMutateAsync.mockResolvedValueOnce(OK_PREVIEW_MANY);
     await openWithNoClassification(user);
@@ -402,7 +402,7 @@ describe("RuleDialog — full-body PATCH and verbatim refusals", () => {
   test("a refusal from save is shown verbatim", async () => {
     const user = userEvent.setup();
     patchMutateAsync.mockRejectedValueOnce(
-      new ApiError(409, "rule 'mask-ssn' would push profile 'trino-eu' to 2001 policies, over its 2000 ceiling"),
+      new ApiError(409, "rule 'mask-ssn' would push enforcement point 'trino-eu' to 2001 policies, over its 2000 ceiling"),
     );
     renderDialog({ entry: { kind: "edit", rule: EXISTING } });
 
@@ -413,7 +413,7 @@ describe("RuleDialog — full-body PATCH and verbatim refusals", () => {
 
     expect(
       await screen.findByText(
-        "rule 'mask-ssn' would push profile 'trino-eu' to 2001 policies, over its 2000 ceiling",
+        "rule 'mask-ssn' would push enforcement point 'trino-eu' to 2001 policies, over its 2000 ceiling",
       ),
     ).toBeInTheDocument();
   });
@@ -474,7 +474,7 @@ describe("RuleDialog — the fan-out's skip list (SP4b-2 finding 4)", () => {
     const skip = {
       source_kind: "rule",
       id: "9c4c1e6f-88bb-4baa-a12d-0b7093e2821d",
-      reason: "profile has no usable `tagService`, so tag rule cannot compile here",
+      reason: "enforcement point has no usable `tagService`, so tag rule cannot compile here",
     };
     previewMutateAsync.mockResolvedValue({
       status: 200,
@@ -943,7 +943,7 @@ describe("RuleDialog — an edit draft never overwrites a newer rule (round 1 re
 const EFFECT = { kind: "mask", catalogs: [{ catalogId: "cat-1", catalogName: "wh", engines: [], notEnforced: "no_engine" }], tableCount: 1, columnCount: 1, enforcedBy: 0, exemptMembers: 2, exemptEveryone: false, alreadyMasked: [], truncated: false };
 
 describe("RuleDialog — the preview speaks in effect (C7)", () => {
-  test("leads with the effect, warns when no engine enforces it, keeps profiles under details", async () => {
+  test("leads with the effect, warns when no engine enforces it, keeps enforcement points under details", async () => {
     const user = userEvent.setup();
     previewMutateAsync.mockResolvedValueOnce({ status: 200, data: { ...OK_PREVIEW_ONE.data, effect: EFFECT } });
     renderDialog({ entry: { kind: "classification", tagKey: "pii_v2", tagName: "PII Data" } });
@@ -1097,22 +1097,22 @@ describe("RuleDialog — a second mask on a column is never silent (C6)", () => 
 
   test("a 409 rule_overlap names both rules and offers no tick", async () => {
     const user = userEvent.setup();
-    previewMutateAsync.mockRejectedValueOnce(new ApiError(409, "recompiling profile …", "rule_overlap", {
-      error: "recompiling profile …", code: "rule_overlap", rules: [{ id: "a", name: "Hash A" }, { id: "b", name: "Null B" }], coordinate: "wh.s.t.email", kind: "mask",
+    previewMutateAsync.mockRejectedValueOnce(new ApiError(409, "recompiling enforcement point …", "rule_overlap", {
+      error: "recompiling enforcement point …", code: "rule_overlap", rules: [{ id: "a", name: "Hash A" }, { id: "b", name: "Null B" }], coordinate: "wh.s.t.email", kind: "mask",
     }));
     renderDialog({ entry: { kind: "classification", tagKey: "pii_v2", tagName: "PII Data" } });
     await user.click(screen.getByRole("button", { name: "Preview" }));
     expect(await screen.findByText(/would make two masks decide wh\.s\.t\.email differently/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Hash A" })).toHaveAttribute("href", "/governance/rules/a");
     expect(screen.getByRole("link", { name: "Null B" })).toHaveAttribute("href", "/governance/rules/b");
-    expect(screen.getByText("Details").closest("details")).toHaveTextContent("recompiling profile …");
+    expect(screen.getByText("Details").closest("details")).toHaveTextContent("recompiling enforcement point …");
     expect(screen.queryByRole("checkbox", { name: /Create anyway/ })).not.toBeInTheDocument();
   });
 
   test("a refused preview of a new rule does not link the rolled-back rule to its own id (KI-289)", async () => {
     const user = userEvent.setup();
-    previewMutateAsync.mockRejectedValueOnce(new ApiError(409, "recompiling profile …", "rule_overlap", {
-      error: "recompiling profile …", code: "rule_overlap", rules: [{ id: "a", name: "Hash A" }, { id: "draft", name: "Null B" }], coordinate: "wh.s.t.email", kind: "mask",
+    previewMutateAsync.mockRejectedValueOnce(new ApiError(409, "recompiling enforcement point …", "rule_overlap", {
+      error: "recompiling enforcement point …", code: "rule_overlap", rules: [{ id: "a", name: "Hash A" }, { id: "draft", name: "Null B" }], coordinate: "wh.s.t.email", kind: "mask",
     }));
     renderDialog({ entry: { kind: "classification", tagKey: "pii_v2", tagName: "PII Data" } });
     await user.clear(screen.getByLabelText(/^Name/));

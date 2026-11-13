@@ -287,7 +287,7 @@ async fn setup() -> Option<Fixture> {
     .expect("warehouse");
     let engine_id: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,'starrocks','egret','{\"starrocksConfig\":{\"feImage\":\"starrocks/fe-ubuntu:4.1.4\"}}'::jsonb,$2) RETURNING id",
+         VALUES ($1,'starrocks','egret','{\"starrocksConfig\":{\"feImage\":\"ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.4\"}}'::jsonb,$2) RETURNING id",
     )
     .bind(unique("perm-routes-eng"))
     .bind(service.id)
@@ -1091,7 +1091,7 @@ async fn extra_profile(f: &Fixture, tag: &str) -> (i64, Uuid) {
     .expect("warehouse");
     let engine_id: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,'starrocks','egret','{\"starrocksConfig\":{\"feImage\":\"starrocks/fe-ubuntu:4.1.4\"}}'::jsonb,$2) RETURNING id",
+         VALUES ($1,'starrocks','egret','{\"starrocksConfig\":{\"feImage\":\"ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.4\"}}'::jsonb,$2) RETURNING id",
     )
     .bind(unique(tag))
     .bind(service.id)
@@ -1190,7 +1190,7 @@ async fn two_profile_catalog(f: &Fixture, tag: &str) -> (i64, i64, Uuid) {
     .expect("trino engine");
     let starrocks_engine_id: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,'starrocks','egret','{\"starrocksConfig\":{\"feImage\":\"starrocks/fe-ubuntu:4.1.4\"}}'::jsonb,$2) RETURNING id",
+         VALUES ($1,'starrocks','egret','{\"starrocksConfig\":{\"feImage\":\"ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.4\"}}'::jsonb,$2) RETURNING id",
     )
     .bind(unique(&format!("{tag}_sr_eng")))
     .bind(starrocks_service.id)
@@ -2932,8 +2932,8 @@ async fn explain_resolves_a_provisioned_engines_plugin_through_its_exact_image()
 }
 
 /// Two engines on one profile that resolve to different plugins cannot share
-/// one verdict. The fixture's bound engine runs 2.8.0; a second one on 4.1.6
-/// runs 2.9.0. Both are modelled, so the refusal is the disagreement itself.
+/// one verdict. The fixture's bound engine (egret's fork image) runs 2.9.0; a
+/// second one on official 4.1.4 runs 2.8.0. Both are modelled, so the refusal is the disagreement itself.
 #[tokio::test]
 async fn a_profile_whose_engines_run_different_plugins_is_refused() {
     let Some(f) = setup().await else { return };
@@ -2941,7 +2941,7 @@ async fn a_profile_whose_engines_run_different_plugins_is_refused() {
     sqlx::query(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
          VALUES ($1,'starrocks','egret', \
-                 '{\"starrocksConfig\":{\"feImage\":\"starrocks/fe-ubuntu:4.1.6\"}}'::jsonb,$2)",
+                 '{\"starrocksConfig\":{\"feImage\":\"starrocks/fe-ubuntu:4.1.4\"}}'::jsonb,$2)",
     )
     .bind(unique("perm-routes-eng2"))
     .bind(f.service_id)

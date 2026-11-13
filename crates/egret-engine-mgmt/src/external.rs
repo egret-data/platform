@@ -368,12 +368,12 @@ pub(crate) async fn detach_declared_and_recompile(
     params(("id" = Uuid, Path, description = "Engine id")),
     request_body = UpdateExternalEngine,
     responses(
-        (status = 200, description = "Updated. Egret's row only: nothing is sent to the engine, a provisioner or Kubernetes. The policy profile it was or is bound to were recompiled in the same transaction. `rangerPluginVersionModelled` is as at registration", body = EngineDto),
-        (status = 400, description = "The engine is not external; nothing to update; invalid host, port or plugin version; or `authzServiceId` naming no profile, one of the wrong type, or a Trino profile with no usable tag service", body = ErrorBody),
+        (status = 200, description = "Updated. Egret's row only: nothing is sent to the engine, a provisioner or Kubernetes. The enforcement point it was or is bound to were recompiled in the same transaction. `rangerPluginVersionModelled` is as at registration", body = EngineDto),
+        (status = 400, description = "The engine is not external; nothing to update; invalid host, port or plugin version; or `authzServiceId` naming no enforcement point, one of the wrong type, or a Trino enforcement point with no usable tag service", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
-        (status = 409, description = "The engine changed concurrently (e.g. a delete); the profile is bound to another engine; or the change would create an order-ambiguous mask or row-filter pair (`code: rule_overlap`). Nothing was written", body = ErrorBody),
+        (status = 409, description = "The engine changed concurrently (e.g. a delete); the enforcement point is bound to another engine; or the change would create an order-ambiguous mask or row-filter pair (`code: rule_overlap`). Nothing was written", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -485,12 +485,12 @@ async fn update_external_engine(
     tag = "control-plane-engines",
     request_body = RegisterExternalEngine,
     responses(
-        (status = 201, description = "Registered. Nothing was provisioned: egret holds a row (`origin: external`), optionally bound to a policy profile, with the given catalogs declared attached (`applyStatus: declared`). The bound profile was recompiled in the same transaction, so its download carries the catalogs' grants at once. `rangerPluginVersionModelled` is false when egret's evaluator has not been read against the (type, declared version) pair (only the pairs in `egret_perm::MODELLED_RANGER_PLUGINS` are): a migration to that profile is then refused, never evaluated at a guessed version. `rangerCredential` is the engine's Ranger plugin credential, committed with the row and **shown only here**: no other response carries the password", body = RegisteredExternalEngineDto),
-        (status = 400, description = "Invalid name, type, host, port or plugin version; a catalog the engine cannot read; `authzServiceId` naming no policy profile or a Trino profile with no usable tag service; or Kubernetes-free registration was malformed", body = ErrorBody),
+        (status = 201, description = "Registered. Nothing was provisioned: egret holds a row (`origin: external`), optionally bound to an enforcement point, with the given catalogs declared attached (`applyStatus: declared`). The bound enforcement point was recompiled in the same transaction, so its download carries the catalogs' grants at once. `rangerPluginVersionModelled` is false when egret's evaluator has not been read against the (type, declared version) pair (only the pairs in `egret_perm::MODELLED_RANGER_PLUGINS` are): a migration to that enforcement point is then refused, never evaluated at a guessed version. `rangerCredential` is the engine's Ranger plugin credential, committed with the row and **shown only here**: no other response carries the password", body = RegisteredExternalEngineDto),
+        (status = 400, description = "Invalid name, type, host, port or plugin version; a catalog the engine cannot read; `authzServiceId` naming no enforcement point or a Trino enforcement point with no usable tag service; or Kubernetes-free registration was malformed", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:create permission", body = ErrorBody),
         (status = 404, description = "A catalog id in `catalogs` names no registry catalog (the message names it); nothing was written", body = ErrorBody),
-        (status = 409, description = "The name is taken, the profile has another type or is bound to another engine, or binding it would create an order-ambiguous mask or row-filter pair (`code: rule_overlap`); nothing was written", body = ErrorBody),
+        (status = 409, description = "The name is taken, the enforcement point has another type or is bound to another engine, or binding it would create an order-ambiguous mask or row-filter pair (`code: rule_overlap`); nothing was written", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -846,7 +846,7 @@ fn plugin_config_judgements(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:read permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
-        (status = 409, description = "The engine is provisioned (egret mounts these files itself), or it is bound to no policy profile (bind one first)", body = ErrorBody),
+        (status = 409, description = "The engine is provisioned (egret mounts these files itself), or it is bound to no enforcement point (bind one first)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]

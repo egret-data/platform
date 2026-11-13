@@ -97,6 +97,9 @@ pub(crate) fn render(
             s.source
         )));
     };
+    if let Effect::Withhold { privileges } = &s.effect {
+        return render_image_deny(s, privileges, *rule_id, service, e);
+    }
     let target = match &s.effect {
         Effect::Mask { .. } => PolicyTarget::Mask,
         Effect::RowFilter { .. } => PolicyTarget::RowFilter,
@@ -160,6 +163,77 @@ pub(crate) fn render(
             "ranger::rules::render handed a {d:?} statement on {t:?}"
         ))),
     }
+}
+
+/// A rule the image gate denies (`egret_perm_ir::lower::rules::is_image_denied`):
+/// an access policy denying `privileges` on what the rule's mask / row filter
+/// would have covered, to everyone except the rule's exempt USERS, named like
+/// the rule's own policy (`perm-rule-{id}...`) so it is attributed to the rule.
+/// An exempt group cannot be excepted from a deny (D7: a Ranger group item
+/// matches nobody here), so its members are denied too: the fail-closed side.
+fn render_image_deny(
+    s: &Statement,
+    privileges: &[egret_perm_ir::statement::Privilege],
+    rule_id: uuid::Uuid,
+    service: &str,
+    e: EngineType,
+) -> Result<Value, CompileError> {
+    let named = |l: &Level| match l {
+        Level::Named(v) => Some(v.clone()),
+        Level::Unnamed => None,
+    };
+    let (cleared, _unexpressible_groups) = member_buckets(&s.audience.except)?;
+    let accesses = super::grants::read_write_accesses(privileges, e, "ranger::rules::render")?;
+    let (name, resources) = match (&s.derivation, &s.target) {
+        (Derivation::AsDeclared, Target::Path(path)) => {
+            let scope = Scope {
+                catalog_id: path.catalog_id.unwrap_or_default(),
+                schema: named(&path.schema),
+                table: named(&path.table),
+                column: named(&path.column),
+            };
+            (
+                format!("{COMPILER_RULE_PREFIX}{rule_id}"),
+                scope_to_resources(&scope, &path.catalog, e, PolicyTarget::Access),
+            )
+        }
+        (Derivation::ExpandedFromClassification, Target::Path(path)) => {
+            let (Some(schema), Some(table)) = (named(&path.schema), named(&path.table)) else {
+                return Err(CompileError::Db(format!(
+                    "ranger::rules::render handed a deny with an unnamed level ({path:?})"
+                )));
+            };
+            let column = named(&path.column)
+                .unwrap_or_else(|| super::withhold::WHOLE_TABLE_COLUMN.to_string());
+            let whole_table = path.column == Level::Unnamed;
+            let col = TaggedColumn {
+                catalog: path.catalog.clone(),
+                schema,
+                table,
+                column,
+            };
+            let name = if whole_table {
+                table_row_filter_name(rule_id, &col.catalog, &col.schema, &col.table)
+            } else {
+                format!(
+                    "{COMPILER_RULE_PREFIX}{rule_id}-{}.{}.{}.{}",
+                    col.catalog, col.schema, col.table, col.column
+                )
+            };
+            (name, column_resources(e, &col, PolicyTarget::Access))
+        }
+        (d, t) => {
+            return Err(CompileError::Db(format!(
+                "ranger::rules::render handed a {d:?} deny on {t:?}"
+            )))
+        }
+    };
+    let input =
+        super::withhold::clearance_input(name, service.to_string(), resources, &accesses, cleared);
+    Ok(stamp_service_type(
+        egret_policy::admin::access_to_ranger_json(&input),
+        e,
+    ))
 }
 
 /// The Ranger `resources` map for one fully-resolved column (StarRocks tag
@@ -451,8 +525,8 @@ mod tests {
     #[test]
     fn matrix_mask_types_equal_the_service_def() {
         use egret_perm_ir::matrix::{
-            support_for_kind, Capability, EpKind, Mechanism, Support, STARROCKS_MASK_TYPES,
-            TRINO_MASK_TYPES,
+            support_for_kind, Capability, EpKind, Mechanism, Support,
+            STARROCKS_MASK_MIN_EGRET_IMAGE, STARROCKS_MASK_TYPES, TRINO_MASK_TYPES,
         };
         for e in [EngineType::Trino, EngineType::StarRocks] {
             let k = EpKind {
@@ -463,7 +537,13 @@ mod tests {
             assert!(!declared.is_empty(), "{e:?} declares no mask type");
             for t in &declared {
                 assert_eq!(
-                    support_for_kind(k, None, true, &Capability::MaskType(t.clone())),
+                    support_for_kind(
+                        k,
+                        None,
+                        Some(STARROCKS_MASK_MIN_EGRET_IMAGE),
+                        true,
+                        &Capability::MaskType(t.clone())
+                    ),
                     Support::Native,
                     "{e:?} {t}"
                 );
@@ -477,6 +557,7 @@ mod tests {
                 support_for_kind(
                     k,
                     None,
+                    Some(STARROCKS_MASK_MIN_EGRET_IMAGE),
                     true,
                     &Capability::MaskType("MASK_NOT_A_TYPE".into())
                 ),

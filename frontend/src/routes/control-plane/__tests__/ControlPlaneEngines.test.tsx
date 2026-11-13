@@ -96,7 +96,7 @@ describe("ControlPlaneEngines", () => {
     const loose = within(await row("loose-sr"));
     expect(loose.getByText("Not governed")).toHaveAttribute(
       "title",
-      "Not governed: this engine is bound to no policy profile, so egret's grants, masks and row filters do not reach it. Bind it to a StarRocks profile in its settings.",
+      "Not governed: this engine is bound to no enforcement point, so egret's grants, masks and row filters do not reach it. Bind it to a StarRocks enforcement point in its settings.",
     );
     expect(loose.queryByText("Security upgrade needed")).not.toBeInTheDocument();
 

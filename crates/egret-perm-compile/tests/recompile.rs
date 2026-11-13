@@ -92,10 +92,14 @@ async fn seed_starrocks_engine_with_tag_rule(db: &Db) -> Fixture {
     .expect("warehouse");
     let engine_id: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,'starrocks','egret','{}'::jsonb,$2) RETURNING id",
+         VALUES ($1,'starrocks','egret',jsonb_build_object('starrocksConfig', jsonb_build_object('feImage', $3::text)),$2) RETURNING id",
     )
     .bind(unique("recompile-eng"))
     .bind(service.id)
+    // egret's own fork image: a StarRocks engine enforces masks and row
+    // filters only from egret.3 (SP3a image gate); an unpinned `{}` spec has
+    // no known image level and would have its masks skipped.
+    .bind(egret_perm::DEFAULT_ENGINE_IMAGES.starrocks_fe_image)
     .fetch_one(pool)
     .await
     .expect("engine");
@@ -1105,10 +1109,14 @@ async fn seed_starrocks_engine_no_grants_yet(db: &Db) -> EmptyFixture {
     .expect("warehouse");
     let engine_id: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,'starrocks','egret','{}'::jsonb,$2) RETURNING id",
+         VALUES ($1,'starrocks','egret',jsonb_build_object('starrocksConfig', jsonb_build_object('feImage', $3::text)),$2) RETURNING id",
     )
     .bind(unique("origin-eng"))
     .bind(service.id)
+    // egret's own fork image: a StarRocks engine enforces masks and row
+    // filters only from egret.3 (SP3a image gate); an unpinned `{}` spec has
+    // no known image level and would have its masks skipped.
+    .bind(egret_perm::DEFAULT_ENGINE_IMAGES.starrocks_fe_image)
     .fetch_one(pool)
     .await
     .expect("engine");

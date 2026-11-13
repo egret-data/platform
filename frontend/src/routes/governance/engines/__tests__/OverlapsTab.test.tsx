@@ -73,7 +73,7 @@ const open = () => openArea(`/governance/engines/${E_TR}?tab=overlaps`, READER);
 const pairs = () => screen.findAllByRole("listitem", { name: /on catalog=/ }, T);
 
 describe("the Overlaps tab (spec §6.3)", () => {
-  it("lists only the pairs of this profile, each with both rules, the shared object and why", async () => {
+  it("lists only the pairs of this enforcement point, each with both rules, the shared object and why", async () => {
     serve(
       answers(
         ok([
@@ -90,7 +90,7 @@ describe("the Overlaps tab (spec §6.3)", () => {
     // The intro must not promise that every stored pair is harmless: a pair
     // with a column-less mask blocks writes once the mask renders `column: *`.
     expect(screen.getByText(/one mask names no column/)).toHaveTextContent(
-      /blocks every write that recompiles this profile, and that mask stays inert, until the pair is broken/,
+      /blocks every write that recompiles this enforcement point, and that mask stays inert, until the pair is broken/,
     );
     expect(screen.queryByText(/so they block nothing/)).not.toBeInTheDocument();
 
@@ -141,7 +141,7 @@ describe("the Overlaps tab (spec §6.3)", () => {
   it("an empty report says so", async () => {
     serve(answers(ok([overlap({ serviceName: "other-profile" })])));
     open();
-    expect(await screen.findByText("No overlapping rules on this profile.", {}, T)).toBeInTheDocument();
+    expect(await screen.findByText("No overlapping rules on this enforcement point.", {}, T)).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /Overlaps/ })).toHaveTextContent("Overlaps0");
   });
 
@@ -152,7 +152,7 @@ describe("the Overlaps tab (spec §6.3)", () => {
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });
 
-  it("an unbound profile's page lists its pairs and counts them on the tab", async () => {
+  it("an unbound enforcement point's page lists its pairs and counts them on the tab", async () => {
     serve({
       "/policies/services": ok([profileDto("loose", { id: 5, origin: "manual" })]),
       "/policies?service=loose": ok([policy(1, "operator", { service: "loose" })]),

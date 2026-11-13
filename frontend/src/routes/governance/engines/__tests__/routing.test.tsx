@@ -27,18 +27,18 @@ describe("the Engine & policy area's routes", () => {
     expect(currentUrl()).toBe("/governance/engines/7f1c0e8a-0000-4000-8000-000000000001?tab=plugin");
   }, 15_000);
 
-  it("opens the profile page at /governance/engines/profiles/:service: the static segment wins over :id", async () => {
+  it("opens the enforcement point page at /governance/engines/profiles/:service: the static segment wins over :id", async () => {
     openApp("/governance/engines/profiles/p1", POLICY_READER);
     expect(await screen.findByRole("heading", { level: 1, name: "p1" }, TIMEOUT)).toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Engine" })).not.toBeInTheDocument();
   }, 15_000);
 
-  it("keeps a profile named with a / in its segment", async () => {
+  it("keeps an enforcement point named with a / in its segment", async () => {
     openApp("/governance/engines/profiles/a%2Fb", POLICY_READER);
     expect(await screen.findByRole("heading", { level: 1, name: "a/b" }, TIMEOUT)).toBeInTheDocument();
   }, 15_000);
 
-  it("sends /governance/engines/profiles, which names no profile, to the index", async () => {
+  it("sends /governance/engines/profiles, which names no enforcement point, to the index", async () => {
     openApp("/governance/engines/profiles", POLICY_READER);
     expect(await screen.findByRole("heading", { level: 1, name: "Engine & policy" }, TIMEOUT)).toBeInTheDocument();
     expect(currentUrl()).toBe("/governance/engines");
@@ -47,7 +47,7 @@ describe("the Engine & policy area's routes", () => {
   it.each([
     ["/governance/engines/profiles/p2/advanced/policies/rowfilter/new"],
     ["/governance/engines/profiles/p2/advanced/policies/access/9"],
-  ])("opens an unbound profile's editor at %s (Q2: the kind stays in the URL)", async (url) => {
+  ])("opens an unbound enforcement point's editor at %s (Q2: the kind stays in the URL)", async (url) => {
     openApp(url, POLICY_READER);
     // The editor's way back is the profile page's Advanced tab (spec §6.6).
     expect(await screen.findByRole("link", { name: "p2" }, TIMEOUT)).toHaveAttribute(
@@ -60,7 +60,7 @@ describe("the Engine & policy area's routes", () => {
   it.each([
     ["/governance/engines/e1/advanced/policies/access/new"],
     ["/governance/engines/e1/advanced/policies/masking/42"],
-  ])("opens an engine's editor route at %s, which first asks the engine for its profile", async (url) => {
+  ])("opens an engine's editor route at %s, which first asks the engine for its enforcement point", async (url) => {
     const fetchMock = openApp(url, POLICY_READER);
     // Every read but the profile list rejects here: the route stops at the engine's error.
     expect(await screen.findByText("The engine could not be loaded. Retry, or reload the page.", {}, TIMEOUT)).toBeInTheDocument();
@@ -79,7 +79,7 @@ describe("the Engine & policy area's routes", () => {
     expect(currentUrl()).toBe(url);
   }, 15_000);
 
-  it("refuses an old profile URL to a user without policy:read, without a profile lookup", async () => {
+  it("refuses an old enforcement point URL to a user without policy:read, without an enforcement point lookup", async () => {
     const fetchMock = openApp("/governance/policies/p1", TAG_ONLY);
     expect(await screen.findByText("403 — Forbidden", {}, TIMEOUT)).toBeInTheDocument();
     await waitFor(() => expect(currentUrl()).toBe("/governance/policies/p1"));

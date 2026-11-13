@@ -715,7 +715,7 @@ async fn assign_resource_tag(
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing catalog_registry:update permission", body = egret_core::http::ErrorBody),
         (status = 404, description = "`code` is `warehouse_not_found` or `tag_not_found`, as for the assignment", body = egret_core::http::ErrorBody),
-        (status = 409, description = "A rule overlap that the unassignment does not remove: a profile it recompiles already holds two mask (or two row-filter) rules that decide one request differently. Same body as the assignment's 409. Or `code: \"profile_set_changed\"` with `retryable: true`: an engine was bound, or a policy profile created, while this write ran, so a profile it recompiles was not locked first (#792); nothing was written, and the same request succeeds when retried", body = egret_core::http::ErrorBody),
+        (status = 409, description = "A rule overlap that the unassignment does not remove: an enforcement point it recompiles already holds two mask (or two row-filter) rules that decide one request differently. Same body as the assignment's 409. Or `code: \"profile_set_changed\"` with `retryable: true`: an engine was bound, or an enforcement point created, while this write ran, so an enforcement point it recompiles was not locked first (#792); nothing was written, and the same request succeeds when retried", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]

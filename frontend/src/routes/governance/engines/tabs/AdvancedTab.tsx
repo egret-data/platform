@@ -31,7 +31,7 @@ import { TagServiceSection } from "@/routes/governance/engines/tabs/TagServiceSe
 export const ADVANCED_WARNING =
   "Manual policies are outside egret's model: egret does not recompile them, does not check overlaps with grants, and Data and People pages will mark them manual. Prefer Engine permissions or grants on Data.";
 export const GENERATED_REFUSES =
-  "egret compiles this profile, so new manual policies are refused. Existing ones can still be edited, enabled, disabled and deleted.";
+  "egret compiles this enforcement point, so new manual policies are refused. Existing ones can still be edited, enabled, disabled and deleted.";
 export const SEED_EXPLAINED =
   "Adds egret's default Trino set (group admin: all access). Existing policies are not changed.";
 
@@ -41,7 +41,7 @@ const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one :
 
 /** What a seed answered, said on the tab (KI-135): the rows land on Policies, not in this tab's list. */
 export function seedResultSentence(created: number): string {
-  if (created === 0) return "No default policy was added: the profile already has policies.";
+  if (created === 0) return "No default policy was added: the enforcement point already has policies.";
   return `Added ${plural(created, "default policy", "default policies")}. They are egret-seeded, so they are listed on the Policies tab, not here.`;
 }
 
@@ -89,7 +89,7 @@ export function AdvancedTab({ ctx }: { ctx: TabContext }) {
         setSeedResult(seedResultSentence(n));
         toast.success(
           n === 0
-            ? "No default policy was added: the profile already has policies."
+            ? "No default policy was added: the enforcement point already has policies."
             : n === 1
               ? "Added 1 default policy."
               : `Added ${n} default policies.`,
@@ -113,7 +113,7 @@ export function AdvancedTab({ ctx }: { ctx: TabContext }) {
     return (
       <div className="space-y-4">
         {warning}
-        <EmptyState icon={FileText} title="This engine downloads no policy profile, so it has no policy." />
+        <EmptyState icon={FileText} title="This engine downloads no enforcement point, so it has no policy." />
       </div>
     );
   }
@@ -130,14 +130,14 @@ export function AdvancedTab({ ctx }: { ctx: TabContext }) {
 
   let list;
   if (policies.isError) {
-    list = <TabError what="policies of this profile" onRetry={policies.refetch} />;
+    list = <TabError what="policies of this enforcement point" onRetry={policies.refetch} />;
   } else if (policies.isLoading) {
     list = <ListSkeleton rows={3} cols={4} />;
   } else if (handWritten.length === 0) {
     list = (
       <EmptyState
         icon={FileText}
-        title="This profile has no manual policy."
+        title="This enforcement point has no manual policy."
         description={otherPoliciesSentence(policies.rows)}
       />
     );

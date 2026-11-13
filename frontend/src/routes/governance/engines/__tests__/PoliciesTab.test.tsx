@@ -66,7 +66,7 @@ const open = (query = "", as = OPERATOR) => openArea(`/governance/engines/${E_TR
 const table = () => screen.findByRole("table", {}, T);
 const rowOf = (name: string) => screen.getByRole("row", { name: new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) });
 
-describe("the Policies tab lists the profile and its tag service (spec §6.2)", () => {
+describe("the Policies tab lists the enforcement point and its tag service (spec §6.2)", () => {
   it("reads both services and lists every row", async () => {
     const { asked } = serve(answers());
     open();
@@ -97,7 +97,7 @@ describe("the Policies tab lists the profile and its tag service (spec §6.2)", 
     expect(screen.getByText("1 policy: 0 egret-compiled · 0 egret-seeded · 1 manual")).toBeInTheDocument();
   });
 
-  it("offers the Tag type only when the profile has a tag service", async () => {
+  it("offers the Tag type only when the enforcement point has a tag service", async () => {
     serve(answers());
     const first = open();
     await table();
@@ -148,7 +148,7 @@ describe("filters live in the URL", () => {
     expect(screen.queryByText(`perm-grant-${G}`)).not.toBeInTheDocument();
   });
 
-  it("?type=masking keeps the profile's masking rows; ?type=tag keeps the tag service's rows", async () => {
+  it("?type=masking keeps the enforcement point's masking rows; ?type=tag keeps the tag service's rows", async () => {
     serve(answers());
     const first = open("&type=masking");
     await table();
@@ -197,10 +197,10 @@ describe("filters live in the URL", () => {
     expect(await table()).toBeInTheDocument();
   });
 
-  it("an empty profile says so", async () => {
+  it("an empty enforcement point says so", async () => {
     serve(answers({ "/policies?service=lake-tr": ok([]), "/policies?service=lake-tr-tag": ok([]) }));
     open();
-    expect(await screen.findByText("This profile has no policy.", {}, T)).toBeInTheDocument();
+    expect(await screen.findByText("This enforcement point has no policy.", {}, T)).toBeInTheDocument();
   });
 
   it("a failing read shows the error and Retry", async () => {
@@ -293,7 +293,7 @@ describe("controls follow the row's source", () => {
     await waitFor(() => expect(asked).toContain("DELETE /policies/10"));
   });
 
-  it("a tag-service row edits through the main profile's editor with its own type", async () => {
+  it("a tag-service row edits through the main enforcement point's editor with its own type", async () => {
     serve(answers());
     open("", WRITER);
     await table();
@@ -315,11 +315,11 @@ describe("controls follow the row's source", () => {
   });
 
   it("a refused toggle shows the server's reason", async () => {
-    serve(answers({ "PUT /policies/10/enabled": fail(409, "the profile is busy") }));
+    serve(answers({ "PUT /policies/10/enabled": fail(409, "the enforcement point is busy") }));
     open("", WRITER);
     await table();
     await userEvent.click(within(rowOf("zeta manual")).getByRole("switch", { name: "Enable zeta manual" }));
-    expect(await screen.findByText("the profile is busy", {}, T)).toBeInTheDocument();
+    expect(await screen.findByText("the enforcement point is busy", {}, T)).toBeInTheDocument();
   });
 
   // Ported from ProfileDetailPage.test.tsx: a 403 names the permission, never echoes "forbidden".

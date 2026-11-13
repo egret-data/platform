@@ -252,9 +252,9 @@ describe("Who can read? — a group on a catalog nothing enforces (finding 4)", 
     const state = within(view).getByTestId("no-profile-state");
     expect(state).toHaveTextContent("Not enforced");
     expect(state).toHaveTextContent(
-      "No engine with a policy profile serves this catalog, so nothing is enforced here (this is not a refusal). Attach an engine to govern it.",
+      "No engine with an enforcement point serves this catalog, so nothing is enforced here (this is not a refusal). Attach an engine to govern it.",
     );
-    expect(within(view).queryByText("Members allowed by every profile")).not.toBeInTheDocument();
+    expect(within(view).queryByText("Members allowed by every enforcement point")).not.toBeInTheDocument();
     expect(within(view).getByRole("region", { name: "Not asked" })).toHaveTextContent("Member SSO");
   });
 
@@ -276,12 +276,12 @@ describe("Who can read? — a group on a catalog nothing enforces (finding 4)", 
     await user.click(within(dialog).getByRole("button", { name: "Explain" }));
 
     const view = await within(dialog).findByTestId("members-explain");
-    expect(within(view).queryByText("Members allowed by every profile")).not.toBeInTheDocument();
+    expect(within(view).queryByText("Members allowed by every enforcement point")).not.toBeInTheDocument();
     expect(view).toHaveTextContent("No member could be asked: none has a username yet, so there is no answer here.");
     expect(within(view).getByRole("region", { name: "Not asked" })).toHaveTextContent("Member SSO");
   });
 
-  it("speaks of engines, not of policy profiles, in the subtitles (N18)", async () => {
+  it("speaks of engines, not of enforcement points, in the subtitles (N18)", async () => {
     serve({
       explainPrincipal: ok({
         membersTotal: 1,
@@ -295,14 +295,14 @@ describe("Who can read? — a group on a catalog nothing enforces (finding 4)", 
     open();
     const dialog = screen.getByRole("dialog", { name: "Who can read?" });
     expect(dialog).toHaveTextContent("as each engine that serves its catalog would decide it");
-    expect(dialog).not.toHaveTextContent(/per policy profile/);
+    expect(dialog).not.toHaveTextContent(/per enforcement point/);
     await pickKind(user, dialog, "Group");
     await user.type(within(dialog).getByRole("combobox", { name: "Group" }), "data-team");
     await user.click(within(dialog).getByRole("button", { name: "Explain" }));
 
     const view = await within(dialog).findByTestId("members-explain");
     expect(view).toHaveTextContent("Each member's own answer, as each engine that serves this catalog would decide it.");
-    expect(view).not.toHaveTextContent(/per policy profile/);
+    expect(view).not.toHaveTextContent(/per enforcement point/);
   });
 });
 

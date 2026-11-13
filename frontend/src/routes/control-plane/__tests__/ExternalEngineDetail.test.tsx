@@ -83,7 +83,7 @@ function renderDetail(me = ADMIN, entry = "/control-plane/engines/x1") {
 }
 
 describe("EngineDetail for an external engine", () => {
-  test("shows the External chip, the address, the version and the bound profile, and offers no provisioning tabs or actions", async () => {
+  test("shows the External chip, the address, the version and the bound enforcement point, and offers no provisioning tabs or actions", async () => {
     stubFetch(routes());
     renderDetail();
 
@@ -125,7 +125,7 @@ describe("EngineDetail for an external engine", () => {
     expect(screen.queryByRole("link", { name: "Open in Engine & policy" })).not.toBeInTheDocument();
   });
 
-  test("an unmodelled (type, version) pair says migrations into the bound profile will be refused", async () => {
+  test("an unmodelled (type, version) pair says migrations into the bound enforcement point will be refused", async () => {
     stubFetch(
       routes({
         "GET /api/control-plane/engines/x1": {
@@ -135,7 +135,7 @@ describe("EngineDetail for an external engine", () => {
     );
     renderDetail();
     const note = await screen.findByTestId("unmodelled-note");
-    expect(note).toHaveTextContent(/migrations into the bound profile will be refused/i);
+    expect(note).toHaveTextContent(/migrations into the bound enforcement point will be refused/i);
   });
 
   test("a modelled pair shows no such warning", async () => {
@@ -211,7 +211,7 @@ describe("EngineDetail for an external engine", () => {
     expect(document.body.textContent).not.toContain("tok-must-never-render");
   });
 
-  test("Plugin config on an OPA profile asks the OPA route, not the Ranger one, and shows the files, warnings and what to supply", async () => {
+  test("Plugin config on an OPA enforcement point asks the OPA route, not the Ranger one, and shows the files, warnings and what to supply", async () => {
     const calls = stubFetch(
       routes({
         "GET /api/control-plane/policies/services": {
@@ -242,7 +242,7 @@ describe("EngineDetail for an external engine", () => {
     expect(document.body.textContent).not.toContain("real-secret-must-never-render");
   });
 
-  test("an OPA route 409 says the profile is no longer on OPA and Reload re-reads the profiles", async () => {
+  test("an OPA route 409 says the enforcement point is no longer on OPA and Reload re-reads the enforcement points", async () => {
     const calls = stubFetch(
       routes({
         "GET /api/control-plane/policies/services": {
@@ -250,7 +250,7 @@ describe("EngineDetail for an external engine", () => {
         },
         "GET /api/control-plane/engines/x1/opa-plugin-config": {
           status: 409,
-          body: { error: "conflict: profile is not on OPA" },
+          body: { error: "conflict: enforcement point is not on OPA" },
         },
       }),
     );
@@ -259,7 +259,7 @@ describe("EngineDetail for an external engine", () => {
     const note = await screen.findByTestId("plugin-config-not-opa");
     expect(note).toHaveTextContent(/no longer on OPA/);
     expect(note).toHaveTextContent(/Reload/);
-    expect(document.body.textContent).not.toContain("No policy profile is bound");
+    expect(document.body.textContent).not.toContain("No enforcement point is bound");
     expect(document.body.textContent).not.toContain("conflict:");
     const before = calls.filter((c) => c.path.endsWith("/policies/services")).length;
     await user.click(screen.getByRole("button", { name: "Reload" }));
@@ -273,27 +273,27 @@ describe("EngineDetail for an external engine", () => {
       routes({
         "GET /api/control-plane/engines/x1/ranger-plugin-config": {
           status: 409,
-          body: { error: "conflict: engine legacy-trino is bound to no policy profile" },
+          body: { error: "conflict: engine legacy-trino is bound to no enforcement point" },
         },
       }),
     );
     renderDetail(ADMIN, "/control-plane/engines/x1?tab=plugin-config");
     const note = await screen.findByTestId("plugin-config-no-profile");
-    expect(note).toHaveTextContent(/differs from this page's profile list/);
-    expect(note).toHaveTextContent(/Reload to check, or bind a profile in Settings/);
+    expect(note).toHaveTextContent(/differs from this page's enforcement point list/);
+    expect(note).toHaveTextContent(/Reload to check, or bind an enforcement point in Settings/);
     expect(document.body.textContent).not.toContain("conflict:");
   });
 
-  test("Plugin config with the profiles unreadable shows the error and requests neither plugin route", async () => {
+  test("Plugin config with the enforcement points unreadable shows the error and requests neither plugin route", async () => {
     const calls = stubFetch(
       routes({
-        "GET /api/control-plane/policies/services": { status: 500, body: { error: "the profile store is down" } },
+        "GET /api/control-plane/policies/services": { status: 500, body: { error: "the enforcement point store is down" } },
         "GET /api/control-plane/engines/x1/opa-plugin-config": { body: { files: [], warnings: [], adminMustSupply: [] } },
       }),
     );
     renderDetail(ADMIN, "/control-plane/engines/x1?tab=plugin-config");
     const err = await screen.findByTestId("plugin-config-profiles-error");
-    expect(err).toHaveTextContent(/Could not read the policy profiles/);
+    expect(err).toHaveTextContent(/Could not read the enforcement points/);
     expect(err).toHaveTextContent(/Try again/);
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
     expect(calls.some((c) => c.path.endsWith("-plugin-config"))).toBe(false);
@@ -308,11 +308,11 @@ describe("EngineDetail for an external engine", () => {
     expect(screen.getByRole("tab", { name: "Settings" })).toHaveAttribute("aria-selected", "true");
   });
 
-  test("Plugin config with the engine's profile missing from the list says so and requests neither plugin route", async () => {
+  test("Plugin config with the engine's enforcement point missing from the list says so and requests neither plugin route", async () => {
     const calls = stubFetch(routes({ "GET /api/control-plane/policies/services": { body: PROFILES } }));
     renderDetail(ADMIN, "/control-plane/engines/x1?tab=plugin-config");
     const note = await screen.findByTestId("plugin-config-no-profile");
-    expect(note).toHaveTextContent(/No policy profile is bound to this engine yet, or this account cannot see/);
+    expect(note).toHaveTextContent(/No enforcement point is bound to this engine yet, or this account cannot see/);
     expect(screen.getByRole("button", { name: "Open Settings" })).toBeInTheDocument();
     expect(calls.some((c) => c.path.endsWith("-plugin-config"))).toBe(false);
   });
@@ -348,16 +348,16 @@ describe("EngineDetail for an external engine", () => {
     expect(calls.find((c) => c.method === "PATCH")?.body).toEqual({ port: 9090 });
   });
 
-  test("Settings: unbinding the profile sends authzServiceId null", async () => {
+  test("Settings: unbinding the enforcement point sends authzServiceId null", async () => {
     const calls = stubFetch(
       routes({ "PATCH /api/control-plane/engines/x1/external": { body: EXTERNAL_ENGINE } }),
     );
     const user = userEvent.setup();
     renderDetail(ADMIN, "/control-plane/engines/x1?tab=settings");
-    const picker = await screen.findByRole("combobox", { name: "Policy profile" });
+    const picker = await screen.findByRole("combobox", { name: "Enforcement point" });
     await waitFor(() => expect(picker).toHaveTextContent("trino-main"));
     await user.click(picker);
-    await user.click(await screen.findByRole("option", { name: "No profile" }));
+    await user.click(await screen.findByRole("option", { name: "No enforcement point" }));
     await user.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(calls.some((c) => c.method === "PATCH")).toBe(true));
     expect(calls.find((c) => c.method === "PATCH")?.body).toEqual({ authzServiceId: null });
@@ -369,7 +369,7 @@ describe("EngineDetail for an external engine", () => {
         "PATCH /api/control-plane/engines/x1/external": {
           status: 409,
           body: {
-            error: "Recompiling profile trino-main would emit an order-ambiguous pair.",
+            error: "Recompiling enforcement point trino-main would emit an order-ambiguous pair.",
             code: "rule_overlap",
             kind: "row_filter",
             coordinate: "lake.sales.orders",
@@ -389,7 +389,7 @@ describe("EngineDetail for an external engine", () => {
     await user.click(screen.getByRole("button", { name: "Save changes" }));
 
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("Recompiling profile trino-main would emit an order-ambiguous pair.");
+    expect(alert).toHaveTextContent("Recompiling enforcement point trino-main would emit an order-ambiguous pair.");
     expect(within(alert).getByText("perm-filter-3")).toBeInTheDocument();
     expect(within(alert).getByText("analyst-filter")).toBeInTheDocument();
     expect(alert).toHaveTextContent("lake.sales.orders");

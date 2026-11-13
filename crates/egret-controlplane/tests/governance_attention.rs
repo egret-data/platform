@@ -1419,15 +1419,22 @@ async fn a_boot_pass_refusal_names_and_links_the_two_rules() {
     let Some(f) = setup().await else { return };
     let pool = &f.db.pool;
     let sid = profile(&f, "k_sr_tie", "starrocks").await;
-    let eng = engine(
-        &f,
-        "k_sr_eng",
-        "starrocks",
-        "provisioned",
-        "running",
-        Some(sid),
+    // StarRocks on the egret fork image (level 4 ≥ the mask/row-filter gate):
+    // the engine supports native column masks and row filters, so the two tied
+    // row-filter rules below actually lower onto the engine and the compile
+    // fails on the tie. The shared `engine()` helper seeds no fork image, which
+    // would gate the row filters out and hide the conflict this test is about.
+    let eng: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, status, authz_service_id) \
+         VALUES ($1, 'starrocks', 'egret', \
+         '{\"starrocksConfig\":{\"feImage\":\"ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.4\"}}'::jsonb, \
+         'running', $2) RETURNING id",
     )
-    .await;
+    .bind("k_sr_eng")
+    .bind(sid)
+    .fetch_one(pool)
+    .await
+    .expect("engine");
     let ws: Uuid =
         sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1, 'T') RETURNING id")
             .bind(unique("k-ws"))

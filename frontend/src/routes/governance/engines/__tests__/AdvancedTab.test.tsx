@@ -30,7 +30,7 @@ const WRITER = me(["policy:read", "policy:create", "policy:update", "policy:dele
 const WARNING =
   "Manual policies are outside egret's model: egret does not recompile them, does not check overlaps with grants, and Data and People pages will mark them manual. Prefer Engine permissions or grants on Data.";
 const GENERATED_SENTENCE =
-  "egret compiles this profile, so new manual policies are refused. Existing ones can still be edited, enabled, disabled and deleted.";
+  "egret compiles this enforcement point, so new manual policies are refused. Existing ones can still be edited, enabled, disabled and deleted.";
 
 /** Not pre-sorted; one row of each source, the hand-written ones in the profile and in its tag service. */
 const ROWS = [
@@ -92,14 +92,14 @@ describe("the Advanced tab (spec §6.6, EP2, EP9)", () => {
     expect(within(list).getByText("Disabled")).toBeInTheDocument();
   });
 
-  it("says when the profile has no manual policy", async () => {
+  it("says when the enforcement point has no manual policy", async () => {
     serve(answers({}, { "/policies?service=lake-tr": ok([policy(3, "compiler")]) }));
     open();
-    expect(await within(await panel()).findByText("This profile has no manual policy.", {}, T)).toBeInTheDocument();
+    expect(await within(await panel()).findByText("This enforcement point has no manual policy.", {}, T)).toBeInTheDocument();
     expect(within(await panel()).queryByText(/hand-written/i)).not.toBeInTheDocument();
   });
 
-  it("offers Create policy on a manual profile: Access, Masking, Row filter, as links to the editor", async () => {
+  it("offers Create policy on a manual enforcement point: Access, Masking, Row filter, as links to the editor", async () => {
     serve(answers());
     open();
     const p = await panel();
@@ -112,7 +112,7 @@ describe("the Advanced tab (spec §6.6, EP2, EP9)", () => {
     );
   });
 
-  it("adds By tag when the profile has a tag service", async () => {
+  it("adds By tag when the enforcement point has a tag service", async () => {
     serve(answers({ tagService: "lake-tr-tag" }));
     open();
     const p = await panel();
@@ -132,7 +132,7 @@ describe("the Advanced tab (spec §6.6, EP2, EP9)", () => {
     expect(within(p).queryByRole("button", { name: "Create policy" })).toBeNull();
   });
 
-  it("on a generated profile offers neither Create nor Seed, and says why", async () => {
+  it("on a generated enforcement point offers neither Create nor Seed, and says why", async () => {
     serve(answers({ origin: "generated" }));
     open();
     const p = await panel();
@@ -141,7 +141,7 @@ describe("the Advanced tab (spec §6.6, EP2, EP9)", () => {
     expect(within(p).queryByRole("button", { name: "Seed default policies" })).toBeNull();
   });
 
-  it("offers Seed default policies on a manual Trino profile with policy:seed, explains it, and reports the count", async () => {
+  it("offers Seed default policies on a manual Trino enforcement point with policy:seed, explains it, and reports the count", async () => {
     const served = serve(
       answers({}, { "POST /policies/services/lake-tr/seed-defaults": ok({ created: 3 }) }),
     );
@@ -176,7 +176,7 @@ describe("the Advanced tab (spec §6.6, EP2, EP9)", () => {
     expect(within(p).queryByRole("button", { name: "Seed default policies" })).toBeNull();
   });
 
-  it("offers no Seed on a StarRocks profile", async () => {
+  it("offers no Seed on a StarRocks enforcement point", async () => {
     serve({
       [`/perm/engines/${E_SR}/grants`]: ok(
         grantsResponse({
@@ -203,11 +203,11 @@ describe("the Advanced tab (spec §6.6, EP2, EP9)", () => {
   });
 
   it("shows the seed refusal in the server's words", async () => {
-    serve(answers({}, { "POST /policies/services/lake-tr/seed-defaults": fail(409, "profile lake-tr is compiled") }));
+    serve(answers({}, { "POST /policies/services/lake-tr/seed-defaults": fail(409, "enforcement point lake-tr is compiled") }));
     open();
     const p = await panel();
     await userEvent.click(await within(p).findByRole("button", { name: "Seed default policies" }, T));
-    expect(await within(p).findByText("profile lake-tr is compiled", {}, T)).toBeInTheDocument();
+    expect(await within(p).findByText("enforcement point lake-tr is compiled", {}, T)).toBeInTheDocument();
   });
 
   it("shows the policy list's error with Retry", async () => {
@@ -239,7 +239,7 @@ const STORED = {
 };
 
 describe("the policy editor under the Advanced tab (spec §2, Q2)", () => {
-  it("edits a policy of an engine's profile, saves, and returns to the Advanced tab", async () => {
+  it("edits a policy of an engine's enforcement point, saves, and returns to the Advanced tab", async () => {
     const served = serve(
       answers({}, {
         "/policies/service-def/lake-tr": ok(SERVICE_DEF),
@@ -255,7 +255,7 @@ describe("the policy editor under the Advanced tab (spec §2, Q2)", () => {
     await waitFor(() => expect(where()).toBe(`/governance/engines/${E_TR}?tab=advanced`));
   });
 
-  it("opens a new masking policy for an unbound profile and goes back to its Advanced tab", async () => {
+  it("opens a new masking policy for an unbound enforcement point and goes back to its Advanced tab", async () => {
     serve({
       "/policies/services": ok([profileDto("loose", { id: 5, origin: "manual" })]),
       "/policies/service-def/loose": ok(SERVICE_DEF),
@@ -274,11 +274,11 @@ describe("the policy editor under the Advanced tab (spec §2, Q2)", () => {
     expect(await screen.findByLabelText("Tag", {}, T)).toBeInTheDocument();
   });
 
-  it("says so when the engine has no profile to write a policy in", async () => {
+  it("says so when the engine has no enforcement point to write a policy in", async () => {
     serve({ [`/perm/engines/${E_TR}/grants`]: ok(grantsResponse({ profile: null })) });
     openArea(`/governance/engines/${E_TR}/advanced/policies/access/new`, WRITER);
     expect(
-      await screen.findByText("This engine downloads no policy profile, so it has no policy to edit.", {}, T),
+      await screen.findByText("This engine downloads no enforcement point, so it has no policy to edit.", {}, T),
     ).toBeInTheDocument();
   });
 
@@ -308,7 +308,7 @@ describe("Seed default policies says what happened (KI-135)", () => {
     serve(a);
     open();
     const p = await panel();
-    expect(await within(p).findByText("This profile has no manual policy.", {}, T)).toBeInTheDocument();
+    expect(await within(p).findByText("This enforcement point has no manual policy.", {}, T)).toBeInTheDocument();
     a["/policies?service=lake-tr"] = ok(Array.from({ length: 13 }, (_, i) => policy(20 + i, "infra")));
     await userEvent.click(within(p).getByRole("button", { name: "Seed default policies" }));
     const status = await within(p).findByRole("status", {}, T);
@@ -326,7 +326,7 @@ describe("Seed default policies says what happened (KI-135)", () => {
     const p = await panel();
     await userEvent.click(await within(p).findByRole("button", { name: "Seed default policies" }, T));
     expect(await within(p).findByRole("status", {}, T)).toHaveTextContent(
-      "No default policy was added: the profile already has policies.",
+      "No default policy was added: the enforcement point already has policies.",
     );
   });
 
@@ -358,7 +358,7 @@ describe("the tag service section (#786)", () => {
   });
   const openLoose = (as = WRITER) => openArea("/governance/engines/profiles/loose?tab=advanced", as);
 
-  it("sets it from the existing tag profiles only, and says the engine can now be bound", async () => {
+  it("sets it from the existing tag enforcement points only, and says the engine can now be bound", async () => {
     const a = base();
     a["PUT /policies/services/loose/tag-service"] = ok({ name: "loose", tagService: "loose_tag" });
     const served = serve(a);
@@ -390,7 +390,7 @@ describe("the tag service section (#786)", () => {
     expect(await within(section).findByText(/must name a `tag` profile/, {}, T)).toBeInTheDocument();
   });
 
-  it("is read-only on an engine's profile, and says why", async () => {
+  it("is read-only on an engine's enforcement point, and says why", async () => {
     serve(answers({ tagService: "lake-tr-tag" }));
     open();
     const section = await within(await panel()).findByRole("region", { name: "Tag service" }, T);
@@ -406,7 +406,7 @@ describe("the tag service section (#786)", () => {
     expect(within(section).queryByRole("combobox")).toBeNull();
   });
 
-  it("is not shown on a StarRocks profile", async () => {
+  it("is not shown on a StarRocks enforcement point", async () => {
     serve(base([profileDto("loose", { id: 5, type: "starrocks", origin: "manual" })]));
     openLoose();
     const p = await panel();

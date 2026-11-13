@@ -285,7 +285,7 @@ describe("a principal's Permissions tab", () => {
     );
     expect(
       within(await screen.findByRole("alertdialog")).getByText(
-        "This grant covers every table matching “ord*”, not one object. It is permanently removed and every profile it reaches recompiles.",
+        "This grant covers every table matching “ord*”, not one object. It is permanently removed and every enforcement point it reaches recompiles.",
       ),
     ).toBeInTheDocument();
   });

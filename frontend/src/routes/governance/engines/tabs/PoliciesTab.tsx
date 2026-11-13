@@ -32,7 +32,7 @@ import type { PolicySource } from "@/routes/governance/engines/profilePolicies";
 import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
 import { cn } from "@/lib/utils";
 
-export const NO_POLICY = "This profile has no policy.";
+export const NO_POLICY = "This enforcement point has no policy.";
 export const NO_MATCH = "No policy matches these filters.";
 export const COMPILED_SENTENCE = "Compiled by egret; change its source";
 export const SEEDED_SENTENCE = "Managed by egret (engine delegation, admin access or query limits).";
@@ -128,7 +128,7 @@ export function PoliciesTab({ ctx }: { ctx: TabContext }) {
   });
 
   if (!profile) {
-    return <EmptyState icon={FileText} title="This engine downloads no policy profile, so it has no policy." />;
+    return <EmptyState icon={FileText} title="This engine downloads no enforcement point, so it has no policy." />;
   }
 
   const sourceParam = search.get("source");
@@ -367,7 +367,7 @@ export function PoliciesTab({ ctx }: { ctx: TabContext }) {
           if (!open) setDeleting(null);
         }}
         title={deleting ? `Delete "${deleting.name}"?` : "Delete policy?"}
-        description="The manual policy is removed from the profile; the engine drops it at its next plugin download."
+        description="The manual policy is removed from the enforcement point; the engine drops it at its next plugin download."
         onConfirm={() => {
           if (deleting) del.mutate({ id: deleting.id });
           setDeleting(null);

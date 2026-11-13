@@ -12,7 +12,7 @@ const CHECKS: Record<string, string> = {
   plugin_silent: "engine liveness and plugin drift",
   plugin_behind: "engine liveness and plugin drift",
   plugin_quiet: "engine liveness and plugin drift",
-  compile_failed: "profile compiles",
+  compile_failed: "enforcement point compiles",
   engine_failed: "engine status",
   engine_auth_failing: "engine Ranger credentials",
   rule_overlaps: "rule overlaps",

@@ -56,7 +56,7 @@ describe("Needs attention", () => {
             // Out of order on purpose: the page groups, it does not trust the order.
             finding({ kind: "tags_without_clearance", severity: "info", sentence: "2 classifications have no clearance: they gate nothing." }),
             finding({ kind: "engine_failed", severity: "critical", sentence: "1 engine egret provisions failed." }),
-            finding({ kind: "compile_failed", severity: "critical", sentence: "The last compile of 1 profile failed." }),
+            finding({ kind: "compile_failed", severity: "critical", sentence: "The last compile of 1 enforcement point failed." }),
           ],
         }),
       ),
@@ -112,7 +112,7 @@ describe("Needs attention", () => {
     ["plugin_behind", "plugin"],
     ["policy_warnings", "policies"],
     ["rule_overlaps", "overlaps"],
-  ])("links a %s profile sample and Open to ?tab=%s", async (kind, tab) => {
+  ])("links a %s enforcement point sample and Open to ?tab=%s", async (kind, tab) => {
     serve(
       ok(
         response({
@@ -135,7 +135,7 @@ describe("Needs attention", () => {
     expect(within(row).getByRole("link", { name: "p/1" })).toHaveAttribute("href", want);
   });
 
-  it("puts no tab on a profile link of a finding kind fixed elsewhere", async () => {
+  it("puts no tab on an enforcement point link of a finding kind fixed elsewhere", async () => {
     serve(
       ok(
         response({

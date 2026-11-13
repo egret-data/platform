@@ -95,7 +95,14 @@ pub struct Entry {
     answer: Answer,
     /// The code the row was derived from.
     pub evidence: &'static str,
+    /// The minimum egret image level this row needs; `None` = any image.
+    min_egret_image: Option<u32>,
 }
+
+/// The StarRocks fork image level at which a column mask and a row filter are
+/// enforced through every protocol (patches 0002/0003/0004). Below it, egret
+/// cannot rely on the engine to apply them, so the matrix lowers them to deny.
+pub const STARROCKS_MASK_MIN_EGRET_IMAGE: u32 = 3;
 
 const TRINO: EpKind = EpKind {
     engine: EngineType::Trino,
@@ -146,6 +153,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::ClassificationSelector(RuleEffectKind::Mask)),
         answer: Answer::NativeWithChannel,
         evidence: "rules.rs:497-500 MissingTagService; trigger.rs:1173-1191; effect.rs:405-409",
+        min_egret_image: None,
     },
     // M2
     Entry {
@@ -155,6 +163,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::ClassificationSelector(RuleEffectKind::RowFilter)),
         answer: Answer::NativeWithChannel,
         evidence: "rules.rs:497-500; effect.rs:405-409",
+        min_egret_image: None,
     },
     // M3
     Entry {
@@ -164,6 +173,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::ClassificationRowFilterOnColumnAttachment),
         answer: Answer::Lowered(LoweringKind::ExpandColumnOnlyTablesPerTable),
         evidence: "rules.rs:502-536 (KI-287)",
+        min_egret_image: None,
     },
     // M4
     Entry {
@@ -173,6 +183,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::ClassificationSelector(RuleEffectKind::Mask)),
         answer: Answer::Lowered(LoweringKind::ExpandPerColumn),
         evidence: "rules.rs:539-621",
+        min_egret_image: Some(STARROCKS_MASK_MIN_EGRET_IMAGE),
     },
     // M5
     Entry {
@@ -182,6 +193,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::ClassificationSelector(RuleEffectKind::RowFilter)),
         answer: Answer::Lowered(LoweringKind::ExpandPerTable),
         evidence: "rules.rs:567-585",
+        min_egret_image: Some(STARROCKS_MASK_MIN_EGRET_IMAGE),
     },
     // M6
     Entry {
@@ -191,6 +203,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::WithholdByClassification),
         answer: Answer::NativeWithChannel,
         evidence: "clearance.rs:334-345",
+        min_egret_image: None,
     },
     // M7
     Entry {
@@ -200,6 +213,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::WithholdByClassification),
         answer: Answer::Lowered(LoweringKind::ExpandPerColumn),
         evidence: "clearance.rs:350-363, 420-605",
+        min_egret_image: None,
     },
     // M8
     Entry {
@@ -209,6 +223,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::GroupPrincipal),
         answer: Answer::Lowered(LoweringKind::ExpandToUsers),
         evidence: "members.rs:690-692, 937-1013 (D7)",
+        min_egret_image: None,
     },
     Entry {
         kind: STARROCKS,
@@ -217,6 +232,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::GroupPrincipal),
         answer: Answer::Lowered(LoweringKind::ExpandToUsers),
         evidence: "members.rs:690-692, 937-1013 (D7)",
+        min_egret_image: None,
     },
     // M9
     Entry {
@@ -226,6 +242,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::RolePrincipal),
         answer: Answer::Lowered(LoweringKind::ExpandToUsers),
         evidence: "members.rs:174, 964-980 (D0)",
+        min_egret_image: None,
     },
     Entry {
         kind: STARROCKS,
@@ -234,6 +251,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::RolePrincipal),
         answer: Answer::Lowered(LoweringKind::ExpandToUsers),
         evidence: "members.rs:174, 964-980 (D0)",
+        min_egret_image: None,
     },
     // M10
     Entry {
@@ -243,6 +261,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::WithholdExemptionByGroup),
         answer: Answer::Missing(ReasonCode::WithholdExemptionByGroupOnly),
         evidence: "clearance.rs:289-299; people.rs:414,430,1023,1037,1234,1242,1322",
+        min_egret_image: None,
     },
     Entry {
         kind: STARROCKS,
@@ -251,6 +270,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::WithholdExemptionByGroup),
         answer: Answer::Missing(ReasonCode::WithholdExemptionByGroupOnly),
         evidence: "clearance.rs:289-299; people.rs:414,430,1023,1037,1234,1242,1322",
+        min_egret_image: None,
     },
     // M11
     Entry {
@@ -260,6 +280,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::WithholdPrivilege(Privilege::Read)),
         answer: Answer::Native,
         evidence: "clearance.rs:1143-1146",
+        min_egret_image: None,
     },
     Entry {
         kind: TRINO,
@@ -268,6 +289,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::WithholdPrivilege(Privilege::Write)),
         answer: Answer::Native,
         evidence: "clearance.rs:1143-1146",
+        min_egret_image: None,
     },
     // M12 (no Write row: missing, "not measured")
     Entry {
@@ -277,6 +299,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::WithholdPrivilege(Privilege::Read)),
         answer: Answer::Native,
         evidence: "clearance.rs:1123-1158",
+        min_egret_image: None,
     },
     // M13
     Entry {
@@ -286,6 +309,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::WithholdThroughView),
         answer: Answer::Lowered(LoweringKind::ViewGuardMask),
         evidence: "clearance_mask.rs:425-460; trigger.rs:609-629",
+        min_egret_image: None,
     },
     // M15
     Entry {
@@ -295,6 +319,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::WithholdThroughMaterializedView),
         answer: Answer::Lowered(LoweringKind::DenyCreateMaterializedView),
         evidence: "clearance.rs:971-1039",
+        min_egret_image: None,
     },
     // M16
     Entry {
@@ -304,6 +329,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::MaskCoversHiddenColumns),
         answer: Answer::Lowered(LoweringKind::DenyHiddenColumns),
         evidence: "trigger.rs:631-669; clearance.rs:654-800",
+        min_egret_image: None,
     },
     // M17
     Entry {
@@ -313,6 +339,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::PoliciesReachMetadataTables),
         answer: Answer::Lowered(LoweringKind::DenyMetadataTables),
         evidence: "trigger.rs:671-742; metadata_tables.rs",
+        min_egret_image: None,
     },
     // M18
     Entry {
@@ -322,6 +349,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::EngineAsksAboutMetadataTables),
         answer: Answer::Missing(ReasonCode::NotMeasured),
         evidence: "metadata_tables.rs:39-43; StarRocksMetadataTablesWarning.tsx",
+        min_egret_image: None,
     },
     // M19
     Entry {
@@ -331,6 +359,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::MaskTypes(TRINO_MASK_TYPES),
         answer: Answer::Native,
         evidence: "rules.rs:825-865",
+        min_egret_image: None,
     },
     Entry {
         kind: STARROCKS,
@@ -339,6 +368,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::MaskTypes(STARROCKS_MASK_TYPES),
         answer: Answer::Native,
         evidence: "rules.rs:825-865",
+        min_egret_image: Some(STARROCKS_MASK_MIN_EGRET_IMAGE),
     },
     // SP2b: one OPA_TRINO row per TRINO row (I5).
     Entry {
@@ -348,6 +378,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::ClassificationSelector(RuleEffectKind::Mask)),
         answer: Answer::NativeWithChannel,
         evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (tag mask rules, asked by GetColumnMask)",
+        min_egret_image: None,
     },
     Entry {
         kind: OPA_TRINO,
@@ -356,6 +387,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::ClassificationSelector(RuleEffectKind::RowFilter)),
         answer: Answer::NativeWithChannel,
         evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (tag row-filter rules, asked by GetRowFilters)",
+        min_egret_image: None,
     },
     Entry {
         kind: OPA_TRINO,
@@ -364,6 +396,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::ClassificationRowFilterOnColumnAttachment),
         answer: Answer::Lowered(LoweringKind::ExpandColumnOnlyTablesPerTable),
         evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (tag row filters over column-only classified tables, asked by GetRowFilters)",
+        min_egret_image: None,
     },
     Entry {
         kind: OPA_TRINO,
@@ -372,6 +405,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::WithholdByClassification),
         answer: Answer::NativeWithChannel,
         evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (role-gated classifications, asked by the data and reach operations)",
+        min_egret_image: None,
     },
     Entry {
         kind: OPA_TRINO,
@@ -380,6 +414,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::GroupPrincipal),
         answer: Answer::Lowered(LoweringKind::ExpandToUsers),
         evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (grants to a group and to public)",
+        min_egret_image: None,
     },
     Entry {
         kind: OPA_TRINO,
@@ -388,6 +423,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::RolePrincipal),
         answer: Answer::Lowered(LoweringKind::ExpandToUsers),
         evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (grants to a platform role)",
+        min_egret_image: None,
     },
     Entry {
         kind: OPA_TRINO,
@@ -396,6 +432,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::WithholdExemptionByGroup),
         answer: Answer::Missing(ReasonCode::WithholdExemptionByGroupOnly),
         evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (group-only clearance gates, which neither side withholds)",
+        min_egret_image: None,
     },
     Entry {
         kind: OPA_TRINO,
@@ -404,6 +441,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::WithholdPrivilege(Privilege::Read)),
         answer: Answer::Native,
         evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (role-gated classifications, asked by SelectFromColumns and reach)",
+        min_egret_image: None,
     },
     Entry {
         kind: OPA_TRINO,
@@ -412,6 +450,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::WithholdPrivilege(Privilege::Write)),
         answer: Answer::Native,
         evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (role-gated classifications, asked by the write operations)",
+        min_egret_image: None,
     },
     Entry {
         kind: OPA_TRINO,
@@ -420,6 +459,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::PoliciesReachMetadataTables),
         answer: Answer::Lowered(LoweringKind::DenyMetadataTables),
         evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (questions on t3$files under restrictions on t3)",
+        min_egret_image: None,
     },
     Entry {
         kind: OPA_TRINO,
@@ -428,6 +468,7 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::MaskTypes(TRINO_MASK_TYPES),
         answer: Answer::Native,
         evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (MASK, MASK_HASH, MASK_NULL, MASK_NONE and CUSTOM masks, asked by GetColumnMask)",
+        min_egret_image: None,
     },
 ];
 
@@ -453,6 +494,7 @@ fn key_matches(k: Key, cap: &Capability) -> bool {
 pub fn support_for_kind(
     kind: EpKind,
     version: Option<&str>,
+    image_level: Option<u32>,
     classification_channel: bool,
     cap: &Capability,
 ) -> Support {
@@ -461,6 +503,11 @@ pub fn support_for_kind(
     }) else {
         return Support::Missing(ReasonCode::NotMeasured);
     };
+    if let Some(min) = e.min_egret_image {
+        if image_level.is_none_or(|lvl| lvl < min) {
+            return Support::Missing(ReasonCode::NotMeasured);
+        }
+    }
     match e.answer {
         Answer::Native => Support::Native,
         Answer::NativeWithChannel if classification_channel => Support::Native,
@@ -470,28 +517,41 @@ pub fn support_for_kind(
     }
 }
 
-/// Every bound engine's version must support `cap` the same way; with none
-/// bound, egret's default image decides (as
-/// [`crate::lower::withhold::view_guard_versions`] does).
+fn restrictiveness(s: &Support) -> u8 {
+    match s {
+        Support::Native => 0,
+        Support::Lowered(_) => 1,
+        Support::Missing(_) => 2,
+    }
+}
+
+/// The most restrictive answer across the EP's bound engines (Native <
+/// Lowered < Missing); with none bound, egret's default image decides (as
+/// [`crate::lower::withhold::view_guard_versions`] does). Two different
+/// answers at the same tier stay a disagreement.
 pub fn support(ep: &EpInput, cap: &Capability) -> Support {
-    let versions: Vec<Option<&str>> = if ep.engines.is_empty() {
-        vec![ep.default_version.as_deref().ok()]
+    let pairs: Vec<(Option<&str>, Option<u32>)> = if ep.engines.is_empty() {
+        vec![(ep.default_version.as_deref().ok(), ep.default_image_level)]
     } else {
         ep.engines
             .iter()
-            .map(|e| e.version.as_deref().ok())
+            .map(|e| (e.version.as_deref().ok(), e.egret_image_level))
             .collect()
     };
-    let mut answer = None;
-    for v in versions {
-        let s = support_for_kind(ep.kind, v, ep.classification_channel, cap);
-        match answer {
-            None => answer = Some(s),
-            Some(a) if a == s => {}
-            Some(_) => return Support::Missing(ReasonCode::VersionsDisagree),
-        }
+    let mut chosen: Option<Support> = None;
+    for (v, lvl) in pairs {
+        let s = support_for_kind(ep.kind, v, lvl, ep.classification_channel, cap);
+        chosen = Some(match chosen {
+            None => s,
+            Some(c) => match restrictiveness(&s).cmp(&restrictiveness(&c)) {
+                std::cmp::Ordering::Greater => s,
+                std::cmp::Ordering::Less => c,
+                std::cmp::Ordering::Equal if s == c => c,
+                std::cmp::Ordering::Equal => Support::Missing(ReasonCode::VersionsDisagree),
+            },
+        });
     }
-    answer.unwrap_or(Support::Missing(ReasonCode::NotMeasured))
+    chosen.unwrap_or(Support::Missing(ReasonCode::NotMeasured))
 }
 
 #[cfg(test)]
@@ -515,9 +575,12 @@ mod tests {
     #[test]
     fn a_trino_classification_mask_needs_the_channel() {
         let cap = Capability::ClassificationSelector(RuleEffectKind::Mask);
-        assert_eq!(support_for_kind(trino(), None, true, &cap), Support::Native);
         assert_eq!(
-            support_for_kind(trino(), None, false, &cap),
+            support_for_kind(trino(), None, None, true, &cap),
+            Support::Native
+        );
+        assert_eq!(
+            support_for_kind(trino(), None, None, false, &cap),
             Support::Missing(ReasonCode::NoClassificationChannel)
         );
     }
@@ -528,6 +591,7 @@ mod tests {
             support_for_kind(
                 starrocks(),
                 None,
+                Some(STARROCKS_MASK_MIN_EGRET_IMAGE),
                 false,
                 &Capability::ClassificationSelector(RuleEffectKind::Mask)
             ),
@@ -537,6 +601,7 @@ mod tests {
             support_for_kind(
                 starrocks(),
                 None,
+                Some(STARROCKS_MASK_MIN_EGRET_IMAGE),
                 false,
                 &Capability::ClassificationSelector(RuleEffectKind::RowFilter)
             ),
@@ -549,12 +614,12 @@ mod tests {
         let cap = Capability::WithholdThroughView;
         for v in ["2.8.0", "2.9.0"] {
             assert_eq!(
-                support_for_kind(starrocks(), Some(v), false, &cap),
+                support_for_kind(starrocks(), Some(v), None, false, &cap),
                 Support::Lowered(LoweringKind::ViewGuardMask)
             );
         }
         assert_eq!(
-            support_for_kind(starrocks(), Some("2.10.0"), false, &cap),
+            support_for_kind(starrocks(), Some("2.10.0"), None, false, &cap),
             Support::Missing(ReasonCode::NotMeasured)
         );
     }
@@ -562,7 +627,13 @@ mod tests {
     #[test]
     fn an_unknown_combination_is_missing_not_measured() {
         assert_eq!(
-            support_for_kind(trino(), None, true, &Capability::MaskCoversHiddenColumns),
+            support_for_kind(
+                trino(),
+                None,
+                None,
+                true,
+                &Capability::MaskCoversHiddenColumns
+            ),
             Support::Missing(ReasonCode::NotMeasured)
         );
     }
@@ -571,7 +642,7 @@ mod tests {
     fn group_only_withhold_exemptions_are_missing_on_ranger() {
         for k in [trino(), starrocks()] {
             assert_eq!(
-                support_for_kind(k, None, true, &Capability::WithholdExemptionByGroup),
+                support_for_kind(k, None, None, true, &Capability::WithholdExemptionByGroup),
                 Support::Missing(ReasonCode::WithholdExemptionByGroupOnly)
             );
         }
@@ -583,6 +654,7 @@ mod tests {
             support_for_kind(
                 starrocks(),
                 None,
+                None,
                 false,
                 &Capability::WithholdPrivilege(Privilege::Read)
             ),
@@ -592,6 +664,7 @@ mod tests {
             support_for_kind(
                 starrocks(),
                 None,
+                None,
                 false,
                 &Capability::WithholdPrivilege(Privilege::Write)
             ),
@@ -600,6 +673,7 @@ mod tests {
         assert_eq!(
             support_for_kind(
                 trino(),
+                None,
                 None,
                 true,
                 &Capability::WithholdPrivilege(Privilege::Write)
@@ -664,8 +738,8 @@ mod tests {
         for channel in [true, false] {
             for c in &caps {
                 assert_eq!(
-                    support_for_kind(opa, Some("2.8.0"), channel, c),
-                    support_for_kind(ranger, Some("2.8.0"), channel, c),
+                    support_for_kind(opa, Some("2.8.0"), None, channel, c),
+                    support_for_kind(ranger, Some("2.8.0"), None, channel, c),
                     "{c:?} channel={channel}"
                 );
             }
@@ -683,9 +757,11 @@ mod tests {
                 .map(|(i, v)| crate::ep::BoundEngine {
                     name: format!("e{i}"),
                     version: v.map(str::to_string).map_err(str::to_string),
+                    egret_image_level: None,
                 })
                 .collect(),
             default_version: default_version.map(str::to_string).map_err(str::to_string),
+            default_image_level: None,
             classification_channel: false,
             catalogs: Default::default(),
         }
@@ -704,9 +780,75 @@ mod tests {
             support(&ep(&[Ok("2.8.0"), Ok("2.9.0")], Ok("x")), &cap),
             guard
         );
+        // Lowered vs Missing: the more restrictive answer wins.
         assert_eq!(
             support(&ep(&[Ok("2.8.0"), Ok("2.10.0")], Ok("2.9.0")), &cap),
-            Support::Missing(ReasonCode::VersionsDisagree)
+            Support::Missing(ReasonCode::NotMeasured)
         );
+    }
+
+    #[test]
+    fn starrocks_mask_needs_the_fork_image_level() {
+        let cap = Capability::ClassificationSelector(RuleEffectKind::Mask);
+        // At or above the enabling level: the normal (lowered-per-column) answer.
+        assert_eq!(
+            support_for_kind(
+                starrocks(),
+                None,
+                Some(STARROCKS_MASK_MIN_EGRET_IMAGE),
+                false,
+                &cap
+            ),
+            Support::Lowered(LoweringKind::ExpandPerColumn)
+        );
+        // Below it (official image, or an older fork): deny, reason not measured.
+        assert_eq!(
+            support_for_kind(starrocks(), None, Some(0), false, &cap),
+            Support::Missing(ReasonCode::NotMeasured)
+        );
+        assert_eq!(
+            support_for_kind(starrocks(), None, None, false, &cap),
+            Support::Missing(ReasonCode::NotMeasured)
+        );
+    }
+
+    #[test]
+    fn a_non_mask_starrocks_row_ignores_the_image_level() {
+        // impersonate / session caps are not image-gated: None image is fine.
+        let cap = Capability::WithholdByClassification;
+        assert_eq!(
+            support_for_kind(starrocks(), None, None, false, &cap),
+            support_for_kind(starrocks(), None, Some(99), false, &cap),
+        );
+    }
+
+    #[test]
+    fn a_trino_row_ignores_the_image_level() {
+        let cap = Capability::ClassificationSelector(RuleEffectKind::Mask);
+        assert_eq!(
+            support_for_kind(trino(), None, None, true, &cap),
+            support_for_kind(trino(), None, Some(0), true, &cap),
+        );
+    }
+
+    #[test]
+    fn mixed_engine_takes_the_most_restrictive() {
+        use crate::ep::BoundEngine;
+        let cap = Capability::ClassificationSelector(RuleEffectKind::Mask);
+        let mut e = ep(&[], Err("x"));
+        e.engines = vec![
+            BoundEngine {
+                name: "new".into(),
+                version: Ok("2.8.0".into()),
+                egret_image_level: Some(STARROCKS_MASK_MIN_EGRET_IMAGE),
+            },
+            BoundEngine {
+                name: "old".into(),
+                version: Ok("2.8.0".into()),
+                egret_image_level: Some(0),
+            },
+        ];
+        // One engine can't enforce the mask: the whole EP lowers to deny.
+        assert_eq!(support(&e, &cap), Support::Missing(ReasonCode::NotMeasured));
     }
 }

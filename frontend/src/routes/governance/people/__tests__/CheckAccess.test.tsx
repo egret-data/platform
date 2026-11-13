@@ -266,7 +266,7 @@ describe("Check access for a group or a role", () => {
         .map((dt) => [dt.textContent, dt.nextElementSibling?.textContent]),
     );
     expect(counts).toEqual({
-      "Members allowed by every profile": "1",
+      "Members allowed by every enforcement point": "1",
       "Members refused by at least one": "1",
       "Members undecidable on at least one": "1",
       "Members whose read is masked on at least one": "0",
@@ -389,7 +389,7 @@ describe("Check access for a group or a role", () => {
         .map((dt) => [dt.textContent, dt.nextElementSibling?.textContent]),
     );
     expect(counts).toEqual({
-      "Members allowed by every profile": "0",
+      "Members allowed by every enforcement point": "0",
       "Members refused by at least one": "0",
       "Members undecidable on at least one": "1",
       "Members whose read is masked on at least one": "1",

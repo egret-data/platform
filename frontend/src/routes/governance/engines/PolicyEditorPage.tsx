@@ -778,7 +778,7 @@ export default function PolicyEditorPage({ service, subject }: { service: string
                   title={scope === "tag" ? "Tag" : "Resource"}
                   description={
                     scope === "tag"
-                      ? "The classification tag this policy applies to. Ranger resolves the tag service from this profile automatically."
+                      ? "The classification tag this policy applies to. Ranger resolves the tag service from this enforcement point automatically."
                       : "The resource this policy applies to. Use * for wildcards."
                   }
                 >

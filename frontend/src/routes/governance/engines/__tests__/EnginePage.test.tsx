@@ -36,7 +36,7 @@ function engineAnswers(over: Record<string, Answer> = {}): Record<string, Answer
 }
 
 describe("the engine page's header (spec §6)", () => {
-  it("names the engine, its type, origin and profile, and the plugin version with engine:read", async () => {
+  it("names the engine, its type, origin and enforcement point, and the plugin version with engine:read", async () => {
     serve(engineAnswers());
     openArea(`/governance/engines/${E_TR}`, OPERATOR);
     expect(await screen.findByRole("heading", { level: 1, name: "lake-trino" }, T)).toBeInTheDocument();
@@ -75,16 +75,16 @@ describe("the engine page's header (spec §6)", () => {
     expect(asked.some((a) => a.includes("/plugin"))).toBe(false);
   });
 
-  it("says No profile for an engine that downloads none", async () => {
+  it("says No enforcement point for an engine that downloads none", async () => {
     serve(engineAnswers({ [`/perm/engines/${E_TR}/grants`]: ok(grantsResponse({ profile: null })) }));
     openArea(`/governance/engines/${E_TR}`, READER);
     const header = await screen.findByRole("region", { name: "Engine" }, T);
-    expect(await within(header).findByText("No profile", {}, T)).toBeInTheDocument();
+    expect(await within(header).findByText("No enforcement point", {}, T)).toBeInTheDocument();
   });
 });
 
 describe("the engine page's banners (EP14)", () => {
-  it("names the other engines of a shared profile, by name", async () => {
+  it("names the other engines of a shared enforcement point, by name", async () => {
     serve(
       engineAnswers({
         [`/perm/engines/${E_TR}/grants`]: ok(
@@ -104,7 +104,7 @@ describe("the engine page's banners (EP14)", () => {
     openArea(`/governance/engines/${E_TR}`, READER);
     expect(
       await screen.findByText(
-        "Profile lake-tr is shared with engines alpha, zeta. Everything on this page applies to all of them.",
+        "Enforcement point lake-tr is shared with engines alpha, zeta. Everything on this page applies to all of them.",
         {},
         T,
       ),
@@ -143,7 +143,7 @@ describe("the engine page's banners (EP14)", () => {
 });
 
 describe("the engine page's tabs (spec §6, FE-PAGE-2)", () => {
-  it("lists the six tabs in order when the profile has a manual policy", async () => {
+  it("lists the six tabs in order when the enforcement point has a manual policy", async () => {
     serve(engineAnswers());
     openArea(`/governance/engines/${E_TR}`, READER);
     await waitFor(() => expect(screen.getAllByRole("tab")).toHaveLength(6), T);
@@ -151,7 +151,7 @@ describe("the engine page's tabs (spec §6, FE-PAGE-2)", () => {
     expect(screen.getByRole("tab", { name: "Engine permissions" })).toHaveAttribute("aria-selected", "true");
   });
 
-  it("hides Migrate while the profile and its tag service hold no manual policy", async () => {
+  it("hides Migrate while the enforcement point and its tag service hold no manual policy", async () => {
     serve(
       engineAnswers({
         "/policies/services": ok([
@@ -230,7 +230,7 @@ describe("the engine page's failures (FE-STATE-1)", () => {
   });
 });
 
-describe("the profile page (EP13, EP15)", () => {
+describe("the enforcement point page (EP13, EP15)", () => {
   const unbound = (over: Record<string, Answer> = {}) => ({
     "/policies/services": ok([
       profileDto("loose", { origin: "manual", type: "starrocks" }),
@@ -245,12 +245,12 @@ describe("the profile page (EP13, EP15)", () => {
     ...over,
   });
 
-  it("frames an unbound profile without Engine permissions and Plugin", async () => {
+  it("frames an unbound enforcement point without Engine permissions and Plugin", async () => {
     serve(unbound());
     openArea("/governance/engines/profiles/loose", READER);
     expect(await screen.findByRole("heading", { level: 1, name: "loose" }, T)).toBeInTheDocument();
-    expect(await screen.findByText("No engine is bound to this profile.", {}, T)).toBeInTheDocument();
-    const header = screen.getByRole("region", { name: "Profile" });
+    expect(await screen.findByText("No engine is bound to this enforcement point.", {}, T)).toBeInTheDocument();
+    const header = screen.getByRole("region", { name: "Enforcement point" });
     expect(within(header).getByText("StarRocks")).toBeInTheDocument();
     expect(within(header).getByText("Manual")).toBeInTheDocument();
     await waitFor(() => expect(tabNames()).toEqual(["Policies", "Overlaps", "Migrate", "Advanced"]));
@@ -263,16 +263,16 @@ describe("the profile page (EP13, EP15)", () => {
     expect(await screen.findByRole("tab", { name: "Policies" }, T)).toHaveAttribute("aria-selected", "true");
   });
 
-  it("replaces a bound profile's URL with its engine page, first engine by name, keeping the query", async () => {
+  it("replaces a bound enforcement point's URL with its engine page, first engine by name, keeping the query", async () => {
     serve(unbound());
     openArea("/governance/engines/profiles/lake-tr?tab=overlaps", READER);
     await waitFor(() => expect(where()).toBe(`/governance/engines/${E_OTHER}?tab=overlaps`), T);
   });
 
-  it("says no profile has the name, with a link to the index", async () => {
+  it("says no enforcement point has the name, with a link to the index", async () => {
     serve(unbound());
     openArea("/governance/engines/profiles/ghost", READER);
-    expect(await screen.findByText("No policy profile named ghost.", {}, T)).toBeInTheDocument();
+    expect(await screen.findByText("No enforcement point named ghost.", {}, T)).toBeInTheDocument();
     // The sentence's own link, not the header's back link (KI-224), which also goes there.
     expect(within(screen.getByRole("alert")).getByRole("link", { name: "Engine & policy" })).toHaveAttribute(
       "href",
@@ -280,7 +280,7 @@ describe("the profile page (EP13, EP15)", () => {
     );
   });
 
-  it("shows a failing profile list with Retry", async () => {
+  it("shows a failing enforcement point list with Retry", async () => {
     serve(unbound({ "/policies/services": fail(500) }));
     openArea("/governance/engines/profiles/loose", READER);
     expect(await screen.findByRole("button", { name: "Retry" }, T)).toBeInTheDocument();
@@ -321,7 +321,7 @@ describe("the engine page's StarRocks metadata-table warning", () => {
     expect(screen.queryByText(WARNING)).not.toBeInTheDocument();
   });
 
-  it("is shown for a StarRocks engine bound to a profile", async () => {
+  it("is shown for a StarRocks engine bound to an enforcement point", async () => {
     serve(engineAnswers({ [`/perm/engines/${E_TR}/grants`]: ok(grantsResponse({ engine: SR_ENGINE })) }));
     openArea(`/governance/engines/${E_TR}`, READER);
     expect(await screen.findByText(WARNING, {}, T)).toBeInTheDocument();
@@ -354,14 +354,14 @@ describe("the engine page's StarRocks metadata-table warning", () => {
     expect(await screen.findByText(WARNING, {}, T)).toBeInTheDocument();
   });
 
-  it("is not shown for a StarRocks engine with no profile", async () => {
+  it("is not shown for a StarRocks engine with no enforcement point", async () => {
     serve(engineAnswers({ [`/perm/engines/${E_TR}/grants`]: ok(grantsResponse({ engine: SR_ENGINE, profile: null })) }));
     openArea(`/governance/engines/${E_TR}`, READER);
-    expect(await screen.findByText("No profile", {}, T)).toBeInTheDocument();
+    expect(await screen.findByText("No enforcement point", {}, T)).toBeInTheDocument();
     expect(screen.queryByText(WARNING)).not.toBeInTheDocument();
   });
 
-  it("is not shown for a Trino engine bound to a profile", async () => {
+  it("is not shown for a Trino engine bound to an enforcement point", async () => {
     serve(engineAnswers());
     openArea(`/governance/engines/${E_TR}`, READER);
     expect(await screen.findByRole("heading", { level: 1, name: "lake-trino" }, T)).toBeInTheDocument();

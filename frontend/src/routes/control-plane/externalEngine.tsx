@@ -28,7 +28,7 @@ import { ENTITY_LINK_CLASS } from "@/components/ui/entity-link";
 
 /** The sentence for an engine whose (type, version) pair egret does not model. */
 export const UNMODELLED_SENTENCE =
-  "egret does not model this engine type and plugin version, so migrations into the bound profile will be refused and Explain will not answer for this engine.";
+  "egret does not model this engine type and plugin version, so migrations into the bound enforcement point will be refused and Explain will not answer for this engine.";
 
 export const PLUGIN_VERSION_RE = /^[0-9]+\.[0-9]+\.[0-9]+$/;
 

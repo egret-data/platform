@@ -210,7 +210,7 @@ describe("PolicyEditorPage", () => {
 
   // Live check L5f: the Advanced and Policies tabs read the orval list key, so a
   // save or delete that invalidates only the legacy key leaves them stale.
-  it("a save and a delete refresh the profile's policy lists that the tabs read", async () => {
+  it("a save and a delete refresh the enforcement point's policy lists that the tabs read", async () => {
     const invalidate = vi.spyOn(QueryClient.prototype, "invalidateQueries");
     routeParams = { kind: "access", policyId: "42" };
     getPolicy.mockResolvedValue({

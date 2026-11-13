@@ -3819,7 +3819,7 @@ fn refuse_dropped_trino_image(b: &CreateEngineBody) -> Result<(), CpError> {
         (status = 400, description = "Unknown/unprovisioned warehouse, invalid input (including a StarRocks engine name longer than 48 characters: the operator derives 63-character pod volume names from it), or provisioning failed", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:create permission", body = ErrorBody),
-        (status = 409, description = "An engine with this name already exists, its same-name policy profile is bound to another engine, or (StarRocks, `code` = `engine_metadata_left_over`) a previous engine of this name left its front-end metadata volume; the message carries the `kubectl` command that removes it", body = ErrorBody),
+        (status = 409, description = "An engine with this name already exists, its same-name enforcement point is bound to another engine, or (StarRocks, `code` = `engine_metadata_left_over`) a previous engine of this name left its front-end metadata volume; the message carries the `kubectl` command that removes it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -6432,11 +6432,11 @@ async fn apply_authz_service_update(
     request_body = CreateEngineBody,
     responses(
         (status = 200, description = "Engine spec updated and pods rolled", body = EngineDto),
-        (status = 400, description = "Invalid config, Kubernetes not configured, `catalogs` sent (create-only — attach through POST /engines/{id}/catalogs/{cid}), `starrocks.feMetaStorageClass`/`feMetaStorageSize` sent (create-only — they render into the FE StatefulSet's immutable `volumeClaimTemplates`; the message says what to do instead), `authz_service_id` naming no policy profile or one with no usable tag service, or re-materializing workspace connections failed", body = ErrorBody),
+        (status = 400, description = "Invalid config, Kubernetes not configured, `catalogs` sent (create-only — attach through POST /engines/{id}/catalogs/{cid}), `starrocks.feMetaStorageClass`/`feMetaStorageSize` sent (create-only — they render into the FE StatefulSet's immutable `volumeClaimTemplates`; the message says what to do instead), `authz_service_id` naming no enforcement point or one with no usable tag service, or re-materializing workspace connections failed", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
-        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress), or `authz_service_id` names a profile of the wrong type or one another engine already binds; retry; The engine is external (`code` = `engine_is_external`): egret does not update, restart, scale or delete the cluster of it", body = ErrorBody),
+        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress), or `authz_service_id` names an enforcement point of the wrong type or one another engine already binds; retry; The engine is external (`code` = `engine_is_external`): egret does not update, restart, scale or delete the cluster of it", body = ErrorBody),
         (status = 502, description = "Kubernetes rejected the update; the previous spec was restored", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -6917,7 +6917,7 @@ pub(crate) fn sr_delegation_block(spec: &serde_json::Value) -> serde_json::Value
     tag = "control-plane-engines",
     params(("id" = Uuid, Path, description = "Engine id")),
     responses(
-        (status = 204, description = "For an external engine: egret's rows only (the engine, its declared attachments and its profile binding) are removed and nothing is sent to any cluster or provisioner, and Kubernetes need not be configured. For a provisioned engine: cluster deleted, engine row removed (its catalogs, workspace connections, query history and notebook access cascade), engine-generated secrets and minted Catalog Clients cleaned up; the engine's own Ranger profile is unbound, not deleted"),
+        (status = 204, description = "For an external engine: egret's rows only (the engine, its declared attachments and its enforcement point binding) are removed and nothing is sent to any cluster or provisioner, and Kubernetes need not be configured. For a provisioned engine: cluster deleted, engine row removed (its catalogs, workspace connections, query history and notebook access cascade), engine-generated secrets and minted Catalog Clients cleaned up; the engine's own Ranger enforcement point is unbound, not deleted"),
         (status = 400, description = "Kubernetes not configured", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:delete permission", body = ErrorBody),
@@ -7374,7 +7374,7 @@ async fn rotate_engine_secrets(
     responses(
         (status = 200, description = "External engine: the new Ranger plugin credential, shown only here (`Cache-Control: no-store`). The previous credential still authenticates until the operator, once the new one is installed, sends its `credentialId` as `installed` to `POST /api/control-plane/engines/{id}/retire-previous-ranger-credential`; until then a further rotation is refused", body = crate::external::RangerCredentialDto),
         (status = 204, description = "Provisioned engine: Kubernetes accepted the apply of a new Ranger plugin credential; the engine's pods restart. The previous credential remains valid until the rollout is observed complete (every pod that runs the Ranger plugin runs the new credential and none of an older template is left); egret then retires it. Until then a further rotation is refused"),
-        (status = 400, description = "Provisioned engine bound to no policy profile (it has no Ranger credential), or Kubernetes is not configured", body = ErrorBody),
+        (status = 400, description = "Provisioned engine bound to no enforcement point (it has no Ranger credential), or Kubernetes is not configured", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
