@@ -660,3 +660,82 @@ async fn the_migrate_endpoint_removes_role_refs_and_undo_restores_them() {
     assert_eq!(roles_of(seeded.grant_id).await, 1, "role ref restored");
     cleanup(&db.pool, seeded.grant_id).await;
 }
+
+// ---------------------------------------------------------------------------
+// SP3c-1 Task 6: `explain` is unchanged for a migrated role's holder.
+// ---------------------------------------------------------------------------
+
+/// `/perm/explain` for `username` and `/perm/explain/principal` for the role,
+/// both for a read of the seeded catalog, as serialised JSON text.
+async fn explain_texts(
+    app: &axum::Router,
+    token: &str,
+    s: &Seeded,
+    username: &str,
+) -> (String, String) {
+    let target =
+        json!({ "catalog_id": s.catalog_id, "schema": null, "table": null, "column": null });
+    let (status, member) = post_json(
+        app,
+        "/perm/explain",
+        token,
+        json!({ "subject": { "user": username }, "action": "read", "target": target }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{member}");
+    let (status, principal) = post_json(
+        app,
+        "/perm/explain/principal",
+        token,
+        json!({ "principal": { "kind": "role", "ref": s.role }, "action": "read", "target": target }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{principal}");
+    (member.to_string(), principal.to_string())
+}
+
+#[tokio::test]
+async fn explain_is_byte_identical_across_the_role_migration() {
+    let Some(dsn) = egret_test_db::url().await else {
+        return;
+    };
+    let db = Db::connect(&dsn, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let pool = db.pool.clone();
+    let seeded = seed_service_with_role_grant(&db).await;
+    let (app, token) = admin_app(&db).await;
+
+    // The compile mints the holder's missing username.
+    let compiled = compile_service_to_ranger_json(&pool, seeded.service_id).await;
+    assert!(!compiled.as_array().unwrap().is_empty(), "{compiled}");
+    let username: String = sqlx::query_scalar(
+        "SELECT u.username FROM users u \
+           JOIN access_grants ag ON ag.principal_type = 'user' AND ag.principal_id = u.id \
+           JOIN roles r ON r.id = ag.role_id \
+          WHERE r.name = $1 AND r.scope = 'platform'",
+    )
+    .bind(&seeded.role)
+    .fetch_one(&pool)
+    .await
+    .expect("the holder has a username after the compile");
+
+    let before = explain_texts(&app, &token, &seeded, &username).await;
+    assert!(
+        before.0.contains("select"),
+        "the explain must actually answer: {}",
+        before.0
+    );
+
+    let mut tx = pool.begin().await.unwrap();
+    let m = migrate_role_principals_in_tx(&mut tx, "tester")
+        .await
+        .expect("migrate");
+    tx.commit().await.unwrap();
+    assert!(m.roles.contains(&seeded.role), "{m:?}");
+
+    let after = explain_texts(&app, &token, &seeded, &username).await;
+    assert_eq!(before.0, after.0, "member explain changed across migration");
+    assert_eq!(before.1, after.1, "role explain changed across migration");
+
+    cleanup(&pool, seeded.grant_id).await;
+}
