@@ -134,6 +134,17 @@ struct Prepared {
     now: crate::executor::Tick,
     cmds: RestartCommands,
     labels: Option<serde_json::Value>,
+    op: Op,
+}
+
+/// Which pure function computed a [`Prepared`]'s commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Op {
+    /// `executor::restart`: the execution ends on `RESTARTED`.
+    Restart,
+    /// `executor::mark_as` (D11): `RESTARTED`, `CANCELLED`, or unchanged
+    /// while a run is still `PAUSED`.
+    MarkAs,
 }
 
 /// **Restart `id` in place, its lock taken here** -- the body of
@@ -197,42 +208,16 @@ async fn prepare(
     stack: Stack,
     nested: Nested,
 ) -> Result<std::result::Result<Prepared, RestartRefused>> {
-    let (ctx, state, now) = claim::load(conn, id, stack).await?;
-    sqlx::query(
-        "SELECT 1 FROM workflow.task_runs WHERE execution_id = $1 ORDER BY run_ix FOR UPDATE",
-    )
-    .bind(id)
-    .execute(&mut *conn)
-    .await
-    .map_err(db_err)?;
-    let row = sqlx::query(
-        "SELECT CASE WHEN loop_index IS NOT NULL THEN parent_execution_id END AS loop_root, \
-                files_pruned_at IS NOT NULL AS files_pruned, \
-                COALESCE(workflow.execution_is_idle(id), false) AS idle, \
-                labels \
-           FROM workflow.executions WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_one(&mut *conn)
-    .await
-    .map_err(db_err)?;
-    let row = Row0220 {
-        loop_root: row.get("loop_root"),
-        files_pruned: row.get("files_pruned"),
-        idle: row.get("idle"),
-        labels: row.get("labels"),
-    };
+    let Locked {
+        ctx,
+        state,
+        now,
+        row,
+    } = lock(conn, id, stack).await?;
 
     // The checks, in the spec's order (D10, then the executor's).
-    if let (Some(root), Nested::No) = (row.loop_root, nested) {
-        return Ok(Err(RestartRefused::LoopIteration { root }));
-    }
-    if row.files_pruned {
-        return Ok(Err(RestartRefused::FilesPruned));
-    }
-    let terminal = state.history.last().is_some_and(|s| s.is_terminal());
-    if terminal && !row.idle {
-        return Ok(Err(RestartRefused::AfterExecutionRunning));
+    if let Some(refused) = d10_refusal(&row, &state, nested) {
+        return Ok(Err(refused.into()));
     }
     let cmds = match crate::executor::restart(&ctx.plan, &state, now) {
         Ok(cmds) => cmds,
@@ -256,7 +241,104 @@ async fn prepare(
         now,
         cmds,
         labels: row.labels,
+        op: Op::Restart,
     }))
+}
+
+/// An execution loaded under its lock, its runs locked too, and the facts
+/// of its row the checks read.
+struct Locked {
+    ctx: claim::ExecutionCtx,
+    state: crate::executor::ExecutionState,
+    now: crate::executor::Tick,
+    row: Row0220,
+}
+
+/// `load` takes the execution's lock (`FOR NO KEY UPDATE`); the run rows are
+/// then locked `FOR UPDATE` in `run_ix` order, as the kill takes them.
+async fn lock(conn: &mut PgConnection, id: Uuid, stack: Stack) -> Result<Locked> {
+    let (ctx, state, now) = claim::load(conn, id, stack).await?;
+    sqlx::query(
+        "SELECT 1 FROM workflow.task_runs WHERE execution_id = $1 ORDER BY run_ix FOR UPDATE",
+    )
+    .bind(id)
+    .execute(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    let row = sqlx::query(
+        "SELECT CASE WHEN loop_index IS NOT NULL THEN parent_execution_id END AS loop_root, \
+                files_pruned_at IS NOT NULL AS files_pruned, \
+                COALESCE(workflow.execution_is_idle(id), false) AS idle, \
+                labels \
+           FROM workflow.executions WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    Ok(Locked {
+        ctx,
+        state,
+        now,
+        row: Row0220 {
+            loop_root: row.get("loop_root"),
+            files_pruned: row.get("files_pruned"),
+            idle: row.get("idle"),
+            labels: row.get("labels"),
+        },
+    })
+}
+
+/// D10's refusals, shared by a restart and a task run's state change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum D10 {
+    LoopIteration { root: Uuid },
+    FilesPruned,
+    AfterExecutionRunning,
+}
+
+impl From<D10> for RestartRefused {
+    fn from(d: D10) -> Self {
+        match d {
+            D10::LoopIteration { root } => Self::LoopIteration { root },
+            D10::FilesPruned => Self::FilesPruned,
+            D10::AfterExecutionRunning => Self::AfterExecutionRunning,
+        }
+    }
+}
+
+impl From<D10> for StateChangeRefused {
+    fn from(d: D10) -> Self {
+        match d {
+            D10::LoopIteration { root } => Self::LoopIteration { root },
+            D10::FilesPruned => Self::FilesPruned,
+            D10::AfterExecutionRunning => Self::AfterExecutionRunning,
+        }
+    }
+}
+
+/// D10's refusals, in the spec's order: a loop iteration (unless this IS
+/// the restart through its root), the files pruned, an `afterExecution:`
+/// still running.
+fn d10_refusal(
+    row: &Row0220,
+    state: &crate::executor::ExecutionState,
+    nested: Nested,
+) -> Option<D10> {
+    if let (Some(root), Nested::No) = (row.loop_root, nested) {
+        return Some(D10::LoopIteration { root });
+    }
+    if row.files_pruned {
+        return Some(D10::FilesPruned);
+    }
+    if is_terminal(state) && !row.idle {
+        return Some(D10::AfterExecutionRunning);
+    }
+    None
+}
+
+fn is_terminal(state: &crate::executor::ExecutionState) -> bool {
+    state.history.last().is_some_and(|s| s.is_terminal())
 }
 
 /// Kestra's line when a reopened `Loop` has no iteration to restart
@@ -288,6 +370,7 @@ pub(super) async fn open(
         now,
         mut cmds,
         labels,
+        op,
     } = prepared;
 
     // D8: for each reopened `Loop` run, its last failing iteration -- the
@@ -347,9 +430,8 @@ pub(super) async fn open(
     for cmd in &cmds.commands {
         apply(&mut state, cmd);
     }
-    debug_assert_eq!(
-        state.history.last(),
-        Some(&RunState::Restarted),
+    debug_assert!(
+        op != Op::Restart || state.history.last() == Some(&RunState::Restarted),
         "executor::restart ends on RESTARTED"
     );
     side_writes(conn, id, &cmds, labels.as_ref()).await?;
@@ -477,6 +559,220 @@ async fn side_writes(
         .map_err(db_err)?;
     }
     Ok(())
+}
+
+/// Why a task run's state change ([`set_task_run_state`]) or an execution's
+/// status change ([`set_execution_status`]) wrote nothing (spec D11). The
+/// route maps each to its coded 409.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StateChangeRefused {
+    /// The execution has not ended, or ended `KILLED`; its state's wire name.
+    NotChangeable(String),
+    /// The target is the state the run or the execution is already in.
+    StateUnchanged,
+    /// The execution is an iteration of a `Loop`; change it through its root.
+    LoopIteration { root: Uuid },
+    /// No run of this execution has that id, or the run with it was emptied
+    /// (Kestra removes it) and never rebuilt.
+    NoSuchTaskRun,
+    /// The execution has ended but its `afterExecution:` still runs (D10).
+    AfterExecutionRunning,
+    /// The pruner deleted the execution's files (`files_pruned_at`, D10).
+    FilesPruned,
+    /// The run has a `WorkingDirectory` ancestor, whose directory is closed;
+    /// restart the execution instead, which re-runs the block whole.
+    InsideWorkingDirectory,
+}
+
+/// D11's four targets, the ones Kestra's UI offers. The route refuses any
+/// other with 400 first; this is the same check, one layer down.
+fn check_target(target: RunState) -> Result<()> {
+    if matches!(
+        target,
+        RunState::Success | RunState::Warning | RunState::Failed | RunState::Cancelled
+    ) {
+        Ok(())
+    } else {
+        Err(Error::InvalidInput(format!(
+            "the state can only be changed to SUCCESS, WARNING, FAILED or CANCELLED, not {}",
+            target.wire()
+        )))
+    }
+}
+
+/// D11's source state: ended, and not `KILLED` (`State.java:189-191`).
+fn not_changeable(state: &crate::executor::ExecutionState) -> Option<StateChangeRefused> {
+    let current = state.history.last().copied().unwrap_or(RunState::Created);
+    (!current.is_terminal() || current == RunState::Killed)
+        .then(|| StateChangeRefused::NotChangeable(current.wire().to_string()))
+}
+
+/// **Set one task run's state** (spec D11, Kestra `markAs`, `ES:603-662`).
+/// The run takes `target` on its history and its last attempt, keeping its
+/// outputs; its ancestors are reopened and the end-hook runs emptied
+/// (`executor::mark_as`); the execution gets the restart's side writes (D7:
+/// `attempt_number + 1`, the `system.restarted` label, the reset and emptied
+/// runs' results cleared, the emptied runs' ids renewed) and settles on from
+/// `RESTARTED`, or ends `CANCELLED` for a `CANCELLED` target. It is opened
+/// by the walk as a restart is (`claim::Job::Restart`).
+///
+/// Unscoped by workspace, like every worker entry point; the route scopes
+/// first. A refusal writes nothing.
+pub async fn set_task_run_state(
+    pool: &PgPool,
+    id: Uuid,
+    task_run_id: Uuid,
+    target: RunState,
+) -> Result<std::result::Result<(), StateChangeRefused>> {
+    check_target(target)?;
+    let mut retries = 0;
+    loop {
+        let changed = transaction!(pool, |at| {
+            let (conn, gate) = at.parts();
+            set_task_run_state_locked(conn, id, Stack::Fresh(gate.clone()), task_run_id, target)
+                .await
+        });
+        match changed {
+            Err(e) if retries < DEADLOCK_RETRIES && is_deadlock(&e) => {
+                retries += 1;
+                tracing::info!(execution = %id, "a task run's state change was a deadlock's victim; running it again");
+            }
+            other => return other,
+        }
+    }
+}
+
+async fn set_task_run_state_locked(
+    conn: &mut PgConnection,
+    id: Uuid,
+    stack: Stack,
+    task_run_id: Uuid,
+    target: RunState,
+) -> Result<std::result::Result<(), StateChangeRefused>> {
+    let Locked {
+        ctx,
+        state,
+        now,
+        row,
+    } = lock(conn, id, stack).await?;
+    if let Some(refused) = d10_refusal(&row, &state, Nested::No) {
+        return Ok(Err(refused.into()));
+    }
+    if let Some(refused) = not_changeable(&state) {
+        return Ok(Err(refused));
+    }
+    // This execution's run only. `load` refuses a gap in `run_ix`, so a
+    // run's `run_ix` is its index in `state.runs`.
+    let run_ix: Option<i32> = sqlx::query_scalar(
+        "SELECT run_ix FROM workflow.task_runs WHERE execution_id = $1 AND id = $2",
+    )
+    .bind(id)
+    .bind(task_run_id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    let Some(run) = run_ix
+        .and_then(|ix| usize::try_from(ix).ok())
+        .filter(|&ix| state.runs.get(ix).is_some_and(|r| !r.history.is_empty()))
+    else {
+        return Ok(Err(StateChangeRefused::NoSuchTaskRun));
+    };
+    if state.runs[run].history.last() == Some(&target) {
+        return Ok(Err(StateChangeRefused::StateUnchanged));
+    }
+    let cmds = match crate::executor::mark_as(&ctx.plan, &state, run, target, now) {
+        Ok(cmds) => cmds,
+        Err(RestartRefusal::NotRestartable(s)) => {
+            return Ok(Err(StateChangeRefused::NotChangeable(s.wire().to_string())))
+        }
+        Err(RestartRefusal::NothingToRestart) => return Ok(Err(StateChangeRefused::NoSuchTaskRun)),
+        Err(RestartRefusal::InsideWorkingDirectory) => {
+            return Ok(Err(StateChangeRefused::InsideWorkingDirectory))
+        }
+    };
+    // `mark_as` never resets a run to `CREATED`: the marked run takes the
+    // target and its ancestors (flowables, never a `Subflow` or a `Loop`'s
+    // own iteration) are reopened `RUNNING`. So `cmds.subflows` and
+    // `cmds.loops` are empty; `open` handles them as a restart's if not.
+    claim::run_job(
+        conn,
+        claim::Job::Restart(Box::new(Opening {
+            id,
+            prepared: Prepared {
+                ctx,
+                state,
+                now,
+                cmds,
+                labels: row.labels,
+                op: Op::MarkAs,
+            },
+        })),
+    )
+    .await?;
+    Ok(Ok(()))
+}
+
+/// **Change a finished execution's status** (spec D11, Kestra `changeState`,
+/// `ES:1385-1392`): `target` appended to its history, then `settle`. No run
+/// is touched, no label is added, `attempt_number` is unchanged; the outbox
+/// writes one Flow-trigger event for the appended state. A `Subflow` parent
+/// whose run is already terminal ignores the child's new state
+/// (`subflow::on_child_terminal`).
+///
+/// Unscoped by workspace, like every worker entry point; the route scopes
+/// first. A refusal writes nothing.
+pub async fn set_execution_status(
+    pool: &PgPool,
+    id: Uuid,
+    target: RunState,
+) -> Result<std::result::Result<(), StateChangeRefused>> {
+    check_target(target)?;
+    let mut retries = 0;
+    loop {
+        let changed = transaction!(pool, |at| {
+            let (conn, gate) = at.parts();
+            set_execution_status_locked(conn, id, Stack::Fresh(gate.clone()), target).await
+        });
+        match changed {
+            Err(e) if retries < DEADLOCK_RETRIES && is_deadlock(&e) => {
+                retries += 1;
+                tracing::info!(execution = %id, "an execution's status change was a deadlock's victim; running it again");
+            }
+            other => return other,
+        }
+    }
+}
+
+async fn set_execution_status_locked(
+    conn: &mut PgConnection,
+    id: Uuid,
+    stack: Stack,
+    target: RunState,
+) -> Result<std::result::Result<(), StateChangeRefused>> {
+    let Locked {
+        ctx,
+        mut state,
+        now,
+        row,
+    } = lock(conn, id, stack).await?;
+    if let Some(root) = row.loop_root {
+        return Ok(Err(StateChangeRefused::LoopIteration { root }));
+    }
+    if let Some(refused) = not_changeable(&state) {
+        return Ok(Err(refused));
+    }
+    // An execution whose `afterExecution:` still runs has not ended (D10).
+    // The pruned files do not matter here: nothing runs again.
+    if !row.idle {
+        return Ok(Err(StateChangeRefused::AfterExecutionRunning));
+    }
+    if state.history.last() == Some(&target) {
+        return Ok(Err(StateChangeRefused::StateUnchanged));
+    }
+    let before = state.clone();
+    apply(&mut state, &Command::SetExecutionState { state: target });
+    claim::settle(conn, &ctx, &before, state, now, None).await?;
+    Ok(Ok(()))
 }
 
 fn db_err(e: sqlx::Error) -> Error {
