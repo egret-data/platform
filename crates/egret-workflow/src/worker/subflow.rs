@@ -669,7 +669,9 @@ pub(super) async fn spawn_one(
 ///   `RUNNING` and waits for it as for a fresh child, and its terminal
 ///   reaches [`on_child_terminal`], which takes it because the run is not
 ///   terminal. A refused restart (files pruned, `afterExecution:` still
-///   running) leaves the child alone and spawns a new one, logged at warn.
+///   running), or a child row that cannot be loaded at all
+///   (`claim::row_content_fault`), leaves the child alone and spawns a new
+///   one, logged at warn.
 /// - any other terminal state: the run ends `SUCCESS` at once with the
 ///   child's outputs copied as [`on_child_terminal`] copies them ("don't
 ///   restart it as it's terminated successfully").
@@ -726,7 +728,27 @@ async fn restart_earlier_child(
     let child = *child;
     match child_state.as_str() {
         "FAILED" | "PAUSED" => {
-            match super::restart::restart_subflow_child(conn, child, ctx.caller()).await? {
+            let restarting =
+                match super::restart::restart_subflow_child(conn, child, ctx.caller()).await {
+                    Ok(answer) => answer,
+                    // **A child row that cannot be loaded** (its frozen source
+                    // no longer plans, a history it cannot parse) must not
+                    // error this settle: every later settle of the parent
+                    // would meet it again and the parent would be wedged. It
+                    // is left alone and a new child is spawned, as for a
+                    // refused restart. Only a fault in the row's own content
+                    // is taken here: a SQL error has aborted the transaction
+                    // and a deadlock must reach `restart_execution`'s retry.
+                    Err(e) if claim::row_content_fault(&e) => {
+                        tracing::warn!(
+                            execution = %ctx.id, run = r.run, %child, error = %e,
+                            "a Subflow's earlier child cannot be loaded; a new child is spawned"
+                        );
+                        return Ok(None);
+                    }
+                    Err(e) => return Err(e),
+                };
+            match restarting {
                 Ok(job) => {
                     let mut jobs = vec![job];
                     if !wait {

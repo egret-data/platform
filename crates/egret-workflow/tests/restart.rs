@@ -1456,6 +1456,49 @@ async fn a_child_whose_restart_is_refused_is_replaced(pool: sqlx::PgPool) {
     assert_eq!(sub.6.as_ref().unwrap()["executionId"], new.0.to_string());
 }
 
+/// **An earlier child that cannot be loaded** (its stored source no longer
+/// plans) does not error the parent's settle, which would wedge every later
+/// settle of the parent: it is left alone and a new child is spawned, as
+/// for a refused restart.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_child_that_cannot_be_loaded_is_replaced(pool: sqlx::PgPool) {
+    // Arrange
+    let (db, ws, user) = setup(&pool).await;
+    seed_restart_child(&db, ws, user).await;
+    let reg = Flaky::new(&[("failFirstTime", 1)]);
+    let root = start(&pool, ws, &restart_parent()).await;
+    drive(&pool, &reg, root).await;
+    assert_eq!(exec_state(&pool, root).await, "FAILED");
+    let first = children(&pool).await;
+    assert_eq!(first.len(), 1);
+    sqlx::query("UPDATE workflow.executions SET source = 'tasks: [' WHERE id = $1")
+        .bind(first[0].0)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Act
+    let out = restart(&pool, root).await;
+    drive(&pool, &reg, root).await;
+
+    // Assert
+    assert_eq!(out, Restarted::Done);
+    assert_eq!(exec_state(&pool, root).await, "SUCCESS");
+    let after = children(&pool).await;
+    assert_eq!(after.len(), 2, "{after:?}");
+    assert_eq!(after.iter().find(|k| k.0 == first[0].0), Some(&first[0]));
+    let source: String = sqlx::query_scalar("SELECT source FROM workflow.executions WHERE id = $1")
+        .bind(first[0].0)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(source, "tasks: [", "the old child row is untouched");
+    let new = after.iter().find(|k| k.0 != first[0].0).unwrap();
+    assert_eq!(new.1, "SUCCESS");
+    let sub = run(&runs_of(&pool, root).await, "callSubflow").clone();
+    assert_eq!(sub.6.as_ref().unwrap()["executionId"], new.0.to_string());
+}
+
 /// **Only a run the restart reset looks up a child (D9).** In a restarted
 /// execution, a `Subflow` run inside a `LoopUntil` is emptied and built
 /// again for each iteration (a new task-run id, as Kestra's new taskrun), so
