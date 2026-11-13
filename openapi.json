@@ -9527,6 +9527,141 @@
         }
       }
     },
+    "/api/control-plane/perm/migrate/clearances": {
+      "post": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "SP3c-2: migrate every gated clearance into a `withhold` rule exempting the\nholders of its required roles and groups, PROVABLY — the compiled artifact\nof every affected profile is fingerprinted before and after and the whole\ntransaction rolls back on any difference. Reversible via the `undo` route.",
+        "operationId": "migrate_clearances",
+        "responses": {
+          "200": {
+            "description": "Every gated clearance migrated into a withhold rule; the compiled output of each affected profile is byte-identical",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClearanceMigration"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Nothing was changed: the equivalence gate refused, or a recompile it needed was refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/migrate/clearances/undo": {
+      "post": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "SP3c-2: undo one clearance migration, restoring `classification_policies`\nand removing the withhold rules it created. Refuses, changing nothing, if a\ncreated rule's exemptions changed since.",
+        "operationId": "undo_clearances",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UndoClearancesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The migration undone"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such migration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Nothing was changed: a created rule was edited since",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/perm/migrate/role-principals": {
       "post": {
         "tags": [
@@ -41911,6 +42046,31 @@
           "not_compiled"
         ]
       },
+      "ClearanceMigration": {
+        "type": "object",
+        "description": "What one clearance migration run did: its provenance id, the tag keys it\nmigrated, and how many withhold rules it created.",
+        "required": [
+          "id",
+          "tags",
+          "rules_created"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "rules_created": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
       "ClearedPeople": {
         "type": "object",
         "description": "The people listed for a classification's clearance, and what each\npopulation means. A person is listed once whatever the number of ways.\n\n- **Role held directly** (`via.kind = role`, `throughGroup` null): a live,\n  `allow` grant of a required role to the user\n  ([`crate::members::role_holders_via`], the compiler's read). Cleared in\n  egret and, with a username, on engines (`onEngines`).\n- **Role held through a group** (`throughGroup` set): a live `allow` grant\n  of a required role to a group the user is a direct member of. Egret's\n  object check clears them (`egret_auth::grants`, `user_groups`); engines\n  refuse them (the compiler expands only user holders).\n- **Group member, gate names no role** (`enginesEnforce` false): egret\n  clears them; engines withhold the data from NOBODY, since a group-only\n  gate compiles to nothing on engines.\n- **Group member, gate also names a role**: egret clears them; engines\n  refuse them (a Ranger group matches nobody; only role holders are\n  excepted).\n- **Scoped grant** (`via.scope` workspace or object): egret clears them\n  only within that workspace or object; engines everywhere (a column read\n  carries no scope).\n- **Platform admins** are always cleared by egret (a scope-correct\n  exemption) and are NOT listed unless they are also listed by a rule\n  above; engines give them no bypass.",
@@ -58604,6 +58764,20 @@
           },
           "request": {
             "$ref": "#/components/schemas/TryRequestEcho"
+          }
+        }
+      },
+      "UndoClearancesRequest": {
+        "type": "object",
+        "description": "`POST …/migrate/clearances/undo`.",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The `id` the migration answered with."
           }
         }
       },

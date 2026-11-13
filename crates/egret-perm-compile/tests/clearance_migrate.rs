@@ -2,12 +2,19 @@
 //!
 //! DB-gated; needs DATABASE_URL (see `egret_test_db`).
 
+use axum::body::Body;
+use axum::http::{Request as HttpRequest, StatusCode};
+use egret_auth::session::SessionService;
 use egret_metastore::Db;
 use egret_perm::PermStore;
 use egret_perm_compile::clearance_migrate::{migrate_clearances_in_tx, undo_clearances_in_tx};
-use egret_perm_compile::{recompile_service, PermHttpError};
+use egret_perm_compile::{perm_router, recompile_service, PermHttpError, PermState};
 use egret_policy::{PolicyStore, COMPILER_CLEARANCE_PREFIX};
+use http_body_util::BodyExt;
+use serde_json::{json, Value};
 use sqlx::PgPool;
+use std::sync::Arc;
+use tower::ServiceExt; // oneshot
 use uuid::Uuid;
 
 /// The migrate/undo operate across services and recompile every
@@ -667,4 +674,273 @@ async fn the_authoring_helpers_replace_exemptions_remove_and_refuse_a_dangling_g
         .expect("remove");
     tx.commit().await.unwrap();
     assert!(withhold_rule(&pool, &f.tag_key).await.is_none());
+}
+
+// ── SP3c-2 Task 7: the admin endpoints and the explain-stable proof ────────
+
+async fn admin_app(db: &Db) -> (axum::Router, String) {
+    let uid: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (provider, email, name, username) VALUES ('local', $1, 'T', $2) \
+         RETURNING id",
+    )
+    .bind(format!("{}@clrmig.egret.local", Uuid::new_v4().simple()))
+    // A username up front: a platform admin without one would be minted one by
+    // the migration's recompile, which refuses (409) once its profile set is
+    // locked.
+    .bind(unique("clradmin"))
+    .fetch_one(&db.pool)
+    .await
+    .expect("user");
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         SELECT 'user', $1, id, 'platform', NULL FROM roles \
+          WHERE scope='platform' AND name='platform_admin'",
+    )
+    .bind(uid)
+    .execute(&db.pool)
+    .await
+    .expect("grant platform_admin");
+    let sessions = SessionService::new(
+        db.clone(),
+        chrono::Duration::hours(24),
+        chrono::Duration::minutes(60),
+    );
+    let token = sessions
+        .create(egret_core::UserId(uid), "test", "127.0.0.1")
+        .await
+        .expect("session")
+        .token;
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    let app = perm_router().with_state(PermState {
+        opa_cache: None,
+        perm: PermStore::new(db.pool.clone()),
+        policy: PolicyStore::new(db.clone()),
+        sessions,
+        pdp,
+    });
+    (app, token)
+}
+
+async fn post_json(app: &axum::Router, uri: &str, token: &str, body: Value) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri(uri)
+                .header("Cookie", format!("egret_session={token}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let json = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| json!({ "_raw": String::from_utf8_lossy(&bytes).to_string() }));
+    (status, json)
+}
+
+#[tokio::test]
+async fn the_clearance_endpoints_migrate_and_undo() {
+    let Some(pool) = pool().await else { return };
+    let _serial = SERIAL.lock().await;
+    reset(&pool).await;
+    let db = Db::connect(&egret_test_db::url().await.unwrap(), 5)
+        .await
+        .unwrap();
+    let f = seed_role_clearance(&db).await;
+    recompile_service(&f.perm, &f.policy, f.profile_id)
+        .await
+        .expect("baseline recompile");
+    let (app, token) = admin_app(&db).await;
+    assert!(withhold_rule(&pool, &f.tag_key).await.is_none());
+
+    let (status, body) = post_json(&app, "/perm/migrate/clearances", &token, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t == f.tag_key.as_str()),
+        "{body}"
+    );
+    assert!(body["rules_created"].as_u64().unwrap() >= 1, "{body}");
+    assert!(
+        withhold_rule(&pool, &f.tag_key).await.is_some(),
+        "the withhold rule appears"
+    );
+
+    let (status, body2) = post_json(
+        &app,
+        "/perm/migrate/clearances/undo",
+        &token,
+        json!({ "id": body["id"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body2}");
+    assert!(
+        withhold_rule(&pool, &f.tag_key).await.is_none(),
+        "the withhold rule is gone"
+    );
+    let gate: Vec<String> = sqlx::query_scalar(
+        "SELECT unnest(required_roles) FROM classification_policies WHERE tag_id = $1",
+    )
+    .bind(f.tag_id)
+    .fetch_all(&pool)
+    .await
+    .expect("read gate");
+    assert_eq!(gate, vec![f.role_name.clone()], "the gate is restored");
+}
+
+/// `/perm/explain` for `username` reading the tagged column of `catalog_id`.
+async fn explain_text(app: &axum::Router, token: &str, catalog_id: Uuid, username: &str) -> String {
+    let (status, body) = post_json(
+        app,
+        "/perm/explain",
+        token,
+        json!({
+            "subject": { "user": username },
+            "action": "read",
+            "target": { "catalog_id": catalog_id, "schema": "sales",
+                        "table": "orders", "column": "email" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body.to_string()
+}
+
+/// SP3c-2 spec: for a ROLE-based clearance `explain` answers byte-for-byte the
+/// same before and after the migration, for a cleared and an uncleared reader.
+/// (A groups-only clearance's explain legitimately changes — enforcement of it
+/// moves — so no identity is asserted for that shape.)
+#[tokio::test]
+async fn explain_is_byte_identical_across_the_clearance_migration() {
+    let Some(pool) = pool().await else { return };
+    let _serial = SERIAL.lock().await;
+    reset(&pool).await;
+    let db = Db::connect(&egret_test_db::url().await.unwrap(), 5)
+        .await
+        .unwrap();
+    let f = seed_role_clearance(&db).await;
+
+    // A catalog attached to the profile's engine, with the gated tag on the
+    // column the explain reads.
+    let ws_id: Uuid =
+        sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,$1) RETURNING id")
+            .bind(unique("clrmig-ws"))
+            .fetch_one(&pool)
+            .await
+            .expect("workspace");
+    let sc_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
+         VALUES ($1,'us-east-1','clrmig-explain','AKIATEST') RETURNING id",
+    )
+    .bind(unique("clrmig-sc"))
+    .fetch_one(&pool)
+    .await
+    .expect("storage connection");
+    let warehouse_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) \
+         VALUES ($1,$2,$3) RETURNING id",
+    )
+    .bind(unique("clrmig_wh"))
+    .bind(ws_id)
+    .bind(sc_id)
+    .fetch_one(&pool)
+    .await
+    .expect("warehouse");
+    let catalog_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) \
+         RETURNING id",
+    )
+    .bind(unique("clrmig_cat"))
+    .bind(warehouse_id)
+    .fetch_one(&pool)
+    .await
+    .expect("registry catalog");
+    // `explain` refuses an engine whose plugin version it cannot tell.
+    sqlx::query(
+        "UPDATE engine_mgmt.engines SET spec = '{\"imageVersion\":\"483\"}'::jsonb \
+          WHERE authz_service_id = $1",
+    )
+    .bind(f.profile_id)
+    .execute(&pool)
+    .await
+    .expect("pin engine image");
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) \
+         SELECT id, $2 FROM engine_mgmt.engines WHERE authz_service_id = $1",
+    )
+    .bind(f.profile_id)
+    .bind(catalog_id)
+    .execute(&pool)
+    .await
+    .expect("attach catalog");
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, column_name) \
+         VALUES ($1,$2,'sales','orders','email')",
+    )
+    .bind(f.tag_id)
+    .bind(warehouse_id)
+    .execute(&pool)
+    .await
+    .expect("tag assignment");
+
+    // The cleared reader (holds the role) and an uncleared one, both with
+    // usernames.
+    let cleared: String = sqlx::query_scalar(
+        "SELECT u.username FROM users u \
+           JOIN access_grants ag ON ag.principal_type = 'user' AND ag.principal_id = u.id \
+           JOIN roles r ON r.id = ag.role_id WHERE r.name = $1 AND r.scope = 'platform'",
+    )
+    .bind(&f.role_name)
+    .fetch_one(&pool)
+    .await
+    .expect("the holder's username");
+    let uncleared = unique("uncleared");
+    sqlx::query("INSERT INTO users (provider, email, name, username) VALUES ('local',$1,'U',$2)")
+        .bind(format!("{uncleared}@egret.local"))
+        .bind(&uncleared)
+        .execute(&pool)
+        .await
+        .expect("uncleared user");
+
+    recompile_service(&f.perm, &f.policy, f.profile_id)
+        .await
+        .expect("baseline recompile");
+    let (app, token) = admin_app(&db).await;
+
+    let before = (
+        explain_text(&app, &token, catalog_id, &cleared).await,
+        explain_text(&app, &token, catalog_id, &uncleared).await,
+    );
+    assert!(
+        before.0.contains("trino") && before.1.contains("trino"),
+        "the explain must actually answer for the profile: {before:?}"
+    );
+
+    let mut tx = pool.begin().await.unwrap();
+    let out = migrate_clearances_in_tx(&mut tx, "test")
+        .await
+        .expect("migrate");
+    tx.commit().await.unwrap();
+    assert!(out.tags.contains(&f.tag_key), "{out:?}");
+    assert!(withhold_rule(&pool, &f.tag_key).await.is_some());
+
+    let after = (
+        explain_text(&app, &token, catalog_id, &cleared).await,
+        explain_text(&app, &token, catalog_id, &uncleared).await,
+    );
+    assert_eq!(before.0, after.0, "cleared reader's explain changed");
+    assert_eq!(before.1, after.1, "uncleared reader's explain changed");
 }

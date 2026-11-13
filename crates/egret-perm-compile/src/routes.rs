@@ -217,6 +217,8 @@ pub fn perm_router() -> Router<PermState> {
             "/perm/migrate/role-principals/undo",
             post(undo_role_principals),
         )
+        .route("/perm/migrate/clearances", post(migrate_clearances))
+        .route("/perm/migrate/clearances/undo", post(undo_clearances))
 }
 
 /// The `perm` surface's OpenAPI document, merged into the top-level doc by
@@ -266,6 +268,8 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         migrate_service_policies,
         migrate_role_principals,
         undo_role_principals,
+        migrate_clearances,
+        undo_clearances,
         undo_service_policy_migration
     ),
     components(schemas(
@@ -399,6 +403,8 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         crate::migrate::WireTagging,
         crate::migrate::UndoRequest,
         crate::role_principal_migrate::RolePrincipalMigration,
+        crate::clearance_migrate::ClearanceMigration,
+        UndoClearancesRequest,
         UndoRolePrincipalsRequest,
         crate::migrate::UndoResponse,
         crate::migrate::UndonePolicy,
@@ -6729,6 +6735,71 @@ async fn undo_role_principals(
     egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
     let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
     crate::role_principal_migrate::undo_role_principals_in_tx(&mut tx, body.id).await?;
+    tx.commit().await.map_err(PermHttpError::db)?;
+    Ok(axum::http::StatusCode::OK)
+}
+
+/// `POST …/migrate/clearances/undo`.
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct UndoClearancesRequest {
+    /// The `id` the migration answered with.
+    pub id: i64,
+}
+
+/// SP3c-2: migrate every gated clearance into a `withhold` rule exempting the
+/// holders of its required roles and groups, PROVABLY — the compiled artifact
+/// of every affected profile is fingerprinted before and after and the whole
+/// transaction rolls back on any difference. Reversible via the `undo` route.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/perm/migrate/clearances",
+    tag = "perm",
+    responses(
+        (status = 200, description = "Every gated clearance migrated into a withhold rule; the compiled output of each affected profile is byte-identical", body = crate::clearance_migrate::ClearanceMigration),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:update permission", body = ErrorBody),
+        (status = 409, description = "Nothing was changed: the equivalence gate refused, or a recompile it needed was refused", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn migrate_clearances(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+) -> Result<Json<crate::clearance_migrate::ClearanceMigration>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    let migrated_by = p.email.clone();
+    let response =
+        crate::clearance_migrate::migrate_clearances_in_tx(&mut tx, &migrated_by).await?;
+    tx.commit().await.map_err(PermHttpError::db)?;
+    Ok(Json(response))
+}
+
+/// SP3c-2: undo one clearance migration, restoring `classification_policies`
+/// and removing the withhold rules it created. Refuses, changing nothing, if a
+/// created rule's exemptions changed since.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/perm/migrate/clearances/undo",
+    tag = "perm",
+    request_body = UndoClearancesRequest,
+    responses(
+        (status = 200, description = "The migration undone"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:update permission", body = ErrorBody),
+        (status = 404, description = "No such migration", body = ErrorBody),
+        (status = 409, description = "Nothing was changed: a created rule was edited since", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn undo_clearances(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+    Json(body): Json<UndoClearancesRequest>,
+) -> Result<axum::http::StatusCode, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    crate::clearance_migrate::undo_clearances_in_tx(&mut tx, body.id).await?;
     tx.commit().await.map_err(PermHttpError::db)?;
     Ok(axum::http::StatusCode::OK)
 }
