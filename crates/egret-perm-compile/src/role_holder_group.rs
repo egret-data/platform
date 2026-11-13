@@ -66,3 +66,33 @@ pub async fn sync_role_holder_group_in_tx(
     .map_err(CompileError::from_db)?;
     Ok(group_id)
 }
+
+/// Re-sync the managed `role:<name> holders` group IFF it already exists, and
+/// report whether it did (SP3c-1 review Fix 1). Every LIVE role-holder-change
+/// path calls this in its own transaction BEFORE its recompile, so a group-ref
+/// grant re-expands from a fresh `user_groups` instead of a stale one (a revoke
+/// would otherwise fail open until the next boot repair).
+///
+/// The existence guard is what keeps a role write made BEFORE the migration has
+/// run from minting a managed group: pre-migration the grants still carry
+/// `kind='role'` and expand straight from `access_grants`, so there is nothing to
+/// sync and nothing should be created. This mirrors the boot repair
+/// (`crate::role_membership::recompile_role_referencing_profiles`), which only
+/// touches already-existing managed groups.
+pub async fn sync_role_holder_group_if_present_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    role: &str,
+) -> Result<bool, CompileError> {
+    let name = role_holder_group_name(role);
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM public.groups WHERE name = $1 AND source = 'managed')",
+    )
+    .bind(&name)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(CompileError::from_db)?;
+    if exists {
+        sync_role_holder_group_in_tx(tx, role).await?;
+    }
+    Ok(exists)
+}

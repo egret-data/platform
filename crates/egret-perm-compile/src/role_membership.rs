@@ -150,11 +150,9 @@ pub async fn delete_platform_role_and_recompile(
         // SP3c-1: a role delete cascades `access_grants`, so it revokes the role
         // from every holder at once — the same fail-open-revoke shape as an
         // explicit unassign. Re-sync the managed holder group (now empty) before
-        // the recompile re-expands it, in this same transaction. Guarded on the
-        // group existing, as the live assign/unassign path is.
-        if managed_holder_group_exists_in_tx(&mut tx, name).await? {
-            crate::role_holder_group::sync_role_holder_group_in_tx(&mut tx, name).await?;
-        }
+        // the recompile re-expands it, in this same transaction (no-op before the
+        // migration has run).
+        crate::role_holder_group::sync_role_holder_group_if_present_in_tx(&mut tx, name).await?;
         for summary in recompile_services_in_tx(&mut tx, &services).await? {
             if !summary.skipped.is_empty() {
                 tracing::warn!(
@@ -230,13 +228,9 @@ async fn with_recompile_in_tx(
         // revoke fails open (the ex-holder stays in the group's `user_groups`
         // and so in the compiled policy). `affected_services_for_role_membership`
         // already added the group-ref profiles to `services`, so this is a single
-        // recompile, not a double one. Guarded on the group ALREADY existing,
-        // exactly as the boot repair (`recompile_role_referencing_profiles`)
-        // is: before the migration has run there is no managed group and the
-        // grants still carry `kind='role'`, so we must not mint one here.
-        if managed_holder_group_exists_in_tx(tx, name).await? {
-            crate::role_holder_group::sync_role_holder_group_in_tx(tx, name).await?;
-        }
+        // recompile, not a double one. The helper is guarded on the group already
+        // existing (no-op before the migration has run).
+        crate::role_holder_group::sync_role_holder_group_if_present_in_tx(tx, name).await?;
         for summary in recompile_services_in_tx(tx, &services).await? {
             if !summary.skipped.is_empty() {
                 tracing::warn!(
@@ -250,24 +244,6 @@ async fn with_recompile_in_tx(
         apply(tx, op, ptype, pid, role_id).await?;
     }
     Ok(())
-}
-
-/// Whether the managed `role:<name> holders` group already exists (SP3c-1). The
-/// live role-membership path re-syncs it only when it does, mirroring the boot
-/// repair, so a role write before the migration has run mints nothing.
-async fn managed_holder_group_exists_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    role: &str,
-) -> Result<bool, CompileError> {
-    let name = crate::role_holder_group::role_holder_group_name(role);
-    sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM public.groups \
-          WHERE name = $1 AND source = 'managed')",
-    )
-    .bind(&name)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(CompileError::from_db)
 }
 
 async fn apply(
