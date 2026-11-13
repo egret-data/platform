@@ -170,6 +170,25 @@ ALTER TABLE perm.rules
 
 ---
 
+### Task 8: Groups-only clearance is now enforced — fix the "not enforced" signal
+
+**Files:** Modify `crates/egret-perm-ir/src/enforcement.rs` (`withhold_engine_reason` ~:165 + its test ~:260); `crates/egret-perm-compile/src/people.rs` (~:419, :431, :719 `groups_only_not_enforced`, :1043, :1060, :1256, :1265, :1344; doc comment :712); `crates/egret-perm-ir/src/matrix.rs` (M10 `WithholdExemptionByGroup` rows + `ReasonCode::WithholdExemptionByGroupOnly` if now inert); `openapi.json` + regenerated `frontend/src/api/.../engineClearance.ts`; `frontend/src/routes/governance/.../ClearancesTab.tsx` (~:26 banner) + `ClearancesTab.test.tsx` (~:72); `crates/egret-perm-compile/tests/people.rs` (~:1073-1161). Docs: `egret-data/docs` clearance page.
+
+**Interfaces:**
+- Consumes: Task 2 made groups-only (and role+group) clearance actually enforced on the engines.
+- Produces: the People API / Clearances UI no longer report `NotEnforcedGroupsOnly` / `GroupsNotEnforced` for a group exemption; a group member of a clearance shows as cleared (enforced), consistent with the new behavior. The now-inert `withhold_engine_reason` + M10 withhold capability rows are removed.
+
+- [ ] **Step 1: Write/adjust the failing test** — `tests/people.rs`: a groups-only clearance's group member is reported as CLEARED/enforced (not `GroupsNotEnforced`), and the service-level clearance read does not carry `not_enforced_groups_only`. This fails today (still reports not-enforced).
+- [ ] **Step 2: Run it** — FAIL.
+- [ ] **Step 3: Remove the stale signal** — delete `EngineClearance::NotEnforcedGroupsOnly` / the `GroupsNotEnforced` member attribution and `withhold_engine_reason`; update `people.rs` to treat group exemptions as enforced (a group member is cleared like a role holder). Remove the now-inert M10 `WithholdExemptionByGroup` matrix rows + `WithholdExemptionByGroupOnly` reason if nothing else reads them (grep first). Fix the stale doc comment at `people.rs:712`.
+- [ ] **Step 4: Run it** — PASS; run `tests/people.rs` + the perm-ir unit tests single-threaded, green.
+- [ ] **Step 5: Regenerate the contract + FE** — `cargo run --bin egret -- openapi > openapi.json`; `cd frontend && npm run gen:api`; update `ClearancesTab.tsx` (drop the "group exemptions are not enforced on engines" banner) + `ClearancesTab.test.tsx`; `npx vitest run` the clearances tests green; confirm the digest is clean.
+- [ ] **Step 6: Commit** `feat(perm): groups-only clearance is enforced — drop the not-enforced signal` (+ docs commit on the docs branch).
+
+> Must land before the SP3c-2 PR merges (Task 2 made the enforcement real; this makes every surface agree).
+
+---
+
 ## Out of scope (later SP3c packages / follow-ups)
 
 - Implicit workspace grant → explicit `ws:<slug> members` grant (SP3c-3).
