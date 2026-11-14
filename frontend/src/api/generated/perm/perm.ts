@@ -66,9 +66,11 @@ import type {
   UndoRequest,
   UndoResponse,
   UndoRolePrincipalsRequest,
+  UndoWsAssignmentsRequest,
   UnresolvedPrincipal,
   UserPrincipal,
-  UsernameReuseReport
+  UsernameReuseReport,
+  WsAssignmentMigration
 } from '../model';
 
 import { customInstance } from '../../mutator';
@@ -2256,6 +2258,229 @@ export const usePermUndoRolePrincipals = <TError = ErrorBody,
         TContext
       > => {
       return useMutation(getPermUndoRolePrincipalsMutationOptions(options), queryClient);
+    }
+    export type permMigrateWsAssignmentsResponse200 = {
+  data: WsAssignmentMigration
+  status: 200
+}
+
+export type permMigrateWsAssignmentsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permMigrateWsAssignmentsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permMigrateWsAssignmentsResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type permMigrateWsAssignmentsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permMigrateWsAssignmentsResponseSuccess = (permMigrateWsAssignmentsResponse200) & {
+  headers: Headers;
+};
+export type permMigrateWsAssignmentsResponseError = (permMigrateWsAssignmentsResponse401 | permMigrateWsAssignmentsResponse403 | permMigrateWsAssignmentsResponse409 | permMigrateWsAssignmentsResponse500) & {
+  headers: Headers;
+};
+
+export type permMigrateWsAssignmentsResponse = (permMigrateWsAssignmentsResponseSuccess | permMigrateWsAssignmentsResponseError)
+
+export const getPermMigrateWsAssignmentsUrl = () => {
+
+
+
+
+  return `/api/control-plane/perm/migrate/ws-assignments`
+}
+
+/**
+ * @summary SP3c-3: rewrite every implicit workspace-assignment grant into an explicit
+grant on the managed `ws:<slug> members` group, PROVABLY — the compiled
+artifact of every affected profile is fingerprinted before and after and the
+whole transaction rolls back on any difference. Reversible via the `undo`
+route.
+ */
+export const permMigrateWsAssignments = async ( options?: Parameters<typeof customInstance>[1]): Promise<permMigrateWsAssignmentsResponse> => {
+
+  return customInstance<permMigrateWsAssignmentsResponse>(getPermMigrateWsAssignmentsUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermMigrateWsAssignmentsMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permMigrateWsAssignments>>, TError,void, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof permMigrateWsAssignments>>, TError,void, TContext> => {
+
+const mutationKey = ['permMigrateWsAssignments'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof permMigrateWsAssignments>>, void> = () => {
+
+
+          return  permMigrateWsAssignments(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PermMigrateWsAssignmentsMutationResult = NonNullable<Awaited<ReturnType<typeof permMigrateWsAssignments>>>
+
+    export type PermMigrateWsAssignmentsMutationError = ErrorBody
+
+    /**
+ * @summary SP3c-3: rewrite every implicit workspace-assignment grant into an explicit
+grant on the managed `ws:<slug> members` group, PROVABLY — the compiled
+artifact of every affected profile is fingerprinted before and after and the
+whole transaction rolls back on any difference. Reversible via the `undo`
+route.
+ */
+export const usePermMigrateWsAssignments = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permMigrateWsAssignments>>, TError,void, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof permMigrateWsAssignments>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getPermMigrateWsAssignmentsMutationOptions(options), queryClient);
+    }
+    export type permUndoWsAssignmentsResponse200 = {
+  data: void
+  status: 200
+}
+
+export type permUndoWsAssignmentsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permUndoWsAssignmentsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permUndoWsAssignmentsResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type permUndoWsAssignmentsResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type permUndoWsAssignmentsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permUndoWsAssignmentsResponseSuccess = (permUndoWsAssignmentsResponse200) & {
+  headers: Headers;
+};
+export type permUndoWsAssignmentsResponseError = (permUndoWsAssignmentsResponse401 | permUndoWsAssignmentsResponse403 | permUndoWsAssignmentsResponse404 | permUndoWsAssignmentsResponse409 | permUndoWsAssignmentsResponse500) & {
+  headers: Headers;
+};
+
+export type permUndoWsAssignmentsResponse = (permUndoWsAssignmentsResponseSuccess | permUndoWsAssignmentsResponseError)
+
+export const getPermUndoWsAssignmentsUrl = () => {
+
+
+
+
+  return `/api/control-plane/perm/migrate/ws-assignments/undo`
+}
+
+/**
+ * @summary SP3c-3: undo one workspace-assignment migration, restoring the implicit
+grants it rewrote. Refuses, changing nothing, if a rewritten row changed since.
+ */
+export const permUndoWsAssignments = async (undoWsAssignmentsRequest: UndoWsAssignmentsRequest, options?: Parameters<typeof customInstance>[1]): Promise<permUndoWsAssignmentsResponse> => {
+
+  return customInstance<permUndoWsAssignmentsResponse>(getPermUndoWsAssignmentsUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(undoWsAssignmentsRequest)
+  }
+);}
+
+
+
+
+
+export const getPermUndoWsAssignmentsMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permUndoWsAssignments>>, TError,{data: UndoWsAssignmentsRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof permUndoWsAssignments>>, TError,{data: UndoWsAssignmentsRequest}, TContext> => {
+
+const mutationKey = ['permUndoWsAssignments'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof permUndoWsAssignments>>, {data: UndoWsAssignmentsRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  permUndoWsAssignments(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PermUndoWsAssignmentsMutationResult = NonNullable<Awaited<ReturnType<typeof permUndoWsAssignments>>>
+    export type PermUndoWsAssignmentsMutationBody = UndoWsAssignmentsRequest
+    export type PermUndoWsAssignmentsMutationError = ErrorBody
+
+    /**
+ * @summary SP3c-3: undo one workspace-assignment migration, restoring the implicit
+grants it rewrote. Refuses, changing nothing, if a rewritten row changed since.
+ */
+export const usePermUndoWsAssignments = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permUndoWsAssignments>>, TError,{data: UndoWsAssignmentsRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof permUndoWsAssignments>>,
+        TError,
+        {data: UndoWsAssignmentsRequest},
+        TContext
+      > => {
+      return useMutation(getPermUndoWsAssignmentsMutationOptions(options), queryClient);
     }
     export type permListOverlapsResponse200 = {
   data: StoredOverlap[]

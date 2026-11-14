@@ -248,6 +248,12 @@ fn refused_for_authoring(p: &Principal) -> Option<&'static str> {
         PrincipalKind::Role => {
             Some("role principals are migrated to managed groups; grant to a group instead")
         }
+        // SP3c-3: the implicit workspace grant is migrated to a `ws:<slug>
+        // members` group grant; authoring writes that grant directly.
+        PrincipalKind::WorkspaceMembers => Some(
+            "workspace_members principals are migrated to managed groups; assign the catalog \
+             to the workspace instead",
+        ),
         PrincipalKind::Group if p.r#ref.starts_with("role:") && p.r#ref.ends_with(" holders") => {
             Some(
                 "role:<name> holders groups are managed migration targets; grant to the \
@@ -837,6 +843,20 @@ pub async fn mint_missing_usernames(pool: &sqlx::PgPool) -> anyhow::Result<Usern
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SP3c-3: workspace-members principals and `ws:<slug> members` groups are
+    /// migration targets; ordinary groups and users are untouched.
+    #[test]
+    fn workspace_members_authoring_is_refused_but_ordinary_refs_are_not() {
+        let p = |kind, r: &str| Principal {
+            kind,
+            r#ref: r.to_string(),
+        };
+        assert!(refused_for_authoring(&p(PrincipalKind::WorkspaceMembers, "x")).is_some());
+        assert!(refused_for_authoring(&p(PrincipalKind::Group, "ws:acme members")).is_some());
+        assert!(refused_for_authoring(&p(PrincipalKind::Group, "analysts")).is_none());
+        assert!(refused_for_authoring(&p(PrincipalKind::User, "ws:acme members")).is_none());
+    }
 
     /// People & groups Task 3 review: a workspace ref in any form `Uuid`
     /// parses is stored canonical, so it matches `standsFor` byte for byte.

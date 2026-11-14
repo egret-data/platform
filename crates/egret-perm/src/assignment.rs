@@ -20,7 +20,7 @@
 //! the same catalog+workspace twice must not accumulate grants, and unbinding
 //! must remove exactly the right one — never a human-authored `explicit` grant
 //! on the same catalog. The old shape got this from `origin='workspace_assignment'`
-//! + `origin_workspace_id` + the partial unique index `grants_one_per_assignment`.
+//! plus `origin_workspace_id` plus the partial unique index `grants_one_per_assignment`.
 //! A plain `explicit` grant has no such key (and the schema CHECK forbids an
 //! `explicit` grant from carrying `origin_workspace_id` at all). So SP3c-3 gives
 //! the new grant its OWN origin value, `workspace_assignment_group`, which keeps
