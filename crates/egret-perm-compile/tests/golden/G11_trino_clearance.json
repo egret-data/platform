@@ -149,6 +149,78 @@
         }
       },
       {
+        "service": "{g11.trino}_tag",
+        "name": "perm-clearance-{g11.grouponly}",
+        "body": {
+          "allowExceptions": [],
+          "denyExceptions": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                },
+                {
+                  "isAllowed": true,
+                  "type": "insert"
+                },
+                {
+                  "isAllowed": true,
+                  "type": "delete"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [],
+              "roles": [],
+              "users": []
+            }
+          ],
+          "denyPolicyItems": [
+            {
+              "accesses": [
+                {
+                  "isAllowed": true,
+                  "type": "select"
+                },
+                {
+                  "isAllowed": true,
+                  "type": "insert"
+                },
+                {
+                  "isAllowed": true,
+                  "type": "delete"
+                }
+              ],
+              "delegateAdmin": false,
+              "groups": [
+                "public"
+              ],
+              "roles": [],
+              "users": []
+            }
+          ],
+          "description": "",
+          "isDenyAllElse": false,
+          "isEnabled": true,
+          "name": "perm-clearance-{g11.grouponly}",
+          "policyItems": [],
+          "policyLabels": [],
+          "policyPriority": 0,
+          "policyType": 0,
+          "resources": {
+            "tag": {
+              "isExcludes": false,
+              "isRecursive": false,
+              "values": [
+                "g11.grouponly"
+              ]
+            }
+          },
+          "service": "{g11.trino}_tag",
+          "serviceType": "tag"
+        }
+      },
+      {
         "service": "{g11.trino}",
         "name": "perm-hidden-meta-perm-clearance-{g11.unheld}-gold_g11_cat.hr.staff",
         "body": {
@@ -295,13 +367,7 @@
         }
       }
     ],
-    "skipped": [
-      {
-        "kind": "Clearance",
-        "id": "{g11.grouponly}",
-        "reason": "the tag's clearance names only `required_groups`, and D7 measured that a Ranger item naming a group matches nobody on any engine egret provisions — so a deny emitted for it would withhold the column from everybody, and the gate stays enforced on object access (Cedar) only"
-      }
-    ],
+    "skipped": [],
     "served": [
       {
         "additionalResources": [],
@@ -583,6 +649,76 @@
             "isRecursive": false,
             "values": [
               "g11.secret"
+            ]
+          }
+        },
+        "service": "{g11.trino}_tag",
+        "serviceType": "tag",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              },
+              {
+                "isAllowed": true,
+                "type": "insert"
+              },
+              {
+                "isAllowed": true,
+                "type": "delete"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "denyPolicyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "select"
+              },
+              {
+                "isAllowed": true,
+                "type": "insert"
+              },
+              {
+                "isAllowed": true,
+                "type": "delete"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [
+              "public"
+            ],
+            "roles": [],
+            "users": []
+          }
+        ],
+        "description": "",
+        "id": 2,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "perm-clearance-{g11.grouponly}",
+        "policyItems": [],
+        "policyLabels": [],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "tag": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "g11.grouponly"
             ]
           }
         },
