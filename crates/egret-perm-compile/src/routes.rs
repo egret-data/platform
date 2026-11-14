@@ -6749,9 +6749,6 @@ async fn undo_role_principals(
 /// `POST …/migrate/clearances/undo`.
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct UndoClearancesRequest {
-/// `POST …/migrate/ws-assignments/undo`.
-#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
-pub struct UndoWsAssignmentsRequest {
     /// The `id` the migration answered with.
     pub id: i64,
 }
@@ -6766,17 +6763,6 @@ pub struct UndoWsAssignmentsRequest {
     tag = "perm",
     responses(
         (status = 200, description = "Every gated clearance migrated into a withhold rule; the compiled output of each affected profile is byte-identical", body = crate::clearance_migrate::ClearanceMigration),
-/// SP3c-3: rewrite every implicit workspace-assignment grant into an explicit
-/// grant on the managed `ws:<slug> members` group, PROVABLY — the compiled
-/// artifact of every affected profile is fingerprinted before and after and the
-/// whole transaction rolls back on any difference. Reversible via the `undo`
-/// route.
-#[utoipa::path(
-    post,
-    path = "/api/control-plane/perm/migrate/ws-assignments",
-    tag = "perm",
-    responses(
-        (status = 200, description = "Every implicit workspace grant rewritten; the compiled output of each affected profile is byte-identical", body = crate::ws_assignment_migrate::WsAssignmentMigration),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 409, description = "Nothing was changed: the equivalence gate refused, or a recompile it needed was refused", body = ErrorBody),
@@ -6787,16 +6773,11 @@ async fn migrate_clearances(
     State(st): State<PermState>,
     Auth(p): Auth,
 ) -> Result<Json<crate::clearance_migrate::ClearanceMigration>, PermHttpError> {
-async fn migrate_ws_assignments(
-    State(st): State<PermState>,
-    Auth(p): Auth,
-) -> Result<Json<crate::ws_assignment_migrate::WsAssignmentMigration>, PermHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
     let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
     let migrated_by = p.email.clone();
     let response =
         crate::clearance_migrate::migrate_clearances_in_tx(&mut tx, &migrated_by).await?;
-        crate::ws_assignment_migrate::migrate_ws_assignments_in_tx(&mut tx, &migrated_by).await?;
     tx.commit().await.map_err(PermHttpError::db)?;
     Ok(Json(response))
 }
@@ -6809,13 +6790,6 @@ async fn migrate_ws_assignments(
     path = "/api/control-plane/perm/migrate/clearances/undo",
     tag = "perm",
     request_body = UndoClearancesRequest,
-/// SP3c-3: undo one workspace-assignment migration, restoring the implicit
-/// grants it rewrote. Refuses, changing nothing, if a rewritten row changed since.
-#[utoipa::path(
-    post,
-    path = "/api/control-plane/perm/migrate/ws-assignments/undo",
-    tag = "perm",
-    request_body = UndoWsAssignmentsRequest,
     responses(
         (status = 200, description = "The migration undone"),
         (status = 401, description = "Not authenticated", body = ErrorBody),
@@ -6833,6 +6807,59 @@ async fn undo_clearances(
     egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
     let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
     crate::clearance_migrate::undo_clearances_in_tx(&mut tx, body.id).await?;
+    tx.commit().await.map_err(PermHttpError::db)?;
+    Ok(axum::http::StatusCode::OK)
+}
+
+/// `POST …/migrate/ws-assignments/undo`.
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct UndoWsAssignmentsRequest {
+    /// The `id` the migration answered with.
+    pub id: i64,
+}
+
+/// SP3c-3: rewrite every implicit workspace-assignment grant into an explicit
+/// grant on the managed `ws:<slug> members` group, PROVABLY — the compiled
+/// artifact of every affected profile is fingerprinted before and after and the
+/// whole transaction rolls back on any difference. Reversible via the `undo`
+/// route.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/perm/migrate/ws-assignments",
+    tag = "perm",
+    responses(
+        (status = 200, description = "Every implicit workspace grant rewritten; the compiled output of each affected profile is byte-identical", body = crate::ws_assignment_migrate::WsAssignmentMigration),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:update permission", body = ErrorBody),
+        (status = 409, description = "Nothing was changed: the equivalence gate refused, or a recompile it needed was refused", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn migrate_ws_assignments(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+) -> Result<Json<crate::ws_assignment_migrate::WsAssignmentMigration>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    let migrated_by = p.email.clone();
+    let response =
+        crate::ws_assignment_migrate::migrate_ws_assignments_in_tx(&mut tx, &migrated_by).await?;
+    tx.commit().await.map_err(PermHttpError::db)?;
+    Ok(Json(response))
+}
+
+/// SP3c-3: undo one workspace-assignment migration, restoring the implicit
+/// grants it rewrote. Refuses, changing nothing, if a rewritten row changed since.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/perm/migrate/ws-assignments/undo",
+    tag = "perm",
+    request_body = UndoWsAssignmentsRequest,
+    responses(
+        (status = 200, description = "The migration undone"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:update permission", body = ErrorBody),
+        (status = 404, description = "No such migration", body = ErrorBody),
         (status = 409, description = "Nothing was changed: a rewritten row was edited since", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
