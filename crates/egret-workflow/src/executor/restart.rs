@@ -220,12 +220,12 @@ fn execution_state(state: &ExecutionState) -> RunState {
     state.history.last().copied().unwrap_or(RunState::Created)
 }
 
-fn kind<'a>(plan: &'a Plan, state: &ExecutionState, run: RunIx) -> Option<&'a TaskKind> {
+pub(super) fn kind<'a>(plan: &'a Plan, state: &ExecutionState, run: RunIx) -> Option<&'a TaskKind> {
     plan.tasks.get(state.runs[run].task).map(|t| &t.kind)
 }
 
 /// D2's predicate on one run's own state.
-fn is_seed(plan: &Plan, state: &ExecutionState, run: RunIx) -> bool {
+pub(super) fn is_seed(plan: &Plan, state: &ExecutionState, run: RunIx) -> bool {
     match state.runs[run].history.last() {
         Some(RunState::Failed) => true,
         // A `LoopUntil` is `PAUSED` only between two iterations (W8 Task 4):
@@ -238,7 +238,7 @@ fn is_seed(plan: &Plan, state: &ExecutionState, run: RunIx) -> bool {
 }
 
 /// Every ancestor of `run`, nearest first (Kestra's `taskRunWithAncestors`).
-fn ancestors(state: &ExecutionState, run: RunIx) -> Vec<RunIx> {
+pub(super) fn ancestors(state: &ExecutionState, run: RunIx) -> Vec<RunIx> {
     let mut out = Vec::new();
     let mut cur = state.runs[run].parent;
     while let Some(p) = cur {
@@ -285,7 +285,13 @@ fn empty(state: &ExecutionState, runs: &BTreeSet<RunIx>, out: &mut RestartComman
 }
 
 /// D3's state for one run of the reset set.
-fn reset(plan: &Plan, state: &ExecutionState, run: RunIx, now: Tick, out: &mut RestartCommands) {
+pub(super) fn reset(
+    plan: &Plan,
+    state: &ExecutionState,
+    run: RunIx,
+    now: Tick,
+    out: &mut RestartCommands,
+) {
     match kind(plan, state, run) {
         Some(TaskKind::Executable { .. }) => {
             to_created(run, out);
@@ -321,7 +327,7 @@ fn reset(plan: &Plan, state: &ExecutionState, run: RunIx, now: Tick, out: &mut R
     }
 }
 
-fn to_created(run: RunIx, out: &mut RestartCommands) {
+pub(super) fn to_created(run: RunIx, out: &mut RestartCommands) {
     out.commands.push(Command::SetRunState {
         run,
         state: RunState::Created,
