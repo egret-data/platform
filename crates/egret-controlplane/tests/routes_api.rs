@@ -2483,9 +2483,20 @@ async fn tag_access_policy_group_clearance_and_uuid_validation() {
     assert_eq!(status, StatusCode::CREATED, "create tag; body={j}");
     let id = j["id"].as_str().expect("tag id").to_string();
 
-    // Set a GROUP-only clearance policy with two valid uuids.
-    let g1 = Uuid::new_v4().to_string();
-    let g2 = Uuid::new_v4().to_string();
+    // Set a GROUP-only clearance policy with two valid uuids. Each names a real
+    // group: authoring refuses a `required_groups` id that names no group.
+    let mut group_ids = Vec::new();
+    for n in 1..=2 {
+        let gid: Uuid = sqlx::query_scalar(
+            "INSERT INTO groups (name, source) VALUES ($1, 'local') RETURNING id",
+        )
+        .bind(format!("clspg-group{n}-{}", Uuid::new_v4().simple()))
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("seed group");
+        group_ids.push(gid.to_string());
+    }
+    let (g1, g2) = (group_ids[0].clone(), group_ids[1].clone());
     let resp = f
         .app
         .clone()
