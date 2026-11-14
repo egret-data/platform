@@ -37,7 +37,8 @@ Restart của Kestra cũng nhận `revision` (`ES:281-373`). Với revision, res
   - **Q6 (S4):** một run `Loop` bị reset trong bản sao chuyển sang `CREATED`, và các iteration của nó chạy lại dưới execution mới. Kestra làm `Loop` như vậy lỗi ngay.
   - **Q7 (S7):** replay từ một task và restart trên source khác cũng từ chối `files_pruned` và `after_execution_running`, như restart của 7a. Replay cả execution không đổi.
 
-- **Q8 (2026-11-14, trong lúc làm A3). Variables đi theo source được chọn, như Kestra.** Khi text của source được chọn khác source đã đóng băng, execution mới lưu `variables` là NULL, để `variables:` của chính source đó có hiệu lực (Kestra `applyNewRevision`, `ES:514-517`). Trên source đã đóng băng, `variables` của execution cũ được mang theo nguyên vẹn. Plan đã nói cột cũ luôn được mang theo; người dùng chọn quy tắc trung thành với Kestra sau review A3 (phát hiện I1). Đây là dạng có ghi ngày của câu cuối của D6. Ghi lại thành điểm khác biệt số 12 ở §5.
+- **Q8 (2026-11-14, trong lúc làm A3). Với replay, variables đi theo source được chọn, như Kestra.** Khi text của source được chọn cho một replay khác source đã đóng băng, execution mới lưu `variables` là NULL, để `variables:` của chính source đó có hiệu lực (Kestra `applyNewRevision`, `ES:514-517`). Trên source đã đóng băng, `variables` của execution cũ được mang theo nguyên vẹn. Plan đã nói cột cũ luôn được mang theo; người dùng chọn quy tắc trung thành với Kestra sau review A3 (phát hiện I1). Đây là dạng có ghi ngày của câu cuối của D6. Ghi lại thành điểm khác biệt số 12 ở §5.
+  - **Quy tắc này chỉ áp dụng cho replay (quyết định của người dùng 2026-11-14, review cuối I2): restart trên source khác mang theo `variables` của execution cũ, như Kestra.** `ExecutionService.restart(.., revision)` của Kestra không bao giờ gọi `applyNewRevision` (`ES:353-368`, chỉ `withFlowRevision`), và `Execution.childExecution` chép `this.variables` (`Execution.java:405-432`), nên một restart của Kestra trên revision N chạy với variables của execution cũ. `worker/copy.rs` mang cột này theo khi loại là restart trên một source; test `replay.rs::a_restart_on_another_source_carries_the_executions_variables`.
 
 ### 2.2 Quyết định thiết kế (quyết định mặc định, 2026-11-14)
 
@@ -65,7 +66,7 @@ Restart của Kestra cũng nhận `revision` (`ES:281-373`). Với revision, res
   - `current` dùng bản nháp của flow, đọc trong transaction của replay.
   - `version:N` dùng source của dòng `flow_versions` đó. N không tồn tại trả 404, code `flow_version_not_found`.
   - Trong mọi trường hợp, execution mới đóng băng source mà nó đã chạy, như mọi execution.
-  - Variables của flow đi theo source được chọn, như `applyNewRevision` của Kestra lấy `flow.getVariables()` (`ES:514-517`). `variables` của lần chạy của execution (7a D3 của W9) được mang theo nguyên vẹn.
+  - Variables của flow đi theo source được chọn, như `applyNewRevision` của Kestra lấy `flow.getVariables()` (`ES:514-517`). `variables` của lần chạy của execution (7a D3 của W9) được mang theo nguyên vẹn. (Đã được Q8 thay thế: một replay trên source khác lưu `variables` là NULL; một restart trên một source mang chúng theo.)
 - **D7. Input.**
   - Không có `inputs`, input của execution cũ được dùng lại, được hiển thị như hiện nay (KI-112).
   - Có `inputs`, body (JSON, hoặc multipart như `start_flow_execution` nhận) thay thế chúng. Nó được kiểm tra với các input khai báo của **source được chọn** bằng cùng bước kiểm tra của start, như `readExecutionInputs(flow, current, inputs)` của Kestra kiểm tra (`EC:1497-1498`).
@@ -162,9 +163,9 @@ Migration: không dự kiến (D10). Nếu cần một migration, số của nó
 Phát hiện trong lúc xây:
 
 11. **Một `Switch` được sao chép giữ case cũ.** Kestra render lại giá trị `Switch` trên source mới. egret mở lại flowable nhưng giữ case mà run cũ đã chọn (review A3, nhỏ). Một task bị di chuyển trong nhánh `If` hoặc `Switch` bị bước kiểm tra nhánh từ chối (`a0d0eb8be`).
-12. **Variables đi theo source được chọn (Q8).** Khi text của source được chọn khác source đã đóng băng, execution mới lưu `variables` là NULL, như `applyNewRevision` của Kestra lấy `variables` của flow mới (`ES:514-517`). Trên source đã đóng băng, `variables` cũ được mang theo.
+12. **Với replay, variables đi theo source được chọn (Q8).** Khi text của source được chọn cho một replay khác source đã đóng băng, execution mới lưu `variables` là NULL, như `applyNewRevision` của Kestra lấy `variables` của flow mới (`ES:514-517`). Trên source đã đóng băng, `variables` cũ được mang theo. Điều này khớp với replay của Kestra. Restart trên source khác mang theo `variables` cũ, như restart trên một revision của Kestra (`ES:353-368`, `Execution.java:405-432`); điều đó cũng khớp với Kestra, nên không phải điểm khác biệt.
 13. **Replay với input đã đổi thay thế input toàn bộ, như Kestra.** Một input `SECRET` tuỳ chọn để trống bị bỏ, không được giữ. Dialog nói "Enter it again: the stored value is hidden." trên một field secret. Không có `inputs`, input cũ được dùng lại, được hiển thị như hiện nay.
-14. **Từ chối `files_pruned` chỉ đi theo chuỗi `replayed_from`.** Câu query trong `worker/copy.rs` (`OLD_ROW`, `chain` đệ quy) đi theo `replayed_from_execution_id`, không đi theo `parent_execution_id` của một retry replay. Một source có file bị pruner xoá sau một liên kết retry-parent không bị từ chối. Kestra không có từ chối như vậy; đây là một lỗ hổng trong gate của chính egret, cần xác nhận ở review cuối.
+14. **Từ chối `files_pruned` đi theo toàn bộ chuỗi của quy tắc đọc (đã sửa trong đợt sửa cuối).** Câu query trong `worker/copy.rs` (`OLD_ROW`, `chain` đệ quy) trước đây chỉ đi theo `replayed_from_execution_id`. Giờ nó đi theo cùng chuỗi với quy tắc đọc của storage (`storage/index.rs`, `chain` của `readable_sql!`): `replayed_from_execution_id`, hoặc `parent_execution_id` của execution thay thế do retry `CREATE_NEW_EXECUTION` (`loop_index` NULL), bắc cầu, giới hạn trong workspace. Một execution thay thế có file của retry parent đã bị prune bị từ chối với 409 `files_pruned` (test `replay.rs::a_copy_of_a_retry_replacement_whose_parent_was_pruned_is_refused`). Kestra hoàn toàn không có từ chối này; gate là của riêng egret (Q7).
 
 Các khác biệt do bảo mật, mang từ 7a D24 và mở rộng:
 
@@ -173,6 +174,7 @@ Các khác biệt do bảo mật, mang từ 7a D24 và mở rộng:
 - Flow đã vào thùng rác hoặc đã purge trả 404 và flow bị disable trả 409 (`startable_flow`). Kestra không có thùng rác.
 - Một source được chọn (`current` hoặc `version:N`) có YAML riêng ghi `disabled: true` bị từ chối 409, như `FlowService.getFlowIfExecutableOrThrow(.., revision)` của Kestra từ chối một revision bị disable (`FlowService.java:861`). Mã 409 này không có code.
 - `files_pruned` và `after_execution_running` áp dụng cho replay từ một task và restart trên source khác (Q7), không áp dụng cho replay cả execution.
+- Một input `SECRET` được dùng lại có thể bị lưu ở dạng rõ. Khi `inputs` được dùng lại và source được chọn không còn khai báo input đó là `SECRET`, `secret_inputs::split` lưu giá trị đã lộ ở dạng rõ trong `inputs` (review cuối M9). Kestra cũng làm vậy (input được mang theo). Đây không phải leo thang quyền: một manager chọn được source thì đã có thể sửa bản nháp và làm lộ secret qua một task.
 
 ## 6. Ngoài phạm vi
 
@@ -196,6 +198,7 @@ Xây ngày 2026-11-14 trên `feat/workflow-replay-from-task`, base `origin/main`
 | A5 | `94066375d` | Quy tắc đọc storage thêm `chain_family`: một bản sao đọc file iteration của loop trong chuỗi source của nó (S5). Một test `storage_index` đã ghim sự loại trừ cũ bị lật lại. | 0 |
 | B1 | `563e1a44c`, fix `edea15b2b` | Routes: `taskRunId`, `source`, alias `revision`, từ chối `breakpoints`, input JSON và multipart; các từ chối có code; audit; OpenAPI; `restart_revision_unsupported` bị gỡ (S8). | 1: audit restart-trên-source nêu tên execution bị thay thế; một source được chọn bị disable là 409 |
 | C1 | `ff67795e5` (client), `249e4f74b`, fix `4ed0eab19` | Client `gen:api`; `ReplayDialog.tsx` (lựa chọn source, change inputs, text restart); menu hàng task-run "Actions for {task}"; các câu từ chối. | 1: replay bị ẩn cho flow không có id thì đưa ra lý do; lỗi input hiện trong mục đang thu gọn |
+| Đợt sửa cuối | `005edc423`, `7feb93bc4`, `db8013a51`, `ddd07dae0`, `df5738f5a` | Sau review cuối toàn nhánh: `files_pruned` đi theo liên kết retry (phân loại c); restart trên một source mang theo `variables` (I2, Q8); guard stamps từ chối một upsert ghi `state` không stamp và một "bản chép" từ bảng dẫn xuất (M4); dialog chờ source được chọn tải xong rồi mới gửi input đã sửa (M5) và cho restart câu `replay_task_not_in_source` riêng (M3); "Replay from this task" bị vô hiệu hoá, kèm lý do, trên một run nằm dưới `WorkingDirectory` (M6). | – |
 
 Số đếm đã đo (các gate ở Z, 2026-11-14):
 
@@ -203,6 +206,8 @@ Số đếm đã đo (các gate ở Z, 2026-11-14):
 - `cargo test -p egret-workflow --no-fail-fast` trên `25fb40103`: 3782 pass, 55 ignored, 8 fail. Bảy cái là `sql_starrocks_live` (máy test không có StarRocks, như trên main). Cái thứ tám là `execution_timestamps::every_state_write_stamps_the_timestamps`: guard chưa biết bản chép nguyên văn. `4b6bf572d` dạy nó một trường hợp (cả `state`, `history`, `started_at` và `ended_at` lấy từ cùng một alias hàng của cùng bảng), kèm các ca tự kiểm chứng rằng bản chép lấy `state` từ chỗ khác vẫn bị từ chối; sau đó `execution_timestamps` 21/21, `replay` 29/29, `replay_routes` 20/20 và `restart` 34/34 pass.
 - `cargo test -p egret-config -p egret-server -p egret-metastore`: 179 pass, gồm `committed_openapi_json_is_current` và digest của client.
 - Frontend: `npm run typecheck` sạch; `npm run lint` 0 lỗi (154 cảnh báo, không cái nào trong file của gói này); `npx vitest run` 8722 pass và 2 fail do timeout 5 s khi máy tải nặng, ở `OutputsTree.test.tsx` và `ScheduleDetail.test.tsx` (không bị gói này đụng tới); cả hai file pass khi chạy riêng (79/79).
+- `npm run build` (ok) và `npm run test:bundle:workflows` (cả 6 kiểm tra ✓), do controller chạy ngày 2026-11-14 sau `0803e4fa6` (review cuối I1), và chạy lại sau đợt sửa cuối (cả 6 ✓).
+- Đợt sửa cuối, trên `df5738f5a`: `replay` 30/30, `replay_routes` 20/20, `restart` 34/34, `restart_routes` 30/30, `execution_timestamps` 21/21, `storage_index` 15/15; `cargo clippy -p egret-workflow --all-targets -- -D warnings` và `cargo fmt --check` sạch; `npm run typecheck` sạch, `npm run lint` 0 lỗi (154 cảnh báo, như trước); `npx vitest run` trên các file đã chạm và `ExecutionDetail.test.tsx` 106/106.
 - Kiểm tra trực tiếp trên `egret serve` chạy native (database và storage riêng, cổng 18466), với `admin@egret.local`, sáng và tối: replay từ task `b` trên version của lần chạy này giữ outputs của `a` và chạy lại `b`, `c` (`system.replay: true`, attempt 2); replay từ `b` trên version hiện tại của flow chạy `c` đã sửa; restart một execution FAILED trên version 2 đã publish mở một execution mới SUCCESS gắn nhãn `system.restarted: true`. Ba dòng audit có `task_run_id`, `source`, `inputs_replaced` và `replayed_from`. Lần kiểm tra phát hiện icon trong menu dòng chưa đặt kích thước; `a4d6afaae` đã sửa.
 
 ### Sai lệch và lý do
@@ -224,7 +229,6 @@ Mỗi task được controller review giữa các task. A1, A3, B1 và C1 mỗi 
 - A5: câu chữ về pruner ở `storage/index.rs:175` gợi ý thời gian lưu giữ dài hơn thực tế; một khẳng định thừa trong `storage_index.rs`; không có test iteration lồng nhau hay test âm cho subflow.
 - B1: một restart không-frozen chạy `startable_flow` hai lần; `refuse_disabled_source` parse source hai lần; không có test 413 trên route replay; `startable_flow` chỉ đánh giá `disabled:` trên YAML của bản nháp.
 - C1: tiêu đề dialog bị đổi trong lúc đóng; một đường lỗi server chưa được test; text lý do `!hasFlow` hiện trong chế độ replay.
-- Còn nợ ở Z: kiểm tra trực tiếp trên trình duyệt (sáng và tối, FE-TEST-2 của 7a) kèm ảnh chụp, và bundle test.
 
 ## 8. Phần còn lại của dòng #7
 

@@ -35,7 +35,8 @@ Kestra's restart also takes a `revision` (`ES:281-373`). With a revision, the re
   - **Q6 (S4):** a `Loop` run reset in a copy goes `CREATED`, and its iterations run again under the new execution. Kestra fails such a `Loop` at once.
   - **Q7 (S7):** a replay from a task and a restart on another source also refuse `files_pruned` and `after_execution_running`, as 7a's restart does. A whole replay is unchanged.
 
-- **Q8 (2026-11-14, during A3). Variables follow the chosen source, as in Kestra.** When the chosen source text differs from the frozen source, the new execution stores NULL `variables`, so that source's own `variables:` apply (Kestra `applyNewRevision`, `ES:514-517`). On the frozen source the old execution's `variables` are carried unchanged. The plan had said the old column always travels; the user chose the Kestra-faithful rule after the A3 review (finding I1). This is the dated form of D6's last sentence. Recorded as §5 divergence 12.
+- **Q8 (2026-11-14, during A3). For a replay, variables follow the chosen source, as in Kestra.** When a replay's chosen source text differs from the frozen source, the new execution stores NULL `variables`, so that source's own `variables:` apply (Kestra `applyNewRevision`, `ES:514-517`). On the frozen source the old execution's `variables` are carried unchanged. The plan had said the old column always travels; the user chose the Kestra-faithful rule after the A3 review (finding I1). This is the dated form of D6's last sentence. Recorded as §5 divergence 12.
+  - **The rule is replay-only (user decision 2026-11-14, final review I2): a restart on another source carries the old execution's `variables`, as Kestra does.** Kestra's `ExecutionService.restart(.., revision)` never calls `applyNewRevision` (`ES:353-368`, only `withFlowRevision`), and `Execution.childExecution` copies `this.variables` (`Execution.java:405-432`), so a Kestra restart on revision N runs with the old execution's variables. `worker/copy.rs` carries the column when the kind is a restart on a source; test `replay.rs::a_restart_on_another_source_carries_the_executions_variables`.
 
 ### 2.2 Design decisions (default decisions, 2026-11-14)
 
@@ -63,7 +64,7 @@ Kestra's restart also takes a `revision` (`ES:281-373`). With a revision, the re
   - `current` uses the flow's draft, read inside the replay's transaction.
   - `version:N` uses that `flow_versions` row's source. A missing N answers 404, code `flow_version_not_found`.
   - In every case the new execution freezes the source it ran, as every execution does.
-  - The flow's variables follow the chosen source, as Kestra's `applyNewRevision` takes `flow.getVariables()` (`ES:514-517`). The execution's run `variables` (7a D3 of W9) travel unchanged.
+  - The flow's variables follow the chosen source, as Kestra's `applyNewRevision` takes `flow.getVariables()` (`ES:514-517`). The execution's run `variables` (7a D3 of W9) travel unchanged. (Superseded by Q8: a replay on another source stores NULL `variables`; a restart on a source carries them.)
 - **D7. Inputs.**
   - With no `inputs`, the old execution's inputs are reused, revealed as today (KI-112).
   - With `inputs`, the body (JSON, or multipart as `start_flow_execution` takes it) replaces them. It is checked against the **chosen source's** declared inputs by the same start check, as Kestra's `readExecutionInputs(flow, current, inputs)` checks it (`EC:1497-1498`).
@@ -160,9 +161,9 @@ Confirmed by the user on 2026-11-14 (Q4 to Q7 and the plan's "Spec corrections")
 Found during the build:
 
 11. **A copied `Switch` keeps its old case.** Kestra re-renders the `Switch` value on the new source. egret reopens the flowable but keeps the case the old run chose (A3 review, minor). A moved task in an `If` or `Switch` branch is refused by the branch check (`a0d0eb8be`).
-12. **Variables follow the chosen source (Q8).** When the chosen source text differs from the frozen source, the new execution stores NULL `variables`, as Kestra's `applyNewRevision` takes the new flow's `variables` (`ES:514-517`). On the frozen source the old `variables` are carried.
+12. **Variables follow the chosen source on a replay (Q8).** When a replay's chosen source text differs from the frozen source, the new execution stores NULL `variables`, as Kestra's `applyNewRevision` takes the new flow's `variables` (`ES:514-517`). On the frozen source the old `variables` are carried. This matches Kestra's replay. A restart on another source carries the old `variables`, as Kestra's restart on a revision does (`ES:353-368`, `Execution.java:405-432`); that also matches Kestra, so it is not a divergence.
 13. **Replay with changed inputs replaces the inputs wholesale, as Kestra does.** An optional `SECRET` input left empty is dropped, not kept. The dialog says "Enter it again: the stored value is hidden." on a secret field. Without `inputs`, the old inputs are reused, revealed as today.
-14. **The `files_pruned` refusal follows the `replayed_from` chain only.** The query in `worker/copy.rs` (`OLD_ROW`, recursive `chain`) walks `replayed_from_execution_id`, not a retry replay's `parent_execution_id`. A source whose files the pruner deleted behind a retry-parent link is not refused. Kestra has no such refusal; this is a gap in egret's own gate, to confirm at the final review.
+14. **The `files_pruned` refusal follows the read rule's whole chain (fixed in the final fix wave).** The query in `worker/copy.rs` (`OLD_ROW`, recursive `chain`) first walked only `replayed_from_execution_id`. It now walks the same chain as the storage read rule (`storage/index.rs`, `readable_sql!`'s `chain`): `replayed_from_execution_id`, or a `CREATE_NEW_EXECUTION` retry replacement's `parent_execution_id` (`loop_index` NULL), transitively, scoped to the workspace. A replacement whose retry parent's files were pruned is refused with 409 `files_pruned` (test `replay.rs::a_copy_of_a_retry_replacement_whose_parent_was_pruned_is_refused`). Kestra has no such refusal at all; the gate is egret's own (Q7).
 
 Security-driven differences, carried from 7a D24 and extended:
 
@@ -171,6 +172,7 @@ Security-driven differences, carried from 7a D24 and extended:
 - A trashed or purged flow answers 404 and a disabled one 409 (`startable_flow`). Kestra has no trash.
 - A chosen source (`current` or `version:N`) whose own YAML says `disabled: true` is refused 409, as Kestra's `FlowService.getFlowIfExecutableOrThrow(.., revision)` refuses a disabled revision (`FlowService.java:861`). The 409 has no code.
 - `files_pruned` and `after_execution_running` apply to a replay from a task and a restart on another source (Q7), not to a whole replay.
+- A reused `SECRET` input can be stored in clear. With `inputs` reused and a chosen source that no longer declares that input `SECRET`, `secret_inputs::split` stores the revealed value in clear in `inputs` (final review M9). Kestra does the same (inputs are carried). It is not an escalation: a manager who can choose the source can already edit the draft and leak a secret through a task.
 
 ## 6. Out of scope
 
@@ -194,6 +196,7 @@ Built 2026-11-14 on `feat/workflow-replay-from-task`, base `origin/main` `844ec4
 | A5 | `94066375d` | The storage read rule adds `chain_family`: a copy reads its source chain's loop iteration files (S5). One `storage_index` test that pinned the old exclusion was flipped. | 0 |
 | B1 | `563e1a44c`, fix `edea15b2b` | Routes: `taskRunId`, `source`, `revision` alias, `breakpoints` refusal, JSON and multipart inputs; coded refusals; audit; OpenAPI; the retired `restart_revision_unsupported` (S8). | 1: the restart-on-source audit names the replaced execution; a disabled chosen source is 409 |
 | C1 | `ff67795e5` (client), `249e4f74b`, fix `4ed0eab19` | `gen:api` client; `ReplayDialog.tsx` (source choice, change inputs, restart text); task-run row menu "Actions for {task}"; refusal sentences. | 1: replay hidden for a flow with no id gives a reason; input errors show in the collapsed section |
+| Final fix wave | `005edc423`, `7feb93bc4`, `db8013a51`, `ddd07dae0`, `df5738f5a` | After the whole-branch final review: `files_pruned` follows the retry link (triage c); a restart on a source carries `variables` (I2, Q8); the stamps guard refuses an upsert that writes `state` unstamped and a derived-table "copy" (M4); the dialog waits for the chosen source before sending edited inputs (M5) and gives a restart its own `replay_task_not_in_source` sentence (M3); "Replay from this task" is disabled, with the reason, on a run beneath a `WorkingDirectory` (M6). | – |
 
 Measured counts (Z gates, 2026-11-14):
 
@@ -201,6 +204,8 @@ Measured counts (Z gates, 2026-11-14):
 - `cargo test -p egret-workflow --no-fail-fast` on `25fb40103`: 3782 passed, 55 ignored, 8 failed. Seven are `sql_starrocks_live` (no StarRocks engine on the test host, as on main). The eighth was `execution_timestamps::every_state_write_stamps_the_timestamps`: the guard did not know a verbatim copy. `4b6bf572d` taught it one (all of `state`, `history`, `started_at` and `ended_at` from one row alias of the same table), with self-check cases that a copy taking `state` from anywhere else is still refused; after it `execution_timestamps` 21/21, `replay` 29/29, `replay_routes` 20/20 and `restart` 34/34 passed.
 - `cargo test -p egret-config -p egret-server -p egret-metastore`: 179 passed, including `committed_openapi_json_is_current` and the client digest.
 - Frontend: `npm run typecheck` clean; `npm run lint` 0 errors (154 warnings, none in files this package touches); `npx vitest run` 8722 passed and 2 failed on 5 s timeouts under machine load, in `OutputsTree.test.tsx` and `ScheduleDetail.test.tsx` (not touched here); both files pass alone (79/79).
+- `npm run build` (ok) and `npm run test:bundle:workflows` (all 6 checks ✓), run by the controller on 2026-11-14 after `0803e4fa6` (final review I1), and again after the final fix wave (all 6 ✓).
+- Final fix wave, on `df5738f5a`: `replay` 30/30, `replay_routes` 20/20, `restart` 34/34, `restart_routes` 30/30, `execution_timestamps` 21/21, `storage_index` 15/15; `cargo clippy -p egret-workflow --all-targets -- -D warnings` and `cargo fmt --check` clean; `npm run typecheck` clean, `npm run lint` 0 errors (154 warnings, as before); `npx vitest run` on the touched files and `ExecutionDetail.test.tsx` 106/106.
 - Live check on a native `egret serve` (its own database and storage, port 18466), as `admin@egret.local`, light and dark: replay from task `b` on this run's version kept `a`'s outputs and reran `b` and `c` (`system.replay: true`, attempt 2); replay from `b` on the flow's current version ran the edited `c`; restart of a FAILED execution on published version 2 opened a new SUCCESS execution labelled `system.restarted: true`. The three audit rows carry `task_run_id`, `source`, `inputs_replaced` and `replayed_from`. The check found the row-menu icons unsized; `a4d6afaae` fixed them.
 
 ### Deviations and their reasons
@@ -222,7 +227,6 @@ Every task was reviewed by the controller between tasks. A1, A3, B1 and C1 each 
 - A5: the pruner wording at `storage/index.rs:175` suggests longer retention than it gives; a redundant assertion in `storage_index.rs`; no nested-iteration or subflow-negative test.
 - B1: a non-frozen restart runs `startable_flow` twice; `refuse_disabled_source` parses the source twice; no 413 test on the replay route; `startable_flow` judges `disabled:` on the draft YAML only.
 - C1: the dialog title flips while closing; a server-error path is untested; the `!hasFlow` reason text renders in replay mode.
-- Owed at Z: the live browser check (light and dark, 7a's FE-TEST-2) with screenshots, and the bundle test.
 
 ## 8. Rest of row #7
 
