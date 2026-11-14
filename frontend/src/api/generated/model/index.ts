@@ -310,6 +310,7 @@ export * from './filePreviewDto';
 export * from './filter';
 export * from './filterOp';
 export * from './filterValue';
+export * from './finalizeSummary';
 export * from './finding';
 export * from './findingDto';
 export * from './flowDto';
