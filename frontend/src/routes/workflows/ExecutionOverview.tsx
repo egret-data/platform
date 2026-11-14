@@ -432,13 +432,13 @@ function TaskRuns({ ws, execution, now, canManage }: { ws: string; execution: Ex
                   <DropdownMenuContent align="end">
                     {changeable ? (
                       <DropdownMenuItem onSelect={() => setChanging(run)}>
-                        <Pencil aria-hidden />
+                        <Pencil aria-hidden className="mr-2 size-4" />
                         Change state
                       </DropdownMenuItem>
                     ) : null}
                     {replayable ? (
                       <DropdownMenuItem onSelect={() => setReplaying(run)}>
-                        <History aria-hidden />
+                        <History aria-hidden className="mr-2 size-4" />
                         Replay from this task
                       </DropdownMenuItem>
                     ) : null}
