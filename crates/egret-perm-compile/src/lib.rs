@@ -137,6 +137,10 @@ pub mod role_principal_migrate;
 // SP3c-2 Task 4: the reversible, equivalence-gated migration of each clearance
 // (`classification_policies`) into a `kind='withhold'` rule, and its undo.
 pub mod clearance_migrate;
+// SP3c-3 Task 4: the reversible, equivalence-gated rewrite of implicit
+// workspace-assignment grants into their managed `ws:<slug> members` group, and
+// its hash-guarded undo.
+pub mod ws_assignment_migrate;
 // SP4d-3 Task 7: the migration transaction (re-classify, write, recompile,
 // switch off, provenance, re-gate every affected profile) and its undo.
 pub mod migrate;

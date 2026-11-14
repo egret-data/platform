@@ -240,3 +240,322 @@ async fn the_ws_assignment_migration_table_records_a_run() {
         .await
         .expect("cleanup");
 }
+
+// ---------------------------------------------------------------------------
+// SP3c-3 Task 4: the reversible, equivalence-gated workspace-assignment ->
+// `ws:<slug> members` group rewrite. `migrate_ws_assignments_in_tx` is global
+// (every service, every implicit grant) and its equivalence gate checks the
+// whole affected profile set, so these tests take the file's SERIAL mutex and
+// run every migrate/undo inside ONE transaction that is rolled back — nothing
+// is committed, so no other test's catalog/workspace is touched. Assertions are
+// scoped to this test's own grant id, never a global count.
+
+use egret_perm_compile::recompile_service_in_tx;
+use egret_perm_compile::ws_assignment_migrate::{
+    migrate_ws_assignments_in_tx, undo_ws_assignments_in_tx,
+};
+use egret_policy::PolicyStore;
+use serde_json::{json, Value};
+use sqlx::{PgPool, Postgres, Transaction};
+
+fn uniq(prefix: &str) -> String {
+    format!("{prefix}_{}", &Uuid::new_v4().simple().to_string()[..12])
+}
+
+struct Seeded {
+    service_id: i64,
+    catalog_id: Uuid,
+    workspace_id: Uuid,
+    slug: String,
+    grant_id: Uuid,
+}
+
+/// A StarRocks profile (one bound engine, one attached Iceberg catalog) whose
+/// catalog is assigned to a fresh workspace that has one (username-less) member,
+/// so the implicit `origin='workspace_assignment'` grant with a
+/// `kind='workspace_members'` principal exists exactly as production writes it.
+/// The service is NOT compiled yet.
+async fn seed_service_with_ws_assignment_grant(db: &Db) -> Seeded {
+    let pool = &db.pool;
+    let policy = PolicyStore::new(db.clone());
+    egret_policy::seed_starrocks(&policy)
+        .await
+        .expect("seed starrocks service-def");
+    let service = policy
+        .create_service(&uniq("sr_wsmig"), "starrocks", &json!({}))
+        .await
+        .expect("create service");
+
+    let (workspace_id, slug) = seed_workspace(pool).await;
+    let member = seed_user(pool).await;
+    add_member(pool, workspace_id, member).await;
+
+    let sc_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
+         VALUES ($1,'us-east-1','egret-wsmig-test','AKIATEST') RETURNING id",
+    )
+    .bind(uniq("wsmig-sc"))
+    .fetch_one(pool)
+    .await
+    .expect("storage connection");
+    let warehouse_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) \
+         VALUES ($1,$2,$3) RETURNING id",
+    )
+    .bind(uniq("wsmig_wh"))
+    .bind(workspace_id)
+    .bind(sc_id)
+    .fetch_one(pool)
+    .await
+    .expect("warehouse");
+    let engine_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'starrocks','egret','{\"starrocksConfig\":{\"feImage\":\"ghcr.io/egret-data/egret-starrocks-fe:4.1.7-egret.4\"}}'::jsonb,$2) RETURNING id",
+    )
+    .bind(uniq("wsmig-eng"))
+    .bind(service.id)
+    .fetch_one(pool)
+    .await
+    .expect("engine");
+    let catalog_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) \
+         RETURNING id",
+    )
+    .bind(uniq("wsmig_cat"))
+    .bind(warehouse_id)
+    .fetch_one(pool)
+    .await
+    .expect("registry catalog");
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1,$2)",
+    )
+    .bind(engine_id)
+    .bind(catalog_id)
+    .execute(pool)
+    .await
+    .expect("attach catalog");
+
+    // The implicit grant, written exactly as the assignment path writes it.
+    let mut tx = pool.begin().await.unwrap();
+    egret_perm::sync_assignment_grants_in_tx(&mut tx, catalog_id, &[workspace_id])
+        .await
+        .expect("sync assignment grant");
+    tx.commit().await.unwrap();
+
+    let grant_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM perm.grants \
+          WHERE catalog_id = $1 AND origin = 'workspace_assignment' AND origin_workspace_id = $2",
+    )
+    .bind(catalog_id)
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await
+    .expect("implicit grant exists");
+
+    Seeded {
+        service_id: service.id,
+        catalog_id,
+        workspace_id,
+        slug,
+        grant_id,
+    }
+}
+
+/// The compiled bodies of a profile (name + policy_jsonb, ordered by name) as a
+/// JSON array — the artifact the engine downloads — read inside `tx`.
+async fn compiled_bodies_in_tx(tx: &mut Transaction<'_, Postgres>, service_id: i64) -> Value {
+    let rows: Vec<(String, Value)> = sqlx::query_as(
+        "SELECT name, policy_jsonb FROM policy.authz_policies WHERE service_id = $1 ORDER BY name",
+    )
+    .bind(service_id)
+    .fetch_all(&mut **tx)
+    .await
+    .unwrap();
+    Value::Array(
+        rows.into_iter()
+            .map(|(name, body)| json!({ "name": name, "body": body }))
+            .collect(),
+    )
+}
+
+/// Delete the seeded grant (cascades its principals) so a later test's view of
+/// the implicit-grant set is not polluted by this one.
+async fn cleanup(pool: &PgPool, grant_id: Uuid) {
+    sqlx::query("DELETE FROM perm.grants WHERE id = $1")
+        .bind(grant_id)
+        .execute(pool)
+        .await
+        .expect("cleanup grant");
+}
+
+#[tokio::test]
+async fn migrating_a_ws_assignment_is_byte_identical_and_removes_workspace_members() {
+    let Some(dsn) = egret_test_db::url().await else {
+        return;
+    };
+    let _g = SERIAL.lock().await;
+    let db = Db::connect(&dsn, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let pool = db.pool.clone();
+    let seeded = seed_service_with_ws_assignment_grant(&db).await;
+
+    // Everything inside ONE transaction that is rolled back: the global migrate
+    // touches every implicit grant, and we must not commit that to the shared DB.
+    let mut tx = pool.begin().await.unwrap();
+    recompile_service_in_tx(&mut tx, seeded.service_id)
+        .await
+        .expect("compile before");
+    let before = compiled_bodies_in_tx(&mut tx, seeded.service_id).await;
+    assert!(
+        !before.as_array().unwrap().is_empty(),
+        "the workspace-members grant must compile to at least one policy before the rewrite: \
+         {before}"
+    );
+
+    let m = migrate_ws_assignments_in_tx(&mut tx, "tester")
+        .await
+        .expect("migrate");
+    assert!(
+        m.catalogs.contains(&seeded.catalog_id),
+        "this catalog was migrated: {m:?}"
+    );
+
+    // (a) No `workspace_members` principal remains for THIS grant; it is now an
+    // `explicit` grant naming the `ws:<slug> members` group.
+    let ws_members_left: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM perm.grant_principals \
+          WHERE grant_id = $1 AND kind = 'workspace_members'::perm.principal_kind",
+    )
+    .bind(seeded.grant_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(ws_members_left, 0, "no workspace_members principal remains");
+
+    let (origin, ows): (String, Option<Uuid>) =
+        sqlx::query_as("SELECT origin, origin_workspace_id FROM perm.grants WHERE id = $1")
+            .bind(seeded.grant_id)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert_eq!(origin, "explicit");
+    assert!(
+        ows.is_none(),
+        "origin_workspace_id cleared on an explicit grant"
+    );
+
+    let group_ref: String = sqlx::query_scalar(
+        "SELECT ref FROM perm.grant_principals \
+          WHERE grant_id = $1 AND kind = 'group'::perm.principal_kind",
+    )
+    .bind(seeded.grant_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(group_ref, ws_members_group_name(&seeded.slug));
+
+    // (b) The compiled output is byte-identical.
+    recompile_service_in_tx(&mut tx, seeded.service_id)
+        .await
+        .expect("compile after");
+    let after = compiled_bodies_in_tx(&mut tx, seeded.service_id).await;
+    assert_eq!(
+        before, after,
+        "compile must be byte-identical after the rewrite"
+    );
+
+    tx.rollback().await.unwrap();
+    cleanup(&pool, seeded.grant_id).await;
+}
+
+#[tokio::test]
+async fn undo_restores_the_workspace_assignment() {
+    let Some(dsn) = egret_test_db::url().await else {
+        return;
+    };
+    let _g = SERIAL.lock().await;
+    let db = Db::connect(&dsn, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let pool = db.pool.clone();
+    let seeded = seed_service_with_ws_assignment_grant(&db).await;
+
+    // migrate + undo in one rolled-back transaction: the provenance row inserted
+    // by migrate is visible to undo in the same tx.
+    let mut tx = pool.begin().await.unwrap();
+    let m = migrate_ws_assignments_in_tx(&mut tx, "tester")
+        .await
+        .expect("migrate");
+    undo_ws_assignments_in_tx(&mut tx, m.id)
+        .await
+        .expect("undo");
+
+    let (origin, ows): (String, Option<Uuid>) =
+        sqlx::query_as("SELECT origin, origin_workspace_id FROM perm.grants WHERE id = $1")
+            .bind(seeded.grant_id)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert_eq!(origin, "workspace_assignment", "origin restored");
+    assert_eq!(
+        ows,
+        Some(seeded.workspace_id),
+        "origin_workspace_id restored"
+    );
+
+    let (kind, p_ref): (String, String) =
+        sqlx::query_as("SELECT kind::text, ref FROM perm.grant_principals WHERE grant_id = $1")
+            .bind(seeded.grant_id)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert_eq!(kind, "workspace_members", "principal kind restored");
+    assert_eq!(
+        p_ref,
+        seeded.workspace_id.to_string(),
+        "principal ref restored"
+    );
+
+    tx.rollback().await.unwrap();
+    cleanup(&pool, seeded.grant_id).await;
+}
+
+#[tokio::test]
+async fn undo_409s_when_a_row_changed() {
+    let Some(dsn) = egret_test_db::url().await else {
+        return;
+    };
+    let _g = SERIAL.lock().await;
+    let db = Db::connect(&dsn, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let pool = db.pool.clone();
+    let seeded = seed_service_with_ws_assignment_grant(&db).await;
+
+    let mut tx = pool.begin().await.unwrap();
+    let m = migrate_ws_assignments_in_tx(&mut tx, "tester")
+        .await
+        .expect("migrate");
+
+    // Tamper with the rewritten managed-group principal so its recorded hash no
+    // longer matches what is stored.
+    sqlx::query(
+        "UPDATE perm.grant_principals SET ref = ref || '_tampered' \
+          WHERE grant_id = $1 AND kind = 'group'::perm.principal_kind",
+    )
+    .bind(seeded.grant_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+
+    let err = undo_ws_assignments_in_tx(&mut tx, m.id)
+        .await
+        .expect_err("undo must refuse a changed row");
+    assert!(
+        err.to_string().contains("undo refused"),
+        "a 409 naming the change: {err}"
+    );
+
+    tx.rollback().await.unwrap();
+    cleanup(&pool, seeded.grant_id).await;
+}

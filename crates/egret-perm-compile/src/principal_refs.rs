@@ -254,6 +254,14 @@ fn refused_for_authoring(p: &Principal) -> Option<&'static str> {
                  role's intended group directly",
             )
         }
+        // SP3c-3: a `ws:<slug> members` group mirrors a workspace's members and
+        // is written only by the workspace-assignment migration and its sync.
+        PrincipalKind::Group if p.r#ref.starts_with("ws:") && p.r#ref.ends_with(" members") => {
+            Some(
+                "ws:<slug> members groups are managed workspace-assignment migration targets; \
+                 assign the catalog to the workspace instead",
+            )
+        }
         _ => None,
     }
 }
@@ -969,6 +977,50 @@ mod tests {
         assert!(
             matches!(stored, Stored::Unresolved(_)),
             "a never-synced holder group must be Unresolved (fails open), never silently Empty"
+        );
+    }
+
+    /// SP3c-3: a `ws:<slug> members` group ref whose row was never synced must
+    /// NOT be silently accepted — an author naming it in an exclude would have
+    /// the subtract evaporate (the J-F3 fail-open hole). An authoring write is
+    /// refused, and the stored-ref report classifies it `Unresolved` (fails
+    /// open), never `Empty`. Mirrors the role-holder-group guard.
+    #[tokio::test]
+    async fn a_ghost_ws_members_group_ref_is_not_silently_accepted() {
+        let Some(dsn) = egret_test_db::url().await else {
+            return;
+        };
+        let db = egret_metastore::Db::connect(&dsn, 2)
+            .await
+            .expect("connect");
+        db.migrate().await.expect("migrate");
+        let mut conn = db.pool.acquire().await.expect("conn");
+
+        // Managed-shaped, but no `groups` row has ever been synced for it.
+        let ghost = Principal {
+            kind: PrincipalKind::Group,
+            r#ref: format!(
+                "ws:ghost-{} members",
+                &Uuid::new_v4().simple().to_string()[..12]
+            ),
+        };
+
+        // The authoring boundary refuses it rather than storing a ref that
+        // expands to nobody.
+        let mut set = PrincipalSet {
+            include: vec![ghost.clone()],
+            exclude: Vec::new(),
+        };
+        let err = resolve_principal_refs(&mut conn, "principals", &mut set, None)
+            .await
+            .expect_err("a never-synced ws-members-group ref must be refused, not accepted");
+        assert!(matches!(err, PermHttpError::BadRequest(_)), "{err}");
+
+        // The stored-ref report flags it fail-open (Unresolved), not Empty.
+        let stored = classify_stored(&mut conn, &ghost).await.expect("classify");
+        assert!(
+            matches!(stored, Stored::Unresolved(_)),
+            "a never-synced ws members group must be Unresolved (fails open), never silently Empty"
         );
     }
 
