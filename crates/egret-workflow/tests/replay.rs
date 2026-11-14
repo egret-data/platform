@@ -1883,3 +1883,77 @@ async fn a_copy_keeps_the_stamps_rule(pool: sqlx::PgPool) {
     .unwrap();
     assert_eq!(broken, 0);
 }
+
+// ── Final fix wave: `files_pruned` follows the retry link (review triage c) ──
+
+/// A `CREATE_NEW_EXECUTION` retry replacement carries its parent's files (the
+/// read rule's chain follows `parent_execution_id` when `loop_index` is NULL).
+/// When the retry parent's files are pruned, a copy of the replacement is
+/// refused with `FilesPruned` instead of failing at run time.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_copy_of_a_retry_replacement_whose_parent_was_pruned_is_refused(pool: sqlx::PgPool) {
+    // Arrange
+    let (_db, ws, _) = setup(&pool).await;
+    let reg = Flaky::new(&[("b", 2)]);
+    let source = format!(
+        "id: retried\nnamespace: t\nretry:\n  behavior: CREATE_NEW_EXECUTION\n  \
+         type: constant\n  maxAttempts: 2\n  interval: PT0S\ntasks:\n{}",
+        tasks(&["a", "b", "c"])
+    );
+    let parent = start(&pool, ws, &source).await;
+    // The parent ends `RETRIED`, which `drive` does not wait for: tick until
+    // its replacement exists.
+    let mut replacement = None;
+    for _ in 0..60 {
+        egret_workflow::worker::tick(&pool, 64, &reg)
+            .await
+            .expect("a worker tick");
+        replacement = sqlx::query_scalar(
+            "SELECT id FROM workflow.executions \
+              WHERE parent_execution_id = $1 AND loop_index IS NULL",
+        )
+        .bind(parent)
+        .fetch_optional(&pool)
+        .await
+        .expect("replacement");
+        if replacement.is_some() {
+            break;
+        }
+    }
+    let replacement: Uuid = replacement.expect("a retry replacement");
+    drive(&pool, &reg, replacement).await;
+    assert_eq!(exec_state(&pool, replacement).await, "FAILED");
+    sqlx::query("UPDATE workflow.executions SET files_pruned_at = now() WHERE id = $1")
+        .bind(parent)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let a = run_id(&runs_of(&pool, replacement).await, "a");
+    let frozen = source_of(&pool, replacement).await;
+    let n = execution_count(&pool).await;
+
+    // Act
+    let from_task = replay(
+        &pool,
+        ws,
+        replacement,
+        &frozen,
+        ReplayKind::FromTaskRun(a),
+        ReplayInputs::Reuse,
+    )
+    .await;
+    let restart = replay(
+        &pool,
+        ws,
+        replacement,
+        &frozen,
+        ReplayKind::RestartOnSource,
+        ReplayInputs::Reuse,
+    )
+    .await;
+
+    // Assert
+    assert_eq!(from_task, Err(ReplayRefused::FilesPruned));
+    assert_eq!(restart, Err(ReplayRefused::FilesPruned));
+    assert_eq!(execution_count(&pool).await, n);
+}

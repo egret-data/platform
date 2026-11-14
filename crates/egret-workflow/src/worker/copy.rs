@@ -128,14 +128,22 @@ struct Old {
     flow_id: Option<Uuid>,
 }
 
-/// One row: the facts the checks read (the files of the whole replay chain,
-/// S7) and what the new row copies.
+/// One row: the facts the checks read (the files of the whole chain, S7)
+/// and what the new row copies. The chain is the read rule's
+/// (`storage::index` `readable_sql!`'s `chain`): a manual replay's
+/// `replayed_from_execution_id` and a `CREATE_NEW_EXECUTION` retry
+/// replacement's `parent_execution_id` (`loop_index` NULL), transitively, in
+/// the workspace (`$2`). A copy carries files from every link, so a pruned
+/// link anywhere refuses it.
 const OLD_ROW: &str = "\
 WITH RECURSIVE chain(id) AS ( \
   SELECT $1::uuid \
   UNION \
-  SELECT e.replayed_from_execution_id FROM workflow.executions e JOIN chain c ON e.id = c.id \
-   WHERE e.replayed_from_execution_id IS NOT NULL) \
+  SELECT src.id FROM chain c \
+    JOIN workflow.executions l ON l.id = c.id AND l.workspace_id = $2 \
+    JOIN workflow.executions src ON src.workspace_id = $2 \
+     AND ((l.loop_index IS NULL AND src.id = l.parent_execution_id) \
+          OR src.id = l.replayed_from_execution_id)) \
 SELECT CASE WHEN x.loop_index IS NOT NULL THEN x.parent_execution_id END AS loop_root, \
        EXISTS (SELECT 1 FROM workflow.executions p JOIN chain c ON p.id = c.id \
                 WHERE p.files_pruned_at IS NOT NULL) AS files_pruned, \
@@ -159,6 +167,7 @@ async fn replay_locked(
     .map_err(db_err)?;
     let row = sqlx::query(OLD_ROW)
         .bind(req.from)
+        .bind(req.workspace_id)
         .fetch_one(&mut *conn)
         .await
         .map_err(db_err)?;
