@@ -1472,6 +1472,147 @@ fn stamps(w: &Write) -> bool {
     }
 }
 
+/// The SQL of the string literal a [`Write`]'s text begins inside: up to its
+/// first unescaped `"`, with Rust's escapes undone (`\` + newline swallows the
+/// newline and the next line's leading whitespace). `None` when the literal
+/// does not close, or uses an escape this scan does not read.
+fn first_literal(text: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(out),
+            '\\' => match chars.next()? {
+                '\n' => {
+                    while chars.peek().is_some_and(|c| c.is_whitespace()) {
+                        chars.next();
+                    }
+                }
+                '"' => out.push('"'),
+                '\\' => out.push('\\'),
+                'n' => out.push('\n'),
+                _ => return None,
+            },
+            c => out.push(c),
+        }
+    }
+    None
+}
+
+/// `list` split at its top-level commas (not inside `(…)` or `'…'`), each
+/// item trimmed.
+fn top_level_items(list: &str) -> Vec<String> {
+    let (mut items, mut cur, mut depth, mut quoted) = (Vec::new(), String::new(), 0i32, false);
+    for c in list.chars() {
+        match c {
+            '\'' => quoted = !quoted,
+            '(' if !quoted => depth += 1,
+            ')' if !quoted => depth -= 1,
+            ',' if !quoted && depth == 0 => {
+                items.push(cur.trim().to_string());
+                cur.clear();
+                continue;
+            }
+            _ => {}
+        }
+        cur.push(c);
+    }
+    items.push(cur.trim().to_string());
+    items
+}
+
+/// The byte offset of the first top-level (not parenthesised, not quoted)
+/// `FROM` keyword in `sql`.
+fn top_level_from(sql: &str) -> Option<usize> {
+    let from = regex::Regex::new(r"(?i)\bFROM\b").unwrap();
+    let at = from.find_iter(sql).map(|m| m.start()).find(|&at| {
+        let before = &sql[..at];
+        let depth = before.matches('(').count() as i64 - before.matches(')').count() as i64;
+        depth == 0 && before.matches('\'').count().is_multiple_of(2)
+    });
+    at
+}
+
+/// The four columns the stamps rule ties together.
+const STAMPED: [&str; 4] = ["state", "history", "started_at", "ended_at"];
+
+/// **A verbatim copy of a row of the same table**, the one `INSERT` that
+/// writes `state` without the stamp macros and is still allowed (package 7b,
+/// `worker/copy.rs`' `INSERT_COPIED_RUNS`). A copy of a row whose
+/// timestamps were written under the rule carries them; stamping `now()`
+/// would invent a start and an end the run never had (Kestra copies a task
+/// run with its state history).
+///
+/// Recognised only when ALL of these hold, read from the ONE string literal
+/// the statement starts in:
+///
+/// - it is `INSERT INTO workflow.<t> (cols…) SELECT items… FROM …`, with as
+///   many items as columns, the select list ending at a top-level `FROM`;
+/// - `state`, `history`, `started_at` and `ended_at` are ALL in the columns,
+///   and each one's item is exactly `<alias>.<that same column>`;
+/// - the four aliases are one alias;
+/// - the `FROM` binds that alias to `workflow.<t>`, the table inserted into.
+///
+/// A state from a bind, a literal, another alias, an alias that is not that
+/// table (an `unnest` of bound arrays), a swapped column, or a missing
+/// timestamp column is not a verbatim copy, and is refused as any unstamped
+/// write is.
+fn copies_verbatim(w: &Write) -> bool {
+    let Some(sql) = first_literal(&w.text) else {
+        return false;
+    };
+    let head =
+        regex::Regex::new(r"(?is)^\s*INSERT\s+INTO\s+workflow\s*\.\s*(executions|task_runs)\s*\(")
+            .unwrap();
+    let Some(h) = head.captures(&sql) else {
+        return false;
+    };
+    let table = h[1].to_string();
+    let open = h.get(0).unwrap().end();
+    let Some(close) = sql[open..].find(')').map(|i| open + i) else {
+        return false;
+    };
+    let columns: Vec<String> = top_level_items(&sql[open..close])
+        .into_iter()
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    let rest = &sql[close + 1..];
+    let Some(select) = regex::Regex::new(r"(?is)^\s*SELECT\b").unwrap().find(rest) else {
+        return false;
+    };
+    let rest = &rest[select.end()..];
+    let Some(from) = top_level_from(rest) else {
+        return false;
+    };
+    let items = top_level_items(&rest[..from]);
+    if items.len() != columns.len() {
+        return false;
+    }
+    let item = regex::Regex::new(r"(?i)^([a-z_][a-z0-9_]*)\s*\.\s*([a-z_][a-z0-9_]*)$").unwrap();
+    let mut alias: Option<String> = None;
+    for col in STAMPED {
+        let Some(ix) = columns.iter().position(|c| c == col) else {
+            return false;
+        };
+        let Some(m) = item.captures(&items[ix]) else {
+            return false;
+        };
+        if !m[2].eq_ignore_ascii_case(col) {
+            return false;
+        }
+        let a = m[1].to_ascii_lowercase();
+        if *alias.get_or_insert_with(|| a.clone()) != a {
+            return false;
+        }
+    }
+    let alias = alias.expect("four columns were read");
+    regex::Regex::new(&format!(
+        r"(?i)\bworkflow\s*\.\s*{table}\s+(?:AS\s+)?{alias}\b"
+    ))
+    .unwrap()
+    .is_match(&rest[from..])
+}
+
 fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
@@ -1504,7 +1645,16 @@ fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 /// - a `stamp_set!` whose first two arguments are not the placeholders that
 ///   `state =` and `history =` bind;
 /// - an `INSERT` with `state` in its columns but without both
-///   `stamp_columns!` and `stamp_values!`;
+///   `stamp_columns!` and `stamp_values!`, unless it is a VERBATIM copy
+///   ([`copies_verbatim`]): an `INSERT … SELECT` whose `state`, `history`,
+///   `started_at` and `ended_at` are each the same-named column of ONE alias
+///   of the table inserted into. That is the one allowance, and it is
+///   structural, not a file or line: a copy that takes `state` or `history`
+///   from a bind, a literal or another alias while carrying the old
+///   timestamps is refused, and so is one that leaves a timestamp column
+///   out. A copy that CHANGES a copied row's state must do it with a later
+///   stamped write (package 7b: `restart::copy_job`'s settle, through
+///   `persist`'s `stamp_set!`);
 /// - ANY `UPDATE`/`INSERT` of these tables built with `format!`, and any
 ///   `UPDATE {…}`/`INSERT INTO {…}` whose table name is interpolated, in
 ///   every crate. None exists today; a new one is refused rather than
@@ -1520,7 +1670,11 @@ fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 ///   values (the binds are Rust, not SQL);
 /// - whether an `INSERT`'s `stamp_values!` arguments are the placeholders
 ///   of its `state`/`history` values;
-/// - an `UPDATE` whose state write it cannot recognise as one.
+/// - an `UPDATE` whose state write it cannot recognise as one;
+/// - whether the row a verbatim copy reads was itself written under the rule
+///   (a pre-0183 row is copied with its NULLs, as it should be), or whether
+///   a later stamped write does follow a copy whose state must change.
+///   `tests/replay.rs::a_copy_keeps_the_stamps_rule` measures the one copy.
 ///
 /// Migration 0183's CHECKs catch only part of a bypass at runtime: an end on
 /// a live row, or an end before its start. A bypass that writes a terminal
@@ -1564,6 +1718,98 @@ fn every_state_write_stamps_the_timestamps() {
          stamp_set!(\"$1\", \"$2\", \"$4\", \"$5\"), \" WHERE id = $3\"",
     );
     assert!(writes_state(&good) && stamps(&good));
+    // The verbatim-copy allowance: the shape `worker/copy.rs` writes passes,
+    // and every copy that takes a stamped column from anywhere but the copied
+    // row of the same table is refused. Each probe is a Write's text as the
+    // scan sees it: it starts inside the literal and the literal closes.
+    let copy = |cols: &str, items: &str, from: &str| {
+        probe(&format!(
+            "INSERT INTO workflow.task_runs \\\n  ({cols}) \\\nSELECT {items} \\\n  FROM {from}\";"
+        ))
+    };
+    let cols = "execution_id, run_ix, state, history, attempts, started_at, ended_at";
+    let unnest = "unnest($3::int[], $4::int[]) AS m(old_ix, new_ix) \
+                  JOIN workflow.task_runs o ON o.execution_id = $2 AND o.run_ix = m.old_ix";
+    let verbatim = copy(
+        cols,
+        "$1, m.new_ix, o.state, o.history, m.attempts, o.started_at, \
+         CASE WHEN o.x IS NOT NULL THEN COALESCE(o.y, now()) END, o.ended_at",
+        unnest,
+    );
+    // (One item too many above: a miscount is refused.)
+    assert!(writes_state(&verbatim) && !copies_verbatim(&verbatim));
+    let verbatim = copy(
+        cols,
+        "$1, m.new_ix, o.state, o.history, m.attempts, o.started_at, o.ended_at",
+        unnest,
+    );
+    assert!(
+        writes_state(&verbatim) && copies_verbatim(&verbatim),
+        "a verbatim copy is allowed"
+    );
+    let not_verbatim = [
+        // `state` from a bind, the old timestamps carried.
+        copy(
+            cols,
+            "$1, m.new_ix, $5, o.history, m.attempts, o.started_at, o.ended_at",
+            unnest,
+        ),
+        // `state` and `history` as literals: a reset written by the copy.
+        copy(
+            cols,
+            "$1, m.new_ix, 'CREATED', '[\"CREATED\"]', m.attempts, o.started_at, o.ended_at",
+            unnest,
+        ),
+        // `state` from another alias.
+        copy(
+            cols,
+            "$1, m.new_ix, m.state, o.history, m.attempts, o.started_at, o.ended_at",
+            unnest,
+        ),
+        // All four from an alias that is not the table: bound arrays.
+        copy(
+            cols,
+            "$1, m.new_ix, m.state, m.history, m.attempts, m.started_at, m.ended_at",
+            "unnest($3::text[], $4::jsonb[], $5::jsonb[], $6::timestamptz[], $7::timestamptz[]) \
+             AS m(state, history, attempts, started_at, ended_at)",
+        ),
+        // The timestamps swapped.
+        copy(
+            cols,
+            "$1, m.new_ix, o.state, o.history, m.attempts, o.ended_at, o.started_at",
+            unnest,
+        ),
+        // A timestamp invented beside a copied state.
+        copy(
+            cols,
+            "$1, m.new_ix, o.state, o.history, m.attempts, o.started_at, NULL",
+            unnest,
+        ),
+        // `ended_at` left out: a copied terminal state with no end.
+        copy(
+            "execution_id, run_ix, state, history, attempts, started_at",
+            "$1, m.new_ix, o.state, o.history, m.attempts, o.started_at",
+            unnest,
+        ),
+        // The alias is the OTHER table.
+        copy(
+            cols,
+            "$1, m.new_ix, o.state, o.history, m.attempts, o.started_at, o.ended_at",
+            "unnest($3::int[]) AS m(new_ix) JOIN workflow.executions o ON o.id = $2",
+        ),
+        // A VALUES insert is never a copy.
+        probe(
+            "INSERT INTO workflow.task_runs (state, history, started_at, ended_at) \
+             VALUES (o.state, o.history, o.started_at, o.ended_at)\";",
+        ),
+    ];
+    for w in &not_verbatim {
+        assert!(
+            writes_state(w) && !stamps(w) && !copies_verbatim(w),
+            "must be refused: {}",
+            w.text
+        );
+    }
     // M3: `format!` is recognised as such.
     let formatted = writes_in(
         "probe",
@@ -1611,7 +1857,10 @@ fn every_state_write_stamps_the_timestamps() {
         "SQL this guard cannot read; build it with `concat!` and the `stamps` macros: {dynamic:#?}"
     );
 
-    let unstamped: Vec<&Write> = state_writes.iter().filter(|w| !stamps(w)).collect();
+    let unstamped: Vec<&Write> = state_writes
+        .iter()
+        .filter(|w| !stamps(w) && !copies_verbatim(w))
+        .collect();
     assert!(
         unstamped.is_empty(),
         "these statements write `state` without the timestamps; build them with \
@@ -1658,4 +1907,15 @@ fn every_state_write_stamps_the_timestamps() {
             "the scan did not find `{kind}` in {file}; it found {found:?}"
         );
     }
+    // And the one verbatim copy is found, and is allowed AS a copy (not by
+    // a stamp macro the scan mistook for one).
+    assert!(
+        state_writes.iter().any(|w| {
+            w.at.starts_with("egret-workflow/src/worker/copy.rs")
+                && w.text.starts_with("INSERT INTO workflow.task_runs")
+                && !stamps(w)
+                && copies_verbatim(w)
+        }),
+        "the scan did not find package 7b's verbatim copy in worker/copy.rs; it found {found:?}"
+    );
 }

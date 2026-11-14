@@ -1754,3 +1754,132 @@ async fn an_after_execution_task_can_be_replayed(pool: sqlx::PgPool) {
     assert_eq!(reg.attempts_of("b").len(), 1, "b is not run again");
     assert_eq!(exec_state(&pool, old).await, "SUCCESS");
 }
+
+// ── Task Z: a copy keeps the stamps rule (`worker::stamps`) ──────────────
+
+/// `(state, history, started_at, ended_at)` of `task`'s run in `ex`.
+type Stamped = (
+    String,
+    Value,
+    Option<chrono::DateTime<chrono::Utc>>,
+    Option<chrono::DateTime<chrono::Utc>>,
+);
+
+async fn stamped(pool: &sqlx::PgPool, ex: Uuid, task: &str) -> Stamped {
+    sqlx::query_as(
+        "SELECT state, history, started_at, ended_at FROM workflow.task_runs \
+          WHERE execution_id = $1 AND task_id = $2",
+    )
+    .bind(ex)
+    .bind(task)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|e| panic!("the run of {task} in {ex}: {e}"))
+}
+
+async fn created_at(pool: &sqlx::PgPool, ex: Uuid) -> chrono::DateTime<chrono::Utc> {
+    sqlx::query_scalar("SELECT created_at FROM workflow.executions WHERE id = $1")
+        .bind(ex)
+        .fetch_one(pool)
+        .await
+        .expect("created_at")
+}
+
+/// `worker::copy`'s `INSERT_COPIED_RUNS` copies `state`, `history`,
+/// `started_at` and `ended_at` verbatim (the guard's one allowance,
+/// `execution_timestamps.rs::copies_verbatim`); the reset is a later stamped
+/// write (`restart::copy_job`'s settle, through `persist`'s `stamp_set!`).
+///
+/// - A carried `SUCCESS` run keeps the old run's start and end exactly.
+/// - The reset run, right after the replay and before any worker tick, is
+///   not terminal and has no end. Its history still holds the old `RUNNING`,
+///   so the rule KEEPS its start, as it does for 7a's restart in place and a
+///   retry reopen (`stamps` module doc: "kept while the new history holds
+///   `RUNNING`").
+/// - Once the new execution has finished, the rerun run has a fresh end
+///   (after the new execution's `created_at`) and the run never ran before
+///   (`c`) has a fresh start and end.
+/// - §3.2's invariants hold on every run of the new execution.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_copy_keeps_the_stamps_rule(pool: sqlx::PgPool) {
+    // Arrange: `a` SUCCESS, `b` FAILED, `c` never created.
+    let (_db, ws, _) = setup(&pool).await;
+    let reg = Flaky::new(&[("b", 1)]);
+    let old = failed_three(&pool, ws, &reg).await;
+    let b = run_id(&runs_of(&pool, old).await, "b");
+    let (old_a, old_b) = (
+        stamped(&pool, old, "a").await,
+        stamped(&pool, old, "b").await,
+    );
+    assert_eq!(old_a.0, "SUCCESS");
+    assert_eq!(old_b.0, "FAILED");
+    assert!(old_a.2.is_some() && old_a.3.is_some() && old_b.3.is_some());
+    let frozen = source_of(&pool, old).await;
+    // A measurable gap: a fresh stamp is after the new `created_at`, an old
+    // one before it.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Act 1: the copy, and its reset settle; no worker tick yet.
+    let new = replay(
+        &pool,
+        ws,
+        old,
+        &frozen,
+        ReplayKind::FromTaskRun(b),
+        ReplayInputs::Reuse,
+    )
+    .await
+    .expect("replayed");
+    let born = created_at(&pool, new).await;
+    let (a, reset) = (
+        stamped(&pool, new, "a").await,
+        stamped(&pool, new, "b").await,
+    );
+
+    // Assert 1: carried exactly; reset consistent with its new state.
+    assert!(old_a.3.unwrap() < born, "the old end precedes the copy");
+    assert_eq!(
+        a, old_a,
+        "a carried SUCCESS run is the old run's, times included"
+    );
+    assert_ne!(reset.0, "FAILED", "{reset:?}");
+    let reset_terminal: bool = sqlx::query_scalar("SELECT workflow.state_is_terminal($1)")
+        .bind(&reset.0)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!reset_terminal, "the reset run is live: {reset:?}");
+    assert_eq!(reset.3, None, "a live run has no end: {reset:?}");
+    assert!(
+        reset.1.as_array().unwrap().iter().any(|s| s == "RUNNING"),
+        "the reset history keeps the old RUNNING: {reset:?}"
+    );
+    assert_eq!(reset.2, old_b.2, "so the rule keeps its start: {reset:?}");
+
+    // Act 2
+    drive(&pool, &reg, new).await;
+
+    // Assert 2: the rerun runs end fresh; `c` starts fresh too.
+    assert_eq!(exec_state(&pool, new).await, "SUCCESS");
+    assert_eq!(stamped(&pool, new, "a").await, old_a, "a is untouched");
+    let (b2, c2) = (
+        stamped(&pool, new, "b").await,
+        stamped(&pool, new, "c").await,
+    );
+    assert_eq!((b2.0.as_str(), c2.0.as_str()), ("SUCCESS", "SUCCESS"));
+    assert!(b2.3.is_some_and(|e| e > born), "b's end is fresh: {b2:?}");
+    assert_eq!(b2.2, old_b.2, "b's start is still its first: {b2:?}");
+    assert!(c2.2.is_some_and(|s| s > born), "c's start is fresh: {c2:?}");
+    assert!(c2.3 >= c2.2, "c ends after it starts: {c2:?}");
+    // §3.2: an end is never before its start, and only a terminal run has one.
+    let broken: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.task_runs WHERE execution_id = $1 \
+            AND (ended_at < started_at \
+                 OR (ended_at IS NOT NULL) <> workflow.state_is_terminal(state))",
+    )
+    .bind(new)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(broken, 0);
+}
