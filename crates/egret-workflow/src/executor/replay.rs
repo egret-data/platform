@@ -35,7 +35,8 @@ pub enum CopyRefusal {
 pub enum MatchFault {
     /// No task of that id.
     Missing,
-    /// A task of that id under another parent task or in another list.
+    /// A task of that id under another parent task, in another list, or in
+    /// another branch of an `If`/`Switch`.
     Moved,
     /// A task of that id in the same place, of another kind.
     OtherKind,
@@ -424,8 +425,8 @@ pub struct CopiedRuns {
 /// Each kept run becomes the next dense index, in the old order, so parents
 /// still precede their children. Its task must be a task of `to` with the
 /// same id ([`MatchFault::Missing`]), under the same parent task and in the
-/// same list -- `tasks`, `errors`, `finally` or `afterExecution`
-/// ([`MatchFault::Moved`]) -- and of the same [`TaskKind`] variant
+/// same list -- `tasks`, `errors`, `finally` or `afterExecution` -- and, under
+/// an `If` or `Switch`, the same branch ([`MatchFault::Moved`]); and of the same [`TaskKind`] variant
 /// ([`MatchFault::OtherKind`]). A reset run is a copied row too, so it is
 /// matched as well; only dropped runs need no match.
 pub fn copy_onto(
@@ -454,9 +455,10 @@ pub fn copy_onto(
         // precede their children, so the parent is already copied.
         let parent = r.parent.map(|p| new_of[&p]);
         let want_parent = parent.map(|p| runs[p].task);
+        let old_parent = r.parent.map(|p| state.runs[p].task);
         if parent_task.get(&t).copied() != Some(want_parent)
-            || role_of(from, r.parent.map(|p| state.runs[p].task), r.task)
-                != role_of(to, want_parent, t)
+            || role_of(from, old_parent, r.task) != role_of(to, want_parent, t)
+            || branch_of(from, old_parent, r.task) != branch_of(to, want_parent, t)
         {
             return Err(fault(MatchFault::Moved));
         }
@@ -517,6 +519,46 @@ fn role_of(plan: &Plan, parent_task: Option<TaskIx>, task: TaskIx) -> Role {
         Role::AfterExecution
     } else {
         Role::Tasks
+    }
+}
+
+/// Which branch of its parent's `tasks` half a task sits in: an `If`'s
+/// `then`/`else`, a `Switch` case (by key) or its `defaults`, or the one
+/// body every other flowable has. [`role_of`] folds them all into
+/// [`Role::Tasks`]; the walk reads only the branch the parent's stored
+/// render chose (`If.childTasks` reads the stored `evaluationResult`), so a
+/// kept run whose task moved to another branch would be orphaned
+/// (fix round 1 of A3, review Important 2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Branch<'a> {
+    Body,
+    Then,
+    Else,
+    Case(&'a str),
+    Default,
+}
+
+fn branch_of(plan: &Plan, parent_task: Option<TaskIx>, task: TaskIx) -> Branch<'_> {
+    match parent_task.map(|p| &plan.tasks[p].kind) {
+        Some(TaskKind::If { then_, else_, .. }) => {
+            if then_.contains(&task) {
+                Branch::Then
+            } else if else_.contains(&task) {
+                Branch::Else
+            } else {
+                Branch::Body
+            }
+        }
+        Some(TaskKind::Switch { cases, default, .. }) => cases
+            .iter()
+            .find(|(_, ts)| ts.contains(&task))
+            .map(|(k, _)| Branch::Case(k.as_str()))
+            .unwrap_or(if default.contains(&task) {
+                Branch::Default
+            } else {
+                Branch::Body
+            }),
+        _ => Branch::Body,
     }
 }
 
@@ -1157,6 +1199,101 @@ mod tests {
                 why: MatchFault::Moved
             })
         );
+    }
+
+    /// Drive `src` with the branch flowable `pick`'s render set to `rendered`
+    /// once it is open (the test driver renders no `If`/`Switch`).
+    fn driven_branch(src: &str, pick: &str, rendered: &str) -> (Plan, ExecutionState) {
+        let plan = build_plan(src).expect("the fixture flow plans");
+        let mut state = ExecutionState::new(&plan);
+        drive(&plan, &mut state, &[]);
+        let ix = run(&plan, &state, pick);
+        state.runs[ix].rendered = Some(rendered.into());
+        drive(&plan, &mut state, &[]);
+        (plan, state)
+    }
+
+    /// Replay from `b` of `src` (where `a` precedes `b` in one branch of
+    /// `pick`), copied onto `target`.
+    fn copy_branch_onto(
+        src: &str,
+        pick: &str,
+        rendered: &str,
+        target: &str,
+    ) -> Result<CopiedRuns, CopyRefusal> {
+        let (plan, state) = driven_branch(src, pick, rendered);
+        assert!(
+            state.runs.iter().any(|r| plan.tasks[r.task].id == "b"),
+            "the fixture reached b"
+        );
+        let sel = replay_from(&plan, &state, run(&plan, &state, "b")).expect("replayable");
+        let to = build_plan(target).expect("the target plans");
+        copy_onto(&plan, &to, &state, &sel)
+    }
+
+    const IF: &str = "io.kestra.plugin.core.flow.If";
+    const SWITCH: &str = "io.kestra.plugin.core.flow.Switch";
+
+    fn if_flow(then_: &[&str], else_: &[&str]) -> String {
+        let t: String = then_.iter().map(|x| leaf(x, 6)).collect();
+        let e: String = else_.iter().map(|x| leaf(x, 6)).collect();
+        flow(&format!(
+            "tasks:\n  - id: i\n    type: {IF}\n    condition: \"{{{{ true }}}}\"\n    \
+             then:\n{t}    else:\n{e}"
+        ))
+    }
+
+    fn switch_flow(x: &[&str], y: &[&str]) -> String {
+        let cx: String = x.iter().map(|t| leaf(t, 8)).collect();
+        let cy: String = y.iter().map(|t| leaf(t, 8)).collect();
+        flow(&format!(
+            "tasks:\n  - id: s\n    type: {SWITCH}\n    value: x\n    cases:\n      \
+             x:\n{cx}      y:\n{cy}"
+        ))
+    }
+
+    // Fix round 1 (review Important 2): a kept task moved to the other
+    // branch of the same `If` is not in the list the walk reads.
+    #[test]
+    fn a_kept_task_moved_from_then_to_else_is_refused() {
+        let src = if_flow(&["a", "b"], &["c"]);
+        let target = if_flow(&["b"], &["a", "c"]);
+
+        let got = copy_branch_onto(&src, "i", "true", &target).map(|_| ());
+
+        assert_eq!(
+            got,
+            Err(CopyRefusal::TaskNotInSource {
+                task_id: "a".into(),
+                why: MatchFault::Moved
+            })
+        );
+    }
+
+    // Fix round 1: the same, from one `Switch` case to another.
+    #[test]
+    fn a_kept_task_moved_to_another_switch_case_is_refused() {
+        let src = switch_flow(&["a", "b"], &["c"]);
+        let target = switch_flow(&["b"], &["a", "c"]);
+
+        let got = copy_branch_onto(&src, "s", "x", &target).map(|_| ());
+
+        assert_eq!(
+            got,
+            Err(CopyRefusal::TaskNotInSource {
+                task_id: "a".into(),
+                why: MatchFault::Moved
+            })
+        );
+    }
+
+    // Fix round 1, control: the same branches in the target fit.
+    #[test]
+    fn a_kept_task_in_the_same_branch_fits() {
+        let src = if_flow(&["a", "b"], &["c"]);
+        assert!(copy_branch_onto(&src, "i", "true", &src).is_ok());
+        let sw = switch_flow(&["a", "b"], &["c"]);
+        assert!(copy_branch_onto(&sw, "s", "x", &sw).is_ok());
     }
 
     // A2.4
