@@ -324,6 +324,8 @@ export * from './flowVersionDtoSnapshot';
 export * from './folderDto';
 export * from './formatPolicyBody';
 export * from './gatedProfile';
+export * from './gateRefusal';
+export * from './gateVerdict';
 export * from './governanceCatalog';
 export * from './governanceCatalogSource';
 export * from './governanceWorkspace';

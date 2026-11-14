@@ -42,6 +42,7 @@ import type {
   ExplainPrincipalResponse,
   ExplainRequest,
   ExplainResponse,
+  GateVerdict,
   GrantView,
   GroupPrincipal,
   MigrateRequest,
@@ -3630,7 +3631,135 @@ export const usePermUndoServicePolicyMigration = <TError = ErrorBody,
       > => {
       return useMutation(getPermUndoServicePolicyMigrationMutationOptions(options), queryClient);
     }
-    export type permServiceMigrationStatusResponse200 = {
+    export type permServiceMigrationGateResponse200 = {
+  data: GateVerdict
+  status: 200
+}
+
+export type permServiceMigrationGateResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permServiceMigrationGateResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permServiceMigrationGateResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type permServiceMigrationGateResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permServiceMigrationGateResponseSuccess = (permServiceMigrationGateResponse200) & {
+  headers: Headers;
+};
+export type permServiceMigrationGateResponseError = (permServiceMigrationGateResponse401 | permServiceMigrationGateResponse403 | permServiceMigrationGateResponse404 | permServiceMigrationGateResponse500) & {
+  headers: Headers;
+};
+
+export type permServiceMigrationGateResponse = (permServiceMigrationGateResponseSuccess | permServiceMigrationGateResponseError)
+
+export const getPermServiceMigrationGateUrl = (serviceId: number,) => {
+
+
+
+
+  return `/api/control-plane/perm/policies/services/${encodeURIComponent(serviceId)}/migration-gate`
+}
+
+export const permServiceMigrationGate = async (serviceId: number, options?: Parameters<typeof customInstance>[1]): Promise<permServiceMigrationGateResponse> => {
+
+  return customInstance<permServiceMigrationGateResponse>(getPermServiceMigrationGateUrl(serviceId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermServiceMigrationGateQueryKey = (serviceId: number,) => {
+    return [
+    `/api/control-plane/perm/policies/services/${encodeURIComponent(serviceId)}/migration-gate`
+    ] as const;
+    }
+
+
+export const getPermServiceMigrationGateQueryOptions = <TData = Awaited<ReturnType<typeof permServiceMigrationGate>>, TError = ErrorBody>(serviceId: number, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permServiceMigrationGate>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getPermServiceMigrationGateQueryKey(serviceId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof permServiceMigrationGate>>> = ({ signal }) => permServiceMigrationGate(serviceId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: serviceId !== null && serviceId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof permServiceMigrationGate>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type PermServiceMigrationGateQueryResult = NonNullable<Awaited<ReturnType<typeof permServiceMigrationGate>>>
+export type PermServiceMigrationGateQueryError = ErrorBody
+
+
+export function usePermServiceMigrationGate<TData = Awaited<ReturnType<typeof permServiceMigrationGate>>, TError = ErrorBody>(
+ serviceId: number, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof permServiceMigrationGate>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permServiceMigrationGate>>,
+          TError,
+          Awaited<ReturnType<typeof permServiceMigrationGate>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermServiceMigrationGate<TData = Awaited<ReturnType<typeof permServiceMigrationGate>>, TError = ErrorBody>(
+ serviceId: number, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permServiceMigrationGate>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof permServiceMigrationGate>>,
+          TError,
+          Awaited<ReturnType<typeof permServiceMigrationGate>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePermServiceMigrationGate<TData = Awaited<ReturnType<typeof permServiceMigrationGate>>, TError = ErrorBody>(
+ serviceId: number, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permServiceMigrationGate>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function usePermServiceMigrationGate<TData = Awaited<ReturnType<typeof permServiceMigrationGate>>, TError = ErrorBody>(
+ serviceId: number, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof permServiceMigrationGate>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getPermServiceMigrationGateQueryOptions(serviceId,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type permServiceMigrationStatusResponse200 = {
   data: EpMigrationStatus
   status: 200
 }

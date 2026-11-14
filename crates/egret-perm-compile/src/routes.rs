@@ -202,6 +202,10 @@ pub fn perm_router() -> Router<PermState> {
             get(service_migration_status),
         )
         .route(
+            "/perm/policies/services/{service_id}/migration-gate",
+            get(service_migration_gate),
+        )
+        .route(
             "/perm/policies/services/{service_id}/migrate",
             post(migrate_service_policies),
         )
@@ -270,6 +274,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         classify_service_policies,
         service_policy_warnings,
         service_migration_status,
+        service_migration_gate,
         migrate_service_policies,
         migrate_role_principals,
         undo_role_principals,
@@ -398,6 +403,8 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         crate::classify::ProfileWarnings,
         crate::classify::WarnedPolicy,
         crate::classify::EpMigrationStatus,
+        crate::ep_gate::GateVerdict,
+        crate::ep_gate::GateRefusal,
         crate::classify::BlockedPolicy,
         crate::classify::ProposedObjects,
         crate::classify::MigrationRecord,
@@ -5143,6 +5150,31 @@ async fn service_migration_status(
     let mut conn = st.perm.pool().acquire().await.map_err(PermHttpError::db)?;
     let classified = crate::classify::classify_service(&mut conn, service_id).await?;
     Ok(Json(crate::classify::ep_migration_status(&classified)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/perm/policies/services/{service_id}/migration-gate",
+    tag = "perm",
+    params(("service_id" = i64, Path, description = "policy.authz_services id")),
+    responses(
+        (status = 200, description = "Whether the enforcement point's migration is complete, and if not, why", body = crate::ep_gate::GateVerdict),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 404, description = "No such policy profile", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn service_migration_gate(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+    Path(service_id): Path<i64>,
+) -> Result<Json<crate::ep_gate::GateVerdict>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
+    let mut conn = st.perm.pool().acquire().await.map_err(PermHttpError::db)?;
+    Ok(Json(
+        crate::ep_gate::ep_gate_via(&mut conn, service_id).await?,
+    ))
 }
 
 /// SP4d-3 Task 7: migrate hand-written policies of one profile into the

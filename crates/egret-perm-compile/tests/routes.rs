@@ -10588,3 +10588,58 @@ async fn a_grant_on_a_catalog_without_an_embedded_warehouse_is_not_locked() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
 }
+
+/// SP3d Task 3: the EP's migration gate is readable over HTTP, behind
+/// `policy:read`, and names a legacy role principal as a refusal.
+#[tokio::test]
+async fn migration_gate_reports_a_role_principal_refusal_over_http() {
+    let Some(mut f) = setup().await else { return };
+    let grant: Uuid = sqlx::query_scalar(
+        "INSERT INTO perm.grants (effect, actions, catalog_id) \
+         VALUES ('allow'::perm.effect, ARRAY['read'], $1) RETURNING id",
+    )
+    .bind(f.catalog_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("role grant");
+    sqlx::query(
+        "INSERT INTO perm.grant_principals (grant_id, kind, ref, mode) \
+         VALUES ($1,'role'::perm.principal_kind,$2,'include'::perm.principal_mode)",
+    )
+    .bind(grant)
+    .bind(unique("gate_role"))
+    .execute(&f.db.pool)
+    .await
+    .expect("role principal");
+
+    let uri = format!("/perm/policies/services/{}/migration-gate", f.service_id);
+    let token = admin_session(&f).await;
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req("GET", &uri, &token, None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["complete"], false, "body: {body}");
+    // `>= 1`: the count may include other tests' installation-wide rows.
+    assert!(
+        body["refusals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| { r["kind"] == "role_principals" && r["count"].as_i64().unwrap_or(0) >= 1 }),
+        "body: {body}"
+    );
+
+    let nobody = session_with_permission(&mut f, "workspace:read").await;
+    let (status, _) = into_json(
+        f.app()
+            .oneshot(req("GET", &uri, &nobody, None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
