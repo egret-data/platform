@@ -1141,6 +1141,11 @@ pub(crate) async fn migrate_in_tx(
             Err(e) => return Err(PermHttpError::db(e)),
         }
     }
+    // SP3d: the recompile above persisted the gate BEFORE this provenance was
+    // written, so re-persist the verdict now that the originals read as migrated.
+    for sid in &recompiled {
+        crate::compile_runs::refresh_migration_complete_in_tx(tx, *sid).await?;
+    }
     response.compile = CompileResponse::from_summaries(recompiled, &summaries);
 
     // ── step 5: re-read every affected download and gate them all ─────────

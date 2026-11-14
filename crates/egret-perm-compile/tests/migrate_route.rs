@@ -1846,3 +1846,34 @@ async fn moving_a_migrated_allow_makes_undo_refuse() {
     let (status, body) = undo(&f, f.p, &[&name]).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
 }
+
+// ── SP3d: the persisted gate verdict is taken after provenance ───────────
+
+/// The migrate's recompile persists `compile_runs.migration_complete` BEFORE
+/// the provenance rows are written, so the original read as still pending and
+/// the stored verdict was stale `false` after the EP was in fact complete.
+#[tokio::test]
+async fn migrating_the_last_operator_policy_persists_a_complete_gate_verdict() {
+    let Some(f) = setup().await else { return };
+    let name = unique("alice reads orders");
+    insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+    let (status, body) = migrate(&f, f.p, &[&name], false).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["committed"], true, "{body}");
+
+    let stored: Option<bool> = sqlx::query_scalar(
+        "SELECT migration_complete FROM perm.compile_runs WHERE service_id = $1",
+    )
+    .bind(f.p)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("the migrate's recompile wrote a compile_runs row");
+    assert_eq!(stored, Some(true), "stale gate verdict after migrate");
+}

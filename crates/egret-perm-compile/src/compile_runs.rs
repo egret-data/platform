@@ -67,6 +67,46 @@ pub(crate) async fn record_compile_ok_in_tx(
     Ok(())
 }
 
+/// SP3d: recompute and persist ONLY the migration-gate verdict for one EP,
+/// without a recompile. Used after a step that changes what the gate reads but
+/// that runs AFTER the compile which first persisted it: the migrate records
+/// `perm.migrated_from` provenance after its recompile, so the recompile's gate
+/// predates it. A gate error logs and stores NULL; it never poisons the tx.
+pub(crate) async fn refresh_migration_complete_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    service_id: i64,
+) -> Result<(), CompileError> {
+    // Savepoint-isolated exactly like the compile seam, so a gate DB error
+    // cannot leave the outer transaction aborted.
+    let complete = match sqlx::Acquire::begin(&mut **tx).await {
+        Ok(mut sp) => match crate::ep_gate::ep_gate_via_tx(&mut sp, service_id).await {
+            Ok(v) => match sp.commit().await {
+                Ok(()) => Some(v.complete),
+                Err(e) => {
+                    tracing::warn!(service_id, error = %e, "gate refresh release failed");
+                    None
+                }
+            },
+            Err(e) => {
+                let _ = sp.rollback().await;
+                tracing::warn!(service_id, error = %e, "gate refresh skipped");
+                None
+            }
+        },
+        Err(e) => {
+            tracing::warn!(service_id, error = %e, "gate refresh savepoint skipped");
+            None
+        }
+    };
+    sqlx::query("UPDATE perm.compile_runs SET migration_complete = $1 WHERE service_id = $2")
+        .bind(complete)
+        .bind(service_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(CompileError::from_db)?;
+    Ok(())
+}
+
 /// Upsert `outcome = 'error'` on its own connection, after the failed
 /// compile's transaction rolled back. Keeps `last_ok_at` and the counts of the
 /// last success. Never overwrites a newer attempt, and records nothing for a
