@@ -1011,3 +1011,97 @@ async fn the_migrate_endpoint_rewrites_the_grant_and_undo_restores_it() {
     );
     cleanup(&db.pool, seeded.grant_id).await;
 }
+
+// ---------------------------------------------------------------------------
+// SP3c-3 Task 7: `explain` is unchanged for a workspace member.
+// ---------------------------------------------------------------------------
+
+/// `/perm/explain` for `username`'s read of the seeded catalog, as serialised
+/// JSON text.
+async fn explain_text(app: &axum::Router, token: &str, catalog_id: Uuid, username: &str) -> String {
+    let target = json!({ "catalog_id": catalog_id, "schema": null, "table": null, "column": null });
+    let (status, body) = post_json(
+        app,
+        "/perm/explain",
+        token,
+        json!({ "subject": { "user": username }, "action": "read", "target": target }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body.to_string()
+}
+
+#[tokio::test]
+async fn explain_is_byte_identical_across_the_ws_assignment_migration() {
+    let Some(dsn) = egret_test_db::url().await else {
+        return;
+    };
+    let _g = SERIAL.lock().await;
+    let db = Db::connect(&dsn, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let pool = db.pool.clone();
+    let seeded = seed_service_with_ws_assignment_grant(&db).await;
+    let (app, token) = admin_app(&db).await;
+
+    // The compile mints the (username-less) member's username, so the member is
+    // really written into the compiled policy and has a name to explain.
+    let mut tx = pool.begin().await.unwrap();
+    recompile_service_in_tx(&mut tx, seeded.service_id)
+        .await
+        .expect("compile");
+    tx.commit().await.unwrap();
+    let member: Uuid = sqlx::query_scalar(
+        "SELECT principal_id FROM public.access_grants \
+          WHERE scope_type = 'workspace' AND scope_id = $1 AND principal_type = 'user'",
+    )
+    .bind(seeded.workspace_id)
+    .fetch_one(&pool)
+    .await
+    .expect("the workspace's one member");
+    let username: String = sqlx::query_scalar("SELECT username FROM public.users WHERE id = $1")
+        .bind(member)
+        .fetch_one(&pool)
+        .await
+        .expect("the compile minted the member's username");
+
+    // A non-member with a username, for contrast.
+    let outsider = seed_user(&pool).await;
+    let outsider_name = uniq("wsnm");
+    sqlx::query("UPDATE public.users SET username = $2 WHERE id = $1")
+        .bind(outsider)
+        .bind(&outsider_name)
+        .execute(&pool)
+        .await
+        .expect("name the outsider");
+
+    let member_before = explain_text(&app, &token, seeded.catalog_id, &username).await;
+    let outsider_before = explain_text(&app, &token, seeded.catalog_id, &outsider_name).await;
+    assert!(
+        member_before.contains("select"),
+        "the member's explain must actually answer: {member_before}"
+    );
+    assert_ne!(
+        member_before, outsider_before,
+        "the workspace grant must distinguish a member from a non-member"
+    );
+
+    let mut tx = pool.begin().await.unwrap();
+    let m = migrate_ws_assignments_in_tx(&mut tx, "tester")
+        .await
+        .expect("migrate");
+    tx.commit().await.unwrap();
+    assert!(m.catalogs.contains(&seeded.catalog_id), "{m:?}");
+
+    let member_after = explain_text(&app, &token, seeded.catalog_id, &username).await;
+    let outsider_after = explain_text(&app, &token, seeded.catalog_id, &outsider_name).await;
+    assert_eq!(
+        member_before, member_after,
+        "member explain changed across the migration"
+    );
+    assert_eq!(
+        outsider_before, outsider_after,
+        "non-member explain changed across the migration"
+    );
+
+    cleanup(&pool, seeded.grant_id).await;
+}
