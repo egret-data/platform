@@ -118,3 +118,60 @@ async fn re_syncing_reconciles_added_and_removed_members() {
 
     assert_eq!(group_members(&db.pool, &name).await.1, vec![u2]);
 }
+
+/// A user joining or leaving a group that HOLDS the workspace changes the
+/// workspace's members; the live group-membership path (`PermGroupRecompiler`)
+/// must re-sync the managed `ws:<slug> members` group, in both directions.
+#[tokio::test]
+async fn a_group_membership_change_resyncs_the_ws_members_group_via_the_live_path() {
+    let Some(dsn) = egret_test_db::url().await else {
+        return;
+    };
+    let _g = SERIAL.lock().await;
+    let db = Db::connect(&dsn, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let (ws, slug) = seed_workspace(&db.pool).await;
+    let u = seed_user(&db.pool).await;
+    let name = ws_members_group_name(&slug);
+
+    // A local group that holds the workspace.
+    let repo = egret_auth::groups::GroupRepo::new(db.clone());
+    let holder_name = format!("wm-holder-{}", &Uuid::new_v4().simple().to_string()[..10]);
+    let holder = repo
+        .create_local(&holder_name, &egret_perm_compile::PermGroupRecompiler)
+        .await
+        .expect("create group");
+    sqlx::query(
+        "INSERT INTO public.access_grants (principal_type, principal_id, role_id, scope_type, scope_id, effect) \
+         SELECT 'group', $1, r.id, 'workspace', $2, 'allow' FROM roles r \
+          WHERE r.scope = 'workspace' AND r.name = 'ws_viewer'",
+    )
+    .bind(holder)
+    .bind(ws)
+    .execute(&db.pool)
+    .await
+    .expect("group holds the workspace");
+    sync(&db.pool, ws).await;
+    assert!(group_members(&db.pool, &name).await.1.is_empty());
+
+    repo.add_member(
+        holder,
+        egret_core::UserId(u),
+        &egret_perm_compile::PermGroupRecompiler,
+    )
+    .await
+    .expect("add member");
+    assert_eq!(group_members(&db.pool, &name).await.1, vec![u]);
+
+    repo.remove_member(
+        holder,
+        egret_core::UserId(u),
+        &egret_perm_compile::PermGroupRecompiler,
+    )
+    .await
+    .expect("remove member");
+    assert!(
+        group_members(&db.pool, &name).await.1.is_empty(),
+        "a user leaving the holding group must leave the managed group (fail-closed)"
+    );
+}

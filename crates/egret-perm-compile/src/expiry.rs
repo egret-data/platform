@@ -93,6 +93,19 @@ pub async fn recompile_lapsed_grants(pool: &PgPool) -> Result<SweepSummary, Comp
     }
 
     lock_services_in_tx(&mut tx, &services).await?;
+    // SP3c-3: a lapsed workspace grant drops its principal from the workspace's
+    // members; refresh the managed `ws:<slug> members` group before recompiling.
+    let mut lapsed_workspaces: Vec<Uuid> = lapsed
+        .iter()
+        .filter_map(|(_, scope_type, scope_id)| (scope_type == "workspace").then_some(*scope_id))
+        .flatten()
+        .collect();
+    lapsed_workspaces.sort_unstable();
+    lapsed_workspaces.dedup();
+    for workspace_id in lapsed_workspaces {
+        crate::ws_members_group::sync_ws_members_group_if_present_in_tx(&mut tx, workspace_id)
+            .await?;
+    }
     let summaries = recompile_services_in_tx(&mut tx, &services).await?;
     tx.commit().await.map_err(db)?;
 

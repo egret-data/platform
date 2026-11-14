@@ -2016,6 +2016,61 @@ pub async fn affected_services_for_workspace_members(
                 .map_err(crate::db_error::from_store)?,
         );
     }
+
+    // SP3c-3: after the workspace-grant migration the `workspace_members` arms
+    // above match NOTHING — the principal was rewritten to a `kind='group'` ref
+    // at `ws:<slug> members`, whose membership mirrors the workspace's members.
+    // A membership change must therefore ALSO recompile the profiles that
+    // reference that managed group, or a removal fails OPEN (the same shape as
+    // SP3c-1's role-holder arm in `affected_services_for_role_membership`).
+    let slug: Option<String> =
+        sqlx::query_scalar("SELECT slug FROM public.workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(db_err)?;
+    if let Some(slug) = slug {
+        let ws_group = crate::ws_members_group::ws_members_group_name(&slug);
+        let group_catalogs: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT g.catalog_id FROM perm.grants g \
+               JOIN perm.grant_principals p ON p.grant_id = g.id \
+              WHERE p.kind = 'group'::perm.principal_kind AND p.ref = $1 \
+             UNION \
+             SELECT r.catalog_id FROM perm.rules r \
+               JOIN perm.rule_exemptions e ON e.rule_id = r.id \
+              WHERE e.kind = 'group'::perm.principal_kind AND e.ref = $1 \
+                AND r.selector_kind = 'path' AND r.catalog_id IS NOT NULL",
+        )
+        .bind(&ws_group)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        let group_tag_exempts: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM perm.rules r \
+               JOIN perm.rule_exemptions e ON e.rule_id = r.id \
+              WHERE e.kind = 'group'::perm.principal_kind AND e.ref = $1 \
+                AND r.selector_kind = 'tag')",
+        )
+        .bind(&ws_group)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        if group_tag_exempts {
+            ids.extend(
+                compiler_targeted_services_via(conn)
+                    .await
+                    .map_err(crate::db_error::from_store)?,
+            );
+        }
+        for catalog_id in group_catalogs {
+            ids.extend(
+                services_for_catalog_via(conn, catalog_id)
+                    .await
+                    .map_err(crate::db_error::from_store)?,
+            );
+        }
+        ids.extend(engine_grant_profiles_naming_via(conn, "group", &[ws_group.as_str()]).await?);
+    }
     normalize_service_order(&mut ids);
     Ok(ids)
 }

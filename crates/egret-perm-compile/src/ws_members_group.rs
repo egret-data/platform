@@ -95,3 +95,25 @@ pub async fn sync_ws_members_group_if_present_in_tx(
     }
     Ok(exists)
 }
+
+/// Re-sync EVERY existing managed `ws:<slug> members` group. For writers that
+/// change workspace membership indirectly and do not know which workspaces they
+/// touched — a user joining or leaving a group that holds a workspace, a group or
+/// user delete. Cheap: only workspaces already migrated have such a group, and
+/// each sync is idempotent. Pre-migration this finds nothing.
+pub async fn sync_all_existing_ws_members_groups_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<(), CompileError> {
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT w.id FROM public.workspaces w \
+           JOIN public.groups g ON g.name = 'ws:' || w.slug || ' members' AND g.source = 'managed' \
+          ORDER BY w.id",
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(CompileError::from_db)?;
+    for id in ids {
+        sync_ws_members_group_in_tx(tx, id).await?;
+    }
+    Ok(())
+}
