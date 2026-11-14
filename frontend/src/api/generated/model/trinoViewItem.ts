@@ -33,8 +33,8 @@ export interface TrinoViewItem {
   /**
      * Whether the owner is cleared for every classification the lineage
      * reaches. `null` when it cannot be said: not DEFINER, lineage not
-     * computed, or a reached clearance names only groups. Read from current
-     * role membership; the engine enforces the last compile, so after a
+     * computed. A required group clears like a required role. Read from
+     * current role and group membership; the engine enforces the last compile, so after a
      * grant expires the two differ until the next recompile.
      * @nullable
      */

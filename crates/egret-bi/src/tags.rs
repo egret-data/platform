@@ -564,6 +564,12 @@ impl TagRepo {
             egret_perm_compile::lock_services_in_tx(&mut tx, &services).await?;
             egret_perm_compile::lock_compile_mints_in_tx(&mut tx).await?;
         }
+        // SP3c-2: the tag's clearance is a managed withhold rule that cascades
+        // away with the tag exactly as its `classification_policies` row does,
+        // so it must not count as a rule "still using" the tag. Removed before
+        // the check (a refusal below rolls this back with the transaction).
+        egret_perm_compile::clearance_migrate::remove_clearance_withhold_rule_in_tx(&mut tx, id)
+            .await?;
         let rules: Vec<(Uuid, String)> = sqlx::query_as(
             "SELECT r.id, r.name FROM perm.rules r JOIN tags t ON t.key = r.tag_key \
               WHERE t.id = $1 ORDER BY r.name",
@@ -770,9 +776,9 @@ impl ClassificationPolicyRepo {
     /// BOTH lists empty = NO gate (informational tag only).
     ///
     /// Returns whatever the accompanying recompile could NOT express — a
-    /// group-only gate, or a Trino profile with no usable tag service — so the
-    /// endpoint can tell the author, instead of answering `{"ok": true}` over a
-    /// clearance no engine will ever enforce.
+    /// Trino profile with no usable tag service — so the endpoint can tell the
+    /// author, instead of answering `{"ok": true}` over a clearance no engine
+    /// will ever enforce.
     pub async fn set_policy(
         &self,
         tag_id: Uuid,
@@ -820,6 +826,14 @@ impl ClassificationPolicyRepo {
         .bind(actor.user_id.0)
         .execute(&mut *tx)
         .await?;
+        // SP3c-2: enforcement reads the withhold rule, so it follows the write.
+        egret_perm_compile::clearance_migrate::upsert_clearance_withhold_rule_in_tx(
+            &mut tx,
+            tag_id,
+            required_roles,
+            required_groups,
+        )
+        .await?;
         reach.retag_and_bump(&mut tx).await?;
         let skipped = Self::recompile_for_clearance_in_tx(&mut tx).await?;
         reach.refuse_created_overlaps(&mut tx).await?;
@@ -856,6 +870,12 @@ impl ClassificationPolicyRepo {
             .bind(tag_id)
             .execute(&mut *tx)
             .await?;
+        // SP3c-2: drop the withhold rule with its table row, or the clearance
+        // would stay enforced from the rule.
+        egret_perm_compile::clearance_migrate::remove_clearance_withhold_rule_in_tx(
+            &mut tx, tag_id,
+        )
+        .await?;
         reach.retag_and_bump(&mut tx).await?;
         let skipped = Self::recompile_for_clearance_in_tx(&mut tx).await?;
         reach.refuse_created_overlaps(&mut tx).await?;
@@ -903,8 +923,7 @@ impl ClassificationPolicyRepo {
     /// to keep in step with it.
     /// **The skips are RETURNED, not only logged (SP4c review I5).** A clearance
     /// authored on a Trino profile with no usable `tagService` compiles nothing
-    /// at all, and a group-only gate compiles nothing on any engine — and the
-    /// endpoint used to answer `{"ok": true}` either way, so the UI showed the
+    /// at all — and the endpoint used to answer `{"ok": true}` either way, so the UI showed the
     /// clearance as active while the data plane had never heard of it. That is
     /// the same failure the compiler already refuses elsewhere: `SkipReport` is
     /// on the perm mutation responses precisely because "a create that succeeded
@@ -921,7 +940,7 @@ impl ClassificationPolicyRepo {
             if !summary.skipped.is_empty() {
                 tracing::warn!(
                     skipped_count = summary.skipped.len(),
-                    "a clearance write's recompile skipped some items — a group-only gate, or a \
+                    "a clearance write's recompile skipped some items — e.g. a \
                      Trino profile with no tag service"
                 );
             }
@@ -930,8 +949,8 @@ impl ClassificationPolicyRepo {
             // once per profile in the affected set — and an author reading "3
             // skipped" for one gate would reasonably think three different
             // things went wrong. The triple is the identity: two profiles that
-            // skipped the same tag for DIFFERENT reasons (one group-only, one
-            // with no tag service) stay two entries, because those are two
+            // skipped the same tag for DIFFERENT reasons (e.g. no tag service on one profile, another
+            // reason on a second) stay two entries, because those are two
             // facts.
             for item in &summary.skipped {
                 if !skipped.iter().any(|s: &egret_perm_compile::SkippedItem| {

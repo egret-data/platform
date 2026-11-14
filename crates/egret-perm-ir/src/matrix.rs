@@ -28,7 +28,6 @@ pub enum Capability {
     ClassificationRowFilterOnColumnAttachment,
     GroupPrincipal,
     RolePrincipal,
-    WithholdExemptionByGroup,
     WithholdPrivilege(Privilege),
     WithholdThroughView,
     WithholdThroughMaterializedView,
@@ -253,25 +252,6 @@ pub const ENTRIES: &[Entry] = &[
         evidence: "members.rs:174, 964-980 (D0)",
         min_egret_image: None,
     },
-    // M10
-    Entry {
-        kind: TRINO,
-        versions: Versions::Any,
-        capability: "WithholdExemptionByGroup",
-        key: Key::Fixed(|c| *c == Capability::WithholdExemptionByGroup),
-        answer: Answer::Missing(ReasonCode::WithholdExemptionByGroupOnly),
-        evidence: "clearance.rs:289-299; people.rs:414,430,1023,1037,1234,1242,1322",
-        min_egret_image: None,
-    },
-    Entry {
-        kind: STARROCKS,
-        versions: Versions::Any,
-        capability: "WithholdExemptionByGroup",
-        key: Key::Fixed(|c| *c == Capability::WithholdExemptionByGroup),
-        answer: Answer::Missing(ReasonCode::WithholdExemptionByGroupOnly),
-        evidence: "clearance.rs:289-299; people.rs:414,430,1023,1037,1234,1242,1322",
-        min_egret_image: None,
-    },
     // M11
     Entry {
         kind: TRINO,
@@ -423,15 +403,6 @@ pub const ENTRIES: &[Entry] = &[
         key: Key::Fixed(|c| *c == Capability::RolePrincipal),
         answer: Answer::Lowered(LoweringKind::ExpandToUsers),
         evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (grants to a platform role)",
-        min_egret_image: None,
-    },
-    Entry {
-        kind: OPA_TRINO,
-        versions: Versions::Any,
-        capability: "WithholdExemptionByGroup",
-        key: Key::Fixed(|c| *c == Capability::WithholdExemptionByGroup),
-        answer: Answer::Missing(ReasonCode::WithholdExemptionByGroupOnly),
-        evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (group-only clearance gates, which neither side withholds)",
         min_egret_image: None,
     },
     Entry {
@@ -639,16 +610,6 @@ mod tests {
     }
 
     #[test]
-    fn group_only_withhold_exemptions_are_missing_on_ranger() {
-        for k in [trino(), starrocks()] {
-            assert_eq!(
-                support_for_kind(k, None, None, true, &Capability::WithholdExemptionByGroup),
-                Support::Missing(ReasonCode::WithholdExemptionByGroupOnly)
-            );
-        }
-    }
-
-    #[test]
     fn starrocks_withholds_read_only() {
         assert_eq!(
             support_for_kind(
@@ -728,7 +689,6 @@ mod tests {
             Capability::WithholdByClassification,
             Capability::GroupPrincipal,
             Capability::RolePrincipal,
-            Capability::WithholdExemptionByGroup,
             Capability::WithholdPrivilege(Privilege::Read),
             Capability::WithholdPrivilege(Privilege::Write),
             Capability::PoliciesReachMetadataTables,

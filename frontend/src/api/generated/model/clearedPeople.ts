@@ -17,20 +17,19 @@ import type { ClearedPerson } from './clearedPerson';
  *   egret and, with a username, on engines (`onEngines`).
  * - **Role held through a group** (`throughGroup` set): a live `allow` grant
  *   of a required role to a group the user is a direct member of. Egret's
- *   object check clears them (`egret_auth::grants`, `user_groups`); engines
- *   refuse them (the compiler expands only user holders).
- * - **Group member, gate names no role** (`enginesEnforce` false): egret
- *   clears them; engines withhold the data from NOBODY, since a group-only
- *   gate compiles to nothing on engines.
- * - **Group member, gate also names a role**: egret clears them; engines
- *   refuse them (a Ranger group matches nobody; only role holders are
- *   excepted).
+ *   object check clears them (`egret_auth::grants`, `user_groups`).
+ * - **Group member** (`via.kind = group`): egret clears them, and engines
+ *   enforce a required group like a required role, so with a username they
+ *   are `onEngines`.
  * - **Scoped grant** (`via.scope` workspace or object): egret clears them
  *   only within that workspace or object; engines everywhere (a column read
  *   carries no scope).
  * - **Platform admins** are always cleared by egret (a scope-correct
  *   exemption) and are NOT listed unless they are also listed by a rule
  *   above; engines give them no bypass.
+ *
+ * `enginesEnforce` is true when the clearance names a required role or a
+ * required group.
  */
 export interface ClearedPeople {
   /**
@@ -45,9 +44,9 @@ export interface ClearedPeople {
   /** More people are listed than `people` carries. */
   truncated: boolean;
   /**
-     * Whether engines enforce the clearance at all: true when it names at
-     * least one required role. False means anyone with SQL access reads the
-     * data on engines.
+     * Whether engines enforce the clearance at all: true when it names a
+     * required role or group. False means the clearance names neither, so
+     * anyone with SQL access reads the data on engines.
      */
   enginesEnforce: boolean;
   /**

@@ -809,8 +809,8 @@ function DecidedBy({
       ) : (
         <p className="text-xs text-muted-foreground">
           No clearing role is recorded for this tag: a gate that declares only groups looks
-          like this — no engine egret provisions can see a group — and so does a gate row
-          that has already been deleted.
+          like this (the engines enforce a required group like a required role, but only
+          roles are listed here), and so does a gate row that has already been deleted.
         </p>
       )}
     </div>

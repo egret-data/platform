@@ -36,7 +36,6 @@ function open(t: Tag, as = STEWARD, extra: Record<string, Answer> = {}) {
 }
 const table = () => screen.findByRole("table", { name: "Clearance" }, T);
 
-const GROUP_WARNING = /not enforced in the engine: no group provider or usersync means a group name never reaches trino or starrocks, and a role name does not either/i;
 const READS_ONLY = /this clearance withholds reads only, on trino and on starrocks alike: a user without it can still overwrite a column they cannot read/i;
 const VIEWS = /trino views in egret.s catalogs carry the classification/i;
 // D2 review: a whole table costs 1 plus its column count, not one policy.
@@ -211,29 +210,26 @@ describe("Clearance tab: the editor (ported from TagDetail)", () => {
   });
 });
 
-describe("Clearance tab: what the engines do not enforce (premise 3)", () => {
+describe("Clearance tab: engine statements (premise 3)", () => {
   it("an ungated classification shows none of the statements", async () => {
     open(pii());
     await table();
-    expect(screen.queryByText(GROUP_WARNING)).not.toBeInTheDocument();
     expect(screen.queryByText(READS_ONLY)).not.toBeInTheDocument();
     expect(screen.queryByText(VIEWS)).not.toBeInTheDocument();
     expect(screen.queryByText(CEILING)).not.toBeInTheDocument();
     expect(screen.queryByText(COMPILES)).not.toBeInTheDocument();
   });
 
-  it("a groups-only gate shows the group warning and none of the role statements", async () => {
+  it("a groups-only gate is enforced: it shows the same engine statements as a role gate", async () => {
     open(pii({ required_groups: ["g1"] }));
     await table();
-    expect(screen.getByText(GROUP_WARNING)).toBeInTheDocument();
-    expect(screen.queryByText(READS_ONLY)).not.toBeInTheDocument();
-    expect(screen.queryByText(/neither engine withholds writes/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(VIEWS)).not.toBeInTheDocument();
-    expect(screen.queryByText(CEILING)).not.toBeInTheDocument();
-    expect(screen.queryByText(COMPILES)).not.toBeInTheDocument();
+    expect(screen.getByText(READS_ONLY)).toBeInTheDocument();
+    expect(screen.getByText(VIEWS)).toBeInTheDocument();
+    expect(screen.getByText(CEILING)).toBeInTheDocument();
+    expect(screen.getByText(COMPILES)).toBeInTheDocument();
   });
 
-  it("a role gate states reads only, the views, the ceiling and the compile line, and no group warning", async () => {
+  it("a role gate states reads only, the views, the ceiling and the compile line", async () => {
     open(pii({ required_roles: ["finance_cleared"] }));
     await table();
     expect(screen.getByText(READS_ONLY)).toBeInTheDocument();
@@ -248,13 +244,11 @@ describe("Clearance tab: what the engines do not enforce (premise 3)", () => {
     expect(screen.getByText(CEILING)).toBeInTheDocument();
     expect(screen.getByText(/enforcement points that see fewer are unaffected/i)).toBeInTheDocument();
     expect(screen.getByText(COMPILES)).toBeInTheDocument();
-    expect(screen.queryByText(GROUP_WARNING)).not.toBeInTheDocument();
   });
 
-  it("a role and a group gate shows all four statements and the compile line", async () => {
+  it("a role and a group gate shows all statements and the compile line", async () => {
     open(pii({ required_roles: ["finance_cleared"], required_groups: ["g1"] }));
     await table();
-    expect(screen.getByText(GROUP_WARNING)).toBeInTheDocument();
     expect(screen.getByText(READS_ONLY)).toBeInTheDocument();
     expect(screen.getByText(VIEWS)).toBeInTheDocument();
     expect(screen.getByText(CEILING)).toBeInTheDocument();
@@ -265,7 +259,6 @@ describe("Clearance tab: what the engines do not enforce (premise 3)", () => {
 describe("Clearance tab: scope first, and who is cleared (C9)", () => {
   const PEOPLE = "/perm/clearances/t-pii/people";
   const NOBODY = { count: 0, people: [], truncated: false, enginesEnforce: false, onEnginesCount: 0 };
-  const ENGINES_NOT = "Engines do not enforce this clearance: anyone with SQL access can read the data.";
   const via = (kind: "role" | "group", name: string, extra = {}) => ({
     kind,
     name,
@@ -319,7 +312,6 @@ describe("Clearance tab: scope first, and who is cleared (C9)", () => {
     });
     await userEvent.click(await screen.findByText("3 people hold a required role or belong to a required group", undefined, T));
     expect(screen.getByText("Platform admins can always open it in egret.")).toBeInTheDocument();
-    expect(screen.queryByText(/Engines do not enforce this clearance/)).not.toBeInTheDocument();
     expect(screen.queryByText(/can open it\b/)).not.toBeInTheDocument();
     const list = screen.getByRole("list", { name: "Cleared people" });
     expect(within(list).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
@@ -373,15 +365,6 @@ describe("Clearance tab: scope first, and who is cleared (C9)", () => {
     expect(within(screen.getByRole("list", { name: "Cleared people" })).getByRole("listitem")).toHaveTextContent(
       "Ann · ann · role cleared in one workspace only · engines",
     );
-  });
-
-  it("states nothing about engines while a clearance change is being saved", async () => {
-    const user = userEvent.setup();
-    open(pii({ required_groups: ["g1"] }), ADMIN, { [PEOPLE]: ok(NOBODY), [`PUT ${POLICY}`]: "never" });
-    expect(await screen.findByText(ENGINES_NOT, undefined, T)).toBeInTheDocument();
-    await pickAndAdd(user, "Role", "auditor");
-    await waitFor(() => expect(screen.queryByText(ENGINES_NOT)).not.toBeInTheDocument());
-    expect(screen.queryByText(/hold a required role|holds a required role|No one holds/)).not.toBeInTheDocument();
   });
 
   it("offers add a mask rule only with policy:update, and says what it needs otherwise", async () => {
@@ -448,13 +431,6 @@ describe("Clearance tab: scope first, and who is cleared (C9)", () => {
     ).toBeInTheDocument();
   });
 
-  it("says when engines do not enforce a group-only clearance", async () => {
-    open(pii({ required_groups: ["g1"] }), ADMIN, { [PEOPLE]: ok(NOBODY) });
-    expect(
-      await screen.findByText("Engines do not enforce this clearance: anyone with SQL access can read the data.", undefined, T),
-    ).toBeInTheDocument();
-  });
-
   it("without policy:read, says what reading the cleared people needs, and asks nothing", async () => {
     const served = open(pii({ required_roles: ["cleared"] }), TAG_MANAGER);
     expect(await screen.findByText("Seeing who is cleared needs the policy:read permission.", undefined, T)).toBeInTheDocument();
@@ -498,7 +474,7 @@ describe("Clearance tab: scope first, and who is cleared (C9)", () => {
     expect(scope?.className).toMatch(/bg-muted/);
     expect(scope?.className).not.toMatch(/highlight/);
     const warnings = notes.filter((n) => n !== scope);
-    expect(warnings).toHaveLength(4);
+    expect(warnings).toHaveLength(3);
     for (const note of warnings) expect(note.className).toMatch(/bg-highlight\/15/);
   });
 });

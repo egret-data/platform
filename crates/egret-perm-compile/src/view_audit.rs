@@ -194,18 +194,18 @@ fn path_rule_selects(index: &RuleIndex, tables: &BTreeSet<LineageTable>) -> bool
 /// for every gated classification in `tags`, the clearance-bearing tag set of
 /// the view's lineage ([`crate::lineage::view_tag_set`]).
 ///
-/// Cleared for one gate means holding at least one of its `required_roles`,
-/// read through [`crate::members::role_usernames`], the same membership the
-/// clearance compiles into its deny exceptions — with
+/// Cleared for one gate means holding at least one of its `required_roles`
+/// or belonging to one of its `required_groups`, read through
+/// [`crate::members::role_usernames`] and
+/// [`crate::members::group_usernames_by_id`], the same memberships the
+/// clearance compiles into its exceptions — with
 /// [`MissingUsername::Omit`](crate::members::MissingUsername::Omit), because
 /// this is served on GET routes and must not write (2026-10-18 design R5). A
-/// holder with no username yet is left out, which is exact here: `owner` is a
-/// username, so such a holder can never be it. An empty `tags` is
+/// member with no username yet is left out, which is exact here: `owner` is a
+/// username, so such a member can never be it. An empty `tags` is
 /// `Some(true)`: nothing reached needs a clearance.
 ///
-/// `None` when a reached gate names only `required_groups`: no engine egret
-/// provisions can see a group, so the clearance compiles to nothing there,
-/// and whether the owner holds it cannot be told from roles.
+/// Always `Some`: a group-only gate is answered from its group's members.
 pub async fn owner_cleared(
     conn: &mut sqlx::PgConnection,
     owner: &str,
@@ -215,8 +215,8 @@ pub async fn owner_cleared(
         return Ok(Some(true));
     }
     let ids: Vec<Uuid> = tags.iter().copied().collect();
-    let gates: Vec<(Uuid, Vec<String>)> = sqlx::query_as(
-        "SELECT tag_id, required_roles FROM classification_policies \
+    let gates: Vec<(Uuid, Vec<String>, Vec<Uuid>)> = sqlx::query_as(
+        "SELECT tag_id, required_roles, required_groups FROM classification_policies \
           WHERE tag_id = ANY($1) \
             AND (cardinality(required_roles) > 0 OR cardinality(required_groups) > 0)",
     )
@@ -224,24 +224,31 @@ pub async fn owner_cleared(
     .fetch_all(&mut *conn)
     .await
     .map_err(CompileError::from_db)?;
-    if gates.iter().any(|(_, roles)| roles.is_empty()) {
-        return Ok(None);
-    }
-    let wanted: Vec<String> = gates
+    let wanted_roles: Vec<String> = gates
         .iter()
-        .flat_map(|(_, roles)| roles.iter().cloned())
+        .flat_map(|(_, roles, _)| roles.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let wanted_groups: Vec<Uuid> = gates
+        .iter()
+        .flat_map(|(_, _, groups)| groups.iter().copied())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
     let members =
-        crate::members::role_usernames(conn, &wanted, crate::members::MissingUsername::Omit)
+        crate::members::role_usernames(conn, &wanted_roles, crate::members::MissingUsername::Omit)
             .await?;
-    Ok(Some(gates.iter().all(|(_, roles)| {
-        roles.iter().any(|r| {
-            members
-                .get(r)
-                .is_some_and(|names| names.iter().any(|n| n == owner))
-        })
+    let group_members = crate::members::group_usernames_by_id(
+        conn,
+        &wanted_groups,
+        crate::members::MissingUsername::Omit,
+    )
+    .await?;
+    let holds = |names: Option<&Vec<String>>| names.is_some_and(|n| n.iter().any(|n| n == owner));
+    Ok(Some(gates.iter().all(|(_, roles, groups)| {
+        roles.iter().any(|r| holds(members.get(r)))
+            || groups.iter().any(|g| holds(group_members.get(g)))
     })))
 }
 

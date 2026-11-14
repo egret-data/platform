@@ -167,7 +167,6 @@ pub enum ReasonCode {
     UnexpandedPrincipal,
     UnknownClassification,
     NoClassificationChannel,
-    WithholdExemptionByGroupOnly,
     ViewNotMeasured,
     TableNotInCatalog,
     NotMeasured,

@@ -1440,10 +1440,10 @@ async fn second_gate(f: &Fixture, catalog: &str, table: &str, roles: &[&str], gr
     .unwrap();
 }
 
-/// M2: cleared means cleared for EVERY reached gate, and a group-only gate
-/// makes the answer unknown.
+/// M2: cleared means cleared for EVERY reached gate; a group-only gate is
+/// answered from its group's members.
 #[tokio::test]
-async fn owner_cleared_needs_every_gate_and_a_group_only_gate_is_unknown() {
+async fn owner_cleared_needs_every_gate_and_a_group_only_gate_is_answered_from_its_group() {
     let Some(f) = setup().await else {
         panic!("no test database");
     };
@@ -1460,9 +1460,26 @@ async fn owner_cleared_needs_every_gate_and_a_group_only_gate_is_unknown() {
     .unwrap();
     let role_b = format!("ve-role-b-{}", suffix());
     second_gate(&f, &s.catalog, "pay", &[&role_b], &[]).await;
-    second_gate(&f, &s.catalog, "hr", &[], &[Uuid::new_v4()]).await;
     let owner = format!("ve_owner_{}", suffix());
     user_holding(&f, &owner, Some(&role_a)).await;
+    let outsider = format!("ve_outsider_{}", suffix());
+    user_holding(&f, &outsider, Some(&role_a)).await;
+    let hr_group: Uuid =
+        sqlx::query_scalar("INSERT INTO groups (name, source) VALUES ($1, 'local') RETURNING id")
+            .bind(format!("ve-hr-{}", suffix()))
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        "INSERT INTO user_groups (user_id, group_id) \
+         SELECT id, $2 FROM users WHERE username = $1",
+    )
+    .bind(&owner)
+    .bind(hr_group)
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    second_gate(&f, &s.catalog, "hr", &[], &[hr_group]).await;
     // Reads orders (gate A, held) and pay (gate B, not held).
     lineage(
         &f,
@@ -1482,9 +1499,17 @@ async fn owner_cleared_needs_every_gate_and_a_group_only_gate_is_unknown() {
         &[(&s.catalog, "sales", "orders"), (&s.catalog, "sales", "hr")],
     )
     .await;
+    lineage(
+        &f,
+        &s.catalog,
+        "v_group_gate_outsider",
+        &[(&s.catalog, "sales", "orders"), (&s.catalog, "sales", "hr")],
+    )
+    .await;
     let views = FakeViews::default()
         .view(&s.catalog, "v_two_gates", Ok(Some(&owner)))
-        .view(&s.catalog, "v_group_gate", Ok(Some(&owner)));
+        .view(&s.catalog, "v_group_gate", Ok(Some(&owner)))
+        .view(&s.catalog, "v_group_gate_outsider", Ok(Some(&outsider)));
 
     let j = trino_exposure(&f, views, s.tag_id).await;
 
@@ -1495,8 +1520,13 @@ async fn owner_cleared_needs_every_gate_and_a_group_only_gate_is_unknown() {
     );
     assert_eq!(
         trino_view(&j, "v_group_gate")["ownerCleared"],
-        serde_json::Value::Null,
-        "a group-only gate cannot be answered from roles; body={j}"
+        true,
+        "an owner in the gate's group is cleared; body={j}"
+    );
+    assert_eq!(
+        trino_view(&j, "v_group_gate_outsider")["ownerCleared"],
+        false,
+        "an owner outside the gate's group is not cleared; body={j}"
     );
     sqlx::query("DELETE FROM classification_policies WHERE tag_id = $1")
         .bind(s.tag_id)

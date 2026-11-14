@@ -309,11 +309,17 @@ async fn grants_with_principals(
 /// Connection-generic core of [`PermStore::list_rules`] — same rationale as
 /// [`list_grants_via`].
 pub async fn list_rules_via(conn: &mut sqlx::PgConnection) -> Result<Vec<Rule>, PermError> {
+    // `withhold` rules (SP3c-2) are a clearance's new home: a tag-selected row
+    // with NO mask/row-filter payload, which `RuleKind`/`rule_from_row` cannot
+    // represent. They are read by their own loader (SP3c-2 Task 5), not through
+    // this mask/row-filter listing, so they are excluded here rather than
+    // failing `rule_from_row` with "unknown rule kind".
     let rows: Vec<RuleRow> = sqlx::query_as(
         "SELECT id, name, kind::text AS kind, mask_type, value_expr, filter_expr, \
                 selector_kind::text AS selector_kind, tag_key, catalog_id, \
                 schema_name, table_name, column_name \
-         FROM perm.rules",
+         FROM perm.rules \
+         WHERE kind <> 'withhold'::perm.rule_kind",
     )
     .fetch_all(&mut *conn)
     .await?;
@@ -334,7 +340,8 @@ pub async fn list_rules_for_catalogs_via(
                 selector_kind::text AS selector_kind, tag_key, catalog_id, \
                 schema_name, table_name, column_name \
          FROM perm.rules \
-         WHERE selector_kind = 'tag'::perm.selector_kind OR catalog_id = ANY($1)",
+         WHERE (selector_kind = 'tag'::perm.selector_kind OR catalog_id = ANY($1)) \
+           AND kind <> 'withhold'::perm.rule_kind",
     )
     .bind(catalogs)
     .fetch_all(&mut *conn)
@@ -719,6 +726,16 @@ pub async fn get_rule_via(
     else {
         return Ok(None);
     };
+    // SP3c-2: a `withhold` row is a clearance's home, not a mask/row_filter, and
+    // `rule_from_row` cannot represent it. It is read by its own loader
+    // (`egret-perm-compile`'s `ir_load::load_withhold_inputs`), never by id
+    // through this generic path — the mask/row_filter callers (grant delete,
+    // table-hook copy, migration) only ever hold a mask/row_filter id. Should
+    // one reach here, answer a clean `None` (the caller's 404) rather than the
+    // "unknown rule kind" error `rule_from_row` would raise.
+    if row.kind == "withhold" {
+        return Ok(None);
+    }
     let exemption_rows: Vec<RuleExemptionRow> = sqlx::query_as(
         "SELECT rule_id, kind::text AS kind, ref AS principal_ref, mode::text AS mode \
          FROM perm.rule_exemptions WHERE rule_id = $1",

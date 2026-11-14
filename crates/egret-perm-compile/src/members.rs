@@ -252,6 +252,131 @@ pub(crate) async fn role_usernames(
     Ok(out)
 }
 
+/// The usernames of the direct members of each group ID in `group_ids`, sorted
+/// and deduplicated, keyed by group id; every requested id appears, even with
+/// no members. A member with no username is minted under
+/// [`MissingUsername::Mint`] (in ascending user-id order) and left out under
+/// [`MissingUsername::Omit`], exactly as [`role_usernames`] does. A clearance
+/// stores its `required_groups` as ids, which [`group_members_via`] (keyed by
+/// name) does not take.
+pub(crate) async fn group_usernames_by_id(
+    conn: &mut sqlx::PgConnection,
+    group_ids: &[Uuid],
+    missing: MissingUsername,
+) -> Result<BTreeMap<Uuid, Vec<String>>, CompileError> {
+    let mut out: BTreeMap<Uuid, Vec<String>> = group_ids.iter().map(|g| (*g, Vec::new())).collect();
+    if out.is_empty() {
+        return Ok(out);
+    }
+    let rows: Vec<(Uuid, Uuid, Option<String>)> = sqlx::query_as(
+        "SELECT ug.group_id, ug.user_id, u.username::text \
+           FROM user_groups ug \
+           JOIN users u ON u.id = ug.user_id \
+          WHERE ug.group_id = ANY($1) \
+          ORDER BY ug.user_id",
+    )
+    .bind(group_ids)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(CompileError::from_db)?;
+    let mut names: HashMap<Uuid, String> = HashMap::new();
+    let mut unnamed: BTreeSet<Uuid> = BTreeSet::new();
+    for (_, user_id, username) in &rows {
+        match username {
+            Some(u) => {
+                names.insert(*user_id, u.clone());
+            }
+            None => {
+                unnamed.insert(*user_id);
+            }
+        }
+    }
+    if missing == MissingUsername::Mint {
+        for user_id in unnamed {
+            let minted = mint_for_compile(conn, user_id).await?;
+            names.insert(user_id, minted);
+        }
+    }
+    for (group_id, user_id, _) in &rows {
+        if let Some(name) = names.get(user_id) {
+            out.entry(*group_id).or_default().push(name.clone());
+        }
+    }
+    for names in out.values_mut() {
+        names.sort();
+        names.dedup();
+    }
+    Ok(out)
+}
+
+/// The usernames of the direct members of each group NAME in `names`, sorted
+/// and deduplicated, keyed by group name; every requested name appears, even
+/// with no members. A member with no username is minted under
+/// [`MissingUsername::Mint`] (in ascending user-id order) and left out under
+/// [`MissingUsername::Omit`], exactly as [`group_usernames_by_id`] does.
+///
+/// SP3c-2 Task 5: a migrated clearance's exemptions are stored as GROUP refs by
+/// name — a role's `role:<name> holders` managed group (whose membership mirrors
+/// the role's holders) and a `required_groups` group by its `groups.name` — and
+/// [`crate::ir_load::load_withhold_inputs`] expands both uniformly through this
+/// one query. It mirrors [`group_usernames_by_id`] exactly, joining `groups` by
+/// `name` instead of taking ids, so a holder group and the role path it replaced
+/// resolve to the same usernames (the byte-identity the read switch rests on).
+pub(crate) async fn group_usernames_by_name(
+    conn: &mut sqlx::PgConnection,
+    names: &[String],
+    missing: MissingUsername,
+) -> Result<BTreeMap<String, Vec<String>>, CompileError> {
+    let mut out: BTreeMap<String, Vec<String>> =
+        names.iter().map(|n| (n.clone(), Vec::new())).collect();
+    if out.is_empty() {
+        return Ok(out);
+    }
+    let wanted: Vec<String> = out.keys().cloned().collect();
+    let rows: Vec<(String, Uuid, Option<String>)> = sqlx::query_as(
+        "SELECT g.name, ug.user_id, u.username::text \
+           FROM groups g \
+           JOIN user_groups ug ON ug.group_id = g.id \
+           JOIN users u ON u.id = ug.user_id \
+          WHERE g.name = ANY($1) \
+          ORDER BY ug.user_id",
+    )
+    .bind(&wanted)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(CompileError::from_db)?;
+    let mut names_by_user: HashMap<Uuid, String> = HashMap::new();
+    let mut unnamed: BTreeSet<Uuid> = BTreeSet::new();
+    for (_, user_id, username) in &rows {
+        match username {
+            Some(u) => {
+                names_by_user.insert(*user_id, u.clone());
+            }
+            None => {
+                unnamed.insert(*user_id);
+            }
+        }
+    }
+    if missing == MissingUsername::Mint {
+        for user_id in unnamed {
+            let minted = mint_for_compile(conn, user_id).await?;
+            names_by_user.insert(user_id, minted);
+        }
+    }
+    for (group_name, user_id, _) in &rows {
+        if let Some(name) = names_by_user.get(user_id) {
+            out.entry(group_name.clone())
+                .or_default()
+                .push(name.clone());
+        }
+    }
+    for names in out.values_mut() {
+        names.sort();
+        names.dedup();
+    }
+    Ok(out)
+}
+
 /// Take the one compile-mint lock on `conn`'s transaction: a
 /// transaction-scoped advisory lock every username mint a compile makes is
 /// taken under ([`mint_for_compile`]), released at commit or rollback.

@@ -31,7 +31,7 @@ use egret_perm::{
     Action, ClearanceGate, Effect, Grant, GrantOrigin, PermStore, Principal, PrincipalKind,
     PrincipalSet, Reason, Scope, Subject as EvalSubject,
 };
-use egret_perm_compile::{recompile_service, SourceKind};
+use egret_perm_compile::recompile_service;
 use egret_policy::{clearance_gates_for_tags_via, PolicyStore, COMPILER_CLEARANCE_PREFIX};
 use serde_json::Value;
 use uuid::Uuid;
@@ -389,13 +389,13 @@ async fn a_collision_suffixed_username_is_excepted_not_the_base_slug() {
     );
 }
 
-/// D7 measured that a Ranger item naming a GROUP matches nobody. A tag gated
-/// ONLY by `required_groups` therefore compiles to NOTHING — and the skip is
-/// REPORTED, not silent: "no policy exists" is also what a compiler that never
-/// looked at classifications at all would produce, so the assertion that
-/// discriminates is that the recompile SAID it skipped this tag.
+/// D7 measured that a Ranger item naming a GROUP matches nobody, so a group
+/// cannot be named in `denyExceptions`. A tag gated ONLY by `required_groups`
+/// therefore has its groups resolved to their members' usernames — like a
+/// role's holders — and is ENFORCED: it used to compile to nothing, leaving
+/// the clearance silently unenforced on the engine.
 #[tokio::test]
-async fn a_groups_only_gated_tag_compiles_to_nothing_and_reports_one_skip() {
+async fn a_groups_only_clearance_is_enforced() {
     let Some(db) = test_db().await else { return };
     let f = seed(&db).await;
     let (tag_id, _) = new_tag(&db).await;
@@ -405,39 +405,43 @@ async fn a_groups_only_gated_tag_compiles_to_nothing_and_reports_one_skip() {
         .fetch_one(&db.pool)
         .await
         .expect("group");
+    let bob = new_user(
+        &db,
+        &format!("{}@egret.local", unique("bob")),
+        Some("clr-bob"),
+    )
+    .await;
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(bob)
+        .bind(group_id)
+        .execute(&db.pool)
+        .await
+        .expect("membership");
     gate(&db, tag_id, &[], &[group_id]).await;
 
     let summary = recompile_service(&f.perm, &f.policy, f.profile_id)
         .await
         .expect("recompile");
 
+    let body = clearance_policy(&db, f.tag_service_id, tag_id)
+        .await
+        .expect("a groups-only gate must now compile to a clearance policy");
+    let deny_items = body["denyPolicyItems"].as_array().expect("denyPolicyItems");
     assert_eq!(
-        clearance_policy(&db, f.tag_service_id, tag_id).await,
-        None,
-        "a group-only gate must compile to no policy — a deny whose exceptions except nobody \
-         withholds the column from everybody"
+        strings_of(&deny_items[0]["groups"]),
+        vec!["public".to_string()],
+        "it withholds from everybody…"
     );
+    let except = body["denyExceptions"].as_array().expect("denyExceptions");
     assert_eq!(
-        clearance_policy(&db, f.profile_id, tag_id).await,
-        None,
-        "and not to the resource profile either"
+        users_of(&except[0]),
+        vec!["clr-bob".to_string()],
+        "…except the group's member: {body:#}"
     );
-
-    // Scoped to THIS test's tag: another test's gated tag is compiled by this
-    // same installation-wide pass and reports its own skips.
-    let mine: Vec<&egret_perm_compile::SkippedItem> =
-        summary.skipped.iter().filter(|s| s.id == tag_id).collect();
-    assert_eq!(
-        mine.len(),
-        1,
-        "the skip must be REPORTED, not silent — got {:?}",
-        summary.skipped
-    );
-    assert_eq!(mine[0].source_kind, SourceKind::Clearance);
     assert!(
-        mine[0].reason.contains("required_groups"),
-        "the reason must name what was skipped and why: {:?}",
-        mine[0].reason
+        summary.skipped.iter().all(|s| s.id != tag_id),
+        "an enforced gate reports no skip: {:?}",
+        summary.skipped
     );
 }
 

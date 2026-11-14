@@ -104,7 +104,7 @@ describe("ViewExposureSection", () => {
     expect(ext).toHaveTextContent(/egret does not connect to engines it does not run/i);
   });
 
-  test("a role clearance names the cost of the engine-wide deny", () => {
+  test("a clearance names the cost of the engine-wide deny", () => {
     respond(EMPTY);
     render(<ViewExposureSection tagId="t1" engineGated />);
 
@@ -112,7 +112,7 @@ describe("ViewExposureSection", () => {
     expect(screen.getByText(/not cleared for every classification/i)).toBeInTheDocument();
   });
 
-  test("without a role clearance it claims no deny", () => {
+  test("without a clearance it claims no deny", () => {
     respond(EMPTY);
     render(<ViewExposureSection tagId="t1" engineGated={false} />);
 

@@ -27,6 +27,7 @@ import type {
 import type {
   AllocatedUsername,
   ClassifiedPolicy,
+  ClearanceMigration,
   ClearedPeople,
   CompileResponse,
   EngineCapabilitiesResponse,
@@ -61,6 +62,7 @@ import type {
   RuleView,
   StaleUserRefsConflict,
   StoredOverlap,
+  UndoClearancesRequest,
   UndoRequest,
   UndoResponse,
   UndoRolePrincipalsRequest,
@@ -1808,6 +1810,229 @@ export const usePermPatchGrant = <TError = ErrorBody,
         TContext
       > => {
       return useMutation(getPermPatchGrantMutationOptions(options), queryClient);
+    }
+    export type permMigrateClearancesResponse200 = {
+  data: ClearanceMigration
+  status: 200
+}
+
+export type permMigrateClearancesResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permMigrateClearancesResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permMigrateClearancesResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type permMigrateClearancesResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permMigrateClearancesResponseSuccess = (permMigrateClearancesResponse200) & {
+  headers: Headers;
+};
+export type permMigrateClearancesResponseError = (permMigrateClearancesResponse401 | permMigrateClearancesResponse403 | permMigrateClearancesResponse409 | permMigrateClearancesResponse500) & {
+  headers: Headers;
+};
+
+export type permMigrateClearancesResponse = (permMigrateClearancesResponseSuccess | permMigrateClearancesResponseError)
+
+export const getPermMigrateClearancesUrl = () => {
+
+
+
+
+  return `/api/control-plane/perm/migrate/clearances`
+}
+
+/**
+ * @summary SP3c-2: migrate every gated clearance into a `withhold` rule exempting the
+holders of its required roles and groups, PROVABLY — the compiled artifact
+of every affected profile is fingerprinted before and after and the whole
+transaction rolls back on any difference. Reversible via the `undo` route.
+ */
+export const permMigrateClearances = async ( options?: Parameters<typeof customInstance>[1]): Promise<permMigrateClearancesResponse> => {
+
+  return customInstance<permMigrateClearancesResponse>(getPermMigrateClearancesUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermMigrateClearancesMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permMigrateClearances>>, TError,void, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof permMigrateClearances>>, TError,void, TContext> => {
+
+const mutationKey = ['permMigrateClearances'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof permMigrateClearances>>, void> = () => {
+
+
+          return  permMigrateClearances(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PermMigrateClearancesMutationResult = NonNullable<Awaited<ReturnType<typeof permMigrateClearances>>>
+
+    export type PermMigrateClearancesMutationError = ErrorBody
+
+    /**
+ * @summary SP3c-2: migrate every gated clearance into a `withhold` rule exempting the
+holders of its required roles and groups, PROVABLY — the compiled artifact
+of every affected profile is fingerprinted before and after and the whole
+transaction rolls back on any difference. Reversible via the `undo` route.
+ */
+export const usePermMigrateClearances = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permMigrateClearances>>, TError,void, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof permMigrateClearances>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getPermMigrateClearancesMutationOptions(options), queryClient);
+    }
+    export type permUndoClearancesResponse200 = {
+  data: void
+  status: 200
+}
+
+export type permUndoClearancesResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permUndoClearancesResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permUndoClearancesResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type permUndoClearancesResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type permUndoClearancesResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permUndoClearancesResponseSuccess = (permUndoClearancesResponse200) & {
+  headers: Headers;
+};
+export type permUndoClearancesResponseError = (permUndoClearancesResponse401 | permUndoClearancesResponse403 | permUndoClearancesResponse404 | permUndoClearancesResponse409 | permUndoClearancesResponse500) & {
+  headers: Headers;
+};
+
+export type permUndoClearancesResponse = (permUndoClearancesResponseSuccess | permUndoClearancesResponseError)
+
+export const getPermUndoClearancesUrl = () => {
+
+
+
+
+  return `/api/control-plane/perm/migrate/clearances/undo`
+}
+
+/**
+ * @summary SP3c-2: undo one clearance migration, restoring `classification_policies`
+and removing the withhold rules it created. Refuses, changing nothing, if a
+created rule's exemptions changed since.
+ */
+export const permUndoClearances = async (undoClearancesRequest: UndoClearancesRequest, options?: Parameters<typeof customInstance>[1]): Promise<permUndoClearancesResponse> => {
+
+  return customInstance<permUndoClearancesResponse>(getPermUndoClearancesUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(undoClearancesRequest)
+  }
+);}
+
+
+
+
+
+export const getPermUndoClearancesMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permUndoClearances>>, TError,{data: UndoClearancesRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof permUndoClearances>>, TError,{data: UndoClearancesRequest}, TContext> => {
+
+const mutationKey = ['permUndoClearances'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof permUndoClearances>>, {data: UndoClearancesRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  permUndoClearances(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PermUndoClearancesMutationResult = NonNullable<Awaited<ReturnType<typeof permUndoClearances>>>
+    export type PermUndoClearancesMutationBody = UndoClearancesRequest
+    export type PermUndoClearancesMutationError = ErrorBody
+
+    /**
+ * @summary SP3c-2: undo one clearance migration, restoring `classification_policies`
+and removing the withhold rules it created. Refuses, changing nothing, if a
+created rule's exemptions changed since.
+ */
+export const usePermUndoClearances = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permUndoClearances>>, TError,{data: UndoClearancesRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof permUndoClearances>>,
+        TError,
+        {data: UndoClearancesRequest},
+        TContext
+      > => {
+      return useMutation(getPermUndoClearancesMutationOptions(options), queryClient);
     }
     export type permMigrateRolePrincipalsResponse200 = {
   data: RolePrincipalMigration

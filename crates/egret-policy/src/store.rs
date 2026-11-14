@@ -2013,11 +2013,9 @@ pub async fn tag_keys_by_ids_via(
 /// The clearance gate for each of `tag_keys` that `egret_perm::evaluate` can
 /// actually agree with the compiled engine about (SP4c Task 4/D4): one
 /// `(tag key, required_roles)` pair per gated tag whose `required_roles` is
-/// non-empty. A `required_groups`-only gate is deliberately excluded — D2/D7
-/// measured that a group name matches nobody in the engine, so
-/// `egret_perm_compile::clearance` compiles it to NO deny at all, and
-/// `explain` reporting a denial for it would disagree with the engine in the
-/// direction opposite the bug SP4c Task 4 fixes.
+/// non-empty. A `required_groups`-only gate is excluded from THIS roles list
+/// (it has no roles to evaluate); use [`gated_tag_keys_via`] to know whether a
+/// tag is gated by roles or groups.
 pub async fn clearance_gates_for_tags_via(
     conn: &mut sqlx::PgConnection,
     tag_keys: &[String],
@@ -2030,6 +2028,30 @@ pub async fn clearance_gates_for_tags_via(
              FROM classification_policies cp
              JOIN tags t ON t.id = cp.tag_id
             WHERE t.key = ANY($1) AND cardinality(cp.required_roles) > 0"#,
+    )
+    .bind(tag_keys)
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
+/// The keys among `tag_keys` whose clearance names a required role OR a
+/// required group: every gate the compiler turns into a withhold (groups are
+/// exemptions like roles). Unlike [`clearance_gates_for_tags_via`], which feeds
+/// `egret_perm::evaluate` with roles only, this answers "is the tag gated at
+/// all", for display.
+pub async fn gated_tag_keys_via(
+    conn: &mut sqlx::PgConnection,
+    tag_keys: &[String],
+) -> Result<Vec<String>, PolicyStoreError> {
+    if tag_keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(sqlx::query_scalar::<_, String>(
+        r#"SELECT t.key
+             FROM classification_policies cp
+             JOIN tags t ON t.id = cp.tag_id
+            WHERE t.key = ANY($1)
+              AND cardinality(cp.required_roles) + cardinality(cp.required_groups) > 0"#,
     )
     .bind(tag_keys)
     .fetch_all(&mut *conn)

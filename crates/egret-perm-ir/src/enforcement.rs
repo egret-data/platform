@@ -8,7 +8,6 @@ use uuid::Uuid;
 
 use crate::ep::{EpKind, Mechanism};
 use crate::matrix::{support_for_kind, Capability, RuleEffectKind, Support};
-use crate::statement::ReasonCode;
 
 /// An engine attached to a catalog, with its profile's kind when bound.
 #[derive(Debug, Clone)]
@@ -157,31 +156,6 @@ pub fn rule_enforcement(
     )
 }
 
-/// M10: why a withhold's group exemptions are not enforced on a Ranger EP,
-/// or `None` when it names no group. A withhold whose exemptions are groups
-/// only (`required_roles_empty`) is therefore not enforced there at all; one
-/// with roles enforces only its role half. The answer is the same for every
-/// Ranger kind (M10 has a row for each), so the kind asked is Trino.
-pub fn withhold_engine_reason(
-    required_roles_empty: bool,
-    required_groups_empty: bool,
-) -> Option<ReasonCode> {
-    // Whether the role half is empty does not change why the group half is
-    // unenforced; the caller combines the two (see `people.rs`).
-    let _ = required_roles_empty;
-    if required_groups_empty {
-        return None;
-    }
-    let k = EpKind {
-        engine: EngineType::Trino,
-        mechanism: Mechanism::Ranger,
-    };
-    match support_for_kind(k, None, None, true, &Capability::WithholdExemptionByGroup) {
-        Support::Missing(r) => Some(r),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,19 +229,6 @@ mod tests {
             rule_enforcement(&reached, &[], false, RuleEffectKind::Mask).2,
             Some(NotEnforcedReason::NoEngine)
         );
-    }
-
-    #[test]
-    fn only_a_withholds_group_half_is_unenforced() {
-        assert_eq!(
-            withhold_engine_reason(true, false),
-            Some(ReasonCode::WithholdExemptionByGroupOnly)
-        );
-        assert_eq!(
-            withhold_engine_reason(false, false),
-            Some(ReasonCode::WithholdExemptionByGroupOnly)
-        );
-        assert_eq!(withhold_engine_reason(false, true), None);
     }
 
     #[test]

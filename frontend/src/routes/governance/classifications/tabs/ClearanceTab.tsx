@@ -55,7 +55,6 @@ export const CLEARANCE_SCOPE = {
 export const NO_CLEARANCE = "None: anyone who can read the data can open it.";
 export const CLEARED_NEEDS_POLICY_READ = "Seeing who is cleared needs the policy:read permission.";
 export const ADMINS_ALWAYS = "Platform admins can always open it in egret.";
-export const ENGINES_DO_NOT_ENFORCE = "Engines do not enforce this clearance: anyone with SQL access can read the data.";
 /** A person egret clears whom the engines' deny does not except (spec C9 table). */
 export const REFUSED_ON_ENGINES = "Cleared in egret, refused on engines";
 export const NO_ONE_LISTED = "No one holds a required role or belongs to a required group yet.";
@@ -175,9 +174,6 @@ function ClearedPeople({ tag }: { tag: Tag }) {
   // Only a settled answer speaks: during the refetch a clearance write starts,
   // the old answer would describe the old clearance.
   const answer = peopleQ.data?.status === 200 && !peopleQ.isFetching ? peopleQ.data.data : null;
-  // A clearance that names no role compiles to nothing on engines (`enginesEnforce`);
-  // the server's tag says the same. Unknown (null) while the answer is pending.
-  const enginesEnforce: boolean | null = !canRead ? roles > 0 : answer ? answer.enginesEnforce : null;
 
   let list: ReactNode;
   if (!canRead) {
@@ -222,7 +218,6 @@ function ClearedPeople({ tag }: { tag: Tag }) {
     <section aria-label="Who is cleared" className="space-y-1">
       {list}
       <p className="text-sm text-muted-foreground">{ADMINS_ALWAYS}</p>
-      {enginesEnforce === false ? <p className="text-sm">{ENGINES_DO_NOT_ENFORCE}</p> : null}
     </section>
   );
 }
@@ -232,10 +227,8 @@ function ClearedPeople({ tag }: { tag: Tag }) {
  * behaviour. One table of required roles and groups; each add or remove
  * writes the whole set (`PUT …/access-policy`, or `DELETE` when it empties);
  * a `skipped` answer is shown here, not reported as saved (SP4c I5); a refusal
- * snaps back to the server's set. The four statements of premise 3 each keep
- * their condition: the group warning with a required group, the other three
- * (and the compile line) with a required role, because a groups-only gate
- * compiles to nothing (`clearance.rs`).
+ * snaps back to the server's set. The engine statements of premise 3 (and the
+ * compile line) show for any required role or group, since both are enforced.
  */
 export function ClearanceTab({ tag }: { tag: Tag }) {
   const canEdit = useCanManageTags();
@@ -329,7 +322,7 @@ export function ClearanceTab({ tag }: { tag: Tag }) {
     ...requiredRoles.map((n) => ({ type: "role" as const, value: n, label: n })),
     ...requiredGroups.map((gid) => ({ type: "group" as const, value: gid, label: groupNameById.get(gid) ?? gid })),
   ];
-  const engineGated = requiredRoles.length > 0;
+  const engineGated = requiredRoles.length + requiredGroups.length > 0;
 
   const hasClearance = requiredRoles.length + requiredGroups.length > 0;
   const serverHasClearance = tag.required_roles.length + tag.required_groups.length > 0;
@@ -384,17 +377,6 @@ export function ClearanceTab({ tag }: { tag: Tag }) {
         <details>
           <summary className="cursor-pointer text-sm font-medium">Engine details</summary>
           <div className="mt-2 space-y-2">
-            {requiredGroups.length > 0 ? (
-              // SP4c D0/D0b: a group name never reaches Trino or StarRocks, and a role
-              // name does not either; only a required role's members are expanded at
-              // compile time. Remove once egret ships a group provider.
-              <Callout>
-                Not enforced in the engine: no group provider or usersync means a group name never reaches Trino or StarRocks,
-                and a role name does not either — only a required role&apos;s enumerated members do. A group requirement is
-                enforced on object access only; opening the object is gated, but reading the same data through SQL Lab or a
-                notebook is not.
-              </Callout>
-            ) : null}
             {engineGated ? (
               <>
                 {/* SP4c Task 7: measured, neither engine withholds a write. */}

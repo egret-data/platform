@@ -40,7 +40,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 use egret_perm::CompileError;
-use egret_perm_ir::enforcement::withhold_engine_reason;
 
 use crate::members::{group_members_via, role_group_holders_via, role_holders_via};
 
@@ -404,15 +403,14 @@ pub enum EngineClearance {
     /// Directly holds `role`, unexpired, and has a username: the compiled
     /// deny excepts them (`clearance.rs:33-58`, `members.rs:146-160`).
     Cleared { role: String },
+    /// In a required group (and without a cleared role): the gate's group
+    /// exemption is enforced on engines, like a role holder's.
+    ClearedViaGroup { group: String },
     /// Not excepted; `because` says why when they hold a required role in a
-    /// way engines do not apply, or are in a required group (whose half of
-    /// the gate engines never enforce).
+    /// way engines do not apply.
     NotCleared {
         because: Option<EngineNotClearedReason>,
     },
-    /// The gate names only groups, so nothing is compiled for it
-    /// (`clearance.rs:266-276`; measured, live doc §1.1 C6).
-    NotEnforcedGroupsOnly,
 }
 
 /// Why engines do not clear a principal egret may clear.
@@ -423,12 +421,6 @@ pub enum EngineNotClearedReason {
     Expired,
     /// A required role held directly, but no username ([`NotOnEngines::NoUsername`]).
     NoUsername,
-    /// In a required group (or, on a group's page, the group itself is
-    /// required): the gate's group half compiles to nothing on engines
-    /// (`clearance.rs:61-70`; D7: a Ranger item naming a group matches nobody),
-    /// so only its roles are enforced there. Given only when no reason above
-    /// applies.
-    GroupsNotEnforced,
 }
 
 /// Whether egret's own object-access check clears a principal for a gated
@@ -699,26 +691,6 @@ struct Gate {
     tag_name: String,
     required_roles: Vec<String>,
     required_groups: Vec<Uuid>,
-}
-
-impl Gate {
-    /// The capability matrix's M10 ([`withhold_engine_reason`]): engines
-    /// enforce no group exemption, so the gate's group half is not enforced
-    /// there.
-    fn group_half_not_enforced(&self) -> bool {
-        withhold_engine_reason(
-            self.required_roles.is_empty(),
-            self.required_groups.is_empty(),
-        )
-        .is_some()
-    }
-
-    /// The gate names only groups and engines do not enforce them (M10), so
-    /// nothing is compiled for it (`egret_perm_ir::lower::withhold`, the groups-only skip).
-    /// [`gates_via`] never returns a gate with both lists empty.
-    fn groups_only_not_enforced(&self) -> bool {
-        self.required_roles.is_empty() && self.group_half_not_enforced()
-    }
 }
 
 /// Every gate, and the names of the groups they require. Both lists empty is
@@ -1040,28 +1012,37 @@ pub async fn read_user_via(
     let clearances = gates
         .iter()
         .map(|g| {
-            let engines = if g.groups_only_not_enforced() {
-                EngineClearance::NotEnforcedGroupsOnly
-            } else {
-                match g.required_roles.iter().find(|r| holds.contains(*r)) {
-                    Some(role) if has_username => EngineClearance::Cleared { role: role.clone() },
-                    Some(_) => EngineClearance::NotCleared {
-                        because: Some(EngineNotClearedReason::NoUsername),
-                    },
-                    None => EngineClearance::NotCleared {
-                        because: if direct
-                            .iter()
-                            .any(|r| r.expired && g.required_roles.contains(&r.role_name))
-                        {
-                            Some(EngineNotClearedReason::Expired)
-                        } else if g.group_half_not_enforced()
-                            && group_ids.iter().any(|gid| g.required_groups.contains(gid))
-                        {
-                            Some(EngineNotClearedReason::GroupsNotEnforced)
+            let engines = match g.required_roles.iter().find(|r| holds.contains(*r)) {
+                Some(role) if has_username => EngineClearance::Cleared { role: role.clone() },
+                Some(_) => EngineClearance::NotCleared {
+                    because: Some(EngineNotClearedReason::NoUsername),
+                },
+                // A required group clears them on engines whatever the state of
+                // a role grant, so it is tested before an expired role.
+                None => {
+                    if let Some((_, group)) = groups
+                        .iter()
+                        .find(|(gid, _)| g.required_groups.contains(gid))
+                    {
+                        if has_username {
+                            EngineClearance::ClearedViaGroup {
+                                group: group.clone(),
+                            }
                         } else {
-                            None
-                        },
-                    },
+                            EngineClearance::NotCleared {
+                                because: Some(EngineNotClearedReason::NoUsername),
+                            }
+                        }
+                    } else if direct
+                        .iter()
+                        .any(|r| r.expired && g.required_roles.contains(&r.role_name))
+                    {
+                        EngineClearance::NotCleared {
+                            because: Some(EngineNotClearedReason::Expired),
+                        }
+                    } else {
+                        EngineClearance::NotCleared { because: None }
+                    }
                 }
             };
             let egret = if let Some(r) = clearing_row(&direct, &g.required_roles) {
@@ -1253,20 +1234,16 @@ pub async fn read_group_via(
         .iter()
         .map(|g| {
             let held_role = clearing_row(&held, &g.required_roles);
-            let engines = if g.groups_only_not_enforced() {
-                EngineClearance::NotEnforcedGroupsOnly
-            } else if let Some(r) = held_role {
+            let engines = if let Some(r) = held_role {
                 EngineClearance::Cleared {
                     role: r.role_name.clone(),
                 }
-            } else {
-                EngineClearance::NotCleared {
-                    because: if g.group_half_not_enforced() && g.required_groups.contains(&gid) {
-                        Some(EngineNotClearedReason::GroupsNotEnforced)
-                    } else {
-                        None
-                    },
+            } else if g.required_groups.contains(&gid) {
+                EngineClearance::ClearedViaGroup {
+                    group: name.to_string(),
                 }
+            } else {
+                EngineClearance::NotCleared { because: None }
             };
             let egret = if g.required_groups.contains(&gid) {
                 EgretClearance::Cleared {
@@ -1341,9 +1318,7 @@ pub async fn read_role_via(
         .iter()
         .map(|g| {
             let required = g.required_roles.iter().any(|r| r == name);
-            let engines = if g.groups_only_not_enforced() {
-                EngineClearance::NotEnforcedGroupsOnly
-            } else if required {
+            let engines = if required {
                 EngineClearance::Cleared {
                     role: name.to_string(),
                 }
@@ -1507,10 +1482,10 @@ pub struct ClearedPerson {
     /// Every way they are listed: role grants (direct, then through a group)
     /// before group memberships, each sorted by name, scope, scope id.
     pub via: Vec<ClearedVia>,
-    /// Whether the compiled engine deny excepts them: they hold a required
-    /// role DIRECTLY (any scope), unexpired, and have a username. Never
-    /// through a group or a group membership. A direct holder with no
-    /// username is named once a compile mints one.
+    /// Whether the compiled withhold excepts them by name: they hold a
+    /// required role directly (any scope, unexpired) or belong to a required
+    /// group, and have a username. A holder with no username is named once a
+    /// compile mints one.
     pub on_engines: bool,
 }
 
@@ -1523,20 +1498,19 @@ pub struct ClearedPerson {
 ///   egret and, with a username, on engines (`onEngines`).
 /// - **Role held through a group** (`throughGroup` set): a live `allow` grant
 ///   of a required role to a group the user is a direct member of. Egret's
-///   object check clears them (`egret_auth::grants`, `user_groups`); engines
-///   refuse them (the compiler expands only user holders).
-/// - **Group member, gate names no role** (`enginesEnforce` false): egret
-///   clears them; engines withhold the data from NOBODY, since a group-only
-///   gate compiles to nothing on engines.
-/// - **Group member, gate also names a role**: egret clears them; engines
-///   refuse them (a Ranger group matches nobody; only role holders are
-///   excepted).
+///   object check clears them (`egret_auth::grants`, `user_groups`).
+/// - **Group member** (`via.kind = group`): egret clears them, and engines
+///   enforce a required group like a required role, so with a username they
+///   are `onEngines`.
 /// - **Scoped grant** (`via.scope` workspace or object): egret clears them
 ///   only within that workspace or object; engines everywhere (a column read
 ///   carries no scope).
 /// - **Platform admins** are always cleared by egret (a scope-correct
 ///   exemption) and are NOT listed unless they are also listed by a rule
 ///   above; engines give them no bypass.
+///
+/// `enginesEnforce` is true when the clearance names a required role or a
+/// required group.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ClearedPeople {
@@ -1548,9 +1522,9 @@ pub struct ClearedPeople {
     pub people: Vec<ClearedPerson>,
     /// More people are listed than `people` carries.
     pub truncated: bool,
-    /// Whether engines enforce the clearance at all: true when it names at
-    /// least one required role. False means anyone with SQL access reads the
-    /// data on engines.
+    /// Whether engines enforce the clearance at all: true when it names a
+    /// required role or group. False means the clearance names neither, so
+    /// anyone with SQL access reads the data on engines.
     pub engines_enforce: bool,
     /// How many of `count` are `onEngines`, independent of the 200 cap.
     pub on_engines_count: u32,
@@ -1636,9 +1610,9 @@ pub async fn cleared_people_via(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    // `egret_perm_ir::lower::withhold`: a gate with no required role compiles to nothing
-    // on engines.
-    let engines_enforce = !roles.is_empty();
+    // `egret_perm_ir::lower::withhold`: a gate naming a role or a group is
+    // enforced on engines (a group member is excepted like a role holder).
+    let engines_enforce = !roles.is_empty() || !group_ids.is_empty();
     // A gate stores group ids; membership is read by name, the key the
     // compiler expands. An id no group has any more admits nobody.
     let groups: Vec<String> = if group_ids.is_empty() {
@@ -1687,13 +1661,15 @@ pub async fn cleared_people_via(
         });
     }
     for m in group_members_via(conn, &groups).await? {
-        listed.entry(m.user_id).or_default().via.insert(ClearedVia {
+        let l = listed.entry(m.user_id).or_default();
+        l.via.insert(ClearedVia {
             kind: ClearedViaKind::Group,
             name: m.group_name,
             scope: None,
             scope_id: None,
             through_group: None,
         });
+        l.on_engines |= m.username.is_some();
     }
 
     let count = u32::try_from(listed.len()).unwrap_or(u32::MAX);

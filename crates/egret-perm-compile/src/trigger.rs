@@ -2043,9 +2043,9 @@ pub async fn affected_services_for_workspace_members(
 /// - **Engine grants** (F11): the profile of the grant's engine.
 ///
 /// **There is deliberately no clearance arm.** A tag's `required_groups` is not
-/// expanded — a group-only gate still compiles to nothing and reports the skip
-/// (`egret_perm_ir::lower::withhold`'s module doc) — so no clearance body names a group's
-/// members, and nothing there can go stale.
+/// a clearance arm here: clearances are rules (`perm.rules` withholds) whose
+/// exemption sets are rebuilt by the clearance sync, so no body in this
+/// module names a clearance group's members and nothing there can go stale.
 ///
 /// `public` contributes nothing: it is never expanded (every engine resolves
 /// it), so who "belongs" to a `groups` row that happens to carry that name

@@ -55,7 +55,7 @@ describe("the Effect strip", () => {
     await waitFor(() => expect(strip()).toHaveTextContent("Mask · Hash: Hash email and 1 more"), T);
     expect(
       within(strip()).getByText(
-        "Only members of 2 groups, and platform admins, may open data with it in egret. Engines do not enforce it.",
+        "Only members of 2 groups, and platform admins, may open data with it in egret.",
       ),
     ).toBeInTheDocument();
     expect(strip()).toHaveTextContent("2 tables · 3 columns · 0 BI objects");
@@ -130,11 +130,10 @@ describe("the Effect strip", () => {
       { required_roles: ["cleared"], required_groups: ["g1", "g2"] },
       "Only holders of 1 role or members of 2 groups, and platform admins, may open data with it in egret.",
     ],
-  ])("states a clearance with roles (%j) without the engine caveat", async (over, sentence) => {
+  ])("states a clearance with roles (%j)", async (over, sentence) => {
     serve({ "/tags": ok([{ ...PII, ...over }]), "/classifications/t-pii/usage": ok(USAGE_NONE), "/perm/rules": ok([]) });
     openArea("/governance/classifications/t-pii", ADMIN);
     expect(await within(await screen.findByRole("region", { name: "Effect" }, T)).findByText(sentence, {}, T)).toBeInTheDocument();
-    expect(strip()).not.toHaveTextContent("Engines do not enforce it.");
   });
 
   it("promises the Data page's Add classification only to who may attach", async () => {

@@ -9527,6 +9527,141 @@
         }
       }
     },
+    "/api/control-plane/perm/migrate/clearances": {
+      "post": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "SP3c-2: migrate every gated clearance into a `withhold` rule exempting the\nholders of its required roles and groups, PROVABLY — the compiled artifact\nof every affected profile is fingerprinted before and after and the whole\ntransaction rolls back on any difference. Reversible via the `undo` route.",
+        "operationId": "migrate_clearances",
+        "responses": {
+          "200": {
+            "description": "Every gated clearance migrated into a withhold rule; the compiled output of each affected profile is byte-identical",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClearanceMigration"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Nothing was changed: the equivalence gate refused, or a recompile it needed was refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/migrate/clearances/undo": {
+      "post": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "SP3c-2: undo one clearance migration, restoring `classification_policies`\nand removing the withhold rules it created. Refuses, changing nothing, if a\ncreated rule's exemptions changed since.",
+        "operationId": "undo_clearances",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UndoClearancesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The migration undone"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such migration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Nothing was changed: a created rule was edited since",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/perm/migrate/role-principals": {
       "post": {
         "tags": [
@@ -39379,7 +39514,7 @@
       },
       "AccessPolicyWritten": {
         "type": "object",
-        "description": "What a clearance write actually reached — **SP4c review I5.**\n\nThe endpoint used to answer a bare `{\"ok\": true}`, so a clearance authored\non a Trino profile with no usable `tagService`, or one naming only groups,\nwas reported as saved while the compiler had emitted nothing at all and the\nUI showed it as active. `skipped` carries exactly what the perm mutation\nresponses already carry (`SkipReport`, same schema) and for the stated\nreason: an author needs to know at authoring time, not from a query that\nlater returns rows it should not.\n\nAn EMPTY `skipped` is the normal answer and means every profile a clearance\ncan reach compiled it.",
+        "description": "What a clearance write actually reached — **SP4c review I5.**\n\nThe endpoint used to answer a bare `{\"ok\": true}`, so a clearance authored\non a Trino profile with no usable `tagService`\nwas reported as saved while the compiler had emitted nothing at all and the\nUI showed it as active. `skipped` carries exactly what the perm mutation\nresponses already carry (`SkipReport`, same schema) and for the stated\nreason: an author needs to know at authoring time, not from a query that\nlater returns rows it should not.\n\nAn EMPTY `skipped` is the normal answer and means every profile a clearance\ncan reach compiled it.",
         "required": [
           "ok",
           "skipped"
@@ -41911,9 +42046,34 @@
           "not_compiled"
         ]
       },
+      "ClearanceMigration": {
+        "type": "object",
+        "description": "What one clearance migration run did: its provenance id, the tag keys it\nmigrated, and how many withhold rules it created.",
+        "required": [
+          "id",
+          "tags",
+          "rules_created"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "rules_created": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
       "ClearedPeople": {
         "type": "object",
-        "description": "The people listed for a classification's clearance, and what each\npopulation means. A person is listed once whatever the number of ways.\n\n- **Role held directly** (`via.kind = role`, `throughGroup` null): a live,\n  `allow` grant of a required role to the user\n  ([`crate::members::role_holders_via`], the compiler's read). Cleared in\n  egret and, with a username, on engines (`onEngines`).\n- **Role held through a group** (`throughGroup` set): a live `allow` grant\n  of a required role to a group the user is a direct member of. Egret's\n  object check clears them (`egret_auth::grants`, `user_groups`); engines\n  refuse them (the compiler expands only user holders).\n- **Group member, gate names no role** (`enginesEnforce` false): egret\n  clears them; engines withhold the data from NOBODY, since a group-only\n  gate compiles to nothing on engines.\n- **Group member, gate also names a role**: egret clears them; engines\n  refuse them (a Ranger group matches nobody; only role holders are\n  excepted).\n- **Scoped grant** (`via.scope` workspace or object): egret clears them\n  only within that workspace or object; engines everywhere (a column read\n  carries no scope).\n- **Platform admins** are always cleared by egret (a scope-correct\n  exemption) and are NOT listed unless they are also listed by a rule\n  above; engines give them no bypass.",
+        "description": "The people listed for a classification's clearance, and what each\npopulation means. A person is listed once whatever the number of ways.\n\n- **Role held directly** (`via.kind = role`, `throughGroup` null): a live,\n  `allow` grant of a required role to the user\n  ([`crate::members::role_holders_via`], the compiler's read). Cleared in\n  egret and, with a username, on engines (`onEngines`).\n- **Role held through a group** (`throughGroup` set): a live `allow` grant\n  of a required role to a group the user is a direct member of. Egret's\n  object check clears them (`egret_auth::grants`, `user_groups`).\n- **Group member** (`via.kind = group`): egret clears them, and engines\n  enforce a required group like a required role, so with a username they\n  are `onEngines`.\n- **Scoped grant** (`via.scope` workspace or object): egret clears them\n  only within that workspace or object; engines everywhere (a column read\n  carries no scope).\n- **Platform admins** are always cleared by egret (a scope-correct\n  exemption) and are NOT listed unless they are also listed by a rule\n  above; engines give them no bypass.\n\n`enginesEnforce` is true when the clearance names a required role or a\nrequired group.",
         "required": [
           "count",
           "people",
@@ -41941,7 +42101,7 @@
           },
           "enginesEnforce": {
             "type": "boolean",
-            "description": "Whether engines enforce the clearance at all: true when it names at\nleast one required role. False means anyone with SQL access reads the\ndata on engines."
+            "description": "Whether engines enforce the clearance at all: true when it names a\nrequired role or group. False means the clearance names neither, so\nanyone with SQL access reads the data on engines."
           },
           "onEnginesCount": {
             "type": "integer",
@@ -41995,7 +42155,7 @@
           },
           "onEngines": {
             "type": "boolean",
-            "description": "Whether the compiled engine deny excepts them: they hold a required\nrole DIRECTLY (any scope), unexpired, and have a username. Never\nthrough a group or a group membership. A direct holder with no\nusername is named once a compile mints one."
+            "description": "Whether the compiled withhold excepts them by name: they hold a\nrequired role directly (any scope, unexpired) or belong to a required\ngroup, and have a username. A holder with no username is named once a\ncompile mints one."
           }
         }
       },
@@ -45699,7 +45859,26 @@
           },
           {
             "type": "object",
-            "description": "Not excepted; `because` says why when they hold a required role in a\nway engines do not apply, or are in a required group (whose half of\nthe gate engines never enforce).",
+            "description": "In a required group (and without a cleared role): the gate's group\nexemption is enforced on engines, like a role holder's.",
+            "required": [
+              "group",
+              "kind"
+            ],
+            "properties": {
+              "group": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "cleared_via_group"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Not excepted; `because` says why when they hold a required role in a\nway engines do not apply.",
             "required": [
               "kind"
             ],
@@ -45718,21 +45897,6 @@
                 "type": "string",
                 "enum": [
                   "not_cleared"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "The gate names only groups, so nothing is compiled for it\n(`clearance.rs:266-276`; measured, live doc §1.1 C6).",
-            "required": [
-              "kind"
-            ],
-            "properties": {
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "not_enforced_groups_only"
                 ]
               }
             }
@@ -46127,8 +46291,7 @@
         "description": "Why engines do not clear a principal egret may clear.",
         "enum": [
           "expired",
-          "no_username",
-          "groups_not_enforced"
+          "no_username"
         ]
       },
       "EnginePluginResponse": {
@@ -46861,7 +47024,7 @@
           },
           {
             "type": "object",
-            "description": "`perm-clearance-{tag_id}[-{locator}]`. A clearance has no Ranger\nanalogue on the wire, so `tag` and `required_roles` are reconstructed\nhere from the `tags` row the name points at (`tags.key`, not\n`tags.name`) and from `classification_policies`. `tag` is `None` when\nthe tag row is gone — a compiled clearance can outlive its gate until\nthe next recompile, and inventing a name for it would be worse than\nsaying none is known.\n\n**`required_roles` is `None` when no gate could be looked up, and that\nis why it is an `Option` rather than a list.** The gate is keyed by\n`tags.key`, so when the `tags` row is gone there is no key to look one\nup by and nothing is known about the clearing roles. An empty list\nwould state the opposite — that the gate names no role — which SP4d-2a\nmeasured live and found false: the gate declared `['sp4d2a_cleared']`\nand the page said it declared only groups. `None` makes \"we could not\nlook\" unrepresentable as \"there is nothing to find\".\n\n**This is an honest 3→2, not 3→3.** `Some([])` still carries two facts\nthis wire cannot separate: (1) the gate declares only\n`required_groups`, which compiles to no engine deny at all (D2/D7), and\n(2) there is no `classification_policies` row for the tag at all —\n`clearance_gates_for_tags_via` filters on\n`cardinality(cp.required_roles) > 0` and `clearing_roles` turns a miss\ninto an empty list, so a DELETED gate whose compiled clearance\npolicy is still being served reads exactly like a groups-only one.\nSeparating those two needs a second query that distinguishes \"no row\"\nfrom \"row with no roles\"; until something asks for it, the page says\nboth out loud.",
+            "description": "`perm-clearance-{tag_id}[-{locator}]`. A clearance has no Ranger\nanalogue on the wire, so `tag` and `required_roles` are reconstructed\nhere from the `tags` row the name points at (`tags.key`, not\n`tags.name`) and from `classification_policies`. `tag` is `None` when\nthe tag row is gone — a compiled clearance can outlive its gate until\nthe next recompile, and inventing a name for it would be worse than\nsaying none is known.\n\n**`required_roles` is `None` when no gate could be looked up, and that\nis why it is an `Option` rather than a list.** The gate is keyed by\n`tags.key`, so when the `tags` row is gone there is no key to look one\nup by and nothing is known about the clearing roles. An empty list\nwould state the opposite — that the gate names no role — which SP4d-2a\nmeasured live and found false: the gate declared `['sp4d2a_cleared']`\nand the page said it declared only groups. `None` makes \"we could not\nlook\" unrepresentable as \"there is nothing to find\".\n\n**This is an honest 3→2, not 3→3.** `Some([])` still carries two facts\nthis wire cannot separate: (1) the gate declares only\n`required_groups` (this wire lists clearing ROLES only; the engines\ndo enforce the group), and\n(2) there is no `classification_policies` row for the tag at all —\n`clearance_gates_for_tags_via` filters on\n`cardinality(cp.required_roles) > 0` and `clearing_roles` turns a miss\ninto an empty list, so a DELETED gate whose compiled clearance\npolicy is still being served reads exactly like a groups-only one.\nSeparating those two needs a second query that distinguishes \"no row\"\nfrom \"row with no roles\"; until something asks for it, the page says\nboth out loud.",
             "required": [
               "tag_id",
               "kind"
@@ -58504,7 +58667,7 @@
               "boolean",
               "null"
             ],
-            "description": "Whether the owner is cleared for every classification the lineage\nreaches. `null` when it cannot be said: not DEFINER, lineage not\ncomputed, or a reached clearance names only groups. Read from current\nrole membership; the engine enforces the last compile, so after a\ngrant expires the two differ until the next recompile."
+            "description": "Whether the owner is cleared for every classification the lineage\nreaches. `null` when it cannot be said: not DEFINER, lineage not\ncomputed. A required group clears like a required role. Read from\ncurrent role and group membership; the engine enforces the last compile, so after a\ngrant expires the two differ until the next recompile."
           },
           "reason": {
             "$ref": "#/components/schemas/TrinoViewReason"
@@ -58604,6 +58767,20 @@
           },
           "request": {
             "$ref": "#/components/schemas/TryRequestEcho"
+          }
+        }
+      },
+      "UndoClearancesRequest": {
+        "type": "object",
+        "description": "`POST …/migrate/clearances/undo`.",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The `id` the migration answered with."
           }
         }
       },
@@ -60035,7 +60212,7 @@
               "boolean",
               "null"
             ],
-            "description": "Whether the owner is cleared for every classification the bases carry.\n`null` when it cannot be said: not DEFINER, lineage not computed, or a\nreached clearance names only groups. Read from current role membership."
+            "description": "Whether the owner is cleared for every classification the bases carry.\n`null` when it cannot be said: not DEFINER or lineage not computed. A\nrequired group clears like a required role. Read from current role and\ngroup membership."
           },
           "lineageState": {
             "$ref": "#/components/schemas/LineageState"

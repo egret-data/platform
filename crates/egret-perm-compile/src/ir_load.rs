@@ -348,43 +348,81 @@ pub(crate) async fn load_engine_privilege_checks(
     Ok(checks)
 }
 
-/// One `classification_policies` row joined to the tag it gates. A row whose
-/// tag no longer exists is dropped by the join — there is no tag left to deny
-/// on.
+/// A `perm.rules` withhold row (SP3c-2) joined to the tag it gates by
+/// `tag_key`. A row whose tag no longer exists is dropped by the join — there
+/// is no tag left to deny on.
 #[derive(sqlx::FromRow)]
-struct GateRow {
+struct WithholdRow {
+    rule_id: Uuid,
     tag_id: Uuid,
     /// `tags.name`, never `tags.key` (see [`Gate::classification_name`]).
     tag_name: String,
-    /// `tags.key` — the STABLE identifier, needed only to read the targets:
+    /// `tags.key` — the STABLE identifier, needed to read the targets:
     /// `tag_assignments_for_service_via` selects assignments by key, the same
     /// lookup [`load_rule_inputs`] does for a tag-selected rule.
+    tag_key: String,
+}
+
+/// One `classification_policies` row joined to the tag it gates — the FALLBACK
+/// source, read only for a clearance whose tag has NO withhold rule yet (see
+/// [`load_withhold_inputs`]). A row whose tag no longer exists is dropped by
+/// the join.
+#[derive(sqlx::FromRow)]
+struct GateRow {
+    tag_id: Uuid,
+    tag_name: String,
     tag_key: String,
     required_roles: Vec<String>,
     required_groups: Vec<Uuid>,
 }
 
+/// The role name a `role:<name> holders` managed-group ref stands for, for the
+/// log line a cleared-nobody gate emits ([`Gate::required_roles`] is otherwise
+/// unused by the lowering). `None` for a plain `required_groups` group ref.
+fn role_of_holder_group_ref(r#ref: &str) -> Option<String> {
+    r#ref
+        .strip_prefix("role:")
+        .and_then(|rest| rest.strip_suffix(" holders"))
+        .map(str::to_string)
+}
+
 /// Read every gated classification for the enforcement point `ep`
 /// (`service_id`), as [`egret_perm_ir::lower::withhold::lower_withholds`]
-/// consumes them. The statements, on `conn`, in the order the clearance
-/// compile always made them:
+/// consumes them.
 ///
-/// 1. every `classification_policies` row joined to its tag, by `tag_id`
-///    (no gate: nothing else is read);
-/// 2. the holders of every role any gate names, in one query, a holder with
-///    no username minted under `MissingUsername::Mint` (2026-10-18 design R5, R6:
-///    a clearing-role holder is excepted now, not after the recompile that
-///    follows their first query). This runs after the model expansion's
-///    mints ([`load_ep`]), as it always has;
-/// 3. per gate, in order, the tables carrying its tag on this service, when
-///    [`needs_targets`] (StarRocks, a gate naming a role);
-/// 4. when [`needs_table_shapes`]: one column read for every table any gate
-///    classifies as a whole (folded, first spelling), then one view read for
-///    the names the column read did not find — a name with no columns may be
-///    a VIEW, which never becomes a table (KI-307 follow-up).
+/// **SP3c-2 Task 5 — the read path is the withhold rules, with a transition
+/// fallback.** A clearance now lives as a `perm.rules` `kind='withhold'` row
+/// (`selector_kind='tag'`, `tag_key` the gated tag) whose cleared principals are
+/// its `perm.rule_exemptions` — each an `include` GROUP ref, resolved uniformly
+/// through the member directory: a role's `role:<name> holders` managed group
+/// (membership mirrors the role's holders) and a `required_groups` group by its
+/// `groups.name` both expand by [`crate::members::group_usernames_by_name`]. The
+/// read set is:
 ///
-/// `cleared` is the UNION of the gate's roles' holders, sorted and
-/// deduplicated.
+///   {withhold rules} ∪ {`classification_policies` rows with no withhold rule}
+///
+/// The second set is the **transition fallback**: a withhold rule exists only
+/// for a clearance that has been MIGRATED ([`crate::clearance_migrate`]) or
+/// authored after Task 6. A deployment where this code ships before the
+/// migration runs, or a clearance authored before Task 6, leaves a
+/// `classification_policies` row with no rule; reading ONLY rules would leave it
+/// UNENFORCED (fail-open). So a `classification_policies` row whose tag has no
+/// withhold rule is read the old way (roles via [`crate::members::role_usernames`],
+/// groups via [`crate::members::group_usernames_by_id`]). The `NOT EXISTS` guard
+/// never double-counts a tag that has both. **This fallback is dead once every
+/// clearance is migrated** (Task 6 makes authoring always create the rule; the
+/// migration backfills existing ones), and can then be deleted together with the
+/// `classification_policies` read.
+///
+/// The statements, on `conn`, in order: the withhold rules joined to their tag;
+/// their exemptions in one query, expanded by group name (minting a missing
+/// username under `MissingUsername::Mint`, 2026-10-18 design R5); the fallback
+/// `classification_policies` rows and their role/group expansions; then, per
+/// gate (ordered by `tag_id`), the tables carrying its tag on this service when
+/// [`needs_targets`] (StarRocks); and when [`needs_table_shapes`] the batched
+/// column/view reads. `cleared` is sorted and deduplicated. A clearance naming
+/// nobody still compiles a deny (withholds from everybody) — that is what
+/// "nobody is cleared" means.
 pub(crate) async fn load_withhold_inputs(
     conn: &mut sqlx::PgConnection,
     ep: &EpInput,
@@ -393,52 +431,150 @@ pub(crate) async fn load_withhold_inputs(
 ) -> Result<Vec<Gate>, CompileError> {
     use egret_ranger_eval::resource::fold_identifier as fold;
 
-    let rows: Vec<GateRow> = sqlx::query_as(
+    // ── Primary: the withhold rules and their group exemptions. ───────────
+    let wh_rows: Vec<WithholdRow> = sqlx::query_as(
+        "SELECT r.id AS rule_id, t.id AS tag_id, t.name AS tag_name, r.tag_key \
+           FROM perm.rules r \
+           JOIN tags t ON t.key = r.tag_key \
+          WHERE r.kind = 'withhold'::perm.rule_kind \
+            AND r.selector_kind = 'tag'::perm.selector_kind \
+          ORDER BY t.id",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(CompileError::from_db)?;
+
+    let rule_ids: Vec<Uuid> = wh_rows.iter().map(|r| r.rule_id).collect();
+    let exemption_rows: Vec<(Uuid, String)> = if rule_ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as(
+            "SELECT rule_id, ref FROM perm.rule_exemptions \
+              WHERE rule_id = ANY($1) \
+                AND kind = 'group'::perm.principal_kind \
+                AND mode = 'include'::perm.principal_mode",
+        )
+        .bind(&rule_ids)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(CompileError::from_db)?
+    };
+    // One query for every distinct exemption group name across all rules.
+    let wanted_names: Vec<String> = exemption_rows
+        .iter()
+        .map(|(_, r)| r.clone())
+        .collect::<std::collections::BTreeSet<String>>()
+        .into_iter()
+        .collect();
+    let name_members =
+        crate::members::group_usernames_by_name(conn, &wanted_names, missing).await?;
+    let mut refs_by_rule: HashMap<Uuid, Vec<String>> = HashMap::new();
+    for (rule_id, r#ref) in &exemption_rows {
+        refs_by_rule
+            .entry(*rule_id)
+            .or_default()
+            .push(r#ref.clone());
+    }
+
+    // ── Fallback: clearances whose tag has no withhold rule yet. ──────────
+    let gate_rows: Vec<GateRow> = sqlx::query_as(
         "SELECT cp.tag_id, t.name AS tag_name, t.key AS tag_key, cp.required_roles, \
                 cp.required_groups \
            FROM classification_policies cp \
            JOIN tags t ON t.id = cp.tag_id \
+          WHERE (cardinality(cp.required_roles) > 0 OR cardinality(cp.required_groups) > 0) \
+            AND NOT EXISTS (SELECT 1 FROM perm.rules r \
+                             WHERE r.kind = 'withhold'::perm.rule_kind AND r.tag_key = t.key) \
           ORDER BY cp.tag_id",
     )
     .fetch_all(&mut *conn)
     .await
     .map_err(CompileError::from_db)?;
-    if rows.is_empty() {
+
+    if wh_rows.is_empty() && gate_rows.is_empty() {
         return Ok(Vec::new());
     }
 
-    // One query for every role named by every gate, rather than one per tag.
-    let wanted: Vec<String> = rows
+    let wanted_roles: Vec<String> = gate_rows
         .iter()
         .flat_map(|g| g.required_roles.iter().cloned())
         .collect::<std::collections::BTreeSet<String>>()
         .into_iter()
         .collect();
-    let members = crate::members::role_usernames(conn, &wanted, missing).await?;
+    let role_members = crate::members::role_usernames(conn, &wanted_roles, missing).await?;
+    let wanted_groups: Vec<Uuid> = gate_rows
+        .iter()
+        .flat_map(|g| g.required_groups.iter().copied())
+        .collect::<std::collections::BTreeSet<Uuid>>()
+        .into_iter()
+        .collect();
+    let id_members = crate::members::group_usernames_by_id(conn, &wanted_groups, missing).await?;
 
-    let mut gates: Vec<Gate> = Vec::with_capacity(rows.len());
-    // Each gate's targets with their warehouse, which the catalog reads need.
-    let mut targets: Vec<Vec<crate::rules::TableTarget>> = Vec::with_capacity(rows.len());
-    for row in rows {
+    // Build (gate, tag_key) from both sources, then order by tag_id so the
+    // lowering sees the gates in the stable order the clearance compile always
+    // produced (byte-identity across the read switch).
+    let mut gated: Vec<(Gate, String)> = Vec::with_capacity(wh_rows.len() + gate_rows.len());
+    for row in wh_rows {
+        let refs = refs_by_rule.remove(&row.rule_id).unwrap_or_default();
         let mut cleared: Vec<String> = Vec::new();
-        for role in &row.required_roles {
-            if let Some(names) = members.get(role) {
+        for r#ref in &refs {
+            if let Some(names) = name_members.get(r#ref) {
                 cleared.extend(names.iter().cloned());
             }
         }
         cleared.sort();
         cleared.dedup();
-        let gate = Gate {
-            classification_id: row.tag_id,
-            classification_name: row.tag_name,
-            required_roles: row.required_roles,
-            required_groups_empty: row.required_groups.is_empty(),
-            cleared,
-            targets: Vec::new(),
-        };
-        let read = if needs_targets(ep, &gate) {
+        let mut required_roles: Vec<String> = refs
+            .iter()
+            .filter_map(|r| role_of_holder_group_ref(r))
+            .collect();
+        required_roles.sort();
+        required_roles.dedup();
+        gated.push((
+            Gate {
+                classification_id: row.tag_id,
+                classification_name: row.tag_name,
+                required_roles,
+                cleared,
+                targets: Vec::new(),
+            },
+            row.tag_key,
+        ));
+    }
+    for row in gate_rows {
+        let mut cleared: Vec<String> = Vec::new();
+        for role in &row.required_roles {
+            if let Some(names) = role_members.get(role) {
+                cleared.extend(names.iter().cloned());
+            }
+        }
+        for group in &row.required_groups {
+            if let Some(names) = id_members.get(group) {
+                cleared.extend(names.iter().cloned());
+            }
+        }
+        cleared.sort();
+        cleared.dedup();
+        gated.push((
+            Gate {
+                classification_id: row.tag_id,
+                classification_name: row.tag_name,
+                required_roles: row.required_roles,
+                cleared,
+                targets: Vec::new(),
+            },
+            row.tag_key,
+        ));
+    }
+    gated.sort_by_key(|g| g.0.classification_id);
+
+    let mut gates: Vec<Gate> = Vec::with_capacity(gated.len());
+    // Each gate's targets with their warehouse, which the catalog reads need.
+    let mut targets: Vec<Vec<crate::rules::TableTarget>> = Vec::with_capacity(gated.len());
+    for (gate, tag_key) in gated {
+        let read = if needs_targets(ep) {
             crate::rules::group_by_table(
-                tag_assignments_for_service_via(conn, service_id, &row.tag_key)
+                tag_assignments_for_service_via(conn, service_id, &tag_key)
                     .await
                     .map_err(crate::db_error::from_store)?,
             )

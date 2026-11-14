@@ -229,7 +229,7 @@ struct StateSpec {
     rules: Vec<RuleSpec>,
     classes: Vec<ClassSpec>,
     /// The tags (by index) gated: by `CLEARING_ROLE`, or (`true`) by the
-    /// group alone, which the lowering does not withhold (M10).
+    /// group alone, which the lowering withholds like a role.
     gated: Vec<(usize, bool)>,
     role_holders: Vec<usize>,
     group_members: Vec<usize>,

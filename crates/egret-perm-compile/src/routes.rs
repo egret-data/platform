@@ -64,11 +64,11 @@ use egret_perm::{
 };
 use egret_policy::{
     catalog_is_assigned_to_workspace_via, catalog_names_for_ids_via, catalogs_for_service_via,
-    clearance_gates_for_tags_via, enabled_policies_for_service_via, get_service_by_id_via,
-    get_service_def_via, resolved_tags_for_resource_via, service_id_by_name_via,
-    services_for_catalog_via, tag_assignment_coordinates_via, tag_keys_by_ids_via,
-    tag_names_for_keys_via, unreadable_table_mask_for, MaskOrigin, PolicyStore, ServiceRow, TagRef,
-    TagWrite,
+    clearance_gates_for_tags_via, enabled_policies_for_service_via, gated_tag_keys_via,
+    get_service_by_id_via, get_service_def_via, resolved_tags_for_resource_via,
+    service_id_by_name_via, services_for_catalog_via, tag_assignment_coordinates_via,
+    tag_keys_by_ids_via, tag_names_for_keys_via, unreadable_table_mask_for, MaskOrigin,
+    PolicyStore, ServiceRow, TagRef, TagWrite,
 };
 use egret_policy_api::ServicePolicies;
 use egret_ranger_eval::eval::{
@@ -217,6 +217,8 @@ pub fn perm_router() -> Router<PermState> {
             "/perm/migrate/role-principals/undo",
             post(undo_role_principals),
         )
+        .route("/perm/migrate/clearances", post(migrate_clearances))
+        .route("/perm/migrate/clearances/undo", post(undo_clearances))
 }
 
 /// The `perm` surface's OpenAPI document, merged into the top-level doc by
@@ -266,6 +268,8 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         migrate_service_policies,
         migrate_role_principals,
         undo_role_principals,
+        migrate_clearances,
+        undo_clearances,
         undo_service_policy_migration
     ),
     components(schemas(
@@ -399,6 +403,8 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         crate::migrate::WireTagging,
         crate::migrate::UndoRequest,
         crate::role_principal_migrate::RolePrincipalMigration,
+        crate::clearance_migrate::ClearanceMigration,
+        UndoClearancesRequest,
         UndoRolePrincipalsRequest,
         crate::migrate::UndoResponse,
         crate::migrate::UndonePolicy,
@@ -647,7 +653,8 @@ pub enum ExplainAttribution {
     ///
     /// **This is an honest 3→2, not 3→3.** `Some([])` still carries two facts
     /// this wire cannot separate: (1) the gate declares only
-    /// `required_groups`, which compiles to no engine deny at all (D2/D7), and
+    /// `required_groups` (this wire lists clearing ROLES only; the engines
+    /// do enforce the group), and
     /// (2) there is no `classification_policies` row for the tag at all —
     /// `clearance_gates_for_tags_via` filters on
     /// `cardinality(cp.required_roles) > 0` and `clearing_roles` turns a miss
@@ -3973,7 +3980,7 @@ fn without_clearance_policies(artifact: &ServicePolicySet) -> ServicePolicySet {
     out
 }
 
-/// The resolved tags that carry a gate with a required role, at either
+/// The resolved tags that carry a gate with a required role or group, at either
 /// level, sorted by name: every classification a StarRocks clearance mask on
 /// the column clears for (one merged mask, the intersection of their cleared
 /// sets, D2).
@@ -3998,11 +4005,7 @@ async fn gated_clearances(
             .await
             .map_err(PermHttpError::db)?;
     let keys: Vec<String> = rows.iter().map(|(_, key, _)| key.clone()).collect();
-    let gated: BTreeSet<String> = clearance_gates_for_tags_via(conn, &keys)
-        .await?
-        .into_iter()
-        .map(|(key, _)| key)
-        .collect();
+    let gated: BTreeSet<String> = gated_tag_keys_via(conn, &keys).await?.into_iter().collect();
     Ok(rows
         .into_iter()
         .filter(|(_, key, _)| gated.contains(key))
@@ -5366,7 +5369,8 @@ mod tests {
 
     /// The honest 3→2. The lookup ran and missed, which happens for a
     /// groups-only gate (`clearance_gates_for_tags_via` filters on
-    /// `cardinality(required_roles) > 0`) and for a gate row already deleted.
+    /// `cardinality(required_roles) > 0`; the engines still enforce the group) and
+    /// for a gate row already deleted.
     /// Those two stay conflated in `Some([])` — what matters is that neither
     /// can be confused with `None`.
     #[test]
@@ -6729,6 +6733,71 @@ async fn undo_role_principals(
     egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
     let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
     crate::role_principal_migrate::undo_role_principals_in_tx(&mut tx, body.id).await?;
+    tx.commit().await.map_err(PermHttpError::db)?;
+    Ok(axum::http::StatusCode::OK)
+}
+
+/// `POST …/migrate/clearances/undo`.
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct UndoClearancesRequest {
+    /// The `id` the migration answered with.
+    pub id: i64,
+}
+
+/// SP3c-2: migrate every gated clearance into a `withhold` rule exempting the
+/// holders of its required roles and groups, PROVABLY — the compiled artifact
+/// of every affected profile is fingerprinted before and after and the whole
+/// transaction rolls back on any difference. Reversible via the `undo` route.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/perm/migrate/clearances",
+    tag = "perm",
+    responses(
+        (status = 200, description = "Every gated clearance migrated into a withhold rule; the compiled output of each affected profile is byte-identical", body = crate::clearance_migrate::ClearanceMigration),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:update permission", body = ErrorBody),
+        (status = 409, description = "Nothing was changed: the equivalence gate refused, or a recompile it needed was refused", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn migrate_clearances(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+) -> Result<Json<crate::clearance_migrate::ClearanceMigration>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    let migrated_by = p.email.clone();
+    let response =
+        crate::clearance_migrate::migrate_clearances_in_tx(&mut tx, &migrated_by).await?;
+    tx.commit().await.map_err(PermHttpError::db)?;
+    Ok(Json(response))
+}
+
+/// SP3c-2: undo one clearance migration, restoring `classification_policies`
+/// and removing the withhold rules it created. Refuses, changing nothing, if a
+/// created rule's exemptions changed since.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/perm/migrate/clearances/undo",
+    tag = "perm",
+    request_body = UndoClearancesRequest,
+    responses(
+        (status = 200, description = "The migration undone"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:update permission", body = ErrorBody),
+        (status = 404, description = "No such migration", body = ErrorBody),
+        (status = 409, description = "Nothing was changed: a created rule was edited since", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn undo_clearances(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+    Json(body): Json<UndoClearancesRequest>,
+) -> Result<axum::http::StatusCode, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    crate::clearance_migrate::undo_clearances_in_tx(&mut tx, body.id).await?;
     tx.commit().await.map_err(PermHttpError::db)?;
     Ok(axum::http::StatusCode::OK)
 }

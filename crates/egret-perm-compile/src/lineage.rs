@@ -229,9 +229,8 @@ pub async fn compute_lineage(
 /// schema and table, as `egret_policy::resolved_tags_for_resource_via`
 /// matches; the catalog joins on `registry.catalogs.name` (module doc).
 ///
-/// A group-only gate is included although the compiler cannot enforce it on an
-/// engine (`egret_perm_ir::lower::withhold`'s skip): the view column carries the same
-/// classification as its base, which is what Cedar enforces for it.
+/// A group-only gate is included like any other: the view column carries the
+/// same classification as its base, which engines and Cedar both enforce.
 ///
 /// **An empty `tables` is [`LineageError::Empty`], never "no tags"**: a caller
 /// holding an empty set has no lineage, and "no tags" would commit the view

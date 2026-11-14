@@ -51,8 +51,7 @@ function clearanceText(tag: Tag): string {
   ]
     .filter(Boolean)
     .join(" or ");
-  const engines = roles === 0 ? " Engines do not enforce it." : "";
-  return `Only ${who}, and platform admins, may open data with it in egret.${engines}`;
+  return `Only ${who}, and platform admins, may open data with it in egret.`;
 }
 
 function Fact({ term, children }: { term: string; children: ReactNode }) {
