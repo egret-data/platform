@@ -8506,9 +8506,11 @@ async fn refs_that_resolve_are_accepted() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
     let msg = body["error"].as_str().unwrap_or_default();
+    // SP3c-3: a real workspace is refused as a migration target (author the
+    // `ws:<slug> members` group grant instead), NOT rejected as an unknown ref.
     assert!(
-        !msg.contains("principals.include[0]"),
-        "a real workspace is not an unknown ref; got {msg:?}"
+        msg.contains("migrated to managed groups"),
+        "a real workspace is refused as a migration target, not as an unknown ref; got {msg:?}"
     );
 }
 

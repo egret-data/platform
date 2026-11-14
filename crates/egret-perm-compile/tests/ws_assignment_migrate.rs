@@ -32,9 +32,13 @@ async fn seed_workspace(pool: &sqlx::PgPool) -> (Uuid, String) {
 }
 
 async fn add_member(pool: &sqlx::PgPool, ws: Uuid, user: Uuid) {
+    // `access_grants.role_id` is NOT NULL; `workspace_members_via` reads any
+    // `(user, workspace, allow)` grant regardless of role, so the seeded
+    // `ws_viewer` role makes the row a member without changing what is counted.
     sqlx::query(
-        "INSERT INTO public.access_grants (principal_type, principal_id, scope_type, scope_id, effect) \
-         VALUES ('user',$1,'workspace',$2,'allow')",
+        "INSERT INTO public.access_grants (principal_type, principal_id, role_id, scope_type, scope_id, effect) \
+         SELECT 'user', $1, r.id, 'workspace', $2, 'allow' \
+           FROM roles r WHERE r.scope = 'workspace' AND r.name = 'ws_viewer'",
     )
     .bind(user)
     .bind(ws)

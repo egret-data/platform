@@ -858,8 +858,10 @@ mod tests {
         assert!(refused_for_authoring(&p(PrincipalKind::User, "ws:acme members")).is_none());
     }
 
-    /// People & groups Task 3 review: a workspace ref in any form `Uuid`
-    /// parses is stored canonical, so it matches `standsFor` byte for byte.
+    /// People & groups Task 3 review, as amended by SP3c-3: a NEW
+    /// `workspace_members` ref can no longer be authored (it is migrated to a
+    /// managed group), and a workspace ref already STORED in any form `Uuid`
+    /// parses still resolves, so it matches `standsFor` byte for byte.
     #[tokio::test]
     async fn a_workspace_ref_is_stored_in_its_canonical_form() {
         let Some(dsn) = egret_test_db::url().await else {
@@ -877,14 +879,17 @@ mod tests {
                 .await
                 .expect("workspace");
         let mut conn = db.pool.acquire().await.expect("conn");
-        let forms = [
+        // SP3c-3: authoring a NEW `workspace_members` principal is refused — the
+        // implicit workspace grant is migrated to a `ws:<slug> members` group, so
+        // the authoring-boundary canonicalisation this ref used to receive no
+        // longer runs (the guard refuses before `lookup`). What still matters,
+        // and is tested below, is that refs already STORED keep resolving in any
+        // spelling.
+        for form in [
             ws.to_string().to_uppercase(),
             ws.simple().to_string(),
-            format!("{{{ws}}}"),
-            ws.urn().to_string(),
             ws.to_string(),
-        ];
-        for form in forms {
+        ] {
             let mut set = PrincipalSet {
                 include: vec![Principal {
                     kind: PrincipalKind::WorkspaceMembers,
@@ -892,29 +897,16 @@ mod tests {
                 }],
                 exclude: Vec::new(),
             };
-            resolve_principal_refs(&mut conn, "principals", &mut set, None)
+            let err = resolve_principal_refs(&mut conn, "principals", &mut set, None)
                 .await
-                .unwrap_or_else(|e| panic!("{form}: {e}"));
-            assert_eq!(set.include[0].r#ref, ws.to_string(), "{form}");
+                .expect_err(&format!(
+                    "{form}: new workspace_members authoring must be refused"
+                ));
+            assert!(
+                format!("{err}").contains("migrated to managed groups"),
+                "{form}: {err}"
+            );
         }
-        // Two spellings of one workspace collapse to one entry.
-        let mut set = PrincipalSet {
-            include: vec![
-                Principal {
-                    kind: PrincipalKind::WorkspaceMembers,
-                    r#ref: ws.simple().to_string(),
-                },
-                Principal {
-                    kind: PrincipalKind::WorkspaceMembers,
-                    r#ref: ws.to_string(),
-                },
-            ],
-            exclude: Vec::new(),
-        };
-        resolve_principal_refs(&mut conn, "principals", &mut set, None)
-            .await
-            .expect("resolve");
-        assert_eq!(set.include.len(), 1);
 
         // A non-canonical spelling already STORED still names the workspace
         // the compiler expands: it resolves, it is not "unmatched".
