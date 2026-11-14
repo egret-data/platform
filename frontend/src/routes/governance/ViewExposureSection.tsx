@@ -34,7 +34,7 @@ import {
  * (external ones, which egret never connects to, and ones not running) are
  * named as not checked, with the reason, whichever of the three it is.
  *
- * `engineGated`: the tag has a role clearance, so it compiles to the A3 deny.
+ * `engineGated`: the tag has a role or group clearance, so it compiles to the A3 deny.
  * Only then does the cost sentence apply; an informational tag contributes
  * no deny (Task 4 review M-4).
  */
@@ -72,7 +72,7 @@ export default function ViewExposureSection({
           These views may hold real classified values; egret does not drop them.{" "}
           {engineGated
             ? "Because of this clearance, users not cleared for every classification on an engine cannot create any materialized view on that engine, even over unclassified data."
-            : "This classification has no role clearance, so it does not stop anyone creating materialized views."}
+            : "This classification has no clearance, so it does not stop anyone creating materialized views."}
         </span>
       </Badge>
 

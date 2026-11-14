@@ -26,8 +26,9 @@ export interface ViewLineageInfo {
   owner?: string | null;
   /**
      * Whether the owner is cleared for every classification the bases carry.
-     * `null` when it cannot be said: not DEFINER, lineage not computed, or a
-     * reached clearance names only groups. Read from current role membership.
+     * `null` when it cannot be said: not DEFINER or lineage not computed. A
+     * required group clears like a required role. Read from current role and
+     * group membership.
      * @nullable
      */
   ownerCleared?: boolean | null;

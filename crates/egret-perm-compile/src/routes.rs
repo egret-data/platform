@@ -64,11 +64,11 @@ use egret_perm::{
 };
 use egret_policy::{
     catalog_is_assigned_to_workspace_via, catalog_names_for_ids_via, catalogs_for_service_via,
-    clearance_gates_for_tags_via, enabled_policies_for_service_via, get_service_by_id_via,
-    get_service_def_via, resolved_tags_for_resource_via, service_id_by_name_via,
-    services_for_catalog_via, tag_assignment_coordinates_via, tag_keys_by_ids_via,
-    tag_names_for_keys_via, unreadable_table_mask_for, MaskOrigin, PolicyStore, ServiceRow, TagRef,
-    TagWrite,
+    clearance_gates_for_tags_via, enabled_policies_for_service_via, gated_tag_keys_via,
+    get_service_by_id_via, get_service_def_via, resolved_tags_for_resource_via,
+    service_id_by_name_via, services_for_catalog_via, tag_assignment_coordinates_via,
+    tag_keys_by_ids_via, tag_names_for_keys_via, unreadable_table_mask_for, MaskOrigin,
+    PolicyStore, ServiceRow, TagRef, TagWrite,
 };
 use egret_policy_api::ServicePolicies;
 use egret_ranger_eval::eval::{
@@ -3980,7 +3980,7 @@ fn without_clearance_policies(artifact: &ServicePolicySet) -> ServicePolicySet {
     out
 }
 
-/// The resolved tags that carry a gate with a required role, at either
+/// The resolved tags that carry a gate with a required role or group, at either
 /// level, sorted by name: every classification a StarRocks clearance mask on
 /// the column clears for (one merged mask, the intersection of their cleared
 /// sets, D2).
@@ -4005,11 +4005,7 @@ async fn gated_clearances(
             .await
             .map_err(PermHttpError::db)?;
     let keys: Vec<String> = rows.iter().map(|(_, key, _)| key.clone()).collect();
-    let gated: BTreeSet<String> = clearance_gates_for_tags_via(conn, &keys)
-        .await?
-        .into_iter()
-        .map(|(key, _)| key)
-        .collect();
+    let gated: BTreeSet<String> = gated_tag_keys_via(conn, &keys).await?.into_iter().collect();
     Ok(rows
         .into_iter()
         .filter(|(_, key, _)| gated.contains(key))

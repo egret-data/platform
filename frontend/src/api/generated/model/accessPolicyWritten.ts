@@ -11,7 +11,7 @@ import type { SkipReport } from './skipReport';
  * What a clearance write actually reached — **SP4c review I5.**
  *
  * The endpoint used to answer a bare `{"ok": true}`, so a clearance authored
- * on a Trino profile with no usable `tagService`, or one naming only groups,
+ * on a Trino profile with no usable `tagService`
  * was reported as saved while the compiler had emitted nothing at all and the
  * UI showed it as active. `skipped` carries exactly what the perm mutation
  * responses already carry (`SkipReport`, same schema) and for the stated
