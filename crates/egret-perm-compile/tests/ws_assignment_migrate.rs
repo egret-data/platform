@@ -175,3 +175,68 @@ async fn a_group_membership_change_resyncs_the_ws_members_group_via_the_live_pat
         "a user leaving the holding group must leave the managed group (fail-closed)"
     );
 }
+
+#[tokio::test]
+async fn the_ws_assignment_migration_table_records_a_run() {
+    let Some(dsn) = egret_test_db::url().await else {
+        return;
+    };
+    let _g = SERIAL.lock().await;
+    let db = Db::connect(&dsn, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+
+    let catalog = Uuid::new_v4();
+    let grant = Uuid::new_v4();
+    let ws = Uuid::new_v4();
+    let original = serde_json::json!([{
+        "grant_id": grant,
+        "origin": "workspace_assignment",
+        "origin_workspace_id": ws,
+        "principal_kind": "workspace_members",
+        "principal_ref": ws.to_string(),
+    }]);
+
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO perm.ws_assignment_migration \
+         (catalogs, grant_ids, principal_hashes, original, migrated_by) \
+         VALUES ($1,$2,$3,$4,$5) RETURNING id",
+    )
+    .bind(vec![catalog])
+    .bind(vec![grant])
+    .bind(vec!["hash-a".to_string()])
+    .bind(&original)
+    .bind("tester")
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert run");
+
+    let (catalogs, grant_ids, hashes, back, by, has_ts): (
+        Vec<Uuid>,
+        Vec<Uuid>,
+        Vec<String>,
+        serde_json::Value,
+        String,
+        bool,
+    ) = sqlx::query_as(
+        "SELECT catalogs, grant_ids, principal_hashes, original, migrated_by, \
+                migrated_at IS NOT NULL \
+         FROM perm.ws_assignment_migration WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("read run");
+
+    assert_eq!(catalogs, vec![catalog]);
+    assert_eq!(grant_ids, vec![grant]);
+    assert_eq!(hashes, vec!["hash-a".to_string()]);
+    assert_eq!(back, original);
+    assert_eq!(by, "tester");
+    assert!(has_ts, "migrated_at defaults to now()");
+
+    sqlx::query("DELETE FROM perm.ws_assignment_migration WHERE id = $1")
+        .bind(id)
+        .execute(&db.pool)
+        .await
+        .expect("cleanup");
+}
