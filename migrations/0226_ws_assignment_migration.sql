@@ -1,4 +1,4 @@
--- 0225_ws_assignment_migration.sql
+-- 0226_ws_assignment_migration.sql
 -- Reversible record of the implicit workspace-grant -> explicit `ws:<slug> members`
 -- group grant rewrite (SP3c-3 Task 3). One row per run; `original` holds, per
 -- migrated grant, the pre-migration (grant_id, origin, origin_workspace_id,

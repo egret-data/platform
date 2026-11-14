@@ -16,7 +16,7 @@
 //! authored before SP3c-3.
 //!
 //! **Why `origin='workspace_assignment_group'` and not plain `explicit`
-//! (migration 0226).** The grant must stay deduplicated and reversible: binding
+//! (migration 0227).** The grant must stay deduplicated and reversible: binding
 //! the same catalog+workspace twice must not accumulate grants, and unbinding
 //! must remove exactly the right one — never a human-authored `explicit` grant
 //! on the same catalog. The old shape got this from `origin='workspace_assignment'`
@@ -95,7 +95,7 @@ pub async fn sync_assignment_grants(
 /// (`tests/assignment.rs`) proves. Idempotent THROUGH
 /// `grants_one_per_assignment_group` (the partial unique index on
 /// `(catalog_id, origin_workspace_id) WHERE origin = 'workspace_assignment_group'`,
-/// `migrations/0226_ws_assignment_group_origin.sql`): the insert below names that
+/// `migrations/0227_ws_assignment_group_origin.sql`): the insert below names that
 /// index's exact conflict target rather than relying on a plain `ON CONFLICT DO
 /// NOTHING`, so re-running with the same workspace set is a no-op instead of
 /// racing the index.

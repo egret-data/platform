@@ -97,6 +97,8 @@ class Server {
     status: 200,
     body: { graph: { nodes: [{ uid: "start:flow", node: "start" }, { uid: "end:flow", node: "end" }], edges: [], clusters: [] }, states: {} },
   };
+  /** Replies for other routes, by `METHOD path`. */
+  extra: Record<string, Reply> = {};
   private served = 0;
 
   constructor(...gets: Reply[]) {
@@ -120,7 +122,14 @@ class Server {
     if (method === "POST" && path === `${EXEC_PATH}/resume`) return this.resume;
     if (method === "POST" && path === `${EXEC_PATH}/replay`) return this.replay;
     if (method === "POST" && path === `${EXEC_PATH}/kill`) return this.kill;
+    const extra = this.extra[`${method} ${path}`];
+    if (extra) return extra;
     return { status: 404, body: { error: `no route ${method} ${path}` } };
+  }
+
+  /** The reads of the executions list (the children query shares its key prefix). */
+  listReads(): number {
+    return this.calls.filter((c) => c.method === "GET" && c.path === `${BASE}/executions`).length;
   }
 
   /** The reads of the execution itself, not of its children. */
@@ -837,7 +846,7 @@ describe("ExecutionDetail: Overview", () => {
     renderPage();
     const runs = await screen.findByRole("region", { name: "Task runs" });
     const rows = within(runs).getAllByRole("row").slice(1);
-    expect(rows.map((r) => r.textContent)).toEqual(["extract—Success45 s", "eacheu-westSuccess15 s"]);
+    expect(rows.map((r) => r.textContent)).toEqual(["extract—Success45 sChange state", "eacheu-westSuccess15 sChange state"]);
     await userEvent.click(within(runs).getByRole("link", { name: "each" }));
     expect(screen.getByTestId("where")).toHaveTextContent(`/explore/${WS}/workflows/executions/${EXEC}/gantt?run=1`);
     // The link lands on the Gantt with that run's panel open (Task 4).
@@ -860,5 +869,144 @@ describe("ExecutionDetail: Overview", () => {
     new Server(ok(execution("SUCCESS", { runs: [] })));
     renderPage();
     expect(await screen.findByText("No task runs yet")).toBeInTheDocument();
+  });
+});
+
+describe("ExecutionDetail: Restart, Change status and Change state (execution ops spec D14)", () => {
+  const posts = (server: Server, suffix: string) => server.calls.filter((c) => c.method === "POST" && c.path === `${EXEC_PATH}${suffix}`);
+  const bodyOf = (path: string) => {
+    const call = vi.mocked(fetch).mock.calls.find(([u, i]) => String(u) === path && i?.method === "POST");
+    return JSON.parse(String(call?.[1]?.body));
+  };
+
+  it("offers Restart on FAILED, not on SUCCESS, and Change status on SUCCESS, not on KILLED", async () => {
+    new Server(ok(execution("FAILED")));
+    const first = renderPage();
+    expect(await screen.findByRole("button", { name: "Restart" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Change status" })).toBeEnabled();
+    first.unmount();
+    vi.unstubAllGlobals();
+
+    new Server(ok(execution("SUCCESS")));
+    const second = renderPage();
+    expect(await screen.findByRole("button", { name: "Change status" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Restart" })).toBeNull();
+    second.unmount();
+    vi.unstubAllGlobals();
+
+    new Server(ok(execution("KILLED")));
+    renderPage();
+    await screen.findByRole("button", { name: "Replay" });
+    expect(screen.queryByRole("button", { name: "Change status" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Change state of extract" })).toBeNull();
+  });
+
+  it("hides all three without can_manage", async () => {
+    new Server(ok(execution("FAILED", { can_manage: false })));
+    renderPage();
+    await screen.findByRole("heading", { level: 1, name: EXEC });
+    for (const name of ["Restart", "Change status", "Change state of extract"]) expect(screen.queryByRole("button", { name })).toBeNull();
+  });
+
+  it("disables them on a loop iteration, saying the loop's execution", async () => {
+    new Server(ok(execution("FAILED", { parent_execution_id: NEW, loop_index: 1 })));
+    renderPage();
+    const restart = await screen.findByRole("button", { name: "Restart" });
+    expect(restart).toBeDisabled();
+    expect(restart).toHaveAccessibleDescription(new RegExp(NEW));
+    expect(screen.getByRole("button", { name: "Change status" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Change state of extract" })).toBeNull();
+  });
+
+  it("restarts after a confirm, re-reads the execution and the list, and toasts", async () => {
+    const server = new Server(ok(execution("FAILED")), ok(execution("RUNNING")));
+    server.extra[`POST ${EXEC_PATH}/restart`] = ok(execution("RUNNING"));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Restart" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Restart this execution?" });
+    expect(posts(server, "/restart")).toHaveLength(0);
+    await waitFor(() => expect(server.listReads()).toBeGreaterThan(0));
+    const listBefore = server.listReads();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Restart" }));
+    await waitFor(() => expect(posts(server, "/restart")).toHaveLength(1));
+    await waitFor(() => expect(server.executionReads()).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(server.listReads()).toBeGreaterThan(listBefore));
+    expect(toast.success).toHaveBeenCalledWith("Restarted the execution");
+  });
+
+  it("says in one sentence why a coded 409 refused the restart, and keeps the dialog", async () => {
+    const server = new Server(ok(execution("FAILED")));
+    server.extra[`POST ${EXEC_PATH}/restart`] = { status: 409, body: { error: "conflict: raw", code: "files_pruned" } };
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Restart" }));
+    const dialog = await screen.findByRole("alertdialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Restart" }));
+    expect(await within(dialog).findByText("The execution's files were deleted, so it cannot be re-run. Replay it instead.")).toBeInTheDocument();
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it("changes the status: the select never offers the current state, the body carries the pick, and both queries are re-read", async () => {
+    const server = new Server(ok(execution("FAILED")), ok(execution("SUCCESS")));
+    server.extra[`POST ${EXEC_PATH}/status`] = ok(execution("SUCCESS"));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Change status" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Change the status of this execution?" });
+    await waitFor(() => expect(server.listReads()).toBeGreaterThan(0));
+    const listBefore = server.listReads();
+    await userEvent.click(within(dialog).getByRole("combobox", { name: "New state" }));
+    const options = (await screen.findAllByRole("option")).map((o) => o.textContent);
+    expect(options).toEqual(["Success", "Warning", "Cancelled"]);
+    await userEvent.click(screen.getByRole("option", { name: "Success" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Change state" }));
+    await waitFor(() => expect(posts(server, "/status")).toHaveLength(1));
+    expect(bodyOf(`${EXEC_PATH}/status`)).toEqual({ state: "SUCCESS" });
+    await waitFor(() => expect(server.executionReads()).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(server.listReads()).toBeGreaterThan(listBefore));
+    expect(toast.success).toHaveBeenCalledWith("Changed the status to Success");
+  });
+
+  it("shows the sentence of a state_unchanged 409 on the status dialog", async () => {
+    const server = new Server(ok(execution("FAILED")));
+    server.extra[`POST ${EXEC_PATH}/status`] = { status: 409, body: { error: "conflict", code: "state_unchanged" } };
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Change status" }));
+    const dialog = await screen.findByRole("alertdialog");
+    await userEvent.click(within(dialog).getByRole("combobox", { name: "New state" }));
+    await userEvent.click(await screen.findByRole("option", { name: "Warning" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Change state" }));
+    expect(await within(dialog).findByText("The execution is already in that state. Pick another.")).toBeInTheDocument();
+  });
+
+  it("changes a task run's state from its row, sends the run id, and says it edits the last attempt", async () => {
+    const server = new Server(ok(execution("FAILED")), ok(execution("FAILED")));
+    server.extra[`POST ${EXEC_PATH}/task-runs/r-1/state`] = ok(execution("SUCCESS"));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Change state of load" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Change the state of load?" });
+    await waitFor(() => expect(server.listReads()).toBeGreaterThan(0));
+    const listBefore = server.listReads();
+    expect(dialog).toHaveTextContent("last attempt only");
+    await userEvent.click(within(dialog).getByRole("combobox", { name: "New state" }));
+    // The run is SUCCESS: the select never offers it.
+    expect((await screen.findAllByRole("option")).map((o) => o.textContent)).toEqual(["Warning", "Failed", "Cancelled"]);
+    await userEvent.click(screen.getByRole("option", { name: "Failed" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Change state" }));
+    await waitFor(() => expect(posts(server, "/task-runs/r-1/state")).toHaveLength(1));
+    expect(bodyOf(`${EXEC_PATH}/task-runs/r-1/state`)).toEqual({ state: "FAILED" });
+    await waitFor(() => expect(server.executionReads()).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(server.listReads()).toBeGreaterThan(listBefore));
+    expect(toast.success).toHaveBeenCalledWith("Changed load to Failed");
+  });
+
+  it("tells to restart the execution when the run is inside a WorkingDirectory", async () => {
+    const server = new Server(ok(execution("FAILED")));
+    server.extra[`POST ${EXEC_PATH}/task-runs/r-0/state`] = { status: 409, body: { error: "x", code: "inside_working_directory" } };
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Change state of extract" }));
+    const dialog = await screen.findByRole("alertdialog");
+    await userEvent.click(within(dialog).getByRole("combobox", { name: "New state" }));
+    await userEvent.click(await screen.findByRole("option", { name: "Failed" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Change state" }));
+    expect(await within(dialog).findByText(/Restart the execution instead/)).toBeInTheDocument();
   });
 });

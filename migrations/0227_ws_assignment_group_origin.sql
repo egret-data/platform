@@ -1,4 +1,4 @@
--- 0226_ws_assignment_group_origin.sql
+-- 0227_ws_assignment_group_origin.sql
 --
 -- SP3c-3 Task 5. The implicit workspace-assignment grant is now AUTHORED as an
 -- explicit READ grant whose principal is the managed `ws:<slug> members` group

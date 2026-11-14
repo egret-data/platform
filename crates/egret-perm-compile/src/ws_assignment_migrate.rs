@@ -45,7 +45,7 @@
 //! id, principal `kind='group' ref=ws:<slug> members`. So a migrated grant and a
 //! freshly-authored one are byte-identical rows — the authoring path's dedup, its
 //! unbind DELETE and its idempotent re-bind all treat them the same. Keeping
-//! `origin_workspace_id` is valid under the widened schema CHECK (migration 0226:
+//! `origin_workspace_id` is valid under the widened schema CHECK (migration 0227:
 //! `(origin IN ('workspace_assignment','workspace_assignment_group')) =
 //! (origin_workspace_id IS NOT NULL)`), and it is what keys the grant in the
 //! partial unique index `grants_one_per_assignment_group`. The undo does not need
@@ -63,7 +63,7 @@
 //!
 //! Each run records, per migrated grant, its pre-migration identity (grant id,
 //! origin, origin_workspace_id, principal kind/ref) in `perm.ws_assignment_migration`
-//! (migration 0225), alongside a canonical hash of its POST-rewrite identity.
+//! (migration 0226), alongside a canonical hash of its POST-rewrite identity.
 //! [`undo_ws_assignments_in_tx`] takes `FOR UPDATE` on that provenance row,
 //! re-hashes each rewritten grant as it stands now, refuses `409` if any diverges
 //! (a grant edited since the migration is no longer the migration's to restore),
@@ -371,7 +371,7 @@ pub async fn migrate_ws_assignments_in_tx(
         // authoring path (`egret_perm::sync_assignment_grants_in_tx`) now writes
         // for a fresh bind: `origin='workspace_assignment_group'` with its
         // workspace id, deduplicated by the `grants_one_per_assignment_group`
-        // partial unique index (migration 0226). A migrated grant and a
+        // partial unique index (migration 0227). A migrated grant and a
         // freshly-authored one are therefore identical rows.
         sqlx::query(
             "UPDATE perm.grants \

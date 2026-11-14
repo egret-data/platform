@@ -1,7 +1,8 @@
 import { useId, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { ChevronDown, ChevronRight, GitFork, ListTree, RotateCw, TextCursorInput } from "lucide-react";
-import { useWorkflowListExecutions } from "@/api/generated/workflow/workflow";
+import { toast } from "sonner";
+import { ChevronDown, ChevronRight, GitFork, ListTree, Pencil, RotateCw, TextCursorInput } from "lucide-react";
+import { useWorkflowListExecutions, useWorkflowSetTaskRunState } from "@/api/generated/workflow/workflow";
 import type { ExecutionDto, ExecutionListItemDto, TaskRunDto } from "@/api/generated/model";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -12,6 +13,14 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StateChip } from "@/components/workflows/StateChip";
 import { executionLive, formatDuration, isTerminalState } from "@/components/workflows/executionState";
+import {
+  canChangeTaskRunState,
+  showsChangeTaskRunState,
+  stateChangeRefusal,
+  type ChangeTarget,
+} from "@/components/workflows/executions/actions";
+import { ChangeStateDialog } from "@/components/workflows/executions/ChangeStateDialog";
+import { runExecutionAction, useRefreshExecution } from "@/components/workflows/executions/useExecutionAction";
 import { FileRow, FileRowList } from "@/components/workflows/executions/files/FileRow";
 import { findFileUris, isFileUri, pathSteps } from "@/components/workflows/executions/outputs/outputsModel";
 import { nextPollMs } from "@/components/workflows/executions/polling";
@@ -36,7 +45,17 @@ const errorMessage = (e: unknown) => (e instanceof Error && e.message ? e.messag
  * banner and topology here; egret's header carries the banner for every tab,
  * and topology arrives with W7c.
  */
-export default function ExecutionOverview({ ws, execution, now }: { ws: string; execution: ExecutionDto; now: number }) {
+export default function ExecutionOverview({
+  ws,
+  execution,
+  now,
+  canManage = false,
+}: {
+  ws: string;
+  execution: ExecutionDto;
+  now: number;
+  canManage?: boolean;
+}) {
   return (
     <div className="grid gap-6">
       <Section title="Inputs">
@@ -52,7 +71,7 @@ export default function ExecutionOverview({ ws, execution, now }: { ws: string; 
         <ChildExecutions ws={ws} execution={execution} now={now} />
       </Section>
       <Section title="Task runs">
-        <TaskRuns ws={ws} execution={execution} now={now} />
+        <TaskRuns ws={ws} execution={execution} now={now} canManage={canManage} />
       </Section>
     </div>
   );
@@ -339,7 +358,23 @@ function RunDuration({ run, now }: { run: TaskRunDto; now: number }) {
  * Every task run, in `run_ix` order (spec §5.3). The task id opens the Gantt
  * with that run selected (`gantt?run=<run_ix>`, spec §6.4).
  */
-function TaskRuns({ ws, execution, now }: { ws: string; execution: ExecutionDto; now: number }) {
+function TaskRuns({ ws, execution, now, canManage }: { ws: string; execution: ExecutionDto; now: number; canManage: boolean }) {
+  const refresh = useRefreshExecution(ws, execution.id);
+  const setState = useWorkflowSetTaskRunState();
+  const [changing, setChanging] = useState<TaskRunDto | null>(null);
+  // The route refuses each of these too; the page offers the action only where it can work (D11).
+  const changeable = canManage && showsChangeTaskRunState(execution) && canChangeTaskRunState(execution).ok;
+
+  const runChange = (run: TaskRunDto, state: ChangeTarget) =>
+    runExecutionAction({
+      call: () => setState.mutateAsync({ workspace: ws, id: execution.id, taskRunId: run.id, data: { state } }),
+      expected: 200,
+      failure: "The task run state could not be changed. Try again.",
+      refresh,
+      refusal: (code) => stateChangeRefusal("task_run", code),
+      onSuccess: () => toast.success(`Changed ${run.task_id} to ${state.charAt(0)}${state.slice(1).toLowerCase()}`),
+    });
+
   const gantt = `/explore/${ws}/workflows/executions/${encodeURIComponent(execution.id)}/gantt`;
   if (execution.runs.length === 0) {
     return (
@@ -351,6 +386,7 @@ function TaskRuns({ ws, execution, now }: { ws: string; execution: ExecutionDto;
     );
   }
   return (
+    <>
     <Table>
       <TableHeader>
         <TableRow>
@@ -358,6 +394,7 @@ function TaskRuns({ ws, execution, now }: { ws: string; execution: ExecutionDto;
           <TableHead>Value</TableHead>
           <TableHead>State</TableHead>
           <TableHead>Duration</TableHead>
+          {changeable ? <TableHead className="w-0"><span className="sr-only">Actions</span></TableHead> : null}
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -375,9 +412,29 @@ function TaskRuns({ ws, execution, now }: { ws: string; execution: ExecutionDto;
             <TableCell className="tabular-nums">
               <RunDuration run={run} now={now} />
             </TableCell>
+            {changeable ? (
+              <TableCell>
+                <Button type="button" variant="ghost" size="sm" aria-label={`Change state of ${run.task_id}`} onClick={() => setChanging(run)}>
+                  <Pencil aria-hidden />
+                  Change state
+                </Button>
+              </TableCell>
+            ) : null}
           </TableRow>
         ))}
       </TableBody>
     </Table>
+    <ChangeStateDialog
+      open={changing !== null}
+      onOpenChange={(o) => {
+        if (!o) setChanging(null);
+      }}
+      title={`Change the state of ${changing?.task_id ?? "this task run"}?`}
+      description="Sets the state of this task run's last attempt only. Earlier attempts keep theirs. The execution continues or ends from the new state."
+      current={changing?.state ?? ""}
+      onSubmit={(state) => runChange(changing as TaskRunDto, state)}
+      fallbackError="The task run state could not be changed. Try again."
+    />
+    </>
   );
 }

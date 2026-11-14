@@ -631,19 +631,40 @@ async fn on_execution_terminal_inner(
     // Already decided. A `transmitFailed` loop ends on the FIRST failure and
     // its siblings terminate afterwards; without this they would each try to
     // re-terminate a finished run and the last one would win.
-    if state.runs[run]
+    //
+    // **Package 7a A3 fix round 1 (option (a)): decided, but still
+    // recorded.** An iteration that ends after its `Loop` run is terminal
+    // (a sibling failure, `Parallel` rule 1, failed the live `Loop`) is
+    // counted and listed below exactly as a live `Loop` would record it --
+    // the same cap, SECRET sealing and `transmitFailed` rule -- so a restart
+    // that later completes the `Loop` holds every iteration's entry. Only
+    // `decide` is skipped: nothing is started and the run's state is not
+    // touched (the early return after the book). Covered by the parent row
+    // lock `claim::load` took above, as every book write is.
+    let decided = state.runs[run]
         .history
         .last()
-        .is_some_and(|s| s.is_terminal())
-    {
-        return Ok(None);
-    }
+        .is_some_and(|s| s.is_terminal());
 
     let values = values_of(&ctx, &state, run)?;
     let started = spawned_count(conn, parent_id, run).await?;
     let terminated = terminated_count(conn, parent_id, run).await?;
     let transmit = transmit_failed(&ctx, task)?;
     let mut child = as_the_loop_reads_it(child_state);
+    // **An iteration that ends a second time** (package 7a A3, spec D8): a
+    // restart of its loop root restarted it in place, so its history holds
+    // `RESTARTED`, and it may already be counted and listed from its first
+    // end. Its count is then derived per index ([`terminated_by_state`]) and
+    // its entry replaces its index's entry, never a second one.
+    let (index, again): (Option<i32>, bool) = sqlx::query_as(
+        "SELECT loop_index, COALESCE(history ? 'RESTARTED', false) \
+           FROM workflow.executions WHERE id = $1",
+    )
+    .bind(execution_id)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    let again = again.then_some(index).flatten();
 
     // **The list, the counters and the total cap (package #6 Task A4, spec
     // D3, D4; `LoopExecutionEventMessageHandler.handleTerminated`).** Under
@@ -656,6 +677,9 @@ async fn on_execution_terminal_inner(
     // and the failing iteration's outputs are not appended).
     if !(transmit && terminated_in_error(child)) {
         let mut book = LoopRunBook::load(conn, parent_id, run).await?;
+        if let Some(index) = again {
+            book.find_entry(conn, index).await?;
+        }
         let entry = match outputs.filter(|t| !t.values.is_empty()) {
             Some(typed) => Some(iteration_entry(conn, execution_id, &state, run, typed).await?),
             None => None,
@@ -687,17 +711,24 @@ async fn on_execution_terminal_inner(
         }
         if !(transmit && terminated_in_error(child)) {
             let next = decide(transmit, child, started, terminated, values.len());
-            let started_after = started + usize::from(matches!(next, Next::Start(_)));
-            book.count(
-                values.len(),
-                started_after.saturating_sub(terminated),
-                child,
-            );
+            let starts = !decided && matches!(next, Next::Start(_));
+            let started_after = started + usize::from(starts);
+            let running = started_after.saturating_sub(terminated);
+            match again {
+                Some(index) => {
+                    let by_state = terminated_by_state(conn, parent_id, run, index, child).await?;
+                    book.recount(values.len(), running, by_state);
+                }
+                None => book.count(values.len(), running, child),
+            }
             if let Some((e, total)) = entry {
                 book.append(e, total)?;
             }
             book.store(conn).await?;
         }
+    }
+    if decided {
+        return Ok(None);
     }
 
     let terminal = match decide(transmit, child, started, terminated, values.len()) {
@@ -833,6 +864,14 @@ struct LoopRunBook {
     /// This iteration end's entry, its sealed frame and the new total, set
     /// by [`LoopRunBook::append`].
     appended: Option<(serde_json::Value, Option<Vec<u8>>, usize)>,
+    /// **The entry this iteration end replaces** (package 7a A3, spec D8):
+    /// its list position and its [`Entry::size`], set by
+    /// [`LoopRunBook::find_entry`] for an iteration that ends a second time.
+    replacing: Option<(usize, usize)>,
+    /// Whether `secret_outputs` holds frames: a replacing entry with no
+    /// SECRET value then seals an empty frame at its position, so the old
+    /// entry's values are not put back over the new one.
+    has_frames: bool,
     /// The bytes this book sent to and received from the database, for the
     /// I1 benchmark (`test-util`).
     io: usize,
@@ -884,8 +923,72 @@ impl LoopRunBook {
             len: usize::try_from(len).unwrap_or(0),
             bytes: bytes.and_then(|b| usize::try_from(b).ok()),
             appended: None,
+            replacing: None,
+            has_frames: false,
             io,
         })
+    }
+
+    /// **Find the entry of iteration `index`** already in the list, for an
+    /// iteration restarted in place (package 7a A3, spec D8): its position
+    /// and its size with its SECRET values in clear, so the cap and the
+    /// running total trade the old entry for the new one. Reads the list and
+    /// the sealed column, which only a re-terminated iteration pays for.
+    async fn find_entry(&mut self, conn: &mut PgConnection, index: i32) -> Result<()> {
+        let found: Option<(i64, serde_json::Value, Option<Vec<u8>>)> = sqlx::query_as(
+            "SELECT e.ord - 1, e.value, t.secret_outputs \
+               FROM workflow.task_runs t, \
+                    jsonb_array_elements(t.outputs -> 'outputs') WITH ORDINALITY AS e(value, ord) \
+              WHERE t.execution_id = $1 AND t.run_ix = $2 \
+                AND (e.value -> 'item' ->> 'iteration')::int = $3 \
+              ORDER BY e.ord DESC LIMIT 1",
+        )
+        .bind(self.execution)
+        .bind(self.run as i32)
+        .bind(index)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        let Some((pos, old, frames)) = found else {
+            return Ok(());
+        };
+        let pos = usize::try_from(pos).unwrap_or(0);
+        let secrets = match frames.as_deref() {
+            Some(f) if !f.is_empty() => {
+                self.has_frames = true;
+                match crate::secret_inputs::open_loop_outputs(f)?.remove(&pos.to_string()) {
+                    Some(serde_json::Value::Object(m)) => m,
+                    _ => serde_json::Map::new(),
+                }
+            }
+            _ => serde_json::Map::new(),
+        };
+        let size = Entry {
+            entry: old,
+            secrets,
+        }
+        .size();
+        self.replacing = Some((pos, size));
+        Ok(())
+    }
+
+    /// **The counters, derived per index** (package 7a A3, spec D8): what
+    /// [`LoopRunBook::count`] would leave had each index ended once, in the
+    /// state `by_state` holds for it ([`terminated_by_state`]).
+    fn recount(
+        &mut self,
+        iteration_count: usize,
+        running: usize,
+        by_state: serde_json::Map<String, serde_json::Value>,
+    ) {
+        self.counters
+            .insert("iterationCount".into(), iteration_count.into());
+        self.counters
+            .insert("runningIterations".into(), running.into());
+        self.counters.insert(
+            "terminatedIterations".into(),
+            serde_json::Value::Object(by_state),
+        );
     }
 
     /// `Ok(total)` -- the running total once `e` is appended -- or
@@ -894,11 +997,19 @@ impl LoopRunBook {
     /// its [`Entry::size`], and each entry after the first one comma, so the
     /// total is the list's serialised size with every SECRET value in clear.
     fn would_fit(&self, e: &Entry, cap: usize) -> std::result::Result<usize, String> {
-        let total = self
-            .bytes
-            .unwrap_or(2)
-            .saturating_add(e.size())
-            .saturating_add(usize::from(self.len > 0));
+        let total = match self.replacing {
+            // The same position: the old entry's bytes out, the new one's in.
+            Some((_, old)) => self
+                .bytes
+                .unwrap_or(2)
+                .saturating_sub(old)
+                .saturating_add(e.size()),
+            None => self
+                .bytes
+                .unwrap_or(2)
+                .saturating_add(e.size())
+                .saturating_add(usize::from(self.len > 0)),
+        };
         if total <= cap {
             return Ok(total);
         }
@@ -931,10 +1042,13 @@ impl LoopRunBook {
     /// [`LoopRunBook::would_fit`] answered: its SECRET values are sealed
     /// here, as this position's frame, and nothing else is.
     fn append(&mut self, e: Entry, total: usize) -> Result<()> {
-        let frame = if e.secrets.is_empty() {
-            None
+        let pos = self.replacing.map_or(self.len, |(pos, _)| pos);
+        let frame = if !e.secrets.is_empty()
+            || (self.replacing.is_some() && self.has_frames && crate::secret_inputs::can_seal())
+        {
+            Some(crate::secret_inputs::seal_loop_entry(pos, &e.secrets)?)
         } else {
-            Some(crate::secret_inputs::seal_loop_entry(self.len, &e.secrets)?)
+            None
         };
         self.appended = Some((e.entry, frame, total));
         Ok(())
@@ -957,6 +1071,9 @@ impl LoopRunBook {
         sqlx::query(
             "UPDATE workflow.task_runs \
                 SET outputs = $3::jsonb || CASE \
+                      WHEN $4::jsonb IS NOT NULL AND $7::int IS NOT NULL THEN \
+                           jsonb_build_object('outputs', \
+                           jsonb_set(outputs -> 'outputs', ARRAY[$7::int::text], $4::jsonb)) \
                       WHEN $4::jsonb IS NOT NULL THEN jsonb_build_object('outputs', \
                            COALESCE(outputs -> 'outputs', '[]'::jsonb) || jsonb_build_array($4::jsonb)) \
                       WHEN outputs ? 'outputs' THEN jsonb_build_object('outputs', outputs -> 'outputs') \
@@ -972,6 +1089,10 @@ impl LoopRunBook {
         .bind(entry)
         .bind(total)
         .bind(frame)
+        .bind(
+            self.replacing
+                .and_then(|(pos, _)| i32::try_from(pos).ok()),
+        )
         .execute(&mut *conn)
         .await
         .map_err(db_err)?;
@@ -1865,6 +1986,57 @@ async fn terminated_count(conn: &mut PgConnection, parent: Uuid, run: RunIx) -> 
     .await
     .map_err(db_err)?;
     Ok(n as usize)
+}
+
+/// **`terminatedIterations` derived per index** (package 7a A3, spec D8):
+/// every terminated iteration of this loop run counted once, under the
+/// state the loop reads for it ([`as_the_loop_reads_it`]), iteration `index`
+/// (the one reporting) under `child`, which can differ from its row (the
+/// 16 MiB cap reads a SUCCESS iteration as FAILED).
+///
+/// Only an iteration that ends a second time is counted this way. An
+/// earlier iteration the cap read as FAILED reads as its row's state here;
+/// the rows hold no record of the cap (see the A3 report).
+async fn terminated_by_state(
+    conn: &mut PgConnection,
+    parent: Uuid,
+    run: RunIx,
+    index: i32,
+    child: RunState,
+) -> Result<serde_json::Map<String, serde_json::Value>> {
+    let terminal: Vec<&str> = RunState::ALL
+        .iter()
+        .filter(|s| s.is_terminal())
+        .map(|s| s.wire())
+        .collect();
+    let rows: Vec<(i32, String)> = sqlx::query_as(
+        "SELECT loop_index, state FROM workflow.executions \
+          WHERE parent_execution_id = $1 AND parent_run_ix = $2 AND loop_index IS NOT NULL \
+            AND state = ANY($3)",
+    )
+    .bind(parent)
+    .bind(run as i32)
+    .bind(&terminal)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    let mut by_state = serde_json::Map::new();
+    for (i, state) in rows {
+        let read = if i == index {
+            child
+        } else {
+            match super::from_wire(&state) {
+                Some(s) => as_the_loop_reads_it(s),
+                None => continue,
+            }
+        };
+        let n = by_state
+            .get(read.wire())
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        by_state.insert(read.wire().to_string(), serde_json::Value::from(n + 1));
+    }
+    Ok(by_state)
 }
 
 /// Keeps the `sqlx::Error` as the source, as `claim`'s does, so a caller can

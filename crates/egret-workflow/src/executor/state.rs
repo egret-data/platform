@@ -873,7 +873,7 @@ impl RunState {
 /// `flowable::descend` records for having no depth guard, and the `> ix` break
 /// below is what makes it true of a state a caller stored and read back rather
 /// than only of one this executor built.
-fn is_descendant_of(state: &ExecutionState, ix: usize, ancestor: RunIx) -> bool {
+pub(super) fn is_descendant_of(state: &ExecutionState, ix: usize, ancestor: RunIx) -> bool {
     let mut cur = state.runs[ix].parent;
     while let Some(p) = cur {
         if p == ancestor {
@@ -885,6 +885,37 @@ fn is_descendant_of(state: &ExecutionState, ix: usize, ancestor: RunIx) -> bool 
         cur = state.runs[p].parent;
     }
     false
+}
+
+/// Open a run's next attempt at `at`: `RUNNING` on the run and a new attempt
+/// reading `[CREATED, RUNNING]`. [`Command::StartRun`]'s write, shared with
+/// [`Command::ReopenFlowable`] so the two attempts cannot differ in shape.
+fn open_attempt(r: &mut TaskRun, at: Tick) {
+    r.history.push(RunState::Running);
+    r.attempts.push(Attempt {
+        history: vec![RunState::Created, RunState::Running],
+        started_at: at,
+        ended_at: None,
+    });
+}
+
+/// Throw a run away in place: what [`Command::RestartLoop`] does to each of a
+/// `LoopUntil`'s descendants and [`Command::EmptyRun`] to the one it names.
+fn empty_run(r: &mut TaskRun) {
+    // **Empty, not `[CREATED]`** -- see `Command::RecreateRun` for the
+    // measurement that forced the distinction. Kestra deletes these taskruns;
+    // the walk builds them back one at a time, and an empty history is what
+    // lets each one be built back at the round it is actually reached.
+    r.history.clear();
+    r.attempts.clear();
+    r.rendered = None;
+    r.rendered_run_if = None;
+    r.not_before = None;
+    r.resume_with = None;
+    // A `WorkingDirectory` block is prepared again: Kestra's new task run has
+    // no working directory yet. Left at `FINISHED`, the next iteration's block
+    // took its aggregate at once and its children never ran (task 2.3b).
+    r.working_dir = None;
 }
 
 pub fn apply(state: &mut ExecutionState, cmd: &Command) {
@@ -905,15 +936,7 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
             resume_with: None,
             working_dir: None,
         }),
-        Command::StartRun { run, at } => {
-            let r = &mut state.runs[*run];
-            r.history.push(RunState::Running);
-            r.attempts.push(Attempt {
-                history: vec![RunState::Created, RunState::Running],
-                started_at: *at,
-                ended_at: None,
-            });
-        }
+        Command::StartRun { run, at } => open_attempt(&mut state.runs[*run], *at),
         // The `SKIPPED` state and the one attempt Kestra records with it, in
         // one write -- see `Command::SkipRun` for why this is not a
         // `SetRunState`. The attempt's own history is `[CREATED, SKIPPED]`
@@ -1000,23 +1023,7 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
                 .filter(|&ix| is_descendant_of(state, ix, *run))
                 .collect();
             for ix in descendants {
-                let r = &mut state.runs[ix];
-                // **Empty, not `[CREATED]`** -- see `Command::RecreateRun` for
-                // the measurement that forced the distinction. Kestra deletes
-                // these taskruns; the walk builds them back one at a time, and
-                // an empty history is what lets each one be built back at the
-                // round it is actually reached.
-                r.history.clear();
-                r.attempts.clear();
-                r.rendered = None;
-                r.rendered_run_if = None;
-                r.not_before = None;
-                r.resume_with = None;
-                // A `WorkingDirectory` block is prepared again: Kestra's new
-                // task run has no working directory yet. Left at `FINISHED`,
-                // the next iteration's block took its aggregate at once and
-                // its children never ran (task 2.3b).
-                r.working_dir = None;
+                empty_run(&mut state.runs[ix]);
             }
             let r = &mut state.runs[*run];
             // `RUNNING` on the run and NOT on the attempt -- the same
@@ -1052,6 +1059,11 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
             if *s == RunState::Created {
                 r.rendered = None;
                 r.rendered_run_if = None;
+                // Package 7a (D3): a `WorkingDirectory` restarted to `CREATED`
+                // is prepared again in a fresh directory, as `CreateRun`
+                // leaves it. No other run that re-enters `CREATED` (a retried
+                // leaf, `retry::reopen_due`) has a phase to clear.
+                r.working_dir = None;
             }
             match r.attempts.last_mut() {
                 Some(a) if !a.history.last().is_some_and(|last| last.is_terminal()) => {
@@ -1065,6 +1077,20 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
         // guarded on the history being empty: `apply` takes no decisions, and
         // the only emitter asks only for runs whose history is empty.
         Command::RecreateRun { run } => state.runs[*run].history.push(RunState::Created),
+        // Package 7a -- see `Command::EmptyRun`: `RestartLoop`'s clearing of
+        // a descendant, for the one run named.
+        Command::EmptyRun { run } => empty_run(&mut state.runs[*run]),
+        // Package 7a (D3, D6) -- see `Command::ReopenFlowable`. The run's
+        // `RUNNING` and a new attempt, exactly as `StartRun` opens one, so
+        // what a flowable measures from `attempt_started_at` restarts at
+        // `at`. Its wait is over: `not_before` and `resume_with` go together,
+        // as `RestartLoop` clears them (migration 0141 pairs the two).
+        Command::ReopenFlowable { run, at } => {
+            let r = &mut state.runs[*run];
+            open_attempt(r, *at);
+            r.not_before = None;
+            r.resume_with = None;
+        }
         Command::SetExecutionState { state: s } => state.history.push(*s),
         // Nothing to record. A sub-execution is a different execution with its
         // own `ExecutionState`, and this one holds no field for it -- which is

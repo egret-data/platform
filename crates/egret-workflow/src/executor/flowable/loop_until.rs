@@ -111,11 +111,19 @@ use super::{aggregate, plus, sequential, Step};
 ///
 /// See the module doc for why this is derived rather than stored, and for the
 /// one shape it is narrower than the artifact's counter for.
+///
+/// **A `RUNNING` that follows a terminal state is not a new iteration**
+/// (package 7a). Only a restart writes one (`Command::ReopenFlowable` on a
+/// `LoopUntil` that ended), and Kestra's restart keeps the run's `iteration`
+/// (`RestartCaseTest.restartOrReplayLoopUntil`): the failed iteration runs
+/// again under the same number. Every other `RUNNING` follows `CREATED` or
+/// `PAUSED`, so the count is unchanged for any history without a restart.
 pub fn iteration(state: &ExecutionState, run: RunIx) -> usize {
-    state.runs[run]
-        .history
+    let history = &state.runs[run].history;
+    history
         .iter()
-        .filter(|s| **s == RunState::Running)
+        .enumerate()
+        .filter(|&(i, s)| *s == RunState::Running && !(i > 0 && history[i - 1].is_terminal()))
         .count()
 }
 

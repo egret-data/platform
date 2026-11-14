@@ -17,7 +17,7 @@
 //! [`close`] is plain SQL and never plans the source:
 //! 1. It locks the execution row (`FOR NO KEY UPDATE`, as `load`), then its
 //!    run rows `FOR UPDATE` in `run_ix` order, as `kill_loaded` does.
-//! 2. A live run (`NOT workflow.state_is_terminal(state)`) that a worker holds
+//! 2. A live run (`workflow.run_is_live(state, history)`) that a worker holds
 //!    is set to `KILLING`, and keeps its lease. "Holds" means `RUNNING`,
 //!    `SUBMITTED` or `KILLING` with `claimed_at IS NOT NULL`, and not the
 //!    caller's own `own` run. That worker has the handler's input, so it can
@@ -194,7 +194,7 @@ pub(super) async fn close(
 
     let runs: Vec<Run> = sqlx::query(
         "SELECT id, state, history, attempts, claimed_at, \
-                NOT workflow.state_is_terminal(state) AS live, \
+                workflow.run_is_live(state, history) AS live, \
                 type_id IS NOT NULL AS leaf \
            FROM workflow.task_runs WHERE execution_id = $1 ORDER BY run_ix FOR UPDATE",
     )

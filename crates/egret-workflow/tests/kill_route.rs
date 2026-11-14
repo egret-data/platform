@@ -1273,6 +1273,48 @@ async fn the_route_force_closes_an_execution_it_cannot_load(pool: sqlx::PgPool) 
     assert!(again.is_empty(), "nothing is left to claim: {again:?}");
 }
 
+/// **Final review M6: an emptied run is not live** (`workflow.run_is_live`).
+/// A restart leaves an `errors:` run it emptied as `CREATED` with
+/// `history = []`; the force-close must not write a `[KILLED]` history onto
+/// that row, which is no run at all (Kestra has none).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_force_close_leaves_an_emptied_run_empty(pool: sqlx::PgPool) {
+    // Arrange
+    let (_db, ws, user, app) = setup(&pool).await;
+    let ex = start(&pool, ws, &one_log("unloadable-emptied")).await;
+    egret_workflow::worker::claim(&pool, 10).await.unwrap();
+    egret_workflow::worker::reap(&pool, std::time::Duration::ZERO)
+        .await
+        .expect("reap");
+    sqlx::query(
+        "INSERT INTO workflow.task_runs \
+           (execution_id, run_ix, task_ix, task_id, type_id, state, history) \
+         VALUES ($1, 1, 1, 'emptied', 'io.kestra.plugin.core.log.Log', 'CREATED', '[]'::jsonb)",
+    )
+    .bind(ex)
+    .execute(&pool)
+    .await
+    .expect("an emptied row");
+    make_unloadable(&pool, ex).await;
+    // Act
+    let res = kill(&app, ws, ex, "", user).await;
+    // Assert
+    assert_eq!(res.status(), 202);
+    assert_eq!(exec_state(&pool, ex).await, "KILLED");
+    assert_eq!(run_row(&pool, ex, "a").await.0, "KILLED");
+    let (state, history): (String, serde_json::Value) = sqlx::query_as(
+        "SELECT state, history FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'emptied'",
+    )
+    .bind(ex)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (state.as_str(), history),
+        ("CREATED", serde_json::json!([]))
+    );
+}
+
 /// **Debt D4, the worker's side: a kill-only claim of a run whose execution
 /// cannot be loaded commits `KILLED` once, instead of being reaped and
 /// claimed again every `working_timeout` for ever.**

@@ -1475,7 +1475,10 @@ impl ExecutionRepo {
 
     /// Every task run of `execution`, ordered by `run_ix` -- their CREATION
     /// order, which is the order `advance()` addresses them in and the order
-    /// the oracle compares.
+    /// the oracle compares -- **except a run a restart emptied** (empty
+    /// `history`, state `CREATED`): Kestra removes those, egret keeps the row
+    /// so run indices stay stable, and a reader must not see a run that never
+    /// ran again.
     ///
     /// A foreign `execution` and one that never existed both answer an empty
     /// `Vec`, indistinguishably, for the same reason [`Self::get`] answers
@@ -1511,6 +1514,7 @@ impl ExecutionRepo {
             " FROM workflow.task_runs t \
              JOIN workflow.executions e ON e.id = t.execution_id \
              WHERE t.execution_id = $1 AND e.workspace_id = $2 \
+               AND t.history <> '[]'::jsonb \
              ORDER BY t.run_ix"
         ))
         .bind(execution)
@@ -1600,6 +1604,7 @@ const GRAPH_RUNS_SQL: &str =
                 AND c.workspace_id = $2 \
               ORDER BY c.created_at DESC, c.id DESC LIMIT 1) AS child_execution_id \
        FROM fam JOIN workflow.task_runs t ON t.execution_id = fam.id \
+      WHERE t.history <> '[]'::jsonb \
       ORDER BY fam.depth, fam.parent, fam.parent_run_ix, fam.loop_index, t.run_ix";
 
 impl ExecutionRepo {
