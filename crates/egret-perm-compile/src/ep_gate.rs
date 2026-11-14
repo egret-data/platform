@@ -365,7 +365,12 @@ mod tests {
         assert!(v
             .refusals
             .iter()
-            .any(|r| matches!(r, GateRefusal::RolePrincipals { count: 1 })));
+            // `>= 1`, not exactly 1: the role_refs rule-exemptions leg counts
+            // `selector_kind='tag'` exemptions installation-wide (they carry no
+            // catalog scope), so a concurrent test binary inserting a
+            // `kind='role'` tag exemption can lift this count above our one
+            // seeded grant. The refusal being present is what this asserts.
+            .any(|r| matches!(r, GateRefusal::RolePrincipals { count } if *count >= 1)));
         assert!(v
             .refusals
             .iter()
