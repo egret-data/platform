@@ -1033,6 +1033,27 @@ describe("ExecutionDetail: Replay from a task (package 7b)", () => {
     await waitFor(() => expect(screen.getByTestId("where")).toHaveTextContent(`/executions/${NEW}/overview`));
   });
 
+  it("shows it disabled, saying why, on a run inside a WorkingDirectory (the server refuses it)", async () => {
+    const source =
+      "id: hello\nnamespace: company.team\ntasks:\n  - id: block\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n    tasks:\n" +
+      "      - id: extract\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n";
+    const server = new Server(
+      ok(execution("SUCCESS", { source, runs: [run("block", "SUCCESS", 0, { type_id: null }), run("extract", "SUCCESS", 1, { parent_ix: 0 })] })),
+    );
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Actions for extract" }));
+    const item = await screen.findByRole("menuitem", { name: /Replay from this task/ });
+    expect(item).toHaveAttribute("aria-disabled", "true");
+    expect(item).toHaveTextContent(/inside a WorkingDirectory block/);
+    await userEvent.click(item);
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(server.calls.filter((c) => c.method === "POST" && c.path === REPLAY_PATH)).toHaveLength(0);
+    // The block itself can be replayed from.
+    await userEvent.keyboard("{Escape}");
+    await userEvent.click(screen.getByRole("button", { name: "Actions for block" }));
+    expect(await screen.findByRole("menuitem", { name: "Replay from this task" })).not.toHaveAttribute("aria-disabled");
+  });
+
   it("does not offer it while the execution runs", async () => {
     new Server(ok(execution("RUNNING")));
     renderPage();

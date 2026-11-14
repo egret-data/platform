@@ -1,4 +1,4 @@
-import { useId, useState, type ReactNode } from "react";
+import { useId, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { ChevronDown, ChevronRight, GitFork, History, ListTree, MoreHorizontal, Pencil, RotateCw, TextCursorInput } from "lucide-react";
@@ -25,6 +25,11 @@ import {
 } from "@/components/workflows/executions/actions";
 import { ChangeStateDialog } from "@/components/workflows/executions/ChangeStateDialog";
 import { ReplayDialog } from "@/components/workflows/executions/ReplayDialog";
+import {
+  INSIDE_WORKING_DIRECTORY_REASON,
+  insideWorkingDirectory,
+  workingDirectoryTaskIds,
+} from "@/components/workflows/executions/workingDirectory";
 import { runExecutionAction, useRefreshExecution } from "@/components/workflows/executions/useExecutionAction";
 import { FileRow, FileRowList } from "@/components/workflows/executions/files/FileRow";
 import { findFileUris, isFileUri, pathSteps } from "@/components/workflows/executions/outputs/outputsModel";
@@ -373,6 +378,9 @@ function TaskRuns({ ws, execution, now, canManage }: { ws: string; execution: Ex
   // Replay from a task is offered where the whole replay is, and not on a loop iteration (its loop's execution replays).
   const replayable = canManage && showsReplayFromTask(execution) && canReplay(execution).ok && !isLoopIteration(execution);
   const hasActions = changeable || replayable;
+  // The server refuses a replay from a run beneath a WorkingDirectory (`inside_working_directory`),
+  // judged on the frozen source: the item says so instead of offering a call that cannot work.
+  const workingDirectories = useMemo(() => (replayable ? workingDirectoryTaskIds(execution.source) : new Set<string>()), [replayable, execution.source]);
 
   const runChange = (run: TaskRunDto, state: ChangeTarget) =>
     runExecutionAction({
@@ -437,10 +445,20 @@ function TaskRuns({ ws, execution, now, canManage }: { ws: string; execution: Ex
                       </DropdownMenuItem>
                     ) : null}
                     {replayable ? (
-                      <DropdownMenuItem onSelect={() => setReplaying(run)}>
-                        <History aria-hidden className="mr-2 size-4" />
-                        Replay from this task
-                      </DropdownMenuItem>
+                      insideWorkingDirectory(run, execution.runs, workingDirectories) ? (
+                        <DropdownMenuItem disabled className="items-start">
+                          <History aria-hidden className="mr-2 mt-0.5 size-4" />
+                          <span className="flex flex-col">
+                            <span>Replay from this task</span>
+                            <span className="text-xs text-muted-foreground">{INSIDE_WORKING_DIRECTORY_REASON}</span>
+                          </span>
+                        </DropdownMenuItem>
+                      ) : (
+                        <DropdownMenuItem onSelect={() => setReplaying(run)}>
+                          <History aria-hidden className="mr-2 size-4" />
+                          Replay from this task
+                        </DropdownMenuItem>
+                      )
                     ) : null}
                   </DropdownMenuContent>
                 </DropdownMenu>
