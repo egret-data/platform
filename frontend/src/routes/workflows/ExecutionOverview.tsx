@@ -1,7 +1,7 @@
 import { useId, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
-import { ChevronDown, ChevronRight, GitFork, ListTree, Pencil, RotateCw, TextCursorInput } from "lucide-react";
+import { ChevronDown, ChevronRight, GitFork, History, ListTree, MoreHorizontal, Pencil, RotateCw, TextCursorInput } from "lucide-react";
 import { useWorkflowListExecutions, useWorkflowSetTaskRunState } from "@/api/generated/workflow/workflow";
 import type { ExecutionDto, ExecutionListItemDto, TaskRunDto } from "@/api/generated/model";
 import { EmptyState } from "@/components/explore/EmptyState";
@@ -9,17 +9,22 @@ import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StateChip } from "@/components/workflows/StateChip";
 import { executionLive, formatDuration, isTerminalState } from "@/components/workflows/executionState";
 import {
   canChangeTaskRunState,
+  canReplay,
+  isLoopIteration,
   showsChangeTaskRunState,
+  showsReplayFromTask,
   stateChangeRefusal,
   type ChangeTarget,
 } from "@/components/workflows/executions/actions";
 import { ChangeStateDialog } from "@/components/workflows/executions/ChangeStateDialog";
+import { ReplayDialog } from "@/components/workflows/executions/ReplayDialog";
 import { runExecutionAction, useRefreshExecution } from "@/components/workflows/executions/useExecutionAction";
 import { FileRow, FileRowList } from "@/components/workflows/executions/files/FileRow";
 import { findFileUris, isFileUri, pathSteps } from "@/components/workflows/executions/outputs/outputsModel";
@@ -362,8 +367,12 @@ function TaskRuns({ ws, execution, now, canManage }: { ws: string; execution: Ex
   const refresh = useRefreshExecution(ws, execution.id);
   const setState = useWorkflowSetTaskRunState();
   const [changing, setChanging] = useState<TaskRunDto | null>(null);
+  const [replaying, setReplaying] = useState<TaskRunDto | null>(null);
   // The route refuses each of these too; the page offers the action only where it can work (D11).
   const changeable = canManage && showsChangeTaskRunState(execution) && canChangeTaskRunState(execution).ok;
+  // Replay from a task is offered where the whole replay is, and not on a loop iteration (its loop's execution replays).
+  const replayable = canManage && showsReplayFromTask(execution) && canReplay(execution).ok && !isLoopIteration(execution);
+  const hasActions = changeable || replayable;
 
   const runChange = (run: TaskRunDto, state: ChangeTarget) =>
     runExecutionAction({
@@ -394,7 +403,7 @@ function TaskRuns({ ws, execution, now, canManage }: { ws: string; execution: Ex
           <TableHead>Value</TableHead>
           <TableHead>State</TableHead>
           <TableHead>Duration</TableHead>
-          {changeable ? <TableHead className="w-0"><span className="sr-only">Actions</span></TableHead> : null}
+          {hasActions ? <TableHead className="w-0"><span className="sr-only">Actions</span></TableHead> : null}
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -412,12 +421,29 @@ function TaskRuns({ ws, execution, now, canManage }: { ws: string; execution: Ex
             <TableCell className="tabular-nums">
               <RunDuration run={run} now={now} />
             </TableCell>
-            {changeable ? (
+            {hasActions ? (
               <TableCell>
-                <Button type="button" variant="ghost" size="sm" aria-label={`Change state of ${run.task_id}`} onClick={() => setChanging(run)}>
-                  <Pencil aria-hidden />
-                  Change state
-                </Button>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button type="button" variant="ghost" size="sm" aria-label={`Actions for ${run.task_id}`}>
+                      <MoreHorizontal aria-hidden />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    {changeable ? (
+                      <DropdownMenuItem onSelect={() => setChanging(run)}>
+                        <Pencil aria-hidden />
+                        Change state
+                      </DropdownMenuItem>
+                    ) : null}
+                    {replayable ? (
+                      <DropdownMenuItem onSelect={() => setReplaying(run)}>
+                        <History aria-hidden />
+                        Replay from this task
+                      </DropdownMenuItem>
+                    ) : null}
+                  </DropdownMenuContent>
+                </DropdownMenu>
               </TableCell>
             ) : null}
           </TableRow>
@@ -434,6 +460,16 @@ function TaskRuns({ ws, execution, now, canManage }: { ws: string; execution: Ex
       current={changing?.state ?? ""}
       onSubmit={(state) => runChange(changing as TaskRunDto, state)}
       fallbackError="The task run state could not be changed. Try again."
+    />
+    <ReplayDialog
+      ws={ws}
+      execution={execution}
+      mode="replay"
+      taskRun={replaying}
+      open={replaying !== null}
+      onOpenChange={(o) => {
+        if (!o) setReplaying(null);
+      }}
     />
     </>
   );

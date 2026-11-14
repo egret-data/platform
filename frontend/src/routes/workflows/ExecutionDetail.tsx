@@ -1,15 +1,12 @@
 import { lazy, useId, useMemo, useState, type ReactNode } from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
-import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { CircleStop, History, Loader2, Pencil, Play, RotateCcw, RotateCw } from "lucide-react";
 import { ApiError } from "@/api/client";
 import {
   useWorkflowGetExecution,
   useWorkflowKillExecution,
-  useWorkflowReplayExecution,
   useWorkflowResumeExecution,
-  useWorkflowRestartExecution,
   useWorkflowSetExecutionStatus,
 } from "@/api/generated/workflow/workflow";
 import type { ExecutionDto, TaskRunDto } from "@/api/generated/model";
@@ -50,7 +47,6 @@ import {
   canResume,
   type ChangeTarget,
   killFeedback,
-  restartRefusal,
   resumeFeedback,
   showsChangeStatus,
   showsKill,
@@ -60,6 +56,7 @@ import {
   stateChangeRefusal,
 } from "@/components/workflows/executions/actions";
 import { ChangeStateDialog } from "@/components/workflows/executions/ChangeStateDialog";
+import { ReplayDialog } from "@/components/workflows/executions/ReplayDialog";
 import { runExecutionAction, useRefreshExecution } from "@/components/workflows/executions/useExecutionAction";
 import { nextExecutionPollMs, staleNote, useNow } from "@/components/workflows/executions/polling";
 import {
@@ -367,13 +364,9 @@ const KILL_NOT_APPLIED = "kill_not_applied";
  * first (FE-ACTION-1), each saying why when disabled (FE-ACTION-4).
  */
 function ExecutionActions({ ws, execution, now }: { ws: string; execution: ExecutionDto; now: number }) {
-  const navigate = useNavigate();
-  const queryClient = useQueryClient();
   const refresh = useRefreshExecution(ws, execution.id);
   const resume = useWorkflowResumeExecution();
-  const replay = useWorkflowReplayExecution();
   const kill = useWorkflowKillExecution();
-  const restart = useWorkflowRestartExecution();
   const setStatus = useWorkflowSetExecutionStatus();
   const [open, setOpen] = useState<Pending>(null);
   // "Also kill subflow executions": on by default, and on again each time the dialog opens.
@@ -406,17 +399,6 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
     else toast.warning(feedback.message);
   };
 
-  const runRestart = () =>
-    runExecutionAction({
-      call: () => restart.mutateAsync({ workspace: ws, id: execution.id }),
-      expected: 200,
-      failure: "The execution could not be restarted. Try again.",
-      refresh,
-      refusal: restartRefusal,
-      // Live again, so polling resumes from the refetched state.
-      onSuccess: () => toast.success("Restarted the execution"),
-    });
-
   const runSetStatus = (state: ChangeTarget) =>
     runExecutionAction({
       call: () => setStatus.mutateAsync({ workspace: ws, id: execution.id, data: { state } }),
@@ -426,14 +408,6 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
       refusal: (code) => stateChangeRefusal("status", code),
       onSuccess: () => toast.success(`Changed the status to ${state.charAt(0)}${state.slice(1).toLowerCase()}`),
     });
-
-  const runReplay = async () => {
-    const res = await replay.mutateAsync({ workspace: ws, id: execution.id });
-    if (res.status !== 201) throw new Error("The execution could not be replayed. Try again.");
-    void queryClient.invalidateQueries({ queryKey: workflowsKeys.executions(ws) });
-    // The new execution is the result: go there, no toast (FE-ACTION-2).
-    navigate(`/explore/${ws}/workflows/executions/${encodeURIComponent(res.data.id)}/overview`);
-  };
 
   const runKill = async () => {
     // Kill of an execution that has ended: it can only reach its afterExecution run.
@@ -459,8 +433,6 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
       throw e;
     }
   };
-
-  const inputNames = Object.keys(execution.inputs ?? {});
 
   return (
     <div className="flex flex-col items-end gap-1">
@@ -523,15 +495,7 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
         onConfirm={runResume}
         fallbackError="The execution could not be resumed. Try again."
       />
-      <ConfirmAction
-        open={open === "restart"}
-        onOpenChange={(o) => setOpen(o ? "restart" : null)}
-        title="Restart this execution?"
-        description="The failed tasks run again in this same execution, and the tasks that succeeded keep their results. The execution keeps its id."
-        confirmLabel="Restart"
-        onConfirm={runRestart}
-        fallbackError="The execution could not be restarted. Try again."
-      />
+      <ReplayDialog ws={ws} execution={execution} mode="restart" open={open === "restart"} onOpenChange={(o) => setOpen(o ? "restart" : null)} />
       <ChangeStateDialog
         open={open === "status"}
         onOpenChange={(o) => setOpen(o ? "status" : null)}
@@ -541,19 +505,7 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
         onSubmit={runSetStatus}
         fallbackError="The status could not be changed. Try again."
       />
-      <ConfirmAction
-        open={open === "replay"}
-        onOpenChange={(o) => setOpen(o ? "replay" : null)}
-        title="Replay this execution?"
-        description="Replay starts a new execution from this execution's frozen YAML and inputs. Edits made to the flow since it ran are not used."
-        confirmLabel="Replay"
-        onConfirm={runReplay}
-        fallbackError="The execution could not be replayed. Try again."
-      >
-        <p className="text-sm text-muted-foreground">
-          {inputNames.length === 0 ? "It has no inputs." : `Inputs: ${inputNames.join(", ")}.`}
-        </p>
-      </ConfirmAction>
+      <ReplayDialog ws={ws} execution={execution} mode="replay" open={open === "replay"} onOpenChange={(o) => setOpen(o ? "replay" : null)} />
       <ConfirmAction
         open={open === "kill"}
         onOpenChange={(o) => setOpen(o ? "kill" : null)}

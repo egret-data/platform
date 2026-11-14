@@ -53,6 +53,19 @@ export function showsReplay(execution: Pick<ExecutionDto, "state">): boolean {
   return isTerminalState(execution.state);
 }
 
+/** Replay is offered from a task run where the whole replay is (package 7b, D14). */
+export function showsReplayFromTask(execution: Pick<ExecutionDto, "state">): boolean {
+  return showsReplay(execution);
+}
+
+/** Which flow source a replay or restart runs on (package 7b): this run's own, the draft, or a published version. */
+export type SourceChoice = { kind: "frozen" } | { kind: "current" } | { kind: "version"; version: number };
+
+/** The `source` query value of the replay and restart routes. */
+export function sourceParam(choice: SourceChoice): string {
+  return choice.kind === "version" ? `version:${choice.version}` : choice.kind;
+}
+
 /** Why Replay is disabled on an execution whose flow was deleted for good (KI-297). */
 export const REPLAY_FLOW_DELETED_REASON = "The flow was deleted permanently, so this execution cannot be replayed";
 
@@ -193,6 +206,43 @@ export function restartRefusal(code: string | undefined): string | null {
       return AFTER_EXECUTION_RUNNING;
     case "files_pruned":
       return FILES_PRUNED;
+    case "invalid_source":
+      return INVALID_SOURCE;
+    case "replay_task_not_in_source":
+      return TASK_NOT_IN_SOURCE;
+    case "flow_version_not_found":
+      return VERSION_NOT_FOUND;
+    default:
+      return null;
+  }
+}
+
+const INVALID_SOURCE = "The version to run on is not valid. Pick this run's version, the flow's current version or a published one.";
+const TASK_NOT_IN_SOURCE = "The chosen version has no task to start from.";
+const VERSION_NOT_FOUND = "That published version no longer exists. Pick another one.";
+
+/**
+ * One sentence for each coded refusal of the replay route; `null` for any other answer. The
+ * dialog appends the server's own message to `replay_task_not_in_source`, which names the task.
+ */
+export function replayRefusal(code: string | undefined): string | null {
+  switch (code) {
+    case "invalid_source":
+      return INVALID_SOURCE;
+    case "replay_breakpoints_unsupported":
+      return "Replaying with breakpoints is not supported.";
+    case "replay_task_not_in_source":
+      return TASK_NOT_IN_SOURCE;
+    case "flow_version_not_found":
+      return VERSION_NOT_FOUND;
+    case "task_run_not_found":
+      return "That task run was not found. Refresh to see the execution's latest task runs.";
+    case "inside_working_directory":
+      return "This task run is inside a WorkingDirectory block. Replay from the block itself, or replay the whole execution.";
+    case "files_pruned":
+      return "The execution's files were deleted, so it cannot be replayed from here.";
+    case "after_execution_running":
+      return AFTER_EXECUTION_RUNNING;
     default:
       return null;
   }

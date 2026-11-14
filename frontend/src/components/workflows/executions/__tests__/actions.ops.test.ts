@@ -5,7 +5,11 @@ import {
   canRestart,
   changeTargets,
   isLoopIteration,
+  replayRefusal,
   restartRefusal,
+  showsReplay,
+  showsReplayFromTask,
+  sourceParam,
   showsChangeStatus,
   showsChangeTaskRunState,
   showsRestart,
@@ -80,5 +84,41 @@ describe("the refusal sentences", () => {
       expect(stateChangeRefusal(kind, "nope")).toBeNull();
     }
     expect(stateChangeRefusal("task_run", "inside_working_directory")).toMatch(/restart the execution/i);
+  });
+});
+
+describe("replay from a task and the version choice (package 7b)", () => {
+  it("spells each source the way the routes read it", () => {
+    expect(sourceParam({ kind: "frozen" })).toBe("frozen");
+    expect(sourceParam({ kind: "current" })).toBe("current");
+    expect(sourceParam({ kind: "version", version: 2 })).toBe("version:2");
+  });
+
+  it("offers Replay from a task wherever the whole replay is offered", () => {
+    expect(ALL_STATES.filter((state) => showsReplayFromTask({ state }))).toEqual(ALL_STATES.filter((state) => showsReplay({ state })));
+  });
+
+  it("gives every coded refusal of the replay route its own sentence", () => {
+    const codes = [
+      "invalid_source",
+      "replay_breakpoints_unsupported",
+      "replay_task_not_in_source",
+      "flow_version_not_found",
+      "task_run_not_found",
+      "inside_working_directory",
+      "files_pruned",
+      "after_execution_running",
+    ];
+    const sentences = codes.map((c) => replayRefusal(c));
+    expect(sentences.every((s) => typeof s === "string" && s.length > 0)).toBe(true);
+    expect(new Set(sentences).size).toBe(codes.length);
+    expect(replayRefusal("something_else")).toBeNull();
+    expect(replayRefusal(undefined)).toBeNull();
+  });
+
+  it("gives the restart route its three new refusals", () => {
+    for (const c of ["invalid_source", "replay_task_not_in_source", "flow_version_not_found"]) {
+      expect(restartRefusal(c)).toEqual(expect.any(String));
+    }
   });
 });
