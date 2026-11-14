@@ -4293,12 +4293,49 @@ fn start_renderer(
 }
 
 /// The body of [`start_execution_in_with`] (and of the test-only
-/// [`start_execution_in`]). Private, as [`apply_outcome_on`].
+/// [`start_execution_in`]). Private, as [`apply_outcome_on`]: the row
+/// ([`insert_execution`]), then its first settle.
 async fn start_execution_in_on(
     conn: &mut PgConnection,
     gate: &Gate,
     new: NewExecution<'_>,
 ) -> Result<Uuid> {
+    let born_failed = new.born_failed;
+    let ctx = insert_execution(conn, gate, new).await?;
+    let empty = ExecutionState::new(&ctx.plan);
+    let mut state = empty.clone();
+    // Born FAILED: the caller's own command, applied before the first settle
+    // exactly as `settle` applies an SLA's terminal before `drive` -- and for
+    // the same effect: `advance()` returns nothing for a terminal execution, so
+    // no run is created, the history is `[CREATED, FAILED]`, and the settle's
+    // outbox hook, parent notification and every other terminal path see an
+    // ordinary FAILED transition.
+    if born_failed {
+        apply(
+            &mut state,
+            &Command::SetExecutionState {
+                state: RunState::Failed,
+            },
+        );
+    }
+    // `Tick(0)` is the execution's own origin — `Tick` is milliseconds since
+    // the execution was created (`executor::state::Tick`), and this is that
+    // instant.
+    settle(conn, &ctx, &empty, state, Tick(0), None).await?;
+    Ok(ctx.id)
+}
+
+/// **The row half of a start** (package 7b A3): everything
+/// [`start_execution_in_on`] does before its settle -- parse, plan, the
+/// served check, `sql_principal::check_start`, the input check, the INSERT
+/// (born `CREATED`), the FILE-input check and index. No settle: a start
+/// settles the empty state ([`settle_new`]); a copy inserts its runs first
+/// (`worker::copy`).
+pub(super) async fn insert_execution(
+    conn: &mut PgConnection,
+    gate: &Gate,
+    new: NewExecution<'_>,
+) -> Result<ExecutionCtx> {
     let NewExecution {
         workspace_id,
         flow_id,
@@ -4417,7 +4454,7 @@ async fn start_execution_in_on(
     }
     crate::storage::index_input_files(conn, workspace_id, id, &input_files).await?;
 
-    let ctx = ExecutionCtx {
+    Ok(ExecutionCtx {
         id,
         workspace_id,
         flow_id,
@@ -4427,28 +4464,7 @@ async fn start_execution_in_on(
         // A caller that starts an execution is the bottom of the stack.
         depth: 0,
         gate: Some(gate.clone()),
-    };
-    let empty = ExecutionState::new(&ctx.plan);
-    let mut state = empty.clone();
-    // Born FAILED: the caller's own command, applied before the first settle
-    // exactly as `settle` applies an SLA's terminal before `drive` -- and for
-    // the same effect: `advance()` returns nothing for a terminal execution, so
-    // no run is created, the history is `[CREATED, FAILED]`, and the settle's
-    // outbox hook, parent notification and every other terminal path see an
-    // ordinary FAILED transition.
-    if born_failed {
-        apply(
-            &mut state,
-            &Command::SetExecutionState {
-                state: RunState::Failed,
-            },
-        );
-    }
-    // `Tick(0)` is the execution's own origin — `Tick` is milliseconds since
-    // the execution was created (`executor::state::Tick`), and this is that
-    // instant.
-    settle(conn, &ctx, &empty, state, Tick(0), None).await?;
-    Ok(id)
+    })
 }
 
 /// Drive an execution forward from whatever the **caller** has just supplied.
