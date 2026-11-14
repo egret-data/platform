@@ -66,10 +66,13 @@ class Server {
   versions: unknown[] = [version(2, sourceWith(INPUTS, "two")), version(1, sourceWith("", "one"))];
   replay: Reply = { status: 201, body: { ...execution({ state: "RUNNING" }), id: NEW } };
   restart: Reply = { status: 201, body: { ...execution({ state: "RUNNING" }), id: NEW } };
+  /** When set, the flow's current source is answered only once this resolves. */
+  flowGate: Promise<void> | null = null;
   constructor() {
     vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
       const method = (init?.method ?? "GET").toUpperCase();
       const [path, qs] = String(input).split("?");
+      if (method === "GET" && path === `${BASE}/flows/${FLOW}` && this.flowGate) await this.flowGate;
       const body = typeof init?.body === "string" ? JSON.parse(init.body) : init?.body;
       this.calls.push({ method, path, query: new URLSearchParams(qs ?? ""), body });
       const { status, body: out } = this.route(method, path);
@@ -240,6 +243,19 @@ describe("ReplayDialog: restart", () => {
     await waitFor(() => expect(screen.getByTestId("where")).toHaveTextContent(`/executions/${NEW}/overview`));
     expect(toast.success).not.toHaveBeenCalled();
   });
+
+  it("explains a replay_task_not_in_source refusal in restart terms, with the server's message", async () => {
+    const server = new Server();
+    server.restart = { status: 400, body: { error: "task extract is not in version 2", code: "replay_task_not_in_source" } };
+    const { onOpenChange } = renderDialog({ mode: "restart" });
+    const d = await dialog();
+    await userEvent.click(within(d).getByRole("radio", { name: "The flow's current version" }));
+    await userEvent.click(within(d).getByRole("button", { name: "Restart" }));
+    const alert = await within(d).findByText(/cannot be restarted on it/);
+    expect(alert).toHaveTextContent(/task extract is not in version 2$/);
+    expect(within(d).queryByText(/no task to start from/)).toBeNull();
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+  });
 });
 
 describe("ReplayDialog: the review's fixes (C1 round 1)", () => {
@@ -293,6 +309,31 @@ describe("ReplayDialog: the review's fixes (C1 round 1)", () => {
     await userEvent.click(within(d).getByRole("radio", { name: "The flow's current version" }));
     await waitFor(() => expect(within(d).getByRole("button", { name: "Change inputs" })).toBeEnabled());
     expect(await within(d).findByLabelText(/who/)).toHaveValue("moon");
+  });
+
+  it("does not drop edited inputs while the chosen source loads: Replay waits, saying why (M5)", async () => {
+    const server = new Server();
+    let release = () => {};
+    server.flowGate = new Promise<void>((r) => {
+      release = r;
+    });
+    renderDialog({ execution: execution({ source: sourceWith(INPUTS), inputs: { who: "world" } }) });
+    const d = await dialog();
+    await userEvent.click(within(d).getByRole("button", { name: "Change inputs" }));
+    const who = await within(d).findByLabelText(/who/);
+    await userEvent.clear(who);
+    await userEvent.type(who, "moon");
+    await userEvent.click(within(d).getByRole("radio", { name: "The flow's current version" }));
+    const replay = within(d).getByRole("button", { name: "Replay" });
+    expect(replay).toBeDisabled();
+    expect(replay).toHaveAccessibleDescription(/changed inputs/);
+    release();
+    // The body remounts once the text arrives, so the button is found again.
+    await waitFor(() => expect(within(d).getByRole("button", { name: "Replay" })).toBeEnabled());
+    await userEvent.click(within(d).getByRole("button", { name: "Replay" }));
+    await waitFor(() => expect(server.posts(REPLAY)).toHaveLength(1));
+    expect(server.posts(REPLAY)[0].query.get("source")).toBe("current");
+    expect(server.posts(REPLAY)[0].body).toEqual({ inputs: { who: "moon" } });
   });
 
   it("sends a FILE input left alone as its old kestra:// value, in JSON", async () => {

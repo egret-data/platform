@@ -209,7 +209,7 @@ export function restartRefusal(code: string | undefined): string | null {
     case "invalid_source":
       return INVALID_SOURCE;
     case "replay_task_not_in_source":
-      return TASK_NOT_IN_SOURCE;
+      return RESTART_TASK_NOT_IN_SOURCE;
     case "flow_version_not_found":
       return VERSION_NOT_FOUND;
     default:
@@ -219,11 +219,14 @@ export function restartRefusal(code: string | undefined): string | null {
 
 const INVALID_SOURCE = "The version to run on is not valid. Pick this run's version, the flow's current version or a published one.";
 const TASK_NOT_IN_SOURCE = "The chosen version has no task to start from.";
+/** A restart has no task to start from: the chosen version lacks a task this execution ran. */
+const RESTART_TASK_NOT_IN_SOURCE = "The chosen version does not match the tasks this execution ran, so it cannot be restarted on it.";
 const VERSION_NOT_FOUND = "That published version no longer exists. Pick another one.";
 
 /**
  * One sentence for each coded refusal of the replay route; `null` for any other answer. The
- * dialog appends the server's own message to `replay_task_not_in_source`, which names the task.
+ * dialog appends the server's own message to `replay_task_not_in_source`, which names the task
+ * (for a restart too, whose sentence is `restartRefusal`'s).
  */
 export function replayRefusal(code: string | undefined): string | null {
   switch (code) {

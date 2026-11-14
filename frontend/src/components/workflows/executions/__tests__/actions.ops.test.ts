@@ -121,4 +121,9 @@ describe("replay from a task and the version choice (package 7b)", () => {
       expect(restartRefusal(c)).toEqual(expect.any(String));
     }
   });
+
+  it("says replay_task_not_in_source in restart terms: a restart has no task to start from", () => {
+    expect(restartRefusal("replay_task_not_in_source")).not.toEqual(replayRefusal("replay_task_not_in_source"));
+    expect(restartRefusal("replay_task_not_in_source")).not.toMatch(/start from/);
+  });
 });

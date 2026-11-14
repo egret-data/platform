@@ -312,6 +312,9 @@ function ReplayBody({
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
+  // Edits made on another source wait for this one's text: until it arrives, which of them it
+  // declares is unknown, so Replay waits rather than send the old inputs (final review M5).
+  const editsWaiting = mode === "replay" && "loading" in sourceText && Object.keys(edits).length > 0;
   const unsupported = unsupportedInputs(inputs);
   const inputsReason: string | typeof LOADING | null =
     mode !== "replay"
@@ -470,6 +473,11 @@ function ReplayBody({
           </Collapsible>
         </div>
       ) : null}
+      {editsWaiting ? (
+        <p id={`${idPrefix}-waiting`} className="text-sm text-muted-foreground">
+          Loading the chosen version: your changed inputs are sent with it once it has loaded.
+        </p>
+      ) : null}
       {error ? (
         <Alert variant="destructive">
           <AlertDescription>{error}</AlertDescription>
@@ -477,7 +485,12 @@ function ReplayBody({
       ) : null}
       <AlertDialogFooter>
         <AlertDialogCancel disabled={pending}>Cancel</AlertDialogCancel>
-        <Button type="button" disabled={pending || choice === null} onClick={() => void confirm()}>
+        <Button
+          type="button"
+          disabled={pending || choice === null || editsWaiting}
+          aria-describedby={editsWaiting ? `${idPrefix}-waiting` : undefined}
+          onClick={() => void confirm()}
+        >
           {pending ? <Loader2 aria-hidden className="animate-spin" /> : null}
           {label}
         </Button>
