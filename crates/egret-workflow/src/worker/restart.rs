@@ -523,11 +523,11 @@ pub(super) async fn open(
             || state.history.last() == Some(&RunState::Restarted),
         "executor::restart and reset_copied end on RESTARTED"
     );
-    let label_key = match op {
-        Op::Replay => REPLAY_LABEL_KEY,
-        Op::Restart | Op::MarkAs => RESTARTED_LABEL_KEY,
+    let label = match op {
+        Op::Replay => (REPLAY_LABEL_KEY, REPLAY_LABEL_VALUE),
+        Op::Restart | Op::MarkAs => (RESTARTED_LABEL_KEY, RESTARTED_LABEL_VALUE),
     };
-    side_writes(conn, id, &cmds, labels.as_ref(), label_key).await?;
+    side_writes(conn, id, &cmds, labels.as_ref(), label).await?;
     for run in no_iteration {
         let run_id: Uuid = sqlx::query_scalar(
             "SELECT id FROM workflow.task_runs WHERE execution_id = $1 AND run_ix = $2",
@@ -564,7 +564,7 @@ async fn side_writes(
     id: Uuid,
     cmds: &RestartCommands,
     labels: Option<&serde_json::Value>,
-    label_key: &str,
+    (label_key, label_value): (&str, &str),
 ) -> Result<()> {
     sqlx::query("UPDATE workflow.executions SET attempt_number = attempt_number + 1 WHERE id = $1")
         .bind(id)
@@ -575,15 +575,13 @@ async fn side_writes(
     // The label, in the column's own shape (`[{"key", "value"}]`, as
     // `labels::own_labels` reads it back and `write_render_side` writes it).
     // Written only when the label is not there yet, as before package 7b.
-    // Both labels' value is "true".
-    debug_assert_eq!(RESTARTED_LABEL_VALUE, REPLAY_LABEL_VALUE);
     if !crate::labels::own_labels(labels)
         .iter()
         .any(|l| l.key == label_key)
     {
         sqlx::query("UPDATE workflow.executions SET labels = $2 WHERE id = $1")
             .bind(id)
-            .bind(with_label(labels, label_key, RESTARTED_LABEL_VALUE))
+            .bind(with_label(labels, label_key, label_value))
             .execute(&mut *conn)
             .await
             .map_err(db_err)?;

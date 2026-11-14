@@ -1157,3 +1157,223 @@ async fn a_kept_attempt_keeps_its_wall_clock(pool: sqlx::PgPool) {
         "old {old_wall}, new {new_wall}"
     );
 }
+
+// ── Fix round 1: `variables` on another source (review Important 1) ──────
+
+/// `variables: {x: <x>}`, then `set` (`SetVariables y: 1`, which stores the
+/// run's WHOLE variables value in `executions.variables`), then `out`, which
+/// outputs `vars.x`.
+fn vars_flow(x: &str) -> String {
+    format!(
+        "id: vars\nnamespace: t\nvariables:\n  x: {x}\ntasks:\n  - id: set\n    \
+         type: io.kestra.plugin.core.execution.SetVariables\n    variables:\n      y: 1\n  \
+         - id: out\n    type: io.kestra.plugin.core.output.OutputValues\n    values:\n      \
+         v: \"{{{{ vars.x }}}}\"\n"
+    )
+}
+
+async fn out_value(pool: &sqlx::PgPool, ex: Uuid) -> Value {
+    let outputs: Option<Value> = sqlx::query_scalar(
+        "SELECT outputs FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'out'",
+    )
+    .bind(ex)
+    .fetch_one(pool)
+    .await
+    .expect("out");
+    outputs.map_or(Value::Null, |o| o["values"]["v"].clone())
+}
+
+async fn exec_variables(pool: &sqlx::PgPool, ex: Uuid) -> Option<Value> {
+    sqlx::query_scalar("SELECT variables FROM workflow.executions WHERE id = $1")
+        .bind(ex)
+        .fetch_one(pool)
+        .await
+        .expect("variables")
+}
+
+/// A replayed execution that ran a variables-updating task, on the frozen
+/// source and its own variables.
+async fn vars_execution(pool: &sqlx::PgPool, ws: Uuid, reg: &Flaky) -> Uuid {
+    let old = start(pool, ws, &vars_flow("old")).await;
+    drive(pool, reg, old).await;
+    assert_eq!(exec_state(pool, old).await, "SUCCESS");
+    assert_eq!(out_value(pool, old).await, "old");
+    assert!(
+        exec_variables(pool, old).await.is_some(),
+        "SetVariables stored the run's variables"
+    );
+    old
+}
+
+/// Kestra `applyNewRevision` (`ES:514-517`): a source other than the frozen
+/// one runs with ITS `variables:`, for every kind of replay.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_replay_on_another_source_reads_that_sources_variables(pool: sqlx::PgPool) {
+    // Arrange
+    egret_workflow::storage::install_mem_for_tests();
+    let (_db, ws, _) = setup(&pool).await;
+    let reg = Flaky::new(&[]).over(egret_workflow::worker::Handlers::with_core_tasks(
+        egret_workflow::storage::current(),
+    ));
+    let old = vars_execution(&pool, ws, &reg).await;
+    let out = run_id(&runs_of(&pool, old).await, "out");
+    let edited = vars_flow("new");
+
+    // Act
+    let mut replays = Vec::new();
+    for kind in [ReplayKind::Whole, ReplayKind::FromTaskRun(out)] {
+        let new = replay(&pool, ws, old, &edited, kind, ReplayInputs::Reuse)
+            .await
+            .expect("replayed");
+        drive(&pool, &reg, new).await;
+        replays.push((kind, new));
+    }
+
+    // Assert
+    for (kind, new) in replays {
+        assert_eq!(exec_state(&pool, new).await, "SUCCESS", "{kind:?}");
+        assert_eq!(out_value(&pool, new).await, "new", "{kind:?}");
+    }
+}
+
+/// The control: on the frozen source the old execution's variables travel
+/// with the replay, as before (W9a D3, final review I3).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_replay_on_the_frozen_source_keeps_the_executions_variables(pool: sqlx::PgPool) {
+    // Arrange
+    egret_workflow::storage::install_mem_for_tests();
+    let (_db, ws, _) = setup(&pool).await;
+    let reg = Flaky::new(&[]).over(egret_workflow::worker::Handlers::with_core_tasks(
+        egret_workflow::storage::current(),
+    ));
+    let old = vars_execution(&pool, ws, &reg).await;
+    let out = run_id(&runs_of(&pool, old).await, "out");
+    let frozen = source_of(&pool, old).await;
+
+    // Act
+    let new = replay(
+        &pool,
+        ws,
+        old,
+        &frozen,
+        ReplayKind::FromTaskRun(out),
+        ReplayInputs::Reuse,
+    )
+    .await
+    .expect("replayed");
+    let copied = exec_variables(&pool, new).await;
+    drive(&pool, &reg, new).await;
+
+    // Assert
+    assert_eq!(copied, exec_variables(&pool, old).await);
+    assert_eq!(out_value(&pool, new).await, "old");
+}
+
+/// A restart on another source reads that source's `variables:` too.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_restart_on_another_source_reads_that_sources_variables(pool: sqlx::PgPool) {
+    // Arrange
+    egret_workflow::storage::install_mem_for_tests();
+    let (_db, ws, _) = setup(&pool).await;
+    let reg = Flaky::new(&[("out", 1)]).over(egret_workflow::worker::Handlers::with_core_tasks(
+        egret_workflow::storage::current(),
+    ));
+    let old = start(&pool, ws, &vars_flow("old")).await;
+    drive(&pool, &reg, old).await;
+    assert_eq!(exec_state(&pool, old).await, "FAILED");
+    assert!(exec_variables(&pool, old).await.is_some());
+
+    // Act
+    let new = replay(
+        &pool,
+        ws,
+        old,
+        &vars_flow("new"),
+        ReplayKind::RestartOnSource,
+        ReplayInputs::Reuse,
+    )
+    .await
+    .expect("restarted");
+    drive(&pool, &reg, new).await;
+
+    // Assert
+    assert_eq!(exec_state(&pool, new).await, "SUCCESS");
+    assert_eq!(out_value(&pool, new).await, "new");
+}
+
+// ── Fix round 1: the refusals `refusals_write_nothing` did not reach ──────
+
+/// S7: a copy must not copy live runs. An ended execution whose
+/// `afterExecution:` still runs is refused, for both kinds of copy.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_copy_of_an_execution_whose_after_execution_runs_is_refused(pool: sqlx::PgPool) {
+    // Arrange
+    let (_db, ws, _) = setup(&pool).await;
+    let source = format!(
+        "id: live-after\nnamespace: t\ntasks:\n{}afterExecution:\n  - id: end\n    type: {LOG}\n    \
+         message: after\n",
+        tasks(&["a"])
+    );
+    let ex = start(&pool, ws, &source).await;
+    // Fail `a` by hand; the settle that ends the execution starts `end`.
+    let claimed = egret_workflow::worker::claim(&pool, 10).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    egret_workflow::worker::commit_outcome(&pool, &claimed[0], &Outcome::failed())
+        .await
+        .unwrap();
+    assert_eq!(exec_state(&pool, ex).await, "FAILED");
+    let runs = runs_of(&pool, ex).await;
+    assert_eq!(run(&runs, "end").3, "RUNNING", "{runs:?}");
+    let n = execution_count(&pool).await;
+
+    // Act
+    let from_task = replay(
+        &pool,
+        ws,
+        ex,
+        &source,
+        ReplayKind::FromTaskRun(run_id(&runs, "a")),
+        ReplayInputs::Reuse,
+    )
+    .await;
+    let restart = replay(
+        &pool,
+        ws,
+        ex,
+        &source,
+        ReplayKind::RestartOnSource,
+        ReplayInputs::Reuse,
+    )
+    .await;
+
+    // Assert
+    assert_eq!(from_task, Err(ReplayRefused::AfterExecutionRunning));
+    assert_eq!(restart, Err(ReplayRefused::AfterExecutionRunning));
+    assert_eq!(execution_count(&pool).await, n);
+    assert_eq!(runs_of(&pool, ex).await, runs, "the old runs are untouched");
+}
+
+/// D2: a replay from a task needs an ended execution, as a whole replay does.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_replay_from_a_task_of_a_running_execution_is_refused(pool: sqlx::PgPool) {
+    // Arrange
+    let (_db, ws, _) = setup(&pool).await;
+    let ex = start(&pool, ws, &three("live")).await;
+    let a = run_id(&runs_of(&pool, ex).await, "a");
+    let n = execution_count(&pool).await;
+
+    // Act
+    let out = replay(
+        &pool,
+        ws,
+        ex,
+        &three("live"),
+        ReplayKind::FromTaskRun(a),
+        ReplayInputs::Reuse,
+    )
+    .await;
+
+    // Assert
+    assert_eq!(out, Err(ReplayRefused::NotTerminal("RUNNING".into())));
+    assert_eq!(execution_count(&pool).await, n);
+}
