@@ -59,6 +59,7 @@ import type {
   SetTriggersDisabledRequest,
   StartExecutionMultipart,
   StartExecutionRequest,
+  StateChangeBody,
   TriggerEntryDto,
   TriggerPageDto,
   UpdateFlowRequest,
@@ -88,6 +89,7 @@ import type {
   WorkflowNamespaceFileRevisionsParams,
   WorkflowNamespaceFileStatsParams,
   WorkflowPreviewExecutionFileParams,
+  WorkflowRestartExecutionParams,
   WorkflowSearchNamespaceFilesParams,
   WorkflowUploadNamespaceFileParams
 } from '../model';
@@ -1514,6 +1516,135 @@ export const useWorkflowReplayExecution = <TError = ErrorBody,
       > => {
       return useMutation(getWorkflowReplayExecutionMutationOptions(options), queryClient);
     }
+    export type workflowRestartExecutionResponse200 = {
+  data: ExecutionDto
+  status: 200
+}
+
+export type workflowRestartExecutionResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowRestartExecutionResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowRestartExecutionResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowRestartExecutionResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowRestartExecutionResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workflowRestartExecutionResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowRestartExecutionResponseSuccess = (workflowRestartExecutionResponse200) & {
+  headers: Headers;
+};
+export type workflowRestartExecutionResponseError = (workflowRestartExecutionResponse400 | workflowRestartExecutionResponse401 | workflowRestartExecutionResponse403 | workflowRestartExecutionResponse404 | workflowRestartExecutionResponse409 | workflowRestartExecutionResponse500) & {
+  headers: Headers;
+};
+
+export type workflowRestartExecutionResponse = (workflowRestartExecutionResponseSuccess | workflowRestartExecutionResponseError)
+
+export const getWorkflowRestartExecutionUrl = (workspace: string,
+    id: string,
+    params?: WorkflowRestartExecutionParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/restart?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/restart`
+}
+
+/**
+ * The scoped read keeps a foreign id from reaching the worker, which is
+ * unscoped; every other check is
+ * [`worker::restart_execution`](crate::worker::restart_execution)'s, made under
+ * the execution's lock, and its answer is authoritative.
+ * @summary Restart a `FAILED` or `PAUSED` execution in place (Kestra's restart).
+ */
+export const workflowRestartExecution = async (workspace: string,
+    id: string,
+    params?: WorkflowRestartExecutionParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowRestartExecutionResponse> => {
+
+  return customInstance<workflowRestartExecutionResponse>(getWorkflowRestartExecutionUrl(workspace,id,params),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowRestartExecutionMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowRestartExecution>>, TError,{workspace: string;id: string;params?: WorkflowRestartExecutionParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowRestartExecution>>, TError,{workspace: string;id: string;params?: WorkflowRestartExecutionParams}, TContext> => {
+
+const mutationKey = ['workflowRestartExecution'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowRestartExecution>>, {workspace: string;id: string;params?: WorkflowRestartExecutionParams}> = (props) => {
+          const {workspace,id,params} = props ?? {};
+
+          return  workflowRestartExecution(workspace,id,params,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowRestartExecutionMutationResult = NonNullable<Awaited<ReturnType<typeof workflowRestartExecution>>>
+
+    export type WorkflowRestartExecutionMutationError = ErrorBody
+
+    /**
+ * @summary Restart a `FAILED` or `PAUSED` execution in place (Kestra's restart).
+ */
+export const useWorkflowRestartExecution = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowRestartExecution>>, TError,{workspace: string;id: string;params?: WorkflowRestartExecutionParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowRestartExecution>>,
+        TError,
+        {workspace: string;id: string;params?: WorkflowRestartExecutionParams},
+        TContext
+      > => {
+      return useMutation(getWorkflowRestartExecutionMutationOptions(options), queryClient);
+    }
     export type workflowResumeExecutionResponse200 = {
   data: ExecutionDto
   status: 200
@@ -1636,6 +1767,246 @@ export const useWorkflowResumeExecution = <TError = ErrorBody,
         TContext
       > => {
       return useMutation(getWorkflowResumeExecutionMutationOptions(options), queryClient);
+    }
+    export type workflowSetExecutionStatusResponse200 = {
+  data: ExecutionDto
+  status: 200
+}
+
+export type workflowSetExecutionStatusResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowSetExecutionStatusResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowSetExecutionStatusResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowSetExecutionStatusResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowSetExecutionStatusResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workflowSetExecutionStatusResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowSetExecutionStatusResponseSuccess = (workflowSetExecutionStatusResponse200) & {
+  headers: Headers;
+};
+export type workflowSetExecutionStatusResponseError = (workflowSetExecutionStatusResponse400 | workflowSetExecutionStatusResponse401 | workflowSetExecutionStatusResponse403 | workflowSetExecutionStatusResponse404 | workflowSetExecutionStatusResponse409 | workflowSetExecutionStatusResponse500) & {
+  headers: Headers;
+};
+
+export type workflowSetExecutionStatusResponse = (workflowSetExecutionStatusResponseSuccess | workflowSetExecutionStatusResponseError)
+
+export const getWorkflowSetExecutionStatusUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/status`
+}
+
+/**
+ * @summary Change a finished execution's status (Kestra's change-state).
+ */
+export const workflowSetExecutionStatus = async (workspace: string,
+    id: string,
+    stateChangeBody: StateChangeBody, options?: Parameters<typeof customInstance>[1]): Promise<workflowSetExecutionStatusResponse> => {
+
+  return customInstance<workflowSetExecutionStatusResponse>(getWorkflowSetExecutionStatusUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(stateChangeBody)
+  }
+);}
+
+
+
+
+
+export const getWorkflowSetExecutionStatusMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowSetExecutionStatus>>, TError,{workspace: string;id: string;data: StateChangeBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowSetExecutionStatus>>, TError,{workspace: string;id: string;data: StateChangeBody}, TContext> => {
+
+const mutationKey = ['workflowSetExecutionStatus'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowSetExecutionStatus>>, {workspace: string;id: string;data: StateChangeBody}> = (props) => {
+          const {workspace,id,data} = props ?? {};
+
+          return  workflowSetExecutionStatus(workspace,id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowSetExecutionStatusMutationResult = NonNullable<Awaited<ReturnType<typeof workflowSetExecutionStatus>>>
+    export type WorkflowSetExecutionStatusMutationBody = StateChangeBody
+    export type WorkflowSetExecutionStatusMutationError = ErrorBody
+
+    /**
+ * @summary Change a finished execution's status (Kestra's change-state).
+ */
+export const useWorkflowSetExecutionStatus = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowSetExecutionStatus>>, TError,{workspace: string;id: string;data: StateChangeBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowSetExecutionStatus>>,
+        TError,
+        {workspace: string;id: string;data: StateChangeBody},
+        TContext
+      > => {
+      return useMutation(getWorkflowSetExecutionStatusMutationOptions(options), queryClient);
+    }
+    export type workflowSetTaskRunStateResponse200 = {
+  data: ExecutionDto
+  status: 200
+}
+
+export type workflowSetTaskRunStateResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowSetTaskRunStateResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowSetTaskRunStateResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowSetTaskRunStateResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowSetTaskRunStateResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workflowSetTaskRunStateResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowSetTaskRunStateResponseSuccess = (workflowSetTaskRunStateResponse200) & {
+  headers: Headers;
+};
+export type workflowSetTaskRunStateResponseError = (workflowSetTaskRunStateResponse400 | workflowSetTaskRunStateResponse401 | workflowSetTaskRunStateResponse403 | workflowSetTaskRunStateResponse404 | workflowSetTaskRunStateResponse409 | workflowSetTaskRunStateResponse500) & {
+  headers: Headers;
+};
+
+export type workflowSetTaskRunStateResponse = (workflowSetTaskRunStateResponseSuccess | workflowSetTaskRunStateResponseError)
+
+export const getWorkflowSetTaskRunStateUrl = (workspace: string,
+    id: string,
+    taskRunId: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/task-runs/${encodeURIComponent(taskRunId)}/state`
+}
+
+/**
+ * The scoped read keeps a foreign execution, and a run that is not this
+ * execution's, from reaching the worker. The worker decides the rest under
+ * the execution's lock. The audit record's `from_state` is the RUN's state
+ * before the change.
+ * @summary Set one task run's state (Kestra's mark-as).
+ */
+export const workflowSetTaskRunState = async (workspace: string,
+    id: string,
+    taskRunId: string,
+    stateChangeBody: StateChangeBody, options?: Parameters<typeof customInstance>[1]): Promise<workflowSetTaskRunStateResponse> => {
+
+  return customInstance<workflowSetTaskRunStateResponse>(getWorkflowSetTaskRunStateUrl(workspace,id,taskRunId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(stateChangeBody)
+  }
+);}
+
+
+
+
+
+export const getWorkflowSetTaskRunStateMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowSetTaskRunState>>, TError,{workspace: string;id: string;taskRunId: string;data: StateChangeBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowSetTaskRunState>>, TError,{workspace: string;id: string;taskRunId: string;data: StateChangeBody}, TContext> => {
+
+const mutationKey = ['workflowSetTaskRunState'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowSetTaskRunState>>, {workspace: string;id: string;taskRunId: string;data: StateChangeBody}> = (props) => {
+          const {workspace,id,taskRunId,data} = props ?? {};
+
+          return  workflowSetTaskRunState(workspace,id,taskRunId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowSetTaskRunStateMutationResult = NonNullable<Awaited<ReturnType<typeof workflowSetTaskRunState>>>
+    export type WorkflowSetTaskRunStateMutationBody = StateChangeBody
+    export type WorkflowSetTaskRunStateMutationError = ErrorBody
+
+    /**
+ * @summary Set one task run's state (Kestra's mark-as).
+ */
+export const useWorkflowSetTaskRunState = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowSetTaskRunState>>, TError,{workspace: string;id: string;taskRunId: string;data: StateChangeBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowSetTaskRunState>>,
+        TError,
+        {workspace: string;id: string;taskRunId: string;data: StateChangeBody},
+        TContext
+      > => {
+      return useMutation(getWorkflowSetTaskRunStateMutationOptions(options), queryClient);
     }
     export type workflowListFlowsResponse200 = {
   data: FlowListItemDto[]

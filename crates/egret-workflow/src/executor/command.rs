@@ -221,6 +221,38 @@ pub enum Command {
     RecreateRun {
         run: RunIx,
     },
+    /// Throw one run away in place, as [`Command::RestartLoop`] throws away
+    /// each of a `LoopUntil`'s descendants -- package 7a (spec D1, D3, D4).
+    ///
+    /// Kestra's restart REMOVES the runs of every `errors:`/`finally:` (with
+    /// their children) and of `afterExecution:`, and every descendant of a
+    /// restarted `WorkingDirectory` (`ExecutionService.restart`). egret cannot
+    /// delete a run (a `RunIx` is a position and a `run_ix` column), so it
+    /// empties it, which is this executor's spelling of "removed from
+    /// `taskRunList`": the walk rebuilds it with [`Command::RecreateRun`] when
+    /// its turn comes, and `flowable::current_list` reads an empty run as "not
+    /// started". The clearing is exactly `RestartLoop`'s on a descendant (one
+    /// function in `apply` does both). Emitted only by
+    /// [`restart`](super::restart::restart) and
+    /// [`mark_as`](super::restart::mark_as).
+    EmptyRun {
+        run: RunIx,
+    },
+    /// Put a terminal (or `PAUSED`) flowable back into `RUNNING` and open a
+    /// new attempt at `at` -- package 7a (spec D3, D6).
+    ///
+    /// Kestra puts `RUNNING` (or `RESTARTED`) on a restarted flowable; egret
+    /// opens a new attempt with it, so that what a flowable measures from
+    /// [`TaskRun::attempt_started_at`](super::TaskRun::attempt_started_at) (a
+    /// `Pause`'s and a `LoopUntil`'s timeouts) restarts at the restart's tick,
+    /// as Kestra's `RESTARTED` history entry makes it. The attempt is the one
+    /// [`Command::StartRun`] opens, and it carries `at` for `StartRun`'s
+    /// reason. The run's wait (`not_before`, `resume_with`) is cleared: it is
+    /// running again and waits on nothing.
+    ReopenFlowable {
+        run: RunIx,
+        at: Tick,
+    },
     SetRunState {
         run: RunIx,
         state: RunState,

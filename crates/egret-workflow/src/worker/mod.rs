@@ -89,6 +89,7 @@ mod reaper;
 mod registry;
 mod render;
 mod replay;
+mod restart;
 // Plan Task 4 is the pure half; plan Task 6 calls it from the runner seam, and
 // this allowance goes with that call.
 #[allow(dead_code)]
@@ -150,6 +151,10 @@ pub use kill::{kill_execution, kill_execution_reporting, KillOutcome};
 pub use reaper::reap;
 pub use registry::Handlers;
 pub use render::execution_render_context;
+pub use restart::{
+    restart_execution, set_execution_status, set_task_run_state, RestartRefused, Restarted,
+    StateChangeRefused, NO_RESTARTABLE_ITERATION, RESTARTED_LABEL_KEY, RESTARTED_LABEL_VALUE,
+};
 /// **How far down a chain of child executions this worker will spawn** — the
 /// backstop beside `subflow`'s cycle guard, and the second half of the one
 /// answer that module gives that is not the artifact's. See its own doc.

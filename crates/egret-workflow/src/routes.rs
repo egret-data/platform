@@ -35,6 +35,9 @@
 //! POST   /api/ws/{workspace}/workflows/executions/{id}/resume
 //! POST   /api/ws/{workspace}/workflows/executions/{id}/replay
 //! POST   /api/ws/{workspace}/workflows/executions/{id}/kill
+//! POST   /api/ws/{workspace}/workflows/executions/{id}/restart
+//! POST   /api/ws/{workspace}/workflows/executions/{id}/task-runs/{task_run_id}/state
+//! POST   /api/ws/{workspace}/workflows/executions/{id}/status
 //! ```
 //!
 //! Mounted under `/ws/{workspace}/workflows/...` here, **not**
@@ -2454,6 +2457,52 @@ async fn startable_flow(
     Ok(flow)
 }
 
+/// **The doors a run of the flow passes, for an operation that runs tasks
+/// again** -- restart and a task run's state change (spec D24, final review
+/// I1). Replay passes the same two (`replay_execution`):
+///
+/// - the flow's current state ([`startable_flow`]): a trashed flow, or one
+///   whose execution names no flow any more (purged), is 404; a disabled one
+///   is 409;
+/// - the `egret.sql` creator gate (`sql_principal::check_start`, door 2):
+///   the caller re-runs the creator's SQL under the creator's identity, so
+///   on a flow that runs `egret.sql` only its creator may.
+///
+/// The frozen source is what is judged, as it is what runs again. A loop
+/// iteration is left to the worker, which refuses it naming its root before
+/// anything runs. Change status runs no task and passes neither door.
+async fn rerun_gate(
+    st: &WorkflowState,
+    ws: Uuid,
+    caller: Uuid,
+    detail: &crate::repo::ExecutionDetail,
+) -> EgretResult<()> {
+    if detail.execution.loop_index.is_some() {
+        return Ok(());
+    }
+    let flow_id = detail
+        .execution
+        .flow_id
+        .ok_or_else(|| Error::NotFound("flow".into()))?;
+    let _ = startable_flow(st, ws, flow_id).await?;
+    let flow = parse(&detail.source)
+        .map_err(|e| Error::InvalidInput(format!("the flow does not parse: {}", e.message)))?;
+    let mut conn = st
+        .db
+        .pool
+        .acquire()
+        .await
+        .map_err(|e| Error::Internal(anyhow::Error::new(e)))?;
+    crate::worker::sql_principal::check_start(
+        &mut conn,
+        &flow,
+        Some(flow_id),
+        &detail.source,
+        Some(caller),
+    )
+    .await
+}
+
 /// The `inputs` object a start will actually run with.
 ///
 /// Split out so the refusal has one site and both routes that need the empty
@@ -3526,6 +3575,366 @@ async fn kill_execution(
     ))
 }
 
+// ---------- Execution operations (package 7a, spec D10, D11, D13) ----------
+
+/// `ErrorBody.code`s of the three execution-operation routes.
+pub const NOT_RESTARTABLE_CODE: &str = "not_restartable";
+pub const NOTHING_TO_RESTART_CODE: &str = "nothing_to_restart";
+pub const AFTER_EXECUTION_RUNNING_CODE: &str = "after_execution_running";
+pub const FILES_PRUNED_CODE: &str = "files_pruned";
+pub const STATE_UNCHANGED_CODE: &str = "state_unchanged";
+pub const INSIDE_WORKING_DIRECTORY_CODE: &str = "inside_working_directory";
+pub const RESTART_REVISION_UNSUPPORTED_CODE: &str = "restart_revision_unsupported";
+
+/// The restart, task-run-state and status routes' error: every
+/// [`egret_core::Error`] (404, and the uncoded 400 of a loop iteration), plus
+/// the coded 409s and the coded 400.
+#[derive(Debug)]
+pub enum ExecOpError {
+    Core(Error),
+    /// A refusal a client can branch on: its status, `ErrorBody.code` and message.
+    Coded(StatusCode, &'static str, String),
+}
+
+impl From<Error> for ExecOpError {
+    fn from(e: Error) -> Self {
+        ExecOpError::Core(e)
+    }
+}
+
+impl ExecOpError {
+    fn conflict(code: &'static str, message: String) -> Self {
+        ExecOpError::Coded(StatusCode::CONFLICT, code, message)
+    }
+
+    /// A loop iteration is a part of its root's run: 400, naming the root, as
+    /// replay's refusal does.
+    fn loop_iteration(id: Uuid, root: Uuid, what: &str) -> Self {
+        ExecOpError::Core(Error::InvalidInput(format!(
+            "execution {id} is an iteration of a Loop in execution {root}, not a run of the \
+             flow, and {what} on its own; use its loop root {root}"
+        )))
+    }
+
+    fn from_restart_refusal(id: Uuid, r: crate::worker::RestartRefused) -> Self {
+        use crate::worker::RestartRefused as R;
+        match r {
+            R::NotRestartable(state) => Self::conflict(
+                NOT_RESTARTABLE_CODE,
+                format!(
+                    "execution {id} is {state}; only a FAILED or PAUSED execution can be restarted"
+                ),
+            ),
+            R::NothingToRestart => Self::conflict(
+                NOTHING_TO_RESTART_CODE,
+                format!("execution {id} has no FAILED or PAUSED task run to restart from"),
+            ),
+            R::AfterExecutionRunning => Self::after_execution(id),
+            R::FilesPruned => Self::files_pruned(id),
+            R::LoopIteration { root } => Self::loop_iteration(id, root, "cannot be restarted"),
+        }
+    }
+
+    fn from_state_change_refusal(id: Uuid, r: crate::worker::StateChangeRefused) -> Self {
+        use crate::worker::StateChangeRefused as R;
+        match r {
+            R::NotChangeable(state) => Self::conflict(
+                NOT_RESTARTABLE_CODE,
+                format!(
+                    "execution {id} is {state}; its state can only be changed once the execution \
+                     has ended, and not when it ended KILLED"
+                ),
+            ),
+            R::StateUnchanged => Self::conflict(
+                STATE_UNCHANGED_CODE,
+                "it is already in that state; nothing would change".to_string(),
+            ),
+            R::LoopIteration { root } => {
+                Self::loop_iteration(id, root, "its state cannot be changed")
+            }
+            R::NoSuchTaskRun => Self::Core(Error::NotFound("task run".into())),
+            R::AfterExecutionRunning => Self::after_execution(id),
+            R::FilesPruned => Self::files_pruned(id),
+            R::InsideWorkingDirectory => Self::conflict(
+                INSIDE_WORKING_DIRECTORY_CODE,
+                "the task run is inside a WorkingDirectory, whose directory is closed; restart \
+                 the execution instead, which re-runs the block whole"
+                    .to_string(),
+            ),
+        }
+    }
+
+    fn after_execution(id: Uuid) -> Self {
+        Self::conflict(
+            AFTER_EXECUTION_RUNNING_CODE,
+            format!("execution {id} has ended but its afterExecution tasks are still running; retry when they have ended"),
+        )
+    }
+
+    fn files_pruned(id: Uuid) -> Self {
+        Self::conflict(
+            FILES_PRUNED_CODE,
+            format!("the files of execution {id} were deleted by the retention pruner; it can no longer be changed"),
+        )
+    }
+}
+
+impl axum::response::IntoResponse for ExecOpError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            ExecOpError::Core(e) => e.into_response(),
+            ExecOpError::Coded(status, code, message) => {
+                let error = if status == StatusCode::CONFLICT {
+                    Error::Conflict(message).to_string()
+                } else {
+                    Error::InvalidInput(message).to_string()
+                };
+                (
+                    status,
+                    Json(egret_core::http::ErrorBody {
+                        error,
+                        code: Some(code.to_string()),
+                    }),
+                )
+                    .into_response()
+            }
+        }
+    }
+}
+
+/// `POST .../executions/{id}/restart`'s query. Only here so the refusal of
+/// `revision` is documented; the handler answers 400 to its presence.
+#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
+pub struct RestartQuery {
+    /// **Not supported.** Restarting from an older revision of the flow
+    /// arrives with package 7b; any value answers 400
+    /// `restart_revision_unsupported`.
+    pub revision: Option<String>,
+}
+
+/// The four states Kestra's UI offers as the target of a state change (D11).
+#[derive(Debug, Clone, Copy, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum StateChangeTarget {
+    Success,
+    Warning,
+    Failed,
+    Cancelled,
+}
+
+impl StateChangeTarget {
+    fn run_state(self) -> RunState {
+        match self {
+            Self::Success => RunState::Success,
+            Self::Warning => RunState::Warning,
+            Self::Failed => RunState::Failed,
+            Self::Cancelled => RunState::Cancelled,
+        }
+    }
+}
+
+/// Body of the task-run-state and status routes.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StateChangeBody {
+    /// The state to set: `SUCCESS`, `WARNING`, `FAILED` or `CANCELLED`.
+    pub state: StateChangeTarget,
+}
+
+/// A body axum's `Json` refused, mapped after the permission check as the
+/// trigger and KV routes do: malformed JSON, a state outside the four (or in
+/// the wrong case), an unknown field and a missing content type are all 400
+/// (axum's own answer to a well-formed but wrong body is 422).
+fn state_change_body_refusal(r: axum::extract::rejection::JsonRejection) -> ExecOpError {
+    ExecOpError::Core(Error::InvalidInput(format!(
+        "the body is not `{{\"state\": \"SUCCESS\"|\"WARNING\"|\"FAILED\"|\"CANCELLED\"}}`: {}",
+        r.body_text()
+    )))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/{id}/restart",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Execution id"),
+        RestartQuery,
+    ),
+    responses(
+        (status = 200, description = "The execution was restarted in place, as Kestra restarts one: it keeps its id, its `FAILED` and `PAUSED` runs are reset, runs that ended `SUCCESS` keep their outputs and are not run again, and it carries the label `system.restarted: true` and `attempt_number + 1`. The body is its detail afterwards.", body = ExecutionDto),
+        (status = 400, description = "The query has a `revision` (code `restart_revision_unsupported`; restarting an older revision is package 7b); or the execution is a **loop iteration** (no code; the message names its loop root, which is restarted instead); or the flow runs `egret.sql` and the caller is not its creator (no code; the tasks run as the creator, as for a replay)", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed; or its flow is in the trash or was deleted (as for a replay)", body = egret_core::http::ErrorBody),
+        (status = 409, description = "Nothing is written. The flow is disabled (no code, as for a replay). `not_restartable`: the execution is not `FAILED` or `PAUSED` (the message names its state). `nothing_to_restart`: no run is `FAILED` or `PAUSED`. `after_execution_running`: the execution has ended but its `afterExecution:` tasks still run. `files_pruned`: the retention pruner deleted the execution's files.", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Restart a `FAILED` or `PAUSED` execution in place (Kestra's restart).
+///
+/// The scoped read keeps a foreign id from reaching the worker, which is
+/// unscoped; every other check is
+/// [`worker::restart_execution`](crate::worker::restart_execution)'s, made under
+/// the execution's lock, and its answer is authoritative.
+async fn restart_execution(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    Query(q): Query<RestartQuery>,
+) -> std::result::Result<Json<ExecutionDto>, ExecOpError> {
+    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    let before = st.executions.get(ctx.workspace_id.0, id).await?;
+    if q.revision.is_some() {
+        return Err(ExecOpError::Coded(
+            StatusCode::BAD_REQUEST,
+            RESTART_REVISION_UNSUPPORTED_CODE,
+            "restarting from a revision is not supported yet; it arrives with package 7b".into(),
+        ));
+    }
+    rerun_gate(&st, ctx.workspace_id.0, ctx.principal.user_id.0, &before).await?;
+    match crate::worker::restart_execution(&st.db.pool, id).await? {
+        crate::worker::Restarted::Done => {}
+        crate::worker::Restarted::Refused(r) => {
+            return Err(ExecOpError::from_restart_refusal(id, r));
+        }
+    }
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "workflow_execution:restart",
+        "workflow_execution",
+        Some(id.to_string()),
+        serde_json::json!({ "from_state": before.execution.state }),
+    ));
+    let detail = st.executions.get(ctx.workspace_id.0, id).await?;
+    Ok(Json(ExecutionDto::new(
+        detail,
+        true,
+        st.trigger_flags.worker_enabled,
+    )))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/{id}/task-runs/{task_run_id}/state",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Execution id"),
+        ("task_run_id" = Uuid, Path, description = "Task run id"),
+    ),
+    request_body = StateChangeBody,
+    responses(
+        (status = 200, description = "The task run took the state (Kestra's mark-as): its outputs are kept, its ancestors are reopened and the execution runs on from `RESTARTED` (or ends `CANCELLED` for a `CANCELLED` target), with the label `system.restarted: true`. The body is the execution's detail afterwards.", body = ExecutionDto),
+        (status = 400, description = "The body is not valid JSON, is not `{\"state\": ...}` with exactly one of `SUCCESS`, `WARNING`, `FAILED`, `CANCELLED` (upper case), or has another field (always 400, never 422); or the execution is a **loop iteration** (no code; the message names its loop root); or the flow runs `egret.sql` and the caller is not its creator (no code; the tasks run as the creator, as for a replay)", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace, or no task run of it with this id (one removed by a restart counts as none); or its flow is in the trash or was deleted (as for a replay)", body = egret_core::http::ErrorBody),
+        (status = 409, description = "Nothing is written. The flow is disabled (no code, as for a replay). The worker then checks, in this order: loop iteration (the 400 above), `files_pruned`, `after_execution_running` (the execution has ended but its `afterExecution:` still runs), `not_restartable` (the execution has not ended, or ended `KILLED`; the message names its state), then the run itself: no such run (the 404 above), `state_unchanged` (the run is already in that state), `inside_working_directory` (the run is inside a `WorkingDirectory`; restart the execution instead).", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Set one task run's state (Kestra's mark-as).
+///
+/// The scoped read keeps a foreign execution, and a run that is not this
+/// execution's, from reaching the worker. The worker decides the rest under
+/// the execution's lock. The audit record's `from_state` is the RUN's state
+/// before the change.
+async fn set_task_run_state(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id, task_run_id)): Path<(String, Uuid, Uuid)>,
+    body: std::result::Result<Json<StateChangeBody>, axum::extract::rejection::JsonRejection>,
+) -> std::result::Result<Json<ExecutionDto>, ExecOpError> {
+    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    let Json(body) = body.map_err(state_change_body_refusal)?;
+    let before = st.executions.get(ctx.workspace_id.0, id).await?;
+    let run = before
+        .runs
+        .iter()
+        .find(|r| r.id == task_run_id)
+        .ok_or_else(|| Error::NotFound("task run".into()))?;
+    let from_state = run.state.clone();
+    let target = body.state.run_state();
+    rerun_gate(&st, ctx.workspace_id.0, ctx.principal.user_id.0, &before).await?;
+    match crate::worker::set_task_run_state(&st.db.pool, id, task_run_id, target).await? {
+        Ok(()) => {}
+        Err(r) => return Err(ExecOpError::from_state_change_refusal(id, r)),
+    }
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "workflow_execution:set_task_run_state",
+        "workflow_execution",
+        Some(id.to_string()),
+        serde_json::json!({
+            "from_state": from_state,
+            "task_run_id": task_run_id,
+            "to_state": target.wire(),
+        }),
+    ));
+    let detail = st.executions.get(ctx.workspace_id.0, id).await?;
+    Ok(Json(ExecutionDto::new(
+        detail,
+        true,
+        st.trigger_flags.worker_enabled,
+    )))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/{id}/status",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Execution id"),
+    ),
+    request_body = StateChangeBody,
+    responses(
+        (status = 200, description = "The execution took the status (Kestra's change-state): the state is appended to its history and the execution settles on from it; no task run is touched and no label is added. The body is its detail afterwards.", body = ExecutionDto),
+        (status = 400, description = "The body is not valid JSON, is not `{\"state\": ...}` with exactly one of `SUCCESS`, `WARNING`, `FAILED`, `CANCELLED` (upper case), or has another field (always 400, never 422); or the execution is a **loop iteration** (no code; the message names its loop root)", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed", body = egret_core::http::ErrorBody),
+        (status = 409, description = "Nothing is written. The worker checks, in this order: loop iteration (the 400 above), `not_restartable` (the execution has not ended, or ended `KILLED`; the message names its state), `after_execution_running` (the execution has ended but its `afterExecution:` still runs), `state_unchanged` (it is already in that state). `files_pruned` does not apply here: nothing runs again.", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Change a finished execution's status (Kestra's change-state).
+async fn set_execution_status(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    body: std::result::Result<Json<StateChangeBody>, axum::extract::rejection::JsonRejection>,
+) -> std::result::Result<Json<ExecutionDto>, ExecOpError> {
+    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    let Json(body) = body.map_err(state_change_body_refusal)?;
+    let before = st.executions.get(ctx.workspace_id.0, id).await?;
+    let target = body.state.run_state();
+    match crate::worker::set_execution_status(&st.db.pool, id, target).await? {
+        Ok(()) => {}
+        Err(r) => return Err(ExecOpError::from_state_change_refusal(id, r)),
+    }
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "workflow_execution:set_status",
+        "workflow_execution",
+        Some(id.to_string()),
+        serde_json::json!({
+            "from_state": before.execution.state,
+            "to_state": target.wire(),
+        }),
+    ));
+    let detail = st.executions.get(ctx.workspace_id.0, id).await?;
+    Ok(Json(ExecutionDto::new(
+        detail,
+        true,
+        st.trigger_flags.worker_enabled,
+    )))
+}
+
 /// One namespace of the workspace (W7d spec §3.1). egret has no namespace
 /// table: a namespace exists while a flow that is not deleted, a live
 /// namespace file or directory (even an empty one) or a live KV key is in
@@ -4070,6 +4479,18 @@ pub fn management_router() -> Router<WorkflowState> {
             "/ws/{workspace}/workflows/executions/{id}/kill",
             post(kill_execution),
         )
+        .route(
+            "/ws/{workspace}/workflows/executions/{id}/restart",
+            post(restart_execution),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/{id}/task-runs/{task_run_id}/state",
+            post(set_task_run_state),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/{id}/status",
+            post(set_execution_status),
+        )
 }
 
 #[derive(utoipa::OpenApi)]
@@ -4102,6 +4523,9 @@ pub fn management_router() -> Router<WorkflowState> {
         resume_execution,
         replay_execution,
         kill_execution,
+        restart_execution,
+        set_task_run_state,
+        set_execution_status,
         list_namespaces,
         get_namespace,
         namespace_dependencies,

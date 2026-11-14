@@ -1,4 +1,4 @@
-import type { ExecutionDto } from "@/api/generated/model";
+import type { ExecutionDto, ExecutionListItemDto } from "@/api/generated/model";
 import type { Enablement } from "@/components/workflows/draftState";
 import { executionLive, isTerminalState, type LiveExecution } from "@/components/workflows/executionState";
 
@@ -125,4 +125,93 @@ export function resumeFeedback(answeredState: string): { tone: "success" | "warn
     return { tone: "warning", message: `Resumed, but the execution then ended ${stateWord(answeredState)}.` };
   }
   return { tone: "success", message: "Resumed the execution" };
+}
+
+/**
+ * RESTART, CHANGE STATUS AND CHANGE STATE (execution-ops spec D10, D11, D14).
+ * All need `workflow:manage`, which hides them like the others.
+ */
+
+/** The four states a state change can set (`StateChangeTarget`), in the order the select lists them. */
+const CHANGE_TARGETS = ["SUCCESS", "WARNING", "FAILED", "CANCELLED"] as const;
+export type ChangeTarget = (typeof CHANGE_TARGETS)[number];
+
+/** The targets a select offers: the four, minus the state the run or execution is in. */
+export function changeTargets(current: string): ChangeTarget[] {
+  return CHANGE_TARGETS.filter((s) => s !== current);
+}
+
+type LoopFields = Pick<ExecutionListItemDto, "parent_execution_id" | "loop_index">;
+
+/** A loop iteration: a child with a `loop_index`. A subflow child has a parent but no index. */
+export function isLoopIteration(execution: LoopFields): boolean {
+  return execution.parent_execution_id != null && execution.loop_index != null;
+}
+
+const iterationReason = (execution: LoopFields, action: string) =>
+  `This is an iteration of a loop. ${action} the loop's execution ${execution.parent_execution_id} instead`;
+
+/** Restart is shown for an execution that failed or waits (D10); a running or finished-well one has nothing to restart. */
+export function showsRestart(execution: Pick<ExecutionDto, "state">): boolean {
+  return execution.state === "FAILED" || execution.state === "PAUSED";
+}
+
+/** Restart, for an execution that `showsRestart`: not a loop iteration, which only its loop's execution restarts. */
+export function canRestart(execution: LoopFields): Enablement {
+  return isLoopIteration(execution) ? { ok: false, reason: iterationReason(execution, "Restart") } : { ok: true };
+}
+
+/** Change status and Change state: an ended execution, `KILLED` excepted (D11). */
+export function showsChangeStatus(execution: Pick<ExecutionDto, "state">): boolean {
+  return isTerminalState(execution.state) && execution.state !== "KILLED";
+}
+
+export const showsChangeTaskRunState = showsChangeStatus;
+
+/** Change status, for an execution that `showsChangeStatus`. */
+export function canChangeStatus(execution: LoopFields): Enablement {
+  return isLoopIteration(execution) ? { ok: false, reason: iterationReason(execution, "Change the status of") } : { ok: true };
+}
+
+/** Change state of a task run, for an execution that `showsChangeTaskRunState`. */
+export function canChangeTaskRunState(execution: LoopFields): Enablement {
+  return isLoopIteration(execution) ? { ok: false, reason: iterationReason(execution, "Change the task run state in") } : { ok: true };
+}
+
+const NOT_RESTARTABLE = "The execution has not ended, or it was killed, so it cannot be changed. Refresh to see its latest state.";
+const AFTER_EXECUTION_RUNNING = "The afterExecution tasks are still running. Try again once they have ended.";
+const FILES_PRUNED = "The execution's files were deleted, so it cannot be re-run. Replay it instead.";
+
+/** One sentence for each coded 409 of the restart route; `null` for any other answer. */
+export function restartRefusal(code: string | undefined): string | null {
+  switch (code) {
+    case "not_restartable":
+      return "Only a failed or paused execution can be restarted. Refresh to see its latest state.";
+    case "nothing_to_restart":
+      return "There is no failed task to restart. Refresh to see the execution's latest state.";
+    case "after_execution_running":
+      return AFTER_EXECUTION_RUNNING;
+    case "files_pruned":
+      return FILES_PRUNED;
+    default:
+      return null;
+  }
+}
+
+/** One sentence for each coded 409 of the status and task-run-state routes; `null` for any other answer. */
+export function stateChangeRefusal(kind: "status" | "task_run", code: string | undefined): string | null {
+  switch (code) {
+    case "not_restartable":
+      return NOT_RESTARTABLE;
+    case "after_execution_running":
+      return AFTER_EXECUTION_RUNNING;
+    case "files_pruned":
+      return FILES_PRUNED;
+    case "state_unchanged":
+      return kind === "status" ? "The execution is already in that state. Pick another." : "The task run is already in that state. Pick another.";
+    case "inside_working_directory":
+      return "This task run is inside a WorkingDirectory block. Restart the execution instead, which re-runs the block whole.";
+    default:
+      return null;
+  }
 }

@@ -48,6 +48,7 @@ pub mod exit;
 mod flowable;
 pub(crate) mod kill;
 mod plan;
+pub mod restart;
 mod retry;
 mod state;
 pub(crate) mod update;
@@ -60,6 +61,7 @@ pub use plan::{
     build_plan, loop_until_gap, pause_gap, plan_stored, DagNode, Plan, PlanError, PlanTask,
     RetryBehavior, RetryDelay, RetryPolicy, TaskIx, TaskKind,
 };
+pub use restart::{mark_as, restart, RestartCommands, RestartRefusal};
 pub use state::{
     apply, Attempt, ExecutionMeta, ExecutionState, Resume, RunIx, RunState, TaskRun, Tick,
     WorkingDirPhase,

@@ -2,13 +2,15 @@ import { lazy, useId, useMemo, useState, type ReactNode } from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { CircleStop, History, Loader2, Play, RotateCw } from "lucide-react";
+import { CircleStop, History, Loader2, Pencil, Play, RotateCcw, RotateCw } from "lucide-react";
 import { ApiError } from "@/api/client";
 import {
   useWorkflowGetExecution,
   useWorkflowKillExecution,
   useWorkflowReplayExecution,
   useWorkflowResumeExecution,
+  useWorkflowRestartExecution,
+  useWorkflowSetExecutionStatus,
 } from "@/api/generated/workflow/workflow";
 import type { ExecutionDto, TaskRunDto } from "@/api/generated/model";
 import { EmptyState } from "@/components/explore/EmptyState";
@@ -41,15 +43,24 @@ import { LogView } from "@/components/workflows/executions/logs/LogView";
 import ExecutionOutputsTab from "@/components/workflows/executions/outputs/ExecutionOutputsTab";
 import { OutputsTree } from "@/components/workflows/executions/outputs/OutputsTree";
 import {
+  canChangeStatus,
   canKill,
   canReplay,
+  canRestart,
   canResume,
+  type ChangeTarget,
   killFeedback,
+  restartRefusal,
   resumeFeedback,
+  showsChangeStatus,
   showsKill,
   showsReplay,
+  showsRestart,
   showsResume,
+  stateChangeRefusal,
 } from "@/components/workflows/executions/actions";
+import { ChangeStateDialog } from "@/components/workflows/executions/ChangeStateDialog";
+import { runExecutionAction, useRefreshExecution } from "@/components/workflows/executions/useExecutionAction";
 import { nextExecutionPollMs, staleNote, useNow } from "@/components/workflows/executions/polling";
 import {
   ESTIMATED_DURATION_TITLE,
@@ -203,7 +214,7 @@ function ExecutionFrame({ ws, tab, execution }: { ws: string; tab: ExecutionTab;
           <TabsTrigger value="outputs">Outputs</TabsTrigger>
         </TabsList>
         <TabsContent value="overview" className="min-h-0 flex-1 overflow-auto p-4">
-          <ExecutionOverview ws={ws} execution={execution} now={now} />
+          <ExecutionOverview ws={ws} execution={execution} now={now} canManage={execution.can_manage} />
         </TabsContent>
         <TabsContent value="topology" className="min-h-0 flex-1 overflow-auto p-4">
           <LazyRouteArea area="Topology" fallback={<Skeleton className="h-[32rem] w-full" />}>
@@ -344,7 +355,7 @@ function ExecutionHeader({ ws, execution, now }: { ws: string; execution: Execut
   );
 }
 
-type Pending = "resume" | "replay" | "kill" | null;
+type Pending = "resume" | "replay" | "kill" | "restart" | "status" | null;
 
 /** The kill route's 409 code: the execution ended before the kill reached it (workflow kill spec D3). */
 const EXECUTION_TERMINATED = "execution_terminated";
@@ -358,9 +369,12 @@ const KILL_NOT_APPLIED = "kill_not_applied";
 function ExecutionActions({ ws, execution, now }: { ws: string; execution: ExecutionDto; now: number }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const refresh = useRefreshExecution(ws, execution.id);
   const resume = useWorkflowResumeExecution();
   const replay = useWorkflowReplayExecution();
   const kill = useWorkflowKillExecution();
+  const restart = useWorkflowRestartExecution();
+  const setStatus = useWorkflowSetExecutionStatus();
   const [open, setOpen] = useState<Pending>(null);
   // "Also kill subflow executions": on by default, and on again each time the dialog opens.
   const [cascade, setCascade] = useState(true);
@@ -376,18 +390,42 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
   const afterRunKill = isTerminalState(execution.state);
   const killShown = showsKill(execution, now);
   const killState = canKill(execution);
+  const restartShown = showsRestart(execution);
+  const restartState = canRestart(execution);
+  const statusShown = showsChangeStatus(execution);
+  const statusState = canChangeStatus(execution);
 
   const runResume = async () => {
     const res = await resume.mutateAsync({ workspace: ws, id: execution.id });
     if (res.status !== 200) throw new Error("The execution could not be resumed. Try again.");
-    void queryClient.invalidateQueries({ queryKey: workflowsKeys.execution(execution.id) });
-    void queryClient.invalidateQueries({ queryKey: workflowsKeys.executions(ws) });
+    refresh();
     // The page stays, so a toast confirms it (FE-ACTION-2), in terms of the
     // state the route answered, not of what was asked.
     const feedback = resumeFeedback(res.data.state);
     if (feedback.tone === "success") toast.success(feedback.message);
     else toast.warning(feedback.message);
   };
+
+  const runRestart = () =>
+    runExecutionAction({
+      call: () => restart.mutateAsync({ workspace: ws, id: execution.id }),
+      expected: 200,
+      failure: "The execution could not be restarted. Try again.",
+      refresh,
+      refusal: restartRefusal,
+      // Live again, so polling resumes from the refetched state.
+      onSuccess: () => toast.success("Restarted the execution"),
+    });
+
+  const runSetStatus = (state: ChangeTarget) =>
+    runExecutionAction({
+      call: () => setStatus.mutateAsync({ workspace: ws, id: execution.id, data: { state } }),
+      expected: 200,
+      failure: "The status could not be changed. Try again.",
+      refresh,
+      refusal: (code) => stateChangeRefusal("status", code),
+      onSuccess: () => toast.success(`Changed the status to ${state.charAt(0)}${state.slice(1).toLowerCase()}`),
+    });
 
   const runReplay = async () => {
     const res = await replay.mutateAsync({ workspace: ws, id: execution.id });
@@ -398,10 +436,6 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
   };
 
   const runKill = async () => {
-    const refresh = () => {
-      void queryClient.invalidateQueries({ queryKey: workflowsKeys.execution(execution.id) });
-      void queryClient.invalidateQueries({ queryKey: workflowsKeys.executions(ws) });
-    };
     // Kill of an execution that has ended: it can only reach its afterExecution run.
     try {
       const res = await kill.mutateAsync({ workspace: ws, id: execution.id, params: { cascade } });
@@ -437,6 +471,18 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
             Resume
           </ReasonButton>
         ) : null}
+        {restartShown ? (
+          <ReasonButton enablement={restartState} reasonId={`${reasonsId}-restart`} onClick={() => setOpen("restart")}>
+            <RotateCcw aria-hidden />
+            Restart
+          </ReasonButton>
+        ) : null}
+        {statusShown ? (
+          <ReasonButton enablement={statusState} reasonId={`${reasonsId}-status`} variant="outline" onClick={() => setOpen("status")}>
+            <Pencil aria-hidden />
+            Change status
+          </ReasonButton>
+        ) : null}
         {replayShown ? (
           <ReasonButton enablement={replayState} reasonId={`${reasonsId}-replay`} variant="outline" onClick={() => setOpen("replay")}>
             <History aria-hidden />
@@ -462,6 +508,8 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
       <DisabledReasons
         actions={[
           ...(resumeShown ? [{ id: `${reasonsId}-resume`, label: "Resume", enablement: resumeState }] : []),
+          ...(restartShown ? [{ id: `${reasonsId}-restart`, label: "Restart", enablement: restartState }] : []),
+          ...(statusShown ? [{ id: `${reasonsId}-status`, label: "Change status", enablement: statusState }] : []),
           ...(replayShown ? [{ id: `${reasonsId}-replay`, label: "Replay", enablement: replayState }] : []),
           ...(killShown ? [{ id: `${reasonsId}-kill`, label: "Kill", enablement: killState }] : []),
         ]}
@@ -474,6 +522,24 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
         confirmLabel="Resume"
         onConfirm={runResume}
         fallbackError="The execution could not be resumed. Try again."
+      />
+      <ConfirmAction
+        open={open === "restart"}
+        onOpenChange={(o) => setOpen(o ? "restart" : null)}
+        title="Restart this execution?"
+        description="The failed tasks run again in this same execution, and the tasks that succeeded keep their results. The execution keeps its id."
+        confirmLabel="Restart"
+        onConfirm={runRestart}
+        fallbackError="The execution could not be restarted. Try again."
+      />
+      <ChangeStateDialog
+        open={open === "status"}
+        onOpenChange={(o) => setOpen(o ? "status" : null)}
+        title="Change the status of this execution?"
+        description="Sets the execution to the state you pick. Its task runs keep their own states."
+        current={execution.state}
+        onSubmit={runSetStatus}
+        fallbackError="The status could not be changed. Try again."
       />
       <ConfirmAction
         open={open === "replay"}
