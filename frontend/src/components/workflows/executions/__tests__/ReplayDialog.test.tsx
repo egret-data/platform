@@ -241,3 +241,84 @@ describe("ReplayDialog: restart", () => {
     expect(toast.success).not.toHaveBeenCalled();
   });
 });
+
+describe("ReplayDialog: the review's fixes (C1 round 1)", () => {
+  const FILES = "  - id: who\n    type: STRING\n  - id: doc\n    type: FILE\n  - id: extra\n    type: FILE\n    required: false";
+  const STORED = "kestra:///company/team/hello/old/doc.txt";
+
+  it("says why the other versions are unavailable when the flow was deleted for good (restart)", async () => {
+    new Server();
+    renderDialog({ mode: "restart", execution: execution({ flow_id: null }) });
+    const d = await dialog();
+    expect(within(d).getByRole("radio", { name: "The flow's current version" })).toBeDisabled();
+    expect(within(d).getByRole("radio", { name: "A published version" })).toBeDisabled();
+    expect(within(d).getByText("The flow was deleted permanently, so only this run's version is available")).toBeInTheDocument();
+  });
+
+  it("disables the published versions, saying it is loading, until the list arrives", async () => {
+    new Server();
+    renderDialog();
+    const d = await dialog();
+    const radio = within(d).getByRole("radio", { name: "A published version" });
+    expect(radio).toBeDisabled();
+    expect(radio).toHaveAccessibleDescription("Loading the published versions");
+    await waitFor(() => expect(radio).toBeEnabled());
+  });
+
+  it("opens Change inputs and shows the error when a required input is missing, instead of doing nothing", async () => {
+    const server = new Server();
+    const src = sourceWith("  - id: who\n    type: STRING\n  - id: token\n    type: SECRET");
+    renderDialog({ execution: execution({ source: src, inputs: { who: "world", token: "******" } }) });
+    const d = await dialog();
+    await userEvent.click(within(d).getByRole("button", { name: "Change inputs" }));
+    const who = await within(d).findByLabelText(/who/);
+    await userEvent.type(who, "!");
+    // Collapse the section, then send: the secret was not entered again.
+    await userEvent.click(within(d).getByRole("button", { name: "Change inputs" }));
+    expect(within(d).queryByLabelText(/who/)).toBeNull();
+    await userEvent.click(within(d).getByRole("button", { name: "Replay" }));
+    expect(await within(d).findByLabelText(/token/)).toBeInTheDocument();
+    expect(within(d).getAllByText(/required|Enter/i).length).toBeGreaterThan(0);
+    expect(server.posts(REPLAY)).toHaveLength(0);
+  });
+
+  it("keeps the edited inputs that the other source also declares when the source is switched", async () => {
+    new Server();
+    renderDialog({ execution: execution({ source: sourceWith(INPUTS), inputs: { who: "world" } }) });
+    const d = await dialog();
+    await userEvent.click(within(d).getByRole("button", { name: "Change inputs" }));
+    const who = await within(d).findByLabelText(/who/);
+    await userEvent.clear(who);
+    await userEvent.type(who, "moon");
+    await userEvent.click(within(d).getByRole("radio", { name: "The flow's current version" }));
+    await waitFor(() => expect(within(d).getByRole("button", { name: "Change inputs" })).toBeEnabled());
+    expect(await within(d).findByLabelText(/who/)).toHaveValue("moon");
+  });
+
+  it("sends a FILE input left alone as its old kestra:// value, in JSON", async () => {
+    const server = new Server();
+    renderDialog({ execution: execution({ source: sourceWith(FILES), inputs: { who: "world", doc: STORED } }) });
+    const d = await dialog();
+    await userEvent.click(within(d).getByRole("button", { name: "Change inputs" }));
+    const who = await within(d).findByLabelText(/who/);
+    await userEvent.type(who, "!");
+    await userEvent.click(within(d).getByRole("button", { name: "Replay" }));
+    await waitFor(() => expect(server.posts(REPLAY)).toHaveLength(1));
+    expect(server.posts(REPLAY)[0].body).toEqual({ inputs: { who: "world!", doc: STORED } });
+  });
+
+  it("sends the old value of an unchanged FILE input beside a new file, as multipart", async () => {
+    const server = new Server();
+    renderDialog({ execution: execution({ source: sourceWith(FILES), inputs: { who: "world", doc: STORED } }) });
+    const d = await dialog();
+    await userEvent.click(within(d).getByRole("button", { name: "Change inputs" }));
+    const extra = await within(d).findByLabelText(/extra/);
+    await userEvent.upload(extra, new File(["x"], "extra.txt", { type: "text/plain" }));
+    await userEvent.click(within(d).getByRole("button", { name: "Replay" }));
+    await waitFor(() => expect(server.posts(REPLAY)).toHaveLength(1));
+    const body = server.posts(REPLAY)[0].body as FormData;
+    expect(body).toBeInstanceOf(FormData);
+    expect(body.get("doc")).toBe(STORED);
+    expect((body.get("extra") as File).name).toBe("extra.txt");
+  });
+});

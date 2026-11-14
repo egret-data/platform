@@ -230,7 +230,7 @@ export function replayRefusal(code: string | undefined): string | null {
     case "invalid_source":
       return INVALID_SOURCE;
     case "replay_breakpoints_unsupported":
-      return "Replaying with breakpoints is not supported.";
+      return "Replaying with breakpoints is not supported. Replay without breakpoints.";
     case "replay_task_not_in_source":
       return TASK_NOT_IN_SOURCE;
     case "flow_version_not_found":
