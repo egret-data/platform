@@ -1270,10 +1270,25 @@ async fn recompile_locked_service_in_tx(
     // SP3d: the migration gate's verdict rides the same row. The compile has
     // already succeeded, so a gate error is logged and stored as NULL; it
     // must never abort the compile.
-    let migration_complete = match crate::ep_gate::ep_gate_via_tx(tx, service_id).await {
-        Ok(v) => Some(v.complete),
+    // The gate runs in a SAVEPOINT: a DB-level failure would otherwise leave
+    // the compile's transaction aborted (25P02) and fail the record below.
+    let migration_complete = match sqlx::Acquire::begin(&mut **tx).await {
+        Ok(mut sp) => match crate::ep_gate::ep_gate_via_tx(&mut sp, service_id).await {
+            Ok(v) => match sp.commit().await {
+                Ok(()) => Some(v.complete),
+                Err(e) => {
+                    tracing::warn!(service_id, error = %e, "migration gate release failed; compile stands");
+                    None
+                }
+            },
+            Err(e) => {
+                let _ = sp.rollback().await;
+                tracing::warn!(service_id, error = %e, "migration gate verdict skipped; compile stands");
+                None
+            }
+        },
         Err(e) => {
-            tracing::warn!(service_id, error = %e, "migration gate verdict skipped; compile stands");
+            tracing::warn!(service_id, error = %e, "migration gate savepoint skipped; compile stands");
             None
         }
     };
