@@ -1414,61 +1414,95 @@ fn set_list(t: &str) -> &str {
     &t[start..stop]
 }
 
+/// Does this `SET` list write the `state` column: `state =` in it, or
+/// `state` in a row-constructor target `(…, state, …) = (…)`?
+fn set_writes_state(set: &str) -> bool {
+    let assign = regex::Regex::new(r"(?i)\bstate\s*=").unwrap();
+    let tuple = regex::Regex::new(r"(?is)\([^()]*\bstate\b[^()]*\)\s*=").unwrap();
+    assign.is_match(set) || tuple.is_match(set)
+}
+
+/// An `INSERT`'s `ON CONFLICT … DO UPDATE` clause, from after `DO UPDATE`
+/// on (still inside the statement's SQL, so [`code_only`] reads it). `None`
+/// when there is no upsert.
+fn upsert_clause(t: &str) -> Option<&str> {
+    regex::Regex::new(r"(?is)\bON\s+CONFLICT\b.*?\bDO\s+UPDATE\b")
+        .unwrap()
+        .find(t)
+        .map(|m| &t[m.end()..])
+}
+
 /// Does this statement write the `state` column?
 ///
-/// - An `UPDATE` writes it when `state =` appears in its `SET` list, or
-///   `state` appears in a row-constructor target `(…, state, …) = (…)`. A
-///   `WHERE … state = 'RUNNING'` only reads it.
-/// - An `INSERT` writes it when `state` is in its column list.
+/// - An `UPDATE` writes it when its `SET` list does ([`set_writes_state`]).
+///   A `WHERE … state = 'RUNNING'` only reads it.
+/// - An `INSERT` writes it when `state` is in its column list, or when its
+///   `ON CONFLICT … DO UPDATE SET` list writes it (final review M4 a).
 fn writes_state(w: &Write) -> bool {
     let t = &w.text;
     if t.trim_start().to_ascii_uppercase().starts_with("UPDATE") {
-        let set = set_list(t);
-        let assign = regex::Regex::new(r"(?i)\bstate\s*=").unwrap();
-        let tuple = regex::Regex::new(r"(?is)\([^()]*\bstate\b[^()]*\)\s*=").unwrap();
-        assign.is_match(set) || tuple.is_match(set)
+        set_writes_state(set_list(t))
     } else {
         let open = t.find('(').unwrap_or(0);
         let close = t[open..].find(')').map(|i| open + i).unwrap_or(t.len());
         regex::Regex::new(r"(?i)\bstate\b")
             .unwrap()
             .is_match(&t[open..close])
+            || upsert_clause(t).is_some_and(|c| set_writes_state(set_list(c)))
+    }
+}
+
+/// Does this `UPDATE` (or `DO UPDATE`) clause stamp through `stamp_set!`?
+/// The macro must be a CALL in the code around the SQL, not inside a string
+/// or a comment (review mutation M4), and its first two arguments must be
+/// the placeholders that `state =` and `history =` bind (review mutation
+/// M5). `clause` begins inside the SQL literal.
+fn set_stamped(clause: &str) -> bool {
+    if !code_only(clause).contains("stamp_set!(") {
+        return false;
+    }
+    let set = set_list(clause);
+    let placeholder = |col: &str| {
+        regex::Regex::new(&format!(r"(?i)\b{col}\s*=\s*(\$\d+)"))
+            .unwrap()
+            .captures(set)
+            .map(|c| c[1].to_string())
+    };
+    let args = regex::Regex::new(r#"stamp_set!\(\s*"(\$\d+)"\s*,\s*"(\$\d+)""#)
+        .unwrap()
+        .captures(clause)
+        .map(|c| (c[1].to_string(), c[2].to_string()));
+    match (placeholder("state"), placeholder("history"), args) {
+        (Some(s), Some(h), Some((a, b))) => s == a && h == b,
+        _ => false,
+    }
+}
+
+/// An `INSERT`'s upsert is an `UPDATE`: when its `DO UPDATE SET` writes
+/// `state`, it must stamp like one (final review M4 a). True when there is
+/// no upsert or it leaves `state` alone.
+fn upsert_stamped(w: &Write) -> bool {
+    match upsert_clause(&w.text) {
+        Some(c) if set_writes_state(set_list(c)) => set_stamped(c),
+        _ => true,
     }
 }
 
 /// Does it stamp the timestamps through `worker::stamps`?
 ///
-/// - The macro must be a CALL: it must appear in the code around the SQL, not
-///   inside a string or a comment (review mutation M4).
-/// - For an `UPDATE`, `stamp_set!`'s first two arguments must be the
-///   placeholders that `state =` and `history =` bind (review mutation M5).
+/// - An `UPDATE` through `stamp_set!` ([`set_stamped`]).
+/// - An `INSERT` through `stamp_columns!` and `stamp_values!`, and its
+///   upsert, if it writes `state`, through `stamp_set!` ([`upsert_stamped`]).
 fn stamps(w: &Write) -> bool {
-    let code = code_only(&w.text);
     if w.text
         .trim_start()
         .to_ascii_uppercase()
         .starts_with("UPDATE")
     {
-        if !code.contains("stamp_set!(") {
-            return false;
-        }
-        let set = set_list(&w.text);
-        let placeholder = |col: &str| {
-            regex::Regex::new(&format!(r"(?i)\b{col}\s*=\s*(\$\d+)"))
-                .unwrap()
-                .captures(set)
-                .map(|c| c[1].to_string())
-        };
-        let args = regex::Regex::new(r#"stamp_set!\(\s*"(\$\d+)"\s*,\s*"(\$\d+)""#)
-            .unwrap()
-            .captures(&w.text)
-            .map(|c| (c[1].to_string(), c[2].to_string()));
-        match (placeholder("state"), placeholder("history"), args) {
-            (Some(s), Some(h), Some((a, b))) => s == a && h == b,
-            _ => false,
-        }
+        set_stamped(&w.text)
     } else {
-        code.contains("stamp_columns!(") && code.contains("stamp_values!(")
+        let code = code_only(&w.text);
+        code.contains("stamp_columns!(") && code.contains("stamp_values!(") && upsert_stamped(w)
     }
 }
 
@@ -1551,7 +1585,12 @@ const STAMPED: [&str; 4] = ["state", "history", "started_at", "ended_at"];
 /// - `state`, `history`, `started_at` and `ended_at` are ALL in the columns,
 ///   and each one's item is exactly `<alias>.<that same column>`;
 /// - the four aliases are one alias;
-/// - the `FROM` binds that alias to `workflow.<t>`, the table inserted into.
+/// - the `FROM` binds that alias DIRECTLY to `workflow.<t>`, the table
+///   inserted into: `FROM workflow.<t> o` or `JOIN workflow.<t> o` at the
+///   top level, not inside a derived table `(SELECT … ) o` (final review
+///   M4 b);
+/// - an `ON CONFLICT … DO UPDATE SET` that writes `state` stamps it like any
+///   `UPDATE` ([`upsert_stamped`], final review M4 a).
 ///
 /// A state from a bind, a literal, another alias, an alias that is not that
 /// table (an `unnest` of bound arrays), a swapped column, or a missing
@@ -1606,11 +1645,18 @@ fn copies_verbatim(w: &Write) -> bool {
         }
     }
     let alias = alias.expect("four columns were read");
-    regex::Regex::new(&format!(
-        r"(?i)\bworkflow\s*\.\s*{table}\s+(?:AS\s+)?{alias}\b"
+    let source = &rest[from..];
+    let bound = regex::Regex::new(&format!(
+        r"(?i)\b(?:FROM|JOIN)\s+workflow\s*\.\s*{table}\s+(?:AS\s+)?{alias}\b"
     ))
     .unwrap()
-    .is_match(&rest[from..])
+    .find_iter(source)
+    .any(|m| {
+        let before = &source[..m.start()];
+        before.matches('(').count() == before.matches(')').count()
+            && before.matches('\'').count().is_multiple_of(2)
+    });
+    bound && upsert_stamped(w)
 }
 
 fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -1655,6 +1701,10 @@ fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 ///   out. A copy that CHANGES a copied row's state must do it with a later
 ///   stamped write (package 7b: `restart::copy_job`'s settle, through
 ///   `persist`'s `stamp_set!`);
+/// - an `INSERT … ON CONFLICT … DO UPDATE SET` that writes `state` without
+///   `stamp_set!` on its placeholders, stamped `INSERT` and verbatim copy
+///   alike (final review M4 a), and a "copy" whose alias is a derived table
+///   `(SELECT … ) o` rather than the table itself (final review M4 b);
 /// - ANY `UPDATE`/`INSERT` of these tables built with `format!`, and any
 ///   `UPDATE {…}`/`INSERT INTO {…}` whose table name is interpolated, in
 ///   every crate. None exists today; a new one is refused rather than
@@ -1802,6 +1852,30 @@ fn every_state_write_stamps_the_timestamps() {
             "INSERT INTO workflow.task_runs (state, history, started_at, ended_at) \
              VALUES (o.state, o.history, o.started_at, o.ended_at)\";",
         ),
+        // Final review M4 (a): a verbatim copy whose upsert rewrites `state`
+        // with no `stamp_set!`.
+        copy(
+            cols,
+            "$1, m.new_ix, o.state, o.history, m.attempts, o.started_at, o.ended_at",
+            &format!("{unnest} ON CONFLICT (execution_id, run_ix) DO UPDATE SET state = $9"),
+        ),
+        // Final review M4 (b): the alias is a derived table that only READS
+        // the same table; its `state` is a bind.
+        copy(
+            cols,
+            "$1, m.new_ix, o.state, o.history, m.attempts, o.started_at, o.ended_at",
+            "unnest($3::int[], $4::int[]) AS m(old_ix, new_ix) \
+             JOIN (SELECT $5 AS state, t.history, t.started_at, t.ended_at, t.run_ix \
+                     FROM workflow.task_runs o JOIN workflow.task_runs t ON t.id = o.id \
+                    WHERE o.execution_id = $2) o ON o.run_ix = m.old_ix",
+        ),
+        copy(
+            cols,
+            "$1, m.new_ix, o.state, o.history, m.attempts, o.started_at, o.ended_at",
+            "(SELECT $5 AS state, o.history, o.started_at, o.ended_at \
+                FROM workflow.task_runs o WHERE o.execution_id = $2) o, \
+             unnest($3::int[], $4::int[]) AS m(old_ix, new_ix)",
+        ),
     ];
     for w in &not_verbatim {
         assert!(
@@ -1810,6 +1884,45 @@ fn every_state_write_stamps_the_timestamps() {
             w.text
         );
     }
+    // Final review M4 (a), on stamped INSERTs too: an `ON CONFLICT … DO
+    // UPDATE SET` that writes `state` is an UPDATE and needs `stamp_set!`
+    // with the placeholders it binds, whatever the INSERT's own columns.
+    let stamped_insert = "INSERT INTO workflow.executions (id, state, history, \", \
+         stamp_columns!(), \") VALUES ($1, $2, $3, \", stamp_values!(\"$2\", \"$3\"), \")";
+    for upsert in [
+        format!("{stamped_insert} ON CONFLICT (id) DO UPDATE SET state = $4\""),
+        format!("{stamped_insert} ON CONFLICT (id) DO UPDATE SET (state, history) = ($4, $5)\""),
+        format!(
+            "{stamped_insert} ON CONFLICT (id) DO UPDATE SET state = $4, history = $5, \", \
+             stamp_set!(\"$5\", \"$4\", \"$6\", \"$7\"), \"\""
+        ),
+        // `state` not among the columns: only the upsert writes it.
+        "INSERT INTO workflow.task_runs (id, message) VALUES ($1, $2) \
+         ON CONFLICT (id) DO UPDATE SET state = 'KILLED'\""
+            .to_string(),
+    ] {
+        let w = probe(&upsert);
+        assert!(
+            writes_state(&w) && !stamps(&w) && !copies_verbatim(&w),
+            "must be refused: {upsert}"
+        );
+    }
+    let stamped_upsert = probe(&format!(
+        "{stamped_insert} ON CONFLICT (id) DO UPDATE SET state = $4, history = $5, \", \
+         stamp_set!(\"$4\", \"$5\", \"$6\", \"$7\"), \"\""
+    ));
+    assert!(
+        writes_state(&stamped_upsert) && stamps(&stamped_upsert),
+        "an upsert that stamps its state write is allowed"
+    );
+    let quiet_upsert = probe(&format!(
+        "{stamped_insert} ON CONFLICT (id) DO UPDATE SET message = $4\""
+    ));
+    assert!(
+        stamps(&quiet_upsert),
+        "an upsert that does not touch `state` needs no `stamp_set!`"
+    );
+
     // M3: `format!` is recognised as such.
     let formatted = writes_in(
         "probe",
