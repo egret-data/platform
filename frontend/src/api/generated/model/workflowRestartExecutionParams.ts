@@ -8,9 +8,14 @@
 
 export type WorkflowRestartExecutionParams = {
 /**
- * **Not supported.** Restarting from an older revision of the flow
- * arrives with package 7b; any value answers 400
- * `restart_revision_unsupported`.
+ * `frozen` (the default: restart in place, 200), `current` (the flow's
+ * draft) or `version:N` (published version N, N ≥ 1). Any source but
+ * `frozen` restarts into a NEW execution (201).
+ * @nullable
+ */
+source?: string | null;
+/**
+ * Kestra's spelling of `version:N`: an integer N ≥ 1. Not with `source`.
  * @nullable
  */
 revision?: string | null;
