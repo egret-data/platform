@@ -1,10 +1,14 @@
 //! `ServiceAccountRepo` against a real database (migration 0229).
 //! DB-gated; self-skips only under `EGRET_ALLOW_DB_SKIP`, otherwise FAILS.
 
+#[path = "support/recorder.rs"]
+mod recorder;
+
 use egret_auth::service_accounts::{SaScope, ServiceAccountRepo};
 use egret_auth::users::UserRepo;
 use egret_core::UserId;
 use egret_metastore::Db;
+use recorder::Recorder;
 use uuid::Uuid;
 
 async fn connect() -> Option<Db> {
@@ -170,7 +174,33 @@ async fn disable_enable_and_delete() {
         "active"
     );
 
-    repo.delete(sa.user_id).await.unwrap();
+    let role: Uuid = sqlx::query_scalar(
+        "SELECT id FROM roles WHERE scope = 'platform' AND name = 'data_steward'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ('user', $1, $2, 'platform', NULL)",
+    )
+    .bind(sa.user_id)
+    .bind(role)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    assert!(repo
+        .delete(sa.user_id, &actor(), &Recorder::default())
+        .await
+        .unwrap());
+    let grants: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM access_grants WHERE principal_id = $1")
+            .bind(sa.user_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(grants, 0, "no orphan grants");
     assert!(repo.get(sa.user_id).await.unwrap().is_none());
     let n: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE id = $1")
         .bind(sa.user_id)
@@ -178,4 +208,34 @@ async fn disable_enable_and_delete() {
         .await
         .unwrap();
     assert_eq!(n, 0);
+}
+
+fn actor() -> egret_core::Principal {
+    egret_core::Principal {
+        user_id: UserId(Uuid::nil()),
+        email: "actor@test.local".into(),
+        platform_roles: vec![],
+        permissions: vec![],
+        group_ids: vec![],
+        impersonator: None,
+    }
+}
+
+#[tokio::test]
+async fn delete_of_a_missing_or_non_service_id_returns_false() {
+    let Some(db) = connect().await else { return };
+    let repo = ServiceAccountRepo::new(db.pool.clone());
+    let human = creator(&db).await;
+    for id in [Uuid::new_v4(), human] {
+        assert!(!repo
+            .delete(id, &actor(), &Recorder::default())
+            .await
+            .unwrap());
+    }
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE id = $1")
+        .bind(human)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "a human user is never deleted through the SA repo");
 }

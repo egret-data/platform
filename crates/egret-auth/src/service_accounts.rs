@@ -218,14 +218,35 @@ impl ServiceAccountRepo {
         row.as_ref().map(row_to_sa).transpose()
     }
 
-    /// Delete the `users` row; the `service_accounts` row goes by cascade.
-    pub async fn delete(&self, user_id: Uuid) -> Result<()> {
-        sqlx::query("DELETE FROM users WHERE id = $1 AND provider = 'service'")
-            .bind(user_id)
-            .execute(&self.pool)
-            .await
-            .map_err(db_err)?;
-        Ok(())
+    /// Delete a service account: `true` when it existed and was deleted,
+    /// `false` when `user_id` is not a service account (a route answers 404).
+    ///
+    /// Delegates to [`UserRepo::hard_delete`], the one delete that sweeps the
+    /// principal's `access_grants`/sessions/group rows and recompiles the
+    /// affected engine profiles, so a retired `svc-` name cannot later inherit
+    /// stale allows. The `service_accounts` row goes by cascade.
+    pub async fn delete(
+        &self,
+        user_id: Uuid,
+        actor: &egret_core::Principal,
+        recompiler: &dyn crate::groups::GroupMembershipRecompiler,
+    ) -> Result<bool> {
+        let is_sa: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM service_accounts WHERE user_id = $1)")
+                .bind(user_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(db_err)?;
+        if !is_sa {
+            return Ok(false);
+        }
+        let users = UserRepo::new(egret_metastore::Db {
+            pool: self.pool.clone(),
+        });
+        Ok(users
+            .hard_delete(UserId(user_id), actor, recompiler)
+            .await?
+            .is_some())
     }
 
     pub async fn disable(&self, user_id: Uuid) -> Result<()> {
