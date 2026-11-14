@@ -106,6 +106,13 @@ async fn gate_inputs(
         .map(|c| c.id)
         .collect();
 
+    // NB: the rule-exemptions leg counts `kind='role'` exemptions on
+    // `selector_kind='tag'` rules installation-wide (tag rules carry no catalog
+    // scope), OR-ed with catalog-scoped path rules. So this EP cannot reach
+    // `complete` while ANY role-kind tag exemption exists anywhere — its verdict
+    // depends on installation-wide state, like the clearance leg below. This is
+    // deliberate and fail-closed: a role principal still reachable through a tag
+    // rule is not yet migrated for this EP's purposes.
     let role_refs: i64 = sqlx::query_scalar(
         "SELECT \
            (SELECT count(*) FROM perm.grants g \
