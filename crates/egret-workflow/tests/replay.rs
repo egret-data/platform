@@ -623,6 +623,49 @@ async fn replay_from_a_loop_run_runs_its_iterations_anew(pool: sqlx::PgPool) {
     assert_eq!(run(&runs_of(&pool, new).await, "after").3, "SUCCESS");
 }
 
+/// S5: a copy keeps a `Loop` run's outputs, which can name files under the
+/// source's iterations, so the read rule must reach them.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_copy_reads_its_source_loop_iterations_files(pool: sqlx::PgPool) {
+    // Arrange
+    let (_db, ws, _) = setup(&pool).await;
+    let reg = Flaky::new(&[]);
+    let x = start(&pool, ws, &loop_flow()).await;
+    drive(&pool, &reg, x).await;
+    let after = run_id(&runs_of(&pool, x).await, "after");
+    let y = replay(
+        &pool,
+        ws,
+        x,
+        &loop_flow(),
+        ReplayKind::FromTaskRun(after),
+        ReplayInputs::Reuse,
+    )
+    .await
+    .expect("Y");
+    drive(&pool, &reg, y).await;
+    let iterations: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions \
+          WHERE parent_execution_id = $1 AND loop_index IS NOT NULL",
+    )
+    .bind(x)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    // Act
+    let mut conn = pool.acquire().await.unwrap();
+    let readable = egret_workflow::storage::index::readable_executions(&mut conn, ws, y)
+        .await
+        .unwrap();
+
+    // Assert
+    assert_eq!(iterations.len(), 2, "{iterations:?}");
+    for it in &iterations {
+        assert!(readable.contains(it), "{it} missing from {readable:?}");
+    }
+}
+
 // ── 6. An edited source ────────────────────────────────────────────────────
 
 #[sqlx::test(migrations = "../../migrations")]

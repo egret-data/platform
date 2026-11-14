@@ -128,6 +128,13 @@ macro_rules! readable_sql {
                   AND ((l.loop_index IS NULL AND src.id = l.parent_execution_id) \
                        OR src.id = l.replayed_from_execution_id) \
              ), \
+             chain_family(id) AS ( \
+               SELECT id FROM chain \
+               UNION \
+               SELECT e.id FROM workflow.executions e JOIN chain_family f \
+                   ON e.parent_execution_id = f.id \
+                WHERE e.loop_index IS NOT NULL AND e.workspace_id = $1 \
+             ), \
              triggers(id) AS ( \
                SELECT e.trigger_execution_id FROM workflow.executions e \
                 WHERE e.workspace_id = $1 AND e.trigger_execution_id IS NOT NULL \
@@ -150,7 +157,7 @@ macro_rules! readable_sql {
                    ON e.parent_execution_id = f.id \
                 WHERE e.loop_index IS NOT NULL AND e.workspace_id = $1 \
              ) \
-             SELECT id FROM family UNION SELECT id FROM chain UNION SELECT id FROM triggers \
+             SELECT id FROM family UNION SELECT id FROM chain_family UNION SELECT id FROM triggers \
              UNION SELECT id FROM trigger_family"
         )
     };
@@ -167,8 +174,11 @@ macro_rules! readable_sql {
 ///   Kestra OSS allows. Still one trigger level: the trigger's own trigger is
 ///   never in the set.
 ///
-/// The chain's own loop iterations are NOT in the set: the family is taken
-/// of R (and of each trigger) only. Empty when `execution` is not in `workspace`.
+/// The chain's own loop iterations ARE in the set (`chain_family`): a copy
+/// keeps a `Loop` run's outputs (package 7b), and those can name files under
+/// the source's iterations. The pruner's protected set grows with it. The
+/// triggers stay one level, taken from the chain itself. Empty when
+/// `execution` is not in `workspace`.
 pub async fn readable_executions(
     conn: &mut PgConnection,
     workspace: Uuid,
