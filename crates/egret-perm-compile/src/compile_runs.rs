@@ -133,3 +133,11 @@ pub async fn failed_compile_runs_via(
     .fetch_all(conn)
     .await
 }
+
+/// EPs whose last compile recorded an incomplete migration (SP3d). `NULL`
+/// ("not computed yet") is deliberately not counted.
+pub async fn migration_incomplete_count_via(conn: &mut PgConnection) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar("SELECT count(*) FROM perm.compile_runs WHERE migration_complete = false")
+        .fetch_one(conn)
+        .await
+}

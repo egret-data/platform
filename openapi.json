@@ -43316,6 +43316,14 @@
               "null"
             ],
             "format": "int64"
+          },
+          "migrationIncomplete": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "EPs whose last compile recorded an incomplete migration (SP3d)."
           }
         }
       },
