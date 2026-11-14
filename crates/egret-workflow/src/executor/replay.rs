@@ -269,12 +269,15 @@ fn successors(plan: &Plan, state: &ExecutionState, chosen: RunIx) -> BTreeSet<Ru
 
     // `:157-169`: a node whose incoming edge comes from a cluster ROOT is
     // also walked from that root -- the first top-level task (`root → t1`)
-    // and the first task of an `errors:` list (`root → e1`, `:468-472`). A
-    // flowable's own root reaches its own errors, already in its subtree.
+    // and the first task of an `errors:` list (`root → e1`, `:468-472`).
+    // Only for a task NODE: the scope root links to `toEdgeTarget` (`:516`),
+    // which for a cluster is the cluster's own root, so a chosen flowable's
+    // only root edge is its own (`GraphCluster.java:74`), and its own root
+    // reaches only its own errors, already in its subtree.
     if let Some(s) = slot(plan, state, chosen) {
         let first = s.list.first() == Some(&state.runs[chosen].task);
         let top_tasks = s.parent.is_none() && s.role == Role::Tasks;
-        if first && (top_tasks || s.role == Role::Errors) {
+        if first && (top_tasks || s.role == Role::Errors) && !is_cluster(plan, state, chosen) {
             for r in under(state, s.parent) {
                 subtree(state, &mut out, r);
             }
@@ -310,6 +313,7 @@ fn successors(plan: &Plan, state: &ExecutionState, chosen: RunIx) -> BTreeSet<Ru
         for r in under(state, s.parent) {
             let t = state.runs[r].task;
             // `fillGraph` chains a task's several runs in order, then the next task's.
+            // Reachable only from a hand-built state: egret's `LoopUntil` reuses its runs.
             let same_task_later = s.shape == Shape::Chain && t == task && r > cur;
             if later.contains(&t) || same_task_later || phases.contains(&t) {
                 subtree(state, &mut out, r);
@@ -321,6 +325,34 @@ fn successors(plan: &Plan, state: &ExecutionState, chosen: RunIx) -> BTreeSet<Ru
         }
     }
     out
+}
+
+/// Whether Kestra draws `run`'s task as a `GraphCluster` (its own root,
+/// task node and end) rather than a task node. Every `FlowableTask` is one
+/// (`GraphUtils.java:453-454`), except a `Pause` with no `errors:` and no
+/// `finally:`, whose `tasksTree` is a plain `GraphTask` (`Pause.java:208-211`).
+/// A `Subflow` is a `SubflowGraphTask` and `Exit`/an update task a
+/// `GraphTask`: task nodes. A task the plan no longer has is taken as a node.
+fn is_cluster(plan: &Plan, state: &ExecutionState, run: RunIx) -> bool {
+    let Some(task) = plan.tasks.get(state.runs[run].task) else {
+        return false;
+    };
+    match &task.kind {
+        TaskKind::Runnable { .. }
+        | TaskKind::Executable { .. }
+        | TaskKind::Exit { .. }
+        | TaskKind::ExecutionUpdate { .. } => false,
+        TaskKind::Pause { .. } => !task.errors.is_empty() || !task.finally.is_empty(),
+        TaskKind::Sequential { .. }
+        | TaskKind::AllowFailure { .. }
+        | TaskKind::WorkingDirectory { .. }
+        | TaskKind::Parallel { .. }
+        | TaskKind::If { .. }
+        | TaskKind::Switch { .. }
+        | TaskKind::Dag { .. }
+        | TaskKind::Loop { .. }
+        | TaskKind::LoopUntil { .. } => true,
+    }
 }
 
 /// The `Dag` nodes that depend on `task`, transitively.
@@ -476,6 +508,12 @@ mod tests {
         let sel = replay_from(&plan, &state, run(&plan, &state, "1-3-2_par")).expect("replayable");
 
         assert_eq!(sel.keep.len(), 8, "kept {:?}", kept(&sel, &plan, &state));
+        let all: BTreeSet<RunIx> = (0..state.runs.len()).collect();
+        let keep: BTreeSet<RunIx> = sel.keep.iter().copied().collect();
+        assert_eq!(
+            ids(&plan, &state, all.difference(&keep).copied()),
+            sorted(&["1-3-2-1", "1-3-2-2_end", "2_end"])
+        );
         assert_eq!(
             reset(&sel, &plan, &state),
             sorted(&["1-3-2_par", "1-3_par", "1_par"])
@@ -567,6 +605,51 @@ mod tests {
 
         // Kestra's root rule (`GraphUtils.java:157-169`): `root → e`.
         assert_eq!(kept(&sel, &plan, &state), sorted(&["e"]));
+    }
+
+    // Fix round 1. Kestra links an `errors:` list's first entry from the
+    // scope root to `toEdgeTarget` (`GraphUtils.java:474-484`, `:516`): for a
+    // flowable that is ITS OWN cluster root, so `successors` (`:157-169`)
+    // adds only that root, never the scope's, and the scope's runs stay.
+    #[test]
+    fn a_flowable_first_in_errors_keeps_the_scope() {
+        let src = flow(&format!(
+            "tasks:\n{}{}errors:\n{}",
+            leaf("a", 2),
+            leaf("b", 2),
+            block("E", SEQ, 2, &leaf("e1", 6))
+        ));
+        let (plan, state) = driven(&src, &[("b", RunState::Failed)]);
+        assert_eq!(
+            ids(&plan, &state, 0..state.runs.len()),
+            sorted(&["a", "b", "E", "e1"])
+        );
+
+        let sel = replay_from(&plan, &state, run(&plan, &state, "E")).expect("replayable");
+
+        assert_eq!(kept(&sel, &plan, &state), sorted(&["a", "b", "E"]));
+        assert_eq!(reset(&sel, &plan, &state), sorted(&["E"]));
+    }
+
+    // Fix round 1, in a nested scope.
+    #[test]
+    fn a_flowable_first_in_a_nested_errors_keeps_the_scope() {
+        let src = flow(&format!(
+            "tasks:\n{}  - id: s\n    type: {SEQ}\n    tasks:\n{}    errors:\n{}",
+            leaf("a", 2),
+            leaf("x", 6),
+            block("E", SEQ, 6, &leaf("e1", 10))
+        ));
+        let (plan, state) = driven(&src, &[("x", RunState::Failed)]);
+        assert_eq!(
+            ids(&plan, &state, 0..state.runs.len()),
+            sorted(&["a", "s", "x", "E", "e1"])
+        );
+
+        let sel = replay_from(&plan, &state, run(&plan, &state, "E")).expect("replayable");
+
+        assert_eq!(kept(&sel, &plan, &state), sorted(&["a", "s", "x", "E"]));
+        assert_eq!(reset(&sel, &plan, &state), sorted(&["E", "s"]));
     }
 
     // 9.
