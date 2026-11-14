@@ -499,3 +499,120 @@ async fn a_success_older_than_the_stored_attempt_changes_nothing() {
     assert_eq!(run.outcome, "error");
     assert_eq!(run.error.as_deref(), Some("later failure"));
 }
+
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn migration_complete_of(e: &Env, service_id: i64) -> Option<bool> {
+    sqlx::query_scalar("SELECT migration_complete FROM perm.compile_runs WHERE service_id = $1")
+        .bind(service_id)
+        .fetch_one(&e.db.pool)
+        .await
+        .expect("read migration_complete")
+}
+
+#[tokio::test]
+async fn a_compile_records_the_migration_gate_verdict_and_recomputes_it() {
+    let _g = SERIAL.lock().await;
+    let Some(e) = env().await else { return };
+    let p = profile(&e).await;
+    let (status, body) = send(&e, "POST", "/perm/grants", Some(grant(&p, "orders"))).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // A legacy role principal on the EP's catalog: the gate is incomplete.
+    let role_grant: Uuid = sqlx::query_scalar(
+        "INSERT INTO perm.grants (effect, actions, catalog_id) \
+         VALUES ('allow'::perm.effect, ARRAY['read'], $1) RETURNING id",
+    )
+    .bind(p.catalog_id)
+    .fetch_one(&e.db.pool)
+    .await
+    .expect("role grant");
+    sqlx::query(
+        "INSERT INTO perm.grant_principals (grant_id, kind, ref, mode) \
+         VALUES ($1,'role'::perm.principal_kind,$2,'include'::perm.principal_mode)",
+    )
+    .bind(role_grant)
+    .bind(unique("runs-role"))
+    .execute(&e.db.pool)
+    .await
+    .expect("role principal");
+    recompile_service(&e.perm, &e.policy, p.service_id)
+        .await
+        .expect("recompile with a role principal");
+    assert_eq!(migration_complete_of(&e, p.service_id).await, Some(false));
+
+    // The migration's resulting row shape, then a recompile flips the verdict.
+    sqlx::query(
+        "UPDATE perm.grant_principals SET kind = 'group'::perm.principal_kind, \
+                ref = 'role:x holders' WHERE grant_id = $1",
+    )
+    .bind(role_grant)
+    .execute(&e.db.pool)
+    .await
+    .expect("migrate role");
+    recompile_service(&e.perm, &e.policy, p.service_id)
+        .await
+        .expect("recompile after migration");
+    assert_eq!(migration_complete_of(&e, p.service_id).await, Some(true));
+}
+
+async fn migration_incomplete_count(e: &Env) -> i64 {
+    let mut conn = e.db.pool.acquire().await.expect("acquire");
+    egret_perm_compile::compile_runs::migration_incomplete_count_via(&mut conn)
+        .await
+        .expect("count incomplete")
+}
+
+#[tokio::test]
+async fn the_incomplete_migration_count_rises_only_for_an_incomplete_ep() {
+    let _g = SERIAL.lock().await;
+    let Some(e) = env().await else { return };
+
+    // A complete EP: a plain grant, no legacy principal. The count is global
+    // over a shared DB, so only deltas are asserted.
+    let before = migration_incomplete_count(&e).await;
+    let complete = profile(&e).await;
+    let (status, body) = send(&e, "POST", "/perm/grants", Some(grant(&complete, "orders"))).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        migration_complete_of(&e, complete.service_id).await,
+        Some(true)
+    );
+    assert_eq!(migration_incomplete_count(&e).await, before);
+
+    // An incomplete EP: a legacy role principal on its catalog.
+    let incomplete = profile(&e).await;
+    let (status, body) = send(
+        &e,
+        "POST",
+        "/perm/grants",
+        Some(grant(&incomplete, "orders")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let role_grant: Uuid = sqlx::query_scalar(
+        "INSERT INTO perm.grants (effect, actions, catalog_id) \
+         VALUES ('allow'::perm.effect, ARRAY['read'], $1) RETURNING id",
+    )
+    .bind(incomplete.catalog_id)
+    .fetch_one(&e.db.pool)
+    .await
+    .expect("role grant");
+    sqlx::query(
+        "INSERT INTO perm.grant_principals (grant_id, kind, ref, mode) \
+         VALUES ($1,'role'::perm.principal_kind,$2,'include'::perm.principal_mode)",
+    )
+    .bind(role_grant)
+    .bind(unique("runs-count-role"))
+    .execute(&e.db.pool)
+    .await
+    .expect("role principal");
+    recompile_service(&e.perm, &e.policy, incomplete.service_id)
+        .await
+        .expect("recompile with a role principal");
+    assert_eq!(
+        migration_complete_of(&e, incomplete.service_id).await,
+        Some(false)
+    );
+    assert_eq!(migration_incomplete_count(&e).await, before + 1);
+}

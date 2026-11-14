@@ -95,6 +95,8 @@ mod shadow;
 // SP4d-3 Task 5: classify every policy of a profile (owner, verdict, blocker
 // sentences) for `GET /perm/policies/services/{id}/classify`.
 pub mod classify;
+/// SP3d: the per-EP migration-complete gate — see the module doc.
+pub mod ep_gate;
 // What a rule preview will do: reach, enforcing engines, exemptions and
 // overlapping masks (classification UX spec C6, C7).
 pub mod effect;

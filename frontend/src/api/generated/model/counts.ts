@@ -18,4 +18,9 @@ export interface Counts {
   rules?: number | null;
   /** @nullable */
   tags?: number | null;
+  /**
+     * EPs whose last compile recorded an incomplete migration (SP3d).
+     * @nullable
+     */
+  migrationIncomplete?: number | null;
 }

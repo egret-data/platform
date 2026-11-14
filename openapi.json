@@ -10693,6 +10693,78 @@
         }
       }
     },
+    "/api/control-plane/perm/policies/services/{service_id}/migration-gate": {
+      "get": {
+        "tags": [
+          "perm"
+        ],
+        "operationId": "service_migration_gate",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "description": "policy.authz_services id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Whether the enforcement point's migration is complete, and if not, why",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateVerdict"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such policy profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/perm/policies/services/{service_id}/migration-status": {
       "get": {
         "tags": [
@@ -43244,6 +43316,14 @@
               "null"
             ],
             "format": "int64"
+          },
+          "migrationIncomplete": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "EPs whose last compile recorded an incomplete migration (SP3d)."
           }
         }
       },
@@ -48820,6 +48900,117 @@
               "type": "integer",
               "format": "int32",
               "minimum": 0
+            }
+          }
+        }
+      },
+      "GateRefusal": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Operator (hand-written) policies the EP still carries (SP3b).",
+            "required": [
+              "pending",
+              "blocked",
+              "kind"
+            ],
+            "properties": {
+              "pending": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "blocked": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "operator_policies"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "`kind='role'` principal refs the EP still names (SP3c-1).",
+            "required": [
+              "count",
+              "kind"
+            ],
+            "properties": {
+              "count": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "role_principals"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Implicit workspace grants the EP still carries (SP3c-3).",
+            "required": [
+              "count",
+              "kind"
+            ],
+            "properties": {
+              "count": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "workspace_grants"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Gated clearance tags with no `withhold` rule yet (SP3c-2, installation-wide).",
+            "required": [
+              "tags",
+              "kind"
+            ],
+            "properties": {
+              "tags": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "clearance_tags"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "One reason an EP is not yet migration-complete. Order is stable (operator →\nrole → workspace → clearance) so the surfaced list and the tests agree."
+      },
+      "GateVerdict": {
+        "type": "object",
+        "description": "Whether an EP's migration is complete, and if not, why.",
+        "required": [
+          "complete",
+          "refusals"
+        ],
+        "properties": {
+          "complete": {
+            "type": "boolean"
+          },
+          "refusals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GateRefusal"
             }
           }
         }

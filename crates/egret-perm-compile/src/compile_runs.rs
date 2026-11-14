@@ -38,18 +38,20 @@ pub(crate) async fn record_compile_ok_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     service_id: i64,
     s: &CompileSummary,
+    migration_complete: Option<bool>,
 ) -> Result<(), CompileError> {
     sqlx::query(
         "INSERT INTO perm.compile_runs \
              (service_id, outcome, attempted_at, error, last_ok_at, \
-              created, updated, deleted, unchanged, skipped) \
-         SELECT $1, 'ok', c.t, NULL, c.t, $2, $3, $4, $5, $6 \
+              created, updated, deleted, unchanged, skipped, migration_complete) \
+         SELECT $1, 'ok', c.t, NULL, c.t, $2, $3, $4, $5, $6, $7 \
            FROM (SELECT clock_timestamp() AS t) c \
          ON CONFLICT (service_id) DO UPDATE SET \
              outcome = 'ok', attempted_at = EXCLUDED.attempted_at, error = NULL, \
              last_ok_at = EXCLUDED.last_ok_at, created = EXCLUDED.created, \
              updated = EXCLUDED.updated, deleted = EXCLUDED.deleted, \
-             unchanged = EXCLUDED.unchanged, skipped = EXCLUDED.skipped \
+             unchanged = EXCLUDED.unchanged, skipped = EXCLUDED.skipped, \
+             migration_complete = EXCLUDED.migration_complete \
          WHERE perm.compile_runs.attempted_at <= EXCLUDED.attempted_at",
     )
     .bind(service_id)
@@ -58,6 +60,7 @@ pub(crate) async fn record_compile_ok_in_tx(
     .bind(count(s.deleted))
     .bind(count(s.unchanged))
     .bind(count(s.skipped.len()))
+    .bind(migration_complete)
     .execute(&mut **tx)
     .await
     .map_err(CompileError::from_db)?;
@@ -129,4 +132,12 @@ pub async fn failed_compile_runs_via(
     )
     .fetch_all(conn)
     .await
+}
+
+/// EPs whose last compile recorded an incomplete migration (SP3d). `NULL`
+/// ("not computed yet") is deliberately not counted.
+pub async fn migration_incomplete_count_via(conn: &mut PgConnection) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar("SELECT count(*) FROM perm.compile_runs WHERE migration_complete = false")
+        .fetch_one(conn)
+        .await
 }

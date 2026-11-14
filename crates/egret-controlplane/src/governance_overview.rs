@@ -158,6 +158,8 @@ pub struct Counts {
     pub grants: Option<i64>,
     pub rules: Option<i64>,
     pub tags: Option<i64>,
+    /// EPs whose last compile recorded an incomplete migration (SP3d).
+    pub migration_incomplete: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
@@ -470,6 +472,12 @@ pub async fn attention_via(
         grants: count(tx, "SELECT count(*) FROM perm.grants", can(POLICY_READ)).await,
         rules: count(tx, "SELECT count(*) FROM perm.rules", can(POLICY_READ)).await,
         tags: count(tx, "SELECT count(*) FROM tags", can(TAG_READ)).await,
+        migration_incomplete: count(
+            tx,
+            "SELECT count(*) FROM perm.compile_runs WHERE migration_complete = false",
+            can(POLICY_READ),
+        )
+        .await,
     };
     AttentionResponse {
         generated_at: Utc::now(),

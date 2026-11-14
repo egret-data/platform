@@ -673,7 +673,7 @@ async fn compile_failures_lineage_attachments_tags_and_catalogs_each_have_a_find
     );
     assert_eq!(
         body["counts"],
-        json!({"catalogs": 2, "grants": 0, "rules": 0, "tags": 3})
+        json!({"catalogs": 2, "grants": 0, "rules": 0, "tags": 3, "migrationIncomplete": 0})
     );
 }
 
