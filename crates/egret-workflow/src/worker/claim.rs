@@ -4325,6 +4325,14 @@ async fn start_execution_in_on(
     Ok(ctx.id)
 }
 
+/// A fresh row's first settle, `Tick(0)`, from the empty state: what
+/// [`start_execution_in_on`] runs after [`insert_execution`] for any start
+/// not born `FAILED` (package 7b: a whole replay).
+pub(super) async fn settle_new(conn: &mut PgConnection, ctx: &ExecutionCtx) -> Result<()> {
+    let empty = ExecutionState::new(&ctx.plan);
+    settle(conn, ctx, &empty, empty.clone(), Tick(0), None).await
+}
+
 /// **The row half of a start** (package 7b A3): everything
 /// [`start_execution_in_on`] does before its settle -- parse, plan, the
 /// served check, `sql_principal::check_start`, the input check, the INSERT
@@ -5634,7 +5642,7 @@ async fn persist(
     Ok(())
 }
 
-fn states_json(states: &[RunState]) -> serde_json::Value {
+pub(super) fn states_json(states: &[RunState]) -> serde_json::Value {
     serde_json::Value::Array(
         states
             .iter()
@@ -5643,7 +5651,7 @@ fn states_json(states: &[RunState]) -> serde_json::Value {
     )
 }
 
-fn attempts_json(attempts: &[Attempt]) -> serde_json::Value {
+pub(super) fn attempts_json(attempts: &[Attempt]) -> serde_json::Value {
     serde_json::Value::Array(
         attempts
             .iter()
