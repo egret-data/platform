@@ -35,8 +35,8 @@ import {
  * named as not checked, with the reason, whichever of the three it is.
  *
  * `engineGated`: the tag has a role clearance, so it compiles to the A3 deny.
- * Only then does the cost sentence apply; a group-only or informational tag
- * contributes no deny (Task 4 review M-4).
+ * Only then does the cost sentence apply; an informational tag contributes
+ * no deny (Task 4 review M-4).
  */
 export default function ViewExposureSection({
   tagId,

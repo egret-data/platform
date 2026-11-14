@@ -227,10 +227,8 @@ function ClearedPeople({ tag }: { tag: Tag }) {
  * behaviour. One table of required roles and groups; each add or remove
  * writes the whole set (`PUT …/access-policy`, or `DELETE` when it empties);
  * a `skipped` answer is shown here, not reported as saved (SP4c I5); a refusal
- * snaps back to the server's set. The four statements of premise 3 each keep
- * their condition: the group warning with a required group, the other three
- * (and the compile line) with a required role, because a groups-only gate
- * compiles to nothing (`clearance.rs`).
+ * snaps back to the server's set. The engine statements of premise 3 (and the
+ * compile line) show for any required role or group, since both are enforced.
  */
 export function ClearanceTab({ tag }: { tag: Tag }) {
   const canEdit = useCanManageTags();

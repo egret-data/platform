@@ -32,10 +32,10 @@ export interface ClearedPerson {
      */
   via: ClearedVia[];
   /**
-     * Whether the compiled engine deny excepts them: they hold a required
-     * role DIRECTLY (any scope), unexpired, and have a username. Never
-     * through a group or a group membership. A direct holder with no
-     * username is named once a compile mints one.
+     * Whether the compiled withhold excepts them by name: they hold a
+     * required role directly (any scope, unexpired) or belong to a required
+     * group, and have a username. A holder with no username is named once a
+     * compile mints one.
      */
   onEngines: boolean;
 }

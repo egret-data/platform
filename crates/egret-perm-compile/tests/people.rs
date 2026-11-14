@@ -1134,6 +1134,13 @@ async fn clearances_answer_for_engines_and_for_egret_per_gate() {
         (engines_no(json!("expired")), not_cleared.clone())
     );
 
+    // ue's expired role does not hide a required group that clears it: put
+    // ue in a group the same gate requires, and engines clear it via the group.
+    let gx = insert_group(p, &o.n("gx"), &[o.ue]).await;
+    let d = gate(p, &o.n("cld"), &[o.n("r1")], &[gx]).await;
+    let ue = principal(&e, &user(o.ue)).await;
+    assert_eq!(both(&ue, d).0, via_group(&o.n("gx")));
+
     // A group and a role answer for themselves.
     let g2 = principal(&e, &format!("/perm/people/groups/{}", o.n("g2"))).await;
     assert_eq!(

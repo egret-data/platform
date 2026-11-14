@@ -1017,15 +1017,10 @@ pub async fn read_user_via(
                 Some(_) => EngineClearance::NotCleared {
                     because: Some(EngineNotClearedReason::NoUsername),
                 },
+                // A required group clears them on engines whatever the state of
+                // a role grant, so it is tested before an expired role.
                 None => {
-                    if direct
-                        .iter()
-                        .any(|r| r.expired && g.required_roles.contains(&r.role_name))
-                    {
-                        EngineClearance::NotCleared {
-                            because: Some(EngineNotClearedReason::Expired),
-                        }
-                    } else if let Some((_, group)) = groups
+                    if let Some((_, group)) = groups
                         .iter()
                         .find(|(gid, _)| g.required_groups.contains(gid))
                     {
@@ -1037,6 +1032,13 @@ pub async fn read_user_via(
                             EngineClearance::NotCleared {
                                 because: Some(EngineNotClearedReason::NoUsername),
                             }
+                        }
+                    } else if direct
+                        .iter()
+                        .any(|r| r.expired && g.required_roles.contains(&r.role_name))
+                    {
+                        EngineClearance::NotCleared {
+                            because: Some(EngineNotClearedReason::Expired),
                         }
                     } else {
                         EngineClearance::NotCleared { because: None }
@@ -1480,10 +1482,10 @@ pub struct ClearedPerson {
     /// Every way they are listed: role grants (direct, then through a group)
     /// before group memberships, each sorted by name, scope, scope id.
     pub via: Vec<ClearedVia>,
-    /// Whether the compiled engine deny excepts them: they hold a required
-    /// role DIRECTLY (any scope), unexpired, and have a username. Never
-    /// through a group or a group membership. A direct holder with no
-    /// username is named once a compile mints one.
+    /// Whether the compiled withhold excepts them by name: they hold a
+    /// required role directly (any scope, unexpired) or belong to a required
+    /// group, and have a username. A holder with no username is named once a
+    /// compile mints one.
     pub on_engines: bool,
 }
 
@@ -1496,20 +1498,19 @@ pub struct ClearedPerson {
 ///   egret and, with a username, on engines (`onEngines`).
 /// - **Role held through a group** (`throughGroup` set): a live `allow` grant
 ///   of a required role to a group the user is a direct member of. Egret's
-///   object check clears them (`egret_auth::grants`, `user_groups`); engines
-///   refuse them (the compiler expands only user holders).
-/// - **Group member, gate names no role** (`enginesEnforce` false): egret
-///   clears them; engines withhold the data from NOBODY, since a group-only
-///   gate compiles to nothing on engines.
-/// - **Group member, gate also names a role**: egret clears them; engines
-///   refuse them (a Ranger group matches nobody; only role holders are
-///   excepted).
+///   object check clears them (`egret_auth::grants`, `user_groups`).
+/// - **Group member** (`via.kind = group`): egret clears them, and engines
+///   enforce a required group like a required role, so with a username they
+///   are `onEngines`.
 /// - **Scoped grant** (`via.scope` workspace or object): egret clears them
 ///   only within that workspace or object; engines everywhere (a column read
 ///   carries no scope).
 /// - **Platform admins** are always cleared by egret (a scope-correct
 ///   exemption) and are NOT listed unless they are also listed by a rule
 ///   above; engines give them no bypass.
+///
+/// `enginesEnforce` is true when the clearance names a required role or a
+/// required group.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ClearedPeople {

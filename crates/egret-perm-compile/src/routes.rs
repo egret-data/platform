@@ -653,7 +653,8 @@ pub enum ExplainAttribution {
     ///
     /// **This is an honest 3→2, not 3→3.** `Some([])` still carries two facts
     /// this wire cannot separate: (1) the gate declares only
-    /// `required_groups`, which compiles to no engine deny at all (D2/D7), and
+    /// `required_groups` (this wire lists clearing ROLES only; the engines
+    /// do enforce the group), and
     /// (2) there is no `classification_policies` row for the tag at all —
     /// `clearance_gates_for_tags_via` filters on
     /// `cardinality(cp.required_roles) > 0` and `clearing_roles` turns a miss
@@ -5372,7 +5373,8 @@ mod tests {
 
     /// The honest 3→2. The lookup ran and missed, which happens for a
     /// groups-only gate (`clearance_gates_for_tags_via` filters on
-    /// `cardinality(required_roles) > 0`) and for a gate row already deleted.
+    /// `cardinality(required_roles) > 0`; the engines still enforce the group) and
+    /// for a gate row already deleted.
     /// Those two stay conflated in `Some([])` — what matters is that neither
     /// can be confused with `None`.
     #[test]
