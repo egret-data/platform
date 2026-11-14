@@ -6,6 +6,8 @@ import { CheckCircle2, Cog, FileText, Loader2, Lock, Server, Undo2, User } from 
 import {
   type ClassifiedPolicy,
   type EpMigrationStatus,
+  type GateRefusal,
+  type GateVerdict,
   type GatedProfile,
   type MigrateResponse,
   type UndoResponse,
@@ -13,7 +15,9 @@ import {
   classifyQueryKey,
   classifyServicePolicies,
   migrateServicePolicies,
+  migrationGateQueryKey,
   migrationStatusQueryKey,
+  serviceMigrationGate,
   serviceMigrationStatus,
   undoServicePolicyMigration,
 } from "@/api/policies";
@@ -105,6 +109,15 @@ export function MigrateTab({
     retry: false,
   });
 
+  // SP3d: the full migration-gate verdict (operator + role + workspace +
+  // clearance). A failed read shows no badge, like the status query.
+  const gate = useQuery<GateVerdict, ApiError>({
+    queryKey: migrationGateQueryKey(serviceId ?? 0),
+    queryFn: () => serviceMigrationGate(serviceId as number),
+    enabled: serviceId !== undefined,
+    retry: false,
+  });
+
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [preview, setPreview] = useState<MigrateResponse | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -130,6 +143,7 @@ export function MigrateTab({
     if (serviceId !== undefined) {
       void queryClient.invalidateQueries({ queryKey: classifyQueryKey(serviceId) });
       void queryClient.invalidateQueries({ queryKey: migrationStatusQueryKey(serviceId) });
+      void queryClient.invalidateQueries({ queryKey: migrationGateQueryKey(serviceId) });
     }
     // A migration flips profiles to `generated` and switches originals off.
     void queryClient.invalidateQueries({ queryKey: ["control-plane", "profiles"] });
@@ -299,6 +313,7 @@ export function MigrateTab({
       </p>
       <div className="space-y-4">
         {status.data && <MigrationStatusBadge status={status.data} />}
+        {gate.data && <MigrationGateBadge verdict={gate.data} />}
 
         {!canWrite && (
           <Alert>
@@ -882,6 +897,43 @@ function readErrorMessage(e: ApiError | null | undefined): string {
   if (e.status === 403) return "This account cannot read policies: it needs the policy:read permission.";
   if (e.status === 404) return "This enforcement point no longer exists. Go back to Policies and pick another.";
   return e.message;
+}
+
+/** FE copy for one gate refusal — the server's `.message()` is not in the JSON. */
+function gateRefusalText(r: GateRefusal): string {
+  switch (r.kind) {
+    case "operator_policies":
+      return r.blocked > 0
+        ? `${plural(r.pending, "manual policy", "manual policies")} still to migrate, ${r.blocked} blocked`
+        : `${plural(r.pending, "manual policy", "manual policies")} still to migrate`;
+    case "role_principals":
+      return `${plural(r.count, "role principal", "role principals")} to migrate to managed groups`;
+    case "workspace_grants":
+      return `${plural(r.count, "workspace grant", "workspace grants")} to migrate to managed groups`;
+    case "clearance_tags":
+      return `${plural(r.tags.length, "gated clearance tag", "gated clearance tags")} without a withhold rule: ${r.tags.join(", ")}`;
+  }
+}
+
+/** SP3d: the full per-EP migration-gate verdict badge (beside the operator-only one). */
+function MigrationGateBadge({ verdict }: { verdict: GateVerdict }) {
+  if (verdict.complete) {
+    return (
+      <StatusBadge tone="success" icon={CheckCircle2}>
+        Fully on the model — every input is migrated
+      </StatusBadge>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      <StatusBadge tone="highlight">{plural(verdict.refusals.length, "step remains", "steps remain")}</StatusBadge>
+      <ul className="space-y-1 text-sm text-muted-foreground">
+        {verdict.refusals.map((r) => (
+          <li key={r.kind}>{gateRefusalText(r)}</li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 
 /** The EP's migration standing: complete, or how many remain and which are blocked (and why, verbatim). */

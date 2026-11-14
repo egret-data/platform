@@ -11,6 +11,7 @@ import type { ClassifiedPolicy, MigrateResponse, UndoResponse } from "@/api/poli
 import {
   classifyServicePolicies,
   migrateServicePolicies,
+  serviceMigrationGate,
   serviceMigrationStatus,
   undoServicePolicyMigration,
 } from "@/api/policies";
@@ -160,6 +161,7 @@ vi.mock("@/api/policies", async (orig) => ({
   classifyServicePolicies: vi.fn(),
   migrateServicePolicies: vi.fn(),
   serviceMigrationStatus: vi.fn(),
+  serviceMigrationGate: vi.fn(),
   undoServicePolicyMigration: vi.fn(),
 }));
 
@@ -220,6 +222,47 @@ beforeEach(() => {
   vi.mocked(serviceMigrationStatus)
     .mockReset()
     .mockResolvedValue({ complete: false, migrated: 0, pending: 0, blocked: [] });
+  vi.mocked(serviceMigrationGate).mockReset().mockResolvedValue({ complete: true, refusals: [] });
+});
+
+describe("MigrateTab — migration gate badge", () => {
+  it("shows the gate badge when migration is complete", async () => {
+    vi.mocked(serviceMigrationGate).mockResolvedValue({ complete: true, refusals: [] });
+    renderPage();
+    expect(await screen.findByText(/fully on the model/i)).toBeInTheDocument();
+  });
+
+  it("lists the gate's remaining steps when incomplete", async () => {
+    vi.mocked(serviceMigrationGate).mockResolvedValue({
+      complete: false,
+      refusals: [
+        { kind: "role_principals", count: 2 },
+        { kind: "clearance_tags", tags: ["pii", "phi"] },
+      ],
+    });
+    renderPage();
+    expect(await screen.findByText(/2 steps remain/i)).toBeInTheDocument();
+    expect(screen.getByText(/2 role principals to migrate/i)).toBeInTheDocument();
+    expect(screen.getByText(/pii, phi/i)).toBeInTheDocument();
+  });
+
+  it("uses singular copy for a single remaining step", async () => {
+    vi.mocked(serviceMigrationGate).mockResolvedValue({
+      complete: false,
+      refusals: [{ kind: "role_principals", count: 1 }],
+    });
+    renderPage();
+    expect(await screen.findByText(/1 step remains/i)).toBeInTheDocument();
+    expect(screen.getByText(/1 role principal to migrate/i)).toBeInTheDocument();
+  });
+
+  it("shows no gate badge when the verdict read fails", async () => {
+    vi.mocked(serviceMigrationGate).mockRejectedValue(new Error("boom"));
+    renderPage();
+    await screen.findByText("engine-service-account");
+    expect(screen.queryByText(/fully on the model/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/steps remain/i)).not.toBeInTheDocument();
+  });
 });
 
 describe("MigrateTab — migration status badge", () => {
