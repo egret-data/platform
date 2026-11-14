@@ -792,7 +792,12 @@ async fn restart_on_a_source_answers_201_and_is_audited(pool: sqlx::PgPool) {
         vec![(
             "workflow_execution:restart".to_string(),
             Some(new.to_string()),
-            json!({ "from_state": "FAILED", "replacement": new, "source": "current" }),
+            json!({
+                "from_state": "FAILED",
+                "replayed_from": ex,
+                "replacement": new,
+                "source": "current",
+            }),
         )]
     );
 
@@ -973,4 +978,130 @@ async fn the_entitlement_gate_covers_replay(pool: sqlx::PgPool) {
         assert_eq!(res.status(), 403, "{path}");
     }
     assert_eq!(execution_count(&pool).await, n);
+}
+
+// ── Fix round 1: a disabled chosen source; uploads of a refused replay ──────
+
+/// Kestra loads the chosen revision and refuses it when it is disabled
+/// (`FlowService.getFlowIfExecutableOrThrow`, `FlowService.java:872`).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_chosen_source_that_is_disabled_is_409(pool: sqlx::PgPool) {
+    // Arrange: version 1 says `disabled: true`, version 2 does not; the
+    // draft is open.
+    let (_db, ws, user, app) = setup(&pool).await;
+    let ex = failed_execution(&pool, ws).await;
+    let flow_id = flow_id_of(&pool, ex).await;
+    let open = flow("ops", &["a", "b", "c"]);
+    let disabled = format!("{open}disabled: true\n");
+    for (version, source) in [(1, &disabled), (2, &open)] {
+        sqlx::query(
+            "INSERT INTO workflow.flow_versions (flow_id, version, snapshot, created_by) \
+             VALUES ($1, $2, jsonb_build_object('source', $3::text), $4)",
+        )
+        .bind(flow_id)
+        .bind(version)
+        .bind(source)
+        .bind(user.0)
+        .execute(&pool)
+        .await
+        .expect("publish a version");
+    }
+    let b = task_run_id(&pool, ex, "b").await;
+    let n = execution_count(&pool).await;
+
+    // Act + Assert
+    for path in [
+        replay_path(ws, ex, "?source=version:1"),
+        replay_path(ws, ex, &format!("?revision=1&taskRunId={b}")),
+        restart_path(ws, ex, "?revision=1"),
+    ] {
+        let res = common::post_no_body(&app, &path, user).await;
+        let msg = expect_error(res, 409, None).await;
+        assert!(msg.contains("disabled"), "{path}: {msg}");
+    }
+    assert_eq!(execution_count(&pool).await, n);
+    assert!(common::audit_mutations(&app).is_empty());
+
+    // The controls: the open version.
+    created(common::post_no_body(&app, &replay_path(ws, ex, "?source=version:2"), user).await)
+        .await;
+    created(common::post_no_body(&app, &restart_path(ws, ex, "?revision=2"), user).await).await;
+}
+
+fn file_part(name: &str, file: &str, bytes: &str) -> Vec<u8> {
+    format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"{file}\"\r\n\
+         Content-Type: text/plain\r\n\r\n{bytes}\r\n--{BOUNDARY}--\r\n"
+    )
+    .into_bytes()
+}
+
+/// Every object the store holds for `ws`.
+async fn objects_of(fs: &egret_workflow::storage::FileStore, ws: Uuid) -> Vec<String> {
+    fs.store
+        .list(&format!("{}{ws}/", fs.prefix), None)
+        .await
+        .expect("list")
+        .objects
+        .into_iter()
+        .map(|o| o.key)
+        .collect()
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_refused_multipart_replay_leaves_no_file(pool: sqlx::PgPool) {
+    // Arrange: a flow with an optional FILE input, run without it; then the
+    // draft drops `b`.
+    let fs = egret_workflow::storage::install_mem_for_tests();
+    let (_db, ws, user, app) = setup(&pool).await;
+    let with_file = |ids: &[&str]| {
+        flow("files", ids).replace(
+            "tasks:\n",
+            "inputs:\n  - id: f\n    type: FILE\n    required: false\ntasks:\n",
+        )
+    };
+    let reg = Flaky::new(&[("b", 1)]);
+    let ex = start(&pool, ws, &with_file(&["a", "b", "c"])).await;
+    drive(&pool, &reg, ex).await;
+    assert_eq!(exec_state(&pool, ex).await, "FAILED");
+    set_draft(&pool, flow_id_of(&pool, ex).await, &with_file(&["a", "c"])).await;
+    let b = task_run_id(&pool, ex, "b").await;
+    let before = objects_of(&fs, ws).await;
+    let n = execution_count(&pool).await;
+
+    // Act: the worker refuses after the file was stored.
+    let res = common::send_raw(
+        &app,
+        "POST",
+        &replay_path(ws, ex, &format!("?source=current&taskRunId={b}")),
+        user,
+        &format!("multipart/form-data; boundary={BOUNDARY}"),
+        file_part("f", "hello.txt", "hello"),
+    )
+    .await;
+
+    // Assert
+    expect_error(res, 400, Some("replay_task_not_in_source")).await;
+    assert_eq!(execution_count(&pool).await, n);
+    assert_eq!(objects_of(&fs, ws).await, before, "the upload was deleted");
+
+    // The control: the frozen source has `b`; the file stays, under the new
+    // execution.
+    let res = common::send_raw(
+        &app,
+        "POST",
+        &replay_path(ws, ex, &format!("?source=frozen&taskRunId={b}")),
+        user,
+        &format!("multipart/form-data; boundary={BOUNDARY}"),
+        file_part("f", "hello.txt", "hello"),
+    )
+    .await;
+    let (new, _) = created(res).await;
+    let after = objects_of(&fs, ws).await;
+    assert!(
+        after
+            .iter()
+            .any(|k| k.contains(&format!("/executions/{new}/")) && k.ends_with("/hello.txt")),
+        "{after:?}"
+    );
 }

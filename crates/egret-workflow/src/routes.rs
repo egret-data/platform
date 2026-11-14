@@ -3296,7 +3296,7 @@ async fn resume_execution(
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
         (status = 404, description = "`task_run_not_found`: `taskRunId` is not a run of this execution (another execution's, another workspace's, one a restart removed, or not a UUID). `flow_version_not_found`: the flow has no published version N. No code: no such execution in this workspace, indistinguishably from one that never existed — **or its flow is in the trash, or no longer exists at all**. A replay is a run of the flow and answers to the flow's current state.", body = egret_core::http::ErrorBody),
-        (status = 409, description = "Nothing is written. No code: the execution has not finished, **or its flow is disabled** (by the `state` column or by its own YAML's `disabled: true`). With `taskRunId`: `inside_working_directory` (the run is inside a `WorkingDirectory`; replay from the block's own run), `files_pruned` (the retention pruner deleted the files of the execution or of one it was replayed from), `after_execution_running` (its `afterExecution:` tasks still run).", body = egret_core::http::ErrorBody),
+        (status = 409, description = "Nothing is written. No code: the execution has not finished, **or its flow is disabled** (by the `state` column or by its own YAML's `disabled: true`), or the chosen source (`current` or `version:N`) itself says `disabled: true`, as Kestra refuses a disabled revision. With `taskRunId`: `inside_working_directory` (the run is inside a `WorkingDirectory`; replay from the block's own run), `files_pruned` (the retention pruner deleted the files of the execution or of one it was replayed from), `after_execution_running` (its `afterExecution:` tasks still run).", body = egret_core::http::ErrorBody),
         (status = 413, description = "An uploaded file is over `workflow.storage.max_file_bytes`, a text part is over 1 MiB, or the JSON body is over 2 MiB. Nothing is created.", body = egret_core::http::ErrorBody),
         (status = 415, description = "A `Content-Type` that is neither `application/json` nor `multipart/form-data`.", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
@@ -3413,6 +3413,7 @@ async fn replay_execution(
     let source = source_text(&st, ws, &detail, &flow, choice)
         .await
         .map_err(op)?;
+    refuse_disabled_source(choice, &source).map_err(core_refusal)?;
 
     // Which replay (D2, D9). The scoped read answers for this execution's
     // runs; a run of another execution is looked for under its `Loop` runs.
@@ -3492,7 +3493,14 @@ async fn replay_execution(
     .await;
     let replacement = match replayed {
         Ok(Ok(replacement)) => Ok(replacement),
-        Ok(Err(r)) => Err(op(ExecOpError::from_replay_refusal(id, r))),
+        Ok(Err(r)) => Err(op(ExecOpError::from_replay_refusal(
+            id,
+            r,
+            match kind {
+                crate::worker::ReplayKind::FromTaskRun(t) => Some(t),
+                _ => None,
+            },
+        ))),
         Err(e) => Err(core_refusal(e)),
     };
     // Nothing was created: what the body stored goes too.
@@ -3798,7 +3806,7 @@ async fn source_text(
                     return Err(ExecOpError::Coded(
                         StatusCode::NOT_FOUND,
                         FLOW_VERSION_NOT_FOUND_CODE,
-                        format!("flow version {n} not found"),
+                        format!("flow version {n}"),
                     ))
                 }
                 Err(e) => return Err(e.into()),
@@ -3816,6 +3824,27 @@ async fn source_text(
                 })
         }
     }
+}
+
+/// A chosen source (`current` or `version:N`) whose own YAML says
+/// `disabled: true` is refused 409, with [`startable_flow`]'s message: Kestra
+/// loads the chosen revision and refuses it when it is disabled
+/// (`FlowService.getFlowIfExecutableOrThrow`, `FlowService.java:861-880`,
+/// called by the replay and restart controllers, `EC:1450`, `:1494`). The
+/// frozen source is not judged here: it is what already ran, and the flow's
+/// current state is [`startable_flow`]'s.
+fn refuse_disabled_source(choice: SourceChoice, source: &str) -> EgretResult<()> {
+    if choice == SourceChoice::Frozen {
+        return Ok(());
+    }
+    let parsed = parse(source)
+        .map_err(|e| Error::InvalidInput(format!("the flow does not parse: {}", e.message)))?;
+    if parsed.disabled {
+        return Err(Error::Conflict(
+            "Cannot execute flow: flow is disabled.".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// The restart, task-run-state, status and replay routes' error: every
@@ -3898,7 +3927,13 @@ impl ExecOpError {
 
     /// A worker refusal of a replay or a restart into a new execution
     /// (package 7b). Nothing was written.
-    fn from_replay_refusal(id: Uuid, r: crate::worker::ReplayRefused) -> Self {
+    /// `task_run` is the run a replay from a task was asked for, which the
+    /// worker's `TaskRunNotFound` does not carry.
+    fn from_replay_refusal(
+        id: Uuid,
+        r: crate::worker::ReplayRefused,
+        task_run: Option<Uuid>,
+    ) -> Self {
         use crate::executor::MatchFault;
         use crate::worker::ReplayRefused as R;
         match r {
@@ -3919,7 +3954,14 @@ impl ExecOpError {
             ),
             R::FilesPruned => Self::files_pruned(id),
             R::AfterExecutionRunning => Self::after_execution(id),
-            R::TaskRunNotFound => Self::task_run_not_found(id, "that id"),
+            R::TaskRunNotFound => match task_run {
+                Some(t) => Self::task_run_not_found(id, &t.to_string()),
+                None => ExecOpError::Coded(
+                    StatusCode::NOT_FOUND,
+                    TASK_RUN_NOT_FOUND_CODE,
+                    format!("a task run of execution {id}"),
+                ),
+            },
             R::InsideWorkingDirectory => Self::conflict(
                 INSIDE_WORKING_DIRECTORY_CODE,
                 "the task run is inside a WorkingDirectory, whose directory is closed; replay \
@@ -3947,7 +3989,8 @@ impl ExecOpError {
         ExecOpError::Coded(
             StatusCode::NOT_FOUND,
             TASK_RUN_NOT_FOUND_CODE,
-            format!("no task run {task_run} in execution {id}"),
+            // Rendered as "not found: task run {t} in execution {id}".
+            format!("task run {task_run} in execution {id}"),
         )
     }
 
@@ -4073,7 +4116,7 @@ fn state_change_body_refusal(r: axum::extract::rejection::JsonRejection) -> Exec
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed; or its flow is in the trash or was deleted (as for a replay). `flow_version_not_found`: the flow has no published version N.", body = egret_core::http::ErrorBody),
-        (status = 409, description = "Nothing is written. The flow is disabled (no code, as for a replay). `not_restartable`: the execution is not `FAILED` or `PAUSED` (the message names its state). `nothing_to_restart`: no run is `FAILED` or `PAUSED`. `after_execution_running`: the execution has ended but its `afterExecution:` tasks still run. `files_pruned`: the retention pruner deleted the files of the execution, or of an execution it was replayed from.", body = egret_core::http::ErrorBody),
+        (status = 409, description = "Nothing is written. The flow is disabled, or the chosen source (`current` or `version:N`) itself says `disabled: true` (no code, as for a replay). `not_restartable`: the execution is not `FAILED` or `PAUSED` (the message names its state). `nothing_to_restart`: no run is `FAILED` or `PAUSED`. `after_execution_running`: the execution has ended but its `afterExecution:` tasks still run. `files_pruned`: the retention pruner deleted the files of the execution, or of an execution it was replayed from.", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
@@ -4138,6 +4181,7 @@ async fn restart_execution(
         .ok_or_else(|| Error::NotFound("flow".into()))?;
     let flow = startable_flow(&st, ws, flow_id).await?;
     let source = source_text(&st, ws, &before, &flow, choice).await?;
+    refuse_disabled_source(choice, &source)?;
     rerun_gate(&st, ws, caller, &before, &source).await?;
     let new_id = Uuid::new_v4();
     let replaced = crate::worker::replay_execution(
@@ -4154,15 +4198,18 @@ async fn restart_execution(
         },
     )
     .await?
-    .map_err(|r| ExecOpError::from_replay_refusal(id, r))?;
+    .map_err(|r| ExecOpError::from_replay_refusal(id, r, None))?;
     st.audit.emit(egret_audit::mutation_for(
         &ctx.principal,
         Some(ws),
         "workflow_execution:restart",
         "workflow_execution",
         Some(replaced.to_string()),
+        // Both ids, as the replay record names them: the record is filed
+        // under the new execution, and `replayed_from` is the one restarted.
         serde_json::json!({
             "from_state": before.execution.state,
+            "replayed_from": id,
             "replacement": replaced,
             "source": choice.wire(),
         }),

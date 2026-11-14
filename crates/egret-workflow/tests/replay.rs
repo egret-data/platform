@@ -1167,6 +1167,76 @@ async fn the_egret_sql_gate_judges_the_chosen_source(pool: sqlx::PgPool) {
     assert_eq!(execution_count(&pool).await, n, "nothing written");
 }
 
+/// The gate in the worker's transaction holds for a restart on a source as
+/// well: the route's `rerun_gate` refuses first, so only a direct call
+/// reaches this check (B1 fix round 1).
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_egret_sql_gate_judges_a_restart_on_a_source(pool: sqlx::PgPool) {
+    // Arrange: a flow created by someone other than the workspace owner, who
+    // makes every call here.
+    let (db, ws, _) = setup(&pool).await;
+    let other: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (email, name, provider, status, password_hash) \
+         VALUES ($1, 't', 'local', 'active', 'x') RETURNING id",
+    )
+    .bind(format!("u_{}@t.local", Uuid::new_v4().simple()))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let frozen = three("gate-restart");
+    let flow = common::seed_flow(&db, ws, egret_core::UserId(other), &frozen, "draft").await;
+    let reg = Flaky::new(&[("b", 1)]);
+    let old = egret_workflow::worker::start_execution(&pool, ws, Some(flow), &frozen, json!({}))
+        .await
+        .expect("start");
+    drive(&pool, &reg, old).await;
+    assert_eq!(exec_state(&pool, old).await, "FAILED");
+    let with_sql = format!(
+        "id: gate-restart\nnamespace: t\ntasks:\n{}  - id: c\n    type: egret.sql\n    \
+         database: trino_prod\n    sql: SELECT 1\n",
+        tasks(&["a", "b"])
+    );
+    let user = owner(&pool, ws).await;
+
+    // Act
+    let allowed = try_replay(
+        &pool,
+        ws,
+        old,
+        &frozen,
+        ReplayKind::RestartOnSource,
+        ReplayInputs::Reuse,
+        user,
+    )
+    .await;
+    let n = execution_count(&pool).await;
+    let refused = try_replay(
+        &pool,
+        ws,
+        old,
+        &with_sql,
+        ReplayKind::RestartOnSource,
+        ReplayInputs::Reuse,
+        user,
+    )
+    .await;
+
+    // Assert
+    assert!(matches!(allowed, Ok(Ok(_))), "{allowed:?}");
+    match refused {
+        Err(egret_core::Error::InvalidInput(m)) => {
+            assert!(m.contains("only its creator can start it"), "{m}")
+        }
+        other => panic!("expected the gate's refusal, got {other:?}"),
+    }
+    assert_eq!(execution_count(&pool).await, n, "nothing written");
+    assert_eq!(
+        exec_state(&pool, old).await,
+        "FAILED",
+        "the old one is untouched"
+    );
+}
+
 // ── 14. A kept attempt keeps its wall clock ────────────────────────────────
 
 #[sqlx::test(migrations = "../../migrations")]

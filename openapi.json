@@ -33612,7 +33612,7 @@
             }
           },
           "409": {
-            "description": "Nothing is written. No code: the execution has not finished, **or its flow is disabled** (by the `state` column or by its own YAML's `disabled: true`). With `taskRunId`: `inside_working_directory` (the run is inside a `WorkingDirectory`; replay from the block's own run), `files_pruned` (the retention pruner deleted the files of the execution or of one it was replayed from), `after_execution_running` (its `afterExecution:` tasks still run).",
+            "description": "Nothing is written. No code: the execution has not finished, **or its flow is disabled** (by the `state` column or by its own YAML's `disabled: true`), or the chosen source (`current` or `version:N`) itself says `disabled: true`, as Kestra refuses a disabled revision. With `taskRunId`: `inside_working_directory` (the run is inside a `WorkingDirectory`; replay from the block's own run), `files_pruned` (the retention pruner deleted the files of the execution or of one it was replayed from), `after_execution_running` (its `afterExecution:` tasks still run).",
             "content": {
               "application/json": {
                 "schema": {
@@ -33787,7 +33787,7 @@
             }
           },
           "409": {
-            "description": "Nothing is written. The flow is disabled (no code, as for a replay). `not_restartable`: the execution is not `FAILED` or `PAUSED` (the message names its state). `nothing_to_restart`: no run is `FAILED` or `PAUSED`. `after_execution_running`: the execution has ended but its `afterExecution:` tasks still run. `files_pruned`: the retention pruner deleted the files of the execution, or of an execution it was replayed from.",
+            "description": "Nothing is written. The flow is disabled, or the chosen source (`current` or `version:N`) itself says `disabled: true` (no code, as for a replay). `not_restartable`: the execution is not `FAILED` or `PAUSED` (the message names its state). `nothing_to_restart`: no run is `FAILED` or `PAUSED`. `after_execution_running`: the execution has ended but its `afterExecution:` tasks still run. `files_pruned`: the retention pruner deleted the files of the execution, or of an execution it was replayed from.",
             "content": {
               "application/json": {
                 "schema": {
