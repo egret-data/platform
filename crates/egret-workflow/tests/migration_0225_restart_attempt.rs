@@ -193,3 +193,11 @@ async fn run_is_live_excludes_terminal_and_emptied_rows(pool: sqlx::PgPool) {
         assert_eq!(live, want, "{state} {history}");
     }
 }
+
+/// `#[sqlx::test]` falls back to `.env`'s dev database when `DATABASE_URL`
+/// is not exported; this binary refuses that, per
+/// `egret_test_db::assert_database_url_is_exported`.
+#[test]
+fn database_url_is_exported_rather_than_read_from_dotenv() {
+    egret_test_db::assert_database_url_is_exported();
+}
