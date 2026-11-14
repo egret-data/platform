@@ -320,10 +320,10 @@ async fn readable_covers_own_root_trigger_retry_replay_and_manual_replay_chain()
     let mut conn = db.pool.acquire().await.unwrap();
 
     let got = sorted(readable_executions(&mut conn, ws, i).await.unwrap());
-    assert_eq!(got, sorted(vec![i, i2, r2, r1, r, t, t2]));
+    assert_eq!(got, sorted(vec![i, i2, j, r2, r1, r, t, t2]));
     assert!(
-        !got.contains(&j),
-        "a replay chain link's own iteration is not readable"
+        got.contains(&j),
+        "a replay chain link's own iteration is readable: a copy keeps a Loop run's outputs"
     );
     assert!(!got.contains(&u));
     assert!(

@@ -48,9 +48,12 @@ pub mod exit;
 mod flowable;
 pub(crate) mod kill;
 mod plan;
+pub mod replay;
 pub mod restart;
 mod retry;
 mod state;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub(crate) mod update;
 
 pub use after_execution::{
@@ -60,6 +63,10 @@ pub use command::Command;
 pub use plan::{
     build_plan, loop_until_gap, pause_gap, plan_stored, DagNode, Plan, PlanError, PlanTask,
     RetryBehavior, RetryDelay, RetryPolicy, TaskIx, TaskKind,
+};
+pub use replay::{
+    copy_onto, replay_from, reset_copied, restart_copy, shift_ticks, CopiedRuns, CopyRefusal,
+    CopySelection, MatchFault,
 };
 pub use restart::{mark_as, restart, RestartCommands, RestartRefusal};
 pub use state::{
