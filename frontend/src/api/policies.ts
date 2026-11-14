@@ -38,9 +38,11 @@ import {
 } from "./generated/policy-admin/policy-admin";
 import {
   getPermClassifyServicePoliciesQueryKey,
+  getPermServiceMigrationGateQueryKey,
   getPermServiceMigrationStatusQueryKey,
   permClassifyServicePolicies,
   permMigrateServicePolicies,
+  permServiceMigrationGate,
   permServiceMigrationStatus,
   permUndoServicePolicyMigration,
 } from "./generated/perm/perm";
@@ -48,6 +50,7 @@ import type {
   ClassifiedPolicy,
   CreatedPolicyId,
   EpMigrationStatus,
+  GateVerdict,
   CreatedProfile,
   MigrateResponse,
   UndoResponse,
@@ -275,6 +278,8 @@ export function compilerOwnedConflict(err: unknown): string | null {
 export type {
   ClassifiedPolicy,
   EpMigrationStatus,
+  GateRefusal,
+  GateVerdict,
   GatedProfile,
   MigrateResponse,
   MigratedPolicy,
@@ -302,6 +307,17 @@ export async function serviceMigrationStatus(serviceId: number): Promise<EpMigra
 /** The key the standing is cached under; a migrate or undo invalidates it. */
 export function migrationStatusQueryKey(serviceId: number) {
   return getPermServiceMigrationStatusQueryKey(serviceId);
+}
+
+/** One enforcement point's full migration-gate verdict (SP3d): operator
+ *  policies + role/workspace/clearance input all migrated. */
+export async function serviceMigrationGate(serviceId: number): Promise<GateVerdict> {
+  return (await permServiceMigrationGate(serviceId)).data as GateVerdict;
+}
+
+/** The key the verdict is cached under; a migrate or undo invalidates it. */
+export function migrationGateQueryKey(serviceId: number) {
+  return getPermServiceMigrationGateQueryKey(serviceId);
 }
 
 function isMigrateResponse(body: unknown): body is MigrateResponse {
