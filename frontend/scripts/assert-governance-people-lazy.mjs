@@ -45,8 +45,8 @@ const MARKERS = [
   ["src/routes/governance/people/tabs/PermissionsTab.tsx", ", held by group "],
   // `otherRulesText`.
   ["src/routes/governance/people/tabs/MasksFiltersTab.tsx", " other rules apply to everyone they do not exempt; "],
-  // `GROUPS_ONLY_GATE`.
-  ["src/routes/governance/people/tabs/ClearancesTab.tsx", "Engines do not enforce this gate (it names only groups)"],
+  // `enginesText`, the expired-role answer (the old groups-only sentence went with SP3c-2).
+  ["src/routes/governance/people/tabs/ClearancesTab.tsx", "Not cleared: the required role has expired."],
   // `CHECK_ACCESS_INTRO`.
   ["src/routes/governance/people/CheckAccessDialog.tsx", "can reach a target, as each engine that serves it"],
   // The prefix a uuid ref may carry.
