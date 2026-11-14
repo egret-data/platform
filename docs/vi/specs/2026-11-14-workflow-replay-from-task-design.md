@@ -183,7 +183,7 @@ Các khác biệt do bảo mật, mang từ 7a D24 và mở rộng:
 
 ## 7. Như đã xây
 
-Xây ngày 2026-11-14 trên `feat/workflow-replay-from-task`, base `origin/main` `844ec47db`. Không có migration (D10 đúng: 0225 đã cho phép `attempt_number > 1`; migration cao nhất vẫn là 0225). Ratchet của executor ở T0 là **301 / 25 / 25 / 0** và census **295 / 25 / 21**. Ratchet và census ở cuối là <<COUNTS>>.
+Xây ngày 2026-11-14 trên `feat/workflow-replay-from-task`, base `origin/main` `844ec47db`. Không có migration (D10 đúng: 0225 đã cho phép `attempt_number > 1`; migration cao nhất vẫn là 0225). Ratchet của executor ở T0 là **301 / 25 / 25 / 0** và census **295 / 25 / 21**. Ratchet và census ở cuối không đổi: **301 / 25 / 25 / 0** và **295 / 25 / 21** (`--test executor`, 62 pass, trên `4b6bf572d`).
 
 | Task | Commit | Đã làm gì | Vòng sửa |
 |---|---|---|---|
@@ -197,7 +197,13 @@ Xây ngày 2026-11-14 trên `feat/workflow-replay-from-task`, base `origin/main`
 | B1 | `563e1a44c`, fix `edea15b2b` | Routes: `taskRunId`, `source`, alias `revision`, từ chối `breakpoints`, input JSON và multipart; các từ chối có code; audit; OpenAPI; `restart_revision_unsupported` bị gỡ (S8). | 1: audit restart-trên-source nêu tên execution bị thay thế; một source được chọn bị disable là 409 |
 | C1 | `ff67795e5` (client), `249e4f74b`, fix `4ed0eab19` | Client `gen:api`; `ReplayDialog.tsx` (lựa chọn source, change inputs, text restart); menu hàng task-run "Actions for {task}"; các câu từ chối. | 1: replay bị ẩn cho flow không có id thì đưa ra lý do; lỗi input hiện trong mục đang thu gọn |
 
-Số đếm đã đo: <<COUNTS>>.
+Số đếm đã đo (các gate ở Z, 2026-11-14):
+
+- `cargo fmt --check`, `cargo clippy -p egret-workflow -p egret-server -p egret-config -p egret-metastore --all-targets -- -D warnings` và `cargo check -p egret-bin`: sạch.
+- `cargo test -p egret-workflow --no-fail-fast` trên `25fb40103`: 3782 pass, 55 ignored, 8 fail. Bảy cái là `sql_starrocks_live` (máy test không có StarRocks, như trên main). Cái thứ tám là `execution_timestamps::every_state_write_stamps_the_timestamps`: guard chưa biết bản chép nguyên văn. `4b6bf572d` dạy nó một trường hợp (cả `state`, `history`, `started_at` và `ended_at` lấy từ cùng một alias hàng của cùng bảng), kèm các ca tự kiểm chứng rằng bản chép lấy `state` từ chỗ khác vẫn bị từ chối; sau đó `execution_timestamps` 21/21, `replay` 29/29, `replay_routes` 20/20 và `restart` 34/34 pass.
+- `cargo test -p egret-config -p egret-server -p egret-metastore`: 179 pass, gồm `committed_openapi_json_is_current` và digest của client.
+- Frontend: `npm run typecheck` sạch; `npm run lint` 0 lỗi (154 cảnh báo, không cái nào trong file của gói này); `npx vitest run` 8722 pass và 2 fail do timeout 5 s khi máy tải nặng, ở `OutputsTree.test.tsx` và `ScheduleDetail.test.tsx` (không bị gói này đụng tới); cả hai file pass khi chạy riêng (79/79).
+- Kiểm tra trực tiếp trên `egret serve` chạy native (database và storage riêng, cổng 18466), với `admin@egret.local`, sáng và tối: replay từ task `b` trên version của lần chạy này giữ outputs của `a` và chạy lại `b`, `c` (`system.replay: true`, attempt 2); replay từ `b` trên version hiện tại của flow chạy `c` đã sửa; restart một execution FAILED trên version 2 đã publish mở một execution mới SUCCESS gắn nhãn `system.restarted: true`. Ba dòng audit có `task_run_id`, `source`, `inputs_replaced` và `replayed_from`. Lần kiểm tra phát hiện icon trong menu dòng chưa đặt kích thước; `a4d6afaae` đã sửa.
 
 ### Sai lệch và lý do
 

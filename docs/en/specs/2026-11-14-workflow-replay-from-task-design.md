@@ -181,7 +181,7 @@ Security-driven differences, carried from 7a D24 and extended:
 
 ## 7. As built
 
-Built 2026-11-14 on `feat/workflow-replay-from-task`, base `origin/main` `844ec47db`. No migration (D10 held: 0225 already allows `attempt_number > 1`; the top migration stays 0225). The executor ratchet at T0 was **301 / 25 / 25 / 0** and the census **295 / 25 / 21**. The ratchet and census at the end are <<COUNTS>>.
+Built 2026-11-14 on `feat/workflow-replay-from-task`, base `origin/main` `844ec47db`. No migration (D10 held: 0225 already allows `attempt_number > 1`; the top migration stays 0225). The executor ratchet at T0 was **301 / 25 / 25 / 0** and the census **295 / 25 / 21**. The ratchet and census at the end are unchanged: **301 / 25 / 25 / 0** and **295 / 25 / 21** (`--test executor`, 62 passed, on `4b6bf572d`).
 
 | Task | Commits | What landed | Fix rounds |
 |---|---|---|---|
@@ -195,7 +195,13 @@ Built 2026-11-14 on `feat/workflow-replay-from-task`, base `origin/main` `844ec4
 | B1 | `563e1a44c`, fix `edea15b2b` | Routes: `taskRunId`, `source`, `revision` alias, `breakpoints` refusal, JSON and multipart inputs; coded refusals; audit; OpenAPI; the retired `restart_revision_unsupported` (S8). | 1: the restart-on-source audit names the replaced execution; a disabled chosen source is 409 |
 | C1 | `ff67795e5` (client), `249e4f74b`, fix `4ed0eab19` | `gen:api` client; `ReplayDialog.tsx` (source choice, change inputs, restart text); task-run row menu "Actions for {task}"; refusal sentences. | 1: replay hidden for a flow with no id gives a reason; input errors show in the collapsed section |
 
-Measured counts: <<COUNTS>>.
+Measured counts (Z gates, 2026-11-14):
+
+- `cargo fmt --check`, `cargo clippy -p egret-workflow -p egret-server -p egret-config -p egret-metastore --all-targets -- -D warnings` and `cargo check -p egret-bin`: clean.
+- `cargo test -p egret-workflow --no-fail-fast` on `25fb40103`: 3782 passed, 55 ignored, 8 failed. Seven are `sql_starrocks_live` (no StarRocks engine on the test host, as on main). The eighth was `execution_timestamps::every_state_write_stamps_the_timestamps`: the guard did not know a verbatim copy. `4b6bf572d` taught it one (all of `state`, `history`, `started_at` and `ended_at` from one row alias of the same table), with self-check cases that a copy taking `state` from anywhere else is still refused; after it `execution_timestamps` 21/21, `replay` 29/29, `replay_routes` 20/20 and `restart` 34/34 passed.
+- `cargo test -p egret-config -p egret-server -p egret-metastore`: 179 passed, including `committed_openapi_json_is_current` and the client digest.
+- Frontend: `npm run typecheck` clean; `npm run lint` 0 errors (154 warnings, none in files this package touches); `npx vitest run` 8722 passed and 2 failed on 5 s timeouts under machine load, in `OutputsTree.test.tsx` and `ScheduleDetail.test.tsx` (not touched here); both files pass alone (79/79).
+- Live check on a native `egret serve` (its own database and storage, port 18466), as `admin@egret.local`, light and dark: replay from task `b` on this run's version kept `a`'s outputs and reran `b` and `c` (`system.replay: true`, attempt 2); replay from `b` on the flow's current version ran the edited `c`; restart of a FAILED execution on published version 2 opened a new SUCCESS execution labelled `system.restarted: true`. The three audit rows carry `task_run_id`, `source`, `inputs_replaced` and `replayed_from`. The check found the row-menu icons unsized; `a4d6afaae` fixed them.
 
 ### Deviations and their reasons
 
