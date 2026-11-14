@@ -2093,7 +2093,14 @@ async fn a_replay_runs_the_frozen_source_and_inputs_and_not_the_drafts() {
     );
     assert_eq!(
         audit[0].2,
-        serde_json::json!({ "replayed_from": done, "replacement": replacement })
+        // Package 7b: the run, the source and whether the inputs changed.
+        serde_json::json!({
+            "replayed_from": done,
+            "replacement": replacement,
+            "task_run_id": null,
+            "source": "frozen",
+            "inputs_replaced": false,
+        })
     );
 }
 
@@ -2138,9 +2145,13 @@ async fn a_replay_copies_the_labels_and_not_the_backfill() {
             .fetch_one(&db.pool)
             .await
             .unwrap();
+    // Spec D10 (package 7b): the engine's `system.replay` label is added.
     assert_eq!(
         labels,
-        Some(serde_json::json!([{"key": "reason", "value": "backfill"}]))
+        Some(serde_json::json!([
+            {"key": "reason", "value": "backfill"},
+            {"key": "system.replay", "value": "true"}
+        ]))
     );
     assert_eq!(backfill, None);
 }

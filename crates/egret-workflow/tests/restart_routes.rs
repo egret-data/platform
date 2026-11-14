@@ -244,16 +244,20 @@ async fn restart_of_a_foreign_execution_is_404(pool: sqlx::PgPool) {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn restart_with_a_revision_is_400_naming_package_7b(pool: sqlx::PgPool) {
+async fn restart_with_a_bad_or_unpublished_revision_is_refused(pool: sqlx::PgPool) {
     let (_db, ws, user, app) = setup(&pool).await;
     let (ex, _reg) = failed_execution(&pool, ws).await;
 
-    for q in ["?revision=1", "?revision=", "?revision", "?revision=abc"] {
+    // Package 7b: `revision` is Kestra's spelling of `source=version:N`.
+    for q in ["?revision=", "?revision", "?revision=abc"] {
         let res = common::post_no_body(&app, &format!("{}{q}", restart_path(ws, ex)), user).await;
-        let msg = expect_error(res, 400, Some("restart_revision_unsupported")).await;
-        assert!(msg.contains("7b"), "{msg}");
+        expect_error(res, 400, Some("invalid_source")).await;
     }
+    let res =
+        common::post_no_body(&app, &format!("{}?revision=1", restart_path(ws, ex)), user).await;
+    expect_error(res, 404, Some("flow_version_not_found")).await;
     assert_eq!(exec_state(&pool, ex).await, "FAILED");
+    assert!(common::audit_mutations(&app).is_empty());
 }
 
 #[sqlx::test(migrations = "../../migrations")]

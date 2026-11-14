@@ -1636,6 +1636,40 @@ impl ExecutionRepo {
             .map_err(db_err)?;
         Ok(Some(crate::graph::FrozenExecution { source, runs }))
     }
+
+    /// The `Loop` run of `root` whose iterations (at any depth) hold
+    /// `task_run`: `(loop run id, loop task id)`, or `None`. Scoped by `ws`:
+    /// a task run of another workspace is `None`, as one that never existed.
+    ///
+    /// The replay route asks it for a `taskRunId` that is not a run of the
+    /// replayed execution, so the refusal can name the `Loop` run to replay
+    /// from instead (package 7b, spec D9).
+    pub async fn loop_run_holding(
+        &self,
+        ws: Uuid,
+        root: Uuid,
+        task_run: Uuid,
+    ) -> Result<Option<(Uuid, String)>> {
+        sqlx::query_as(
+            "WITH RECURSIVE up(id, parent, parent_run_ix, loop_index) AS ( \
+               SELECT e.id, e.parent_execution_id, e.parent_run_ix, e.loop_index \
+                 FROM workflow.task_runs t JOIN workflow.executions e ON e.id = t.execution_id \
+                WHERE t.id = $3 AND e.workspace_id = $1 \
+               UNION \
+               SELECT e.id, e.parent_execution_id, e.parent_run_ix, e.loop_index \
+                 FROM workflow.executions e JOIN up ON e.id = up.parent \
+                WHERE up.loop_index IS NOT NULL AND e.workspace_id = $1) \
+             SELECT t.id, t.task_id FROM up \
+               JOIN workflow.task_runs t ON t.execution_id = up.parent AND t.run_ix = up.parent_run_ix \
+              WHERE up.parent = $2 AND up.loop_index IS NOT NULL",
+        )
+        .bind(ws)
+        .bind(root)
+        .bind(task_run)
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(db_err)
+    }
 }
 
 /// [`ExecutionRepo::log_status`]'s answer.
