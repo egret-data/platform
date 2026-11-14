@@ -146,6 +146,9 @@ pub mod ws_assignment_migrate;
 // SP4d-3 Task 7: the migration transaction (re-classify, write, recompile,
 // switch off, provenance, re-gate every affected profile) and its undo.
 pub mod migrate;
+// SP3d Package C: the one-way door — delete provenance + switched-off originals
+// once every EP is migration-complete.
+pub mod finalize;
 pub(crate) mod people;
 // People & groups Task 3: `standsFor` agrees with the compiler's expansion
 // (spec §4.1). In-crate because the expansion is crate-private.

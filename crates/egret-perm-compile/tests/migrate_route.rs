@@ -1877,3 +1877,113 @@ async fn migrating_the_last_operator_policy_persists_a_complete_gate_verdict() {
     .expect("the migrate's recompile wrote a compile_runs row");
     assert_eq!(stored, Some(true), "stale gate verdict after migrate");
 }
+
+// ── SP3d Package C: finalize ─────────────────────────────────────────────
+
+/// Fail-closed: a profile that still holds an unmigrated operator policy is
+/// incomplete, so the endpoint refuses with a 409 and deletes nothing — the
+/// provenance of a policy migrated on the same profile survives, and so does
+/// its undo.
+#[tokio::test]
+async fn finalize_is_refused_while_an_ep_is_incomplete_and_deletes_nothing() {
+    let Some(f) = setup().await else { return };
+    let migrated = unique("alice reads orders");
+    insert(
+        &f,
+        f.p,
+        &migrated,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+    let (status, body) = migrate(&f, f.p, &[&migrated], false).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // A policy the migration was not asked to take stays an operator policy.
+    insert(
+        &f,
+        f.p,
+        &unique("bob reads orders"),
+        "operator",
+        access_policy(&f.catalog, "sales", "bob"),
+    )
+    .await;
+
+    let mut conn = f.db.pool.acquire().await.expect("conn");
+    let (incomplete, total) = egret_perm_compile::finalize::incomplete_eps(&mut conn)
+        .await
+        .expect("gate read");
+    assert!(
+        incomplete >= 1 && incomplete <= total,
+        "{incomplete}/{total}"
+    );
+    drop(conn);
+
+    let (status, body) = post(&f, "/perm/migrate/finalize".into(), json!({})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not migration-complete"),
+        "{body}"
+    );
+    assert_eq!(provenance(&f, f.p).await.len(), 1, "nothing was deleted");
+    let (status, _) = undo(&f, f.p, &[&migrated]).await;
+    assert_eq!(status, StatusCode::OK, "the migration is still undoable");
+}
+
+/// The delete logic, scoped to this profile (the test database is shared):
+/// provenance and the switched-off original go, a later undo finds nothing,
+/// the compiled model is untouched, and a second run deletes zero rows.
+#[tokio::test]
+async fn the_legacy_delete_removes_provenance_and_the_original_and_is_idempotent() {
+    use egret_perm_compile::finalize::{delete_legacy_inputs_in_tx, Scope};
+    let Some(f) = setup().await else { return };
+    let name = unique("alice reads orders");
+    let id = insert(
+        &f,
+        f.p,
+        &name,
+        "operator",
+        access_policy(&f.catalog, "sales", "alice"),
+    )
+    .await;
+    let (status, body) = migrate(&f, f.p, &[&name], false).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(grants_on_catalog(&f).await, 1);
+    let before = downloaded_names(&f, f.p).await;
+    assert!(!enabled(&f, id).await, "switched off by the migration");
+
+    let mut tx = f.db.pool.begin().await.expect("begin");
+    let s = delete_legacy_inputs_in_tx(&mut tx, Scope::Services(&[f.p]))
+        .await
+        .expect("delete");
+    tx.commit().await.expect("commit");
+    assert_eq!(s.policy_migrations_deleted, 1);
+    assert_eq!(s.original_policies_deleted, 1);
+
+    assert!(provenance(&f, f.p).await.is_empty());
+    let gone: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM policy.authz_policies WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&f.db.pool)
+            .await
+            .expect("lookup");
+    assert!(gone.is_none(), "the original is deleted");
+    assert_eq!(grants_on_catalog(&f).await, 1, "the compiled model stays");
+    assert_eq!(
+        downloaded_names(&f, f.p).await,
+        before,
+        "the engine's download is unchanged"
+    );
+    let (status, _) = undo(&f, f.p, &[&name]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "undo has nothing on record");
+
+    let mut tx = f.db.pool.begin().await.expect("begin");
+    let again = delete_legacy_inputs_in_tx(&mut tx, Scope::Services(&[f.p]))
+        .await
+        .expect("second delete");
+    tx.commit().await.expect("commit");
+    assert_eq!(again.policy_migrations_deleted, 0);
+    assert_eq!(again.original_policies_deleted, 0);
+}

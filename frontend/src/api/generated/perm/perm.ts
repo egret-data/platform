@@ -42,6 +42,7 @@ import type {
   ExplainPrincipalResponse,
   ExplainRequest,
   ExplainResponse,
+  FinalizeSummary,
   GateVerdict,
   GrantView,
   GroupPrincipal,
@@ -2036,6 +2037,116 @@ export const usePermUndoClearances = <TError = ErrorBody,
         TContext
       > => {
       return useMutation(getPermUndoClearancesMutationOptions(options), queryClient);
+    }
+    export type permFinalizeMigrationResponse200 = {
+  data: FinalizeSummary
+  status: 200
+}
+
+export type permFinalizeMigrationResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permFinalizeMigrationResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permFinalizeMigrationResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type permFinalizeMigrationResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permFinalizeMigrationResponseSuccess = (permFinalizeMigrationResponse200) & {
+  headers: Headers;
+};
+export type permFinalizeMigrationResponseError = (permFinalizeMigrationResponse401 | permFinalizeMigrationResponse403 | permFinalizeMigrationResponse409 | permFinalizeMigrationResponse500) & {
+  headers: Headers;
+};
+
+export type permFinalizeMigrationResponse = (permFinalizeMigrationResponseSuccess | permFinalizeMigrationResponseError)
+
+export const getPermFinalizeMigrationUrl = () => {
+
+
+
+
+  return `/api/control-plane/perm/migrate/finalize`
+}
+
+/**
+ * @summary SP3d Package C: close the switch to the permission model, irreversibly.
+Refused (409, nothing written) unless every enforcement point is
+migration-complete; then deletes all migration provenance and the
+switched-off original operator policies in one transaction. Idempotent.
+ */
+export const permFinalizeMigration = async ( options?: Parameters<typeof customInstance>[1]): Promise<permFinalizeMigrationResponse> => {
+
+  return customInstance<permFinalizeMigrationResponse>(getPermFinalizeMigrationUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getPermFinalizeMigrationMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permFinalizeMigration>>, TError,void, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof permFinalizeMigration>>, TError,void, TContext> => {
+
+const mutationKey = ['permFinalizeMigration'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof permFinalizeMigration>>, void> = () => {
+
+
+          return  permFinalizeMigration(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PermFinalizeMigrationMutationResult = NonNullable<Awaited<ReturnType<typeof permFinalizeMigration>>>
+
+    export type PermFinalizeMigrationMutationError = ErrorBody
+
+    /**
+ * @summary SP3d Package C: close the switch to the permission model, irreversibly.
+Refused (409, nothing written) unless every enforcement point is
+migration-complete; then deletes all migration provenance and the
+switched-off original operator policies in one transaction. Idempotent.
+ */
+export const usePermFinalizeMigration = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permFinalizeMigration>>, TError,void, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof permFinalizeMigration>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getPermFinalizeMigrationMutationOptions(options), queryClient);
     }
     export type permMigrateRolePrincipalsResponse200 = {
   data: RolePrincipalMigration

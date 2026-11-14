@@ -9662,6 +9662,67 @@
         }
       }
     },
+    "/api/control-plane/perm/migrate/finalize": {
+      "post": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "SP3d Package C: close the switch to the permission model, irreversibly.\nRefused (409, nothing written) unless every enforcement point is\nmigration-complete; then deletes all migration provenance and the\nswitched-off original operator policies in one transaction. Idempotent.",
+        "operationId": "finalize_migration",
+        "responses": {
+          "200": {
+            "description": "The switch is closed; what was removed (all zeros when already finalized)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FinalizeSummary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Nothing was changed: an enforcement point is not migration-complete",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/perm/migrate/role-principals": {
       "post": {
         "tags": [
@@ -48463,6 +48524,44 @@
           "is_null",
           "is_not_null"
         ]
+      },
+      "FinalizeSummary": {
+        "type": "object",
+        "description": "What finalize removed.",
+        "required": [
+          "policy_migrations_deleted",
+          "clearance_migrations_deleted",
+          "role_principal_migrations_deleted",
+          "ws_assignment_migrations_deleted",
+          "original_policies_deleted"
+        ],
+        "properties": {
+          "policy_migrations_deleted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows deleted from `perm.migrated_from`."
+          },
+          "clearance_migrations_deleted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows deleted from `perm.clearance_migration`."
+          },
+          "role_principal_migrations_deleted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows deleted from `perm.role_principal_migration`."
+          },
+          "ws_assignment_migrations_deleted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows deleted from `perm.ws_assignment_migration`."
+          },
+          "original_policies_deleted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Switched-off original operator policies deleted."
+          }
+        }
       },
       "Finding": {
         "type": "object",

@@ -221,6 +221,7 @@ pub fn perm_router() -> Router<PermState> {
             "/perm/migrate/role-principals/undo",
             post(undo_role_principals),
         )
+        .route("/perm/migrate/finalize", post(finalize_migration))
         .route("/perm/migrate/clearances", post(migrate_clearances))
         .route("/perm/migrate/clearances/undo", post(undo_clearances))
         .route("/perm/migrate/ws-assignments", post(migrate_ws_assignments))
@@ -282,6 +283,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         undo_clearances,
         migrate_ws_assignments,
         undo_ws_assignments,
+        finalize_migration,
         undo_service_policy_migration
     ),
     components(schemas(
@@ -423,6 +425,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         crate::ws_assignment_migrate::WsAssignmentMigration,
         UndoWsAssignmentsRequest,
         crate::migrate::UndoResponse,
+        crate::finalize::FinalizeSummary,
         crate::migrate::UndonePolicy,
         CreatedResponse,
         SkipReport,
@@ -6841,6 +6844,33 @@ async fn undo_clearances(
     crate::clearance_migrate::undo_clearances_in_tx(&mut tx, body.id).await?;
     tx.commit().await.map_err(PermHttpError::db)?;
     Ok(axum::http::StatusCode::OK)
+}
+
+/// SP3d Package C: close the switch to the permission model, irreversibly.
+/// Refused (409, nothing written) unless every enforcement point is
+/// migration-complete; then deletes all migration provenance and the
+/// switched-off original operator policies in one transaction. Idempotent.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/perm/migrate/finalize",
+    tag = "perm",
+    responses(
+        (status = 200, description = "The switch is closed; what was removed (all zeros when already finalized)", body = crate::finalize::FinalizeSummary),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:update permission", body = ErrorBody),
+        (status = 409, description = "Nothing was changed: an enforcement point is not migration-complete", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn finalize_migration(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+) -> Result<Json<crate::finalize::FinalizeSummary>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    let summary = crate::finalize::finalize_in_tx(&mut tx).await?;
+    tx.commit().await.map_err(PermHttpError::db)?;
+    Ok(Json(summary))
 }
 
 /// `POST …/migrate/ws-assignments/undo`.
